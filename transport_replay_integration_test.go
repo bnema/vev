@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/testutil/replaytest"
 	"github.com/stretchr/testify/require"
 )
@@ -39,7 +40,7 @@ func TestTransportReplayIntegration(t *testing.T) {
 		got, err := receiver.Recv()
 		require.NoError(t, err)
 		require.Equal(t, want, got)
-		output, err := ports.UnmarshalOutput(got.Payload)
+		output, err := wire.UnmarshalOutput(got.Payload)
 		require.NoError(t, err)
 		bytes = append(bytes, output.Data...)
 		terminal.Write(output.Data)
@@ -102,7 +103,7 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				for _, snapshot := range sequence {
-					if err := sender.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(snapshot)}); err != nil {
+					if err := sender.Send(wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(snapshot)}); err != nil {
 						done <- err
 						return
 					}
@@ -113,9 +114,9 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 			for _, want := range sequence {
 				frame, err := receiver.Recv()
 				require.NoError(t, err)
-				require.Equal(t, ports.MsgTheme, frame.Type)
-				require.Equal(t, ports.MarshalTheme(want), frame.Payload, "theme payload must be preserved byte-for-byte before decode")
-				got, err := ports.UnmarshalTheme(frame.Payload)
+				require.Equal(t, wire.MsgTheme, frame.Type)
+				require.Equal(t, wire.MarshalTheme(want), frame.Payload, "theme payload must be preserved byte-for-byte before decode")
+				got, err := wire.UnmarshalTheme(frame.Payload)
 				require.NoError(t, err)
 				require.Equal(t, want, got)
 			}

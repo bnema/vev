@@ -9,13 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // fanoutBlockingTransport blocks only the first output send. The paired
 // healthy attachment must still receive its frame while this peer is stuck.
 type fanoutBlockingTransport struct {
-	sent       chan ports.Frame
+	sent       chan wire.Frame
 	entered    chan struct{}
 	release    chan struct{}
 	done       chan struct{}
@@ -26,16 +26,16 @@ type fanoutBlockingTransport struct {
 
 func newFanoutBlockingTransport() *fanoutBlockingTransport {
 	return &fanoutBlockingTransport{
-		sent:    make(chan ports.Frame, 8),
+		sent:    make(chan wire.Frame, 8),
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 		done:    make(chan struct{}),
 	}
 }
 
-func (t *fanoutBlockingTransport) Send(frame ports.Frame) error {
+func (t *fanoutBlockingTransport) Send(frame wire.Frame) error {
 	t.sent <- frame
-	if frame.Type == ports.MsgOutput {
+	if frame.Type == wire.MsgOutput {
 		t.enteredOne.Do(func() { close(t.entered) })
 		<-t.release
 	}
@@ -43,7 +43,7 @@ func (t *fanoutBlockingTransport) Send(frame ports.Frame) error {
 	return nil
 }
 
-func (t *fanoutBlockingTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
+func (t *fanoutBlockingTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
 
 func (t *fanoutBlockingTransport) Close() error {
 	t.releaseOne.Do(func() { close(t.release) })
@@ -102,7 +102,7 @@ func TestRenderCoordinatorFanoutDoesNotWaitForSlowTransport(t *testing.T) {
 
 	select {
 	case frame := <-healthySends:
-		require.Equal(t, ports.MsgOutput, frame.Type, "healthy attachment did not receive output")
+		require.Equal(t, wire.MsgOutput, frame.Type, "healthy attachment did not receive output")
 	case <-time.After(2 * time.Second):
 		t.Fatal("healthy attachment remained blocked behind the slow transport")
 	}

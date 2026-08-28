@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // frameHeaderLen is the size, in bytes, of the length prefix that precedes
@@ -19,7 +20,7 @@ const frameHeaderLen = 4
 var ErrZeroLengthFrame = errors.New("ipc: zero-length frame")
 
 // ErrFrameTooLarge is returned by Recv when a frame's length field exceeds
-// ports.MaxFrameLen, and by Send when a payload is too large to encode.
+// wire.MaxFrameLen, and by Send when a payload is too large to encode.
 var ErrFrameTooLarge = errors.New("ipc: frame exceeds maximum length")
 
 // ErrBackpressure means the bounded IPC egress queue is full. Callers using
@@ -103,7 +104,7 @@ type sendRequest struct {
 }
 
 // Send queues f for the sole writer and waits for its wire attempt.
-func (t *unixTransport) Send(f ports.Frame) error {
+func (t *unixTransport) Send(f wire.Frame) error {
 	data, err := marshalFrame(f)
 	if err != nil {
 		return err
@@ -124,7 +125,7 @@ func (t *unixTransport) Send(f ports.Frame) error {
 
 // SendAsync accepts f for ordered background transmission without waiting for
 // a socket write. The queue is bounded and ownership includes a payload copy.
-func (t *unixTransport) SendAsync(f ports.Frame) error {
+func (t *unixTransport) SendAsync(f wire.Frame) error {
 	data, err := marshalFrame(f)
 	if err != nil {
 		return err
@@ -137,9 +138,9 @@ func (t *unixTransport) SendAsync(f ports.Frame) error {
 	return nil
 }
 
-func marshalFrame(f ports.Frame) ([]byte, error) {
+func marshalFrame(f wire.Frame) ([]byte, error) {
 	n := 1 + len(f.Payload) // type + payload
-	if n > ports.MaxFrameLen {
+	if n > wire.MaxFrameLen {
 		return nil, ErrFrameTooLarge
 	}
 	buf := make([]byte, frameHeaderLen+n)
@@ -256,22 +257,22 @@ func writeAll(w io.Writer, data []byte) error {
 // Recv reads one frame: a 4-byte length, then a body of that many bytes
 // (type byte + payload). It blocks until a full frame arrives, the
 // connection is closed (io.EOF), or an error occurs.
-func (t *unixTransport) Recv() (ports.Frame, error) {
+func (t *unixTransport) Recv() (wire.Frame, error) {
 	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
 	var hdr [frameHeaderLen]byte
 	if _, err := io.ReadFull(t.conn, hdr[:]); err != nil {
 		end(false)
-		return ports.Frame{}, err
+		return wire.Frame{}, err
 	}
 
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n == 0 {
 		end(false)
-		return ports.Frame{}, ErrZeroLengthFrame
+		return wire.Frame{}, ErrZeroLengthFrame
 	}
-	if n > ports.MaxFrameLen {
+	if n > wire.MaxFrameLen {
 		end(false)
-		return ports.Frame{}, ErrFrameTooLarge
+		return wire.Frame{}, ErrFrameTooLarge
 	}
 
 	if cap(t.readBuf) < int(n) {
@@ -281,7 +282,7 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 	}
 	if _, err := io.ReadFull(t.conn, t.readBuf); err != nil {
 		end(false)
-		return ports.Frame{}, err
+		return wire.Frame{}, err
 	}
 
 	var payload []byte
@@ -290,7 +291,7 @@ func (t *unixTransport) Recv() (ports.Frame, error) {
 		copy(payload, t.readBuf[1:])
 	}
 	end(true)
-	return ports.Frame{Type: ports.MsgType(t.readBuf[0]), Payload: payload}, nil
+	return wire.Frame{Type: wire.MsgType(t.readBuf[0]), Payload: payload}, nil
 }
 
 func (t *unixTransport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {

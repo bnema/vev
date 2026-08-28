@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -309,15 +310,15 @@ func probeRecord(kind byte, id uint64) []byte {
 }
 
 func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
-	tr := &Transport{nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame), maxRecvBuffer: maxRecvBuffer, done: make(chan struct{})}
+	tr := &Transport{nextRecvSeq: 1, recvBuf: make(map[uint64]wire.Frame), maxRecvBuffer: maxRecvBuffer, done: make(chan struct{})}
 	tr.deliverCond = sync.NewCond(&tr.deliverMu)
 	for i := range maxRecvBuffer + 100 {
-		tr.enqueueReliable(uint64(1000+i), ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}})
+		tr.enqueueReliable(uint64(1000+i), wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}})
 	}
 	if got := len(tr.recvBuf); got != maxRecvBuffer {
 		t.Fatalf("recvBuf len=%d, want %d", got, maxRecvBuffer)
 	}
-	tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
+	tr.enqueueReliable(1, wire.Frame{Type: wire.MsgOutput, Payload: []byte("next")})
 	if _, ok := tr.recvBuf[1]; !ok {
 		t.Fatalf("next expected sequence was dropped when far-future buffer was full")
 	}
@@ -329,13 +330,13 @@ func TestReliableRecvBufferBoundedForFarFutureSequences(t *testing.T) {
 func TestOutputPrerequisitesRemainInFullReceiveBuffer(t *testing.T) {
 	tr := &Transport{
 		nextRecvSeq:   1,
-		recvBuf:       map[uint64]ports.Frame{2: {Type: ports.MsgOutput, Payload: []byte("stale")}},
+		recvBuf:       map[uint64]wire.Frame{2: {Type: wire.MsgOutput, Payload: []byte("stale")}},
 		maxRecvBuffer: 1,
 		done:          make(chan struct{}),
 	}
 	tr.deliverCond = sync.NewCond(&tr.deliverMu)
 
-	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("replacement")})
+	ackSeq, ack, queued := tr.enqueueReliable(3, wire.Frame{Type: wire.MsgOutput, Payload: []byte("replacement")})
 	if ack || queued || ackSeq != 0 {
 		t.Fatalf("replacement ackSeq=%d ack=%v queued=%v, want output rejected while prerequisite buffer is full", ackSeq, ack, queued)
 	}
@@ -353,22 +354,22 @@ func TestReliableFullRecvBufferDoesNotAckDroppedFarFutureFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := &Transport{pc: aPC, peer: testAddr("b"), codec: codec, sendDir: 1, mtu: pdgram.DefaultMTU, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame), maxRecvBuffer: maxRecvBuffer, clock: realClock{}, done: make(chan struct{})}
+	tr := &Transport{pc: aPC, peer: testAddr("b"), codec: codec, sendDir: 1, mtu: pdgram.DefaultMTU, nextRecvSeq: 1, recvBuf: make(map[uint64]wire.Frame), maxRecvBuffer: maxRecvBuffer, clock: realClock{}, done: make(chan struct{})}
 	tr.deliverCond = sync.NewCond(&tr.deliverMu)
 	defer func() { _ = aPC.Close() }()
 	defer func() { _ = bPC.Close() }()
 
 	for i := range maxRecvBuffer {
-		tr.recvBuf[uint64(1000+i)] = ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}
+		tr.recvBuf[uint64(1000+i)] = wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}
 	}
-	tr.handleRecord(encodeData(9999, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("dropped")}))
+	tr.handleRecord(encodeData(9999, true, wire.Frame{Type: wire.MsgOutput, Payload: []byte("dropped")}))
 	select {
 	case pkt := <-bPC.in:
 		t.Fatalf("unexpected ACK packet for dropped frame: %x", pkt.b)
 	case <-time.After(25 * time.Millisecond):
 	}
 
-	tr.handleRecord(encodeData(1, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")}))
+	tr.handleRecord(encodeData(1, true, wire.Frame{Type: wire.MsgOutput, Payload: []byte("next")}))
 	select {
 	case <-bPC.in:
 	case <-time.After(time.Second):
@@ -376,27 +377,27 @@ func TestReliableFullRecvBufferDoesNotAckDroppedFarFutureFrame(t *testing.T) {
 	}
 }
 
-func recvMaybe(tr *Transport, d time.Duration) (ports.Frame, bool) {
-	ch := make(chan ports.Frame, 1)
+func recvMaybe(tr *Transport, d time.Duration) (wire.Frame, bool) {
+	ch := make(chan wire.Frame, 1)
 	go func() { f, _ := tr.Recv(); ch <- f }()
 	select {
 	case f := <-ch:
 		return f, true
 	case <-time.After(d):
-		return ports.Frame{}, false
+		return wire.Frame{}, false
 	}
 }
 
-func recvWithin(t *testing.T, tr *Transport, d time.Duration) ports.Frame {
+func recvWithin(t *testing.T, tr *Transport, d time.Duration) wire.Frame {
 	t.Helper()
-	ch := make(chan ports.Frame, 1)
+	ch := make(chan wire.Frame, 1)
 	go func() { f, _ := tr.Recv(); ch <- f }()
 	select {
 	case f := <-ch:
 		return f
 	case <-time.After(d):
 		t.Fatal("timeout")
-		return ports.Frame{}
+		return wire.Frame{}
 	}
 }
 
@@ -412,10 +413,10 @@ func waitPeer(t *testing.T, tr *Transport, want string) {
 	t.Fatalf("peer=%v, want %s", tr.Peer(), want)
 }
 
-func recvErrWithin(t *testing.T, tr *Transport, d time.Duration) (ports.Frame, error) {
+func recvErrWithin(t *testing.T, tr *Transport, d time.Duration) (wire.Frame, error) {
 	t.Helper()
 	type result struct {
-		f   ports.Frame
+		f   wire.Frame
 		err error
 	}
 	ch := make(chan result, 1)
@@ -428,6 +429,6 @@ func recvErrWithin(t *testing.T, tr *Transport, d time.Duration) (ports.Frame, e
 		return r.f, r.err
 	case <-time.After(d):
 		t.Fatal("timeout")
-		return ports.Frame{}, nil
+		return wire.Frame{}, nil
 	}
 }

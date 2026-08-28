@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
@@ -117,7 +118,7 @@ func (t *reconnectTestTimer) Stop() bool {
 
 // recvItem is one scripted Recv result.
 type recvItem struct {
-	f    ports.Frame
+	f    wire.Frame
 	err  error
 	wait <-chan struct{}
 }
@@ -135,26 +136,26 @@ func scriptRecv(tr *portsmocks.MockTransport, items ...recvItem) func() {
 		ch <- it
 	}
 	done := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		select {
 		case it := <-ch:
 			if it.wait != nil {
 				select {
 				case <-it.wait:
 				case <-done:
-					return ports.Frame{}, io.EOF
+					return wire.Frame{}, io.EOF
 				}
 			}
 			return it.f, it.err
 		case <-done:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
 	return func() { close(done) }
 }
 
-func frameOf(t ports.MsgType, payload []byte) ports.Frame {
-	return ports.Frame{Type: t, Payload: payload}
+func frameOf(t wire.MsgType, payload []byte) wire.Frame {
+	return wire.Frame{Type: t, Payload: payload}
 }
 
 // blockingReader blocks on Read until closed, then returns EOF. Stands in
@@ -234,8 +235,8 @@ func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int3
 	return tm, in
 }
 
-func isType(typ ports.MsgType) any {
-	return mock.MatchedBy(func(f ports.Frame) bool { return f.Type == typ })
+func isType(typ wire.MsgType) any {
+	return mock.MatchedBy(func(f wire.Frame) bool { return f.Type == typ })
 }
 
 // transportDialer adapts one already-open test transport to the Runner API.
@@ -339,13 +340,13 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 				return io.ErrClosedPipe
 			}
 			if tt.phase == "send" {
-				tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(ports.Frame) error {
+				tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(wire.Frame) error {
 					return block()
 				}).Once()
 			} else {
-				tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-				tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
-					return ports.Frame{}, block()
+				tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+				tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
+					return wire.Frame{}, block()
 				}).Once()
 			}
 			dialer := portsmocks.NewMockDialer(t)
@@ -384,7 +385,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("handshake operation leaked after Run returned")
 			}
-			tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
+			tr.AssertNotCalled(t, "Send", isType(wire.MsgTheme))
 		})
 	}
 }
@@ -401,17 +402,17 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 
 	gotHello := make(chan protocol.Hello, 1)
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
-		hello, err := ports.UnmarshalHello(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
+		hello, err := wire.UnmarshalHello(f.Payload)
 		require.NoError(t, err)
 		gotHello <- hello
 		return nil
 	}).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -434,14 +435,14 @@ func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
 	defer term.in.unblock()
 	lifecycle := domain.SessionLifecycleID{9, 8, 7}
 	tr := &recordingTransport{recvs: []recvItem{
-		{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+		{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID:   "s1",
 			SessionName: "main",
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "main"},
 			},
 		}))},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 
 	err := runTestClient(context.Background(), attachTestDependencies(tr, term, realClock{}), client.AttachRequest{
@@ -458,14 +459,14 @@ func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
 	foundSubscription := false
 	for _, frame := range tr.Sends() {
 		switch frame.Type {
-		case ports.MsgRecentRouteSnapshot:
+		case wire.MsgRecentRouteSnapshot:
 			var err error
-			snapshot, err = ports.UnmarshalRecentRouteSnapshot(frame.Payload)
+			snapshot, err = wire.UnmarshalRecentRouteSnapshot(frame.Payload)
 			require.NoError(t, err)
 			foundSnapshot = true
-		case ports.MsgRouteAttentionSubscription:
+		case wire.MsgRouteAttentionSubscription:
 			var err error
-			subscription, err = ports.UnmarshalRouteAttentionSubscription(frame.Payload)
+			subscription, err = wire.UnmarshalRouteAttentionSubscription(frame.Payload)
 			require.NoError(t, err)
 			foundSubscription = true
 		}
@@ -484,8 +485,8 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 
 	firstLifecycle := domain.SessionLifecycleID{1}
 	secondLifecycle := domain.SessionLifecycleID{2}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
-		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
@@ -495,12 +496,12 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 	secondTarget := protocol.ExactSessionTarget{LifecycleID: secondLifecycle, SessionName: "second"}
 	first := &recordingTransport{recvs: []recvItem{
 		{f: welcome("first", firstLifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Session: "second", Intent: protocol.IntentAttach, ExactTarget: &secondTarget,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
 		}))},
-		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: secondTarget}))},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: secondTarget}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	dialer := &sequenceDialer{trs: []ports.Transport{first}}
 
@@ -530,7 +531,7 @@ func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	}
 	tr := &recordingTransport{recvs: []recvItem{
 		{f: welcomeFrame(0)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 
 	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, term, realClock{}), request))
@@ -550,8 +551,8 @@ func TestStoppedLocalHandoffDialsReplacementTransport(t *testing.T) {
 	sourceLifecycle := domain.SessionLifecycleID{1}
 	targetLifecycle := domain.SessionLifecycleID{2}
 	target := protocol.ExactSessionTarget{LifecycleID: targetLifecycle, SessionName: "stopped"}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
-		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
@@ -560,14 +561,14 @@ func TestStoppedLocalHandoffDialsReplacementTransport(t *testing.T) {
 	}
 	first := &recordingTransport{recvs: []recvItem{
 		{f: welcome("source", sourceLifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Session: "stopped", Intent: protocol.IntentAttach, ExactTarget: &target,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}))},
 	}}
 	second := &recordingTransport{recvs: []recvItem{
 		{f: welcome("stopped", targetLifecycle)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	dialer := &sequenceDialer{trs: []ports.Transport{first, second}}
 
@@ -587,8 +588,8 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 	defer term.in.unblock()
 	localLifecycle := domain.SessionLifecycleID{1}
 	remoteLifecycle := domain.SessionLifecycleID{2}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
-		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
 		}))
@@ -599,7 +600,7 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 	}
 	local1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("local", localLifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Endpoint: "remote", Session: "work", Intent: protocol.IntentAttach,
 			RemoteTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}))},
@@ -610,7 +611,7 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 	}}
 	local2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("local", localLifecycle)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote}}
@@ -632,8 +633,8 @@ func TestAcceptedHomeActionUsesCapturedRouteAfterRequestMetadataRebase(t *testin
 	require.Equal(t, protocol.StartupOverlaySessionPicker, helloFromSend(t, local2).StartupOverlay)
 }
 
-func hybridWelcomeFrame(name string, lifecycle domain.SessionLifecycleID) ports.Frame {
-	return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+func hybridWelcomeFrame(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
+	return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 		SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 		CommittedIdentity: &protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
 	}))
@@ -642,7 +643,7 @@ func hybridWelcomeFrame(name string, lifecycle domain.SessionLifecycleID) ports.
 func hybridLocalBootstrap(lifecycle domain.SessionLifecycleID, target domain.RemoteSessionTarget) *recordingTransport {
 	return &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("local", lifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach,
 			RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}))},
@@ -669,16 +670,16 @@ func hybridPickerDependencies(localDialer ports.Dialer, term ports.Terminal, clo
 	return deps
 }
 
-func hybridParkedRequestHandler(requests chan<- protocol.ParkedRouteRequest, requestErrors chan<- error, signals map[protocol.ParkedRouteAction]chan struct{}) func(ports.Frame) {
+func hybridParkedRequestHandler(requests chan<- protocol.ParkedRouteRequest, requestErrors chan<- error, signals map[protocol.ParkedRouteAction]chan struct{}) func(wire.Frame) {
 	once := make(map[protocol.ParkedRouteAction]*sync.Once, len(signals))
 	for action := range signals {
 		once[action] = &sync.Once{}
 	}
-	return func(frame ports.Frame) {
-		if frame.Type != ports.MsgParkedRouteRequest {
+	return func(frame wire.Frame) {
+		if frame.Type != wire.MsgParkedRouteRequest {
 			return
 		}
-		request, err := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		request, err := wire.UnmarshalParkedRouteRequest(frame.Payload)
 		if err != nil {
 			if requestErrors != nil {
 				requestErrors <- err
@@ -717,11 +718,11 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 	remote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("source", remoteSourceLifecycle)},
 		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: parkSent},
-		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: remoteTargetLifecycle, SessionName: "target"}})), wait: switchSent},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteSwitched}))},
-		{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 2, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("target frame")}))},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: parkSent},
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: remoteTargetLifecycle, SessionName: "target"}})), wait: switchSent},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteSwitched}))},
+		{f: frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 2, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("target frame")}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	remote.onSend = hybridParkedRequestHandler(parkedRequests, parkedRequestErrors, map[protocol.ParkedRouteAction]chan struct{}{
 		protocol.ParkedRoutePrepare: parkSent,
@@ -729,14 +730,14 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 	})
 	localPicker := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("local", localLifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Endpoint: "remote", Session: "target", Intent: protocol.IntentAttach,
 			RemoteTarget: &targetTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}))},
 	}}
 	var resizeOnce sync.Once
-	localPicker.onSend = func(frame ports.Frame) {
-		if frame.Type == ports.MsgHello {
+	localPicker.onSend = func(frame wire.Frame) {
+		if frame.Type == wire.MsgHello {
 			resizeOnce.Do(func() { term.setSize(domain.Size{Cols: 100, Rows: 40}) })
 		}
 	}
@@ -763,10 +764,10 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 	frames := remote.Sends()
 	switchIndex := -1
 	for i, frame := range frames {
-		if frame.Type != ports.MsgParkedRouteRequest {
+		if frame.Type != wire.MsgParkedRouteRequest {
 			continue
 		}
-		request, requestErr := ports.UnmarshalParkedRouteRequest(frame.Payload)
+		request, requestErr := wire.UnmarshalParkedRouteRequest(frame.Payload)
 		require.NoError(t, requestErr)
 		if request.Action == protocol.ParkedRouteSwitch {
 			switchIndex = i
@@ -774,8 +775,8 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 		}
 	}
 	require.Positive(t, switchIndex)
-	require.Equal(t, ports.MsgResize, frames[switchIndex-1].Type, "current size must precede the parked switch")
-	resize, resizeErr := ports.UnmarshalResize(frames[switchIndex-1].Payload)
+	require.Equal(t, wire.MsgResize, frames[switchIndex-1].Type, "current size must precede the parked switch")
+	resize, resizeErr := wire.UnmarshalResize(frames[switchIndex-1].Payload)
 	require.NoError(t, resizeErr)
 	require.Equal(t, domain.Size{Cols: 100, Rows: 40}, resize.Size)
 	require.Equal(t, int32(1), remoteDialer.calls.Load(), "same-host picker switch must retain the authenticated remote transport")
@@ -803,8 +804,8 @@ func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 	sourceRemote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("source", sourceLifecycle)},
 		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: prepareSent},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteExpired})), wait: switchSent},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: prepareSent},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteExpired})), wait: switchSent},
 	}}
 	sourceRemote.onSend = hybridParkedRequestHandler(nil, parkedRequestErrors, map[protocol.ParkedRouteAction]chan struct{}{
 		protocol.ParkedRoutePrepare: prepareSent,
@@ -812,14 +813,14 @@ func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 	})
 	localPicker := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("local", localLifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Endpoint: "remote", Session: "target", Intent: protocol.IntentAttach,
 			RemoteTarget: &targetTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}))},
 	}}
 	targetRemote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("target", targetLifecycle)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{
@@ -951,10 +952,10 @@ func TestHybridPickerBackResumesRetainedRemoteTransport(t *testing.T) {
 	remote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("work", remoteLifecycle)},
 		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: parkSent},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteResumed})), wait: resumeSent},
-		{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("source frame")}))},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: parkSent},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteResumed})), wait: resumeSent},
+		{f: frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("source frame")}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	remote.onSend = hybridParkedRequestHandler(nil, parkedRequestErrors, map[protocol.ParkedRouteAction]chan struct{}{
 		protocol.ParkedRoutePrepare: parkSent,
@@ -1002,7 +1003,7 @@ func TestHybridPickerDifferentHostFallsBackToNewRemoteDial(t *testing.T) {
 	sourceRemote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("source", sourceLifecycle)},
 		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
-		{f: frameOf(ports.MsgParkedRouteResponse, ports.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: parkSent},
+		{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: parkSent},
 		{err: io.EOF, wait: keepSourceOpen},
 	}}
 	sourceRemote.onSend = hybridParkedRequestHandler(nil, parkedRequestErrors, map[protocol.ParkedRouteAction]chan struct{}{
@@ -1010,14 +1011,14 @@ func TestHybridPickerDifferentHostFallsBackToNewRemoteDial(t *testing.T) {
 	})
 	localPicker := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("local", localLifecycle)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(protocol.AttachTarget{
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 			Endpoint: targetTarget.Endpoint, Session: targetTarget.SessionName, Intent: protocol.IntentAttach,
 			RemoteTarget: &targetTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}))},
 	}}
 	targetRemote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("target", targetLifecycle)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	localDialer := &sequenceDialer{trs: []ports.Transport{localInitial, localPicker}}
 	sourceDialer := &sequenceDialer{trs: []ports.Transport{markedDatagramTransport{Transport: sourceRemote}}}
@@ -1048,8 +1049,8 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	remoteLifecycle := domain.SessionLifecycleID{2, 2, 2}
 	newLifecycle := domain.SessionLifecycleID{3, 3, 3}
 	remoteNewLifecycle := domain.SessionLifecycleID{4, 4, 4}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) ports.Frame {
-		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID:    name + "-id",
 			SessionName:  name,
 			ResumeToken:  token,
@@ -1073,14 +1074,14 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 
 	local1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("test", localLifecycle, 11)},
-		{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(remoteHandoff))},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(remoteHandoff))},
 	}}
 	local2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("test", localLifecycle, 11)},
-		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
 			Target: protocol.ExactSessionTarget{LifecycleID: newLifecycle, SessionName: "new"},
 		}))},
-		{f: frameOf(ports.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 2, Generation: 2}))},
+		{f: frameOf(wire.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 2, Generation: 2}))},
 	}}
 	local3 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("test", localLifecycle, 11)},
@@ -1088,21 +1089,21 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	}}
 	remote1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-manual", remoteLifecycle, 22)},
-		{f: frameOf(ports.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}))},
+		{f: frameOf(wire.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}))},
 	}}
 	remote2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-manual", remoteLifecycle, 22)},
-		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
 			Target: protocol.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"},
 		}))},
-		{f: frameOf(ports.MsgRoutePosition, mustMarshalRoutePosition(protocol.RoutePosition{
+		{f: frameOf(wire.MsgRoutePosition, mustMarshalRoutePosition(protocol.RoutePosition{
 			Target: protocol.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, ActiveTabID: "tab-2",
 		}))},
 		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
 	}}
 	remote3 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("remote-new", remoteNewLifecycle, 22)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	localDialer := &sequenceDialer{trs: []ports.Transport{local1, local2, local3}}
 	remoteDialer := &sequenceDialer{trs: []ports.Transport{remote1, remote2, remote3}}
@@ -1129,16 +1130,16 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, remoteNewHello.ExactTarget)
 }
 
-func navigationDirectiveFrame(action protocol.NavigationAction) ports.Frame {
+func navigationDirectiveFrame(action protocol.NavigationAction) wire.Frame {
 	directive := protocol.NavigationDirective{Action: action}
 	if action == protocol.NavigationOpenHomePicker {
 		directive.LeaseID = protocol.ParkedRouteLeaseID{1}
 	}
-	return frameOf(ports.MsgNavigationAction, ports.MarshalNavigationDirective(directive))
+	return frameOf(wire.MsgNavigationAction, wire.MarshalNavigationDirective(directive))
 }
 
 func mustMarshalCommittedIdentity(identity protocol.CommittedRouteIdentity) []byte {
-	payload, err := ports.MarshalCommittedRouteIdentity(identity)
+	payload, err := wire.MarshalCommittedRouteIdentity(identity)
 	if err != nil {
 		panic(err)
 	}
@@ -1146,7 +1147,7 @@ func mustMarshalCommittedIdentity(identity protocol.CommittedRouteIdentity) []by
 }
 
 func mustMarshalRouteAction(action protocol.RouteNavigationAction) []byte {
-	payload, err := ports.MarshalRouteNavigationAction(action)
+	payload, err := wire.MarshalRouteNavigationAction(action)
 	if err != nil {
 		panic(err)
 	}
@@ -1154,7 +1155,7 @@ func mustMarshalRouteAction(action protocol.RouteNavigationAction) []byte {
 }
 
 func mustMarshalRoutePosition(position protocol.RoutePosition) []byte {
-	payload, err := ports.MarshalRoutePosition(position)
+	payload, err := wire.MarshalRoutePosition(position)
 	if err != nil {
 		panic(err)
 	}
@@ -1170,11 +1171,11 @@ func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.
 
 	target := protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach}
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "local"}))},
-		recvItem{f: frameOf(ports.MsgAttachTarget, ports.MarshalAttachTarget(target))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "local"}))},
+		recvItem{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(target))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1197,10 +1198,10 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 
 	gotHello := make(chan protocol.Hello, 1)
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
-		hello, err := ports.UnmarshalHello(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
+		hello, err := wire.UnmarshalHello(f.Payload)
 		if err != nil {
 			return err
 		}
@@ -1208,8 +1209,8 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 		return nil
 	}).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1226,17 +1227,17 @@ func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).RunAndReturn(func(f ports.Frame) error {
-		hello, err := ports.UnmarshalHello(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
+		hello, err := wire.UnmarshalHello(f.Payload)
 		require.NoError(t, err)
 		require.Equal(t, uint8(1), hello.MaxOutputInFlight)
 		return nil
 	}).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1252,13 +1253,13 @@ func TestAttachHappyPath(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main"}))},
-		recvItem{f: frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("hello world")}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main"}))},
+		recvItem{f: frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("hello world")}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1275,9 +1276,9 @@ func TestAttachVersionMismatch(t *testing.T) {
 	// EnterRaw must NOT be called on the error-before-welcome path.
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
-		frameOf(ports.MsgError, ports.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
+		frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
 		nil,
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1287,7 +1288,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
 	require.Equal(t, protocol.ErrVersionMismatch, pe.Code)
-	tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
+	tr.AssertNotCalled(t, "Send", isType(wire.MsgTheme))
 }
 
 func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
@@ -1298,12 +1299,12 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	boom := errors.New("connection reset")
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
 		recvItem{err: boom},
 	)
 	defer unblock()
@@ -1322,11 +1323,11 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
 		recvItem{err: io.EOF},
 	)
 	defer unblock()
@@ -1356,35 +1357,35 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	gotInput := make(chan []byte, 2)
 	allowDetach := make(chan struct{})
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
-		in, err := ports.UnmarshalInput(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgInput)).RunAndReturn(func(f wire.Frame) error {
+		in, err := wire.UnmarshalInput(f.Payload)
 		require.NoError(t, err)
 		gotInput <- in.Data
 		close(allowDetach)
 		return nil
 	}).Once()
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
+	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 	recvCh := make(chan recvItem, 1)
 	recvCh <- recvItem{f: welcome}
 	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
 		case <-allowDetach:
 			select {
 			case <-closed:
-				return ports.Frame{}, io.EOF
+				return wire.Frame{}, io.EOF
 			default:
 				close(closed)
 				return detached, nil
 			}
 		case <-closed:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1418,35 +1419,35 @@ func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 	gotInput := make(chan []byte, 1)
 	allowDetach := make(chan struct{})
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
-		in, err := ports.UnmarshalInput(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgInput)).RunAndReturn(func(f wire.Frame) error {
+		in, err := wire.UnmarshalInput(f.Payload)
 		require.NoError(t, err)
 		gotInput <- in.Data
 		close(allowDetach)
 		return nil
 	}).Once()
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
+	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 	recvCh := make(chan recvItem, 1)
 	recvCh <- recvItem{f: welcome}
 	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
 		case <-allowDetach:
 			select {
 			case <-closed:
-				return ports.Frame{}, io.EOF
+				return wire.Frame{}, io.EOF
 			default:
 				close(closed)
 				return detached, nil
 			}
 		case <-closed:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1473,24 +1474,24 @@ func TestAttachForwardsResize(t *testing.T) {
 	var firstRecvOnce sync.Once
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	// The resize frame is forwarded via the sender goroutine.
 	gotResize := make(chan protocol.Resize, 1)
-	tr.EXPECT().Send(isType(ports.MsgResize)).RunAndReturn(func(f ports.Frame) error {
-		r, _ := ports.UnmarshalResize(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgResize)).RunAndReturn(func(f wire.Frame) error {
+		r, _ := wire.UnmarshalResize(f.Payload)
 		gotResize <- r
 		close(detachAfterResize)
 		return nil
 	}).Once()
 
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
+	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 	recvCh := make(chan recvItem, 2)
 	recvCh <- recvItem{f: welcome}
 	done := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		firstRecvOnce.Do(func() { close(firstRecv) })
 		select {
 		case it := <-recvCh:
@@ -1499,13 +1500,13 @@ func TestAttachForwardsResize(t *testing.T) {
 			// Deliver the detach once the resize has been observed.
 			select {
 			case <-done:
-				return ports.Frame{}, io.EOF
+				return wire.Frame{}, io.EOF
 			default:
 				close(done)
 				return detached, nil
 			}
 		case <-done:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1534,12 +1535,12 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	defer in.unblock()
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	boom := errors.New("connection reset")
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
 		recvItem{err: boom},
 	)
 	defer unblock()
@@ -1558,9 +1559,9 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
-		frameOf(ports.MsgError, ports.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
+		frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
 		nil,
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1571,7 +1572,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
-	tr.AssertNotCalled(t, "Send", isType(ports.MsgTheme))
+	tr.AssertNotCalled(t, "Send", isType(wire.MsgTheme))
 }
 
 func TestRunPhaseASingleAttempt(t *testing.T) {
@@ -1604,14 +1605,14 @@ func (d *sequenceDialer) Dial(context.Context) (ports.Transport, error) {
 type recordingTransport struct {
 	mu      sync.Mutex
 	recvs   []recvItem
-	sends   []ports.Frame
+	sends   []wire.Frame
 	closed  atomic.Int32
 	stall   <-chan struct{}
-	onSend  func(ports.Frame)
+	onSend  func(wire.Frame)
 	onClose func()
 }
 
-func (t *recordingTransport) Send(f ports.Frame) error {
+func (t *recordingTransport) Send(f wire.Frame) error {
 	t.mu.Lock()
 	t.sends = append(t.sends, f)
 	onSend := t.onSend
@@ -1622,18 +1623,18 @@ func (t *recordingTransport) Send(f ports.Frame) error {
 	return nil
 }
 
-func (t *recordingTransport) Sends() []ports.Frame {
+func (t *recordingTransport) Sends() []wire.Frame {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]ports.Frame(nil), t.sends...)
+	return append([]wire.Frame(nil), t.sends...)
 }
 
-func (t *recordingTransport) Recv() (ports.Frame, error) {
+func (t *recordingTransport) Recv() (wire.Frame, error) {
 	if len(t.recvs) == 0 {
 		if t.stall != nil {
 			<-t.stall
 		}
-		return ports.Frame{}, io.EOF
+		return wire.Frame{}, io.EOF
 	}
 	it := t.recvs[0]
 	t.recvs = t.recvs[1:]
@@ -1692,14 +1693,14 @@ func helloFromSend(t *testing.T, tr *recordingTransport) protocol.Hello {
 	t.Helper()
 	sends := tr.Sends()
 	require.NotEmpty(t, sends)
-	require.Equal(t, ports.MsgHello, sends[0].Type)
-	h, err := ports.UnmarshalHello(sends[0].Payload)
+	require.Equal(t, wire.MsgHello, sends[0].Type)
+	h, err := wire.UnmarshalHello(sends[0].Payload)
 	require.NoError(t, err)
 	return h
 }
 
-func welcomeFrame(token uint64) ports.Frame {
-	return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: protocol.CapabilityResume}))
+func welcomeFrame(token uint64) wire.Frame {
+	return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: protocol.CapabilityResume}))
 }
 
 func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
@@ -1707,7 +1708,7 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	defer term.in.unblock()
 	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
 	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
-	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
+	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2, tr3}}
 	clock := &reconnectTestClock{}
 	result := make(chan error, 1)
@@ -1741,20 +1742,20 @@ func TestReconnectRestoresLastPublishedRouteTab(t *testing.T) {
 	defer term.in.unblock()
 	lifecycle := domain.SessionLifecycleID{7, 8, 9}
 	target := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}
-	welcome := func(token uint64) ports.Frame {
-		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+	welcome := func(token uint64) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID: "work", SessionName: "work", ResumeToken: token, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
 		}))
 	}
 	tr1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome(11)},
-		{f: frameOf(ports.MsgRoutePosition, mustMarshalRoutePosition(protocol.RoutePosition{Target: target, ActiveTabID: "tab-2"}))},
+		{f: frameOf(wire.MsgRoutePosition, mustMarshalRoutePosition(protocol.RoutePosition{Target: target, ActiveTabID: "tab-2"}))},
 		{err: io.EOF},
 	}}
 	tr2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome(22)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	dialer := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
 	clock := &reconnectTestClock{}
@@ -1780,8 +1781,8 @@ func TestRemoteReconnectDropsStalePickerTargetAfterDaemonSessionSwitch(t *testin
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: oldLifecycle,
 		SessionName: "old", LiveTabID: "tab-1",
 	}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) ports.Frame {
-		return frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
@@ -1790,14 +1791,14 @@ func TestRemoteReconnectDropsStalePickerTargetAfterDaemonSessionSwitch(t *testin
 	}
 	tr1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("old", oldLifecycle, 11)},
-		{f: frameOf(ports.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
 			Target: protocol.ExactSessionTarget{LifecycleID: newLifecycle, SessionName: "new"},
 		}))},
 		{err: io.EOF},
 	}}
 	tr2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("new", newLifecycle, 22)},
-		{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	}}
 	dialer := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
 	clock := &reconnectTestClock{}
@@ -1838,8 +1839,8 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 			},
 			remember: func() error { return nil },
 			recv: []recvItem{
-				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-				{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+				{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+				{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 			},
 			wantCalled: true,
 		},
@@ -1852,8 +1853,8 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 			},
 			remember: func() error { return errors.New("disk full") },
 			recv: []recvItem{
-				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-				{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+				{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+				{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 			},
 			wantCalled: true,
 		},
@@ -1869,8 +1870,8 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 				return nil
 			},
 			recv: []recvItem{
-				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-				{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+				{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+				{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 			},
 		},
 		{
@@ -1885,7 +1886,7 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 				return nil
 			},
 			recv: []recvItem{
-				{f: frameOf(ports.MsgError, ports.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"}))},
+				{f: frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"}))},
 			},
 			preWelcomeReject: true,
 			wantErr:          true,
@@ -1899,7 +1900,7 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 			},
 			remember: func() error { return nil },
 			recv: []recvItem{
-				{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+				{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
 				{err: errors.New("connection reset")},
 			},
 			wantCalled: true,
@@ -1940,9 +1941,9 @@ func TestAttachRememberRemoteHost(t *testing.T) {
 
 			tr := portsmocks.NewMockTransport(t)
 			if !tt.preWelcomeReject {
-				tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
+				tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
 			}
-			tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+			tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 			if tt.preWelcomeReject {
 				tr.EXPECT().Recv().Return(tt.recv[0].f, tt.recv[0].err).Once()
 			} else {
@@ -1984,7 +1985,7 @@ func TestRunRememberRemoteHostAtMostOnceAcrossReconnects(t *testing.T) {
 	learnerDone := make(chan struct{})
 
 	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
-	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
+	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr1, tr2}}
 
 	deps := testDependencies(d, term, realClock{}, nil, nil)
@@ -2033,11 +2034,11 @@ func TestAttachRememberRemoteHostDoesNotBlockAfterWelcome(t *testing.T) {
 	learnerDone := make(chan struct{})
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -2114,11 +2115,11 @@ func TestRunRestoresTerminalBeforeWaitingForLearner(t *testing.T) {
 	learnerDone := make(chan struct{})
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -2211,11 +2212,11 @@ func TestRunReturnsWhenRemoteHostLearnerStalls(t *testing.T) {
 	}).Maybe()
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -2267,7 +2268,7 @@ func TestRunReturnsWhenRemoteHostLearnerStalls(t *testing.T) {
 func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
-	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))}}}
+	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))}}}
 	d := &sequenceDialer{trs: []ports.Transport{tr}}
 
 	err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: false})

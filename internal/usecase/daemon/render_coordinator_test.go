@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 )
@@ -267,12 +268,12 @@ func awaitLatestCoordinatorTimer(t *testing.T, clk *coordinatorMockClock) *coord
 	}
 }
 
-func requireNoCoordinatorOutputFrame(t *testing.T, sends chan ports.Frame) {
+func requireNoCoordinatorOutputFrame(t *testing.T, sends chan wire.Frame) {
 	t.Helper()
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type == ports.MsgRoutePosition {
+			if frame.Type == wire.MsgRoutePosition {
 				continue
 			}
 			t.Fatalf("unexpected output frame: %+v", frame)
@@ -1509,7 +1510,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 }
 
 func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
-	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan ports.Frame, *coordinatorMockClock, chan renderInvalidation) {
+	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Frame, *coordinatorMockClock, chan renderInvalidation) {
 		t.Helper()
 		p, releasePTY := newBlockingPTY(t)
 		t.Cleanup(releasePTY)

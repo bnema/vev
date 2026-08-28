@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
@@ -44,11 +45,11 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 	allowDetach := make(chan struct{})
 
 	tr := portsmocks.NewMockTransport(t)
-	tr.EXPECT().Send(isType(ports.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(ports.MsgResize)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgInput)).RunAndReturn(func(f ports.Frame) error {
-		in, err := ports.UnmarshalInput(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType(wire.MsgResize)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgInput)).RunAndReturn(func(f wire.Frame) error {
+		in, err := wire.UnmarshalInput(f.Payload)
 		require.NoError(t, err)
 		gotInput <- append([]byte(nil), in.Data...)
 		if bytes.IndexByte(in.Data, triggerByte) >= 0 {
@@ -56,33 +57,33 @@ func runRemoteClipboardTest(t *testing.T, remote bool, clip ports.ClipboardReade
 		}
 		return nil
 	}).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgImagePush)).RunAndReturn(func(f ports.Frame) error {
-		ip, err := ports.UnmarshalImagePush(f.Payload)
+	tr.EXPECT().Send(isType(wire.MsgImagePush)).RunAndReturn(func(f wire.Frame) error {
+		ip, err := wire.UnmarshalImagePush(f.Payload)
 		require.NoError(t, err)
 		gotImage <- ip
 		return nil
 	}).Maybe()
-	tr.EXPECT().Send(isType(ports.MsgClientNotice)).Return(nil).Maybe()
+	tr.EXPECT().Send(isType(wire.MsgClientNotice)).Return(nil).Maybe()
 
-	welcome := frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
+	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 	recvCh := make(chan recvItem, 1)
 	recvCh <- recvItem{f: welcome}
 	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
 		case <-allowDetach:
 			select {
 			case <-closed:
-				return ports.Frame{}, io.EOF
+				return wire.Frame{}, io.EOF
 			default:
 				close(closed)
 				return detached, nil
 			}
 		case <-closed:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -142,17 +143,17 @@ func TestRunRemoteClipboardCtrlVWithNoImageForwardsCtrlV(t *testing.T) {
 }
 
 type clipboardToastLifecycleTransport struct {
-	recv  chan ports.Frame
-	sends chan ports.Frame
+	recv  chan wire.Frame
+	sends chan wire.Frame
 }
 
-func (t *clipboardToastLifecycleTransport) Send(f ports.Frame) error {
+func (t *clipboardToastLifecycleTransport) Send(f wire.Frame) error {
 	t.sends <- f
 	return nil
 }
 
-func (t *clipboardToastLifecycleTransport) Recv() (ports.Frame, error) { return <-t.recv, nil }
-func (*clipboardToastLifecycleTransport) Close() error                 { return nil }
+func (t *clipboardToastLifecycleTransport) Recv() (wire.Frame, error) { return <-t.recv, nil }
+func (*clipboardToastLifecycleTransport) Close() error                { return nil }
 
 type clipboardToastLifecycleDialer struct{ transport ports.Transport }
 
@@ -175,8 +176,8 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 
 	clipboard := portsmocks.NewMockClipboardReader(t)
 	clipboard.EXPECT().ReadImage(mock.Anything).Return("", nil, errors.New("read failed")).Once()
-	transport := &clipboardToastLifecycleTransport{recv: make(chan ports.Frame, 8), sends: make(chan ports.Frame, 16)}
-	transport.recv <- frameOf(ports.MsgWelcome, ports.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
+	transport := &clipboardToastLifecycleTransport{recv: make(chan wire.Frame, 8), sends: make(chan wire.Frame, 16)}
+	transport.recv <- frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
 
 	result := make(chan error, 1)
 	go func() {
@@ -187,10 +188,10 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 	for !gotNotice {
 		select {
 		case sent := <-transport.sends:
-			if sent.Type != ports.MsgClientNotice {
+			if sent.Type != wire.MsgClientNotice {
 				continue
 			}
-			notice, err := ports.UnmarshalClientNotice(sent.Payload)
+			notice, err := wire.UnmarshalClientNotice(sent.Payload)
 			require.NoError(t, err)
 			require.Equal(t, protocol.ClientNoticeClipboardFallback, notice.Action)
 			gotNotice = true
@@ -199,8 +200,8 @@ func TestRunRemoteClipboardFailureNotifiesDaemonAndWritesOutputVerbatim(t *testi
 		}
 	}
 	beforeOutput := out.String()
-	transport.recv <- frameOf(ports.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("incremental")}))
-	transport.recv <- frameOf(ports.MsgDetached, ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	transport.recv <- frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("incremental")}))
+	transport.recv <- frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
 
 	select {
 	case err := <-result:

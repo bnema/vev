@@ -5,12 +5,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/testutil/replaytest"
 )
 
 func TestTransportReplay(t *testing.T) {
-	replaytest.Run(t, func(t *testing.T, frames []ports.Frame) []ports.Frame {
+	replaytest.Run(t, func(t *testing.T, frames []wire.Frame) []wire.Frame {
 		clientRead, serverWrite := io.Pipe()
 		serverRead, clientWrite := io.Pipe()
 		sender := NewTransport(clientRead, clientWrite, func() error { return clientWrite.Close() })
@@ -26,7 +26,7 @@ func TestTransportReplay(t *testing.T) {
 				}
 			}
 		})
-		got := make([]ports.Frame, 0, len(frames))
+		got := make([]wire.Frame, 0, len(frames))
 		for range frames {
 			frame, err := receiver.Recv()
 			if err != nil {

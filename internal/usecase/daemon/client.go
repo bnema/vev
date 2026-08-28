@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -409,7 +410,7 @@ var errTransportReplaced = errors.New("client transport was replaced")
 
 // sendExpectedTransport writes only when expected is still the attachment's
 // current transport incarnation. It preserves sendMu -> linkMu lock ordering.
-func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f ports.Frame) error {
+func (ac *attachedClient) sendExpectedTransport(expected transportSnapshot, f wire.Frame) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	if !ac.transportSnapshotCurrent(expected) {
@@ -435,7 +436,7 @@ func (ac *attachedClient) beginExpectedTransportSendLocked(expected transportSna
 	return nil
 }
 
-func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, f ports.Frame, ticket *attachmentEffect) error {
+func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportSnapshot, f wire.Frame, ticket *attachmentEffect) error {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
 	// A attachment-bound send requires a live ticket, and reports every rejection,
@@ -459,11 +460,11 @@ func (ac *attachedClient) sendExpectedTransportForAttachment(expected transportS
 // detachNotifyTimeout, the transport is force-closed, failing the in-flight
 // write. Detach/kill/shutdown paths use this so they are never gated on a
 // client that has stopped draining its socket.
-func (d *Daemon) boundedSend(ac *attachedClient, f ports.Frame) {
+func (d *Daemon) boundedSend(ac *attachedClient, f wire.Frame) {
 	_ = d.boundedSendErr(ac, f)
 }
 
-func (d *Daemon) boundedSendErr(ac *attachedClient, f ports.Frame) error {
+func (d *Daemon) boundedSendErr(ac *attachedClient, f wire.Frame) error {
 	expected := ac.transportSnapshot()
 	if expected.transport == nil {
 		return errors.New("client transport is nil")

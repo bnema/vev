@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // routeRemoteTargetWithContext is the exact-target branch for picker handoffs.
@@ -119,12 +120,12 @@ func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, act
 			effect.ac.clearParkedRoute()
 		}
 	}
-	payload := ports.MarshalNavigationDirective(directive)
+	payload := wire.MarshalNavigationDirective(directive)
 	if payload == nil {
 		rollback()
 		return errAttachmentTransition
 	}
-	if err := effect.sendControl(ports.Frame{Type: ports.MsgNavigationAction, Payload: payload}); err != nil {
+	if err := effect.sendControl(wire.Frame{Type: wire.MsgNavigationAction, Payload: payload}); err != nil {
 		rollback()
 		return err
 	}
@@ -132,11 +133,11 @@ func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, act
 }
 
 func (d *Daemon) sendRecentRouteNavigationActionForAttachment(effect *attachmentEffect, action protocol.RouteNavigationAction) error {
-	payload, err := ports.MarshalRouteNavigationAction(action)
+	payload, err := wire.MarshalRouteNavigationAction(action)
 	if err != nil {
 		return errAttachmentTransition
 	}
-	return effect.sendControl(ports.Frame{Type: ports.MsgNavigateRecentRoute, Payload: payload})
+	return effect.sendControl(wire.Frame{Type: wire.MsgNavigateRecentRoute, Payload: payload})
 }
 
 func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffect) error {
@@ -149,11 +150,11 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffec
 		Ephemeral: effect.sess.ephemeral,
 	}
 	effect.sess.mu.Unlock()
-	payload, err := ports.MarshalCommittedRouteIdentity(identity)
+	payload, err := wire.MarshalCommittedRouteIdentity(identity)
 	if err != nil {
 		return errAttachmentTransition
 	}
-	return effect.sendControl(ports.Frame{Type: ports.MsgCommittedRouteIdentity, Payload: payload})
+	return effect.sendControl(wire.Frame{Type: wire.MsgCommittedRouteIdentity, Payload: payload})
 }
 
 func (d *Daemon) finishRouteAttach(sess *session, tr ports.Transport, sz domain.Size, h protocol.Hello, routeCreated, purge bool) (*attachedClient, error) {

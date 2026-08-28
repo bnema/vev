@@ -7,20 +7,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
-type ackRecordingTransport struct{ sent chan ports.Frame }
+type ackRecordingTransport struct{ sent chan wire.Frame }
 
-func (t *ackRecordingTransport) Send(f ports.Frame) error   { t.sent <- f; return nil }
-func (t *ackRecordingTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (t *ackRecordingTransport) Close() error               { return nil }
+func (t *ackRecordingTransport) Send(f wire.Frame) error   { t.sent <- f; return nil }
+func (t *ackRecordingTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (t *ackRecordingTransport) Close() error              { return nil }
 
 func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
-	normal := make(chan ports.Frame, sendQueueDepth)
+	normal := make(chan wire.Frame, sendQueueDepth)
 	for range cap(normal) {
-		normal <- ports.Frame{Type: ports.MsgInput}
+		normal <- wire.Frame{Type: wire.MsgInput}
 	}
 	const epoch = 7
 	acks := newCumulativeAckQueue()
@@ -30,13 +30,13 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tr := &ackRecordingTransport{sent: make(chan ports.Frame, sendQueueDepth+1)}
+	tr := &ackRecordingTransport{sent: make(chan wire.Frame, sendQueueDepth+1)}
 	errCh := make(chan error, 1)
 	go runSender(ctx, cancel, tr, nil, nil, normal, nil, acks, errCh, slog.Default())
 
 	first := <-tr.sent
-	require.Equal(t, ports.MsgAck, first.Type)
-	ack, err := ports.UnmarshalAck(first.Payload)
+	require.Equal(t, wire.MsgAck, first.Type)
+	ack, err := wire.UnmarshalAck(first.Payload)
 	require.NoError(t, err)
 	require.Equal(t, uint64(epoch), ack.Epoch)
 	require.Equal(t, uint64(maxUnackedOutputStatesForTest), ack.State)
@@ -45,21 +45,21 @@ func TestCumulativeAckBypassesFullNormalSendQueue(t *testing.T) {
 func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	normal := make(chan ports.Frame, 1)
-	control := make(chan ports.Frame, 1)
+	normal := make(chan wire.Frame, 1)
+	control := make(chan wire.Frame, 1)
 	gate := newSamePeerInputGate()
 	gate.setPaused(true)
 	held := make(chan struct{})
 	gate.afterInputHeld = func() { close(held) }
-	transport := &ackRecordingTransport{sent: make(chan ports.Frame, 2)}
+	transport := &ackRecordingTransport{sent: make(chan wire.Frame, 2)}
 	acks := newCumulativeAckQueue()
 	errs := make(chan error, 1)
 	go runSender(ctx, cancel, transport, control, nil, normal, gate, acks, errs, slog.Default())
 
-	normal <- ports.Frame{Type: ports.MsgInput, Payload: []byte("held")}
+	normal <- wire.Frame{Type: wire.MsgInput, Payload: []byte("held")}
 	awaitSenderSignal(t, held)
-	control <- ports.Frame{Type: ports.MsgSamePeerSwitchRequest, Payload: []byte("switch")}
-	if got := awaitSenderFrame(t, transport.sent); got.Type != ports.MsgSamePeerSwitchRequest {
+	control <- wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: []byte("switch")}
+	if got := awaitSenderFrame(t, transport.sent); got.Type != wire.MsgSamePeerSwitchRequest {
 		t.Fatalf("first frame = %d, want same-peer switch request", got.Type)
 	}
 	select {
@@ -68,7 +68,7 @@ func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 	default:
 	}
 	gate.setPaused(false)
-	if got := awaitSenderFrame(t, transport.sent); got.Type != ports.MsgInput {
+	if got := awaitSenderFrame(t, transport.sent); got.Type != wire.MsgInput {
 		t.Fatalf("released frame = %d, want input", got.Type)
 	}
 }
@@ -76,14 +76,14 @@ func TestSamePeerSwitchControlBypassesHeldInput(t *testing.T) {
 func TestSenderBarrierLeavesPausedInputQueued(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	normal := make(chan ports.Frame, 1)
+	normal := make(chan wire.Frame, 1)
 	barriers := make(chan chan struct{})
 	gate := newSamePeerInputGate()
 	gate.setPaused(true)
-	transport := &ackRecordingTransport{sent: make(chan ports.Frame, 1)}
+	transport := &ackRecordingTransport{sent: make(chan wire.Frame, 1)}
 	go runSender(ctx, cancel, transport, nil, barriers, normal, gate, newCumulativeAckQueue(), make(chan error, 1), slog.Default())
 
-	normal <- ports.Frame{Type: ports.MsgInput, Payload: []byte("held")}
+	normal <- wire.Frame{Type: wire.MsgInput, Payload: []byte("held")}
 	barrierDone := make(chan struct{})
 	barriers <- barrierDone
 	awaitSenderSignal(t, barrierDone)
@@ -94,7 +94,7 @@ func TestSenderBarrierLeavesPausedInputQueued(t *testing.T) {
 	}
 
 	gate.setPaused(false)
-	if got := awaitSenderFrame(t, transport.sent); got.Type != ports.MsgInput {
+	if got := awaitSenderFrame(t, transport.sent); got.Type != wire.MsgInput {
 		t.Fatalf("released frame = %d, want input", got.Type)
 	}
 }
@@ -104,14 +104,14 @@ func TestSenderBarrierFlushesPendingAck(t *testing.T) {
 	defer cancel()
 	acks := newCumulativeAckQueue()
 	acks.offer(3, 9)
-	transport := &ackRecordingTransport{sent: make(chan ports.Frame, 1)}
+	transport := &ackRecordingTransport{sent: make(chan wire.Frame, 1)}
 	barriers := make(chan chan struct{})
-	go runSender(ctx, cancel, transport, nil, barriers, make(chan ports.Frame, 1), newSamePeerInputGate(), acks, make(chan error, 1), slog.Default())
+	go runSender(ctx, cancel, transport, nil, barriers, make(chan wire.Frame, 1), newSamePeerInputGate(), acks, make(chan error, 1), slog.Default())
 
 	done := make(chan struct{})
 	barriers <- done
 	frame := awaitSenderFrame(t, transport.sent)
-	require.Equal(t, ports.MsgAck, frame.Type)
+	require.Equal(t, wire.MsgAck, frame.Type)
 	awaitSenderSignal(t, done)
 }
 
@@ -124,14 +124,14 @@ func awaitSenderSignal(t *testing.T, signal <-chan struct{}) {
 	}
 }
 
-func awaitSenderFrame(t *testing.T, frames <-chan ports.Frame) ports.Frame {
+func awaitSenderFrame(t *testing.T, frames <-chan wire.Frame) wire.Frame {
 	t.Helper()
 	select {
 	case frame := <-frames:
 		return frame
 	case <-time.After(time.Second):
 		t.Fatal("sender did not emit frame")
-		return ports.Frame{}
+		return wire.Frame{}
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestBoundedStderrRetainsAtMostDiagnosticLimit(t *testing.T) {
@@ -50,13 +50,13 @@ func TestAssertNoDirectHandoffProcessesInitialFramesAndRetainsOutput(t *testing.
 		probe:  &visualProbe{},
 		frames: make(chan harnessFrame, 2),
 	}
-	tr.frames <- harnessFrame{frame: ports.Frame{Type: ports.MsgOutput}}
-	tr.frames <- harnessFrame{frame: ports.Frame{Type: ports.MsgAttachTarget}}
+	tr.frames <- harnessFrame{frame: wire.Frame{Type: wire.MsgOutput}}
+	tr.frames <- harnessFrame{frame: wire.Frame{Type: wire.MsgAttachTarget}}
 
 	if err := assertNoDirectHandoff(tr); err == nil {
 		t.Fatal("direct handoff was not rejected")
 	}
-	if len(tr.queued) != 1 || tr.queued[0].frame.Type != ports.MsgOutput {
+	if len(tr.queued) != 1 || tr.queued[0].frame.Type != wire.MsgOutput {
 		t.Fatalf("queued frames = %#v, want one retained output", tr.queued)
 	}
 	if tr.probe.unexpectedHandoffs != 1 {

@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 )
 
@@ -236,11 +237,11 @@ func newFactorySeq(t *testing.T, ptys ...ports.PTY) *portsmocks.MockPTYFactory {
 // newConn scripts a MockTransport: Recv yields first then more (in order),
 // then blocks until the connection is released or Closed (returning io.EOF).
 // Every Send is captured on the returned channel.
-func newConn(t *testing.T, first ports.Frame, more ...ports.Frame) (*portsmocks.MockTransport, chan ports.Frame, func()) {
+func newConn(t *testing.T, first wire.Frame, more ...wire.Frame) (*portsmocks.MockTransport, chan wire.Frame, func()) {
 	t.Helper()
 	tr := portsmocks.NewMockTransport(t)
-	sends := make(chan ports.Frame, 64)
-	recvCh := make(chan ports.Frame, 1+len(more))
+	sends := make(chan wire.Frame, 64)
+	recvCh := make(chan wire.Frame, 1+len(more))
 	recvCh <- first
 	for _, f := range more {
 		recvCh <- f
@@ -249,15 +250,15 @@ func newConn(t *testing.T, first ports.Frame, more ...ports.Frame) (*portsmocks.
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
 
-	tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		select {
 		case f := <-recvCh:
 			return f, nil
 		case <-done:
-			return ports.Frame{}, io.EOF
+			return wire.Frame{}, io.EOF
 		}
 	}).Maybe()
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
 		sends <- f
 		return nil
 	}).Maybe()
@@ -265,14 +266,14 @@ func newConn(t *testing.T, first ports.Frame, more ...ports.Frame) (*portsmocks.
 	return tr, sends, closeDone
 }
 
-func mustHello(intent uint8, name string, sz domain.Size) ports.Frame {
-	return ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
+func mustHello(intent uint8, name string, sz domain.Size) wire.Frame {
+	return wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(protocol.Hello{
 		Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color",
 	})}
 }
 
-func frameInput(data []byte) ports.Frame {
-	return ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: data})}
+func frameInput(data []byte) wire.Frame {
+	return wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: data})}
 }
 
 func screenLineText(s *vt.Screen, y int) string {
@@ -284,7 +285,7 @@ func screenLineText(s *vt.Screen, y int) string {
 }
 
 // awaitFrame waits for the next frame of type typ on ch, failing on timeout.
-func awaitFrame(t *testing.T, ch chan ports.Frame, typ ports.MsgType) ports.Frame {
+func awaitFrame(t *testing.T, ch chan wire.Frame, typ wire.MsgType) wire.Frame {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
@@ -318,10 +319,10 @@ func sessionCount(d *Daemon) int {
 
 func listSessions(t *testing.T, d *Daemon) protocol.Sessions {
 	t.Helper()
-	tr, sends, _ := newConn(t, ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})})
+	tr, sends, _ := newConn(t, wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})})
 	d.handleList(tr)
-	f := awaitFrame(t, sends, ports.MsgSessions)
-	sessions, err := ports.UnmarshalSessions(f.Payload)
+	f := awaitFrame(t, sends, wire.MsgSessions)
+	sessions, err := wire.UnmarshalSessions(f.Payload)
 	require.NoError(t, err)
 	return sessions
 }
@@ -331,7 +332,7 @@ func listSessions(t *testing.T, d *Daemon) protocol.Sessions {
 // transport mock while channels make both sides of the wire deterministic.
 type welcomeBlockingTransport struct {
 	tr             *portsmocks.MockTransport
-	sends          chan ports.Frame
+	sends          chan wire.Frame
 	welcomeEntered chan struct{}
 	releaseWelcome chan struct{}
 	recvDone       chan struct{}
@@ -342,23 +343,23 @@ type welcomeBlockingTransport struct {
 func newWelcomeBlockingTransport(t *testing.T) *welcomeBlockingTransport {
 	t.Helper()
 	b := &welcomeBlockingTransport{
-		sends:          make(chan ports.Frame, 8),
+		sends:          make(chan wire.Frame, 8),
 		welcomeEntered: make(chan struct{}),
 		releaseWelcome: make(chan struct{}),
 		recvDone:       make(chan struct{}),
 	}
 	b.tr = portsmocks.NewMockTransport(t)
-	b.tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+	b.tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
 		b.sends <- f
-		if f.Type == ports.MsgWelcome {
+		if f.Type == wire.MsgWelcome {
 			close(b.welcomeEntered)
 			<-b.releaseWelcome
 		}
 		return nil
 	}).Maybe()
-	b.tr.EXPECT().Recv().RunAndReturn(func() (ports.Frame, error) {
+	b.tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
 		<-b.recvDone
-		return ports.Frame{}, io.EOF
+		return wire.Frame{}, io.EOF
 	}).Maybe()
 	b.tr.EXPECT().Close().Return(nil).Maybe()
 	t.Cleanup(b.finish)
@@ -374,11 +375,11 @@ func (b *welcomeBlockingTransport) finish() {
 	b.closeOnce.Do(func() { close(b.recvDone) })
 }
 
-func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan ports.Frame) {
+func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan wire.Frame) {
 	t.Helper()
 	tr := portsmocks.NewMockTransport(t)
-	sends := make(chan ports.Frame, 64)
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
+	sends := make(chan wire.Frame, 64)
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
 		sends <- f
 		return nil
 	}).Maybe()
@@ -386,22 +387,22 @@ func newCapturingTransport(t testing.TB) (*portsmocks.MockTransport, chan ports.
 	return tr, sends
 }
 
-func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+func newManualSessionWithPTYs(t testing.TB, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	return newManualSessionWithPTYsClock(t, stubClock{}, ptys...)
 }
 
-func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+func newManualSessionWithPTYsClock(t testing.TB, clock ports.Clock, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	return newManualSessionWithPTYsClockCleanup(t, clock, true, ptys...)
 }
 
-func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	return newManualSessionWithPTYsClockCleanup(t, stubClock{}, registerCleanup, ptys...)
 }
 
-func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan ports.Frame) {
+func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	d := newTestDaemonWithCleanup(t, nil, clock, registerCleanup)
 	tr, sends := newCapturingTransport(t)
@@ -432,7 +433,7 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 	return d, sess, ac, sends
 }
 
-func newManualTabSession(t *testing.T, n int) (*Daemon, *session, *attachedClient, chan ports.Frame, []func()) {
+func newManualTabSession(t *testing.T, n int) (*Daemon, *session, *attachedClient, chan wire.Frame, []func()) {
 	t.Helper()
 	ptys := make([]ports.PTY, 0, n)
 	releases := make([]func(), 0, n)
@@ -671,8 +672,8 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 
 	awaitTestCompletion(t, tr.welcomeEntered, "timed out waiting for Welcome send")
 	handshakeTimer := awaitHandshakeTimer(t, clock)
-	welcome := awaitFrame(t, tr.sends, ports.MsgWelcome)
-	require.Equal(t, ports.MsgWelcome, welcome.Type)
+	welcome := awaitFrame(t, tr.sends, wire.MsgWelcome)
+	require.Equal(t, wire.MsgWelcome, welcome.Type)
 	sess := firstSession(d)
 	sess.mu.Lock()
 	ac := sess.snapshotAttachmentsLocked()[0]
@@ -695,8 +696,8 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 
 	tr.release()
-	output := awaitFrame(t, tr.sends, ports.MsgOutput)
-	first, err := ports.UnmarshalOutput(output.Payload)
+	output := awaitFrame(t, tr.sends, wire.MsgOutput)
+	first, err := wire.UnmarshalOutput(output.Payload)
 	require.NoError(t, err)
 	require.Zero(t, first.Base, "the first post-Welcome frame is full")
 	tr.finish()
@@ -710,10 +711,10 @@ func TestHandleHelloDefersFreshOutputUntilWelcome(t *testing.T) {
 // MsgDetached send until the transport is closed (mirroring a full kernel
 // send buffer: only Close fails the in-flight write). Serve must still tear
 
-func mustOutputData(t *testing.T, sends chan ports.Frame) []byte {
+func mustOutputData(t *testing.T, sends chan wire.Frame) []byte {
 	t.Helper()
-	f := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(f.Payload)
+	f := awaitFrame(t, sends, wire.MsgOutput)
+	out, err := wire.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
 	return out.Data
 }

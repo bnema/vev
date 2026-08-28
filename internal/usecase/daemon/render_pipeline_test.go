@@ -14,7 +14,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/testutil/replaytest"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -32,11 +32,11 @@ import (
 // assertions must not depend on any adapter's framing implementation.
 type scriptedReplayTransport struct {
 	t      *testing.T
-	frames []ports.Frame
+	frames []wire.Frame
 	next   int
 }
 
-func (s *scriptedReplayTransport) Send(got ports.Frame) error {
+func (s *scriptedReplayTransport) Send(got wire.Frame) error {
 	s.t.Helper()
 	if s.next >= len(s.frames) {
 		s.t.Errorf("unexpected frame %#v", got)
@@ -48,8 +48,8 @@ func (s *scriptedReplayTransport) Send(got ports.Frame) error {
 	require.Equal(s.t, want.Payload, got.Payload)
 	return nil
 }
-func (*scriptedReplayTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*scriptedReplayTransport) Close() error               { return nil }
+func (*scriptedReplayTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*scriptedReplayTransport) Close() error              { return nil }
 
 func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	frames := replaytest.Transcript()
@@ -57,7 +57,7 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	terminal := vt.NewScreen(8, 3)
 	for _, frame := range frames {
 		require.NoError(t, transport.Send(frame))
-		output, err := ports.UnmarshalOutput(frame.Payload)
+		output, err := wire.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
 		require.Equal(t, frame.Payload, mustMarshalOutput(output), "output payload must remain byte exact")
 		terminal.Write(output.Data)
@@ -253,7 +253,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	require.True(t, d.emitFrame(sess, ac, &state, composed))
 	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.output.lastCursor)
 	require.Equal(t, uint64(1), ac.output.next)
-	out, err := ports.UnmarshalOutput((<-sends).Payload)
+	out, err := wire.UnmarshalOutput((<-sends).Payload)
 	require.NoError(t, err)
 	require.Zero(t, out.Base)
 	require.Equal(t, uint64(1), out.New)
@@ -332,12 +332,12 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 	stream := newOutputStateStream()
 	prepared, err := stream.prepareFrame(nil, &state, composed.frame, composed.damage, composed.reset, composed.cursor)
 	require.NoError(t, err)
-	var outputFrame ports.Frame
-	require.NoError(t, prepared.send(0, func(frame ports.Frame) error {
+	var outputFrame wire.Frame
+	require.NoError(t, prepared.send(0, func(frame wire.Frame) error {
 		outputFrame = frame
 		return nil
 	}))
-	output, err := ports.UnmarshalOutput(outputFrame.Payload)
+	output, err := wire.UnmarshalOutput(outputFrame.Payload)
 	require.NoError(t, err)
 	terminalBytes := output.Data
 	require.Equal(t, "\x1b[1;1H\x1b[0;7m tab \x1b[0m      R\x1b[2;1HAAAAAAAAAAAA\x1b[3;1HBBB┌─fl─┐BBB\x1b[4;1H───Prompt───\x1b[5;1HPROMPT\x1b[K\x1b[B\x1b[2K\x1b[7;1H\x1b[0;7m sess \x1b[0m     B\x1b[0m\x1b[?25l", string(terminalBytes))

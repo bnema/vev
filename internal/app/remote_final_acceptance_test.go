@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/require"
 )
@@ -58,17 +59,17 @@ func serveAcceptanceRemote(tr ports.Transport, target string, handoff protocol.A
 			return
 		}
 		if !welcomed {
-			if frame.Type != ports.MsgHello {
+			if frame.Type != wire.MsgHello {
 				continue
 			}
-			if err := tr.Send(ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: target})}); err != nil {
+			if err := tr.Send(wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: target})}); err != nil {
 				return
 			}
 			welcomed = true
 			continue
 		}
 		if handoff.Endpoint != "" {
-			_ = tr.Send(ports.Frame{Type: ports.MsgAttachTarget, Payload: ports.MarshalAttachTarget(handoff)})
+			_ = tr.Send(wire.Frame{Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(handoff)})
 			for {
 				if _, err := tr.Recv(); err != nil {
 					return
@@ -79,16 +80,16 @@ func serveAcceptanceRemote(tr ports.Transport, target string, handoff protocol.A
 		if outputs != nil {
 			outputs <- string(data)
 		}
-		payload, err := ports.MarshalOutput(protocol.Output{
+		payload, err := wire.MarshalOutput(protocol.Output{
 			Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Data: data,
 		})
 		if err != nil {
 			return
 		}
-		if err := tr.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
+		if err := tr.Send(wire.Frame{Type: wire.MsgOutput, Payload: payload}); err != nil {
 			return
 		}
-		_ = tr.Send(ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})})
+		_ = tr.Send(wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})})
 		for {
 			if _, err := tr.Recv(); err != nil {
 				return
@@ -150,18 +151,18 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 		handoff: protocol.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: protocol.IntentAttach},
 	}).Dial(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, wireTransport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{
+	require.NoError(t, wireTransport.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24},
 	})}))
 	welcome, err := wireTransport.Recv()
 	require.NoError(t, err)
-	require.Equal(t, ports.MsgWelcome, welcome.Type)
-	require.NoError(t, wireTransport.Send(ports.Frame{Type: ports.MsgTheme, Payload: ports.MarshalTheme(protocol.Theme{})}))
+	require.Equal(t, wire.MsgWelcome, welcome.Type)
+	require.NoError(t, wireTransport.Send(wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(protocol.Theme{})}))
 	attachTarget, err := wireTransport.Recv()
 	require.NoError(t, err)
-	target, err := ports.UnmarshalAttachTarget(attachTarget.Payload)
+	target, err := wire.UnmarshalAttachTarget(attachTarget.Payload)
 	require.NoError(t, err)
-	require.Equal(t, ports.MsgAttachTarget, attachTarget.Type)
+	require.Equal(t, wire.MsgAttachTarget, attachTarget.Type)
 	require.Equal(t, "picked.example", target.Endpoint)
 	require.NoError(t, wireTransport.Close())
 

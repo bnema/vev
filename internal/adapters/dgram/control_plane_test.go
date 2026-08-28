@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -81,7 +82,7 @@ func TestReadLoopDoesNotWriteACKSynchronously(t *testing.T) {
 	a.diagnosticCh = make(chan Diagnostic, 1)
 	a.mu.Unlock()
 
-	if err := b.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("first")}); err != nil {
+	if err := b.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("first")}); err != nil {
 		t.Fatal(err)
 	}
 	awaitSignal(t, contacts, "first authenticated record")
@@ -92,7 +93,7 @@ func TestReadLoopDoesNotWriteACKSynchronously(t *testing.T) {
 	awaitSignal(t, ackStarted, "blocked ACK")
 
 	clk.advance(time.Second)
-	if err := b.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("second")}); err != nil {
+	if err := b.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("second")}); err != nil {
 		t.Fatal(err)
 	}
 	awaitSignal(t, contacts, "second authenticated record while ACK write is blocked")
@@ -471,7 +472,7 @@ func TestHeartbeatContinuesDuringRetransmitStorm(t *testing.T) {
 	a.mu.Lock()
 	for seq := uint64(1); seq <= 64; seq++ {
 		a.pending[seq] = &pending{
-			frame:    ports.Frame{Type: ports.MsgInput, Payload: make([]byte, 24*a.mtu)},
+			frame:    wire.Frame{Type: wire.MsgInput, Payload: make([]byte, 24*a.mtu)},
 			enqueued: now.Add(-time.Second), first: now.Add(-time.Second), last: now.Add(-time.Second),
 		}
 	}
@@ -515,7 +516,7 @@ func TestHealthChecksContinueDuringRetransmitStorm(t *testing.T) {
 	now := clk.Now()
 	a.mu.Lock()
 	a.pending[1] = &pending{
-		frame:    ports.Frame{Type: ports.MsgInput, Payload: make([]byte, 24*a.mtu)},
+		frame:    wire.Frame{Type: wire.MsgInput, Payload: make([]byte, 24*a.mtu)},
 		enqueued: now.Add(-time.Second), first: now.Add(-time.Second), last: now.Add(-time.Second),
 	}
 	a.mu.Unlock()

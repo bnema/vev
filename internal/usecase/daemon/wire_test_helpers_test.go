@@ -1,12 +1,12 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func mustMarshalOutput(m protocol.Output) []byte {
-	payload, err := ports.MarshalOutput(m)
+	payload, err := wire.MarshalOutput(m)
 	if err != nil {
 		panic(err)
 	}
@@ -14,7 +14,7 @@ func mustMarshalOutput(m protocol.Output) []byte {
 }
 
 func mustMarshalAck(m protocol.Ack) []byte {
-	payload, err := ports.MarshalAck(m)
+	payload, err := wire.MarshalAck(m)
 	if err != nil {
 		panic(err)
 	}
@@ -22,7 +22,7 @@ func mustMarshalAck(m protocol.Ack) []byte {
 }
 
 func mustMarshalResize(m protocol.Resize) []byte {
-	payload, err := ports.MarshalResize(m)
+	payload, err := wire.MarshalResize(m)
 	if err != nil {
 		panic(err)
 	}

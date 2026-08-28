@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func BenchmarkTransportSend(b *testing.B) {
 	conn := discardConn{}
 	tr := NewTransport(conn)
 	payload := []byte("payload payload payload")
-	frame := ports.Frame{Type: ports.MsgOutput, Payload: payload}
+	frame := wire.Frame{Type: wire.MsgOutput, Payload: payload}
 
 	b.ReportAllocs()
 	for b.Loop() {
@@ -26,7 +26,7 @@ func BenchmarkTransportSend(b *testing.B) {
 
 func BenchmarkTransportRecvReuse(b *testing.B) {
 	payload := []byte("payload payload payload")
-	encoded := encodeBenchmarkFrame(ports.Frame{Type: ports.MsgOutput, Payload: payload})
+	encoded := encodeBenchmarkFrame(wire.Frame{Type: wire.MsgOutput, Payload: payload})
 	recv := &unixTransport{conn: &loopingReaderConn{data: encoded}}
 
 	b.ReportAllocs()
@@ -37,7 +37,7 @@ func BenchmarkTransportRecvReuse(b *testing.B) {
 	}
 }
 
-func encodeBenchmarkFrame(f ports.Frame) []byte {
+func encodeBenchmarkFrame(f wire.Frame) []byte {
 	n := 1 + len(f.Payload)
 	buf := make([]byte, frameHeaderLen+n)
 	binary.BigEndian.PutUint32(buf[:frameHeaderLen], uint32(n))

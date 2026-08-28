@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
@@ -55,7 +56,7 @@ func TestTransportObservabilityIPCEOFAndCloseEndFailedSpans(t *testing.T) {
 	left, right := net.Pipe()
 	transport := NewTransport(left, WithRuntimeObserver(reporter))
 	_ = right.Close()
-	if err := transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("failed")}); err == nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgOutput, Payload: []byte("failed")}); err == nil {
 		t.Fatal("Send() error = nil after peer close")
 	}
 	_ = transport.Close()
@@ -152,7 +153,7 @@ func TestTransportObservabilityIPCMarksCarriageWithoutChangingBytes(t *testing.T
 	defer func() { _ = right.Close() }()
 	client := NewTransport(left, WithRuntimeObserver(reporter))
 	server := NewTransport(right, WithRuntimeObserver(reporter))
-	want := ports.Frame{Type: ports.MsgOutput, Payload: []byte("wire bytes stay exact")}
+	want := wire.Frame{Type: wire.MsgOutput, Payload: []byte("wire bytes stay exact")}
 
 	var wg sync.WaitGroup
 	wg.Go(func() {

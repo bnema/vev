@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestDiagnosticSnapshotSeparatesProgressAges(t *testing.T) {
@@ -20,8 +21,8 @@ func TestDiagnosticSnapshotSeparatesProgressAges(t *testing.T) {
 		retransmits:             64,
 		reassemblyInflight:      2,
 		pending: map[uint64]*pending{
-			1: {frame: ports.Frame{Payload: make([]byte, 7)}},
-			2: {frame: ports.Frame{Payload: make([]byte, 11)}},
+			1: {frame: wire.Frame{Payload: make([]byte, 7)}},
+			2: {frame: wire.Frame{Payload: make([]byte, 11)}},
 		},
 		diagnosticCh: make(chan Diagnostic, diagnosticBufferSize),
 		done:         make(chan struct{}),

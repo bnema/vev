@@ -1,11 +1,11 @@
 package dgram
 
-import "github.com/bnema/vev/internal/ports"
+import "github.com/bnema/vev/internal/protocol/wire"
 
 type dataSendJob struct {
 	seq      uint64
 	reliable bool
-	frame    ports.Frame
+	frame    wire.Frame
 	done     chan error
 }
 
@@ -52,8 +52,8 @@ func (t *Transport) notifyOutputPacerLocked() {
 	t.outputWake = make(chan struct{})
 }
 
-func shouldPaceOutput(f ports.Frame) bool {
-	return f.Type == ports.MsgOutput
+func shouldPaceOutput(f wire.Frame) bool {
+	return f.Type == wire.MsgOutput
 }
 
 func (t *Transport) markPendingSent(seq uint64, reliable bool) {

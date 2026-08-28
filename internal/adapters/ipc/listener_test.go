@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestListenAcceptRoundTrip(t *testing.T) {
@@ -43,7 +43,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 		}
 		defer func() { _ = conn.Close() }()
 		client := NewTransport(conn)
-		errCh <- client.Send(ports.Frame{Type: ports.MsgPing})
+		errCh <- client.Send(wire.Frame{Type: wire.MsgPing})
 	}()
 
 	transport, err := ln.Accept()
@@ -56,7 +56,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recv() error = %v", err)
 	}
-	if got.Type != ports.MsgPing {
+	if got.Type != wire.MsgPing {
 		t.Fatalf("Recv() type = %v, want MsgPing", got.Type)
 	}
 	if err := <-errCh; err != nil {

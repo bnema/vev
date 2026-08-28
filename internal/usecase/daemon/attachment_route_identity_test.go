@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,8 +14,8 @@ type committedIdentityErrorTransport struct {
 	closeTrackingTransport
 }
 
-func (t *committedIdentityErrorTransport) Send(frame ports.Frame) error {
-	if frame.Type == ports.MsgCommittedRouteIdentity {
+func (t *committedIdentityErrorTransport) Send(frame wire.Frame) error {
+	if frame.Type == wire.MsgCommittedRouteIdentity {
 		return errors.New("committed identity send failed")
 	}
 	return t.closeTrackingTransport.Send(frame)
@@ -58,11 +58,11 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 	var identity protocol.CommittedRouteIdentity
 	found := false
 	for _, frame := range transport.Sends() {
-		if frame.Type != ports.MsgCommittedRouteIdentity {
+		if frame.Type != wire.MsgCommittedRouteIdentity {
 			continue
 		}
 		var decodeErr error
-		identity, decodeErr = ports.UnmarshalCommittedRouteIdentity(frame.Payload)
+		identity, decodeErr = wire.UnmarshalCommittedRouteIdentity(frame.Payload)
 		require.NoError(t, decodeErr)
 		found = true
 	}

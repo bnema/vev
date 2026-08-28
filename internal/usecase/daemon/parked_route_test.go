@@ -14,28 +14,29 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 type parkedRouteFailTransport struct{}
 
-func (parkedRouteFailTransport) Send(ports.Frame) error     { return errors.New("send failed") }
-func (parkedRouteFailTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (parkedRouteFailTransport) Close() error               { return nil }
+func (parkedRouteFailTransport) Send(wire.Frame) error     { return errors.New("send failed") }
+func (parkedRouteFailTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (parkedRouteFailTransport) Close() error              { return nil }
 
 type parkedRouteExpiryTransport struct {
-	sends  chan ports.Frame
+	sends  chan wire.Frame
 	closed chan struct{}
 	once   sync.Once
 }
 
-func (t *parkedRouteExpiryTransport) Send(frame ports.Frame) error {
+func (t *parkedRouteExpiryTransport) Send(frame wire.Frame) error {
 	t.sends <- frame
 	return nil
 }
 
-func (t *parkedRouteExpiryTransport) Recv() (ports.Frame, error) {
+func (t *parkedRouteExpiryTransport) Recv() (wire.Frame, error) {
 	<-t.closed
-	return ports.Frame{}, io.EOF
+	return wire.Frame{}, io.EOF
 }
 
 func (t *parkedRouteExpiryTransport) Close() error {
@@ -62,7 +63,7 @@ func (c *parkedRouteClock) setNow(now time.Time) {
 	c.mu.Unlock()
 }
 
-func armAndPrepareParkedRoute(t *testing.T, d *Daemon, source *session, ac *attachedClient, sends chan ports.Frame) protocol.ParkedRouteLeaseID {
+func armAndPrepareParkedRoute(t *testing.T, d *Daemon, source *session, ac *attachedClient, sends chan wire.Frame) protocol.ParkedRouteLeaseID {
 	t.Helper()
 	ac.navigationCapabilities |= protocol.NavigationCapabilityHomePicker
 	token := source.captureAttachmentCapability(ac, ac.transport())
@@ -70,14 +71,14 @@ func armAndPrepareParkedRoute(t *testing.T, d *Daemon, source *session, ac *atta
 	require.True(t, admitted)
 	require.NoError(t, d.sendNavigationActionForAttachment(effect, protocol.NavigationOpenHomePicker))
 	effect.End()
-	directiveFrame := awaitFrame(t, sends, ports.MsgNavigationAction)
-	directive, err := ports.UnmarshalNavigationDirective(directiveFrame.Payload)
+	directiveFrame := awaitFrame(t, sends, wire.MsgNavigationAction)
+	directive, err := wire.UnmarshalNavigationDirective(directiveFrame.Payload)
 	require.NoError(t, err)
 
 	prepare := protocol.ParkedRouteRequest{RequestID: 1, LeaseID: directive.LeaseID, Action: protocol.ParkedRoutePrepare}
-	require.False(t, d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(prepare)}))
-	readyFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	ready, err := ports.UnmarshalParkedRouteResponse(readyFrame.Payload)
+	require.False(t, d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(prepare)}))
+	readyFrame := awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	ready, err := wire.UnmarshalParkedRouteResponse(readyFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady}, ready)
 	return directive.LeaseID
@@ -108,12 +109,12 @@ func TestParkedRouteSwitchesExactLiveTargetOnRetainedTransport(t *testing.T) {
 		SessionName: "target", LiveTabID: domain.TabStableID(target.tabs[0].stableID),
 	}
 	switchRequest := protocol.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: protocol.ParkedRouteSwitch, Target: &targetRequest}
-	require.False(t, d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)}))
+	require.False(t, d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(switchRequest)}))
 
 	require.Same(t, target, ac.currentAttachmentSession())
 	require.False(t, ac.parkedRouteOutput.Load())
-	responseFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	response, err := ports.UnmarshalParkedRouteResponse(responseFrame.Payload)
+	responseFrame := awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	response, err := wire.UnmarshalParkedRouteResponse(responseFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteSwitched}, response)
 }
@@ -147,11 +148,11 @@ func TestParkedRouteSwitchAcceptedBeforeLeaseExpiryCommitsAtomically(t *testing.
 		SessionName: "target", LiveTabID: domain.TabStableID(target.tabs[0].stableID),
 	}
 	switchRequest := protocol.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: protocol.ParkedRouteSwitch, Target: &targetRequest}
-	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(switchRequest)})
 
 	require.Same(t, target, ac.currentAttachmentSession())
-	responseFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	response, err := ports.UnmarshalParkedRouteResponse(responseFrame.Payload)
+	responseFrame := awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	response, err := wire.UnmarshalParkedRouteResponse(responseFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ParkedRouteSwitched, response.Status)
 }
@@ -185,7 +186,7 @@ func TestParkedRouteRestoresExactStoppedTargetWithDaemonEnvironment(t *testing.T
 		SessionName: "stopped", Stopped: true, StoppedTab: domain.NewStableTabSelector("tab-b"),
 	}
 	switchRequest := protocol.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: protocol.ParkedRouteSwitch, Target: &target}
-	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(switchRequest)})
 
 	restored := ac.currentAttachmentSession()
 	require.NotNil(t, restored)
@@ -210,23 +211,23 @@ func TestParkedRouteStaleTargetLeavesSourceResumable(t *testing.T) {
 		SessionName: "missing", LiveTabID: "tab-1",
 	}
 	switchRequest := protocol.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: protocol.ParkedRouteSwitch, Target: &missing}
-	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(switchRequest)})
-	staleFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	stale, err := ports.UnmarshalParkedRouteResponse(staleFrame.Payload)
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(switchRequest)})
+	staleFrame := awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	stale, err := wire.UnmarshalParkedRouteResponse(staleFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ParkedRouteStaleTarget, stale.Status)
 	require.Same(t, source, ac.currentAttachmentSession())
 	require.True(t, ac.parkedRouteOutput.Load())
 
 	resume := protocol.ParkedRouteRequest{RequestID: 3, LeaseID: leaseID, Action: protocol.ParkedRouteResume}
-	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
-	resumedFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	resumed, err := ports.UnmarshalParkedRouteResponse(resumedFrame.Payload)
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(resume)})
+	resumedFrame := awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	resumed, err := wire.UnmarshalParkedRouteResponse(resumedFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ParkedRouteResumed, resumed.Status)
 	require.False(t, ac.parkedRouteOutput.Load())
-	outputFrame := awaitFrame(t, sends, ports.MsgOutput)
-	output, err := ports.UnmarshalOutput(outputFrame.Payload)
+	outputFrame := awaitFrame(t, sends, wire.MsgOutput)
+	output, err := wire.UnmarshalOutput(outputFrame.Payload)
 	require.NoError(t, err)
 	require.True(t, output.Full)
 }
@@ -245,10 +246,10 @@ func TestParkedRouteDoesNotReplayOneShotEffectsAfterResume(t *testing.T) {
 	}
 
 	resume := protocol.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: protocol.ParkedRouteResume}
-	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
-	_ = awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	outputFrame := awaitFrame(t, sends, ports.MsgOutput)
-	output, err := ports.UnmarshalOutput(outputFrame.Payload)
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(resume)})
+	_ = awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	outputFrame := awaitFrame(t, sends, wire.MsgOutput)
+	output, err := wire.UnmarshalOutput(outputFrame.Payload)
 	require.NoError(t, err)
 	require.True(t, output.Full)
 	require.NotContains(t, string(output.Data), "one-shot effect")
@@ -270,9 +271,9 @@ func TestParkedRouteExpiredLeaseFailsClosed(t *testing.T) {
 	ac.parkedRoute.expiresAt = d.clock.Now()
 	ac.parkedRouteMu.Unlock()
 	resume := protocol.ParkedRouteRequest{RequestID: 2, LeaseID: leaseID, Action: protocol.ParkedRouteResume}
-	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), ports.Frame{Type: ports.MsgParkedRouteRequest, Payload: ports.MarshalParkedRouteRequest(resume)})
-	responseFrame := awaitFrame(t, sends, ports.MsgParkedRouteResponse)
-	response, err := ports.UnmarshalParkedRouteResponse(responseFrame.Payload)
+	d.handleAttachmentClientFrame(source.captureAttachmentCapability(ac, ac.transport()), wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(resume)})
+	responseFrame := awaitFrame(t, sends, wire.MsgParkedRouteResponse)
+	response, err := wire.UnmarshalParkedRouteResponse(responseFrame.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ParkedRouteExpired, response.Status)
 	require.Same(t, source, ac.currentAttachmentSession())
@@ -308,7 +309,7 @@ func TestParkedRouteLeaseExpiryClosesExactRetainedTransport(t *testing.T) {
 	clock.EXPECT().Now().Return(time.Time{}).Maybe()
 	clock.EXPECT().NewTimer(mock.Anything).Return(timer).Once()
 	d.clock = clock
-	transport := &parkedRouteExpiryTransport{sends: make(chan ports.Frame, 8), closed: make(chan struct{})}
+	transport := &parkedRouteExpiryTransport{sends: make(chan wire.Frame, 8), closed: make(chan struct{})}
 	ac.replaceTransport(transport)
 
 	_ = armAndPrepareParkedRoute(t, d, source, ac, transport.sends)

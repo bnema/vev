@@ -13,8 +13,8 @@ import (
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -1445,13 +1445,13 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		frameInput([]byte("\x1b ")),
 		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),
-		ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
+		wire.Frame{Type: wire.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
 	)
 
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, ports.MsgWelcome)
-	first := awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgWelcome)
+	first := awaitFrame(t, sends, wire.MsgOutput)
 	require.Eventually(t, func() bool {
 		sessions := listSessions(t, d)
 		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
@@ -1466,8 +1466,8 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		"timed out awaiting resized output frame",
 	)
 
-	for _, f := range []ports.Frame{first, resized} {
-		out, err := ports.UnmarshalOutput(f.Payload)
+	for _, f := range []wire.Frame{first, resized} {
+		out, err := wire.UnmarshalOutput(f.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(out.Data), "work")
 		require.Contains(t, string(out.Data), ";7m", "active status tab should be inverse-highlighted")

@@ -15,6 +15,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestSnapshotCoordinatorQuarantineCancelsPublicationBeforeDelete(t *testing.T) {
@@ -311,7 +312,7 @@ func TestServeShutdownDeadlineStillJoinsPaneExitWriter(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, listener) }()
 
-	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgWelcome)
 	sess := firstSession(d)
 	require.NotNil(t, sess)
 
@@ -476,7 +477,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgWelcome)
 	markSnapshotDirty(firstSession(d))
 	d.snapshotWake <- struct{}{}
 	first := <-published
@@ -533,7 +534,7 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, ports.MsgWelcome)
+	awaitFrame(t, sends, wire.MsgWelcome)
 	markSnapshotDirty(firstSession(d))
 	d.snapshotWake <- struct{}{}
 	select {

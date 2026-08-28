@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -56,15 +57,15 @@ func TestRemoteHostDepsDefaultsStore(t *testing.T) {
 
 func TestDecodeSessionListErrorReply(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
-		_, err := decodeSessionListReply(ports.Frame{
-			Type:    ports.MsgError,
-			Payload: ports.MarshalErrorMsg(protocol.ErrorMsg{Text: "denied"}),
+		_, err := decodeSessionListReply(wire.Frame{
+			Type:    wire.MsgError,
+			Payload: wire.MarshalErrorMsg(protocol.ErrorMsg{Text: "denied"}),
 		})
 		require.EqualError(t, err, "vev: denied")
 	})
 
 	t.Run("malformed", func(t *testing.T) {
-		_, err := decodeSessionListReply(ports.Frame{Type: ports.MsgError, Payload: []byte{0}})
+		_, err := decodeSessionListReply(wire.Frame{Type: wire.MsgError, Payload: []byte{0}})
 		require.ErrorContains(t, err, "vev: decoding error reply")
 	})
 }

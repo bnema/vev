@@ -19,9 +19,9 @@ import (
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -38,14 +38,14 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	pane.screen.Write([]byte("\x1b[38;2;180;90;30mX"))
 
 	d.enterCopyMode(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	undimmed := client.Frame.At(0, 1)
 	require.Equal(t, 'X', undimmed.Rune, "fixture must address copy-mode pane content")
 	copyBar := append([]renderer.Cell(nil), client.Frame.Row(client.Frame.Height-1)...)
 	require.Contains(t, rowText(copyBar), "[SCROLL]", "fixture must capture the copy status bar")
 
 	d.enterPalette(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	dimmed := client.Frame.At(0, 1)
 	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
 	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style), dimmed.Style, "palette backdrop must dim the composed copy frame")
@@ -84,8 +84,8 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 
 			d.firstPaint(sess, ac)
 
-			frame := awaitFrame(t, sends, ports.MsgOutput)
-			output, err := ports.UnmarshalOutput(frame.Payload)
+			frame := awaitFrame(t, sends, wire.MsgOutput)
+			output, err := wire.UnmarshalOutput(frame.Payload)
 			require.NoError(t, err)
 			require.Zero(t, output.Base, "first paint must be a mandatory reset")
 			select {
@@ -107,13 +107,13 @@ func TestPaletteBackdropDimsSimultaneousPicker(t *testing.T) {
 	pane.screen.Write([]byte("X"))
 
 	d.enterPicker(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	pickerTitle := client.Frame.At(31, 2)
 	require.Equal(t, 'S', pickerTitle.Rune, "fixture must address the picker title")
 	undimmedPane := client.Frame.At(0, 1)
 
 	d.enterPalette(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	dimmedPickerTitle := pickerTitle
 	dimmedPickerTitle.Style = themeui.NewDimmer(backdropTheme()).Dim(pickerTitle.Style)
 	require.Equal(t, dimmedPickerTitle, client.Frame.At(31, 2), "the lower-priority picker must be part of the palette backdrop")
@@ -129,13 +129,13 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("X"))
 	d.paint(sess, ac, true, nil)
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	undimmed := client.Frame.At(0, 1)
 	topBar := client.Frame.At(0, 0)
 	bottomBar := client.Frame.At(0, 24)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	dimmed := client.Frame.At(0, 1)
 	require.Equal(t, 'X', dimmed.Rune)
 	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style), dimmed.Style, "open palette must use the theme dim style")
@@ -147,7 +147,7 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	require.Equal(t, dimmedBottomBar, client.Frame.At(0, 24), "bottom chrome is part of the complete backdrop")
 
 	d.handleInput(sess, ac, []byte("\x1b"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, ports.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	require.Equal(t, undimmed, client.Frame.At(0, 1), "full redraw restores pane rune and style")
 	require.Equal(t, topBar, client.Frame.At(0, 0))
 	require.Equal(t, bottomBar, client.Frame.At(0, 24))
@@ -189,10 +189,10 @@ func awaitPTYReadProcessed(t *testing.T, processed <-chan struct{}) {
 	<-processed
 }
 
-func awaitOutputFrameWithoutSleep(t *testing.T, sends <-chan ports.Frame) ports.Frame {
+func awaitOutputFrameWithoutSleep(t *testing.T, sends <-chan wire.Frame) wire.Frame {
 	t.Helper()
 	frame := <-sends
-	require.Equal(t, ports.MsgOutput, frame.Type)
+	require.Equal(t, wire.MsgOutput, frame.Type)
 	return frame
 }
 
@@ -332,7 +332,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, inactiveProcessed)
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
-		output, err := ports.UnmarshalOutput(frame.Payload)
+		output, err := wire.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(output.Data), "partial complete")
 		requireNoCoordinatorOutputFrame(t, sends)
@@ -365,7 +365,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, newProcessed)
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
-		output, err := ports.UnmarshalOutput(frame.Payload)
+		output, err := wire.UnmarshalOutput(frame.Payload)
 		require.NoError(t, err)
 		require.Contains(t, string(output.Data), "newly active")
 		require.NotContains(t, string(output.Data), "old partial")
@@ -515,7 +515,7 @@ func TestPaneRenderableActiveAttachmentDoesNotScanPickerPreviews(t *testing.T) {
 }
 
 func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
-	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan ports.Frame) {
+	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan wire.Frame) {
 		t.Helper()
 		p, release := newBlockingPTY(t)
 		t.Cleanup(release)
@@ -589,8 +589,8 @@ func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
 	d.handleInput(sess, ac, []byte("CLT\r"))
 
 	require.Equal(t, 0, sessionCount(d))
-	f := awaitFrame(t, sends, ports.MsgDetached)
-	det, err := ports.UnmarshalDetached(f.Payload)
+	f := awaitFrame(t, sends, wire.MsgDetached)
+	det, err := wire.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 }
@@ -610,8 +610,8 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
 	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	f := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(f.Payload)
+	f := awaitFrame(t, sends, wire.MsgOutput)
+	out, err := wire.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
 	data := string(out.Data)
 	require.Contains(t, data, "remaining")
@@ -636,8 +636,8 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
 	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	f := awaitFrame(t, sends, ports.MsgOutput)
-	out, err := ports.UnmarshalOutput(f.Payload)
+	f := awaitFrame(t, sends, wire.MsgOutput)
+	out, err := wire.UnmarshalOutput(f.Payload)
 	require.NoError(t, err)
 	data := string(out.Data)
 	require.Contains(t, data, "active")
@@ -655,8 +655,8 @@ func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
 	releases[0]()
 
 	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond)
-	f := awaitFrame(t, sends, ports.MsgDetached)
-	det, err := ports.UnmarshalDetached(f.Payload)
+	f := awaitFrame(t, sends, wire.MsgDetached)
+	det, err := wire.UnmarshalDetached(f.Payload)
 	require.NoError(t, err)
 	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 
@@ -933,8 +933,8 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	var gotOutput atomic.Bool
 	tr := portsmocks.NewMockTransport(t)
 	tr.EXPECT().Close().Return(nil).Maybe()
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f ports.Frame) error {
-		if f.Type == ports.MsgOutput {
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
+		if f.Type == wire.MsgOutput {
 			gotOutput.Store(true)
 		}
 		return nil
@@ -1053,7 +1053,7 @@ func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
 	}
 	select {
 	case f := <-sends:
-		require.NotEqual(t, ports.MsgOutput, f.Type)
+		require.NotEqual(t, wire.MsgOutput, f.Type)
 	default:
 	}
 }

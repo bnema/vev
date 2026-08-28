@@ -13,6 +13,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestTransportObservabilitySSHStdioEOFEndsReceive(t *testing.T) {
@@ -212,7 +213,7 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	reporter := ports.NewSerializedRuntimeObserver(observer, 64)
 	defer reporter.Close()
 
-	frame := ports.Frame{Type: ports.MsgOutput, Payload: []byte("stdio bytes stay exact")}
+	frame := wire.Frame{Type: wire.MsgOutput, Payload: []byte("stdio bytes stay exact")}
 	var observed, baseline bytes.Buffer
 	if err := NewTransport(bytes.NewReader(nil), &observed, nil, WithRuntimeObserver(reporter)).Send(frame); err != nil {
 		t.Fatalf("observed Send() error = %v", err)

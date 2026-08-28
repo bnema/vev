@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const (
@@ -50,7 +51,7 @@ type proxyCopyDirection struct {
 	dst              ports.Transport
 	recvKind         proxyCopyErrKind
 	sendKind         proxyCopyErrKind
-	transform        func(ports.Frame) ports.Frame
+	transform        func(wire.Frame) wire.Frame
 	retryRecoverable bool
 }
 
@@ -211,15 +212,15 @@ func recoverableClientLink(t ports.Transport, err error) bool {
 // clampDatagramHelloOutputWindow enforces the datagram-safe state window at
 // the adapter boundary. Invalid Hello payloads pass through unchanged so the
 // daemon remains the single authority for strict decoding and version checks.
-func clampDatagramHelloOutputWindow(f ports.Frame) ports.Frame {
-	if f.Type != ports.MsgHello {
+func clampDatagramHelloOutputWindow(f wire.Frame) wire.Frame {
+	if f.Type != wire.MsgHello {
 		return f
 	}
-	hello, err := ports.UnmarshalHello(f.Payload)
+	hello, err := wire.UnmarshalHello(f.Payload)
 	if err != nil {
 		return f
 	}
 	hello.MaxOutputInFlight = 1
-	f.Payload = ports.MarshalHello(hello)
+	f.Payload = wire.MarshalHello(hello)
 	return f
 }

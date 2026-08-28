@@ -47,6 +47,7 @@ import (
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
@@ -1077,12 +1078,12 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 		cwd = ""
 	}
 	hello := detachedLocalHello(name, cwd)
-	if err := transport.Send(ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(hello)}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}); err != nil {
 		return fmt.Errorf("vev: creating detached session: %w", err)
 	}
 
 	type detachedReply struct {
-		frame ports.Frame
+		frame wire.Frame
 		err   error
 	}
 	replyCh := make(chan detachedReply, 1)
@@ -1100,10 +1101,10 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 			return fmt.Errorf("vev: awaiting detached session creation: %w", reply.err)
 		}
 		switch reply.frame.Type {
-		case ports.MsgWelcome:
+		case wire.MsgWelcome:
 			return nil
-		case ports.MsgError:
-			em, derr := ports.UnmarshalErrorMsg(reply.frame.Payload)
+		case wire.MsgError:
+			em, derr := wire.UnmarshalErrorMsg(reply.frame.Payload)
 			if derr != nil {
 				return fmt.Errorf("vev: decoding error reply: %w", derr)
 			}
@@ -1126,7 +1127,7 @@ func requestDaemonStop(ctx context.Context) error {
 		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
 	}
 	defer func() { _ = transport.Close() }()
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{All: true})}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}); err != nil {
 		return fmt.Errorf("vev: requesting daemon stop: %w", err)
 	}
 	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
@@ -1482,7 +1483,7 @@ func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr er
 	}
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgList, Payload: ports.MarshalList(protocol.List{})}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}); err != nil {
 		return nil, fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
@@ -1492,18 +1493,18 @@ func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr er
 	return decodeSessionListReply(reply)
 }
 
-func decodeSessionListReply(reply ports.Frame) ([]protocol.SessionInfo, error) {
-	if reply.Type == ports.MsgError {
-		em, err := ports.UnmarshalErrorMsg(reply.Payload)
+func decodeSessionListReply(reply wire.Frame) ([]protocol.SessionInfo, error) {
+	if reply.Type == wire.MsgError {
+		em, err := wire.UnmarshalErrorMsg(reply.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("vev: decoding error reply: %w", err)
 		}
 		return nil, fmt.Errorf("vev: %s", em.Text)
 	}
-	if reply.Type != ports.MsgSessions {
+	if reply.Type != wire.MsgSessions {
 		return nil, fmt.Errorf("vev: unexpected reply type %d to list", reply.Type)
 	}
-	sessions, err := ports.UnmarshalSessions(reply.Payload)
+	sessions, err := wire.UnmarshalSessions(reply.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("vev: decoding session list: %w", err)
 	}
@@ -1596,7 +1597,7 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 	}
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(ports.Frame{Type: ports.MsgKill, Payload: ports.MarshalKill(protocol.Kill{Name: name, All: all || daemon})}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Name: name, All: all || daemon})}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)
 	}
 	reply, err := transport.Recv()
@@ -1609,8 +1610,8 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 		}
 		return fmt.Errorf("vev: reading kill reply: %w", err)
 	}
-	if reply.Type == ports.MsgError {
-		em, _ := ports.UnmarshalErrorMsg(reply.Payload)
+	if reply.Type == wire.MsgError {
+		em, _ := wire.UnmarshalErrorMsg(reply.Payload)
 		return fmt.Errorf("vev: %s", em.Text)
 	}
 	printKillSuccess(name, all, daemon)

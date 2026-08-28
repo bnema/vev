@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 )
 
@@ -35,11 +36,11 @@ func TestReliableDuplicateAckedButNotDeliveredTwice(t *testing.T) {
 			t.Errorf("close b: %v", err)
 		}
 	}()
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}); err != nil {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("typed")}); err != nil {
 		t.Fatal(err)
 	}
 	got := recvWithin(t, b, time.Second)
-	if got.Type != ports.MsgInput || string(got.Payload) != "typed" {
+	if got.Type != wire.MsgInput || string(got.Payload) != "typed" {
 		t.Fatalf("got=%+v", got)
 	}
 	eventually(t, time.Second, droppedAck.Load)
@@ -70,7 +71,7 @@ func TestAuthenticatedPeerChangeUpdatesPeerAndEmitsConnected(t *testing.T) {
 		t.Fatalf("unauthenticated packet changed peer to %v", a.Peer())
 	}
 	c, _ := pdgram.NewCodec(key())
-	rec := encodeData(7, true, ports.Frame{Type: ports.MsgPing})
+	rec := encodeData(7, true, wire.Frame{Type: wire.MsgPing})
 	frags, _ := pdgram.FragmentPayload(9, rec, pdgram.DefaultMTU)
 	raw, _ := pdgram.MarshalFragment(frags[0])
 	aPC.in <- packet{c.Seal(2, 99, raw, nil), testAddr("evil")}
@@ -214,12 +215,12 @@ func TestAuthenticatedFragmentSeparatesContactProgressAndPeerEligibility(t *test
 }
 
 func TestReliableReceiveBufferDoesNotDropAckedFutureFrame(t *testing.T) {
-	tr := &Transport{maxRecvBuffer: 1, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
-	_, ack, queued := tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("future")})
+	tr := &Transport{maxRecvBuffer: 1, nextRecvSeq: 1, recvBuf: make(map[uint64]wire.Frame)}
+	_, ack, queued := tr.enqueueReliable(2, wire.Frame{Type: wire.MsgOutput, Payload: []byte("future")})
 	if !ack || !queued {
 		t.Fatalf("future enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
-	_, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("next")})
+	_, ack, queued = tr.enqueueReliable(1, wire.Frame{Type: wire.MsgOutput, Payload: []byte("next")})
 	if !ack || !queued {
 		t.Fatalf("next enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -229,19 +230,19 @@ func TestReliableReceiveBufferDoesNotDropAckedFutureFrame(t *testing.T) {
 }
 
 func TestDataRecordWireEncoding(t *testing.T) {
-	got := encodeData(5, true, ports.Frame{Type: ports.MsgOutput, Payload: []byte("x")})
-	want := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(ports.MsgOutput), 0, 'x'}
+	got := encodeData(5, true, wire.Frame{Type: wire.MsgOutput, Payload: []byte("x")})
+	want := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(wire.MsgOutput), 0, 'x'}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("encoded data=%v, want %v", got, want)
 	}
 	seq, reliable, frame, ok := decodeData(got)
-	if !ok || seq != 5 || !reliable || frame.Type != ports.MsgOutput || string(frame.Payload) != "x" {
+	if !ok || seq != 5 || !reliable || frame.Type != wire.MsgOutput || string(frame.Payload) != "x" {
 		t.Fatalf("decoded seq=%d reliable=%v frame=%+v ok=%v", seq, reliable, frame, ok)
 	}
 }
 
 func TestDataRecordWireDecodeRejectsUnknownFlags(t *testing.T) {
-	withTrailingGarbage := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(ports.MsgOutput), 1, 'x'}
+	withTrailingGarbage := []byte{recData, 0, 0, 0, 0, 0, 0, 0, 5, 1, byte(wire.MsgOutput), 1, 'x'}
 	if _, _, _, ok := decodeData(withTrailingGarbage); ok {
 		t.Fatal("decodeData accepted unknown data-record flags with trailing garbage")
 	}
@@ -255,13 +256,13 @@ func TestReliableDeliveryPreservesInputSequenceOrder(t *testing.T) {
 	defer func() { _ = b.Close() }()
 
 	for i := range 100 {
-		if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte{byte(i)}}); err != nil {
+		if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := range 100 {
 		got := recvWithin(t, b, time.Second)
-		if got.Type != ports.MsgInput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
+		if got.Type != wire.MsgInput || len(got.Payload) != 1 || got.Payload[0] != byte(i) {
 			t.Fatalf("frame %d delivered out of order: %+v", i, got)
 		}
 	}
@@ -275,7 +276,7 @@ func TestAckProcessingContinuesWhenConsumerBackpressured(t *testing.T) {
 	defer func() { _ = b.Close() }()
 
 	for i := range cap(b.in) + 20 {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -296,9 +297,9 @@ func TestAckProcessingContinuesWhenConsumerBackpressured(t *testing.T) {
 }
 
 func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
-	tr := &Transport{maxRecvBuffer: maxRecvBuffer, nextRecvSeq: 1, recvBuf: make(map[uint64]ports.Frame)}
+	tr := &Transport{maxRecvBuffer: maxRecvBuffer, nextRecvSeq: 1, recvBuf: make(map[uint64]wire.Frame)}
 
-	ackSeq, ack, queued := tr.enqueueReliable(3, ports.Frame{Type: ports.MsgOutput, Payload: []byte("third")})
+	ackSeq, ack, queued := tr.enqueueReliable(3, wire.Frame{Type: wire.MsgOutput, Payload: []byte("third")})
 	if !ack || !queued {
 		t.Fatalf("out-of-order enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -306,7 +307,7 @@ func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
 		t.Fatalf("out-of-order ack=%d, want highest contiguous %d", got, want)
 	}
 
-	ackSeq, ack, queued = tr.enqueueReliable(1, ports.Frame{Type: ports.MsgOutput, Payload: []byte("first")})
+	ackSeq, ack, queued = tr.enqueueReliable(1, wire.Frame{Type: wire.MsgOutput, Payload: []byte("first")})
 	if !ack || !queued {
 		t.Fatalf("first enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}
@@ -314,7 +315,7 @@ func TestReliableReceiverAcksOnlyHighestContiguousSequence(t *testing.T) {
 		t.Fatalf("first contiguous ack=%d, want %d", got, want)
 	}
 
-	ackSeq, ack, queued = tr.enqueueReliable(2, ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")})
+	ackSeq, ack, queued = tr.enqueueReliable(2, wire.Frame{Type: wire.MsgOutput, Payload: []byte("second")})
 	if !ack || !queued {
 		t.Fatalf("gap fill enqueue ack=%v queued=%v, want true/true", ack, queued)
 	}

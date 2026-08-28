@@ -17,6 +17,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // attachPaletteClock deliberately exposes each independently-created timer.
@@ -115,11 +116,11 @@ func (*attachPaletteTerminalHarness) Flush() error                           { r
 
 type attachPaletteTransport struct {
 	mu           sync.Mutex
-	frames       []ports.Frame
+	frames       []wire.Frame
 	themes       []protocol.Theme
 	themeCh      chan protocol.Theme
 	inputCh      chan protocol.Input
-	detached     chan ports.Frame
+	detached     chan wire.Frame
 	themeSendErr error
 	welcomed     bool
 }
@@ -128,20 +129,20 @@ func newAttachPaletteTransport() *attachPaletteTransport {
 	return &attachPaletteTransport{
 		themeCh:  make(chan protocol.Theme, 16),
 		inputCh:  make(chan protocol.Input, 16),
-		detached: make(chan ports.Frame, 1),
+		detached: make(chan wire.Frame, 1),
 	}
 }
-func (t *attachPaletteTransport) Send(frame ports.Frame) error {
+func (t *attachPaletteTransport) Send(frame wire.Frame) error {
 	t.mu.Lock()
 	t.frames = append(t.frames, frame)
 	themeSendErr := t.themeSendErr
 	t.mu.Unlock()
 	switch frame.Type {
-	case ports.MsgTheme:
+	case wire.MsgTheme:
 		if themeSendErr != nil {
 			return themeSendErr
 		}
-		got, err := ports.UnmarshalTheme(frame.Payload)
+		got, err := wire.UnmarshalTheme(frame.Payload)
 		if err != nil {
 			return err
 		}
@@ -149,8 +150,8 @@ func (t *attachPaletteTransport) Send(frame ports.Frame) error {
 		t.themes = append(t.themes, got)
 		t.mu.Unlock()
 		t.themeCh <- got
-	case ports.MsgInput:
-		got, err := ports.UnmarshalInput(frame.Payload)
+	case wire.MsgInput:
+		got, err := wire.UnmarshalInput(frame.Payload)
 		if err != nil {
 			return err
 		}
@@ -158,12 +159,12 @@ func (t *attachPaletteTransport) Send(frame ports.Frame) error {
 	}
 	return nil
 }
-func (t *attachPaletteTransport) Recv() (ports.Frame, error) {
+func (t *attachPaletteTransport) Recv() (wire.Frame, error) {
 	t.mu.Lock()
 	if !t.welcomed {
 		t.welcomed = true
 		t.mu.Unlock()
-		return ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
+		return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
 	}
 	t.mu.Unlock()
 	return <-t.detached, nil
@@ -239,7 +240,7 @@ func (h *attachPaletteHarness) nextTimer(t *testing.T) *attachPaletteTimer {
 }
 func (h *attachPaletteHarness) detach(t *testing.T) {
 	t.Helper()
-	h.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
+	h.transport.detached <- wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
 	result := <-h.done
 	require.NoError(t, result.err)
 	select {
@@ -325,7 +326,7 @@ func TestAttachReconnectPreservesStandaloneEscapeBeforeClaimRevocation(t *testin
 
 	// Detach starts reconnect teardown. The residual must already be owned by
 	// the lifecycle reader at the precise point the old claim is revoked.
-	first.transport.detached <- ports.Frame{Type: ports.MsgDetached, Payload: ports.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
+	first.transport.detached <- wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
 	require.Equal(t, []byte("\x1b"), <-revoked)
 	release()
 	require.NoError(t, (<-first.done).err)
@@ -437,7 +438,7 @@ func TestStdinPumpSameReadSchemeAndOldMarkerCannotAdvanceReplacement(t *testing.
 	// notification and publish its replacement generation before the scanner
 	// can deliver the old marker from the same terminal Read.
 	events := make(chan paletteGenerationEvent)
-	out := make(chan ports.Frame, 1)
+	out := make(chan wire.Frame, 1)
 	schemeHandled := make(chan struct{})
 	pump := &stdinPump{
 		ctx:              ctx,

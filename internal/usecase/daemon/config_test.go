@@ -8,8 +8,8 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -318,11 +318,11 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	d.enterPalette(sess, ac)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handlePaletteInput(ac, []byte("new"))
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 	d.handlePaletteInput(ac, []byte{0x0e})
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	ac.overlays.paletteMu.Lock()
 	model := ac.overlays.palette
@@ -334,7 +334,7 @@ func TestApplyConfigRepaintsActivePaletteWithoutReplacingModel(t *testing.T) {
 	cfg := domain.Defaults()
 	cfg.Palette = domain.PaletteConfig{Anchor: domain.AnchorTopLeft, AnchorSet: true}
 	d.ApplyConfig(cfg)
-	awaitFrame(t, sends, ports.MsgOutput)
+	awaitFrame(t, sends, wire.MsgOutput)
 
 	ac.overlays.paletteMu.Lock()
 	defer ac.overlays.paletteMu.Unlock()

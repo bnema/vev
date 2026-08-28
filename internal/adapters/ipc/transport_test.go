@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestTransportSendRecvBothDirections(t *testing.T) {
@@ -24,8 +25,8 @@ func TestTransportSendRecvBothDirections(t *testing.T) {
 	client := NewTransport(c1)
 	server := NewTransport(c2)
 
-	clientToServer := ports.Frame{Type: ports.MsgHello, Payload: ports.MarshalHello(protocol.Hello{Version: 1, Intent: protocol.IntentNew, Name: "w0"})}
-	serverToClient := ports.Frame{Type: ports.MsgWelcome, Payload: ports.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main"})}
+	clientToServer := wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(protocol.Hello{Version: 1, Intent: protocol.IntentNew, Name: "w0"})}
+	serverToClient := wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main"})}
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -97,12 +98,12 @@ func TestTransportLargeFrameNearCap(t *testing.T) {
 	server := NewTransport(c2)
 
 	// Largest payload whose frame length (1 + len(payload)) still fits
-	// exactly at ports.MaxFrameLen.
-	payload := make([]byte, ports.MaxFrameLen-1)
+	// exactly at wire.MaxFrameLen.
+	payload := make([]byte, wire.MaxFrameLen-1)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
-	want := ports.Frame{Type: ports.MsgOutput, Payload: payload}
+	want := wire.Frame{Type: wire.MsgOutput, Payload: payload}
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -135,13 +136,13 @@ func TestTransportManySmallFramesBackToBack(t *testing.T) {
 	server := NewTransport(c2)
 
 	const count = 200
-	frames := make([]ports.Frame, count)
+	frames := make([]wire.Frame, count)
 	for i := range frames {
-		frames[i] = ports.Frame{Type: ports.MsgPing, Payload: nil}
+		frames[i] = wire.Frame{Type: wire.MsgPing, Payload: nil}
 	}
 	// Vary a couple to prove ordering and content are both preserved.
-	frames[7] = ports.Frame{Type: ports.MsgInput, Payload: ports.MarshalInput(protocol.Input{Data: []byte("hop")})}
-	frames[150] = ports.Frame{Type: ports.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 5, Rows: 6}})}
+	frames[7] = wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("hop")})}
+	frames[150] = wire.Frame{Type: wire.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 5, Rows: 6}})}
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -178,7 +179,7 @@ func TestTransportRecvOversizeFrame(t *testing.T) {
 
 	go func() {
 		var hdr [4]byte
-		binary.BigEndian.PutUint32(hdr[:], ports.MaxFrameLen+1)
+		binary.BigEndian.PutUint32(hdr[:], wire.MaxFrameLen+1)
 		_, _ = c1.Write(hdr[:])
 	}()
 
@@ -228,8 +229,8 @@ func TestTransportSendOversizePayloadRejected(t *testing.T) {
 	defer func() { _ = c2.Close() }()
 
 	client := NewTransport(c1)
-	payload := make([]byte, ports.MaxFrameLen) // +1 byte type => exceeds max
-	err := client.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload})
+	payload := make([]byte, wire.MaxFrameLen) // +1 byte type => exceeds max
+	err := client.Send(wire.Frame{Type: wire.MsgOutput, Payload: payload})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("client.Send() error = %v, want ErrFrameTooLarge", err)
 	}
@@ -257,7 +258,7 @@ func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
 		t.Fatal("IPC transport does not implement AsyncTransport")
 	}
 
-	welcome := ports.Frame{Type: ports.MsgWelcome, Payload: []byte("welcome")}
+	welcome := wire.Frame{Type: wire.MsgWelcome, Payload: []byte("welcome")}
 	sent := make(chan error, 1)
 	go func() { sent <- server.Send(welcome) }()
 	got, err := client.Recv()
@@ -277,16 +278,16 @@ func TestTransportAsyncEgressPreservesWelcomeBeforeOutput(t *testing.T) {
 	}
 
 	payload := []byte("first")
-	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: payload}); err != nil {
+	if err := async.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: payload}); err != nil {
 		t.Fatalf("SendAsync first output: %v", err)
 	}
 	payload[0] = 'X' // async ownership must not retain caller memory.
-	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("second")}); err != nil {
+	if err := async.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("second")}); err != nil {
 		t.Fatalf("SendAsync second output: %v", err)
 	}
-	for _, want := range []ports.Frame{
-		{Type: ports.MsgOutput, Payload: []byte("first")},
-		{Type: ports.MsgOutput, Payload: []byte("second")},
+	for _, want := range []wire.Frame{
+		{Type: wire.MsgOutput, Payload: []byte("first")},
+		{Type: wire.MsgOutput, Payload: []byte("second")},
 	} {
 		got, err := client.Recv()
 		if err != nil {
@@ -322,7 +323,7 @@ func TestTransportSendWaitsForEgressCapacity(t *testing.T) {
 	}
 
 	queued := fillAsyncEgress(t, transport, async, timeout)
-	want := ports.Frame{Type: ports.MsgOutput, Payload: []byte("synchronous")}
+	want := wire.Frame{Type: wire.MsgOutput, Payload: []byte("synchronous")}
 	sent := make(chan error, 1)
 	go func() { sent <- server.Send(want) }()
 	waitForEgressSender(t, transport, timeout)
@@ -371,7 +372,7 @@ func TestTransportCloseInterruptsSendWaitingForEgressCapacity(t *testing.T) {
 	fillAsyncEgress(t, transport, async, timeout)
 
 	sent := make(chan error, 1)
-	go func() { sent <- server.Send(ports.Frame{Type: ports.MsgOutput, Payload: []byte("synchronous")}) }()
+	go func() { sent <- server.Send(wire.Frame{Type: wire.MsgOutput, Payload: []byte("synchronous")}) }()
 	waitForEgressSender(t, transport, timeout)
 
 	closeTransport(t, server)
@@ -421,18 +422,18 @@ func closeTransport(t *testing.T, transport ports.Transport) {
 	}
 }
 
-func fillAsyncEgress(t *testing.T, transport *unixTransport, async ports.AsyncTransport, timeout time.Duration) []ports.Frame {
+func fillAsyncEgress(t *testing.T, transport *unixTransport, async ports.AsyncTransport, timeout time.Duration) []wire.Frame {
 	t.Helper()
 
-	first := ports.Frame{Type: ports.MsgOutput, Payload: []byte{0}}
+	first := wire.Frame{Type: wire.MsgOutput, Payload: []byte{0}}
 	if err := async.SendAsync(first); err != nil {
 		t.Fatalf("SendAsync blocked frame: %v", err)
 	}
 	waitForEgressDequeue(t, transport, timeout)
 
-	queued := []ports.Frame{first}
+	queued := []wire.Frame{first}
 	for i := 1; ; i++ {
-		frame := ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}
+		frame := wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}
 		err := async.SendAsync(frame)
 		switch {
 		case err == nil:
@@ -479,12 +480,12 @@ func TestTransportAsyncEgressIsBoundedAndCloseInterruptsWorkers(t *testing.T) {
 	}
 
 	// The first write blocks in net.Pipe because the peer never drains it.
-	if err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("blocked")}); err != nil {
+	if err := async.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("blocked")}); err != nil {
 		t.Fatalf("SendAsync blocked frame: %v", err)
 	}
 	var backpressure error
 	for range sendQueueCapacity + 2 {
-		err := async.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")})
+		err := async.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("queued")})
 		if errors.Is(err, ErrBackpressure) {
 			backpressure = err
 			break

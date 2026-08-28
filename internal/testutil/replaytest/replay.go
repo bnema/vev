@@ -8,31 +8,31 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func mustMarshalOutput(m protocol.Output) []byte {
-	payload, err := ports.MarshalOutput(m)
+	payload, err := wire.MarshalOutput(m)
 	if err != nil {
 		panic(err)
 	}
 	return payload
 }
 
-var transcript = []ports.Frame{
-	{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
-	{Type: ports.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Base: 1, New: 2, Echo: 7, Size: domain.Size{Cols: 80, Rows: 24}, Data: []byte("\x1b[2;1HTWO")})},
+var transcript = []wire.Frame{
+	{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("\x1b[2J\x1b[Hone\r\ntwo")})},
+	{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{Epoch: 1, Base: 1, New: 2, Echo: 7, Size: domain.Size{Cols: 80, Rows: 24}, Data: []byte("\x1b[2;1HTWO")})},
 }
 
 // Transcript returns a deep copy of the canonical replay transcript so an
 // adapter cannot mutate the fixture observed by another adapter.
-func Transcript() []ports.Frame {
+func Transcript() []wire.Frame {
 	return cloneFrames(transcript)
 }
 
 // Exchange carries already-composed frames through one transport adapter.
-type Exchange func(t *testing.T, frames []ports.Frame) []ports.Frame
+type Exchange func(t *testing.T, frames []wire.Frame) []wire.Frame
 
 // Run verifies that an adapter preserves the canonical transcript exactly.
 func Run(t *testing.T, exchange Exchange) {
@@ -50,12 +50,12 @@ func Run(t *testing.T, exchange Exchange) {
 			t.Errorf("frame %d payload = %x, want byte-for-byte %x", i, got[i].Payload, want[i].Payload)
 			continue
 		}
-		gotOutput, err := ports.UnmarshalOutput(got[i].Payload)
+		gotOutput, err := wire.UnmarshalOutput(got[i].Payload)
 		if err != nil {
 			t.Errorf("frame %d output decode: %v", i, err)
 			continue
 		}
-		wantOutput, err := ports.UnmarshalOutput(want[i].Payload)
+		wantOutput, err := wire.UnmarshalOutput(want[i].Payload)
 		if err != nil {
 			t.Fatalf("canonical frame %d output decode: %v", i, err)
 		}
@@ -65,10 +65,10 @@ func Run(t *testing.T, exchange Exchange) {
 	}
 }
 
-func cloneFrames(frames []ports.Frame) []ports.Frame {
-	cloned := make([]ports.Frame, len(frames))
+func cloneFrames(frames []wire.Frame) []wire.Frame {
+	cloned := make([]wire.Frame, len(frames))
 	for i, frame := range frames {
-		cloned[i] = ports.Frame{Type: frame.Type, Payload: append([]byte(nil), frame.Payload...)}
+		cloned[i] = wire.Frame{Type: frame.Type, Payload: append([]byte(nil), frame.Payload...)}
 	}
 	return cloned
 }

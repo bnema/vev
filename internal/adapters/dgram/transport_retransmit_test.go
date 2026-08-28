@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestResendSkipsQueuedOutputBeforeFirstWireAttempt(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 10)
-	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("queued")}}
+	tr.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("queued")}}
 
 	tr.resendPending()
 
@@ -27,7 +28,7 @@ func TestResendSkipsOutputDuringFirstWireAttempt(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 10)
 	now := tr.clock.Now()
 	tr.pending[1] = &pending{
-		frame:           ports.Frame{Type: ports.MsgOutput, Payload: []byte("sending")},
+		frame:           wire.Frame{Type: wire.MsgOutput, Payload: []byte("sending")},
 		first:           now.Add(-time.Second),
 		last:            now.Add(-time.Second),
 		initialInFlight: true,
@@ -68,11 +69,11 @@ func TestReliableInputRetransmitsUntilAck(t *testing.T) {
 			t.Errorf("close b: %v", err)
 		}
 	}()
-	if err := a.Send(ports.Frame{Type: ports.MsgInput, Payload: []byte("typed")}); err != nil {
+	if err := a.Send(wire.Frame{Type: wire.MsgInput, Payload: []byte("typed")}); err != nil {
 		t.Fatal(err)
 	}
 	got := recvWithin(t, b, time.Second)
-	if got.Type != ports.MsgInput || string(got.Payload) != "typed" || !dropped.Load() {
+	if got.Type != wire.MsgInput || string(got.Payload) != "typed" || !dropped.Load() {
 		t.Fatalf("got=%+v dropped=%v", got, dropped.Load())
 	}
 }
@@ -95,11 +96,11 @@ func TestOutputRetransmitsUntilAck(t *testing.T) {
 			t.Errorf("close b: %v", err)
 		}
 	}()
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("state1")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("state1")}); err != nil {
 		t.Fatal(err)
 	}
 	got := recvWithin(t, b, time.Second)
-	if got.Type != ports.MsgOutput || string(got.Payload) != "state1" || !dropped.Load() {
+	if got.Type != wire.MsgOutput || string(got.Payload) != "state1" || !dropped.Load() {
 		t.Fatalf("got=%+v dropped=%v", got, dropped.Load())
 	}
 }
@@ -124,7 +125,7 @@ func TestImmediateLoopbackAckSamplesStampedFinalWrite(t *testing.T) {
 		t.Error("ACK did not retire pending frame before WriteTo returned")
 	}
 
-	if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte("state")}); err != nil {
+	if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte("state")}); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, time.Second, func() bool {
@@ -155,14 +156,14 @@ func TestOutputDependencyChainRetransmitsDroppedPredecessors(t *testing.T) {
 	defer func() { _ = b.Close() }()
 
 	for _, payload := range []string{"state1", "state2", "state3"} {
-		if err := a.SendAsync(ports.Frame{Type: ports.MsgOutput, Payload: []byte(payload)}); err != nil {
+		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: []byte(payload)}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	for _, want := range []string{"state1", "state2", "state3"} {
 		got := recvWithin(t, b, time.Second)
-		if got.Type != ports.MsgOutput || string(got.Payload) != want {
+		if got.Type != wire.MsgOutput || string(got.Payload) != want {
 			t.Fatalf("got=%+v, want ordered prerequisite output %q", got, want)
 		}
 	}
@@ -175,7 +176,7 @@ func TestResendPendingCapsBurst(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 2)
 	now := tr.clock.Now()
 	for i := range 5 {
-		tr.pending[uint64(i+1)] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(i)}}, last: now.Add(-time.Second)}
+		tr.pending[uint64(i+1)] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(i)}}, last: now.Add(-time.Second)}
 	}
 
 	tr.resendPending()
@@ -189,7 +190,7 @@ func TestRetransmitBatchReducesCongestionWindowOnce(t *testing.T) {
 	now := tr.clock.Now()
 	for seq := uint64(1); seq <= 3; seq++ {
 		tr.pending[seq] = &pending{
-			frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(seq)}},
+			frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(seq)}},
 			last:  now.Add(-time.Second),
 		}
 	}
@@ -209,7 +210,7 @@ func TestACKBeforeQueuedRetransmitDoesNotReduceCongestionWindow(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 1)
 	now := tr.clock.Now()
 	tr.pending[1] = &pending{
-		frame:     ports.Frame{Type: ports.MsgOutput, Payload: []byte("acked")},
+		frame:     wire.Frame{Type: wire.MsgOutput, Payload: []byte("acked")},
 		first:     now.Add(-time.Second),
 		last:      now.Add(-time.Second),
 		wireBytes: tr.mtu,
@@ -244,7 +245,7 @@ func TestOversizedRetransmitHonorsPacketBudget(t *testing.T) {
 	tr.clock = clk
 	tr.done = make(chan struct{})
 	tr.pending[1] = &pending{
-		frame: ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 24*tr.mtu)},
+		frame: wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, 24*tr.mtu)},
 		last:  clk.now.Add(-time.Second),
 	}
 	done := make(chan struct{})
@@ -274,9 +275,9 @@ func TestOversizedRetransmitHonorsPacketBudget(t *testing.T) {
 func TestResendPendingUsesExponentialBackoffAndMaxDelay(t *testing.T) {
 	tr, writes := newResendTestTransport(t, 10)
 	now := tr.clock.Now()
-	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("too-soon")}, last: now.Add(-150 * time.Millisecond), attempts: 1}
-	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("ready")}, last: now.Add(-250 * time.Millisecond), attempts: 1}
-	tr.pending[3] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte("capped")}, last: now.Add(-time.Second), attempts: 10}
+	tr.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("too-soon")}, last: now.Add(-150 * time.Millisecond), attempts: 1}
+	tr.pending[2] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("ready")}, last: now.Add(-250 * time.Millisecond), attempts: 1}
+	tr.pending[3] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte("capped")}, last: now.Add(-time.Second), attempts: 10}
 
 	tr.resendPending()
 	if got := writes.Load(); got != 2 {
@@ -297,7 +298,7 @@ func TestCumulativeAckReleasesAllEarlierPendingFrames(t *testing.T) {
 	tr, _ := newResendTestTransport(t, 10)
 	now := tr.clock.Now()
 	for seq := uint64(1); seq <= 3; seq++ {
-		tr.pending[seq] = &pending{frame: ports.Frame{Type: ports.MsgOutput, Payload: []byte{byte(seq)}}, first: now, last: now}
+		tr.pending[seq] = &pending{frame: wire.Frame{Type: wire.MsgOutput, Payload: []byte{byte(seq)}}, first: now, last: now}
 	}
 
 	tr.handleRecord(ackRecord(3))
@@ -314,14 +315,14 @@ func TestRTTEstimatorUpdatesRTOFromAckSample(t *testing.T) {
 	tr.resendAfter = 100 * time.Millisecond
 	tr.maxResendAfter = time.Second
 	tr.rto = tr.resendAfter
-	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: clk.now.Add(-200 * time.Millisecond), last: clk.now.Add(-200 * time.Millisecond)}
+	tr.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput}, first: clk.now.Add(-200 * time.Millisecond), last: clk.now.Add(-200 * time.Millisecond)}
 
 	tr.handleRecord(ackRecord(1))
 
 	if tr.rto <= tr.resendAfter {
 		t.Fatalf("rto=%v, want above initial resend after RTT sample", tr.rto)
 	}
-	tr.pending[2] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: clk.now, last: clk.now.Add(-(tr.rto - time.Millisecond))}
+	tr.pending[2] = &pending{frame: wire.Frame{Type: wire.MsgOutput}, first: clk.now, last: clk.now.Add(-(tr.rto - time.Millisecond))}
 	tr.resendPending()
 	if got := writes.Load(); got != 0 {
 		t.Fatalf("writes before rto=%d, want 0", got)
@@ -340,7 +341,7 @@ func TestRTTEstimatorIgnoresRetransmittedFramesAfterRecovery(t *testing.T) {
 	tr.resendAfter = 100 * time.Millisecond
 	tr.maxResendAfter = time.Second
 	tr.rto = tr.resendAfter
-	tr.pending[1] = &pending{frame: ports.Frame{Type: ports.MsgOutput}, first: clk.now.Add(-200 * time.Millisecond), last: clk.now.Add(-tr.resendAfter)}
+	tr.pending[1] = &pending{frame: wire.Frame{Type: wire.MsgOutput}, first: clk.now.Add(-200 * time.Millisecond), last: clk.now.Add(-tr.resendAfter)}
 	tr.resendPending()
 	tr.linkState = ports.LinkStateOffline
 

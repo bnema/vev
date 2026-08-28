@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
@@ -184,12 +185,12 @@ func TestPerformanceFixtureExplicitCloseReleasesIterationState(t *testing.T) {
 func TestCountingOutputTransportCountsOpaquePayloadAndRejectsShortPayload(t *testing.T) {
 	transport := &countingOutputTransport{}
 
-	err := transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: make([]byte, 23)})
+	err := transport.Send(wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, 23)})
 	require.Error(t, err)
 	require.Equal(t, countingOutputMetrics{}, transport.metrics())
 
 	payload := append(make([]byte, 24), 0xff, 0x00, 0xfe)
-	require.NoError(t, transport.Send(ports.Frame{Type: ports.MsgOutput, Payload: payload}))
+	require.NoError(t, transport.Send(wire.Frame{Type: wire.MsgOutput, Payload: payload}))
 	require.Equal(t, countingOutputMetrics{frames: 1, bytes: 3, payloadBytes: uint64(len(payload))}, transport.metrics())
 	require.Equal(t, payload, transport.lastPayload())
 
@@ -230,7 +231,7 @@ func TestPerformanceFixtureCounters(t *testing.T) {
 func TestRenderStageHooksCountProductionBoundariesOnFailedSend(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	d.paint(sess, ac, true, nil)
-	_ = awaitFrame(t, sends, ports.MsgOutput)
+	_ = awaitFrame(t, sends, wire.MsgOutput)
 	var captures, compositions, emissions int
 	ac.renderStages = renderStageHooks{
 		capture: func() { captures++ },
@@ -446,7 +447,7 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 			}
 			metrics := fixture.metrics()
 			if payload := fixture.output.lastPayload(); payload != nil {
-				if _, err := ports.UnmarshalOutput(payload); err != nil {
+				if _, err := wire.UnmarshalOutput(payload); err != nil {
 					b.Fatalf("decode last output: %v", err)
 				}
 			}
@@ -1347,8 +1348,8 @@ type countingOutputTransport struct {
 	last []byte
 }
 
-func (t *countingOutputTransport) Send(frame ports.Frame) error {
-	if frame.Type != ports.MsgOutput {
+func (t *countingOutputTransport) Send(frame wire.Frame) error {
+	if frame.Type != wire.MsgOutput {
 		return nil
 	}
 	if len(frame.Payload) < outputPayloadHeaderBytes {
@@ -1362,8 +1363,8 @@ func (t *countingOutputTransport) Send(frame ports.Frame) error {
 	t.mu.Unlock()
 	return nil
 }
-func (*countingOutputTransport) Recv() (ports.Frame, error) { return ports.Frame{}, io.EOF }
-func (*countingOutputTransport) Close() error               { return nil }
+func (*countingOutputTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*countingOutputTransport) Close() error              { return nil }
 func (t *countingOutputTransport) reset() {
 	t.mu.Lock()
 	t.countingOutputMetrics = countingOutputMetrics{}

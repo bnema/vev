@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestFrameWelcomeSnapshotsSessionMetadataUnderLock(t *testing.T) {
@@ -27,7 +27,7 @@ func TestFrameWelcomeSnapshotsSessionMetadataUnderLock(t *testing.T) {
 		if frameErr != nil {
 			t.Fatalf("frameWelcome() error = %v", frameErr)
 		}
-		welcome, err := ports.UnmarshalWelcome(frame.Payload)
+		welcome, err := wire.UnmarshalWelcome(frame.Payload)
 		if err != nil {
 			t.Fatalf("UnmarshalWelcome() error = %v", err)
 		}

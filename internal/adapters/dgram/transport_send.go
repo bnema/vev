@@ -6,16 +6,17 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-func (t *Transport) Send(f ports.Frame) error {
+func (t *Transport) Send(f wire.Frame) error {
 	end := t.beginRuntimeOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	err := t.send(f, false)
 	end(err == nil)
 	return err
 }
 
-func (t *Transport) SendAsync(f ports.Frame) error {
+func (t *Transport) SendAsync(f wire.Frame) error {
 	end := t.beginRuntimeOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
 	err := t.send(f, true)
 	end(err == nil)
@@ -24,9 +25,9 @@ func (t *Transport) SendAsync(f ports.Frame) error {
 
 // SendSynchronous owns queue reservation, fragment pacing, per-write deadlines,
 // and close cancellation. Callers must not layer a shorter preflight timer over it.
-func (t *Transport) SendSynchronous(f ports.Frame) error { return t.Send(f) }
+func (t *Transport) SendSynchronous(f wire.Frame) error { return t.Send(f) }
 
-func (t *Transport) send(f ports.Frame, async bool) error {
+func (t *Transport) send(f wire.Frame, async bool) error {
 	reliable := true
 	if err := t.lockOutboundSlot(reliable); err != nil {
 		return err
