@@ -2,6 +2,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -126,7 +127,7 @@ func TestRemotePreviewRejectsControlRunes(t *testing.T) {
 	for _, control := range []rune{'\x01', '\x1b', '\x7f', '\u0085'} {
 		preview := valid
 		preview.Cells = []renderer.Cell{{Rune: control}}
-		if err := protocol.ValidateRemotePreview(preview); err != protocol.ErrInvalidRemotePreview {
+		if err := protocol.ValidateRemotePreview(preview); !errors.Is(err, protocol.ErrInvalidRemotePreview) {
 			t.Fatalf("control rune %U: ValidateRemotePreview() error = %v, want %v", control, err, protocol.ErrInvalidRemotePreview)
 		}
 		if MarshalRemotePreview(preview) != nil {

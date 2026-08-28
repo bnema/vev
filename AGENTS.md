@@ -51,7 +51,7 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 ## Ports and mocks
 
 - Define application cross-layer interfaces in `internal/ports`; raw frame carriage interfaces live in `internal/protocol/wire`.
-- Adapters implement ports and raw carriage contracts; use cases consume only application ports.
+- Adapters implement ports and raw carriage contracts; use cases consume application connections through `internal/ports` and typed semantic values from `internal/protocol`, never raw carriage contracts.
 - Tests should prefer generated `portsmocks.MockX` with `.EXPECT()`.
 - Hand-written fakes are okay only when mocks make the test harder to understand.
 - After changing a port, run `make mocks` and commit the generated updates.

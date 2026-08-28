@@ -34,8 +34,13 @@ func TestRemotePreviewCodecPreservesWideStyledCells(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Cells) != len(preview.Cells) || !got.Cells[0].Equal(preview.Cells[0]) || !got.Cells[1].Equal(preview.Cells[1]) {
+	if len(got.Cells) != len(preview.Cells) {
 		t.Fatalf("cells = %#v, want %#v", got.Cells, preview.Cells)
+	}
+	for i := range preview.Cells {
+		if !got.Cells[i].Equal(preview.Cells[i]) {
+			t.Fatalf("cell %d = %#v, want %#v", i, got.Cells[i], preview.Cells[i])
+		}
 	}
 }
 
@@ -43,11 +48,7 @@ func TestRemotePreviewCodecRejectsMalformedBoundsAndGarbage(t *testing.T) {
 	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewOK, LifecycleID: previewTargetForTest().LifecycleID, TabID: "tab-1", Revision: 1, Width: 1, Height: 1, Cells: []renderer.Cell{{Rune: 'x'}}}
 	payload := MarshalRemotePreview(preview)
 	require.NotNil(t, payload)
-	for i := 0; i < len(payload); i++ {
-		if _, err := UnmarshalRemotePreview(payload[:i]); err == nil {
-			t.Fatalf("prefix %d unexpectedly decoded", i)
-		}
-	}
+	assertAllPrefixesFail(t, payload, UnmarshalRemotePreview)
 	if _, err := UnmarshalRemotePreview(append(append([]byte(nil), payload...), 1)); err == nil {
 		t.Fatal("trailing garbage unexpectedly decoded")
 	}
