@@ -50,7 +50,7 @@ func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
 	case wire.MsgCommand:
 		failure.Kind = protocol.DecodeMessageCommand
 		failure.Version, _ = wire.PeekCommandVersion(frame.Payload)
-		failure.RequestID, _ = wire.PeekCommandRequestID(frame.Payload)
+		failure.RequestID, failure.HasRequestID = wire.PeekCommandRequestID(frame.Payload)
 	case wire.MsgKill:
 		failure.Kind = protocol.DecodeMessageKill
 	case wire.MsgRemotePreviewRequest:

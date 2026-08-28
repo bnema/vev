@@ -6,6 +6,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDetectTrueColorPreservesKittyEnvironment(t *testing.T) {
+	require.True(t, DetectTrueColor("xterm-kitty", "", []string{"KITTY_WINDOW_ID=1"}))
+}
+
 func TestDetect(t *testing.T) {
 	tests := []struct {
 		name         string

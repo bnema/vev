@@ -2,6 +2,7 @@ package catalogue
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
@@ -59,6 +60,13 @@ func TestValidateRemoteCatalogRejectsTerminalUnsafeText(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvalidRemoteCatalog)
 		})
 	}
+}
+
+func TestValidateRemoteCatalogCacheEntriesRejectsTerminalUnsafeHost(t *testing.T) {
+	err := ValidateRemoteCatalogCacheEntries([]RemoteCatalogCacheEntry{{
+		Host: "host\u202eoverride", FetchedAt: time.Unix(1, 0), Sessions: []RemoteCatalogSession{},
+	}})
+	require.ErrorIs(t, err, ErrInvalidRemoteCatalog)
 }
 
 func TestValidateRemoteCatalogRejectsDuplicateSessionNames(t *testing.T) {

@@ -191,14 +191,16 @@ func TestServerConnectionPreservesPayloadAgnosticClientControls(t *testing.T) {
 
 func TestServerConnectionClassifiesDecodeFailures(t *testing.T) {
 	tests := []struct {
-		name     string
-		frame    wire.Frame
-		category protocol.DecodeCategory
-		version  uint16
-		request  uint64
+		name       string
+		frame      wire.Frame
+		category   protocol.DecodeCategory
+		version    uint16
+		request    uint64
+		hasRequest bool
 	}{
 		{name: "malformed hello", frame: wire.Frame{Type: wire.MsgHello, Payload: []byte{0, 38}}, category: protocol.DecodeMalformed, version: 38},
-		{name: "malformed command", frame: wire.Frame{Type: wire.MsgCommand, Payload: []byte{0, 37, 0, 0, 0, 0, 0, 0, 0, 9}}, category: protocol.DecodeMalformed, version: 37, request: 9},
+		{name: "truncated command", frame: wire.Frame{Type: wire.MsgCommand, Payload: []byte{0}}, category: protocol.DecodeMalformed},
+		{name: "malformed command", frame: wire.Frame{Type: wire.MsgCommand, Payload: []byte{0, 37, 0, 0, 0, 0, 0, 0, 0, 9}}, category: protocol.DecodeMalformed, version: 37, request: 9, hasRequest: true},
 		{name: "wrong direction", frame: wire.Frame{Type: wire.MsgOutput}, category: protocol.DecodeWrongDirection},
 		{name: "unknown", frame: wire.Frame{Type: 255}, category: protocol.DecodeUnknownType},
 	}
@@ -210,6 +212,7 @@ func TestServerConnectionClassifiesDecodeFailures(t *testing.T) {
 			require.Equal(t, tt.category, failure.Category)
 			require.Equal(t, tt.version, failure.Version)
 			require.Equal(t, tt.request, failure.RequestID)
+			require.Equal(t, tt.hasRequest, failure.HasRequestID)
 		})
 	}
 }

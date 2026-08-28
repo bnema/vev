@@ -110,10 +110,10 @@ func (e *RemoteCatalogVersionMismatchError) Error() string {
 }
 
 var (
-	ErrInvalidRemoteCatalog       = errors.New("ports: invalid remote catalog")
-	ErrRemoteCatalogTooLarge      = errors.New("ports: remote catalog exceeds size limit")
-	ErrRemoteCatalogUnknownState  = errors.New("ports: remote catalog has unknown state")
-	ErrRemoteCatalogInvalidReason = errors.New("ports: remote catalog has unknown reason")
+	ErrInvalidRemoteCatalog       = errors.New("catalogue: invalid remote catalog")
+	ErrRemoteCatalogTooLarge      = errors.New("catalogue: remote catalog exceeds size limit")
+	ErrRemoteCatalogUnknownState  = errors.New("catalogue: remote catalog has unknown state")
+	ErrRemoteCatalogInvalidReason = errors.New("catalogue: remote catalog has unknown reason")
 )
 
 // ValidateRemoteCatalog applies the exact current schema and all bounds before use.
@@ -223,7 +223,7 @@ func ValidateRemoteCatalogCacheEntries(entries []RemoteCatalogCacheEntry) error 
 	}
 	seenHosts := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
-		if err := domain.ValidateRemoteHostTarget(entry.Host); err != nil || len(entry.Host) > RemoteCatalogMaxNameBytes {
+		if !validText(entry.Host) || len(entry.Host) > RemoteCatalogMaxNameBytes || domain.ValidateRemoteHostTarget(entry.Host) != nil {
 			return fmt.Errorf("%w: invalid host", ErrInvalidRemoteCatalog)
 		}
 		if entry.FetchedAt.IsZero() || entry.FetchedAt.UnixNano() <= 0 {

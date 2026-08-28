@@ -1062,7 +1062,7 @@ func detachedLocalHello(name, cwd string) protocol.Hello {
 		Size:      domain.Size{Cols: 80, Rows: 24},
 		TermEnv:   termEnv,
 		Cwd:       cwd,
-		TrueColor: client.DetectTrueColor(termEnv, os.Getenv("COLORTERM")),
+		TrueColor: client.DetectTrueColor(termEnv, os.Getenv("COLORTERM"), os.Environ()),
 		Env:       os.Environ(),
 	}
 }

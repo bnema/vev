@@ -94,7 +94,11 @@ func environmentValues(env []string) map[string]string {
 	return values
 }
 
-// DetectTrueColor reports whether TERM/COLORTERM advertise direct color support.
-func DetectTrueColor(termEnv, colorTerm string) bool {
-	return Detect([]string{"TERM=" + termEnv, "COLORTERM=" + colorTerm}).TrueColor()
+// DetectTrueColor reports whether the supplied terminal environment advertises
+// direct color support. Explicit TERM/COLORTERM values override env entries.
+func DetectTrueColor(termEnv, colorTerm string, env []string) bool {
+	detectionEnv := make([]string, 0, len(env)+2)
+	detectionEnv = append(detectionEnv, env...)
+	detectionEnv = append(detectionEnv, "TERM="+termEnv, "COLORTERM="+colorTerm)
+	return Detect(detectionEnv).TrueColor()
 }

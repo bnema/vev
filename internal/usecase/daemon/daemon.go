@@ -1078,6 +1078,9 @@ func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.Server
 		}
 		send(serverError(protocol.ErrInternal, "malformed hello"))
 	case protocol.DecodeMessageCommand:
+		if !failure.HasRequestID {
+			return
+		}
 		code, text := protocol.ErrInternal, "malformed command request"
 		if failure.Version != 0 && failure.Version != protocol.Version {
 			code, text = protocol.ErrVersionMismatch, "protocol version mismatch"

@@ -59,6 +59,7 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 					"type", failure.Type,
 					"version", failure.Version,
 					"request", failure.RequestID,
+					"has_request", failure.HasRequestID,
 				)
 				continue
 			}

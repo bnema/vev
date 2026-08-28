@@ -149,22 +149,21 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 	tests := []struct {
 		name    string
 		payload []byte
-		want    protocol.CommandResult
+		want    *protocol.CommandResult
 	}{
 		{
 			name:    "incompatible version",
 			payload: incompatibleVersion,
-			want:    protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
+			want:    &protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
 		},
 		{
 			name:    "truncated version prefix",
 			payload: []byte{0},
-			want:    protocol.CommandResult{Code: protocol.ErrInternal, Text: "malformed command request"},
 		},
 		{
 			name:    "trailing garbage",
 			payload: append(append([]byte(nil), valid...), 0xff),
-			want:    protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
+			want:    &protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
 		},
 	}
 	for _, tt := range tests {
@@ -176,12 +175,16 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 
 			require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: tt.payload}))
 			frame, err := tr.Recv()
+			if tt.want == nil {
+				require.ErrorIs(t, err, io.EOF)
+				return
+			}
 			require.NoError(t, err)
 			require.Equal(t, wire.MsgCommandResult, frame.Type)
-			require.Equal(t, wire.MarshalCommandResult(tt.want), frame.Payload)
+			require.Equal(t, wire.MarshalCommandResult(*tt.want), frame.Payload)
 			result, err := wire.UnmarshalCommandResult(frame.Payload)
 			require.NoError(t, err)
-			require.Equal(t, tt.want, result)
+			require.Equal(t, *tt.want, result)
 		})
 	}
 }
