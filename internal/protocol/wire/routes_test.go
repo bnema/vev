@@ -244,6 +244,58 @@ func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {
 	}
 }
 
+func TestRouteCreateSessionCodecsAreStrict(t *testing.T) {
+	action := protocol.RouteCreateSessionAction{RequestID: 5, SnapshotGeneration: 9, Key: 7, Generation: 8, SessionName: "example"}
+	failure := protocol.SessionCreationFailure{RequestID: 5, Code: protocol.RouteFailureUnavailable}
+	tests := []struct {
+		name      string
+		golden    string
+		want      any
+		marshal   func() ([]byte, error)
+		unmarshal func([]byte) (any, error)
+	}{
+		{
+			name: "create action", golden: "000000000000000500000000000000090000000000000007000000000000000800076578616d706c65", want: action,
+			marshal: func() ([]byte, error) { return MarshalRouteCreateSessionAction(action) },
+			unmarshal: func(data []byte) (any, error) {
+				return UnmarshalRouteCreateSessionAction(data)
+			},
+		},
+		{
+			name: "creation failure", golden: "000000000000000503", want: failure,
+			marshal: func() ([]byte, error) { return MarshalSessionCreationFailure(failure) },
+			unmarshal: func(data []byte) (any, error) {
+				return UnmarshalSessionCreationFailure(data)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := tt.marshal()
+			require.NoError(t, err)
+			require.Equal(t, tt.golden, hex.EncodeToString(encoded))
+			for i := range encoded {
+				_, err := tt.unmarshal(encoded[:i])
+				require.Error(t, err, "prefix length %d", i)
+			}
+			_, err = tt.unmarshal(append(append([]byte(nil), encoded...), 0))
+			require.Error(t, err)
+			got, err := tt.unmarshal(encoded)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+
+	for _, invalid := range []protocol.RouteCreateSessionAction{
+		{},
+		{RequestID: 1, SnapshotGeneration: 1, Key: 1, Generation: 1},
+		{RequestID: 1, SnapshotGeneration: 1, Key: 1, Generation: 1, SessionName: "bad name"},
+	} {
+		_, err := MarshalRouteCreateSessionAction(invalid)
+		require.Error(t, err)
+	}
+}
+
 func TestRouteActionAndFailureCodecsAreBounded(t *testing.T) {
 	action := protocol.RouteNavigationAction{SnapshotGeneration: 9, Key: 7, Generation: 8}
 	encoded, err := MarshalRouteNavigationAction(action)

@@ -196,7 +196,7 @@ func TestAttachTargetRejectsResumeIntent(t *testing.T) {
 }
 
 func TestTargetWireIncludesRequiredV27Section(t *testing.T) {
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
+	want := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
 	got := MarshalAttachTarget(protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach})
 	if !bytes.Equal(got, want) {
 		t.Fatalf("target bytes = %x, want %x", got, want)

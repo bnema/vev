@@ -34,14 +34,25 @@ func TestFormatRecentRoutePresentations(t *testing.T) {
 			}},
 		},
 		{
-			name: "duplicate local and remote names qualify every entry",
+			name: "duplicate local and remote names keep local compact",
 			input: []recentRoutePresentation{
 				{name: "logs", kind: recentRouteLocal},
 				{name: "logs", hostLabel: "edge", kind: recentRouteRemote},
 			},
 			want: []recentRouteDisplay{
-				{name: "logs@local", kind: recentRouteLocal},
+				{name: "logs", kind: recentRouteLocal},
 				{name: "logs@edge", kind: recentRouteRemote},
+			},
+		},
+		{
+			name: "duplicate local generations stay compact",
+			input: []recentRoutePresentation{
+				{name: "logs", kind: recentRouteLocal},
+				{name: "logs", kind: recentRouteLocal},
+			},
+			want: []recentRouteDisplay{
+				{name: "logs", kind: recentRouteLocal},
+				{name: "logs", kind: recentRouteLocal},
 			},
 		},
 		{
@@ -86,8 +97,8 @@ func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) 
 
 	hints := recentRouteHints(snapshot, nil)
 	require.Equal(t, []palette.RecentSessionHint{
-		{Rank: 1, Name: "logs@local", SnapshotGeneration: 1, Key: 1, Generation: 1},
-		{Rank: 2, Name: "logs@local", SnapshotGeneration: 1, Key: 2, Generation: 1},
+		{Rank: 1, Name: "logs", SnapshotGeneration: 1, Key: 1, Generation: 1},
+		{Rank: 2, Name: "logs", SnapshotGeneration: 1, Key: 2, Generation: 1},
 	}, hints.Recent)
 
 	hints = palette.ContextualHints{
@@ -101,8 +112,8 @@ func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) 
 	ranked := rankedRecentForHintsWithSnapshot(&hints, snapshot)
 
 	require.Equal(t, []rankedRecent{
-		{rank: 4, name: "logs@local", kind: recentRouteLocal, attention: true},
-		{rank: 9, name: "logs@local", kind: recentRouteLocal, selected: true},
+		{rank: 4, name: "logs", kind: recentRouteLocal, attention: true},
+		{rank: 9, name: "logs", kind: recentRouteLocal, selected: true},
 	}, ranked)
 }
 

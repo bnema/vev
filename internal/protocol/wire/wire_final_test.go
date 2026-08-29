@@ -12,8 +12,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if protocol.Version != 37 {
-		t.Fatalf("ProtocolVersion = %d, want 37", protocol.Version)
+	if protocol.Version != 38 {
+		t.Fatalf("ProtocolVersion = %d, want 38", protocol.Version)
 	}
 	payload := MarshalHello(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -27,7 +27,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 37, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 38, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	want = append(want, 0, 0)
 	got := MarshalHello(msg)
@@ -196,7 +196,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach}
-	want := []byte{0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0}
+	want := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0}
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -212,7 +212,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	if localPayload == nil {
 		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
 	}
-	wantLocal := []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
+	wantLocal := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
 	if !bytes.Equal(localPayload, wantLocal) {
 		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
 	}
@@ -222,7 +222,19 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	}
 	assertAllPrefixesFail(t, localPayload, UnmarshalAttachTarget)
 	assertTrailingGarbageFails(t, localPayload, UnmarshalAttachTarget)
-	for _, bad := range []protocol.AttachTarget{{Endpoint: "host", Intent: protocol.IntentAttach}, {Endpoint: "host", Session: "work", Intent: 99}} {
+	creation := protocol.AttachTarget{RequestID: 7, Endpoint: "host", Session: "example", Intent: protocol.IntentNew, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned}
+	creationPayload := MarshalAttachTarget(creation)
+	if creationPayload == nil {
+		t.Fatal("MarshalAttachTarget rejected correlated remote creation")
+	}
+	decodedCreation, err := UnmarshalAttachTarget(creationPayload)
+	if err != nil || decodedCreation != creation {
+		t.Fatalf("creation target = %+v, error %v, want %+v", decodedCreation, err, creation)
+	}
+	assertAllPrefixesFail(t, creationPayload, UnmarshalAttachTarget)
+	assertTrailingGarbageFails(t, creationPayload, UnmarshalAttachTarget)
+
+	for _, bad := range []protocol.AttachTarget{{Endpoint: "host", Intent: protocol.IntentAttach}, {Endpoint: "host", Session: "work", Intent: 99}, {Endpoint: "host", Session: "example", Intent: protocol.IntentNew}} {
 		if got := MarshalAttachTarget(bad); got != nil {
 			t.Fatalf("MarshalAttachTarget(%+v) = %x, want nil", bad, got)
 		}
@@ -234,7 +246,8 @@ func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	lifecycle[0] = 1
 	target := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach, ExactTarget: &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, SamePeer: true}
 	payload := MarshalAttachTarget(target)
-	want := append([]byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1}, make([]byte, 15)...)
+	want := append(make([]byte, 8), []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1}...)
+	want = append(want, make([]byte, 15)...)
 	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1)
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("exact target bytes = %x, want %x", payload, want)

@@ -907,8 +907,8 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 	}
 	pickerHandoff := remoteTarget == ""
-	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, policy protocol.EnvironmentPolicy) protocol.EnvironmentPolicy {
-		if pickerHandoff && target == nil {
+	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, intent uint8, policy protocol.EnvironmentPolicy) protocol.EnvironmentPolicy {
+		if pickerHandoff && target == nil && intent != protocol.IntentNew {
 			return protocol.EnvironmentPolicyDaemonOwned
 		}
 		return policy
@@ -932,7 +932,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if err != nil {
 			return nil, client.AttachRequest{}, err
 		}
-		policy := pickerEnvironmentPolicy(selection, target.EnvironmentPolicy)
+		policy := pickerEnvironmentPolicy(selection, target.Intent, target.EnvironmentPolicy)
 		displayOrigin := domain.RemoteDisplayOrigin(target.Endpoint)
 		if selection != nil {
 			displayOrigin = selection.DisplayOrigin
@@ -1026,7 +1026,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			remoteSelection = &copyTarget
 			remoteDisplayOrigin = copyTarget.DisplayOrigin
 		}
-		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.EnvironmentPolicy)
+		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.Intent, handoffErr.Target.EnvironmentPolicy)
 		if modeErr != nil {
 			return modeErr
 		}

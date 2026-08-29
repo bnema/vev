@@ -40,6 +40,8 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "parked", message: protocol.ParkedRouteRequest{RequestID: 1, LeaseID: lease, Action: protocol.ParkedRoutePrepare}, typeID: wire.MsgParkedRouteRequest},
 		{name: "snapshot", message: protocol.RecentRouteSnapshot{}, typeID: wire.MsgRecentRouteSnapshot},
 		{name: "route failure", message: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgRouteNavigationFailure},
+		{name: "creation failure", message: protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgSessionCreationFailure},
+		{name: "creation failure pointer", message: &protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgSessionCreationFailure},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -48,6 +50,10 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 			require.Equal(t, tt.typeID, raw.sent.Type)
 			got, err := decodeClient(raw.sent)
 			require.NoError(t, err)
+			if message, ok := tt.message.(*protocol.SessionCreationFailure); ok {
+				require.Equal(t, *message, got)
+				return
+			}
 			require.Equal(t, tt.message, got)
 		})
 	}
@@ -72,6 +78,7 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 		{name: "preview", message: protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}},
 		{name: "identity", message: protocol.CommittedRouteIdentity{Target: exact}},
 		{name: "route action", message: protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 1, Generation: 1}},
+		{name: "route create", message: protocol.RouteCreateSessionAction{RequestID: 1, SnapshotGeneration: 1, Key: 1, Generation: 1, SessionName: "example"}},
 		{name: "route failure", message: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}},
 		{name: "route position", message: protocol.RoutePosition{Target: exact, ActiveTabID: "tab-1"}},
 		{name: "switch failure", message: protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchUnavailable}},

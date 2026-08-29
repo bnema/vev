@@ -631,6 +631,47 @@ func UnmarshalRouteNavigationAction(b []byte) (protocol.RouteNavigationAction, e
 	return action, nil
 }
 
+func MarshalRouteCreateSessionAction(action protocol.RouteCreateSessionAction) ([]byte, error) {
+	if err := action.Validate(); err != nil {
+		return nil, err
+	}
+	w := payloadWriter{}
+	w.putUint64(action.RequestID)
+	w.putUint64(action.SnapshotGeneration)
+	w.putUint64(action.Key)
+	w.putUint64(action.Generation)
+	w.putString(action.SessionName)
+	return w.b, nil
+}
+
+func UnmarshalRouteCreateSessionAction(b []byte) (protocol.RouteCreateSessionAction, error) {
+	r := payloadReader{b: b}
+	var action protocol.RouteCreateSessionAction
+	var err error
+	if action.RequestID, err = r.getUint64(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if action.SnapshotGeneration, err = r.getUint64(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if action.Key, err = r.getUint64(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if action.Generation, err = r.getUint64(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if action.SessionName, err = r.getString(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if err := r.done(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if err := action.Validate(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	return action, nil
+}
+
 func validateRouteNavigationFailure(failure protocol.RouteNavigationFailure) error {
 	if failure.Key == 0 || failure.Generation == 0 {
 		return fmt.Errorf("%w: failure identity is zero", protocol.ErrInvalidRouteWire)
@@ -650,6 +691,37 @@ func MarshalRouteNavigationFailure(failure protocol.RouteNavigationFailure) ([]b
 	w.putUint64(failure.Generation)
 	w.putUint8(uint8(failure.Code))
 	return w.b, nil
+}
+
+func MarshalSessionCreationFailure(failure protocol.SessionCreationFailure) ([]byte, error) {
+	if err := failure.Validate(); err != nil {
+		return nil, err
+	}
+	w := payloadWriter{}
+	w.putUint64(failure.RequestID)
+	w.putUint8(uint8(failure.Code))
+	return w.b, nil
+}
+
+func UnmarshalSessionCreationFailure(b []byte) (protocol.SessionCreationFailure, error) {
+	r := payloadReader{b: b}
+	var failure protocol.SessionCreationFailure
+	var err error
+	if failure.RequestID, err = r.getUint64(); err != nil {
+		return protocol.SessionCreationFailure{}, err
+	}
+	code, err := r.getUint8()
+	if err != nil {
+		return protocol.SessionCreationFailure{}, err
+	}
+	failure.Code = protocol.RouteFailureCode(code)
+	if err := r.done(); err != nil {
+		return protocol.SessionCreationFailure{}, err
+	}
+	if err := failure.Validate(); err != nil {
+		return protocol.SessionCreationFailure{}, err
+	}
+	return failure, nil
 }
 
 func UnmarshalRouteNavigationFailure(b []byte) (protocol.RouteNavigationFailure, error) {

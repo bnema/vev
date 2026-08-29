@@ -69,6 +69,8 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 	require.NoError(t, err)
 	failurePayload, err := wire.MarshalRouteNavigationFailure(protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable})
 	require.NoError(t, err)
+	creationFailurePayload, err := wire.MarshalSessionCreationFailure(protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable})
+	require.NoError(t, err)
 
 	tests := []struct {
 		name  string
@@ -94,6 +96,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "parked", frame: wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(protocol.ParkedRouteRequest{RequestID: 4, LeaseID: lease, Action: protocol.ParkedRoutePrepare})}, want: protocol.ParkedRouteRequest{RequestID: 4, LeaseID: lease, Action: protocol.ParkedRoutePrepare}},
 		{name: "snapshot", frame: wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: snapshotPayload}, want: protocol.RecentRouteSnapshot{}},
 		{name: "route failure", frame: wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: failurePayload}, want: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}},
+		{name: "creation failure", frame: wire.Frame{Type: wire.MsgSessionCreationFailure, Payload: creationFailurePayload}, want: protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,6 +123,7 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}
 	identity := protocol.CommittedRouteIdentity{Target: exact}
 	routeAction := protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 1, Generation: 1}
+	routeCreate := protocol.RouteCreateSessionAction{RequestID: 1, SnapshotGeneration: 1, Key: 1, Generation: 1, SessionName: "example"}
 	routeFailure := protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}
 	routePosition := protocol.RoutePosition{Target: exact, ActiveTabID: "tab-1"}
 	switchFailure := protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchUnavailable}
@@ -130,6 +134,8 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	identityPayload, err := wire.MarshalCommittedRouteIdentity(identity)
 	require.NoError(t, err)
 	routeActionPayload, err := wire.MarshalRouteNavigationAction(routeAction)
+	require.NoError(t, err)
+	routeCreatePayload, err := wire.MarshalRouteCreateSessionAction(routeCreate)
 	require.NoError(t, err)
 	routeFailurePayload, err := wire.MarshalRouteNavigationFailure(routeFailure)
 	require.NoError(t, err)
@@ -156,6 +162,8 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 		{name: "preview", message: preview, typeID: wire.MsgRemotePreviewResponse, payload: wire.MarshalRemotePreview(preview)},
 		{name: "identity", message: identity, typeID: wire.MsgCommittedRouteIdentity, payload: identityPayload},
 		{name: "route action", message: routeAction, typeID: wire.MsgNavigateRecentRoute, payload: routeActionPayload},
+		{name: "route create", message: routeCreate, typeID: wire.MsgRouteCreateSession, payload: routeCreatePayload},
+		{name: "route create pointer", message: &routeCreate, typeID: wire.MsgRouteCreateSession, payload: routeCreatePayload},
 		{name: "route failure", message: routeFailure, typeID: wire.MsgRouteNavigationFailure, payload: routeFailurePayload},
 		{name: "route position", message: routePosition, typeID: wire.MsgRoutePosition, payload: routePositionPayload},
 		{name: "switch failure", message: switchFailure, typeID: wire.MsgSamePeerSwitchFailure, payload: switchFailurePayload},

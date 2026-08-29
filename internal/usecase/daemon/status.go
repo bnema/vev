@@ -203,7 +203,7 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 			presentation.kind = recentRouteRemote
 		}
 	}
-	name := formatRecentRouteName(presentation, false)
+	name := formatRecentRouteName(presentation)
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	activeIndex := 0
 	if ac != nil {

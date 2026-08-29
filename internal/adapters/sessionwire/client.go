@@ -101,6 +101,8 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalCommittedRouteIdentity(frame.Payload)
 	case wire.MsgNavigateRecentRoute:
 		return wire.UnmarshalRouteNavigationAction(frame.Payload)
+	case wire.MsgRouteCreateSession:
+		return wire.UnmarshalRouteCreateSessionAction(frame.Payload)
 	case wire.MsgRouteNavigationFailure:
 		return wire.UnmarshalRouteNavigationFailure(frame.Payload)
 	case wire.MsgRoutePosition:
@@ -114,7 +116,7 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		wire.MsgClientNotice, wire.MsgCommand, wire.MsgOutputResetRequest,
 		wire.MsgRemotePreviewRequest, wire.MsgRouteAttentionSubscription,
 		wire.MsgSamePeerSwitchRequest, wire.MsgParkedRouteRequest,
-		wire.MsgRecentRouteSnapshot:
+		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -183,6 +185,9 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationFailure:
 		payload, err := wire.MarshalRouteNavigationFailure(m)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}, err
+	case protocol.SessionCreationFailure:
+		payload, err := wire.MarshalSessionCreationFailure(m)
+		return wire.Frame{Type: wire.MsgSessionCreationFailure, Payload: payload}, err
 	case *protocol.Hello:
 		if m != nil {
 			return encodeClient(*m)
@@ -256,6 +261,10 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 			return encodeClient(*m)
 		}
 	case *protocol.RouteNavigationFailure:
+		if m != nil {
+			return encodeClient(*m)
+		}
+	case *protocol.SessionCreationFailure:
 		if m != nil {
 			return encodeClient(*m)
 		}

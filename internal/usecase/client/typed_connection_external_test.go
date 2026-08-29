@@ -137,6 +137,9 @@ func externalClientFrame(m protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationFailure:
 		p, e := wire.MarshalRouteNavigationFailure(x)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: p}, e
+	case protocol.SessionCreationFailure:
+		p, e := wire.MarshalSessionCreationFailure(x)
+		return wire.Frame{Type: wire.MsgSessionCreationFailure, Payload: p}, e
 	default:
 		return wire.Frame{}, errors.New("test client: unsupported message")
 	}
@@ -161,6 +164,8 @@ func externalServerMessage(f wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalParkedRouteResponse(f.Payload)
 	case wire.MsgNavigateRecentRoute:
 		return wire.UnmarshalRouteNavigationAction(f.Payload)
+	case wire.MsgRouteCreateSession:
+		return wire.UnmarshalRouteCreateSessionAction(f.Payload)
 	case wire.MsgCommittedRouteIdentity:
 		return wire.UnmarshalCommittedRouteIdentity(f.Payload)
 	case wire.MsgSamePeerSwitchFailure:

@@ -1158,6 +1158,69 @@ func TestHybridPickerDifferentHostFallsBackToNewRemoteDial(t *testing.T) {
 	require.Positive(t, sourceRemote.closed.Load())
 }
 
+func TestRemoteCreationFailuresRestoreSourceAndReportCorrelation(t *testing.T) {
+	tests := []struct {
+		name            string
+		handoffErr      error
+		dialErr         error
+		wantTargetCalls int32
+	}{
+		{name: "handoff resolution", handoffErr: errors.New("handoff failed")},
+		{name: "target dial", dialErr: errors.New("dial failed"), wantTargetCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := newRunTerminal()
+			defer term.in.unblock()
+
+			lifecycle := domain.SessionLifecycleID{1}
+			target := protocol.AttachTarget{
+				RequestID: 7, Endpoint: "host-a", Session: "example", Intent: protocol.IntentNew,
+				EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+			}
+			initial := &recordingTransport{recvs: []recvItem{
+				{f: hybridWelcomeFrame("work", lifecycle)},
+				{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(target))},
+			}}
+			restored := &recordingTransport{recvs: []recvItem{
+				{f: hybridWelcomeFrame("work", lifecycle)},
+				{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+			}}
+			sourceDialer := &sequenceDialer{trs: []wire.Transport{initial, restored}}
+			targetDialer := &sequenceDialer{errs: []error{tt.dialErr}}
+			deps := testDependencies(sourceDialer, term, realClock{}, nil, nil)
+			deps.AttachHandoff = func(got protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
+				require.Equal(t, target, got)
+				if tt.handoffErr != nil {
+					return nil, client.AttachRequest{}, tt.handoffErr
+				}
+				return targetDialer, client.AttachRequest{
+					Intent: protocol.IntentNew, SessionName: "example", Remote: true,
+					Origin: protocol.RouteOriginDiscovery, OriginKey: "host-a", HostLabel: "host-a",
+					EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+				}, nil
+			}
+
+			require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
+				Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+			}))
+			require.Equal(t, int32(2), sourceDialer.calls.Load())
+			require.Equal(t, tt.wantTargetCalls, targetDialer.calls.Load())
+			var failure protocol.SessionCreationFailure
+			for _, frame := range restored.Sends() {
+				if frame.Type != wire.MsgSessionCreationFailure {
+					continue
+				}
+				var err error
+				failure, err = wire.UnmarshalSessionCreationFailure(frame.Payload)
+				require.NoError(t, err)
+			}
+			require.Equal(t, uint64(7), failure.RequestID)
+			require.Equal(t, protocol.RouteFailureUnavailable, failure.Code)
+		})
+	}
+}
+
 func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

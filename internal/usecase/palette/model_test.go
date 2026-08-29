@@ -7,10 +7,138 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/stretchr/testify/require"
 )
+
+func cnsCommand(t *testing.T) command.Command {
+	t.Helper()
+	for _, candidate := range command.PaletteRegistry() {
+		if candidate.Slug == "new-session" {
+			return candidate
+		}
+	}
+	require.FailNow(t, "new-session command missing from palette registry")
+	return command.Command{}
+}
+
+func TestCNSDestinationModeRequiresExplicitSelection(t *testing.T) {
+	cns := cnsCommand(t)
+	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
+	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
+
+	tests := []struct {
+		name       string
+		query      string
+		navigate   func(*Model)
+		wantText   string
+		wantSelect bool
+		wantFirst  bool
+	}{
+		{name: "plain requires selection", query: "CNS", wantText: "Create session locally…", wantFirst: true},
+		{name: "named requires selection", query: "CNS example", wantText: "Create session “example”", wantFirst: true},
+		{name: "down chooses first", query: "CNS example", navigate: (*Model).Down, wantText: "Create session “example”", wantSelect: true, wantFirst: true},
+		{name: "up chooses last", query: "CNS example", navigate: (*Model).Up, wantText: "Create session “example” on host-a", wantSelect: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New([]Result{NewCommandResult(cns), local, remote})
+			for _, r := range tt.query {
+				m.Insert(r)
+			}
+			require.Len(t, m.Matches(), 2)
+			if tt.wantFirst {
+				require.Equal(t, tt.wantText, m.Matches()[0].Result.DisplayText())
+			}
+			if tt.navigate != nil {
+				tt.navigate(m)
+			}
+			selected, ok := m.Selected()
+			require.Equal(t, tt.wantSelect, ok)
+			if ok {
+				require.Equal(t, tt.wantText, selected.DisplayText())
+			}
+		})
+	}
+}
+
+func TestCNSDestinationRefreshPreservesOnlyExplicitSelection(t *testing.T) {
+	cns := cnsCommand(t)
+	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
+	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
+	m := New([]Result{NewCommandResult(cns), local, remote})
+	for _, r := range "CNS example" {
+		m.Insert(r)
+	}
+	m.ReplaceResults([]Result{NewCommandResult(cns), local, remote})
+	_, ok := m.Selected()
+	require.False(t, ok)
+
+	m.Down()
+	m.ReplaceResults([]Result{NewCommandResult(cns), remote, local})
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	_, kind, _, _, _, ok := selected.CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, CreateSessionOnLocalRoute, kind)
+
+	remoteB := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-b", "host-b", protocol.RouteRef{}, 0)
+	m.ReplaceResults([]Result{NewCommandResult(cns), remote, remoteB})
+	_, ok = m.Selected()
+	require.False(t, ok, "removing the explicit destination must not select its replacement")
+
+	m.Down()
+	m.ReplaceResults([]Result{NewCommandResult(cns), remote})
+	_, ok = m.Selected()
+	require.False(t, ok, "two-to-one refresh must not promote the generic command")
+
+	m.ReplaceResults([]Result{NewCommandResult(cns), remote, remoteB})
+	m.Down()
+	m.ReplaceResults([]Result{NewCommandResult(cns)})
+	_, ok = m.Selected()
+	require.False(t, ok, "two-to-zero refresh must not promote the generic command")
+}
+
+func TestCNSUnselectedDestinationCollapseDoesNotPromoteCommand(t *testing.T) {
+	cns := cnsCommand(t)
+	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
+	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
+	newModel := func() *Model {
+		m := New([]Result{NewCommandResult(cns), local, remote})
+		for _, r := range "CNS example" {
+			m.Insert(r)
+		}
+		return m
+	}
+
+	m := newModel()
+	m.ReplaceResults([]Result{NewCommandResult(cns), local})
+	_, ok := m.Selected()
+	require.False(t, ok, "unselected two-to-one refresh must not promote CNS")
+
+	m = newModel()
+	m.ReplaceResults([]Result{NewCommandResult(cns)})
+	_, ok = m.Selected()
+	require.False(t, ok, "unselected two-to-zero refresh must not promote CNS")
+}
+
+func TestCNSDestinationRefreshDoesNotPromoteCommandSelection(t *testing.T) {
+	cns := cnsCommand(t)
+	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
+	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
+	m := New([]Result{NewCommandResult(cns), local})
+	for _, r := range "CNS" {
+		m.Insert(r)
+	}
+	_, ok := m.Selected()
+	require.True(t, ok, "single-daemon CNS keeps ordinary command selection")
+
+	m.ReplaceResults([]Result{NewCommandResult(cns), local, remote})
+	_, ok = m.Selected()
+	require.False(t, ok, "entering multi-destination mode requires fresh navigation")
+}
 
 func TestReplaceResultsPreservesExactRemoteSelection(t *testing.T) {
 	result := func(endpoint string, lifecycle byte) Result {

@@ -17,16 +17,27 @@ const (
 	ResultKindStoppedSession
 	ResultKindRemoteSession
 	ResultKindRecentRoute
+	ResultKindCreateSessionDestination
+)
+
+// CreateSessionDestinationKind identifies where a CNS result creates a session.
+type CreateSessionDestinationKind uint8
+
+const (
+	CreateSessionOnServingDaemon CreateSessionDestinationKind = iota + 1
+	CreateSessionOnLocalRoute
+	CreateSessionOnRemoteHost
 )
 
 // Result is an immutable palette target. Its kind is the sole discriminator
 // for its private command, local-session, remote-session, or route payload.
 type Result struct {
-	kind          ResultKind
-	command       command.Command
-	session       sessionPayload
-	remoteSession remoteSessionPayload
-	route         routePayload
+	kind              ResultKind
+	command           command.Command
+	session           sessionPayload
+	remoteSession     remoteSessionPayload
+	route             routePayload
+	createDestination createSessionDestinationPayload
 }
 
 type sessionPayload struct {
@@ -44,6 +55,15 @@ type remoteSessionPayload struct {
 type routePayload struct {
 	label  string
 	action protocol.RouteNavigationAction
+}
+
+type createSessionDestinationPayload struct {
+	name          string
+	kind          CreateSessionDestinationKind
+	displayOrigin string
+	endpoint      string
+	route         protocol.RouteRef
+	snapshotGen   uint64
 }
 
 // NewCommandResult creates a static command palette target.
@@ -102,6 +122,19 @@ func NewRecentRouteResult(label string, action protocol.RouteNavigationAction) R
 	return Result{kind: ResultKindRecentRoute, route: routePayload{label: label, action: action}}
 }
 
+// NewCreateSessionDestination creates an immutable destination template. The
+// palette binds the current validated CNS name without parsing rendered text.
+func NewCreateSessionDestination(kind CreateSessionDestinationKind, displayOrigin, endpoint string, route protocol.RouteRef, snapshotGeneration uint64) Result {
+	return Result{kind: ResultKindCreateSessionDestination, createDestination: createSessionDestinationPayload{
+		kind: kind, displayOrigin: displayOrigin, endpoint: endpoint, route: route, snapshotGen: snapshotGeneration,
+	}}
+}
+
+func (r Result) withCreateSessionName(name string) Result {
+	r.createDestination.name = name
+	return r
+}
+
 func (r Result) Kind() ResultKind { return r.kind }
 
 func (r Result) sameTarget(other Result) bool {
@@ -117,6 +150,11 @@ func (r Result) sameTarget(other Result) bool {
 		return r.remoteSession.key == other.remoteSession.key && r.remoteSession.target == other.remoteSession.target
 	case ResultKindRecentRoute:
 		return r.route.action == other.route.action
+	case ResultKindCreateSessionDestination:
+		return r.createDestination.kind == other.createDestination.kind &&
+			r.createDestination.endpoint == other.createDestination.endpoint &&
+			r.createDestination.route == other.createDestination.route &&
+			r.createDestination.snapshotGen == other.createDestination.snapshotGen
 	default:
 		return false
 	}
@@ -132,7 +170,25 @@ func (r Result) DisplayText() string {
 	if r.kind == ResultKindRecentRoute {
 		return activeSessionDisplayPrefix + r.route.label
 	}
+	if r.kind == ResultKindCreateSessionDestination {
+		return r.createSessionDestinationDisplay()
+	}
 	return r.sessionDisplayPrefix() + r.session.display
+}
+
+func (r Result) createSessionDestinationDisplay() string {
+	destination := r.createDestination
+	if destination.name == "" {
+		if destination.kind == CreateSessionOnLocalRoute {
+			return "Create session locally…"
+		}
+		return "Create session on " + destination.displayOrigin + "…"
+	}
+	text := "Create session “" + destination.name + "”"
+	if destination.kind != CreateSessionOnLocalRoute {
+		text += " on " + destination.displayOrigin
+	}
+	return text
 }
 
 func (r Result) sessionDisplayPrefix() string {
@@ -189,6 +245,19 @@ func (r Result) RemoteSessionUnavailableReason() (string, bool) {
 // recent-route result.
 func (r Result) RouteNavigationAction() (protocol.RouteNavigationAction, bool) {
 	return r.route.action, r.kind == ResultKindRecentRoute
+}
+
+// CreateSessionDestination returns structured creation authority only for CNS
+// destination rows. Labels are never parsed back into these values.
+func (r Result) CreateSessionDestination() (name string, kind CreateSessionDestinationKind, displayOrigin, endpoint string, route protocol.RouteRef, ok bool) {
+	d := r.createDestination
+	return d.name, d.kind, d.displayOrigin, d.endpoint, d.route, r.kind == ResultKindCreateSessionDestination
+}
+
+// CreateSessionSnapshotGeneration returns the route snapshot generation bound
+// to a local destination. Other destination kinds carry zero.
+func (r Result) CreateSessionSnapshotGeneration() (uint64, bool) {
+	return r.createDestination.snapshotGen, r.kind == ResultKindCreateSessionDestination
 }
 
 const (

@@ -36,20 +36,24 @@ type RenderOptions struct {
 }
 
 type Model struct {
-	results         []Result
-	argumentResults []Result
-	input           ui.TextInput
-	matches         []Match
-	selected        int
-	scroll          int
+	results            []Result
+	argumentResults    []Result
+	createDestinations []Result
+	input              ui.TextInput
+	matches            []Match
+	selected           int
+	scroll             int
+	destinationMode    bool
+	selectionMade      bool
 }
 
 // New accepts typed immutable palette results.
 func New(results []Result) *Model {
-	copied := append([]Result(nil), results...)
+	ordinary, destinations := splitResults(results)
 	m := &Model{
-		results:         copied,
-		argumentResults: requiredArgumentResults(copied),
+		results:            ordinary,
+		argumentResults:    requiredArgumentResults(ordinary),
+		createDestinations: destinations,
 	}
 	m.refresh()
 	return m
@@ -63,19 +67,31 @@ func (m *Model) ReplaceResults(results []Result) {
 	if m == nil {
 		return
 	}
+	wasDestinationMode := m.destinationMode
+	wasSelectionMade := m.selectionMade
 	selected, hadSelection := m.Selected()
-	m.results = append([]Result(nil), results...)
+	selectedDestination := hadSelection && selected.Kind() == ResultKindCreateSessionDestination
+	m.results, m.createDestinations = splitResults(results)
 	m.argumentResults = requiredArgumentResults(m.results)
 	m.refresh()
 	if !hadSelection {
+		if m.destinationMode || wasDestinationMode && !wasSelectionMade {
+			m.selectionMade = false
+		}
 		return
 	}
 	for i, match := range m.matches {
 		if match.Result.sameTarget(selected) {
 			m.selected = i
+			m.selectionMade = true
 			m.clamp()
 			return
 		}
+	}
+	if selectedDestination || m.destinationMode {
+		m.selectionMade = false
+		m.selected, m.scroll = 0, 0
+		m.clamp()
 	}
 }
 
@@ -93,14 +109,14 @@ func DefaultRenderStyles() RenderStyles {
 func (m *Model) Insert(r rune) {
 	if m != nil {
 		m.input.Insert(r)
-		m.selected, m.scroll = 0, 0
+		m.selected, m.scroll, m.selectionMade = 0, 0, false
 		m.refresh()
 	}
 }
 func (m *Model) Backspace() {
 	if m != nil && m.input.Value() != "" {
 		m.input.Backspace()
-		m.selected, m.scroll = 0, 0
+		m.selected, m.scroll, m.selectionMade = 0, 0, false
 		m.refresh()
 	}
 }
@@ -112,13 +128,31 @@ func (m *Model) Query() string {
 	return m.input.Value()
 }
 func (m *Model) Up() {
-	if m != nil && m.selected > 0 {
+	if m == nil || len(m.matches) == 0 {
+		return
+	}
+	if !m.selectionMade {
+		m.selected = len(m.matches) - 1
+		m.selectionMade = true
+		m.clamp()
+		return
+	}
+	if m.selected > 0 {
 		m.selected--
 		m.clamp()
 	}
 }
 func (m *Model) Down() {
-	if m != nil && m.selected+1 < len(m.matches) {
+	if m == nil || len(m.matches) == 0 {
+		return
+	}
+	if !m.selectionMade {
+		m.selected = 0
+		m.selectionMade = true
+		m.clamp()
+		return
+	}
+	if m.selected+1 < len(m.matches) {
 		m.selected++
 		m.clamp()
 	}
@@ -126,7 +160,7 @@ func (m *Model) Down() {
 
 // Selected returns the typed immutable target, not an executable command.
 func (m *Model) Selected() (Result, bool) {
-	if m == nil || m.selected < 0 || m.selected >= len(m.matches) {
+	if m == nil || !m.selectionMade || m.selected < 0 || m.selected >= len(m.matches) {
 		return Result{}, false
 	}
 	return m.matches[m.selected].Result, true
@@ -162,7 +196,7 @@ func (m *Model) CompleteSelected() bool {
 	}
 
 	m.input.SetValue(completed)
-	m.selected, m.scroll = 0, 0
+	m.selected, m.scroll, m.selectionMade = 0, 0, false
 	m.refresh()
 	return true
 }
@@ -206,6 +240,18 @@ func (m *Model) Matches() []Match {
 
 func (m *Model) refresh() {
 	query := m.input.Value()
+	wasDestinationMode := m.destinationMode
+	if destinations, ok := m.cnsDestinationMatches(query); ok {
+		m.destinationMode = true
+		if !wasDestinationMode {
+			m.selectionMade = false
+		}
+		m.matches = destinations
+		m.clamp()
+		return
+	}
+	m.destinationMode = false
+	m.selectionMade = true
 	m.matches = Fuzzy(m.results, query)
 	// Keep an exact command row selected over fuzzy session matches.
 	if result, ok := ExactCommandResult(m.results, query); ok {
@@ -224,6 +270,44 @@ func (m *Model) refresh() {
 		}
 	}
 	m.clamp()
+}
+
+func splitResults(results []Result) (ordinary, destinations []Result) {
+	ordinary = make([]Result, 0, len(results))
+	for _, result := range results {
+		if result.Kind() == ResultKindCreateSessionDestination {
+			destinations = append(destinations, result)
+			continue
+		}
+		ordinary = append(ordinary, result)
+	}
+	return ordinary, destinations
+}
+
+func (m *Model) cnsDestinationMatches(query string) ([]Match, bool) {
+	if len(m.createDestinations) < 2 {
+		return nil, false
+	}
+	fields := strings.Fields(query)
+	if len(fields) == 0 || len(fields) > 2 {
+		return nil, false
+	}
+	cmd, ok := ArgumentCommand(m.results, query)
+	if !ok || cmd.Slug != "new-session" {
+		return nil, false
+	}
+	name := ""
+	if len(fields) == 2 {
+		name = fields[1]
+		if domain.ValidateSessionName(name) != nil {
+			return nil, false
+		}
+	}
+	matches := make([]Match, len(m.createDestinations))
+	for i, destination := range m.createDestinations {
+		matches[i] = newMatch(destination.withCreateSessionName(name), 0)
+	}
+	return matches, true
 }
 
 func requiredArgumentResults(results []Result) []Result {
@@ -315,15 +399,17 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 		}
 		match := m.matches[idx]
 		style := row
-		if idx == m.selected {
+		rowSelected := idx == m.selected && m.selectionMade
+		if rowSelected {
 			style = selection
 		}
 		ui.FillRect(frame, domain.Rect{Y: y + start, Width: frame.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: style})
 		if cmd, ok := match.Result.Command(); ok {
-			m.renderCommand(frame, y+start, style, selection, desc, selectionDesc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Preview, opts.Feedback, idx == m.selected)
+			m.renderCommand(frame, y+start, style, selection, desc, selectionDesc, codeWidth, cmd, match.Positions, activeCmd, activeOK, opts.Guidance, opts.Preview, opts.Feedback, rowSelected)
 			continue
 		}
-		m.renderSession(frame, y+start, style, selection, match, opts.Feedback, idx == m.selected)
+		showFeedback := rowSelected || !m.selectionMade && idx == 0
+		m.renderSession(frame, y+start, style, selection, match, opts.Feedback, showFeedback)
 	}
 	return frame
 }
