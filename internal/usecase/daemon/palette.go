@@ -22,7 +22,10 @@ const (
 	paletteRailWidth      = 64
 )
 
-var paletteModal = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
+var (
+	paletteModal                    = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
+	errCreateDestinationUnavailable = errors.New("that destination is no longer available")
+)
 
 func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 	modal := paletteModal
@@ -97,6 +100,50 @@ func paletteDaemonDisplayOrigin(snapshot protocol.RecentRouteSnapshot, lifecycle
 	return paletteRemoteDisplayOrigin(active.HostLabel)
 }
 
+func routeEntryForRef(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteRef) (protocol.RecentRouteEntry, bool) {
+	if ref.IsZero() {
+		return protocol.RecentRouteEntry{}, false
+	}
+	if snapshot.Active == ref {
+		entryRef := protocol.RouteRef{Key: snapshot.ActiveEntry.Key, Generation: snapshot.ActiveEntry.Generation}
+		if entryRef == ref {
+			return snapshot.ActiveEntry, true
+		}
+	}
+	for _, entry := range snapshot.Entries {
+		if entry.Key == ref.Key && entry.Generation == ref.Generation {
+			return entry, true
+		}
+	}
+	return protocol.RecentRouteEntry{}, false
+}
+
+func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID, remoteCatalog []remoteCatalogPresentationEntry, hostRanks map[string]int) []palette.Result {
+	results := make([]palette.Result, 0, len(remoteCatalog)+2)
+	if home, ok := routeEntryForRef(snapshot, snapshot.Home); ok && home.Kind == protocol.RouteKindLocal {
+		results = append(results, palette.NewCreateSessionDestination(
+			palette.CreateSessionOnLocalRoute, "", "", snapshot.Home, snapshot.Generation,
+		))
+	}
+	if active, ok := activeRouteEntryForLifecycle(snapshot, currentLifecycle); ok && active.Kind == protocol.RouteKindRemote {
+		results = append(results, palette.NewCreateSessionDestination(
+			palette.CreateSessionOnServingDaemon, paletteRemoteDisplayOrigin(active.HostLabel), "", protocol.RouteRef{}, 0,
+		))
+	}
+	for _, host := range remoteCatalog {
+		if host.status != remoteHostFresh || host.entry.Host == "" {
+			continue
+		}
+		if _, configured := hostRanks[host.entry.Host]; !configured {
+			continue
+		}
+		results = append(results, palette.NewCreateSessionDestination(
+			palette.CreateSessionOnRemoteHost, paletteRemoteDisplayOrigin(host.entry.Host), host.entry.Host, protocol.RouteRef{}, 0,
+		))
+	}
+	return results
+}
+
 func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemonDisplayOrigin string) bool {
 	if entry.Kind == protocol.RouteKindLocal {
 		return true
@@ -135,16 +182,19 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	daemonDisplayOrigin := paletteDaemonDisplayOrigin(routeSnapshot, currentLifecycle)
 
 	remoteCatalog := d.remoteCatalogSnapshot()
-	sortRemoteCatalog(remoteCatalog, d.remoteHostRanks())
+	hostRanks := d.remoteHostRanks()
+	sortRemoteCatalog(remoteCatalog, hostRanks)
 	remoteSessionCount := 0
 	for _, host := range remoteCatalog {
 		remoteSessionCount += len(host.entry.Sessions)
 	}
 
-	results := make([]palette.Result, 0, len(commands)+len(sessions)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
+	destinations := createSessionDestinationResults(routeSnapshot, currentLifecycle, remoteCatalog, hostRanks)
+	results := make([]palette.Result, 0, len(commands)+len(destinations)+len(sessions)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
 	}
+	results = append(results, destinations...)
 	active := make([]palette.Result, 0, len(sessions))
 	for _, candidate := range sessions {
 		snap := candidate.snapshotView(viewOptions{})
@@ -345,11 +395,13 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var hasRemoteTarget bool
 	var routeTarget protocol.RouteNavigationAction
 	var hasRouteTarget bool
+	var createDestination palette.Result
+	var hasCreateDestination bool
 	var args []string
 	var routeSnapshot protocol.RecentRouteSnapshot
 	var generation uint64
 	var rawQuery string
-	changed, cancel, execute := false, false, false
+	changed, cancel, execute, chooseDestination := false, false, false, false
 	var closedDiscovery remoteDiscoveryInstance
 	var effect *attachmentEffect
 	if len(effects) != 0 {
@@ -404,6 +456,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			selected, ok := ac.overlays.palette.Selected()
 			if !ok {
 				changed = true
+				chooseDestination = true
 				return
 			}
 			rawQuery = ac.overlays.palette.Query()
@@ -435,6 +488,9 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			} else if action, ok := selected.RouteNavigationAction(); ok {
 				routeTarget = action
 				hasRouteTarget = true
+			} else if _, _, _, _, _, ok := selected.CreateSessionDestination(); ok {
+				createDestination = selected
+				hasCreateDestination = true
 			} else if _, ok := selected.SessionTarget(); ok {
 				sessionTarget = selected
 				hasSessionTarget = true
@@ -448,6 +504,9 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	})
 	if changed {
 		ac.overlays.paletteFeedback = ""
+		if chooseDestination {
+			ac.overlays.paletteFeedback = "Choose a destination"
+		}
 		ac.overlays.palettePreview = ""
 		active, ok := ac.overlays.palette.ArgumentCommand()
 		if ok {
@@ -476,6 +535,35 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	if !execute {
 		if changed {
 			d.invalidateRender(entry, ac, true, "palette.go")
+		}
+		return
+	}
+
+	if hasCreateDestination {
+		name, _, _, _, _, _ := createDestination.CreateSessionDestination()
+		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, effect: effect}
+		if err := exec.validateCreateSessionDestination(createDestination); err != nil {
+			ac.paletteFailure(generation, rawQuery, errCreateDestinationUnavailable.Error())
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		if !d.closeExecutedPalette(ac, generation, rawQuery) {
+			return
+		}
+		if name == "" {
+			d.enterTransitionPrompt(entry, ac, " Create session ", "", func(name string, promptEffect *attachmentEffect) error {
+				return exec.createSessionOnDestination(promptEffect, createDestination, name)
+			})
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		err := exec.createSessionOnValidatedDestination(effect, createDestination, name)
+		if err != nil && !errors.Is(err, errAttachmentTransition) {
+			d.reportAttachmentError(entry, domain.UserErr(domain.NoticeSessionUnavailable, "couldn't create session", err))
+			return
+		}
+		if current := ac.currentAttachmentSession(); current != nil {
+			d.invalidateRender(current, ac, true, "palette.go")
 		}
 		return
 	}
@@ -737,6 +825,107 @@ func (e paletteExec) CreateSessionNamed(name string) error {
 		return e.d.createSessionAndSwitch(e.sess, e.ac, name)
 	}
 	return e.d.createSessionAndSwitchForAttachment(e.effect, name)
+}
+
+func (e paletteExec) validateCreateSessionDestination(result palette.Result) error {
+	_, kind, _, endpoint, route, ok := result.CreateSessionDestination()
+	if !ok {
+		return errCreateDestinationUnavailable
+	}
+	switch kind {
+	case palette.CreateSessionOnServingDaemon:
+		return nil
+	case palette.CreateSessionOnLocalRoute:
+		if e.ac == nil {
+			return errCreateDestinationUnavailable
+		}
+		snapshotGeneration, ok := result.CreateSessionSnapshotGeneration()
+		if !ok || snapshotGeneration == 0 {
+			return errCreateDestinationUnavailable
+		}
+		snapshot := e.ac.routeSnapshotCopy()
+		entry, valid := routeEntryForRef(snapshot, route)
+		if !valid || snapshot.Generation != snapshotGeneration || entry.Kind != protocol.RouteKindLocal {
+			return errCreateDestinationUnavailable
+		}
+		return nil
+	case palette.CreateSessionOnRemoteHost:
+		if !e.d.remoteCreateHostReady(endpoint) {
+			return errCreateDestinationUnavailable
+		}
+		return nil
+	default:
+		return errCreateDestinationUnavailable
+	}
+}
+
+func (e paletteExec) createSessionOnDestination(effect *attachmentEffect, result palette.Result, name string) error {
+	if err := e.validateCreateSessionDestination(result); err != nil {
+		return err
+	}
+	return e.createSessionOnValidatedDestination(effect, result, name)
+}
+
+func (e paletteExec) createSessionOnValidatedDestination(effect *attachmentEffect, result palette.Result, name string) error {
+	if err := domain.ValidateSessionName(name); err != nil {
+		return err
+	}
+	_, kind, _, endpoint, route, _ := result.CreateSessionDestination()
+	if kind == palette.CreateSessionOnServingDaemon ||
+		(kind == palette.CreateSessionOnLocalRoute && e.ac != nil && e.ac.routeSnapshotCopy().Active == route) {
+		if effect == nil {
+			return e.d.createSessionAndSwitch(e.sess, e.ac, name)
+		}
+		return e.d.createSessionAndSwitchForAttachment(effect, name)
+	}
+	if effect == nil {
+		return errAttachmentTransition
+	}
+	requestID := e.d.creationRequestSeq.Add(1)
+	if requestID == 0 {
+		requestID = e.d.creationRequestSeq.Add(1)
+	}
+	switch kind {
+	case palette.CreateSessionOnLocalRoute:
+		snapshotGeneration, _ := result.CreateSessionSnapshotGeneration()
+		action := protocol.RouteCreateSessionAction{
+			RequestID: requestID, SnapshotGeneration: snapshotGeneration,
+			Key: route.Key, Generation: route.Generation, SessionName: name,
+		}
+		if err := effect.sendControl(action); err != nil {
+			return err
+		}
+		return nil
+	case palette.CreateSessionOnRemoteHost:
+		handoff := protocol.AttachTarget{
+			RequestID: requestID, Endpoint: endpoint, Session: name, Intent: protocol.IntentNew,
+			EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+		}
+		if err := protocol.ValidateAttachTarget(handoff); err != nil {
+			return errAttachmentTransition
+		}
+		if err := effect.sendControl(handoff); err != nil {
+			return err
+		}
+		e.d.clientGoneForAttachment(effect, false)
+		return nil
+	default:
+		return errAttachmentTransition
+	}
+}
+
+func (d *Daemon) remoteCreateHostReady(endpoint string) bool {
+	if d == nil || domain.ValidateRemoteHostTarget(endpoint) != nil {
+		return false
+	}
+	ranks := d.remoteHostRanks()
+	if _, ok := ranks[endpoint]; !ok {
+		return false
+	}
+	d.remoteCatalog.mu.Lock()
+	defer d.remoteCatalog.mu.Unlock()
+	_, ok := d.remoteCatalogEntryLocked(endpoint)
+	return ok
 }
 
 func (e paletteExec) CreateEphemeralSession() error {

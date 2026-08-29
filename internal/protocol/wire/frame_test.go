@@ -7,8 +7,8 @@ import (
 )
 
 func TestProtocolVersion(t *testing.T) {
-	if protocol.Version != 37 {
-		t.Fatalf("ProtocolVersion = %d, want 37", protocol.Version)
+	if protocol.Version != 38 {
+		t.Fatalf("ProtocolVersion = %d, want 38", protocol.Version)
 	}
 }
 
@@ -37,14 +37,14 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgKill", MsgKill}, {"MsgTheme", MsgTheme}, {"MsgAck", MsgAck},
 		{"MsgImagePush", MsgImagePush}, {"MsgClientNotice", MsgClientNotice},
 		{"MsgCommand", MsgCommand}, {"MsgOutputResetRequest", MsgOutputResetRequest}, {"MsgRemotePreviewRequest", MsgRemotePreviewRequest},
-		{"MsgRouteAttentionSubscription", MsgRouteAttentionSubscription}, {"MsgSamePeerSwitchRequest", MsgSamePeerSwitchRequest}, {"MsgParkedRouteRequest", MsgParkedRouteRequest},
+		{"MsgRouteAttentionSubscription", MsgRouteAttentionSubscription}, {"MsgSamePeerSwitchRequest", MsgSamePeerSwitchRequest}, {"MsgParkedRouteRequest", MsgParkedRouteRequest}, {"MsgSessionCreationFailure", MsgSessionCreationFailure},
 		{"MsgWelcome", MsgWelcome}, {"MsgError", MsgError}, {"MsgOutput", MsgOutput},
 		{"MsgDetached", MsgDetached}, {"MsgPong", MsgPong}, {"MsgSessions", MsgSessions},
 		{"MsgCommandResult", MsgCommandResult},
 		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget}, {"MsgNavigationAction", MsgNavigationAction},
 		{"MsgCommittedRouteIdentity", MsgCommittedRouteIdentity}, {"MsgRecentRouteSnapshot", MsgRecentRouteSnapshot},
 		{"MsgNavigateRecentRoute", MsgNavigateRecentRoute}, {"MsgRouteNavigationFailure", MsgRouteNavigationFailure},
-		{"MsgRoutePosition", MsgRoutePosition}, {"MsgSamePeerSwitchFailure", MsgSamePeerSwitchFailure}, {"MsgParkedRouteResponse", MsgParkedRouteResponse},
+		{"MsgRoutePosition", MsgRoutePosition}, {"MsgSamePeerSwitchFailure", MsgSamePeerSwitchFailure}, {"MsgParkedRouteResponse", MsgParkedRouteResponse}, {"MsgRouteCreateSession", MsgRouteCreateSession},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

@@ -244,6 +244,39 @@ func TestRouteLabelsRejectTerminalUnsafeText(t *testing.T) {
 	}
 }
 
+func TestRouteCreateSessionCodecsAreStrict(t *testing.T) {
+	action := protocol.RouteCreateSessionAction{RequestID: 5, SnapshotGeneration: 9, Key: 7, Generation: 8, SessionName: "example"}
+	encoded, err := MarshalRouteCreateSessionAction(action)
+	require.NoError(t, err)
+	require.Equal(t, "000000000000000500000000000000090000000000000007000000000000000800076578616d706c65", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalRouteCreateSessionAction)
+	_, err = UnmarshalRouteCreateSessionAction(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+	got, err := UnmarshalRouteCreateSessionAction(encoded)
+	require.NoError(t, err)
+	require.Equal(t, action, got)
+
+	failure := protocol.SessionCreationFailure{RequestID: 5, Code: protocol.RouteFailureUnavailable}
+	encoded, err = MarshalSessionCreationFailure(failure)
+	require.NoError(t, err)
+	require.Equal(t, "000000000000000503", hex.EncodeToString(encoded))
+	assertAllPrefixesFail(t, encoded, UnmarshalSessionCreationFailure)
+	_, err = UnmarshalSessionCreationFailure(append(append([]byte(nil), encoded...), 0))
+	require.Error(t, err)
+	gotFailure, err := UnmarshalSessionCreationFailure(encoded)
+	require.NoError(t, err)
+	require.Equal(t, failure, gotFailure)
+
+	for _, invalid := range []protocol.RouteCreateSessionAction{
+		{},
+		{RequestID: 1, SnapshotGeneration: 1, Key: 1, Generation: 1},
+		{RequestID: 1, SnapshotGeneration: 1, Key: 1, Generation: 1, SessionName: "bad name"},
+	} {
+		_, err := MarshalRouteCreateSessionAction(invalid)
+		require.Error(t, err)
+	}
+}
+
 func TestRouteActionAndFailureCodecsAreBounded(t *testing.T) {
 	action := protocol.RouteNavigationAction{SnapshotGeneration: 9, Key: 7, Generation: 8}
 	encoded, err := MarshalRouteNavigationAction(action)

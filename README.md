@@ -65,6 +65,8 @@ Type a code or fuzzy-search the palette. Common default codes:
 | `MFP` / `MAT` | move pane / tab | `SSP` | session picker |
 | `DET` | detach | `NTC` | notifications |
 
+In hybrid mode, `CNS` and `CNS <name>` list eligible daemon destinations in the existing palette. Choose one explicitly with Up or Down before pressing Enter. The unqualified choice appears only when the client has an exact local route; remote choices remain host-qualified. A direct remote start without a proven local route never labels its home route as local.
+
 Scroll up to enter copy mode; use vim motions, `v` to select, and `y` to copy. All codes and bindings are configurable in [configuration](docs/configuration.md).
 
 ## Remote attach

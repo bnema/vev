@@ -81,6 +81,24 @@ func TestPromptSubmitErrorKeepsPromptOpen(t *testing.T) {
 	require.Contains(t, string(out.Data), "name already in use")
 }
 
+func TestTransitionPromptDestinationFailureStaysVisible(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
+
+	d.enterTransitionPrompt(sess, ac, " Create session ", "", func(string, *attachmentEffect) error {
+		return errCreateDestinationUnavailable
+	})
+	awaitFrame(t, sends, wire.MsgOutput)
+	d.handlePromptInput(ac, []byte("example\r"))
+	repaint := awaitFrame(t, sends, wire.MsgOutput)
+
+	require.True(t, ac.overlays.promptActive())
+	out, err := wire.UnmarshalOutput(repaint.Payload)
+	require.NoError(t, err)
+	require.Contains(t, string(out.Data), "that destination is no longer available")
+}
+
 func TestPromptSubmitSessionSpawnFailureReportsOneSafeNotice(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()

@@ -331,6 +331,25 @@ func TestRouteLedgerConcurrentInitialAttachmentsKeepOneHome(t *testing.T) {
 	require.Equal(t, 1, homeCount)
 }
 
+func TestRouteLedgerCreationSelectionRequiresExactLocalRoute(t *testing.T) {
+	ledger := newRouteLedger()
+	local, err := ledger.commit(routeTestCandidate(1, protocol.RouteOriginLocal))
+	require.NoError(t, err)
+	_, err = ledger.commit(routeTestCandidate(2, protocol.RouteOriginRemote))
+	require.NoError(t, err)
+	action := protocol.RouteCreateSessionAction{
+		RequestID: 1, SnapshotGeneration: ledger.snapshot().Generation,
+		Key: uint64(local.key), Generation: uint64(local.generation), SessionName: "example",
+	}
+	selection, ok := ledger.creationSelection(action)
+	require.True(t, ok)
+	require.Equal(t, protocol.RouteKindLocal, selection.selected.presentation.kind)
+
+	action.SnapshotGeneration--
+	_, ok = ledger.creationSelection(action)
+	require.False(t, ok)
+}
+
 func TestRouteLedgerTransitionRejectsConcurrentCommit(t *testing.T) {
 	ledger := newRouteLedger()
 	selected, err := ledger.commit(routeTestCandidate(1, protocol.RouteOriginLocal))

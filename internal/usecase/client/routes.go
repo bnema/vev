@@ -679,6 +679,21 @@ func (l *routeLedger) navigationSelection(action protocol.RouteNavigationAction)
 	return selection, true
 }
 
+func (l *routeLedger) creationSelection(action protocol.RouteCreateSessionAction) (routeNavigationSelection, bool) {
+	if action.Validate() != nil {
+		return routeNavigationSelection{}, false
+	}
+	selection, ok := l.navigationSelection(protocol.RouteNavigationAction{
+		SnapshotGeneration: action.SnapshotGeneration,
+		Key:                action.Key,
+		Generation:         action.Generation,
+	})
+	if !ok || selection.noOp || selection.selected.presentation.kind != protocol.RouteKindLocal {
+		return routeNavigationSelection{}, false
+	}
+	return selection, true
+}
+
 // navigationRecord validates that an action belongs to the latest complete
 // snapshot. The active route is metadata-only and selecting it is a no-op.
 func (l *routeLedger) navigationRecord(action protocol.RouteNavigationAction) (routeRecord, bool, bool) {

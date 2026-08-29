@@ -8,8 +8,8 @@ const MaxFrameLen = 16 << 20
 type MsgType uint8
 
 // Frame message types use non-contiguous allocations: the legacy client range
-// is 1–13 and 15, and newer client controls use 32–33 and 35. Server-originated
-// messages occupy 16–23, 25–31, 34, and 36. Values 14 and 24 remain reserved for
+// is 1–13 and 15, and newer client controls use 32–33, 35, and 37. Server-originated
+// messages occupy 16–23, 25–31, 34, 36, and 38. Values 14 and 24 remain reserved for
 // future extensions.
 const (
 	MsgHello                      MsgType = 1
@@ -29,6 +29,7 @@ const (
 	MsgRouteAttentionSubscription MsgType = 32
 	MsgSamePeerSwitchRequest      MsgType = 33
 	MsgParkedRouteRequest         MsgType = 35
+	MsgSessionCreationFailure     MsgType = 37
 
 	MsgWelcome                MsgType = 16
 	MsgError                  MsgType = 17
@@ -47,6 +48,7 @@ const (
 	MsgRoutePosition          MsgType = 31
 	MsgSamePeerSwitchFailure  MsgType = 34
 	MsgParkedRouteResponse    MsgType = 36
+	MsgRouteCreateSession     MsgType = 38
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

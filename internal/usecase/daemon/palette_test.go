@@ -47,6 +47,66 @@ func beginRecentRoutePaletteEffect(t *testing.T, d *Daemon, sess *session, ac *a
 	return effect
 }
 
+func TestCreateSessionDestinationResultsUseStructuredRouteAuthority(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	snapshot := protocol.RecentRouteSnapshot{
+		Generation: 4,
+		Active:     protocol.RouteRef{Key: 2, Generation: 3},
+		ActiveEntry: protocol.RecentRouteEntry{
+			Key: 2, Generation: 3, Kind: protocol.RouteKindRemote, HostLabel: "host-a",
+			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
+		},
+		Home: protocol.RouteRef{Key: 1, Generation: 2},
+		Entries: []protocol.RecentRouteEntry{{
+			Key: 1, Generation: 2, Kind: protocol.RouteKindLocal,
+			Target: testRouteTarget("home", 2), Name: "home",
+		}},
+	}
+	catalog := []remoteCatalogPresentationEntry{
+		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-b"}, status: remoteHostFresh},
+		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-c"}, status: remoteHostStale},
+	}
+
+	results := createSessionDestinationResults(snapshot, lifecycle, catalog, map[string]int{"host-b": 0, "host-c": 1})
+	require.Len(t, results, 3)
+	_, kind, _, endpoint, route, ok := results[0].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnLocalRoute, kind)
+	require.Equal(t, snapshot.Home, route)
+	require.Empty(t, endpoint)
+	snapshotGeneration, ok := results[0].CreateSessionSnapshotGeneration()
+	require.True(t, ok)
+	require.Equal(t, snapshot.Generation, snapshotGeneration)
+	_, kind, origin, endpoint, _, ok := results[1].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnServingDaemon, kind)
+	require.Equal(t, "host-a", origin)
+	require.Empty(t, endpoint)
+	_, kind, origin, endpoint, _, ok = results[2].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
+	require.Equal(t, "host-b", origin)
+	require.Equal(t, "host-b", endpoint)
+}
+
+func TestCreateSessionDestinationResultsDoNotInferLocalFromRemoteHome(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	snapshot := protocol.RecentRouteSnapshot{
+		Generation: 1,
+		Active:     protocol.RouteRef{Key: 1, Generation: 1},
+		Home:       protocol.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: protocol.RecentRouteEntry{
+			Key: 1, Generation: 1, Kind: protocol.RouteKindRemote, HostLabel: "host-a",
+			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
+		},
+	}
+	results := createSessionDestinationResults(snapshot, lifecycle, nil, nil)
+	require.Len(t, results, 1)
+	_, kind, _, _, _, ok := results[0].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnServingDaemon, kind)
+}
+
 func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t *testing.T) {
 	paletteColors := [16]renderer.RGB{}
 	paletteColors[2] = renderer.RGB{R: 10, G: 230, B: 120}

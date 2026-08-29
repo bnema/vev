@@ -140,6 +140,19 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 	case protocol.RouteAttentionSubscription:
 		effect.ac.setRouteAttentionSubscription(message)
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-attention")
+	case protocol.SessionCreationFailure:
+		notice := "couldn't create session"
+		switch message.Code {
+		case protocol.RouteFailureStaleSelection, protocol.RouteFailureNoSuchRoute:
+			notice = "that destination is no longer available"
+		case protocol.RouteFailureTargetChanged:
+			notice = "the destination returned an unexpected session"
+		case protocol.RouteFailureOriginUnavailable:
+			notice = "couldn't restore the original session after creation failed"
+		case protocol.RouteFailureUnavailable:
+			notice = "the selected destination is unavailable"
+		}
+		d.notify(effect.sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, notice, nil)
 	case protocol.RouteNavigationFailure:
 		notice := "route navigation failed"
 		switch message.Code {

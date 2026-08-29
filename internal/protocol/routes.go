@@ -234,6 +234,23 @@ type RouteNavigationAction struct {
 	Generation         uint64
 }
 
+// RouteCreateSessionAction asks the client to create a named session through
+// one exact route authority from the latest complete snapshot.
+type RouteCreateSessionAction struct {
+	RequestID          uint64
+	SnapshotGeneration uint64
+	Key                uint64
+	Generation         uint64
+	SessionName        string
+}
+
+func (a RouteCreateSessionAction) Validate() error {
+	if a.RequestID == 0 || a.SnapshotGeneration == 0 || a.Key == 0 || a.Generation == 0 || domain.ValidateSessionName(a.SessionName) != nil {
+		return ErrInvalidRouteWire
+	}
+	return nil
+}
+
 // SamePeerSwitchRequest confirms a daemon-offered endpoint-empty target. It
 // carries only the exact lifecycle identity and the client-owned tab cursor;
 // transport origin remains proven by the existing authenticated connection.
@@ -320,6 +337,20 @@ func (c RouteFailureCode) valid() bool {
 
 func (c RouteFailureCode) Validate() error {
 	if !c.valid() {
+		return ErrInvalidRouteWire
+	}
+	return nil
+}
+
+// SessionCreationFailure reports a correlated pre-commit create transition
+// failure after the client has restored the source route.
+type SessionCreationFailure struct {
+	RequestID uint64
+	Code      RouteFailureCode
+}
+
+func (f SessionCreationFailure) Validate() error {
+	if f.RequestID == 0 || !f.Code.valid() {
 		return ErrInvalidRouteWire
 	}
 	return nil

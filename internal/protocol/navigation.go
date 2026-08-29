@@ -87,6 +87,9 @@ func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOver
 }
 
 func validateHelloNavigation(h Hello) error {
+	if h.Intent == IntentNew {
+		return ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, true)
+	}
 	if h.Intent != IntentAttach && h.Intent != IntentResume {
 		if h.NavigationCapabilities != 0 || h.StartupOverlay != StartupOverlayNone {
 			return ErrInvalidNavigation

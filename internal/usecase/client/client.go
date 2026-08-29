@@ -229,6 +229,7 @@ type Runner struct {
 	origin            protocol.RouteOrigin
 	ledger            *routeLedger
 	routeFailure      *protocol.RouteNavigationFailure
+	creationFailure   *protocol.SessionCreationFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -393,7 +394,8 @@ func validateAttachRequest(request AttachRequest) error {
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
-	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, request.RemoteTarget != nil || request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned); err != nil {
+	homePickerRoute := request.RemoteTarget != nil || request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || request.Intent == protocol.IntentNew
+	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, homePickerRoute); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
@@ -468,6 +470,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	var routeNavigationSelection *routeNavigationSelection
 	var routeNavigationFallback *attachRoute
 	var routeNavigationAction *protocol.RouteNavigationAction
+	creationPending := false
+	var creationFallback *attachRoute
+	var creationRequestID uint64
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -628,6 +633,16 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if err != nil {
 			err = handshakeContextError(ctx, timedOut, err)
 			finishHandshake()
+			if creationPending && creationFallback != nil && ctx.Err() == nil {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(err)}
+				route := *creationFallback
+				creationFallback = nil
+				creationPending = false
+				creationRequestID = 0
+				returnNavigationPending = true
+				restoreReturnRoute(route)
+				continue
+			}
 			if resumeToken == 0 || ctx.Err() != nil {
 				if clearErr := reconnect.clear(); clearErr != nil {
 					return errors.Join(err, clearErr)
@@ -655,7 +670,18 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		ms.dialed = true
 		if transport == nil {
 			finishHandshake()
-			return errors.New("vev: dialer returned nil transport")
+			err := errors.New("vev: dialer returned nil transport")
+			if creationPending && creationFallback != nil {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
+				route := *creationFallback
+				creationFallback = nil
+				creationPending = false
+				creationRequestID = 0
+				returnNavigationPending = true
+				restoreReturnRoute(route)
+				continue
+			}
+			return err
 		}
 		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
 		connection, err := NewSessionConnection(transport, SessionTarget{
@@ -666,6 +692,16 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			stopHandshakeTransport()
 			finishHandshake()
 			_ = transport.Close()
+			if creationPending && creationFallback != nil {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
+				route := *creationFallback
+				creationFallback = nil
+				creationPending = false
+				creationRequestID = 0
+				returnNavigationPending = true
+				restoreReturnRoute(route)
+				continue
+			}
 			return err
 		}
 
@@ -731,12 +767,51 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.PreferredTabID = result.routePosition.ActiveTabID
 			attemptRequest.RemoteTarget = nil
 		}
+		if result.err == nil && result.welcomed && creationPending {
+			creationPending = false
+			creationFallback = nil
+			creationRequestID = 0
+		}
 		if result.err == nil && result.welcomed && routeNavigationPending {
 			routeNavigationPending = false
 			routeNavigationSelection = nil
 			routeNavigationResumeFallback = false
 			routeNavigationFallback = nil
 			routeNavigationAction = nil
+		}
+		if result.routeCreateAction != nil {
+			action := *result.routeCreateAction
+			source := attachRoute{dialer: dialer, request: cloneAttachRequest(attemptRequest), resumeToken: resumeToken}
+			if r.ledger == nil {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: action.RequestID, Code: protocol.RouteFailureUnavailable}
+				returnNavigationPending = true
+				restoreReturnRoute(source)
+				continue
+			}
+			selection, valid := r.ledger.creationSelection(action)
+			if !valid {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: action.RequestID, Code: protocol.RouteFailureStaleSelection}
+				returnNavigationPending = true
+				restoreReturnRoute(source)
+				continue
+			}
+			creationFallback = &attachRoute{dialer: selection.prior.dialer, request: cloneAttachRequest(selection.prior.request), resumeToken: selection.prior.resumeToken}
+			dialer = selection.selected.dialer
+			attemptRequest = cloneAttachRequest(selection.selected.request)
+			attemptRequest.Intent = protocol.IntentNew
+			attemptRequest.SessionName = action.SessionName
+			attemptRequest.ExactTarget = nil
+			attemptRequest.RemoteTarget = nil
+			attemptRequest.PreferredTabID = ""
+			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
+			attemptRequest.NavigationCapabilities = 0
+			attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
+			resumeToken = 0
+			creationPending = true
+			creationRequestID = action.RequestID
+			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
+			backoff = defaultReconnectBackoff.initial
+			continue
 		}
 		if result.routeAction != nil {
 			if r.ledger == nil {
@@ -846,13 +921,19 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				}
 				nextDialer, nextRequest, handoffErr = r.attachHandoff(*target)
 				if handoffErr != nil {
+					if target.Intent == protocol.IntentNew && target.RequestID != 0 {
+						r.creationFailure = &protocol.SessionCreationFailure{RequestID: target.RequestID, Code: routeFailureCode(handoffErr)}
+						returnNavigationPending = true
+						restoreReturnRoute(source)
+						continue
+					}
 					return handoffErr
 				}
 			}
 			if target.ExactTarget != nil {
 				nextRequest.ExactTarget = target.ExactTarget
 			}
-			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned) {
+			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || target.Intent == protocol.IntentNew) {
 				nextRequest.NavigationCapabilities |= protocol.NavigationCapabilityHomePicker
 			}
 			if attemptRequest.StartupOverlay == protocol.StartupOverlaySessionPicker {
@@ -861,10 +942,28 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
+				if target.Intent == protocol.IntentNew && target.RequestID != 0 {
+					r.creationFailure = &protocol.SessionCreationFailure{RequestID: target.RequestID, Code: protocol.RouteFailureUnavailable}
+					returnNavigationPending = true
+					restoreReturnRoute(source)
+					continue
+				}
 				return fmt.Errorf("vev: invalid route handoff request: %w", err)
 			}
 			if nextDialer == nil {
+				if target.Intent == protocol.IntentNew && target.RequestID != 0 {
+					r.creationFailure = &protocol.SessionCreationFailure{RequestID: target.RequestID, Code: protocol.RouteFailureUnavailable}
+					returnNavigationPending = true
+					restoreReturnRoute(source)
+					continue
+				}
 				return errors.New("vev: route handoff returned nil dialer")
+			}
+			if target.Intent == protocol.IntentNew && target.RequestID != 0 {
+				fallback := source
+				creationFallback = &fallback
+				creationPending = true
+				creationRequestID = target.RequestID
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest
@@ -890,6 +989,16 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			route := *returnRoute
 			returnRoute = nil
 			homeNavigationPending = false
+			returnNavigationPending = true
+			restoreReturnRoute(route)
+			continue
+		}
+		if creationPending && creationFallback != nil {
+			r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(result.err)}
+			route := *creationFallback
+			creationFallback = nil
+			creationPending = false
+			creationRequestID = 0
 			returnNavigationPending = true
 			restoreReturnRoute(route)
 			continue
@@ -1121,6 +1230,7 @@ type attachResult struct {
 	handoff           *attachHandoff
 	action            protocol.NavigationAction
 	routeAction       *protocol.RouteNavigationAction
+	routeCreateAction *protocol.RouteCreateSessionAction
 	err               error
 }
 
@@ -1325,6 +1435,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.ExactTarget != nil && *request.ExactTarget != committedIdentity.Target {
 			return welcomedResult(errRouteTargetChanged)
 		}
+		if request.Intent == protocol.IntentNew && request.SessionName != committedIdentity.Target.SessionName {
+			return welcomedResult(errRouteTargetChanged)
+		}
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
@@ -1351,6 +1464,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}); err != nil {
 			return welcomedResult(fmt.Errorf("vev: publishing route snapshot: %w", err))
 		}
+	}
+	if a.runner.creationFailure != nil {
+		if err := sendHandshake(func() error {
+			return transport.SendClient(*a.runner.creationFailure)
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing session creation failure: %w", err))
+		}
+		a.runner.creationFailure = nil
 	}
 	if a.runner.routeFailure != nil {
 		if err := sendHandshake(func() error {
@@ -1777,6 +1898,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return context.Canceled
 		}
 	}
+	sendCreationFailure := func(requestID uint64, code protocol.RouteFailureCode) error {
+		failure := protocol.SessionCreationFailure{RequestID: requestID, Code: code}
+		if failure.Validate() != nil {
+			return protocol.ErrInvalidRouteWire
+		}
+		select {
+		case sendCh <- failure:
+			return nil
+		case <-loopCtx.Done():
+			return context.Canceled
+		}
+	}
 	dismissReconnect := func() error {
 		if !reconnect.showing {
 			return nil
@@ -2038,6 +2171,26 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				navigation := welcomedResult(nil)
 				navigation.action = directive.Action
 				return navigation
+			case protocol.RouteCreateSessionAction:
+				action := message
+				if action.Validate() != nil {
+					continue
+				}
+				if a.runner.ledger == nil {
+					if ferr := sendCreationFailure(action.RequestID, protocol.RouteFailureUnavailable); ferr != nil {
+						return welcomedResult(ferr)
+					}
+					continue
+				}
+				if _, valid := a.runner.ledger.creationSelection(action); !valid {
+					if ferr := sendCreationFailure(action.RequestID, protocol.RouteFailureStaleSelection); ferr != nil {
+						return welcomedResult(ferr)
+					}
+					continue
+				}
+				result := welcomedResult(nil)
+				result.routeCreateAction = &action
+				return result
 			case protocol.RouteNavigationAction:
 				action := message
 				if a.runner.ledger == nil {

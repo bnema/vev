@@ -13,7 +13,7 @@ import (
 )
 
 // Version is the negotiated vev session protocol version.
-const Version uint16 = 37
+const Version uint16 = 38
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.
@@ -197,6 +197,7 @@ type Output struct {
 }
 
 type AttachTarget struct {
+	RequestID         uint64
 	Endpoint          string
 	Session           string
 	Intent            uint8
@@ -373,6 +374,9 @@ func ValidateAttachTarget(m AttachTarget) error {
 		return ErrInvalidAttachTarget
 	}
 	if m.Intent == IntentResume || !validEnvironmentPolicy(m.EnvironmentPolicy) {
+		return ErrInvalidAttachTarget
+	}
+	if m.Intent == IntentNew && m.Endpoint != "" && m.RequestID == 0 || m.RequestID != 0 && m.Intent != IntentNew {
 		return ErrInvalidAttachTarget
 	}
 	if m.ExactTarget != nil && (m.ExactTarget.SessionName != m.Session || m.ExactTarget.Validate() != nil) {

@@ -40,15 +40,10 @@ func formatRecentRoutePresentations(entries []recentRoutePresentation) []recentR
 	if entries == nil {
 		return nil
 	}
-	nameCounts := make(map[string]int, len(entries))
-	for _, entry := range entries {
-		nameCounts[entry.name]++
-	}
-
 	out := make([]recentRouteDisplay, len(entries))
 	for i, entry := range entries {
 		out[i] = recentRouteDisplay{
-			name:      formatRecentRouteName(entry, nameCounts[entry.name] > 1),
+			name:      formatRecentRouteName(entry),
 			kind:      entry.kind,
 			ephemeral: entry.ephemeral,
 			attention: entry.attention,
@@ -57,22 +52,18 @@ func formatRecentRoutePresentations(entries []recentRoutePresentation) []recentR
 	return out
 }
 
-func formatRecentRouteName(entry recentRoutePresentation, ambiguous bool) string {
+func formatRecentRouteName(entry recentRoutePresentation) string {
 	name := entry.name
 	if entry.ephemeral {
 		name += "*"
 	}
-	if entry.kind != recentRouteRemote && !ambiguous {
+	if entry.kind != recentRouteRemote {
 		return name
 	}
 
 	host := entry.hostLabel
 	if host == "" {
-		if entry.kind == recentRouteRemote {
-			host = "remote"
-		} else {
-			host = "local"
-		}
+		host = "remote"
 	}
 	return domain.RemoteSessionDisplay(name, host)
 }

@@ -1200,6 +1200,7 @@ func MarshalAttachTarget(m protocol.AttachTarget) []byte {
 		return nil
 	}
 	w := payloadWriter{}
+	w.putUint64(m.RequestID)
 	w.putString(m.Endpoint)
 	w.putString(m.Session)
 	w.putUint8(m.Intent)
@@ -1213,6 +1214,9 @@ func MarshalAttachTarget(m protocol.AttachTarget) []byte {
 func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 	// Preflight lengths and intent before getString can allocate either value.
 	probe := payloadReader{b: b}
+	if _, err := probe.getUint64(); err != nil {
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
+	}
 	endpointLen, err := probe.getUint16()
 	if err != nil || int(endpointLen) > len(probe.b) {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
@@ -1242,6 +1246,9 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 
 	r := payloadReader{b: b}
 	var m protocol.AttachTarget
+	if m.RequestID, err = r.getUint64(); err != nil {
+		return protocol.AttachTarget{}, err
+	}
 	if m.Endpoint, err = r.getString(); err != nil {
 		return protocol.AttachTarget{}, err
 	}
