@@ -264,6 +264,10 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 		if m != nil {
 			return encodeClient(*m)
 		}
+	case *protocol.SessionCreationFailure:
+		if m != nil {
+			return encodeClient(*m)
+		}
 	default:
 		return wire.Frame{}, ErrWrongDirection
 	}

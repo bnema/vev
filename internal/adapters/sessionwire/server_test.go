@@ -163,6 +163,7 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 		{name: "identity", message: identity, typeID: wire.MsgCommittedRouteIdentity, payload: identityPayload},
 		{name: "route action", message: routeAction, typeID: wire.MsgNavigateRecentRoute, payload: routeActionPayload},
 		{name: "route create", message: routeCreate, typeID: wire.MsgRouteCreateSession, payload: routeCreatePayload},
+		{name: "route create pointer", message: &routeCreate, typeID: wire.MsgRouteCreateSession, payload: routeCreatePayload},
 		{name: "route failure", message: routeFailure, typeID: wire.MsgRouteNavigationFailure, payload: routeFailurePayload},
 		{name: "route position", message: routePosition, typeID: wire.MsgRoutePosition, payload: routePositionPayload},
 		{name: "switch failure", message: switchFailure, typeID: wire.MsgSamePeerSwitchFailure, payload: switchFailurePayload},

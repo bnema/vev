@@ -41,6 +41,7 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "snapshot", message: protocol.RecentRouteSnapshot{}, typeID: wire.MsgRecentRouteSnapshot},
 		{name: "route failure", message: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgRouteNavigationFailure},
 		{name: "creation failure", message: protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgSessionCreationFailure},
+		{name: "creation failure pointer", message: &protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgSessionCreationFailure},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -49,6 +50,10 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 			require.Equal(t, tt.typeID, raw.sent.Type)
 			got, err := decodeClient(raw.sent)
 			require.NoError(t, err)
+			if message, ok := tt.message.(*protocol.SessionCreationFailure); ok {
+				require.Equal(t, *message, got)
+				return
+			}
 			require.Equal(t, tt.message, got)
 		})
 	}

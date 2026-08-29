@@ -13,15 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCNSDestinationModeRequiresExplicitSelection(t *testing.T) {
-	var cns command.Command
+func cnsCommand(t *testing.T) command.Command {
+	t.Helper()
 	for _, candidate := range command.PaletteRegistry() {
 		if candidate.Slug == "new-session" {
-			cns = candidate
-			break
+			return candidate
 		}
 	}
-	require.NotEmpty(t, cns.Code)
+	require.FailNow(t, "new-session command missing from palette registry")
+	return command.Command{}
+}
+
+func TestCNSDestinationModeRequiresExplicitSelection(t *testing.T) {
+	cns := cnsCommand(t)
 	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
 	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
 
@@ -31,10 +35,11 @@ func TestCNSDestinationModeRequiresExplicitSelection(t *testing.T) {
 		navigate   func(*Model)
 		wantText   string
 		wantSelect bool
+		wantFirst  bool
 	}{
-		{name: "plain requires selection", query: "CNS", wantText: "Create session locally…"},
-		{name: "named requires selection", query: "CNS example", wantText: "Create session “example”"},
-		{name: "down chooses first", query: "CNS example", navigate: (*Model).Down, wantText: "Create session “example”", wantSelect: true},
+		{name: "plain requires selection", query: "CNS", wantText: "Create session locally…", wantFirst: true},
+		{name: "named requires selection", query: "CNS example", wantText: "Create session “example”", wantFirst: true},
+		{name: "down chooses first", query: "CNS example", navigate: (*Model).Down, wantText: "Create session “example”", wantSelect: true, wantFirst: true},
 		{name: "up chooses last", query: "CNS example", navigate: (*Model).Up, wantText: "Create session “example” on host-a", wantSelect: true},
 	}
 	for _, tt := range tests {
@@ -44,7 +49,7 @@ func TestCNSDestinationModeRequiresExplicitSelection(t *testing.T) {
 				m.Insert(r)
 			}
 			require.Len(t, m.Matches(), 2)
-			if tt.navigate == nil || tt.name == "down chooses first" {
+			if tt.wantFirst {
 				require.Equal(t, tt.wantText, m.Matches()[0].Result.DisplayText())
 			}
 			if tt.navigate != nil {
@@ -60,13 +65,7 @@ func TestCNSDestinationModeRequiresExplicitSelection(t *testing.T) {
 }
 
 func TestCNSDestinationRefreshPreservesOnlyExplicitSelection(t *testing.T) {
-	var cns command.Command
-	for _, candidate := range command.PaletteRegistry() {
-		if candidate.Slug == "new-session" {
-			cns = candidate
-			break
-		}
-	}
+	cns := cnsCommand(t)
 	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
 	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
 	m := New([]Result{NewCommandResult(cns), local, remote})
@@ -103,13 +102,7 @@ func TestCNSDestinationRefreshPreservesOnlyExplicitSelection(t *testing.T) {
 }
 
 func TestCNSUnselectedDestinationCollapseDoesNotPromoteCommand(t *testing.T) {
-	var cns command.Command
-	for _, candidate := range command.PaletteRegistry() {
-		if candidate.Slug == "new-session" {
-			cns = candidate
-			break
-		}
-	}
+	cns := cnsCommand(t)
 	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
 	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
 	newModel := func() *Model {
@@ -132,13 +125,7 @@ func TestCNSUnselectedDestinationCollapseDoesNotPromoteCommand(t *testing.T) {
 }
 
 func TestCNSDestinationRefreshDoesNotPromoteCommandSelection(t *testing.T) {
-	var cns command.Command
-	for _, candidate := range command.PaletteRegistry() {
-		if candidate.Slug == "new-session" {
-			cns = candidate
-			break
-		}
-	}
+	cns := cnsCommand(t)
 	local := NewCreateSessionDestination(CreateSessionOnLocalRoute, "", "", protocol.RouteRef{Key: 1, Generation: 1}, 1)
 	remote := NewCreateSessionDestination(CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0)
 	m := New([]Result{NewCommandResult(cns), local})

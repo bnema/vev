@@ -63,11 +63,13 @@ func TestCreateSessionDestinationResultsUseStructuredRouteAuthority(t *testing.T
 		}},
 	}
 	catalog := []remoteCatalogPresentationEntry{
+		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-a"}, status: remoteHostFresh},
 		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-b"}, status: remoteHostFresh},
 		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-c"}, status: remoteHostStale},
+		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-d"}, status: remoteHostFresh},
 	}
 
-	results := createSessionDestinationResults(snapshot, lifecycle, catalog, map[string]int{"host-b": 0, "host-c": 1})
+	results := createSessionDestinationResults(snapshot, lifecycle, catalog, map[string]int{"host-a": 0, "host-b": 1, "host-c": 2})
 	require.Len(t, results, 3)
 	_, kind, _, endpoint, route, ok := results[0].CreateSessionDestination()
 	require.True(t, ok)
@@ -87,6 +89,14 @@ func TestCreateSessionDestinationResultsUseStructuredRouteAuthority(t *testing.T
 	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
 	require.Equal(t, "host-b", origin)
 	require.Equal(t, "host-b", endpoint)
+}
+
+func TestRemoteCreateSessionDestinationRequiresAttachmentEffect(t *testing.T) {
+	result := palette.NewCreateSessionDestination(
+		palette.CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0,
+	)
+	err := (paletteExec{}).validateCreateSessionDestination(nil, result)
+	require.ErrorIs(t, err, errCreateDestinationUnavailable)
 }
 
 func TestCreateSessionDestinationResultsDoNotInferLocalFromRemoteHome(t *testing.T) {

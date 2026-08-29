@@ -335,19 +335,35 @@ func TestRouteLedgerCreationSelectionRequiresExactLocalRoute(t *testing.T) {
 	ledger := newRouteLedger()
 	local, err := ledger.commit(routeTestCandidate(1, protocol.RouteOriginLocal))
 	require.NoError(t, err)
-	_, err = ledger.commit(routeTestCandidate(2, protocol.RouteOriginRemote))
+	remoteCandidate := routeTestCandidate(2, protocol.RouteOriginRemote)
+	remoteCandidate.presentation.kind = protocol.RouteKindRemote
+	remote, err := ledger.commit(remoteCandidate)
 	require.NoError(t, err)
-	action := protocol.RouteCreateSessionAction{
-		RequestID: 1, SnapshotGeneration: ledger.snapshot().Generation,
-		Key: uint64(local.key), Generation: uint64(local.generation), SessionName: "example",
-	}
-	selection, ok := ledger.creationSelection(action)
-	require.True(t, ok)
-	require.Equal(t, protocol.RouteKindLocal, selection.selected.presentation.kind)
+	snapshotGeneration := ledger.snapshot().Generation
 
-	action.SnapshotGeneration--
-	_, ok = ledger.creationSelection(action)
-	require.False(t, ok)
+	tests := []struct {
+		name               string
+		selected           routeIdentity
+		snapshotGeneration uint64
+		want               bool
+	}{
+		{name: "exact local route", selected: local, snapshotGeneration: snapshotGeneration, want: true},
+		{name: "stale snapshot", selected: local, snapshotGeneration: snapshotGeneration - 1},
+		{name: "remote route", selected: remote, snapshotGeneration: snapshotGeneration},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action := protocol.RouteCreateSessionAction{
+				RequestID: 1, SnapshotGeneration: tt.snapshotGeneration,
+				Key: uint64(tt.selected.key), Generation: uint64(tt.selected.generation), SessionName: "example",
+			}
+			selection, ok := ledger.creationSelection(action)
+			require.Equal(t, tt.want, ok)
+			if ok {
+				require.Equal(t, protocol.RouteKindLocal, selection.selected.presentation.kind)
+			}
+		})
+	}
 }
 
 func TestRouteLedgerTransitionRejectsConcurrentCommit(t *testing.T) {

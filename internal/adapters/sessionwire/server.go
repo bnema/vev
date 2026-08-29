@@ -359,6 +359,10 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 		if m != nil {
 			return encodeServer(*m)
 		}
+	case *protocol.RouteCreateSessionAction:
+		if m != nil {
+			return encodeServer(*m)
+		}
 	case *protocol.RouteNavigationFailure:
 		if m != nil {
 			return encodeServer(*m)

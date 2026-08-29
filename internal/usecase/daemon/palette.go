@@ -120,14 +120,16 @@ func routeEntryForRef(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteR
 
 func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID, remoteCatalog []remoteCatalogPresentationEntry, hostRanks map[string]int) []palette.Result {
 	results := make([]palette.Result, 0, len(remoteCatalog)+2)
+	servingOrigin := ""
 	if home, ok := routeEntryForRef(snapshot, snapshot.Home); ok && home.Kind == protocol.RouteKindLocal {
 		results = append(results, palette.NewCreateSessionDestination(
 			palette.CreateSessionOnLocalRoute, "", "", snapshot.Home, snapshot.Generation,
 		))
 	}
 	if active, ok := activeRouteEntryForLifecycle(snapshot, currentLifecycle); ok && active.Kind == protocol.RouteKindRemote {
+		servingOrigin = paletteRemoteDisplayOrigin(active.HostLabel)
 		results = append(results, palette.NewCreateSessionDestination(
-			palette.CreateSessionOnServingDaemon, paletteRemoteDisplayOrigin(active.HostLabel), "", protocol.RouteRef{}, 0,
+			palette.CreateSessionOnServingDaemon, servingOrigin, "", protocol.RouteRef{}, 0,
 		))
 	}
 	for _, host := range remoteCatalog {
@@ -137,8 +139,12 @@ func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, curr
 		if _, configured := hostRanks[host.entry.Host]; !configured {
 			continue
 		}
+		displayOrigin := paletteRemoteDisplayOrigin(host.entry.Host)
+		if servingOrigin != "" && displayOrigin == servingOrigin {
+			continue
+		}
 		results = append(results, palette.NewCreateSessionDestination(
-			palette.CreateSessionOnRemoteHost, paletteRemoteDisplayOrigin(host.entry.Host), host.entry.Host, protocol.RouteRef{}, 0,
+			palette.CreateSessionOnRemoteHost, displayOrigin, host.entry.Host, protocol.RouteRef{}, 0,
 		))
 	}
 	return results
@@ -542,7 +548,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	if hasCreateDestination {
 		name, _, _, _, _, _ := createDestination.CreateSessionDestination()
 		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, effect: effect}
-		if err := exec.validateCreateSessionDestination(createDestination); err != nil {
+		if err := exec.validateCreateSessionDestination(effect, createDestination); err != nil {
 			ac.paletteFailure(generation, rawQuery, errCreateDestinationUnavailable.Error())
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
@@ -827,7 +833,7 @@ func (e paletteExec) CreateSessionNamed(name string) error {
 	return e.d.createSessionAndSwitchForAttachment(e.effect, name)
 }
 
-func (e paletteExec) validateCreateSessionDestination(result palette.Result) error {
+func (e paletteExec) validateCreateSessionDestination(effect *attachmentEffect, result palette.Result) error {
 	_, kind, _, endpoint, route, ok := result.CreateSessionDestination()
 	if !ok {
 		return errCreateDestinationUnavailable
@@ -848,9 +854,12 @@ func (e paletteExec) validateCreateSessionDestination(result palette.Result) err
 		if !valid || snapshot.Generation != snapshotGeneration || entry.Kind != protocol.RouteKindLocal {
 			return errCreateDestinationUnavailable
 		}
+		if effect == nil && snapshot.Active != route {
+			return errCreateDestinationUnavailable
+		}
 		return nil
 	case palette.CreateSessionOnRemoteHost:
-		if !e.d.remoteCreateHostReady(endpoint) {
+		if effect == nil || !e.d.remoteCreateHostReady(endpoint) {
 			return errCreateDestinationUnavailable
 		}
 		return nil
@@ -860,7 +869,7 @@ func (e paletteExec) validateCreateSessionDestination(result palette.Result) err
 }
 
 func (e paletteExec) createSessionOnDestination(effect *attachmentEffect, result palette.Result, name string) error {
-	if err := e.validateCreateSessionDestination(result); err != nil {
+	if err := e.validateCreateSessionDestination(effect, result); err != nil {
 		return err
 	}
 	return e.createSessionOnValidatedDestination(effect, result, name)
