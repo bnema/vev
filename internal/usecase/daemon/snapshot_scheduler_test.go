@@ -287,8 +287,9 @@ func TestForcedSnapshotShutdownTimeoutRetainsRetryableStateAndNotice(t *testing.
 	}
 }
 
-func TestServeShutdownDeadlineStillJoinsPaneExitWriter(t *testing.T) {
+func TestServeShutdownDeadlineStillJoinsRetainedSessionWriter(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
+	defer releasePTY()
 	clock := newServeShutdownClock()
 	d := newTestDaemon(t, newFactory(t, pty), clock)
 	repository := portsmocks.NewMockSnapshotRepository(t)
@@ -316,10 +317,10 @@ func TestServeShutdownDeadlineStillJoinsPaneExitWriter(t *testing.T) {
 	sess := firstSession(d)
 	require.NotNil(t, sess)
 
-	// Releasing the real pane reader drives EOF through ptyReader, reapPane, and
-	// closePane. That ordinary lifecycle path must own teardown before Serve's
-	// context cancellation enters its competing shutdownAll path.
-	releasePTY()
+	// A retained-session teardown still publishes a terminal snapshot. It must
+	// own teardown before Serve's context cancellation enters its competing
+	// shutdownAll path.
+	go func() { _ = d.killSession(sess, protocol.ReasonServerShutdown, false) }()
 	select {
 	case <-publicationStarted:
 	case <-time.After(testWaitTimeout):

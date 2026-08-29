@@ -551,6 +551,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 	t.Run("failed final pane close fails and retains session", func(t *testing.T) {
 		d := newTestDaemon(t, &controlPTYFactory{}, stubClock{})
 		d.snapsEnabled = true
+		d.persistEnabled = true
 		d.snapshotRepository = portsmocks.NewMockSnapshotRepository(t)
 		sess := addControlSession(d, "work", "t_work", "p_work")
 		sess.mu.Lock()

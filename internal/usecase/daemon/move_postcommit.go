@@ -160,7 +160,7 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 	d.finishParkedAttachmentRetirements(p.retiredParked)
 	if p.sourceEmpty && p.sourceMetadataValid && d.persistEnabled {
 		if err := d.beginSnapshotPurge(p.sourceName, p.source.incarnation); err == nil {
-			if err := d.finishSnapshotPurge(d.serveCtx, p.sourceName, p.source.incarnation); err != nil {
+			if err := d.finishSnapshotPurge(d.serveCtx, p.sourceName, p.source.incarnation, p.source.createdAt); err != nil {
 				d.log.Warn("moving final pane source purge failed", "err", err, "session", p.sourceName)
 			}
 		}

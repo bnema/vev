@@ -38,7 +38,7 @@ vev host list                    list remote hosts
 vev kill <name>|--all            kill sessions
 ```
 
-The daemon starts on first use and exits after the last session. Numbered sessions survive detach; named sessions also survive daemon restarts. See [durable-session recovery](docs/durable-session-recovery.md).
+The daemon starts on first use and exits after the last session. Numbered sessions survive detach; named sessions also survive daemon restarts. Exiting the final shell removes that session and returns to the most recently used session; with no previous session, vev exits. See [durable-session recovery](docs/durable-session-recovery.md).
 
 > [!NOTE]
 > A release that bumps vev's protocol version resets named sessions saved by an older protocol. Session names are retained, but layouts, tabs, terminal history, recovery transcripts, and process-recovery state are discarded. Each local or remote daemon applies this reset to its own sessions when it first starts with the new protocol.
