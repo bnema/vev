@@ -1854,6 +1854,58 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	require.Contains(t, term.out.String(), "\x1b[2K")
 }
 
+func TestExpiredResumeFallsBackToFreshExactAttach(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+	target := protocol.ExactSessionTarget{
+		LifecycleID: domain.SessionLifecycleID{7, 8, 9},
+		SessionName: "work",
+	}
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: target.LifecycleID,
+		SessionName: target.SessionName, LiveTabID: "stale-tab",
+	}
+	welcome := func(token uint64) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+			SessionID: "work", SessionName: "work", ResumeToken: token, Capabilities: protocol.CapabilityResume,
+			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
+		}))
+	}
+	tr1 := &recordingTransport{recvs: []recvItem{{f: welcome(11)}, {err: io.EOF}}}
+	tr2 := &recordingTransport{recvs: []recvItem{{f: frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{
+		Code: protocol.ErrNoSuchSession, Text: "resume token is no longer valid",
+	}))}}}
+	tr3 := &recordingTransport{recvs: []recvItem{
+		{f: welcome(22)},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	dialer := &sequenceDialer{trs: []wire.Transport{tr1, tr2, tr3}}
+	clock := &reconnectTestClock{}
+	result := make(chan error, 1)
+	go func() {
+		result <- runTestClient(context.Background(), testDependencies(dialer, term, clock, nil, nil), client.AttachRequest{
+			Intent: protocol.IntentAttach, SessionName: "work", Remote: true,
+			Origin: protocol.RouteOriginDiscovery, OriginKey: "remote", RemoteTarget: &remoteTarget,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+		})
+	}()
+
+	clock.fireReconnect(t)
+	require.NoError(t, <-result)
+	require.Equal(t, int32(3), dialer.calls.Load())
+
+	initialHello := helloFromSend(t, tr1)
+	resumeHello := helloFromSend(t, tr2)
+	fallbackHello := helloFromSend(t, tr3)
+	require.Equal(t, protocol.IntentResume, resumeHello.Intent)
+	require.Equal(t, uint64(11), resumeHello.ResumeToken)
+	require.Equal(t, protocol.IntentAttach, fallbackHello.Intent)
+	require.Zero(t, fallbackHello.ResumeToken)
+	require.Equal(t, &target, fallbackHello.ExactTarget)
+	require.Nil(t, fallbackHello.RemoteTarget)
+	require.Equal(t, initialHello.ClientID, fallbackHello.ClientID)
+}
+
 func TestReconnectRestoresLastPublishedRouteTab(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

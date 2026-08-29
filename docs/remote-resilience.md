@@ -127,8 +127,10 @@ picker selection changes.
   canonical encoding. The protocol validates the compression kind, declared
   decoded length, stream integrity, and trailing bytes before terminal output
   is applied.
-- The attachment reconnects with its resume token after a path change. The
-  remote session and its PTYs remain in place while the attachment is offline.
+- The attachment reconnects with its resume token after a path change. If the
+  attachment resume window expires but its exact session lifecycle still
+  exists, the client opens a fresh exact attachment instead. The remote session
+  and its PTYs remain in place while the attachment is offline.
 
 The raw UDP AEAD key is held only in memory during bootstrap and transport
 setup. It is not written to durable state. Key buffers are cleared on the
