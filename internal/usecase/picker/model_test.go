@@ -335,8 +335,8 @@ func TestRenderDrawsCustomOrientedSeparators(t *testing.T) {
 		rect domain.Rect
 		rune rune
 	}{
-		{"horizontal layout", domain.Size{Cols: 69, Rows: 4}, domain.Rect{X: 20, Width: 1, Height: 4}, '│'},
-		{"stacked layout", domain.Size{Cols: 24, Rows: 12}, domain.Rect{Y: 4, Width: 24, Height: 1}, '─'},
+		{"horizontal layout", domain.Size{Cols: 69, Rows: 5}, domain.Rect{X: 20, Width: 1, Height: 4}, '│'},
+		{"stacked layout", domain.Size{Cols: 24, Rows: 13}, domain.Rect{Y: 4, Width: 24, Height: 1}, '─'},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -356,26 +356,28 @@ func TestRenderListOnlyOmitsSeparatorAndPreview(t *testing.T) {
 	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
 	frame := m.Render(domain.Size{Cols: 23, Rows: 11}, Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{cell('x')}}}, RenderStyles{Separator: renderer.Style{Foreground: 8}})
 
-	require.Equal(t, ' ', frame.At(22, 10).Rune)
 	require.NotEqual(t, 'x', frame.At(22, 10).Rune)
+	require.Equal(t, 'E', frame.At(0, 10).Rune, "the final inner row is reserved for status")
 }
 
 func TestRenderPreviewAnchorsOversizedSourceToFinalRows(t *testing.T) {
 	m := New(nil, SelectionConfig{Mode: SelectNavigationTab})
 	preview := Preview{Width: 24, Height: 9, Rows: previewRows(24, "abcdefghi")}
 
-	frame := m.Render(domain.Size{Cols: 24, Rows: 12}, preview)
+	frame := m.Render(domain.Size{Cols: 24, Rows: 13}, preview)
 	require.Equal(t, 'c', frame.At(0, 5).Rune)
 	require.Equal(t, 'i', frame.At(0, 11).Rune)
+	require.Equal(t, 'E', frame.At(0, 12).Rune)
 }
 
 func TestRenderPreviewBottomPlacesShortSource(t *testing.T) {
 	m := New(nil, SelectionConfig{Mode: SelectNavigationTab})
 	preview := Preview{Width: 24, Height: 1, Rows: previewRows(24, "z")}
 
-	frame := m.Render(domain.Size{Cols: 24, Rows: 12}, preview)
+	frame := m.Render(domain.Size{Cols: 24, Rows: 13}, preview)
 	require.Equal(t, ' ', frame.At(0, 5).Rune)
 	require.Equal(t, 'z', frame.At(0, 11).Rune)
+	require.Equal(t, 'E', frame.At(0, 12).Rune)
 }
 
 func TestRenderAttentionMarkerSmokeWithResponsiveLayout(t *testing.T) {
@@ -492,35 +494,64 @@ func TestSelectedIndexReportsRawSelectedRow(t *testing.T) {
 	require.Equal(t, 1, m.SelectedIndex())
 }
 
-func TestStoppedSessionRendersDownSuffix(t *testing.T) {
+func TestStoppedSessionUsesOneSelectableHeaderWithRightAlignedStatus(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		sessionID   domain.SessionID
 		sessionName string
 		size        domain.Size
+		wantRow     string
 	}{
-		{name: "normal", sessionID: "stopped:work", sessionName: "work", size: domain.Size{Cols: 24, Rows: 4}},
-		{name: "constrained", sessionID: "stopped:long", sessionName: "long-session", size: domain.Size{Cols: 8, Rows: 2}},
+		{name: "normal", sessionID: "stopped:work", sessionName: "work", size: domain.Size{Cols: 24, Rows: 4}, wantRow: "work           [stopped]"},
+		{name: "constrained", sessionID: "stopped:long", sessionName: "long-session", size: domain.Size{Cols: 12, Rows: 2}, wantRow: "l… [stopped]"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			m := New([]SessionView{{ID: tt.sessionID, Name: tt.sessionName, Tabs: []TabEntry{{Name: ""}}, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
+			m := New([]SessionView{{ID: tt.sessionID, Name: tt.sessionName, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
 			got, ok := m.Selected()
 			require.True(t, ok)
-			require.Equal(t, Target{Session: tt.sessionID, Name: tt.sessionName, TabIndex: 0, Stopped: true}, got)
+			require.Equal(t, Target{Session: tt.sessionID, Name: tt.sessionName, TabIndex: -1, Stopped: true}, got)
+			require.Len(t, m.rows, 1)
 
 			frame := m.Render(tt.size, Preview{})
 			var label strings.Builder
 			for _, cell := range frame.Row(0) {
 				label.WriteRune(cell.Rune)
 			}
-			require.Contains(t, label.String(), "(down)")
+			require.Equal(t, tt.wantRow, strings.TrimRight(label.String(), " "))
 		})
 	}
 }
 
+func TestRemoteStatusBadgesAlignRightAndStatusOmitsDelete(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab"}
+	m := New([]SessionView{{
+		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &target, RemoteHost: "arch",
+		RemoteActivation: RemoteAttach, Tabs: []TabEntry{{TabID: "tab", Name: "shell"}},
+	}}, SelectionConfig{Mode: SelectNavigationTab})
+
+	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
+	require.Equal(t, "work@arch           [up]", strings.TrimRight(rowText(frame.Row(0)), " "))
+	status := rowText(frame.Row(3))
+	require.Contains(t, status, "Enter open")
+	require.NotContains(t, status, "x delete")
+}
+
+func rowText(row []renderer.Cell) string {
+	var text strings.Builder
+	for _, cell := range row {
+		if cell.Continuation {
+			continue
+		}
+		text.WriteRune(cell.Rune)
+	}
+	return text.String()
+}
+
 func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
 	live := SessionView{ID: "live", Name: "work", Tabs: []TabEntry{{TabID: "t1", Name: "tab"}}}
-	halted := SessionView{ID: "stopped:old", Name: "old", TargetName: "old", Stopped: true, Tabs: []TabEntry{{}}}
+	halted := SessionView{ID: "stopped:old", Name: "old", TargetName: "old", Stopped: true}
 	m := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab})
 
 	stoppedStyle := renderer.Style{Foreground: -1, Background: -1, Italic: true, Attrs: renderer.AttrDim}
@@ -528,15 +559,14 @@ func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
 	require.Equal(t, stoppedStyle, styles.Stopped)
 
 	frame := m.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
-	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old (down)" header, 3 its tab row.
+	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old [stopped]" header.
 	require.Equal(t, stoppedStyle, frame.Row(2)[0].Style, "stopped header must be dim italic")
-	require.Equal(t, stoppedStyle, frame.Row(3)[0].Style, "stopped tab row must be dim italic")
 	require.NotEqual(t, stoppedStyle, frame.Row(0)[0].Style, "live header keeps base style")
 
 	selected := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: halted.ID}})
 	selectedFrame := selected.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
-	require.NotEqual(t, stoppedStyle, selectedFrame.Row(3)[0].Style, "selected stopped row keeps selection style, not Stopped")
-	require.True(t, selectedFrame.Row(3)[0].Style.Inverse, "selected stopped row still shows selection")
+	require.NotEqual(t, stoppedStyle, selectedFrame.Row(2)[0].Style, "selected stopped row keeps selection style, not Stopped")
+	require.True(t, selectedFrame.Row(2)[0].Style.Inverse, "selected stopped row still shows selection")
 }
 
 func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
@@ -551,12 +581,13 @@ func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
 		}},
 	}
 
-	frame := m.Render(domain.Size{Cols: 24, Rows: 12}, preview)
+	frame := m.Render(domain.Size{Cols: 24, Rows: 13}, preview)
 	require.True(t, frame.At(0, 1).Style.Inverse)
 	require.Equal(t, 'a', frame.At(0, 11).Rune)
 	require.Equal(t, 'w', frame.At(22, 11).Rune)
 	require.Equal(t, ' ', frame.At(23, 11).Rune, "wide rune crossing preview pane is dropped")
 	require.Equal(t, ' ', frame.At(0, 5).Rune, "short preview is bottom anchored")
+	require.Equal(t, 'E', frame.At(0, 12).Rune)
 }
 
 func TestRenderListScrollsSelectionIntoView(t *testing.T) {
@@ -566,9 +597,10 @@ func TestRenderListScrollsSelectionIntoView(t *testing.T) {
 	}
 
 	frame := m.Render(domain.Size{Cols: 23, Rows: 4}, Preview{})
-	require.Equal(t, ' ', frame.At(0, 3).Rune)
-	require.Equal(t, 'f', frame.At(2, 3).Rune)
-	require.True(t, frame.At(0, 3).Style.Inverse)
+	require.Equal(t, ' ', frame.At(0, 2).Rune)
+	require.Equal(t, 'f', frame.At(2, 2).Rune)
+	require.True(t, frame.At(0, 2).Style.Inverse)
+	require.Equal(t, 'E', frame.At(0, 3).Rune)
 }
 
 func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
@@ -576,7 +608,7 @@ func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
 
 	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
 
-	layout := ChooseLayout(domain.Size{Cols: 69, Rows: 5})
+	layout := ChooseGeometry(domain.Size{Cols: 69, Rows: 5})
 	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
 	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "truncated label should end with an ellipsis at the list edge")
 	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
@@ -640,7 +672,7 @@ func TestRenderListTruncatesDetailBeforeName(t *testing.T) {
 	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
 
 	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
-	layout := ChooseLayout(domain.Size{Cols: 69, Rows: 5})
+	layout := ChooseGeometry(domain.Size{Cols: 69, Rows: 5})
 	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
 
 	want := "  short-name (a ver…"
@@ -657,11 +689,98 @@ func TestRenderListTruncatesNameWhenAloneExceedsWidth(t *testing.T) {
 	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
 
 	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
-	layout := ChooseLayout(domain.Size{Cols: 69, Rows: 5})
+	layout := ChooseGeometry(domain.Size{Cols: 69, Rows: 5})
 	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
 
 	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "the name segment itself is ellipsized once it alone exceeds the width")
 	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
+}
+
+func TestSearchSelectsBestMatchAndPreservesExactTarget(t *testing.T) {
+	m := New([]SessionView{
+		{ID: "backend", Name: "backend", Tabs: []TabEntry{{TabID: "api-tab", Name: "api-server"}, {TabID: "logs-tab", Name: "logs"}}},
+		{ID: "frontend", Name: "frontend", Tabs: []TabEntry{{TabID: "web-tab", Name: "web"}}},
+	}, SelectionConfig{Mode: SelectNavigationTab})
+
+	m.EnterSearch()
+	for _, r := range "api" {
+		m.InsertSearch(r)
+	}
+
+	require.True(t, m.SearchActive())
+	require.Equal(t, "api", m.Query())
+	require.Equal(t, 1, m.MatchCount())
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, Target{Session: "backend", TabID: "api-tab", TabIndex: 0}, selected)
+	require.Equal(t, " Search sessions & tabs: api_ ", m.SearchTitle())
+}
+
+func TestSearchUsesContextWithoutHighlightingUnrelatedText(t *testing.T) {
+	m := New([]SessionView{
+		{ID: "backend", Name: "backend", Tabs: []TabEntry{{TabID: "logs-tab", Name: "logs"}}},
+		{ID: "frontend", Name: "frontend", Tabs: []TabEntry{{TabID: "web-tab", Name: "web"}}},
+	}, SelectionConfig{Mode: SelectNavigationTab})
+	m.EnterSearch()
+	for _, r := range "back" {
+		m.InsertSearch(r)
+	}
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("logs-tab"), selected.TabID, "a parent-session match keeps its tab target navigable")
+
+	matchStyle := renderer.Style{Bold: true, Foreground: 2}
+	frame := m.Render(domain.Size{Cols: 40, Rows: 6}, Preview{}, RenderStyles{
+		Background: renderer.DefaultStyle(), Base: renderer.DefaultStyle(), Name: renderer.DefaultStyle(), Detail: renderer.DefaultStyle(),
+		Selection: renderer.Style{Inverse: true}, SelectionName: renderer.Style{Inverse: true}, SelectionMuted: renderer.Style{Inverse: true},
+		SearchMatch: matchStyle, SelectionMatch: matchStyle,
+	})
+	for x := 2; x < 6; x++ {
+		require.False(t, frame.At(x, 1).Style.Equal(matchStyle), "context matches must not highlight unrelated rendered tab text")
+	}
+	require.True(t, frame.At(0, 3).Style.Attrs&renderer.AttrDim != 0, "non-matching rows are dimmed")
+}
+
+func TestSearchZeroMatchesSuppressesActivationAndRetainsCursorAnchor(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}, SelectionConfig{Mode: SelectNavigationTab})
+	before, ok := m.Cursor()
+	require.True(t, ok)
+
+	m.EnterSearch()
+	for _, r := range "absent" {
+		m.InsertSearch(r)
+	}
+
+	require.Zero(t, m.MatchCount())
+	_, ok = m.Selected()
+	require.False(t, ok)
+	after, ok := m.Cursor()
+	require.True(t, ok)
+	require.Equal(t, before, after)
+}
+
+func TestSearchNavigationUsesCanonicalVisualOrderAfterBestRank(t *testing.T) {
+	m := New([]SessionView{
+		{ID: "first", Name: "first", Tabs: []TabEntry{{TabID: "zeta", Name: "zeta"}}},
+		{ID: "second", Name: "second", Tabs: []TabEntry{{TabID: "a", Name: "a"}}},
+		{ID: "third", Name: "third", Tabs: []TabEntry{{TabID: "alpha", Name: "alpha"}}},
+	}, SelectionConfig{Mode: SelectNavigationTab})
+	m.EnterSearch()
+	m.InsertSearch('a')
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("a"), selected.TabID, "exact match wins initial ranking")
+	m.Up()
+	selected, ok = m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("zeta"), selected.TabID, "navigation follows visual order rather than rank order")
+	m.Down()
+	m.Down()
+	selected, ok = m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("alpha"), selected.TabID)
 }
 
 func cell(r rune) renderer.Cell {
@@ -676,10 +795,11 @@ func TestRenderStylesFillBackgroundRowsAndSelection(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 20, Rows: 5}, Preview{}, RenderStyles{
 		Background: background, Base: base, Name: base, Detail: base,
 		Selection: selection, SelectionName: selection, SelectionMuted: selection,
-		Separator: base,
+		Separator: base, Status: base,
 	})
 
-	require.True(t, frame.At(19, 4).Style.Equal(background), "unused interior keeps modal base")
+	require.True(t, frame.At(19, 3).Style.Equal(background), "unused content keeps modal base")
+	require.True(t, frame.At(19, 4).Style.Equal(base), "status owns the final inner row")
 	require.True(t, frame.At(19, 0).Style.Equal(base), "ordinary row owns inactive surface")
 	require.True(t, frame.At(19, 1).Style.Equal(selection), "selected row owns active surface")
 }
@@ -733,10 +853,10 @@ func TestPickerRowsKeepTerminalBackgroundAcrossAccentFallbacks(t *testing.T) {
 				Background: styles.PickerBase, Base: styles.PickerBase, Name: styles.PickerName,
 				Detail: styles.PickerDescription, Selection: styles.PickerSelection,
 				SelectionName: styles.PickerSelection, SelectionMuted: styles.PickerSelection,
-				Separator: styles.PickerSeparator,
+				Separator: styles.PickerSeparator, Status: styles.PickerDescription,
 			})
-			require.True(t, frame.At(5, 3).Style.Equal(styles.PickerDescription), "description text keeps a contrast-derived foreground without a background tint")
-			require.True(t, frame.At(31, 3).Style.Equal(styles.PickerBase), "unused row cells retain the terminal background")
+			require.True(t, frame.At(5, 3).Style.Equal(styles.PickerDescription), "status text keeps a contrast-derived foreground without a background tint")
+			require.True(t, frame.At(31, 3).Style.Equal(styles.PickerDescription), "status filler owns the final row")
 		})
 	}
 }

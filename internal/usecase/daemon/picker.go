@@ -177,32 +177,53 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		}
 	}
 	views := make([]picker.SessionView, 0, len(live)+len(stopped)+catalogRows)
-	for _, item := range live {
-		views = append(views, item.view.pickerView())
+	grouped := pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped
+	for i, item := range live {
+		view := item.view.pickerView()
+		if grouped && i == 0 {
+			view.Section = "LOCAL"
+		}
+		views = append(views, view)
 	}
 	for _, host := range catalog {
+		publishedForHost := 0
 		for _, session := range host.entry.Sessions {
 			key := domain.RemoteSessionKey{Host: host.entry.Host, Name: session.Name}
 			if key.Validate() != nil {
 				continue
 			}
-			views = append(views, remotePickerView(key, session, host.status, host.entry.FetchedAt))
+			view := remotePickerView(key, session, host.status, host.entry.FetchedAt)
+			if grouped {
+				view.HideRemoteOrigin = true
+				if publishedForHost == 0 {
+					view.Section = "REMOTE  " + host.entry.Host
+				}
+			}
+			views = append(views, view)
+			publishedForHost++
 		}
 		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch || host.status == remoteHostMalformed) {
-			views = append(views, remotePickerHostView(host.entry.Host, host.status))
+			view := remotePickerHostView(host.entry.Host, host.status)
+			if grouped {
+				view.Section = "REMOTE  " + host.entry.Host
+			}
+			views = append(views, view)
 		}
 	}
-	for _, s := range stopped {
+	for i, s := range stopped {
 		createdAt := s.createdAt
-		views = append(views, picker.SessionView{
+		view := picker.SessionView{
 			ID:                domain.SessionID("stopped:" + s.name),
 			Incarnation:       s.incarnation,
 			Name:              s.name,
 			TargetName:        s.name,
-			Tabs:              []picker.TabEntry{{}},
 			Stopped:           true,
 			ExpectedCreatedAt: &createdAt,
-		})
+		}
+		if grouped && i == 0 {
+			view.Section = "LOCAL"
+		}
+		views = append(views, view)
 	}
 	return views, current
 }
@@ -305,18 +326,27 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		rt.pickerMu.Unlock()
 		return
 	}
-	result := handleListInputLocked(d.clock, data, d.pickerListInputState(ac), func(b byte) listInputResult {
-		switch b {
-		case 'x':
-			return listInputResult{action: b, stop: true}
-		case 's':
-			return listInputResult{action: b, stop: true}
-		case '\r', '\n':
-			return listInputResult{action: b, exit: true}
-		default:
-			return listInputResult{}
+	var result listInputResult
+	if rt.picker.SearchActive() {
+		result = d.handlePickerSearchInputLocked(ac, data)
+	} else if len(data) > 0 && data[0] == '/' {
+		rt.picker.EnterSearch()
+		result.changed = true
+		if len(data) > 1 {
+			result = d.handlePickerSearchInputLocked(ac, data[1:])
 		}
-	})
+	} else {
+		result = handleListInputLocked(d.clock, data, d.pickerListInputState(ac), func(b byte) listInputResult {
+			switch b {
+			case 'x', 's':
+				return listInputResult{action: b, stop: true}
+			case '\r', '\n':
+				return listInputResult{action: b, exit: true}
+			default:
+				return listInputResult{}
+			}
+		})
+	}
 	var target picker.Target
 	var cursor picker.Target
 	var ok bool
@@ -595,8 +625,9 @@ func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Targ
 }
 
 func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
-	layout := picker.ChooseLayout(size)
-	width, height := layout.Preview.Width, layout.Preview.Height
+	presentation := pickerModal.Resolve(size)
+	geometry := picker.ChooseGeometry(rectSize(presentation.Inner))
+	width, height := geometry.Preview.Width, geometry.Preview.Height
 	if width <= 0 || height <= 0 {
 		return 0, 0
 	}
@@ -1397,7 +1428,7 @@ func (d *Daemon) killPickerTargetForAttachment(target picker.Target, effect *att
 
 func (d *Daemon) killPickerTarget(target picker.Target) error {
 	if target.Stopped {
-		if err := d.retryStoppedPurge(target.Name); err != nil {
+		if err := d.retryStoppedPurgeExact(target.Name, target.Incarnation, target.ExpectedCreatedAt); err != nil {
 			d.log.Warn("deleting persisted stopped session failed", "err", err, "session", target.Name)
 			return domain.UserErr(domain.NoticePersistDelete, "couldn't delete stopped session", err)
 		}

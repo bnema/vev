@@ -206,12 +206,6 @@ func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatal
 	// must remain possible, while sendRemoteAttachTargetForAttachment will
 	// fail closed on the invalid target.
 	remoteTarget := &target
-	if stopped && len(viewTabs) == 0 {
-		// A healthy durable record may intentionally have no retained tabs,
-		// for example after a protocol reset. Mirror local stopped rows with
-		// one default picker target; the owning daemon creates that sole tab.
-		viewTabs = append(viewTabs, picker.TabEntry{})
-	}
 	reason := remoteReasonForStatus(status)
 	targetValid := remoteTarget.Validate() == nil
 	activation := picker.RemoteUnavailable

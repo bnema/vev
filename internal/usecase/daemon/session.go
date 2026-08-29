@@ -1262,10 +1262,18 @@ func (d *Daemon) retryStoppedPurge(name string) error {
 	return d.retryStoppedPurgeContext(d.serveCtx, name)
 }
 
+func (d *Daemon) retryStoppedPurgeExact(name string, incarnation domain.IncarnationID, expectedCreatedAt *int64) error {
+	return d.retryStoppedPurgeContextExact(d.serveCtx, name, incarnation, expectedCreatedAt)
+}
+
 func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) error {
+	return d.retryStoppedPurgeContextExact(ctx, name, domain.IncarnationID{}, nil)
+}
+
+func (d *Daemon) retryStoppedPurgeContextExact(ctx context.Context, name string, incarnation domain.IncarnationID, expectedCreatedAt *int64) error {
 	d.mu.Lock()
 	stopped, ok := d.inactive[name]
-	if !ok {
+	if !ok || incarnation != (domain.IncarnationID{}) && stopped.incarnation != incarnation || expectedCreatedAt != nil && stopped.createdAt != *expectedCreatedAt {
 		d.mu.Unlock()
 		return nil
 	}

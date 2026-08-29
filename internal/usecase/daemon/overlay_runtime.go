@@ -24,6 +24,7 @@ type overlayRuntime struct {
 	// picker is published, so delayed close and registration work can prove it
 	// still owns the exact lifecycle it captured.
 	pickerGeneration          uint64
+	pickerRefreshSequence     uint64
 	pickerTitle               string
 	pickerIntent              pickerIntent
 	pickerSource              moveSourceLocator

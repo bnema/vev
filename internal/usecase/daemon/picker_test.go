@@ -190,6 +190,10 @@ func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
 	// Named (MRU-desc) → ephemeral (MRU-desc) → stopped, even though the
 	// ephemeral session has the highest mruAt.
 	require.Equal(t, []string{"notes", "work", "1", "halted"}, names)
+	require.Equal(t, "LOCAL", views[0].Section)
+	require.Empty(t, views[1].Section)
+	require.Empty(t, views[2].Section)
+	require.Equal(t, "LOCAL", views[3].Section, "the later stopped run repeats its section without reordering")
 }
 
 func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
@@ -888,6 +892,76 @@ func TestPickerSplitArrowNavigatesWithoutExiting(t *testing.T) {
 	}
 }
 
+func TestPickerSearchAcceptsPrintableActionsAndSplitUTF8(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releaseAll(releases)
+
+	d.enterPicker(sess, ac)
+	awaitFrame(t, sends, wire.MsgOutput)
+	d.handlePickerInput(ac, []byte("/"))
+	d.handlePickerInput(ac, []byte("jkqxs/"))
+	d.handlePickerInput(ac, []byte{0xc3})
+	d.handlePickerInput(ac, []byte{0xa9})
+
+	ac.overlays.pickerMu.Lock()
+	query := ac.overlays.picker.Query()
+	active := ac.overlays.picker.SearchActive()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, active)
+	require.Equal(t, "jkqxs/é", query)
+	require.True(t, ac.overlays.pickerActive(), "printable action keys must not close search")
+}
+
+func TestPickerSearchSplitArrowNavigatesMatches(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releaseAll(releases)
+
+	d.enterPicker(sess, ac)
+	awaitFrame(t, sends, wire.MsgOutput)
+	d.handlePickerInput(ac, []byte("/"))
+	d.handlePickerInput(ac, []byte("\x1b["))
+	d.handlePickerInput(ac, []byte("B"))
+
+	ac.overlays.pickerMu.Lock()
+	selected, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, 1, selected.TabIndex)
+}
+
+func TestPickerSearchLoneEscapeClearsThenExitsThenCloses(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releaseAll(releases)
+	clk := &signalClock{timers: make(chan *signalTimer, 3)}
+	d.clock = clk
+
+	d.enterPicker(sess, ac)
+	awaitFrame(t, sends, wire.MsgOutput)
+	d.handlePickerInput(ac, []byte("/query"))
+
+	fireEscape := func() {
+		d.handlePickerInput(ac, []byte("\x1b"))
+		timer := <-clk.timers
+		timer.ch <- time.Now()
+	}
+	fireEscape()
+	require.Eventually(t, func() bool {
+		ac.overlays.pickerMu.Lock()
+		defer ac.overlays.pickerMu.Unlock()
+		return ac.overlays.picker != nil && ac.overlays.picker.SearchActive() && ac.overlays.picker.Query() == ""
+	}, time.Second, 5*time.Millisecond)
+
+	fireEscape()
+	require.Eventually(t, func() bool {
+		ac.overlays.pickerMu.Lock()
+		defer ac.overlays.pickerMu.Unlock()
+		return ac.overlays.picker != nil && !ac.overlays.picker.SearchActive()
+	}, time.Second, 5*time.Millisecond)
+
+	fireEscape()
+	require.Eventually(t, func() bool { return !ac.overlays.pickerActive() }, time.Second, 5*time.Millisecond)
+}
+
 func TestPickerNavigationBackSendFailureKeepsPickerOpen(t *testing.T) {
 	d, sess, ac, _, releases := newManualTabSession(t, 1)
 	defer releases[0]()
@@ -1212,7 +1286,7 @@ func TestCaptureOverlayLayersPreservesPickerSemanticSurfacesAcrossFallbacks(t *t
 			}
 
 			inner := state.overlays.picker.inner
-			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
+			layout := picker.ChooseGeometry(domain.Size{Cols: inner.Width, Rows: inner.Height})
 			require.Equal(t, picker.LayoutHorizontal, layout.Mode)
 			require.True(t, inner.At(5, 3).Style.Equal(state.styles.PickerDescription), "description text keeps a muted foreground on the terminal background")
 			require.True(t, inner.At(layout.List.Width-1, 3).Style.Equal(state.styles.PickerBase), "inactive row filler keeps the terminal background")
@@ -1251,7 +1325,7 @@ func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testin
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
 
 			inner := state.overlays.picker.inner
-			layout := picker.ChooseLayout(domain.Size{Cols: inner.Width, Rows: inner.Height})
+			layout := picker.ChooseGeometry(domain.Size{Cols: inner.Width, Rows: inner.Height})
 			require.Equal(t, tt.wantMode, layout.Mode)
 			got := strings.Join(frameRows(inner), "\n")
 			if tt.wantMarker {
@@ -1643,6 +1717,31 @@ func TestPickerKillActiveSessionSnapshotDeleteRefusalReportsOnceAndKeepsPicker(t
 	_, stillActive := d.sessions[target.id]
 	d.mu.Unlock()
 	require.False(t, stillActive, "the purge keeps its existing removal semantics despite cleanup failure")
+}
+
+func TestPickerKillStoppedSessionRejectsSameNameReplacement(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, _, _, _ := newManualSessionWithPTYs(t, p)
+
+	oldCreatedAt := int64(7)
+	replacement := inactiveSession{
+		name: "stopped", createdAt: 8, incarnation: domain.IncarnationID{2},
+		state: protocol.SessionDown,
+	}
+	d.inactive[replacement.name] = replacement
+
+	err := d.killPickerTarget(picker.Target{
+		Name: "stopped", Stopped: true, Incarnation: domain.IncarnationID{1}, ExpectedCreatedAt: &oldCreatedAt,
+	})
+	require.NoError(t, err)
+
+	d.mu.Lock()
+	got, ok := d.inactive[replacement.name]
+	d.mu.Unlock()
+	require.True(t, ok, "a stale picker row must not purge a same-name replacement")
+	require.Equal(t, replacement.incarnation, got.incarnation)
+	require.Equal(t, replacement.createdAt, got.createdAt)
 }
 
 // TestPickerKillStoppedSessionPersistDeleteFailureSurfacesNoticeAndKeepsEntry

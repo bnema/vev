@@ -979,7 +979,7 @@ func TestRemoteRefreshUpdatesAllOpenPickersPreservingSelection(t *testing.T) {
 		updated := owner.overlays.picker
 		selected, ok := updated.Selected()
 		owner.overlays.pickerMu.Unlock()
-		require.NotSame(t, before[owner], updated, "every open picker must receive the refreshed model")
+		require.Same(t, before[owner], updated, "refresh updates rows in place so attachment-local editor state remains owned")
 		require.True(t, ok)
 		require.Equal(t, domain.SessionID("second"), selected.Session)
 	}
@@ -1251,6 +1251,36 @@ func TestRemotePickerStaleAfterCloseCannotRemoveReopenedPicker(t *testing.T) {
 	ac.overlays.pickerMu.Lock()
 	require.Same(t, reopened, ac.overlays.picker)
 	ac.overlays.pickerMu.Unlock()
+}
+
+func TestRemotePickerRefreshPreservesQueryEditedDuringBuild(t *testing.T) {
+	d := newRemotePickerDaemon(nil)
+	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	model := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
+	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
+	d.handlePickerInput(ac, []byte("/before"))
+
+	rebuildReached := make(chan struct{})
+	allowPublication := make(chan struct{})
+	ac.overlays.afterPickerRefreshBuild = func(*picker.Model) {
+		close(rebuildReached)
+		<-allowPublication
+	}
+	refreshed := make(chan struct{})
+	go func() {
+		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		close(refreshed)
+	}()
+	<-rebuildReached
+
+	d.handlePickerInput(ac, []byte("-after"))
+	close(allowPublication)
+	<-refreshed
+
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	require.Same(t, model, ac.overlays.picker, "refresh applies rows in place so attachment-local editor state remains owned")
+	require.Equal(t, "before-after", ac.overlays.picker.Query())
 }
 
 func TestRemotePickerStaleRefreshCannotOverwriteReopenedModel(t *testing.T) {

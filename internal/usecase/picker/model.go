@@ -1,7 +1,9 @@
 package picker
 
 import (
+	"fmt"
 	"math"
+	"strings"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -12,7 +14,8 @@ const (
 	MinPreviewWidth           = 24
 	MinHorizontalPreviewWidth = 48
 	MinListWidth              = 16
-	MaxListWidth              = 32
+	MinHorizontalListWidth    = 20
+	MaxListWidth              = 44
 	MinPaneHeight             = 4
 	MinStackHeight            = 12
 )
@@ -40,6 +43,7 @@ const (
 
 type SessionView struct {
 	ID                domain.SessionID
+	Section           string
 	Incarnation       domain.IncarnationID
 	Name              string
 	TargetName        string
@@ -48,6 +52,7 @@ type SessionView struct {
 	Stopped           bool
 	ExpectedCreatedAt *int64
 	RemoteKey         *domain.RemoteSessionKey
+	HideRemoteOrigin  bool
 	// RemoteTarget is the structured route/lifecycle identity for picker rows.
 	// It is never reconstructed from Name or a rendered label.
 	RemoteTarget *domain.RemoteSessionTarget
@@ -108,10 +113,13 @@ type RenderStyles struct {
 	Detail         renderer.Style // non-selected detail segment
 	// Background fills otherwise unused interior cells. Base owns ordinary
 	// rows, preserving a distinct inactive surface from modal chrome.
-	Background renderer.Style
-	Base       renderer.Style // non-selected row fill + suffixes
-	Stopped    renderer.Style // full row style for non-selected stopped rows (fill, name, detail, suffix)
-	Separator  renderer.Style // preview separator
+	Background     renderer.Style
+	Base           renderer.Style // non-selected row fill + suffixes
+	Stopped        renderer.Style // full row style for non-selected stopped rows (fill, name, detail, suffix)
+	Separator      renderer.Style // preview separator
+	Status         renderer.Style // one-row picker-local contextual help
+	SearchMatch    renderer.Style // matched runes on ordinary rows
+	SelectionMatch renderer.Style // matched runes on the selected row
 }
 
 func defaultRenderStyles() RenderStyles {
@@ -123,7 +131,11 @@ func defaultRenderStyles() RenderStyles {
 	stopped := renderer.DefaultStyle()
 	stopped.Attrs = renderer.AttrDim
 	stopped.Italic = true
-	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Stopped: stopped}
+	searchMatch := base
+	searchMatch.Bold = true
+	selectionMatch := selection
+	selectionMatch.Bold = true
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Stopped: stopped, Status: separator, SearchMatch: searchMatch, SelectionMatch: selectionMatch}
 }
 
 type Target struct {
@@ -161,10 +173,25 @@ type Layout struct {
 	Preview   domain.Rect
 }
 
+// Geometry is the single picker layout contract consumed by rendering and
+// remote preview sizing. Status always reserves the final available inner row.
+type Geometry struct {
+	Content   domain.Rect
+	Status    domain.Rect
+	Mode      LayoutMode
+	List      domain.Rect
+	Separator domain.Rect
+	Preview   domain.Rect
+}
+
 type Model struct {
-	mode     SelectionMode
-	rows     []row
-	selected int
+	mode          SelectionMode
+	rows          []row
+	selected      int
+	searchActive  bool
+	query         ui.TextInput
+	searchMatches map[int]searchMatch
+	matchRows     []int
 }
 
 type rowKind uint8
@@ -172,7 +199,39 @@ type rowKind uint8
 const (
 	rowSession rowKind = iota
 	rowTab
+	rowSection
 )
+
+type rowStatus uint8
+
+const (
+	rowStatusNone rowStatus = iota
+	rowStatusUp
+	rowStatusStopped
+	rowStatusDown
+	rowStatusStale
+	rowStatusVersion
+	rowStatusError
+)
+
+func (s rowStatus) badge() string {
+	switch s {
+	case rowStatusUp:
+		return "[up]"
+	case rowStatusStopped:
+		return "[stopped]"
+	case rowStatusDown:
+		return "[down]"
+	case rowStatusStale:
+		return "[stale]"
+	case rowStatusVersion:
+		return "[version]"
+	case rowStatusError:
+		return "[error]"
+	default:
+		return ""
+	}
+}
 
 func (k rowKind) rendersAsHeader() bool {
 	return k == rowSession
@@ -199,6 +258,7 @@ type row struct {
 	// targetName is the named-session lookup name threaded into Target;
 	// distinct from dispName, which is what gets drawn.
 	targetName           string
+	sessionDisplay       string
 	tabID                domain.TabStableID
 	tabIndex             int
 	stopped              bool
@@ -214,12 +274,17 @@ type row struct {
 	selectable           bool
 	focusable            bool
 	dim                  bool
+	status               rowStatus
+	statusDetail         string
 }
 
 func New(sessions []SessionView, config SelectionConfig) *Model {
 	m := &Model{mode: config.Mode, selected: -1}
 	activeSelection := -1
 	for _, session := range sessions {
+		if session.Section != "" {
+			m.rows = append(m.rows, row{kind: rowSection, dispName: session.Section, dim: true})
+		}
 		sessionRows := rowsForSession(session, config)
 		for _, pickerRow := range sessionRows {
 			idx := len(m.rows)
@@ -269,8 +334,8 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	}
 	expectedCreatedAt, hasExpectedCreatedAt := int64Value(session.ExpectedCreatedAt)
 	common := row{
-		session: session.ID, incarnation: session.Incarnation, targetName: targetName,
-		stopped: stopped, expectedCreatedAt: expectedCreatedAt,
+		session: session.ID, incarnation: session.Incarnation, targetName: targetName, sessionDisplay: session.Name,
+		stopped: stopped, status: statusForSession(session, stopped), statusDetail: session.RemoteDetail, expectedCreatedAt: expectedCreatedAt,
 		hasExpectedCreatedAt: hasExpectedCreatedAt,
 	}
 	if session.RemoteKey != nil {
@@ -285,21 +350,19 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	header.kind, header.dispName, header.tabIndex = rowSession, session.Name, -1
 	if common.hasRemoteKey {
 		header.dispName = common.remoteKey.Name
-		display := common.remoteKey.Display()
-		header.detail = display[len(common.remoteKey.Name):]
+		if !session.HideRemoteOrigin {
+			display := common.remoteKey.Display()
+			header.detail = display[len(common.remoteKey.Name):]
+		}
 	}
 	header.selectable = header.kind.selectable(config.Mode)
 	header.focusable = header.selectable
+	if config.Mode == SelectNavigationTab && stopped && len(session.Tabs) == 0 {
+		header.selectable, header.focusable = true, true
+	}
 	if common.remote {
-		if session.RemoteDetail != "" {
-			if header.detail != "" {
-				header.detail += " (" + session.RemoteDetail + ")"
-			} else {
-				header.detail = session.RemoteDetail
-			}
-		}
 		if common.hasRemoteTarget {
-			header.selectable = false
+			header.selectable = config.Mode == SelectNavigationTab && stopped && len(session.Tabs) == 0 && remoteActivatable(session) && common.remoteTarget.Validate() == nil
 			header.focusable = config.Mode == SelectNavigationTab && len(session.Tabs) == 0
 		} else {
 			header.selectable = false
@@ -370,6 +433,29 @@ func remoteStoppedOrdinalSelector(index int, rawName string, tabCount int) (doma
 	return domain.NewOrdinalTabSelector(uint16(index), rawName, uint16(tabCount)), true
 }
 
+func statusForSession(session SessionView, stopped bool) rowStatus {
+	if stopped {
+		return rowStatusStopped
+	}
+	if session.RemoteKey == nil && session.RemoteTarget == nil && session.RemoteHost == "" {
+		return rowStatusNone
+	}
+	switch session.RemoteReason {
+	case "host_unreachable":
+		return rowStatusDown
+	case "version_mismatch":
+		return rowStatusVersion
+	case "refreshing", "catalog_stale":
+		return rowStatusStale
+	case "malformed", "session_broken", "identity_changed":
+		return rowStatusError
+	}
+	if session.RemoteActivation == RemoteAttach {
+		return rowStatusUp
+	}
+	return rowStatusNone
+}
+
 func remoteActivatable(session SessionView) bool {
 	return session.RemoteActivation == RemoteAttach || session.RemoteActivation == RemoteRestart
 }
@@ -402,15 +488,13 @@ func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) b
 	if mode == SelectMoveTabSession {
 		return pickerRow.kind == rowSession
 	}
+	// A stopped session with no retained tab metadata uses its selectable
+	// header as the default restart target and matches on exact session identity.
+	if current.TabID == "" && pickerRow.stopped {
+		return pickerRow.kind == rowSession
+	}
 	if pickerRow.kind != rowTab {
 		return false
-	}
-	// A stopped session contributes one synthetic tab row carrying no stable tab
-	// identity, so it matches on session identity alone. Its session ID is
-	// namespaced ("stopped:<name>"), and move modes drop stopped sessions
-	// entirely, so no live row can be reached this way.
-	if current.TabID == "" {
-		return pickerRow.stopped
 	}
 	return pickerRow.tabID == current.TabID
 }
@@ -422,14 +506,30 @@ func int64Value(value *int64) (int64, bool) {
 	return *value, true
 }
 
+// ChooseGeometry reserves the final inner row for picker-local status before
+// solving the list and preview layout.
+func ChooseGeometry(inner domain.Size) Geometry {
+	if inner.Cols <= 0 || inner.Rows <= 0 {
+		return Geometry{}
+	}
+	contentRows := max(inner.Rows-1, 0)
+	layout := ChooseLayout(domain.Size{Cols: inner.Cols, Rows: contentRows})
+	return Geometry{
+		Content: domain.Rect{Width: inner.Cols, Height: contentRows},
+		Status:  domain.Rect{Y: contentRows, Width: inner.Cols, Height: 1},
+		Mode:    layout.Mode, List: layout.List, Separator: layout.Separator, Preview: layout.Preview,
+	}
+}
+
 func ChooseLayout(inner domain.Size) Layout {
 	if inner.Cols <= 0 || inner.Rows <= 0 {
 		return Layout{}
 	}
 	if inner.Rows >= MinPaneHeight {
-		listWidth := clamp(inner.Cols*30/100, MinListWidth, MaxListWidth)
+		listWidth := clamp(inner.Cols*40/100, MinListWidth, MaxListWidth)
+		listWidth = min(listWidth, inner.Cols-MinHorizontalPreviewWidth-1)
 		previewWidth := inner.Cols - listWidth - 1
-		if previewWidth >= MinHorizontalPreviewWidth {
+		if listWidth >= MinHorizontalListWidth && previewWidth >= MinHorizontalPreviewWidth {
 			return Layout{
 				Mode:      LayoutHorizontal,
 				List:      domain.Rect{Width: listWidth, Height: inner.Rows},
@@ -452,10 +552,18 @@ func ChooseLayout(inner domain.Size) Layout {
 }
 
 func (m *Model) Up() {
+	if m != nil && m.searchActive {
+		m.moveSearch(-1)
+		return
+	}
 	m.move(-1)
 }
 
 func (m *Model) Down() {
+	if m != nil && m.searchActive {
+		m.moveSearch(1)
+		return
+	}
 	m.move(1)
 }
 
@@ -474,7 +582,7 @@ func (m *Model) Selected() (Target, bool) {
 		return Target{}, false
 	}
 	r := m.rows[m.selected]
-	if !r.selectable {
+	if !r.selectable || m.searchActive && m.query.Value() != "" && !m.rowMatches(m.selected) {
 		return Target{}, false
 	}
 	return r.target(), true
@@ -519,25 +627,34 @@ func (m *Model) Clone() *Model {
 	}
 	clone := *m
 	clone.rows = append([]row(nil), m.rows...)
+	clone.query.SetValue(m.query.Value())
+	clone.matchRows = append([]int(nil), m.matchRows...)
+	if m.searchMatches != nil {
+		clone.searchMatches = make(map[int]searchMatch, len(m.searchMatches))
+		for idx, match := range m.searchMatches {
+			clone.searchMatches[idx] = match.clone()
+		}
+	}
 	return &clone
 }
 
 func (m *Model) Render(inner domain.Size, preview Preview, styles ...RenderStyles) renderer.Frame {
 	frame := renderer.NewFrame(max(inner.Cols, 0), max(inner.Rows, 0))
-	layout := ChooseLayout(inner)
+	geometry := ChooseGeometry(inner)
 	styleSet := defaultRenderStyles()
 	if len(styles) > 0 {
 		styleSet = styles[0]
 	}
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: styleSet.Background})
-	m.renderList(frame, layout.List, styleSet)
-	switch layout.Mode {
+	m.renderList(frame, geometry.List, styleSet)
+	switch geometry.Mode {
 	case LayoutHorizontal:
-		ui.DrawSeparator(frame, layout.Separator, ui.SeparatorVertical, styleSet.Separator)
+		ui.DrawSeparator(frame, geometry.Separator, ui.SeparatorVertical, styleSet.Separator)
 	case LayoutStacked:
-		ui.DrawSeparator(frame, layout.Separator, ui.SeparatorHorizontal, styleSet.Separator)
+		ui.DrawSeparator(frame, geometry.Separator, ui.SeparatorHorizontal, styleSet.Separator)
 	}
-	ui.BlitFrame(frame, layout.Preview, preview, ui.VerticalAnchorBottom)
+	ui.BlitFrame(frame, geometry.Preview, preview, ui.VerticalAnchorBottom)
+	m.renderStatus(frame, geometry.Status, styleSet.Status)
 	return frame
 }
 
@@ -613,13 +730,16 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 		r := m.rows[idx]
 		base, nameStyle, detailStyle := styles.Base, styles.Name, styles.Detail
+		if r.kind == rowSection {
+			nameStyle = styles.Detail
+		}
 		if idx == m.selected {
 			base, nameStyle, detailStyle = styles.Selection, styles.SelectionName, styles.SelectionMuted
 		}
 		if r.stopped && idx != m.selected {
 			base, nameStyle, detailStyle = styles.Stopped, styles.Stopped, styles.Stopped
 		}
-		if r.dim {
+		if r.dim || m.searchActive && m.query.Value() != "" && !m.rowMatches(idx) {
 			base.Attrs |= renderer.AttrDim
 			nameStyle.Attrs |= renderer.AttrDim
 			detailStyle.Attrs |= renderer.AttrDim
@@ -627,29 +747,39 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 
 		name := r.dispName
-		if !r.kind.rendersAsHeader() {
+		if r.kind == rowTab {
 			name = "  " + name
 		}
-		suffix := ""
-		if r.kind.rendersAsHeader() && r.stopped {
-			suffix = "(down)"
-		}
-		name = ui.TruncateText(name, max(rect.Width-len(suffix), 0))
-		x := ui.DrawText(frame, rect.X, rect.Y+y, clipX, name, nameStyle)
-
+		badge := ""
 		if r.kind.rendersAsHeader() {
-			if r.stopped {
-				detail := r.detail
-				if detail == "" {
-					detail = " "
-				} else {
-					detail += " "
-				}
-				detail = ui.TruncateText(detail, max(clipX-x-len(suffix), 0))
-				x = ui.DrawText(frame, x, rect.Y+y, clipX, detail, base)
-				ui.DrawText(frame, x, rect.Y+y, clipX, suffix, base)
-			} else {
-				ui.DrawText(frame, x, rect.Y+y, clipX, ui.TruncateText(r.detail, clipX-x), detailStyle)
+			badge = r.status.badge()
+		}
+		contentClipX := clipX
+		nameWidth := rect.Width
+		if badge != "" {
+			nameWidth = max(rect.Width-len(badge)-1, 0)
+			contentClipX = max(rect.X, clipX-len(badge)-1)
+		}
+		name = ui.TruncateText(name, nameWidth)
+		nameMatchStyle := styles.SearchMatch
+		if idx == m.selected {
+			nameMatchStyle = styles.SelectionMatch
+		}
+		namePositions := m.matchPositions(idx, matchName)
+		if r.kind == rowTab {
+			namePositions = shiftPositions(namePositions, 2)
+		}
+		x := drawMatchedText(frame, rect.X, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
+
+		if r.kind == rowSection {
+			continue
+		}
+		if r.kind.rendersAsHeader() {
+			detail := ui.TruncateText(r.detail, contentClipX-x)
+			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, m.matchPositions(idx, matchDetail))
+			if badge != "" {
+				badgeX := max(rect.X, clipX-len(badge))
+				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, base)
 			}
 			continue
 		}
@@ -659,8 +789,88 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 
 		detail := ui.TruncateText(r.detail, clipX-x)
-		ui.DrawText(frame, x, rect.Y+y, clipX, detail, detailStyle)
+		drawMatchedText(frame, x, rect.Y+y, clipX, detail, detailStyle, nameMatchStyle, m.matchPositions(idx, matchDetail))
 	}
+}
+
+func (m *Model) matchPositions(idx int, field matchField) []int {
+	if m == nil || !m.searchActive || m.query.Value() == "" {
+		return nil
+	}
+	return m.searchMatches[idx].positions(field)
+}
+
+func shiftPositions(positions []int, delta int) []int {
+	if len(positions) == 0 || delta == 0 {
+		return positions
+	}
+	shifted := make([]int, len(positions))
+	for i, position := range positions {
+		shifted[i] = position + delta
+	}
+	return shifted
+}
+
+func drawMatchedText(frame renderer.Frame, x, y, clipX int, text string, base, match renderer.Style, positions []int) int {
+	positionSet := make(map[int]struct{}, len(positions))
+	for _, position := range positions {
+		positionSet[position] = struct{}{}
+	}
+	for runeIndex, r := range []rune(text) {
+		style := base
+		if _, ok := positionSet[runeIndex]; ok {
+			style = match
+		}
+		x = ui.DrawText(frame, x, y, clipX, string(r), style)
+		if x >= clipX {
+			break
+		}
+	}
+	return x
+}
+
+func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style renderer.Style) {
+	if rect.Width <= 0 || rect.Height <= 0 || rect.Y < 0 || rect.Y >= frame.Height {
+		return
+	}
+	ui.FillRect(frame, rect, renderer.Cell{Rune: ' ', Style: style})
+	action := "open"
+	deletable := false
+	if m != nil && m.selected >= 0 && m.selected < len(m.rows) {
+		selected := m.rows[m.selected]
+		if selected.stopped {
+			action = "restart"
+		}
+		deletable = selected.selectable && !selected.remote
+	}
+	var groups []string
+	if m != nil && m.searchActive {
+		groups = []string{fmt.Sprintf("%d matches", len(m.matchRows)), "Enter " + action, "arrows next"}
+		escape := "Esc exit"
+		if m.query.Value() != "" {
+			escape = "Esc clear"
+		}
+		groups = append(groups, escape)
+	} else {
+		if m != nil && m.selected >= 0 && m.selected < len(m.rows) && m.rows[m.selected].dim && m.rows[m.selected].statusDetail != "" {
+			groups = append(groups, m.rows[m.selected].statusDetail)
+		}
+		if rect.Width < 60 {
+			groups = append(groups, "Enter "+action, "/", "Esc", "j/k")
+			if deletable {
+				groups = append(groups, "x")
+			}
+			groups = append(groups, "s")
+		} else {
+			groups = append(groups, "j/k move", "Enter "+action)
+			if deletable {
+				groups = append(groups, "x delete")
+			}
+			groups = append(groups, "/ search", "s sort", "Esc close")
+		}
+	}
+	text := strings.Join(groups, "  ")
+	ui.DrawText(frame, rect.X, rect.Y, rect.X+rect.Width, ui.TruncateText(text, rect.Width), style)
 }
 
 func (m *Model) scrollOffset(visible int) int {
