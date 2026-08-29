@@ -189,7 +189,7 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 	}
 	if intent != pickerNavigate {
 		if _, ok := model.Selected(); !ok {
-			d.closePickerIfCurrent(ac, observedModel, observedGeneration)
+			d.closePickerIfCurrentRefresh(ac, observedModel, observedGeneration, refreshSequence)
 			return
 		}
 	}

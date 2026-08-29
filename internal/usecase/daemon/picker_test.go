@@ -898,8 +898,7 @@ func TestPickerSearchAcceptsPrintableActionsAndSplitUTF8(t *testing.T) {
 
 	d.enterPicker(sess, ac)
 	awaitFrame(t, sends, wire.MsgOutput)
-	d.handlePickerInput(ac, []byte("/"))
-	d.handlePickerInput(ac, []byte("jkqxs/"))
+	d.handlePickerInput(ac, []byte("j/jkqxs/"))
 	d.handlePickerInput(ac, []byte{0xc3})
 	d.handlePickerInput(ac, []byte{0xa9})
 
@@ -909,7 +908,24 @@ func TestPickerSearchAcceptsPrintableActionsAndSplitUTF8(t *testing.T) {
 	ac.overlays.pickerMu.Unlock()
 	require.True(t, active)
 	require.Equal(t, "jkqxs/é", query)
-	require.True(t, ac.overlays.pickerActive(), "printable action keys must not close search")
+	require.True(t, ac.overlays.pickerActive(), "a slash after navigation must enter search and keep later action bytes printable")
+}
+
+func TestPickerSearchZeroMatchEnterKeepsPickerOpen(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releaseAll(releases)
+
+	d.enterPicker(sess, ac)
+	awaitFrame(t, sends, wire.MsgOutput)
+	d.handlePickerInput(ac, []byte("/absent\r"))
+
+	require.True(t, ac.overlays.pickerActive())
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	require.True(t, ac.overlays.picker.SearchActive())
+	require.Equal(t, "absent", ac.overlays.picker.Query())
+	_, ok := ac.overlays.picker.Selected()
+	require.False(t, ok)
 }
 
 func TestPickerSearchSplitArrowNavigatesMatches(t *testing.T) {
@@ -927,6 +943,23 @@ func TestPickerSearchSplitArrowNavigatesMatches(t *testing.T) {
 	ac.overlays.pickerMu.Unlock()
 	require.True(t, ok)
 	require.Equal(t, 1, selected.TabIndex)
+}
+
+func TestPickerSearchRepeatedEscapeChunkClearsThenExits(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 1)
+	defer releaseAll(releases)
+
+	d.enterPicker(sess, ac)
+	awaitFrame(t, sends, wire.MsgOutput)
+	d.handlePickerInput(ac, []byte("/query"))
+	d.handlePickerInput(ac, []byte("\x1b\x1b"))
+
+	require.True(t, ac.overlays.pickerActive())
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	require.True(t, ac.overlays.picker.SearchActive(), "first Escape clears while the second is retained as the next staged Escape")
+	require.Empty(t, ac.overlays.picker.Query())
+	require.Equal(t, []byte{0x1b}, ac.overlays.pickerPending)
 }
 
 func TestPickerSearchLoneEscapeClearsThenExitsThenCloses(t *testing.T) {
@@ -1299,6 +1332,29 @@ func TestCaptureOverlayLayersPreservesPickerSemanticSurfacesAcrossFallbacks(t *t
 			}
 		})
 	}
+}
+
+func TestCaptureOverlayLayersRendersNarrowSearchTitleAndStatus(t *testing.T) {
+	model := picker.New([]picker.SessionView{{ID: "s", Name: "session", Tabs: []picker.TabEntry{{TabID: "tab", Name: "shell"}}}}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
+	model.EnterSearch()
+	for _, r := range "a-very-long-absent-query" {
+		model.InsertSearch(r)
+	}
+	state := capturedRenderState{
+		theme:  themeui.BuiltinDark,
+		styles: themeui.Resolve(themeui.BuiltinDark, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles,
+		layout: capturedTabLayout{area: domain.Rect{Width: 30, Height: 10}},
+	}
+	snap := &overlayRenderSnapshot{pickerActive: true, pickerModel: model}
+
+	captureOverlayLayers(&state, snap, domain.PaletteConfig{})
+
+	require.True(t, strings.HasPrefix(state.overlays.picker.title, " / "))
+	require.True(t, strings.HasSuffix(state.overlays.picker.title, "_ "))
+	inner := state.overlays.picker.inner
+	status := rowText(inner.Row(inner.Height - 1))
+	require.Contains(t, status, "0 matches")
+	require.NotContains(t, status, "x delete", "search action bytes belong to the query")
 }
 
 func TestCaptureOverlayLayersResizeRecomposesPickerWithoutStalePreview(t *testing.T) {

@@ -1273,7 +1273,13 @@ func (d *Daemon) retryStoppedPurgeContext(ctx context.Context, name string) erro
 func (d *Daemon) retryStoppedPurgeContextExact(ctx context.Context, name string, incarnation domain.IncarnationID, expectedCreatedAt *int64) error {
 	d.mu.Lock()
 	stopped, ok := d.inactive[name]
-	if !ok || incarnation != (domain.IncarnationID{}) && stopped.incarnation != incarnation || expectedCreatedAt != nil && stopped.createdAt != *expectedCreatedAt {
+	if !ok {
+		d.mu.Unlock()
+		return nil
+	}
+	incarnationChanged := incarnation != (domain.IncarnationID{}) && stopped.incarnation != incarnation
+	createdAtChanged := expectedCreatedAt != nil && stopped.createdAt != *expectedCreatedAt
+	if incarnationChanged || createdAtChanged {
 		d.mu.Unlock()
 		return nil
 	}

@@ -29,6 +29,16 @@ func (d *Daemon) handlePickerSearchInputLocked(ac *attachedClient, data []byte) 
 		switch data[offset] {
 		case keys.ESC:
 			tail := data[offset:]
+			if len(tail) > 1 && tail[1] == keys.ESC {
+				d.applyPickerSearchEscapeLocked(ac)
+				result.changed = true
+				if !rt.picker.SearchActive() {
+					result.exit = true
+					return result
+				}
+				offset++
+				continue
+			}
 			if consumed, move := routeListEscape(tail); consumed > 0 {
 				switch move {
 				case 'A':
@@ -90,6 +100,14 @@ func (d *Daemon) handlePickerSearchInputLocked(ac *attachedClient, data []byte) 
 	return result
 }
 
+func (d *Daemon) applyPickerSearchEscapeLocked(ac *attachedClient) {
+	if ac.overlays.picker.Query() != "" {
+		ac.overlays.picker.ClearSearch()
+	} else {
+		ac.overlays.picker.ExitSearch()
+	}
+}
+
 func (d *Daemon) retainPickerSearchESCLocked(ac *attachedClient) {
 	rt := ac.overlays
 	rt.pickerPending = append(rt.pickerPending[:0], keys.ESC)
@@ -102,11 +120,7 @@ func (d *Daemon) retainPickerSearchESCLocked(ac *attachedClient) {
 		rt.pickerPending = nil
 		rt.pickerESC.timer = nil
 		rt.pickerESC.done = nil
-		if rt.picker.Query() != "" {
-			rt.picker.ClearSearch()
-		} else {
-			rt.picker.ExitSearch()
-		}
+		d.applyPickerSearchEscapeLocked(ac)
 		rt.pickerMu.Unlock()
 		if sess := ac.currentAttachmentSession(); sess != nil {
 			d.registerPreviewForSelection(ac)

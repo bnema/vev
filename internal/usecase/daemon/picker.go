@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sort"
@@ -326,31 +327,40 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		rt.pickerMu.Unlock()
 		return
 	}
+	normalAction := func(b byte) listInputResult {
+		switch b {
+		case 'x', 's':
+			return listInputResult{action: b, stop: true}
+		case '\r', '\n':
+			return listInputResult{action: b, exit: true}
+		default:
+			return listInputResult{}
+		}
+	}
 	var result listInputResult
 	if rt.picker.SearchActive() {
 		result = d.handlePickerSearchInputLocked(ac, data)
-	} else if len(data) > 0 && data[0] == '/' {
-		rt.picker.EnterSearch()
-		result.changed = true
-		if len(data) > 1 {
-			result = d.handlePickerSearchInputLocked(ac, data[1:])
+	} else if slash := bytes.IndexByte(data, '/'); slash >= 0 {
+		result = handleListInputLocked(d.clock, data[:slash], d.pickerListInputState(ac), normalAction)
+		if result.action == 0 && !result.exit {
+			rt.picker.EnterSearch()
+			result.changed = true
+			if slash+1 < len(data) {
+				searchResult := d.handlePickerSearchInputLocked(ac, data[slash+1:])
+				searchResult.changed = searchResult.changed || result.changed
+				result = searchResult
+			}
 		}
 	} else {
-		result = handleListInputLocked(d.clock, data, d.pickerListInputState(ac), func(b byte) listInputResult {
-			switch b {
-			case 'x', 's':
-				return listInputResult{action: b, stop: true}
-			case '\r', '\n':
-				return listInputResult{action: b, exit: true}
-			default:
-				return listInputResult{}
-			}
-		})
+		result = handleListInputLocked(d.clock, data, d.pickerListInputState(ac), normalAction)
 	}
 	var target picker.Target
 	var cursor picker.Target
 	var ok bool
 	var cursorOK bool
+	var rejectedBySearch bool
+	observedPicker := rt.picker
+	observedGeneration := rt.pickerGeneration
 	var intent pickerIntent
 	var source moveSourceLocator
 	// prevIdx is the row the victim occupied; -1 means "no post-delete hint".
@@ -358,15 +368,23 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
 		target, ok = rt.picker.Selected()
 		cursor, cursorOK = rt.picker.Cursor()
+		rejectedBySearch = rt.picker.SelectionRejectedBySearch()
 		prevIdx = rt.picker.SelectedIndex()
 	}
 	intent, source = rt.pickerIntent, rt.pickerSource
 	rt.pickerMu.Unlock()
 
+	if !d.pickerInstanceCurrent(ac, observedPicker, observedGeneration) {
+		return
+	}
 	if result.action == 's' {
 		d.togglePickerSort()
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 		d.invalidateRender(sess, ac, true, "picker.go")
+		return
+	}
+	if (result.action == '\r' || result.action == '\n') && !ok && rejectedBySearch {
+		d.invalidateRender(sess, ac, true, "picker search no match")
 		return
 	}
 	if (result.action == '\r' || result.action == '\n') && !ok && cursorOK && (cursor.RemoteTarget != nil || cursor.RemoteHost != "") {
@@ -422,7 +440,7 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			}
 			backNavigationSent = true
 		}
-		d.closePicker(ac)
+		d.closePickerIfCurrent(ac, observedPicker, observedGeneration)
 	}
 	if committing {
 		if intent == pickerMovePane || intent == pickerMoveTab {
@@ -434,7 +452,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 			if len(effects) != 0 && effects[0] != nil {
 				effects[0].End()
 			}
-			d.closePicker(ac)
+			if !d.closePickerIfCurrent(ac, observedPicker, observedGeneration) {
+				return
+			}
 			err := d.commitMovePickerSelection(intent, source, target)
 			if err != nil {
 				d.reportAttachmentError(sess, movePickerUserError(err))
@@ -446,9 +466,11 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 		}
 		var err error
 		if len(effects) != 0 && effects[0] != nil {
-			err = d.switchToTargetForAttachment(effects[0], target, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select")
+			err = d.switchToTargetForAttachment(effects[0], target, sessionHandoffGuard{closePicker: true, allowSamePeer: true, pickerModel: observedPicker, pickerGeneration: observedGeneration}, "picker-select")
 		} else {
-			d.closePicker(ac)
+			if !d.closePickerIfCurrent(ac, observedPicker, observedGeneration) {
+				return
+			}
 			err = d.switchToTarget(sess, ac, target)
 		}
 		if errors.Is(err, errAttachmentTransition) {
@@ -743,15 +765,31 @@ func (d *Daemon) closePicker(ac *attachedClient) {
 	d.closePickerIfCurrent(ac, nil, 0)
 }
 
-// closePickerIfCurrent closes only the observed picker lifecycle. A nonzero
-// generation guards terminal parked cleanup even when a refresh replaced the
-// model within that generation.
-func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
+func (d *Daemon) pickerInstanceCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
 	if ac == nil || ac.overlays == nil {
 		return false
 	}
 	ac.overlays.pickerMu.Lock()
-	if model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation) || model == nil && generation != 0 && ac.overlays.pickerGeneration != generation {
+	defer ac.overlays.pickerMu.Unlock()
+	return ac.overlays.picker == model && ac.overlays.pickerGeneration == generation
+}
+
+// closePickerIfCurrent closes only the observed picker lifecycle. A nonzero
+// generation guards terminal parked cleanup even when a refresh replaced the
+// model within that generation.
+func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
+	return d.closePickerIfCurrentRefresh(ac, model, generation, 0)
+}
+
+func (d *Daemon) closePickerIfCurrentRefresh(ac *attachedClient, model *picker.Model, generation, refreshSequence uint64) bool {
+	if ac == nil || ac.overlays == nil {
+		return false
+	}
+	ac.overlays.pickerMu.Lock()
+	refreshChanged := refreshSequence != 0 && ac.overlays.pickerRefreshSequence != refreshSequence
+	modelChanged := model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation)
+	generationChanged := model == nil && generation != 0 && ac.overlays.pickerGeneration != generation
+	if refreshChanged || modelChanged || generationChanged {
 		ac.overlays.pickerMu.Unlock()
 		return false
 	}
@@ -808,9 +846,19 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 // one active-session handoff. Its zero value keeps daemon-owned transitions on
 // their established path.
 type sessionHandoffGuard struct {
-	expectedSource *tab
-	closePicker    bool
-	allowSamePeer  bool
+	expectedSource   *tab
+	closePicker      bool
+	allowSamePeer    bool
+	pickerModel      *picker.Model
+	pickerGeneration uint64
+}
+
+func (d *Daemon) closePickerForGuard(ac *attachedClient, guard sessionHandoffGuard) bool {
+	if guard.pickerModel != nil || guard.pickerGeneration != 0 {
+		return d.closePickerIfCurrent(ac, guard.pickerModel, guard.pickerGeneration)
+	}
+	d.closePicker(ac)
+	return true
 }
 
 // switchActiveTargetForAttachment hands a frame-bound navigation request to the
@@ -880,7 +928,7 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(effect *attachmentEffect
 	if guard.closePicker {
 		fresh, admitted := effect.ac.beginAttachmentEffect(transition.published)
 		if admitted {
-			d.closePicker(effect.ac)
+			d.closePickerForGuard(effect.ac, guard)
 			fresh.End()
 		}
 	}
@@ -989,7 +1037,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 		// Keep the source link open until the client receives the ordered cleanup
 		// and handoff frames, then let the client's close drive ordinary parking.
 		if guard.closePicker {
-			d.closePicker(effect.ac)
+			d.closePickerForGuard(effect.ac, guard)
 		}
 		effect.bindActionEnd(d, "detach")
 		effect.End()
@@ -1030,7 +1078,7 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
 	}
 	if guard.closePicker {
-		d.closePicker(effect.ac)
+		d.closePickerForGuard(effect.ac, guard)
 	}
 	d.clientGoneForAttachment(effect, false)
 	return nil
@@ -1140,11 +1188,11 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 		if sourceEffect != nil {
 			fresh, admitted := ac.beginAttachmentEffect(transition.published)
 			if admitted {
-				d.closePicker(ac)
+				d.closePickerForGuard(ac, guard)
 				fresh.End()
 			}
 		} else {
-			d.closePicker(ac)
+			d.closePickerForGuard(ac, guard)
 		}
 	}
 	d.deferAttachmentTransitionCleanups(transition)

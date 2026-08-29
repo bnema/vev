@@ -760,6 +760,64 @@ func TestSearchZeroMatchesSuppressesActivationAndRetainsCursorAnchor(t *testing.
 	require.Equal(t, before, after)
 }
 
+func TestSearchTitleKeepsQueryTailAndCaretAtNarrowWidth(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}, SelectionConfig{Mode: SelectNavigationTab})
+	m.EnterSearch()
+	for _, r := range "abcdefghijklmnopqrstuv" {
+		m.InsertSearch(r)
+	}
+
+	title := m.SearchTitle(20)
+	require.LessOrEqual(t, textCellWidth(title), 20)
+	require.True(t, strings.HasPrefix(title, " / "))
+	require.True(t, strings.HasSuffix(title, "v_ "), "the visible title keeps the query tail and caret")
+}
+
+func TestSearchDoesNotHighlightEllipsisForTruncatedWideMatch(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "tab", Name: "abcdefghijklmnopq界"}}}}, SelectionConfig{Mode: SelectNavigationTab})
+	m.EnterSearch()
+	m.InsertSearch('界')
+	matchStyle := renderer.Style{Foreground: 2, Bold: true}
+	frame := m.Render(domain.Size{Cols: 20, Rows: 3}, Preview{}, RenderStyles{
+		Background: renderer.DefaultStyle(), Base: renderer.DefaultStyle(), Name: renderer.DefaultStyle(), Detail: renderer.DefaultStyle(),
+		Selection: renderer.Style{Inverse: true}, SelectionName: renderer.Style{Inverse: true}, SelectionMuted: renderer.Style{Inverse: true},
+		SearchMatch: matchStyle, SelectionMatch: matchStyle,
+	})
+
+	require.Equal(t, '…', frame.At(19, 1).Rune)
+	require.False(t, frame.At(19, 1).Style.Equal(matchStyle), "a dropped wide-rune match must not style the truncation ellipsis")
+}
+
+func TestReplaceFromMovesStoppedHeaderCursorToNewFocusableTab(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	emptyTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", Stopped: true}
+	m := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &emptyTarget, Stopped: true, RemoteActivation: RemoteRestart}}, SelectionConfig{Mode: SelectNavigationTab})
+	require.Equal(t, 0, m.SelectedIndex())
+
+	tabTarget := emptyTarget
+	tabTarget.StoppedTab = domain.NewStableTabSelector("tab")
+	next := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &tabTarget, Stopped: true, RemoteActivation: RemoteRestart, Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}, SelectionConfig{Mode: SelectNavigationTab})
+	m.ReplaceFrom(next)
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("tab"), selected.TabID)
+	require.Equal(t, 1, m.SelectedIndex(), "the contextual stopped header must not retain focus after real tabs appear")
+}
+
+func TestUnavailableStoppedRemoteUsesAvailabilityBadgeAndHint(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{1}
+	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
+	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", Stopped: true}
+	m := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &target, Stopped: true, RemoteReason: "catalog_stale", RemoteDetail: "catalog stale", RemoteActivation: RemoteUnavailable}}, SelectionConfig{Mode: SelectNavigationTab})
+
+	frame := m.Render(domain.Size{Cols: 40, Rows: 3}, Preview{})
+	require.Contains(t, rowText(frame.Row(0)), "[stale]")
+	require.Contains(t, rowText(frame.Row(2)), "Enter unavailable")
+	require.NotContains(t, rowText(frame.Row(2)), "Enter restart")
+}
+
 func TestSearchNavigationUsesCanonicalVisualOrderAfterBestRank(t *testing.T) {
 	m := New([]SessionView{
 		{ID: "first", Name: "first", Tabs: []TabEntry{{TabID: "zeta", Name: "zeta"}}},

@@ -276,6 +276,10 @@ type row struct {
 	dim                  bool
 	status               rowStatus
 	statusDetail         string
+	foldedName           string
+	foldedDetail         string
+	foldedSession        string
+	foldedHost           string
 }
 
 func New(sessions []SessionView, config SelectionConfig) *Model {
@@ -374,6 +378,7 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 	if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
 		header.selectable, header.focusable, header.dim = false, false, true
 	}
+	header.prepareSearch()
 	rows := []row{header}
 	for i, tab := range session.Tabs {
 		if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
@@ -418,12 +423,20 @@ func rowsForSession(session SessionView, config SelectionConfig) []row {
 		if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
 			tabRow.selectable, tabRow.focusable, tabRow.dim = false, false, true
 		}
+		tabRow.prepareSearch()
 		rows = append(rows, tabRow)
 	}
 	if config.Mode == SelectMovePaneTab && len(rows) == 1 && !session.CannotAcceptMoves {
 		return nil
 	}
 	return rows
+}
+
+func (r *row) prepareSearch() {
+	r.foldedName = strings.ToLower(r.dispName)
+	r.foldedDetail = strings.ToLower(r.detail)
+	r.foldedSession = strings.ToLower(r.sessionDisplay)
+	r.foldedHost = strings.ToLower(r.remoteHost)
 }
 
 func remoteStoppedOrdinalSelector(index int, rawName string, tabCount int) (domain.TabSelector, bool) {
@@ -434,26 +447,29 @@ func remoteStoppedOrdinalSelector(index int, rawName string, tabCount int) (doma
 }
 
 func statusForSession(session SessionView, stopped bool) rowStatus {
+	remote := session.RemoteKey != nil || session.RemoteTarget != nil || session.RemoteHost != ""
+	if remote {
+		switch session.RemoteReason {
+		case "host_unreachable":
+			return rowStatusDown
+		case "version_mismatch":
+			return rowStatusVersion
+		case "refreshing", "catalog_stale":
+			return rowStatusStale
+		case "malformed", "session_broken", "identity_changed":
+			return rowStatusError
+		}
+	}
 	if stopped {
 		return rowStatusStopped
 	}
-	if session.RemoteKey == nil && session.RemoteTarget == nil && session.RemoteHost == "" {
+	if !remote {
 		return rowStatusNone
-	}
-	switch session.RemoteReason {
-	case "host_unreachable":
-		return rowStatusDown
-	case "version_mismatch":
-		return rowStatusVersion
-	case "refreshing", "catalog_stale":
-		return rowStatusStale
-	case "malformed", "session_broken", "identity_changed":
-		return rowStatusError
 	}
 	if session.RemoteActivation == RemoteAttach {
 		return rowStatusUp
 	}
-	return rowStatusNone
+	return rowStatusError
 }
 
 func remoteActivatable(session SessionView) bool {
@@ -628,13 +644,10 @@ func (m *Model) Clone() *Model {
 	clone := *m
 	clone.rows = append([]row(nil), m.rows...)
 	clone.query.SetValue(m.query.Value())
-	clone.matchRows = append([]int(nil), m.matchRows...)
-	if m.searchMatches != nil {
-		clone.searchMatches = make(map[int]searchMatch, len(m.searchMatches))
-		for idx, match := range m.searchMatches {
-			clone.searchMatches[idx] = match.clone()
-		}
-	}
+	// Search results are copy-on-write: every query mutation publishes a new
+	// map and row slice, so render snapshots can safely share the old values.
+	clone.matchRows = m.matchRows
+	clone.searchMatches = m.searchMatches
 	return &clone
 }
 
@@ -760,6 +773,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			nameWidth = max(rect.Width-len(badge)-1, 0)
 			contentClipX = max(rect.X, clipX-len(badge)-1)
 		}
+		originalName := name
 		name = ui.TruncateText(name, nameWidth)
 		nameMatchStyle := styles.SearchMatch
 		if idx == m.selected {
@@ -769,6 +783,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if r.kind == rowTab {
 			namePositions = shiftPositions(namePositions, 2)
 		}
+		namePositions = visibleMatchPositions(namePositions, name, name != originalName)
 		x := drawMatchedText(frame, rect.X, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
 
 		if r.kind == rowSection {
@@ -776,7 +791,8 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 		if r.kind.rendersAsHeader() {
 			detail := ui.TruncateText(r.detail, contentClipX-x)
-			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, m.matchPositions(idx, matchDetail))
+			detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.detail)
+			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			if badge != "" {
 				badgeX := max(rect.X, clipX-len(badge))
 				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, base)
@@ -789,7 +805,8 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 
 		detail := ui.TruncateText(r.detail, clipX-x)
-		drawMatchedText(frame, x, rect.Y+y, clipX, detail, detailStyle, nameMatchStyle, m.matchPositions(idx, matchDetail))
+		detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.detail)
+		drawMatchedText(frame, x, rect.Y+y, clipX, detail, detailStyle, nameMatchStyle, detailPositions)
 	}
 }
 
@@ -798,6 +815,20 @@ func (m *Model) matchPositions(idx int, field matchField) []int {
 		return nil
 	}
 	return m.searchMatches[idx].positions(field)
+}
+
+func visibleMatchPositions(positions []int, rendered string, truncated bool) []int {
+	if !truncated || len(positions) == 0 {
+		return positions
+	}
+	limit := max(len([]rune(rendered))-1, 0) // the final rune is the ellipsis
+	visible := make([]int, 0, len(positions))
+	for _, position := range positions {
+		if position < limit {
+			visible = append(visible, position)
+		}
+	}
+	return visible
 }
 
 func shiftPositions(positions []int, delta int) []int {
@@ -812,19 +843,22 @@ func shiftPositions(positions []int, delta int) []int {
 }
 
 func drawMatchedText(frame renderer.Frame, x, y, clipX int, text string, base, match renderer.Style, positions []int) int {
-	positionSet := make(map[int]struct{}, len(positions))
-	for _, position := range positions {
-		positionSet[position] = struct{}{}
+	if len(positions) == 0 {
+		return ui.DrawText(frame, x, y, clipX, text, base)
 	}
-	for runeIndex, r := range []rune(text) {
+	positionIndex := 0
+	runeIndex := 0
+	for _, r := range text {
 		style := base
-		if _, ok := positionSet[runeIndex]; ok {
+		if positionIndex < len(positions) && positions[positionIndex] == runeIndex {
 			style = match
+			positionIndex++
 		}
 		x = ui.DrawText(frame, x, y, clipX, string(r), style)
 		if x >= clipX {
 			break
 		}
+		runeIndex++
 	}
 	return x
 }
@@ -838,7 +872,9 @@ func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style rende
 	deletable := false
 	if m != nil && m.selected >= 0 && m.selected < len(m.rows) {
 		selected := m.rows[m.selected]
-		if selected.stopped {
+		if !selected.selectable {
+			action = "unavailable"
+		} else if selected.stopped {
 			action = "restart"
 		}
 		deletable = selected.selectable && !selected.remote

@@ -3,7 +3,12 @@ package picker
 import (
 	"slices"
 	"strings"
+	"unicode/utf8"
+
+	renderer "github.com/bnema/vev-vt"
 )
+
+const MaxSearchQueryRunes = 256
 
 type matchField uint8
 
@@ -24,17 +29,6 @@ type fieldMatch struct {
 type searchMatch struct {
 	fieldMatches []fieldMatch
 	best         fieldMatch
-}
-
-func (m searchMatch) clone() searchMatch {
-	clone := m
-	clone.fieldMatches = make([]fieldMatch, len(m.fieldMatches))
-	for i, field := range m.fieldMatches {
-		clone.fieldMatches[i] = field
-		clone.fieldMatches[i].positions = slices.Clone(field.positions)
-	}
-	clone.best.positions = slices.Clone(m.best.positions)
-	return clone
 }
 
 func (m searchMatch) positions(field matchField) []int {
@@ -74,15 +68,44 @@ func (m *Model) Query() string {
 	return m.query.Value()
 }
 
-func (m *Model) SearchTitle() string {
+func (m *Model) SearchTitle(width ...int) string {
 	if m == nil || !m.searchActive {
 		return ""
 	}
-	return " Search sessions & tabs: " + m.query.Value() + "_ "
+	full := " Search sessions & tabs: " + m.query.Value() + "_ "
+	if len(width) == 0 || textCellWidth(full) <= width[0] {
+		return full
+	}
+	const prefix = " / "
+	available := max(width[0]-textCellWidth(prefix)-2, 1)
+	return prefix + tailCells(m.query.Value(), available) + "_ "
+}
+
+func tailCells(text string, width int) string {
+	runes := []rune(text)
+	used := 0
+	start := len(runes)
+	for start > 0 {
+		cellWidth := renderer.RuneWidth(runes[start-1])
+		if used+cellWidth > width {
+			break
+		}
+		used += cellWidth
+		start--
+	}
+	return string(runes[start:])
+}
+
+func textCellWidth(text string) int {
+	width := 0
+	for _, r := range text {
+		width += renderer.RuneWidth(r)
+	}
+	return width
 }
 
 func (m *Model) InsertSearch(r rune) {
-	if m == nil || !m.searchActive {
+	if m == nil || !m.searchActive || utf8.RuneCountInString(m.query.Value()) >= MaxSearchQueryRunes {
 		return
 	}
 	m.query.Insert(r)
@@ -126,7 +149,7 @@ func (m *Model) ReplaceFrom(next *Model) {
 	m.selected = next.selected
 	if hadCursor {
 		for idx, candidate := range m.rows {
-			if sameTarget(candidate.target(), cursor) {
+			if candidate.focusable && sameTarget(candidate.target(), cursor) {
 				m.selected = idx
 				break
 			}
@@ -139,9 +162,9 @@ func (m *Model) ReplaceFrom(next *Model) {
 	if !searchActive {
 		return
 	}
-	m.refreshSearch(false)
-	if query != "" && !m.rowMatches(m.selected) {
-		m.refreshSearch(true)
+	best := m.refreshSearch(false)
+	if query != "" && !m.rowMatches(m.selected) && best >= 0 {
+		m.selected = best
 	}
 }
 
@@ -167,6 +190,12 @@ func sameOptionalInt64(left, right *int64) bool {
 		return left == nil && right == nil
 	}
 	return *left == *right
+}
+
+// SelectionRejectedBySearch reports that the retained cursor is only a hidden
+// anchor and must not be interpreted as an unavailable activation target.
+func (m *Model) SelectionRejectedBySearch() bool {
+	return m != nil && m.searchActive && m.query.Value() != "" && !m.rowMatches(m.selected)
 }
 
 func (m *Model) rowMatches(idx int) bool {
@@ -196,26 +225,27 @@ func (m *Model) moveSearch(delta int) {
 	}
 }
 
-func (m *Model) refreshSearch(selectBest bool) {
+func (m *Model) refreshSearch(selectBest bool) int {
 	m.searchMatches = make(map[int]searchMatch)
-	m.matchRows = m.matchRows[:0]
-	query := m.query.Value()
+	m.matchRows = make([]int, 0, len(m.rows))
+	query := strings.ToLower(m.query.Value())
 	if query == "" {
 		for idx, row := range m.rows {
 			if row.focusable {
 				m.matchRows = append(m.matchRows, idx)
 			}
 		}
-		return
+		return -1
 	}
 
+	needleRunes := []rune(query)
 	bestIdx := -1
 	var best fieldMatch
 	for idx, row := range m.rows {
 		if !row.focusable {
 			continue
 		}
-		matched, ok := matchRow(row, query)
+		matched, ok := matchRow(row, query, needleRunes)
 		if !ok {
 			continue
 		}
@@ -228,32 +258,33 @@ func (m *Model) refreshSearch(selectBest bool) {
 	if selectBest && bestIdx >= 0 {
 		m.selected = bestIdx
 	}
+	return bestIdx
 }
 
-func matchRow(row row, query string) (searchMatch, bool) {
+func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
 	fields := []struct {
 		kind matchField
 		text string
 	}{
-		{matchName, row.dispName},
-		{matchDetail, row.detail},
+		{matchName, row.foldedName},
+		{matchDetail, row.foldedDetail},
 	}
 	if row.kind == rowTab {
 		fields = append(fields, struct {
 			kind matchField
 			text string
-		}{matchContext, row.sessionDisplay})
+		}{matchContext, row.foldedSession})
 	}
-	if row.remoteHost != "" {
+	if row.foldedHost != "" {
 		fields = append(fields, struct {
 			kind matchField
 			text string
-		}{matchContext, row.remoteHost})
+		}{matchContext, row.foldedHost})
 	}
 
 	var result searchMatch
 	for _, field := range fields {
-		match, ok := scoreField(field.kind, field.text, query)
+		match, ok := scoreField(field.kind, field.text, query, needleRunes)
 		if !ok {
 			continue
 		}
@@ -265,23 +296,19 @@ func matchRow(row row, query string) (searchMatch, bool) {
 	return result, len(result.fieldMatches) != 0
 }
 
-func scoreField(field matchField, text, query string) (fieldMatch, bool) {
-	haystack := []rune(strings.ToLower(text))
-	needle := []rune(strings.ToLower(query))
+func scoreField(field matchField, text, query string, needle []rune) (fieldMatch, bool) {
 	if len(needle) == 0 {
 		return fieldMatch{field: field}, true
 	}
-	lower := string(haystack)
-	needleText := string(needle)
-	if lower == needleText {
+	if text == query {
 		positions := rangeRunePositions(len(needle))
 		return fieldMatch{field: field, positions: positions, rank: 0, span: len(positions)}, true
 	}
-	if strings.HasPrefix(lower, needleText) {
+	if strings.HasPrefix(text, query) {
 		positions := rangeRunePositions(len(needle))
 		return fieldMatch{field: field, positions: positions, rank: 1, span: len(positions)}, true
 	}
-	positions, ok := subsequenceRunePositions(haystack, needle)
+	positions, ok := subsequenceRunePositions([]rune(text), needle)
 	if !ok {
 		return fieldMatch{}, false
 	}

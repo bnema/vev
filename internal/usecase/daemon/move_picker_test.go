@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -295,6 +296,47 @@ func TestMovePickerRefreshCloseKeepsReplacementPicker(t *testing.T) {
 	ac.overlays.pickerMu.Lock()
 	require.Same(t, replacement, ac.overlays.picker)
 	ac.overlays.pickerMu.Unlock()
+}
+
+func TestMovePickerOlderEmptyRefreshCannotCloseNewerValidRefresh(t *testing.T) {
+	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
+	defer releaseAll(releases)
+	require.NoError(t, d.enterPickerForIntent(source, ac, pickerMovePane, moveSourceLocator{
+		Session: moveSessionLocator{ID: source.id, Incarnation: source.incarnation, Name: source.name},
+		TabID:   "source-tab", PaneID: "source-pane",
+	}))
+	d.mu.Lock()
+	delete(d.sessions, destination.id)
+	d.mu.Unlock()
+
+	rebuildReached := make(chan struct{})
+	allowOld := make(chan struct{})
+	var builds atomic.Int32
+	ac.overlays.afterPickerRefreshBuild = func(*picker.Model) {
+		if builds.Add(1) == 1 {
+			close(rebuildReached)
+			<-allowOld
+		}
+	}
+	oldDone := make(chan struct{})
+	go func() {
+		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		close(oldDone)
+	}()
+	<-rebuildReached
+
+	d.mu.Lock()
+	d.sessions[destination.id] = destination
+	d.mu.Unlock()
+	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+	close(allowOld)
+	<-oldDone
+
+	require.True(t, ac.overlays.pickerActive(), "the older empty refresh must not close the newer in-place publication")
+	ac.overlays.pickerMu.Lock()
+	_, ok := ac.overlays.picker.Selected()
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, ok)
 }
 
 func TestMovePickerDispatchMuNotHeldWhileOpen(t *testing.T) {

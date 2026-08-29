@@ -242,7 +242,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 	if snap.pickerActive && snap.pickerModel != nil {
 		presentation := pickerModal.Resolve(size)
 		title := snap.pickerTitle
-		if searchTitle := snap.pickerModel.SearchTitle(); searchTitle != "" {
+		if searchTitle := snap.pickerModel.SearchTitle(presentation.Bounds.Width - 2); searchTitle != "" {
 			title = searchTitle
 		} else if title == "" {
 			title = pickerModal.Title
