@@ -315,7 +315,11 @@ func TestMovePickerOlderEmptyRefreshCannotCloseNewerValidRefresh(t *testing.T) {
 	ac.overlays.afterPickerRefreshBuild = func(*picker.Model) {
 		if builds.Add(1) == 1 {
 			close(rebuildReached)
-			<-allowOld
+			select {
+			case <-allowOld:
+			case <-time.After(time.Second):
+				t.Error("timed out waiting to release the older move-picker refresh")
+			}
 		}
 	}
 	oldDone := make(chan struct{})
@@ -323,14 +327,22 @@ func TestMovePickerOlderEmptyRefreshCannotCloseNewerValidRefresh(t *testing.T) {
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 		close(oldDone)
 	}()
-	<-rebuildReached
+	select {
+	case <-rebuildReached:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first move-picker refresh rebuild")
+	}
 
 	d.mu.Lock()
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
 	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 	close(allowOld)
-	<-oldDone
+	select {
+	case <-oldDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the older move-picker refresh")
+	}
 
 	require.True(t, ac.overlays.pickerActive(), "the older empty refresh must not close the newer in-place publication")
 	ac.overlays.pickerMu.Lock()

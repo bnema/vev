@@ -2,7 +2,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"sort"
@@ -12,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -186,6 +186,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		}
 		views = append(views, view)
 	}
+	publishedRemote := false
 	for _, host := range catalog {
 		publishedForHost := 0
 		for _, session := range host.entry.Sessions {
@@ -202,6 +203,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 			}
 			views = append(views, view)
 			publishedForHost++
+			publishedRemote = true
 		}
 		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch || host.status == remoteHostMalformed) {
 			view := remotePickerHostView(host.entry.Host, host.status)
@@ -209,6 +211,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 				view.Section = "REMOTE  " + host.entry.Host
 			}
 			views = append(views, view)
+			publishedRemote = true
 		}
 	}
 	for i, s := range stopped {
@@ -221,7 +224,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 			Stopped:           true,
 			ExpectedCreatedAt: &createdAt,
 		}
-		if grouped && i == 0 {
+		if grouped && i == 0 && (len(live) == 0 || publishedRemote) {
 			view.Section = "LOCAL"
 		}
 		views = append(views, view)
@@ -285,6 +288,29 @@ func remotePickerReasonText(reason string) string {
 	}
 }
 
+func pickerSearchSlashIndex(data, pending []byte) int {
+	if len(pending) != 0 {
+		return -1
+	}
+	for offset := 0; offset < len(data); {
+		if data[offset] == '/' {
+			return offset
+		}
+		if data[offset] != keys.ESC {
+			offset++
+			continue
+		}
+		if consumed, _ := routeListEscape(data[offset:]); consumed > 0 {
+			offset += consumed
+			continue
+		}
+		// An incomplete or unknown escape owns the rest of this input chunk;
+		// slash bytes inside it cannot transition the picker into search mode.
+		return -1
+	}
+	return -1
+}
+
 func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	rt := ac.overlays
 	var previewGeneration uint64
@@ -340,9 +366,9 @@ func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*
 	var result listInputResult
 	if rt.picker.SearchActive() {
 		result = d.handlePickerSearchInputLocked(ac, data)
-	} else if slash := bytes.IndexByte(data, '/'); slash >= 0 {
+	} else if slash := pickerSearchSlashIndex(data, rt.pickerPending); slash >= 0 {
 		result = handleListInputLocked(d.clock, data[:slash], d.pickerListInputState(ac), normalAction)
-		if result.action == 0 && !result.exit {
+		if result.action == 0 && !result.exit && len(rt.pickerPending) == 0 {
 			rt.picker.EnterSearch()
 			result.changed = true
 			if slash+1 < len(data) {

@@ -502,7 +502,7 @@ func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) b
 		return false
 	}
 	if pickerRow.hasRemoteKey && pickerRow.kind == rowSession {
-		return current.RemoteKey == nil || pickerRow.remoteKey == *current.RemoteKey
+		return pickerRow.focusable && (current.RemoteKey == nil || pickerRow.remoteKey == *current.RemoteKey)
 	}
 	if mode == SelectMoveTabSession {
 		return pickerRow.kind == rowSession
@@ -510,7 +510,7 @@ func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) b
 	// A stopped session with no retained tab metadata uses its selectable
 	// header as the default restart target and matches on exact session identity.
 	if current.TabID == "" && pickerRow.stopped {
-		return pickerRow.kind == rowSession
+		return pickerRow.kind == rowSession && pickerRow.selectable
 	}
 	if pickerRow.kind != rowTab {
 		return false

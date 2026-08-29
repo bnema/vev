@@ -806,7 +806,13 @@ func TestReplaceFromMovesStoppedHeaderCursorToNewFocusableTab(t *testing.T) {
 
 	tabTarget := emptyTarget
 	tabTarget.StoppedTab = domain.NewStableTabSelector("tab")
-	next := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &tabTarget, Stopped: true, RemoteActivation: RemoteRestart, Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}, SelectionConfig{Mode: SelectNavigationTab})
+	retained := []SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &tabTarget, Stopped: true, RemoteActivation: RemoteRestart, Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}
+	next := New(retained, SelectionConfig{Mode: SelectNavigationTab})
+	direct := New(retained, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: key.ID(), RemoteKey: &key}})
+	directSelected, ok := direct.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("tab"), directSelected.TabID, "retained tabs must not pin the current cursor to the contextual header")
+
 	m.ReplaceFrom(next)
 
 	selected, ok := m.Selected()

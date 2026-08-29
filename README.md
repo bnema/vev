@@ -65,7 +65,7 @@ Type a code or fuzzy-search the palette. Common default codes:
 | `MFP` / `MAT` | move pane / tab | `SSP` | session picker |
 | `DET` | detach | `NTC` | notifications |
 
-In the session picker, press `/` to fuzzy-search session and tab names; use Arrow keys or Ctrl+n/Ctrl+p to move between matches.
+In the session picker, press `/` to fuzzy-search session names, hosts, tab names, and tab details; use Arrow keys or Ctrl+n/Ctrl+p to move between matches. Escape clears the query, and a second Escape leaves search.
 
 When a client is attached to both a local and a remote daemon, `CNS` and `CNS <name>` list eligible daemon destinations in the existing palette. If two or more destinations exist, choose one explicitly with Up or Down before pressing Enter. The unqualified choice appears only when the client has an exact local route; remote choices remain host-qualified. A direct remote start without a proven local route never labels its home route as local.
 

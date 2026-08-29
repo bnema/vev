@@ -193,7 +193,7 @@ func TestPickerViewsGroupedModePutsNamedBeforeEphemeral(t *testing.T) {
 	require.Equal(t, "LOCAL", views[0].Section)
 	require.Empty(t, views[1].Section)
 	require.Empty(t, views[2].Section)
-	require.Equal(t, "LOCAL", views[3].Section, "the later stopped run repeats its section without reordering")
+	require.Empty(t, views[3].Section, "a contiguous local-only inventory keeps one section header")
 }
 
 func TestPickerSortToggleFlipsModeAndKeepsSelection(t *testing.T) {
@@ -909,6 +909,26 @@ func TestPickerSearchAcceptsPrintableActionsAndSplitUTF8(t *testing.T) {
 	require.True(t, active)
 	require.Equal(t, "jkqxs/é", query)
 	require.True(t, ac.overlays.pickerActive(), "a slash after navigation must enter search and keep later action bytes printable")
+}
+
+func TestPickerSlashInsideEscapeSequenceDoesNotEnterSearch(t *testing.T) {
+	for _, chunks := range [][][]byte{
+		{{0x1b, '[', '/', 'A'}},
+		{{0x1b, '['}, {'/', 'A'}},
+	} {
+		d, sess, ac, sends, releases := newManualTabSession(t, 1)
+		d.enterPicker(sess, ac)
+		awaitFrame(t, sends, wire.MsgOutput)
+		for _, chunk := range chunks {
+			d.handlePickerInput(ac, chunk)
+		}
+
+		ac.overlays.pickerMu.Lock()
+		searchActive := ac.overlays.picker != nil && ac.overlays.picker.SearchActive()
+		ac.overlays.pickerMu.Unlock()
+		require.False(t, searchActive)
+		releaseAll(releases)
+	}
 }
 
 func TestPickerSearchZeroMatchEnterKeepsPickerOpen(t *testing.T) {
