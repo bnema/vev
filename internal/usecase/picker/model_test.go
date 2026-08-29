@@ -1,6 +1,7 @@
 package picker
 
 import (
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -771,6 +772,14 @@ func TestSearchTitleKeepsQueryTailAndCaretAtNarrowWidth(t *testing.T) {
 	require.LessOrEqual(t, textCellWidth(title), 20)
 	require.True(t, strings.HasPrefix(title, " / "))
 	require.True(t, strings.HasSuffix(title, "v_ "), "the visible title keeps the query tail and caret")
+
+	for width := 0; width < 5; width++ {
+		t.Run(fmt.Sprintf("degenerate width %d", width), func(t *testing.T) {
+			got := m.SearchTitle(width)
+			require.LessOrEqual(t, textCellWidth(got), width)
+			require.NotContains(t, got, "v", "degenerate titles must not force a query cell")
+		})
+	}
 }
 
 func TestSearchDoesNotHighlightEllipsisForTruncatedWideMatch(t *testing.T) {

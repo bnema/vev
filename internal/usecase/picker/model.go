@@ -772,9 +772,10 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 		contentClipX := clipX
 		nameWidth := rect.Width
+		badgeWidth := textCellWidth(badge)
 		if badge != "" {
-			nameWidth = max(rect.Width-len(badge)-1, 0)
-			contentClipX = max(rect.X, clipX-len(badge)-1)
+			nameWidth = max(rect.Width-badgeWidth-1, 0)
+			contentClipX = max(rect.X, clipX-badgeWidth-1)
 		}
 		originalName := name
 		name = ui.TruncateText(name, nameWidth)
@@ -797,7 +798,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.detail)
 			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			if badge != "" {
-				badgeX := max(rect.X, clipX-len(badge))
+				badgeX := max(rect.X, clipX-badgeWidth)
 				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, base)
 			}
 			continue

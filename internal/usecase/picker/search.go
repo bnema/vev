@@ -76,9 +76,16 @@ func (m *Model) SearchTitle(width ...int) string {
 	if len(width) == 0 || textCellWidth(full) <= width[0] {
 		return full
 	}
-	const prefix = " / "
-	available := max(width[0]-textCellWidth(prefix)-2, 1)
-	return prefix + tailCells(m.query.Value(), available) + "_ "
+	const (
+		prefix = " / "
+		suffix = "_ "
+	)
+	fixedWidth := textCellWidth(prefix) + textCellWidth(suffix)
+	if width[0] < fixedWidth {
+		return tailCells("_", width[0])
+	}
+	available := width[0] - fixedWidth
+	return prefix + tailCells(m.query.Value(), available) + suffix
 }
 
 func tailCells(text string, width int) string {
