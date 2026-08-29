@@ -169,7 +169,7 @@ func (m *Model) ReplaceFrom(next *Model) {
 }
 
 func sameTarget(left, right Target) bool {
-	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name || left.RemoteHost != right.RemoteHost || left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped || !sameOptionalInt64(left.ExpectedCreatedAt, right.ExpectedCreatedAt) {
+	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name || left.RemoteHost != right.RemoteHost || left.TabID != right.TabID || left.Stopped != right.Stopped || !sameOptionalInt64(left.ExpectedCreatedAt, right.ExpectedCreatedAt) {
 		return false
 	}
 	if left.RemoteKey == nil || right.RemoteKey == nil {

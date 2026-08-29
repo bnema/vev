@@ -1271,11 +1271,11 @@ func TestRemotePickerRefreshPreservesQueryEditedDuringBuild(t *testing.T) {
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 		close(refreshed)
 	}()
-	<-rebuildReached
+	receiveRemotePickerClose(t, rebuildReached, "picker rebuild")
 
 	d.handlePickerInput(ac, []byte("-after"))
 	close(allowPublication)
-	<-refreshed
+	receiveRemotePickerClose(t, refreshed, "picker refresh")
 
 	ac.overlays.pickerMu.Lock()
 	defer ac.overlays.pickerMu.Unlock()

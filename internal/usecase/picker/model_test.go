@@ -806,6 +806,23 @@ func TestReplaceFromMovesStoppedHeaderCursorToNewFocusableTab(t *testing.T) {
 	require.Equal(t, 1, m.SelectedIndex(), "the contextual stopped header must not retain focus after real tabs appear")
 }
 
+func TestReplaceFromPreservesStableTabAcrossReordering(t *testing.T) {
+	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "first", Name: "first"}, {TabID: "selected", Name: "selected"}}}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "s", TabID: "selected"}})
+	next := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "selected", Name: "selected"}, {TabID: "first", Name: "first"}}}}, SelectionConfig{Mode: SelectNavigationTab})
+
+	m.ReplaceFrom(next)
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, domain.TabStableID("selected"), selected.TabID)
+	require.Equal(t, 0, selected.TabIndex)
+}
+
+func TestFilteredSessionDoesNotLeaveOrphanSection(t *testing.T) {
+	m := New([]SessionView{{ID: "stopped", Section: "LOCAL", Name: "stopped", Stopped: true}}, SelectionConfig{Mode: SelectMovePaneTab})
+	require.Empty(t, m.rows)
+}
+
 func TestUnavailableStoppedRemoteUsesAvailabilityBadgeAndHint(t *testing.T) {
 	lifecycle := domain.SessionLifecycleID{1}
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}

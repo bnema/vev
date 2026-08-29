@@ -286,10 +286,13 @@ func New(sessions []SessionView, config SelectionConfig) *Model {
 	m := &Model{mode: config.Mode, selected: -1}
 	activeSelection := -1
 	for _, session := range sessions {
+		sessionRows := rowsForSession(session, config)
+		if len(sessionRows) == 0 {
+			continue
+		}
 		if session.Section != "" {
 			m.rows = append(m.rows, row{kind: rowSection, dispName: session.Section, dim: true})
 		}
-		sessionRows := rowsForSession(session, config)
 		for _, pickerRow := range sessionRows {
 			idx := len(m.rows)
 			m.rows = append(m.rows, pickerRow)

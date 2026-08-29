@@ -23,7 +23,9 @@ type overlayRuntime struct {
 	// pickerGeneration identifies one open lifecycle. It advances only when a
 	// picker is published, so delayed close and registration work can prove it
 	// still owns the exact lifecycle it captured.
-	pickerGeneration          uint64
+	pickerGeneration uint64
+	// pickerRefreshSequence advances for every rebuild attempt in one open
+	// lifecycle. A zero close token deliberately disables this extra fence.
 	pickerRefreshSequence     uint64
 	pickerTitle               string
 	pickerIntent              pickerIntent
