@@ -927,6 +927,14 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			enterHomePicker()
 			continue
 		}
+		if attemptRequest.Intent == protocol.IntentResume && !result.welcomed &&
+			attemptRequest.ExactTarget != nil && resumeNeedsExactAttach(result.err) {
+			attemptRequest.Intent = protocol.IntentAttach
+			attemptRequest.RemoteTarget = nil
+			resumeToken = 0
+			backoff = defaultReconnectBackoff.initial
+			continue
+		}
 		if !shouldReconnect(result.err) || resumeToken == 0 || ctx.Err() != nil {
 			if clearErr := reconnect.clear(); clearErr != nil {
 				return errors.Join(result.err, clearErr)
