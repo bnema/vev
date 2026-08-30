@@ -1031,43 +1031,39 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	if exactTarget == nil {
 		return errAttachmentTransition
 	}
+	// A close-and-dial handoff leaves this daemon's Kitty namespace. A
+	// same-peer transition keeps the attachment and its namespace; the target
+	// scene diff deletes and replaces the source session's placements.
+	if samePeerEligible {
+		if err := offerSamePeerAttachTarget(effect, *exactTarget); err != nil {
+			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't offer local session switch", err)
+		}
+		return nil
+	}
 	handoff := protocol.AttachTarget{
 		Session:           sessionName,
 		Intent:            protocol.IntentAttach,
 		ExactTarget:       exactTarget,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-		SamePeer:          samePeerEligible,
 	}
 	if protocol.ValidateAttachTarget(handoff) != nil {
 		return errAttachmentTransition
 	}
-	// A close-and-dial handoff leaves this daemon's Kitty namespace. A
-	// same-peer transition keeps the attachment and its namespace; the target
-	// scene diff deletes and replaces the source session's placements.
-	if !samePeerEligible {
-		if err := d.cleanupAttachmentOutput(effect.ac); err != nil {
-			return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up attachment output before local handoff", err)
-		}
-	} else {
-		effect.ac.offerSamePeerTarget(*exactTarget)
+	if err := d.cleanupAttachmentOutput(effect.ac); err != nil {
+		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't clean up attachment output before local handoff", err)
 	}
 	if err := effect.sendControl(handoff); err != nil {
-		if samePeerEligible {
-			effect.ac.clearSamePeerOffer()
-		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't offer local session switch", err)
 	}
-	if !samePeerEligible {
-		// Stopped and explicit non-default index targets retain the close-and-dial
-		// handoff instead of losing their target-specific transition semantics.
-		// Keep the source link open until the client receives the ordered cleanup
-		// and handoff frames, then let the client's close drive ordinary parking.
-		if guard.closePicker {
-			d.closePickerForGuard(effect.ac, guard)
-		}
-		effect.bindActionEnd(d, "detach")
-		effect.End()
+	// Stopped and explicit non-default index targets retain the close-and-dial
+	// handoff instead of losing their target-specific transition semantics.
+	// Keep the source link open until the client receives the ordered cleanup
+	// and handoff frames, then let the client's close drive ordinary parking.
+	if guard.closePicker {
+		d.closePickerForGuard(effect.ac, guard)
 	}
+	effect.bindActionEnd(d, "detach")
+	effect.End()
 	return nil
 }
 

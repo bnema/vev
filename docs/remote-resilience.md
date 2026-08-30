@@ -38,9 +38,10 @@ across local, direct remote, and picker-discovered attachments. Catalog targets
 retain exact endpoints, while route snapshots keep endpoints private; rows from
 those sources therefore remain separate when their authority cannot be compared
 exactly. The daemon renders the latest attachment snapshot; active routes are
-metadata-only, while `JRS` and `BCK` send typed
-key/generation actions back to the client. Route history is process-local and
-is not persisted or shared between clients.
+metadata-only. `JRS` and cross-daemon `BCK` transitions send typed
+key/generation actions back to the client, while `BCK` to a live session on the
+current authenticated daemon uses an in-band switch. Route history is
+process-local and is not persisted or shared between clients.
 
 A picker-selected remote target is a direct handoff with one input pump. Exact
 lifecycle/name identities are carried separately from display labels, and a
