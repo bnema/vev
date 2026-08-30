@@ -116,6 +116,7 @@ func cloneRoutePosition(position *protocol.RoutePosition) *protocol.RoutePositio
 }
 
 func routeCandidateForAttach(request AttachRequest, identity protocol.CommittedRouteIdentity, dialer ports.ClientDialer, resumeToken uint64) routeCandidate {
+	created := request.Intent == protocol.IntentNew
 	origin := normalizeRouteOrigin(request.Origin, request.Remote)
 	originKey := normalizeRouteOriginKey(request.OriginKey, origin)
 	kind := protocol.RouteKindLocal
@@ -135,9 +136,16 @@ func routeCandidateForAttach(request AttachRequest, identity protocol.CommittedR
 	request = cloneAttachRequest(request)
 	request.Origin = origin
 	request.OriginKey = originKey
+	request.Intent = protocol.IntentAttach
 	request.SessionName = identity.Target.SessionName
 	request.ExactTarget = &identity.Target
 	request.HostLabel = hostLabel
+	// Client-owned environment is creation input, not durable route metadata.
+	// Once a remote creation commits, later navigation must preserve the new
+	// session's daemon-owned environment and can safely advertise hybrid Home.
+	if created && kind == protocol.RouteKindRemote {
+		request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+	}
 	// Discovery targets are point-in-time attach authority, including a live
 	// tab selector. Once Welcome commits an exact route, mutable tab memory is
 	// carried independently by PreferredTabID.
