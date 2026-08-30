@@ -173,6 +173,8 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 	}
 	intent, source := rt.pickerIntent, rt.pickerSource
 	observedModel, observedGeneration := rt.picker, rt.pickerGeneration
+	rt.pickerRefreshSequence++
+	refreshSequence := rt.pickerRefreshSequence
 	current := picker.SourceFilter{}
 	if intent != pickerNavigate || opts.preserveSelection {
 		cursor, _ := rt.picker.Cursor()
@@ -187,19 +189,17 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 	}
 	if intent != pickerNavigate {
 		if _, ok := model.Selected(); !ok {
-			d.closePickerIfCurrent(ac, observedModel, observedGeneration)
+			d.closePickerIfCurrentRefresh(ac, observedModel, observedGeneration, refreshSequence)
 			return
 		}
 	}
-	// Navigate-only: move intents keep the selection-or-close logic above
-	// authoritative, so a stale row index can never override it.
-	if intent == pickerNavigate && opts.nearestRow >= 0 {
-		model.SelectNearestRow(opts.nearestRow)
-	}
 	rt.pickerMu.Lock()
-	updated := rt.picker == observedModel && rt.pickerGeneration == observedGeneration && rt.pickerIntent == intent && rt.pickerSource == source
+	updated := rt.picker == observedModel && rt.pickerGeneration == observedGeneration && rt.pickerRefreshSequence == refreshSequence && rt.pickerIntent == intent && rt.pickerSource == source
 	if updated {
-		rt.picker = model
+		rt.picker.ReplaceFrom(model)
+		if intent == pickerNavigate && opts.nearestRow >= 0 {
+			rt.picker.SelectNearestRow(opts.nearestRow)
+		}
 		rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
 	}
 	rt.pickerMu.Unlock()
