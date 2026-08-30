@@ -1262,6 +1262,71 @@ func TestRemoteCreationFailuresRestoreSourceAndReportCorrelation(t *testing.T) {
 	}
 }
 
+func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	remoteLifecycle := domain.SessionLifecycleID{2}
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+			SessionID: name + "-id", SessionName: name, ResumeToken: 1,
+			Capabilities: protocol.CapabilityResume,
+			CommittedIdentity: &protocol.CommittedRouteIdentity{
+				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
+			},
+		}))
+	}
+	createRemote := protocol.AttachTarget{
+		RequestID: 1, Endpoint: "remote", Session: "created", Intent: protocol.IntentNew,
+		EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+	}
+	local1 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("misc", localLifecycle)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(createRemote))},
+	}}
+	remote1 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("created", remoteLifecycle)},
+		{f: frameOf(wire.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{
+			SnapshotGeneration: 2, Key: 1, Generation: 1,
+		}))},
+	}}
+	local2 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("misc", localLifecycle)},
+		{f: frameOf(wire.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{
+			SnapshotGeneration: 3, Key: 2, Generation: 2,
+		}))},
+	}}
+	remote2 := &recordingTransport{recvs: []recvItem{
+		{f: welcome("created", remoteLifecycle)},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote1, remote2}}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
+		require.Equal(t, createRemote, target)
+		return remoteDialer, client.AttachRequest{
+			Intent: protocol.IntentNew, SessionName: target.Session, Remote: true,
+			Origin: protocol.RouteOriginDiscovery, OriginKey: target.Endpoint,
+			EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+		}, nil
+	}
+
+	err := runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "misc", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), remoteDialer.calls.Load())
+	returnHello := helloFromSend(t, remote2)
+	require.Equal(t, protocol.IntentResume, returnHello.Intent)
+	require.Equal(t, "created", returnHello.Name)
+	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: remoteLifecycle, SessionName: "created"}, returnHello.ExactTarget)
+	require.Nil(t, returnHello.RemoteTarget)
+	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, returnHello.EnvironmentPolicy)
+	require.Equal(t, protocol.NavigationCapabilityHomePicker, returnHello.NavigationCapabilities)
+}
+
 func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
