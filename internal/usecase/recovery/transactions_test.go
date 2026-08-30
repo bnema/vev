@@ -294,6 +294,34 @@ func TestResetIncompatibleReplacesExactHealthyCheckpoint(t *testing.T) {
 	require.Equal(t, []domain.IncarnationID{old.IncarnationID}, repository.deletedIDs)
 }
 
+func TestDeleteExactDoesNotDeleteSameNameReplacement(t *testing.T) {
+	oldID := domain.IncarnationID{1}
+	newID := domain.IncarnationID{2}
+	catalogue := newTransactionCatalogue(domain.CatalogueRecord{Name: "work", IncarnationID: newID, Cwd: "/tmp", CreatedAt: 22, UpdatedAt: 22})
+	repository := &transactionRepository{}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
+
+	require.NoError(t, coordinator.DeleteExact(context.Background(), "work", oldID, 11))
+	record, ok, err := catalogue.Record("work")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, newID, record.IncarnationID)
+	require.Empty(t, repository.deleteCalls)
+}
+
+func TestDeleteExactDeletesMatchingLifecycle(t *testing.T) {
+	id := domain.IncarnationID{1}
+	catalogue := newTransactionCatalogue(domain.CatalogueRecord{Name: "work", IncarnationID: id, Cwd: "/tmp", CreatedAt: 11, UpdatedAt: 11})
+	repository := &transactionRepository{}
+	coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
+
+	require.NoError(t, coordinator.DeleteExact(context.Background(), "work", id, 11))
+	_, ok, err := catalogue.Record("work")
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Equal(t, []domain.IncarnationID{id}, repository.deleteCalls)
+}
+
 func TestResetIncompatibleDeleteFailureReturnsCommittedFreshAuthority(t *testing.T) {
 	t.Parallel()
 	old := healthyTransactionRecord()

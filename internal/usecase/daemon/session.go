@@ -1165,9 +1165,9 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 		var err error
 		if effect != nil {
 			effect.bindActionEnd(d, "close-tab")
-			err = d.killSessionForAttachment(sess, protocol.ReasonSessionKilled, false, effect, "close-tab")
+			err = d.killSessionForAttachment(sess, protocol.ReasonSessionKilled, true, effect, "close-tab")
 		} else {
-			err = d.killSession(sess, protocol.ReasonSessionKilled, false)
+			err = d.killSession(sess, protocol.ReasonSessionKilled, true)
 		}
 		if err != nil {
 			d.log.Warn("closing last tab failed", "session", name, "err", err)
@@ -1240,7 +1240,7 @@ func (d *Daemon) beginSnapshotPurge(_ string, _ domain.IncarnationID) error {
 // finishSnapshotPurge removes catalogue metadata first, then deletes the
 // incarnation directory. Startup garbage collection removes the directory if
 // the second step is interrupted.
-func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.IncarnationID) error {
+func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, incarnation domain.IncarnationID, createdAt int64) error {
 	if !d.persistEnabled {
 		return nil
 	}
@@ -1252,7 +1252,7 @@ func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, _ domain.
 	}
 	purgeCtx, cancel := context.WithTimeout(ctx, snapshotFinalFlushTimeout)
 	defer cancel()
-	return d.recovery.Delete(purgeCtx, name)
+	return d.recovery.DeleteExact(purgeCtx, name, incarnation, createdAt)
 }
 
 // retryStoppedPurge completes a previously closed session's durable purge.
@@ -1285,16 +1285,16 @@ func (d *Daemon) retryStoppedPurgeContextExact(ctx context.Context, name string,
 	}
 	stopped.purging = true
 	d.inactive[name] = stopped
+	d.mu.Unlock()
 
 	if err := d.beginSnapshotPurge(name, stopped.incarnation); err != nil {
-		d.mu.Unlock()
 		return err
 	}
-	if err := d.finishSnapshotPurge(ctx, name, stopped.incarnation); err != nil {
-		d.mu.Unlock()
+	if err := d.finishSnapshotPurge(ctx, name, stopped.incarnation, stopped.createdAt); err != nil {
 		return err
 	}
-	if current, ok := d.inactive[name]; ok && current.purging {
+	d.mu.Lock()
+	if current, ok := d.inactive[name]; ok && current.purging && current.sameLifecycle(stopped) {
 		delete(d.inactive, name)
 	}
 	d.mu.Unlock()
@@ -1810,17 +1810,18 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	// another generation after this destructive source deletion. Keep the hidden
 	// stopped record when deletion fails so a repeated live kill can retry.
 	if !ephemeral && purge {
-		d.mu.Lock()
-		sess.mu.Lock()
-		err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation)
-		sess.mu.Unlock()
+		err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation, stoppedRecord.CreatedAt)
 		if err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
-		} else if stopped, ok := d.inactive[stoppedName]; ok && stopped.purging {
-			delete(d.inactive, stoppedName)
+		} else {
+			expected := inactiveSessionFromRecord(stoppedRecord, protocol.SessionDown, nil)
+			d.mu.Lock()
+			if stopped, ok := d.inactive[stoppedName]; ok && stopped.purging && stopped.sameLifecycle(expected) {
+				delete(d.inactive, stoppedName)
+			}
+			d.mu.Unlock()
 		}
-		d.mu.Unlock()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

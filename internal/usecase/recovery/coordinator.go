@@ -170,8 +170,8 @@ func (c *Coordinator) Rename(ctx context.Context, oldName, newName string) (doma
 	return record, nil
 }
 
-// Delete removes the catalogue record before deleting its incarnation. A crash
-// between those steps leaves an orphan that startup garbage collection removes.
+// Delete removes the current catalogue record before deleting its incarnation.
+// Callers that captured lifecycle identity must use DeleteExact.
 func (c *Coordinator) Delete(ctx context.Context, name string) error {
 	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
 		return errors.New("recovery: incomplete delete dependencies")
@@ -194,6 +194,33 @@ func (c *Coordinator) Delete(ctx context.Context, name string) error {
 		return err
 	}
 	return c.repository.DeleteIncarnation(ctx, record.IncarnationID)
+}
+
+// DeleteExact removes a catalogue record only while it still identifies the
+// lifecycle captured by the caller. A stale teardown cannot delete a same-name
+// replacement created after that capture.
+func (c *Coordinator) DeleteExact(ctx context.Context, name string, incarnation domain.IncarnationID, createdAt int64) error {
+	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil {
+		return errors.New("recovery: incomplete exact delete dependencies")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+	unlock := c.locks.Lock([]string{name})
+	defer unlock()
+	record, ok, err := c.catalogue.Record(name)
+	if err != nil {
+		return err
+	}
+	if !ok || record.IncarnationID != incarnation || record.CreatedAt != createdAt {
+		return nil
+	}
+	if err := c.catalogue.Delete(name); err != nil {
+		return err
+	}
+	return c.repository.DeleteIncarnation(ctx, incarnation)
 }
 
 // CollectGarbage takes a catalogue snapshot and applies retention while all

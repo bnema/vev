@@ -1232,7 +1232,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	WithStore(t, store)(d)
 	require.NoError(t, testPersister(t, d).Save(persist.Record{Name: "old", IncarnationID: domain.IncarnationID{1}, Cwd: "/tmp", CreatedAt: 1, UpdatedAt: 1}))
-	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp", createdAt: 1}
+	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp", createdAt: 1, incarnation: domain.IncarnationID{1}}
 	require.NoError(t, d.killPickerTarget(picker.Target{Name: "old", Stopped: true}))
 	require.False(t, state.has("old"))
 	d.mu.Lock()

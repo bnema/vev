@@ -1678,11 +1678,8 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
 				return []*reconnectToastRecordingTransport{tr1, tr2}
 			},
-			sleep: func(context.CancelFunc) bool { return true },
-			wantErr: func(t *testing.T, err error) {
-				var detached *DetachedError
-				require.True(t, errors.As(err, &detached))
-			},
+			sleep:   func(context.CancelFunc) bool { return true },
+			wantErr: func(t *testing.T, err error) { require.NoError(t, err) },
 		},
 	}
 

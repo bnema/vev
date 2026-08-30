@@ -646,6 +646,81 @@ type routeNavigationSelection struct {
 	noOp               bool
 }
 
+type killedRouteSelection struct {
+	selected           routeRecord
+	sourceAliases      []routeIdentity
+	snapshotGeneration routeGeneration
+	active             routeIdentity
+}
+
+// killedSelection captures the newest route that does not identify the active
+// endpoint authority and exact lifecycle. Route origin is intentionally not
+// part of alias equivalence: direct and discovery routes can retain the same
+// canonical endpoint authority.
+func (l *routeLedger) killedSelection() (killedRouteSelection, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	selection := killedRouteSelection{snapshotGeneration: l.generation, active: l.active}
+	activeIndex := l.indexByIdentityLocked(l.active)
+	if activeIndex < 0 {
+		return selection, false
+	}
+	source := l.entries[activeIndex]
+	for _, entry := range l.entries {
+		if entry.originKey == source.originKey && entry.target.LifecycleID == source.target.LifecycleID {
+			selection.sourceAliases = append(selection.sourceAliases, entry.identity)
+			continue
+		}
+		if selection.selected.identity.empty() {
+			selection.selected = cloneRouteRecord(entry)
+		}
+	}
+	return selection, !selection.selected.identity.empty()
+}
+
+func (l *routeLedger) retireKilled(selection killedRouteSelection) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.generation != selection.snapshotGeneration || l.active != selection.active {
+		return errRouteStaleSelection
+	}
+	l.removeKilledAliasesLocked(selection.sourceAliases)
+	l.generation++
+	return nil
+}
+
+func (l *routeLedger) commitKilledTransition(selection killedRouteSelection, candidate routeCandidate) error {
+	candidate, err := prepareRouteCandidate(candidate)
+	if err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.generation != selection.snapshotGeneration || l.active != selection.active ||
+		l.indexByIdentityLocked(selection.selected.identity) < 0 {
+		return errRouteStaleSelection
+	}
+	l.removeKilledAliasesLocked(selection.sourceAliases)
+	if _, err = l.commitLocked(candidate); err != nil {
+		return err
+	}
+	if l.previous.empty() && len(l.entries) > 1 {
+		l.previous = l.entries[1].identity
+	}
+	return nil
+}
+
+func (l *routeLedger) removeKilledAliasesLocked(aliases []routeIdentity) {
+	for i := len(l.entries) - 1; i >= 0; i-- {
+		for _, alias := range aliases {
+			if l.entries[i].identity == alias {
+				l.removeAtLocked(i)
+				break
+			}
+		}
+	}
+}
+
 // navigationSelection validates an action against the latest complete
 // snapshot and captures the selected route, live restoration route, snapshot
 // generation, and active identity under one read lock. The commit phase uses

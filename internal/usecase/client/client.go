@@ -468,6 +468,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	routeNavigationPending := false
 	routeNavigationResumeFallback := false
 	var routeNavigationSelection *routeNavigationSelection
+	var killedSelection *killedRouteSelection
+	killedResumeFallback := false
 	var routeNavigationFallback *attachRoute
 	var routeNavigationAction *protocol.RouteNavigationAction
 	creationPending := false
@@ -633,6 +635,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if err != nil {
 			err = handshakeContextError(ctx, timedOut, err)
 			finishHandshake()
+			if killedSelection != nil {
+				return errors.Join(err, r.ledger.retireKilled(*killedSelection))
+			}
 			if creationPending && creationFallback != nil && ctx.Err() == nil {
 				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(err)}
 				route := *creationFallback
@@ -671,6 +676,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if transport == nil {
 			finishHandshake()
 			err := errors.New("vev: dialer returned nil transport")
+			if killedSelection != nil {
+				return errors.Join(err, r.ledger.retireKilled(*killedSelection))
+			}
 			if creationPending && creationFallback != nil {
 				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
 				route := *creationFallback
@@ -721,6 +729,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			request:                  attemptRequest,
 			resumeToken:              resumeToken,
 			routeNavigationSelection: routeNavigationSelection,
+			killedSelection:          killedSelection,
 			clientID:                 processClientID,
 			milestones:               &ms,
 			themeState:               themeState,
@@ -771,6 +780,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			creationPending = false
 			creationFallback = nil
 			creationRequestID = 0
+		}
+		if result.err == nil && result.welcomed && killedSelection != nil {
+			killedSelection = nil
+			killedResumeFallback = false
 		}
 		if result.err == nil && result.welcomed && routeNavigationPending {
 			routeNavigationPending = false
@@ -981,6 +994,51 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return clearErr
 			}
 			return nil
+		}
+		var detached *DetachedError
+		if errors.As(result.err, &detached) && detached.Reason == protocol.ReasonSessionKilled {
+			if r.ledger == nil {
+				return errors.New("vev: route ledger unavailable after session kill")
+			}
+			selection, hasPrevious := r.ledger.killedSelection()
+			if !hasPrevious {
+				if err := r.ledger.retireKilled(selection); err != nil {
+					return err
+				}
+				return reconnect.clear()
+			}
+			killedSelection = &selection
+			dialer = selection.selected.dialer
+			attemptRequest = cloneAttachRequest(selection.selected.request)
+			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
+			attemptRequest.NavigationCapabilities = 0
+			resumeToken = selection.selected.resumeToken
+			killedResumeFallback = resumeToken != 0
+			if resumeToken != 0 {
+				attemptRequest.Intent = protocol.IntentResume
+			} else {
+				attemptRequest.Intent = protocol.IntentAttach
+			}
+			homeRoute = nil
+			returnRoute = nil
+			homeNavigationPending = false
+			returnNavigationPending = false
+			routeNavigationPending = false
+			routeNavigationSelection = nil
+			routeNavigationFallback = nil
+			routeNavigationAction = nil
+			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
+			backoff = defaultReconnectBackoff.initial
+			continue
+		}
+		if killedSelection != nil {
+			if killedResumeFallback && resumeNeedsExactAttach(result.err) {
+				attemptRequest.Intent = protocol.IntentAttach
+				resumeToken = 0
+				killedResumeFallback = false
+				continue
+			}
+			return errors.Join(result.err, r.ledger.retireKilled(*killedSelection))
 		}
 		if result.welcomed {
 			homeNavigationPending = false
@@ -1205,6 +1263,7 @@ type attachAttempt struct {
 	request                  AttachRequest
 	resumeToken              uint64
 	routeNavigationSelection *routeNavigationSelection
+	killedSelection          *killedRouteSelection
 	clientID                 [16]byte
 	milestones               *milestones
 	themeState               *terminalThemeState
@@ -1444,7 +1503,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if !a.transientPicker {
 			candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
 			var commitErr error
-			if a.routeNavigationSelection != nil {
+			if a.killedSelection != nil {
+				commitErr = a.runner.ledger.commitKilledTransition(*a.killedSelection, candidate)
+			} else if a.routeNavigationSelection != nil {
 				selection := *a.routeNavigationSelection
 				commitErr = a.runner.ledger.commitTransition(selection.selected.identity, selection.snapshotGeneration, selection.active, candidate)
 			} else {

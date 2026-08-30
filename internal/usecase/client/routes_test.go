@@ -33,6 +33,64 @@ func routeTestCandidate(index byte, origin protocol.RouteOrigin) routeCandidate 
 	}
 }
 
+func TestRouteLedgerKilledSelectionRetiresSourceAliasesAndCommitsPrevious(t *testing.T) {
+	ledger := newRouteLedger()
+	older := routeTestCandidate(0, protocol.RouteOriginLocal)
+	older.originKey = "local"
+	_, err := ledger.commit(older)
+	require.NoError(t, err)
+	prior := routeTestCandidate(1, protocol.RouteOriginLocal)
+	prior.originKey = "local"
+	prior.request.PreferredTabID = "tab-prior"
+	_, err = ledger.commit(prior)
+	require.NoError(t, err)
+
+	alias := routeTestCandidate(2, protocol.RouteOriginRemote)
+	alias.originKey = "ssh://host"
+	_, err = ledger.commit(alias)
+	require.NoError(t, err)
+	active := alias
+	active.origin = protocol.RouteOriginDiscovery
+	active.target.SessionName = "renamed-session"
+	active.presentation.name = active.target.SessionName
+	active.request.SessionName = active.target.SessionName
+	_, err = ledger.commit(active)
+	require.NoError(t, err)
+
+	selection, ok := ledger.killedSelection()
+	require.True(t, ok)
+	require.Equal(t, prior.target, selection.selected.target)
+
+	candidate := routeCandidateForAttach(selection.selected.request,
+		protocol.CommittedRouteIdentity{Target: prior.target}, selection.selected.dialer, 0)
+	require.NoError(t, ledger.commitKilledTransition(selection, candidate))
+
+	snapshot := ledger.snapshot()
+	require.Equal(t, prior.target, snapshot.ActiveEntry.Target)
+	require.Len(t, snapshot.Entries, 1)
+	require.Equal(t, older.target, snapshot.Entries[0].Target)
+	require.Equal(t, snapshot.Entries[0].Key, snapshot.Previous.Key)
+	require.Equal(t, domain.TabStableID("tab-prior"), ledger.entries[0].request.PreferredTabID)
+	for _, entry := range ledger.entries {
+		require.NotEqual(t, alias.target, entry.target)
+	}
+}
+
+func TestRouteLedgerKilledSelectionWithoutPreviousRetiresActive(t *testing.T) {
+	ledger := newRouteLedger()
+	active := routeTestCandidate(1, protocol.RouteOriginRemote)
+	active.originKey = "ssh://host"
+	_, err := ledger.commit(active)
+	require.NoError(t, err)
+
+	selection, ok := ledger.killedSelection()
+	require.False(t, ok)
+	require.NoError(t, ledger.retireKilled(selection))
+	require.Empty(t, ledger.entries)
+	require.Empty(t, ledger.activeRef())
+	require.Empty(t, ledger.homeRef())
+}
+
 func TestRouteCandidateRetainsHostLabelWithoutDiscoveryTarget(t *testing.T) {
 	target := routeTestTarget(1)
 	candidate := routeCandidateForAttach(AttachRequest{

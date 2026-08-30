@@ -515,6 +515,47 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 	require.Equal(t, int32(1), dialer.calls.Load(), "same-peer switching must not dial a replacement transport")
 }
 
+func TestKilledSessionReturnsToPreviousLocalRoute(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	firstTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "first"}
+	secondTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "second"}
+	welcome := func(target protocol.ExactSessionTarget) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+			SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 1,
+			Capabilities:      protocol.CapabilityResume,
+			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
+		}))
+	}
+	active := &recordingTransport{recvs: []recvItem{
+		{f: welcome(firstTarget)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "second", Intent: protocol.IntentAttach, ExactTarget: &secondTarget,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: secondTarget}))},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))},
+	}}
+	previous := &recordingTransport{recvs: []recvItem{
+		{f: welcome(firstTarget)},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	dialer := &sequenceDialer{trs: []wire.Transport{active, previous}}
+
+	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "first", Origin: protocol.RouteOriginLocal,
+		OriginKey: "local", EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(2), dialer.calls.Load())
+	hello := helloFromSend(t, previous)
+	require.Equal(t, protocol.IntentResume, hello.Intent)
+	require.Equal(t, firstTarget, *hello.ExactTarget)
+	require.Equal(t, int32(1), term.restoreCount.Load())
+}
+
 func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
@@ -2497,16 +2538,14 @@ func TestRunReturnsWhenRemoteHostLearnerStalls(t *testing.T) {
 	}
 }
 
-func TestRunDoesNotRetryTerminalDetachedError(t *testing.T) {
+func TestRunExitsCleanlyWhenKilledSessionHasNoPriorRoute(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
 	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))}}}
 	d := &sequenceDialer{trs: []wire.Transport{tr}}
 
 	err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: false})
-	require.Error(t, err)
-	var de *client.DetachedError
-	require.True(t, errors.As(err, &de))
+	require.NoError(t, err)
 	require.Equal(t, int32(1), d.calls.Load())
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }
