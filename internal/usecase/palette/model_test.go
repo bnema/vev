@@ -199,6 +199,22 @@ func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {
 	require.Len(t, m.Matches(), 3)
 }
 
+func TestModelSelectsExactSessionNameAheadOfPrefix(t *testing.T) {
+	m := New([]Result{
+		NewActiveSessionResultWithDisplayOrigin(testExactTarget("vev-vt", 1), time.Time{}, "arch"),
+		NewActiveSessionResultWithDisplayOrigin(testExactTarget("vev", 2), time.Time{}, "arch"),
+	})
+	for _, r := range "vev" {
+		m.Insert(r)
+	}
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	name, ok := selected.SessionName()
+	require.True(t, ok)
+	require.Equal(t, "vev", name)
+}
+
 func TestModelNoMatchesClearsSelection(t *testing.T) {
 	m := New(CommandResults([]command.Command{cmd("ABC", "Alpha", "first")}))
 	m.Insert('z')

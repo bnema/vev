@@ -2,6 +2,7 @@ package palette
 
 import (
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -53,6 +54,7 @@ type remoteSessionPayload struct {
 }
 
 type routePayload struct {
+	name   string
 	label  string
 	action protocol.RouteNavigationAction
 }
@@ -118,8 +120,8 @@ func NewRemoteSessionResult(key domain.RemoteSessionKey, target domain.RemoteSes
 }
 
 // NewRecentRouteResult creates an immutable client-ledger route target.
-func NewRecentRouteResult(label string, action protocol.RouteNavigationAction) Result {
-	return Result{kind: ResultKindRecentRoute, route: routePayload{label: label, action: action}}
+func NewRecentRouteResult(name, label string, action protocol.RouteNavigationAction) Result {
+	return Result{kind: ResultKindRecentRoute, route: routePayload{name: name, label: label, action: action}}
 }
 
 // NewCreateSessionDestination creates an immutable destination template. The
@@ -200,6 +202,23 @@ func (r Result) sessionDisplayPrefix() string {
 
 func (r Result) SearchText() string {
 	return r.DisplayText()
+}
+
+// searchTerms returns the user-facing identity and qualified label without the
+// action prefix. The offset maps term rune positions back into DisplayText.
+func (r Result) searchTerms() (identity, label string, offset int, ok bool) {
+	switch r.kind {
+	case ResultKindCommand:
+		return r.command.Code, r.command.Code, 0, true
+	case ResultKindActiveSession, ResultKindStoppedSession:
+		return r.session.target.SessionName, r.session.display, utf8.RuneCountInString(r.sessionDisplayPrefix()), true
+	case ResultKindRemoteSession:
+		return r.remoteSession.key.Name, r.remoteSession.key.Display(), utf8.RuneCountInString(activeSessionDisplayPrefix), true
+	case ResultKindRecentRoute:
+		return r.route.name, r.route.label, utf8.RuneCountInString(activeSessionDisplayPrefix), true
+	default:
+		return "", "", 0, false
+	}
 }
 
 // Command returns the command payload only for command results.

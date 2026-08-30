@@ -267,7 +267,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if _, exists := represented[identity]; exists && paletteRouteRepresentsDaemonSession(entry, daemonDisplayOrigin) {
 			continue
 		}
-		results = append(results, palette.NewRecentRouteResult(label, protocol.RouteNavigationAction{
+		results = append(results, palette.NewRecentRouteResult(entry.Target.SessionName, label, protocol.RouteNavigationAction{
 			SnapshotGeneration: routeSnapshot.Generation,
 			Key:                entry.Key,
 			Generation:         entry.Generation,
