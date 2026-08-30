@@ -74,7 +74,7 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 
 func TestRecentRouteResultCarriesExactNavigationAction(t *testing.T) {
 	action := protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 7, Generation: 3}
-	result := NewRecentRouteResult("logs@edge", action)
+	result := NewRecentRouteResult("logs", "logs@edge", action)
 
 	require.Equal(t, ResultKindRecentRoute, result.Kind())
 	require.Equal(t, "Switch to session logs@edge", result.DisplayText())
@@ -86,7 +86,7 @@ func TestRecentRouteResultCarriesExactNavigationAction(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestSessionResultsSearchDisplayedActionText(t *testing.T) {
+func TestSessionResultsSearchSemanticNamesAndDisplayedActionText(t *testing.T) {
 	created := time.Date(2026, time.March, 1, 2, 3, 4, 0, time.UTC)
 	tests := []struct {
 		name      string
@@ -95,7 +95,7 @@ func TestSessionResultsSearchDisplayedActionText(t *testing.T) {
 		positions []int
 	}{
 		{name: "active prefix", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "switch", positions: []int{0, 1, 2, 3, 4, 5}},
-		{name: "active name", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "work", positions: []int{1, 8, 20, 21}},
+		{name: "active name", result: NewActiveSessionResult(testExactTarget("work", 1), created), query: "work", positions: []int{18, 19, 20, 21}},
 		{name: "stopped prefix", result: NewStoppedSessionResult(testExactTarget("archive", 2), created), query: "resume", positions: []int{0, 1, 2, 3, 4, 5}},
 		{name: "stopped name", result: NewStoppedSessionResult(testExactTarget("archive", 2), created), query: "archive", positions: []int{15, 16, 17, 18, 19, 20, 21}},
 	}
