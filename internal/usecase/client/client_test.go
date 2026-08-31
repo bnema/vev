@@ -823,6 +823,61 @@ func TestHybridPickerSameHostSwitchReusesRemoteTransport(t *testing.T) {
 	require.Equal(t, int32(1), remoteDialer.calls.Load(), "same-host picker switch must retain the authenticated remote transport")
 }
 
+func TestHybridBackSessionSamePeerOfferReusesRemoteTransport(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	sourceLifecycle := domain.SessionLifecycleID{2}
+	targetLifecycle := domain.SessionLifecycleID{3}
+	sourceExact := protocol.ExactSessionTarget{LifecycleID: sourceLifecycle, SessionName: "source"}
+	targetExact := protocol.ExactSessionTarget{LifecycleID: targetLifecycle, SessionName: "target"}
+	sourceTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: sourceLifecycle,
+		SessionName: "source", LiveTabID: "source-tab",
+	}
+	localInitial := hybridLocalBootstrap(localLifecycle, sourceTarget)
+	firstSwitchSent := make(chan struct{})
+	backSwitchSent := make(chan struct{})
+	remote := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("source", sourceLifecycle)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "target", Intent: protocol.IntentAttach, ExactTarget: &targetExact,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: targetExact})), wait: firstSwitchSent},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "source", Intent: protocol.IntentAttach, ExactTarget: &sourceExact,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: sourceExact})), wait: backSwitchSent},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	remote.onSend = func(frame wire.Frame) {
+		if frame.Type != wire.MsgSamePeerSwitchRequest {
+			return
+		}
+		request, err := wire.UnmarshalSamePeerSwitchRequest(frame.Payload)
+		require.NoError(t, err)
+		switch request.Target {
+		case targetExact:
+			close(firstSwitchSent)
+		case sourceExact:
+			close(backSwitchSent)
+		}
+	}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{markedDatagramTransport{Transport: remote}}}
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	require.NoError(t, runTestClient(ctx, deps, client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+	}))
+	require.Equal(t, int32(1), remoteDialer.calls.Load(), "BCK must retain the authenticated remote transport")
+}
+
 func TestHybridPickerLocalSelectionCommitsLocalRoute(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

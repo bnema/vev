@@ -6,8 +6,9 @@ import (
 )
 
 // backSessionForAttachment delegates previous-route ownership to the client
-// once it has published a complete route snapshot. There is no daemon-local
-// previous-session fallback after the global-history cutover.
+// once it has published a complete route snapshot. A live route on the current
+// daemon uses the authenticated same-peer path; all other routes return to the
+// client for close-and-dial navigation.
 func (d *Daemon) backSessionForAttachment(effect *attachmentEffect) error {
 	if d == nil || !effect.current() || effect.sess == nil || effect.ac == nil {
 		return nil
@@ -21,6 +22,12 @@ func (d *Daemon) backSessionForAttachment(effect *attachmentEffect) error {
 	}
 	if snapshot.Previous.Key == 0 || snapshot.Previous.Generation == 0 {
 		return nil
+	}
+	if target, ok := effect.ac.routeAttentionTarget(snapshot.Previous); ok {
+		targetSession, _, live := d.samePeerTarget(protocol.SamePeerSwitchRequest{Target: target})
+		if live && targetSession != effect.sess {
+			return offerSamePeerAttachTarget(effect, target)
+		}
 	}
 	return d.sendRecentRouteNavigationActionForAttachment(effect, protocol.RouteNavigationAction{
 		SnapshotGeneration: snapshot.Generation,

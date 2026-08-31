@@ -11,6 +11,30 @@ func (ac *attachedClient) offerSamePeerTarget(target protocol.ExactSessionTarget
 	ac.samePeerOfferMu.Unlock()
 }
 
+// offerSamePeerAttachTarget arms the exact target before publishing its
+// endpoint-empty handoff, then rolls the offer back if publication fails.
+func offerSamePeerAttachTarget(effect *attachmentEffect, target protocol.ExactSessionTarget) error {
+	if effect == nil || effect.ac == nil || !effect.current() {
+		return errAttachmentTransition
+	}
+	handoff := protocol.AttachTarget{
+		Session:           target.SessionName,
+		Intent:            protocol.IntentAttach,
+		ExactTarget:       &target,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+		SamePeer:          true,
+	}
+	if protocol.ValidateAttachTarget(handoff) != nil {
+		return errAttachmentTransition
+	}
+	effect.ac.offerSamePeerTarget(target)
+	if err := effect.sendControl(handoff); err != nil {
+		effect.ac.clearSamePeerOffer()
+		return err
+	}
+	return nil
+}
+
 func (ac *attachedClient) clearSamePeerOffer() {
 	ac.samePeerOfferMu.Lock()
 	ac.samePeerOffer = nil
