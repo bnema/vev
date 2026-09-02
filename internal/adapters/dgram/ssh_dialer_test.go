@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -132,47 +133,143 @@ func TestListenUDPPacketUsesDualStackWildcard(t *testing.T) {
 }
 
 func TestResolveUDPPeers(t *testing.T) {
-	t.Run("hostname preserves order and removes duplicates", func(t *testing.T) {
-		withUDPIPLookup(t, func(_ context.Context, host string) ([]net.IPAddr, error) {
-			if host != "remote.example" {
-				t.Fatalf("lookup host = %q, want remote.example", host)
-			}
-			return []net.IPAddr{
+	tests := []struct {
+		name        string
+		target      string
+		addrs       []net.IPAddr
+		wantPeers   []string
+		wantErr     string
+		wantLookups int
+	}{
+		{
+			name:   "hostname preserves order and removes duplicates",
+			target: "remote.example",
+			addrs: []net.IPAddr{
 				{IP: net.ParseIP("192.0.2.1")},
 				{IP: net.ParseIP("2001:db8::1")},
 				{IP: net.ParseIP("192.0.2.1")},
-			}, nil
-		})
-		peers, err := resolveUDPPeers(context.Background(), "remote.example", 4444)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := make([]string, 0, len(peers))
-		for _, peer := range peers {
-			got = append(got, peer.String())
-		}
-		want := []string{"192.0.2.1:4444", "[2001:db8::1]:4444"}
-		if !equalStrings(got, want) {
-			t.Fatalf("peers = %v, want %v", got, want)
-		}
-	})
+			},
+			wantPeers:   []string{"192.0.2.1:4444", "[2001:db8::1]:4444"},
+			wantLookups: 1,
+		},
+		{
+			name:        "explicit IP bypasses lookup",
+			target:      "[2001:db8::1]",
+			wantPeers:   []string{"[2001:db8::1]:4444"},
+			wantLookups: 0,
+		},
+		{
+			name:        "empty lookup result",
+			target:      "remote.example",
+			wantErr:     `no UDP peer addresses for "remote.example"`,
+			wantLookups: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lookups := 0
+			withUDPIPLookup(t, func(_ context.Context, host string) ([]net.IPAddr, error) {
+				lookups++
+				if host != "remote.example" {
+					t.Fatalf("lookup host = %q, want remote.example", host)
+				}
+				return tt.addrs, nil
+			})
 
-	t.Run("explicit IP bypasses lookup", func(t *testing.T) {
-		withUDPIPLookup(t, func(context.Context, string) ([]net.IPAddr, error) {
-			t.Fatal("explicit IP unexpectedly resolved")
-			return nil, nil
+			peers, err := resolveUDPPeers(context.Background(), tt.target, 4444)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("resolveUDPPeers() error = %v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else {
+				got := make([]string, 0, len(peers))
+				for _, peer := range peers {
+					got = append(got, peer.String())
+				}
+				if !slices.Equal(got, tt.wantPeers) {
+					t.Fatalf("peers = %v, want %v", got, tt.wantPeers)
+				}
+			}
+			if got := lookups; got != tt.wantLookups {
+				t.Fatalf("lookup calls = %d, want %d", got, tt.wantLookups)
+			}
 		})
-		peers, err := resolveUDPPeers(context.Background(), "[2001:db8::1]", 4444)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, want := len(peers), 1; got != want {
-			t.Fatalf("peer count = %d, want %d", got, want)
-		}
-		if got, want := peers[0].String(), "[2001:db8::1]:4444"; got != want {
-			t.Fatalf("peer = %q, want %q", got, want)
-		}
-	})
+	}
+}
+
+func TestCandidateProbeContext(t *testing.T) {
+	tests := []struct {
+		name              string
+		remaining         int
+		newContext        func() (context.Context, context.CancelFunc)
+		wantDeadline      bool
+		wantDone          bool
+		minDeadlineRemain time.Duration
+		maxDeadlineRemain time.Duration
+	}{
+		{
+			name:      "one candidate retains selection deadline",
+			remaining: 1,
+			newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), time.Hour)
+			},
+			wantDeadline:      true,
+			minDeadlineRemain: 59 * time.Minute,
+			maxDeadlineRemain: time.Hour,
+		},
+		{
+			name:       "no selection deadline",
+			remaining:  2,
+			newContext: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+		},
+		{
+			name:      "expired selection deadline",
+			remaining: 2,
+			newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			},
+			wantDeadline: true,
+			wantDone:     true,
+		},
+		{
+			name:      "splits remaining budget",
+			remaining: 4,
+			newContext: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), time.Hour)
+			},
+			wantDeadline:      true,
+			minDeadlineRemain: 14 * time.Minute,
+			maxDeadlineRemain: 16 * time.Minute,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			selectionCtx, selectionCancel := tt.newContext()
+			defer selectionCancel()
+			probeCtx, probeCancel := candidateProbeContext(selectionCtx, tt.remaining)
+			defer probeCancel()
+
+			deadline, hasDeadline := probeCtx.Deadline()
+			if hasDeadline != tt.wantDeadline {
+				t.Fatalf("probe context has deadline = %v, want %v", hasDeadline, tt.wantDeadline)
+			}
+			if hasDeadline && tt.minDeadlineRemain != 0 {
+				remaining := time.Until(deadline)
+				if remaining < tt.minDeadlineRemain || remaining > tt.maxDeadlineRemain {
+					t.Fatalf("probe deadline remaining = %v, want [%v, %v]", remaining, tt.minDeadlineRemain, tt.maxDeadlineRemain)
+				}
+			}
+			if tt.wantDone {
+				select {
+				case <-probeCtx.Done():
+				default:
+					t.Fatal("probe context is not done")
+				}
+			}
+		})
+	}
 }
 
 func TestRemoteDialerFallsBackAcrossResolvedUDPPeers(t *testing.T) {
@@ -235,7 +332,7 @@ func TestRemoteDialerFallsBackAcrossResolvedUDPPeers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := peers, []string{"192.0.2.1:4444", "192.0.2.2:4444"}; !equalStrings(got, want) {
+	if got, want := peers, []string{"192.0.2.1:4444", "192.0.2.2:4444"}; !slices.Equal(got, want) {
 		t.Fatalf("probed peers = %v, want %v", got, want)
 	}
 	if !firstClosed {
@@ -279,10 +376,11 @@ func TestRemoteDialerReportsFailureAfterAllResolvedUDPPeers(t *testing.T) {
 		return tracked, nil
 	})
 
+	probeErr := errors.New("unreachable at 192.0.2.2:4444")
 	probeCalls := 0
 	withUDPProbe(t, func(context.Context, *Transport) error {
 		probeCalls++
-		return errors.New("unreachable")
+		return probeErr
 	})
 
 	tr, err := NewRemoteDialer("remote.example", "work").Dial(context.Background())
@@ -300,21 +398,12 @@ func TestRemoteDialerReportsFailureAfterAllResolvedUDPPeers(t *testing.T) {
 			t.Fatalf("candidate socket %d was not closed", i+1)
 		}
 	}
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("Dial() error = %v, want final probe cause", err)
+	}
 	if strings.Contains(err.Error(), "192.0.2.") {
 		t.Fatalf("Dial() error leaked candidate address: %q", err)
 	}
-}
-
-func equalStrings(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
@@ -335,8 +424,9 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	withListenUDP(t, func(context.Context) (net.PacketConn, error) {
 		return closeTrackPacketConn{PacketConn: pc, closed: &closed}, nil
 	})
+	withUDPProbe(t, func(context.Context, *Transport) error { return context.DeadlineExceeded })
 	d := NewRemoteDialer("127.0.0.1", "work")
-	d.ProbeTimeout = time.Nanosecond
+	d.ProbeTimeout = time.Second
 	tr, err := d.Dial(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "remote UDP transport unavailable: probe UDP transport") {
 		t.Fatalf("Dial() error = %v, want probe unavailable", err)
@@ -348,7 +438,10 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	if dialErr.Kind != RemoteDialProbeUnreachable {
 		t.Fatalf("Dial() error kind = %v, want probe unreachable", dialErr.Kind)
 	}
-	for _, want := range []string{"firewall", "VEV_UDP_PORT_RANGE", "VEV_REMOTE_TRANSPORT=stdio vev attach 127.0.0.1"} {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Dial() error = %v, want probe deadline cause", err)
+	}
+	for _, want := range []string{"context deadline exceeded", "firewall", "VEV_UDP_PORT_RANGE", "VEV_REMOTE_TRANSPORT=stdio vev attach 127.0.0.1"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("Dial() error = %q, want actionable hint %q", err, want)
 		}

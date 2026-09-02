@@ -179,8 +179,17 @@ func (d RemoteDialer) Dial(ctx context.Context) (wire.Transport, error) {
 		return nil, udpUnavailable("resolve UDP peers", err, &stderr)
 	}
 
-	var t *Transport
+	var (
+		t            *Transport
+		lastProbeErr error
+	)
 	for i, peer := range peers {
+		if err := selectionCtx.Err(); err != nil {
+			if lastProbeErr == nil {
+				lastProbeErr = err
+			}
+			break
+		}
 		pc, err := listenUDPPacket(selectionCtx)
 		if err != nil {
 			if t != nil {
@@ -216,11 +225,15 @@ func (d RemoteDialer) Dial(ctx context.Context) (wire.Transport, error) {
 			cleanup = false
 			return t, nil
 		}
+		lastProbeErr = err
 	}
 	if t != nil {
 		_ = t.Close()
 	}
-	return nil, udpProbeUnreachable(d.Target, errors.New("all resolved UDP peer candidates failed"), &stderr)
+	if lastProbeErr == nil {
+		lastProbeErr = errors.New("all resolved UDP peer candidates failed")
+	}
+	return nil, udpProbeUnreachable(d.Target, sanitizeUDPProbeError(lastProbeErr), &stderr)
 }
 
 func candidateProbeContext(ctx context.Context, remainingCandidates int) (context.Context, context.CancelFunc) {
@@ -349,6 +362,22 @@ func readUDPReady(r io.Reader) (udpReady, error) {
 		return udpReady{}, fmt.Errorf("invalid bootstrap key length %d", keyLen)
 	}
 	return udpReady{port: port, key: out}, nil
+}
+
+type sanitizedUDPProbeError struct{ cause error }
+
+func (e sanitizedUDPProbeError) Error() string { return "UDP probe failed" }
+func (e sanitizedUDPProbeError) Unwrap() error { return e.cause }
+
+func sanitizeUDPProbeError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	default:
+		return sanitizedUDPProbeError{cause: err}
+	}
 }
 
 func udpUnavailable(action string, err error, stderr fmt.Stringer) error {

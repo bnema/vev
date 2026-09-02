@@ -69,9 +69,15 @@ func (t *Transport) replaceDialCandidate(pc net.PacketConn, peer net.Addr) error
 		return errors.New("dgram: closed")
 	}
 	old := t.pc
+	now := t.clock.Now()
 	t.pc = pc
 	t.peer = peer
 	t.writeDeadlines = newWriteDeadlineState(pc)
+	t.health = newHealthTracker(now)
+	t.lastAuthenticatedPacket = now
+	t.lastCompleteRecord = now
+	t.lastACKProgress = now
+	t.setLinkStateLocked(ports.LinkStateConnected)
 	t.mu.Unlock()
 
 	go t.readLoop(pc)
