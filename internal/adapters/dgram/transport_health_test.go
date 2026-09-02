@@ -55,6 +55,54 @@ func TestPortHopPreservesPendingReliableMessages(t *testing.T) {
 	}
 }
 
+func TestReplaceDialCandidateResetsHealthState(t *testing.T) {
+	oldPC, oldPeer := newPair()
+	newPC, newPeer := newPair()
+	defer func() { _ = oldPeer.Close() }()
+	defer func() { _ = newPeer.Close() }()
+	tr, err := NewTransport(oldPC, testAddr("b"), key(), 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tr.Close() }()
+
+	before := tr.clock.Now()
+	tr.mu.Lock()
+	tr.health = healthTracker{
+		lastPacket:   before.Add(-time.Hour),
+		lastRecord:   before.Add(-time.Hour),
+		lastProgress: before.Add(-time.Hour),
+		pendingSince: before.Add(-time.Hour),
+		generation:   42,
+	}
+	tr.linkState = ports.LinkStateProbing
+	tr.hoppedOffline = true
+	tr.hopGeneration = 42
+	tr.lastAuthenticatedPacket = before.Add(-time.Hour)
+	tr.lastCompleteRecord = before.Add(-time.Hour)
+	tr.lastACKProgress = before.Add(-time.Hour)
+	tr.mu.Unlock()
+
+	if err := tr.replaceDialCandidate(newPC, testAddr("b2")); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if got, want := tr.linkState, ports.LinkStateConnected; got != want {
+		t.Fatalf("link state = %v, want %v", got, want)
+	}
+	if tr.hoppedOffline || tr.hopGeneration != 0 {
+		t.Fatalf("hop state = (%v, %d), want (false, 0)", tr.hoppedOffline, tr.hopGeneration)
+	}
+	if tr.health.lastPacket.Before(before) || tr.health.lastRecord.Before(before) || tr.health.lastProgress.Before(before) {
+		t.Fatalf("health baseline was not reset: %+v", tr.health)
+	}
+	if tr.health.pendingSince != (time.Time{}) {
+		t.Fatalf("pending since = %v, want zero", tr.health.pendingSince)
+	}
+}
+
 func TestPortHopRetriesAfterRebindFailure(t *testing.T) {
 	aPC, bPC := newPair()
 	var attempts atomic.Int32
