@@ -47,6 +47,20 @@ func withListenUDP(t *testing.T, fn func(context.Context) (net.PacketConn, error
 	t.Cleanup(func() { listenUDPPacket = old })
 }
 
+func withUDPIPLookup(t *testing.T, fn func(context.Context, string) ([]net.IPAddr, error)) {
+	t.Helper()
+	old := lookupUDPIPAddrs
+	lookupUDPIPAddrs = fn
+	t.Cleanup(func() { lookupUDPIPAddrs = old })
+}
+
+func withUDPProbe(t *testing.T, fn func(context.Context, *Transport) error) {
+	t.Helper()
+	old := probeUDPTransport
+	probeUDPTransport = fn
+	t.Cleanup(func() { probeUDPTransport = old })
+}
+
 func TestRemoteDialerUDPBootstrapFailures(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	tests := []struct {
@@ -117,6 +131,192 @@ func TestListenUDPPacketUsesDualStackWildcard(t *testing.T) {
 	}
 }
 
+func TestResolveUDPPeers(t *testing.T) {
+	t.Run("hostname preserves order and removes duplicates", func(t *testing.T) {
+		withUDPIPLookup(t, func(_ context.Context, host string) ([]net.IPAddr, error) {
+			if host != "remote.example" {
+				t.Fatalf("lookup host = %q, want remote.example", host)
+			}
+			return []net.IPAddr{
+				{IP: net.ParseIP("192.0.2.1")},
+				{IP: net.ParseIP("2001:db8::1")},
+				{IP: net.ParseIP("192.0.2.1")},
+			}, nil
+		})
+		peers, err := resolveUDPPeers(context.Background(), "remote.example", 4444)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, 0, len(peers))
+		for _, peer := range peers {
+			got = append(got, peer.String())
+		}
+		want := []string{"192.0.2.1:4444", "[2001:db8::1]:4444"}
+		if !equalStrings(got, want) {
+			t.Fatalf("peers = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("explicit IP bypasses lookup", func(t *testing.T) {
+		withUDPIPLookup(t, func(context.Context, string) ([]net.IPAddr, error) {
+			t.Fatal("explicit IP unexpectedly resolved")
+			return nil, nil
+		})
+		peers, err := resolveUDPPeers(context.Background(), "[2001:db8::1]", 4444)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := len(peers), 1; got != want {
+			t.Fatalf("peer count = %d, want %d", got, want)
+		}
+		if got, want := peers[0].String(), "[2001:db8::1]:4444"; got != want {
+			t.Fatalf("peer = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRemoteDialerFallsBackAcrossResolvedUDPPeers(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
+	proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader("VEV-UDP 4444 " + key + "\n"))}
+	withBootstrapStarter(t, func(context.Context, string, io.Writer) bootstrapProcess { return proc })
+	withUDPIPLookup(t, func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host != "remote.example" {
+			t.Fatalf("lookup host = %q, want remote.example", host)
+		}
+		return []net.IPAddr{
+			{IP: net.ParseIP("192.0.2.1")},
+			{IP: net.ParseIP("192.0.2.2")},
+		}, nil
+	})
+
+	var (
+		firstClosed  bool
+		secondClosed bool
+		listenCalls  int
+	)
+	withListenUDP(t, func(context.Context) (net.PacketConn, error) {
+		var lc net.ListenConfig
+		pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		listenCalls++
+		switch listenCalls {
+		case 1:
+			return closeTrackPacketConn{PacketConn: pc, closed: &firstClosed}, nil
+		case 2:
+			return closeTrackPacketConn{PacketConn: pc, closed: &secondClosed}, nil
+		default:
+			t.Fatalf("listen UDP calls = %d, want at most 2", listenCalls)
+			return nil, nil
+		}
+	})
+
+	var (
+		peers          []string
+		firstTransport *Transport
+	)
+	withUDPProbe(t, func(_ context.Context, tr *Transport) error {
+		tr.mu.Lock()
+		peer := tr.peer.String()
+		tr.mu.Unlock()
+		peers = append(peers, peer)
+		if len(peers) == 1 {
+			firstTransport = tr
+			return errors.New("first UDP address is unreachable")
+		}
+		if tr != firstTransport {
+			t.Fatal("fallback created a new transport and reset its authenticated state")
+		}
+		return nil
+	})
+
+	tr, err := NewRemoteDialer("remote.example", "work").Dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := peers, []string{"192.0.2.1:4444", "192.0.2.2:4444"}; !equalStrings(got, want) {
+		t.Fatalf("probed peers = %v, want %v", got, want)
+	}
+	if !firstClosed {
+		t.Fatal("first candidate socket was not closed")
+	}
+	if secondClosed {
+		t.Fatal("winning candidate socket closed before transport close")
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !secondClosed {
+		t.Fatal("winning candidate socket was not closed with transport")
+	}
+}
+
+func TestRemoteDialerReportsFailureAfterAllResolvedUDPPeers(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
+	proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader("VEV-UDP 4444 " + key + "\n"))}
+	withBootstrapStarter(t, func(context.Context, string, io.Writer) bootstrapProcess { return proc })
+	withUDPIPLookup(t, func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("192.0.2.1")},
+			{IP: net.ParseIP("192.0.2.2")},
+		}, nil
+	})
+
+	closed := make([]bool, 2)
+	listenCalls := 0
+	withListenUDP(t, func(context.Context) (net.PacketConn, error) {
+		if listenCalls == len(closed) {
+			t.Fatal("opened more sockets than resolved candidates")
+		}
+		var lc net.ListenConfig
+		pc, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		tracked := closeTrackPacketConn{PacketConn: pc, closed: &closed[listenCalls]}
+		listenCalls++
+		return tracked, nil
+	})
+
+	probeCalls := 0
+	withUDPProbe(t, func(context.Context, *Transport) error {
+		probeCalls++
+		return errors.New("unreachable")
+	})
+
+	tr, err := NewRemoteDialer("remote.example", "work").Dial(context.Background())
+	if err == nil {
+		t.Fatal("Dial() error = nil, want all candidates unavailable")
+	}
+	if tr != nil {
+		t.Fatalf("Dial() transport = %T, want nil", tr)
+	}
+	if got, want := probeCalls, 2; got != want {
+		t.Fatalf("probe calls = %d, want %d", got, want)
+	}
+	for i, wasClosed := range closed {
+		if !wasClosed {
+			t.Fatalf("candidate socket %d was not closed", i+1)
+		}
+	}
+	if strings.Contains(err.Error(), "192.0.2.") {
+		t.Fatalf("Dial() error leaked candidate address: %q", err)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, pdgram.KeySize))
 	proc := &fakeBootstrapProcess{stdout: io.NopCloser(strings.NewReader("VEV-UDP 4444 " + key + "\n"))}
@@ -148,7 +348,7 @@ func TestRemoteDialerProbeFailureCleansUpWithoutStdioFallback(t *testing.T) {
 	if dialErr.Kind != RemoteDialProbeUnreachable {
 		t.Fatalf("Dial() error kind = %v, want probe unreachable", dialErr.Kind)
 	}
-	for _, want := range []string{"firewall", "VEV_REMOTE_TRANSPORT=stdio vev attach 127.0.0.1"} {
+	for _, want := range []string{"firewall", "VEV_UDP_PORT_RANGE", "VEV_REMOTE_TRANSPORT=stdio vev attach 127.0.0.1"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("Dial() error = %q, want actionable hint %q", err, want)
 		}

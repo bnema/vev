@@ -1,6 +1,8 @@
 package dgram
 
 import (
+	"errors"
+	"net"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
@@ -45,6 +47,36 @@ func (t *Transport) notifyTimerHook(get func() func()) {
 	if hook != nil {
 		hook()
 	}
+}
+
+// replaceDialCandidate installs a fresh socket and remote peer while retaining
+// the transport's authenticated codec, counters, and replay state. It is used
+// only while selecting an initial remote UDP peer.
+func (t *Transport) replaceDialCandidate(pc net.PacketConn, peer net.Addr) error {
+	// Keep the same lock order as hopPacketConnOnce. In particular, wait for
+	// in-flight control writes before retiring their packet connection.
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	t.controlConnMu.Lock()
+	defer t.controlConnMu.Unlock()
+	t.mu.Lock()
+	if t.closed {
+		err := t.closeErr
+		t.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return errors.New("dgram: closed")
+	}
+	old := t.pc
+	t.pc = pc
+	t.peer = peer
+	t.writeDeadlines = newWriteDeadlineState(pc)
+	t.mu.Unlock()
+
+	go t.readLoop(pc)
+	_ = old.Close()
+	return nil
 }
 
 func (t *Transport) hopPacketConnOnce(generation uint64) {

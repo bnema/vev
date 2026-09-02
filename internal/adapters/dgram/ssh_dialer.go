@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -49,6 +50,9 @@ var (
 	listenUDPPacket = func(ctx context.Context) (net.PacketConn, error) {
 		var lc net.ListenConfig
 		return lc.ListenPacket(ctx, "udp", ":0")
+	}
+	lookupUDPIPAddrs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
 	}
 	probeUDPTransport = func(ctx context.Context, t *Transport) error { return t.Probe(ctx) }
 )
@@ -166,36 +170,72 @@ func (d RemoteDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	}
 	waited = true
 	cleanup = false
-	peer, err := resolveUDPPeer(bootstrapCtx, d.Target, ready.port)
+	// Share the existing probe budget across resolution and all candidates so a
+	// hostname with many addresses cannot extend remote attach indefinitely.
+	selectionCtx, selectionCancel := context.WithTimeout(ctx, probeTimeout)
+	defer selectionCancel()
+	peers, err := resolveUDPPeers(selectionCtx, d.Target, ready.port)
 	if err != nil {
-		return nil, udpUnavailable("resolve UDP peer", err, &stderr)
+		return nil, udpUnavailable("resolve UDP peers", err, &stderr)
 	}
-	pc, err := listenUDPPacket(ctx)
-	if err != nil {
-		return nil, udpUnavailable("listen UDP", err, &stderr)
+
+	var t *Transport
+	for i, peer := range peers {
+		pc, err := listenUDPPacket(selectionCtx)
+		if err != nil {
+			if t != nil {
+				_ = t.Close()
+			}
+			return nil, udpUnavailable("listen UDP", err, &stderr)
+		}
+		if t == nil {
+			// RebindPacketConn heals NAT rebinds / stale conntrack paths by hopping to a
+			// fresh local UDP socket once the link is silent long enough to probe. The
+			// bind reuses listenUDPPacket so tests can stub it.
+			t, err = NewTransportWithOptions(pc, peer, ready.key, 1, 2, Options{
+				Observe: DiagnosticLogObserver(d.Log),
+				RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
+					return listenUDPPacket(ctx)
+				},
+			}, WithRuntimeObserver(d.RuntimeObserver))
+			pdgram.Erase(ready.key)
+			if err != nil {
+				_ = pc.Close()
+				return nil, udpUnavailable("create UDP transport", err, &stderr)
+			}
+		} else if err := t.replaceDialCandidate(pc, peer); err != nil {
+			_ = pc.Close()
+			_ = t.Close()
+			return nil, udpUnavailable("replace UDP peer", err, &stderr)
+		}
+
+		probeCtx, cancel := candidateProbeContext(selectionCtx, len(peers)-i)
+		err = probeUDPTransport(probeCtx, t)
+		cancel()
+		if err == nil {
+			cleanup = false
+			return t, nil
+		}
 	}
-	// RebindPacketConn heals NAT rebinds / stale conntrack paths by hopping to a
-	// fresh local UDP socket once the link is silent long enough to probe. The
-	// bind reuses listenUDPPacket so tests can stub it.
-	t, err := NewTransportWithOptions(pc, peer, ready.key, 1, 2, Options{
-		Observe: DiagnosticLogObserver(d.Log),
-		RebindPacketConn: func(net.PacketConn) (net.PacketConn, error) {
-			return listenUDPPacket(ctx)
-		},
-	}, WithRuntimeObserver(d.RuntimeObserver))
-	pdgram.Erase(ready.key)
-	if err != nil {
-		_ = pc.Close()
-		return nil, udpUnavailable("create UDP transport", err, &stderr)
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	if err := probeUDPTransport(probeCtx, t); err != nil {
+	if t != nil {
 		_ = t.Close()
-		return nil, udpProbeUnreachable(d.Target, err, &stderr)
 	}
-	cleanup = false
-	return t, nil
+	return nil, udpProbeUnreachable(d.Target, errors.New("all resolved UDP peer candidates failed"), &stderr)
+}
+
+func candidateProbeContext(ctx context.Context, remainingCandidates int) (context.Context, context.CancelFunc) {
+	if remainingCandidates <= 1 {
+		return context.WithCancel(ctx)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, remaining/time.Duration(remainingCandidates))
 }
 
 type udpReadyResult struct {
@@ -237,19 +277,29 @@ func waitBootstrapContext(ctx context.Context, proc bootstrapProcess) error {
 	}
 }
 
-func resolveUDPPeer(ctx context.Context, target string, port int) (*net.UDPAddr, error) {
+func resolveUDPPeers(ctx context.Context, target string, port int) ([]*net.UDPAddr, error) {
 	host := sshTargetHost(target)
 	if ip := net.ParseIP(host); ip != nil {
-		return &net.UDPAddr{IP: ip, Port: port}, nil
+		return []*net.UDPAddr{{IP: ip, Port: port}}, nil
 	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	addrs, err := lookupUDPIPAddrs(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	if len(addrs) == 0 {
+	peers := make([]*net.UDPAddr, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		peer := &net.UDPAddr{IP: addr.IP, Zone: addr.Zone, Port: port}
+		if _, ok := seen[peer.String()]; ok {
+			continue
+		}
+		seen[peer.String()] = struct{}{}
+		peers = append(peers, peer)
+	}
+	if len(peers) == 0 {
 		return nil, fmt.Errorf("no UDP peer addresses for %q", host)
 	}
-	return &net.UDPAddr{IP: addrs[0].IP, Zone: addrs[0].Zone, Port: port}, nil
+	return peers, nil
 }
 
 type udpReady struct {
@@ -312,14 +362,12 @@ func udpDialFailure(kind RemoteDialFailureKind, action string, err error, stderr
 	return &RemoteDialError{Kind: kind, Action: action, Err: err, Hint: hint}
 }
 
-// udpProbeUnreachable wraps a probe failure with actionable guidance. A failed
-// probe almost always means a firewall on the remote is dropping datagrams to
-// vev's UDP proxy rather than a vev bug, so name the two real fixes instead of
-// surfacing a bare deadline error.
+// udpProbeUnreachable wraps a probe failure with actionable guidance without
+// assuming a particular VPN or firewall implementation.
 func udpProbeUnreachable(target string, err error, stderr fmt.Stringer) error {
 	return udpDialFailure(RemoteDialProbeUnreachable, "probe UDP transport", err, stderr, fmt.Sprintf("\n"+
-		"  the remote host is not reachable over UDP; a firewall is likely dropping the datagrams.\n"+
-		"  open UDP on the remote (e.g. `sudo ufw allow in on tailscale0`) or attach over SSH with `VEV_REMOTE_TRANSPORT=stdio vev attach %s`", target))
+		"  check UDP routing and the remote firewall for VEV_UDP_PORT_RANGE.\n"+
+		"  retry over SSH with `VEV_REMOTE_TRANSPORT=stdio vev attach %s`", target))
 }
 
 func sshTargetHost(target string) string {
