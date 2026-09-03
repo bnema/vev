@@ -27,7 +27,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 38, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 39, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	want = append(want, 0, 0)
 	got := MarshalHello(msg)

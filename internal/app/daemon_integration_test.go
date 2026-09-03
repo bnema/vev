@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -122,35 +123,37 @@ func listRemoteSessions(t *testing.T, dir string) protocol.Sessions {
 }
 
 func killAll(dir string) error {
-	tr, err := ipc.DialContext(context.Background(), dir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tr.Close() }()
-	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillAll})}); err != nil {
-		return err
-	}
-	_, err = tr.Recv()
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	return err
+	return requestKill(dir, protocol.KillAll)
 }
 
 func killDaemon(dir string) error {
+	return requestKill(dir, protocol.KillDaemon)
+}
+
+func requestKill(dir string, scope protocol.KillScope) error {
 	tr, err := ipc.DialContext(context.Background(), dir)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tr.Close() }()
-	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillDaemon})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: scope})}); err != nil {
 		return err
 	}
-	_, err = tr.Recv()
+	reply, err := tr.Recv()
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if reply.Type != wire.MsgError {
+		return nil
+	}
+	em, err := wire.UnmarshalErrorMsg(reply.Payload)
+	if err != nil {
+		return fmt.Errorf("decoding kill error: %w", err)
+	}
+	return fmt.Errorf("kill failed: %s", em.Text)
 }
 
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {

@@ -875,7 +875,7 @@ func (d *Daemon) terminateAllWithSnapshotDeadline(reason uint8, purge bool, dead
 			s.reserveShutdownTeardown()
 		}
 	}
-	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
+	d.log.Info("session termination begin", "reason", reason, "purge", purge, "live_sessions", len(snapshot), "stopped_sessions", len(stoppedNames))
 	// Purge stopped authority before signaling Serve to exit. Once the final
 	// live registry entry closes, Serve cancels its context; deleting stopped
 	// records afterward would be interrupted and retain broken catalogue entries.
