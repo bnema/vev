@@ -7,9 +7,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/pkg/kv"
 )
+
+const legacyRecordWireVersion = 5
 
 func TestOpenOrCreateMigrationPreservesBackupAndIsIdempotent(t *testing.T) {
 	t.Parallel()
@@ -19,7 +20,7 @@ func TestOpenOrCreateMigrationPreservesBackupAndIsIdempotent(t *testing.T) {
 		TabNames: []string{"shell"}, TabRecords: []domain.CatalogueTabRecord{{StableID: "tab-1", Name: "shell"}},
 		Committed: &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
 	}
-	legacy, err := encodeRecordValueForFormat(record, protocolRecordVersion, protocol.Version-1)
+	legacy, err := encodeRecordValueForFormat(record, protocolRecordVersion, legacyRecordWireVersion)
 	require.NoError(t, err)
 	dir := privateDir(t)
 	store, err := kv.Open(StorePath(dir))
@@ -88,7 +89,7 @@ func TestOpenOrCreateMigratesV3Records(t *testing.T) {
 func TestOpenOrCreateMigrationRejectsConflictingBackupWithoutChangingCatalogue(t *testing.T) {
 	t.Parallel()
 	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}
-	legacy, err := encodeRecordValueForFormat(record, protocolRecordVersion, protocol.Version)
+	legacy, err := encodeRecordValueForFormat(record, protocolRecordVersion, legacyRecordWireVersion)
 	require.NoError(t, err)
 	dir := privateDir(t)
 	store, err := kv.Open(StorePath(dir))
@@ -109,7 +110,7 @@ func TestOpenOrCreateMigrationRejectsConflictingBackupWithoutChangingCatalogue(t
 func TestOpenOrCreateMigrationRejectsSymlinkBackupWithoutChangingCatalogue(t *testing.T) {
 	t.Parallel()
 	record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}}
-	legacy, err := encodeRecordValueForFormat(record, protocolRecordVersion, protocol.Version)
+	legacy, err := encodeRecordValueForFormat(record, protocolRecordVersion, legacyRecordWireVersion)
 	require.NoError(t, err)
 	dir := privateDir(t)
 	store, err := kv.Open(StorePath(dir))
