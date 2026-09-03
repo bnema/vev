@@ -7,16 +7,24 @@ import (
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
 )
 
 const (
-	catalogueRecordVersion             uint16 = 5
-	protocolLessCatalogueRecordVersion uint16 = 4
-	legacyCatalogueRecordVersion       uint16 = 3
+	catalogueRecordVersion       uint16 = 6
+	legacyCatalogueRecordVersion uint16 = 3
+	protocolLessRecordVersion    uint16 = 4
+	protocolRecordVersion        uint16 = 5
 )
 
 var errMalformedRecord = errors.New("persist: malformed catalogue record")
+
+// UnsupportedCatalogueRecordFormatError reports a well-formed record header
+// whose layout this binary cannot safely decode.
+type UnsupportedCatalogueRecordFormatError struct{ Got uint16 }
+
+func (e *UnsupportedCatalogueRecordFormatError) Error() string {
+	return fmt.Sprintf("persist: unsupported catalogue record format %d", e.Got)
+}
 
 var catalogueMagic = [4]byte{'V', 'E', 'V', 'C'}
 
@@ -24,17 +32,21 @@ var catalogueMagic = [4]byte{'V', 'E', 'V', 'C'}
 type Record = domain.CatalogueRecord
 
 func encodeRecordValue(record domain.CatalogueRecord) ([]byte, error) {
-	return encodeRecordValueForProtocol(record, protocol.Version)
+	return encodeRecordValueForFormat(record, catalogueRecordVersion, 0)
 }
 
-func encodeRecordValueForProtocol(record domain.CatalogueRecord, protocolVersion uint16) ([]byte, error) {
+// encodeRecordValueForFormat exists to create strict historical fixtures. New
+// records must always use catalogueRecordVersion.
+func encodeRecordValueForFormat(record domain.CatalogueRecord, format, legacyProtocolVersion uint16) ([]byte, error) {
 	if err := record.Validate(); err != nil {
 		return nil, fmt.Errorf("persist: invalid catalogue record: %w", err)
 	}
 	buf := make([]byte, 0, 128)
 	buf = append(buf, catalogueMagic[:]...)
-	buf = binary.BigEndian.AppendUint16(buf, catalogueRecordVersion)
-	buf = binary.BigEndian.AppendUint16(buf, protocolVersion)
+	buf = binary.BigEndian.AppendUint16(buf, format)
+	if format == protocolRecordVersion {
+		buf = binary.BigEndian.AppendUint16(buf, legacyProtocolVersion)
+	}
 	buf = append(buf, record.IncarnationID[:]...)
 	var err error
 	buf, err = appendCheckedString(buf, record.Cwd)
@@ -54,18 +66,20 @@ func encodeRecordValueForProtocol(record domain.CatalogueRecord, protocolVersion
 			return nil, err
 		}
 	}
-	if uint64(len(record.TabRecords)) > math.MaxUint32 {
-		return nil, errors.New("persist: too many tab records")
-	}
-	buf = binary.BigEndian.AppendUint32(buf, uint32(len(record.TabRecords)))
-	for _, tab := range record.TabRecords {
-		buf, err = appendCheckedString(buf, string(tab.StableID))
-		if err != nil {
-			return nil, err
+	if format != legacyCatalogueRecordVersion {
+		if uint64(len(record.TabRecords)) > math.MaxUint32 {
+			return nil, errors.New("persist: too many tab records")
 		}
-		buf, err = appendCheckedString(buf, tab.Name)
-		if err != nil {
-			return nil, err
+		buf = binary.BigEndian.AppendUint32(buf, uint32(len(record.TabRecords)))
+		for _, tab := range record.TabRecords {
+			buf, err = appendCheckedString(buf, string(tab.StableID))
+			if err != nil {
+				return nil, err
+			}
+			buf, err = appendCheckedString(buf, tab.Name)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	buf = appendRef(buf, record.Committed)
@@ -74,8 +88,8 @@ func encodeRecordValueForProtocol(record domain.CatalogueRecord, protocolVersion
 }
 
 type storedRecord struct {
-	record          domain.CatalogueRecord
-	protocolVersion uint16
+	record        domain.CatalogueRecord
+	formatVersion uint16
 }
 
 func decodeRecordValue(name string, value []byte) (domain.CatalogueRecord, error) {
@@ -93,13 +107,16 @@ func decodeStoredRecordValue(name string, value []byte) (storedRecord, error) {
 		return storedRecord{}, errMalformedRecord
 	}
 	version, ok := reader.u16()
-	if !ok || (version != catalogueRecordVersion && version != protocolLessCatalogueRecordVersion && version != legacyCatalogueRecordVersion) {
+	if !ok {
 		return storedRecord{}, errMalformedRecord
 	}
-	var protocolVersion uint16
-	if version == catalogueRecordVersion {
-		protocolVersion, ok = reader.u16()
-		if !ok {
+	switch version {
+	case catalogueRecordVersion, protocolRecordVersion, protocolLessRecordVersion, legacyCatalogueRecordVersion:
+	default:
+		return storedRecord{}, &UnsupportedCatalogueRecordFormatError{Got: version}
+	}
+	if version == protocolRecordVersion {
+		if _, ok := reader.u16(); !ok { // Legacy v5 wire protocol; deliberately ignored.
 			return storedRecord{}, errMalformedRecord
 		}
 	}
@@ -143,8 +160,8 @@ func decodeStoredRecordValue(name string, value []byte) (storedRecord, error) {
 	if version == legacyCatalogueRecordVersion {
 		if len(record.TabNames) != 0 {
 			record.TabRecords = make([]domain.CatalogueTabRecord, len(record.TabNames))
-			for i, name := range record.TabNames {
-				record.TabRecords[i] = domain.CatalogueTabRecord{Name: name}
+			for i, tabName := range record.TabNames {
+				record.TabRecords[i] = domain.CatalogueTabRecord{Name: tabName}
 			}
 		}
 	} else {
@@ -173,7 +190,7 @@ func decodeStoredRecordValue(name string, value []byte) (storedRecord, error) {
 	if err := record.Validate(); err != nil {
 		return storedRecord{}, errors.Join(errMalformedRecord, fmt.Errorf("persist: invalid catalogue record: %w", err))
 	}
-	return storedRecord{record: record, protocolVersion: protocolVersion}, nil
+	return storedRecord{record: record, formatVersion: version}, nil
 }
 
 func appendCheckedString(buf []byte, value string) ([]byte, error) {
@@ -183,6 +200,7 @@ func appendCheckedString(buf []byte, value string) ([]byte, error) {
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(value)))
 	return append(buf, value...), nil
 }
+
 func appendRef(buf []byte, ref *domain.CheckpointRef) []byte {
 	if ref == nil {
 		return append(buf, 0)

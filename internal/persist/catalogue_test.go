@@ -50,47 +50,46 @@ func testCatalogueRecordRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOpenOrCreateReportsRecordsFromOlderProtocol(t *testing.T) {
+func TestOpenOrCreateMigratesLegacyRecordsWithoutProtocolReset(t *testing.T) {
 	record := domain.CatalogueRecord{
 		Name: "work", IncarnationID: domain.IncarnationID{1}, Cwd: "/workspace",
 		CreatedAt: 11, UpdatedAt: 22, LastUsedSeq: 33,
-		TabNames:  []string{"shell", "logs"},
+		TabNames: []string{"shell", "logs"}, TabRecords: []domain.CatalogueTabRecord{{StableID: "shell", Name: "shell"}, {StableID: "logs", Name: "logs"}},
 		Committed: &domain.CheckpointRef{Generation: 3, ManifestDigest: [32]byte{3}},
 	}
-	olderProtocol, err := encodeRecordValueForProtocol(record, protocol.Version-1)
-	require.NoError(t, err)
-	protocolLess, err := encodeRecordValue(record)
-	require.NoError(t, err)
-	binary.BigEndian.PutUint16(protocolLess[len(catalogueMagic):], protocolLessCatalogueRecordVersion)
-	protocolLess = append(protocolLess[:len(catalogueMagic)+2], protocolLess[len(catalogueMagic)+4:]...)
-
-	currentProtocol, err := encodeRecordValue(record)
-	require.NoError(t, err)
 	for _, tt := range []struct {
-		name         string
-		encoded      []byte
-		incompatible bool
+		name   string
+		format uint16
+		wire   uint16
 	}{
-		{name: "current protocol", encoded: currentProtocol},
-		{name: "recorded older protocol", encoded: olderProtocol, incompatible: true},
-		{name: "protocol-less v4 record", encoded: protocolLess, incompatible: true},
+		{name: "v5 older protocol", format: protocolRecordVersion, wire: protocol.Version - 1},
+		{name: "v5 current protocol", format: protocolRecordVersion, wire: protocol.Version},
+		{name: "v5 newer protocol", format: protocolRecordVersion, wire: protocol.Version + 1},
+		{name: "v4", format: protocolLessRecordVersion},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := encodeRecordValueForFormat(record, tt.format, tt.wire)
+			require.NoError(t, err)
 			dir := privateDir(t)
 			store, err := kv.Open(StorePath(dir))
 			require.NoError(t, err)
-			require.NoError(t, store.Set([]byte(record.Name), tt.encoded))
+			require.NoError(t, store.Set([]byte(record.Name), encoded))
 			require.NoError(t, store.Close())
 
 			opened, err := OpenOrCreate(dir)
 			require.NoError(t, err)
-			defer func() { require.NoError(t, opened.Catalogue.Close()) }()
 			require.Equal(t, []domain.CatalogueRecord{record}, opened.Records)
-			if tt.incompatible {
-				require.Equal(t, []domain.CatalogueRecord{record}, opened.IncompatibleRecords)
-			} else {
-				require.Empty(t, opened.IncompatibleRecords)
-			}
+			require.True(t, opened.Migration.Performed)
+			require.Equal(t, []uint16{tt.format}, opened.Migration.SourceFormats)
+			require.NoError(t, opened.Catalogue.Close())
+			migrated, err := kv.Open(StorePath(dir))
+			require.NoError(t, err)
+			value, ok := migrated.Get([]byte(record.Name))
+			require.True(t, ok)
+			require.NoError(t, migrated.Close())
+			stored, err := decodeStoredRecordValue(record.Name, value)
+			require.NoError(t, err)
+			require.Equal(t, catalogueRecordVersion, stored.formatVersion)
 		})
 	}
 }
@@ -104,10 +103,29 @@ func TestDecodeRecordValueRejectsMalformedCheckpointMarker(t *testing.T) {
 	require.ErrorIs(t, err, errMalformedRecord)
 }
 
+func TestDecodeRecordValueRejectsUnsupportedFormat(t *testing.T) {
+	encoded, err := encodeRecordValue(validRecord("work", 1))
+	require.NoError(t, err)
+	binary.BigEndian.PutUint16(encoded[len(catalogueMagic):], catalogueRecordVersion+1)
+
+	_, err = decodeRecordValue("work", encoded)
+	var unsupported *UnsupportedCatalogueRecordFormatError
+	require.ErrorAs(t, err, &unsupported)
+	require.Equal(t, catalogueRecordVersion+1, unsupported.Got)
+}
+
 func checkpointMarkerOffset(t *testing.T, encoded []byte) int {
 	t.Helper()
 	r := valueReader{data: encoded}
-	_, ok := r.take(len(catalogueMagic) + 2 + 2 + len(domain.IncarnationID{}))
+	_, ok := r.take(len(catalogueMagic))
+	require.True(t, ok)
+	version, ok := r.u16()
+	require.True(t, ok)
+	if version == protocolRecordVersion {
+		_, ok = r.u16()
+		require.True(t, ok)
+	}
+	_, ok = r.take(len(domain.IncarnationID{}))
 	require.True(t, ok)
 	_, ok = r.str()
 	require.True(t, ok)
