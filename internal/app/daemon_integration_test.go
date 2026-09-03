@@ -139,7 +139,10 @@ func requestKill(dir string, scope protocol.KillScope) error {
 	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: scope})}); err != nil {
 		return err
 	}
-	reply, err := tr.Recv()
+	reply, err := receiveKillReply(tr, daemonStopTimeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
@@ -154,6 +157,53 @@ func requestKill(dir string, scope protocol.KillScope) error {
 		return fmt.Errorf("decoding kill error: %w", err)
 	}
 	return fmt.Errorf("kill failed: %s", em.Text)
+}
+
+func receiveKillReply(tr wire.Transport, timeout time.Duration) (wire.Frame, error) {
+	type result struct {
+		frame wire.Frame
+		err   error
+	}
+	received := make(chan result, 1)
+	go func() {
+		frame, err := tr.Recv()
+		received <- result{frame: frame, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case reply := <-received:
+		return reply.frame, reply.err
+	case <-timer.C:
+		_ = tr.Close()
+		reply := <-received
+		return reply.frame, errors.Join(context.DeadlineExceeded, reply.err)
+	}
+}
+
+type blockingRecvTransport struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (*blockingRecvTransport) Send(wire.Frame) error { return nil }
+
+func (t *blockingRecvTransport) Recv() (wire.Frame, error) {
+	<-t.closed
+	return wire.Frame{}, io.ErrClosedPipe
+}
+
+func (t *blockingRecvTransport) Close() error {
+	t.once.Do(func() { close(t.closed) })
+	return nil
+}
+
+func TestReceiveKillReplyTimesOut(t *testing.T) {
+	tr := &blockingRecvTransport{closed: make(chan struct{})}
+	_, err := receiveKillReply(tr, 10*time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
 
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
