@@ -97,7 +97,7 @@ Catalogue failure is fail-closed: vev does not publish an empty replacement daem
 
 ## Theme
 
-With `theme = auto`, vev follows the terminal's reported foreground, background, light/dark scheme, and ANSI palette. `theme.palette = on` is the default. `theme.accent = auto` derives one accent from the terminal's chromatic ANSI colors; repeated terminal colors are preferred, otherwise vev uses an eligible blue slot when available. `theme.accent = 0` through `theme.accent = 15` selects exactly that ANSI slot. Arbitrary RGB values and `off` are not accepted for `theme.accent`.
+With `theme = auto`, vev follows the terminal's reported foreground, background, light/dark scheme, and ANSI palette. `theme.palette = on` is the default. `theme.accent = auto` derives one accent from the terminal's chromatic ANSI colors; larger and more cohesive repeated-color groups are preferred, then conventional normal/bright pairs, otherwise vev uses an eligible blue slot when available. `theme.accent = 0` through `theme.accent = 15` selects exactly that ANSI slot. Arbitrary RGB values and `off` are not accepted for `theme.accent`.
 
 When the terminal provides truecolor defaults and a usable RGB palette slot, vev uses the resolved accent for active chrome and derives softer bar, inactive, recent-session, and border colors from it. It preserves readability by reducing a surface intensity when needed. Terminal application/pane colors are not recolored. Without truecolor default colors or a usable RGB resolved accent, chrome backgrounds remain neutral; an available selected ANSI slot can still decorate foregrounds or borders. An explicit unavailable slot is never replaced with another slot.
 
