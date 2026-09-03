@@ -34,11 +34,12 @@ func accentCandidateSlot(index int) uint8 {
 }
 
 type accentGroup struct {
-	members   uint16
-	size      uint8
-	pairs     uint8
-	chromaSum float64
-	rep       uint8
+	members     uint16
+	size        uint8
+	pairs       uint8
+	distanceSum float64
+	chromaSum   float64
+	rep         uint8
 }
 
 // ResolveAccent deterministically selects a terminal-owned accent. It uses
@@ -147,11 +148,13 @@ func resolveAutoAccent(t Theme) Accent {
 		}
 	}
 	winner := groups[best]
-	runnerSize, runnerPairs := uint8(0), uint8(0)
+	runnerUp := accentGroup{}
 	if runner >= 0 {
-		runnerSize, runnerPairs = groups[runner].size, groups[runner].pairs
+		runnerUp = groups[runner]
 	}
-	if winner.size >= 2 && (winner.size > runnerSize || winner.pairs > runnerPairs) {
+	if winner.size >= 2 && (winner.size > runnerUp.size ||
+		winner.size == runnerUp.size && (winner.distanceSum < runnerUp.distanceSum ||
+			winner.distanceSum == runnerUp.distanceSum && winner.pairs > runnerUp.pairs)) {
 		slot := accentCandidateSlot(int(winner.rep))
 		return resolvedAccent(t, t.Palette[slot], slot)
 	}
@@ -204,8 +207,13 @@ func finalizeAccentGroup(group *accentGroup, colors [accentCandidateCount]oklab)
 		group.chromaSum += okLabChroma(colors[i])
 		var totalDistance float64
 		for j := range accentCandidateCount {
-			if group.members&(uint16(1)<<j) != 0 {
-				totalDistance += okLabDistance(colors[i], colors[j])
+			if group.members&(uint16(1)<<j) == 0 {
+				continue
+			}
+			distance := okLabDistance(colors[i], colors[j])
+			totalDistance += distance
+			if j > i {
+				group.distanceSum += distance
 			}
 		}
 		if first || totalDistance < representativeDistance || (totalDistance == representativeDistance && slot < accentCandidateSlot(int(representative))) {
@@ -234,6 +242,9 @@ func accentGroupHasSlot(group accentGroup, slot uint8) bool {
 func betterAccentGroup(a, b accentGroup) bool {
 	if a.size != b.size {
 		return a.size > b.size
+	}
+	if a.distanceSum != b.distanceSum {
+		return a.distanceSum < b.distanceSum
 	}
 	if a.pairs != b.pairs {
 		return a.pairs > b.pairs

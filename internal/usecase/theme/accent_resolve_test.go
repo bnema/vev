@@ -71,6 +71,34 @@ func TestResolveAccentAuto(t *testing.T) {
 			want:  Accent{RGB: blue, Slot: 4, Known: true},
 		},
 		{
+			name: "exact theme accent beats a looser regular bright pair",
+			theme: func() Theme {
+				t := paletteTheme(map[int]renderer.RGB{
+					0:  {R: 0xf4, G: 0xf7, B: 0xf5},
+					1:  {R: 0xb6, G: 0x4d, B: 0x58},
+					2:  {R: 0x3d, G: 0x66, B: 0x66},
+					3:  {R: 0x8f, G: 0x62, B: 0x2b},
+					4:  {R: 0x42, G: 0x6f, B: 0xa8},
+					5:  {R: 0x74, G: 0x6f, B: 0x76},
+					6:  {R: 0x5a, G: 0x85, B: 0x85},
+					7:  {R: 0x1d, G: 0x22, B: 0x24},
+					8:  {R: 0x75, G: 0x79, B: 0x82},
+					9:  {R: 0xa9, G: 0x47, B: 0x51},
+					10: {R: 0x2a, G: 0x4a, B: 0x4a},
+					11: {R: 0x7d, G: 0x55, B: 0x25},
+					12: {R: 0x34, G: 0x5f, B: 0x95},
+					13: {R: 0x62, G: 0x5d, B: 0x64},
+					14: {R: 0x3d, G: 0x66, B: 0x66},
+					15: {R: 0x08, G: 0x09, B: 0x0a},
+				})
+				t.Foreground = renderer.RGB{R: 0x1d, G: 0x22, B: 0x24}
+				t.Background = renderer.RGB{R: 0xf4, G: 0xf7, B: 0xf5}
+				t.Light = true
+				return t
+			}(),
+			want: Accent{RGB: renderer.RGB{R: 0x3d, G: 0x66, B: 0x66}, Slot: 2, Known: true},
+		},
+		{
 			name:  "regular bright pair beats equal size runner up",
 			theme: paletteTheme(map[int]renderer.RGB{2: teal, 10: teal, 4: blue, 13: blue}),
 			want:  Accent{RGB: teal, Slot: 2, Known: true},
