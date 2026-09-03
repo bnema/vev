@@ -79,13 +79,13 @@ the destination's authoritative output is flushed.
 
 ## Durable record compatibility
 
-Catalogue record format version 5 stores the protocol version alongside stable
-tab identity metadata. At daemon startup, version 3 and 4 records and version 5
-records written by another protocol are decoded only to retain their session
-names; all other session state is reset before socket publication. Compatible
-version 5 records restore normally. Older binaries reject version 5 records, so
-a downgrade also resets sessions when the older binary can read the catalogue,
-or fails closed when it cannot. Back up the vev state before a rollback.
+Catalogue record format version 6 stores durable session metadata independently
+from the live protocol version. At daemon startup, supported version 3–5 records
+are losslessly converted before socket publication and the original catalogue is
+preserved as a private `sessions.kv.pre-v6.bak` backup. A wire-protocol change
+does not reset session state. Unsupported or corrupt records fail closed without
+modifying the catalogue. Older binaries cannot read version 6, so restore the
+backup before a rollback.
 
 Remote catalogues are bounded and versioned. The current schema is mandatory
 and contains lifecycle IDs, ordered typed tab records, state, active tab,

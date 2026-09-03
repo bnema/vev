@@ -12,11 +12,11 @@ vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle
 
 Discard creates a new incarnation and retains the old record and snapshots under `snapshots/quarantine/` until an explicit later purge.
 
-## Protocol upgrades
+## Catalogue format upgrades
 
-Each catalogue record stores the protocol version that wrote it. At startup, a record from any other protocol—including a newer protocol after a downgrade—is atomically replaced with a fresh incarnation before the daemon publishes its socket. Only the session name is retained; the working directory, layout, tabs, terminal history, recovery transcript, process-recovery state, and checkpoints are discarded. Records created before protocol tracking are treated the same way.
+Catalogue format version 6 is independent from the live client/daemon protocol. At startup, vev losslessly converts supported version 3–5 records to version 6 before publishing its socket. The conversion preserves session identity, working directory, tabs, timestamps, checkpoint references, and degradation state; a wire-protocol update alone never resets durable sessions.
 
-This reset is per named session and crash-safe. Once the fresh catalogue authority is committed, leftover snapshot objects are no longer authoritative and startup garbage collection can remove them. Catalogue corruption is not treated as a protocol mismatch and remains fail-closed.
+Before rewriting a legacy catalogue, vev creates and syncs a private `sessions.kv.pre-v6.bak` backup beside it. The catalogue is then replaced atomically. If the source is corrupt, from an unsupported future format, or conflicts with an existing backup, startup fails closed and leaves the catalogue untouched. Version 6 is not readable by older binaries; to roll back, stop vev and restore the backup before starting the older binary.
 
 ## Incompatible checkpoints
 
@@ -36,6 +36,6 @@ A `lifecycle_owner_wait` event normally means another daemon is initializing or 
 
 ## Diagnostics
 
-Durable state and recovery journals are under `$XDG_STATE_HOME/vev` (default `~/.local/state/vev`). Snapshot quarantine is under its `snapshots/quarantine/` tree. Runtime ownership is under `$XDG_RUNTIME_DIR/vev`; logs are JSON lines in the state directory.
+Durable state and catalogue migration backups are under `$XDG_STATE_HOME/vev` (default `~/.local/state/vev`). Snapshot quarantine is under its `snapshots/quarantine/` tree. Runtime ownership is under `$XDG_RUNTIME_DIR/vev`; logs are JSON lines in the state directory.
 
 Use session names, incarnation IDs, generation numbers, reason codes, and cursors from recovery events when diagnosing a failure. Recovery logs never include terminal or snapshot object contents.
