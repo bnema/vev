@@ -18,6 +18,7 @@ const legacyCatalogueBackupSuffix = ".pre-v6.bak"
 type Migration struct {
 	Performed     bool
 	SourceFormats []uint16
+	TargetFormat  uint16
 	RecordCount   int
 	BackupPath    string
 }
@@ -52,8 +53,7 @@ func (p *Persister) migrateLegacyRecords(path string, records []domain.Catalogue
 
 	updates := make(map[string]*domain.CatalogueRecord, len(records))
 	for i := range records {
-		record := records[i]
-		updates[record.Name] = &record
+		updates[records[i].Name] = &records[i]
 	}
 	if err := p.Apply(updates); err != nil {
 		return Migration{}, fmt.Errorf("write migrated catalogue: %w", err)
@@ -61,6 +61,7 @@ func (p *Persister) migrateLegacyRecords(path string, records []domain.Catalogue
 	return Migration{
 		Performed:     true,
 		SourceFormats: formats,
+		TargetFormat:  catalogueRecordVersion,
 		RecordCount:   len(records),
 		BackupPath:    backupPath,
 	}, nil
@@ -95,11 +96,11 @@ func createMatchingBackup(path string, data []byte) error {
 		return err
 	}
 
-	tmp := path + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("create catalogue backup temporary file: %w", err)
 	}
+	tmp := file.Name()
 	cleanup := func(err error) error {
 		return errors.Join(err, file.Close(), os.Remove(tmp))
 	}

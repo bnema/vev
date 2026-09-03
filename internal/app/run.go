@@ -674,7 +674,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	coordinator := recovery.NewCoordinator(opened.Catalogue, snapshotRepository, rand.Reader)
 	if opened.Migration.Performed {
 		recoveryMode = "catalogue-migrated"
-		log.Info("catalogue_migrated", "source_formats", opened.Migration.SourceFormats, "target_format", 6, "records", opened.Migration.RecordCount, "backup", opened.Migration.BackupPath)
+		log.Info("catalogue_migrated", "source_formats", opened.Migration.SourceFormats, "target_format", opened.Migration.TargetFormat, "records", opened.Migration.RecordCount, "backup", opened.Migration.BackupPath)
 	}
 	logCatalogueRecovery(log, opened.Records, recoveryMode)
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))

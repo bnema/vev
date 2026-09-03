@@ -29,12 +29,14 @@ func TestOpenOrCreateMigrationPreservesBackupAndIsIdempotent(t *testing.T) {
 	require.NoError(t, store.Close())
 	original, err := os.ReadFile(StorePath(dir))
 	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(StorePath(dir)+legacyCatalogueBackupSuffix+".tmp", []byte("stale"), 0o600))
 
 	opened, err := OpenOrCreate(dir)
 	require.NoError(t, err)
 	require.Equal(t, []domain.CatalogueRecord{record}, opened.Records)
 	require.True(t, opened.Migration.Performed)
 	require.Equal(t, []uint16{protocolRecordVersion}, opened.Migration.SourceFormats)
+	require.Equal(t, catalogueRecordVersion, opened.Migration.TargetFormat)
 	require.Equal(t, 1, opened.Migration.RecordCount)
 	require.NoError(t, opened.Catalogue.Close())
 
