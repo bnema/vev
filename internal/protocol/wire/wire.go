@@ -1331,8 +1331,8 @@ func UnmarshalOutputResetRequest(b []byte) (protocol.OutputResetRequest, error) 
 func MarshalKill(m protocol.Kill) []byte {
 	w := payloadWriter{}
 	w.putString(m.Name)
-	if m.All {
-		w.putUint8(1)
+	if m.Scope != protocol.KillSession {
+		w.putUint8(uint8(m.Scope))
 	}
 	return w.b
 }
@@ -1344,17 +1344,21 @@ func UnmarshalKill(b []byte) (protocol.Kill, error) {
 	if err != nil {
 		return protocol.Kill{}, err
 	}
-	var all bool
+	var scope protocol.KillScope
 	if len(r.b) > 0 {
-		all, err = r.getBool()
-		if err != nil {
-			return protocol.Kill{}, err
+		value, readErr := r.getUint8()
+		if readErr != nil {
+			return protocol.Kill{}, readErr
+		}
+		scope = protocol.KillScope(value)
+		if scope > protocol.KillAll {
+			return protocol.Kill{}, errInvalidEnum
 		}
 	}
 	if err := r.done(); err != nil {
 		return protocol.Kill{}, err
 	}
-	return protocol.Kill{Name: name, All: all}, nil
+	return protocol.Kill{Name: name, Scope: scope}, nil
 }
 
 // MarshalSessions encodes m into a Sessions message payload: a uint16 count

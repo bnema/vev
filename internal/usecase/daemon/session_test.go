@@ -144,13 +144,39 @@ func TestHandshakeNoSuchSession(t *testing.T) {
 
 func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
-	tr, _, _ := newConn(t, wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})})
+	tr, _, _ := newConn(t, wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillAll})})
 	d.handleConn(tr)
 
 	select {
 	case <-d.done:
 	case <-time.After(time.Second):
 		t.Fatal("kill all on empty daemon did not signal shutdown")
+	}
+}
+
+func TestBeginTeardownRequestResolvesShutdownPreservation(t *testing.T) {
+	tests := []struct {
+		name       string
+		reserve    bool
+		wantReason uint8
+		wantPurge  bool
+	}{
+		{name: "natural exit purges", wantReason: protocol.ReasonSessionKilled, wantPurge: true},
+		{name: "shutdown reservation preserves", reserve: true, wantReason: protocol.ReasonServerShutdown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := &session{}
+			if tt.reserve {
+				sess.reserveShutdownTeardown()
+			}
+			reason, purge, acquired := sess.beginTeardownRequest(nil, protocol.ReasonSessionKilled, true)
+			require.True(t, acquired)
+			require.Equal(t, tt.wantReason, reason)
+			require.Equal(t, tt.wantPurge, purge)
+			sess.finishTeardown()
+		})
 	}
 }
 

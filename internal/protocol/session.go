@@ -13,7 +13,7 @@ import (
 )
 
 // Version is the negotiated vev session protocol version.
-const Version uint16 = 38
+const Version uint16 = 39
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.
@@ -210,9 +210,19 @@ type AttachTarget struct {
 type Detached struct{ Reason uint8 }
 type List struct{}
 
+type KillScope uint8
+
+const (
+	KillSession KillScope = 0
+	// KillDaemon retains the legacy All=true wire value so an older client can
+	// never turn daemon shutdown into destructive session deletion.
+	KillDaemon KillScope = 1
+	KillAll    KillScope = 2
+)
+
 type Kill struct {
-	Name string
-	All  bool
+	Name  string
+	Scope KillScope
 }
 
 type SessionState uint8

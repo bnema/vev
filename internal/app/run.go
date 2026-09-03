@@ -1098,7 +1098,7 @@ func requestDaemonStop(ctx context.Context) error {
 		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
 	}
 	defer func() { _ = transport.Close() }()
-	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}); err != nil {
+	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillDaemon})}); err != nil {
 		return fmt.Errorf("vev: requesting daemon stop: %w", err)
 	}
 	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
@@ -1568,25 +1568,36 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 	}
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Name: name, All: all || daemon})}); err != nil {
+	scope := protocol.KillSession
+	if all {
+		scope = protocol.KillAll
+	} else if daemon {
+		scope = protocol.KillDaemon
+	}
+	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Name: name, Scope: scope})}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)
 	}
 	reply, err := transport.Recv()
-	if err != nil {
-		// The daemon may close the connection after killing; treat a clean
-		// EOF as success.
-		if errors.Is(err, io.EOF) {
-			printKillSuccess(name, all, daemon)
-			return nil
-		}
+	if err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("vev: reading kill reply: %w", err)
 	}
-	if reply.Type == wire.MsgError {
-		em, err := wire.UnmarshalErrorMsg(reply.Payload)
-		if err != nil {
-			return fmt.Errorf("vev: decoding error reply: %w", err)
+	if err == nil && reply.Type == wire.MsgError {
+		em, decodeErr := wire.UnmarshalErrorMsg(reply.Payload)
+		if decodeErr != nil {
+			return fmt.Errorf("vev: decoding error reply: %w", decodeErr)
 		}
 		return fmt.Errorf("vev: %s", em.Text)
+	}
+	if all || daemon {
+		waitCtx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
+		defer cancel()
+		owner, waitErr := waitForLifecycleAvailability(waitCtx, ipc.SocketDir(), defaultBackoff)
+		if waitErr != nil {
+			return fmt.Errorf("vev: waiting for daemon ownership transfer: %w", waitErr)
+		}
+		if releaseErr := owner.Release(); releaseErr != nil {
+			return fmt.Errorf("vev: releasing daemon ownership probe: %w", releaseErr)
+		}
 	}
 	printKillSuccess(name, all, daemon)
 	return nil

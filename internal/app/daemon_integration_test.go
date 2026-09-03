@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -122,19 +123,87 @@ func listRemoteSessions(t *testing.T, dir string) protocol.Sessions {
 }
 
 func killAll(dir string) error {
+	return requestKill(dir, protocol.KillAll)
+}
+
+func killDaemon(dir string) error {
+	return requestKill(dir, protocol.KillDaemon)
+}
+
+func requestKill(dir string, scope protocol.KillScope) error {
 	tr, err := ipc.DialContext(context.Background(), dir)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tr.Close() }()
-	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: scope})}); err != nil {
 		return err
 	}
-	_, err = tr.Recv()
+	reply, err := receiveKillReply(tr, daemonStopTimeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if reply.Type != wire.MsgError {
+		return nil
+	}
+	em, err := wire.UnmarshalErrorMsg(reply.Payload)
+	if err != nil {
+		return fmt.Errorf("decoding kill error: %w", err)
+	}
+	return fmt.Errorf("kill failed: %s", em.Text)
+}
+
+func receiveKillReply(tr wire.Transport, timeout time.Duration) (wire.Frame, error) {
+	type result struct {
+		frame wire.Frame
+		err   error
+	}
+	received := make(chan result, 1)
+	go func() {
+		frame, err := tr.Recv()
+		received <- result{frame: frame, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case reply := <-received:
+		return reply.frame, reply.err
+	case <-timer.C:
+		_ = tr.Close()
+		reply := <-received
+		return reply.frame, errors.Join(context.DeadlineExceeded, reply.err)
+	}
+}
+
+type blockingRecvTransport struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (*blockingRecvTransport) Send(wire.Frame) error { return nil }
+
+func (t *blockingRecvTransport) Recv() (wire.Frame, error) {
+	<-t.closed
+	return wire.Frame{}, io.ErrClosedPipe
+}
+
+func (t *blockingRecvTransport) Close() error {
+	t.once.Do(func() { close(t.closed) })
+	return nil
+}
+
+func TestReceiveKillReplyTimesOut(t *testing.T) {
+	tr := &blockingRecvTransport{closed: make(chan struct{})}
+	_, err := receiveKillReply(tr, 10*time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
 
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
@@ -501,6 +570,65 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("restarted daemon did not stop after kill --daemon")
+	}
+}
+
+func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	dir := filepath.Join(t.TempDir(), "runtime")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+
+	start := func() <-chan error {
+		opened, err := persist.OpenOrCreate(stateDir)
+		require.NoError(t, err)
+		coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+		_, served := startDaemonInDir(t, dir,
+			daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}),
+			daemon.WithCatalogue(opened.Catalogue, opened.Records),
+			daemon.WithSnapshotRepository(repository),
+			daemon.WithRecoveryCoordinator(coordinator),
+		)
+		return served
+	}
+
+	served := start()
+	first, _ := attach(t, dir, protocol.IntentNew, "alpha", sz)
+	require.NoError(t, first.Close())
+	second, _ := attach(t, dir, protocol.IntentNew, "beta", sz)
+	require.NoError(t, second.Close())
+
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+
+	served = start()
+	sessions := listRemoteSessions(t, dir)
+	require.Equal(t, []protocol.SessionInfo{
+		{Name: "alpha", State: protocol.SessionDown},
+		{Name: "beta", State: protocol.SessionDown},
+	}, sessions.Sessions)
+
+	require.NoError(t, killAll(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted daemon did not stop after kill all")
+	}
+
+	served = start()
+	require.Empty(t, listRemoteSessions(t, dir).Sessions)
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("empty daemon did not stop")
 	}
 }
 
@@ -1313,7 +1441,7 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	killTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = killTr.Close() }()
-	require.NoError(t, killTr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}))
+	require.NoError(t, killTr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillAll})}))
 
 	_, err = killTr.Recv()
 	require.ErrorIs(t, err, io.EOF)

@@ -42,13 +42,14 @@ type session struct {
 	// tab, or pane locks. The owner performs teardown without holding teardownMu;
 	// duplicate daemon-shutdown callers can therefore bound their ownership wait
 	// with Serve's shared snapshot deadline.
-	teardownMu        sync.Mutex
-	teardownActive    bool
-	teardownDone      chan struct{}
-	moveReservations  uint
-	teardownWaiters   uint
-	teardownChanged   chan struct{}
-	lifecycleStopOnce sync.Once
+	teardownMu                sync.Mutex
+	teardownActive            bool
+	teardownDone              chan struct{}
+	moveReservations          uint
+	teardownWaiters           uint
+	teardownChanged           chan struct{}
+	shutdownTeardownRequested bool
+	lifecycleStopOnce         sync.Once
 	// sessionCore.mu guards tabs, attachment membership, restoreDone, clipFiles,
 	// and clipboard queue state.
 	// restoreDone remains attached to a restored session after it is published in
@@ -1481,16 +1482,38 @@ func (s *session) signalTeardownChangedLocked() {
 	s.teardownChanged = make(chan struct{})
 }
 
+// reserveShutdownTeardown makes preservation the authoritative terminal
+// disposition before shutdown cancels PTYs. PTY EOF may still win teardown
+// ownership, but it can no longer reinterpret daemon cancellation as a natural
+// final-shell exit and purge the named session.
+func (s *session) reserveShutdownTeardown() {
+	if s == nil {
+		return
+	}
+	s.teardownMu.Lock()
+	s.shutdownTeardownRequested = true
+	s.signalTeardownChangedLocked()
+	s.teardownMu.Unlock()
+}
+
 // beginTeardown waits for ownership without holding teardownMu across teardown.
 // A false result means Serve's shared shutdown budget expired while another
 // lifecycle path owned the session. Ordinary callers wait and retry ownership,
 // preserving failed-teardown and stopped-purge retry semantics.
 func (s *session) beginTeardown(deadline *snapshotShutdownDeadline) bool {
+	_, _, acquired := s.beginTeardownRequest(deadline, 0, false)
+	return acquired
+}
+
+// beginTeardownRequest acquires teardown ownership and resolves its terminal
+// disposition atomically with shutdown reservation. This is the sole boundary
+// allowed to turn a teardown trigger into preserve-versus-purge policy.
+func (s *session) beginTeardownRequest(deadline *snapshotShutdownDeadline, reason uint8, purge bool) (uint8, bool, bool) {
 	for {
 		if deadline != nil {
 			select {
 			case <-deadline.Done():
-				return false
+				return reason, purge, false
 			default:
 			}
 		}
@@ -1501,15 +1524,19 @@ func (s *session) beginTeardown(deadline *snapshotShutdownDeadline) bool {
 				select {
 				case <-deadline.Done():
 					s.teardownMu.Unlock()
-					return false
+					return reason, purge, false
 				default:
 				}
 			}
 			s.teardownActive = true
 			s.teardownDone = make(chan struct{})
 			s.signalTeardownChangedLocked()
+			if s.shutdownTeardownRequested {
+				reason = protocol.ReasonServerShutdown
+				purge = false
+			}
 			s.teardownMu.Unlock()
-			return true
+			return reason, purge, true
 		}
 		s.teardownWaiters++
 		s.signalTeardownChangedLocked()
@@ -1531,7 +1558,7 @@ func (s *session) beginTeardown(deadline *snapshotShutdownDeadline) bool {
 		s.signalTeardownChangedLocked()
 		s.teardownMu.Unlock()
 		if timedOut {
-			return false
+			return reason, purge, false
 		}
 	}
 }
@@ -1611,7 +1638,9 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	// later callers observe the completed registry transition instead of
 	// manufacturing a newer generation that the owner will quarantine. A
 	// shutdown duplicate abandons this wait when the shared budget expires.
-	if !sess.beginTeardown(deadline) {
+	var acquired bool
+	reason, purge, acquired = sess.beginTeardownRequest(deadline, reason, purge)
+	if !acquired {
 		return nil
 	}
 	defer sess.finishTeardown()
