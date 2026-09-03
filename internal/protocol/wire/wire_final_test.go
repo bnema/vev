@@ -12,8 +12,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if protocol.Version != 38 {
-		t.Fatalf("ProtocolVersion = %d, want 38", protocol.Version)
+	if protocol.Version != 39 {
+		t.Fatalf("ProtocolVersion = %d, want 39", protocol.Version)
 	}
 	payload := MarshalHello(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -318,10 +318,10 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 		},
 		{name: "detached reason", payload: []byte{0xff}, decode: func(b []byte) error { _, err := UnmarshalDetached(b); return err }},
 		{
-			name: "kill boolean",
+			name: "kill scope",
 			payload: func() []byte {
-				b := MarshalKill(protocol.Kill{All: true})
-				b[len(b)-1] = 2
+				b := MarshalKill(protocol.Kill{Scope: protocol.KillAll})
+				b[len(b)-1] = 3
 				return b
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalKill(b); return err },

@@ -796,7 +796,8 @@ func TestKillGoldenAndRoundTrip(t *testing.T) {
 	}{
 		{name: "named", msg: protocol.Kill{Name: "main"}, want: []byte{0x00, 0x04, 0x6d, 0x61, 0x69, 0x6e}},
 		{name: "empty", msg: protocol.Kill{Name: ""}, want: []byte{0x00, 0x00}},
-		{name: "all", msg: protocol.Kill{All: true}, want: []byte{0x00, 0x00, 0x01}},
+		{name: "daemon", msg: protocol.Kill{Scope: protocol.KillDaemon}, want: []byte{0x00, 0x00, 0x01}},
+		{name: "all", msg: protocol.Kill{Scope: protocol.KillAll}, want: []byte{0x00, 0x00, 0x02}},
 	}
 
 	for _, tt := range tests {

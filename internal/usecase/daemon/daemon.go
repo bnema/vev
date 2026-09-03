@@ -803,7 +803,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 		snapshotDeadline = newSnapshotShutdownDeadline(d.clock)
 		defer snapshotDeadline.stop()
 	}
-	d.shutdownAllWithSnapshotDeadline(protocol.ReasonServerShutdown, snapshotDeadline)
+	d.terminateAllWithSnapshotDeadline(protocol.ReasonServerShutdown, false, snapshotDeadline)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
@@ -823,7 +823,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 		d.persistShutdownSnapshotFailure(name, context.DeadlineExceeded)
 	}
 	d.WaitDurableWriters()
-	d.shutdownAllWithSnapshotDeadline(protocol.ReasonServerShutdown, snapshotDeadline)
+	d.terminateAllWithSnapshotDeadline(protocol.ReasonServerShutdown, false, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
 	if err := d.flushCatalogue(); err != nil {
@@ -842,10 +842,14 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 // inserted after the snapshot: route rejects once closing is set, and both run
 // under d.mu. killSession (which relocks) runs after the lock is released.
 func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
-	return d.shutdownAllWithSnapshotDeadline(reason, nil)
+	return d.terminateAllWithSnapshotDeadline(reason, false, nil)
 }
 
-func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+func (d *Daemon) purgeAll(reason uint8) (checkpointIncomplete bool) {
+	return d.terminateAllWithSnapshotDeadline(reason, true, nil)
+}
+
+func (d *Daemon) terminateAllWithSnapshotDeadline(reason uint8, purge bool, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
 	d.cancelRemoteDiscoveryRefresh()
 	d.closeMoveLifecycles()
 	d.mu.Lock()
@@ -853,13 +857,37 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 	d.purgeAllParkingLocked()
 	parkedRetirements := d.purgeAllParkedLocked()
 	snapshot := d.sessionsSnapshotLocked()
+	stoppedNames := make([]string, 0, len(d.inactive))
+	if purge {
+		for name := range d.inactive {
+			stoppedNames = append(stoppedNames, name)
+		}
+		sort.Strings(stoppedNames)
+	}
 	empty := len(snapshot) == 0
 	d.mu.Unlock()
 	d.finishParkedAttachmentRetirements(parkedRetirements)
+	if !purge {
+		// Publish preservation policy for the complete registry snapshot before
+		// cancelling any PTY. Cancellation-driven EOF is allowed to own teardown,
+		// but its disposition must remain daemon shutdown rather than session purge.
+		for _, s := range snapshot {
+			s.reserveShutdownTeardown()
+		}
+	}
 	d.log.Info("graceful shutdown begin", "reason", reason, "sessions", len(snapshot))
+	// Purge stopped authority before signaling Serve to exit. Once the final
+	// live registry entry closes, Serve cancels its context; deleting stopped
+	// records afterward would be interrupted and retain broken catalogue entries.
+	for _, name := range stoppedNames {
+		if err := d.retryStoppedPurge(name); err != nil {
+			checkpointIncomplete = true
+			d.log.Error("deleting stopped session during kill all failed", "err", err, "session", name)
+		}
+	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })
-		return false
+		return checkpointIncomplete
 	}
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that
@@ -869,11 +897,11 @@ func (d *Daemon) shutdownAllWithSnapshotDeadline(reason uint8, deadline *snapsho
 		ephemeral := s.ephemeral
 		s.mu.Unlock()
 		s.stopInMemoryLifecycle()
-		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline, nil); err != nil {
+		if err := d.killSessionWithSnapshotDeadline(s, reason, purge, deadline, nil); err != nil {
 			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
-		if !ephemeral && deadline != nil {
+		if !purge && !ephemeral && deadline != nil {
 			select {
 			case <-deadline.Done():
 				checkpointIncomplete = true
@@ -1143,8 +1171,18 @@ func (d *Daemon) handleList(tr ports.ServerConnection) {
 func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 	defer func() { _ = tr.Close() }()
 
-	if request.All {
+	switch request.Scope {
+	case protocol.KillAll:
+		if d.purgeAll(protocol.ReasonSessionKilled) {
+			_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "one or more sessions could not be deleted"))
+		}
+		return
+	case protocol.KillDaemon:
 		d.shutdownAll(protocol.ReasonServerShutdown)
+		return
+	case protocol.KillSession:
+	default:
+		_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "invalid kill scope"))
 		return
 	}
 

@@ -127,7 +127,23 @@ func killAll(dir string) error {
 		return err
 	}
 	defer func() { _ = tr.Close() }()
-	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}); err != nil {
+	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillAll})}); err != nil {
+		return err
+	}
+	_, err = tr.Recv()
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
+}
+
+func killDaemon(dir string) error {
+	tr, err := ipc.DialContext(context.Background(), dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tr.Close() }()
+	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillDaemon})}); err != nil {
 		return err
 	}
 	_, err = tr.Recv()
@@ -501,6 +517,65 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("restarted daemon did not stop after kill --daemon")
+	}
+}
+
+func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	dir := filepath.Join(t.TempDir(), "runtime")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+
+	start := func() <-chan error {
+		opened, err := persist.OpenOrCreate(stateDir)
+		require.NoError(t, err)
+		coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+		_, served := startDaemonInDir(t, dir,
+			daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}),
+			daemon.WithCatalogue(opened.Catalogue, opened.Records),
+			daemon.WithSnapshotRepository(repository),
+			daemon.WithRecoveryCoordinator(coordinator),
+		)
+		return served
+	}
+
+	served := start()
+	first, _ := attach(t, dir, protocol.IntentNew, "alpha", sz)
+	require.NoError(t, first.Close())
+	second, _ := attach(t, dir, protocol.IntentNew, "beta", sz)
+	require.NoError(t, second.Close())
+
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+
+	served = start()
+	sessions := listRemoteSessions(t, dir)
+	require.Equal(t, []protocol.SessionInfo{
+		{Name: "alpha", State: protocol.SessionDown},
+		{Name: "beta", State: protocol.SessionDown},
+	}, sessions.Sessions)
+
+	require.NoError(t, killAll(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted daemon did not stop after kill all")
+	}
+
+	served = start()
+	require.Empty(t, listRemoteSessions(t, dir).Sessions)
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("empty daemon did not stop")
 	}
 }
 
@@ -1313,7 +1388,7 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	killTr, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	defer func() { _ = killTr.Close() }()
-	require.NoError(t, killTr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{All: true})}))
+	require.NoError(t, killTr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillAll})}))
 
 	_, err = killTr.Recv()
 	require.ErrorIs(t, err, io.EOF)
