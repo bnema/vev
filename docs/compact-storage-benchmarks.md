@@ -1,12 +1,13 @@
 # Compact storage: measured budgets
 
-Measured September 5, 2026 on Linux amd64, Ryzen 5 7535HS, Go 1.27.1,
+Measured September 5, 2026 (CEST; September 4 UTC) on Linux amd64, Ryzen 5 7535HS, Go 1.27.1,
 `GOMAXPROCS=2`. The existing manual-test binary was not replaced or restarted.
 
 ## References and method
 
 - Consumer baseline: clean vev `9bf07496` (before this integration).
-- Compact consumer: this integration worktree, using vev-vt `f912b86`.
+- Measured compact consumer: the integration captured in vev `b59725e3`, using vev-vt `f912b86` (before the final review fixes).
+- Current integration dependency: vev-vt `f2960699a487`. The figures below were not remeasured at this revision; they describe the earlier `f912b86` dependency state.
 - Retained-history baseline: vev-vt foundation `a0f7c5a`, before compact pages.
 - Consumer workloads: 120 × 40 terminals, 10,000 history rows per pane.
 - Main consumer comparisons: three 100 ms samples, reported as medians.
@@ -82,7 +83,11 @@ that it has been removed.
 
 ## Reproduce
 
-Run the same consumer command in clean vev `9bf07496` and the integration tree:
+Run the same consumer command in clean vev `9bf07496` and the integration tree.
+The current integration measures the final dependency, not the exact historical
+sample above. For the historical comparison, use a separate checkout of vev
+`b59725e3`, which pins the compatible `f912b86` dependency and pre-review consumer
+API. Do not downgrade the dependency alone in the current integration.
 
 ```sh
 GOMAXPROCS=2 go test ./internal/usecase/daemon -run '^$' \

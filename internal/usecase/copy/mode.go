@@ -207,7 +207,7 @@ func (s Snapshot) FindRowID(id vt.RowID) int {
 	return -1
 }
 
-func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
+func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) error {
 	i := 0
 	stopped := false
 	err := s.history.Range(func(r []renderer.Cell) bool {
@@ -219,18 +219,17 @@ func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
 		return true
 	})
 	if err != nil {
-		// Search has no recoverable-error result. Preserve its fail-closed
-		// invariant instead of publishing partial matches from corrupt state.
-		panic(err)
+		return err
 	}
 	if stopped {
-		return
+		return nil
 	}
 	for y := range s.screen.Height {
 		if !yield(i+y, s.screen.Row(y)) {
-			return
+			return nil
 		}
 	}
+	return nil
 }
 
 type SearchMatch struct {
@@ -470,9 +469,13 @@ func FindMatches(doc *Document, query string) []SearchMatch {
 	if doc == nil || query == "" {
 		return nil
 	}
+	return findMatches(doc, query, doc.Snapshot().rangeRows)
+}
+
+func findMatches(doc *Document, query string, rangeRows func(func(int, []renderer.Cell) bool) error) []SearchMatch {
 	needle := lowerRunes(query)
 	matches := []SearchMatch{}
-	doc.Snapshot().rangeRows(func(row int, cells []renderer.Cell) bool {
+	err := rangeRows(func(row int, cells []renderer.Cell) bool {
 		hay, indexes := searchableCells(cells)
 		text := ""
 		for start := 0; start+len(needle) <= len(hay); {
@@ -493,6 +496,10 @@ func FindMatches(doc *Document, query string) []SearchMatch {
 		}
 		return true
 	})
+	if err != nil {
+		// Discard partial results without taking down the daemon on corrupt history.
+		return nil
+	}
 	return matches
 }
 func searchableCells(cells []renderer.Cell) ([]rune, []int) {
