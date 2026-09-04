@@ -101,6 +101,16 @@ Use `vev cmd --help` for commands and targeting options.
 
 ## Development
 
+Use `VEV_ENV` to keep development runs separate from your installed vev and from other builds:
+
+```sh
+VEV_ENV=dev go run .
+VEV_ENV=dev go run . kill --all
+rm -rf .dev/dev
+```
+
+Each name shares one daemon and its vev-owned files under `.dev/<name>/`; use separate names to run binaries side by side. This isolates vev configuration, runtime files, durable sessions, hosts, snapshots, and logs, but it is not an OS, filesystem, or network sandbox.
+
 ```sh
 make test   # go test ./... -race
 make lint   # goimports check, go vet
