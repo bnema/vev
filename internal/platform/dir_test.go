@@ -100,6 +100,10 @@ func TestActivateDevelopmentEnvironment(t *testing.T) {
 			if err := os.Chdir(cwd); err != nil {
 				t.Fatal(err)
 			}
+			canonicalCwd, getwdErr := os.Getwd()
+			if getwdErr != nil {
+				t.Fatal(getwdErr)
+			}
 			t.Setenv("VEV_ENV", tt.environment)
 			t.Setenv("VEV_ENV_ROOT", "")
 			t.Setenv("XDG_CONFIG_HOME", "/existing/config")
@@ -127,7 +131,7 @@ func TestActivateDevelopmentEnvironment(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.check != nil {
-				tt.check(t, cwd)
+				tt.check(t, canonicalCwd)
 			}
 		})
 	}
@@ -180,8 +184,11 @@ func TestActivateDevelopmentEnvironmentRecomputesProfileFromInheritedBase(t *tes
 		}
 	})
 
-	invocationCwd := t.TempDir()
-	if err := os.Chdir(invocationCwd); err != nil {
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	invocationCwd, err := os.Getwd()
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("VEV_ENV", "alpha")
