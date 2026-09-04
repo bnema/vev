@@ -79,6 +79,20 @@ code.detach = DET
 
 Invalid values log a warning and resolve that setting to its default on both initial load and reload.
 
+## Development environments
+
+Set `VEV_ENV` to a name such as `dev` to redirect all vev-owned paths into `.dev/<name>/` under the directory where vev was invoked. The name must be one safe segment of at most 64 ASCII letters, digits, dots, underscores, or hyphens, and must start with a letter or digit.
+
+```sh
+VEV_ENV=dev go run .
+VEV_ENV=dev go run . kill --all
+rm -rf .dev/dev
+```
+
+The selected absolute root is retained by the detached daemon and inherited vev processes even when their working directory changes. A name isolates configuration, runtime files, durable sessions, hosts, snapshots, and logs from normal XDG locations and from other names. Invocations using the same name intentionally share a daemon and files; use separate names for side-by-side binaries.
+
+This feature isolates vev-owned data only. It does not sandbox pane processes or provide OS, filesystem, or network isolation.
+
 ## Remote hosts
 
 Remote host commands, listing, and successful direct-attach learning are always active.

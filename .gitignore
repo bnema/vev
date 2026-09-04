@@ -1,4 +1,5 @@
 /vev
+.dev/
 *.test
 .superpowers/
 docs/superpowers/

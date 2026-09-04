@@ -424,6 +424,85 @@ func TestRunUDPProxyClientDeadAfterExceedsIdleTTL(t *testing.T) {
 	require.Greater(t, udpProxyClientTransportOptions.DeadAfter, udpProxyIdleTTL)
 }
 
+func TestDevelopmentTempDirOption(t *testing.T) {
+	absoluteBase := filepath.Join(t.TempDir(), ".dev")
+	creatorErr := errors.New("cannot secure directory")
+	tests := []struct {
+		name        string
+		environment string
+		base        string
+		creatorErr  error
+		wantPath    string
+		wantOption  bool
+		wantErr     error
+	}{
+		{
+			name: "inactive environment",
+			base: absoluteBase,
+		},
+		{
+			name:        "active environment",
+			environment: "work",
+			base:        absoluteBase,
+			wantPath:    filepath.Join(absoluteBase, "work", "tmp"),
+			wantOption:  true,
+		},
+		{
+			name:        "creator error",
+			environment: "work",
+			base:        absoluteBase,
+			creatorErr:  creatorErr,
+			wantPath:    filepath.Join(absoluteBase, "work", "tmp"),
+			wantErr:     creatorErr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("VEV_ENV", tt.environment)
+			t.Setenv("VEV_ENV_ROOT", tt.base)
+			var creatorCalls []string
+
+			option, err := developmentTempDirOption(func(path string) error {
+				creatorCalls = append(creatorCalls, path)
+				return tt.creatorErr
+			})
+
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				require.Nil(t, option)
+			} else {
+				require.NoError(t, err)
+				if tt.wantOption {
+					require.NotNil(t, option)
+				} else {
+					require.Nil(t, option)
+				}
+			}
+			if tt.wantPath == "" {
+				require.Empty(t, creatorCalls)
+			} else {
+				require.Equal(t, []string{tt.wantPath}, creatorCalls)
+				require.True(t, filepath.IsAbs(tt.wantPath))
+			}
+		})
+	}
+}
+
+func TestRunActivatesDevelopmentEnvironmentBeforeParsing(t *testing.T) {
+	t.Setenv("VEV_ENV", "../live")
+	t.Setenv("XDG_CONFIG_HOME", "/existing/config")
+	t.Setenv("XDG_STATE_HOME", "/existing/state")
+	t.Setenv("XDG_RUNTIME_DIR", "/existing/runtime")
+
+	err := Run([]string{"unknown"})
+	require.ErrorContains(t, err, "invalid VEV_ENV")
+	require.NotContains(t, err.Error(), "unknown command")
+	require.Equal(t, "/existing/config", os.Getenv("XDG_CONFIG_HOME"))
+	require.Equal(t, "/existing/state", os.Getenv("XDG_STATE_HOME"))
+	require.Equal(t, "/existing/runtime", os.Getenv("XDG_RUNTIME_DIR"))
+}
+
 func TestParseArgs(t *testing.T) {
 	tests := []struct {
 		name         string

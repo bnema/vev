@@ -145,6 +145,9 @@ func versionLine() string {
 // Run is the entry point invoked by main. It parses args into a command and
 // dispatches it.
 func Run(args []string) error {
+	if err := platform.ActivateDevelopmentEnvironment(); err != nil {
+		return err
+	}
 	cmd, err := parseArgs(args)
 	if err != nil {
 		return err
@@ -479,6 +482,17 @@ func snapshotDir() string {
 	return filepath.Join(platform.StateDir(), "snapshots")
 }
 
+func developmentTempDirOption(ensurePrivate func(string) error) (daemon.Option, error) {
+	dir, active := platform.DevelopmentEnvironmentTempDir()
+	if !active {
+		return nil, nil
+	}
+	if err := ensurePrivate(dir); err != nil {
+		return nil, fmt.Errorf("vev: secure development temp directory: %w", err)
+	}
+	return daemon.WithTempDir(dir), nil
+}
+
 func pprofAddrIsLoopback(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
@@ -640,6 +654,13 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	}
 
 	daemonOpts := []daemon.Option{remoteDiscoveryOpt}
+	developmentTempOpt, err := developmentTempDirOption(safedir.EnsurePrivate)
+	if err != nil {
+		return err
+	}
+	if developmentTempOpt != nil {
+		daemonOpts = append(daemonOpts, developmentTempOpt)
+	}
 	if observer != nil {
 		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
 	}
