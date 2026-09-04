@@ -210,7 +210,7 @@ func (s Snapshot) FindRowID(id vt.RowID) int {
 func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
 	i := 0
 	stopped := false
-	s.history.Range(func(r []renderer.Cell) bool {
+	err := s.history.Range(func(r []renderer.Cell) bool {
 		if !yield(i, r) {
 			stopped = true
 			return false
@@ -218,6 +218,11 @@ func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) {
 		i++
 		return true
 	})
+	if err != nil {
+		// Search has no recoverable-error result. Preserve its fail-closed
+		// invariant instead of publishing partial matches from corrupt state.
+		panic(err)
+	}
 	if stopped {
 		return
 	}
