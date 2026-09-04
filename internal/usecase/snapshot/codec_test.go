@@ -140,7 +140,7 @@ func TestActiveTabReferenceMustBeExact(t *testing.T) {
 }
 
 func TestUnmarshalRejectsV4LegacyVersions(t *testing.T) {
-	for _, version := range []uint16{1, 2, 3} {
+	for _, version := range []uint16{1, 2, 3, 4} {
 		if _, err := Unmarshal(v4Envelope(version, 0, nil)); !errors.Is(err, ErrBadVersion) {
 			t.Fatalf("version %d: %v", version, err)
 		}
@@ -477,7 +477,7 @@ func transcriptBlob(t *testing.T, rows [][]renderer.Cell) []byte {
 }
 func requireV4Envelope(t *testing.T, data []byte) {
 	t.Helper()
-	if version != 4 || len(data) < 16 || binary.BigEndian.Uint16(data[4:6]) != 4 || binary.BigEndian.Uint16(data[6:8]) != 0 {
+	if version != 5 || len(data) < 16 || binary.BigEndian.Uint16(data[4:6]) != 5 || binary.BigEndian.Uint16(data[6:8]) != 0 {
 		t.Fatalf("not v4 envelope: % x", data)
 	}
 }

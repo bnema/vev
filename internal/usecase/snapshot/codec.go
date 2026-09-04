@@ -22,7 +22,7 @@ var (
 
 const (
 	magic                = "VEVS"
-	version              = uint16(4)
+	version              = uint16(5) // Compact VTC1 payloads; dense checkpoints are incompatible.
 	maxDecodedBodySize   = 256 << 20
 	maxSnapshotObjects   = 1 << 16
 	maxSnapshotBytes     = 256 << 20
