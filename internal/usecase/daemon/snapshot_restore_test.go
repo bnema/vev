@@ -133,7 +133,7 @@ func cloneAcceptanceGeneration(g ports.SnapshotGeneration) ports.SnapshotGenerat
 
 func restoreAcceptanceSession(t *testing.T, name string) snapcodec.Session {
 	t.Helper()
-	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 8 * 293, ChunkRows: 2})
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxBytes: 8 * 293 * 32, ChunkRows: 2})
 	for _, ch := range []rune{'a', 'b', 'c', 'd', 'e'} {
 		row := make([]renderer.Cell, 293)
 		for i := range row {
@@ -242,15 +242,21 @@ func TestRestoreIncrementalGenerationAcceptance(t *testing.T) {
 	pane.mu.Lock()
 	wantHistory := []string{strings.Repeat("a", 293), strings.Repeat("b", 293), strings.Repeat("c", 293), strings.Repeat("d", 293), strings.Repeat("e", 293), "primary-visible", "alternate-active"}
 	require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "bounded history must precede primary and active alternate transcript rows")
-	for y := range pane.screen.Frame.Height {
-		for x := range pane.screen.Frame.Width {
-			require.Truef(t, pane.screen.Frame.At(x, y).Equal(renderer.BlankCell()), "restored frame cell (%d,%d) must be blank", x, y)
+	for y := range pane.screen.Rows() {
+		for x := range pane.screen.Columns() {
+			require.Truef(t, pane.screen.Cell(x, y).Equal(renderer.BlankCell()), "restored frame cell (%d,%d) must be blank", x, y)
 		}
 	}
 	require.Equal(t, 7, pane.history.Len())
-	require.Equal(t, 7*293, pane.history.Cells())
+	cells := 0
+	view := pane.history.View()
+	for y := range view.Len() {
+		cells += view.RowWidth(y)
+	}
+	require.Equal(t, 7*293, cells)
 	require.Equal(t, defaultScrollbackRows, pane.history.Cap())
-	require.Equal(t, defaultScrollbackCells, pane.history.CellCap())
+	require.Equal(t, defaultScrollbackBytes, pane.history.ByteCap())
+	require.LessOrEqual(t, pane.history.LogicalBytes(), pane.history.ByteCap())
 	pane.screen.Write([]byte("new-output"))
 	pane.screen.Write([]byte("\x1b[?1049h\x1b[?1049l"))
 	require.Equal(t, wantHistory, snapshotHistoryTexts(pane.history.View()), "new output and redraw must not remove recovered history")
@@ -558,7 +564,7 @@ func TestRestorePaneTerminalRequiresCompleteRecoveryAndInstallsAtomically(t *tes
 			require.Error(t, err)
 			require.Same(t, oldScreen, p.screen)
 			require.Same(t, oldHistory, p.history)
-			require.Equal(t, 'o', p.screen.Frame.At(0, 0).Rune, "a failed restore must never install a partial or old persisted frame")
+			require.Equal(t, 'o', p.screen.Cell(0, 0).Rune, "a failed restore must never install a partial or old persisted frame")
 			require.Equal(t, "old-history", cellsString(p.history.View().Row(0)))
 		})
 	}

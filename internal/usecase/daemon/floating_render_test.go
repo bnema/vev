@@ -208,8 +208,8 @@ func TestResponsiveFloatingResizeCommitsZeroContentDrawerWithoutPhysicalResize(t
 	require.Empty(t, pty.sizes(), "a zero-inner drawer must not issue a synthetic PTY resize")
 	require.Equal(t, requested, floating.popupGeometry)
 	require.Equal(t, initial.Inner, floating.rect, "physical geometry remains at the last usable size")
-	require.Equal(t, initial.Inner.Width, floating.screen.Frame.Width)
-	require.Equal(t, initial.Inner.Height, floating.screen.Frame.Height)
+	require.Equal(t, initial.Inner.Width, floating.screen.Columns())
+	require.Equal(t, initial.Inner.Height, floating.screen.Rows())
 }
 
 func TestFloatingAxisGeometryEndpointsAndTinyBorders(t *testing.T) {
@@ -296,11 +296,13 @@ func TestComposeCapturedFloatingFrameClipsRetainedGeometryAfterFailedShrink(t *t
 	floatingPane := newPane("floating", pty, rectSize(retained.Inner))
 	floatingPane.rect = retained.Inner
 	floatingPane.popupGeometry = retained
-	for y := range floatingPane.screen.Frame.Height {
-		for x := range floatingPane.screen.Frame.Width {
-			floatingPane.screen.Frame.Set(x, y, renderer.Cell{Rune: rune('a' + y*10 + x)})
+	seed := renderer.NewFrame(floatingPane.screen.Columns(), floatingPane.screen.Rows())
+	for y := range seed.Height {
+		for x := range seed.Width {
+			seed.Set(x, y, renderer.Cell{Rune: rune('a' + y*10 + x)})
 		}
 	}
+	writeTestFrame(t, floatingPane.screen, seed)
 	requested := calculateContentFloatingGeometry(rectSize(content), domain.FloatingConfig{Width: 80, Height: 80})
 	d := newTestDaemon(t, nil, stubClock{})
 	require.False(t, applyFloatingResizePlanForTest(d, floatingPane, requested))
@@ -557,8 +559,8 @@ func TestResizeFloatingPaneCommitsSameSizeGeometryWithoutPTYResize(t *testing.T)
 			require.Empty(t, pty.sizes(), "same-size geometry must not resize the PTY")
 			require.Equal(t, tt.next.Inner, p.rect)
 			require.Equal(t, tt.next, p.popupGeometry)
-			require.Equal(t, 6, p.screen.Frame.Width)
-			require.Equal(t, 3, p.screen.Frame.Height)
+			require.Equal(t, 6, p.screen.Columns())
+			require.Equal(t, 3, p.screen.Rows())
 		})
 	}
 }
@@ -633,7 +635,7 @@ func TestCaptureAndComposeFloatingFrameSynchronizesWithPTYReader(t *testing.T) {
 func TestDrawFloatingBorderOmitsTinyAxes(t *testing.T) {
 	frame := renderer.NewFrame(2, 1)
 	drawFloatingBorder(frame, floatingGeometry{Mode: ui.PresentationFloating, Bounds: domain.Rect{Width: 2, Height: 1}}, "title", renderer.Style{})
-	for _, cell := range frame.Cells {
+	for _, cell := range frame.Row(0) {
 		require.Equal(t, renderer.BlankCell().Rune, cell.Rune)
 	}
 }
@@ -698,10 +700,13 @@ func TestComposeCapturedFloatingFrameCachedAllocationsAreOnlyFrameClone(t *testi
 	}
 
 	allocs := testing.AllocsPerRun(100, func() { composeCapturedFloatingFrame(input) })
-	// The production entry point deliberately clones Frame.Cells and its row
-	// offsets to keep the cached base immutable; those are its two unavoidable
-	// allocations. A higher count would reintroduce avoidable cache churn.
-	require.LessOrEqual(t, allocs, float64(2))
+	// Compare with the actual compact clone rather than assuming the old two
+	// dense slices. One additional allocation permits the first style insertion.
+	cloneAllocs := testing.AllocsPerRun(100, func() { benchmarkComposeSink.frame = base.Clone() })
+	require.LessOrEqual(t, allocs, cloneAllocs+1)
+	if copyEnterAllocationBudgetEnabled {
+		assertRenderByteBudget(t, func() { benchmarkComposeSink.frame, _ = composeCapturedFloatingFrame(input) }, 40<<10)
+	}
 }
 
 var (
@@ -851,16 +856,16 @@ func TestToggleFloatingResizesHiddenPaneOnShowAndRetriesFailure(t *testing.T) {
 	require.NoError(t, d.toggleFloating(sess, nil))
 	require.Equal(t, []domain.Size{rectSize(current)}, pty.sizes())
 	require.Equal(t, initial, floating.rect)
-	require.Equal(t, initial.Width, floating.screen.Frame.Width)
-	require.Equal(t, initial.Height, floating.screen.Frame.Height)
+	require.Equal(t, initial.Width, floating.screen.Columns())
+	require.Equal(t, initial.Height, floating.screen.Rows())
 	require.Equal(t, initialGeometry, floating.popupGeometry)
 
 	require.NoError(t, d.toggleFloating(sess, nil)) // hide
 	require.NoError(t, d.toggleFloating(sess, nil)) // retry show
 	require.Equal(t, []domain.Size{rectSize(current), rectSize(current)}, pty.sizes())
 	require.Equal(t, current, floating.rect)
-	require.Equal(t, current.Width, floating.screen.Frame.Width)
-	require.Equal(t, current.Height, floating.screen.Frame.Height)
+	require.Equal(t, current.Width, floating.screen.Columns())
+	require.Equal(t, current.Height, floating.screen.Rows())
 	require.Equal(t, currentGeometry, floating.popupGeometry)
 }
 
@@ -945,8 +950,8 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 	p.mu.Lock()
 	require.Equal(t, previousGeometry.Inner, p.rect, "a stale floating apply must not publish its rectangle")
 	require.Equal(t, previousGeometry, p.popupGeometry, "a stale floating apply must not publish its geometry")
-	require.Equal(t, previousGeometry.Inner.Width, p.screen.Frame.Width, "a stale floating apply must not resize the screen")
-	require.Equal(t, previousGeometry.Inner.Height, p.screen.Frame.Height, "a stale floating apply must not resize the screen")
+	require.Equal(t, previousGeometry.Inner.Width, p.screen.Columns(), "a stale floating apply must not resize the screen")
+	require.Equal(t, previousGeometry.Inner.Height, p.screen.Rows(), "a stale floating apply must not resize the screen")
 	require.False(t, p.resizeApplying, "a stale floating apply must release its parser gate")
 	p.mu.Unlock()
 
@@ -955,8 +960,8 @@ func TestFloatingLayoutRejectsStaleResizeBeforePublishing(t *testing.T) {
 	require.Equal(t, []domain.Size{rectSize(oldGeometry.Inner), rectSize(newGeometry.Inner)}, pty.sizes())
 	require.Equal(t, newGeometry.Inner, p.rect)
 	require.Equal(t, newGeometry, p.popupGeometry)
-	require.Equal(t, newGeometry.Inner.Width, p.screen.Frame.Width)
-	require.Equal(t, newGeometry.Inner.Height, p.screen.Frame.Height)
+	require.Equal(t, newGeometry.Inner.Width, p.screen.Columns())
+	require.Equal(t, newGeometry.Inner.Height, p.screen.Rows())
 }
 
 func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
@@ -969,8 +974,8 @@ func TestResizeFloatingPaneFailureAndSerialization(t *testing.T) {
 		require.False(t, applyFloatingResizePlanForTest(d, p, requested))
 		require.Equal(t, domain.Rect{X: 8, Y: 3, Width: 5, Height: 4}, p.rect)
 		require.Equal(t, floatingGeometry{}, p.popupGeometry)
-		require.Equal(t, 5, p.screen.Frame.Width)
-		require.Equal(t, 4, p.screen.Frame.Height)
+		require.Equal(t, 5, p.screen.Columns())
+		require.Equal(t, 4, p.screen.Rows())
 	})
 
 	t.Run("competing resizes serialize", func(t *testing.T) {

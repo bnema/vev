@@ -46,7 +46,7 @@ func TestTransportReplayIntegration(t *testing.T) {
 	}
 	wg.Wait()
 	require.Equal(t, "\x1b[2J\x1b[Hone\r\ntwo\x1b[2;1HTWO", string(bytes))
-	require.Equal(t, []string{"one     ", "TWO     ", "        "}, integrationFrameRows(terminal.Frame))
+	require.Equal(t, []string{"one     ", "TWO     ", "        "}, integrationFrameRows(terminal))
 }
 
 // TestThemeGenerationTransportSequences proves the generation's cleared then
@@ -124,12 +124,11 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 	}
 }
 
-func integrationFrameRows(frame renderer.Frame) []string {
-	rows := make([]string, frame.Height)
+func integrationFrameRows(frame renderer.CellSource) []string {
+	rows := make([]string, frame.Rows())
 	for y := range rows {
-		cells := frame.Row(y)
-		for _, cell := range cells {
-			rows[y] += string(cell.Rune)
+		for x := range frame.Columns() {
+			rows[y] += string(frame.Cell(x, y).Rune)
 		}
 	}
 	return rows

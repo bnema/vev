@@ -82,6 +82,27 @@ type TabsConfig struct {
 	TerminalTitle bool
 }
 
+// ScrollbackConfig is vev's per-pane retention policy. The terminal library
+// only enforces these application-selected limits. Zero megabytes disables
+// history; zero lines removes the additional line ceiling.
+type ScrollbackConfig struct {
+	Megabytes uint64
+	Lines     int
+}
+
+const DefaultScrollbackMegabytes uint64 = 50
+const DefaultScrollbackLines = 10_000
+const MaxScrollbackMegabytes uint64 = 4096
+const MaxScrollbackLines = 1_000_000
+
+func DefaultScrollbackConfig() ScrollbackConfig {
+	return ScrollbackConfig{Megabytes: DefaultScrollbackMegabytes, Lines: DefaultScrollbackLines}
+}
+
+func (c ScrollbackConfig) Valid() bool {
+	return c.Megabytes <= MaxScrollbackMegabytes && c.Lines >= 0 && c.Lines <= MaxScrollbackLines
+}
+
 // Config is the user-editable vev configuration after parsing. Unknown binding
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
@@ -98,6 +119,7 @@ type Config struct {
 	Floating       FloatingConfig
 	Nav            NavConfig
 	Tabs           TabsConfig
+	Scrollback     ScrollbackConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -135,5 +157,6 @@ func Defaults() Config {
 		Tabs: TabsConfig{
 			TerminalTitle: true,
 		},
+		Scrollback: DefaultScrollbackConfig(),
 	}
 }

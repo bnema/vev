@@ -209,7 +209,7 @@ func (p *visualProbe) apply(output protocol.Output) visualOutputResult {
 
 	// The client writes side effects as well as state-bearing frames, but only
 	// state-bearing frames advance the dependency chain and receive an ACK.
-	if p.screen.Frame.Width != output.Size.Cols || p.screen.Frame.Height != output.Size.Rows {
+	if p.screen.Columns() != output.Size.Cols || p.screen.Rows() != output.Size.Rows {
 		p.screen.Resize(output.Size.Cols, output.Size.Rows)
 	}
 	p.screen.Write(output.Data)
@@ -255,11 +255,11 @@ func visualScreenLines(screen *vt.Screen) []string {
 	if screen == nil {
 		return nil
 	}
-	lines := make([]string, screen.Frame.Height)
-	for y := range screen.Frame.Height {
+	lines := make([]string, screen.Rows())
+	for y := range screen.Rows() {
 		var line strings.Builder
-		for x := range screen.Frame.Width {
-			r := screen.Frame.At(x, y).Rune
+		for x := range screen.Columns() {
+			r := screen.Cell(x, y).Rune
 			if r == 0 {
 				r = ' '
 			}

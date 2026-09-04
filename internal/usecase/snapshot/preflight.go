@@ -243,7 +243,7 @@ func preflightBlob(r *payloadReader, totals *vt.DecodeStats, blobs *uint64, budg
 	}
 	blob := r.b[:n]
 	r.b = r.b[n:]
-	stats, err := vt.PreflightHistoryBlob(blob)
+	stats, err := vt.MeasureHistoryBlob(blob)
 	if err != nil {
 		return vt.DecodeStats{}, fmt.Errorf("%w: VT blob", ErrInvalidData)
 	}
@@ -361,14 +361,14 @@ func preflightTabReferences(r *payloadReader) error {
 			return err
 		}
 		for range n {
-			if err := skipBlob(r); err != nil {
+			if err := validateBlob(r); err != nil {
 				return err
 			}
 		}
-		if err := skipBlob(r); err != nil {
+		if err := validateBlob(r); err != nil {
 			return err
 		}
-		if err := skipBlob(r); err != nil {
+		if err := validateBlob(r); err != nil {
 			return err
 		}
 		if err := preflightProcess(r); err != nil {
@@ -386,13 +386,19 @@ func preflightTabReferences(r *payloadReader) error {
 	return nil
 }
 
-func skipBlob(r *payloadReader) error {
+// validateBlob runs only after the complete collection passes resource sizing.
+// Dictionary/identity validation may allocate, but cannot run once per pane in
+// an over-budget collection. Sizing alone never authorizes session construction.
+func validateBlob(r *payloadReader) error {
 	n, err := r.getUint32()
 	if err != nil {
 		return err
 	}
 	if uint64(n) > uint64(len(r.b)) {
 		return ErrShortPayload
+	}
+	if _, err := vt.PreflightHistoryBlob(r.b[:n]); err != nil {
+		return fmt.Errorf("%w: VT blob", ErrInvalidData)
 	}
 	r.b = r.b[n:]
 	return nil

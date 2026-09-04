@@ -24,7 +24,7 @@ type Snapshot struct {
 	Width, Height int
 }
 
-func NewSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, rowIDs []vt.RowID) Snapshot {
+func NewSnapshot(historySource *vt.History, screen vt.CellSource, bounds []vt.LineBound, rowIDs []vt.RowID) Snapshot {
 	return newSnapshot(historySource, screen, bounds, append([]vt.RowID(nil), rowIDs...))
 }
 
@@ -37,21 +37,27 @@ func NewSnapshotFromScreen(historySource *vt.History, screen *vt.Screen) Snapsho
 	if screen == nil {
 		return NewSnapshot(historySource, renderer.Frame{}, nil, nil)
 	}
-	return newSnapshot(historySource, screen.Frame, screen.LineBounds(), screen.RowIDs())
+	return newSnapshot(historySource, screen, screen.LineBounds(), screen.RowIDs())
 }
 
-func newSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.LineBound, screenRowIDs []vt.RowID) Snapshot {
+func newSnapshot(historySource *vt.History, screen vt.CellSource, bounds []vt.LineBound, screenRowIDs []vt.RowID) Snapshot {
+	owned := renderer.NewFrame(screen.Columns(), screen.Rows())
+	for y := range screen.Rows() {
+		for x := range screen.Columns() {
+			owned.Set(x, y, screen.Cell(x, y))
+		}
+	}
 	var history vt.HistoryView
 	if historySource != nil {
 		history = historySource.SealAndView()
 	}
 	return Snapshot{
 		history:      history,
-		screen:       screen.Clone(),
+		screen:       owned,
 		screenBounds: append([]vt.LineBound(nil), bounds...),
 		screenRowIDs: screenRowIDs,
-		Width:        screen.Width,
-		Height:       screen.Height,
+		Width:        screen.Columns(),
+		Height:       screen.Rows(),
 	}
 }
 
@@ -60,7 +66,7 @@ func newSnapshot(historySource *vt.History, screen renderer.Frame, bounds []vt.L
 func NewSnapshotFromLines(rows [][]renderer.Cell, bounds []vt.LineBound, width, height int) Snapshot {
 	history := vt.NewHistory(vt.HistoryConfig{
 		MaxRows:   max(len(rows), 1),
-		MaxCells:  snapshotRowsCellBudget(rows),
+		MaxBytes:  math.MaxUint64, // Input is already owned and bounded by the caller.
 		ChunkRows: 256,
 	})
 	for i, row := range rows {
@@ -80,31 +86,65 @@ func NewSnapshotFromRows(rows [][]renderer.Cell, width, height int) Snapshot {
 	return NewSnapshotFromLines(rows, nil, width, height)
 }
 
-// snapshotRowsCellBudget returns a capacity that retains every supplied row.
-// Saturation is safe because a larger representable capacity does not exist.
-func snapshotRowsCellBudget(rows [][]renderer.Cell) int {
-	cells := 0
-	for _, row := range rows {
-		if len(row) > math.MaxInt-cells {
-			return math.MaxInt
-		}
-		cells += len(row)
-	}
-	return cells
-}
 func (s Snapshot) Len() int { return s.history.Len() + s.screen.Height }
 func (s Snapshot) Row(i int) []renderer.Cell {
 	if i < 0 {
 		return nil
 	}
 	if i < s.history.Len() {
-		return s.history.BorrowedRow(i)
+		return s.history.Row(i)
 	}
 	i -= s.history.Len()
 	if i >= s.screen.Height {
 		return nil
 	}
 	return s.screen.Row(i)
+}
+
+func (s Snapshot) RowWidth(y int) int {
+	if y < 0 {
+		return 0
+	}
+	if y < s.history.Len() {
+		return s.history.RowWidth(y)
+	}
+	y -= s.history.Len()
+	if y >= s.screen.Height {
+		return 0
+	}
+	return s.screen.Width
+}
+
+func (s Snapshot) Cell(x, y int) renderer.Cell {
+	if y < 0 || x < 0 {
+		return renderer.BlankCell()
+	}
+	if y < s.history.Len() {
+		return s.history.Cell(x, y)
+	}
+	y -= s.history.Len()
+	if y >= s.screen.Height || x >= s.screen.Width {
+		return renderer.BlankCell()
+	}
+	return s.screen.Cell(x, y)
+}
+
+func (s Snapshot) CopyRow(y int, dst []renderer.Cell) int {
+	if y < 0 {
+		return 0
+	}
+	if y < s.history.Len() {
+		return s.history.CopyRow(y, dst)
+	}
+	y -= s.history.Len()
+	if y >= s.screen.Height {
+		return 0
+	}
+	n := min(len(dst), s.screen.Width)
+	for x := range n {
+		dst[x] = s.screen.Cell(x, y)
+	}
+	return n
 }
 
 // Bound returns the logical extent of row i, dispatching between sealed history
@@ -483,13 +523,16 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 	selectionBounds, hasSelectionBounds := m.selection.bounds(d)
 	selection, hasSelection := optionalStyle(styles, 1)
 	cursor, cursorValid := d.Normalize(m.navigator.Pos)
+	row := make([]renderer.Cell, frame.Width)
 	for y := range d.Height() {
 		src := m.ViewportTop + y
 		if src >= d.Len() {
 			break
 		}
-		row := frame.Row(y)
-		copy(row, d.Row(src))
+		for x := range row {
+			row[x] = renderer.BlankCell()
+		}
+		d.snapshot.CopyRow(src, row)
 		if match, ok := m.currentSearchMatchForRow(src); ok {
 			for x := max(match.Start, 0); x < min(match.End, len(row)); x++ {
 				applySelectionStyle(&row[x].Style, selection, hasSelection)
@@ -510,12 +553,14 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 			cursorCol := min(cursor.Col, len(row)-1)
 			applySelectionStyle(&row[cursorCol].Style, selection, hasSelection)
 		}
+		frame.WriteRow(y, 0, row)
 	}
 	status := inverseStyle()
 	if len(styles) > 0 {
 		status = styles[0]
 	}
-	drawCopyStatus(frame.Row(d.Height()), m, d.Len(), status)
+	drawCopyStatus(row, m, d.Len(), status)
+	frame.WriteRow(d.Height(), 0, row)
 	return frame
 }
 func (m *Mode) currentSearchMatchForRow(row int) (SearchMatch, bool) {

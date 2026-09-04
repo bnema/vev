@@ -295,9 +295,7 @@ func cloneCapturedStackState(in capturedRenderState) capturedRenderState {
 	out.layout.placements = append([]layout.Placement(nil), in.layout.placements...)
 	out.panes = append([]capturedPaneRenderState(nil), in.panes...)
 	for i := range out.panes {
-		if in.panes[i].frame.Cells != nil {
-			out.panes[i].frame = in.panes[i].frame.Clone()
-		}
+		out.panes[i].frame = in.panes[i].frame.Clone()
 		out.panes[i].rawDamage = append([]renderer.Damage(nil), in.panes[i].rawDamage...)
 		out.panes[i].damage = append([]renderer.Damage(nil), in.panes[i].damage...)
 	}

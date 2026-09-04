@@ -87,7 +87,7 @@ func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
 	awaitToastCount(t, ac, 1)
 	replayOutputFrames(t, screen, drainAllFrames(sends))
 
-	rows := frameRows(screen.Frame)
+	rows := frameRows(captureTestFrame(screen))
 	if !containsTopRight(rows, "couldn't open pane", ac.size.Cols/2) {
 		t.Fatalf("composed frame missing toast message top-right:\n%s", strings.Join(rows, "\n"))
 	}
@@ -101,7 +101,7 @@ func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
 		t.Fatal("expiry did not invalidate the render")
 	}
 
-	rows = frameRows(screen.Frame)
+	rows = frameRows(captureTestFrame(screen))
 	if containsTopRight(rows, "couldn't open pane", ac.size.Cols/2) {
 		t.Fatalf("toast message still present after TTL expired:\n%s", strings.Join(rows, "\n"))
 	}

@@ -93,8 +93,8 @@ func TestVisualProbeResizesToAcceptedOutput(t *testing.T) {
 	})
 
 	require.True(t, result.Accepted)
-	require.Equal(t, outputSize.Cols, probe.screen.Frame.Width)
-	require.Equal(t, outputSize.Rows, probe.screen.Frame.Height)
+	require.Equal(t, outputSize.Cols, probe.screen.Columns())
+	require.Equal(t, outputSize.Rows, probe.screen.Rows())
 	require.Len(t, probe.checkpoints, 1)
 	require.Equal(t, outputSize.Cols, probe.checkpoints[0].snapshot.Columns())
 	require.Equal(t, outputSize.Rows, probe.checkpoints[0].snapshot.Rows())

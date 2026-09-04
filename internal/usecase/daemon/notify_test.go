@@ -893,7 +893,7 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 	ac.sendMu.Lock()
 	base := ac.pipelineCache.frame.Clone()
 	ac.sendMu.Unlock()
-	require.Equal(t, frameRows(base), frameRows(terminal.Frame), "fake-clock expiry must restore every old toast cell")
+	require.Equal(t, frameRows(base), frameRows(terminal), "fake-clock expiry must restore every old toast cell")
 }
 
 // TestToastExpiryOnlyRemovesItsOwnEntry proves a fired timer cannot dismiss a

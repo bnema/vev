@@ -424,13 +424,15 @@ func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer
 		width := min(target.Width-srcX, copyFrame.Width-srcX)
 		width = min(width, frame.Width-dstX)
 		if width > 0 && target.Y+y >= 0 {
-			copy(frame.Row(target.Y + y)[dstX:dstX+width], copyFrame.Row(y)[srcX:srcX+width])
+			for x := range width {
+				frame.Set(dstX+x, target.Y+y, copyFrame.Cell(srcX+x, y))
+			}
 		}
 	}
 	statusY := frame.Height - 1
-	for x := range frame.Row(statusY) {
-		frame.Row(statusY)[x] = renderer.Cell{Rune: ' ', Style: styles.SurfaceBar}
+	frame.FillRow(statusY, 0, frame.Width, renderer.Cell{Rune: ' ', Style: styles.SurfaceBar})
+	for x := range min(frame.Width, copyFrame.Width) {
+		frame.Set(x, statusY, copyFrame.Cell(x, copyFrame.Height-1))
 	}
-	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(frame.Width, copyFrame.Width)])
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }

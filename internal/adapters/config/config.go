@@ -35,6 +35,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenPaletteKeys := make(map[string]bool)
 	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
+	seenScrollbackKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -185,6 +186,22 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("duplicate key %q", key)})
 			}
 			cfg.Codes[codeKey] = value
+		case key == "scrollback.megabytes":
+			warnings = warnDuplicateKey(warnings, seenScrollbackKeys, key, lineNo)
+			n, err := strconv.ParseUint(value, 10, 64)
+			if err != nil || n > domain.MaxScrollbackMegabytes {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid %s %q (want 0–%d)", key, value, domain.MaxScrollbackMegabytes)})
+				continue
+			}
+			cfg.Scrollback.Megabytes = n
+		case key == "scrollback.lines":
+			warnings = warnDuplicateKey(warnings, seenScrollbackKeys, key, lineNo)
+			n, err := strconv.ParseUint(value, 10, 64)
+			if err != nil || n > domain.MaxScrollbackLines {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid %s %q (want 0–%d)", key, value, domain.MaxScrollbackLines)})
+				continue
+			}
+			cfg.Scrollback.Lines = int(n)
 		case key == "snapshot.restore_processes":
 			var processWarnings []domain.Warning
 			cfg.Snapshot.RestoreProcesses, processWarnings = parseProcessList(value, lineNo)

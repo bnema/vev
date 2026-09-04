@@ -227,11 +227,11 @@ func TestUnmarshalEnforcesCanonicalHistoryBlobRoles(t *testing.T) {
 	if len(sealed) < 2 {
 		t.Fatalf("expected at least two sealed chunks, got %d", len(sealed))
 	}
-	multiChunk := append([]byte(nil), sealed[0][:17]...)
-	binary.BigEndian.PutUint32(multiChunk[5:9], 2)
-	binary.BigEndian.PutUint64(multiChunk[9:17], 4)
-	multiChunk = append(multiChunk, sealed[0][17:]...)
-	multiChunk = append(multiChunk, sealed[1][17:]...)
+	multiChunk := append([]byte(nil), sealed[0][:16]...)
+	binary.BigEndian.PutUint32(multiChunk[4:8], 2)
+	binary.BigEndian.PutUint64(multiChunk[8:16], 4)
+	multiChunk = append(multiChunk, sealed[0][16:]...)
+	multiChunk = append(multiChunk, sealed[1][16:]...)
 	transcript := transcriptBlob(t, [][]renderer.Cell{{{Rune: 'v'}}})
 	emptyTranscript := transcriptBlob(t, nil)
 

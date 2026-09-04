@@ -270,7 +270,7 @@ func (d *Daemon) restoreSnapshotPane(ctx context.Context, sessionName, tabStable
 		}
 		return nil, err
 	}
-	p := newPaneWithStableIDAndTitle(paneSnap.ID, paneStableID, pty, ptyGeometry.Size, launch.title)
+	p := newPaneWithStableIDAndTitle(paneSnap.ID, paneStableID, pty, ptyGeometry.Size, launch.title, d.currentHistoryConfig())
 	if !lifetime.publish(p) {
 		_ = pty.Close()
 		return nil, lifetime.ctx.Err()
@@ -372,7 +372,7 @@ func restorePaneTerminal(p *pane, snap snapcodec.Pane) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	screen, err := vt.NewScreenWithRecoveryTranscript(p.screen.Frame.Width, p.screen.Frame.Height, vt.HistoryConfig{MaxRows: defaultScrollbackRows, MaxCells: defaultScrollbackCells}, snap.SealedChunks, snap.Tail, snap.Transcript)
+	screen, err := vt.NewScreenWithRecoveryTranscript(p.screen.Columns(), p.screen.Rows(), p.history.Limits(), snap.SealedChunks, snap.Tail, snap.Transcript)
 	if err != nil {
 		return fmt.Errorf("snapshot recovery: %w", err)
 	}

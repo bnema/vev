@@ -90,7 +90,7 @@ func TestStatusCompositionGolden(t *testing.T) {
 		reset:  true,
 		layout: capturedTabLayout{area: domain.Rect{Width: 12, Height: 2}, focus: win.focusedPane().id, valid: true},
 		panes: []capturedPaneRenderState{{
-			id: win.focusedPane().id, frame: win.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: win.focusedPane().id, Content: domain.Rect{Width: 12, Height: 2}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+			id: win.focusedPane().id, frame: captureTestFrame(win.focusedPane().screen), placement: layout.Placement{ID: win.focusedPane().id, Content: domain.Rect{Width: 12, Height: 2}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
 		}},
 		bars: barState{status: sess.statusSegmentsFor(ac, true)},
 	}

@@ -80,7 +80,7 @@ func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testin
 	fixture.snapshots.reset()
 	fixture.activePane.mu.Lock()
 	fixture.activePane.screen.Write([]byte("\x1b[1;1Hchanged"))
-	frame := fixture.activePane.screen.Frame.Clone()
+	frame := captureTestFrame(fixture.activePane.screen)
 	fixture.activePane.mu.Unlock()
 	for i, r := range "changed" {
 		require.Equalf(t, r, frame.At(i, 0).Rune, "fixture must overwrite at column %d", i)
@@ -141,13 +141,14 @@ func TestIncrementalSnapshotMetricScenarios(t *testing.T) {
 	}
 }
 
-func TestPerformanceFixtureCellLimitedHistory(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 293, Rows: 40}, panes: 1, historyRows: 10_000})
+func TestPerformanceFixtureByteLimitedHistory(t *testing.T) {
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 400, Rows: 40}, panes: 1, historyRows: 10_000})
 	fixture.activePane.mu.Lock()
-	rows, cells, capCells := fixture.activePane.history.Len(), fixture.activePane.history.Cells(), fixture.activePane.history.CellCap()
+	rows, bytes, budget := fixture.activePane.history.Len(), fixture.activePane.history.LogicalBytes(), fixture.activePane.history.ByteCap()
 	fixture.activePane.mu.Unlock()
-	require.Less(t, rows, 10_000)
-	require.LessOrEqual(t, cells, capCells)
+	require.Less(t, rows, 10_000, "byte eviction must happen before the line ceiling")
+	require.Positive(t, bytes)
+	require.LessOrEqual(t, bytes, budget)
 }
 
 func TestPerformanceFixtureExplicitCloseReleasesIterationState(t *testing.T) {
@@ -517,7 +518,7 @@ type snapshotBenchmarkScenario struct {
 	baseline    bool
 	mutate      func(*performanceFixture, int)
 	unchanged   bool
-	cellLimited bool
+	byteLimited bool
 }
 
 var snapshotBenchmarkScenarios = []snapshotBenchmarkScenario{
@@ -528,7 +529,7 @@ var snapshotBenchmarkScenarios = []snapshotBenchmarkScenario{
 	// mutable tail and cannot evict a sealed chunk.
 	{name: "tail-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 9_999, baseline: true, mutate: mutateBenchmarkTail},
 	{name: "new-sealed-chunk", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkSealedChunk},
-	{name: "cell-limited-293-columns", size: domain.Size{Cols: 293, Rows: 40}, historyRows: 10_000, cellLimited: true},
+	{name: "byte-limited-400-columns", size: domain.Size{Cols: 400, Rows: 40}, historyRows: 10_000, byteLimited: true},
 }
 
 func benchmarkIncrementalSnapshotRepository(b *testing.B, scenario snapshotBenchmarkScenario) {
@@ -588,17 +589,17 @@ func benchmarkIncrementalSnapshotRepository(b *testing.B, scenario snapshotBench
 
 func validateSnapshotBenchmarkFixture(b *testing.B, fixture *performanceFixture, scenario snapshotBenchmarkScenario) {
 	b.Helper()
-	if !fixture.hasHistoryTopology(1, 1, scenario.historyRows) && !scenario.cellLimited {
+	if !fixture.hasHistoryTopology(1, 1, scenario.historyRows) && !scenario.byteLimited {
 		b.Fatal("invalid incremental snapshot fixture")
 	}
-	if !scenario.cellLimited {
+	if !scenario.byteLimited {
 		return
 	}
 	fixture.activePane.mu.Lock()
-	rows, cells, capCells := fixture.activePane.history.Len(), fixture.activePane.history.Cells(), fixture.activePane.history.CellCap()
+	rows, bytes, budget := fixture.activePane.history.Len(), fixture.activePane.history.LogicalBytes(), fixture.activePane.history.ByteCap()
 	fixture.activePane.mu.Unlock()
-	if rows >= scenario.historyRows || cells > capCells {
-		b.Fatalf("293-column fixture did not enforce cell limit: rows=%d cells=%d cap=%d", rows, cells, capCells)
+	if rows >= scenario.historyRows || bytes > budget {
+		b.Fatalf("400-column fixture did not enforce byte retention: rows=%d bytes=%d budget=%d", rows, bytes, budget)
 	}
 }
 
@@ -645,7 +646,7 @@ func mutateBenchmarkTranscript(fixture *performanceFixture, operation int) {
 func mutateBenchmarkTail(fixture *performanceFixture, operation int) {
 	fixture.activePane.mu.Lock()
 	defer fixture.activePane.mu.Unlock()
-	row := make([]renderer.Cell, fixture.activePane.screen.Frame.Width)
+	row := make([]renderer.Cell, fixture.activePane.screen.Columns())
 	for column := range row {
 		row[column] = renderer.Cell{Rune: rune('a' + (operation+column)%26)}
 	}
@@ -821,10 +822,9 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
 
-// Root-cause hypothesis (verified by this guard before the fix): S2 allocates
-// one pane-frame copy during capture plus a new composed frame and its
-// base-frame clone for every live paint. Those client-sized copies, rather
-// than history, account for the ~1 MiB/op regression in the pinned benchmark.
+// Compact-page budgets are measured against the dense baseline in
+// docs/compact-storage-benchmarks.md. Count and byte limits are separate:
+// small page dictionaries cost allocations but replace much larger cell copies.
 func TestLivePaintAllocationBudget(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -835,28 +835,32 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: 10_000})
-			allocs := testing.AllocsPerRun(20, func() {
+			run := func() {
 				fixture.paintLive()
 				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
-			})
-			require.LessOrEqual(t, allocs, float64(38), "live paint must reuse attachment-owned render scratch across warm paints")
+			}
+			allocs := testing.AllocsPerRun(20, run)
+			require.LessOrEqual(t, allocs, float64(44), "warm paint must not regain per-row allocations")
+			if copyEnterAllocationBudgetEnabled {
+				assertRenderByteBudget(t, run, 96<<10)
+			}
 		})
 	}
 }
 
-// TestCopyEnterAllocationBudget protects the byte-stream attachment baseline
-// plus 10%. Copy rendering borrows sealed VT history rows; allocating a copy
-// per viewport row is a production regression even though capture is immutable.
+// TestCopyEnterAllocationBudget protects the measured compact baseline plus
+// roughly 10% in allocation count, and separately bounds bytes per operation.
+// It must still reject per-row copies or a return to dense frame snapshots.
 func TestCopyEnterAllocationBudget(t *testing.T) {
 	for _, tt := range []struct {
 		name             string
 		tabs, panes, max int
 	}{
-		{name: "1tab-1pane", tabs: 1, panes: 1, max: 66},
-		{name: "1tab-4panes", tabs: 1, panes: 4, max: 85},
-		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 71},
-		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 90},
-		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 79},
+		{name: "1tab-1pane", tabs: 1, panes: 1, max: 94},
+		{name: "1tab-4panes", tabs: 1, panes: 4, max: 126},
+		{name: "4tabs-1pane", tabs: 4, panes: 1, max: 97},
+		{name: "4tabs-4panes", tabs: 4, panes: 4, max: 130},
+		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 106},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
@@ -875,7 +879,12 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 			}
 
 			allocs := testing.AllocsPerRun(20, run)
-			require.LessOrEqual(t, allocs, float64(tt.max), "copy enter must stay within 10% of the byte-stream attachment allocation baseline")
+			require.LessOrEqual(t, allocs, float64(tt.max), "copy entry exceeds its measured compact allocation budget")
+			budget := int64(512 << 10)
+			if tt.panes == 4 {
+				budget = 384 << 10
+			}
+			assertRenderByteBudget(t, run, budget)
 		})
 	}
 }
@@ -1140,8 +1149,8 @@ func (f *performanceFixture) configureTab(tb *tab, tabIndex, paneCount, historyR
 	tb.mu.Unlock()
 	for _, p := range panes {
 		p.mu.Lock()
-		width := p.screen.Frame.Width
-		for row := 0; p.history.Len() < historyRows && row < historyRows+p.screen.Frame.Height; row++ {
+		width := p.screen.Columns()
+		for row := 0; p.history.Len() < historyRows && row < historyRows+p.screen.Rows(); row++ {
 			p.screen.Write([]byte(performanceFullWidthRow(width, tabIndex, row) + "\r\n"))
 		}
 		p.mu.Unlock()

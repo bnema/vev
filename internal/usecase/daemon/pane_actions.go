@@ -98,7 +98,7 @@ func (d *Daemon) spawnPaneOpAt(
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "pane", newID, "kind", "pane")
 		return paneFocusChange{}, domain.UserErr(domain.NoticePaneSpawn, "couldn't open pane: shell failed to start", err)
 	}
-	p := newPaneWithStableIDAndTitle(newID, paneStableID, pty, rectSize(newRect), launch.title)
+	p := newPaneWithStableIDAndTitle(newID, paneStableID, pty, rectSize(newRect), launch.title, d.currentHistoryConfig())
 	p.geometry = initialGeometry
 	setScreenGeometry(p.screen, initialGeometry)
 	p.rect = newRect

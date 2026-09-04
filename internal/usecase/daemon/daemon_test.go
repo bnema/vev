@@ -277,9 +277,9 @@ func frameInput(data []byte) wire.Frame {
 }
 
 func screenLineText(s *vt.Screen, y int) string {
-	out := make([]rune, s.Frame.Width)
-	for x := range s.Frame.Width {
-		out[x] = s.Frame.At(x, y).Rune
+	out := make([]rune, s.Columns())
+	for x := range s.Columns() {
+		out[x] = s.Cell(x, y).Rune
 	}
 	return string(out)
 }

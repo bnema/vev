@@ -197,8 +197,8 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out captured
 	out.damageGeneration = damage.Generation
 	out.rawDamage = append(out.rawDamage[:0], damage.Damage...)
 
-	width := min(max(visible.Width, 0), p.screen.Frame.Width)
-	height := min(max(visible.Height, 0), p.screen.Frame.Height)
+	width := min(max(visible.Width, 0), p.screen.Columns())
+	height := min(max(visible.Height, 0), p.screen.Rows())
 	needsFrame := len(damage.Damage) > 0
 	frameChanged := out.frame.Width != width || out.frame.Height != height
 	if frameChanged {
@@ -209,11 +209,13 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out captured
 	// pane. With no VT damage, retain it rather than copying inactive panes.
 	if needsFrame {
 		for y := range height {
-			copy(out.frame.Row(y), p.screen.Frame.Row(y)[:width])
+			for x := range width {
+				out.frame.Set(x, y, p.screen.Cell(x, y))
+			}
 		}
 	}
 
-	if frameChanged || uncertainDamage(damage.Damage, p.screen.Frame.Width, p.screen.Frame.Height) {
+	if frameChanged || uncertainDamage(damage.Damage, p.screen.Columns(), p.screen.Rows()) {
 		// A cache entry with a new frame has no terminal-shadow equivalent.
 		// Redraw it even when the pane has no VT damage, such as an untouched
 		// pane first made visible after a tab or session switch.

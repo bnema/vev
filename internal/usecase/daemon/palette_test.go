@@ -173,7 +173,7 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 			captureOverlayLayers(&state, snap, domain.PaletteConfig{})
 
 			inactive := state.overlays.palette.inner.At(4, 1).Style
-			require.Equal(t, state.styles.PickerDescription.Foreground, inactive.Foreground)
+			require.Equal(t, state.styles.PickerDescription.Canonical().Foreground, inactive.Canonical().Foreground)
 			require.Equal(t, state.styles.PickerDescription.HasForegroundRGB, inactive.HasForegroundRGB)
 			require.Equal(t, state.styles.PickerDescription.ForegroundRGB, inactive.ForegroundRGB)
 			require.False(t, inactive.HasBackgroundRGB)

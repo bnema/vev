@@ -64,7 +64,7 @@ func TestDrawSeparatorClipsAndRejectsInvalid(t *testing.T) {
 }
 
 func TestDrawSeparatorInvalidFrame(t *testing.T) {
-	f := renderer.Frame{Width: 2, Height: 2, Cells: make([]renderer.Cell, 3)}
+	f := renderer.Frame{Width: 2, Height: 2}
 	DrawSeparator(f, domain.Rect{Width: 2, Height: 1}, SeparatorHorizontal, renderer.DefaultStyle())
 }
 

@@ -40,7 +40,7 @@ func TestComposeFrameToastDamageIsIncrementalAndRestoresOldFootprints(t *testing
 	require.NoError(t, err)
 	require.Less(t, len(incremental)*2, len(full), "one-cell update with a stable toast must stay bounded below full-screen output")
 	terminal.Write(incremental)
-	require.Equal(t, frameRows(updated.frame), frameRows(terminal.Frame))
+	require.Equal(t, frameRows(updated.frame), frameRows(terminal))
 
 	// Stacking and overflow stay visually identical while their complete old and
 	// new coverage remains incremental damage.
@@ -129,7 +129,7 @@ func replayToastFrame(t *testing.T, stream *attachmentOutput, terminal *vt.Scree
 	data, err := stream.render(composed.frame, composed.damage, composed.reset)
 	require.NoError(t, err)
 	terminal.Write(data)
-	require.Equal(t, frameRows(composed.frame), frameRows(terminal.Frame))
+	require.Equal(t, frameRows(composed.frame), frameRows(terminal))
 }
 
 func requireNoFullRedraw(t *testing.T, damage []renderer.Damage) {

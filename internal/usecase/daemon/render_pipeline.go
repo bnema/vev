@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"slices"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -86,7 +87,9 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	if in.frame.Width == width && in.frame.Height == frameHeight {
 		for y := 0; y < frame.Height; y++ {
-			copy(frame.Row(y), in.frame.Row(y))
+			for x := range frame.Width {
+				frame.Set(x, y, in.frame.Cell(x, y))
+			}
 		}
 	}
 	styles := state.styles
@@ -99,8 +102,14 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	defaultDimmer := themeui.NewDimmer(state.theme)
 	neutralBorder := styles.NeutralBorder
 	inactivePaneDimmer := themeui.NewDimmer(state.theme, themeui.WithForegroundDimming(inactivePaneForegroundDimming))
-	drawTopBarSnapshot(frame.Row(0), state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
-	drawStatusBarState(frame.Row(rows+1), state.bars, styles)
+	// The alternate cache owns these rows; the committed cache remains intact
+	// until prepare/send succeeds. Row extraction would allocate on each paint.
+	topBar := slices.Grow(scratch.bars.top[:0], width)[:width]
+	drawTopBarSnapshot(topBar, state.bars.status, state.bars.attentionFrame, state.bars.topRight, styles)
+	frame.WriteRow(0, 0, topBar)
+	bottomBar := slices.Grow(scratch.bars.bottom[:0], width)[:width]
+	drawStatusBarState(bottomBar, state.bars, styles)
+	frame.WriteRow(rows+1, 0, bottomBar)
 	content := domain.Rect{Y: contentY, Width: width, Height: rows}
 	if state.layout.valid {
 		drawDividers(frame, state.layout.dividers, content.Y, defaultDimmer.Dim(neutralBorder))
@@ -164,11 +173,15 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
 		frame, damage = composeCapturedOverlays(state, frame, damage)
 	}
+	for x := range width {
+		topBar[x] = baseFrame.Cell(x, 0)
+		bottomBar[x] = baseFrame.Cell(x, rows+1)
+	}
 	if !full {
-		if !sameCells(in.bars.top, baseFrame.Row(0)) {
+		if !sameCells(in.bars.top, topBar) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: 0, Width: width, Height: 1})
 		}
-		if !sameCells(in.bars.bottom, baseFrame.Row(rows+1)) {
+		if !sameCells(in.bars.bottom, bottomBar) {
 			damage = append(damage, renderer.Damage{Kind: renderer.DamageText, X: 0, Y: rows + 1, Width: width, Height: 1})
 		}
 	}
@@ -186,7 +199,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs, contentY)
 	outCache := composeCacheInput{valid: !overlaysActive, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
-	outCache.bars.capture(baseFrame.Row(0), baseFrame.Row(rows+1))
+	outCache.bars = barCache{top: topBar, bottom: bottomBar}
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
 
@@ -345,7 +358,9 @@ func copyModalInner(dst renderer.Frame, target domain.Rect, src renderer.Frame) 
 		return
 	}
 	for y := range height {
-		copy(dst.Row(top + y)[left:left+width], src.Row(sourceY + y)[sourceX:sourceX+width])
+		for x := range width {
+			dst.Set(left+x, top+y, src.Cell(sourceX+x, sourceY+y))
+		}
 	}
 }
 
