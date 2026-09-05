@@ -78,7 +78,10 @@ ForceCommand {root}/remote-shell
             f"export {key}={shlex.quote(env[key])}" for key in
             ("VEV_ENV", "VEV_ENV_ROOT", "VEV_LOG", "VEV_REMOTE_TRANSPORT", "SHELL", "PATH")
         ) + "\nunset VEV\nexec vev attach local-one\n")
-        sshd = subprocess.Popen([shutil.which("sshd"), "-D", "-f", str(root / "sshd.conf"),
+        sshd_path = shutil.which("sshd") or shutil.which("sshd", path="/usr/sbin:/sbin")
+        if sshd_path is None:
+            raise RuntimeError("sshd not found; install openssh-server or add it to PATH")
+        sshd = subprocess.Popen([sshd_path, "-D", "-f", str(root / "sshd.conf"),
                                  "-E", str(root / "sshd.log")], cwd=root)
 
         def screen():
@@ -126,9 +129,11 @@ ForceCommand {root}/remote-shell
                 try:
                     command([str(bindir / "ssh"), "localhost", "true"])
                     break
-                except subprocess.CalledProcessError:
+                except subprocess.CalledProcessError as err:
                     if sshd.poll() is not None or time.monotonic() >= deadline:
-                        raise RuntimeError((root / "sshd.log").read_text())
+                        log = root / "sshd.log"
+                        detail = log.read_text() if log.exists() else "sshd produced no log"
+                        raise RuntimeError(detail) from err
                     time.sleep(0.1)
             command([str(binary), "host", "add", "localhost"])
             for name in ("local-one", "local-two"):
