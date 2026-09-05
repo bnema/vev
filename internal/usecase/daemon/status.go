@@ -283,14 +283,28 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	if d != nil {
 		state.attentionFrame = d.attentionFrame()
 	}
-	if cur != nil {
+	homePicker := ac != nil && ac.startupOverlay == protocol.StartupOverlaySessionPicker && ac.navigationCapabilities&protocol.NavigationCapabilityBack != 0
+	if homePicker {
+		// The local session only hosts the picker. Its name, tabs and bar
+		// scripts do not describe the remote route the user is still on.
+		// Leave that chrome empty until the client publishes its snapshot.
+		if active, ok := activeRouteEntryForLifecycle(routeSnapshot, routeSnapshot.ActiveEntry.Target.LifecycleID); ok {
+			kind := recentRouteLocal
+			if active.Kind == protocol.RouteKindRemote {
+				kind = recentRouteRemote
+			}
+			state.status.session = formatRecentRouteName(recentRoutePresentation{
+				name: active.Name, hostLabel: domain.RemoteDisplayOrigin(active.HostLabel), kind: kind, ephemeral: active.Ephemeral,
+			})
+		}
+	} else if cur != nil {
 		includeTerminalTitle := true
 		if d != nil {
 			includeTerminalTitle = d.currentTabsConfig().TerminalTitle
 		}
 		state.status = cur.statusSegmentsFor(ac, includeTerminalTitle)
 	}
-	if cur != nil && d != nil {
+	if !homePicker && cur != nil && d != nil {
 		state.topRight, state.bottomRight = d.barScriptSnapshot(cur)
 	}
 	if ranked != nil {

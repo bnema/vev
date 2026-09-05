@@ -607,8 +607,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			finishHandshake: finishHandshake, stopHandshakeTransport: stopHandshakeTransport,
 			request: request, clientID: processClientID, milestones: &ms,
 			themeState: themeState, enterRaw: enterRaw, reconnect: localReconnect,
-			terminalInput:   func() *terminalInputPump { return input },
-			transientPicker: true, returnAttachTargets: true,
+			terminalInput: func() *terminalInputPump { return input },
 		}).run(attemptCtx)
 		stopHandshakeTransport()
 		finishHandshake()
@@ -952,6 +951,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if attemptRequest.StartupOverlay == protocol.StartupOverlaySessionPicker {
 				returnRoute = nil
 				returnResumeFallback = false
+				nextRequest.StartupOverlay = protocol.StartupOverlayNone
+				nextRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack
 			}
 			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
@@ -1274,8 +1275,6 @@ type attachAttempt struct {
 	rememberRemoteHost       func()
 	terminalInput            func() *terminalInputPump
 	openHomePicker           func(context.Context) attachResult
-	transientPicker          bool
-	returnAttachTargets      bool
 }
 
 type attachResult struct {
@@ -1335,6 +1334,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		transport = a.connection.Connection()
 	}
 	request := a.request
+	// Both parked UDP and close-and-dial home pickers only borrow a local
+	// attachment for rendering. They do not own the client's active route.
+	transientPicker := request.StartupOverlay == protocol.StartupOverlaySessionPicker
 	term := a.runner.term
 	clk := a.runner.clock
 	intent := request.Intent
@@ -1500,7 +1502,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
-		if !a.transientPicker {
+		if !transientPicker {
 			candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
 			var commitErr error
 			if a.killedSelection != nil {
@@ -2138,7 +2140,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 			case protocol.AttachTarget:
 				target := message
-				if a.returnAttachTargets {
+				if transientPicker {
 					handoff := welcomedResult(nil)
 					handoff.target = &target
 					return handoff
@@ -2280,6 +2282,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				name = identity.Target.SessionName
 				committedIdentity = cloneCommittedIdentity(&identity)
+				if transientPicker {
+					continue
+				}
 				if a.runner.ledger == nil {
 					return welcomedResult(errors.New("vev: route ledger unavailable"))
 				}
