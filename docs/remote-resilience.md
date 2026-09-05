@@ -77,6 +77,13 @@ and dial normally. While any switch takes longer than the short display
 threshold, the client overlays an animated switching or starting toast until
 the destination's authoritative output is flushed.
 
+Opening the home picker does not change the client's active route or recent
+session order, on either UDP or SSH stdio. Its status bar keeps the source
+session label (for example, `misc@igor`), not the local session hosting the
+picker. Local backing-session tabs and bar-script output are hidden while
+this temporary attachment renders the picker. Selecting a destination commits
+that route; Back returns to the source.
+
 ## Durable record compatibility
 
 Catalogue record format version 6 stores durable session metadata independently
