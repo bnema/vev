@@ -1017,17 +1017,17 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	if !matches || !effect.current() {
 		return errAttachmentTransition
 	}
-	if targetSess != nil && target.TabID != "" {
-		// An explicit tab row is a direct user choice, not route memory; retain
-		// the established daemon-side transition so it opens exactly that tab.
+	homePicker := effect.ac.startupOverlay == protocol.StartupOverlaySessionPicker
+	if !homePicker && targetSess != nil && target.TabID != "" {
+		// Ordinary local tab navigation keeps the attachment. A home picker
+		// only borrows it: selecting even its backing session must hand off
+		// to the client so the remote route and temporary attachment end.
 		return d.switchToTargetGuardedForAttachment(effect.sess, effect.ac, target, guard, effect, action)
 	}
 
-	// An active session row with no explicit non-default tab is on the
-	// authenticated daemon and can use the client-confirmed same-peer path.
-	// Explicit tab rows already take the direct transition path above, while
-	// stopped sessions have no active target session and retain the fallback.
-	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
+	// Ordinary live session rows can use the client-confirmed same-peer
+	// path. Temporary home pickers and stopped targets require a handoff.
+	samePeerEligible := !homePicker && guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
 	if exactTarget == nil {
 		return errAttachmentTransition
 	}
@@ -1044,6 +1044,7 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 		Session:           sessionName,
 		Intent:            protocol.IntentAttach,
 		ExactTarget:       exactTarget,
+		PreferredTabID:    target.TabID,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	if protocol.ValidateAttachTarget(handoff) != nil {

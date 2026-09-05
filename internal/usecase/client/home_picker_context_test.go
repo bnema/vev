@@ -24,6 +24,7 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 		{name: "UDP backing session renamed", udp: true, rename: true},
 		{name: "stdio backing session renamed", rename: true},
 		{name: "stdio select new local destination", selectLocal: true},
+		{name: "UDP select new local destination", udp: true, selectLocal: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			term := newRunTerminal()
@@ -69,7 +70,7 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 				selected := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{3}, SessionName: "destination"}
 				localPicker.recvs = append(localPicker.recvs, recvItem{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
 					Session: selected.SessionName, Intent: protocol.IntentAttach, ExactTarget: &selected,
-					EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+					EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, PreferredTabID: "chosen-tab",
 				}))})
 				localDestination = &recordingTransport{recvs: []recvItem{
 					{f: hybridWelcomeFrame(selected.SessionName, selected.LifecycleID)},
@@ -114,6 +115,7 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 			if localDestination != nil {
 				hello := helloFromSend(t, localDestination)
 				require.Equal(t, protocol.StartupOverlayNone, hello.StartupOverlay)
+				require.Equal(t, domain.TabStableID("chosen-tab"), hello.PreferredTabID)
 				require.Zero(t, hello.NavigationCapabilities&protocol.NavigationCapabilityBack)
 				var selected protocol.RecentRouteSnapshot
 				for _, sent := range localDestination.Sends() {

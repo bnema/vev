@@ -1207,6 +1207,7 @@ func MarshalAttachTarget(m protocol.AttachTarget) []byte {
 	marshalRemoteTargetSection(&w, m.RemoteTarget, m.EnvironmentPolicy)
 	marshalExactTargetSection(&w, m.ExactTarget)
 	w.putBool(m.SamePeer)
+	w.putString(string(m.PreferredTabID))
 	return w.b
 }
 
@@ -1240,6 +1241,9 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 	if _, err := probe.getBool(); err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
+	if err := probe.skipString(); err != nil {
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
+	}
 	if err := probe.done(); err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
@@ -1267,6 +1271,11 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 	if m.SamePeer, err = r.getBool(); err != nil {
 		return protocol.AttachTarget{}, err
 	}
+	preferredTabID, err := r.getString()
+	if err != nil {
+		return protocol.AttachTarget{}, err
+	}
+	m.PreferredTabID = domain.TabStableID(preferredTabID)
 	if err := r.done(); err != nil {
 		return protocol.AttachTarget{}, err
 	}

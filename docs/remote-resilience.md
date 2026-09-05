@@ -82,7 +82,12 @@ session order, on either UDP or SSH stdio. Its status bar keeps the source
 session label (for example, `misc@igor`), not the local session hosting the
 picker. Local backing-session tabs and bar-script output are hidden while
 this temporary attachment renders the picker. Selecting a destination commits
-that route; Back returns to the source.
+that route; Back returns to the source. Local tab selections also hand off to
+the client, including selections in the backing session itself: the temporary
+picker connection never becomes the destination attachment. Protocol version
+40 carries the explicit local tab in `AttachTarget.PreferredTabID`; it overrides
+remembered tab state. If that tab disappears before attach, the existing Hello
+default-tab fallback applies. Upgrade the client and both daemons together.
 
 ## Durable record compatibility
 
