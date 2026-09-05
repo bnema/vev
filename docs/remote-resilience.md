@@ -82,7 +82,30 @@ session order, on either UDP or SSH stdio. Its status bar keeps the source
 session label (for example, `misc@igor`), not the local session hosting the
 picker. Local backing-session tabs and bar-script output are hidden while
 this temporary attachment renders the picker. Selecting a destination commits
-that route; Back returns to the source.
+that route; Back returns to the source. Local tab selections also hand off to
+the client, including selections in the backing session itself: the temporary
+picker connection never becomes the destination attachment. Protocol version
+40 carries the explicit local tab in `AttachTarget.PreferredTabID`; it overrides
+remembered tab state. If that tab disappears before attach, the existing Hello
+default-tab fallback applies. Upgrade the client and both daemons together.
+
+### Real-client hybrid navigation check
+
+On Linux with Python 3, tmux, OpenSSH and an sshd runnable as your current user:
+
+```sh
+go build -o /tmp/vev-hybrid-check .
+python3 scripts/hybrid-navigation-repro.py --binary /tmp/vev-hybrid-check --artifacts /tmp/vev-hybrid-check-frames
+```
+
+This creates two private `VEV_ENV=dev` daemons and a loopback-only SSH server
+with temporary keys, then drives a real client in a dedicated tmux server over
+UDP and SSH stdio. It checks the remote picker label, Back, selecting a second
+local tab, updated recent history, and returning via the remote palette to the
+remembered local tab. Terminal captures are saved to the artifact directory;
+the test daemons, tmux server, SSH server and temporary state are cleaned up.
+Normal vev sessions and SSH configuration are untouched. Use `--transport udp`
+or `--transport stdio` to run one carriage.
 
 ## Durable record compatibility
 

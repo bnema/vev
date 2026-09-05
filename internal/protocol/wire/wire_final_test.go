@@ -12,8 +12,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if protocol.Version != 39 {
-		t.Fatalf("ProtocolVersion = %d, want 39", protocol.Version)
+	if protocol.Version != 40 {
+		t.Fatalf("ProtocolVersion = %d, want 40", protocol.Version)
 	}
 	payload := MarshalHello(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -27,7 +27,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 39, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 40, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	want = append(want, 0, 0)
 	got := MarshalHello(msg)
@@ -196,7 +196,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach}
-	want := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0}
+	want := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0, 0, 0}
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -212,7 +212,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	if localPayload == nil {
 		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
 	}
-	wantLocal := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0}
+	wantLocal := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0, 0, 0}
 	if !bytes.Equal(localPayload, wantLocal) {
 		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
 	}
@@ -248,7 +248,7 @@ func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	payload := MarshalAttachTarget(target)
 	want := append(make([]byte, 8), []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1}...)
 	want = append(want, make([]byte, 15)...)
-	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1)
+	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1, 0, 0)
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("exact target bytes = %x, want %x", payload, want)
 	}

@@ -551,8 +551,8 @@ func (l *routeLedger) snapshot() protocol.RecentRouteSnapshot {
 }
 
 // samePeerHandoff restores a previously committed route on the daemon already
-// connected to by the client. The daemon deliberately sends no tab state: the
-// ledger is the sole owner of per-route view memory.
+// connected to by the client. An explicit tab selection overrides route memory;
+// a session-only selection restores the client's remembered view.
 func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.AttachTarget) AttachRequest {
 	origin := normalizeRouteOrigin(active.Origin, active.Remote)
 	originKey := normalizeRouteOriginKey(active.OriginKey, origin)
@@ -582,8 +582,8 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.Atta
 		}
 		request.EnvironmentPolicy = environmentPolicy
 		request.ExactTarget = target.ExactTarget
-		if target.ExactTarget == nil {
-			request.PreferredTabID = ""
+		if target.ExactTarget == nil || target.PreferredTabID != "" {
+			request.PreferredTabID = target.PreferredTabID
 		}
 		return request
 	}
@@ -592,7 +592,7 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.Atta
 	request.Intent = target.Intent
 	request.SessionName = target.Session
 	request.ExactTarget = target.ExactTarget
-	request.PreferredTabID = ""
+	request.PreferredTabID = target.PreferredTabID
 	request.RemoteTarget = nil
 	if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 		request.NavigationCapabilities = 0

@@ -13,7 +13,7 @@ import (
 )
 
 // Version is the negotiated vev session protocol version.
-const Version uint16 = 39
+const Version uint16 = 40
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.
@@ -205,6 +205,10 @@ type AttachTarget struct {
 	ExactTarget       *ExactSessionTarget
 	EnvironmentPolicy EnvironmentPolicy
 	SamePeer          bool
+	// PreferredTabID carries an explicit local tab selection across a handoff.
+	// Empty retains the client's route memory; a disappeared tab uses Hello's
+	// existing default-tab fallback.
+	PreferredTabID domain.TabStableID
 }
 
 type Detached struct{ Reason uint8 }
@@ -393,6 +397,9 @@ func ValidateAttachTarget(m AttachTarget) error {
 		return ErrInvalidAttachTarget
 	}
 	if m.SamePeer && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil) {
+		return ErrInvalidAttachTarget
+	}
+	if m.PreferredTabID != "" && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil || m.Intent != IntentAttach || domain.ValidateTabStableID(m.PreferredTabID) != nil) {
 		return ErrInvalidAttachTarget
 	}
 	if m.RemoteTarget == nil {

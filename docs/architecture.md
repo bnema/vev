@@ -48,4 +48,4 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
 - Add remote catalogue schema fields and validation to `internal/protocol/catalogue`.
 - Add message IDs, binary layouts, strict decoding, compression, or raw carriage contracts to `internal/protocol/wire`.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Keep protocol version `37` unless a negotiated wire layout changes.
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `40`).

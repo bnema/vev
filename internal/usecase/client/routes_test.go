@@ -190,16 +190,20 @@ func TestRouteLedgerSamePeerHandoffRestoresRouteTab(t *testing.T) {
 		name            string
 		target          protocol.ExactSessionTarget
 		wantExactTarget *protocol.ExactSessionTarget
+		explicitTab     domain.TabStableID
 		wantTab         domain.TabStableID
 	}{
 		{name: "matching lifecycle restores remembered tab", target: first.target, wantExactTarget: &first.target, wantTab: "tab-first"},
 		{name: "recreated session does not reuse remembered tab", target: recreated, wantExactTarget: &recreated},
+		{name: "explicit tab overrides memory", target: first.target, wantExactTarget: &first.target, explicitTab: "chosen-tab", wantTab: "chosen-tab"},
+		{name: "new lifecycle retains explicit tab", target: recreated, wantExactTarget: &recreated, explicitTab: "chosen-tab", wantTab: "chosen-tab"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			request := ledger.samePeerHandoff(second.request, protocol.AttachTarget{
 				Session:           first.target.SessionName,
 				Intent:            protocol.IntentAttach,
 				ExactTarget:       &tt.target,
+				PreferredTabID:    tt.explicitTab,
 				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 			})
 			require.Equal(t, first.target.SessionName, request.SessionName)
