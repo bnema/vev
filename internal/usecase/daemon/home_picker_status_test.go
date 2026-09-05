@@ -56,7 +56,9 @@ func TestHomePickerStatusKeepsActiveRemoteRoute(t *testing.T) {
 			bars := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
 			frame := composeFrame(capturedRenderState{window: domain.Size{Cols: 80, Rows: 24}, bars: bars}, composeCacheInput{}).frame
 			require.Equal(t, tc.wantSession, bars.status.session)
-			require.Contains(t, rowText(frame.Row(frame.Height-1)), tc.wantSession)
+			if tc.wantSession != "" {
+				require.Contains(t, rowText(frame.Row(frame.Height-1)), tc.wantSession)
+			}
 			if tc.homePicker {
 				require.Empty(t, bars.status.tabs, "local tabs must not masquerade as remote tabs")
 				require.Empty(t, bars.topRight)

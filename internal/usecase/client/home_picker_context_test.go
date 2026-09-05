@@ -79,7 +79,8 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 			} else {
 				localPicker.recvs = append(localPicker.recvs, recvItem{f: navigationDirectiveFrame(protocol.NavigationBack)})
 			}
-			deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"igor": remoteDialer})
+			clock := &reconnectTestClock{}
+			deps := hybridPickerDependencies(localDialer, term, clock, map[string]ports.ClientDialer{"igor": remoteDialer})
 			require.NoError(t, runTestClient(t.Context(), deps, client.AttachRequest{
 				Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
 			}))
