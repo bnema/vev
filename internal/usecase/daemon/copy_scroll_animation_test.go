@@ -25,9 +25,12 @@ func TestCopyScrollAnimationEasesAndPreservesDistance(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("scroll frame not emitted")
 				}
+				// Wait for publication and capture the ACK coordinates under
+				// the same lock that protects the in-flight output transaction.
 				f.ac.sendMu.Lock()
+				epoch, state := f.ac.output.currentEpoch(), f.ac.output.next
 				f.ac.sendMu.Unlock()
-				f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
+				f.ac.ackOutputState(epoch, state)
 			}
 			rt := f.ac.overlays
 			start := rt.copyMode.ViewportTop
