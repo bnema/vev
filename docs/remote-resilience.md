@@ -89,24 +89,6 @@ picker connection never becomes the destination attachment. Protocol version
 remembered tab state. If that tab disappears before attach, the existing Hello
 default-tab fallback applies. Upgrade the client and both daemons together.
 
-### Real-client hybrid navigation check
-
-On Linux with Python 3, tmux, OpenSSH and an sshd runnable as your current user:
-
-```sh
-go build -o /tmp/vev-hybrid-check .
-python3 scripts/hybrid-navigation-repro.py --binary /tmp/vev-hybrid-check --artifacts /tmp/vev-hybrid-check-frames
-```
-
-This creates two private `VEV_ENV=dev` daemons and a loopback-only SSH server
-with temporary keys, then drives a real client in a dedicated tmux server over
-UDP and SSH stdio. It checks the remote picker label, Back, selecting a second
-local tab, updated recent history, and returning via the remote palette to the
-remembered local tab. Terminal captures are saved to the artifact directory;
-the test daemons, tmux server, SSH server and temporary state are cleaned up.
-Normal vev sessions and SSH configuration are untouched. Use `--transport udp`
-or `--transport stdio` to run one carriage.
-
 ## Durable record compatibility
 
 Catalogue record format version 6 stores durable session metadata independently
