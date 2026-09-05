@@ -322,6 +322,25 @@ func (m *Mode) MoveRows(delta int) bool {
 	}
 	return changed
 }
+
+// ScrollRows moves the viewport and cursor together for mouse-wheel input.
+// Unlike keyboard navigation, reversing direction scrolls immediately rather
+// than first walking the cursor to the opposite edge of the viewport.
+func (m *Mode) ScrollRows(delta int) bool {
+	if m == nil || m.document == nil || m.document.Len() == 0 || delta == 0 {
+		return false
+	}
+	d := m.document
+	oldTop := m.ViewportTop
+	maxTop := max(d.Len()-max(d.Height(), 1), 0)
+	top := oldTop + min(max(delta, -oldTop), maxTop-oldTop)
+	row := m.navigator.Pos.Row
+	row += min(max(delta, -row), d.Len()-1-row)
+	changed := m.move(func(d *Document) bool { return m.navigator.moveVertical(d, row) }, false)
+	m.ViewportTop = top
+	return changed || oldTop != top
+}
+
 func (m *Mode) Page(pages int) bool {
 	if m == nil || m.document == nil {
 		return false
@@ -542,12 +561,21 @@ func (m *Mode) RenderRows(paint func(int, []renderer.Cell), styles ...renderer.S
 	if m == nil || m.document == nil {
 		return
 	}
+	m.RenderRowsRange(0, m.document.Height(), paint, styles...)
+}
+
+// RenderRowsRange paints viewport rows in [start, end), then the status row.
+// Row coordinates remain viewport-relative and the callback borrows each row.
+func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell), styles ...renderer.Style) {
+	if m == nil || m.document == nil {
+		return
+	}
 	d := m.document
 	selectionBounds, hasSelectionBounds := m.selection.bounds(d)
 	selection, hasSelection := optionalStyle(styles, 1)
 	cursor, cursorValid := d.Normalize(m.navigator.Pos)
 	row := make([]renderer.Cell, d.Width())
-	for y := range d.Height() {
+	for y := max(start, 0); y < min(end, d.Height()); y++ {
 		src := m.ViewportTop + y
 		for x := range row {
 			row[x] = renderer.BlankCell()

@@ -44,27 +44,29 @@ func copyTargetPane(rt *overlayRuntime) *pane {
 func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 	rt := ac.overlays
 	rt.copyMu.Lock()
-	if rt.copyMode == nil || rt.copyPane == nil || rt.copyDocument == nil {
-		rt.copyMu.Unlock()
-		return
-	}
-	if delta > 0 && rt.copyMode.AtBottom() {
-		rt.clearCopyModeLocked()
-		rt.copyMu.Unlock()
-		d.invalidateRender(sess, ac, true, "copymode.go")
-		return
-	}
-	rt.copyMode.MoveRows(delta)
-	exit := delta > 0 && rt.copyMode.AtBottom()
-	if exit {
-		rt.clearCopyModeLocked()
-	}
+	changed, exit := rt.moveCopyWheelLocked(delta)
 	rt.copyMu.Unlock()
+	if !changed && !exit {
+		return
+	}
 	// Moving within the immutable copy document does not invalidate live pane
 	// captures. The compositor still redraws the overlay; leaving it resets live
 	// state so attachment-local snapshots cannot survive the return to the PTY.
 	d.invalidateRender(sess, ac, exit, "copymode.go")
 }
+
+func (rt *overlayRuntime) moveCopyWheelLocked(delta int) (changed, exit bool) {
+	if rt.copyMode == nil || rt.copyPane == nil || rt.copyDocument == nil {
+		return false, false
+	}
+	changed = rt.copyMode.ScrollRows(delta)
+	exit = delta > 0 && rt.copyMode.AtBottom()
+	if exit {
+		rt.clearCopyModeLocked()
+	}
+	return changed, exit
+}
+
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	tb := sess.tabForAttachment(ac)
 	if tb == nil {

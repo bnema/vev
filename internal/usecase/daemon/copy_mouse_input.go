@@ -28,10 +28,13 @@ func (d *Daemon) handleCopyMouse(sess *session, ac *attachedClient, tb *tab, ev 
 	}
 	switch ev.Button {
 	case mouse.WheelUp:
-		d.copyWheel(sess, ac, -3)
+		d.smoothCopyWheel(sess, ac, -3)
 	case mouse.WheelDown:
-		d.copyWheel(sess, ac, 3)
+		d.smoothCopyWheel(sess, ac, 3)
 	case mouse.Left:
+		rt.copyMu.Lock()
+		rt.stopCopyScrollLocked()
+		rt.copyMu.Unlock()
 		d.handleActiveCopyMouse(sess, ac, tb, ev)
 	}
 	return true
