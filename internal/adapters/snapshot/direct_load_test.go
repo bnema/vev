@@ -67,7 +67,7 @@ func TestLoadCheckpointPreservesManifestVersionError(t *testing.T) {
 		name    string
 		version uint16
 	}{
-		{name: "old", version: codec.ManifestVersion - 1},
+		{name: "dense VT checkpoint", version: 3},
 		{name: "future", version: codec.ManifestVersion + 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

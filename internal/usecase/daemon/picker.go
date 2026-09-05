@@ -1570,13 +1570,16 @@ func pickerPreviewFromCapturedRender(state capturedRenderState) picker.Preview {
 }
 
 func pickerPreviewFromLockedPane(p *pane) picker.Preview {
-	return pickerPreviewFromFrame(p.screen.Frame)
+	return pickerPreviewFromFrame(p.screen)
 }
 
-func pickerPreviewFromFrame(frame renderer.Frame) picker.Preview {
-	rows := make([][]renderer.Cell, frame.Height)
+func pickerPreviewFromFrame(frame renderer.CellSource) picker.Preview {
+	rows := make([][]renderer.Cell, frame.Rows())
 	for y := range rows {
-		rows[y] = append([]renderer.Cell(nil), frame.Row(y)...)
+		rows[y] = make([]renderer.Cell, frame.Columns())
+		for x := range rows[y] {
+			rows[y][x] = frame.Cell(x, y)
+		}
 	}
-	return picker.Preview{Rows: rows, Width: frame.Width, Height: frame.Height}
+	return picker.Preview{Rows: rows, Width: frame.Columns(), Height: frame.Rows()}
 }

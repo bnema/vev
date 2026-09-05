@@ -73,7 +73,7 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 		gotTabSize := tb.size
 		pane := tb.focusedPane()
 		pane.mu.Lock()
-		gotPaneSize := domain.Size{Cols: pane.screen.Frame.Width, Rows: pane.screen.Frame.Height}
+		gotPaneSize := domain.Size{Cols: pane.screen.Columns(), Rows: pane.screen.Rows()}
 		pane.mu.Unlock()
 		tb.mu.Unlock()
 		require.Equal(t, wantContent, gotTabSize)

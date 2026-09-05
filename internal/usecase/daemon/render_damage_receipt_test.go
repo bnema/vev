@@ -162,7 +162,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			require.Contains(t, string(out.Data), "changed", "retry must emit the retained terminal bytes")
 			p.mu.Lock()
 			require.Empty(t, p.screen.Damage(), "only the successful retry commits its receipt")
-			require.Equal(t, 'c', p.screen.Frame.At(0, 0).Rune, "retry preserves the changed VT shadow")
+			require.Equal(t, 'c', p.screen.Cell(0, 0).Rune, "retry preserves the changed VT shadow")
 			p.mu.Unlock()
 		})
 	}

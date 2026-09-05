@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -324,7 +325,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 			return nil, domain.UserErr(domain.NoticeSessionSpawn, "couldn't create session: shell failed to start", err)
 		}
 		appliedPaneGeometry := initialPaneGeometry
-		tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
+		tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title, d.currentHistoryConfig())
 		if pane := tb.focusedPane(); pane != nil {
 			pane.geometry = appliedPaneGeometry
 			setScreenGeometry(pane.screen, appliedPaneGeometry)
@@ -675,7 +676,7 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 		d.log.Warn("pty spawn failed", "err", err, "session", name, "kind", "tab")
 		return domain.UserErr(domain.NoticeTabSpawn, "couldn't open tab: shell failed to start", err)
 	}
-	tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title)
+	tb := newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, tbSize, launch.title, d.currentHistoryConfig())
 	if pane := tb.focusedPane(); pane != nil {
 		pane.geometry = claimGeometry
 		setScreenGeometry(pane.screen, claimGeometry)
@@ -736,12 +737,12 @@ func newTab(pty ports.PTY, sz domain.Size) *tab {
 }
 
 func newTabWithStableID(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size) *tab {
-	return newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, sz, defaultShellTitle)
+	return newTabWithStableIDAndTitle(tabStableID, paneStableID, pty, sz, defaultShellTitle, historyConfigFor(domain.DefaultScrollbackConfig()))
 }
 
-func newTabWithStableIDAndTitle(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size, title string) *tab {
+func newTabWithStableIDAndTitle(tabStableID, paneStableID string, pty ports.PTY, sz domain.Size, title string, historyConfig vt.HistoryConfig) *tab {
 	id := layout.PaneID("pane-1")
-	p := newPaneWithStableIDAndTitle(id, paneStableID, pty, sz, title)
+	p := newPaneWithStableIDAndTitle(id, paneStableID, pty, sz, title, historyConfig)
 	return &tab{
 		stableID:   tabStableID,
 		tree:       layout.NewTree(id),
@@ -850,6 +851,7 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 	if owner.session != sess || owner.tab != tb {
 		return
 	}
+	d.applyHistoryLimitsToPane(p)
 	sess.mu.Lock()
 	name := sess.name
 	sess.mu.Unlock()

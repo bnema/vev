@@ -350,7 +350,7 @@ func TestAttachmentOutputRepeatedUnackedScrollRemainsClientCorrect(t *testing.T)
 	require.True(t, ok)
 	mustApplyOutput(t, client, third)
 	for y, want := range []string{"BBBB", "CCCC", "N   "} {
-		require.Equal(t, want, outputStateRow(client.Frame.Row(y)))
+		require.Equal(t, want, outputStateRow(client.RowCells(y)))
 	}
 }
 
@@ -416,7 +416,7 @@ func TestAttachmentOutputResizeFrameThenNoopAndDamageAreDifferential(t *testing.
 	screen.Resize(6, 2)
 
 	stream := newOutputStateStream()
-	resized, ok, err := drawOutputState(t, stream, screen.Frame, screen.Damage(), true, 0)
+	resized, ok, err := drawOutputState(t, stream, captureTestFrame(screen), screen.Damage(), true, 0)
 	require.NoError(t, err)
 	require.True(t, ok)
 	resizeOutput, err := wire.UnmarshalOutput(resized.Payload)
@@ -424,12 +424,12 @@ func TestAttachmentOutputResizeFrameThenNoopAndDamageAreDifferential(t *testing.
 	require.Zero(t, resizeOutput.Base, "resize must emit the one reset frame")
 	screen.ClearDamage()
 
-	_, ok, err = drawOutputState(t, stream, screen.Frame, screen.Damage(), false, 0)
+	_, ok, err = drawOutputState(t, stream, captureTestFrame(screen), screen.Damage(), false, 0)
 	require.NoError(t, err)
 	require.False(t, ok, "an unchanged render after resize must emit nothing")
 
-	screen.Frame.Set(0, 0, renderer.Cell{Rune: 'x', Style: renderer.DefaultStyle()})
-	damaged, ok, err := drawOutputState(t, stream, screen.Frame, []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false, 0)
+	screen.Write([]byte("\x1b[1;1Hx"))
+	damaged, ok, err := drawOutputState(t, stream, captureTestFrame(screen), []renderer.Damage{{Kind: renderer.DamageText, Width: 1, Height: 1}}, false, 0)
 	require.NoError(t, err)
 	require.True(t, ok)
 	damageOutput, err := wire.UnmarshalOutput(damaged.Payload)

@@ -19,9 +19,9 @@ func TestCaptureRemotePreviewUsesBottomRowsForShorterPreview(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 	pane.mu.Lock()
 	pane.screen = vt.NewScreen(2, 3)
-	pane.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'a'})
-	pane.screen.Frame.Set(0, 1, renderer.Cell{Rune: 'b'})
-	pane.screen.Frame.Set(0, 2, renderer.Cell{Rune: 'c'})
+	writeTestRow(pane.screen, 0, "a")
+	writeTestRow(pane.screen, 1, "b")
+	writeTestRow(pane.screen, 2, "c")
 	pane.mu.Unlock()
 
 	target := domain.RemoteSessionTarget{
@@ -103,9 +103,11 @@ func TestCaptureRemotePreviewCompactsBlankTail(t *testing.T) {
 			pane := sess.tabs[0].focusedPane()
 			pane.mu.Lock()
 			pane.screen = vt.NewScreen(test.screenWidth, test.screenHeight)
+			frame := renderer.NewFrame(test.screenWidth, test.screenHeight)
 			for _, cell := range test.cells {
-				pane.screen.Frame.Set(cell.x, cell.y, cell.cell)
+				frame.Set(cell.x, cell.y, cell.cell)
 			}
+			writeTestFrame(t, pane.screen, frame)
 			pane.mu.Unlock()
 
 			target := domain.RemoteSessionTarget{
@@ -148,8 +150,7 @@ func TestCaptureRemotePreviewDoesNotSplitWideRuneAtCropBoundary(t *testing.T) {
 	pane.screen = vt.NewScreen(3, 1)
 	style := renderer.DefaultStyle()
 	style.Bold = true
-	pane.screen.Frame.Set(1, 0, renderer.Cell{Rune: '界', Style: style})
-	pane.screen.Frame.Set(2, 0, renderer.Cell{Continuation: true, Style: style})
+	pane.screen.Write([]byte("\x1b[1;2H\x1b[1m界"))
 	pane.mu.Unlock()
 
 	target := domain.RemoteSessionTarget{

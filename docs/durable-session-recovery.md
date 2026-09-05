@@ -20,6 +20,8 @@ Before rewriting a legacy catalogue, vev creates and syncs a private `sessions.k
 
 ## Incompatible checkpoints
 
+Compact VT storage uses VEVM version 4 and VEVS version 5. Dense VT checkpoints are intentionally incompatible: there is no scrollback migration or legacy decoder. On the next daemon startup, healthy older VEVM checkpoints take the reset path below. This clears saved tabs, layout, screen contents, scrollback, and recovery transcripts while preserving session names and working directories. The live client/daemon protocol is unchanged. Installing a binary does not restart an existing daemon.
+
 After verifying a VEVM manifest's digest, vev treats any VEVM version mismatch as an incompatible healthy checkpoint. It atomically replaces only that named session's exact healthy checkpoint with a fresh incarnation. Unlike a protocol reset, this replacement retains the session name and working directory, but has no checkpoint, tabs, terminal history, or recovery transcript.
 
 Digest mismatches, corruption, validation failures, I/O errors, and ambiguous failures are never reset or purged. The session remains degraded for explicit recovery.

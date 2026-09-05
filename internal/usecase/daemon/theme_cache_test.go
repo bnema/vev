@@ -74,7 +74,7 @@ func TestAppliedThemeKeepsDimmerOutsideResolvedChrome(t *testing.T) {
 	}
 	out := composeFrame(state, composeCacheInput{})
 	require.Equal(t, cell, out.frame.At(0, 1))
-	require.Equal(t, themeui.NewDimmer(raw, themeui.WithForegroundDimming(inactivePaneForegroundDimming)).Dim(cell.Style), out.frame.At(2, 1).Style)
+	require.Equal(t, themeui.NewDimmer(raw, themeui.WithForegroundDimming(inactivePaneForegroundDimming)).Dim(cell.Style).Canonical(), out.frame.At(2, 1).Style.Canonical())
 }
 
 func TestChromeDimmersUseNeutralInputsOutsideAccentRamp(t *testing.T) {
@@ -83,8 +83,8 @@ func TestChromeDimmersUseNeutralInputsOutsideAccentRamp(t *testing.T) {
 	neutral := renderer.DefaultStyle()
 	neutral.HasForegroundRGB = true
 	neutral.ForegroundRGB = themeui.Blend(raw.Foreground, raw.Background, 0.40)
-	want := themeui.NewDimmer(raw).Dim(neutral)
-	accentDerived := themeui.NewDimmer(raw).Dim(resolved.Styles.BorderMuted)
+	want := themeui.NewDimmer(raw).Dim(neutral).Canonical()
+	accentDerived := themeui.NewDimmer(raw).Dim(resolved.Styles.BorderMuted).Canonical()
 
 	split := cachedSplitState("neutral-divider", "left", layout.Horizontal, raw)
 	split.styles = resolved.Styles

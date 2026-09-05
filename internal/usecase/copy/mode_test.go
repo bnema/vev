@@ -43,12 +43,12 @@ func TestNewSnapshotFromRowsPreservesWideRows(t *testing.T) {
 }
 
 func TestSnapshotCarriesImmutableRowIDsAndDocumentsResolveBookmarks(t *testing.T) {
-	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8})
 	require.NoError(t, history.AppendWithID(row("hist"), vt.LineBound{End: 4}, vt.RowID(11)))
 	require.NoError(t, history.AppendWithID(row("tail"), vt.LineBound{End: 4}, vt.RowID(12)))
 	screen := renderer.NewFrame(4, 2)
-	copy(screen.Row(0), row("live"))
-	copy(screen.Row(1), row("more"))
+	screen.WriteRow(0, 0, row("live"))
+	screen.WriteRow(1, 0, row("more"))
 	rowIDs := []vt.RowID{21, 22}
 
 	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 4}}, rowIDs)
@@ -74,12 +74,12 @@ func TestSnapshotBoundDispatchesLikeRow(t *testing.T) {
 		return cells
 	}
 
-	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8})
 	if err := history.Append(row("hist"), vt.LineBound{End: 4, Soft: true}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	screen := renderer.NewFrame(4, 2)
-	copy(screen.Row(0), row("live"))
+	screen.WriteRow(0, 0, row("live"))
 
 	snap := NewSnapshot(history, screen, []vt.LineBound{{End: 4}, {End: 0, Soft: true}}, nil)
 
@@ -359,14 +359,14 @@ func TestSelectedTextJoinsAcrossTheHistoryScreenBoundary(t *testing.T) {
 	}
 
 	const width = 4
-	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8, MaxCells: 1024})
+	history := vt.NewHistory(vt.HistoryConfig{MaxRows: 8})
 	// The last history row wrapped into what is now the first live screen row.
 	if err := history.Append(row("abcd", width), vt.LineBound{End: width, Soft: true}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	screen := renderer.NewFrame(width, 2)
-	copy(screen.Row(0), row("ef", width))
-	copy(screen.Row(1), row("gh", width))
+	screen.WriteRow(0, 0, row("ef", width))
+	screen.WriteRow(1, 0, row("gh", width))
 
 	snapshot := NewSnapshot(history, screen, []vt.LineBound{{End: 2}, {End: 2}}, nil)
 	doc := NewDocument(snapshot, "")
@@ -434,10 +434,10 @@ func TestSelectedTextJoinsRowsWrappedByTheVT(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			screen := vt.NewScreenWithHistory(width, height, vt.HistoryConfig{MaxRows: 64, MaxCells: 4096})
+			screen := vt.NewScreenWithHistory(width, height, vt.HistoryConfig{MaxRows: 64})
 			screen.Write([]byte(tc.input))
 
-			snapshot := NewSnapshot(screen.History(), screen.Frame, screen.LineBounds(), nil)
+			snapshot := NewSnapshot(screen.History(), screen, screen.LineBounds(), nil)
 			require.Equal(t, tc.wantHistoryLen, snapshot.history.Len(), "history/screen seam moved")
 			doc := NewDocument(snapshot, domain.DefaultWordSeparators)
 

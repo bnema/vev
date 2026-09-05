@@ -68,7 +68,7 @@ func (d *Daemon) captureRemotePreview(request protocol.RemotePreviewRequest) (pr
 		tab.mu.Unlock()
 		return protocol.RemotePreview{}, errRemotePreviewNoSuchTarget
 	}
-	source := pane.screen.Frame.Clone()
+	source := pane.screen.Snapshot()
 	revision := pane.syncGen
 	pane.mu.Unlock()
 	tab.mu.Unlock()
@@ -76,12 +76,12 @@ func (d *Daemon) captureRemotePreview(request protocol.RemotePreviewRequest) (pr
 		revision = 1
 	}
 
-	width := min(int(request.Width), source.Width)
-	height := min(int(request.Height), source.Height)
+	width := min(int(request.Width), source.Columns())
+	height := min(int(request.Height), source.Rows())
 	if width <= 0 || height <= 0 {
 		return protocol.RemotePreview{}, errRemotePreviewNoSuchTarget
 	}
-	startY, endY := source.Height-height, source.Height
+	startY, endY := source.Rows()-height, source.Rows()
 	if last := remotePreviewLastContentRow(source, width, startY, endY); last >= startY {
 		endY = last + 1
 	} else if last := remotePreviewLastContentRow(source, width, 0, startY); last >= 0 {
@@ -119,10 +119,10 @@ func (d *Daemon) captureRemotePreview(request protocol.RemotePreviewRequest) (pr
 // the bounded viewport crop. Remote terminal frames retain their full PTY
 // height even when the only output is near the top; compacting the blank tail lets the
 // picker bottom-anchor short output instead of clipping it away.
-func remotePreviewLastContentRow(frame renderer.Frame, width, start, end int) int {
+func remotePreviewLastContentRow(frame renderer.CellSource, width, start, end int) int {
 	for y := end - 1; y >= start; y-- {
-		for x, cell := range frame.Row(y)[:width] {
-			cell, splitWideRune := cropRemotePreviewCell(cell, x, width)
+		for x := range width {
+			cell, splitWideRune := cropRemotePreviewCell(frame.Cell(x, y), x, width)
 			if !splitWideRune && remotePreviewCellVisible(cell) {
 				return y
 			}

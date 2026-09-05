@@ -171,11 +171,11 @@ func newPane(id layout.PaneID, pty ports.PTY, sz domain.Size) *pane {
 }
 
 func newPaneWithStableID(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size) *pane {
-	return newPaneWithStableIDAndTitle(id, stableID, pty, sz, defaultShellTitle)
+	return newPaneWithStableIDAndTitle(id, stableID, pty, sz, defaultShellTitle, historyConfigFor(domain.DefaultScrollbackConfig()))
 }
 
-func newPaneWithStableIDAndTitle(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size, title string) *pane {
-	screen := vt.NewScreenWithHistory(sz.Cols, sz.Rows, vt.HistoryConfig{MaxRows: defaultScrollbackRows, MaxCells: defaultScrollbackCells})
+func newPaneWithStableIDAndTitle(id layout.PaneID, stableID string, pty ports.PTY, sz domain.Size, title string, historyConfig vt.HistoryConfig) *pane {
+	screen := vt.NewScreenWithHistory(sz.Cols, sz.Rows, historyConfig)
 	return &pane{
 		id:       id,
 		stableID: stableID,

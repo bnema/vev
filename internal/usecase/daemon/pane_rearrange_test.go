@@ -411,7 +411,7 @@ func (h *paneRearrangeHarness) snapshot() paneRearrangeSnapshot {
 		snapshot.panes[id] = p
 		p.mu.Lock()
 		snapshot.rects[id] = p.rect
-		snapshot.screens[id] = domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}
+		snapshot.screens[id] = domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}
 		p.mu.Unlock()
 	}
 	h.tab.mu.Unlock()

@@ -41,6 +41,8 @@ func (d *Document) Len() int                    { return d.snapshot.Len() }
 func (d *Document) Width() int                  { return d.snapshot.Width }
 func (d *Document) Height() int                 { return d.snapshot.Height }
 func (d *Document) Row(row int) []renderer.Cell { return d.snapshot.Row(row) }
+func (d *Document) RowWidth(row int) int        { return d.snapshot.RowWidth(row) }
+func (d *Document) Cell(x, y int) renderer.Cell { return d.snapshot.Cell(x, y) }
 func (d *Document) RowID(row int) vt.RowID      { return d.snapshot.RowID(row) }
 func (d *Document) FindRowID(id vt.RowID) int   { return d.snapshot.FindRowID(id) }
 
@@ -50,20 +52,20 @@ func (d *Document) Normalize(pos Pos) (Pos, bool) {
 	if pos.Row < 0 || pos.Row >= d.Len() || pos.Col < 0 {
 		return Pos{}, false
 	}
-	row := d.Row(pos.Row)
-	if len(row) == 0 {
+	width := d.RowWidth(pos.Row)
+	if width == 0 {
 		if pos.Col == 0 {
 			return pos, true
 		}
 		return Pos{}, false
 	}
-	if pos.Col >= len(row) {
+	if pos.Col >= width {
 		return Pos{}, false
 	}
-	for pos.Col > 0 && row[pos.Col].Continuation {
+	for pos.Col > 0 && d.Cell(pos.Col, pos.Row).Continuation {
 		pos.Col--
 	}
-	if row[pos.Col].Continuation {
+	if d.Cell(pos.Col, pos.Row).Continuation {
 		return Pos{}, false
 	}
 	return pos, true
@@ -72,11 +74,11 @@ func (d *Document) Normalize(pos Pos) (Pos, bool) {
 // PrevGlyph returns the previous glyph head on pos's physical row.
 func (d *Document) PrevGlyph(pos Pos) (Pos, bool) {
 	pos, ok := d.Normalize(pos)
-	if !ok || len(d.Row(pos.Row)) == 0 {
+	if !ok || d.RowWidth(pos.Row) == 0 {
 		return Pos{}, false
 	}
 	for col := pos.Col - 1; col >= 0; col-- {
-		if !d.Row(pos.Row)[col].Continuation {
+		if !d.Cell(col, pos.Row).Continuation {
 			return Pos{Row: pos.Row, Col: col}, true
 		}
 	}
@@ -89,9 +91,9 @@ func (d *Document) NextGlyph(pos Pos) (Pos, bool) {
 	if !ok {
 		return Pos{}, false
 	}
-	row := d.Row(pos.Row)
-	for col := pos.Col + 1; col < len(row); col++ {
-		if !row[col].Continuation {
+	width := d.RowWidth(pos.Row)
+	for col := pos.Col + 1; col < width; col++ {
+		if !d.Cell(col, pos.Row).Continuation {
 			return Pos{Row: pos.Row, Col: col}, true
 		}
 	}
@@ -357,12 +359,11 @@ func (d *Document) isSeparator(r rune) bool {
 }
 
 func (d *Document) isGlyph(pos Pos) bool {
-	row := d.Row(pos.Row)
-	return pos.Col >= 0 && pos.Col < len(row) && !row[pos.Col].Continuation
+	return pos.Col >= 0 && pos.Col < d.RowWidth(pos.Row) && !d.Cell(pos.Col, pos.Row).Continuation
 }
 
 func (d *Document) runeAt(pos Pos) rune {
-	cell := d.Row(pos.Row)[pos.Col]
+	cell := d.Cell(pos.Col, pos.Row)
 	if cell.Rune == 0 {
 		return ' '
 	}
@@ -373,13 +374,13 @@ func (d *Document) runeAt(pos Pos) rune {
 // an index for unrelated scrollback rows.
 func (d *Document) nextDocumentGlyph(pos Pos) (Pos, bool) {
 	for row := pos.Row; row < d.Len(); row++ {
-		cells := d.Row(row)
+		width := d.RowWidth(row)
 		start := 0
 		if row == pos.Row {
 			start = pos.Col + 1
 		}
-		for col := start; col < len(cells); col++ {
-			if !cells[col].Continuation {
+		for col := start; col < width; col++ {
+			if !d.Cell(col, row).Continuation {
 				return Pos{Row: row, Col: col}, true
 			}
 		}
@@ -391,13 +392,12 @@ func (d *Document) nextDocumentGlyph(pos Pos) (Pos, bool) {
 // building an index for unrelated scrollback rows.
 func (d *Document) previousDocumentGlyph(pos Pos) (Pos, bool) {
 	for row := pos.Row; row >= 0; row-- {
-		cells := d.Row(row)
-		start := len(cells) - 1
+		start := d.RowWidth(row) - 1
 		if row == pos.Row {
 			start = min(pos.Col-1, start)
 		}
 		for col := start; col >= 0; col-- {
-			if !cells[col].Continuation {
+			if !d.Cell(col, row).Continuation {
 				return Pos{Row: row, Col: col}, true
 			}
 		}

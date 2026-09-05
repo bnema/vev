@@ -136,8 +136,8 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 		p.resizeApplying = true
 		p.resizePending = []byte("A\x1b[1;81HB")
 		d.replayResizePending(sess, tb, p, true, domain.Rect{Width: 120, Height: 23})
-		require.Equal(t, 120, p.screen.Frame.Width)
-		require.Equal(t, 'B', p.screen.Frame.At(80, 0).Rune)
+		require.Equal(t, 120, p.screen.Columns())
+		require.Equal(t, 'B', p.screen.Cell(80, 0).Rune)
 		require.False(t, p.resizeApplying)
 	})
 	t.Run("failure retains old parser width", func(t *testing.T) {
@@ -147,8 +147,8 @@ func TestReplayResizePendingBuffersSuccessFailureAndBatchOrder(t *testing.T) {
 		p.resizeApplying = true
 		p.resizePending = []byte("\x1b[1;81HB")
 		d.replayResizePending(sess, tb, p, false, domain.Rect{Width: 120, Height: 23})
-		require.Equal(t, 80, p.screen.Frame.Width)
-		require.Equal(t, 'B', p.screen.Frame.At(79, 0).Rune)
+		require.Equal(t, 80, p.screen.Columns())
+		require.Equal(t, 'B', p.screen.Cell(79, 0).Rune)
 	})
 	t.Run("batches retain read order", func(t *testing.T) {
 		pty := &transactionalResizePTY{}
@@ -220,7 +220,7 @@ func TestApplySessionLayoutStopsRetryWhenSessionCanceled(t *testing.T) {
 	tb.mu.Unlock()
 	p.mu.Lock()
 	require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "canceled session published a pane rectangle")
-	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "canceled session published a VT size")
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}, "canceled session published a VT size")
 	p.mu.Unlock()
 }
 
@@ -299,7 +299,7 @@ func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testi
 	tb.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-1"}
 	first := tb.panes["pane-1"]
 	oldFailedRect := second.rect
-	oldFailedScreen := domain.Size{Cols: second.screen.Frame.Width, Rows: second.screen.Frame.Height}
+	oldFailedScreen := domain.Size{Cols: second.screen.Columns(), Rows: second.screen.Rows()}
 	tb.mu.Unlock()
 
 	d.resize(sess, ac, domain.Size{Cols: 60, Rows: 20})
@@ -310,7 +310,7 @@ func TestTransactionalResizePartialFailureCommitsOnlySuccessfulPTYState(t *testi
 		"all pane rectangles publish with the committed layout")
 	require.Equal(t, []domain.Size{{Cols: 30, Rows: 18}}, ok.requested())
 	require.Equal(t, []domain.Size{{Cols: 29, Rows: 18}}, failed.requested())
-	require.Equal(t, oldFailedScreen, domain.Size{Cols: second.screen.Frame.Width, Rows: second.screen.Frame.Height},
+	require.Equal(t, oldFailedScreen, domain.Size{Cols: second.screen.Columns(), Rows: second.screen.Rows()},
 		"failed PTY retains its parser/screen size for clipped padded composition")
 	require.NotEqual(t, oldFailedRect, second.rect, "failed PTY rectangle still follows the committed layout")
 }
@@ -345,7 +345,7 @@ func TestTransactionalResizeRetryMarksNamedSnapshotDirtyOnlyOnSuccess(t *testing
 			sess.snapshotMu.Unlock()
 			require.Equal(t, tc.wantGeneration, generation)
 			require.True(t, sess.snapDirty.Load())
-			require.Equal(t, tc.wantScreen, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+			require.Equal(t, tc.wantScreen, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()})
 		})
 	}
 }
@@ -371,7 +371,7 @@ func TestTransactionalResizeRetryTargetsNewestCommittedEpoch(t *testing.T) {
 	// S3 retries 59x32, then commits the parser/screen and requests a reset.
 	require.Equal(t, []domain.Size{{Cols: 49, Rows: 28}, {Cols: 59, Rows: 32}}, failed.requested(),
 		"the failed old apply is historical; only the authoritative newest epoch retries it")
-	require.Equal(t, domain.Size{Cols: 59, Rows: 32}, domain.Size{Cols: retry.screen.Frame.Width, Rows: retry.screen.Frame.Height})
+	require.Equal(t, domain.Size{Cols: 59, Rows: 32}, domain.Size{Cols: retry.screen.Columns(), Rows: retry.screen.Rows()})
 	require.Equal(t, uint64(2), sess.renderCoordinator().resizeSnapshot().committed,
 		"the retry belongs to the newest committed epoch")
 }
@@ -422,7 +422,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 			p := tb.focusedPane()
 			p.mu.Lock()
 			require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect)
-			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+			require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()})
 			p.mu.Unlock()
 		}
 		require.False(t, sess.snapDirty.Load())
@@ -440,7 +440,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, tb.size, "rejected epoch published a tab size")
 		p := tb.focusedPane()
 		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p.rect, "rejected epoch published a pane rectangle")
-		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "rejected epoch published a VT size")
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}, "rejected epoch published a VT size")
 	}
 
 	require.True(t, sess.geometry.runResizeTransaction(d, sess, ac, lease, newer))
@@ -448,7 +448,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, tb.size)
 		p := tb.focusedPane()
 		require.Equal(t, domain.Rect{Width: 120, Height: 32}, p.rect)
-		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()})
 	}
 	committed := 0
 	for _, mark := range observer.marks {
@@ -621,7 +621,7 @@ func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
 			popup.mu.Lock()
 			require.Equal(t, fromGeometry, popup.popupGeometry, "in-flight resize exposed an uncommitted mode")
 			require.Equal(t, fromGeometry.Inner, popup.rect)
-			require.Equal(t, rectSize(fromGeometry.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+			require.Equal(t, rectSize(fromGeometry.Inner), domain.Size{Cols: popup.screen.Columns(), Rows: popup.screen.Rows()})
 			popup.mu.Unlock()
 			close(release)
 			require.True(t, <-done)
@@ -631,7 +631,7 @@ func TestTransactionalResizeFloatingBreakpointRace(t *testing.T) {
 			require.Equal(t, tc.wantMode, popup.popupGeometry.Mode)
 			require.Equal(t, toGeometry, popup.popupGeometry)
 			require.Equal(t, toGeometry.Inner, popup.rect)
-			require.Equal(t, rectSize(toGeometry.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+			require.Equal(t, rectSize(toGeometry.Inner), domain.Size{Cols: popup.screen.Columns(), Rows: popup.screen.Rows()})
 			popup.mu.Unlock()
 		})
 	}
@@ -677,7 +677,7 @@ func TestApplyVisibleFloatingLayoutPreservesCommittedGeometryOnPTYResizeFailure(
 	popup.mu.Lock()
 	require.Equal(t, committed.Inner, popup.rect, "failed PTY resize published a speculative rectangle")
 	require.Equal(t, committed, popup.popupGeometry, "failed PTY resize published speculative popup geometry")
-	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Columns(), Rows: popup.screen.Rows()})
 	require.True(t, popup.resizeRetry, "failed PTY resize must remain retryable")
 	require.False(t, popup.resizeApplying, "failed PTY resize must reopen the parser gate")
 	popup.mu.Unlock()
@@ -715,7 +715,7 @@ func TestApplyVisibleFloatingLayoutPublishesSameSizeGeometryWithoutPTYResize(t *
 	popup.mu.Lock()
 	require.Equal(t, requested.Inner, popup.rect)
 	require.Equal(t, requested, popup.popupGeometry)
-	require.Equal(t, rectSize(requested.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.Equal(t, rectSize(requested.Inner), domain.Size{Cols: popup.screen.Columns(), Rows: popup.screen.Rows()})
 	require.False(t, popup.resizeRetry)
 	popup.mu.Unlock()
 }
@@ -747,7 +747,7 @@ func TestZeroInnerFloatingDrawerPublicationDoesNotRecheckCurrent(t *testing.T) {
 	popup.mu.Lock()
 	require.Equal(t, requested, popup.popupGeometry)
 	require.Equal(t, committed.Inner, popup.rect)
-	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Columns(), Rows: popup.screen.Rows()})
 	popup.mu.Unlock()
 }
 
@@ -772,7 +772,7 @@ func TestZeroInnerFloatingDrawerRejectsStaleRequestWithoutPhysicalPublication(t 
 	popup.mu.Lock()
 	require.Equal(t, committed, popup.popupGeometry)
 	require.Equal(t, committed.Inner, popup.rect)
-	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Frame.Width, Rows: popup.screen.Frame.Height})
+	require.Equal(t, rectSize(committed.Inner), domain.Size{Cols: popup.screen.Columns(), Rows: popup.screen.Rows()})
 	popup.mu.Unlock()
 }
 

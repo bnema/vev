@@ -40,6 +40,11 @@ focus-pane-down = alt+j
 switch-tab-1 = alt+1
 # ... through switch-tab-9 = alt+9
 
+# Per-pane scrollback: decimal MB; zero disables history.
+scrollback.megabytes = 50
+# Optional additional line ceiling; zero means byte-only retention.
+scrollback.lines = 10000
+
 # Processes relaunched when a named session is restored. Empty disables relaunch.
 snapshot.restore_processes = vi,vim,nvim,emacs,man,less,more,tail,top,htop,btop,claude,codex,pi,opencode
 
@@ -78,6 +83,32 @@ code.detach = DET
 ```
 
 Invalid values log a warning and resolve that setting to its default on both initial load and reload.
+
+## Scrollback
+
+`vev` chooses the retention policy; `vev-vt` enforces it. The PTY transports
+bytes and does not own scrollback.
+
+- `scrollback.megabytes`: 0–4096 decimal MB, default 50. Zero disables history.
+- `scrollback.lines`: 0–1,000,000 lines, default 10,000. Zero removes the
+  additional line ceiling when the byte budget is positive.
+- Limits apply independently to each pane, including hidden floating panes,
+  and exclude visible primary/alternate grids. They measure uncompressed
+  logical history bytes, not total process RSS.
+- Reload applies to existing panes immediately. Lowering a limit evicts the
+  oldest rows; disabling history discards its retained contents. Existing copy
+  documents remain stable. New and restored panes use the current limits.
+- Idle maintenance visits at most one sealed page per pane every five seconds,
+  skips busy panes, and compresses only pages that remain cold. Compression does
+  not grant additional retention or count compressed bytes toward the budget.
+
+Persistence has separate per-blob and aggregate safety ceilings; raising the
+runtime retention budget does not remove them. The compact codec replaces the
+old VT encoding directly: old VT history blobs are not readable by this alpha
+build. Test with `VEV_ENV=dev`, not your normal daemon's persisted state.
+
+See [compact storage measurements](compact-storage-benchmarks.md) for memory,
+allocation and CPU trade-offs.
 
 ## Development environments
 

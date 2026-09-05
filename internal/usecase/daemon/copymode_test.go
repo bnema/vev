@@ -133,7 +133,7 @@ func TestComposeCopyClientFrameConcurrentPaneOutput(t *testing.T) {
 	tb := testAttachmentTab(sess)
 	pane := tb.focusedPane()
 	pane.mu.Lock()
-	snap := scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds(), nil)
+	snap := scopy.NewSnapshot(pane.history, pane.screen, pane.screen.LineBounds(), nil)
 	pane.mu.Unlock()
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
@@ -167,7 +167,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 	tb := testAttachmentTab(sess)
 	tb.focusedPane().screen = vt.NewScreen(12, 3)
 	tb.focusedPane().screen.Write([]byte("live"))
-	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen.Frame, tb.focusedPane().screen.LineBounds(), nil)
+	snap := scopy.NewSnapshot(tb.focusedPane().history, tb.focusedPane().screen, tb.focusedPane().screen.LineBounds(), nil)
 	mode := scopy.NewMode(scopy.NewDocument(snap, domain.DefaultWordSeparators))
 
 	bars := barState{status: sess.statusSegments(true)}
@@ -176,7 +176,7 @@ func TestCopyModeFrameIncludesTopAndBottomChrome(t *testing.T) {
 		reset:  true,
 		layout: capturedTabLayout{area: content, focus: tb.focusedPane().id, valid: true},
 		panes: []capturedPaneRenderState{{
-			id: tb.focusedPane().id, frame: tb.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: tb.focusedPane().id, Content: content}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+			id: tb.focusedPane().id, frame: captureTestFrame(tb.focusedPane().screen), placement: layout.Placement{ID: tb.focusedPane().id, Content: content}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
 		}},
 		bars: bars,
 	}, composeCacheInput{}).frame
@@ -230,8 +230,8 @@ func TestCopyModeSearchModalRoutesBatchedInputAfterSlash(t *testing.T) {
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.tabs[0].focusedPane()
-	copy(pane.screen.Frame.Row(0), testRow("alpha"))
-	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
+	writeTestRow(pane.screen, 0, "alpha")
+	writeTestRow(pane.screen, 1, "beta alpha")
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, wire.MsgOutput)
@@ -253,9 +253,9 @@ func TestCopyModeSearchModalJumpsAndKeepsNavigation(t *testing.T) {
 	p, _ := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.tabs[0].focusedPane()
-	copy(pane.screen.Frame.Row(0), testRow("alpha"))
-	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
-	copy(pane.screen.Frame.Row(2), testRow("gamma"))
+	writeTestRow(pane.screen, 0, "alpha")
+	writeTestRow(pane.screen, 1, "beta alpha")
+	writeTestRow(pane.screen, 2, "gamma")
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, wire.MsgOutput)
@@ -297,9 +297,9 @@ func TestCopyModeSearchModalSelectionPreviewsBehindModal(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	pane := sess.tabs[0].focusedPane()
-	copy(pane.screen.Frame.Row(0), testRow("alpha"))
-	copy(pane.screen.Frame.Row(1), testRow("beta alpha"))
-	copy(pane.screen.Frame.Row(2), testRow("gamma"))
+	writeTestRow(pane.screen, 0, "alpha")
+	writeTestRow(pane.screen, 1, "beta alpha")
+	writeTestRow(pane.screen, 2, "gamma")
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, wire.MsgOutput)
@@ -323,7 +323,7 @@ func TestCopyModeSearchModalCapturesMouseAndClearsOnExit(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 	installTestHistory(pane, vt.HistoryConfig{MaxRows: 4})
 	appendHistoryRow(t, pane.history, testRow("old alpha"))
-	copy(pane.screen.Frame.Row(0), testRow("live alpha"))
+	writeTestRow(pane.screen, 0, "live alpha")
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, wire.MsgOutput)
@@ -455,7 +455,7 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil).Len() >= 12
+		return scopy.NewSnapshot(p.history, p.screen, p.screen.LineBounds(), nil).Len() >= 12
 	}, 2*time.Second, 5*time.Millisecond)
 
 	sess := firstSession(d)
@@ -548,8 +548,8 @@ func TestCopyModeOversizedYankShowsTooLargeFeedback(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 1})
 	longLine := strings.Repeat("x", scopy.OSC52MaxPayloadBytes+1)
-	sess.tabs[0].focusedPane().screen.Frame = renderer.NewFrame(len(longLine), 1)
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow(longLine))
+	sess.tabs[0].focusedPane().screen.Resize(len(longLine), 1)
+	writeTestRow(sess.tabs[0].focusedPane().screen, 0, longLine)
 
 	d.enterCopyMode(sess, ac)
 	awaitFrame(t, sends, wire.MsgOutput)
@@ -806,7 +806,7 @@ func TestFloatingCopyModeWheelUsesCapturedSnapshot(t *testing.T) {
 	}
 	fp.screen.Write([]byte("live"))
 	fp.mu.Lock()
-	total := scopy.NewSnapshot(fp.history, fp.screen.Frame, fp.screen.LineBounds(), nil).Len()
+	total := scopy.NewSnapshot(fp.history, fp.screen, fp.screen.LineBounds(), nil).Len()
 	fp.mu.Unlock()
 
 	d.enterCopyMode(sess, ac)
@@ -885,8 +885,8 @@ func TestMouseDragCopyEntryCapturesSourceForYank(t *testing.T) {
 	pty, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
 	pane := sess.tabs[0].focusedPane()
-	copy(pane.screen.Frame.Row(0), testRow("alpha"))
-	copy(pane.screen.Frame.Row(1), testRow("bravo"))
+	writeTestRow(pane.screen, 0, "alpha")
+	writeTestRow(pane.screen, 1, "bravo")
 
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M\x1b[<32;1;3M"))
 	mustOutputData(t, sends)
@@ -917,7 +917,7 @@ func TestComposeCopyClientFrameStylesStatusContentAndSurround(t *testing.T) {
 			base := renderer.NewFrame(20, 8)
 			pane := newPane("split", nil, domain.Size{Cols: 12, Rows: 2})
 			pane.screen.Write([]byte("copy"))
-			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen.Frame, pane.screen.LineBounds(), nil), domain.DefaultWordSeparators))
+			mode := scopy.NewMode(scopy.NewDocument(scopy.NewSnapshot(pane.history, pane.screen, pane.screen.LineBounds(), nil), domain.DefaultWordSeparators))
 			if tt.selectMode {
 				mode.ToggleLineSelection()
 			}

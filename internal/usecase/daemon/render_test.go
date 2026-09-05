@@ -39,23 +39,23 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 
 	d.enterCopyMode(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	undimmed := client.Frame.At(0, 1)
+	undimmed := client.Cell(0, 1)
 	require.Equal(t, 'X', undimmed.Rune, "fixture must address copy-mode pane content")
-	copyBar := append([]renderer.Cell(nil), client.Frame.Row(client.Frame.Height-1)...)
+	copyBar := client.RowCells(client.Rows() - 1)
 	require.Contains(t, rowText(copyBar), "[SCROLL]", "fixture must capture the copy status bar")
 
 	d.enterPalette(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	dimmed := client.Frame.At(0, 1)
+	dimmed := client.Cell(0, 1)
 	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
-	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style), dimmed.Style, "palette backdrop must dim the composed copy frame")
+	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "palette backdrop must dim the composed copy frame")
 	for x, cell := range copyBar {
-		cell.Style = themeui.NewDimmer(theme).Dim(cell.Style)
-		require.Equal(t, cell, client.Frame.At(x, client.Frame.Height-1), "copy status bar must be part of the complete backdrop")
+		cell.Style = themeui.NewDimmer(theme).Dim(cell.Style).Canonical()
+		require.Equal(t, cell, client.Cell(x, client.Rows()-1), "copy status bar must be part of the complete backdrop")
 	}
 	paletteVisible := false
-	for y := range client.Frame.Height {
-		paletteVisible = paletteVisible || strings.Contains(rowText(client.Frame.Row(y)), "Commands")
+	for y := range client.Rows() {
+		paletteVisible = paletteVisible || strings.Contains(rowText(client.RowCells(y)), "Commands")
 	}
 	require.True(t, paletteVisible, "palette must remain composed above copy mode")
 }
@@ -108,16 +108,16 @@ func TestPaletteBackdropDimsSimultaneousPicker(t *testing.T) {
 
 	d.enterPicker(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	pickerTitle := client.Frame.At(31, 2)
+	pickerTitle := client.Cell(31, 2)
 	require.Equal(t, 'S', pickerTitle.Rune, "fixture must address the picker title")
-	undimmedPane := client.Frame.At(0, 1)
+	undimmedPane := client.Cell(0, 1)
 
 	d.enterPalette(sess, ac)
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
 	dimmedPickerTitle := pickerTitle
-	dimmedPickerTitle.Style = themeui.NewDimmer(backdropTheme()).Dim(pickerTitle.Style)
-	require.Equal(t, dimmedPickerTitle, client.Frame.At(31, 2), "the lower-priority picker must be part of the palette backdrop")
-	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmedPane.Style), client.Frame.At(0, 1).Style, "pane content outside overlays must use the theme dim style")
+	dimmedPickerTitle.Style = themeui.NewDimmer(backdropTheme()).Dim(pickerTitle.Style).Canonical()
+	require.Equal(t, dimmedPickerTitle, client.Cell(31, 2), "the lower-priority picker must be part of the palette backdrop")
+	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmedPane.Style).Canonical(), client.Cell(0, 1).Style.Canonical(), "pane content outside overlays must use the theme dim style")
 }
 
 func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
@@ -130,27 +130,27 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	pane.screen.Write([]byte("X"))
 	d.paint(sess, ac, true, nil)
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	undimmed := client.Frame.At(0, 1)
-	topBar := client.Frame.At(0, 0)
-	bottomBar := client.Frame.At(0, 24)
+	undimmed := client.Cell(0, 1)
+	topBar := client.Cell(0, 0)
+	bottomBar := client.Cell(0, 24)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	dimmed := client.Frame.At(0, 1)
+	dimmed := client.Cell(0, 1)
 	require.Equal(t, 'X', dimmed.Rune)
-	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style), dimmed.Style, "open palette must use the theme dim style")
+	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "open palette must use the theme dim style")
 	dimmedTopBar := topBar
-	dimmedTopBar.Style = themeui.NewDimmer(backdropTheme()).Dim(topBar.Style)
+	dimmedTopBar.Style = themeui.NewDimmer(backdropTheme()).Dim(topBar.Style).Canonical()
 	dimmedBottomBar := bottomBar
-	dimmedBottomBar.Style = themeui.NewDimmer(backdropTheme()).Dim(bottomBar.Style)
-	require.Equal(t, dimmedTopBar, client.Frame.At(0, 0), "top chrome is part of the complete backdrop")
-	require.Equal(t, dimmedBottomBar, client.Frame.At(0, 24), "bottom chrome is part of the complete backdrop")
+	dimmedBottomBar.Style = themeui.NewDimmer(backdropTheme()).Dim(bottomBar.Style).Canonical()
+	require.Equal(t, dimmedTopBar, client.Cell(0, 0), "top chrome is part of the complete backdrop")
+	require.Equal(t, dimmedBottomBar, client.Cell(0, 24), "bottom chrome is part of the complete backdrop")
 
 	d.handleInput(sess, ac, []byte("\x1b"))
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	require.Equal(t, undimmed, client.Frame.At(0, 1), "full redraw restores pane rune and style")
-	require.Equal(t, topBar, client.Frame.At(0, 0))
-	require.Equal(t, bottomBar, client.Frame.At(0, 24))
+	require.Equal(t, undimmed, client.Cell(0, 1), "full redraw restores pane rune and style")
+	require.Equal(t, topBar, client.Cell(0, 0))
+	require.Equal(t, bottomBar, client.Cell(0, 24))
 }
 
 // --- test doubles -----------------------------------------------------------
@@ -672,7 +672,7 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 
 	win := newTab(p, domain.Size{Cols: 4, Rows: 4})
 	for y, text := range []string{"0000", "1111", "2222", "3333"} {
-		copy(win.focusedPane().screen.Frame.Row(y), testRow(text))
+		writeTestRow(win.focusedPane().screen, y, text)
 	}
 	win.focusedPane().screen.Row = 3
 
@@ -690,15 +690,15 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	// layout: tabSize reserves 2 chrome rows (top + bottom bar) here, not 1,
 	// so a client height of 4 (not 3) is what yields the same 2-row tab.
 	d.resize(sess, ac, domain.Size{Cols: 4, Rows: 4})
-	require.Equal(t, "2222", frameRowString(win.focusedPane().screen.Frame, 0))
-	require.Equal(t, "3333", frameRowString(win.focusedPane().screen.Frame, 1))
+	require.Equal(t, "2222", frameRowString(captureTestFrame(win.focusedPane().screen), 0))
+	require.Equal(t, "3333", frameRowString(captureTestFrame(win.focusedPane().screen), 1))
 	require.Equal(t, 2, win.focusedPane().history.Len())
 	require.Equal(t, "0000", cellsString(win.focusedPane().history.View().Row(0)))
 	require.Equal(t, "1111", cellsString(win.focusedPane().history.View().Row(1)))
 
 	d.resize(sess, ac, domain.Size{Cols: 6, Rows: 6})
-	require.Equal(t, "2222  ", frameRowString(win.focusedPane().screen.Frame, 0))
-	require.Equal(t, "3333  ", frameRowString(win.focusedPane().screen.Frame, 1))
+	require.Equal(t, "2222  ", frameRowString(captureTestFrame(win.focusedPane().screen), 0))
+	require.Equal(t, "3333  ", frameRowString(captureTestFrame(win.focusedPane().screen), 1))
 	require.Equal(t, 2, win.focusedPane().history.Len())
 }
 
@@ -925,7 +925,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	win := newTab(newScriptPTY(nil), domain.Size{Cols: 80, Rows: 24})
 	p.EXPECT().Resize(domain.Geometry{Size: domain.Size{Cols: 100, Rows: 28}}).RunAndReturn(func(domain.Geometry) error {
 		// The screen must not yet be resized when the PTY is: proves order.
-		screenWidthAtResize = win.focusedPane().screen.Frame.Width
+		screenWidthAtResize = win.focusedPane().screen.Columns()
 		return nil
 	}).Once()
 	win.focusedPane().pty = p
@@ -952,8 +952,8 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	d.paint(sess, ac, false, nil)
 
 	require.Equal(t, 80, screenWidthAtResize, "pty.Resize must run before screen.Resize")
-	require.Equal(t, 100, win.focusedPane().screen.Frame.Width, "screen resized after pty")
-	require.Equal(t, 28, win.focusedPane().screen.Frame.Height, "screen reserves top and bottom chrome rows")
+	require.Equal(t, 100, win.focusedPane().screen.Columns(), "screen resized after pty")
+	require.Equal(t, 28, win.focusedPane().screen.Rows(), "screen reserves top and bottom chrome rows")
 	require.True(t, gotOutput.Load(), "resize forces a full redraw output")
 }
 
@@ -1141,7 +1141,7 @@ func TestPaintAlignsFloatingCursorWithCommittedGeometry(t *testing.T) {
 	cfg := d.currentFloatingConfig()
 	committed := calculateContentFloatingGeometry(domain.Size{Cols: contentArea.Width, Rows: contentArea.Height}, cfg)
 	floating := newPane("floating", nil, rectSize(committed.Inner))
-	floating.screen.Frame.Set(0, 0, renderer.Cell{Rune: 'F'})
+	writeTestRow(floating.screen, 0, "F")
 	floating.popupGeometry = committed
 	installTestFloating(testAttachmentTab(sess), floating, true)
 
@@ -1218,7 +1218,7 @@ func TestComposeCopyClientFrameOverlaysBaseAtTarget(t *testing.T) {
 	}
 	p := newPane("floating", nil, domain.Size{Cols: 18, Rows: 2})
 	p.screen.Write([]byte("ab\r\ncd"))
-	document := scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil)
+	document := scopy.NewSnapshot(p.history, p.screen, p.screen.LineBounds(), nil)
 	mode := scopy.NewMode(scopy.NewDocument(document, domain.DefaultWordSeparators))
 	target := domain.Rect{X: 2, Y: 3, Width: 18, Height: 2}
 

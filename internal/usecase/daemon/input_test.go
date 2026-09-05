@@ -217,7 +217,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, secondOutput.Base, "tab switch must emit the complete target frame first")
 	terminal.Write(secondOutput.Data)
-	require.NotContains(t, strings.Join(frameRows(terminal.Frame), "\n"), "source", "the first target-tab frame must not retain source pane cells")
+	require.NotContains(t, strings.Join(frameRows(terminal), "\n"), "source", "the first target-tab frame must not retain source pane cells")
 }
 
 func TestClosePanePrunesAttachedCaptureFrameAndKeepsSurvivor(t *testing.T) {
@@ -314,8 +314,8 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	// Route the real Alt+F binding. Showing a retained pane must paint once.
 	d.handleInput(sess, ac, []byte("\x1bf"))
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
-	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "┌")
+	require.Contains(t, strings.Join(frameRows(client), "\n"), "popup-content")
+	require.Contains(t, strings.Join(frameRows(client), "\n"), "┌")
 	select {
 	case extra := <-sends:
 		t.Fatalf("show emitted duplicate output: %#v", extra)
@@ -326,7 +326,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	// unrelated output, while retaining the existing PTY and context.
 	d.handleInput(sess, ac, []byte("\x1bf"))
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	require.NotContains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	require.NotContains(t, strings.Join(frameRows(client), "\n"), "popup-content")
 	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	require.Equal(t, floatingHidden, tb.floating.state)
@@ -344,7 +344,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	// resize/start frame.
 	d.handleInput(sess, ac, []byte("\x1bf"))
 	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	require.Contains(t, strings.Join(frameRows(client.Frame), "\n"), "popup-content")
+	require.Contains(t, strings.Join(frameRows(client), "\n"), "popup-content")
 	tb.mu.Lock()
 	require.Equal(t, floatingVisible, tb.floating.state)
 	require.Same(t, floating, tb.floating.pane)
@@ -1063,7 +1063,7 @@ func TestCopyModeMousePressReleaseWithoutMotionEmitsNoOSC52(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	writeTestRow(sess.tabs[0].focusedPane().screen, 0, "alpha")
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 
@@ -1079,7 +1079,7 @@ func TestCopyModeMousePressReleaseWithoutMotionEmitsNoOSC52(t *testing.T) {
 func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
+	writeTestRow(sess.tabs[0].focusedPane().screen, 0, "alpha")
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 
@@ -1103,9 +1103,9 @@ func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
 func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(1), testRow("bravo"))
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(2), testRow("charlie"))
+	writeTestRow(sess.tabs[0].focusedPane().screen, 0, "alpha")
+	writeTestRow(sess.tabs[0].focusedPane().screen, 1, "bravo")
+	writeTestRow(sess.tabs[0].focusedPane().screen, 2, "charlie")
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
@@ -1146,7 +1146,7 @@ func TestCopyModeMouseDragYanksOSC52AndExits(t *testing.T) {
 func TestMouseNormalScreenStatusRowClearsStalePressState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Rows(), "fixture assumption: status row is wire row 24")
 
 	// Press on a content row establishes a (soon to be stale) anchor.
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
@@ -1197,10 +1197,10 @@ func TestCopyModeRejectedReleaseClearsPointerAndClickBeforeMotion(t *testing.T) 
 func TestCopyModeStatusRowPressClearsDragState(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(0), testRow("alpha"))
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(1), testRow("bravo"))
-	copy(sess.tabs[0].focusedPane().screen.Frame.Row(2), testRow("charlie"))
-	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	writeTestRow(sess.tabs[0].focusedPane().screen, 0, "alpha")
+	writeTestRow(sess.tabs[0].focusedPane().screen, 1, "bravo")
+	writeTestRow(sess.tabs[0].focusedPane().screen, 2, "charlie")
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Rows(), "fixture assumption: status row is wire row 24")
 
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
@@ -1244,7 +1244,7 @@ func TestMouseNormalScreenDragUsesPressOwnedDocumentAfterOutputEviction(t *testi
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
 	installTestHistory(sess.tabs[0].focusedPane(), vt.HistoryConfig{MaxRows: 50})
-	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Frame.Height, "fixture assumption: status row is wire row 24")
+	require.Equal(t, 23, sess.tabs[0].focusedPane().screen.Rows(), "fixture assumption: status row is wire row 24")
 
 	// Press anchors document row 0 before output eviction.
 	d.handleInput(sess, ac, []byte("\x1b[<0;1;2M"))
@@ -1502,7 +1502,7 @@ func TestCopyModeDragOutsideSplitPaneClampsToPaneContent(t *testing.T) {
 	d.procComm = nil
 	tb := testAttachmentTab(sess)
 	for i := range 10 {
-		copy(tb.focusedPane().screen.Frame.Row(i), testRow(string(rune('a'+i))))
+		writeTestRow(tb.focusedPane().screen, i, string(rune('a'+i)))
 	}
 	tb.mu.Lock()
 	tb.size = domain.Size{Cols: 41, Rows: 10}

@@ -30,8 +30,8 @@ func TestNilPTYLifecyclePathsDoNotPanic(t *testing.T) {
 	require.NotPanics(t, func() {
 		sess.geometry.applyTabLayout(d, sess, first)
 	})
-	require.Equal(t, 20, first.focusedPane().screen.Frame.Width)
-	require.Equal(t, 5, first.focusedPane().screen.Frame.Height)
+	require.Equal(t, 20, first.focusedPane().screen.Columns())
+	require.Equal(t, 5, first.focusedPane().screen.Rows())
 
 	first.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: "pane-2"}
 	first.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})

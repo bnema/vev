@@ -316,9 +316,9 @@ func assertNoTextAfterInput(t *testing.T, p *pump, sz domain.Size, absent string
 
 func screenText(s *vt.Screen) string {
 	var b strings.Builder
-	for y := range s.Frame.Height {
-		for x := range s.Frame.Width {
-			r := s.Frame.At(x, y).Rune
+	for y := range s.Rows() {
+		for x := range s.Columns() {
+			r := s.Cell(x, y).Rune
 			if r == 0 {
 				r = ' '
 			}

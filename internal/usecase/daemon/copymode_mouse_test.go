@@ -28,7 +28,7 @@ func mouseCopyHarness(t *testing.T, rows ...string) (*Daemon, *session, *attache
 	d.clock = clock
 	pane := testAttachmentTab(sess).focusedPane()
 	for i, row := range rows {
-		copy(pane.screen.Frame.Row(i), testRow(row))
+		writeTestRow(pane.screen, i, row)
 	}
 	d.enterCopyMode(sess, ac)
 	return d, sess, ac, clock
@@ -44,8 +44,7 @@ func TestCopyDoubleClick(t *testing.T) {
 		pane := testAttachmentTab(sess).focusedPane()
 		d.exitCopyMode(ac)
 		pane.mu.Lock()
-		row := pane.screen.Frame.Row(0)
-		row[2] = renderer.Cell{Continuation: true}
+		require.True(t, pane.screen.Cell(2, 0).Continuation)
 		pane.mu.Unlock()
 		d.enterCopyMode(sess, ac)
 
@@ -324,7 +323,7 @@ func TestCopyWordSelectionYanksExactOSC52(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	clock := &manualMouseClock{now: time.Unix(1, 0)}
 	d.clock = clock
-	copy(testAttachmentTab(sess).focusedPane().screen.Frame.Row(0), testRow("alpha beta"))
+	writeTestRow(testAttachmentTab(sess).focusedPane().screen, 0, "alpha beta")
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 
@@ -350,7 +349,7 @@ func TestCopyPointerAndClickResetOnCopyExitAndReplacement(t *testing.T) {
 		{name: "replacement publication", run: func(d *Daemon, sess *session, ac *attachedClient) {
 			p := testAttachmentTab(sess).focusedPane()
 			p.mu.Lock()
-			doc := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen.Frame, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)
+			doc := scopy.NewDocument(scopy.NewSnapshot(p.history, p.screen, p.screen.LineBounds(), nil), domain.DefaultWordSeparators)
 			p.mu.Unlock()
 			require.True(t, d.publishCopyMode(sess, ac, testAttachmentTab(sess), p, doc, nil, nil))
 		}},

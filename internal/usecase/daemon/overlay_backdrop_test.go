@@ -29,7 +29,7 @@ func TestApplyOverlayBackdropDimsCompleteFrame(t *testing.T) {
 	dimmed := themeui.NewDimmer(backdropTheme()).Dim(renderer.DefaultStyle())
 	for y := range frame.Height {
 		for x := range frame.Width {
-			require.Equal(t, dimmed, frame.At(x, y).Style, "cell (%d,%d)", x, y)
+			require.Equal(t, dimmed.Canonical(), frame.At(x, y).Style.Canonical(), "cell (%d,%d)", x, y)
 		}
 	}
 	require.Equal(t, '界', frame.At(1, 1).Rune)
@@ -44,7 +44,7 @@ func TestDimFrameRectClipsToFrame(t *testing.T) {
 	dimmed := themeui.NewDimmer(backdropTheme()).Dim(renderer.DefaultStyle())
 
 	for _, point := range [][2]int{{2, 2}, {3, 2}, {2, 3}, {3, 3}} {
-		require.Equal(t, dimmed, frame.At(point[0], point[1]).Style)
+		require.Equal(t, dimmed.Canonical(), frame.At(point[0], point[1]).Style.Canonical())
 	}
 	for _, point := range [][2]int{{0, 0}, {1, 1}, {3, 1}, {1, 3}} {
 		require.Equal(t, before.At(point[0], point[1]).Style, frame.At(point[0], point[1]).Style)

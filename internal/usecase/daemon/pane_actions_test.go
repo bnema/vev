@@ -188,14 +188,14 @@ func TestLayoutApplicationRetriesOnlyAcceptedFailedGeometry(t *testing.T) {
 		}
 	}
 	require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}}, pty.requested())
-	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height}, "failed apply must not publish a VT resize")
+	require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}, "failed apply must not publish a VT resize")
 	timer.fire()
 	awaitSignal(t, secondResize, "accepted failure was not retried")
 	require.Equal(t, []domain.Size{{Cols: 100, Rows: 20}, {Cols: 100, Rows: 20}}, pty.requested())
 	require.Eventually(t, func() bool {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return p.screen.Frame.Width == 100 && p.screen.Frame.Height == 20
+		return p.screen.Columns() == 100 && p.screen.Rows() == 20
 	}, time.Second, time.Millisecond, "successful retry did not publish its VT size")
 }
 
@@ -245,7 +245,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, currentFirst, first.rect)
 	require.Equal(t, currentSecond, second.rect)
-	require.Equal(t, rectSize(currentFirst), domain.Size{Cols: first.screen.Frame.Width, Rows: first.screen.Frame.Height})
+	require.Equal(t, rectSize(currentFirst), domain.Size{Cols: first.screen.Columns(), Rows: first.screen.Rows()})
 	require.Equal(t, []domain.Size{{Cols: 40, Rows: 22}, rectSize(currentFirst)}, failed.requested())
 
 	rc.mu.Lock()
@@ -256,7 +256,7 @@ func TestDelayedRetryUsesFreshLayoutAfterPaneResize(t *testing.T) {
 
 	require.Equal(t, []domain.Size{{Cols: 40, Rows: 22}, rectSize(currentFirst)}, failed.requested(), "delayed retry must not apply stale PTY geometry")
 	require.Equal(t, currentFirst, first.rect, "delayed retry must not publish a stale rectangle")
-	require.Equal(t, rectSize(currentFirst), domain.Size{Cols: first.screen.Frame.Width, Rows: first.screen.Frame.Height}, "delayed retry must not publish a stale VT size")
+	require.Equal(t, rectSize(currentFirst), domain.Size{Cols: first.screen.Columns(), Rows: first.screen.Rows()}, "delayed retry must not publish a stale VT size")
 }
 
 func TestLayoutApplicationDoesNotHoldTabLock(t *testing.T) {
@@ -320,9 +320,9 @@ func TestLayoutApplicationRejectsStalePaneIdentity(t *testing.T) {
 	awaitSignal(t, done, "stale layout did not retry")
 
 	require.Equal(t, domain.Rect{Width: 20, Height: 10}, oldPane.rect, "stale pane rectangle was published")
-	require.Equal(t, 20, oldPane.screen.Frame.Width, "stale pane screen was published")
+	require.Equal(t, 20, oldPane.screen.Columns(), "stale pane screen was published")
 	require.Equal(t, domain.Rect{Width: 41, Height: 10}, replacement.rect)
-	require.Equal(t, 41, replacement.screen.Frame.Width)
+	require.Equal(t, 41, replacement.screen.Columns())
 }
 
 func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
@@ -371,7 +371,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		tb.mu.Unlock()
 		require.False(t, exists)
 		require.Equal(t, domain.Rect{Width: 80, Height: 23}, p2.rect, "removed pane received a stale rectangle publication")
-		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p2.screen.Frame.Width, Rows: p2.screen.Frame.Height}, "removed pane received a stale screen publication")
+		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p2.screen.Columns(), Rows: p2.screen.Rows()}, "removed pane received a stale screen publication")
 		p2.mu.Lock()
 		require.False(t, p2.resizeApplying, "removed pane gate was not cancelled")
 		p2.mu.Unlock()
@@ -440,7 +440,7 @@ func TestLayoutApplicationRejectsStaleCloseFocusAndSize(t *testing.T) {
 		awaitSignal(t, oldDone, "old size apply did not finish")
 		require.True(t, <-resizeDone)
 		require.Equal(t, domain.Rect{Width: 100, Height: 28}, p.rect)
-		require.Equal(t, domain.Size{Cols: 100, Rows: 28}, domain.Size{Cols: p.screen.Frame.Width, Rows: p.screen.Frame.Height})
+		require.Equal(t, domain.Size{Cols: 100, Rows: 28}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()})
 		require.Equal(t, []domain.Size{{Cols: 80, Rows: 23}, {Cols: 100, Rows: 28}}, pty.requested())
 	})
 }
@@ -596,8 +596,8 @@ func TestApplyLayoutResizesPTYsAndScreens(t *testing.T) {
 
 	sess.geometry.applyTabLayout(d, sess, tb)
 
-	require.Equal(t, 20, tb.panes["pane-1"].screen.Frame.Width)
-	require.Equal(t, 20, tb.panes["pane-2"].screen.Frame.Width)
+	require.Equal(t, 20, tb.panes["pane-1"].screen.Columns())
+	require.Equal(t, 20, tb.panes["pane-2"].screen.Columns())
 	require.Equal(t, domain.Rect{X: 21, Width: 20, Height: 10}, tb.panes["pane-2"].rect)
 }
 
@@ -617,8 +617,8 @@ func TestResizeReflowsAllPanes(t *testing.T) {
 	require.Equal(t, domain.Size{Cols: 60, Rows: 18}, tb.size)
 	require.Equal(t, domain.Rect{Width: 30, Height: 18}, tb.panes["pane-1"].rect)
 	require.Equal(t, domain.Rect{X: 31, Width: 29, Height: 18}, tb.panes["pane-2"].rect)
-	require.Equal(t, 30, tb.panes["pane-1"].screen.Frame.Width)
-	require.Equal(t, 29, tb.panes["pane-2"].screen.Frame.Width)
+	require.Equal(t, 30, tb.panes["pane-1"].screen.Columns())
+	require.Equal(t, 29, tb.panes["pane-2"].screen.Columns())
 }
 
 func TestFocusDirAtReturnsDepartingSpanAndMapsNoNeighbor(t *testing.T) {
@@ -945,7 +945,7 @@ func TestCloseOriginalPaneLeavesSurvivorFunctional(t *testing.T) {
 		reset:  true,
 		layout: capturedTabLayout{area: content, focus: tb.focusedPane().id, valid: true},
 		panes: []capturedPaneRenderState{{
-			id: tb.focusedPane().id, frame: tb.focusedPane().screen.Frame.Clone(), placement: layout.Placement{ID: tb.focusedPane().id, Content: content}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
+			id: tb.focusedPane().id, frame: captureTestFrame(tb.focusedPane().screen), placement: layout.Placement{ID: tb.focusedPane().id, Content: content}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()},
 		}},
 		bars: barState{status: sess.statusSegments(true)},
 	}, composeCacheInput{}).frame

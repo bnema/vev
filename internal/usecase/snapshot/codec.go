@@ -22,7 +22,7 @@ var (
 
 const (
 	magic                = "VEVS"
-	version              = uint16(4)
+	version              = uint16(5) // Compact VTC1 payloads; dense checkpoints are incompatible.
 	maxDecodedBodySize   = 256 << 20
 	maxSnapshotObjects   = 1 << 16
 	maxSnapshotBytes     = 256 << 20
@@ -34,8 +34,9 @@ const (
 	maxSnapshotDecodedAllocation = 256 << 20
 )
 
-// Unmarshal validates the complete manifest and all VT blobs without
-// allocations first, then decodes the already preflighted data.
+// Unmarshal first measures the complete manifest and its VT blobs without
+// allocating. After accepting aggregate budgets, it validates references and
+// blob semantics before decoding the session.
 func Unmarshal(b []byte) (Session, error) {
 	if len(b) < 16 {
 		return Session{}, ErrShortPayload

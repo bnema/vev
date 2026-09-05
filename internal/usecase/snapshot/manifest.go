@@ -16,7 +16,7 @@ const (
 	manifestMagic                = "VEVM"
 	headMagic                    = "VEVH"
 	objectMagic                  = "VEVO"
-	ManifestVersion              = uint16(3)
+	ManifestVersion              = uint16(4) // Reject dense VT checkpoints before loading their objects.
 	manifestHeaderSize           = 16
 	objectEnvelopeBodyPrefixSize = 1 + 4 // object kind and payload length
 	minObjectEnvelopeSize        = manifestHeaderSize + objectEnvelopeBodyPrefixSize + 1

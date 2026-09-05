@@ -384,13 +384,13 @@ func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 	pane := tb.focusedPane()
 	pane.screen.Write([]byte("ATTENTION-PANE-CONTENT"))
 	bars := d.barStateFor(sess, "")
-	area := domain.Rect{Width: pane.screen.Frame.Width, Height: pane.screen.Frame.Height}
+	area := domain.Rect{Width: pane.screen.Columns(), Height: pane.screen.Rows()}
 	placement := layout.Placement{ID: pane.id, Content: area}
 	state := capturedRenderState{
 		reset:  true,
 		layout: capturedTabLayout{area: area, focus: pane.id, placements: []layout.Placement{placement}, valid: true},
 		panes: []capturedPaneRenderState{{
-			id: pane.id, frame: pane.screen.Frame.Clone(), placement: placement, focused: true,
+			id: pane.id, frame: captureTestFrame(pane.screen), placement: placement, focused: true,
 			damage: []renderer.Damage{renderer.FullRedraw()},
 		}},
 		bars: bars,
@@ -413,7 +413,7 @@ func TestComposeFrameAttentionFrameChangeDamagesOnlyBars(t *testing.T) {
 	require.Equal(t, firstContent, rowText(out.frame.Row(1)), "unchanged pane content must remain in the composed frame")
 	require.Contains(t, rowText(out.frame.Row(1)), "ATTENTION-PANE-CONTENT")
 	require.NotEmpty(t, damage)
-	lastRow := pane.screen.Frame.Height + 1
+	lastRow := pane.screen.Rows() + 1
 	for _, dmg := range damage {
 		require.Contains(t, []int{0, lastRow}, dmg.Y, "expected damage confined to bar rows, got y=%d", dmg.Y)
 	}

@@ -63,7 +63,7 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 		terminal.Write(output.Data)
 	}
 	require.Equal(t, len(frames), transport.next)
-	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal.Frame), "terminal replay is the final renderer shadow")
+	require.Equal(t, []string{"one     ", "TWO     ", "        "}, frameRows(terminal), "terminal replay is the final renderer shadow")
 }
 
 func TestCapturePaneRenderStateOwnsVisibleFrameWithoutConsumingDamage(t *testing.T) {
@@ -343,16 +343,20 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 	require.Equal(t, "\x1b[1;1H\x1b[0;7m tab \x1b[0m      R\x1b[2;1HAAAAAAAAAAAA\x1b[3;1HBBB┌─fl─┐BBB\x1b[4;1H───Prompt───\x1b[5;1HPROMPT\x1b[K\x1b[B\x1b[2K\x1b[7;1H\x1b[0;7m sess \x1b[0m     B\x1b[0m\x1b[?25l", string(terminalBytes))
 	client := vt.NewScreen(composed.frame.Width, composed.frame.Height)
 	client.Write(terminalBytes)
-	require.Equal(t, frameRows(composed.frame), frameRows(client.Frame))
+	require.Equal(t, frameRows(composed.frame), frameRows(client))
 	again, err := stream.renderer.Draw(composed.frame, nil)
 	require.NoError(t, err)
 	require.Empty(t, again, "renderer shadow must exactly equal the composed frame")
 }
 
-func frameRows(frame renderer.Frame) []string {
-	rows := make([]string, frame.Height)
+func frameRows(frame renderer.CellSource) []string {
+	rows := make([]string, frame.Rows())
+	cells := make([]renderer.Cell, frame.Columns())
 	for y := range rows {
-		rows[y] = rowText(frame.Row(y))
+		for x := range cells {
+			cells[x] = frame.Cell(x, y)
+		}
+		rows[y] = rowText(cells)
 	}
 	return rows
 }
@@ -391,7 +395,7 @@ func TestComposeEmitExactReplaySafeAndUnsafeScroll(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.wantBytes, string(secondBytes))
 			client.Write(secondBytes)
-			require.Equal(t, frameRows(second.frame), frameRows(client.Frame))
+			require.Equal(t, frameRows(second.frame), frameRows(client))
 			again, err := stream.renderer.Draw(second.frame, nil)
 			require.NoError(t, err)
 			require.Empty(t, again, "renderer shadow must equal replayed terminal state")
@@ -494,12 +498,12 @@ func TestComposeFrameModalBackdropDimsCompleteFrameIncludingToasts(t *testing.T)
 	} {
 		t.Run(name, func(t *testing.T) {
 			x, y := point[0], point[1]
-			require.Equal(t, dimmer.Dim(base.frame.At(x, y).Style), composed.frame.At(x, y).Style)
+			require.Equal(t, dimmer.Dim(base.frame.At(x, y).Style).Canonical(), composed.frame.At(x, y).Style.Canonical())
 		})
 	}
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, composed.damage)
 	require.False(t, composed.cache.valid)
-	require.Equal(t, base.cache.frame.Cells, composed.cache.frame.Cells, "the reusable cache remains toast-free and unadorned")
+	require.Equal(t, captureTestFrame(base.cache.frame), captureTestFrame(composed.cache.frame), "the reusable cache remains toast-free and unadorned")
 }
 
 func TestComposeFrameFloatingBackdropDimsCompleteFrameIncludingToasts(t *testing.T) {
@@ -544,10 +548,10 @@ func TestComposeFrameFloatingBackdropDimsCompleteFrameIncludingToasts(t *testing
 	} {
 		t.Run(name, func(t *testing.T) {
 			x, y := point[0], point[1]
-			require.Equal(t, dimmer.Dim(toastOnly.frame.At(x, y).Style), composed.frame.At(x, y).Style)
+			require.Equal(t, dimmer.Dim(toastOnly.frame.At(x, y).Style).Canonical(), composed.frame.At(x, y).Style.Canonical())
 		})
 	}
-	require.Equal(t, toastOnly.cache.frame.Cells, composed.cache.frame.Cells, "floating decoration must not enter the reusable base cache")
+	require.Equal(t, captureTestFrame(toastOnly.cache.frame), captureTestFrame(composed.cache.frame), "floating decoration must not enter the reusable base cache")
 }
 
 func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {
@@ -593,7 +597,7 @@ func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {
 			frame, damage := composeCapturedOverlays(state, renderer.NewFrame(5, 3), nil)
 
 			require.Equal(t, 'L', frame.At(1, 1).Rune)
-			require.Equal(t, themeui.NewDimmer(theme).Dim(lowerStyle), frame.At(1, 1).Style, "the lower-priority modal is part of the higher modal backdrop")
+			require.Equal(t, themeui.NewDimmer(theme).Dim(lowerStyle).Canonical(), frame.At(1, 1).Style.Canonical(), "the lower-priority modal is part of the higher modal backdrop")
 			require.Equal(t, 'H', frame.At(3, 1).Rune)
 			require.Equal(t, higherStyle, frame.At(3, 1).Style, "the keyboard owner remains visually topmost")
 			require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, damage)

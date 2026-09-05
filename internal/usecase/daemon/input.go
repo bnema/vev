@@ -253,7 +253,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 		return
 	}
 	p.mu.Lock()
-	childRows := p.screen.Frame.Height
+	childRows := p.screen.Rows()
 	mouseMode, mouseSGR := p.screen.MouseMode()
 	altScreen := p.screen.AltScreenActive()
 	p.mu.Unlock()

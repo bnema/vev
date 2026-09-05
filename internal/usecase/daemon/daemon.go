@@ -35,12 +35,11 @@ const debounceInterval = minDebounceInterval
 // ptyReadBufSize is the PTY reader's read buffer.
 const ptyReadBufSize = 32 * 1024
 
-// New and restored panes are bounded by both history rows and cells. The
-// cell budget keeps a very wide terminal from retaining disproportionately
-// more scrollback than the normal 160-column case.
+// New and restored panes have independent line and uncompressed logical-byte
+// ceilings. Visible primary and alternate screens are outside this budget.
 const (
-	defaultScrollbackRows  = 10_000
-	defaultScrollbackCells = 12_000 * 160
+	defaultScrollbackRows  = domain.DefaultScrollbackLines
+	defaultScrollbackBytes = domain.DefaultScrollbackMegabytes * 1_000_000
 )
 
 // detachNotifyTimeout bounds the best-effort Detached notification on the
@@ -294,6 +293,7 @@ type Daemon struct {
 	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
 	navConfig                      atomic.Pointer[domain.NavConfig]
 	tabsConfig                     atomic.Pointer[domain.TabsConfig]
+	scrollbackConfig               atomic.Pointer[domain.ScrollbackConfig]
 	themeConfig                    atomic.Pointer[themeConfigSnapshot]
 	barScripts                     *barScriptState
 	notices                        *noticeCenter
@@ -688,6 +688,8 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	d.copyConfig.Store(&defaultCopy)
 	defaultPalette := defaults.Palette
 	d.paletteConfig.Store(&defaultPalette)
+	defaultTabs := defaults.Tabs
+	d.tabsConfig.Store(&defaultTabs)
 	for _, o := range opts {
 		o(d)
 	}
@@ -746,6 +748,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	})
 	d.sessWg.Go(func() {
 		d.barScriptPoller(d.serveCtx)
+	})
+	d.sessWg.Go(func() {
+		d.historyMaintenance(d.serveCtx)
 	})
 	if d.persistEnabled {
 		d.sessWg.Go(func() {

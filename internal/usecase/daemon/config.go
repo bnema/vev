@@ -43,6 +43,12 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	bindings, warnings := keys.BuildBindingEntries(cfg.BindingEntries)
 	overrides, codeWarnings := d.buildCodeOverrides(cfg.Codes)
 	allWarnings := append(append([]domain.Warning{}, warnings...), codeWarnings...)
+	scrollback := cfg.Scrollback
+	if !scrollback.Valid() {
+		scrollback = domain.DefaultScrollbackConfig()
+		allWarnings = append(allWarnings, domain.Warning{Msg: "invalid scrollback limits; using vev defaults"})
+	}
+	d.scrollbackConfig.Store(&scrollback)
 	for _, warning := range allWarnings {
 		d.logConfigWarning(warning)
 	}
@@ -61,6 +67,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	tabs := cfg.Tabs
 	d.tabsConfig.Store(&tabs)
 	d.storeThemeConfig(cfg)
+	d.applyHistoryLimits()
 	barChanged := false
 	if d.barScripts != nil {
 		d.barScripts.mu.Lock()

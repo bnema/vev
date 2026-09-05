@@ -414,7 +414,7 @@ func TestRenderUsesConfiguredStyles(t *testing.T) {
 			assert: func(t *testing.T, style renderer.Style) {
 				require.True(t, style.Italic)
 				require.True(t, style.HasForegroundRGB)
-				require.Equal(t, -1, style.Foreground)
+				require.Equal(t, 0, style.Foreground, "inactive indexed color is canonicalized")
 				require.Equal(t, renderer.RGB{R: 10, G: 20, B: 30}, style.ForegroundRGB)
 			},
 		},
@@ -548,7 +548,7 @@ func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) 
 				SelectionDescription: styles.PickerSelectionMuted,
 			}})
 			inactive := frame.At(4, 1).Style
-			require.Equal(t, styles.SurfaceInactive.Background, inactive.Background)
+			require.Equal(t, styles.SurfaceInactive.Canonical().Background, inactive.Background)
 			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, inactive.HasBackgroundRGB)
 			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, inactive.BackgroundRGB)
 			if tt.name == "indexed only" {

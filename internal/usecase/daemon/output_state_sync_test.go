@@ -147,12 +147,12 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	require.NoError(t, err)
 
 	pane := sess.tabs[0].focusedPane()
-	for y := range pane.screen.Frame.Height {
+	initial := renderer.NewFrame(pane.screen.Columns(), pane.screen.Rows())
+	for y := range initial.Height {
 		cell := renderer.Cell{Rune: rune('A' + y), Style: renderer.DefaultStyle()}
-		for x := range pane.screen.Frame.Width {
-			pane.screen.Frame.Set(x, y, cell)
-		}
+		initial.FillRow(y, 0, initial.Width, cell)
 	}
+	writeTestFrame(t, pane.screen, initial)
 	pane.screen.ClearDamage()
 	client := vt.NewScreen(80, 25)
 	d.paint(sess, ac, true, nil)
@@ -164,22 +164,22 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	// paints are generated from the ACKed frame and apply the scroll twice to
 	// the client. The ordered stream instead renders the second paint from the
 	// preceding emitted frame and overwrites the incompatible repeated damage.
-	desired := pane.screen.Frame.Clone()
+	desired := captureTestFrame(pane.screen)
 	desired.ScrollUp(0, desired.Height-1, 1)
 	for x := range desired.Width {
 		desired.Set(x, desired.Height-1, renderer.Cell{Rune: 'z', Style: renderer.DefaultStyle()})
 	}
 	for range 2 {
-		pane.screen.Frame = desired.Clone()
-		pane.screen.Row = pane.screen.Frame.Height - 1
+		writeTestFrame(t, pane.screen, desired)
+		pane.screen.Row = pane.screen.Rows() - 1
 		pane.screen.Col = 0
 		pane.screen.Write([]byte("\nq"))
-		pane.screen.Frame = desired.Clone()
+		writeTestFrame(t, pane.screen, desired)
 		d.paint(sess, ac, false, nil)
 		mustApplyOutput(t, client, awaitFrame(t, tr.sends, wire.MsgOutput))
 	}
 
-	require.Equal(t, 'B', client.Frame.At(0, 1).Rune,
+	require.Equal(t, 'B', client.Cell(0, 1).Rune,
 		"client-visible content must equal the latest daemon-composed frame after pipelined scroll paints")
 }
 
@@ -323,11 +323,11 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			timer.ch <- time.Time{}
 			awaitTestCompletion(t, done, "resize callback did not complete")
 			require.True(t, p.deliveredWhileApplying(), "redraw must arrive while PTY.Resize owns the apply gate")
-			require.Equal(t, 'B', pane.screen.Frame.At(100, 0).Rune, "replay must parse the redraw before commit")
+			require.Equal(t, 'B', pane.screen.Cell(100, 0).Rune, "replay must parse the redraw before commit")
 
 			client.Resize(120, 24)
 			mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-			require.Equal(t, 'B', client.Frame.At(100, 1).Rune,
+			require.Equal(t, 'B', client.Cell(100, 1).Rune,
 				"first grown frame exposed stale pre-SIGWINCH pane content")
 			select {
 			case extra := <-sends:
@@ -398,6 +398,6 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, wire.MsgOutput)
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
-	require.Equal(t, 120, testAttachmentTab(sess).focusedPane().screen.Frame.Width)
+	require.Equal(t, 120, testAttachmentTab(sess).focusedPane().screen.Columns())
 	requireNoOutputFrame(t, sends)
 }

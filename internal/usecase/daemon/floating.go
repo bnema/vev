@@ -427,7 +427,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		return
 	}
 	ptyGeometry := spec.ptyGeometry
-	p := newPaneWithStableIDAndTitle(layout.PaneID("floating"), spec.paneStableID, pty, spec.size, spec.fallback)
+	p := newPaneWithStableIDAndTitle(layout.PaneID("floating"), spec.paneStableID, pty, spec.size, spec.fallback, d.currentHistoryConfig())
 	p.geometry = ptyGeometry
 	setScreenGeometry(p.screen, ptyGeometry)
 	p.rect = spec.geometry.ptyRect()

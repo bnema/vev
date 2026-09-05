@@ -60,7 +60,10 @@ func (d *Daemon) copyWheel(sess *session, ac *attachedClient, delta int) {
 		rt.clearCopyModeLocked()
 	}
 	rt.copyMu.Unlock()
-	d.invalidateRender(sess, ac, true, "copymode.go")
+	// Moving within the immutable copy document does not invalidate live pane
+	// captures. The compositor still redraws the overlay; leaving it resets live
+	// state so attachment-local snapshots cannot survive the return to the PTY.
+	d.invalidateRender(sess, ac, exit, "copymode.go")
 }
 func (d *Daemon) enterCopyMode(sess *session, ac *attachedClient) {
 	tb := sess.tabForAttachment(ac)
@@ -416,21 +419,22 @@ func composeCopyClientFrame(mode *scopy.Mode, target domain.Rect, frame renderer
 	if mode == nil || target.Width <= 0 || target.Height <= 0 || frame.Width <= 0 || frame.Height <= 0 {
 		return frame, nil
 	}
-	copyFrame := mode.Render(styles.CopyStatus, styles.Selection)
-	bodyRows := max(copyFrame.Height-1, 0)
-	for y := 0; y < target.Height && y < bodyRows && target.Y+y < frame.Height-1; y++ {
+	statusY := frame.Height - 1
+	frame.FillRow(statusY, 0, frame.Width, renderer.Cell{Rune: ' ', Style: styles.SurfaceBar})
+	mode.RenderRows(func(y int, row []renderer.Cell) {
+		if y == mode.Document().Height() {
+			frame.WriteRow(statusY, 0, row[:min(frame.Width, len(row))])
+			return
+		}
+		if y >= target.Height || target.Y+y < 0 || target.Y+y >= statusY {
+			return
+		}
 		dstX := max(target.X, 0)
 		srcX := max(-target.X, 0)
-		width := min(target.Width-srcX, copyFrame.Width-srcX)
-		width = min(width, frame.Width-dstX)
-		if width > 0 && target.Y+y >= 0 {
-			copy(frame.Row(target.Y + y)[dstX:dstX+width], copyFrame.Row(y)[srcX:srcX+width])
+		width := min(target.Width-srcX, len(row)-srcX, frame.Width-dstX)
+		if width > 0 {
+			frame.WriteRow(target.Y+y, dstX, row[srcX:srcX+width])
 		}
-	}
-	statusY := frame.Height - 1
-	for x := range frame.Row(statusY) {
-		frame.Row(statusY)[x] = renderer.Cell{Rune: ' ', Style: styles.SurfaceBar}
-	}
-	copy(frame.Row(statusY), copyFrame.Row(copyFrame.Height - 1)[:min(frame.Width, copyFrame.Width)])
+	}, styles.CopyStatus, styles.Selection)
 	return frame, []renderer.Damage{renderer.FullRedraw()}
 }
