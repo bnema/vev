@@ -530,19 +530,31 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 	if m == nil || m.document == nil {
 		return renderer.NewFrame(0, 0)
 	}
+	frame := renderer.NewFrame(m.document.Width(), m.document.Height()+1)
+	m.RenderRows(func(y int, row []renderer.Cell) { frame.WriteRow(y, 0, row) }, styles...)
+	return frame
+}
+
+// RenderRows paints viewport rows followed by the status row at Document.Height().
+// The callback borrows a reusable semantic row only until it returns. Rendering
+// directly into a compositor avoids building and then decoding a compact frame.
+func (m *Mode) RenderRows(paint func(int, []renderer.Cell), styles ...renderer.Style) {
+	if m == nil || m.document == nil {
+		return
+	}
 	d := m.document
-	frame := renderer.NewFrame(d.Width(), d.Height()+1)
 	selectionBounds, hasSelectionBounds := m.selection.bounds(d)
 	selection, hasSelection := optionalStyle(styles, 1)
 	cursor, cursorValid := d.Normalize(m.navigator.Pos)
-	row := make([]renderer.Cell, frame.Width)
+	row := make([]renderer.Cell, d.Width())
 	for y := range d.Height() {
 		src := m.ViewportTop + y
-		if src >= d.Len() {
-			break
-		}
 		for x := range row {
 			row[x] = renderer.BlankCell()
+		}
+		if src >= d.Len() {
+			paint(y, row)
+			continue
 		}
 		d.snapshot.CopyRow(src, row)
 		if match, ok := m.currentSearchMatchForRow(src); ok {
@@ -565,15 +577,14 @@ func (m *Mode) Render(styles ...renderer.Style) renderer.Frame {
 			cursorCol := min(cursor.Col, len(row)-1)
 			applySelectionStyle(&row[cursorCol].Style, selection, hasSelection)
 		}
-		frame.WriteRow(y, 0, row)
+		paint(y, row)
 	}
 	status := inverseStyle()
 	if len(styles) > 0 {
 		status = styles[0]
 	}
 	drawCopyStatus(row, m, d.Len(), status)
-	frame.WriteRow(d.Height(), 0, row)
-	return frame
+	paint(d.Height(), row)
 }
 func (m *Mode) currentSearchMatchForRow(row int) (SearchMatch, bool) {
 	if m == nil || m.SearchIndex < 0 || m.SearchIndex >= len(m.Searches) {

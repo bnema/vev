@@ -86,9 +86,16 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		frame = renderer.NewFrame(width, frameHeight)
 	}
 	if in.frame.Width == width && in.frame.Height == frameHeight {
-		for y := 0; y < frame.Height; y++ {
-			for x := range frame.Width {
-				frame.Set(x, y, in.frame.Cell(x, y))
+		if state.overlays.copyMode != nil {
+			// Compact Clone preserves page-local style IDs. Re-interning every
+			// cell into scratch costs more than a structural copy while scrolling.
+			// The clone still isolates committed state from failed publications.
+			frame = in.frame.Clone()
+		} else {
+			for y := 0; y < frame.Height; y++ {
+				for x := range frame.Width {
+					frame.Set(x, y, in.frame.Cell(x, y))
+				}
 			}
 		}
 	}
@@ -198,7 +205,14 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs, contentY)
-	outCache := composeCacheInput{valid: !overlaysActive, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	// A plain copy viewport is painted on a clone, never into baseFrame. Keep
+	// that unadorned base reusable between wheel events. Modal/floating paths
+	// retain their conservative invalidation, and copy exit requests a reset.
+	copyOnly := state.overlays.copyMode != nil && state.overlays.copyActive &&
+		!state.overlays.copySearchActive && !state.overlays.pickerActive &&
+		!state.overlays.paletteActive && !state.overlays.promptActive &&
+		!state.overlays.noticesOverlayActive && !state.overlays.resizeActive && !state.floating.visible
+	outCache := composeCacheInput{valid: !overlaysActive || copyOnly, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars = barCache{top: topBar, bottom: bottomBar}
 	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
 }
