@@ -4,10 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAttachTargetPreferredTabStrict(t *testing.T) {
