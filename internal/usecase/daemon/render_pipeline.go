@@ -48,6 +48,7 @@ type composeCacheInput struct {
 	toastFootprints         []domain.Rect
 	theme                   themeui.Theme
 	styleGeneration         uint64
+	copyViewport            copyViewportState
 }
 
 type composedRenderFrame struct {
@@ -173,11 +174,27 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		})
 		damage = floatingDamage
 	}
-	if overlaysActive {
-		if !toastsVisible && !state.floating.visible {
-			frame = baseFrame.Clone()
+	copyOnly := state.overlays.copyMode != nil && state.overlays.copyActive &&
+		!state.overlays.copySearchActive && !state.overlays.pickerActive &&
+		!state.overlays.paletteActive && !state.overlays.promptActive &&
+		!state.overlays.noticesOverlayActive && !state.overlays.resizeActive && !state.floating.visible
+	var copyViewport copyViewportState
+	var scrollDamage []renderer.Damage
+	if copyOnly && !toastsVisible {
+		copyViewport = captureCopyViewport(state, content)
+		if !full {
+			scrollDamage = copyViewportDamage(in.copyViewport, copyViewport, frame)
 		}
-		frame, damage = composeCapturedCopyMode(state, frame, damage, content)
+	}
+	if overlaysActive {
+		if scrollDamage != nil && in.copyViewport.frame.Width == width && in.copyViewport.frame.Height == frameHeight {
+			frame = composeScrolledCopyViewport(state, baseFrame, in.copyViewport, copyViewport, scrollDamage)
+		} else {
+			if !toastsVisible && !state.floating.visible {
+				frame = baseFrame.Clone()
+			}
+			frame, damage = composeCapturedCopyMode(state, frame, damage, content)
+		}
 		frame, damage = composeCapturedOverlays(state, frame, damage)
 	}
 	for x := range width {
@@ -208,13 +225,18 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// A plain copy viewport is painted on a clone, never into baseFrame. Keep
 	// that unadorned base reusable between wheel events. Modal/floating paths
 	// retain their conservative invalidation, and copy exit requests a reset.
-	copyOnly := state.overlays.copyMode != nil && state.overlays.copyActive &&
-		!state.overlays.copySearchActive && !state.overlays.pickerActive &&
-		!state.overlays.paletteActive && !state.overlays.promptActive &&
-		!state.overlays.noticesOverlayActive && !state.overlays.resizeActive && !state.floating.visible
 	outCache := composeCacheInput{valid: !overlaysActive || copyOnly, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
 	outCache.bars = barCache{top: topBar, bottom: bottomBar}
-	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || state.overlays.active()}
+	if copyViewport.document != nil {
+		copyViewport.frame = frame
+		outCache.copyViewport = copyViewport
+	}
+	if scrollDamage != nil {
+		damage = scrollDamage
+	}
+	// A copy viewport is ordinary terminal content, not a new output epoch.
+	// Keep conservative resets for other overlays and explicit resynchronization.
+	return composedRenderFrame{frame: frame, damage: damage, cursor: cursor, cache: outCache, reset: state.reset || (overlaysActive && !copyOnly)}
 }
 
 func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title string, focused bool, styles themeui.Styles, neutralBorder renderer.Style, dimmer themeui.Dimmer) {
@@ -312,6 +334,12 @@ func composeCapturedCopyMode(state capturedRenderState, frame renderer.Frame, da
 	if !o.copyActive {
 		return frame, damage
 	}
+	target := capturedCopyTarget(state, content)
+	return composeCopyClientFrame(o.copyMode, target, frame, state.styles)
+}
+
+func capturedCopyTarget(state capturedRenderState, content domain.Rect) domain.Rect {
+	o := state.overlays
 	target := domain.Rect{}
 	if state.floating.visible && (o.copyPaneID == "" || o.copyPaneID == state.floating.pane.id) {
 		target = state.floating.geometry.translate(content.X, content.Y).Inner
@@ -329,7 +357,7 @@ func composeCapturedCopyMode(state capturedRenderState, frame renderer.Frame, da
 			}
 		}
 	}
-	return composeCopyClientFrame(o.copyMode, target, frame, state.styles)
+	return target
 }
 
 func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage) (renderer.Frame, []renderer.Damage) {

@@ -152,6 +152,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Copy.WordSeparators = separators
+		case key == "copy.reduce-motion":
+			warnings = warnDuplicateKey(warnings, seenCopyKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid copy.reduce-motion %q", value)})
+				continue
+			}
+			cfg.Copy.ReduceMotion = on
 		case key == "floating.command":
 			warnings = warnDuplicateKey(warnings, seenFloatingKeys, key, lineNo)
 			command, ok := parseBarCommand(value)

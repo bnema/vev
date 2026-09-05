@@ -1,5 +1,5 @@
-github.com/bnema/vev-vt v0.5.0 h1:sIUgb0UGTJbtqw+c/zpatLSKLaUkbF/GBxMcHWm8vDM=
-github.com/bnema/vev-vt v0.5.0/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
+github.com/bnema/vev-vt v0.5.1 h1:EmePfvddaHypVWmAP+ae+T6HxxQhl0UST+6kOr6AgfY=
+github.com/bnema/vev-vt v0.5.1/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

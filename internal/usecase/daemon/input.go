@@ -286,7 +286,7 @@ func (d *Daemon) handleTerminalMouse(sess *session, ac *attachedClient, p *pane,
 			return
 		}
 		d.enterCopyMode(sess, ac)
-		d.copyWheel(sess, ac, -3)
+		d.smoothCopyWheel(sess, ac, -3)
 	case mouse.WheelDown:
 		if altScreen {
 			_ = sess.runMutation(func() error {

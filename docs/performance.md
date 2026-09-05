@@ -113,6 +113,66 @@ latency:
 
 ```sh
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonHistory' -benchtime=1x -benchmem
-go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
+go test github.com/bnema/vev-vt/ansi github.com/bnema/vev-vt ./internal/adapters/ipc -run '^$' -bench=. -benchmem
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeCapturedFloatingFrameCached$' -benchmem
 ```
+
+## Mouse scroll rendering
+
+Wheel input moves the immutable copy viewport, rather than walking the keyboard
+cursor to an edge before scrolling. Ordinary copy paints preserve the output
+epoch. For unchanged full-width viewports, composition rotates retained compact
+rows and paints only exposed rows and cursor highlights. The ANSI renderer checks
+the scroll against its own committed shadow before using a scroll region in
+either direction. Selection, search, narrow panes, floating panes, notices, and
+geometry/theme changes keep their conservative composition paths.
+
+The unadorned live-pane cache stays separate from the displayed copy viewport.
+Neither committed frame is mutated while preparing a candidate; failed output
+cannot publish its viewport metadata. Copy exit refreshes live content.
+
+Mouse animation is tested separately with injected clocks: first response,
+16 ms pacing, burst accumulation, deceleration, reversal, cancellation, and the
+120 ms tail deadline. The rendering benchmark deliberately bypasses those timers
+to measure work rather than sleep time:
+
+```sh
+go test ./internal/usecase/daemon -run '^$' \
+  -bench '^BenchmarkDaemonHistoryCopyScroll$' -benchmem -count=3
+go test ./internal/usecase/daemon ./internal/usecase/copy -race \
+  -run 'TestCopyScrollAnimation|TestCopyWheel|TestScrollRows|TestRenderRowsRange'
+```
+
+### Local comparison (2026-09-05)
+
+AMD Ryzen 5 7535HS, Linux amd64, Go 1.27.1; three repetitions, median time.
+Baseline: vev `cb489d5b` with vev-vt v0.5.0. Each operation is two wheel movements
+with 10,000 retained rows; setup and copy entry are outside the timed loop.
+
+| Viewport | Before, ms/pair | After, ms/pair | Last ANSI bytes/wheel, before → after |
+| --- | ---: | ---: | ---: |
+| 120×40 | 1.306 | 0.654 | 4,998 → 713 |
+| 182×53 | 2.531 | 1.159 | 9,873 → 1,023 |
+| 240×70 | 4.329 | 1.850 | 17,088 → 1,313 |
+
+Important limits of this comparison:
+
+- The old alternating-wheel loop mostly moved a cursor within a stationary
+  viewport after its first scroll. The new loop actually moves the viewport on
+  every wheel event. These are the same input events, not equivalent old/new
+  visual behavior.
+- Allocated bytes remain roughly unchanged: about 0.66/1.16/1.95 MB per pair.
+  Transactional compact-frame copies still dominate allocations; the speedup
+  is not evidence of eliminating GC pressure.
+- This repetitive fixture compresses snapshots very well. Encoded output payloads
+  **increase** from 574/751/896 to 762/1,072/1,362 bytes per wheel because ordinary
+  incremental output is uncompressed. Fewer ANSI bytes means less terminal work,
+  not automatically fewer network bytes. Animation also adds intermediate frames.
+- These are in-process measurements, not terminal presentation latency or a
+  substitute for the canonical remote matrix. Subjective motion and remote
+  latency still need real-terminal validation.
+
+Ghostty was inspected as a design reference at local commit `c81f0b268`, especially
+`src/renderer/generic.zig` and `src/renderer/Thread.zig`: retain viewport state,
+track dirty work, and separate terminal capture from rendering work. vev keeps
+its server-side ANSI architecture; no GPU renderer or Ghostty code is imported.

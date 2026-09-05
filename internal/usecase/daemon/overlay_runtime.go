@@ -71,6 +71,7 @@ type overlayRuntime struct {
 	copyPane          *pane
 	copyPending       []byte
 	copyESC           pendingByteTimer
+	copyScroll        copyScrollAnimation
 	copySearch        *visualsearch.Model
 	copySearchPending []byte
 	statusFeedback    string
@@ -199,6 +200,7 @@ func (rt *overlayRuntime) beginCopyPointerLocked(pointer copyPointerState) {
 }
 
 func (rt *overlayRuntime) invalidateCopyPointerLocked(clearClick bool) {
+	rt.stopCopyScrollLocked()
 	rt.copyPointerEpoch++
 	rt.copyPointer = copyPointerState{}
 	if clearClick {
@@ -255,6 +257,9 @@ func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte, effects ...*attach
 		return false
 	}
 	ac := rt.ac
+	rt.copyMu.Lock()
+	rt.stopCopyScrollLocked()
+	rt.copyMu.Unlock()
 	var effect *attachmentEffect
 	if len(effects) != 0 {
 		effect = effects[0]

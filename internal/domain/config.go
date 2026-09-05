@@ -50,9 +50,10 @@ type BarConfig struct {
 	Interval    time.Duration
 }
 
-// CopyConfig contains copy-mode text selection settings.
+// CopyConfig contains copy-mode selection and mouse motion settings.
 type CopyConfig struct {
 	WordSeparators string
+	ReduceMotion   bool
 }
 
 // PaletteConfig contains palette placement settings. A false AnchorSet uses the

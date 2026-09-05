@@ -5,6 +5,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/stretchr/testify/require"
 )
@@ -46,12 +47,18 @@ func BenchmarkDaemonHistoryCopyScroll(b *testing.B) {
 			f.d.copyWheel(f.sess, f.ac, -5000)
 			f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 			b.ReportAllocs()
+			f.output.reset()
 			for b.Loop() {
 				f.d.copyWheel(f.sess, f.ac, -3)
 				f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 				f.d.copyWheel(f.sess, f.ac, 3)
 				f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 			}
+			metrics := f.output.metrics()
+			b.ReportMetric(float64(metrics.payloadBytes)/float64(2*b.N), "wire-B/wheel")
+			output, err := wire.UnmarshalOutput(f.output.lastPayload())
+			require.NoError(b, err)
+			b.ReportMetric(float64(len(output.Data)), "last-ANSI-B/wheel")
 		})
 	}
 }
