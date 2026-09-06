@@ -383,6 +383,14 @@ func attachEnvironment(environment []string) []string {
 	return append([]string(nil), environment...)
 }
 
+func cloneRouteNavigationAction(action *protocol.RouteNavigationAction) *protocol.RouteNavigationAction {
+	if action == nil {
+		return nil
+	}
+	copyAction := *action
+	return &copyAction
+}
+
 func validateAttachRequest(request AttachRequest) error {
 	if request.Origin != 0 {
 		if err := request.Origin.Validate(); err != nil {
@@ -757,6 +765,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			request:                  attemptRequest,
 			resumeToken:              resumeToken,
 			routeNavigationSelection: routeNavigationSelection,
+			routeNavigationAction:    cloneRouteNavigationAction(routeNavigationAction),
 			killedSelection:          killedSelection,
 			clientID:                 processClientID,
 			milestones:               &ms,
@@ -1296,6 +1305,7 @@ type attachAttempt struct {
 	request                  AttachRequest
 	resumeToken              uint64
 	routeNavigationSelection *routeNavigationSelection
+	routeNavigationAction    *protocol.RouteNavigationAction
 	killedSelection          *killedRouteSelection
 	clientID                 [16]byte
 	milestones               *milestones
@@ -2476,6 +2486,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case protocol.RouteNavigationFailure:
 				failure := message
 				log.Warn("route navigation rejected", "key", failure.Key, "generation", failure.Generation, "code", failure.Code)
+				if a.routeNavigationAction != nil && failure.Key == a.routeNavigationAction.Key && failure.Generation == a.routeNavigationAction.Generation && a.runner.ui != nil {
+					a.runner.ui.failHandoff()
+				}
 			case protocol.Detached:
 				d := message
 				ms.detached = true
