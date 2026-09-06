@@ -101,6 +101,18 @@ func TestTerminalQueuesTerminalResponsesOutsideScreenWrite(t *testing.T) {
 	}
 }
 
+func TestTerminalPublishesGeometryChangesImmediatelyOutsideOutputTransaction(t *testing.T) {
+	terminal := newTestTerminal(t, 4, 2)
+	terminal.ObserveTerminalResize(domain.Geometry{Size: domain.Size{Cols: 6, Rows: 3}})
+	snapshot, err := terminal.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Columns != 6 || snapshot.Rows != 3 || snapshot.Revision == 0 {
+		t.Fatalf("resize snapshot = %#v", snapshot)
+	}
+}
+
 func TestTerminalFailedTransactionMakesCaptureUnavailable(t *testing.T) {
 	terminal := newTestTerminal(t, 4, 2)
 	terminal.BeginOutput(ports.UIContext{})

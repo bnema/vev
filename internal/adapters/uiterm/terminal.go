@@ -256,9 +256,15 @@ func (t *Terminal) ObserveTerminalResize(geometry domain.Geometry) {
 		t.available = false
 		return
 	}
+	if t.geometry == geometry {
+		return
+	}
 	t.geometry = geometry
 	t.screen.Resize(geometry.Cols, geometry.Rows)
 	t.dirty = true
+	if t.txDepth == 0 {
+		t.publishLocked()
+	}
 }
 
 func (t *Terminal) InvalidateTerminalObservation() {
