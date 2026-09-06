@@ -122,6 +122,7 @@ func (h Hello) Geometry() domain.Geometry {
 
 type Input struct {
 	InputSeq uint64
+	ActionID uint64
 	Data     []byte
 }
 
@@ -185,6 +186,13 @@ type ErrorMsg struct {
 	Text string
 }
 
+type ViewContext struct {
+	Publication   uint64
+	Route         CommittedRouteIdentity
+	TabID         domain.TabStableID
+	FocusedPaneID domain.PaneStableID
+}
+
 type Output struct {
 	Epoch        uint64
 	Base         uint64
@@ -193,7 +201,31 @@ type Output struct {
 	ViewRevision uint64
 	Size         domain.Size
 	Full         bool
+	Context      *ViewContext
 	Data         []byte
+}
+
+type UIFence struct{ ActionID uint64 }
+
+type UIReceiptOutcome uint8
+
+const (
+	UIReceiptProcessed UIReceiptOutcome = iota + 1
+	UIReceiptUnavailable
+)
+
+type UIReceipt struct {
+	ActionID        uint64
+	Epoch           uint64
+	State           uint64
+	ViewPublication uint64
+	Outcome         UIReceiptOutcome
+}
+
+type UIViewUpdate struct {
+	Epoch   uint64
+	State   uint64
+	Context ViewContext
 }
 
 type AttachTarget struct {

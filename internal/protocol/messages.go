@@ -26,6 +26,7 @@ func (ParkedRouteRequest) clientMessage()         {}
 func (RecentRouteSnapshot) clientMessage()        {}
 func (RouteNavigationFailure) clientMessage()     {}
 func (SessionCreationFailure) clientMessage()     {}
+func (UIFence) clientMessage()                    {}
 
 func (Welcome) serverMessage()                  {}
 func (ErrorMsg) serverMessage()                 {}
@@ -44,3 +45,5 @@ func (RouteNavigationFailure) serverMessage()   {}
 func (RoutePosition) serverMessage()            {}
 func (SamePeerSwitchFailure) serverMessage()    {}
 func (ParkedRouteResponse) serverMessage()      {}
+func (UIReceipt) serverMessage()                {}
+func (UIViewUpdate) serverMessage()             {}

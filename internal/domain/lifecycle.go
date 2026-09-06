@@ -182,12 +182,21 @@ func ValidateRemoteDisplayOrigin(origin string) error {
 // ValidateTabStableID validates the opaque stable tab identity used by
 // picker and attachment handoffs.
 func ValidateTabStableID(value TabStableID) error {
-	if value == "" || len(value) > 128 || !utf8.ValidString(string(value)) {
-		return errors.New("invalid stable tab ID")
+	return validateStableID(string(value), "tab")
+}
+
+// ValidatePaneStableID validates the session/tab-qualified focused pane identity.
+func ValidatePaneStableID(value PaneStableID) error {
+	return validateStableID(string(value), "pane")
+}
+
+func validateStableID(value, kind string) error {
+	if value == "" || len(value) > 128 || !utf8.ValidString(value) {
+		return fmt.Errorf("invalid stable %s ID", kind)
 	}
 	for _, r := range value {
 		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return errors.New("invalid stable tab ID")
+			return fmt.Errorf("invalid stable %s ID", kind)
 		}
 	}
 	return nil

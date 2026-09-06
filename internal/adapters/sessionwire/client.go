@@ -111,12 +111,16 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
 	case wire.MsgParkedRouteResponse:
 		return wire.UnmarshalParkedRouteResponse(frame.Payload)
+	case wire.MsgUIReceipt:
+		return wire.UnmarshalUIReceipt(frame.Payload)
+	case wire.MsgUIViewUpdate:
+		return wire.UnmarshalUIViewUpdate(frame.Payload)
 	case wire.MsgHello, wire.MsgInput, wire.MsgResize, wire.MsgDetach, wire.MsgPing,
 		wire.MsgList, wire.MsgKill, wire.MsgTheme, wire.MsgAck, wire.MsgImagePush,
 		wire.MsgClientNotice, wire.MsgCommand, wire.MsgOutputResetRequest,
 		wire.MsgRemotePreviewRequest, wire.MsgRouteAttentionSubscription,
 		wire.MsgSamePeerSwitchRequest, wire.MsgParkedRouteRequest,
-		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure:
+		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure, wire.MsgUIFence:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -161,6 +165,9 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 		return wire.Frame{Type: wire.MsgCommand, Payload: payload}, err
 	case protocol.OutputResetRequest:
 		return wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(m)}, nil
+	case protocol.UIFence:
+		payload, err := wire.MarshalUIFence(m)
+		return wire.Frame{Type: wire.MsgUIFence, Payload: payload}, err
 	case protocol.RemotePreviewRequest:
 		payload := wire.MarshalRemotePreviewRequest(m)
 		if payload == nil {

@@ -669,6 +669,7 @@ func UnmarshalHello(b []byte) (protocol.Hello, error) {
 func MarshalInput(m protocol.Input) []byte {
 	w := payloadWriter{}
 	w.putUint64(m.InputSeq)
+	w.putUint64(m.ActionID)
 	w.putBytes(m.Data)
 	return w.b
 }
@@ -681,7 +682,11 @@ func UnmarshalInput(b []byte) (protocol.Input, error) {
 	if err != nil {
 		return protocol.Input{}, err
 	}
-	return protocol.Input{InputSeq: seq, Data: r.rest()}, nil
+	actionID, err := r.getUint64()
+	if err != nil {
+		return protocol.Input{}, err
+	}
+	return protocol.Input{InputSeq: seq, ActionID: actionID, Data: r.rest()}, nil
 }
 
 // MarshalImagePush encodes m into an ImagePush message payload.

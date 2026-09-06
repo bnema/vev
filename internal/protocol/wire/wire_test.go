@@ -217,8 +217,8 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 		msg  protocol.Input
 		want []byte
 	}{
-		{name: "data", msg: protocol.Input{InputSeq: 0x0102030405060708, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x68, 0x69}},
-		{name: "empty", msg: protocol.Input{InputSeq: 0, Data: nil}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		{name: "data", msg: protocol.Input{InputSeq: 0x0102030405060708, ActionID: 9, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0, 0, 0, 0, 0, 0, 0, 9, 0x68, 0x69}},
+		{name: "empty", msg: protocol.Input{InputSeq: 0, Data: nil}, want: make([]byte, 16)},
 	}
 
 	for _, tt := range tests {
@@ -238,7 +238,7 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 	}
 
 	full := MarshalInput(tests[0].msg)
-	assertAllPrefixesFail(t, full[:8], UnmarshalInput)
+	assertAllPrefixesFail(t, full[:16], UnmarshalInput)
 }
 
 func TestImagePushGoldenAndRoundTrip(t *testing.T) {
