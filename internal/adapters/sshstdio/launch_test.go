@@ -37,6 +37,36 @@ func TestBuildCommandForRemoteCleanupVerifiesOwnerBeforeRemoval(t *testing.T) {
 	require.Contains(t, spec.Args[2], "rm -rf -- \"$root\"")
 }
 
+func TestIsolatedLaunchScriptRemovesRootWhenCleanupCommandFails(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		cleanup    bool
+		wantExists bool
+	}{
+		{name: "launch", mode: "_stdio", wantExists: true},
+		{name: "cleanup", mode: "_ui-cleanup", cleanup: true, wantExists: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "root")
+			if test.cleanup {
+				require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", "/bin/true", nil, "_stdio", false)).Run())
+			}
+			err := exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", "/bin/false", nil, test.mode, test.cleanup)).Run()
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr)
+			require.Equal(t, 1, exitErr.ExitCode())
+			_, statErr := os.Stat(root)
+			if test.wantExists {
+				require.NoError(t, statErr)
+			} else {
+				require.ErrorIs(t, statErr, os.ErrNotExist)
+			}
+		})
+	}
+}
+
 func TestIsolatedLaunchScriptOwnsAndCleansFreshRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	launch := isolatedLaunchScript(root, "owner-token", "/bin/true", nil, "_stdio", false)

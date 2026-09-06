@@ -594,8 +594,9 @@ func isolatedLaunchScript(root, ownerToken, executable string, environment []str
 	command = append(command, environment...)
 	command = append(command, executable, mode)
 	if cleanup {
+		script.WriteString("command_status=0; if ")
 		script.WriteString(quotedWords(command))
-		script.WriteString("; rm -rf -- \"$root\"")
+		script.WriteString("; then :; else command_status=$?; fi; rm_status=0; rm -rf -- \"$root\" || rm_status=$?; if [ \"$command_status\" -ne 0 ]; then exit \"$command_status\"; fi; exit \"$rm_status\"")
 	} else {
 		script.WriteString("trap - EXIT; exec ")
 		script.WriteString(quotedWords(command))

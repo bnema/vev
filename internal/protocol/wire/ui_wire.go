@@ -113,7 +113,7 @@ func UnmarshalUIReceipt(data []byte) (protocol.UIReceipt, error) {
 }
 
 func MarshalUIViewUpdate(message protocol.UIViewUpdate) ([]byte, error) {
-	if message.Epoch == 0 {
+	if message.Epoch == 0 || message.State == 0 {
 		return nil, errInvalidUIMessage
 	}
 	w := payloadWriter{}
@@ -141,7 +141,7 @@ func UnmarshalUIViewUpdate(data []byte) (protocol.UIViewUpdate, error) {
 	if err := r.done(); err != nil {
 		return protocol.UIViewUpdate{}, err
 	}
-	if message.Epoch == 0 {
+	if message.Epoch == 0 || message.State == 0 {
 		return protocol.UIViewUpdate{}, errInvalidUIMessage
 	}
 	return message, nil

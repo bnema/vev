@@ -204,8 +204,9 @@ func TestRemoteTargetWireRichGoldenRoundTrip(t *testing.T) {
 		0x00, 0x04, 'w', 'o', 'r', 'k', 0x00,
 		0x00, 0x05, 't', 'a', 'b', '-', '3', 0x00, 0x01,
 		0x00, 0x00, 0x00, 0x00,
+		// CauseActionID.
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	}
-	want = append(want, make([]byte, 8)...)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("rich target bytes = %x, want %x", got, want)
 	}
@@ -215,5 +216,23 @@ func TestRemoteTargetWireRichGoldenRoundTrip(t *testing.T) {
 	}
 	if decoded.RemoteTarget == nil || *decoded.RemoteTarget != *target || decoded.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 		t.Fatalf("decoded target = %#v, policy = %d", decoded.RemoteTarget, decoded.EnvironmentPolicy)
+	}
+}
+
+func TestRemoteTargetWireRejectsMalformedCauseActionID(t *testing.T) {
+	valid := MarshalAttachTarget(protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach})
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "truncated cause action ID", payload: append([]byte(nil), valid[:len(valid)-1]...)},
+		{name: "trailing bytes", payload: append(append([]byte(nil), valid...), 0)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := UnmarshalAttachTarget(test.payload); err == nil {
+				t.Fatal("malformed CauseActionID payload decoded successfully")
+			}
+		})
 	}
 }

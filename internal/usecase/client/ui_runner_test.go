@@ -108,7 +108,12 @@ func testUIRunnerAction(t *testing.T, handoff bool) {
 	case <-time.After(time.Second):
 		t.Fatal("missing labeled fence")
 	}
-	input := <-sentInput
+	var input protocol.Input
+	select {
+	case input = <-sentInput:
+	case <-time.After(time.Second):
+		t.Fatal("input was not dispatched")
+	}
 	require.Equal(t, []byte("\x1b"), input.Data)
 	require.Equal(t, fence.ActionID, input.ActionID)
 	select {

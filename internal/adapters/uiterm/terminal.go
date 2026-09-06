@@ -32,6 +32,7 @@ type Terminal struct {
 	mu sync.Mutex
 
 	screen          *vt.Screen
+	mirror          bool
 	geometry        domain.Geometry
 	context         ports.UIContext
 	latest          ports.UISnapshot
@@ -79,6 +80,7 @@ func newTerminal(ctx context.Context, geometry domain.Geometry, attachmentHandle
 	inR, inW := io.Pipe()
 	t := &Terminal{
 		screen:          screen,
+		mirror:          allowOversized,
 		geometry:        geometry,
 		context:         ports.UIContext{AttachmentHandle: attachmentHandle, Generation: 1},
 		available:       true,
@@ -100,6 +102,7 @@ func newTerminal(ctx context.Context, geometry domain.Geometry, attachmentHandle
 		case t.replies <- copyResponse:
 		default:
 			t.available = false
+			t.signalChange()
 		}
 	}
 	go t.runReplies(ctx)
@@ -219,6 +222,7 @@ func (t *Terminal) EndOutput(success bool) {
 	}
 	if t.txFailed {
 		t.available = false
+		t.signalChange()
 		return
 	}
 	t.publishLocked()
@@ -270,8 +274,12 @@ func (t *Terminal) ObserveTerminalResize(geometry domain.Geometry) {
 	geometry = geometry.NormalizePixels()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed || geometry.Cols <= 0 || geometry.Rows <= 0 {
+	if t.closed {
+		return
+	}
+	if geometry.Cols <= 0 || geometry.Rows <= 0 {
 		t.available = false
+		t.signalChange()
 		return
 	}
 	if geometry.Cols > MaxColumns || geometry.Rows > MaxRows {
@@ -281,13 +289,16 @@ func (t *Terminal) ObserveTerminalResize(geometry domain.Geometry) {
 		t.signalChange()
 		return
 	}
-	if t.captureTooLarge || t.screen == nil {
+	if t.screen == nil || t.captureTooLarge && t.mirror {
 		// A mirror cannot reconstruct the pixels that were emitted while its
 		// viewport was oversized. Keep capture_too_large rather than exposing
 		// a new blank or stale screen as current.
 		t.geometry = geometry
 		t.signalChange()
 		return
+	}
+	if t.captureTooLarge {
+		t.captureTooLarge = false
 	}
 	if t.geometry == geometry {
 		return

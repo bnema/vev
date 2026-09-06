@@ -99,15 +99,15 @@ func parseUIDriverArgs(args []string) (uiDriverOptions, error) {
 	for len(args) > 0 {
 		name := args[0]
 		if name == "--help" || name == "-h" {
-			return uiDriverOptions{}, usagef("`ui-driver` options: --session NAME --cols N --rows N --remote ENDPOINT --launch-config PATH, or --socket PATH")
+			return uiDriverOptions{}, usagef("`--ui-driver` options: --session NAME --cols N --rows N --remote ENDPOINT --launch-config PATH, or --socket PATH")
 		}
 		if !strings.HasPrefix(name, "--") {
-			return uiDriverOptions{}, usagef("`ui-driver` does not accept positional arguments")
+			return uiDriverOptions{}, usagef("`--ui-driver` does not accept positional arguments")
 		}
 		args = args[1:]
 		value := func(flag string) (string, error) {
 			if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "--") {
-				return "", usagef("`ui-driver %s` requires a value", flag)
+				return "", usagef("`--ui-driver %s` requires a value", flag)
 			}
 			value := args[0]
 			args = args[1:]
@@ -183,7 +183,7 @@ func parseUIDriverArgs(args []string) (uiDriverOptions, error) {
 			}
 			options.launchConfig, launchSet = value, true
 		default:
-			return uiDriverOptions{}, usagef("unknown `ui-driver` option %q", name)
+			return uiDriverOptions{}, usagef("unknown `--ui-driver` option %q", name)
 		}
 	}
 	if socketSet && (sessionSet || colsSet || rowsSet || remoteSet || launchSet) {
@@ -222,7 +222,7 @@ func parseLaunchConfig(path string) (launchConfig, error) {
 	if err != nil {
 		return result, fmt.Errorf("vev: open launch config: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, launchConfigMaxBytes+1))
 	if err != nil {
 		return result, fmt.Errorf("vev: read launch config: %w", err)
@@ -302,9 +302,6 @@ func parseLaunchEndpoint(data []byte, remote bool) (launchEndpoint, error) {
 	env, ok := launchEnvironment(fields["env"])
 	if !ok {
 		return launchEndpoint{}, errors.New("vev: invalid launch environment")
-	}
-	if !remote && env["VEV_ENV"] != "" {
-		return launchEndpoint{}, errors.New("vev: launch environment cannot set reserved VEV_ENV")
 	}
 	return launchEndpoint{binary: binary, root: root, env: env}, nil
 }
@@ -672,7 +669,7 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 	if options.remote == "" {
 		// A headless named session creates a new local session; an omitted name
 		// retains the ordinary ephemeral attach intent.
-		intent := uint8(protocol.IntentEphemeral)
+		intent := protocol.IntentEphemeral
 		if options.session != "" {
 			intent = protocol.IntentNew
 		}
@@ -683,7 +680,7 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 		}
 		return errors.Join(runErr, cleanupErr)
 	}
-	intent := uint8(protocol.IntentEphemeral)
+	intent := protocol.IntentEphemeral
 	if options.session != "" {
 		intent = protocol.IntentAttach
 	}
@@ -770,15 +767,17 @@ func (l *configuredRemoteLaunches) cleanup(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	targets := make([]string, 0, len(l.attempted))
+	tokens := make(map[string]string, len(l.attempted))
 	for target := range l.attempted {
 		targets = append(targets, target)
+		tokens[target] = l.tokens[target]
 	}
 	l.mu.Unlock()
 	sort.Strings(targets)
 	var cleanupErr error
 	for _, target := range targets {
 		endpoint := l.config.remotes[target]
-		spec := sshstdio.BuildCommandForRemoteCleanup(target, endpoint.root, l.tokens[target], endpoint.binary, launchEnvironmentSliceForConfig(endpoint, l.config), uiRemoteCleanupCommand)
+		spec := sshstdio.BuildCommandForRemoteCleanup(target, endpoint.root, tokens[target], endpoint.binary, launchEnvironmentSliceForConfig(endpoint, l.config), uiRemoteCleanupCommand)
 		if err := sshstdio.RunRemoteCommand(ctx, spec); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("vev: clean remote launch endpoint: %w", err))
 		}
@@ -868,7 +867,7 @@ func waitForHeadlessPublication(ctx context.Context, ui *client.UI) (ports.UISna
 	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return ports.UISnapshot{}, errors.New("vev: headless attachment did not publish an initial view")
+			return ports.UISnapshot{}, fmt.Errorf("vev: headless attachment did not publish an initial view: %w", err)
 		}
 		return ports.UISnapshot{}, err
 	}
@@ -937,7 +936,7 @@ func (s *stdioStream) Close() error {
 
 // runAttachWithOptions is the composition path for ordinary interactive
 // clients. Observation is opt-in; the default path remains term.New().
-func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget string, options interactiveUIOptions) error {
+func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget string, options interactiveUIOptions) (retErr error) {
 	if !options.observe && !options.control && options.socket == "" {
 		return runAttach(ctx, intent, name, remoteTarget)
 	}
@@ -952,6 +951,13 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 	}
 	defer func() { _ = logCloser.Close() }()
 	clk := clock.New()
+	observer, observerCloser, err := newPerformanceTrace(clk)
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observerCloser != nil {
+		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
+	}
 	physical := term.NewWithFilesAndObservation(os.Stdin, os.Stdout, nil)
 	geometry, err := physical.Geometry()
 	if err != nil {
@@ -983,16 +989,16 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 			return err
 		}
 		fmt.Fprintln(os.Stderr, socketPath)
-		defer endpoint.Close()
+		defer func() { _ = endpoint.Close() }()
 	}
 	return runAttachWithDeps(ctx, intent, name, remoteTarget, "", log, runAttachDeps{
-		localDialer:             func() wire.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} },
-		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(nil),
+		localDialer:             func() wire.Dialer { return localDaemonDialer{dir: ipc.SocketDir(), observer: observer} },
+		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(observer),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
 		runClient:               runClientWithDeps,
 		createDetached:          createDetachedLocalSession,
 		clipboard:               clipboard.New(),
-		runtimeObserver:         nil,
+		runtimeObserver:         observer,
 		ui:                      ui,
 		terminal:                func() ports.Terminal { return observedTerminal{Terminal: physical, UIOutputTransaction: mirror} },
 		clock:                   func() ports.Clock { return clk },

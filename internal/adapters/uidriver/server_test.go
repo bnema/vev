@@ -47,7 +47,7 @@ func TestServeCaptureProceedsWhileWaitIsPending(t *testing.T) {
 	service.EXPECT().Capture("a").Return(testSnapshot(), nil).Once()
 	server := New(service, nil)
 	host, peer := net.Pipe()
-	defer peer.Close()
+	defer func() { _ = peer.Close() }()
 	require.NoError(t, peer.SetDeadline(time.Now().Add(2*time.Second)))
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(context.Background(), host, testReady(true)) }()
@@ -89,7 +89,7 @@ func TestServeCaptureProceedsWhileWaitIsPending(t *testing.T) {
 func TestServeReadOnlyRejectsBeforeServiceAction(t *testing.T) {
 	service := portsmocks.NewMockUIService(t)
 	host, peer := net.Pipe()
-	defer peer.Close()
+	defer func() { _ = peer.Close() }()
 	require.NoError(t, peer.SetDeadline(time.Now().Add(2*time.Second)))
 	done := make(chan error, 1)
 	go func() { done <- New(service, nil).Serve(context.Background(), host, testReady(false)) }()
@@ -139,7 +139,7 @@ func TestServeWriteDeadlineClosesNonreadingStream(t *testing.T) {
 	timer.EXPECT().Stop().Return(true).Once()
 	server := New(nil, clock)
 	host, peer := net.Pipe()
-	defer peer.Close()
+	defer func() { _ = peer.Close() }()
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(context.Background(), host, testReady(false)) }()
 	select {

@@ -648,6 +648,8 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				sendErr = sendUIReceiptLocked(marks.attachmentEffect, sendTransport, receipt)
 				if sendErr == nil {
 					rc.finishUIFence(state.lease, pending)
+				} else {
+					rc.failUIFence(state.lease, pending)
 				}
 			}
 		}

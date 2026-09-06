@@ -159,8 +159,8 @@ func TestUIFenceFailedPublicationOrReceiptDoesNotConfirm(t *testing.T) {
 				rc.mu.Lock()
 				pending := lease.pendingUIFence
 				rc.mu.Unlock()
-				require.NotNil(t, pending, "failed receipt send cannot finalize its slot")
-				require.True(t, pending.retiring)
+				require.Nil(t, pending, "failed receipt send must release its slot")
+				require.False(t, rc.needsUIFence(lease, rc.captureUIFence(lease)))
 			}
 			require.Empty(t, drainAllFrames(sends), "no successful receipt after a failed publication/send")
 		})

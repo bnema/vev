@@ -125,9 +125,10 @@ usage:
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
   vev cmd <command>   run a control command (vev cmd --help)
-  vev ui-driver       drive a headless attachment over JSONL
   vev --ui-observe    expose passive observation for this interactive client
+                      (optional: --ui-socket PATH)
   vev --ui-control    expose observation and input control for this client
+                      (optional: --ui-socket PATH)
   vev --help          show this help
   vev --version       show version`
 
@@ -170,6 +171,13 @@ func parseArgs(args []string) (command, error) {
 	if len(args) == 0 {
 		return command{kind: kindAttach, intent: protocol.IntentEphemeral}, nil
 	}
+	if args[0] == "--ui-driver" {
+		options, err := parseUIDriverArgs(args[1:])
+		if err != nil {
+			return command{}, err
+		}
+		return command{kind: kindUIDriver, uiDriver: options}, nil
+	}
 
 	var uiObserve, uiControl bool
 	var uiSocket string
@@ -200,54 +208,36 @@ parsedUIFlags:
 	if len(args) == 0 {
 		return command{kind: kindAttach, intent: protocol.IntentEphemeral, uiObserve: uiObserve, uiControl: uiControl, uiSocket: uiSocket}, nil
 	}
+	if (uiObserve || uiControl || uiSocket != "") && args[0] != "new" && args[0] != "attach" && args[0] != "a" {
+		return command{}, usagef("UI flags are only valid for an attach command")
+	}
 
 	switch args[0] {
 	case "--daemon":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		return command{kind: kindDaemon}, nil
 	case "--daemon-launcher":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		return command{kind: kindDaemonLauncher}, nil
 	case "_stdio":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		if len(args) != 1 {
 			return command{}, usagef("`_stdio` does not accept a session name")
 		}
 		return command{kind: kindStdio}, nil
 	case "_udp-bootstrap":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		if len(args) != 1 {
 			return command{}, usagef("`_udp-bootstrap` does not accept a session name")
 		}
 		return command{kind: kindUDPBootstrap}, nil
 	case "_udp-proxy":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		if len(args) != 1 {
 			return command{}, usagef("`_udp-proxy` does not accept a session name")
 		}
 		return command{kind: kindUDPProxy}, nil
 	case "_remote-preview":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		if len(args) != 2 || args[1] == "" {
 			return command{}, usagef("`_remote-preview` requires one encoded request")
 		}
 		return command{kind: kindRemotePreview, remotePreviewPayload: args[1]}, nil
 	case uiRemoteCleanupCommand:
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		if len(args) != 1 {
 			return command{}, usagef("`%s` does not accept arguments", uiRemoteCleanupCommand)
 		}
@@ -293,37 +283,16 @@ parsedUIFlags:
 		cmd.uiSocket = interactive.socket
 		return cmd, nil
 	case "ls", "list":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		return parseListArgs(args[1:])
 	case "host":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		return parseHostArgs(args[1:])
 	case "cmd":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		invocation, err := parseCmdArgs(args[1:])
 		if err != nil {
 			return command{}, err
 		}
 		return command{kind: kindCmd, cmd: invocation}, nil
-	case "ui-driver":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("interactive UI flags cannot be combined with `ui-driver`")
-		}
-		options, err := parseUIDriverArgs(args[1:])
-		if err != nil {
-			return command{}, err
-		}
-		return command{kind: kindUIDriver, uiDriver: options}, nil
 	case "kill":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`kill` requires a session name, --all, or --daemon")
 		}
@@ -345,14 +314,8 @@ parsedUIFlags:
 			return command{kind: kindKill, name: args[1]}, nil
 		}
 	case "-h", "--help", "help":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		return command{kind: kindHelp}, nil
 	case "--version", "version":
-		if uiObserve || uiControl || uiSocket != "" {
-			return command{}, usagef("UI flags are only valid for an attach command")
-		}
 		return command{kind: kindVersion}, nil
 	default:
 		return command{}, usagef("unknown command %q", args[0])
@@ -1250,6 +1213,9 @@ func runUIRemoteCleanup(ctx context.Context) error {
 	root := os.Getenv("VEV_ENV_ROOT")
 	if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
 		return errors.New("vev: remote UI cleanup requires a private absolute launch root")
+	}
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir == "" || runtimeDir != filepath.Join(root, "runtime") {
+		return errors.New("vev: remote UI cleanup requires the launch runtime directory")
 	}
 	if err := requestDaemonStop(ctx); err != nil && !errors.Is(err, errDaemonNotRunning) {
 		return err

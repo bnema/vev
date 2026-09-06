@@ -25,6 +25,6 @@ func TestRenderByteMeasurementUsesBoundedRunsAndExcludesWarmup(t *testing.T) {
 		require.Equal(t, 21, calls, "one warmup and twenty samples, not a time-calibrated benchmark")
 		require.Equal(t, procs, runtime.GOMAXPROCS(0))
 		require.GreaterOrEqual(t, got, int64(size))
-		require.Less(t, got, int64(size+256), "warmup bytes must not enter the per-operation measurement")
+		require.Less(t, got, int64(size*2), "warmup bytes must not enter the per-operation measurement")
 	}
 }

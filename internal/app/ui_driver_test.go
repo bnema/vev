@@ -23,6 +23,19 @@ func TestParseUIDriverArgs(t *testing.T) {
 		{name: "socket", args: []string{"--socket", "/tmp/ui.sock"}, want: uiDriverOptions{socket: "/tmp/ui.sock", cols: uiDriverDefaultColumns, rows: uiDriverDefaultRows}, wantSocket: true},
 		{name: "socket conflicts", args: []string{"--socket", "/tmp/ui.sock", "--rows", "20"}, wantErr: true},
 		{name: "relative socket", args: []string{"--socket", "ui.sock"}, wantErr: true},
+		{name: "duplicate socket", args: []string{"--socket", "/tmp/a.sock", "--socket", "/tmp/b.sock"}, wantErr: true},
+		{name: "duplicate session", args: []string{"--session", "one", "--session", "two"}, wantErr: true},
+		{name: "duplicate columns", args: []string{"--cols", "80", "--cols", "100"}, wantErr: true},
+		{name: "duplicate rows", args: []string{"--rows", "24", "--rows", "30"}, wantErr: true},
+		{name: "duplicate remote", args: []string{"--remote", "one.example", "--remote", "two.example"}, wantErr: true},
+		{name: "duplicate launch config", args: []string{"--launch-config", "/tmp/one.json", "--launch-config", "/tmp/two.json"}, wantErr: true},
+		{name: "missing socket", args: []string{"--socket"}, wantErr: true},
+		{name: "missing session", args: []string{"--session"}, wantErr: true},
+		{name: "missing columns", args: []string{"--cols"}, wantErr: true},
+		{name: "missing rows", args: []string{"--rows"}, wantErr: true},
+		{name: "missing remote", args: []string{"--remote"}, wantErr: true},
+		{name: "missing launch config", args: []string{"--launch-config"}, wantErr: true},
+		{name: "NUL launch config", args: []string{"--launch-config", "/tmp/\x00config.json"}, wantErr: true},
 		{name: "unknown", args: []string{"--nope"}, wantErr: true},
 		{name: "positional", args: []string{"work"}, wantErr: true},
 		{name: "bad geometry", args: []string{"--cols", "0"}, wantErr: true},
@@ -49,7 +62,15 @@ func TestParseArgsUIOptionsAreAttachOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, kindAttach, command.kind)
 	require.True(t, command.uiControl)
-	require.True(t, command.uiObserve == false)
+	require.False(t, command.uiObserve)
+	driver, err := parseArgs([]string{"--ui-driver", "--session", "work"})
+	require.NoError(t, err)
+	require.Equal(t, kindUIDriver, driver.kind)
+	require.Equal(t, "work", driver.uiDriver.session)
+	_, err = parseArgs([]string{"ui-driver"})
+	require.Error(t, err)
+	_, err = parseArgs([]string{"--ui-driver", "--ui-observe"})
+	require.Error(t, err)
 	trailing, err := parseArgs([]string{"attach", "work", "--ui-observe", "--ui-socket", "/tmp/ui.sock"})
 	require.NoError(t, err)
 	require.True(t, trailing.uiObserve)
@@ -158,4 +179,18 @@ func TestConfiguredRemoteDialerRejectsUnlistedEndpoint(t *testing.T) {
 	require.Equal(t, ports.UIErrEndpointNotConfigured, uiErr.Code)
 	_, err = factory("user@example.com", "work", "unknown", nil)
 	require.Error(t, err)
+}
+
+func TestRunUIRemoteCleanupRequiresMatchingLaunchRuntime(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "launch-root")
+	for name, runtimeDir := range map[string]string{
+		"missing":   "",
+		"different": filepath.Join(root, "other"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("VEV_ENV_ROOT", root)
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+			require.Error(t, runUIRemoteCleanup(t.Context()))
+		})
+	}
 }

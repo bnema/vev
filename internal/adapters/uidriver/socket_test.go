@@ -14,6 +14,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -21,8 +22,7 @@ import (
 func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 	service := portsmocks.NewMockUIService(t)
 	service.EXPECT().Capture("attachment").Return(testSnapshot(), nil).Once()
-	directory := t.TempDir()
-	require.NoError(t, os.Chmod(directory, 0o700))
+	directory := shortDir(t)
 	path := filepath.Join(directory, "ui.sock")
 	server := New(service, nil)
 	endpoint, err := ListenUnix(path, server, func() Ready {
@@ -30,11 +30,12 @@ func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), fileMode(t, path))
-	defer endpoint.Close()
+	defer func() { _ = endpoint.Close() }()
 
-	conn, err := net.DialTimeout("unix", path, time.Second)
+	dialer := &net.Dialer{Timeout: time.Second}
+	conn, err := dialer.DialContext(context.Background(), "unix", path)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	decoder := json.NewDecoder(bufio.NewReader(conn))
 	var ready envelope
 	require.NoError(t, decoder.Decode(&ready))
@@ -52,7 +53,7 @@ func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 }
 
 func TestListenUnixRejectsUnsafeParentSymlink(t *testing.T) {
-	root := t.TempDir()
+	root := shortDir(t)
 	target := filepath.Join(root, "target")
 	require.NoError(t, os.Mkdir(target, 0o700))
 	link := filepath.Join(root, "link")
@@ -62,7 +63,7 @@ func TestListenUnixRejectsUnsafeParentSymlink(t *testing.T) {
 }
 
 func TestListenUnixRejectsExistingPathWithoutRemovingIt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ui.sock")
+	path := filepath.Join(shortDir(t), "ui.sock")
 	require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
 	_, err := ListenUnix(path, New(nil, nil), nil)
 	require.Error(t, err)
@@ -72,11 +73,11 @@ func TestListenUnixRejectsExistingPathWithoutRemovingIt(t *testing.T) {
 }
 
 func TestUnixEndpointClosePreservesReplacementPath(t *testing.T) {
-	directory := t.TempDir()
-	require.NoError(t, os.Chmod(directory, 0o700))
+	directory := shortDir(t)
 	path := filepath.Join(directory, "ui.sock")
 	endpoint, err := ListenUnix(path, New(nil, nil), nil)
 	require.NoError(t, err)
+	defer func() { _ = endpoint.Close() }()
 
 	replacement := filepath.Join(directory, "replacement")
 	require.NoError(t, os.Rename(path, replacement))
@@ -105,8 +106,8 @@ func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
 	server := New(service, nil)
 	firstHost, firstPeer := net.Pipe()
 	secondHost, secondPeer := net.Pipe()
-	defer firstPeer.Close()
-	defer secondPeer.Close()
+	defer func() { _ = firstPeer.Close() }()
+	defer func() { _ = secondPeer.Close() }()
 	firstDone := make(chan error, 1)
 	secondDone := make(chan error, 1)
 	go func() { firstDone <- server.Serve(context.Background(), firstHost, testReady(true)) }()
@@ -130,8 +131,8 @@ func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
 	close(release)
 	processed := readEnvelope(t, firstDecoder)
 	require.Nil(t, processed.Error)
-	firstPeer.Close()
-	secondPeer.Close()
+	require.NoError(t, firstPeer.Close())
+	require.NoError(t, secondPeer.Close())
 	select {
 	case <-firstDone:
 	case <-time.After(time.Second):
@@ -145,12 +146,11 @@ func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
 }
 
 func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
-	directory := t.TempDir()
-	require.NoError(t, os.Chmod(directory, 0o700))
+	directory := shortDir(t)
 	path := filepath.Join(directory, "ui.sock")
 	endpoint, err := ListenUnix(path, New(nil, nil), func() Ready { return testReady(false) })
 	require.NoError(t, err)
-	defer endpoint.Close()
+	defer func() { _ = endpoint.Close() }()
 
 	var output bytes.Buffer
 	require.NoError(t, Bridge(context.Background(), path, strings.NewReader(""), &output))
@@ -158,6 +158,15 @@ func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
 	var ready envelope
 	require.NoError(t, decoder.Decode(&ready))
 	require.Zero(t, ready.ID)
+}
+
+func shortDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "vev")
+	require.NoError(t, err)
+	require.NoError(t, safedir.EnsurePrivate(directory))
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(directory)) })
+	return directory
 }
 
 func fileMode(t *testing.T, path string) os.FileMode {

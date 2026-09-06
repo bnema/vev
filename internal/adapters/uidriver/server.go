@@ -110,7 +110,7 @@ func (s *Server) Serve(ctx context.Context, stream io.ReadWriteCloser, ready Rea
 		s.connections--
 		s.mu.Unlock()
 	}()
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	serving, cancelServing := context.WithCancel(ctx)
 	defer cancelServing()

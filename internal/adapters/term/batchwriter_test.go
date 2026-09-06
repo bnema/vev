@@ -149,7 +149,10 @@ func TestBatchWriter_ObservesOnlySuccessfulPhysicalWrites(t *testing.T) {
 	observation := &recordingObservation{}
 	bw := newBatchWriterWithObservation(rw, 4, observation)
 
-	if _, err := bw.WriteString("abcdefgh"); err != nil {
+	if _, err := bw.WriteString("abc"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bw.WriteString("defgh"); err != nil {
 		t.Fatal(err)
 	}
 	if got := string(observation.writes[0]); got != "abcd" {

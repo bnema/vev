@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -61,19 +62,31 @@ func (u *UI) WaitForSnapshot(ctx context.Context, match func(ports.UISnapshot) b
 	if match == nil {
 		return ports.UISnapshot{}, ports.ErrUIUnavailable
 	}
+	var lastSnapshotErr error
 	for {
 		if err := ctx.Err(); err != nil {
+			if lastSnapshotErr != nil {
+				return ports.UISnapshot{}, errors.Join(err, lastSnapshotErr)
+			}
 			return ports.UISnapshot{}, err
 		}
 		snapshot, err := u.state.Snapshot()
-		if err == nil && match(snapshot) {
-			return snapshot, nil
+		if err == nil {
+			lastSnapshotErr = nil
+			if match(snapshot) {
+				return snapshot, nil
+			}
+		} else {
+			lastSnapshotErr = err
 		}
 		u.mu.Lock()
 		changed := u.changed
 		u.mu.Unlock()
 		select {
 		case <-ctx.Done():
+			if lastSnapshotErr != nil {
+				return ports.UISnapshot{}, errors.Join(ctx.Err(), lastSnapshotErr)
+			}
 			return ports.UISnapshot{}, ctx.Err()
 		case <-changed:
 		}

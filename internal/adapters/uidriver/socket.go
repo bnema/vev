@@ -9,13 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/pkg/safedir"
 )
 
 const (
-	unixSocketMode = 0o600
-	unixSocketMax  = 107
+	unixSocketMode   = 0o600
+	unixSocketMax    = 107
+	acceptRetryDelay = 10 * time.Millisecond
 )
 
 // UnixEndpoint exposes one already-bound attachment. It never creates or
@@ -65,7 +67,9 @@ func ListenUnix(path string, server *Server, ready func() Ready) (*UnixEndpoint,
 	boundInfo, infoErr := os.Lstat(path)
 	cleanup := func(cleanErr error) (*UnixEndpoint, error) {
 		_ = listener.Close()
-		removeOwnedSocket(path, boundInfo)
+		if removeErr := removeOwnedSocket(path, boundInfo); removeErr != nil {
+			cleanErr = errors.Join(cleanErr, removeErr)
+		}
 		return nil, cleanErr
 	}
 	if infoErr != nil {
@@ -141,6 +145,11 @@ func (e *UnixEndpoint) accept() {
 			if e.ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-time.After(acceptRetryDelay):
+			}
 			continue
 		}
 		if !peerIsCurrentUser(conn) {
@@ -209,7 +218,7 @@ func Bridge(ctx context.Context, path string, input io.Reader, output io.Writer)
 	if err != nil {
 		return fmt.Errorf("uidriver: connect socket: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	inputDone := make(chan error, 1)

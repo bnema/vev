@@ -44,11 +44,15 @@ func TestOutputApplyCapturedViewContext(t *testing.T) {
 				output.Context = nil
 			}
 			next, accepted := initial.next(output)
-			require.Equal(t, scenario == "delta" || scenario == "plain side effect", accepted)
-			if scenario == "delta" {
+			switch scenario {
+			case "delta":
+				require.True(t, accepted)
 				require.Equal(t, context, next.context)
-			} else if scenario == "plain side effect" {
+			case "plain side effect":
+				require.True(t, accepted)
 				require.Equal(t, initial, next, "query/cleanup bytes cannot overwrite committed view identity")
+			default:
+				require.False(t, accepted)
 			}
 		})
 	}

@@ -304,6 +304,10 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 	tb.mu.Unlock()
 	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
+	attachmentTransports := make(map[*attachedClient]transportSnapshot, len(attachments))
+	for _, ac := range attachments {
+		attachmentTransports[ac] = ac.transportSnapshot()
+	}
 
 	if finalPane {
 		for _, ac := range attachments {
@@ -314,11 +318,33 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		if err := d.closeTabLocked(sess, tb, true); err != nil {
 			return true
 		}
-		// A concurrent detach/rebind can invalidate killSession's attachment
-		// snapshot without committing teardown. Keep the EOF owner until tab
-		// closure actually revokes it, so the reader retries the current owner
-		// rather than abandoning hidden PTYs in a half-closed session.
-		return p.owner.Load() == nil
+		if p.owner.Load() == nil {
+			return true
+		}
+		// A successful no-op teardown means participant, gate, or lifecycle
+		// validation rejected the mutation without changing either the tab list
+		// or the pane owner. Retrying that exact state would spin forever; only
+		// retry when the teardown made observable progress that can be consumed
+		// by the next owner resolution.
+		d.mu.Lock()
+		sessionCurrent := d.sessions[sess.id] == sess
+		sess.mu.Lock()
+		tabCurrent := slices.Contains(sess.tabs, tb)
+		attachmentsChanged := len(sess.attachments) != len(attachmentTransports)
+		if !attachmentsChanged {
+			for ac, transport := range attachmentTransports {
+				if _, attached := sess.attachments[ac]; !attached || !ac.transportSnapshotCurrent(transport) {
+					attachmentsChanged = true
+					break
+				}
+			}
+		}
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		if sessionCurrent && tabCurrent && !attachmentsChanged {
+			return true
+		}
+		return false
 	}
 	sess.geometry.applyTabLayout(d, sess, tb)
 	for _, ac := range attachments {

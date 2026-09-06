@@ -93,7 +93,7 @@ func TestHeadlessDriverUsesRealRunnerAndDaemon(t *testing.T) {
 
 	writeDriverTestRequest(t, clientSide, map[string]any{
 		"version": 1, "id": 4, "op": "text", "attachment": readyResult.Attachment,
-		"generation": readyResult.Generation, "text": "printf HEADLESS_OK",
+		"generation": readyResult.Generation, "text": "printf 'HEADLESS_%s' OK",
 	})
 	textAction := readDriverTestEnvelope(t, decoder)
 	require.Nil(t, textAction.Error)

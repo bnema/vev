@@ -47,8 +47,8 @@ func (f DialerFactory) DialerForRemote(target, session string, mode TransportMod
 // DialerForRemoteWithLaunch selects the same normal carriage while using the
 // explicit endpoint executable/environment for remote child startup.
 func (f DialerFactory) DialerForRemoteWithLaunch(target, session string, mode TransportMode, log *slog.Logger, launch *EndpointLaunch) (wire.Dialer, error) {
-	if launch != nil && (launch.Root == "" || launch.OwnerToken == "") {
-		return nil, errors.New("vev: isolated remote launch requires a root owner")
+	if launch != nil && (launch.Binary == "" || launch.Root == "" || launch.OwnerToken == "") {
+		return nil, errors.New("vev: isolated remote launch requires a binary, root, and owner")
 	}
 	return f.dialerForRemote(target, session, mode, log, launch)
 }

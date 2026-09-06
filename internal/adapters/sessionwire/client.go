@@ -247,6 +247,10 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 		if m != nil {
 			return encodeClient(*m)
 		}
+	case *protocol.UIFence:
+		if m != nil {
+			return encodeClient(*m)
+		}
 	case *protocol.RemotePreviewRequest:
 		if m != nil {
 			return encodeClient(*m)

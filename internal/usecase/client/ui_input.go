@@ -82,7 +82,7 @@ func encodeUIKey(key string, applicationCursor bool) (string, bool) {
 	case "PageDown":
 		return "\x1b[6~", true
 	}
-	final := ""
+	var final string
 	switch key {
 	case "Up":
 		final = "A"

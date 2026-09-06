@@ -114,12 +114,43 @@ func TestTerminalPublishesGeometryChangesImmediatelyOutsideOutputTransaction(t *
 	}
 }
 
+func TestTerminalRecoversAfterOversizedGeometry(t *testing.T) {
+	terminal := newTestTerminal(t, 4, 2)
+	terminal.ObserveTerminalResize(domain.Geometry{Size: domain.Size{Cols: MaxColumns + 1, Rows: 2}})
+	_, err := terminal.Snapshot()
+	var uiErr *ports.UIError
+	if !errors.As(err, &uiErr) || uiErr.Code != ports.UIErrCaptureTooLarge {
+		t.Fatalf("oversized Snapshot() error = %v, want capture_too_large", err)
+	}
+
+	terminal.ObserveTerminalResize(domain.Geometry{Size: domain.Size{Cols: 6, Rows: 3}})
+	snapshot, err := terminal.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Columns != 6 || snapshot.Rows != 3 || snapshot.Revision == 0 {
+		t.Fatalf("recovered resize snapshot = %#v", snapshot)
+	}
+}
+
+func TestTerminalSignalsCaptureUnavailable(t *testing.T) {
+	terminal := newTestTerminal(t, 4, 2)
+	terminal.BeginOutput(ports.UIContext{})
+	_, _ = terminal.Write([]byte("data"))
+	terminal.EndOutput(false)
+	select {
+	case <-terminal.Changes():
+	case <-time.After(time.Second):
+		t.Fatal("capture unavailability did not signal Changes")
+	}
+}
+
 func TestTerminalFailedTransactionMakesCaptureUnavailable(t *testing.T) {
 	terminal := newTestTerminal(t, 4, 2)
 	terminal.BeginOutput(ports.UIContext{})
 	_, _ = terminal.Write([]byte("data"))
 	terminal.EndOutput(false)
-	if _, err := terminal.Snapshot(); err != ports.ErrUIUnavailable {
+	if _, err := terminal.Snapshot(); !errors.Is(err, ports.ErrUIUnavailable) {
 		t.Fatalf("Snapshot error = %v", err)
 	}
 }
@@ -150,9 +181,16 @@ func TestMirrorReportsOversizedGeometryWithoutRejectingTheTerminal(t *testing.T)
 	}
 	defer validMirror.Close()
 	validMirror.ObserveTerminalResize(domain.Geometry{Size: domain.Size{Cols: MaxColumns + 1, Rows: 2}})
+	if _, err := validMirror.Write([]byte("output while oversized")); err != nil {
+		t.Fatalf("oversized mirror Write() error = %v", err)
+	}
+	if err := validMirror.Flush(); err != nil {
+		t.Fatalf("oversized mirror Flush() error = %v", err)
+	}
+	validMirror.ObserveTerminalResize(domain.Geometry{Size: domain.Size{Cols: 4, Rows: 2}})
 	_, err = validMirror.Snapshot()
 	if !errors.As(err, &uiErr) || uiErr.Code != ports.UIErrCaptureTooLarge {
-		t.Fatalf("resized Snapshot() error = %v, want capture_too_large", err)
+		t.Fatalf("recovered mirror Snapshot() error = %v, want capture_too_large", err)
 	}
 }
 

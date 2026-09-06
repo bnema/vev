@@ -1,13 +1,13 @@
 # UI driver
 
-`vev ui-driver` exposes one opt-in attachment as a bounded JSON Lines stream. It is intended for tests and local automation that need the rendered terminal, not a second terminal implementation.
+`vev --ui-driver` exposes one opt-in attachment as a bounded JSON Lines stream. It is intentionally a hidden headless entry point for tests and local automation that need the rendered terminal, not a second terminal implementation.
 
 ## Headless attachment
 
 Start a new numbered session with the default 80x24 viewport:
 
 ```sh
-vev ui-driver
+vev --ui-driver
 ```
 
 The first line on stdout is the attachment discovery response. It is emitted only after the client has applied and published its initial full view:
@@ -28,9 +28,10 @@ Input targets the exact current `generation`:
 
 ```json
 {"version":1,"id":2,"op":"keys","attachment":"<opaque-handle>","generation":1,"keys":["Alt+Space"]}
-{"version":1,"id":3,"op":"text","attachment":"<opaque-handle>","generation":1,"text":"printf 'driver ok'"}
-{"version":1,"id":4,"op":"keys","attachment":"<opaque-handle>","generation":1,"keys":["Enter"]}
-{"version":1,"id":5,"op":"wait","attachment":"<opaque-handle>","after_action":2,"expect":{"text_contains":"driver ok"}}
+{"version":1,"id":3,"op":"keys","attachment":"<opaque-handle>","generation":1,"keys":["Escape"]}
+{"version":1,"id":4,"op":"text","attachment":"<opaque-handle>","generation":1,"text":"printf 'driver ok'"}
+{"version":1,"id":5,"op":"keys","attachment":"<opaque-handle>","generation":1,"keys":["Enter"]}
+{"version":1,"id":6,"op":"wait","attachment":"<opaque-handle>","after_action":5,"expect":{"text_contains":"driver ok"}}
 ```
 
 `keys` accepts only the documented finite grammar: `Enter`, `Escape`, `Tab`, `Backspace`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Space`, one printable ASCII character, `Ctrl+` with the supported ASCII control set, and `Alt+` followed by one supported unmodified ASCII character. Cursor navigation follows the terminal's application-cursor mode. Raw escape notation, keypad keys, combined modifiers, and unknown names are rejected.
@@ -72,7 +73,7 @@ EOF detaches this driver attachment and closes its access stream. It does not ki
 Without `--launch-config`, normal local daemon startup and inherited client environment policy are unchanged. The option is the only way to request an explicit isolated endpoint:
 
 ```sh
-vev ui-driver --session test --cols 100 --rows 30 \
+vev --ui-driver --session test --cols 100 --rows 30 \
   --launch-config /absolute/path/launch.json
 ```
 
@@ -129,7 +130,7 @@ The socket parent is private (`0700`) and the socket is private (`0600`). On Lin
 The bridge form connects JSONL stdio to an already-running opted-in client; it does not create another attachment:
 
 ```sh
-vev ui-driver --socket /absolute/private/ui.sock
+vev --ui-driver --socket /absolute/private/ui.sock
 ```
 
 The physical terminal remains authoritative for geometry and terminal query responses. Mirroring observes bytes at the serialized terminal writer and publishes only after a successful physical flush. Capture and wait never write to the terminal, request a redraw, change focus, claim PTY geometry, send Resize, or acknowledge protocol output independently. If mirroring fails, capture becomes unavailable while the interactive client continues running. Disconnecting an observer leaves the interactive attachment and its shells running.

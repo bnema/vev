@@ -30,9 +30,12 @@ func testViewContextGolden() []byte {
 
 func TestUIWireRoundTripsAndRejectsTruncation(t *testing.T) {
 	tests := []struct {
-		name      string
-		marshal   func() ([]byte, error)
-		unmarshal func([]byte) error
+		name             string
+		marshal          func() ([]byte, error)
+		unmarshal        func([]byte) error
+		mutate           func([]byte)
+		wantMarshalError bool
+		wantUnmarshalErr bool
 	}{
 		{
 			name:      "fence",
@@ -60,11 +63,40 @@ func TestUIWireRoundTripsAndRejectsTruncation(t *testing.T) {
 			},
 			unmarshal: func(data []byte) error { _, err := UnmarshalUIViewUpdate(data); return err },
 		},
+		{
+			name: "view update zero state marshal",
+			marshal: func() ([]byte, error) {
+				return MarshalUIViewUpdate(protocol.UIViewUpdate{Epoch: 1, Context: testViewContext()})
+			},
+			wantMarshalError: true,
+		},
+		{
+			name: "view update zero state wire",
+			marshal: func() ([]byte, error) {
+				return MarshalUIViewUpdate(protocol.UIViewUpdate{Epoch: 1, State: 1, Context: testViewContext()})
+			},
+			unmarshal:        func(data []byte) error { _, err := UnmarshalUIViewUpdate(data); return err },
+			mutate:           func(data []byte) { clear(data[8:16]) },
+			wantUnmarshalErr: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			encoded, err := test.marshal()
+			if test.wantMarshalError {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
+			if test.mutate != nil {
+				test.mutate(encoded)
+				if test.wantUnmarshalErr {
+					require.Error(t, test.unmarshal(encoded))
+				} else {
+					require.NoError(t, test.unmarshal(encoded))
+				}
+				return
+			}
 			require.NoError(t, test.unmarshal(encoded))
 			for size := range len(encoded) {
 				require.Error(t, test.unmarshal(encoded[:size]), "prefix %d", size)

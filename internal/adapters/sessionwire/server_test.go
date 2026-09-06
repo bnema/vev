@@ -114,6 +114,8 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	welcome := protocol.Welcome{SessionID: "session"}
 	errorMessage := protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}
 	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}
+	receipt := protocol.UIReceipt{ActionID: 7, Epoch: 1, State: 1, ViewPublication: 1, Outcome: protocol.UIReceiptProcessed}
+	viewUpdate := protocol.UIViewUpdate{Epoch: 1, State: 1, Context: *testUIOutputContext()}
 	detached := protocol.Detached{Reason: protocol.ReasonDetach}
 	pong := protocol.Pong{}
 	sessions := protocol.Sessions{}
@@ -130,6 +132,10 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	parkedResponse := protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady}
 
 	outputPayload, err := wire.MarshalOutput(output)
+	require.NoError(t, err)
+	receiptPayload, err := wire.MarshalUIReceipt(receipt)
+	require.NoError(t, err)
+	viewUpdatePayload, err := wire.MarshalUIViewUpdate(viewUpdate)
 	require.NoError(t, err)
 	identityPayload, err := wire.MarshalCommittedRouteIdentity(identity)
 	require.NoError(t, err)
@@ -153,6 +159,10 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 		{name: "welcome", message: welcome, typeID: wire.MsgWelcome, payload: wire.MarshalWelcome(welcome)},
 		{name: "error", message: errorMessage, typeID: wire.MsgError, payload: wire.MarshalErrorMsg(errorMessage)},
 		{name: "output", message: output, typeID: wire.MsgOutput, payload: outputPayload},
+		{name: "receipt", message: receipt, typeID: wire.MsgUIReceipt, payload: receiptPayload},
+		{name: "receipt pointer", message: &receipt, typeID: wire.MsgUIReceipt, payload: receiptPayload},
+		{name: "view update", message: viewUpdate, typeID: wire.MsgUIViewUpdate, payload: viewUpdatePayload},
+		{name: "view update pointer", message: &viewUpdate, typeID: wire.MsgUIViewUpdate, payload: viewUpdatePayload},
 		{name: "detached", message: detached, typeID: wire.MsgDetached, payload: wire.MarshalDetached(detached)},
 		{name: "pong", message: pong, typeID: wire.MsgPong, payload: wire.MarshalPong(pong)},
 		{name: "sessions", message: sessions, typeID: wire.MsgSessions, payload: wire.MarshalSessions(sessions)},

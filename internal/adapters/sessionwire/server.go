@@ -332,6 +332,14 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 		if m != nil {
 			return encodeServer(*m)
 		}
+	case *protocol.UIReceipt:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.UIViewUpdate:
+		if m != nil {
+			return encodeServer(*m)
+		}
 	case *protocol.Detached:
 		if m != nil {
 			return encodeServer(*m)
