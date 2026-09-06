@@ -340,12 +340,14 @@ func assertChildEnvironment(t *testing.T, tr wire.Transport, p *pump, sz domain.
 	command := "printf '\\033[2J\\033[H'; printf 'VEV_TEST_ENV=%s SHELL=%s XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=%s TERM=%s COLORTERM=%s TERM_PROGRAM=%s VEV_PREFIX=%.24s\\n' \"$VEV_TEST_ENV\" \"${SHELL##*/}\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$TERM\" \"$COLORTERM\" \"$TERM_PROGRAM\" \"$VEV\"\n"
 	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(command)})}))
 	text := awaitScreenText(t, p, sz, "TERM_PROGRAM=vev")
+	// The concrete PTY adapter selects the profile from host terminfo. Exact
+	// direct/fallback behavior is covered by the adapter's hermetic tests.
+	require.Regexp(t, `TERM=xterm-(direct|256color)\s`, text)
 	for _, want := range []string{
 		"VEV_TEST_ENV=" + wantTestEnv,
 		"SHELL=" + filepath.Base(wantShell),
 		"XDG_RUNTIME_DIR=" + wantRuntimeDir,
 		"WAYLAND_DISPLAY=" + wantWayland,
-		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=vev",
 		"VEV_PREFIX=session=environment,tab=",
