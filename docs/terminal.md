@@ -2,9 +2,45 @@
 
 ## Color
 
-Panes always receive vev's stable compatibility contract: `TERM=xterm-256color`, `COLORTERM=truecolor`, and `TERM_PROGRAM=vev`. This contract does not mirror the terminal attached outside vev.
+Panes receive `TERM=xterm-direct` when the pane host can look up that terminfo entry, otherwise `TERM=xterm-256color`. Both profiles receive `COLORTERM=truecolor` and `TERM_PROGRAM=vev`. The profile describes vev's virtual terminal, not the terminal attached outside vev.
+
+Before each PTY launch, vev runs `infocmp -x xterm-direct` on the daemon's host with the child's environment and working directory. This honors terminfo search settings such as `TERMINFO`, `TERMINFO_DIRS`, and `HOME`. The helper is resolved through the daemon's `PATH`. A missing helper, failed lookup, or one-second probe timeout selects the 256-color compatibility profile. Existing panes keep their original environment; newly opened or restored panes check again.
+
+`xterm-direct` advertises 16,777,216 colors through terminfo and uses direct RGB color setters. With `xterm-256color`, applications need to recognize `COLORTERM=truecolor` or otherwise enable RGB output; `tput colors` reports only the entry's 256 indexed colors.
 
 Each attachment independently detects its output color support from terminal environment signals. vev preserves RGB pane state and converts it to the xterm 256-color palette only for attachments that do not advertise truecolor. An attachment reporting a 256-color terminal receives a one-time warning before its first paint. Environment signals are advisory—especially through nested multiplexers—and do not advertise Kitty graphics support.
+
+### Installing the direct-color entry
+
+Check availability on the machine where the pane runs, including each remote vev host:
+
+```sh
+infocmp -x xterm-direct
+tput -T xterm-direct colors
+# Expected color count: 16777216
+```
+
+On Arch Linux and CachyOS, the `ncurses` package supplies the entry and the `infocmp`, `tput`, and `tic` tools:
+
+```sh
+sudo pacman -S ncurses
+```
+
+Other distributions may package extended terminfo entries separately. Install their terminfo database and ncurses utilities, then repeat the checks above.
+
+For a user-local installation, export the entry on a machine that has it:
+
+```sh
+infocmp -x xterm-direct > xterm-direct.terminfo
+```
+
+Copy the file to the destination and compile it there:
+
+```sh
+tic -x -o ~/.terminfo xterm-direct.terminfo
+```
+
+Open a new pane to use the installed entry. The daemon also needs `infocmp` available in its `PATH`; restart the daemon if that search path needs to change. SSH destinations and containers entered from a pane need their own entry if they inherit `TERM=xterm-direct`. Installation on the pane host does not install it inside those environments.
 
 ## Kitty graphics
 

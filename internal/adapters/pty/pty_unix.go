@@ -34,12 +34,16 @@ type Factory struct{}
 func NewFactory() *Factory { return &Factory{} }
 
 // Open spawns command with args attached to a freshly allocated pseudo-terminal
-// and returns the master side as a ports.PTY. env is passed to the child
-// verbatim (nil means inherit the current process environment); the caller
-// decides TERM and friends. geometry sets the terminal window geometry before
-// the child starts, so the child observes the correct dimensions on its first
-// query.
+// and returns the master side as a ports.PTY. env supplies the child environment
+// (nil means inherit the current process environment). TERM is selected from
+// the host's available terminfo entries; other entries are preserved. geometry
+// sets the terminal window geometry before the child's first query.
 func (Factory) Open(ctx context.Context, command string, args []string, env []string, dir string, geometry domain.Geometry) (ports.PTY, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dir = platform.DirOrHome(dir)
+	env = paneEnvironment(ctx, env, dir)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -75,7 +79,7 @@ func (Factory) Open(ctx context.Context, command string, args []string, env []st
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Env = env
-	cmd.Dir = platform.DirOrHome(dir)
+	cmd.Dir = dir
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave

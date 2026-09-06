@@ -2039,7 +2039,8 @@ func shellFromEnvironment(env []string) string {
 }
 
 // childEnvFrom preserves the supplied environment byte-for-byte and in order,
-// except for exact reserved variable names which vev owns.
+// except for exact reserved variable names which vev owns. TERM starts with the
+// compatibility default; the PTY adapter selects the host-available profile.
 func childEnvFrom(env []string, name, tabStableID, paneStableID string) []string {
 	out := make([]string, 0, len(env)+4)
 	for _, entry := range env {
