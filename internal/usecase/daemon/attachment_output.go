@@ -32,6 +32,8 @@ type attachmentOutput struct {
 	maxOutstandingAtomic      atomic.Uint64
 	forceSnapshot             bool
 	initialized               bool
+	viewPublication           uint64
+	lastViewContext           protocol.ViewContext
 	lastCursor                cursorOut
 	lastRoutePosition         protocol.RoutePosition
 	graphicsOutput            *graphicsOutputState
@@ -244,6 +246,7 @@ type preparedOutput struct {
 	generation           uint64
 	connectionGeneration uint64
 	viewRevision         uint64
+	context              *protocol.ViewContext
 	size                 domain.Size
 	data                 []byte
 	reset                bool
@@ -304,7 +307,16 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(protocol.Ou
 	if p.reset {
 		base = 0
 	}
-	out, err := marshalOutputState(data, p.epoch, base, p.next, echoAck, p.viewRevision, p.size, p.reset)
+	var context *protocol.ViewContext
+	if p.context != nil {
+		if p.stream.viewPublication == ^uint64(0) {
+			return errors.New("view publication number exhausted")
+		}
+		candidate := *p.context
+		candidate.Publication = p.stream.viewPublication + 1
+		context = &candidate
+	}
+	out, err := marshalOutputState(data, p.epoch, base, p.next, echoAck, p.viewRevision, p.size, p.reset, context)
 	if err != nil {
 		p.stream.forceSnapshot = true
 		return err
@@ -314,6 +326,10 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(protocol.Ou
 		return err
 	}
 	p.commit()
+	if context != nil {
+		p.stream.viewPublication = context.Publication
+		p.stream.lastViewContext = *context
+	}
 	p.stream.next = p.next
 	p.stream.publishOutstanding()
 	p.sent = true
@@ -332,6 +348,45 @@ func (p *preparedOutput) commitNoSend() {
 	}
 	p.commit()
 	p.sent = true
+}
+
+// publishNoBytes commits a composition without advancing the terminal replay
+// chain. A fence can request a fresh semantic boundary even for an unchanged
+// view. Callers retain the ordinary attachment send/effect ownership.
+func (p *preparedOutput) publishNoBytes(confirm bool, send func(protocol.UIViewUpdate) error) error {
+	if p == nil || p.stream == nil || p.attempted {
+		return nil
+	}
+	p.stream.lockView()
+	defer p.stream.unlockView()
+	p.attempted = true
+	if !p.currentLocked() || len(p.data) != 0 {
+		return nil
+	}
+	if p.context != nil {
+		candidate := *p.context
+		candidate.Publication = p.stream.viewPublication
+		if confirm || candidate != p.stream.lastViewContext {
+			if p.stream.next == 0 {
+				return errors.New("view update requires committed output")
+			}
+			if candidate.Publication == ^uint64(0) {
+				return errors.New("view publication number exhausted")
+			}
+			candidate.Publication++
+			if err := candidate.Validate(); err != nil {
+				return err
+			}
+			if err := send(protocol.UIViewUpdate{Epoch: p.epoch, State: p.stream.next, Context: candidate}); err != nil {
+				return err
+			}
+			p.stream.viewPublication = candidate.Publication
+			p.stream.lastViewContext = candidate
+		}
+	}
+	p.commit()
+	p.sent = true
+	return nil
 }
 
 func (p *preparedOutput) commit() {
@@ -379,10 +434,10 @@ func (p *preparedOutput) currentLocked() bool {
 		(p.stream.attachment == nil || p.stream.attachment.lifecycle.generationValue() == p.connectionGeneration)
 }
 
-func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool) (protocol.Output, error) {
+func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision uint64, size domain.Size, full bool, context *protocol.ViewContext) (protocol.Output, error) {
 	output := protocol.Output{
 		Epoch: epoch, Base: base, New: next, Echo: echoAck, ViewRevision: viewRevision,
-		Size: size, Full: full, Data: data,
+		Size: size, Full: full, Data: data, Context: context,
 	}
 	if err := protocol.ValidateOutput(output); err != nil {
 		return protocol.Output{}, err
@@ -408,7 +463,7 @@ func (s *attachmentOutput) sideEffectLocked(data []byte, echoAck uint64) (protoc
 	if s != nil && s.attachment != nil {
 		size = s.attachment.sizeSnapshot()
 	}
-	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false)
+	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false, nil)
 }
 
 func (s *attachmentOutput) ack(epoch, state uint64) bool {

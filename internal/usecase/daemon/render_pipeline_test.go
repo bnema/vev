@@ -14,6 +14,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/testutil/replaytest"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
@@ -316,9 +317,11 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 		modalInner.Set(x, 0, renderer.Cell{Rune: r, Style: renderer.DefaultStyle()})
 	}
 	state := capturedRenderState{
+		route:    protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "sess"}},
+		view:     attachmentView{tabID: "tab-1"},
 		reset:    true,
 		layout:   capturedTabLayout{area: domain.Rect{Width: 12, Height: 5}, valid: true, focus: "p", placements: []layout.Placement{{ID: "p", Content: domain.Rect{Width: 12, Height: 5}}}},
-		panes:    []capturedPaneRenderState{{id: "p", frame: paneFrame, placement: layout.Placement{ID: "p", Content: domain.Rect{Width: 12, Height: 5}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
+		panes:    []capturedPaneRenderState{{id: "p", stableID: "pane-1", frame: paneFrame, placement: layout.Placement{ID: "p", Content: domain.Rect{Width: 12, Height: 5}}, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
 		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{id: "f", frame: floatingFrame}, geometry: floatingGeometry{Mode: ui.PresentationFloating, Bounds: domain.Rect{X: 3, Y: 1, Width: 6, Height: 3}, Inner: domain.Rect{X: 4, Y: 2, Width: 4, Height: 1}}, title: "float", generation: 1},
 		bars:     barState{status: statusSnapshot{session: "sess", tabs: []statusTab{{name: "tab", active: true}}}, topRight: "R", bottomRight: "B"},
 		overlays: capturedOverlayRenderState{promptActive: true, prompt: capturedModal{active: true, title: "Prompt", presentation: (ui.Modal{FixedWidth: 8, FixedHeight: 3, Title: "Prompt"}).Resolve(domain.Size{Cols: 12, Rows: 7}), inner: modalInner}},

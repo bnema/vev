@@ -284,7 +284,7 @@ func TestGraphicsOutputRelaysLargeKittenIcatRGBWithinWireBudget(t *testing.T) {
 	prepared, err := newGraphicsOutputState().prepare(scene.Snapshot(), true)
 	require.NoError(t, err)
 	require.Greater(t, len(prepared.data), 8<<20, "valid icat RGB replay must not be suppressed by the old graphics-only cap")
-	_, err = marshalOutputState(prepared.data, 1, 0, 1, 0, 0, domain.Size{Cols: 80, Rows: 24}, true)
+	_, err = marshalOutputState(prepared.data, 1, 0, 1, 0, 0, domain.Size{Cols: 80, Rows: 24}, true, nil)
 	require.NoError(t, err, "the relayed graphics stream must fit the real Output wire budget")
 }
 

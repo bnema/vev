@@ -4,6 +4,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	vevgraphics "github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -44,6 +45,7 @@ type damageReceipt struct {
 type capturedRenderState struct {
 	attachment      *attachedClient // identity only; never dereferenced by composition
 	sessionID       domain.SessionID
+	route           protocol.CommittedRouteIdentity
 	incarnation     domain.IncarnationID
 	lease           *attachmentLease
 	view            attachmentView
@@ -66,6 +68,22 @@ type capturedRenderState struct {
 	tabGeneration      uint64
 	floatingGeneration uint64
 	receipts           []damageReceipt // private capture receipts; compose must not inspect these
+}
+
+// viewContext describes only this captured composition, never live session state.
+func (s *capturedRenderState) viewContext() protocol.ViewContext {
+	context := protocol.ViewContext{Route: s.route, TabID: s.view.tabID}
+	if s.floating.visible && s.floating.focused {
+		context.FocusedPaneID = s.floating.pane.stableID
+		return context
+	}
+	for _, pane := range s.panes {
+		if pane.focused {
+			context.FocusedPaneID = pane.stableID
+			break
+		}
+	}
+	return context
 }
 
 type capturedTabLayout struct {
@@ -279,6 +297,10 @@ func captureLocalRenderState(
 	_, owned := sess.attachments[ac]
 	sessionID := sess.id
 	incarnation := sess.incarnation
+	route := protocol.CommittedRouteIdentity{
+		Target:    protocol.ExactSessionTarget{LifecycleID: incarnation, SessionName: sess.name},
+		Ephemeral: sess.ephemeral,
+	}
 	sess.mu.Unlock()
 	if !owned {
 		return nil, false
@@ -350,7 +372,7 @@ func captureLocalRenderState(
 		window = ac.sizeSnapshot()
 	}
 	*state = capturedRenderState{
-		attachment: ac, sessionID: sessionID, incarnation: incarnation, lease: lease, view: view, window: window,
+		attachment: ac, sessionID: sessionID, route: route, incarnation: incarnation, lease: lease, view: view, window: window,
 		reset: reset, bars: bars, theme: bars.theme,
 		styles: request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,

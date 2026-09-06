@@ -443,11 +443,15 @@ func TestAttachmentOutputFailedSendKeepsTextCursorAndGraphicsSpeculative(t *test
 	require.NoError(t, err)
 	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: 1, Height: 1})
 	require.NoError(t, err)
-	state := &capturedRenderState{panes: []capturedPaneRenderState{{
-		graphics:         scene.Snapshot(),
-		graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 1, Rows: 1}, PixelWidth: 1, PixelHeight: 1},
-		placement:        layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
-	}}}
+	state := &capturedRenderState{
+		route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}},
+		view:  attachmentView{tabID: "tab-1"},
+		panes: []capturedPaneRenderState{{
+			stableID: "pane-1", focused: true,
+			graphics:         scene.Snapshot(),
+			graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 1, Rows: 1}, PixelWidth: 1, PixelHeight: 1},
+			placement:        layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
+		}}}
 	graphicsState := newGraphicsOutputState()
 	output := attachmentOutputWithGraphics(graphicsState)
 	output.lastCursor = cursorOut{valid: true, row: 1, col: 1}

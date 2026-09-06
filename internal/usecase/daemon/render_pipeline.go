@@ -477,10 +477,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	entry.core().mu.Lock()
 	_, owned := entry.core().attachments[ac]
 	position := protocol.RoutePosition{
-		Target: protocol.ExactSessionTarget{
-			LifecycleID: entry.core().incarnation,
-			SessionName: entry.core().name,
-		},
+		Target:      state.route.Target,
 		ActiveTabID: state.view.tabID,
 	}
 	entry.core().mu.Unlock()
