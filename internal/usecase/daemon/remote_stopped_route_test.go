@@ -14,12 +14,11 @@ import (
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
 )
 
-func TestDaemonOwnedNoExactTargetRejectsNewAndEphemeral(t *testing.T) {
+func TestDaemonOwnedNoExactTargetRejectsEphemeral(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		intent uint8
 	}{
-		{name: "new", intent: protocol.IntentNew},
 		{name: "ephemeral", intent: protocol.IntentEphemeral},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

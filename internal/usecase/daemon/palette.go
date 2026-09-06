@@ -908,7 +908,7 @@ func (e paletteExec) createSessionOnValidatedDestination(effect *attachmentEffec
 	case palette.CreateSessionOnRemoteHost:
 		handoff := protocol.AttachTarget{
 			RequestID: requestID, Endpoint: endpoint, Session: name, Intent: protocol.IntentNew,
-			EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}
 		if err := protocol.ValidateAttachTarget(handoff); err != nil {
 			return errAttachmentTransition

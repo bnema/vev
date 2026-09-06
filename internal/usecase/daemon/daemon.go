@@ -1610,7 +1610,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 		}
 	}
 	if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned && h.RemoteTarget == nil &&
-		(h.Intent == protocol.IntentNew || h.Intent == protocol.IntentEphemeral) {
+		h.Intent == protocol.IntentEphemeral {
 		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "daemon-owned environment requires an exact remote target"}
 	}
 	d.mu.Lock()
@@ -1655,7 +1655,13 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 			d.mu.Unlock()
 			return nil, nil, &protoErr{protocol.ErrNameTaken, "session name already in use: " + h.Name}
 		}
-		sess, err := d.createSessionLockedWithMode(h.Name, false, h.Cwd, h.Geometry(), h.Env)
+		cwd, env := h.Cwd, h.Env
+		if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned {
+			// A remote CNS destination owns shell startup just like a picker
+			// attach. Client paths may exist here but belong to another user.
+			cwd, env = d.dirOrHome(""), copyEnvironment(d.baseEnv)
+		}
+		sess, err := d.createSessionLockedWithMode(h.Name, false, cwd, h.Geometry(), env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err

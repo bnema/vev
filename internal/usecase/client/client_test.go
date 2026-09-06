@@ -1334,7 +1334,7 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	}
 	createRemote := protocol.AttachTarget{
 		RequestID: 1, Endpoint: "remote", Session: "created", Intent: protocol.IntentNew,
-		EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	local1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("misc", localLifecycle)},
@@ -1364,7 +1364,7 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 		return remoteDialer, client.AttachRequest{
 			Intent: protocol.IntentNew, SessionName: target.Session, Remote: true,
 			Origin: protocol.RouteOriginDiscovery, OriginKey: target.Endpoint,
-			EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+			EnvironmentPolicy: target.EnvironmentPolicy,
 		}, nil
 	}
 
@@ -1373,6 +1373,9 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, int32(2), remoteDialer.calls.Load())
+	createHello := helloFromSend(t, remote1)
+	require.Equal(t, protocol.IntentNew, createHello.Intent)
+	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, createHello.EnvironmentPolicy)
 	returnHello := helloFromSend(t, remote2)
 	require.Equal(t, protocol.IntentResume, returnHello.Intent)
 	require.Equal(t, "created", returnHello.Name)
