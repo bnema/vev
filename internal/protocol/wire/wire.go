@@ -1230,6 +1230,7 @@ func MarshalAttachTarget(m protocol.AttachTarget) []byte {
 	marshalExactTargetSection(&w, m.ExactTarget)
 	w.putBool(m.SamePeer)
 	w.putString(string(m.PreferredTabID))
+	w.putUint64(m.CauseActionID)
 	return w.b
 }
 
@@ -1266,6 +1267,9 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 	if err := probe.skipString(); err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
+	if _, err := probe.getUint64(); err != nil {
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
+	}
 	if err := probe.done(); err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
@@ -1298,6 +1302,9 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 		return protocol.AttachTarget{}, err
 	}
 	m.PreferredTabID = domain.TabStableID(preferredTabID)
+	if m.CauseActionID, err = r.getUint64(); err != nil {
+		return protocol.AttachTarget{}, err
+	}
 	if err := r.done(); err != nil {
 		return protocol.AttachTarget{}, err
 	}
@@ -1746,6 +1753,7 @@ func MarshalNavigationDirective(directive protocol.NavigationDirective) []byte {
 	w := payloadWriter{}
 	w.putUint8(uint8(directive.Action))
 	w.putBytes(directive.LeaseID[:])
+	w.putUint64(directive.CauseActionID)
 	return w.b
 }
 
@@ -1760,10 +1768,14 @@ func UnmarshalNavigationDirective(b []byte) (protocol.NavigationDirective, error
 	if err != nil {
 		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
+	causeActionID, err := r.getUint64()
+	if err != nil {
+		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
+	}
 	if err := r.done(); err != nil {
 		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
-	directive := protocol.NavigationDirective{Action: protocol.NavigationAction(value)}
+	directive := protocol.NavigationDirective{Action: protocol.NavigationAction(value), CauseActionID: causeActionID}
 	copy(directive.LeaseID[:], lease)
 	if MarshalNavigationDirective(directive) == nil {
 		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation

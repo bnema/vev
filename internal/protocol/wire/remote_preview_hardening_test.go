@@ -205,6 +205,7 @@ func TestRemoteTargetWireRichGoldenRoundTrip(t *testing.T) {
 		0x00, 0x05, 't', 'a', 'b', '-', '3', 0x00, 0x01,
 		0x00, 0x00, 0x00, 0x00,
 	}
+	want = append(want, make([]byte, 8)...)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("rich target bytes = %x, want %x", got, want)
 	}

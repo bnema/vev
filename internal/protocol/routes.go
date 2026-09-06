@@ -229,6 +229,7 @@ type RecentRouteSnapshot struct {
 // RouteNavigationAction asks the client to resolve one entry from a specific
 // complete snapshot. It carries no session name, endpoint, or credential.
 type RouteNavigationAction struct {
+	CauseActionID      uint64
 	SnapshotGeneration uint64
 	Key                uint64
 	Generation         uint64
@@ -237,6 +238,7 @@ type RouteNavigationAction struct {
 // RouteCreateSessionAction asks the client to create a named session through
 // one exact route authority from the latest complete snapshot.
 type RouteCreateSessionAction struct {
+	CauseActionID      uint64
 	RequestID          uint64
 	SnapshotGeneration uint64
 	Key                uint64

@@ -197,6 +197,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach}
 	want := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0, 0, 0}
+	want = append(want, make([]byte, 8)...)
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -213,6 +214,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
 	}
 	wantLocal := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0, 0, 0}
+	wantLocal = append(wantLocal, make([]byte, 8)...)
 	if !bytes.Equal(localPayload, wantLocal) {
 		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
 	}
@@ -249,6 +251,7 @@ func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	want := append(make([]byte, 8), []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1}...)
 	want = append(want, make([]byte, 15)...)
 	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1, 0, 0)
+	want = append(want, make([]byte, 8)...)
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("exact target bytes = %x, want %x", payload, want)
 	}
@@ -302,7 +305,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 			name: "attach target same-peer boolean",
 			payload: func() []byte {
 				b := MarshalAttachTarget(protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach})
-				b[len(b)-1] = 2
+				b[len(b)-11] = 2
 				return b
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalAttachTarget(b); return err },

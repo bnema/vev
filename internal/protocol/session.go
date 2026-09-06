@@ -243,6 +243,7 @@ type UIViewUpdate struct {
 }
 
 type AttachTarget struct {
+	CauseActionID     uint64
 	RequestID         uint64
 	Endpoint          string
 	Session           string

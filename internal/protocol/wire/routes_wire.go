@@ -606,6 +606,7 @@ func MarshalRouteNavigationAction(action protocol.RouteNavigationAction) ([]byte
 	w.putUint64(action.SnapshotGeneration)
 	w.putUint64(action.Key)
 	w.putUint64(action.Generation)
+	w.putUint64(action.CauseActionID)
 	return w.b, nil
 }
 
@@ -620,6 +621,9 @@ func UnmarshalRouteNavigationAction(b []byte) (protocol.RouteNavigationAction, e
 		return protocol.RouteNavigationAction{}, err
 	}
 	if action.Generation, err = r.getUint64(); err != nil {
+		return protocol.RouteNavigationAction{}, err
+	}
+	if action.CauseActionID, err = r.getUint64(); err != nil {
 		return protocol.RouteNavigationAction{}, err
 	}
 	if err := r.done(); err != nil {
@@ -641,6 +645,7 @@ func MarshalRouteCreateSessionAction(action protocol.RouteCreateSessionAction) (
 	w.putUint64(action.Key)
 	w.putUint64(action.Generation)
 	w.putString(action.SessionName)
+	w.putUint64(action.CauseActionID)
 	return w.b, nil
 }
 
@@ -661,6 +666,9 @@ func UnmarshalRouteCreateSessionAction(b []byte) (protocol.RouteCreateSessionAct
 		return protocol.RouteCreateSessionAction{}, err
 	}
 	if action.SessionName, err = r.getString(); err != nil {
+		return protocol.RouteCreateSessionAction{}, err
+	}
+	if action.CauseActionID, err = r.getUint64(); err != nil {
 		return protocol.RouteCreateSessionAction{}, err
 	}
 	if err := r.done(); err != nil {
