@@ -107,7 +107,7 @@ func TestKeyboardVerticalOverflowSwitchesOnlyAcrossAlphabeticalLiveSessions(t *t
 		target.tree = &layout.Tree{Root: &layout.Node{Kind: layout.Split, Dir: layout.Horizontal, Children: []*layout.Node{layout.NewLeaf("pane-1"), layout.NewLeaf("pane-2")}}, Focus: focus}
 		target.panes["pane-2"] = newPane("pane-2", nil, domain.Size{Cols: 20, Rows: 10})
 		target.mu.Unlock()
-		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name}, ctx: t.Context(), cancel: func() {}, tabs: tabs}
+		return &session{sessionCore: sessionCore{id: domain.SessionID(id), name: name, incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: tabs}
 	}
 	charlie := newSession("live-charlie", "charlie", 1, "pane-2")
 	echo := newSession("live-echo", "echo", 1, "pane-2")
@@ -278,12 +278,26 @@ func TestVerticalOverflowTreatsDisplacedSourceClientAsNoNeighbor(t *testing.T) {
 }
 
 func TestVerticalOverflowIsRaceFreeDuringSessionRename(t *testing.T) {
-	d, alpha, ac, _ := newManualSessionWithPTYs(t, nil)
+	d, alpha, ac, sends := newManualSessionWithPTYs(t, nil)
+	// This race test generates many full views and semantic route updates.
+	// Keep its test client reading rather than filling the bounded transport.
+	stop, drained := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			select {
+			case <-sends:
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer func() { close(stop); <-drained }()
 	alpha.mu.Lock()
 	alpha.name = "alpha"
 	alpha.mu.Unlock()
-	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
-	echo := &session{sessionCore: sessionCore{id: "live-echo", name: "echo"}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	charlie := &session{sessionCore: sessionCore{id: "live-charlie", name: "charlie", incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
+	echo := &session{sessionCore: sessionCore{id: "live-echo", name: "echo", incarnation: newTestLifecycle(t)}, ctx: t.Context(), cancel: func() {}, tabs: []*tab{newTab(nil, domain.Size{Cols: 41, Rows: 10})}}
 	d.mu.Lock()
 	d.sessions[echo.id] = echo
 	d.sessions[charlie.id] = charlie

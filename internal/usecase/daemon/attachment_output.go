@@ -140,6 +140,9 @@ func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, f
 	if err != nil {
 		return nil, err
 	}
+	context := state.viewContext()
+	ansi.context = &context
+	ansi.viewRevision = state.view.revision
 	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
 	graphicsReset := reset || o.forceSnapshot || !o.initialized
 	graphicsBudget := max(protocol.MaxOutputDataLen-len(ansi.data)-len(cursor.data), 0)
@@ -167,6 +170,18 @@ func (p *preparedAttachmentOutput) send(echoAck uint64, send func(protocol.Outpu
 		}
 	}
 	if err := p.ansi.send(p.data, echoAck, sendOutput); err != nil {
+		p.abortGraphics()
+		return err
+	}
+	p.commitIfSent()
+	return nil
+}
+
+func (p *preparedAttachmentOutput) publishNoBytes(confirm bool, send func(protocol.UIViewUpdate) error) error {
+	if p == nil || p.ansi == nil {
+		return nil
+	}
+	if err := p.ansi.publishNoBytes(confirm, send); err != nil {
 		p.abortGraphics()
 		return err
 	}

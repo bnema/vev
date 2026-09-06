@@ -943,7 +943,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	d.resize(sess, ac, newSize)

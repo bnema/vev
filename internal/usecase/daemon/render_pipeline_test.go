@@ -264,6 +264,9 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	state := cacheState("steady", 1)
 	state.attachment = ac
+	state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	state.view.tabID = domain.TabStableID(sess.tabs[0].stableID)
+	state.view.revision = ac.viewSnapshot().revision
 	initial := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
 	ac.sendMu.Lock()
 	require.True(t, d.emitFrame(sess, ac, &state, initial))

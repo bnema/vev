@@ -49,6 +49,7 @@ type capturedRenderState struct {
 	incarnation     domain.IncarnationID
 	lease           *attachmentLease
 	view            attachmentView
+	focusedPaneID   domain.PaneStableID
 	window          domain.Size
 	reset           bool
 	layout          capturedTabLayout
@@ -72,7 +73,7 @@ type capturedRenderState struct {
 
 // viewContext describes only this captured composition, never live session state.
 func (s *capturedRenderState) viewContext() protocol.ViewContext {
-	context := protocol.ViewContext{Route: s.route, TabID: s.view.tabID}
+	context := protocol.ViewContext{Route: s.route, TabID: s.view.tabID, FocusedPaneID: s.focusedPaneID}
 	if s.floating.visible && s.floating.focused {
 		context.FocusedPaneID = s.floating.pane.stableID
 		return context
@@ -305,11 +306,14 @@ func captureLocalRenderState(
 	if !owned {
 		return nil, false
 	}
-	tb, focusedPane := sess.paneForAttachment(ac)
+	tb := sess.tabForAttachment(ac)
 	if tb == nil {
-		tb = sess.tabForAttachment(ac)
+		return nil, false
 	}
-	if tb == nil {
+	// Resolve all pane selection from one view value. Navigation after this
+	// point invalidates the captured revision at prepared-output admission.
+	view := ac.viewSnapshot()
+	if view.tabID != domain.TabStableID(tb.stableID) {
 		return nil, false
 	}
 
@@ -339,8 +343,18 @@ func captureLocalRenderState(
 	defer tb.mu.Unlock()
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	var focus layout.PaneID
-	if focusedPane != nil && tb.panes[focusedPane.id] == focusedPane {
-		focus = focusedPane.id
+	var focusedPaneID domain.PaneStableID
+	for _, pane := range tb.panes {
+		if pane != nil && domain.PaneStableID(pane.stableID) == view.paneID {
+			focus = pane.id
+			focusedPaneID = domain.PaneStableID(pane.stableID)
+			break
+		}
+	}
+	if focusedPaneID == "" && (tb.floating.state != floatingVisible || tb.floating.pane == nil) {
+		// A removed input target is not a committed semantic view. Its owning
+		// topology mutation will repair/invalidate the attachment separately.
+		return nil, false
 	}
 	layoutSnap := tabLayoutSnapshot{
 		area: area, focus: focus, placements: scratch.placements,
@@ -366,7 +380,6 @@ func captureLocalRenderState(
 		layoutSnap.dividers = scratch.dividers
 	}
 	state := &scratch.state
-	view := ac.viewSnapshot()
 	window := domain.Size{}
 	if view.windowSet {
 		window = ac.sizeSnapshot()
@@ -374,7 +387,8 @@ func captureLocalRenderState(
 	*state = capturedRenderState{
 		attachment: ac, sessionID: sessionID, route: route, incarnation: incarnation, lease: lease, view: view, window: window,
 		reset: reset, bars: bars, theme: bars.theme,
-		styles: request.styles, styleGeneration: request.styleGeneration,
+		focusedPaneID: focusedPaneID,
+		styles:        request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,

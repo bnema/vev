@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"io"
 	"log/slog"
 	"sync"
@@ -402,6 +403,13 @@ func newManualSessionWithPTYsCleanup(t testing.TB, registerCleanup bool, ptys ..
 	return newManualSessionWithPTYsClockCleanup(t, stubClock{}, registerCleanup, ptys...)
 }
 
+func newTestLifecycle(t testing.TB) domain.SessionLifecycleID {
+	t.Helper()
+	id, err := domain.NewSessionLifecycleID(rand.Reader)
+	require.NoError(t, err)
+	return id
+}
+
 func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, registerCleanup bool, ptys ...ports.PTY) (*Daemon, *session, *attachedClient, chan wire.Frame) {
 	t.Helper()
 	d := newTestDaemonWithCleanup(t, nil, clock, registerCleanup)
@@ -420,11 +428,20 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 		}
 		tabs = append(tabs, tb)
 	}
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: tabs}
+	lifecycle := newTestLifecycle(t)
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", incarnation: lifecycle, attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: tabs}
 	for _, tb := range tabs {
 		publishTiledPaneOwners(sess, tb)
 	}
 	ac.setSession(sess)
+	// This fixture models an already attached client, with its initial route
+	// position known. Handshake tests exercise the first position publication.
+	if len(tabs) != 0 {
+		ac.output.lastRoutePosition = protocol.RoutePosition{
+			Target:      protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: sess.name},
+			ActiveTabID: domain.TabStableID(tabs[0].stableID),
+		}
+	}
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, nil)
 	d.sessions[sess.id] = sess
 	if registerCleanup {

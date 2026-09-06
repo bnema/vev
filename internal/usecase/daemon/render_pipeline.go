@@ -533,7 +533,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	var sendTr ports.ServerConnection
 	var sendErr error
 	suppressedGraphics := state.suppressedGraphics && !ac.terminalCapabilities.SupportsKittyGraphics()
-	if len(data) > 0 {
+	if len(data) > 0 || prepared.ansi.context != nil {
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
 		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
@@ -552,7 +552,16 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				}
 			}
 			if sendErr == nil {
-				sendErr = prepared.send(ac.echoAck.Load(), send)
+				if len(data) > 0 {
+					sendErr = prepared.send(ac.echoAck.Load(), send)
+				} else {
+					sendErr = prepared.publishNoBytes(false, func(update protocol.UIViewUpdate) error {
+						if sendTr.Capabilities().AsyncSend {
+							return sendTr.SendServerAsync(update)
+						}
+						return sendTr.SendServer(update)
+					})
+				}
 			}
 			if marks.attachmentEffect != nil && interruptible {
 				if sendErr != nil {

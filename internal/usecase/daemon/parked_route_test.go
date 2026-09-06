@@ -253,6 +253,9 @@ func TestParkedRouteDoesNotReplayOneShotEffectsAfterResume(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, output.Full)
 	require.NotContains(t, string(output.Data), "one-shot effect")
+	position, err := wire.UnmarshalRoutePosition(awaitFrame(t, sends, wire.MsgRoutePosition).Payload)
+	require.NoError(t, err)
+	require.Equal(t, source.incarnation, position.Target.LifecycleID)
 	select {
 	case frame := <-sends:
 		t.Fatalf("parked one-shot effect replayed as frame type %d", frame.Type)
