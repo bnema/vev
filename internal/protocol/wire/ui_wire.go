@@ -10,7 +10,7 @@ import (
 var errInvalidUIMessage = errors.New("invalid UI protocol message")
 
 func marshalViewContext(w *payloadWriter, context protocol.ViewContext) error {
-	if context.Publication == 0 || context.Route.Validate() != nil || domain.ValidateTabStableID(context.TabID) != nil || domain.ValidatePaneStableID(context.FocusedPaneID) != nil {
+	if context.Validate() != nil {
 		return errInvalidUIMessage
 	}
 	w.putUint64(context.Publication)
@@ -42,7 +42,7 @@ func unmarshalViewContext(r *payloadReader) (protocol.ViewContext, error) {
 	}
 	context.TabID = domain.TabStableID(tabID)
 	context.FocusedPaneID = domain.PaneStableID(paneID)
-	if context.Publication == 0 || context.Route.Validate() != nil || domain.ValidateTabStableID(context.TabID) != nil || domain.ValidatePaneStableID(context.FocusedPaneID) != nil {
+	if context.Validate() != nil {
 		return protocol.ViewContext{}, errInvalidUIMessage
 	}
 	return context, nil

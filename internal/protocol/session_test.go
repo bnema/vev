@@ -10,8 +10,8 @@ import (
 )
 
 func TestVersionRemainsWireCompatible(t *testing.T) {
-	require.Equal(t, uint16(40), Version)
-	require.Equal(t, (16<<20)-55, MaxOutputDataLen)
+	require.Equal(t, uint16(41), Version)
+	require.Equal(t, (16<<20)-407, MaxOutputDataLen)
 }
 
 func TestHelloSemanticValidation(t *testing.T) {
