@@ -230,9 +230,9 @@ func (d *Daemon) reapPane(sess *session, tb *tab, p *pane) {
 }
 
 // reapPaneOwner resolves the owner afresh after EOF. A stale attempt retries
-// the immutable owner pointer; a successful attempt revokes owner publication
-// under pane.mu before releasing membership locks, so a competing close or
-// move can never reap the pane from a second owner.
+// the immutable owner pointer. Non-final removal revokes it with membership;
+// final-pane removal retains it until tab/session teardown commits, so stale
+// attachment snapshots cannot abandon the EOF before closing its resources.
 func (d *Daemon) reapPaneOwner(p *pane) {
 	for p != nil {
 		lease := p.effectLease()
@@ -297,7 +297,9 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		delete(tb.panes, p.id)
 		tb.bumpLayoutGenerationLocked()
 	}
-	p.clearOwnerLocked()
+	if !finalPane {
+		p.clearOwnerLocked()
+	}
 	p.mu.Unlock()
 	tb.mu.Unlock()
 	sess.invalidateViewsLocked()
@@ -309,8 +311,14 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 				ac.overlays.clearCopyModeForPane(p)
 			}
 		}
-		_ = d.closeTabLocked(sess, tb, true)
-		return true
+		if err := d.closeTabLocked(sess, tb, true); err != nil {
+			return true
+		}
+		// A concurrent detach/rebind can invalidate killSession's attachment
+		// snapshot without committing teardown. Keep the EOF owner until tab
+		// closure actually revokes it, so the reader retries the current owner
+		// rather than abandoning hidden PTYs in a half-closed session.
+		return p.owner.Load() == nil
 	}
 	sess.geometry.applyTabLayout(d, sess, tb)
 	for _, ac := range attachments {
