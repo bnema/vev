@@ -203,6 +203,12 @@ func (t *Terminal) PublishContext(context ports.UIContext) error {
 	if t.closed || !t.available {
 		return ports.ErrUIUnavailable
 	}
+	if context.AttachmentHandle == "" {
+		context.AttachmentHandle = t.context.AttachmentHandle
+	}
+	if context.Generation == 0 {
+		context.Generation = t.context.Generation
+	}
 	t.context = context
 	t.publishLocked()
 	return nil

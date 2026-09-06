@@ -1678,6 +1678,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}
 	awaitingReconnectReset := false
 	outputState := outputApplyState{}
+	uiOutput, _ := term.(ports.UIOutputTransaction)
+	uiContext := ports.UIContext{Generation: 1}
 	outputResetRequested := false
 	transitionWaitingFull := false
 	var samePeerSwitch *samePeerSwitchPending
@@ -2099,18 +2101,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if parkedWaitingFull && !o.Full {
 					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
 				}
-				uiOutput, _ := term.(ports.UIOutputTransaction)
 				if uiOutput != nil {
-					uiContext := ports.UIContext{
-						Generation: 1, OutputEpoch: o.Epoch, OutputState: o.New,
-						ViewRevision: o.ViewRevision, Status: ports.UIStatusAttached,
+					status := ports.UIStatusAttached
+					if reconnect.showing {
+						status = ports.UIStatusReconnecting
+					} else if !o.Full && transition != nil && transition.active {
+						status = ports.UIStatusTransitioning
 					}
-					if committedIdentity != nil {
-						uiContext.Route = *cloneCommittedIdentity(committedIdentity)
-					}
-					if routePosition != nil {
-						uiContext.TabID = routePosition.ActiveTabID
-					}
+					uiContext = nextState.uiContext(uiContext, status)
 					uiOutput.BeginOutput(uiContext)
 				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
@@ -2167,6 +2165,26 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					log.Debug("received first output")
 					endHandshake()
 				}
+			case protocol.UIViewUpdate:
+				nextState, accepted, needsReset := outputState.nextView(message)
+				if needsReset && !outputResetRequested {
+					select {
+					case sendCh <- protocol.OutputResetRequest{}:
+						outputResetRequested = true
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				}
+				if !accepted {
+					continue
+				}
+				if uiOutput != nil {
+					uiContext = nextState.uiContext(uiContext, uiContext.Status)
+					if err := uiOutput.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+						return welcomedResult(fmt.Errorf("vev: publishing UI context: %w", err))
+					}
+				}
+				outputState = nextState
 			case protocol.AttachTarget:
 				target := message
 				if transientPicker {
