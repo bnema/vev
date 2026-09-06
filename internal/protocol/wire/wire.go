@@ -31,7 +31,7 @@ var errInvalidBoolean = errors.New("ports: invalid boolean flag")
 var errInvalidEnum = errors.New("ports: invalid enum value")
 
 const (
-	outputHeaderLen            = 5*8 + 2*2 + 1
+	outputHeaderLen            = 5*8 + 2*2 + 2
 	outputCompressionHeaderLen = 1 + 4
 	outputPayloadOverhead      = outputHeaderLen + outputCompressionHeaderLen + 4
 	// outputCompressionThreshold keeps small snapshots on the canonical path.
@@ -1059,6 +1059,12 @@ func MarshalOutput(m protocol.Output) ([]byte, error) {
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
 	w.putBool(m.Full)
+	w.putBool(m.Context != nil)
+	if m.Context != nil {
+		if err := marshalViewContext(&w, *m.Context); err != nil {
+			return nil, err
+		}
+	}
 	w.putUint8(kind)
 	w.putUint32(uint32(len(m.Data)))
 	w.putLongBytes(data)
@@ -1126,6 +1132,17 @@ func UnmarshalOutput(b []byte) (protocol.Output, error) {
 	m.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
 	if m.Full, err = r.getBool(); err != nil {
 		return protocol.Output{}, err
+	}
+	hasContext, err := r.getBool()
+	if err != nil {
+		return protocol.Output{}, err
+	}
+	if hasContext {
+		context, contextErr := unmarshalViewContext(&r)
+		if contextErr != nil {
+			return protocol.Output{}, contextErr
+		}
+		m.Context = &context
 	}
 	if err := protocol.ValidateOutput(m); err != nil {
 		return protocol.Output{}, err
