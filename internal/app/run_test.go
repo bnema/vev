@@ -1039,27 +1039,43 @@ func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
 }
 
 func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-
-	localCalls, remoteCalls := 0, 0
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "", "", nil, runAttachDeps{
-		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
-		remoteDialerFactory: factory.DialerForRemote,
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			if deps.Remote {
-				remoteCalls++
-				require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, request)
-				return nil
-			}
-			localCalls++
-			require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local"}, request)
-			return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach}}
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, 1, localCalls, "the failed local picker attach must not retry locally")
-	require.Equal(t, 1, remoteCalls, "the selected target must be dialed and attached exactly once")
+	for _, tt := range []struct {
+		name      string
+		intent    uint8
+		requestID uint64
+		policy    protocol.EnvironmentPolicy
+	}{
+		{name: "attach", intent: protocol.IntentAttach},
+		{name: "create", intent: protocol.IntentNew, requestID: 1, policy: protocol.EnvironmentPolicyDaemonOwned},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			factory := newRemoteDialerFactoryMock(t)
+			factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(2)
+			target := protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: tt.intent, RequestID: tt.requestID, EnvironmentPolicy: tt.policy}
+			want := client.AttachRequest{Intent: tt.intent, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
+			localCalls, remoteCalls := 0, 0
+			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "", "", nil, runAttachDeps{
+				localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
+				remoteDialerFactory: factory.DialerForRemote,
+				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+					if deps.Remote {
+						remoteCalls++
+						require.Equal(t, want, request)
+						return nil
+					}
+					localCalls++
+					require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local"}, request)
+					_, next, err := deps.AttachHandoff(target)
+					require.NoError(t, err)
+					require.Equal(t, want, next, "in-run handoff must preserve environment ownership")
+					return &client.AttachTargetError{Target: target}
+				},
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, localCalls, "the failed local picker attach must not retry locally")
+			require.Equal(t, 1, remoteCalls, "the selected target must be dialed and attached exactly once")
+		})
+	}
 }
 
 func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {

@@ -29,9 +29,9 @@ their first frame as a static fallback.
 
 ## Environment
 
-On each attach, the attaching environment becomes the session's source of truth for future PTY children. vev preserves it except that it replaces `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`; `SHELL` selects the command used to start each PTY. Already-running processes keep their original environment.
+Local and direct CLI remote attachments supply the session's environment for future PTY children. A later client-owned attachment updates that shared environment; already-running processes keep their original environment. vev replaces `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`; `SHELL` selects the command used to start each PTY.
 
-The attaching client's exported environment is sent in the connection handshake and becomes the session's source of truth for future PTY children, including remote attaches. A later attachment updates that shared environment for children created afterward; already-running processes keep their original environment.
+Picker-selected remote attachments do not replace the session's environment with the client's exports. When restarting a stopped remote session, vev uses the destination daemon's environment and the persisted working directory. A `CNS` handoff to another remote daemon also uses that daemon's environment, starting in its home directory rather than the client's working directory. This keeps `HOME`, `SHELL`, `PATH`, and XDG paths local to the destination host.
 
 ## VT compatibility
 
