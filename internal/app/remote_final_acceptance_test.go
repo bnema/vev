@@ -82,6 +82,11 @@ func serveAcceptanceRemote(tr wire.Transport, target string, handoff protocol.At
 		}
 		payload, err := wire.MarshalOutput(protocol.Output{
 			Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Data: data,
+			Context: &protocol.ViewContext{
+				Publication: 1,
+				Route:       protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "remote-fixture"}},
+				TabID:       "tab-1", FocusedPaneID: "pane-1",
+			},
 		})
 		if err != nil {
 			return

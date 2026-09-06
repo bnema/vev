@@ -34,10 +34,14 @@ func TestUISynchronizationClientDispatch(t *testing.T) {
 	}
 }
 
-func TestUISynchronizationServerDispatch(t *testing.T) {
-	context := protocol.ViewContext{Publication: 4,
+func testUIOutputContext() *protocol.ViewContext {
+	return &protocol.ViewContext{Publication: 4,
 		Route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}},
 		TabID: "tab-1", FocusedPaneID: "pane-1"}
+}
+
+func TestUISynchronizationServerDispatch(t *testing.T) {
+	context := *testUIOutputContext()
 	for _, test := range []struct {
 		name    string
 		message protocol.ServerMessage

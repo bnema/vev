@@ -113,7 +113,7 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	lease := protocol.ParkedRouteLeaseID{1}
 	welcome := protocol.Welcome{SessionID: "session"}
 	errorMessage := protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}
-	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}
+	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}
 	detached := protocol.Detached{Reason: protocol.ReasonDetach}
 	pong := protocol.Pong{}
 	sessions := protocol.Sessions{}
@@ -248,7 +248,7 @@ func TestServerConnectionPreservesSendModesCapabilitiesAndErrors(t *testing.T) {
 	require.ErrorIs(t, connection.SendServerSynchronous(message), sendErr)
 	require.Equal(t, wire.MsgPong, raw.synchronous.Type)
 
-	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}
+	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}
 	require.ErrorIs(t, connection.SendOutput(output), sendErr)
 	require.Equal(t, wire.MsgOutput, raw.sent.Type)
 	require.ErrorIs(t, connection.SendOutputAsync(output), sendErr)

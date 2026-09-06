@@ -1040,8 +1040,9 @@ func UnmarshalErrorMsg(b []byte) (protocol.ErrorMsg, error) {
 }
 
 // MarshalOutput encodes m into the epoch/base/new/echo/viewRevision/
-// size/full/compression/decoded-length/data message layout. Compression is
-// limited to large, full snapshots and is retained only when it saves bytes.
+// size/full/context-presence/context/compression/decoded-length/data layout.
+// State-bearing output requires context; side effects prohibit it. Compression
+// is limited to large, full snapshots and retained only when it saves bytes.
 func MarshalOutput(m protocol.Output) ([]byte, error) {
 	if err := protocol.ValidateOutput(m); err != nil {
 		return nil, err

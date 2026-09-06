@@ -16,6 +16,18 @@ func testViewContext() protocol.ViewContext {
 	}
 }
 
+// testViewContextGolden is independent of the codec; output golden tests also
+// use its literal length to target compression fields after semantic context.
+func testViewContextGolden() []byte {
+	return []byte{
+		0, 0, 0, 0, 0, 0, 0, 1,
+		1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 4, 'w', 'o', 'r', 'k', 0,
+		0, 5, 't', 'a', 'b', '-', '1',
+		0, 6, 'p', 'a', 'n', 'e', '-', '1',
+	}
+}
+
 func TestUIWireRoundTripsAndRejectsTruncation(t *testing.T) {
 	tests := []struct {
 		name      string

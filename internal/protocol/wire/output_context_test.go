@@ -57,6 +57,25 @@ func TestOutputContextFitsMaximumFrame(t *testing.T) {
 	require.ErrorIs(t, err, protocol.ErrInvalidOutput)
 }
 
+func TestOutputRequiresSemanticContext(t *testing.T) {
+	context := testViewContext()
+	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 1, Rows: 1}, Context: &context}
+	valid, err := MarshalOutput(output)
+	require.NoError(t, err)
+	// Remove the semantic block without changing replay/data fields. Decoder
+	// validation must reject contextless state output before allocating data.
+	contextBytes := payloadWriter{}
+	require.NoError(t, marshalViewContext(&contextBytes, context))
+	missing := append(append([]byte(nil), valid[:outputHeaderLen]...), valid[outputHeaderLen+len(contextBytes.b):]...)
+	missing[outputHeaderLen-1] = 0
+	_, err = UnmarshalOutput(missing)
+	require.ErrorIs(t, err, protocol.ErrInvalidOutput)
+	output.Context = nil
+	require.ErrorIs(t, protocol.ValidateOutput(output), protocol.ErrInvalidOutput)
+	_, err = MarshalOutput(output)
+	require.ErrorIs(t, err, protocol.ErrInvalidOutput)
+}
+
 func TestOutputRejectsInvalidSemanticContext(t *testing.T) {
 	for _, scenario := range []string{"side effect", "zero publication", "missing lifecycle", "missing tab", "missing pane"} {
 		t.Run(scenario, func(t *testing.T) {

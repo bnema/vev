@@ -105,9 +105,10 @@ func TestFinalResizeGoldenStrict(t *testing.T) {
 }
 
 func TestFinalOutputGoldenStrict(t *testing.T) {
+	context := testViewContext()
 	msg := protocol.Output{
 		Epoch: 1, Base: 0, New: 7, Echo: 8, ViewRevision: 9,
-		Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("ok"),
+		Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Context: &context, Data: []byte("ok"),
 	}
 	want := []byte{
 		0, 0, 0, 0, 0, 0, 0, 1,
@@ -115,10 +116,10 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 		0, 0, 0, 0, 0, 0, 0, 7,
 		0, 0, 0, 0, 0, 0, 0, 8,
 		0, 0, 0, 0, 0, 0, 0, 9,
-		0, 80, 0, 24, 1, 0,
-		0, 0, 0, 0, 2,
-		0, 0, 0, 2, 'o', 'k',
+		0, 80, 0, 24, 1, 1,
 	}
+	want = append(want, testViewContextGolden()...)
+	want = append(want, 0, 0, 0, 0, 2, 0, 0, 0, 2, 'o', 'k')
 	got, err := MarshalOutput(msg)
 	if err != nil {
 		t.Fatalf("MarshalOutput() error = %v", err)
@@ -135,11 +136,12 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 }
 
 func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
-	valid := protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true}
+	context := testViewContext()
+	valid := protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Context: &context}
 	for _, bad := range []protocol.Output{
 		{},
-		{Epoch: 1, Base: 0, New: 1, Size: valid.Size},
-		{Epoch: 1, Base: 0, New: 1, Full: true},
+		{Epoch: 1, Base: 0, New: 1, Size: valid.Size, Context: &context},
+		{Epoch: 1, Base: 0, New: 1, Full: true, Context: &context},
 	} {
 		if got, err := MarshalOutput(bad); err == nil || got != nil {
 			t.Fatalf("MarshalOutput(%+v) = (%x, %v), want nil payload and error", bad, got, err)
@@ -158,7 +160,10 @@ func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 		{name: "size zero", mutate: func(b []byte) { binary.BigEndian.PutUint16(b[40:42], 0) }},
 		{name: "full flag false for reset", mutate: func(b []byte) { b[44] = 0 }},
 		{name: "invalid bool", mutate: func(b []byte) { b[44] = 2 }},
-		{name: "impossible data length", mutate: func(b []byte) { binary.BigEndian.PutUint32(b[46:50], ^uint32(0)) }},
+		{name: "impossible data length", mutate: func(b []byte) {
+			offset := outputHeaderLen + len(testViewContextGolden()) + 1
+			binary.BigEndian.PutUint32(b[offset:offset+4], ^uint32(0))
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bad := append([]byte(nil), payload...)

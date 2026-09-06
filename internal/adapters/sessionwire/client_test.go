@@ -68,7 +68,7 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 	}{
 		{name: "welcome", message: protocol.Welcome{SessionID: "session"}},
 		{name: "error", message: protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}},
-		{name: "output", message: protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}},
+		{name: "output", message: protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}},
 		{name: "detached", message: protocol.Detached{Reason: protocol.ReasonDetach}},
 		{name: "pong", message: protocol.Pong{}},
 		{name: "sessions", message: protocol.Sessions{Sessions: []protocol.SessionInfo{}}},

@@ -44,7 +44,12 @@ func TestHelloSemanticValidation(t *testing.T) {
 }
 
 func TestOutputSemanticValidation(t *testing.T) {
-	valid := Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}
+	context := ViewContext{
+		Publication: 1,
+		Route:       CommittedRouteIdentity{Target: ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}},
+		TabID:       "tab-1", FocusedPaneID: "pane-1",
+	}
+	valid := Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &context}
 	require.NoError(t, ValidateOutput(valid))
 
 	invalid := valid

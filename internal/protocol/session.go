@@ -424,7 +424,7 @@ func ValidateOutput(m Output) error {
 		if m.Base != 0 || m.Full || m.Context != nil {
 			return ErrInvalidOutput
 		}
-	} else if (m.Base == 0 && !m.Full) || (m.Base != 0 && (m.Full || m.New != m.Base+1)) {
+	} else if m.Context == nil || (m.Base == 0 && !m.Full) || (m.Base != 0 && (m.Full || m.New != m.Base+1)) {
 		return ErrInvalidOutput
 	}
 	if err := ValidateSize(m.Size); err != nil {
