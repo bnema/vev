@@ -104,6 +104,7 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 	}
 	switch message := message.(type) {
 	case protocol.Input:
+		effect.uiActionID = message.ActionID
 		d.handleSequencedInputForAttachment(effect, message.InputSeq, message.Data)
 	case protocol.UIFence:
 		if !d.registerAttachmentUIFence(effect, message.ActionID) {

@@ -302,6 +302,9 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationAction:
 		payload, err := wire.MarshalRouteNavigationAction(m)
 		return wire.Frame{Type: wire.MsgNavigateRecentRoute, Payload: payload}, err
+	case protocol.RouteCreateSessionAction:
+		payload, err := wire.MarshalRouteCreateSessionAction(m)
+		return wire.Frame{Type: wire.MsgRouteCreateSession, Payload: payload}, err
 	case protocol.RouteNavigationFailure:
 		payload, err := wire.MarshalRouteNavigationFailure(m)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}, err
