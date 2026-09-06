@@ -1,19 +1,31 @@
 package daemon
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// Benchmark accounting measures allocated bytes, not retained heap. Setup and
-// warm-up belong to the calling fixture, outside this measured operation.
+// Measure bytes with the same bounded warmup/sampling strategy as
+// testing.AllocsPerRun. These sequential allocation tests need a byte budget,
+// not testing.Benchmark's default one-second timing calibration per assertion.
+func renderAllocatedBytesPerRun(run func()) int64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	run()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const samples = 20
+	for range samples {
+		run()
+	}
+	runtime.ReadMemStats(&after)
+	return int64((after.TotalAlloc - before.TotalAlloc) / samples)
+}
+
+// Setup and warmup remain outside the measured operation; existing byte
+// ceilings are unchanged. Like AllocsPerRun, do not call from parallel tests.
 func assertRenderByteBudget(t *testing.T, run func(), maximum int64) {
 	t.Helper()
-	result := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			run()
-		}
-	})
-	require.LessOrEqual(t, result.AllocedBytesPerOp(), maximum, "rendering must preserve the compact byte-allocation benefit")
+	require.LessOrEqual(t, renderAllocatedBytesPerRun(run), maximum, "rendering must preserve the compact byte-allocation benefit")
 }

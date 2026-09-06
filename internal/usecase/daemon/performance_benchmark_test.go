@@ -328,8 +328,11 @@ func TestPerformanceFixtureSnapshotCaptureRetainsSealedHistory(t *testing.T) {
 func TestPerformanceFixtureCoordinatorMetricsForCanonicalTopologies(t *testing.T) {
 	for _, topology := range daemonHistoryTopologies {
 		t.Run(topology.name, func(t *testing.T) {
+			// These assertions cover coordinator counts, not history scaling.
+			// Keep every topology; the separate history and allocation gates
+			// retain their full 10,000-row datasets.
 			fixture := newPerformanceFixture(t, performanceConfig{
-				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000,
+				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 1,
 			})
 			fixture.paintLive()
 			metrics := fixture.metrics()
