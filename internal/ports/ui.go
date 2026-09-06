@@ -94,6 +94,23 @@ type UISnapshot struct {
 	ApplicationCursor bool
 }
 
+// UI error codes are stable API values shared by client ownership and adapters.
+const (
+	UIErrInvalidRequest        = "invalid_request"
+	UIErrUnsupportedVersion    = "unsupported_version"
+	UIErrPermissionDenied      = "permission_denied"
+	UIErrStaleAttachment       = "stale_attachment"
+	UIErrUnavailable           = "unavailable"
+	UIErrTimeout               = "timeout"
+	UIErrOutcomeUnknown        = "outcome_unknown"
+	UIErrCaptureTooLarge       = "capture_too_large"
+	UIErrActionExpired         = "action_expired"
+	UIErrInputBusy             = "input_busy"
+	UIErrBusy                  = "busy"
+	UIErrNavigationFailed      = "navigation_failed"
+	UIErrEndpointNotConfigured = "endpoint_not_configured"
+)
+
 // UIError reports a sanitized operation failure without captured content.
 type UIError struct {
 	Code     string
@@ -111,6 +128,15 @@ type UIActionRequest struct {
 	Text       string
 	Timeout    time.Duration
 }
+
+// UI action statuses are stable API values, separate from presentation status.
+const (
+	UIActionPending          = "pending"
+	UIActionProcessed        = "processed"
+	UIActionOutcomeUnknown   = UIErrOutcomeUnknown
+	UIActionNavigationFailed = UIErrNavigationFailed
+	UIActionUnavailable      = UIErrUnavailable
+)
 
 type UIActionResult struct {
 	ActionID uint64

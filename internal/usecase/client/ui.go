@@ -32,13 +32,22 @@ type UI struct {
 	reservedContext ports.UIContext
 	waits           int
 	boundary        ports.UIActionResult
+	dispatched      map[uint64]bool
+	handoff         *uiActionHandoff
+}
+
+type uiActionHandoff struct {
+	actionID              uint64
+	sourceGeneration      uint64
+	destinationGeneration uint64
+	boundary              ports.UIActionResult
 }
 
 func NewUI(state ports.UIState, clock ports.Clock) *UI {
 	if clock == nil {
 		clock = systemClock{}
 	}
-	return &UI{state: state, clock: clock, handle: fmt.Sprintf("%x", newClientID()), changed: make(chan struct{}), records: make(map[uint64]ports.UIActionResult)}
+	return &UI{state: state, clock: clock, handle: fmt.Sprintf("%x", newClientID()), changed: make(chan struct{}), records: make(map[uint64]ports.UIActionResult), dispatched: make(map[uint64]bool)}
 }
 
 func (u *UI) Handle() string { return u.handle }
@@ -64,6 +73,13 @@ func (u *UI) status(status ports.UIPresentationStatus) {
 // Observe relays the sink's single coalesced signal to bounded concurrent
 // waiters. The Runner owns this worker's lifetime.
 func (u *UI) Observe(ctx context.Context) {
+	defer func() {
+		u.mu.Lock()
+		if u.pending != 0 {
+			u.finishLocked(u.pending, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
+		}
+		u.mu.Unlock()
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -80,7 +96,7 @@ func (u *UI) signalLocked() { close(u.changed); u.changed = make(chan struct{}) 
 
 func (u *UI) Capture(attachment string) (ports.UISnapshot, error) {
 	if attachment != u.handle {
-		return ports.UISnapshot{}, &ports.UIError{Code: "stale_attachment"}
+		return ports.UISnapshot{}, &ports.UIError{Code: ports.UIErrStaleAttachment}
 	}
 	return u.state.Snapshot()
 }
@@ -90,7 +106,7 @@ func uiTimeout(timeout time.Duration) (time.Duration, error) {
 		return 5 * time.Second, nil
 	}
 	if timeout < time.Millisecond || timeout > 30*time.Second {
-		return 0, &ports.UIError{Code: "invalid_request"}
+		return 0, &ports.UIError{Code: ports.UIErrInvalidRequest}
 	}
 	return timeout, nil
 }
@@ -163,15 +179,15 @@ func uiSnapshotText(snapshot ports.UISnapshot) string {
 func (u *UI) Wait(ctx context.Context, request ports.UIWaitRequest) (ports.UIWaitResult, error) {
 	timeout, err := uiTimeout(request.Timeout)
 	if err != nil || !validateUIExpect(request.Expect) {
-		return ports.UIWaitResult{}, &ports.UIError{Code: "invalid_request"}
+		return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrInvalidRequest}
 	}
 	if request.Attachment != u.handle {
-		return ports.UIWaitResult{}, &ports.UIError{Code: "stale_attachment"}
+		return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrStaleAttachment}
 	}
 	u.mu.Lock()
 	if u.waits >= 4 {
 		u.mu.Unlock()
-		return ports.UIWaitResult{}, &ports.UIError{Code: "busy"}
+		return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrBusy}
 	}
 	u.waits++
 	u.mu.Unlock()
@@ -189,17 +205,17 @@ func (u *UI) Wait(ctx context.Context, request ports.UIWaitRequest) (ports.UIWai
 		u.mu.Unlock()
 		if request.AfterAction != 0 {
 			if !exists {
-				return ports.UIWaitResult{}, &ports.UIError{Code: "action_expired", ActionID: request.AfterAction}
+				return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrActionExpired, ActionID: request.AfterAction}
 			}
-			if action.Status != "pending" && action.Status != "processed" {
+			if action.Status != ports.UIActionPending && action.Status != ports.UIActionProcessed {
 				return ports.UIWaitResult{}, &ports.UIError{Code: action.Status, Accepted: action.Accepted, ActionID: action.ActionID}
 			}
-			if action.Status == "processed" && action.Context.Generation != generation {
-				return ports.UIWaitResult{}, &ports.UIError{Code: "outcome_unknown", Accepted: true, ActionID: action.ActionID}
+			if action.Status == ports.UIActionProcessed && action.Context.Generation != generation {
+				return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrOutcomeUnknown, Accepted: true, ActionID: action.ActionID}
 			}
 		}
 		snapshot, snapshotErr := u.Capture(request.Attachment)
-		eligible := request.AfterAction == 0 || action.Status == "processed" && snapshot.Revision >= action.Revision && snapshot.Context.Generation == action.Context.Generation
+		eligible := request.AfterAction == 0 || action.Status == ports.UIActionProcessed && snapshot.Revision >= action.Revision && snapshot.Context.Generation == action.Context.Generation
 		if snapshotErr == nil && eligible && uiMatches(snapshot, request.Expect) {
 			if request.AfterAction != 0 {
 				u.mu.Lock()
@@ -216,7 +232,7 @@ func (u *UI) Wait(ctx context.Context, request ports.UIWaitRequest) (ports.UIWai
 		case <-ctx.Done():
 			return ports.UIWaitResult{}, ctx.Err()
 		case <-timer.C():
-			return ports.UIWaitResult{}, &ports.UIError{Code: "timeout", Accepted: action.Accepted, ActionID: request.AfterAction}
+			return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrTimeout, Accepted: action.Accepted, ActionID: request.AfterAction}
 		case <-changed:
 		}
 	}

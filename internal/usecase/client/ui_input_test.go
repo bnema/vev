@@ -17,6 +17,7 @@ func TestEncodeUIKeys(t *testing.T) {
 		{name: "navigation", keys: []string{"Up", "Down", "Right", "Left", "Home", "End", "PageUp", "PageDown"}, want: "\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F\x1b[5~\x1b[6~"},
 		{name: "application", keys: []string{"Up", "Home", "End"}, app: true, want: "\x1bOA\x1bOH\x1bOF"},
 		{name: "modifiers", keys: []string{"Ctrl+A", "Ctrl+@", "Ctrl+_", "Alt+Space", "Alt+x"}, want: "\x01\x00\x1f\x1b \x1bx"},
+		{name: "alt ASCII names", keys: []string{"Alt+Enter", "Alt+Tab", "Alt+Backspace", "Alt+Escape"}, want: "\x1b\r\x1b\t\x1b\x7f\x1b\x1b"},
 		{name: "empty", invalid: true},
 		{name: "case", keys: []string{"enter"}, invalid: true},
 		{name: "combined", keys: []string{"Ctrl+Alt+A"}, invalid: true},

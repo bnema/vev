@@ -641,6 +641,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
 		transport, err := boundedDialWithTransition(handshakeCtx, dialer, transition)
 		if err != nil {
+			if r.ui != nil {
+				r.ui.failHandoff()
+			}
 			err = handshakeContextError(ctx, timedOut, err)
 			finishHandshake()
 			if killedSelection != nil {
@@ -753,6 +756,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
+		if result.err != nil && r.ui != nil {
+			r.ui.failHandoff()
+		}
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -1578,6 +1584,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	controlCh := make(chan protocol.ClientMessage, 1)
 	barrierCh := make(chan chan struct{})
 	inputGate := newSamePeerInputGate()
+	inputGate.ui = a.runner.ui
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 	senderStarted := false
@@ -1690,6 +1697,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	uiOutput, _ := term.(ports.UIOutputTransaction)
 	uiContext := ports.UIContext{Generation: 1}
 	ui := a.runner.ui
+	publishUIStatus := func(status ports.UIPresentationStatus) {
+		uiContext.Status = status
+		if ui != nil {
+			ui.status(status)
+		}
+	}
 	var uiGeneration uint64
 	outputResetRequested := false
 	transitionWaitingFull := false
@@ -1754,7 +1767,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			uiGeneration = ui.bindForeground(foregroundCtx, input, consumer)
 			uiContext.AttachmentHandle = ui.Handle()
 			uiContext.Generation = uiGeneration
-			ui.status(ports.UIStatusTransitioning)
+			publishUIStatus(ports.UIStatusTransitioning)
 		}
 		generation := uiGeneration
 		stdinDone := make(chan struct{})
@@ -2058,7 +2071,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				continue
 			}
 			if ui != nil {
-				ui.status(ports.UIStatusReconnecting)
+				publishUIStatus(ports.UIStatusReconnecting)
 			}
 			stage := stageForLinkState(ev.State)
 			if reconnect.remote && reconnect.showing && reconnect.stage != stage {
@@ -2130,6 +2143,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if parkedWaitingFull && !o.Full {
 					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
 				}
+				if ui != nil && o.Full && foreground == nil && (parkedWaitingFull || samePeerSwitch == nil) {
+					startForeground()
+				}
 				if uiOutput != nil {
 					status := ports.UIStatusAttached
 					if reconnect.showing {
@@ -2175,6 +2191,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				outputState = nextState
 				if ui != nil && o.New != 0 {
 					ui.published(uiGeneration)
+					if o.Full {
+						ui.destinationFull(uiGeneration)
+					}
 				}
 				if transition != nil && transition.active && (!transitionWaitingFull || o.Full) {
 					transitionWaitingFull = false
@@ -2226,7 +2245,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 			case protocol.AttachTarget:
 				if ui != nil {
-					ui.status(ports.UIStatusTransitioning)
+					ui.follow(uiGeneration, message.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
 				}
 				target := message
 				if transientPicker {
@@ -2253,6 +2273,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						return welcomedResult(errors.New("vev: invalid same-peer switch"))
 					}
 					samePeerSwitch = &samePeerSwitchPending{requestID: nextSamePeerRequestID, target: *target.ExactTarget}
+					if ui != nil {
+						stopForeground()
+						ui.mu.Lock()
+						inputGate.retiredUI.Store(ui.nextAction)
+						ui.mu.Unlock()
+					}
 					inputGate.setPaused(true)
 					select {
 					case controlCh <- switchRequest:
@@ -2309,7 +2335,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 			case protocol.NavigationDirective:
 				if ui != nil {
-					ui.status(ports.UIStatusTransitioning)
+					ui.follow(uiGeneration, message.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
 				}
 				directive := message
 				datagramRoute := transport.Capabilities().PreferredOutputWindow == 1
@@ -2343,6 +2370,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
+				if ui != nil {
+					ui.follow(uiGeneration, action.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
+				}
 				result := welcomedResult(nil)
 				result.routeCreateAction = &action
 				return result
@@ -2363,6 +2394,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				if noOp {
 					continue
+				}
+				if ui != nil {
+					ui.follow(uiGeneration, action.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
 				}
 				navigation := welcomedResult(nil)
 				navigation.routeAction = &action
@@ -2393,9 +2428,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case protocol.SamePeerSwitchFailure:
 				failure := message
 				if samePeerSwitch != nil && failure.RequestID == samePeerSwitch.requestID {
+					if ui != nil {
+						ui.failHandoff()
+					}
 					samePeerSwitch = nil
 					inputGate.setPaused(false)
-					if transition != nil && transition.showing {
+					if ui != nil || transition != nil && transition.showing {
 						transitionWaitingFull = true
 						if !outputResetRequested {
 							select {
@@ -2519,6 +2557,9 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.ClientConnection, control <-chan protocol.ClientMessage, barriers <-chan chan struct{}, in <-chan protocol.ClientMessage, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
 	send := func(message protocol.ClientMessage) bool {
+		if inputGate.discardRetiredUI(message) {
+			return true
+		}
 		if err := transport.SendClient(message); err != nil {
 			select {
 			case errCh <- err:
@@ -3052,9 +3093,10 @@ func (p *stdinPump) run() {
 	var automated bool
 	var activeBatch *terminalAutomationRequest
 	var batchSent atomic.Bool
+	var batchComplete bool
 	defer func() {
 		if activeBatch != nil {
-			activeBatch.dispatched <- false
+			activeBatch.dispatched <- batchComplete
 		}
 	}()
 	var sendOK atomic.Bool
@@ -3230,6 +3272,7 @@ func (p *stdinPump) run() {
 			batch = &request
 			activeBatch = batch
 			batchSent.Store(false)
+			batchComplete = false
 			result = request.record
 			automated = true
 			actionID.Store(result.actionID)
@@ -3295,6 +3338,7 @@ func (p *stdinPump) run() {
 			})
 			markers.flush(sink)
 			ok := coalescer.EndBatch() && sendOK.Load()
+			batchComplete = ok && pendingEvents.Load() == 0
 			applied := make(chan struct{})
 			if ok {
 				ok = sendEvent(paletteGenerationEvent{kind: paletteEventUIBatchEnd, batchApplied: applied})
@@ -3302,14 +3346,17 @@ func (p *stdinPump) run() {
 			if ok {
 				select {
 				case <-applied:
+					batchComplete = true
 				case <-p.ctx.Done():
 					ok = false
 				}
 			}
 			if ok && batchSent.Load() {
 				ok = send(protocol.UIFence{ActionID: result.actionID})
+			} else if ok && batch.owner != nil {
+				batch.owner.completeLocal(result.generation, result.actionID)
 			}
-			batch.dispatched <- ok
+			batch.dispatched <- batchComplete
 			activeBatch = nil
 			if !ok {
 				return

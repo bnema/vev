@@ -17,8 +17,10 @@ func (u *UI) bindForeground(ctx context.Context, input *terminalInputPump, consu
 	u.consumer = consumer
 	u.foreground = ctx
 	u.boundary = ports.UIActionResult{}
-	if u.pending != 0 {
-		u.finishLocked(u.pending, "outcome_unknown", ports.UIActionResult{})
+	if u.handoff != nil && u.handoff.destinationGeneration == 0 {
+		u.handoff.destinationGeneration = u.generation
+	} else if u.pending != 0 {
+		u.finishLocked(u.pending, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
 		u.pending = 0
 	}
 	u.signalLocked()
@@ -33,10 +35,11 @@ func (u *UI) accept(id, generation uint64) bool {
 	}
 	if len(u.order) == uiActionHistory {
 		delete(u.records, u.order[0])
+		delete(u.dispatched, u.order[0])
 		u.order = u.order[1:]
 	}
 	u.order = append(u.order, id)
-	u.records[id] = ports.UIActionResult{ActionID: id, Accepted: true, Status: "pending", Context: u.reservedContext}
+	u.records[id] = ports.UIActionResult{ActionID: id, Accepted: true, Status: ports.UIActionPending, Context: u.reservedContext}
 	u.signalLocked()
 	return true
 }
@@ -47,11 +50,15 @@ func (u *UI) finishLocked(id uint64, status string, boundary ports.UIActionResul
 		return
 	}
 	record.Status = status
-	if status == "processed" {
+	if status == ports.UIActionProcessed {
+		u.dispatched[id] = true
 		record.Revision = boundary.Revision
 		record.Context = boundary.Context
 	}
 	u.records[id] = record
+	if u.handoff != nil && u.handoff.actionID == id {
+		u.handoff = nil
+	}
 	if u.pending == id {
 		u.pending = 0
 	}
@@ -77,19 +84,22 @@ func (u *UI) published(generation uint64) {
 func (u *UI) receipt(generation uint64, receipt protocol.UIReceipt) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.handoff != nil && u.handoff.actionID == receipt.ActionID {
+		return
+	}
 	record, ok := u.records[receipt.ActionID]
-	if !ok || record.Status != "pending" || record.Context.Generation != generation || generation != u.generation || receipt.Validate() != nil {
+	if !ok || record.Status != ports.UIActionPending || record.Context.Generation != generation || generation != u.generation || receipt.Validate() != nil {
 		return
 	}
 	if receipt.Outcome == protocol.UIReceiptUnavailable {
-		u.finishLocked(receipt.ActionID, "unavailable", ports.UIActionResult{})
+		u.finishLocked(receipt.ActionID, ports.UIActionUnavailable, ports.UIActionResult{})
 		return
 	}
 	boundary := u.boundary
 	if boundary.Context.OutputEpoch != receipt.Epoch || boundary.Context.OutputState != receipt.State || boundary.Context.ViewPublication != receipt.ViewPublication || boundary.Revision == 0 {
 		return
 	}
-	u.finishLocked(receipt.ActionID, "processed", boundary)
+	u.finishLocked(receipt.ActionID, ports.UIActionProcessed, boundary)
 }
 
 func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.UIActionResult, error) {
@@ -98,14 +108,14 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 		return ports.UIActionResult{}, err
 	}
 	if request.Attachment != u.handle {
-		return ports.UIActionResult{}, &ports.UIError{Code: "stale_attachment"}
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrStaleAttachment}
 	}
 	snapshot, err := u.state.Snapshot()
 	if err != nil {
 		return ports.UIActionResult{}, err
 	}
 	if request.Generation == 0 || snapshot.Context.Generation != request.Generation {
-		return ports.UIActionResult{}, &ports.UIError{Code: "stale_attachment"}
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrStaleAttachment}
 	}
 	var data []byte
 	switch {
@@ -117,20 +127,20 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 		err = errUIInvalidInput
 	}
 	if err != nil {
-		return ports.UIActionResult{}, &ports.UIError{Code: "invalid_request"}
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrInvalidRequest}
 	}
 	u.mu.Lock()
 	if request.Generation != u.generation {
 		u.mu.Unlock()
-		return ports.UIActionResult{}, &ports.UIError{Code: "stale_attachment"}
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrStaleAttachment}
 	}
 	if u.pending != 0 {
 		u.mu.Unlock()
-		return ports.UIActionResult{}, &ports.UIError{Code: "busy"}
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrBusy}
 	}
 	if u.foreground == nil || u.foreground.Err() != nil || snapshot.Context.Status != ports.UIStatusAttached {
 		u.mu.Unlock()
-		return ports.UIActionResult{}, &ports.UIError{Code: "unavailable"}
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrUnavailable}
 	}
 	u.nextAction++
 	id := u.nextAction
@@ -162,17 +172,17 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 	select {
 	case input.automation <- batch:
 	case <-ctx.Done():
-		return reject("timeout")
+		return reject(ports.UIErrTimeout)
 	case <-foreground.Done():
-		return reject("unavailable")
+		return reject(ports.UIErrUnavailable)
 	case <-timer.C():
-		return reject("timeout")
+		return reject(ports.UIErrTimeout)
 	}
 	// Once the owner receives the request it returns admission without I/O. Learn
 	// that decision even if cancellation races it; never claim rollback of input.
 	admitted := <-batch.admitted
 	if !admitted {
-		return reject("input_busy")
+		return reject(ports.UIErrInputBusy)
 	}
 	go u.trackDispatch(foreground, id, batch.dispatched)
 	for {
@@ -181,20 +191,20 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 		changed := u.changed
 		u.mu.Unlock()
 		if !exists {
-			return ports.UIActionResult{}, &ports.UIError{Code: "action_expired", Accepted: true, ActionID: id}
+			return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrActionExpired, Accepted: true, ActionID: id}
 		}
-		if record.Status == "processed" {
+		if record.Status == ports.UIActionProcessed {
 			return record, nil
 		}
-		if record.Status != "pending" {
+		if record.Status != ports.UIActionPending {
 			return record, &ports.UIError{Code: record.Status, Accepted: true, ActionID: id}
 		}
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			return record, &ports.UIError{Code: "timeout", Accepted: true, ActionID: id}
+			return record, &ports.UIError{Code: ports.UIErrTimeout, Accepted: true, ActionID: id}
 		case <-timer.C():
-			return record, &ports.UIError{Code: "timeout", Accepted: true, ActionID: id}
+			return record, &ports.UIError{Code: ports.UIErrTimeout, Accepted: true, ActionID: id}
 		}
 	}
 }
@@ -202,30 +212,45 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 func (u *UI) trackDispatch(ctx context.Context, id uint64, dispatched <-chan bool) {
 	timer := u.clock.NewTimer(30 * time.Second)
 	defer timer.Stop()
+	foregroundDone := ctx.Done()
 	for {
 		u.mu.Lock()
 		record, exists := u.records[id]
 		changed := u.changed
 		u.mu.Unlock()
-		if !exists || record.Status != "pending" {
+		if !exists || record.Status != ports.UIActionPending {
 			return
 		}
 		status := ""
 		select {
 		case ok := <-dispatched:
 			if !ok {
-				status = "outcome_unknown"
+				status = ports.UIActionOutcomeUnknown
+			} else {
+				u.mu.Lock()
+				if _, exists := u.records[id]; exists {
+					u.dispatched[id] = true
+					u.completeHandoffLocked()
+				}
+				u.mu.Unlock()
 			}
 			dispatched = nil
-		case <-ctx.Done():
-			status = "outcome_unknown"
+		case <-foregroundDone:
+			u.mu.Lock()
+			following := u.handoff != nil && u.handoff.actionID == id
+			u.mu.Unlock()
+			if following {
+				foregroundDone = nil
+			} else {
+				status = ports.UIActionOutcomeUnknown
+			}
 		case <-timer.C():
-			status = "unavailable"
+			status = ports.UIActionUnavailable
 		case <-changed:
 		}
 		if status != "" {
 			u.mu.Lock()
-			if current := u.records[id]; current.Status == "pending" {
+			if current := u.records[id]; current.Status == ports.UIActionPending {
 				u.finishLocked(id, status, ports.UIActionResult{})
 			}
 			u.mu.Unlock()

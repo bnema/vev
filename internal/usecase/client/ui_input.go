@@ -46,8 +46,10 @@ func encodeUIKeys(keys []string, applicationCursor bool) ([]byte, error) {
 func encodeUIKey(key string, applicationCursor bool) (string, bool) {
 	if strings.HasPrefix(key, "Alt+") {
 		plain := strings.TrimPrefix(key, "Alt+")
-		if plain == "Space" {
-			plain = " "
+		switch plain {
+		case "Enter", "Escape", "Tab", "Backspace", "Space":
+			encoded, _ := encodeUIKey(plain, applicationCursor)
+			return "\x1b" + encoded, true
 		}
 		if len(plain) == 1 && plain[0] >= 0x20 && plain[0] <= 0x7e {
 			return "\x1b" + plain, true

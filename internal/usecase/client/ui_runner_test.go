@@ -17,6 +17,14 @@ import (
 )
 
 func TestUIRunnerAppliesFenceReceiptAfterMetadataPublication(t *testing.T) {
+	testUIRunnerAction(t, false)
+}
+
+func TestUIRunnerSamePeerActionWaitsForDestinationFull(t *testing.T) {
+	testUIRunnerAction(t, true)
+}
+
+func testUIRunnerAction(t *testing.T, handoff bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: 8, Rows: 2}}, "")
@@ -43,6 +51,8 @@ func TestUIRunnerAppliesFenceReceiptAfterMetadataPublication(t *testing.T) {
 	var themeCount int
 	sentInput := make(chan protocol.Input, 16)
 	fences := make(chan protocol.UIFence, 1)
+	switches := make(chan protocol.SamePeerSwitchRequest, 1)
+	routeSnapshots := make(chan struct{}, 8)
 	transport.EXPECT().SendClient(mock.Anything).RunAndReturn(func(message protocol.ClientMessage) error {
 		switch message := message.(type) {
 		case protocol.Theme:
@@ -55,6 +65,10 @@ func TestUIRunnerAppliesFenceReceiptAfterMetadataPublication(t *testing.T) {
 			sentInput <- message
 		case protocol.UIFence:
 			fences <- message
+		case protocol.SamePeerSwitchRequest:
+			switches <- message
+		case protocol.RecentRouteSnapshot:
+			routeSnapshots <- struct{}{}
 		}
 		return nil
 	}).Maybe()
@@ -72,7 +86,7 @@ func TestUIRunnerAppliesFenceReceiptAfterMetadataPublication(t *testing.T) {
 			t.Error("Runner did not detach")
 		}
 	})
-	incoming <- protocol.Welcome{SessionID: "session", SessionName: "fixture"}
+	incoming <- protocol.Welcome{SessionID: "session", SessionName: "fixture", CommittedIdentity: &view.Route}
 	attached := ports.UIStatusAttached
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached}})
 	require.NoError(t, err)
@@ -103,8 +117,33 @@ func TestUIRunnerAppliesFenceReceiptAfterMetadataPublication(t *testing.T) {
 	default:
 	}
 	view.Publication = 2
-	incoming <- protocol.UIViewUpdate{Epoch: 1, State: 1, Context: view}
-	incoming <- protocol.UIReceipt{ActionID: fence.ActionID, Epoch: 1, State: 1, ViewPublication: 2, Outcome: protocol.UIReceiptProcessed}
+	if handoff {
+		for len(routeSnapshots) > 0 {
+			<-routeSnapshots
+		}
+		target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "destination"}
+		incoming <- protocol.AttachTarget{SamePeer: true, ExactTarget: &target, CauseActionID: fence.ActionID}
+		select {
+		case request := <-switches:
+			require.Equal(t, target, request.Target)
+		case <-time.After(time.Second):
+			t.Fatal("missing existing same-peer switch request")
+		}
+		incoming <- protocol.CommittedRouteIdentity{Target: target}
+		requireSignal(t, routeSnapshots, "identity commit was not handled")
+		select {
+		case <-result:
+			t.Fatal("identity alone completed the action")
+		case err := <-failed:
+			t.Fatalf("handoff failed: %v", err)
+		default:
+		}
+		view.Route.Target = target
+		incoming <- protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 8, Rows: 2}, Context: &view, Data: []byte("\x1b[2J\x1b[Hready")}
+	} else {
+		incoming <- protocol.UIViewUpdate{Epoch: 1, State: 1, Context: view}
+		incoming <- protocol.UIReceipt{ActionID: fence.ActionID, Epoch: 1, State: 1, ViewPublication: 2, Outcome: protocol.UIReceiptProcessed}
+	}
 	var action ports.UIActionResult
 	select {
 	case action = <-result:
@@ -117,6 +156,10 @@ func TestUIRunnerAppliesFenceReceiptAfterMetadataPublication(t *testing.T) {
 	require.Equal(t, "processed", action.Status)
 	require.Equal(t, uint64(2), action.Context.ViewPublication)
 	require.Equal(t, ui.Handle(), action.Context.AttachmentHandle)
+	if handoff {
+		require.Equal(t, uint64(2), action.Context.Generation)
+		require.Equal(t, "destination", action.Context.Route.Target.SessionName)
+	}
 	text := "ready"
 	matched, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), AfterAction: action.ActionID, Expect: ports.UIExpect{TextContains: &text, Status: &attached}})
 	require.NoError(t, err)
