@@ -59,6 +59,35 @@ type interactiveUIOptions struct {
 	socket  string
 }
 
+func parseInteractiveUIFlags(args []string, observe, control bool, socket string) (interactiveUIOptions, error) {
+	options := interactiveUIOptions{observe: observe, control: control, socket: socket}
+	for len(args) > 0 {
+		switch args[0] {
+		case "--ui-observe":
+			options.observe = true
+			args = args[1:]
+		case "--ui-control":
+			options.control = true
+			args = args[1:]
+		case "--ui-socket":
+			if len(args) < 2 || args[1] == "" {
+				return interactiveUIOptions{}, usagef("`--ui-socket` requires a path")
+			}
+			options.socket = args[1]
+			args = args[2:]
+		default:
+			return interactiveUIOptions{}, usagef("unknown attach option %q", args[0])
+		}
+	}
+	if options.socket != "" && !options.observe && !options.control {
+		return interactiveUIOptions{}, usagef("`--ui-socket` requires `--ui-observe` or `--ui-control`")
+	}
+	if options.socket != "" && (!filepath.IsAbs(options.socket) || strings.IndexByte(options.socket, 0) >= 0) {
+		return interactiveUIOptions{}, usagef("`--ui-socket` requires an absolute path")
+	}
+	return options, nil
+}
+
 func parseUIDriverArgs(args []string) (uiDriverOptions, error) {
 	options := uiDriverOptions{cols: uiDriverDefaultColumns, rows: uiDriverDefaultRows}
 	var socketSet, sessionSet, colsSet, rowsSet, remoteSet, launchSet bool

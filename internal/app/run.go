@@ -191,9 +191,11 @@ func parseArgs(args []string) (command, error) {
 		args = args[1:]
 	}
 parsedUIFlags:
-	if uiSocket != "" && !uiObserve && !uiControl {
-		return command{}, usagef("`--ui-socket` requires `--ui-observe` or `--ui-control`")
+	interactive, err := parseInteractiveUIFlags(nil, uiObserve, uiControl, uiSocket)
+	if err != nil {
+		return command{}, err
 	}
+	uiObserve, uiControl, uiSocket = interactive.observe, interactive.control, interactive.socket
 	if len(args) == 0 {
 		return command{kind: kindAttach, intent: protocol.IntentEphemeral, uiObserve: uiObserve, uiControl: uiControl, uiSocket: uiSocket}, nil
 	}
@@ -245,19 +247,21 @@ parsedUIFlags:
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
 		}
-		if len(args) > 2 {
-			return command{}, usagef("`new` does not support command overrides")
+		interactive, err := parseInteractiveUIFlags(args[2:], uiObserve, uiControl, uiSocket)
+		if err != nil {
+			return command{}, err
 		}
 		if err := domain.ValidateSessionName(args[1]); err != nil {
 			return command{}, err
 		}
-		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1], uiObserve: uiObserve, uiControl: uiControl, uiSocket: uiSocket}, nil
+		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1], uiObserve: interactive.observe, uiControl: interactive.control, uiSocket: interactive.socket}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
 		}
-		if len(args) > 2 {
-			return command{}, usagef("`attach` accepts exactly one session name or remote target")
+		interactive, err := parseInteractiveUIFlags(args[2:], uiObserve, uiControl, uiSocket)
+		if err != nil {
+			return command{}, err
 		}
 		cmd := command{kind: kindAttach, intent: protocol.IntentAttach, name: args[1]}
 		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
@@ -275,9 +279,9 @@ parsedUIFlags:
 				cmd.intent = protocol.IntentEphemeral
 			}
 		}
-		cmd.uiObserve = uiObserve
-		cmd.uiControl = uiControl
-		cmd.uiSocket = uiSocket
+		cmd.uiObserve = interactive.observe
+		cmd.uiControl = interactive.control
+		cmd.uiSocket = interactive.socket
 		return cmd, nil
 	case "ls", "list":
 		if uiObserve || uiControl || uiSocket != "" {

@@ -2,11 +2,13 @@ package uidriver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +114,22 @@ func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("second socket server did not stop")
 	}
+}
+
+func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.Chmod(directory, 0o700))
+	path := filepath.Join(directory, "ui.sock")
+	endpoint, err := ListenUnix(path, New(nil, nil), func() Ready { return testReady(false) })
+	require.NoError(t, err)
+	defer endpoint.Close()
+
+	var output bytes.Buffer
+	require.NoError(t, Bridge(context.Background(), path, strings.NewReader(""), &output))
+	decoder := json.NewDecoder(&output)
+	var ready envelope
+	require.NoError(t, decoder.Decode(&ready))
+	require.Zero(t, ready.ID)
 }
 
 func fileMode(t *testing.T, path string) os.FileMode {
