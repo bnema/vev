@@ -35,6 +35,39 @@ func TestCaptureRejectsExcessGeometryWithoutResizing(t *testing.T) {
 	require.Equal(t, ports.UIErrCaptureTooLarge, uiErr.Code)
 }
 
+func TestCaptureFitsMaximumViewportForStructuredFormats(t *testing.T) {
+	snapshot := ports.UISnapshot{Columns: maxColumns, Rows: maxRows, Cells: make([]ports.UICell, maxColumns*maxRows)}
+	for _, format := range []captureFormat{formatCells, formatBoth} {
+		t.Run(string(format), func(t *testing.T) {
+			require.True(t, captureFitsResponse(snapshot, format))
+		})
+	}
+	capture, err := publicCapture(snapshot, formatCells)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(capture)
+	require.NoError(t, err)
+	require.Less(t, len(encoded), maxResponseBytes)
+}
+
+func TestColorResponseSerializesZeroComponents(t *testing.T) {
+	tests := []struct {
+		name  string
+		color colorResponse
+		want  string
+	}{
+		{name: "default", color: colorResponse{Kind: colorDefault}, want: `{"kind":"default","index":0,"r":0,"g":0,"b":0}`},
+		{name: "indexed zero", color: colorResponse{Kind: colorIndexed}, want: `{"kind":"indexed","index":0,"r":0,"g":0,"b":0}`},
+		{name: "rgb zero", color: colorResponse{Kind: colorRGB}, want: `{"kind":"rgb","index":0,"r":0,"g":0,"b":0}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.color)
+			require.NoError(t, err)
+			require.Equal(t, test.want, string(encoded))
+		})
+	}
+}
+
 func TestCaptureRejectsOversizedCellBeforeSerialization(t *testing.T) {
 	snapshot := ports.UISnapshot{Revision: 1, Columns: 1, Rows: 1, Cells: []ports.UICell{{Text: strings.Repeat("x", maxResponseBytes), Width: 1}}}
 	_, err := publicCapture(snapshot, formatCells)

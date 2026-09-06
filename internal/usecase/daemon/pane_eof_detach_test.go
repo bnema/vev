@@ -14,7 +14,7 @@ func TestLastPaneEOFRetriesSessionTeardownAfterConcurrentDetach(t *testing.T) {
 			tb := sess.tabs[0]
 			last := tb.focusedPane()
 			hiddenPTY := newQuietPTY()
-			defer hiddenPTY.Close()
+			defer func() { _ = hiddenPTY.Close() }()
 			installTestFloating(tb, newPane("floating", hiddenPTY, domain.Size{Cols: 20, Rows: 5}), false)
 			defer tb.closeAllPanes()
 			changed := false

@@ -16,7 +16,7 @@ import (
 const (
 	apiVersion         = 1
 	maxRequestBytes    = 64 << 10
-	maxResponseBytes   = 32 << 20
+	maxResponseBytes   = 48 << 20
 	maxSerializedBytes = 128 << 20
 	maxConnections     = 4
 	maxColumns         = 512

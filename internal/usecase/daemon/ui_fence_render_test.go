@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -117,9 +118,9 @@ func TestUIFenceFailedPublicationOrReceiptDoesNotConfirm(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 			tr := newMockServerConnection(t)
 			sends := make(chan wire.Frame, 16)
-			fail := false
+			var fail atomic.Bool
 			tr.EXPECT().Send(mock.Anything).RunAndReturn(func(frame wire.Frame) error {
-				if fail && frame.Type == failedType {
+				if fail.Load() && frame.Type == failedType {
 					return errors.New("injected send failure")
 				}
 				sends <- frame
@@ -146,7 +147,7 @@ func TestUIFenceFailedPublicationOrReceiptDoesNotConfirm(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, drainAllFrames(sends))
 			require.False(t, d.handleAttachmentClientMessage(captureAttachmentCapability(sess, ac, tr), protocol.UIFence{ActionID: 13}))
-			fail = true
+			fail.Store(true)
 			require.Equal(t, paintEmitted, d.paint(sess, ac, false, lease))
 			awaitTestValue(t, cleanupEntered, "failed send did not reserve exact-attachment cleanup")
 			if failedType == wire.MsgUIViewUpdate {

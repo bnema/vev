@@ -19,12 +19,12 @@ import (
 func TestInteractiveObservationPublishesPhysicalWriterTransaction(t *testing.T) {
 	inputReader, inputWriter, err := os.Pipe()
 	require.NoError(t, err)
-	defer inputReader.Close()
-	defer inputWriter.Close()
+	defer func() { _ = inputReader.Close() }()
+	defer func() { _ = inputWriter.Close() }()
 	outputReader, outputWriter, err := os.Pipe()
 	require.NoError(t, err)
-	defer outputReader.Close()
-	defer outputWriter.Close()
+	defer func() { _ = outputReader.Close() }()
+	defer func() { _ = outputWriter.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

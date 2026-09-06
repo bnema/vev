@@ -302,6 +302,16 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 		t.Fatalf("no-byte transaction sent state frame %#v", frame)
 	default:
 	}
+
+	state.focusedPaneID = "pane-2"
+	state.panes[0].stableID = "pane-2"
+	ac.sendMu.Lock()
+	require.True(t, d.emitFrame(sess, ac, &state, noByte))
+	frame := <-sends
+	require.Equal(t, wire.MsgUIViewUpdate, frame.Type)
+	update, err := wire.UnmarshalUIViewUpdate(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, state.focusedPaneID, update.Context.FocusedPaneID)
 }
 
 func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {

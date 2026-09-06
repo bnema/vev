@@ -41,12 +41,17 @@ func TestUIInputPumpBatchFenceOrdering(t *testing.T) {
 			}
 			require.Equal(t, paletteEventUIBatchEnd, boundary.kind)
 			var got string
-			for len(out) > 0 {
-				message := <-out
-				in, ok := message.(protocol.Input)
-				require.True(t, ok, "fence passed the local barrier")
-				require.Equal(t, uint64(9), in.ActionID)
-				got += string(in.Data)
+			deadline := time.After(time.Second)
+			for len(got) < len(text) {
+				select {
+				case message := <-out:
+					in, ok := message.(protocol.Input)
+					require.True(t, ok, "fence passed the local barrier")
+					require.Equal(t, uint64(9), in.ActionID)
+					got += string(in.Data)
+				case <-deadline:
+					t.Fatalf("automated batch stalled: got %q", got)
+				}
 			}
 			require.Equal(t, text, got)
 			// A physical read can queue while the action waits, but cannot interleave.
@@ -60,7 +65,7 @@ func TestUIInputPumpBatchFenceOrdering(t *testing.T) {
 			}
 			require.True(t, <-req.dispatched)
 			var human string
-			deadline := time.After(time.Second)
+			deadline = time.After(time.Second)
 			for len(human) < len("human") {
 				select {
 				case message := <-out:

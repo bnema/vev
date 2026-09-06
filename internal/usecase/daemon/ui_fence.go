@@ -121,9 +121,5 @@ func (c *renderCoordinator) finishUIFence(lease *attachmentLease, pending *pendi
 // Retirement already canceled its expiry timer, so leaving the pending fence in
 // place would permanently occupy the attachment's single fence slot.
 func (c *renderCoordinator) failUIFence(lease *attachmentLease, pending *pendingUIFence) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.leaseCurrentLocked(lease, true) && lease.pendingUIFence == pending && pending.retiring {
-		lease.cancelUIFenceLocked()
-	}
+	c.finishUIFence(lease, pending)
 }

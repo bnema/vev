@@ -33,6 +33,7 @@ type Terminal struct {
 	observation ports.UIObservationSink
 
 	mu         sync.Mutex
+	geometryMu sync.Mutex     // serializes winsize reads with observation publication
 	orig       *rawterm.State // saved terminal state; nil when raw mode wasn't entered (or was restored)
 	entered    bool           // true between a successful EnterRaw and its restore
 	rawSkipped bool           // true if fd wasn't a tty, so MakeRaw/Restore were skipped
@@ -188,6 +189,8 @@ func (t *Terminal) restoreRawLocked() error {
 // Geometry returns the current terminal cell dimensions and optional pixel
 // dimensions reported by the controlling terminal.
 func (t *Terminal) Geometry() (domain.Geometry, error) {
+	t.geometryMu.Lock()
+	defer t.geometryMu.Unlock()
 	ws, err := rawterm.GetWinsize(t.fd)
 	if err != nil {
 		return domain.Geometry{}, fmt.Errorf("term: get size: %w", err)

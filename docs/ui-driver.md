@@ -61,7 +61,7 @@ Supported predicates are literal `text_contains`, an exact `session` (`lifecycle
 - Headless viewports are at most 512 columns by 256 rows.
 - The default and maximum request timeout are 5 seconds and 30 seconds.
 - Each attachment allows at most four socket connections, one admitted action across all controllers, four active waits, and 64 retained action records.
-- Each connection has one response being written and at most one queued response. A slow reader is closed after the bounded write deadline or queue overrun.
+- Each connection has one response being written and at most two queued responses. A slow reader is closed after the bounded write deadline or queue overrun.
 - Serialized response memory is bounded to 128 MiB per attachment. An oversized capture returns `capture_too_large`; it never resizes an interactive terminal.
 
 Errors are structured and sanitized. Stable codes include `invalid_request`, `unsupported_version`, `permission_denied`, `stale_attachment`, `unavailable`, `timeout`, `outcome_unknown`, `capture_too_large`, `action_expired`, `input_busy`, `busy`, `navigation_failed`, and `endpoint_not_configured`. Error messages contain only the code; screen contents, credentials, endpoint internals, and environment values are not logged or returned.

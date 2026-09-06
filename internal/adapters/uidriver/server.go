@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	responseSlots        = 2
+	responseSlots        = 3
 	errorResponseReserve = 1024
 )
 

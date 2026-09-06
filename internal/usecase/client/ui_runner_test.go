@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,16 +49,15 @@ func testUIRunnerAction(t *testing.T, handoff bool) {
 		}
 	}).Maybe()
 	view := protocol.ViewContext{Publication: 1, Route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "fixture"}}, TabID: "tab", FocusedPaneID: "pane"}
-	var themeCount int
+	var themeCount atomic.Int32
 	sentInput := make(chan protocol.Input, 16)
 	fences := make(chan protocol.UIFence, 1)
 	switches := make(chan protocol.SamePeerSwitchRequest, 1)
-	routeSnapshots := make(chan struct{}, 8)
+	routeSnapshots := make(chan protocol.RecentRouteSnapshot, 8)
 	transport.EXPECT().SendClient(mock.Anything).RunAndReturn(func(message protocol.ClientMessage) error {
 		switch message := message.(type) {
 		case protocol.Theme:
-			themeCount++
-			if themeCount == 2 {
+			if themeCount.Add(1) == 2 {
 				initial := view
 				incoming <- protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 8, Rows: 2}, Context: &initial, Data: []byte("\x1b[Hready")}
 			}
@@ -68,7 +68,7 @@ func testUIRunnerAction(t *testing.T, handoff bool) {
 		case protocol.SamePeerSwitchRequest:
 			switches <- message
 		case protocol.RecentRouteSnapshot:
-			routeSnapshots <- struct{}{}
+			routeSnapshots <- message
 		}
 		return nil
 	}).Maybe()
@@ -123,8 +123,13 @@ func testUIRunnerAction(t *testing.T, handoff bool) {
 	}
 	view.Publication = 2
 	if handoff {
-		for len(routeSnapshots) > 0 {
-			<-routeSnapshots
+	drainRouteSnapshots:
+		for {
+			select {
+			case <-routeSnapshots:
+			default:
+				break drainRouteSnapshots
+			}
 		}
 		target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "destination"}
 		incoming <- protocol.AttachTarget{SamePeer: true, ExactTarget: &target, CauseActionID: fence.ActionID}
@@ -135,7 +140,16 @@ func testUIRunnerAction(t *testing.T, handoff bool) {
 			t.Fatal("missing existing same-peer switch request")
 		}
 		incoming <- protocol.CommittedRouteIdentity{Target: target}
-		requireSignal(t, routeSnapshots, "identity commit was not handled")
+		deadline := time.After(time.Second)
+		committed := false
+		for !committed {
+			select {
+			case snapshot := <-routeSnapshots:
+				committed = snapshot.ActiveEntry.Target == target
+			case <-deadline:
+				t.Fatal("identity commit was not handled")
+			}
+		}
 		select {
 		case <-result:
 			t.Fatal("identity alone completed the action")

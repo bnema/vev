@@ -160,7 +160,7 @@ func TestServeWriteDeadlineClosesNonreadingStream(t *testing.T) {
 
 func TestSerializedBudgetKeepsSpaceForBusyErrors(t *testing.T) {
 	server := New(nil, nil)
-	for range 3 {
+	for range 2 {
 		require.True(t, server.reserve(maxResponseBytes))
 	}
 	require.False(t, server.reserve(maxResponseBytes))

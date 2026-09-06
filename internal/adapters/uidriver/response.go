@@ -72,10 +72,10 @@ const (
 
 type colorResponse struct {
 	Kind  colorKind `json:"kind"`
-	Index uint8     `json:"index,omitempty"`
-	R     uint8     `json:"r,omitempty"`
-	G     uint8     `json:"g,omitempty"`
-	B     uint8     `json:"b,omitempty"`
+	Index uint8     `json:"index"`
+	R     uint8     `json:"r"`
+	G     uint8     `json:"g"`
+	B     uint8     `json:"b"`
 }
 
 type styleResponse struct {
