@@ -70,8 +70,8 @@ func UnmarshalUIFence(data []byte) (protocol.UIFence, error) {
 }
 
 func MarshalUIReceipt(message protocol.UIReceipt) ([]byte, error) {
-	if message.ActionID == 0 || message.Epoch == 0 || message.ViewPublication == 0 || message.Outcome < protocol.UIReceiptProcessed || message.Outcome > protocol.UIReceiptUnavailable {
-		return nil, errInvalidUIMessage
+	if err := message.Validate(); err != nil {
+		return nil, err
 	}
 	w := payloadWriter{}
 	w.putUint64(message.ActionID)

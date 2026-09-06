@@ -105,6 +105,16 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 	switch message := message.(type) {
 	case protocol.Input:
 		d.handleSequencedInputForAttachment(effect, message.InputSeq, message.Data)
+	case protocol.UIFence:
+		if !d.registerAttachmentUIFence(effect, message.ActionID) {
+			// Invalid/overflowing fences retire this exact attachment, not just
+			// its carriage. Cleanup is asynchronous so even refusal cannot pin
+			// dispatch behind a blocked render send.
+			launchCleanup := d.reserveAttachmentSendErrorCleanup(effect.capability(), effect.transport.transport)
+			effect.End()
+			launchCleanup()
+			return true
+		}
 	case protocol.Resize:
 		if effect.current() {
 			d.resizeAttachmentGeometryForLease(effect, message.Geometry())

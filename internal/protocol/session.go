@@ -236,6 +236,25 @@ type UIReceipt struct {
 	Outcome         UIReceiptOutcome
 }
 
+// Validate requires a committed publication for success. Unavailable receipts
+// carry no boundary: expiry cannot claim that any captured view was processed.
+func (r UIReceipt) Validate() error {
+	if r.ActionID == 0 {
+		return errors.New("UI receipt requires an action ID")
+	}
+	switch r.Outcome {
+	case UIReceiptProcessed:
+		if r.Epoch != 0 && r.State != 0 && r.ViewPublication != 0 {
+			return nil
+		}
+	case UIReceiptUnavailable:
+		if r.Epoch == 0 && r.State == 0 && r.ViewPublication == 0 {
+			return nil
+		}
+	}
+	return errors.New("invalid UI receipt boundary or outcome")
+}
+
 type UIViewUpdate struct {
 	Epoch   uint64
 	State   uint64

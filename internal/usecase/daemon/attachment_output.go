@@ -262,11 +262,14 @@ type preparedOutput struct {
 	connectionGeneration uint64
 	viewRevision         uint64
 	context              *protocol.ViewContext
-	size                 domain.Size
-	data                 []byte
-	reset                bool
-	attempted            bool
-	sent                 bool
+	// boundary is the exact accepted semantic publication, not mutable stream
+	// state that a concurrent view rebase could replace before receipt send.
+	boundary  protocol.UIReceipt
+	size      domain.Size
+	data      []byte
+	reset     bool
+	attempted bool
+	sent      bool
 }
 
 func (s *attachmentOutput) prepare(frame renderer.Frame, damage []renderer.Damage, reset bool) (*preparedOutput, error) {
@@ -344,6 +347,7 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(protocol.Ou
 	if context != nil {
 		p.stream.viewPublication = context.Publication
 		p.stream.lastViewContext = *context
+		p.boundary = protocol.UIReceipt{Epoch: p.epoch, State: p.next, ViewPublication: context.Publication, Outcome: protocol.UIReceiptProcessed}
 	}
 	p.stream.next = p.next
 	p.stream.publishOutstanding()
@@ -397,6 +401,7 @@ func (p *preparedOutput) publishNoBytes(confirm bool, send func(protocol.UIViewU
 			}
 			p.stream.viewPublication = candidate.Publication
 			p.stream.lastViewContext = candidate
+			p.boundary = protocol.UIReceipt{Epoch: p.epoch, State: p.stream.next, ViewPublication: candidate.Publication, Outcome: protocol.UIReceiptProcessed}
 		}
 	}
 	p.commit()

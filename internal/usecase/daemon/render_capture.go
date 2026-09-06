@@ -48,6 +48,7 @@ type capturedRenderState struct {
 	route           protocol.CommittedRouteIdentity
 	incarnation     domain.IncarnationID
 	lease           *attachmentLease
+	uiFence         uint64
 	view            attachmentView
 	focusedPaneID   domain.PaneStableID
 	window          domain.Size
@@ -274,6 +275,7 @@ type renderCaptureRequest struct {
 	styleGeneration uint64
 	reset           bool
 	lease           *attachmentLease
+	uiFence         uint64
 }
 
 // captureLocalRenderState is the ownership boundary for a local attachment
@@ -387,6 +389,7 @@ func captureLocalRenderState(
 	*state = capturedRenderState{
 		attachment: ac, sessionID: sessionID, route: route, incarnation: incarnation, lease: lease, view: view, window: window,
 		reset: reset, bars: bars, theme: bars.theme,
+		uiFence:       request.uiFence,
 		focusedPaneID: focusedPaneID,
 		styles:        request.styles, styleGeneration: request.styleGeneration,
 		overlays: overlays, preview: preview,

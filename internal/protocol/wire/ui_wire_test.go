@@ -35,6 +35,13 @@ func TestUIWireRoundTripsAndRejectsTruncation(t *testing.T) {
 			unmarshal: func(data []byte) error { _, err := UnmarshalUIReceipt(data); return err },
 		},
 		{
+			name: "unavailable receipt",
+			marshal: func() ([]byte, error) {
+				return MarshalUIReceipt(protocol.UIReceipt{ActionID: 7, Outcome: protocol.UIReceiptUnavailable})
+			},
+			unmarshal: func(data []byte) error { _, err := UnmarshalUIReceipt(data); return err },
+		},
+		{
 			name: "view update",
 			marshal: func() ([]byte, error) {
 				return MarshalUIViewUpdate(protocol.UIViewUpdate{Epoch: 2, State: 3, Context: testViewContext()})

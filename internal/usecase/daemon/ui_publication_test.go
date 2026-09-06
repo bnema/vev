@@ -59,11 +59,16 @@ func TestPreparedOutputSemanticPublication(t *testing.T) {
 				require.NoError(t, err)
 				require.Nil(t, sideEffect.Context)
 				require.Equal(t, context.Route, stream.lastViewContext.Route)
+				boundary := prepared.boundary
+				require.Equal(t, protocol.UIReceipt{Epoch: stream.epoch, State: stream.next, ViewPublication: stream.viewPublication, Outcome: protocol.UIReceiptProcessed}, boundary)
+				stream.rebase()
+				require.Equal(t, boundary, prepared.boundary, "later view rebases cannot change an accepted receipt boundary")
 			case "send failure":
 				require.ErrorIs(t, err, sendErr)
 				require.True(t, called)
 				require.False(t, prepared.sent)
 				require.Equal(t, before, stream.viewPublication)
+				require.Zero(t, prepared.boundary)
 			case "stale", "exhausted":
 				if scenario == "exhausted" {
 					require.Error(t, err)
@@ -129,6 +134,14 @@ func TestPreparedOutputNoBytePublication(t *testing.T) {
 			require.Equal(t, epoch, stream.epoch)
 			require.Equal(t, state, stream.next)
 			require.Equal(t, outstanding, stream.outstanding())
+			if scenario == "focus" || scenario == "fence" {
+				boundary := prepared.boundary
+				require.Equal(t, protocol.UIReceipt{Epoch: epoch, State: state, ViewPublication: wantPublication, Outcome: protocol.UIReceiptProcessed}, boundary)
+				stream.rebase()
+				require.Equal(t, boundary, prepared.boundary)
+			} else {
+				require.Zero(t, prepared.boundary, "only an accepted publication supplies a receipt boundary")
+			}
 		})
 	}
 }
