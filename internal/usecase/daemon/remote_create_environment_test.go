@@ -59,6 +59,11 @@ func TestNewSessionEnvironmentOwnership(t *testing.T) {
 					for _, value := range wantEnv {
 						require.Contains(t, env, value)
 					}
+					if tt.policy == protocol.EnvironmentPolicyDaemonOwned {
+						for _, value := range clientEnv {
+							require.NotContains(t, env, value)
+						}
+					}
 					return newQuietPTY(), nil
 				},
 			)
