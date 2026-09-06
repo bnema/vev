@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,36 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateSocketPathUsesPlatformLimit(t *testing.T) {
+	const (
+		expectedDarwinSocketMax = 103
+		expectedLinuxSocketMax  = 107
+	)
+	expectedMax := expectedLinuxSocketMax
+	switch runtime.GOOS {
+	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
+		expectedMax = expectedDarwinSocketMax
+	}
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "at limit", path: "/" + strings.Repeat("a", expectedMax-1), want: true},
+		{name: "above limit", path: "/" + strings.Repeat("a", expectedMax), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateSocketPath(test.path)
+			if test.want {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
 
 func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 	service := portsmocks.NewMockUIService(t)

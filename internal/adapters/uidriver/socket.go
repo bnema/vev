@@ -16,7 +16,6 @@ import (
 
 const (
 	unixSocketMode   = 0o600
-	unixSocketMax    = 107
 	acceptRetryDelay = 10 * time.Millisecond
 )
 
