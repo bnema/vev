@@ -36,6 +36,9 @@ vev ls [<host>|--all]            list sessions
 vev host add|rm <host>           manage remote hosts
 vev host list                    list remote hosts
 vev kill <name>|--all            kill sessions
+vev ui-driver [options]          drive a headless attachment over JSONL
+vev --ui-observe ...              expose passive observation for an attach
+vev --ui-control ...              expose observation and input control
 ```
 
 The daemon starts on first use and exits after the last session. Numbered sessions survive detach; named sessions also survive daemon restarts. Exiting the final shell removes that session and returns to the most recently used session; with no previous session, vev exits. See [durable-session recovery](docs/durable-session-recovery.md).
@@ -79,6 +82,10 @@ vev attach user@host[:session]
 
 SSH bootstraps an authenticated direct UDP connection that resumes after sleep or network changes. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. The remote host needs vev installed; see [remote resilience](docs/remote-resilience.md) for firewall, transport, and host-list details.
 
+## UI driver
+
+`vev ui-driver` provides bounded capture, key/text input, and deterministic waits for a headless attachment. Existing clients stay unchanged unless `--ui-observe` or `--ui-control` is explicitly enabled. See [UI driver](docs/ui-driver.md) for the JSONL contract, private socket bridge, completion semantics, and isolated endpoint configuration.
+
 ## Scripting
 
 `vev cmd` controls a running daemon without starting one:
@@ -97,6 +104,7 @@ Use `vev cmd --help` for commands and targeting options.
 - [Terminal compatibility](docs/terminal.md)
 - [Remote resilience](docs/remote-resilience.md)
 - [Durable session recovery](docs/durable-session-recovery.md)
+- [UI driver](docs/ui-driver.md): headless capture/control and opt-in interactive observation
 - [Performance](docs/performance.md)
 
 ## Development

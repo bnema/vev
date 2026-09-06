@@ -519,6 +519,13 @@ func clientClock(deps runAttachDeps) ports.Clock {
 	return clock.New()
 }
 
+func clientEnvironment(factory func(string) []string, target string) []string {
+	if factory == nil {
+		return nil
+	}
+	return append([]string(nil), factory(target)...)
+}
+
 func runUIDriver(ctx context.Context, options uiDriverOptions) error {
 	if options.socket != "" {
 		return uidriver.Bridge(ctx, options.socket, os.Stdin, os.Stdout)
@@ -593,6 +600,8 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 		terminal:                func() ports.Terminal { return terminal },
 		clock:                   func() ports.Clock { return clk },
 		disableCapabilityProbe:  true,
+		localEnvironment:        launchEnvironmentForConfig(config),
+		remoteEnvironment:       remoteEnvironmentForConfig(config),
 		stateDir:                platform.StateDir,
 	}
 	if options.remote == "" {
@@ -611,6 +620,26 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 	return runHeadlessClient(ctx, intent, options.session, options.remote, log, deps, ui, terminal, false)
 }
 
+func launchEnvironmentForConfig(config *launchConfig) []string {
+	if config == nil || config.local == nil {
+		return nil
+	}
+	return launchEnvironmentSlice(*config.local)
+}
+
+func remoteEnvironmentForConfig(config *launchConfig) func(string) []string {
+	if config == nil {
+		return nil
+	}
+	return func(target string) []string {
+		endpoint, ok := config.remotes[target]
+		if !ok {
+			return nil
+		}
+		return launchEnvironmentSlice(endpoint)
+	}
+}
+
 func configuredRemoteDialerFactory(config *launchConfig) remoteDialerForTarget {
 	if config == nil {
 		return defaultRemoteDialerFactory()
@@ -626,13 +655,17 @@ func configuredRemoteDialerFactory(config *launchConfig) remoteDialerForTarget {
 	}
 }
 
-func runHeadlessClient(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal, ownedRoot bool) (retErr error) {
+func runHeadlessClient(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal, ownedRoot bool) error {
+	return runHeadlessClientWithStream(ctx, intent, name, remoteTarget, log, deps, ui, terminal, ownedRoot, &stdioStream{reader: os.Stdin, writer: os.Stdout})
+}
+
+func runHeadlessClientWithStream(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal, ownedRoot bool, stream io.ReadWriteCloser) (retErr error) {
 	if ownedRoot {
 		defer func() {
 			stopCtx, stop := context.WithTimeout(context.Background(), daemonStopTimeout)
 			stopErr := requestDaemonStop(stopCtx)
 			stop()
-			if stopErr != nil && !strings.Contains(stopErr.Error(), "no daemon running") {
+			if stopErr != nil && !errors.Is(stopErr, errDaemonNotRunning) {
 				retErr = errors.Join(retErr, stopErr)
 			}
 		}()
@@ -657,7 +690,7 @@ func runHeadlessClient(ctx context.Context, intent uint8, name, remoteTarget str
 	}
 	server := uidriver.New(ui, deps.clock())
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Serve(runCtx, &stdioStream{reader: os.Stdin, writer: os.Stdout}, ready) }()
+	go func() { serveDone <- server.Serve(runCtx, stream, ready) }()
 
 	select {
 	case serveErr := <-serveDone:

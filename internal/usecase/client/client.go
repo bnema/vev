@@ -182,16 +182,20 @@ type Dependencies struct {
 // client-only presentation metadata. RemoteTarget is an optional exact picker
 // handoff and is serialized into Hello only when present.
 type AttachRequest struct {
-	Intent                 uint8
-	SessionName            string
-	Remote                 bool
-	Origin                 protocol.RouteOrigin
-	OriginKey              string
-	RemoteTarget           *domain.RemoteSessionTarget
-	ExactTarget            *protocol.ExactSessionTarget
-	PreferredTabID         domain.TabStableID
-	HostLabel              string
-	EnvironmentPolicy      protocol.EnvironmentPolicy
+	Intent            uint8
+	SessionName       string
+	Remote            bool
+	Origin            protocol.RouteOrigin
+	OriginKey         string
+	RemoteTarget      *domain.RemoteSessionTarget
+	ExactTarget       *protocol.ExactSessionTarget
+	PreferredTabID    domain.TabStableID
+	HostLabel         string
+	EnvironmentPolicy protocol.EnvironmentPolicy
+	// Environment, when non-nil, is the complete environment to advertise to
+	// a client-owned daemon endpoint. It is separate from the driver's process
+	// environment and is supplied only by explicit composition.
+	Environment            []string
 	NavigationCapabilities protocol.NavigationCapabilities
 	StartupOverlay         protocol.StartupOverlay
 }
@@ -372,6 +376,13 @@ func (r *Runner) rememberKittyDirectGraphics(value bool) bool {
 	return value
 }
 
+func attachEnvironment(environment []string) []string {
+	if environment == nil {
+		return os.Environ()
+	}
+	return append([]string(nil), environment...)
+}
+
 func validateAttachRequest(request AttachRequest) error {
 	if request.Origin != 0 {
 		if err := request.Origin.Validate(); err != nil {
@@ -429,11 +440,14 @@ func validateAttachRequest(request AttachRequest) error {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	var stopObserve context.CancelFunc
+	var observed chan struct{}
 	if r.ui != nil {
-		observeCtx, stopObserve := context.WithCancel(ctx)
-		observed := make(chan struct{})
+		observeCtx, cancelObserve := context.WithCancel(ctx)
+		stopObserve = cancelObserve
+		observed = make(chan struct{})
 		go func() { defer close(observed); r.ui.Observe(observeCtx) }()
-		defer func() { r.ui.status(ports.UIStatusDetached); stopObserve(); <-observed }()
+		defer func() { stopObserve(); <-observed }()
 	}
 	request = cloneAttachRequest(request)
 	if request.Origin == 0 {
@@ -526,6 +540,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 		}
 	}()
+	if r.ui != nil {
+		defer r.ui.status(ports.UIStatusDetached)
+	}
 	remote := request.Remote || r.remote
 	reconnect := &reconnectUI{
 		term:       r.term,
@@ -1448,7 +1465,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		TrueColor:              trueColor,
 		KittyDirectGraphics:    kittyDirectGraphics,
 		MaxOutputInFlight:      requestedOutputWindow(transport),
-		Env:                    os.Environ(),
+		Env:                    attachEnvironment(request.Environment),
 		RemoteTarget:           request.RemoteTarget,
 		ExactTarget:            exactTarget,
 		PreferredTabID:         request.PreferredTabID,

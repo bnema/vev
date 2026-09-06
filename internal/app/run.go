@@ -891,6 +891,8 @@ type runAttachDeps struct {
 	terminal                func() ports.Terminal
 	clock                   func() ports.Clock
 	disableCapabilityProbe  bool
+	localEnvironment        []string
+	remoteEnvironment       func(string) []string
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -1021,6 +1023,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			Intent:            target.Intent,
 			SessionName:       target.Session,
 			Remote:            true,
+			Environment:       clientEnvironment(deps.remoteEnvironment, target.Endpoint),
 			Origin:            protocol.RouteOriginDiscovery,
 			OriginKey:         target.Endpoint,
 			RemoteTarget:      selection,
@@ -1058,6 +1061,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Intent:            intent,
 				SessionName:       name,
 				Remote:            true,
+				Environment:       clientEnvironment(deps.remoteEnvironment, remoteTarget),
 				Origin:            routeOrigin,
 				OriginKey:         routeOriginKey,
 				RemoteTarget:      remoteSelection,
@@ -1081,7 +1085,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Remote:                 false,
 				Origin:                 protocol.RouteOriginLocal,
 				OriginKey:              "local",
-			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: protocol.RouteOriginLocal, OriginKey: "local"})
+			}, client.AttachRequest{Intent: intent, SessionName: name, Environment: append([]string(nil), deps.localEnvironment...), Origin: protocol.RouteOriginLocal, OriginKey: "local"})
 		}
 
 		var handoffErr *client.AttachTargetError
@@ -1121,6 +1125,8 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 }
 
 const daemonStopTimeout = 2 * time.Second
+
+var errDaemonNotRunning = errors.New("vev: no daemon running")
 
 type localDaemonDialer struct {
 	dir         string
@@ -1215,7 +1221,7 @@ func requestDaemonStop(ctx context.Context) error {
 		return fmt.Errorf("vev: stopping daemon: %w", err)
 	}
 	if owner != nil {
-		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
+		return errors.Join(errDaemonNotRunning, owner.Release())
 	}
 	defer func() { _ = transport.Close() }()
 	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillDaemon})}); err != nil {
@@ -1684,7 +1690,7 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 			printKillSuccess(name, all, daemon)
 			return nil
 		}
-		return fmt.Errorf("vev: no daemon running")
+		return errDaemonNotRunning
 	}
 	defer func() { _ = transport.Close() }()
 
