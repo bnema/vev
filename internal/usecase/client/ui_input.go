@@ -108,17 +108,25 @@ func encodeUIKey(key string, applicationCursor bool) (string, bool) {
 
 func validUIKeyBatch(data []byte) bool {
 	for i := 0; i < len(data); i++ {
-		if data[i] != 0x1b || i+1 == len(data) {
+		if data[i] != 0x1b {
+			continue
+		}
+		// A bare Escape is the only intentionally incomplete escape sequence.
+		if i+1 == len(data) {
 			continue
 		}
 		switch data[i+1] {
 		case ']', 'P', '_', '^', 'X':
-			// OSC and terminal string protocols are not keyboard sequences.
+			// A lone Alt character is valid, but adding a suffix would turn
+			// it into an OSC/DCS/APC/string prefix.
 			if i+2 < len(data) {
 				return false
 			}
+			continue
 		case '[':
-			if i+2 == len(data) {
+			// Alt+[ is a valid one-character key. Once it has a suffix, only
+			// one of the finite CSI keyboard sequences is accepted.
+			if i+2 >= len(data) {
 				continue
 			}
 			if strings.ContainsRune("ABCDHF", rune(data[i+2])) {
@@ -131,13 +139,24 @@ func validUIKeyBatch(data []byte) bool {
 			}
 			return false
 		case 'O':
-			if i+2 == len(data) {
+			// Alt+O is valid on its own; otherwise accept only application
+			// cursor sequences.
+			if i+2 >= len(data) {
 				continue
 			}
 			if !strings.ContainsRune("ABCDHF", rune(data[i+2])) {
 				return false
 			}
 			i += 2
+		default:
+			// The remaining form is Alt+one character. Its second byte may be
+			// one of the explicit control-key aliases, but no other control
+			// sequence or C1 byte is admitted.
+			next := data[i+1]
+			if next < 0x20 && next != '\r' && next != '\t' && next != 0x1b || next >= 0x80 && next <= 0x9f {
+				return false
+			}
+			i++
 		}
 	}
 	return true

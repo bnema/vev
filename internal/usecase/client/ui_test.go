@@ -75,13 +75,13 @@ func TestUIActionTimeoutRetainsExactReceiptBoundary(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("request deadline stalled")
 	}
-	require.Equal(t, "timeout", actionErr.Code)
+	require.Equal(t, ports.UIErrTimeout, actionErr.Code)
 	require.True(t, actionErr.Accepted)
 	require.Equal(t, batch.record.actionID, actionErr.ActionID)
 	// A receipt for another publication cannot use an earlier matching screen.
 	u.receipt(1, protocol.UIReceipt{ActionID: actionErr.ActionID, Epoch: 1, State: 1, ViewPublication: 2, Outcome: protocol.UIReceiptProcessed})
 	u.mu.Lock()
-	require.Equal(t, "pending", u.records[actionErr.ActionID].Status)
+	require.Equal(t, ports.UIActionPending, u.records[actionErr.ActionID].Status)
 	u.mu.Unlock()
 	snapshot, err := terminal.Snapshot()
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestUIActionTimeoutRetainsExactReceiptBoundary(t *testing.T) {
 	u.mu.Lock()
 	record := u.records[actionErr.ActionID]
 	u.mu.Unlock()
-	require.Equal(t, "processed", record.Status)
+	require.Equal(t, ports.UIActionProcessed, record.Status)
 	require.Equal(t, boundary.Revision, record.Revision)
 	text := "ready"
 	result, err := u.Wait(ctx, ports.UIWaitRequest{Attachment: u.Handle(), AfterAction: record.ActionID, Expect: ports.UIExpect{TextContains: &text}})
@@ -122,7 +122,7 @@ func TestUIWaitBroadcastAndAttachmentQuota(t *testing.T) {
 	_, err := u.Wait(ctx, request)
 	var uiErr *ports.UIError
 	require.ErrorAs(t, err, &uiErr)
-	require.Equal(t, "busy", uiErr.Code)
+	require.Equal(t, ports.UIErrBusy, uiErr.Code)
 	snapshot, err := terminal.Snapshot()
 	require.NoError(t, err)
 	snapshot.Context.Status = status
@@ -169,8 +169,8 @@ func TestUIWaitFakeDeadlineAndExpiredAction(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("wait deadline stalled")
 	}
-	require.Equal(t, "timeout", uiErr.Code)
+	require.Equal(t, ports.UIErrTimeout, uiErr.Code)
 	_, err := u.Wait(ctx, ports.UIWaitRequest{Attachment: u.Handle(), AfterAction: 99, Expect: ports.UIExpect{TextContains: &text}})
 	require.ErrorAs(t, err, &uiErr)
-	require.Equal(t, "action_expired", uiErr.Code)
+	require.Equal(t, ports.UIErrActionExpired, uiErr.Code)
 }

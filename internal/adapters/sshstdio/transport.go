@@ -526,6 +526,17 @@ func BuildCommandForRemoteCommand(target string, command ...string) CommandSpec 
 	return CommandSpec{Path: "ssh", Args: args}
 }
 
+// BuildCommandForRemoteLaunch prefixes an explicit complete environment and
+// absolute executable to a hidden remote mode. Each value remains one quoted
+// remote-shell word; no caller input is concatenated into an unquoted command.
+func BuildCommandForRemoteLaunch(target, executable string, environment []string, mode string) CommandSpec {
+	command := make([]string, 0, len(environment)+4)
+	command = append(command, "env", "-i")
+	command = append(command, environment...)
+	command = append(command, executable, mode)
+	return BuildCommandForRemoteCommand(target, command...)
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -542,6 +553,13 @@ func DialContextWithRuntimeObserver(ctx context.Context, target, session string,
 	return dialContext(ctx, target, session, logger, opts...)
 }
 
+// DialContextWithLaunch is the explicit-environment variant used by isolated
+// driver endpoints. An empty executable preserves the normal `vev _stdio`
+// command.
+func DialContextWithLaunch(ctx context.Context, target, executable string, environment []string, logger *slog.Logger, opts ...Option) (wire.Transport, error) {
+	return dialContextWithLaunch(ctx, target, executable, environment, logger, opts...)
+}
+
 // DialContext is like Dial, but the context gates ssh startup. Once the
 // transport is returned, its Close method owns the subprocess lifetime; the
 // handshake context must not kill an already-established carriage. Callers may
@@ -556,10 +574,17 @@ func DialContext(ctx context.Context, target, session string, logger ...*slog.Lo
 }
 
 func dialContext(ctx context.Context, target, session string, log *slog.Logger, opts ...Option) (wire.Transport, error) {
+	return dialContextWithLaunch(ctx, target, "", nil, log, opts...)
+}
+
+func dialContextWithLaunch(ctx context.Context, target, executable string, environment []string, log *slog.Logger, opts ...Option) (wire.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	spec := BuildCommand(target, session)
+	spec := BuildCommand(target, "")
+	if executable != "" {
+		spec = BuildCommandForRemoteLaunch(target, executable, environment, "_stdio")
+	}
 	// The caller's context is also the bounded protocol-handshake context and is
 	// canceled after the first committed publication. Binding it to the command
 	// would kill a healthy long-lived carriage at that boundary. Transport.Close
@@ -578,12 +603,12 @@ func dialContext(ctx context.Context, target, session string, log *slog.Logger, 
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		if log != nil {
-			log.Error("ssh start failed", "target", target, "session", session, "err", err)
+			log.Error("ssh start failed", "target", target, "session", "", "err", err)
 		}
 		return nil, fmt.Errorf("sshstdio: start ssh: %w", err)
 	}
 
-	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, session)
+	waiter := newProcessWaiter(cmd, stdin, &stderr, sshCloseTimeout, log, target, "")
 	transport := newTransport(stdout, stdin, waiter.close, waiter.eofErr)
 	if err := ctx.Err(); err != nil {
 		_ = transport.Close()

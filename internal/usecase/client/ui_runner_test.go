@@ -153,7 +153,7 @@ func testUIRunnerAction(t *testing.T, handoff bool) {
 		t.Fatal("applied receipt did not complete action")
 	}
 	require.True(t, action.Accepted)
-	require.Equal(t, "processed", action.Status)
+	require.Equal(t, ports.UIActionProcessed, action.Status)
 	require.Equal(t, uint64(2), action.Context.ViewPublication)
 	require.Equal(t, ui.Handle(), action.Context.AttachmentHandle)
 	if handoff {

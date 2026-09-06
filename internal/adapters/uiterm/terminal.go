@@ -51,6 +51,17 @@ type Terminal struct {
 }
 
 func New(ctx context.Context, geometry domain.Geometry, attachmentHandle string) (*Terminal, error) {
+	return newTerminal(ctx, geometry, attachmentHandle, true)
+}
+
+// NewMirror creates a VT mirror for an existing physical terminal. Physical
+// terminals remain the sole authority for terminal query responses, so the
+// mirror deliberately leaves Screen.OnResponse unset.
+func NewMirror(ctx context.Context, geometry domain.Geometry, attachmentHandle string) (*Terminal, error) {
+	return newTerminal(ctx, geometry, attachmentHandle, false)
+}
+
+func newTerminal(ctx context.Context, geometry domain.Geometry, attachmentHandle string, deterministicReplies bool) (*Terminal, error) {
 	geometry = geometry.NormalizePixels()
 	if geometry.Cols <= 0 || geometry.Rows <= 0 || geometry.Cols > MaxColumns || geometry.Rows > MaxRows {
 		return nil, errors.New("uiterm: geometry outside supported bounds")
@@ -68,6 +79,10 @@ func New(ctx context.Context, geometry domain.Geometry, attachmentHandle string)
 		inW:       inW,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+	}
+	if !deterministicReplies {
+		close(t.done)
+		return t, nil
 	}
 	t.screen.OnResponse = func(response []byte) {
 		copyResponse := append([]byte(nil), response...)

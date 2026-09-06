@@ -1,27 +1,41 @@
 package client
 
-import "github.com/bnema/vev/internal/ports"
+import (
+	"context"
+
+	"github.com/bnema/vev/internal/ports"
+)
 
 // follow joins an immutable navigation cause to the Runner's existing handoff.
 // It selects no route and never retries or opens a connection itself.
 func (u *UI) follow(generation, actionID uint64) bool {
+	var dispatchContext context.Context
+	startDispatch := false
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	record, exists := u.records[actionID]
 	if actionID == 0 || !exists || generation != u.generation || record.Context.Generation != generation || record.Status != ports.UIActionPending && record.Status != ports.UIActionProcessed {
+		u.mu.Unlock()
 		return false
 	}
 	if u.pending != 0 && u.pending != actionID {
 		u.finishLocked(u.pending, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
 	}
 	if record.Status == ports.UIActionProcessed {
-		go u.trackDispatch(u.foreground, actionID, nil)
+		dispatchContext = u.foreground
+		if dispatchContext == nil {
+			dispatchContext = context.Background()
+		}
+		startDispatch = true
 	}
 	record.Status = ports.UIActionPending
 	u.records[actionID] = record
 	u.pending = actionID
 	u.handoff = &uiActionHandoff{actionID: actionID, sourceGeneration: generation}
 	u.signalLocked()
+	u.mu.Unlock()
+	if startDispatch {
+		go u.trackDispatch(dispatchContext, actionID, nil)
+	}
 	return true
 }
 

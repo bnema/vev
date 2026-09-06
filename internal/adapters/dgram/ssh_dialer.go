@@ -107,6 +107,11 @@ type RemoteDialer struct {
 	ProbeTimeout     time.Duration
 	Log              *slog.Logger
 	RuntimeObserver  ports.SerializedRuntimeObserver
+	// BootstrapBinary and BootstrapEnvironment are set only by an explicit
+	// launch configuration. Empty values retain the normal remote `vev`
+	// bootstrap command.
+	BootstrapBinary      string
+	BootstrapEnvironment []string
 }
 
 func NewRemoteDialer(target, _ string) RemoteDialer {
@@ -115,6 +120,16 @@ func NewRemoteDialer(target, _ string) RemoteDialer {
 
 func NewRemoteDialerWithLogger(target, _ string, log *slog.Logger) RemoteDialer {
 	return RemoteDialer{Target: target, ProbeTimeout: defaultProbeTimeout, Log: log}
+}
+
+func (d RemoteDialer) bootstrapProcess(ctx context.Context, stderr io.Writer) bootstrapProcess {
+	if d.BootstrapBinary == "" {
+		return startUDPBootstrap(ctx, d.Target, stderr)
+	}
+	spec := sshstdio.BuildCommandForRemoteLaunch(d.Target, d.BootstrapBinary, d.BootstrapEnvironment, "_udp-bootstrap")
+	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	cmd.Stderr = stderr
+	return execBootstrapProcess{cmd: cmd}
 }
 
 func (d RemoteDialer) Dial(ctx context.Context) (wire.Transport, error) {
@@ -133,7 +148,7 @@ func (d RemoteDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	defer bootstrapCancel()
 
 	var stderr limitedBuffer
-	proc := startUDPBootstrap(bootstrapCtx, d.Target, &stderr)
+	proc := d.bootstrapProcess(bootstrapCtx, &stderr)
 	stdout, err := proc.StdoutPipe()
 	if err != nil {
 		return nil, udpUnavailable("bootstrap stdout", err, &stderr)

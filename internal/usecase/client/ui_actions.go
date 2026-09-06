@@ -44,7 +44,7 @@ func (u *UI) accept(id, generation uint64) bool {
 	return true
 }
 
-func (u *UI) finishLocked(id uint64, status string, boundary ports.UIActionResult) {
+func (u *UI) finishLocked(id uint64, status ports.UIActionStatus, boundary ports.UIActionResult) {
 	record, ok := u.records[id]
 	if !ok {
 		return
@@ -153,7 +153,7 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 	admissionCtx, cancelAdmission := context.WithCancel(ctx)
 	defer cancelAdmission()
 	batch := terminalAutomationRequest{ctx: admissionCtx, owner: u, consumer: consumer, record: terminalReadResult{data: data, source: terminalInputAutomation, generation: request.Generation, actionID: id, endBatch: true}, admitted: make(chan bool, 1), dispatched: make(chan bool, 1)}
-	reject := func(code string) (ports.UIActionResult, error) {
+	reject := func(code ports.UIErrorCode) (ports.UIActionResult, error) {
 		u.mu.Lock()
 		delete(u.records, id)
 		if u.pending == id {
@@ -197,7 +197,7 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 			return record, nil
 		}
 		if record.Status != ports.UIActionPending {
-			return record, &ports.UIError{Code: record.Status, Accepted: true, ActionID: id}
+			return record, &ports.UIError{Code: ports.UIErrorCode(record.Status), Accepted: true, ActionID: id}
 		}
 		select {
 		case <-changed:
@@ -221,7 +221,7 @@ func (u *UI) trackDispatch(ctx context.Context, id uint64, dispatched <-chan boo
 		if !exists || record.Status != ports.UIActionPending {
 			return
 		}
-		status := ""
+		var status ports.UIActionStatus
 		select {
 		case ok := <-dispatched:
 			if !ok {

@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -121,7 +122,7 @@ func validateUIExpect(expect ports.UIExpect) bool {
 	if expect.Session != nil && expect.Session.Validate() != nil {
 		return false
 	}
-	if expect.Focus != nil && (expect.Focus.TabID == "" || expect.Focus.PaneID == "") {
+	if expect.Focus != nil && (domain.ValidateTabStableID(expect.Focus.TabID) != nil || domain.ValidatePaneStableID(expect.Focus.PaneID) != nil) {
 		return false
 	}
 	if expect.Status != nil {
@@ -208,7 +209,7 @@ func (u *UI) Wait(ctx context.Context, request ports.UIWaitRequest) (ports.UIWai
 				return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrActionExpired, ActionID: request.AfterAction}
 			}
 			if action.Status != ports.UIActionPending && action.Status != ports.UIActionProcessed {
-				return ports.UIWaitResult{}, &ports.UIError{Code: action.Status, Accepted: action.Accepted, ActionID: action.ActionID}
+				return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrorCode(action.Status), Accepted: action.Accepted, ActionID: action.ActionID}
 			}
 			if action.Status == ports.UIActionProcessed && action.Context.Generation != generation {
 				return ports.UIWaitResult{}, &ports.UIError{Code: ports.UIErrOutcomeUnknown, Accepted: true, ActionID: action.ActionID}

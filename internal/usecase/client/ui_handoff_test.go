@@ -21,7 +21,7 @@ func TestUIHandoffRequiresDestinationFullAndCompleteDispatch(t *testing.T) {
 			u.dispatched[1] = dispatchFirst
 			require.True(t, u.follow(1, 1))
 			u.receipt(1, protocol.UIReceipt{ActionID: 1, Epoch: 1, State: 1, ViewPublication: 1, Outcome: protocol.UIReceiptProcessed})
-			require.Equal(t, "pending", u.records[1].Status, "source receipt cannot complete a correlated handoff")
+			require.Equal(t, ports.UIActionPending, u.records[1].Status, "source receipt cannot complete a correlated handoff")
 			generation := u.bindForeground(ctx, u.input, u.consumer)
 			require.Equal(t, uint64(2), generation)
 			view := snapshot.Context
@@ -30,14 +30,14 @@ func TestUIHandoffRequiresDestinationFullAndCompleteDispatch(t *testing.T) {
 			view.OutputEpoch = 2
 			require.NoError(t, terminal.PublishContext(view))
 			u.published(generation)
-			require.Equal(t, "pending", u.records[1].Status, "route identity or metadata is not destination full output")
+			require.Equal(t, ports.UIActionPending, u.records[1].Status, "route identity or metadata is not destination full output")
 			u.destinationFull(generation)
 			if !dispatchFirst {
-				require.Equal(t, "pending", u.records[1].Status)
+				require.Equal(t, ports.UIActionPending, u.records[1].Status)
 				u.dispatched[1] = true
 				u.completeHandoffLocked()
 			}
-			require.Equal(t, "processed", u.records[1].Status)
+			require.Equal(t, ports.UIActionProcessed, u.records[1].Status)
 			require.Equal(t, generation, u.records[1].Context.Generation)
 			require.Equal(t, "destination", u.records[1].Context.Route.Target.SessionName)
 		})
@@ -66,16 +66,16 @@ func TestUILateHandoffAndUnrelatedReplacement(t *testing.T) {
 	u.reservedContext = snapshot.Context
 	require.True(t, u.accept(1, 1))
 	u.receipt(1, protocol.UIReceipt{ActionID: 1, Epoch: 1, State: 1, ViewPublication: 1, Outcome: protocol.UIReceiptProcessed})
-	require.Equal(t, "processed", u.records[1].Status)
+	require.Equal(t, ports.UIActionProcessed, u.records[1].Status)
 	require.True(t, u.follow(1, 1), "a deferred cause retains its original action")
 	u.failHandoff()
-	require.Equal(t, "navigation_failed", u.records[1].Status)
+	require.Equal(t, ports.UIActionNavigationFailed, u.records[1].Status)
 	u.pending = 2
 	u.reservedContext = snapshot.Context
 	require.True(t, u.accept(2, 1))
 	require.False(t, u.follow(1, 0))
 	u.bindForeground(ctx, u.input, u.consumer)
-	require.Equal(t, "outcome_unknown", u.records[2].Status)
+	require.Equal(t, ports.UIActionOutcomeUnknown, u.records[2].Status)
 }
 
 func TestSamePeerGateDiscardsOnlyRetiredAutomatedInput(t *testing.T) {
@@ -90,11 +90,11 @@ func TestSamePeerGateDiscardsOnlyRetiredAutomatedInput(t *testing.T) {
 	gate.ui = u
 	gate.retiredUI.Store(1)
 	require.True(t, gate.discardRetiredUI(protocol.UIFence{ActionID: 1}))
-	require.Equal(t, "pending", u.records[1].Status, "a superseded source fence is not lost input")
+	require.Equal(t, ports.UIActionPending, u.records[1].Status, "a superseded source fence is not lost input")
 	require.False(t, gate.discardRetiredUI(protocol.Input{Data: []byte("human")}))
 	require.False(t, gate.discardRetiredUI(protocol.Input{ActionID: 2, Data: []byte("new generation")}))
 	require.True(t, gate.discardRetiredUI(protocol.Input{ActionID: 1, Data: []byte("unsent suffix")}))
-	require.Equal(t, "outcome_unknown", u.records[1].Status)
+	require.Equal(t, ports.UIActionOutcomeUnknown, u.records[1].Status)
 	require.Nil(t, u.handoff)
 	require.False(t, gate.discardRetiredUI(protocol.Ack{Epoch: 1, State: 1}))
 }

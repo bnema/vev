@@ -41,7 +41,6 @@ import (
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
-	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/persist"
@@ -71,6 +70,7 @@ const (
 	kindUDPBootstrap
 	kindUDPProxy
 	kindRemotePreview
+	kindUIDriver
 	kindHelp
 	kindVersion
 )
@@ -90,6 +90,10 @@ type command struct {
 	killDaemon           bool
 	cmd                  cmdInvocation
 	remotePreviewPayload string
+	uiDriver             uiDriverOptions
+	uiObserve            bool
+	uiControl            bool
+	uiSocket             string
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -120,6 +124,9 @@ usage:
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
   vev cmd <command>   run a control command (vev cmd --help)
+  vev ui-driver       drive a headless attachment over JSONL
+  vev --ui-observe    expose passive observation for this interactive client
+  vev --ui-control    expose observation and input control for this client
   vev --help          show this help
   vev --version       show version`
 
@@ -163,27 +170,73 @@ func parseArgs(args []string) (command, error) {
 		return command{kind: kindAttach, intent: protocol.IntentEphemeral}, nil
 	}
 
+	var uiObserve, uiControl bool
+	var uiSocket string
+	for len(args) > 0 {
+		switch args[0] {
+		case "--ui-observe":
+			uiObserve = true
+		case "--ui-control":
+			uiControl = true
+		case "--ui-socket":
+			if len(args) < 2 || args[1] == "" {
+				return command{}, usagef("`--ui-socket` requires a path")
+			}
+			uiSocket = args[1]
+			args = args[2:]
+			continue
+		default:
+			goto parsedUIFlags
+		}
+		args = args[1:]
+	}
+parsedUIFlags:
+	if uiSocket != "" && !uiObserve && !uiControl {
+		return command{}, usagef("`--ui-socket` requires `--ui-observe` or `--ui-control`")
+	}
+	if len(args) == 0 {
+		return command{kind: kindAttach, intent: protocol.IntentEphemeral, uiObserve: uiObserve, uiControl: uiControl, uiSocket: uiSocket}, nil
+	}
+
 	switch args[0] {
 	case "--daemon":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		return command{kind: kindDaemon}, nil
 	case "--daemon-launcher":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		return command{kind: kindDaemonLauncher}, nil
 	case "_stdio":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		if len(args) != 1 {
 			return command{}, usagef("`_stdio` does not accept a session name")
 		}
 		return command{kind: kindStdio}, nil
 	case "_udp-bootstrap":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		if len(args) != 1 {
 			return command{}, usagef("`_udp-bootstrap` does not accept a session name")
 		}
 		return command{kind: kindUDPBootstrap}, nil
 	case "_udp-proxy":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		if len(args) != 1 {
 			return command{}, usagef("`_udp-proxy` does not accept a session name")
 		}
 		return command{kind: kindUDPProxy}, nil
 	case "_remote-preview":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		if len(args) != 2 || args[1] == "" {
 			return command{}, usagef("`_remote-preview` requires one encoded request")
 		}
@@ -198,7 +251,7 @@ func parseArgs(args []string) (command, error) {
 		if err := domain.ValidateSessionName(args[1]); err != nil {
 			return command{}, err
 		}
-		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1]}, nil
+		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1], uiObserve: uiObserve, uiControl: uiControl, uiSocket: uiSocket}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
@@ -222,18 +275,42 @@ func parseArgs(args []string) (command, error) {
 				cmd.intent = protocol.IntentEphemeral
 			}
 		}
+		cmd.uiObserve = uiObserve
+		cmd.uiControl = uiControl
+		cmd.uiSocket = uiSocket
 		return cmd, nil
 	case "ls", "list":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		return parseListArgs(args[1:])
 	case "host":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		return parseHostArgs(args[1:])
 	case "cmd":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		invocation, err := parseCmdArgs(args[1:])
 		if err != nil {
 			return command{}, err
 		}
 		return command{kind: kindCmd, cmd: invocation}, nil
+	case "ui-driver":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("interactive UI flags cannot be combined with `ui-driver`")
+		}
+		options, err := parseUIDriverArgs(args[1:])
+		if err != nil {
+			return command{}, err
+		}
+		return command{kind: kindUIDriver, uiDriver: options}, nil
 	case "kill":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`kill` requires a session name, --all, or --daemon")
 		}
@@ -255,8 +332,14 @@ func parseArgs(args []string) (command, error) {
 			return command{kind: kindKill, name: args[1]}, nil
 		}
 	case "-h", "--help", "help":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		return command{kind: kindHelp}, nil
 	case "--version", "version":
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
 		return command{kind: kindVersion}, nil
 	default:
 		return command{}, usagef("unknown command %q", args[0])
@@ -284,6 +367,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runUDPProxy(ctx, os.Stdout)
 	case kindRemotePreview:
 		return runRemotePreview(ctx, cmd.remotePreviewPayload)
+	case kindUIDriver:
+		return runUIDriver(ctx, cmd.uiDriver)
 	case kindList:
 		return runList(ctx, cmd)
 	case kindHost:
@@ -293,7 +378,7 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindCmd:
 		return runCmd(ctx, cmd.cmd)
 	case kindAttach:
-		return runAttach(ctx, cmd.intent, cmd.name, cmd.remoteTarget)
+		return runAttachWithOptions(ctx, cmd.intent, cmd.name, cmd.remoteTarget, interactiveUIOptions{observe: cmd.uiObserve, control: cmd.uiControl, socket: cmd.uiSocket})
 	default:
 		return usagef("unhandled command")
 	}
@@ -802,6 +887,10 @@ type runAttachDeps struct {
 	runClient               runClientFunc
 	createDetached          func(context.Context, string) error
 	runtimeObserver         ports.SerializedRuntimeObserver
+	ui                      *client.UI
+	terminal                func() ports.Terminal
+	clock                   func() ports.Clock
+	disableCapabilityProbe  bool
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -952,17 +1041,19 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return dialErr
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:            sessionwire.NewClientDialer(dialer),
-				Terminal:          term.New(),
-				Clock:             clock.New(),
-				Clipboard:         deps.clipboard,
-				Logger:            log,
-				RuntimeObserver:   deps.runtimeObserver,
-				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
-				AttachHandoff:     handoff,
-				Remote:            true,
-				Origin:            protocol.RouteOriginRemote,
-				OriginKey:         remoteTarget,
+				Dialer:                 sessionwire.NewClientDialer(dialer),
+				Terminal:               clientTerminal(deps),
+				Clock:                  clientClock(deps),
+				DisableCapabilityProbe: deps.disableCapabilityProbe,
+				UI:                     deps.ui,
+				Clipboard:              deps.clipboard,
+				Logger:                 log,
+				RuntimeObserver:        deps.runtimeObserver,
+				RemoteHostLearner:      attachRememberLearner(deps, remoteTarget, log),
+				AttachHandoff:          handoff,
+				Remote:                 true,
+				Origin:                 protocol.RouteOriginRemote,
+				OriginKey:              remoteTarget,
 			}, client.AttachRequest{
 				Intent:            intent,
 				SessionName:       name,
@@ -978,16 +1069,18 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:          sessionwire.NewClientDialer(localDialer()),
-				Terminal:        term.New(),
-				Clock:           clock.New(),
-				Clipboard:       deps.clipboard,
-				Logger:          log,
-				RuntimeObserver: deps.runtimeObserver,
-				AttachHandoff:   handoff,
-				Remote:          false,
-				Origin:          protocol.RouteOriginLocal,
-				OriginKey:       "local",
+				Dialer:                 sessionwire.NewClientDialer(localDialer()),
+				Terminal:               clientTerminal(deps),
+				Clock:                  clientClock(deps),
+				DisableCapabilityProbe: deps.disableCapabilityProbe,
+				UI:                     deps.ui,
+				Clipboard:              deps.clipboard,
+				Logger:                 log,
+				RuntimeObserver:        deps.runtimeObserver,
+				AttachHandoff:          handoff,
+				Remote:                 false,
+				Origin:                 protocol.RouteOriginLocal,
+				OriginKey:              "local",
 			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: protocol.RouteOriginLocal, OriginKey: "local"})
 		}
 
@@ -1030,8 +1123,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 const daemonStopTimeout = 2 * time.Second
 
 type localDaemonDialer struct {
-	dir      string
-	observer ports.SerializedRuntimeObserver
+	dir         string
+	observer    ports.SerializedRuntimeObserver
+	executable  string
+	environment []string
 }
 
 func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {
@@ -1041,7 +1136,11 @@ func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {
 			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
 		}
 	}
-	return ensureDaemonWithLifecycle(ctx, d.dir, dial, realSpawn, defaultBackoff)
+	spawn := realSpawn
+	if d.executable != "" {
+		spawn = func() error { return spawnDaemonWithEnvironment(d.executable, d.environment) }
+	}
+	return ensureDaemonWithLifecycle(ctx, d.dir, dial, spawn, defaultBackoff)
 }
 
 func detachedLocalHello(name, cwd string) protocol.Hello {

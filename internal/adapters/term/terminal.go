@@ -267,5 +267,9 @@ func (t *Terminal) Out() io.Writer {
 
 // Flush writes any buffered output to the terminal device.
 func (t *Terminal) Flush() error {
-	return t.bw.Flush()
+	err := t.bw.Flush()
+	if err != nil && t.observation != nil {
+		t.observation.InvalidateTerminalObservation()
+	}
+	return err
 }

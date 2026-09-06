@@ -94,31 +94,34 @@ type UISnapshot struct {
 	ApplicationCursor bool
 }
 
+// UIErrorCode is a stable machine-readable API error value.
+type UIErrorCode string
+
 // UI error codes are stable API values shared by client ownership and adapters.
 const (
-	UIErrInvalidRequest        = "invalid_request"
-	UIErrUnsupportedVersion    = "unsupported_version"
-	UIErrPermissionDenied      = "permission_denied"
-	UIErrStaleAttachment       = "stale_attachment"
-	UIErrUnavailable           = "unavailable"
-	UIErrTimeout               = "timeout"
-	UIErrOutcomeUnknown        = "outcome_unknown"
-	UIErrCaptureTooLarge       = "capture_too_large"
-	UIErrActionExpired         = "action_expired"
-	UIErrInputBusy             = "input_busy"
-	UIErrBusy                  = "busy"
-	UIErrNavigationFailed      = "navigation_failed"
-	UIErrEndpointNotConfigured = "endpoint_not_configured"
+	UIErrInvalidRequest        UIErrorCode = "invalid_request"
+	UIErrUnsupportedVersion    UIErrorCode = "unsupported_version"
+	UIErrPermissionDenied      UIErrorCode = "permission_denied"
+	UIErrStaleAttachment       UIErrorCode = "stale_attachment"
+	UIErrUnavailable           UIErrorCode = "unavailable"
+	UIErrTimeout               UIErrorCode = "timeout"
+	UIErrOutcomeUnknown        UIErrorCode = "outcome_unknown"
+	UIErrCaptureTooLarge       UIErrorCode = "capture_too_large"
+	UIErrActionExpired         UIErrorCode = "action_expired"
+	UIErrInputBusy             UIErrorCode = "input_busy"
+	UIErrBusy                  UIErrorCode = "busy"
+	UIErrNavigationFailed      UIErrorCode = "navigation_failed"
+	UIErrEndpointNotConfigured UIErrorCode = "endpoint_not_configured"
 )
 
 // UIError reports a sanitized operation failure without captured content.
 type UIError struct {
-	Code     string
+	Code     UIErrorCode
 	Accepted bool
 	ActionID uint64
 }
 
-func (e *UIError) Error() string { return e.Code }
+func (e *UIError) Error() string { return string(e.Code) }
 
 // UIActionRequest contains one validated operation, not raw terminal bytes.
 type UIActionRequest struct {
@@ -129,19 +132,22 @@ type UIActionRequest struct {
 	Timeout    time.Duration
 }
 
+// UIActionStatus is the lifecycle of one admitted automation action.
+type UIActionStatus string
+
 // UI action statuses are stable API values, separate from presentation status.
 const (
-	UIActionPending          = "pending"
-	UIActionProcessed        = "processed"
-	UIActionOutcomeUnknown   = UIErrOutcomeUnknown
-	UIActionNavigationFailed = UIErrNavigationFailed
-	UIActionUnavailable      = UIErrUnavailable
+	UIActionPending          UIActionStatus = "pending"
+	UIActionProcessed        UIActionStatus = "processed"
+	UIActionOutcomeUnknown   UIActionStatus = UIActionStatus(UIErrOutcomeUnknown)
+	UIActionNavigationFailed UIActionStatus = UIActionStatus(UIErrNavigationFailed)
+	UIActionUnavailable      UIActionStatus = UIActionStatus(UIErrUnavailable)
 )
 
 type UIActionResult struct {
 	ActionID uint64
 	Accepted bool
-	Status   string
+	Status   UIActionStatus
 	Revision uint64
 	Context  UIContext
 }
@@ -167,7 +173,7 @@ type UIWaitRequest struct {
 
 type UIWaitResult struct {
 	ActionID     uint64
-	ActionStatus string
+	ActionStatus UIActionStatus
 	Revision     uint64
 	Context      UIContext
 }
