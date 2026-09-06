@@ -1,6 +1,7 @@
 package client
 
 import (
+	"sync/atomic"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
@@ -53,14 +54,23 @@ const (
 	paletteEventBackground
 	paletteEventPalette
 	paletteEventScheme
+	paletteEventUIBatchEnd
 )
 
 type paletteGenerationEvent struct {
-	id    paletteGenerationID
-	kind  paletteGenerationEventKind
-	rgb   renderer.RGB
-	slot  uint8
-	light bool
+	id           paletteGenerationID
+	kind         paletteGenerationEventKind
+	rgb          renderer.RGB
+	slot         uint8
+	light        bool
+	batchApplied chan struct{}
+	pending      *atomic.Int64
+}
+
+func (e paletteGenerationEvent) applied() {
+	if e.pending != nil {
+		e.pending.Add(-1)
+	}
 }
 
 // paletteGenerationAction is deliberately declarative. The attach loop is

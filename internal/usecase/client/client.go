@@ -2058,6 +2058,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(errLinkOffline)
 			}
 		case event := <-paletteEvents:
+			if event.kind == paletteEventUIBatchEnd {
+				close(event.batchApplied)
+				continue
+			}
 			if event.kind == paletteEventScheme {
 				retained := themeState.update(func(current *protocol.Theme) {
 					current.SchemeKnown = true
@@ -2065,12 +2069,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				})
 				actions := coordinator.start(retained, true)
 				activeGeneration.Store(uint64(coordinator.current.id))
-				if err := processPaletteActions(actions); err != nil {
+				err := processPaletteActions(actions)
+				event.applied()
+				if err != nil {
 					return welcomedResult(err)
 				}
 				continue
 			}
-			if err := processPaletteActions(coordinator.handle(event)); err != nil {
+			err := processPaletteActions(coordinator.handle(event))
+			event.applied()
+			if err != nil {
 				return welcomedResult(err)
 			}
 		case r := <-recvCh:
@@ -2609,9 +2617,31 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.C
 
 // terminalReadResult is copied by terminalInputPump before the next Read so
 // terminal input remains owned by one lifecycle reader across reconnects.
+type terminalInputSource uint8
+
+const (
+	terminalInputHuman terminalInputSource = iota
+	terminalInputReply
+	terminalInputAutomation
+)
+
 type terminalReadResult struct {
-	data []byte
-	err  error
+	data       []byte
+	err        error
+	source     terminalInputSource
+	generation uint64
+	actionID   uint64
+	endBatch   bool
+}
+
+// terminalAutomationRequest is admitted only by the foreground scanner owner.
+// Its reply is buffered so cancellation never holds up physical input.
+type terminalAutomationRequest struct {
+	ctx        context.Context
+	consumer   uint64
+	record     terminalReadResult
+	admitted   chan bool
+	dispatched chan bool
 }
 
 // terminalInputPump is the sole consumer of the caller-owned terminal reader.
@@ -2620,8 +2650,9 @@ type terminalReadResult struct {
 // after Run exits; suspend drops any result received while inactive and never
 // closes caller-owned stdin. Reconnects and later runs never add another reader.
 type terminalInputPump struct {
-	in   io.Reader
-	done chan struct{}
+	in         io.Reader
+	done       chan struct{}
+	automation chan terminalAutomationRequest
 
 	mu sync.Mutex
 	// residual holds scanner bytes that were read but not delivered when an
@@ -2652,6 +2683,7 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	return &terminalInputPump{
 		in:         in,
 		done:       make(chan struct{}),
+		automation: make(chan terminalAutomationRequest),
 		activation: 1,
 		active:     true,
 		ready:      make(chan struct{}, 1),
@@ -2960,6 +2992,7 @@ type stdinPump struct {
 	in                  io.Reader // compatibility for isolated scanner tests
 	input               *terminalInputPump
 	consumer            uint64
+	uiGeneration        uint64
 	out                 chan<- protocol.ClientMessage
 	clock               ports.Clock
 	clipboard           ports.ClipboardReader
@@ -2977,6 +3010,15 @@ func (p *stdinPump) run() {
 	var scanner theme.Scanner
 	var markers paletteMarkerScanner
 	var inputSeq uint64
+	var actionID atomic.Uint64
+	var automated bool
+	var activeBatch *terminalAutomationRequest
+	var batchSent atomic.Bool
+	defer func() {
+		if activeBatch != nil {
+			activeBatch.dispatched <- false
+		}
+	}()
 	var sendOK atomic.Bool
 	var undeliveredMu sync.Mutex
 	var undelivered []byte
@@ -2998,11 +3040,16 @@ func (p *stdinPump) run() {
 			}
 		})
 	}
+	var pendingEvents atomic.Int64
 	sendEvent := func(event paletteGenerationEvent) bool {
 		if !sendOK.Load() {
 			return false
 		}
-		return p.sendLease.send(func() bool {
+		if p.uiGeneration != 0 && event.kind != paletteEventUIBatchEnd {
+			event.pending = &pendingEvents
+			pendingEvents.Add(1)
+		}
+		ok := p.sendLease.send(func() bool {
 			select {
 			case p.paletteEvents <- event:
 				if p.afterPaletteEvent != nil {
@@ -3014,13 +3061,20 @@ func (p *stdinPump) run() {
 				return false
 			}
 		})
+		if !ok {
+			event.applied()
+		}
+		return ok
 	}
 	coalescer := newPasteCoalescer(p.clock, func(data []byte) {
 		if len(data) == 0 {
 			return
 		}
 		inputSeq++
-		if !send(protocol.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)}) {
+		if actionID.Load() != 0 {
+			batchSent.Store(true)
+		}
+		if !send(protocol.Input{InputSeq: inputSeq, ActionID: actionID.Load(), Data: append([]byte(nil), data...)}) {
 			undeliveredMu.Lock()
 			undelivered = append(undelivered, data...)
 			undeliveredMu.Unlock()
@@ -3061,7 +3115,7 @@ func (p *stdinPump) run() {
 	// that undecided suffix; the rest of its source read has already been
 	// delivered and must not be replayed by the next attempt.
 	defer func() {
-		if p.ctx.Err() != nil {
+		if p.ctx.Err() != nil && !automated {
 			// Closing flushes any bracketed-paste prefix or buffer through the
 			// coalescer's emit callback. Failed ordinary-input deliveries are
 			// retained ahead of a trailing undecided marker prefix, matching their
@@ -3114,86 +3168,135 @@ func (p *stdinPump) run() {
 	defer disarmMarkerDeadline()
 
 	for {
+		var result terminalReadResult
+		var batch *terminalAutomationRequest
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-markerTimerC:
 			flushMarkerPrefix()
+			continue
+		case request := <-input.automation:
+			input.mu.Lock()
+			clean := input.consumer == consumer && request.consumer == consumer && input.pending == nil && len(input.residual) == 0 && input.delivering == 0
+			input.mu.Unlock()
+			clean = clean && request.ctx.Err() == nil && p.ctx.Err() == nil && !scanner.Pending() && !markers.hasPendingPrefix() && coalescer.Idle() && pendingEvents.Load() == 0
+			clean = clean && request.record.source == terminalInputAutomation && request.record.actionID != 0 && request.record.generation != 0 && request.record.generation == p.uiGeneration && request.record.endBatch && len(request.record.data) > 0 && len(request.record.data) <= uiMaxInputBytes && validUIKeyBatch(request.record.data)
+			request.admitted <- clean
+			if !clean {
+				continue
+			}
+			batch = &request
+			activeBatch = batch
+			batchSent.Store(false)
+			result = request.record
+			automated = true
+			actionID.Store(result.actionID)
 		case <-input.ready:
-			result, ok := input.take(p.ctx, consumer)
+			var ok bool
+			result, ok = input.take(p.ctx, consumer)
 			if !ok {
 				if p.ctx.Err() != nil {
 					return
 				}
 				continue
 			}
-			if p.afterInputTake != nil {
-				p.afterInputTake()
-			}
-			// The lease is not acknowledged until scanner delivery completes.
-			// This second check closes the cancellation window after take.
-			if p.ctx.Err() != nil {
-				return
-			}
-			disarmMarkerDeadline()
-			// All scanner callbacks from this Read must retain this one generation.
-			// A scheme notification can start its replacement before a later byte in
-			// the same read is scanned; reloading there would misclassify an old
-			// completion marker as the replacement's drain response.
-			readGeneration := paletteGenerationID(p.activeGeneration.Load())
-			if len(result.data) > 0 {
-				scanner.Scan(result.data, func(kind int, rgb renderer.RGB) {
-					kindEvent := paletteEventForeground
-					if kind == 11 {
-						kindEvent = paletteEventBackground
-					}
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
-				}, func(slot int, rgb renderer.RGB) {
-					// Scanner implementations are independently testable; retain the
-					// protocol boundary here too so a malformed implementation cannot
-					// wrap a negative or oversized int into an ANSI palette slot.
-					slot8, ok := paletteSlot(slot)
-					if !ok {
-						return
-					}
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: slot8, rgb: rgb})
-				}, func(light bool) {
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
-				}, func(data []byte) {
-					markers.scan(data, sink, func() {
-						sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
-					})
-				})
-				if !sendOK.Load() {
-					// Commit the source read so callbacks accepted before cancellation
-					// are never replayed. The deferred handoff retains only ordinary
-					// bytes whose callback could not be delivered, plus any undecided
-					// trailing marker prefix.
-					input.ack(consumer)
+		}
+		if p.afterInputTake != nil {
+			p.afterInputTake()
+		}
+		// The lease is not acknowledged until scanner delivery completes.
+		// This second check closes the cancellation window after take.
+		if p.ctx.Err() != nil {
+			return
+		}
+		disarmMarkerDeadline()
+		// All scanner callbacks from this Read must retain this one generation.
+		// A scheme notification can start its replacement before a later byte in
+		// the same read is scanned; reloading there would misclassify an old
+		// completion marker as the replacement's drain response.
+		readGeneration := paletteGenerationID(p.activeGeneration.Load())
+		if len(result.data) > 0 {
+			scanner.Scan(result.data, func(kind int, rgb renderer.RGB) {
+				kindEvent := paletteEventForeground
+				if kind == 11 {
+					kindEvent = paletteEventBackground
+				}
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
+			}, func(slot int, rgb renderer.RGB) {
+				// Scanner implementations are independently testable; retain the
+				// protocol boundary here too so a malformed implementation cannot
+				// wrap a negative or oversized int into an ANSI palette slot.
+				slot8, ok := paletteSlot(slot)
+				if !ok {
 					return
 				}
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: slot8, rgb: rgb})
+			}, func(light bool) {
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
+			}, func(data []byte) {
+				markers.scan(data, sink, func() {
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
+				})
+			})
+			if !sendOK.Load() {
+				// Commit the source read so callbacks accepted before cancellation
+				// are never replayed. The deferred handoff retains only ordinary
+				// bytes whose callback could not be delivered, plus any undecided
+				// trailing marker prefix.
+				input.ack(consumer)
+				return
 			}
-			if markers.hasPendingPrefix() {
-				armMarkerDeadline()
+		}
+		if batch != nil {
+			scanner.EndBatch(func(data []byte) {
+				markers.scan(data, sink, func() { sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker}) })
+			})
+			markers.flush(sink)
+			ok := coalescer.EndBatch() && sendOK.Load()
+			applied := make(chan struct{})
+			if ok {
+				ok = sendEvent(paletteGenerationEvent{kind: paletteEventUIBatchEnd, batchApplied: applied})
 			}
-			if result.err != nil {
-				disarmMarkerDeadline()
-				markers.flush(sink)
+			if ok {
 				select {
-				case p.out <- protocol.Detach{}:
+				case <-applied:
 				case <-p.ctx.Done():
+					ok = false
 				}
-				p.cancel()
+			}
+			if ok && batchSent.Load() {
+				ok = send(protocol.UIFence{ActionID: result.actionID})
+			}
+			batch.dispatched <- ok
+			activeBatch = nil
+			if !ok {
 				return
 			}
-			// Commit every callback from this raw read before observing a
-			// concurrent cancellation. Any remaining marker prefix is retained
-			// by the deferred handoff above, so reconnects never duplicate the
-			// delivered bytes or lose a standalone Escape.
-			input.ack(consumer)
-			if p.ctx.Err() != nil {
-				return
+			actionID.Store(0)
+			automated = false
+			continue
+		}
+		if markers.hasPendingPrefix() {
+			armMarkerDeadline()
+		}
+		if result.err != nil {
+			disarmMarkerDeadline()
+			markers.flush(sink)
+			select {
+			case p.out <- protocol.Detach{}:
+			case <-p.ctx.Done():
 			}
+			p.cancel()
+			return
+		}
+		// Commit every callback from this raw read before observing a
+		// concurrent cancellation. Any remaining marker prefix is retained
+		// by the deferred handoff above, so reconnects never duplicate the
+		// delivered bytes or lose a standalone Escape.
+		input.ack(consumer)
+		if p.ctx.Err() != nil {
+			return
 		}
 	}
 }
