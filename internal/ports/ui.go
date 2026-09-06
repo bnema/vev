@@ -1,7 +1,9 @@
 package ports
 
 import (
+	"context"
 	"errors"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -90,6 +92,66 @@ type UISnapshot struct {
 	Cells             []UICell
 	AutoWrap          bool
 	ApplicationCursor bool
+}
+
+// UIError reports a sanitized operation failure without captured content.
+type UIError struct {
+	Code     string
+	Accepted bool
+	ActionID uint64
+}
+
+func (e *UIError) Error() string { return e.Code }
+
+// UIActionRequest contains one validated operation, not raw terminal bytes.
+type UIActionRequest struct {
+	Attachment string
+	Generation uint64
+	Keys       []string
+	Text       string
+	Timeout    time.Duration
+}
+
+type UIActionResult struct {
+	ActionID uint64
+	Accepted bool
+	Status   string
+	Revision uint64
+	Context  UIContext
+}
+
+type UIExpect struct {
+	TextContains *string
+	Session      *protocol.ExactSessionTarget
+	Focus        *UIFocus
+	Status       *UIPresentationStatus
+}
+
+type UIFocus struct {
+	TabID  domain.TabStableID
+	PaneID domain.PaneStableID
+}
+
+type UIWaitRequest struct {
+	Attachment  string
+	AfterAction uint64
+	Expect      UIExpect
+	Timeout     time.Duration
+}
+
+type UIWaitResult struct {
+	ActionID     uint64
+	ActionStatus string
+	Revision     uint64
+	Context      UIContext
+}
+
+// UIService is attachment-scoped. Implementations bound actions and waits;
+// adapters own permissions, decoding, socket quotas and response serialization.
+type UIService interface {
+	Capture(attachment string) (UISnapshot, error)
+	Action(ctx context.Context, request UIActionRequest) (UIActionResult, error)
+	Wait(ctx context.Context, request UIWaitRequest) (UIWaitResult, error)
 }
 
 var ErrUIUnavailable = errors.New("UI capture unavailable")

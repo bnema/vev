@@ -161,6 +161,7 @@ type Dependencies struct {
 	// DisableCapabilityProbe skips active outer-terminal discovery for headless
 	// embedders and deterministic tests. Interactive clients leave it false.
 	DisableCapabilityProbe bool
+	UI                     *UI
 	Clipboard              ports.ClipboardReader
 	Logger                 *slog.Logger
 	RuntimeObserver        ports.SerializedRuntimeObserver
@@ -217,6 +218,7 @@ func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attach
 }
 
 type Runner struct {
+	ui                *UI
 	dialer            ports.ClientDialer
 	term              ports.Terminal
 	clock             ports.Clock
@@ -246,6 +248,7 @@ func NewRunner(deps Dependencies) *Runner {
 		log = slog.Default()
 	}
 	return &Runner{
+		ui:                deps.UI,
 		dialer:            deps.Dialer,
 		term:              deps.Terminal,
 		clock:             deps.Clock,
@@ -426,6 +429,12 @@ func validateAttachRequest(request AttachRequest) error {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	if r.ui != nil {
+		observeCtx, stopObserve := context.WithCancel(ctx)
+		observed := make(chan struct{})
+		go func() { defer close(observed); r.ui.Observe(observeCtx) }()
+		defer func() { r.ui.status(ports.UIStatusDetached); stopObserve(); <-observed }()
+	}
 	request = cloneAttachRequest(request)
 	if request.Origin == 0 {
 		request.Origin = r.origin
@@ -1680,6 +1689,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	outputState := outputApplyState{}
 	uiOutput, _ := term.(ports.UIOutputTransaction)
 	uiContext := ports.UIContext{Generation: 1}
+	ui := a.runner.ui
+	var uiGeneration uint64
 	outputResetRequested := false
 	transitionWaitingFull := false
 	var samePeerSwitch *samePeerSwitchPending
@@ -1739,6 +1750,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		foregroundCtx, foregroundCancel := context.WithCancel(loopCtx)
 		consumer := input.claim()
+		if ui != nil {
+			uiGeneration = ui.bindForeground(foregroundCtx, input, consumer)
+			uiContext.AttachmentHandle = ui.Handle()
+			uiContext.Generation = uiGeneration
+			ui.status(ports.UIStatusTransitioning)
+		}
+		generation := uiGeneration
 		stdinDone := make(chan struct{})
 		resizeDone := make(chan struct{})
 		sendLease := newForegroundSendLease()
@@ -1749,7 +1767,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				foregroundCancel()
 				cancel()
 			}
-			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
+			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, uiGeneration: generation, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
 		}()
 		go func() {
 			defer close(resizeDone)
@@ -2039,6 +2057,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				continue
 			}
+			if ui != nil {
+				ui.status(ports.UIStatusReconnecting)
+			}
 			stage := stageForLinkState(ev.State)
 			if reconnect.remote && reconnect.showing && reconnect.stage != stage {
 				reconnect.stage = stage
@@ -2152,6 +2173,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					uiOutput.EndOutput(true)
 				}
 				outputState = nextState
+				if ui != nil && o.New != 0 {
+					ui.published(uiGeneration)
+				}
 				if transition != nil && transition.active && (!transitionWaitingFull || o.Full) {
 					transitionWaitingFull = false
 					transition.stop()
@@ -2193,7 +2217,17 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 				}
 				outputState = nextState
+				if ui != nil {
+					ui.published(uiGeneration)
+				}
+			case protocol.UIReceipt:
+				if ui != nil {
+					ui.receipt(uiGeneration, message)
+				}
 			case protocol.AttachTarget:
+				if ui != nil {
+					ui.status(ports.UIStatusTransitioning)
+				}
 				target := message
 				if transientPicker {
 					handoff := welcomedResult(nil)
@@ -2274,6 +2308,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 				}
 			case protocol.NavigationDirective:
+				if ui != nil {
+					ui.status(ports.UIStatusTransitioning)
+				}
 				directive := message
 				datagramRoute := transport.Capabilities().PreferredOutputWindow == 1
 				if directive.Action == protocol.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
@@ -2638,6 +2675,7 @@ type terminalReadResult struct {
 // Its reply is buffered so cancellation never holds up physical input.
 type terminalAutomationRequest struct {
 	ctx        context.Context
+	owner      *UI
 	consumer   uint64
 	record     terminalReadResult
 	admitted   chan bool
@@ -3182,6 +3220,9 @@ func (p *stdinPump) run() {
 			input.mu.Unlock()
 			clean = clean && request.ctx.Err() == nil && p.ctx.Err() == nil && !scanner.Pending() && !markers.hasPendingPrefix() && coalescer.Idle() && pendingEvents.Load() == 0
 			clean = clean && request.record.source == terminalInputAutomation && request.record.actionID != 0 && request.record.generation != 0 && request.record.generation == p.uiGeneration && request.record.endBatch && len(request.record.data) > 0 && len(request.record.data) <= uiMaxInputBytes && validUIKeyBatch(request.record.data)
+			if clean && request.owner != nil {
+				clean = request.owner.accept(request.record.actionID, request.record.generation)
+			}
 			request.admitted <- clean
 			if !clean {
 				continue
