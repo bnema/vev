@@ -765,7 +765,7 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	defer release2()
 	defer release3()
 	d, source, ac, _ := newManualSessionWithPTYs(t, p1)
-	target := &session{sessionCore: sessionCore{id: "target", name: "target"}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
+	target := &session{sessionCore: sessionCore{id: "target", name: "target", incarnation: newTestLifecycle(t)}, ctx: source.ctx, cancel: func() {}, tabs: []*tab{
 		newTab(p2, domain.Size{Cols: 80, Rows: 23}),
 		newTab(p3, domain.Size{Cols: 80, Rows: 23}),
 	}}

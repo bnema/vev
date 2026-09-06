@@ -276,6 +276,12 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.Output:
 		payload, err := wire.MarshalOutput(m)
 		return wire.Frame{Type: wire.MsgOutput, Payload: payload}, err
+	case protocol.UIViewUpdate:
+		payload, err := wire.MarshalUIViewUpdate(m)
+		return wire.Frame{Type: wire.MsgUIViewUpdate, Payload: payload}, err
+	case protocol.UIReceipt:
+		payload, err := wire.MarshalUIReceipt(m)
+		return wire.Frame{Type: wire.MsgUIReceipt, Payload: payload}, err
 	case protocol.Detached:
 		return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(m)}, nil
 	case protocol.Pong:
@@ -296,6 +302,9 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationAction:
 		payload, err := wire.MarshalRouteNavigationAction(m)
 		return wire.Frame{Type: wire.MsgNavigateRecentRoute, Payload: payload}, err
+	case protocol.RouteCreateSessionAction:
+		payload, err := wire.MarshalRouteCreateSessionAction(m)
+		return wire.Frame{Type: wire.MsgRouteCreateSession, Payload: payload}, err
 	case protocol.RouteNavigationFailure:
 		payload, err := wire.MarshalRouteNavigationFailure(m)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}, err

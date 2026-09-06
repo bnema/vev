@@ -234,11 +234,14 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalRouteNavigationFailure(frame.Payload)
 	case wire.MsgSessionCreationFailure:
 		return wire.UnmarshalSessionCreationFailure(frame.Payload)
+	case wire.MsgUIFence:
+		return wire.UnmarshalUIFence(frame.Payload)
 	case wire.MsgWelcome, wire.MsgError, wire.MsgOutput, wire.MsgDetached, wire.MsgPong,
 		wire.MsgSessions, wire.MsgCommandResult, wire.MsgNavigationAction,
 		wire.MsgAttachTarget, wire.MsgRemotePreviewResponse,
 		wire.MsgCommittedRouteIdentity, wire.MsgNavigateRecentRoute, wire.MsgRouteCreateSession,
-		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure, wire.MsgParkedRouteResponse:
+		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure, wire.MsgParkedRouteResponse,
+		wire.MsgUIReceipt, wire.MsgUIViewUpdate:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -258,6 +261,12 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.Output:
 		payload, err := wire.MarshalOutput(m)
 		return wire.Frame{Type: wire.MsgOutput, Payload: payload}, err
+	case protocol.UIReceipt:
+		payload, err := wire.MarshalUIReceipt(m)
+		return wire.Frame{Type: wire.MsgUIReceipt, Payload: payload}, err
+	case protocol.UIViewUpdate:
+		payload, err := wire.MarshalUIViewUpdate(m)
+		return wire.Frame{Type: wire.MsgUIViewUpdate, Payload: payload}, err
 	case protocol.Detached:
 		if err := protocol.ValidateDetached(m); err != nil {
 			return wire.Frame{}, err
@@ -320,6 +329,14 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return encodeServer(*m)
 		}
 	case *protocol.Output:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.UIReceipt:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.UIViewUpdate:
 		if m != nil {
 			return encodeServer(*m)
 		}

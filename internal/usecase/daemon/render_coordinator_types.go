@@ -75,6 +75,9 @@ type attachmentLease struct {
 	// outlives the coordinator's coalesced delivered map so an older capacity
 	// failure cannot overwrite a newer attempt.
 	deliveredGeneration uint64
+	// UI fences are exact-lease capabilities, never inferred from wake delivery.
+	requestedUIFence uint64
+	pendingUIFence   *pendingUIFence
 	// A lease is an immutable callback capability. Its lifecycle and delivery
 	// bits are changed only under renderCoordinator.mu; callbacks revalidate it at each
 	// short effect boundary and never retain coordinator ownership while routing

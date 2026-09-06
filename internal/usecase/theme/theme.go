@@ -124,6 +124,20 @@ type Scanner struct {
 	pending []byte
 }
 
+// Pending reports undecided terminal-response bytes at the input owner's
+// admission boundary. Like Scan, it is called only by that owner.
+func (s *Scanner) Pending() bool { return len(s.pending) != 0 }
+
+// EndBatch forwards an admitted batch's undecided suffix as ordinary input.
+// It neither invents a terminal response nor closes the reusable scanner.
+func (s *Scanner) EndBatch(onBytes func([]byte)) {
+	pending := s.pending
+	s.pending = nil
+	if len(pending) != 0 {
+		onBytes(pending)
+	}
+}
+
 // Scan extracts ESC ] 10;<color>, ESC ] 11;<color>, and ESC ] 4;<slot>;<color>
 // responses terminated by BEL or ST.
 // All non-matching bytes are emitted through onBytes in original order, and a

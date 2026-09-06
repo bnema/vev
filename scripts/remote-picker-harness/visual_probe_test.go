@@ -30,9 +30,20 @@ func (t *probeTestTransport) Send(frame wire.Frame) error {
 func (*probeTestTransport) Recv() (wire.Frame, error) { return wire.Frame{}, errors.New("not used") }
 func (*probeTestTransport) Close() error              { return nil }
 
+func probeTestSemanticOutput(output protocol.Output) protocol.Output {
+	if output.New != 0 && output.Context == nil {
+		output.Context = &protocol.ViewContext{
+			Publication: output.New,
+			Route:       protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "probe-fixture"}},
+			TabID:       "tab-1", FocusedPaneID: "pane-1",
+		}
+	}
+	return output
+}
+
 func probeTestOutput(t *testing.T, output protocol.Output) wire.Frame {
 	t.Helper()
-	payload, err := wire.MarshalOutput(output)
+	payload, err := wire.MarshalOutput(probeTestSemanticOutput(output))
 	if err != nil {
 		t.Fatalf("marshal output: %v", err)
 	}
@@ -62,7 +73,7 @@ func TestVisualProbePersistsFullAndIncrementalOutput(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			result := probe.apply(tt.output)
+			result := probe.apply(probeTestSemanticOutput(tt.output))
 			if !result.Accepted || !result.StateBearing {
 				t.Fatalf("result = %+v, want accepted state-bearing output", result)
 			}
@@ -88,9 +99,9 @@ func TestVisualProbePersistsFullAndIncrementalOutput(t *testing.T) {
 func TestVisualProbeResizesToAcceptedOutput(t *testing.T) {
 	probe := newVisualProbe(domain.Size{Cols: probeTestCols, Rows: probeTestRows})
 	outputSize := domain.Size{Cols: 48, Rows: 3}
-	result := probe.apply(protocol.Output{
+	result := probe.apply(probeTestSemanticOutput(protocol.Output{
 		Epoch: 1, New: 1, Full: true, ViewRevision: 1, Size: outputSize, Data: []byte("resized"),
-	})
+	}))
 
 	require.True(t, result.Accepted)
 	require.Equal(t, outputSize.Cols, probe.screen.Columns())
@@ -122,11 +133,11 @@ func TestVisualProbeRejectsOutputWithoutMutationOrAck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			probe := newVisualProbe(size)
 			first := protocol.Output{Epoch: 1, New: 1, Full: true, ViewRevision: 4, Size: size, Data: []byte("keep")}
-			if result := probe.apply(first); !result.Accepted {
+			if result := probe.apply(probeTestSemanticOutput(first)); !result.Accepted {
 				t.Fatal("seed output was rejected")
 			}
 			beforeText, beforeState, beforeCheckpoints := probe.text(), probe.state, len(probe.checkpoints)
-			result := probe.apply(tt.output)
+			result := probe.apply(probeTestSemanticOutput(tt.output))
 			if result.Accepted || result.StateBearing || result.Ack != (protocol.Ack{}) {
 				t.Fatalf("result = %+v, want rejected output without ACK", result)
 			}
@@ -179,7 +190,7 @@ func TestVisualProbeSideEffectsApplyWithoutAck(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			probe := newVisualProbe(size)
-			if tt.seed != nil && !probe.apply(*tt.seed).Accepted {
+			if tt.seed != nil && !probe.apply(probeTestSemanticOutput(*tt.seed)).Accepted {
 				t.Fatal("seed output was rejected")
 			}
 			beforeState, beforeCheckpoints := probe.state, len(probe.checkpoints)
@@ -312,7 +323,7 @@ func TestHarnessArtifactIsBoundedAndContainsOnlyMetadata(t *testing.T) {
 		if state == 1 {
 			output.Full = true
 		}
-		if result := probe.apply(output); !result.Accepted {
+		if result := probe.apply(probeTestSemanticOutput(output)); !result.Accepted {
 			t.Fatalf("probe output %d was rejected", state)
 		}
 	}

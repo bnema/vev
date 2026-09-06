@@ -31,7 +31,7 @@ var errInvalidBoolean = errors.New("ports: invalid boolean flag")
 var errInvalidEnum = errors.New("ports: invalid enum value")
 
 const (
-	outputHeaderLen            = 5*8 + 2*2 + 1
+	outputHeaderLen            = 5*8 + 2*2 + 2
 	outputCompressionHeaderLen = 1 + 4
 	outputPayloadOverhead      = outputHeaderLen + outputCompressionHeaderLen + 4
 	// outputCompressionThreshold keeps small snapshots on the canonical path.
@@ -669,6 +669,7 @@ func UnmarshalHello(b []byte) (protocol.Hello, error) {
 func MarshalInput(m protocol.Input) []byte {
 	w := payloadWriter{}
 	w.putUint64(m.InputSeq)
+	w.putUint64(m.ActionID)
 	w.putBytes(m.Data)
 	return w.b
 }
@@ -681,7 +682,11 @@ func UnmarshalInput(b []byte) (protocol.Input, error) {
 	if err != nil {
 		return protocol.Input{}, err
 	}
-	return protocol.Input{InputSeq: seq, Data: r.rest()}, nil
+	actionID, err := r.getUint64()
+	if err != nil {
+		return protocol.Input{}, err
+	}
+	return protocol.Input{InputSeq: seq, ActionID: actionID, Data: r.rest()}, nil
 }
 
 // MarshalImagePush encodes m into an ImagePush message payload.
@@ -1035,8 +1040,9 @@ func UnmarshalErrorMsg(b []byte) (protocol.ErrorMsg, error) {
 }
 
 // MarshalOutput encodes m into the epoch/base/new/echo/viewRevision/
-// size/full/compression/decoded-length/data message layout. Compression is
-// limited to large, full snapshots and is retained only when it saves bytes.
+// size/full/context-presence/context/compression/decoded-length/data layout.
+// State-bearing output requires context; side effects prohibit it. Compression
+// is limited to large, full snapshots and retained only when it saves bytes.
 func MarshalOutput(m protocol.Output) ([]byte, error) {
 	if err := protocol.ValidateOutput(m); err != nil {
 		return nil, err
@@ -1054,6 +1060,12 @@ func MarshalOutput(m protocol.Output) ([]byte, error) {
 	w.putUint16(uint16(m.Size.Cols))
 	w.putUint16(uint16(m.Size.Rows))
 	w.putBool(m.Full)
+	w.putBool(m.Context != nil)
+	if m.Context != nil {
+		if err := marshalViewContext(&w, *m.Context); err != nil {
+			return nil, err
+		}
+	}
 	w.putUint8(kind)
 	w.putUint32(uint32(len(m.Data)))
 	w.putLongBytes(data)
@@ -1121,6 +1133,17 @@ func UnmarshalOutput(b []byte) (protocol.Output, error) {
 	m.Size = domain.Size{Cols: int(cols), Rows: int(rows)}
 	if m.Full, err = r.getBool(); err != nil {
 		return protocol.Output{}, err
+	}
+	hasContext, err := r.getBool()
+	if err != nil {
+		return protocol.Output{}, err
+	}
+	if hasContext {
+		context, contextErr := unmarshalViewContext(&r)
+		if contextErr != nil {
+			return protocol.Output{}, contextErr
+		}
+		m.Context = &context
 	}
 	if err := protocol.ValidateOutput(m); err != nil {
 		return protocol.Output{}, err
@@ -1208,6 +1231,7 @@ func MarshalAttachTarget(m protocol.AttachTarget) []byte {
 	marshalExactTargetSection(&w, m.ExactTarget)
 	w.putBool(m.SamePeer)
 	w.putString(string(m.PreferredTabID))
+	w.putUint64(m.CauseActionID)
 	return w.b
 }
 
@@ -1244,6 +1268,9 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 	if err := probe.skipString(); err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
+	if _, err := probe.getUint64(); err != nil {
+		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
+	}
 	if err := probe.done(); err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
@@ -1276,6 +1303,9 @@ func UnmarshalAttachTarget(b []byte) (protocol.AttachTarget, error) {
 		return protocol.AttachTarget{}, err
 	}
 	m.PreferredTabID = domain.TabStableID(preferredTabID)
+	if m.CauseActionID, err = r.getUint64(); err != nil {
+		return protocol.AttachTarget{}, err
+	}
 	if err := r.done(); err != nil {
 		return protocol.AttachTarget{}, err
 	}
@@ -1724,6 +1754,7 @@ func MarshalNavigationDirective(directive protocol.NavigationDirective) []byte {
 	w := payloadWriter{}
 	w.putUint8(uint8(directive.Action))
 	w.putBytes(directive.LeaseID[:])
+	w.putUint64(directive.CauseActionID)
 	return w.b
 }
 
@@ -1738,10 +1769,14 @@ func UnmarshalNavigationDirective(b []byte) (protocol.NavigationDirective, error
 	if err != nil {
 		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
+	causeActionID, err := r.getUint64()
+	if err != nil {
+		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
+	}
 	if err := r.done(); err != nil {
 		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation
 	}
-	directive := protocol.NavigationDirective{Action: protocol.NavigationAction(value)}
+	directive := protocol.NavigationDirective{Action: protocol.NavigationAction(value), CauseActionID: causeActionID}
 	copy(directive.LeaseID[:], lease)
 	if MarshalNavigationDirective(directive) == nil {
 		return protocol.NavigationDirective{}, protocol.ErrInvalidNavigation

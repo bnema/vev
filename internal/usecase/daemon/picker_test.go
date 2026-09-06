@@ -1104,8 +1104,8 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", ephemeral: true, attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", incarnation: newTestLifecycle(t), ephemeral: true, attachments: map[*attachedClient]struct{}{ac1: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
+	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac2: {}}}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
 	ac1.setSession(sess1)
 	ac2.setSession(sess2)
 	d.sessions[sess1.id] = sess1
@@ -1116,6 +1116,9 @@ func TestPickerStalePaintAfterSessionSwitchSendsNoFrame(t *testing.T) {
 	d.stealClientForTarget(sess1, ac1, sess2, picker.Target{Session: sess2.id})
 	d.firstPaint(sess2, ac1)
 	awaitFrame(t, sends1, wire.MsgOutput)
+	position, err := wire.UnmarshalRoutePosition(awaitFrame(t, sends1, wire.MsgRoutePosition).Payload)
+	require.NoError(t, err)
+	require.Equal(t, sess2.incarnation, position.Target.LifecycleID)
 	require.Same(t, sess2, ac1.currentSession())
 	for len(sends1) > 0 {
 		<-sends1
@@ -1159,8 +1162,9 @@ func TestPickerSessionSwitchPublishesBeforeInFlightPaintSendCompletes(t *testing
 	sctx2, cancel2 := context.WithCancel(d.serveCtx)
 	defer cancel1()
 	defer cancel2()
-	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
-	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta"}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	sess1 := &session{sessionCore: sessionCore{id: "s1", name: "alpha", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx1, cancel: cancel1, tabs: []*tab{newTestTabWithContext(p1, sctx1, cancel1)}}
+	sess2 := &session{sessionCore: sessionCore{id: "s2", name: "beta", incarnation: newTestLifecycle(t)}, ctx: sctx2, cancel: cancel2, tabs: []*tab{newTestTabWithContext(p2, sctx2, cancel2)}}
+	ac.output.lastRoutePosition = protocol.RoutePosition{Target: protocol.ExactSessionTarget{LifecycleID: sess1.incarnation, SessionName: sess1.name}, ActiveTabID: domain.TabStableID(sess1.tabs[0].stableID)}
 	ac.setSession(sess1)
 	d.sessions[sess1.id] = sess1
 	d.sessions[sess2.id] = sess2

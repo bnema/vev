@@ -28,8 +28,9 @@ type ParkedRouteLeaseID [16]byte
 func (id ParkedRouteLeaseID) IsZero() bool { return id == ParkedRouteLeaseID{} }
 
 type NavigationDirective struct {
-	Action  NavigationAction
-	LeaseID ParkedRouteLeaseID
+	CauseActionID uint64
+	Action        NavigationAction
+	LeaseID       ParkedRouteLeaseID
 }
 
 type ParkedRouteAction uint8

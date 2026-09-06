@@ -19,14 +19,11 @@ func TestCopyCompositionDoesNotAllocateIntermediateFrame(t *testing.T) {
 	frame := renderer.NewFrame(182, 55)
 	target := domain.Rect{Y: 1, Width: 182, Height: 53}
 	styles := resolveStyles(nil)
-	result := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			composeCopyClientFrame(mode, target, frame, styles)
-		}
-	})
 	// A reusable semantic row and status text fit in 32 KiB. A second compact
 	// viewport alone needs over 150 KiB and must not be built just to copy it.
-	require.LessOrEqual(t, result.AllocedBytesPerOp(), int64(32<<10))
+	assertRenderByteBudget(t, func() {
+		composeCopyClientFrame(mode, target, frame, styles)
+	}, 32<<10)
 }
 
 // Each operation renders two wheel movements, up three rows then down three.

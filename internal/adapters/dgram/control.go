@@ -99,7 +99,8 @@ func (t *Transport) ackScheduleLoop() {
 		}
 	}()
 	scheduleACK := func() {
-		if ackTimerC == nil {
+		armed := ackTimerC == nil
+		if armed {
 			if ackTimer == nil {
 				ackTimer = t.clock.NewTimer(maxACKDelay)
 			} else {
@@ -111,26 +112,30 @@ func (t *Transport) ackScheduleLoop() {
 		hook := t.afterACKScheduled
 		t.mu.Unlock()
 		if hook != nil {
-			hook()
+			hook(armed)
 		}
 	}
 	dispatchACK := func() {
 		seq, ok := t.takeACK()
-		if !ok {
-			return
-		}
-		select {
-		case t.ackSend <- seq:
-			t.mu.Lock()
-			hook := t.afterACKDispatched
-			t.mu.Unlock()
-			if hook != nil {
-				hook()
+		dispatched := false
+		if ok {
+			select {
+			case t.ackSend <- seq:
+				dispatched = true
+			default:
+				// Preserve the cumulative maximum until the bounded ACK sender
+				// has capacity again.
+				t.queueACK(seq)
 			}
-		default:
-			// Preserve the cumulative maximum until the bounded ACK sender has
-			// capacity again.
-			t.queueACK(seq)
+		}
+		// A queued wake can outlive the deadline that already consumed its
+		// cumulative ACK. Signal completion even when this attempt is empty;
+		// manual-clock tests must not wait for a nonexistent socket write.
+		t.mu.Lock()
+		hook := t.afterACKDispatchAttempt
+		t.mu.Unlock()
+		if hook != nil {
+			hook(dispatched)
 		}
 	}
 

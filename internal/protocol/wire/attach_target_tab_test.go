@@ -19,6 +19,7 @@ func TestAttachTargetPreferredTabStrict(t *testing.T) {
 	want := append(make([]byte, 8), 0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1)
 	want = append(want, make([]byte, 15)...)
 	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 0, 0, 3, 't', 'a', 'b')
+	want = append(want, make([]byte, 8)...)
 	require.Equal(t, want, payload)
 	decoded, err := UnmarshalAttachTarget(payload)
 	require.NoError(t, err)
@@ -26,7 +27,7 @@ func TestAttachTargetPreferredTabStrict(t *testing.T) {
 	assertAllPrefixesFail(t, payload, UnmarshalAttachTarget)
 	assertTrailingGarbageFails(t, payload, UnmarshalAttachTarget)
 	malformed := append([]byte(nil), payload...)
-	malformed[len(malformed)-1] = '\n'
+	malformed[len(malformed)-9] = '\n'
 	_, err = UnmarshalAttachTarget(malformed)
 	require.ErrorIs(t, err, protocol.ErrInvalidAttachTarget)
 

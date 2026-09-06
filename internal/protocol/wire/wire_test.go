@@ -136,7 +136,7 @@ func TestHelloEnvironmentCodec(t *testing.T) {
 		}
 		got := MarshalHello(msg)
 		want := []byte{
-			0x00, 0x28, 0x00, // version, intent, first client ID byte
+			0x00, 0x29, 0x00, // version, intent, first client ID byte
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // client ID
 			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // resume token
@@ -217,8 +217,8 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 		msg  protocol.Input
 		want []byte
 	}{
-		{name: "data", msg: protocol.Input{InputSeq: 0x0102030405060708, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x68, 0x69}},
-		{name: "empty", msg: protocol.Input{InputSeq: 0, Data: nil}, want: []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+		{name: "data", msg: protocol.Input{InputSeq: 0x0102030405060708, ActionID: 9, Data: []byte("hi")}, want: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0, 0, 0, 0, 0, 0, 0, 9, 0x68, 0x69}},
+		{name: "empty", msg: protocol.Input{InputSeq: 0, Data: nil}, want: make([]byte, 16)},
 	}
 
 	for _, tt := range tests {
@@ -238,7 +238,7 @@ func TestInputGoldenAndRoundTrip(t *testing.T) {
 	}
 
 	full := MarshalInput(tests[0].msg)
-	assertAllPrefixesFail(t, full[:8], UnmarshalInput)
+	assertAllPrefixesFail(t, full[:16], UnmarshalInput)
 }
 
 func TestImagePushGoldenAndRoundTrip(t *testing.T) {
@@ -367,7 +367,7 @@ func TestThemeGenerationClearedWireGoldenPreservesProtocolVersion(t *testing.T) 
 	}
 	want := append([]byte{0x0f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x00}, make([]byte, 48)...)
 	require.Equal(t, want, MarshalTheme(cleared))
-	require.Equal(t, uint16(40), protocol.Version)
+	require.Equal(t, uint16(41), protocol.Version)
 }
 
 func TestResizeGoldenAndRoundTrip(t *testing.T) {
@@ -528,7 +528,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 			name: "minimal",
 			msg:  protocol.CommandRequest{Version: protocol.Version, Slug: "split-right"},
 			want: []byte{
-				0x00, 0x28,
+				0x00, 0x29,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x00, // self
@@ -551,7 +551,7 @@ func TestCommandRequestGoldenAndRoundTrip(t *testing.T) {
 				JSON:          true,
 			},
 			want: []byte{
-				0x00, 0x28,
+				0x00, 0x29,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // request ID
 				0x00, // attached
 				0x01, // self
@@ -682,8 +682,18 @@ func TestErrorMsgGoldenAndRoundTrip(t *testing.T) {
 }
 
 func TestOutputGoldenAndRoundTrip(t *testing.T) {
-	msg := protocol.Output{Epoch: 1, Base: 0, New: 2, Echo: 3, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("hello\n")}
-	want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a}
+	context := testViewContext()
+	msg := protocol.Output{Epoch: 1, Base: 0, New: 2, Echo: 3, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Context: &context, Data: []byte("hello\n")}
+	want := []byte{
+		0, 0, 0, 0, 0, 0, 0, 1,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 2,
+		0, 0, 0, 0, 0, 0, 0, 3,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 1, 0, 1, 1, 1,
+	}
+	want = append(want, testViewContextGolden()...)
+	want = append(want, 0, 0, 0, 0, 6, 0, 0, 0, 6, 'h', 'e', 'l', 'l', 'o', '\n')
 
 	got, err := MarshalOutput(msg)
 	if err != nil {
@@ -989,7 +999,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "attached",
 			msg:  protocol.CommandRequest{Version: protocol.Version, RequestID: 0x0102030405060708, Attached: true, Self: true, Slug: "split-right", Args: []string{"--vertical"}},
 			want: []byte{
-				0x00, 0x28, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
+				0x00, 0x29, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
 				0x00, 0x0b, 's', 'p', 'l', 'i', 't', '-', 'r', 'i', 'g', 'h', 't',
 				0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, '-', '-', 'v', 'e', 'r', 't', 'i', 'c', 'a', 'l',
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -999,7 +1009,7 @@ func TestCommandCorrelationGoldenAndStrict(t *testing.T) {
 			name: "control",
 			msg:  protocol.CommandRequest{Version: protocol.Version, Slug: "ls"},
 			want: []byte{
-				0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x02, 'l', 's', 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			},

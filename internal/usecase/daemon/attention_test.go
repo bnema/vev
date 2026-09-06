@@ -295,8 +295,11 @@ func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
 	require.True(t, selectTestAttachmentTab(sess, 1))
 	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
-	// As above: the deferred all-clients repaint has nothing new to say about
-	// this client's bars, so no second frame follows.
+	position, err := wire.UnmarshalRoutePosition(awaitFrame(t, sends, wire.MsgRoutePosition).Payload)
+	require.NoError(t, err)
+	require.Equal(t, domain.TabStableID(sess.tabs[1].stableID), position.ActiveTabID)
+	// The tab transition publishes its position, but the deferred repaint has
+	// no additional terminal bytes.
 	select {
 	case f := <-sends:
 		t.Fatalf("unexpected extra frame after ack: %v", f.Type)
@@ -460,7 +463,7 @@ func TestJumpAttentionCrossesSessionsWhenNoLocalBells(t *testing.T) {
 	tab2b.attention = true
 	tab2b.attentionAt = time.Unix(5, 0)
 	sess2 := &session{sessionCore: sessionCore{id: "other",
-		name: "other"}, ctx: sctx2,
+		name: "other", incarnation: newTestLifecycle(t)}, ctx: sctx2,
 		cancel: cancel2,
 		tabs:   []*tab{tab2a, tab2b},
 	}

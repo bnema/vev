@@ -76,6 +76,9 @@ func (c *SessionConnection) AttachRequest() AttachRequest {
 // cloneAttachRequest keeps the immutable request independent from transport
 // ownership while protecting the exact remote target from caller mutation.
 func cloneAttachRequest(request AttachRequest) AttachRequest {
+	if request.Environment != nil {
+		request.Environment = append(make([]string, 0, len(request.Environment)), request.Environment...)
+	}
 	if request.RemoteTarget != nil {
 		target := *request.RemoteTarget
 		request.RemoteTarget = &target

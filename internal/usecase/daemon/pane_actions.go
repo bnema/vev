@@ -230,9 +230,9 @@ func (d *Daemon) reapPane(sess *session, tb *tab, p *pane) {
 }
 
 // reapPaneOwner resolves the owner afresh after EOF. A stale attempt retries
-// the immutable owner pointer; a successful attempt revokes owner publication
-// under pane.mu before releasing membership locks, so a competing close or
-// move can never reap the pane from a second owner.
+// the immutable owner pointer. Non-final removal revokes it with membership;
+// final-pane removal retains it until tab/session teardown commits, so stale
+// attachment snapshots cannot abandon the EOF before closing its resources.
 func (d *Daemon) reapPaneOwner(p *pane) {
 	for p != nil {
 		lease := p.effectLease()
@@ -297,11 +297,17 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		delete(tb.panes, p.id)
 		tb.bumpLayoutGenerationLocked()
 	}
-	p.clearOwnerLocked()
+	if !finalPane {
+		p.clearOwnerLocked()
+	}
 	p.mu.Unlock()
 	tb.mu.Unlock()
 	sess.invalidateViewsLocked()
 	sess.mu.Unlock()
+	attachmentTransports := make(map[*attachedClient]transportSnapshot, len(attachments))
+	for _, ac := range attachments {
+		attachmentTransports[ac] = ac.transportSnapshot()
+	}
 
 	if finalPane {
 		for _, ac := range attachments {
@@ -309,8 +315,36 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 				ac.overlays.clearCopyModeForPane(p)
 			}
 		}
-		_ = d.closeTabLocked(sess, tb, true)
-		return true
+		if err := d.closeTabLocked(sess, tb, true); err != nil {
+			return true
+		}
+		if p.owner.Load() == nil {
+			return true
+		}
+		// A successful no-op teardown means participant, gate, or lifecycle
+		// validation rejected the mutation without changing either the tab list
+		// or the pane owner. Retrying that exact state would spin forever; only
+		// retry when the teardown made observable progress that can be consumed
+		// by the next owner resolution.
+		d.mu.Lock()
+		sessionCurrent := d.sessions[sess.id] == sess
+		sess.mu.Lock()
+		tabCurrent := slices.Contains(sess.tabs, tb)
+		attachmentsChanged := len(sess.attachments) != len(attachmentTransports)
+		if !attachmentsChanged {
+			for ac, transport := range attachmentTransports {
+				if _, attached := sess.attachments[ac]; !attached || !ac.transportSnapshotCurrent(transport) {
+					attachmentsChanged = true
+					break
+				}
+			}
+		}
+		sess.mu.Unlock()
+		d.mu.Unlock()
+		if sessionCurrent && tabCurrent && !attachmentsChanged {
+			return true
+		}
+		return false
 	}
 	sess.geometry.applyTabLayout(d, sess, tb)
 	for _, ac := range attachments {

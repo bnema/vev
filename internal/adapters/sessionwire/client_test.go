@@ -34,6 +34,8 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "notice", message: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}, typeID: wire.MsgClientNotice},
 		{name: "command", message: protocol.CommandRequest{Version: protocol.Version, RequestID: 1, Slug: "list-sessions"}, typeID: wire.MsgCommand},
 		{name: "reset", message: protocol.OutputResetRequest{}, typeID: wire.MsgOutputResetRequest},
+		{name: "UI fence", message: protocol.UIFence{ActionID: 7}, typeID: wire.MsgUIFence},
+		{name: "UI fence pointer", message: &protocol.UIFence{ActionID: 7}, typeID: wire.MsgUIFence},
 		{name: "preview", message: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}, typeID: wire.MsgRemotePreviewRequest},
 		{name: "attention", message: protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{}}, typeID: wire.MsgRouteAttentionSubscription},
 		{name: "same peer", message: protocol.SamePeerSwitchRequest{RequestID: 1, Target: exact}, typeID: wire.MsgSamePeerSwitchRequest},
@@ -50,11 +52,14 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 			require.Equal(t, tt.typeID, raw.sent.Type)
 			got, err := decodeClient(raw.sent)
 			require.NoError(t, err)
-			if message, ok := tt.message.(*protocol.SessionCreationFailure); ok {
+			switch message := tt.message.(type) {
+			case *protocol.SessionCreationFailure:
 				require.Equal(t, *message, got)
-				return
+			case *protocol.UIFence:
+				require.Equal(t, *message, got)
+			default:
+				require.Equal(t, tt.message, got)
 			}
-			require.Equal(t, tt.message, got)
 		})
 	}
 }
@@ -68,7 +73,7 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 	}{
 		{name: "welcome", message: protocol.Welcome{SessionID: "session"}},
 		{name: "error", message: protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}},
-		{name: "output", message: protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}}},
+		{name: "output", message: protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}},
 		{name: "detached", message: protocol.Detached{Reason: protocol.ReasonDetach}},
 		{name: "pong", message: protocol.Pong{}},
 		{name: "sessions", message: protocol.Sessions{Sessions: []protocol.SessionInfo{}}},
