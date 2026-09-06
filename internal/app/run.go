@@ -71,6 +71,7 @@ const (
 	kindUDPProxy
 	kindRemotePreview
 	kindUIDriver
+	kindUIRemoteCleanup
 	kindHelp
 	kindVersion
 )
@@ -243,6 +244,14 @@ parsedUIFlags:
 			return command{}, usagef("`_remote-preview` requires one encoded request")
 		}
 		return command{kind: kindRemotePreview, remotePreviewPayload: args[1]}, nil
+	case uiRemoteCleanupCommand:
+		if uiObserve || uiControl || uiSocket != "" {
+			return command{}, usagef("UI flags are only valid for an attach command")
+		}
+		if len(args) != 1 {
+			return command{}, usagef("`%s` does not accept arguments", uiRemoteCleanupCommand)
+		}
+		return command{kind: kindUIRemoteCleanup}, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -371,6 +380,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runUDPProxy(ctx, os.Stdout)
 	case kindRemotePreview:
 		return runRemotePreview(ctx, cmd.remotePreviewPayload)
+	case kindUIRemoteCleanup:
+		return runUIRemoteCleanup(ctx)
 	case kindUIDriver:
 		return runUIDriver(ctx, cmd.uiDriver)
 	case kindList:
@@ -726,7 +737,16 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	remoteDiscoveryOpt, err := remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport))
+	allowedRemoteEndpoints, allowlistConfigured, err := remoteLaunchAllowlistFromEnv()
+	if err != nil {
+		return err
+	}
+	var remoteDiscoveryOpt daemon.Option
+	if allowlistConfigured {
+		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), allowedRemoteEndpoints)
+	} else {
+		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport))
+	}
 	if err != nil {
 		return err
 	}
@@ -874,7 +894,10 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	})
 }
 
-const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
+const (
+	envRemoteTransport     = "VEV_REMOTE_TRANSPORT"
+	uiRemoteCleanupCommand = "_ui-cleanup"
+)
 
 func defaultLocalDialer() wire.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
@@ -940,17 +963,24 @@ func validateRemoteAttachHandoff(target protocol.AttachTarget) error {
 
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
 // the same validated transport selection used by direct remote attach.
-func remoteDiscoveryDaemonOption(stateDir, transport string) (daemon.Option, error) {
+func remoteDiscoveryDaemonOption(stateDir, transport string, allowlists ...map[string]struct{}) (daemon.Option, error) {
 	_, err := remoteTransportModeFromEnv(transport)
 	if err != nil {
 		return nil, err
 	}
-	discovery := daemon.WithRemoteDiscovery(
-		newRemoteHostStore(remoteadapter.HostStorePath(stateDir)),
-		newRemoteCatalogClient(),
-		newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)),
-	)
-	preview := daemon.WithRemotePreview(newRemotePreviewClient())
+	store := ports.RemoteHostStore(newRemoteHostStore(remoteadapter.HostStorePath(stateDir)))
+	catalog := ports.RemoteCatalogClient(newRemoteCatalogClient())
+	cache := ports.RemoteCatalogCache(newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)))
+	previewClient := ports.RemotePreviewClient(newRemotePreviewClient())
+	if len(allowlists) > 0 {
+		allowed := allowlists[0]
+		store = allowlistedRemoteHostStore{delegate: store, allowed: allowed}
+		catalog = allowlistedRemoteCatalogClient{delegate: catalog, allowed: allowed}
+		cache = allowlistedRemoteCatalogCache{delegate: cache, allowed: allowed}
+		previewClient = allowlistedRemotePreviewClient{delegate: previewClient, allowed: allowed}
+	}
+	discovery := daemon.WithRemoteDiscovery(store, catalog, cache)
+	preview := daemon.WithRemotePreview(previewClient)
 	return func(d *daemon.Daemon) {
 		discovery(d)
 		preview(d)
@@ -1214,6 +1244,17 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 			return fmt.Errorf("vev: unexpected reply type %d to detached session creation", reply.frame.Type)
 		}
 	}
+}
+
+func runUIRemoteCleanup(ctx context.Context) error {
+	root := os.Getenv("VEV_ENV_ROOT")
+	if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
+		return errors.New("vev: remote UI cleanup requires a private absolute launch root")
+	}
+	if err := requestDaemonStop(ctx); err != nil && !errors.Is(err, errDaemonNotRunning) {
+		return err
+	}
+	return nil
 }
 
 func requestDaemonStop(ctx context.Context) error {

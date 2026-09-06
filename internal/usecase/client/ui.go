@@ -54,6 +54,32 @@ func NewUI(state ports.UIState, clock ports.Clock) *UI {
 
 func (u *UI) Handle() string { return u.handle }
 
+// WaitForSnapshot waits on the UI owner's broadcast signal rather than
+// consuming the terminal's single coalesced state channel. The predicate is
+// evaluated against the latest owned snapshot and never under the UI mutex.
+func (u *UI) WaitForSnapshot(ctx context.Context, match func(ports.UISnapshot) bool) (ports.UISnapshot, error) {
+	if match == nil {
+		return ports.UISnapshot{}, ports.ErrUIUnavailable
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return ports.UISnapshot{}, err
+		}
+		snapshot, err := u.state.Snapshot()
+		if err == nil && match(snapshot) {
+			return snapshot, nil
+		}
+		u.mu.Lock()
+		changed := u.changed
+		u.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ports.UISnapshot{}, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
 // ActionComplete returns a closed channel once an accepted action reaches a
 // terminal status. It is an optional lifecycle seam for adapters enforcing
 // attachment-wide action admission after a request timeout.

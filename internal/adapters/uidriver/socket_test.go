@@ -71,6 +71,24 @@ func TestListenUnixRejectsExistingPathWithoutRemovingIt(t *testing.T) {
 	require.Equal(t, []byte("keep"), data)
 }
 
+func TestUnixEndpointClosePreservesReplacementPath(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.Chmod(directory, 0o700))
+	path := filepath.Join(directory, "ui.sock")
+	endpoint, err := ListenUnix(path, New(nil, nil), nil)
+	require.NoError(t, err)
+
+	replacement := filepath.Join(directory, "replacement")
+	require.NoError(t, os.Rename(path, replacement))
+	require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
+	require.NoError(t, endpoint.Close())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+	require.NoError(t, os.Remove(replacement))
+}
+
 func TestServeUsesAttachmentWideActionLimitAcrossConnections(t *testing.T) {
 	service := portsmocks.NewMockUIService(t)
 	started := make(chan struct{})

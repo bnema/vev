@@ -65,7 +65,7 @@ Supported predicates are literal `text_contains`, an exact `session` (`lifecycle
 
 Errors are structured and sanitized. Stable codes include `invalid_request`, `unsupported_version`, `permission_denied`, `stale_attachment`, `unavailable`, `timeout`, `outcome_unknown`, `capture_too_large`, `action_expired`, `input_busy`, `busy`, `navigation_failed`, and `endpoint_not_configured`. Error messages contain only the code; screen contents, credentials, endpoint internals, and environment values are not logged or returned.
 
-EOF detaches this driver attachment and closes its access stream. It does not kill shells or sessions. A headless run using an explicit launch configuration also owns and tears down only the isolated endpoint root it created.
+EOF detaches this driver attachment and closes its access stream. It does not kill shells or sessions on an existing endpoint. For an explicit launch configuration, the app performs a separate owned-endpoint teardown after driver access closes; it stops and removes only roots this invocation created.
 
 ## Explicit launch configuration
 
@@ -107,7 +107,7 @@ The configuration file must be owned by the current user, mode `0600`, valid UTF
 
 `local` may be omitted only for a direct `--remote` start. `remotes` defaults to an empty list. Binary and root paths must be absolute. Environment maps are complete child environments, not merges with the invoking process. `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `VEV_ENV`, and `VEV_ENV_ROOT` are reserved and supplied by vev; they cannot appear in the file. Values are passed as argument data through the existing process/SSH builders, never by shell-concatenating untrusted strings.
 
-A local configured root must not exist before the invocation creates it. Its derived config, state, runtime, and temporary directories are private. A launch-config invocation refuses to fall back to an unlisted remote endpoint. Directory isolation is not a process, filesystem, or network sandbox; environment files and binaries remain sensitive.
+A configured root must not exist before the invocation creates it. Local roots and remotely created roots use private derived config, state, runtime, and temporary directories; a remote root is reused only by later connections carrying the same invocation-owned token. A launch-config invocation refuses to fall back to an unlisted remote endpoint, including during catalogue and preview discovery. Directory isolation is not a process, filesystem, or network sandbox; environment files and binaries remain sensitive.
 
 ## Existing interactive clients
 

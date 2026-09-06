@@ -47,6 +47,14 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 	}
 }
 
+func TestDialerFactoryRejectsIncompleteIsolatedLaunch(t *testing.T) {
+	factory := NewDialerFactory()
+	_, err := factory.DialerForRemoteWithLaunch("remote.example", "work", TransportStdio, nil, &EndpointLaunch{Binary: "/bin/vev"})
+	if err == nil {
+		t.Fatal("DialerForRemoteWithLaunch() error = nil, want incomplete owner rejection")
+	}
+}
+
 func TestDialerFactoryRejectsUnsupportedMode(t *testing.T) {
 	factory := NewDialerFactory()
 

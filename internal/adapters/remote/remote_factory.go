@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -28,6 +29,8 @@ type DialerFactory struct {
 // environment selected by an explicit UI-driver launch configuration.
 type EndpointLaunch struct {
 	Binary      string
+	Root        string
+	OwnerToken  string
 	Environment []string
 }
 
@@ -44,6 +47,9 @@ func (f DialerFactory) DialerForRemote(target, session string, mode TransportMod
 // DialerForRemoteWithLaunch selects the same normal carriage while using the
 // explicit endpoint executable/environment for remote child startup.
 func (f DialerFactory) DialerForRemoteWithLaunch(target, session string, mode TransportMode, log *slog.Logger, launch *EndpointLaunch) (wire.Dialer, error) {
+	if launch != nil && (launch.Root == "" || launch.OwnerToken == "") {
+		return nil, errors.New("vev: isolated remote launch requires a root owner")
+	}
 	return f.dialerForRemote(target, session, mode, log, launch)
 }
 
@@ -57,6 +63,8 @@ func (f DialerFactory) dialerForRemote(target, session string, mode TransportMod
 		dialer.RuntimeObserver = f.observer
 		if launch != nil {
 			dialer.BootstrapBinary = launch.Binary
+			dialer.BootstrapRoot = launch.Root
+			dialer.BootstrapOwnerToken = launch.OwnerToken
 			dialer.BootstrapEnvironment = append([]string(nil), launch.Environment...)
 		}
 		return dialer, nil
@@ -87,5 +95,5 @@ func (d stdioDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	if d.launch == nil {
 		return sshstdio.DialContextWithRuntimeObserver(ctx, d.target, "", d.log, sshstdio.WithRuntimeObserver(d.observer))
 	}
-	return sshstdio.DialContextWithLaunch(ctx, d.target, d.launch.Binary, d.launch.Environment, d.log, sshstdio.WithRuntimeObserver(d.observer))
+	return sshstdio.DialContextWithIsolatedLaunch(ctx, d.target, d.launch.Root, d.launch.OwnerToken, d.launch.Binary, d.launch.Environment, d.log, sshstdio.WithRuntimeObserver(d.observer))
 }

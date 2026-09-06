@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/adapters/uidriver"
 	"github.com/bnema/vev/internal/adapters/uiterm"
@@ -37,11 +40,13 @@ import (
 )
 
 const (
-	uiDriverDefaultColumns = 80
-	uiDriverDefaultRows    = 24
-	launchConfigVersion    = 1
-	launchConfigMaxBytes   = 64 << 10
-	launchConfigMaxDepth   = 8
+	uiDriverDefaultColumns          = 80
+	uiDriverDefaultRows             = 24
+	launchConfigVersion             = 1
+	launchConfigMaxBytes            = 64 << 10
+	launchConfigMaxDepth            = 8
+	launchAllowedRemoteEndpointsEnv = "VEV_UI_DRIVER_ALLOWED_REMOTE_ENDPOINTS"
+	uiDriverCleanupTimeout          = 10 * time.Second
 )
 
 type uiDriverOptions struct {
@@ -279,7 +284,11 @@ func parseLaunchConfig(path string) (launchConfig, error) {
 
 func parseLaunchEndpoint(data []byte, remote bool) (launchEndpoint, error) {
 	fields, ok := launchObject(data)
-	if !ok || !launchExactFields(fields, "binary", "root", "env") {
+	allowed := []string{"binary", "root", "env"}
+	if remote {
+		allowed = append(allowed, "endpoint")
+	}
+	if !ok || !launchExactFields(fields, allowed...) {
 		return launchEndpoint{}, errors.New("vev: invalid launch endpoint")
 	}
 	binary, ok := launchString(fields["binary"])
@@ -334,7 +343,7 @@ func validEnvironmentName(name string) bool {
 
 func isReservedLaunchEnvironment(name string) bool {
 	switch name {
-	case "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "VEV_ENV", "VEV_ENV_ROOT":
+	case "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "VEV_ENV", "VEV_ENV_ROOT", launchAllowedRemoteEndpointsEnv:
 		return true
 	default:
 		return false
@@ -510,7 +519,11 @@ func activateLaunchRoot(root string) (func(), error) {
 }
 
 func launchEnvironmentSlice(endpoint launchEndpoint) []string {
-	values := make(map[string]string, len(endpoint.env)+5)
+	return launchEnvironmentSliceForConfig(endpoint, nil)
+}
+
+func launchEnvironmentSliceForConfig(endpoint launchEndpoint, config *launchConfig) []string {
+	values := make(map[string]string, len(endpoint.env)+6)
 	for name, value := range endpoint.env {
 		values[name] = value
 	}
@@ -518,6 +531,9 @@ func launchEnvironmentSlice(endpoint launchEndpoint) []string {
 	values["XDG_STATE_HOME"] = filepath.Join(endpoint.root, "state")
 	values["XDG_RUNTIME_DIR"] = filepath.Join(endpoint.root, "runtime")
 	values["VEV_ENV_ROOT"] = endpoint.root
+	if config != nil {
+		values[launchAllowedRemoteEndpointsEnv] = strings.Join(launchConfigRemoteTargets(config), "\n")
+	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -528,6 +544,18 @@ func launchEnvironmentSlice(endpoint launchEndpoint) []string {
 		result = append(result, key+"="+values[key])
 	}
 	return result
+}
+
+func launchConfigRemoteTargets(config *launchConfig) []string {
+	if config == nil || len(config.remotes) == 0 {
+		return nil
+	}
+	targets := make([]string, 0, len(config.remotes))
+	for target := range config.remotes {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	return targets
 }
 
 func clientTerminal(deps runAttachDeps) ports.Terminal {
@@ -579,8 +607,13 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 			}
 		}
 	}
+	remoteLaunches, err := newConfiguredRemoteLaunches(config)
+	if err != nil {
+		return err
+	}
 	var rootRestore func()
 	var ownedRoot string
+	removeRootOnReturn := true
 	if config != nil && options.remote == "" {
 		if err := createLaunchRoot(config.local.root); err != nil {
 			return err
@@ -593,6 +626,9 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 		}
 		defer func() {
 			rootRestore()
+			if !removeRootOnReturn {
+				return
+			}
 			if err := removeOwnedLaunchRoot(ownedRoot); err != nil && retErr == nil {
 				retErr = err
 			}
@@ -616,11 +652,11 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 	deps := runAttachDeps{
 		localDialer: func() wire.Dialer {
 			if config != nil && config.local != nil {
-				return localDaemonDialer{dir: localDir, executable: config.local.binary, environment: launchEnvironmentSlice(*config.local)}
+				return localDaemonDialer{dir: localDir, executable: config.local.binary, environment: launchEnvironmentSliceForConfig(*config.local, config)}
 			}
 			return localDaemonDialer{dir: localDir}
 		},
-		remoteDialerFactory:     configuredRemoteDialerFactory(config),
+		remoteDialerFactory:     remoteLaunches.dialerFactory(),
 		selectedRemoteTransport: os.Getenv(envRemoteTransport),
 		runClient:               runClientWithDeps,
 		createDetached:          createDetachedLocalSession,
@@ -640,20 +676,30 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) (retErr e
 		if options.session != "" {
 			intent = protocol.IntentNew
 		}
-		return runHeadlessClient(ctx, intent, options.session, "", log, deps, ui, terminal, ownedRoot != "")
+		runErr := runHeadlessClient(ctx, intent, options.session, "", log, deps, ui, terminal)
+		cleanupErr := cleanupHeadlessEndpoint(ownedRoot, remoteLaunches)
+		if cleanupErr != nil && ownedRoot != "" {
+			removeRootOnReturn = false
+		}
+		return errors.Join(runErr, cleanupErr)
 	}
 	intent := uint8(protocol.IntentEphemeral)
 	if options.session != "" {
 		intent = protocol.IntentAttach
 	}
-	return runHeadlessClient(ctx, intent, options.session, options.remote, log, deps, ui, terminal, false)
+	runErr := runHeadlessClient(ctx, intent, options.session, options.remote, log, deps, ui, terminal)
+	cleanupErr := cleanupHeadlessEndpoint(ownedRoot, remoteLaunches)
+	if cleanupErr != nil && ownedRoot != "" {
+		removeRootOnReturn = false
+	}
+	return errors.Join(runErr, cleanupErr)
 }
 
 func launchEnvironmentForConfig(config *launchConfig) []string {
 	if config == nil || config.local == nil {
 		return nil
 	}
-	return launchEnvironmentSlice(*config.local)
+	return launchEnvironmentSliceForConfig(*config.local, config)
 }
 
 func remoteEnvironmentForConfig(config *launchConfig) func(string) []string {
@@ -665,46 +711,122 @@ func remoteEnvironmentForConfig(config *launchConfig) func(string) []string {
 		if !ok {
 			return nil
 		}
-		return launchEnvironmentSlice(endpoint)
+		return launchEnvironmentSliceForConfig(endpoint, config)
 	}
 }
 
-func configuredRemoteDialerFactory(config *launchConfig) remoteDialerForTarget {
+type configuredRemoteLaunches struct {
+	config    *launchConfig
+	factory   remoteadapter.DialerFactory
+	mu        sync.Mutex
+	tokens    map[string]string
+	attempted map[string]struct{}
+}
+
+func newConfiguredRemoteLaunches(config *launchConfig) (*configuredRemoteLaunches, error) {
 	if config == nil {
+		return nil, nil
+	}
+	launches := &configuredRemoteLaunches{config: config, factory: remoteadapter.NewDialerFactory(), tokens: make(map[string]string, len(config.remotes)), attempted: make(map[string]struct{})}
+	for target := range config.remotes {
+		token, err := newLaunchOwnerToken()
+		if err != nil {
+			return nil, fmt.Errorf("vev: create remote launch owner: %w", err)
+		}
+		launches.tokens[target] = token
+	}
+	return launches, nil
+}
+
+func newLaunchOwnerToken() (string, error) {
+	value := make([]byte, 18)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func (l *configuredRemoteLaunches) dialerFactory() remoteDialerForTarget {
+	if l == nil {
 		return defaultRemoteDialerFactory()
 	}
-	factory := remoteadapter.NewDialerFactory()
 	return func(target, session string, mode remoteadapter.TransportMode, log *slog.Logger) (wire.Dialer, error) {
-		endpoint, ok := config.remotes[target]
+		endpoint, ok := l.config.remotes[target]
 		if !ok {
 			return nil, &ports.UIError{Code: ports.UIErrEndpointNotConfigured}
 		}
-		launch := &remoteadapter.EndpointLaunch{Binary: endpoint.binary, Environment: launchEnvironmentSlice(endpoint)}
-		return factory.DialerForRemoteWithLaunch(target, session, mode, log, launch)
+		l.mu.Lock()
+		l.attempted[target] = struct{}{}
+		token := l.tokens[target]
+		l.mu.Unlock()
+		launch := &remoteadapter.EndpointLaunch{Binary: endpoint.binary, Root: endpoint.root, OwnerToken: token, Environment: launchEnvironmentSliceForConfig(endpoint, l.config)}
+		return l.factory.DialerForRemoteWithLaunch(target, session, mode, log, launch)
 	}
 }
 
-func runHeadlessClient(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal, ownedRoot bool) error {
-	return runHeadlessClientWithStream(ctx, intent, name, remoteTarget, log, deps, ui, terminal, ownedRoot, &stdioStream{reader: os.Stdin, writer: os.Stdout})
+func (l *configuredRemoteLaunches) cleanup(ctx context.Context) error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	targets := make([]string, 0, len(l.attempted))
+	for target := range l.attempted {
+		targets = append(targets, target)
+	}
+	l.mu.Unlock()
+	sort.Strings(targets)
+	var cleanupErr error
+	for _, target := range targets {
+		endpoint := l.config.remotes[target]
+		spec := sshstdio.BuildCommandForRemoteCleanup(target, endpoint.root, l.tokens[target], endpoint.binary, launchEnvironmentSliceForConfig(endpoint, l.config), uiRemoteCleanupCommand)
+		if err := sshstdio.RunRemoteCommand(ctx, spec); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("vev: clean remote launch endpoint: %w", err))
+		}
+	}
+	return cleanupErr
 }
 
-func runHeadlessClientWithStream(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal, ownedRoot bool, stream io.ReadWriteCloser) (retErr error) {
-	if ownedRoot {
-		defer func() {
-			stopCtx, stop := context.WithTimeout(context.Background(), daemonStopTimeout)
-			stopErr := requestDaemonStop(stopCtx)
-			stop()
-			if stopErr != nil && !errors.Is(stopErr, errDaemonNotRunning) {
-				retErr = errors.Join(retErr, stopErr)
-			}
-		}()
+func configuredRemoteDialerFactory(config *launchConfig) remoteDialerForTarget {
+	launches, err := newConfiguredRemoteLaunches(config)
+	if err != nil {
+		return func(string, string, remoteadapter.TransportMode, *slog.Logger) (wire.Dialer, error) { return nil, err }
 	}
+	return launches.dialerFactory()
+}
+
+// cleanupHeadlessEndpoint is the explicit disposable-endpoint teardown. It
+// runs only after the driver stream has detached, never from the JSONL server
+// or the shared client runner.
+func cleanupHeadlessEndpoint(ownedRoot string, remote *configuredRemoteLaunches) error {
+	if ownedRoot == "" && remote == nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), uiDriverCleanupTimeout)
+	defer cancel()
+	var cleanupErr error
+	if ownedRoot != "" {
+		stopErr := requestDaemonStop(cleanupCtx)
+		if stopErr != nil && !errors.Is(stopErr, errDaemonNotRunning) {
+			cleanupErr = errors.Join(cleanupErr, stopErr)
+		}
+	}
+	if remote != nil {
+		cleanupErr = errors.Join(cleanupErr, remote.cleanup(cleanupCtx))
+	}
+	return cleanupErr
+}
+
+func runHeadlessClient(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal) error {
+	return runHeadlessClientWithStream(ctx, intent, name, remoteTarget, log, deps, ui, terminal, &stdioStream{reader: os.Stdin, writer: os.Stdout})
+}
+
+func runHeadlessClientWithStream(ctx context.Context, intent uint8, name, remoteTarget string, log *slog.Logger, deps runAttachDeps, ui *client.UI, terminal *uiterm.Terminal, stream io.ReadWriteCloser) (retErr error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	runnerDone := make(chan error, 1)
 	go func() { runnerDone <- runAttachWithDeps(runCtx, intent, name, remoteTarget, "", log, deps) }()
 
-	snapshot, err := waitForHeadlessPublication(runCtx, terminal)
+	snapshot, err := waitForHeadlessPublication(runCtx, ui)
 	if err != nil {
 		cancel()
 		runErr := <-runnerDone
@@ -738,22 +860,19 @@ func runHeadlessClientWithStream(ctx context.Context, intent uint8, name, remote
 	return retErr
 }
 
-func waitForHeadlessPublication(ctx context.Context, state ports.UIState) (ports.UISnapshot, error) {
-	timer := time.NewTimer(protocol.HandshakeTimeout)
-	defer timer.Stop()
-	for {
-		snapshot, err := state.Snapshot()
-		if err == nil && snapshot.Context.Generation != 0 && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication != 0 {
-			return snapshot, nil
-		}
-		select {
-		case <-ctx.Done():
-			return ports.UISnapshot{}, ctx.Err()
-		case <-timer.C:
+func waitForHeadlessPublication(ctx context.Context, ui *client.UI) (ports.UISnapshot, error) {
+	readyCtx, cancel := context.WithTimeout(ctx, protocol.HandshakeTimeout)
+	defer cancel()
+	snapshot, err := ui.WaitForSnapshot(readyCtx, func(snapshot ports.UISnapshot) bool {
+		return snapshot.Context.Generation != 0 && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication != 0
+	})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			return ports.UISnapshot{}, errors.New("vev: headless attachment did not publish an initial view")
-		case <-state.Changes():
 		}
+		return ports.UISnapshot{}, err
 	}
+	return snapshot, nil
 }
 
 func removeOwnedLaunchRoot(root string) error {

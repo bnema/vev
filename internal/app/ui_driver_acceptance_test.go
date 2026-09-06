@@ -53,7 +53,7 @@ func TestHeadlessDriverUsesRealRunnerAndDaemon(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- runHeadlessClientWithStream(ctx, protocol.IntentEphemeral, "", "", discardLog(), deps, ui, terminal, false, serverSide)
+		done <- runHeadlessClientWithStream(ctx, protocol.IntentEphemeral, "", "", discardLog(), deps, ui, terminal, serverSide)
 	}()
 	defer clientSide.Close()
 	decoder := json.NewDecoder(clientSide)

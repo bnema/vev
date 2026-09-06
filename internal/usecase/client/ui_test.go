@@ -137,6 +137,46 @@ func TestUIWaitBroadcastAndAttachmentQuota(t *testing.T) {
 	}
 }
 
+func TestUIWaitForSnapshotUsesObservationBroadcast(t *testing.T) {
+	u, terminal, _, ctx := newUITestService(t)
+	observeCtx, cancel := context.WithCancel(ctx)
+	observed := make(chan struct{})
+	go func() {
+		u.Observe(observeCtx)
+		close(observed)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-observed:
+		case <-time.After(time.Second):
+			t.Fatal("observation worker did not stop")
+		}
+	}()
+
+	status := ports.UIStatusReconnecting
+	result := make(chan ports.UISnapshot, 1)
+	go func() {
+		snapshot, err := u.WaitForSnapshot(ctx, func(snapshot ports.UISnapshot) bool {
+			return snapshot.Context.Status == status
+		})
+		if err != nil {
+			return
+		}
+		result <- snapshot
+	}()
+	current, err := terminal.Snapshot()
+	require.NoError(t, err)
+	current.Context.Status = status
+	require.NoError(t, terminal.PublishContext(current.Context))
+	select {
+	case snapshot := <-result:
+		require.Equal(t, status, snapshot.Context.Status)
+	case <-time.After(time.Second):
+		t.Fatal("UI observation broadcast did not wake snapshot waiter")
+	}
+}
+
 func TestUIActionHistoryEvictsOnlyOnAcceptance(t *testing.T) {
 	u, _, _, _ := newUITestService(t)
 	for id := uint64(1); id <= uiActionHistory; id++ {

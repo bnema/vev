@@ -537,6 +537,93 @@ func BuildCommandForRemoteLaunch(target, executable string, environment []string
 	return BuildCommandForRemoteCommand(target, command...)
 }
 
+const isolatedLaunchMarker = ".vev-ui-driver-owner"
+
+// BuildCommandForRemoteLaunchWithRoot creates a fresh private endpoint root on
+// the remote host before starting the selected binary. A stable owner token
+// lets later connections from the same driver reuse that root while rejecting
+// a root created by another invocation.
+func BuildCommandForRemoteLaunchWithRoot(target, root, ownerToken, executable string, environment []string, mode string) CommandSpec {
+	if root == "" || ownerToken == "" {
+		return BuildCommandForRemoteCommand(target, "sh", "-c", "exit 1")
+	}
+	script := isolatedLaunchScript(root, ownerToken, executable, environment, mode, false)
+	return BuildCommandForRemoteCommand(target, "sh", "-c", script)
+}
+
+// BuildCommandForRemoteCleanup stops the daemon bound to an owned endpoint and
+// removes its root only after the owner token has been verified remotely.
+func BuildCommandForRemoteCleanup(target, root, ownerToken, executable string, environment []string, mode string) CommandSpec {
+	if root == "" || ownerToken == "" {
+		return BuildCommandForRemoteCommand(target, "sh", "-c", "exit 1")
+	}
+	script := isolatedLaunchScript(root, ownerToken, executable, environment, mode, true)
+	return BuildCommandForRemoteCommand(target, "sh", "-c", script)
+}
+
+func isolatedLaunchScript(root, ownerToken, executable string, environment []string, mode string, cleanup bool) string {
+	rootRef := shellQuote(root)
+	markerRef := shellQuote(root + "/" + isolatedLaunchMarker)
+	tokenRef := shellQuote(ownerToken)
+	var script strings.Builder
+	script.WriteString("set -eu; root=")
+	script.WriteString(rootRef)
+	script.WriteString("; marker=")
+	script.WriteString(markerRef)
+	script.WriteString("; token=")
+	script.WriteString(tokenRef)
+	script.WriteString("; if [ -L \"$root\" ]; then exit 1; fi; ")
+	if cleanup {
+		script.WriteString("if [ ! -e \"$root\" ]; then exit 0; fi; ")
+	}
+	script.WriteString("if [ -e \"$root\" ]; then ")
+	script.WriteString("[ -d \"$root\" ] && [ ! -L \"$marker\" ] && [ -f \"$marker\" ] && [ \"$(cat -- \"$marker\")\" = \"$token\" ] || exit 1; ")
+	if !cleanup {
+		script.WriteString("else umask 077; mkdir -m 700 -- \"$root\"; created=1; ")
+		script.WriteString("trap 'if [ \"$created\" = 1 ]; then rm -rf -- \"$root\"; fi' EXIT; ")
+		for _, child := range []string{"config", "state", "runtime", "tmp"} {
+			script.WriteString("mkdir -m 700 -- \"$root/")
+			script.WriteString(child)
+			script.WriteString("\"; ")
+		}
+		script.WriteString("printf '%s' \"$token\" > \"$marker\"; chmod 600 -- \"$marker\"; ")
+	}
+	script.WriteString("fi; ")
+	command := make([]string, 0, len(environment)+4)
+	command = append(command, "env", "-i")
+	command = append(command, environment...)
+	command = append(command, executable, mode)
+	if cleanup {
+		script.WriteString(quotedWords(command))
+		script.WriteString("; rm -rf -- \"$root\"")
+	} else {
+		script.WriteString("trap - EXIT; exec ")
+		script.WriteString(quotedWords(command))
+	}
+	return script.String()
+}
+
+func quotedWords(words []string) string {
+	quoted := make([]string, 0, len(words))
+	for _, word := range words {
+		quoted = append(quoted, shellQuote(word))
+	}
+	return strings.Join(quoted, " ")
+}
+
+// RunRemoteCommand executes a command through the local ssh binary without
+// exposing its output, which may contain configured environment or endpoint
+// values.
+func RunRemoteCommand(ctx context.Context, spec CommandSpec) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -557,7 +644,13 @@ func DialContextWithRuntimeObserver(ctx context.Context, target, session string,
 // driver endpoints. An empty executable preserves the normal `vev _stdio`
 // command.
 func DialContextWithLaunch(ctx context.Context, target, executable string, environment []string, logger *slog.Logger, opts ...Option) (wire.Transport, error) {
-	return dialContextWithLaunch(ctx, target, executable, environment, logger, opts...)
+	return dialContextWithLaunch(ctx, target, "", "", executable, environment, logger, opts...)
+}
+
+// DialContextWithIsolatedLaunch starts a remote child after it has exclusively
+// created or revalidated its private endpoint root.
+func DialContextWithIsolatedLaunch(ctx context.Context, target, root, ownerToken, executable string, environment []string, logger *slog.Logger, opts ...Option) (wire.Transport, error) {
+	return dialContextWithLaunch(ctx, target, root, ownerToken, executable, environment, logger, opts...)
 }
 
 // DialContext is like Dial, but the context gates ssh startup. Once the
@@ -574,16 +667,20 @@ func DialContext(ctx context.Context, target, session string, logger ...*slog.Lo
 }
 
 func dialContext(ctx context.Context, target, session string, log *slog.Logger, opts ...Option) (wire.Transport, error) {
-	return dialContextWithLaunch(ctx, target, "", nil, log, opts...)
+	return dialContextWithLaunch(ctx, target, "", "", "", nil, log, opts...)
 }
 
-func dialContextWithLaunch(ctx context.Context, target, executable string, environment []string, log *slog.Logger, opts ...Option) (wire.Transport, error) {
+func dialContextWithLaunch(ctx context.Context, target, root, ownerToken, executable string, environment []string, log *slog.Logger, opts ...Option) (wire.Transport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	spec := BuildCommand(target, "")
 	if executable != "" {
-		spec = BuildCommandForRemoteLaunch(target, executable, environment, "_stdio")
+		if root != "" && ownerToken != "" {
+			spec = BuildCommandForRemoteLaunchWithRoot(target, root, ownerToken, executable, environment, "_stdio")
+		} else {
+			spec = BuildCommandForRemoteLaunch(target, executable, environment, "_stdio")
+		}
 	}
 	// The caller's context is also the bounded protocol-handshake context and is
 	// canceled after the first committed publication. Binding it to the command

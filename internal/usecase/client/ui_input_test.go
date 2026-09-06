@@ -26,6 +26,8 @@ func TestEncodeUIKeys(t *testing.T) {
 		{name: "paste assembled", keys: []string{"Escape", "[", "2", "0", "0", "~"}, invalid: true},
 		{name: "paste close assembled", keys: []string{"Alt+[", "2", "0", "1", "~"}, invalid: true},
 		{name: "theme assembled", keys: []string{"Escape", "]", "1", "0", ";"}, invalid: true},
+		{name: "doubled escape theme", keys: []string{"Escape", "Escape", "]", "1", "0", ";"}, invalid: true},
+		{name: "doubled escape paste", keys: []string{"Escape", "Escape", "[", "2", "0", "0", "~"}, invalid: true},
 		{name: "marker assembled", keys: []string{"Escape", "[", "?", "2", "0", "3", "1"}, invalid: true},
 		{name: "scheme assembled", keys: []string{"Escape", "[", "?", "9", "9", "7"}, invalid: true},
 		{name: "too many", keys: make([]string, 257), invalid: true},

@@ -31,16 +31,17 @@ var (
 type Terminal struct {
 	mu sync.Mutex
 
-	screen    *vt.Screen
-	geometry  domain.Geometry
-	context   ports.UIContext
-	latest    ports.UISnapshot
-	revision  uint64
-	available bool
-	dirty     bool
-	closed    bool
-	txDepth   int
-	txFailed  bool
+	screen          *vt.Screen
+	geometry        domain.Geometry
+	context         ports.UIContext
+	latest          ports.UISnapshot
+	revision        uint64
+	available       bool
+	captureTooLarge bool
+	dirty           bool
+	closed          bool
+	txDepth         int
+	txFailed        bool
 
 	changes chan struct{}
 	replies chan []byte
@@ -51,36 +52,45 @@ type Terminal struct {
 }
 
 func New(ctx context.Context, geometry domain.Geometry, attachmentHandle string) (*Terminal, error) {
-	return newTerminal(ctx, geometry, attachmentHandle, true)
+	return newTerminal(ctx, geometry, attachmentHandle, true, false)
 }
 
 // NewMirror creates a VT mirror for an existing physical terminal. Physical
 // terminals remain the sole authority for terminal query responses, so the
-// mirror deliberately leaves Screen.OnResponse unset.
+// mirror deliberately leaves Screen.OnResponse unset. Unlike a headless
+// terminal, an interactive mirror may represent an oversized viewport; its
+// captures then report capture_too_large while the physical terminal keeps
+// operating normally.
 func NewMirror(ctx context.Context, geometry domain.Geometry, attachmentHandle string) (*Terminal, error) {
-	return newTerminal(ctx, geometry, attachmentHandle, false)
+	return newTerminal(ctx, geometry, attachmentHandle, false, true)
 }
 
-func newTerminal(ctx context.Context, geometry domain.Geometry, attachmentHandle string, deterministicReplies bool) (*Terminal, error) {
+func newTerminal(ctx context.Context, geometry domain.Geometry, attachmentHandle string, deterministicReplies, allowOversized bool) (*Terminal, error) {
 	geometry = geometry.NormalizePixels()
-	if geometry.Cols <= 0 || geometry.Rows <= 0 || geometry.Cols > MaxColumns || geometry.Rows > MaxRows {
+	if geometry.Cols <= 0 || geometry.Rows <= 0 || (!allowOversized && (geometry.Cols > MaxColumns || geometry.Rows > MaxRows)) {
 		return nil, errors.New("uiterm: geometry outside supported bounds")
+	}
+	oversized := geometry.Cols > MaxColumns || geometry.Rows > MaxRows
+	var screen *vt.Screen
+	if !oversized {
+		screen = vt.NewScreen(geometry.Cols, geometry.Rows)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	inR, inW := io.Pipe()
 	t := &Terminal{
-		screen:    vt.NewScreen(geometry.Cols, geometry.Rows),
-		geometry:  geometry,
-		context:   ports.UIContext{AttachmentHandle: attachmentHandle, Generation: 1},
-		available: true,
-		changes:   make(chan struct{}, 1),
-		replies:   make(chan []byte, replyQueueDepth),
-		inR:       inR,
-		inW:       inW,
-		cancel:    cancel,
-		done:      make(chan struct{}),
+		screen:          screen,
+		geometry:        geometry,
+		context:         ports.UIContext{AttachmentHandle: attachmentHandle, Generation: 1},
+		available:       true,
+		captureTooLarge: oversized,
+		changes:         make(chan struct{}, 1),
+		replies:         make(chan []byte, replyQueueDepth),
+		inR:             inR,
+		inW:             inW,
+		cancel:          cancel,
+		done:            make(chan struct{}),
 	}
-	if !deterministicReplies {
+	if !deterministicReplies || screen == nil {
 		close(t.done)
 		return t, nil
 	}
@@ -156,7 +166,9 @@ func (t *Terminal) Write(data []byte) (int, error) {
 	if t.closed {
 		return 0, io.ErrClosedPipe
 	}
-	t.screen.Write(data)
+	if t.screen != nil {
+		t.screen.Write(data)
+	}
 	t.dirty = true
 	if !t.available {
 		return len(data), errors.New("uiterm: terminal response queue overflow")
@@ -232,7 +244,13 @@ func (t *Terminal) PublishContext(context ports.UIContext) error {
 func (t *Terminal) Snapshot() (ports.UISnapshot, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.available || t.latest.Revision == 0 {
+	if !t.available {
+		return ports.UISnapshot{}, ports.ErrUIUnavailable
+	}
+	if t.captureTooLarge {
+		return ports.UISnapshot{}, &ports.UIError{Code: ports.UIErrCaptureTooLarge}
+	}
+	if t.latest.Revision == 0 {
 		return ports.UISnapshot{}, ports.ErrUIUnavailable
 	}
 	return cloneSnapshot(t.latest), nil
@@ -252,8 +270,23 @@ func (t *Terminal) ObserveTerminalResize(geometry domain.Geometry) {
 	geometry = geometry.NormalizePixels()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed || geometry.Cols <= 0 || geometry.Rows <= 0 || geometry.Cols > MaxColumns || geometry.Rows > MaxRows {
+	if t.closed || geometry.Cols <= 0 || geometry.Rows <= 0 {
 		t.available = false
+		return
+	}
+	if geometry.Cols > MaxColumns || geometry.Rows > MaxRows {
+		t.geometry = geometry
+		t.captureTooLarge = true
+		t.dirty = true
+		t.signalChange()
+		return
+	}
+	if t.captureTooLarge || t.screen == nil {
+		// A mirror cannot reconstruct the pixels that were emitted while its
+		// viewport was oversized. Keep capture_too_large rather than exposing
+		// a new blank or stale screen as current.
+		t.geometry = geometry
+		t.signalChange()
 		return
 	}
 	if t.geometry == geometry {
@@ -290,7 +323,7 @@ func (t *Terminal) Close() {
 }
 
 func (t *Terminal) publishLocked() {
-	if !t.available {
+	if !t.available || t.captureTooLarge || t.screen == nil {
 		return
 	}
 	screen := t.screen.Snapshot()

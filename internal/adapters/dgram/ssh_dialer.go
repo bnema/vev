@@ -111,6 +111,8 @@ type RemoteDialer struct {
 	// launch configuration. Empty values retain the normal remote `vev`
 	// bootstrap command.
 	BootstrapBinary      string
+	BootstrapRoot        string
+	BootstrapOwnerToken  string
 	BootstrapEnvironment []string
 }
 
@@ -126,7 +128,7 @@ func (d RemoteDialer) bootstrapProcess(ctx context.Context, stderr io.Writer) bo
 	if d.BootstrapBinary == "" {
 		return startUDPBootstrap(ctx, d.Target, stderr)
 	}
-	spec := sshstdio.BuildCommandForRemoteLaunch(d.Target, d.BootstrapBinary, d.BootstrapEnvironment, "_udp-bootstrap")
+	spec := sshstdio.BuildCommandForRemoteLaunchWithRoot(d.Target, d.BootstrapRoot, d.BootstrapOwnerToken, d.BootstrapBinary, d.BootstrapEnvironment, "_udp-bootstrap")
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 	cmd.Stderr = stderr
 	return execBootstrapProcess{cmd: cmd}

@@ -58,10 +58,18 @@ func ListenUnix(path string, server *Server, ready func() Ready) (*UnixEndpoint,
 	if err != nil {
 		return nil, fmt.Errorf("uidriver: listen on socket: %w", err)
 	}
+	// Never let net.UnixListener unlink the pathname behind our ownership
+	// check. A caller may replace the path after bind; cleanup must preserve
+	// that replacement rather than deleting it during Close.
+	listener.SetUnlinkOnClose(false)
+	boundInfo, infoErr := os.Lstat(path)
 	cleanup := func(cleanErr error) (*UnixEndpoint, error) {
 		_ = listener.Close()
-		_ = os.Remove(path)
+		removeOwnedSocket(path, boundInfo)
 		return nil, cleanErr
+	}
+	if infoErr != nil {
+		return cleanup(fmt.Errorf("uidriver: stat socket: %w", infoErr))
 	}
 	if err := os.Chmod(path, unixSocketMode); err != nil {
 		return cleanup(fmt.Errorf("uidriver: secure socket: %w", err))
@@ -154,6 +162,26 @@ func (e *UnixEndpoint) accept() {
 // Path is the bound filesystem path.
 func (e *UnixEndpoint) Path() string { return e.path }
 
+func removeOwnedSocket(path string, expected os.FileInfo) error {
+	if expected == nil {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !os.SameFile(info, expected) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // Close stops accepting connections and removes only the socket inode created
 // by this endpoint.
 func (e *UnixEndpoint) Close() error {
@@ -164,13 +192,7 @@ func (e *UnixEndpoint) Close() error {
 			closeErr = err
 		}
 		e.wg.Wait()
-		if info, err := os.Lstat(e.path); err == nil {
-			if os.SameFile(info, e.file) {
-				if err := os.Remove(e.path); err != nil && !errors.Is(err, os.ErrNotExist) && closeErr == nil {
-					closeErr = err
-				}
-			}
-		} else if !errors.Is(err, os.ErrNotExist) && closeErr == nil {
+		if err := removeOwnedSocket(e.path, e.file); err != nil && closeErr == nil {
 			closeErr = err
 		}
 	})

@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
@@ -84,6 +85,52 @@ func TestParseLaunchConfigStrictAndOptionalEndpoints(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestParseLaunchConfigAcceptsRemoteEndpoint(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "remote-root")
+	configPath := filepath.Join(t.TempDir(), "launch.json")
+	data := `{"version":1,"remotes":[{"endpoint":"user@example.com","binary":"/bin/vev","root":"` + root + `","env":{"HOME":"/home/test","PATH":"/bin"}}]}`
+	require.NoError(t, os.WriteFile(configPath, []byte(data), 0o600))
+
+	config, err := parseLaunchConfig(configPath)
+	require.NoError(t, err)
+	require.Nil(t, config.local)
+	require.Equal(t, launchEndpoint{binary: "/bin/vev", root: root, env: map[string]string{"HOME": "/home/test", "PATH": "/bin"}}, config.remotes["user@example.com"])
+}
+
+func TestLaunchEnvironmentForConfigIncludesRemoteAllowlist(t *testing.T) {
+	config := &launchConfig{remotes: map[string]launchEndpoint{
+		"user@z.example": {},
+		"user@a.example": {},
+	}}
+	environment := launchEnvironmentSliceForConfig(launchEndpoint{root: "/tmp/root"}, config)
+	var allowlist string
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, launchAllowedRemoteEndpointsEnv+"=") {
+			allowlist = strings.TrimPrefix(entry, launchAllowedRemoteEndpointsEnv+"=")
+		}
+	}
+	require.Equal(t, "user@a.example\nuser@z.example", allowlist)
+}
+
+func TestRemoteLaunchAllowlistFromEnvironment(t *testing.T) {
+	t.Setenv(launchAllowedRemoteEndpointsEnv, "user@z.example\nuser@a.example")
+	allowed, configured, err := remoteLaunchAllowlistFromEnv()
+	require.NoError(t, err)
+	require.True(t, configured)
+	require.Equal(t, map[string]struct{}{"user@z.example": {}, "user@a.example": {}}, allowed)
+
+	t.Setenv(launchAllowedRemoteEndpointsEnv, "user@bad host")
+	_, configured, err = remoteLaunchAllowlistFromEnv()
+	require.Error(t, err)
+	require.True(t, configured)
+
+	t.Setenv(launchAllowedRemoteEndpointsEnv, "")
+	allowed, configured, err = remoteLaunchAllowlistFromEnv()
+	require.NoError(t, err)
+	require.True(t, configured)
+	require.Empty(t, allowed)
 }
 
 func TestLaunchRootIsExclusiveAndPrivate(t *testing.T) {

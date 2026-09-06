@@ -2,6 +2,7 @@ package uiterm
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -120,6 +121,38 @@ func TestTerminalFailedTransactionMakesCaptureUnavailable(t *testing.T) {
 	terminal.EndOutput(false)
 	if _, err := terminal.Snapshot(); err != ports.ErrUIUnavailable {
 		t.Fatalf("Snapshot error = %v", err)
+	}
+}
+
+func TestMirrorReportsOversizedGeometryWithoutRejectingTheTerminal(t *testing.T) {
+	ctx := context.Background()
+	mirror, err := NewMirror(ctx, domain.Geometry{Size: domain.Size{Cols: MaxColumns + 1, Rows: 2}}, "attachment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mirror.Close()
+
+	if _, err := mirror.Write([]byte("still interactive")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := mirror.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	_, err = mirror.Snapshot()
+	var uiErr *ports.UIError
+	if !errors.As(err, &uiErr) || uiErr.Code != ports.UIErrCaptureTooLarge {
+		t.Fatalf("Snapshot() error = %v, want capture_too_large", err)
+	}
+
+	validMirror, err := NewMirror(ctx, domain.Geometry{Size: domain.Size{Cols: 4, Rows: 2}}, "attachment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer validMirror.Close()
+	validMirror.ObserveTerminalResize(domain.Geometry{Size: domain.Size{Cols: MaxColumns + 1, Rows: 2}})
+	_, err = validMirror.Snapshot()
+	if !errors.As(err, &uiErr) || uiErr.Code != ports.UIErrCaptureTooLarge {
+		t.Fatalf("resized Snapshot() error = %v, want capture_too_large", err)
 	}
 }
 

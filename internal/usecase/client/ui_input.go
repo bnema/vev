@@ -151,9 +151,14 @@ func validUIKeyBatch(data []byte) bool {
 		default:
 			// The remaining form is Alt+one character. Its second byte may be
 			// one of the explicit control-key aliases, but no other control
-			// sequence or C1 byte is admitted.
+			// sequence or C1 byte is admitted. A second Escape must be checked
+			// again as a possible sequence introducer; otherwise ESC ESC ]...
+			// could hide an OSC response behind a valid Alt+Escape token.
 			next := data[i+1]
-			if next < 0x20 && next != '\r' && next != '\t' && next != 0x1b || next >= 0x80 && next <= 0x9f {
+			if next == 0x1b {
+				continue
+			}
+			if next < 0x20 && next != '\r' && next != '\t' || next >= 0x80 && next <= 0x9f {
 				return false
 			}
 			i++
