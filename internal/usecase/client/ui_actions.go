@@ -34,11 +34,17 @@ func (u *UI) accept(id, generation uint64) bool {
 		return false
 	}
 	if len(u.order) == uiActionHistory {
-		delete(u.records, u.order[0])
-		delete(u.dispatched, u.order[0])
+		evicted := u.order[0]
+		delete(u.records, evicted)
+		delete(u.dispatched, evicted)
+		if done, ok := u.completion[evicted]; ok {
+			close(done)
+			delete(u.completion, evicted)
+		}
 		u.order = u.order[1:]
 	}
 	u.order = append(u.order, id)
+	u.completion[id] = make(chan struct{})
 	u.records[id] = ports.UIActionResult{ActionID: id, Accepted: true, Status: ports.UIActionPending, Context: u.reservedContext}
 	u.signalLocked()
 	return true
@@ -56,6 +62,10 @@ func (u *UI) finishLocked(id uint64, status ports.UIActionStatus, boundary ports
 		record.Context = boundary.Context
 	}
 	u.records[id] = record
+	if done, ok := u.completion[id]; ok {
+		close(done)
+		delete(u.completion, id)
+	}
 	if u.handoff != nil && u.handoff.actionID == id {
 		u.handoff = nil
 	}

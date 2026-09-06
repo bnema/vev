@@ -34,6 +34,7 @@ type UI struct {
 	waits           int
 	boundary        ports.UIActionResult
 	dispatched      map[uint64]bool
+	completion      map[uint64]chan struct{}
 	handoff         *uiActionHandoff
 }
 
@@ -48,10 +49,30 @@ func NewUI(state ports.UIState, clock ports.Clock) *UI {
 	if clock == nil {
 		clock = systemClock{}
 	}
-	return &UI{state: state, clock: clock, handle: fmt.Sprintf("%x", newClientID()), changed: make(chan struct{}), records: make(map[uint64]ports.UIActionResult), dispatched: make(map[uint64]bool)}
+	return &UI{state: state, clock: clock, handle: fmt.Sprintf("%x", newClientID()), changed: make(chan struct{}), records: make(map[uint64]ports.UIActionResult), dispatched: make(map[uint64]bool), completion: make(map[uint64]chan struct{})}
 }
 
 func (u *UI) Handle() string { return u.handle }
+
+// ActionComplete returns a closed channel once an accepted action reaches a
+// terminal status. It is an optional lifecycle seam for adapters enforcing
+// attachment-wide action admission after a request timeout.
+func (u *UI) ActionComplete(actionID uint64) <-chan struct{} {
+	if actionID == 0 {
+		return nil
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if done, ok := u.completion[actionID]; ok {
+		return done
+	}
+	if record, ok := u.records[actionID]; ok && record.Status != ports.UIActionPending {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return nil
+}
 
 func (u *UI) status(status ports.UIPresentationStatus) {
 	publication, ok := u.state.(ports.UIOutputTransaction)

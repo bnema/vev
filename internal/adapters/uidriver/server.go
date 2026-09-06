@@ -81,6 +81,19 @@ type queuedResponse struct {
 	ownsID   bool
 }
 
+type actionCompletionTracker interface {
+	ActionComplete(actionID uint64) <-chan struct{}
+}
+
+func (s *Server) releaseActionWhenDone(ctx context.Context, done <-chan struct{}) {
+	select {
+	case <-done:
+		s.finishAction()
+	case <-ctx.Done():
+		s.finishAction()
+	}
+}
+
 // Serve owns stream until return. Close must interrupt its blocked reads and
 // writes (Unix sockets and the app's owned stdio pipes satisfy this contract).
 func (s *Server) Serve(ctx context.Context, stream io.ReadWriteCloser, ready Ready) error {
@@ -245,13 +258,14 @@ func (s *Server) Serve(ctx context.Context, stream io.ReadWriteCloser, ready Rea
 		}
 
 		execute := func() {
+			holdAction := false
 			defer func() {
 				stateMu.Lock()
 				if parsed.Op == opWait {
 					waitActive = false
 				}
 				stateMu.Unlock()
-				if isAction && ready.Control {
+				if isAction && ready.Control && !holdAction {
 					s.finishAction()
 				}
 			}()
@@ -276,6 +290,17 @@ func (s *Server) Serve(ctx context.Context, stream io.ReadWriteCloser, ready Rea
 				})
 			case opKeys, opText:
 				result, err := s.service.Action(serving, parsed.Action)
+				if err != nil {
+					var uiErr *ports.UIError
+					if errors.As(err, &uiErr) && uiErr.Accepted && uiErr.ActionID != 0 {
+						if tracker, ok := s.service.(actionCompletionTracker); ok {
+							if done := tracker.ActionComplete(uiErr.ActionID); done != nil {
+								holdAction = true
+								go s.releaseActionWhenDone(serving, done)
+							}
+						}
+					}
+				}
 				respond(parsed.ID, true, func() envelope {
 					if err != nil {
 						return errorEnvelope(parsed.ID, err)
