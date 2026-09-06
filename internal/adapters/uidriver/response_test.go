@@ -3,6 +3,7 @@ package uidriver
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/ports"
@@ -29,6 +30,14 @@ func TestCaptureTextCellsAndOwnedContext(t *testing.T) {
 
 func TestCaptureRejectsExcessGeometryWithoutResizing(t *testing.T) {
 	_, err := publicCapture(ports.UISnapshot{Columns: maxColumns + 1, Rows: 1}, formatCells)
+	var uiErr *ports.UIError
+	require.ErrorAs(t, err, &uiErr)
+	require.Equal(t, ports.UIErrCaptureTooLarge, uiErr.Code)
+}
+
+func TestCaptureRejectsOversizedCellBeforeSerialization(t *testing.T) {
+	snapshot := ports.UISnapshot{Revision: 1, Columns: 1, Rows: 1, Cells: []ports.UICell{{Text: strings.Repeat("x", maxResponseBytes), Width: 1}}}
+	_, err := publicCapture(snapshot, formatCells)
 	var uiErr *ports.UIError
 	require.ErrorAs(t, err, &uiErr)
 	require.Equal(t, ports.UIErrCaptureTooLarge, uiErr.Code)

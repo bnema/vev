@@ -45,7 +45,7 @@ func ListenUnix(path string, server *Server, ready func() Ready) (*UnixEndpoint,
 		return nil, err
 	}
 	parent := filepath.Dir(path)
-	if err := safedir.EnsurePrivate(parent); err != nil {
+	if err := secureSocketParent(parent); err != nil {
 		return nil, fmt.Errorf("uidriver: secure socket directory: %w", err)
 	}
 	if _, err := os.Lstat(path); err == nil {
@@ -75,6 +75,32 @@ func ListenUnix(path string, server *Server, ready func() Ready) (*UnixEndpoint,
 	endpoint.wg.Add(1)
 	go endpoint.accept()
 	return endpoint, nil
+}
+
+func secureSocketParent(parent string) error {
+	for current := parent; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("safedir: %s is a symlink", current)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("safedir: %s is not a directory", current)
+			}
+			if current == filepath.Dir(current) {
+				break
+			}
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			break
+		}
+	}
+	return safedir.EnsurePrivate(parent)
 }
 
 func validateSocketPath(path string) error {

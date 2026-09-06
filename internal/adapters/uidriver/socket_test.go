@@ -51,6 +51,16 @@ func TestListenUnixServesPrivateAttachmentAndCleansOwnedSocket(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestListenUnixRejectsUnsafeParentSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	require.NoError(t, os.Mkdir(target, 0o700))
+	link := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(target, link))
+	_, err := ListenUnix(filepath.Join(link, "ui.sock"), New(nil, nil), nil)
+	require.Error(t, err)
+}
+
 func TestListenUnixRejectsExistingPathWithoutRemovingIt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ui.sock")
 	require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
