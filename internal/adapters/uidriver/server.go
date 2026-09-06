@@ -178,7 +178,11 @@ func (s *Server) Serve(ctx context.Context, stream io.ReadWriteCloser, ready Rea
 			if err != nil {
 				// The fixed error envelope is deliberately tiny; reaching this
 				// branch means the process cannot produce a valid response.
-				data = []byte(`{"version":1,"id":0,"error":{"code":"unavailable","message":"unavailable","accepted":false}}\n`)
+				s.release(reserved)
+				<-slots
+				cancelServing()
+				closeStream()
+				return false
 			}
 		}
 		queued := queuedResponse{data: data, reserved: reserved, id: id, ownsID: ownsID}
