@@ -3,6 +3,8 @@ package term
 import (
 	"errors"
 	"testing"
+
+	"github.com/bnema/vev/internal/domain"
 )
 
 // recordingWriter records each Write call it receives, copying the bytes
@@ -31,6 +33,19 @@ func (r *recordingWriter) all() []byte {
 	}
 	return out
 }
+
+type recordingObservation struct {
+	writes      [][]byte
+	flushes     int
+	invalidated bool
+}
+
+func (r *recordingObservation) ObserveTerminalWrite(data []byte) {
+	r.writes = append(r.writes, append([]byte(nil), data...))
+}
+func (r *recordingObservation) ObserveTerminalFlush()                 { r.flushes++ }
+func (r *recordingObservation) ObserveTerminalResize(domain.Geometry) {}
+func (r *recordingObservation) InvalidateTerminalObservation()        { r.invalidated = true }
 
 func TestBatchWriter_BufferedUntilFlush(t *testing.T) {
 	rw := &recordingWriter{}
@@ -126,5 +141,41 @@ func TestBatchWriter_FlushOnEmptyBufferIsNoop(t *testing.T) {
 	}
 	if len(rw.writes) != 0 {
 		t.Fatalf("expected no sink writes, got %d", len(rw.writes))
+	}
+}
+
+func TestBatchWriter_ObservesOnlySuccessfulPhysicalWrites(t *testing.T) {
+	rw := &recordingWriter{}
+	observation := &recordingObservation{}
+	bw := newBatchWriterWithObservation(rw, 4, observation)
+
+	if _, err := bw.WriteString("abcdefgh"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(observation.writes[0]); got != "abcd" {
+		t.Fatalf("observed auto-flush prefix = %q", got)
+	}
+	if observation.flushes != 0 {
+		t.Fatal("auto-flush ended a publication transaction")
+	}
+	if err := bw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if observation.flushes != 1 {
+		t.Fatalf("flush boundaries = %d, want 1", observation.flushes)
+	}
+	if got := string(append(observation.writes[0], observation.writes[1]...)); got != "abcdefgh" {
+		t.Fatalf("observed successful prefixes = %q", got)
+	}
+
+	rw.failNext = true
+	if _, err := bw.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := bw.Flush(); err == nil {
+		t.Fatal("failed physical flush returned nil")
+	}
+	if len(observation.writes) != 2 || observation.flushes != 1 {
+		t.Fatalf("failed output was observed: writes=%d flushes=%d", len(observation.writes), observation.flushes)
 	}
 }

@@ -17,38 +17,6 @@ import (
 // Compile-time check that Terminal satisfies ports.Terminal.
 var _ ports.Terminal = (*Terminal)(nil)
 
-// Escape sequences for alt-screen and cursor visibility control. All
-// emissions go through the batched writer and are explicitly flushed.
-const (
-	altScreenEnter        = "\x1b[?1049h"
-	altScreenExit         = "\x1b[?1049l"
-	cursorHide            = "\x1b[?25l"
-	cursorShow            = "\x1b[?25h"
-	cursorStyleDefault    = "\x1b[0 q"
-	mouseEnable           = "\x1b[?1002h\x1b[?1006h"
-	mouseDisable          = "\x1b[?1002l\x1b[?1006l"
-	bracketedPasteEnable  = "\x1b[?2004h"
-	bracketedPasteDisable = "\x1b[?2004l"
-	colorSchemeEnable     = "\x1b[?2031h"
-	colorSchemeDisable    = "\x1b[?2031l"
-	// DECAWM. vev addresses every row explicitly and never relies on the
-	// terminal wrapping its output, so autowrap stays off while it owns the
-	// alt screen: a frame the daemon composed for a wider terminal is then
-	// clipped at the right margin instead of bleeding a styled run onto the
-	// next row. Restored alongside the other modes, since DECAWM is global
-	// and is not saved by the alt-screen switch.
-	autowrapDisable = "\x1b[?7l"
-	autowrapEnable  = "\x1b[?7h"
-)
-
-// visualRestore turns off every mode EnterRaw turns on, in reverse order, and
-// hands the normal screen back. Shared by the ordinary restore and the direct
-// fallback so the two can never drift: a partial emission may have left any
-// prefix of the enter sequence in effect, so the reset has to cover all of it.
-// Every mode reset here is idempotent.
-const visualRestore = cursorShow + cursorStyleDefault + mouseDisable +
-	bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
-
 // bufSize is the batched writer's buffer capacity.
 const bufSize = 64 * 1024
 
@@ -58,10 +26,11 @@ const bufSize = 64 * 1024
 //
 // Zero value is not usable; use New or NewWithFiles.
 type Terminal struct {
-	in  *os.File
-	out *os.File
-	fd  int
-	bw  *batchWriter
+	in          *os.File
+	out         *os.File
+	fd          int
+	bw          *batchWriter
+	observation ports.UIObservationSink
 
 	mu         sync.Mutex
 	orig       *rawterm.State // saved terminal state; nil when raw mode wasn't entered (or was restored)
@@ -89,11 +58,18 @@ func New() *Terminal {
 // exists so tests can inject a PTY pair (or a plain pipe, for the
 // non-tty paths) in place of the process's real stdin/stdout.
 func NewWithFiles(in, out *os.File) *Terminal {
+	return NewWithFilesAndObservation(in, out, nil)
+}
+
+// NewWithFilesAndObservation creates a terminal that mirrors successfully
+// emitted byte prefixes and flush boundaries to observation.
+func NewWithFilesAndObservation(in, out *os.File, observation ports.UIObservationSink) *Terminal {
 	return &Terminal{
-		in:  in,
-		out: out,
-		fd:  int(in.Fd()),
-		bw:  newBatchWriter(out, bufSize),
+		in:          in,
+		out:         out,
+		fd:          int(in.Fd()),
+		bw:          newBatchWriterWithObservation(out, bufSize, observation),
+		observation: observation,
 	}
 }
 
@@ -123,7 +99,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable); err != nil {
+	if _, err := t.bw.WriteString(visualEnter); err != nil {
 		t.resetVisualModesDirect()
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
@@ -147,6 +123,9 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 // harmless. Best effort by construction — the descriptor is usually broken
 // too. Must be called with t.mu held.
 func (t *Terminal) resetVisualModesDirect() {
+	if t.observation != nil {
+		t.observation.InvalidateTerminalObservation()
+	}
 	_, _ = t.out.WriteString(visualRestore)
 }
 
@@ -213,11 +192,15 @@ func (t *Terminal) Geometry() (domain.Geometry, error) {
 	if err != nil {
 		return domain.Geometry{}, fmt.Errorf("term: get size: %w", err)
 	}
-	return (domain.Geometry{
+	geometry := (domain.Geometry{
 		Size:        domain.Size{Cols: int(ws.Col), Rows: int(ws.Row)},
 		PixelWidth:  int(ws.Xpixel),
 		PixelHeight: int(ws.Ypixel),
-	}).NormalizePixels(), nil
+	}).NormalizePixels()
+	if t.observation != nil {
+		t.observation.ObserveTerminalResize(geometry)
+	}
+	return geometry, nil
 }
 
 // ResizeEvents returns a channel of coalesced terminal sizes, one per

@@ -2099,7 +2099,24 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if parkedWaitingFull && !o.Full {
 					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
 				}
+				uiOutput, _ := term.(ports.UIOutputTransaction)
+				if uiOutput != nil {
+					uiContext := ports.UIContext{
+						Generation: 1, OutputEpoch: o.Epoch, OutputState: o.New,
+						ViewRevision: o.ViewRevision, Status: ports.UIStatusAttached,
+					}
+					if committedIdentity != nil {
+						uiContext.Route = *cloneCommittedIdentity(committedIdentity)
+					}
+					if routePosition != nil {
+						uiContext.TabID = routePosition.ActiveTabID
+					}
+					uiOutput.BeginOutput(uiContext)
+				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
+					if uiOutput != nil {
+						uiOutput.EndOutput(false)
+					}
 					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
 				if awaitingReconnectReset && o.Full && o.Base == 0 && o.New != 0 {
@@ -2108,13 +2125,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if reconnect.showing && reconnect.remote {
 					geometry, serr := term.Geometry()
 					if serr != nil {
+						if uiOutput != nil {
+							uiOutput.EndOutput(false)
+						}
 						return welcomedResult(fmt.Errorf("vev: reading terminal geometry for reconnect redraw: %w", serr))
 					}
 					if rerr := reconnect.redraw(geometry.Size); rerr != nil {
+						if uiOutput != nil {
+							uiOutput.EndOutput(false)
+						}
 						return welcomedResult(fmt.Errorf("vev: redrawing reconnect toast: %w", rerr))
 					}
 				} else if ferr := term.Flush(); ferr != nil {
+					if uiOutput != nil {
+						uiOutput.EndOutput(false)
+					}
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
+				}
+				if uiOutput != nil {
+					uiOutput.EndOutput(true)
 				}
 				outputState = nextState
 				if transition != nil && transition.active && (!transitionWaitingFull || o.Full) {
