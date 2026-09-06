@@ -99,7 +99,7 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	}
 	t.orig = old
 
-	if _, err := t.bw.WriteString(visualEnter); err != nil {
+	if _, err := t.bw.Write(VisualEnterSequence()); err != nil {
 		t.resetVisualModesDirect()
 		_ = t.restoreRawLocked()
 		return nil, fmt.Errorf("term: enter alt screen: %w", err)
@@ -126,7 +126,7 @@ func (t *Terminal) resetVisualModesDirect() {
 	if t.observation != nil {
 		t.observation.InvalidateTerminalObservation()
 	}
-	_, _ = t.out.WriteString(visualRestore)
+	_, _ = t.out.Write(VisualRestoreSequence())
 }
 
 // makeRestoreLocked returns an idempotent restore closure for the
@@ -149,7 +149,7 @@ func (t *Terminal) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, werr := t.bw.WriteString(visualRestore)
+	_, werr := t.bw.Write(VisualRestoreSequence())
 	ferr := t.bw.Flush()
 	if werr != nil || ferr != nil {
 		t.resetVisualModesDirect()
