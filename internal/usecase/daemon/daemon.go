@@ -772,12 +772,14 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 		// The watcher owns no I/O or workers; joining it inside the
 		// feature budget keeps shutdown accounting in one place even
 		// when no monitor runner is configured.
+		// This join is a wall-time operational bound and must not use
+		// the injected daemon clock, whose timers may never fire in tests.
 		defer func() {
-			join := d.clock.NewTimer(remoteMonitorShutdownJoin)
+			join := time.NewTimer(remoteMonitorShutdownJoin)
 			defer join.Stop()
 			select {
 			case <-watcherDone:
-			case <-join.C():
+			case <-join.C:
 				d.log.Warn("remote directory watcher shutdown join timed out")
 			}
 		}()
@@ -791,12 +793,14 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 		// never extends daemon shutdown past its own budget. The monitor
 		// runner owns its runtime's two-second cleanup join, so joining
 		// the runner transitively joins the workers.
+		// This join is a wall-time operational bound and must not use
+		// the injected daemon clock, whose timers may never fire in tests.
 		defer func() {
-			join := d.clock.NewTimer(remoteMonitorShutdownJoin)
+			join := time.NewTimer(remoteMonitorShutdownJoin)
 			defer join.Stop()
 			select {
 			case <-monitorDone:
-			case <-join.C():
+			case <-join.C:
 				d.log.Warn("remote monitor shutdown join timed out")
 				return
 			}
@@ -805,7 +809,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 			// watcher join above runs on the same budget.
 			select {
 			case <-watcherDone:
-			case <-join.C():
+			case <-join.C:
 				d.log.Warn("remote directory watcher shutdown join timed out")
 			}
 		}()

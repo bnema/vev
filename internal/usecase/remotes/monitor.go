@@ -179,8 +179,9 @@ func (m *Monitor) loop(ctx context.Context, jobs chan<- ports.RemoteJob, results
 			state.dirty = false
 			m.publish(state)
 		}
-		wait := state.nextWakeup(m.clock.Now())
-		delay := wait.Sub(m.clock.Now())
+		wakeNow := m.clock.Now()
+		wait := state.nextWakeup(wakeNow)
+		delay := wait.Sub(wakeNow)
 		if delay < 0 {
 			delay = 0
 		}
@@ -490,7 +491,7 @@ func (m *Monitor) seedPendingCache(state *serviceState) bool {
 	if len(state.pendingCache) == 0 || !state.registryDone {
 		return false
 	}
-	remaining := state.pendingCache[:0]
+	remaining := make([]catalogue.RemoteCatalogCacheEntry, 0, len(state.pendingCache))
 	seeded := false
 	for _, entry := range state.pendingCache {
 		if entry.Incarnation == [16]byte{} {
@@ -498,6 +499,7 @@ func (m *Monitor) seedPendingCache(state *serviceState) bool {
 		}
 		host, ok := state.hosts[entry.Host]
 		if !ok || host.inventoryConfirmed || host.cacheSeeded || host.registration.Incarnation != entry.Incarnation {
+			remaining = append(remaining, entry)
 			continue
 		}
 		host.sessions = append([]catalogue.RemoteCatalogSession(nil), entry.Sessions...)
@@ -505,7 +507,6 @@ func (m *Monitor) seedPendingCache(state *serviceState) bool {
 		host.lastSuccess = entry.FetchedAt
 		host.cacheSeeded = true
 		seeded = true
-		remaining = append(remaining, entry)
 	}
 	state.pendingCache = remaining
 	return seeded

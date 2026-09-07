@@ -366,7 +366,7 @@ func (_c *MockUIObservationSink_ObserveTerminalResize_Call) RunAndReturn(run fun
 
 // ObserveTerminalWrite provides a mock function for the type MockUIObservationSink
 func (_mock *MockUIObservationSink) ObserveTerminalWrite(data []byte) {
-	_mock.Called(data)
+	_mock.Called(append([]byte(nil), data...))
 	return
 }
 
