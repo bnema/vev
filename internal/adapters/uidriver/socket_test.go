@@ -193,7 +193,9 @@ func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
 
 func shortDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp", "vev")
+	directory, err := os.MkdirTemp(".", "v")
+	require.NoError(t, err)
+	directory, err = filepath.Abs(directory)
 	require.NoError(t, err)
 	require.NoError(t, safedir.EnsurePrivate(directory))
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(directory)) })

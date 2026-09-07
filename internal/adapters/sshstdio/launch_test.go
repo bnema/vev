@@ -34,7 +34,7 @@ func TestBuildCommandForRemoteCleanupVerifiesOwnerBeforeRemoval(t *testing.T) {
 	spec := BuildCommandForRemoteCleanup("test@example.com", "/tmp/root", "owner", "/opt/vev", []string{"HOME=/tmp/home"}, "_ui-cleanup")
 	require.Contains(t, spec.Args[2], "/tmp/root/.vev-ui-driver-owner")
 	require.Contains(t, spec.Args[2], "'_ui-cleanup'")
-	require.Contains(t, spec.Args[2], "rm -rf -- \"$root\"")
+	require.Contains(t, spec.Args[2], "rm -rf \"$root\"")
 }
 
 func TestIsolatedLaunchScriptRemovesRootWhenCleanupCommandFails(t *testing.T) {

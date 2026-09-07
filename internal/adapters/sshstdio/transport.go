@@ -577,16 +577,16 @@ func isolatedLaunchScript(root, ownerToken, executable string, environment []str
 		script.WriteString("if [ ! -e \"$root\" ]; then exit 0; fi; ")
 	}
 	script.WriteString("if [ -e \"$root\" ]; then ")
-	script.WriteString("[ -d \"$root\" ] && [ ! -L \"$marker\" ] && [ -f \"$marker\" ] && [ \"$(cat -- \"$marker\")\" = \"$token\" ] || exit 1; ")
+	script.WriteString("[ -d \"$root\" ] && [ ! -L \"$marker\" ] && [ -f \"$marker\" ] && [ \"$(cat \"$marker\")\" = \"$token\" ] || exit 1; ")
 	if !cleanup {
-		script.WriteString("else umask 077; mkdir -m 700 -- \"$root\"; created=1; ")
-		script.WriteString("trap 'if [ \"$created\" = 1 ]; then rm -rf -- \"$root\"; fi' EXIT; ")
+		script.WriteString("else umask 077; mkdir -m 700 \"$root\"; created=1; ")
+		script.WriteString("trap 'if [ \"$created\" = 1 ]; then rm -rf \"$root\"; fi' EXIT; ")
 		for _, child := range []string{"config", "state", "runtime", "tmp"} {
-			script.WriteString("mkdir -m 700 -- \"$root/")
+			script.WriteString("mkdir -m 700 \"$root/")
 			script.WriteString(child)
 			script.WriteString("\"; ")
 		}
-		script.WriteString("printf '%s' \"$token\" > \"$marker\"; chmod 600 -- \"$marker\"; ")
+		script.WriteString("printf '%s' \"$token\" > \"$marker\"; chmod 600 \"$marker\"; ")
 	}
 	script.WriteString("fi; ")
 	command := make([]string, 0, len(environment)+4)
@@ -596,7 +596,7 @@ func isolatedLaunchScript(root, ownerToken, executable string, environment []str
 	if cleanup {
 		script.WriteString("command_status=0; if ")
 		script.WriteString(quotedWords(command))
-		script.WriteString("; then :; else command_status=$?; fi; rm_status=0; rm -rf -- \"$root\" || rm_status=$?; if [ \"$command_status\" -ne 0 ]; then exit \"$command_status\"; fi; exit \"$rm_status\"")
+		script.WriteString("; then :; else command_status=$?; fi; rm_status=0; rm -rf \"$root\" || rm_status=$?; if [ \"$command_status\" -ne 0 ]; then exit \"$command_status\"; fi; exit \"$rm_status\"")
 	} else {
 		script.WriteString("trap - EXIT; exec ")
 		script.WriteString(quotedWords(command))
