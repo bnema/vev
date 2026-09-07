@@ -143,31 +143,31 @@ func (_c *MockRemoteHostStore_Forget_Call) RunAndReturn(run func(target string) 
 }
 
 // Hosts provides a mock function for the type MockRemoteHostStore
-func (_mock *MockRemoteHostStore) Hosts() ([]string, []string, error) {
+func (_mock *MockRemoteHostStore) Hosts() ([]domain.RemoteRegistration, []domain.RemoteRegistration, error) {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for Hosts")
 	}
 
-	var r0 []string
-	var r1 []string
+	var r0 []domain.RemoteRegistration
+	var r1 []domain.RemoteRegistration
 	var r2 error
-	if returnFunc, ok := ret.Get(0).(func() ([]string, []string, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func() ([]domain.RemoteRegistration, []domain.RemoteRegistration, error)); ok {
 		return returnFunc()
 	}
-	if returnFunc, ok := ret.Get(0).(func() []string); ok {
+	if returnFunc, ok := ret.Get(0).(func() []domain.RemoteRegistration); ok {
 		r0 = returnFunc()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]string)
+			r0 = ret.Get(0).([]domain.RemoteRegistration)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func() []string); ok {
+	if returnFunc, ok := ret.Get(1).(func() []domain.RemoteRegistration); ok {
 		r1 = returnFunc()
 	} else {
 		if ret.Get(1) != nil {
-			r1 = ret.Get(1).([]string)
+			r1 = ret.Get(1).([]domain.RemoteRegistration)
 		}
 	}
 	if returnFunc, ok := ret.Get(2).(func() error); ok {
@@ -195,12 +195,12 @@ func (_c *MockRemoteHostStore_Hosts_Call) Run(run func()) *MockRemoteHostStore_H
 	return _c
 }
 
-func (_c *MockRemoteHostStore_Hosts_Call) Return(pinned []string, learned []string, err error) *MockRemoteHostStore_Hosts_Call {
+func (_c *MockRemoteHostStore_Hosts_Call) Return(pinned []domain.RemoteRegistration, learned []domain.RemoteRegistration, err error) *MockRemoteHostStore_Hosts_Call {
 	_c.Call.Return(pinned, learned, err)
 	return _c
 }
 
-func (_c *MockRemoteHostStore_Hosts_Call) RunAndReturn(run func() ([]string, []string, error)) *MockRemoteHostStore_Hosts_Call {
+func (_c *MockRemoteHostStore_Hosts_Call) RunAndReturn(run func() ([]domain.RemoteRegistration, []domain.RemoteRegistration, error)) *MockRemoteHostStore_Hosts_Call {
 	_c.Call.Return(run)
 	return _c
 }

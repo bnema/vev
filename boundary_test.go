@@ -71,6 +71,12 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 	}{
 		{"usecase accepts semantic protocol", modulePath + "/internal/usecase/client", modulePath + "/internal/protocol", false, true},
 		{"usecase rejects wire", modulePath + "/internal/usecase/daemon", modulePath + "/internal/protocol/wire", false, false},
+		{"remotes accepts ports", modulePath + "/internal/usecase/remotes", modulePath + "/internal/ports", false, true},
+		{"remotes accepts domain", modulePath + "/internal/usecase/remotes", modulePath + "/internal/domain", false, true},
+		{"remotes rejects wire", modulePath + "/internal/usecase/remotes", modulePath + "/internal/protocol/wire", false, false},
+		{"remotes rejects adapter", modulePath + "/internal/usecase/remotes", modulePath + "/internal/adapters/ipc", false, false},
+		{"remotes rejects app", modulePath + "/internal/usecase/remotes", modulePath + "/internal/app", false, false},
+		{"remotes rejects persist", modulePath + "/internal/usecase/remotes", modulePath + "/internal/persist", false, false},
 		{"usecase rejects adapter", modulePath + "/internal/usecase/client", modulePath + "/internal/adapters/ipc", false, false},
 		{"domain rejects ports", modulePath + "/internal/domain", modulePath + "/internal/ports", false, false},
 		{"pkg rejects internal", modulePath + "/pkg/rawterm", modulePath + "/internal/domain", false, false},

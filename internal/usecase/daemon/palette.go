@@ -7,6 +7,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -56,12 +57,8 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
-	generation := ac.overlays.paletteGeneration
 	ac.overlays.paletteMu.Unlock()
 	d.invalidateRender(sess, ac, true, "palette.go")
-	d.remoteDiscoveryOpened(remoteDiscoveryInstance{
-		ac: ac, kind: remoteDiscoveryPalette, generation: generation, palette: model,
-	})
 }
 
 type paletteSessionIdentity struct {
@@ -118,9 +115,10 @@ func routeEntryForRef(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteR
 	return protocol.RecentRouteEntry{}, false
 }
 
-func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID, remoteCatalog []remoteCatalogPresentationEntry, hostRanks map[string]int) []palette.Result {
-	results := make([]palette.Result, 0, len(remoteCatalog)+2)
+func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID, hosts []ports.RemoteHostSnapshot) []palette.Result {
+	results := make([]palette.Result, 0, len(hosts)+2)
 	servingOrigin := ""
+	servingEndpoint := ""
 	if home, ok := routeEntryForRef(snapshot, snapshot.Home); ok && home.Kind == protocol.RouteKindLocal {
 		results = append(results, palette.NewCreateSessionDestination(
 			palette.CreateSessionOnLocalRoute, "", "", snapshot.Home, snapshot.Generation,
@@ -128,26 +126,40 @@ func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, curr
 	}
 	if active, ok := activeRouteEntryForLifecycle(snapshot, currentLifecycle); ok && active.Kind == protocol.RouteKindRemote {
 		servingOrigin = paletteRemoteDisplayOrigin(active.HostLabel)
+		servingEndpoint = servingRouteEndpoint(hosts, active.Target.LifecycleID)
 		results = append(results, palette.NewCreateSessionDestination(
 			palette.CreateSessionOnServingDaemon, servingOrigin, "", protocol.RouteRef{}, 0,
 		))
 	}
-	for _, host := range remoteCatalog {
-		if host.status != remoteHostFresh || host.entry.Host == "" {
+	for _, host := range hosts {
+		if host.Endpoint == "" {
 			continue
 		}
-		if _, configured := hostRanks[host.entry.Host]; !configured {
-			continue
-		}
-		displayOrigin := paletteRemoteDisplayOrigin(host.entry.Host)
-		if servingOrigin != "" && displayOrigin == servingOrigin {
+		displayOrigin := paletteRemoteDisplayOrigin(host.Endpoint)
+		if servingEndpoint != "" && host.Endpoint == servingEndpoint {
 			continue
 		}
 		results = append(results, palette.NewCreateSessionDestination(
-			palette.CreateSessionOnRemoteHost, displayOrigin, host.entry.Host, protocol.RouteRef{}, 0,
+			palette.CreateSessionOnRemoteHost, displayOrigin, host.Endpoint, protocol.RouteRef{}, 0,
 		))
 	}
 	return results
+}
+
+// servingRouteEndpoint resolves the exact endpoint serving the active
+// remote route by matching its session lifecycle against the directory
+// inventory. Display origins collide across login prefixes (vev@arch vs
+// arch), so only an exact lifecycle match suppresses the duplicate
+// per-host destination.
+func servingRouteEndpoint(hosts []ports.RemoteHostSnapshot, lifecycle domain.SessionLifecycleID) string {
+	for _, host := range hosts {
+		for _, session := range host.Sessions {
+			if session.LifecycleID == lifecycle {
+				return host.Endpoint
+			}
+		}
+	}
+	return ""
 }
 
 func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemonDisplayOrigin string) bool {
@@ -158,11 +170,16 @@ func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemon
 		paletteRemoteDisplayOrigin(entry.HostLabel) == daemonDisplayOrigin
 }
 
-func remotePaletteUnavailableReason(status remoteHostStatus, session catalogue.RemoteCatalogSession) string {
+func remotePaletteUnavailableReason(host ports.RemoteHostSnapshot, session catalogue.RemoteCatalogSession) string {
 	if session.State == catalogue.RemoteCatalogSessionBroken {
-		return "session_broken"
+		return domain.RemoteReasonSessionBroken
 	}
-	return remoteReasonForStatus(status)
+	return directorySessionReason(host, session, mustRemotePaletteTarget(host.Endpoint, session))
+}
+
+func mustRemotePaletteTarget(endpoint string, session catalogue.RemoteCatalogSession) domain.RemoteSessionTarget {
+	_, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{Host: endpoint, Name: session.Name}, session)
+	return target
 }
 
 // paletteResults captures eligible named sessions before paletteMu so the
@@ -187,15 +204,15 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	}
 	daemonDisplayOrigin := paletteDaemonDisplayOrigin(routeSnapshot, currentLifecycle)
 
-	remoteCatalog := d.remoteCatalogSnapshot()
-	hostRanks := d.remoteHostRanks()
-	sortRemoteCatalog(remoteCatalog, hostRanks)
+	directory := d.remoteDirectorySnapshot()
+	hosts := append([]ports.RemoteHostSnapshot(nil), directory.Hosts...)
+	sortDirectoryHosts(hosts)
 	remoteSessionCount := 0
-	for _, host := range remoteCatalog {
-		remoteSessionCount += len(host.entry.Sessions)
+	for _, host := range hosts {
+		remoteSessionCount += len(host.Sessions)
 	}
 
-	destinations := createSessionDestinationResults(routeSnapshot, currentLifecycle, remoteCatalog, hostRanks)
+	destinations := createSessionDestinationResults(routeSnapshot, currentLifecycle, hosts)
 	results := make([]palette.Result, 0, len(commands)+len(destinations)+len(sessions)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
@@ -232,13 +249,13 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	}
 	discovered := make([]discoveredRemote, 0, remoteSessionCount)
 	discoveredByPresentation := make(map[remotePalettePresentationIdentity][]paletteSessionIdentity, remoteSessionCount)
-	for _, host := range remoteCatalog {
-		for _, session := range host.entry.Sessions {
+	for _, host := range hosts {
+		for _, session := range host.Sessions {
 			if session.Ephemeral {
 				continue
 			}
 			key, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{
-				Host: host.entry.Host, Name: session.Name,
+				Host: host.Endpoint, Name: session.Name,
 			}, session)
 			if key.Validate() != nil || target.Validate() != nil {
 				continue
@@ -249,7 +266,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			}
 			discovered = append(discovered, discoveredRemote{
 				identity: identity,
-				result:   palette.NewRemoteSessionResult(key, target, remotePaletteUnavailableReason(host.status, session)),
+				result:   palette.NewRemoteSessionResult(key, target, remotePaletteUnavailableReason(host, session)),
 			})
 			discoveredByPresentation[presentation] = append(discoveredByPresentation[presentation], identity)
 		}
@@ -408,7 +425,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var generation uint64
 	var rawQuery string
 	changed, cancel, execute, chooseDestination := false, false, false, false
-	var closedDiscovery remoteDiscoveryInstance
 	var effect *attachmentEffect
 	if len(effects) != 0 {
 		effect = effects[0]
@@ -530,11 +546,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 	}
 	if cancel {
-		closedDiscovery = ac.clearPaletteLocked()
+		ac.clearPaletteLocked()
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
-		d.remoteDiscoveryClosed(closedDiscovery)
 		d.invalidateRender(entry, ac, true, "palette.go")
 		return
 	}
@@ -715,8 +730,7 @@ func paletteArgs(query string, cmd command.Command) []string {
 	return action.Args
 }
 
-func (ac *attachedClient) clearPaletteLocked() remoteDiscoveryInstance {
-	model := ac.overlays.palette
+func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = nil
 	ac.overlays.paletteRouteSnapshot = protocol.RecentRouteSnapshot{}
@@ -724,9 +738,6 @@ func (ac *attachedClient) clearPaletteLocked() remoteDiscoveryInstance {
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
-	return remoteDiscoveryInstance{
-		ac: ac, kind: remoteDiscoveryPalette, generation: ac.overlays.paletteGeneration, palette: model,
-	}
 }
 
 func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback string) {
@@ -744,9 +755,8 @@ func (d *Daemon) closeExecutedPalette(ac *attachedClient, generation uint64, raw
 		ac.overlays.paletteMu.Unlock()
 		return false
 	}
-	instance := ac.clearPaletteLocked()
+	ac.clearPaletteLocked()
 	ac.overlays.paletteMu.Unlock()
-	d.remoteDiscoveryClosed(instance)
 	return true
 }
 
@@ -763,9 +773,8 @@ func (d *Daemon) closePaletteIfCurrent(ac *attachedClient, generation uint64) bo
 		ac.overlays.paletteMu.Unlock()
 		return false
 	}
-	instance := ac.clearPaletteLocked()
+	ac.clearPaletteLocked()
 	ac.overlays.paletteMu.Unlock()
-	d.remoteDiscoveryClosed(instance)
 	return true
 }
 
@@ -927,13 +936,10 @@ func (d *Daemon) remoteCreateHostReady(endpoint string) bool {
 	if d == nil || domain.ValidateRemoteHostTarget(endpoint) != nil {
 		return false
 	}
-	ranks := d.remoteHostRanks()
-	if _, ok := ranks[endpoint]; !ok {
-		return false
-	}
-	d.remoteCatalog.mu.Lock()
-	defer d.remoteCatalog.mu.Unlock()
-	_, ok := d.remoteCatalogEntryLocked(endpoint)
+	// Registration is creation authority: any registered endpoint is
+	// attemptable at any inventory age. Freshness renders; the destination
+	// rejects precisely on exact identity.
+	_, ok := d.remoteDirectorySnapshot().Find(endpoint)
 	return ok
 }
 

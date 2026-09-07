@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/sshstdio"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
@@ -49,7 +50,7 @@ func TestRemoteCatalogClientCommandConstruction(t *testing.T) {
 				t.Fatalf("List() error = %v", err)
 			}
 
-			want := sshstdio.BuildCommandForRemoteCommand(tt.target, "vev", "cmd", "remote-catalog", "--json")
+			want := sshstdio.BuildCommandForObservation(tt.target, catalogSSHConnectTimeout, "vev", "cmd", "remote-catalog", "--json")
 			if gotPath != want.Path {
 				t.Fatalf("Path = %q, want %q", gotPath, want.Path)
 			}
@@ -61,11 +62,24 @@ func TestRemoteCatalogClientCommandConstruction(t *testing.T) {
 					t.Fatalf("Args[%d] = %q, want %q (all %q)", i, gotArgs[i], want.Args[i], gotArgs)
 				}
 			}
-			if gotArgs[0] != "--" || gotArgs[1] != tt.target {
-				t.Fatalf("target must remain one unquoted local argv word after --; got %q", gotArgs)
+			sep := -1
+			for i, arg := range gotArgs {
+				if arg == "--" {
+					sep = i
+					break
+				}
 			}
-			if !strings.Contains(gotArgs[2], "'vev'") || !strings.Contains(gotArgs[2], "'remote-catalog'") {
-				t.Fatalf("remote command words must be shell-quoted; got %q", gotArgs[2])
+			if sep < 0 || sep+1 >= len(gotArgs) || gotArgs[sep+1] != tt.target {
+				t.Fatalf("observation must keep the target one unquoted local argv word right after --; got %q", gotArgs)
+			}
+			joined := strings.Join(gotArgs[:sep], " ")
+			for _, flag := range []string{"-T", "BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectTimeout=", "ConnectionAttempts=1"} {
+				if !strings.Contains(joined, flag) {
+					t.Fatalf("observation argv missing %q; got %q", flag, gotArgs)
+				}
+			}
+			if sep+2 >= len(gotArgs) || !strings.Contains(gotArgs[sep+2], "'vev'") || !strings.Contains(gotArgs[sep+2], "'remote-catalog'") {
+				t.Fatalf("remote command words must be shell-quoted; got %q", gotArgs)
 			}
 		})
 	}
@@ -268,6 +282,60 @@ func TestRemoteCatalogClientDecode(t *testing.T) {
 				if !reflect.DeepEqual(got.Sessions[i], tt.want.Sessions[i]) {
 					t.Fatalf("Sessions[%d] = %#v, want %#v", i, got.Sessions[i], tt.want.Sessions[i])
 				}
+			}
+		})
+	}
+}
+
+func exitError(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	if err == nil {
+		t.Fatalf("exit %d returned nil error", code)
+	}
+	return err
+}
+
+func TestClassifyCatalogError(t *testing.T) {
+	t.Parallel()
+
+	sshWrapped := func(code int, stderr string) error {
+		return fmt.Errorf("%w: %w: %s", errCatalogSSH, exitError(t, code), stderr)
+	}
+	mismatch := &catalogue.RemoteCatalogVersionMismatchError{Got: 1, Want: 2, Kind: "protocol"}
+
+	tests := []struct {
+		name string
+		err  error
+		want domain.RemoteFailureKind
+	}{
+		{name: "nil", err: nil, want: domain.RemoteFailureNone},
+		{name: "deadline", err: context.DeadlineExceeded, want: domain.RemoteFailureTimeout},
+		{name: "canceled stays transport", err: context.Canceled, want: domain.RemoteFailureTransport},
+		{name: "version mismatch", err: mismatch, want: domain.RemoteFailureIncompatible},
+		{name: "wrapped version mismatch", err: fmt.Errorf("decode: %w", mismatch), want: domain.RemoteFailureIncompatible},
+		{name: "too large", err: errCatalogTooLarge, want: domain.RemoteFailureInvalidResponse},
+		{name: "decode", err: fmt.Errorf("%w: bad", errCatalogDecode), want: domain.RemoteFailureInvalidResponse},
+		{name: "trailing", err: errCatalogTrailing, want: domain.RemoteFailureInvalidResponse},
+		{name: "required", err: errCatalogRequired, want: domain.RemoteFailureInvalidResponse},
+		{name: "invalid catalog", err: fmt.Errorf("%w: bad session", catalogue.ErrInvalidRemoteCatalog), want: domain.RemoteFailureInvalidResponse},
+		{name: "trust failure", err: sshWrapped(255, "Host key verification failed."), want: domain.RemoteFailureTrust},
+		{name: "changed host key", err: sshWrapped(255, "@@@@@@@@@@@@\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n@@@@@@@@@@@@"), want: domain.RemoteFailureTrust},
+		{name: "auth failure", err: sshWrapped(255, "user@arch: Permission denied (publickey)."), want: domain.RemoteFailureAuthentication},
+		{name: "bare too many auth failures stay transport", err: sshWrapped(255, "Too many authentication failures"), want: domain.RemoteFailureTransport},
+		{name: "remote command exits 255 with auth text stays transport", err: sshWrapped(255, "vev: remote helper failed\nPermission denied (publickey)"), want: domain.RemoteFailureTransport},
+		{name: "remote command timeout text stays transport", err: sshWrapped(255, "catalog fetch timed out"), want: domain.RemoteFailureTransport},
+		{name: "connect timeout", err: sshWrapped(255, "ssh: connect to host arch port 22: Connection timed out"), want: domain.RemoteFailureTimeout},
+		{name: "unrecognized ssh failure stays transport", err: sshWrapped(255, "some new mysterious error"), want: domain.RemoteFailureTransport},
+		{name: "remote command failure stays transport", err: sshWrapped(1, "remote vev exploded"), want: domain.RemoteFailureTransport},
+		{name: "auth text without client exit stays transport", err: fmt.Errorf("%w: %s", errCatalogSSH, "Permission denied (publickey)"), want: domain.RemoteFailureTransport},
+		{name: "plain error stays transport", err: errors.New("boom"), want: domain.RemoteFailureTransport},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ClassifyCatalogError(tt.err); got != tt.want {
+				t.Fatalf("ClassifyCatalogError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

@@ -29,8 +29,9 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	fetchedAt := time.Unix(0, 1780000000000000000)
 	entries := []catalogue.RemoteCatalogCacheEntry{
 		{
-			Host:      "zebra",
-			FetchedAt: fetchedAt,
+			Host:        "zebra",
+			FetchedAt:   fetchedAt,
+			Incarnation: [16]byte{9},
 			Sessions: []catalogue.RemoteCatalogSession{
 				{
 					LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2",
@@ -40,9 +41,10 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 			},
 		},
 		{
-			Host:      "arch",
-			FetchedAt: fetchedAt.Add(time.Second),
-			Sessions:  []catalogue.RemoteCatalogSession{},
+			Host:        "arch",
+			FetchedAt:   fetchedAt.Add(time.Second),
+			Incarnation: [16]byte{7},
+			Sessions:    []catalogue.RemoteCatalogSession{},
 		},
 	}
 
@@ -63,8 +65,8 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	if alpha < 0 || work < 0 || alpha >= work {
 		t.Fatalf("stored sessions are not ordered: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"version":3`) || !strings.Contains(string(raw), `"tabs":[{"id":"work-1"`) {
-		t.Fatalf("stored cache does not pin the v3 typed-tab contract: %s", raw)
+	if !strings.Contains(string(raw), `"version":4`) || !strings.Contains(string(raw), `"tabs":[{"id":"work-1"`) {
+		t.Fatalf("stored cache does not pin the v4 typed-tab contract: %s", raw)
 	}
 	if strings.Contains(string(raw), `"detail"`) || strings.Contains(string(raw), `"attention"`) {
 		t.Fatalf("stored cache contains dynamic tab fields: %s", raw)
@@ -75,13 +77,15 @@ func TestCatalogCacheStoreLoad(t *testing.T) {
 	}
 	want := []catalogue.RemoteCatalogCacheEntry{
 		{
-			Host:      "arch",
-			FetchedAt: fetchedAt.Add(time.Second),
-			Sessions:  []catalogue.RemoteCatalogSession{},
+			Host:        "arch",
+			FetchedAt:   fetchedAt.Add(time.Second),
+			Incarnation: [16]byte{7},
+			Sessions:    []catalogue.RemoteCatalogSession{},
 		},
 		{
-			Host:      "zebra",
-			FetchedAt: fetchedAt,
+			Host:        "zebra",
+			FetchedAt:   fetchedAt,
+			Incarnation: [16]byte{9},
 			Sessions: []catalogue.RemoteCatalogSession{
 				{LifecycleID: [16]byte{2}, Name: "alpha", State: "down", Ephemeral: true, Tabs: []catalogue.RemoteCatalogTab{{ID: "alpha-1"}}, Attached: true},
 				{LifecycleID: [16]byte{1}, Name: "work", State: "up", LastUsedSeq: 42, ActiveTabID: "work-2", Tabs: []catalogue.RemoteCatalogTab{{ID: "work-1"}, {ID: "work-2", Index: 1}}},
@@ -156,6 +160,30 @@ func TestCatalogCacheLoadMigratesExactV2TabList(t *testing.T) {
 	}
 }
 
+func TestCatalogCacheLegacyV3LoadsWithoutIncarnation(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "vev", "remote-catalog-cache.json")
+	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte(`{"version":3,"hosts":[{"target":"user@arch","fetched_at_unix_nano":1780000000000000000,"sessions":[]}]}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+
+	got, err := NewFileCatalogCache(path).Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Host != "user@arch" {
+		t.Fatalf("Load() = %#v, want one user@arch entry", got)
+	}
+	if got[0].Incarnation != [16]byte{} {
+		t.Fatalf("legacy entry incarnation = %x, want zero (unbound advisory data)", got[0].Incarnation)
+	}
+}
+
 func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 	t.Parallel()
 
@@ -166,7 +194,10 @@ func TestCatalogCacheLoadRejectsInvalidFilesWithoutReplacingThem(t *testing.T) {
 		{name: "truncated", raw: []byte(`{"version":3,"hosts":[`)},
 		{name: "trailing JSON", raw: []byte(`{"version":3,"hosts":[]} {}`)},
 		{name: "obsolete count-only version", raw: []byte(`{"version":2,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[{"lifecycle_id":"01000000000000000000000000000000","name":"work","state":"up","ephemeral":false,"tabs":1,"active_tab_id":"t_work","attached":false}]}]}`)},
-		{name: "unknown version", raw: []byte(`{"version":4,"hosts":[]}`)},
+		{name: "unknown version", raw: []byte(`{"version":5,"hosts":[]}`)},
+		{name: "v4 missing incarnation", raw: []byte(`{"version":4,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":[]}]}`)},
+		{name: "v4 malformed incarnation", raw: []byte(`{"version":4,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"incarnation":"not-hex","sessions":[]}]}`)},
+		{name: "v4 short incarnation", raw: []byte(`{"version":4,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"incarnation":"0123","sessions":[]}]}`)},
 		{name: "missing hosts", raw: []byte(`{"version":3}`)},
 		{name: "null hosts", raw: []byte(`{"version":3,"hosts":null}`)},
 		{name: "null sessions", raw: []byte(`{"version":3,"hosts":[{"target":"arch","fetched_at_unix_nano":1,"sessions":null}]}`)},
@@ -321,5 +352,5 @@ func TestCatalogCacheStoreRenameFailureCleansTemporaryFile(t *testing.T) {
 }
 
 func equalRemoteCatalogCacheEntry(a, b catalogue.RemoteCatalogCacheEntry) bool {
-	return a.Host == b.Host && a.FetchedAt.Equal(b.FetchedAt) && reflect.DeepEqual(a.Sessions, b.Sessions)
+	return a.Host == b.Host && a.FetchedAt.Equal(b.FetchedAt) && a.Incarnation == b.Incarnation && reflect.DeepEqual(a.Sessions, b.Sessions)
 }

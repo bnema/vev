@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -24,7 +25,8 @@ import (
 const (
 	maxCatalogBytes           = 1 << 20
 	maxCatalogDiagnosticBytes = 4 << 10
-	catalogCommandTimeout     = 30 * time.Second
+	catalogCommandTimeout     = 10 * time.Second
+	catalogSSHConnectTimeout  = 5 * time.Second
 	catalogCommandWaitDelay   = 500 * time.Millisecond
 )
 
@@ -35,6 +37,131 @@ var (
 	errCatalogSSH      = errors.New("remote catalog: ssh command failed")
 	errCatalogTooLarge = errors.New("remote catalog: output exceeds size limit")
 )
+
+// sshClientTrustMarkers are OpenSSH-client-originated diagnostics for host-key
+// trust failures. They are only consulted when the ssh client itself exited
+// 255, which separates client-side failures from remote command output.
+var sshClientTrustMarkers = []string{
+	"Host key verification failed.",
+	"REMOTE HOST IDENTIFICATION HAS CHANGED",
+	"Host key for ",
+	"No host key is known ",
+	"No ECDSA host key is known ",
+}
+
+// sshClientAuthMarkers are OpenSSH-client diagnostics for explicit
+// authentication failures. Unlike host-key text, these phrases can also be
+// emitted by a remote command that exits 255 (ssh propagates the remote
+// status), so they only classify when ssh-client framing proves client
+// provenance: an `ssh:` line prefix or a `host:` label prefix on the same
+// line. Bare matches stay generic transport errors.
+var sshClientAuthMarkers = []string{
+	"Permission denied ",
+	"Permission denied (",
+	"Too many authentication failures",
+	"Authentication failed",
+}
+
+// sshClientTimeoutMarkers are OpenSSH-client diagnostics for bounded
+// connect/command timeouts. As with authentication text, they require
+// ssh-client framing; unframed matches stay generic transport errors.
+var sshClientTimeoutMarkers = []string{
+	"Connection timed out",
+	"timed out",
+	"Timeout, server not responding",
+}
+
+// ClassifyCatalogError maps an observation failure to its sanitized failure
+// kind without leaking raw stderr, keys, endpoints or terminal contents.
+// Unrecognized SSH errors stay generic transport errors: authentication is
+// never inferred from arbitrary remote stderr, only from explicit ssh-client
+// diagnostics on ssh client exit 255.
+func ClassifyCatalogError(err error) domain.RemoteFailureKind {
+	if err == nil {
+		return domain.RemoteFailureNone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return domain.RemoteFailureTimeout
+	}
+	var mismatch *catalogue.RemoteCatalogVersionMismatchError
+	if errors.As(err, &mismatch) {
+		return domain.RemoteFailureIncompatible
+	}
+	if errors.Is(err, errCatalogTooLarge) ||
+		errors.Is(err, errCatalogDecode) ||
+		errors.Is(err, errCatalogTrailing) ||
+		errors.Is(err, errCatalogRequired) ||
+		errors.Is(err, catalogue.ErrInvalidRemoteCatalog) {
+		return domain.RemoteFailureInvalidResponse
+	}
+	if errors.Is(err, errCatalogSSH) && sshClientExit(err) {
+		text := err.Error()
+		for _, marker := range sshClientTrustMarkers {
+			if strings.Contains(text, marker) {
+				return domain.RemoteFailureTrust
+			}
+		}
+		for _, marker := range sshClientAuthMarkers {
+			if hasClientFramedMarker(text, marker) {
+				return domain.RemoteFailureAuthentication
+			}
+		}
+		for _, marker := range sshClientTimeoutMarkers {
+			if hasClientFramedMarker(text, marker) {
+				return domain.RemoteFailureTimeout
+			}
+		}
+	}
+	if timeoutError(err) {
+		return domain.RemoteFailureTimeout
+	}
+	return domain.RemoteFailureTransport
+}
+
+// hasClientFramedMarker reports whether marker appears with ssh-client
+// framing: on a line starting with `ssh:`, or after a `host:` label prefix
+// on the same line (the `destination: message` form ssh uses for its own
+// errors). Only the stderr tail past the client's exit status is examined
+// so the wrapper's own colons never count as framing. A remote command
+// exiting 255 can emit the same phrases without framing, so unframed
+// matches prove nothing and stay transport errors.
+func hasClientFramedMarker(text, marker string) bool {
+	diag := text
+	if _, after, ok := strings.Cut(text, "exit status 255: "); ok {
+		diag = after
+	}
+	for _, line := range strings.Split(diag, "\n") {
+		if !strings.Contains(line, marker) {
+			continue
+		}
+		if strings.HasPrefix(line, "ssh:") {
+			return true
+		}
+		if label, _, ok := strings.Cut(line, ": "); ok && !strings.ContainsAny(label, " \t:") {
+			return true
+		}
+	}
+	return false
+}
+
+// sshClientExit reports whether the ssh client itself failed (exit 255),
+// separating client-side transport/auth/trust failures from remote command
+// output carried in the same wrapped error.
+func sshClientExit(err error) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	return exit.ExitCode() == 255
+}
+
+func timeoutError(err error) bool {
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+	return errors.Is(err, os.ErrDeadlineExceeded)
+}
 
 // CatalogClient fetches remote session catalogs over SSH.
 type CatalogClient struct {
@@ -57,10 +184,13 @@ func (c *CatalogClient) listTimeout() time.Duration {
 	return catalogCommandTimeout
 }
 
-// List runs `ssh -- <target> 'vev' 'cmd' 'remote-catalog' '--json'` and decodes
-// exactly one versioned catalog envelope from stdout. List always applies a
-// bounded command timeout derived from ctx so a caller with no deadline cannot
-// hang indefinitely, while still honoring caller cancellation.
+// List runs a non-interactive `ssh` observation of `vev cmd remote-catalog
+// --json` and decodes exactly one versioned catalog envelope from stdout.
+// The observation never prompts, allocates a TTY, mutates trust, or executes
+// host strings as shell fragments. List always applies a bounded command
+// timeout derived from ctx so a caller with no deadline cannot hang
+// indefinitely, while still honoring caller cancellation; owned SSH
+// processes are killed and reaped on cancellation with a bounded wait.
 func (c *CatalogClient) List(ctx context.Context, target string) (catalogue.RemoteCatalog, error) {
 	if err := ctx.Err(); err != nil {
 		return catalogue.RemoteCatalog{}, err
@@ -77,8 +207,10 @@ func (c *CatalogClient) List(ctx context.Context, target string) (catalogue.Remo
 	if command == nil {
 		command = exec.CommandContext
 	}
-	spec := sshstdio.BuildCommandForRemoteCommand(target, "vev", "cmd", "remote-catalog", "--json")
+	spec := sshstdio.BuildCommandForObservation(target, catalogSSHConnectTimeout, "vev", "cmd", "remote-catalog", "--json")
 	cmd := command(runCtx, spec.Path, spec.Args...)
+	// Stdin stays detached: exec leaves a nil Stdin on the null device, and
+	// batch mode forbids prompts even if output were ever attached to a TTY.
 	stdout := boundedBuffer{limit: maxCatalogBytes}
 	stderr := boundedBuffer{limit: maxCatalogDiagnosticBytes}
 	cmd.Stdout = &stdout

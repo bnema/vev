@@ -40,9 +40,9 @@ type allowlistedRemoteHostStore struct {
 	allowed  map[string]struct{}
 }
 
-func (s allowlistedRemoteHostStore) Hosts() (pinned, learned []string, err error) {
+func (s allowlistedRemoteHostStore) Hosts() (pinned, learned []domain.RemoteRegistration, err error) {
 	pinned, learned, err = s.delegate.Hosts()
-	return filterRemoteTargets(pinned, s.allowed), filterRemoteTargets(learned, s.allowed), err
+	return filterRemoteRegistrations(pinned, s.allowed), filterRemoteRegistrations(learned, s.allowed), err
 }
 
 func (s allowlistedRemoteHostStore) AddPinned(target string) error {
@@ -138,6 +138,16 @@ func filterRemoteTargets(targets []string, allowed map[string]struct{}) []string
 	for _, target := range targets {
 		if allowlistedRemoteEndpoint(allowed, target) {
 			filtered = append(filtered, target)
+		}
+	}
+	return filtered
+}
+
+func filterRemoteRegistrations(registrations []domain.RemoteRegistration, allowed map[string]struct{}) []domain.RemoteRegistration {
+	filtered := make([]domain.RemoteRegistration, 0, len(registrations))
+	for _, record := range registrations {
+		if allowlistedRemoteEndpoint(allowed, record.Endpoint) {
+			filtered = append(filtered, record)
 		}
 	}
 	return filtered

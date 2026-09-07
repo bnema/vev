@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -106,6 +107,82 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildCommandForObservationDisablesTTYAndTrustMutation(t *testing.T) {
+	spec := BuildCommandForObservation("user@example.com", 5*time.Second, "vev", "cmd", "remote-catalog", "--json")
+	if spec.Path != "ssh" {
+		t.Fatalf("Path = %q, want ssh", spec.Path)
+	}
+	flat := strings.Join(spec.Args, " ")
+	for _, want := range []string{"-T", "BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectTimeout=5", "ConnectionAttempts=1"} {
+		if !strings.Contains(flat, want) {
+			t.Fatalf("observation argv %q missing %q", spec.Args, want)
+		}
+	}
+
+	// Effective behavior: explicit CLI options must win over a user
+	// configuration that requests a TTY, key updates, prompts and lax
+	// host-key checking. ssh -G reports the effective configuration
+	// without connecting.
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("ssh binary not available for effective-config probe")
+	}
+	conflict := "Host *\n  RequestTTY yes\n  UpdateHostKeys yes\n  BatchMode no\n  StrictHostKeyChecking no\n"
+	confPath := t.TempDir() + "/ssh_config"
+	if err := os.WriteFile(confPath, []byte(conflict), 0o600); err != nil {
+		t.Fatalf("write conflicting ssh config: %v", err)
+	}
+	sep := -1
+	for i, arg := range spec.Args {
+		if arg == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 {
+		t.Fatalf("observation argv %q has no option terminator", spec.Args)
+	}
+	probe := append(append([]string{}, spec.Args[:sep]...), "-F", confPath, "-G", "user@example.com")
+	out, err := exec.Command(ssh, probe...).Output()
+	if err != nil {
+		t.Fatalf("ssh -G probe: %v", err)
+	}
+	effective := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value, ok := strings.Cut(line, " ")
+		if ok {
+			effective[strings.ToLower(key)] = strings.ToLower(value)
+		}
+	}
+	for key, want := range map[string]string{
+		"connecttimeout": "5", "connectionattempts": "1",
+	} {
+		if effective[key] != want {
+			t.Fatalf("effective ssh %s = %q, want %q (config must not override observation argv)", key, effective[key], want)
+		}
+	}
+	// ssh -G spells boolean keywords true/false where the configuration
+	// spells yes/no; normalize both spellings before comparing.
+	normalize := func(value string) string {
+		switch value {
+		case "yes", "true":
+			return "yes"
+		case "no", "false":
+			return "no"
+		default:
+			return value
+		}
+	}
+	for key, want := range map[string]string{
+		"batchmode": "yes", "stricthostkeychecking": "yes",
+		"requesttty": "no", "updatehostkeys": "no",
+	} {
+		if got := normalize(effective[key]); got != want {
+			t.Fatalf("effective ssh %s = %q, want %q (config must not override observation argv)", key, effective[key], want)
+		}
 	}
 }
 

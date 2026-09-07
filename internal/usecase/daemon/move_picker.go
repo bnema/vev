@@ -195,15 +195,27 @@ func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions
 	}
 	rt.pickerMu.Lock()
 	updated := rt.picker == observedModel && rt.pickerGeneration == observedGeneration && rt.pickerRefreshSequence == refreshSequence && rt.pickerIntent == intent && rt.pickerSource == source
+	var before, after picker.Target
+	var haveBefore, haveAfter bool
 	if updated {
+		before, haveBefore = rt.picker.Selected()
 		rt.picker.ReplaceFrom(model)
 		if intent == pickerNavigate && opts.nearestRow >= 0 {
 			rt.picker.SelectNearestRow(opts.nearestRow)
 		}
 		rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
+		after, haveAfter = rt.picker.Selected()
 	}
 	rt.pickerMu.Unlock()
-	if updated {
-		d.registerPreviewForSelection(ac)
+	if !updated {
+		return
 	}
+	// A directory publication rebuilds rows around the same selection:
+	// keep an in-flight remote preview when the exact selected route did
+	// not change instead of cancelling it on every revision. Availability
+	// reasons render around the route and are ignored here.
+	if haveBefore && haveAfter && pickerRouteTargetsEqual(before, after) {
+		return
+	}
+	d.registerPreviewForSelection(ac)
 }

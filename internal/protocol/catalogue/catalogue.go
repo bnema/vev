@@ -29,10 +29,13 @@ const (
 )
 
 // RemoteCatalogCacheEntry is one immutable exact-schema host snapshot.
+// Incarnation binds the entry to one host-registry registration: a zero
+// incarnation is unbound advisory data and must never seed a registration.
 type RemoteCatalogCacheEntry struct {
-	Host      string
-	FetchedAt time.Time
-	Sessions  []RemoteCatalogSession
+	Host        string
+	FetchedAt   time.Time
+	Incarnation [16]byte
+	Sessions    []RemoteCatalogSession
 }
 
 // RemoteCatalogTab is one bounded, untrusted tab presentation hint.
@@ -264,7 +267,7 @@ func validText(value string) bool {
 
 func validReason(reason string) bool {
 	switch reason {
-	case "", "refreshing", "catalog_stale", "host_unreachable", "version_mismatch", "session_down", "session_broken", "identity_changed", "not_found", "timeout", "malformed":
+	case "", domain.RemoteReasonRefreshing, domain.RemoteReasonCatalogStale, domain.RemoteReasonHostUnreachable, domain.RemoteReasonVersionMismatch, domain.RemoteReasonSessionDown, domain.RemoteReasonSessionBroken, domain.RemoteReasonIdentityChanged, domain.RemoteReasonNotFound, domain.RemoteReasonTimeout, domain.RemoteReasonMalformed:
 		return true
 	default:
 		return false

@@ -842,7 +842,7 @@ func TestUnavailableStoppedRemoteUsesAvailabilityBadgeAndHint(t *testing.T) {
 	lifecycle := domain.SessionLifecycleID{1}
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", Stopped: true}
-	m := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &target, Stopped: true, RemoteReason: "catalog_stale", RemoteDetail: "catalog stale", RemoteActivation: RemoteUnavailable}}, SelectionConfig{Mode: SelectNavigationTab})
+	m := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &target, Stopped: true, RemoteReason: domain.RemoteReasonCatalogStale, RemoteDetail: "catalog stale", RemoteActivation: RemoteUnavailable}}, SelectionConfig{Mode: SelectNavigationTab})
 
 	frame := m.Render(domain.Size{Cols: 40, Rows: 3}, Preview{})
 	require.Contains(t, rowText(frame.Row(0)), "[stale]")

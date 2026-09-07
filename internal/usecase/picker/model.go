@@ -453,13 +453,13 @@ func statusForSession(session SessionView, stopped bool) rowStatus {
 	remote := session.RemoteKey != nil || session.RemoteTarget != nil || session.RemoteHost != ""
 	if remote {
 		switch session.RemoteReason {
-		case "host_unreachable":
+		case domain.RemoteReasonHostUnreachable:
 			return rowStatusDown
-		case "version_mismatch":
+		case domain.RemoteReasonVersionMismatch:
 			return rowStatusVersion
-		case "refreshing", "catalog_stale":
+		case domain.RemoteReasonRefreshing, domain.RemoteReasonCatalogStale:
 			return rowStatusStale
-		case "malformed", "session_broken", "identity_changed":
+		case domain.RemoteReasonMalformed, domain.RemoteReasonSessionBroken, domain.RemoteReasonIdentityChanged, domain.RemoteReasonAuthFailure:
 			return rowStatusError
 		}
 	}

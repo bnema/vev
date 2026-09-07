@@ -51,6 +51,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
+	"github.com/bnema/vev/internal/usecase/remotes"
 	pdgram "github.com/bnema/vev/pkg/dgram"
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -706,9 +707,9 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	}
 	var remoteDiscoveryOpt daemon.Option
 	if allowlistConfigured {
-		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), allowedRemoteEndpoints)
+		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), clk, log, allowedRemoteEndpoints)
 	} else {
-		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport))
+		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), clk, log)
 	}
 	if err != nil {
 		return err
@@ -925,8 +926,10 @@ func validateRemoteAttachHandoff(target protocol.AttachTarget) error {
 }
 
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
-// the same validated transport selection used by direct remote attach.
-func remoteDiscoveryDaemonOption(stateDir, transport string, allowlists ...map[string]struct{}) (daemon.Option, error) {
+// the same validated transport selection used by direct remote attach, then
+// composes the bounded remote runtime and its monitor. Construction performs
+// no I/O; the daemon starts the monitor without waiting for readiness.
+func remoteDiscoveryDaemonOption(stateDir, transport string, clk ports.Clock, log *slog.Logger, allowlists ...map[string]struct{}) (daemon.Option, error) {
 	_, err := remoteTransportModeFromEnv(transport)
 	if err != nil {
 		return nil, err
@@ -942,11 +945,12 @@ func remoteDiscoveryDaemonOption(stateDir, transport string, allowlists ...map[s
 		cache = allowlistedRemoteCatalogCache{delegate: cache, allowed: allowed}
 		previewClient = allowlistedRemotePreviewClient{delegate: previewClient, allowed: allowed}
 	}
-	discovery := daemon.WithRemoteDiscovery(store, catalog, cache)
 	preview := daemon.WithRemotePreview(previewClient)
+	monitor := remotes.NewMonitor(remoteadapter.NewRuntime(store, catalog, cache, log), clk, log)
+	remoteMonitor := daemon.WithRemoteMonitor(monitor, monitor.Run)
 	return func(d *daemon.Daemon) {
-		discovery(d)
 		preview(d)
+		remoteMonitor(d)
 	}, nil
 }
 

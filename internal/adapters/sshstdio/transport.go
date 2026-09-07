@@ -526,6 +526,34 @@ func BuildCommandForRemoteCommand(target string, command ...string) CommandSpec 
 	return CommandSpec{Path: "ssh", Args: args}
 }
 
+// BuildCommandForObservation constructs non-interactive ssh argv for remote
+// observation (catalogue checks). It reuses the quoting/argv pattern above
+// and additionally pins batch mode (never prompt), strict host-key checking
+// (never accept new keys automatically), a bounded connect timeout and a
+// single connection attempt. TTY allocation is disabled (-T) and advertised
+// host-key updates are refused (UpdateHostKeys=no) so background observation
+// can neither grab a terminal nor mutate the user's known-hosts trust state,
+// even when local ssh configuration requests a TTY or key updates: explicit
+// command-line options override configuration file values. No stdin is
+// allocated by this argv; the caller must leave Stdin detached. Interactive
+// attach authentication is untouched: only observation uses this builder.
+func BuildCommandForObservation(target string, connectTimeout time.Duration, command ...string) CommandSpec {
+	secs := int(connectTimeout / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	spec := BuildCommandForRemoteCommand(target, command...)
+	opts := []string{
+		"-T",
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UpdateHostKeys=no",
+		"-o", fmt.Sprintf("ConnectTimeout=%d", secs),
+		"-o", "ConnectionAttempts=1",
+	}
+	return CommandSpec{Path: spec.Path, Args: append(opts, spec.Args...)}
+}
+
 // BuildCommandForRemoteLaunch prefixes an explicit complete environment and
 // absolute executable to a hidden remote mode. Each value remains one quoted
 // remote-shell word; no caller input is concatenated into an unquoted command.

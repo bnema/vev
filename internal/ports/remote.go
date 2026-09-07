@@ -8,9 +8,12 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// RemoteHostStore persists pinned and learned remote host targets.
+// RemoteHostStore persists pinned and learned remote host targets as
+// registration records. Each record carries a persistent random incarnation
+// so remove/re-add cycles are observable even when the endpoint string is
+// unchanged.
 type RemoteHostStore interface {
-	Hosts() (pinned, learned []string, err error)
+	Hosts() (pinned, learned []domain.RemoteRegistration, err error)
 	AddPinned(target string) error
 	RemovePinned(target string) error
 	Remember(target string) error

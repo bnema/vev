@@ -298,14 +298,15 @@ type Daemon struct {
 	barScripts                     *barScriptState
 	notices                        *noticeCenter
 	resumeParkGrace                time.Duration
-	// remoteCatalog owns cache-derived discovery state independently of the
-	// live attachment registry. Its cache reads and writes never hold d.mu.
-	remoteCatalog       remoteCatalogState
-	remotePreview       remotePreviewState
-	remoteHostStore     ports.RemoteHostStore
-	remoteCatalogClient ports.RemoteCatalogClient
-	remoteCatalogCache  ports.RemoteCatalogCache
-	remotePreviewClient ports.RemotePreviewClient
+	remotePreview                  remotePreviewState
+	remotePreviewClient            ports.RemotePreviewClient
+	// remoteDirectory is the snapshot-only projection served by the remote
+	// monitor. Presentation reads it without I/O; nil disables remote
+	// directory projections without affecting local behavior.
+	remoteDirectory ports.RemoteDirectory
+	// remoteMonitorRun starts the monitor policy loop. Serve owns its
+	// lifetime; nil disables background monitoring.
+	remoteMonitorRun func(context.Context) error
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -415,12 +416,13 @@ func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 	return func(d *Daemon) { d.runtimeObserver = observer }
 }
 
-// WithRemoteDiscovery installs the remote discovery ports used by the daemon.
-func WithRemoteDiscovery(store ports.RemoteHostStore, catalog ports.RemoteCatalogClient, cache ports.RemoteCatalogCache) Option {
+// WithRemoteMonitor installs the snapshot-only remote directory and the
+// monitor runner. Serve starts the runner without waiting for registry,
+// cache or runtime readiness and stops it with its own context.
+func WithRemoteMonitor(directory ports.RemoteDirectory, run func(context.Context) error) Option {
 	return func(d *Daemon) {
-		d.remoteHostStore = store
-		d.remoteCatalogClient = catalog
-		d.remoteCatalogCache = cache
+		d.remoteDirectory = directory
+		d.remoteMonitorRun = run
 	}
 }
 
@@ -606,7 +608,18 @@ func (d *Daemon) allocateLifecycleCreatedAtLocked() (int64, error) {
 }
 
 func (d *Daemon) nowUnixNano() int64 {
-	return d.clock.Now().UnixNano()
+	return d.daemonNow().UnixNano()
+}
+
+// daemonNow reports the daemon clock. New defaults a nil clock to the
+// system clock, so the fallback below only serves hand-built fixtures
+// and stays explicit about its provenance instead of hiding a bare
+// wall-clock read.
+func (d *Daemon) daemonNow() time.Time {
+	if d == nil || d.clock == nil {
+		return systemClock{}.Now()
+	}
+	return d.clock.Now()
 }
 
 type systemClock struct{}
@@ -670,7 +683,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		snapshotAdmitted:             make(map[*snapshotCapture]struct{}),
 		snapshotWake:                 make(chan struct{}, 1),
 		notices:                      newNoticeCenter(),
-		remoteCatalog:                newRemoteCatalogState(),
 		resumeParkGrace:              defaultResumeParkGrace,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
@@ -730,9 +742,13 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		d.lastAllocatedCreatedAt = maxCreatedAt
 	}
 	d.mruSeq.Store(maxSeq)
-	d.loadRemoteCatalogCache()
 	return d
 }
+
+// remoteMonitorShutdownJoin bounds the daemon's wait for monitor teardown.
+// The monitor bounds its own runtime cleanup to two seconds; this join only
+// covers scheduling slack and never enters the session worker group.
+const remoteMonitorShutdownJoin = 3 * time.Second
 
 // Serve runs the accept loop over l, owning it for the loop's lifetime. It
 // returns when the last session is removed or ctx is cancelled; on the latter
@@ -742,6 +758,49 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	defer d.serveCancel()
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())
 	defer d.hardCancel()
+
+	// Remote directory projections relay without I/O: the watcher rebuilds
+	// only open views on publication and never requests reconciliation.
+	// The watcher and the monitor runner share one bounded shutdown budget
+	// below, outside the session worker group.
+	watcherDone := make(chan struct{})
+	if d.remoteDirectory != nil {
+		go func() {
+			defer close(watcherDone)
+			d.watchRemoteDirectory(d.serveCtx)
+		}()
+	} else {
+		close(watcherDone)
+	}
+	var monitorDone chan error
+	if d.remoteMonitorRun != nil {
+		monitorDone = make(chan error, 1)
+		go func() { monitorDone <- d.remoteMonitorRun(d.serveCtx) }()
+	}
+	// Bounded join outside the session worker group: remote teardown never
+	// extends daemon shutdown past this single budget. The monitor runner
+	// owns its runtime's two-second cleanup join, so joining the runner
+	// transitively joins the workers; the watcher owns no I/O or workers.
+	// This join is a wall-time operational bound on purpose: it uses the
+	// package wall clock (like the handshake timeout) instead of the
+	// injected daemon clock, whose timers may never fire in tests.
+	defer func() {
+		join := systemClock{}.NewTimer(remoteMonitorShutdownJoin)
+		defer join.Stop()
+		if monitorDone != nil {
+			select {
+			case <-monitorDone:
+			case <-join.C():
+				d.log.Warn("remote monitor shutdown join timed out")
+				return
+			}
+		}
+		select {
+		case <-watcherDone:
+		case <-join.C():
+			d.log.Warn("remote directory watcher shutdown join timed out")
+		}
+	}()
 
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)
@@ -855,7 +914,6 @@ func (d *Daemon) purgeAll(reason uint8) (checkpointIncomplete bool) {
 }
 
 func (d *Daemon) terminateAllWithSnapshotDeadline(reason uint8, purge bool, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
-	d.cancelRemoteDiscoveryRefresh()
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true

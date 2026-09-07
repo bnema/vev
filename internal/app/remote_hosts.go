@@ -232,29 +232,29 @@ func mergeKnownHosts(deps remoteHostDeps) ([]domain.RemoteHost, error) {
 
 // mergeRemoteHosts returns pinned hosts in stored order, then learned-only
 // hosts in lexical order. Duplicates keep first occurrence and mark both sources.
-func mergeRemoteHosts(pinned, learned []string) []domain.RemoteHost {
-	pinned = domain.UniqueRemoteHostTargets(pinned)
+func mergeRemoteHosts(pinned, learned []domain.RemoteRegistration) []domain.RemoteHost {
+	pinned = domain.UniqueRemoteRegistrations(pinned)
 	learnedSet := make(map[string]struct{}, len(learned))
-	for _, target := range learned {
-		learnedSet[target] = struct{}{}
+	for _, record := range learned {
+		learnedSet[record.Endpoint] = struct{}{}
 	}
 	pinnedSet := make(map[string]struct{}, len(pinned))
 	out := make([]domain.RemoteHost, 0, len(pinned)+len(learned))
-	for _, target := range pinned {
-		pinnedSet[target] = struct{}{}
-		_, isLearned := learnedSet[target]
-		out = append(out, domain.RemoteHost{Target: target, Pinned: true, Learned: isLearned})
+	for _, record := range pinned {
+		pinnedSet[record.Endpoint] = struct{}{}
+		_, isLearned := learnedSet[record.Endpoint]
+		out = append(out, domain.RemoteHost{Target: record.Endpoint, Pinned: true, Learned: isLearned, Registration: record})
 	}
-	learnedOnly := make([]string, 0, len(learned))
-	for _, target := range learned {
-		if _, ok := pinnedSet[target]; !ok {
-			learnedOnly = append(learnedOnly, target)
+	learnedOnly := make([]domain.RemoteRegistration, 0, len(learned))
+	for _, record := range learned {
+		if _, ok := pinnedSet[record.Endpoint]; !ok {
+			learnedOnly = append(learnedOnly, record)
 		}
 	}
-	learnedOnly = domain.UniqueRemoteHostTargets(learnedOnly)
-	sort.Strings(learnedOnly)
-	for _, target := range learnedOnly {
-		out = append(out, domain.RemoteHost{Target: target, Learned: true})
+	learnedOnly = domain.UniqueRemoteRegistrations(learnedOnly)
+	sort.Slice(learnedOnly, func(i, j int) bool { return learnedOnly[i].Endpoint < learnedOnly[j].Endpoint })
+	for _, record := range learnedOnly {
+		out = append(out, domain.RemoteHost{Target: record.Endpoint, Learned: true, Registration: record})
 	}
 	return out
 }
