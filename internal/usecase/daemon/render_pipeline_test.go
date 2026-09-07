@@ -307,7 +307,12 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	state.panes[0].stableID = "pane-2"
 	ac.sendMu.Lock()
 	require.True(t, d.emitFrame(sess, ac, &state, noByte))
-	frame := <-sends
+	var frame wire.Frame
+	select {
+	case frame = <-sends:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for UI view update")
+	}
 	require.Equal(t, wire.MsgUIViewUpdate, frame.Type)
 	update, err := wire.UnmarshalUIViewUpdate(frame.Payload)
 	require.NoError(t, err)

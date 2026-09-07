@@ -9,6 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func lookupCommand(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	require.NoError(t, err)
+	path, err = filepath.Abs(path)
+	require.NoError(t, err)
+	return path
+}
+
 func TestBuildCommandForRemoteLaunchQuotesBinaryAndEnvironment(t *testing.T) {
 	spec := BuildCommandForRemoteLaunch("test@example.com", "/opt/vev with-space", []string{"HOME=/tmp/home", "VALUE=a;b'c"}, "_stdio")
 	require.Equal(t, "ssh", spec.Path)
@@ -38,6 +47,8 @@ func TestBuildCommandForRemoteCleanupVerifiesOwnerBeforeRemoval(t *testing.T) {
 }
 
 func TestIsolatedLaunchScriptRemovesRootWhenCleanupCommandFails(t *testing.T) {
+	truePath := lookupCommand(t, "true")
+	falsePath := lookupCommand(t, "false")
 	tests := []struct {
 		name       string
 		mode       string
@@ -51,9 +62,9 @@ func TestIsolatedLaunchScriptRemovesRootWhenCleanupCommandFails(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "root")
 			if test.cleanup {
-				require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", "/bin/true", nil, "_stdio", false)).Run())
+				require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", truePath, nil, "_stdio", false)).Run())
 			}
-			err := exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", "/bin/false", nil, test.mode, test.cleanup)).Run()
+			err := exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", falsePath, nil, test.mode, test.cleanup)).Run()
 			var exitErr *exec.ExitError
 			require.ErrorAs(t, err, &exitErr)
 			require.Equal(t, 1, exitErr.ExitCode())
@@ -68,8 +79,9 @@ func TestIsolatedLaunchScriptRemovesRootWhenCleanupCommandFails(t *testing.T) {
 }
 
 func TestIsolatedLaunchScriptOwnsAndCleansFreshRoot(t *testing.T) {
+	truePath := lookupCommand(t, "true")
 	root := filepath.Join(t.TempDir(), "root")
-	launch := isolatedLaunchScript(root, "owner-token", "/bin/true", nil, "_stdio", false)
+	launch := isolatedLaunchScript(root, "owner-token", truePath, nil, "_stdio", false)
 	require.NoError(t, exec.Command("sh", "-c", launch).Run())
 	marker := filepath.Join(root, ".vev-ui-driver-owner")
 	data, err := os.ReadFile(marker)
@@ -78,9 +90,9 @@ func TestIsolatedLaunchScriptOwnsAndCleansFreshRoot(t *testing.T) {
 
 	// The same owner can reconnect to the endpoint, but another token cannot
 	// reuse the root created by this invocation.
-	require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", "/bin/true", nil, "_stdio", false)).Run())
-	require.Error(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "other-owner", "/bin/true", nil, "_stdio", false)).Run())
-	require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", "/bin/true", nil, "_ui-cleanup", true)).Run())
+	require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", truePath, nil, "_stdio", false)).Run())
+	require.Error(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "other-owner", truePath, nil, "_stdio", false)).Run())
+	require.NoError(t, exec.Command("sh", "-c", isolatedLaunchScript(root, "owner-token", truePath, nil, "_ui-cleanup", true)).Run())
 	_, err = os.Stat(root)
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
