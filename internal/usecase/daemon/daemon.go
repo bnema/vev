@@ -761,59 +761,46 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 
 	// Remote directory projections relay without I/O: the watcher rebuilds
 	// only open views on publication and never requests reconciliation.
-	// Both the watcher and the monitor runner join below inside the
-	// bounded feature budget, outside the session worker group.
+	// The watcher and the monitor runner share one bounded shutdown budget
+	// below, outside the session worker group.
 	watcherDone := make(chan struct{})
 	if d.remoteDirectory != nil {
 		go func() {
 			defer close(watcherDone)
 			d.watchRemoteDirectory(d.serveCtx)
 		}()
-		// The watcher owns no I/O or workers; joining it inside the
-		// feature budget keeps shutdown accounting in one place even
-		// when no monitor runner is configured.
-		// This join is a wall-time operational bound and must not use
-		// the injected daemon clock, whose timers may never fire in tests.
-		defer func() {
-			join := time.NewTimer(remoteMonitorShutdownJoin)
-			defer join.Stop()
-			select {
-			case <-watcherDone:
-			case <-join.C:
-				d.log.Warn("remote directory watcher shutdown join timed out")
-			}
-		}()
 	} else {
 		close(watcherDone)
 	}
+	var monitorDone chan error
 	if d.remoteMonitorRun != nil {
-		monitorDone := make(chan error, 1)
+		monitorDone = make(chan error, 1)
 		go func() { monitorDone <- d.remoteMonitorRun(d.serveCtx) }()
-		// Bounded join outside the session worker group: remote teardown
-		// never extends daemon shutdown past its own budget. The monitor
-		// runner owns its runtime's two-second cleanup join, so joining
-		// the runner transitively joins the workers.
-		// This join is a wall-time operational bound and must not use
-		// the injected daemon clock, whose timers may never fire in tests.
-		defer func() {
-			join := time.NewTimer(remoteMonitorShutdownJoin)
-			defer join.Stop()
+	}
+	// Bounded join outside the session worker group: remote teardown never
+	// extends daemon shutdown past this single budget. The monitor runner
+	// owns its runtime's two-second cleanup join, so joining the runner
+	// transitively joins the workers; the watcher owns no I/O or workers.
+	// This join is a wall-time operational bound on purpose: it uses the
+	// package wall clock (like the handshake timeout) instead of the
+	// injected daemon clock, whose timers may never fire in tests.
+	defer func() {
+		join := systemClock{}.NewTimer(remoteMonitorShutdownJoin)
+		defer join.Stop()
+		if monitorDone != nil {
 			select {
 			case <-monitorDone:
-			case <-join.C:
+			case <-join.C():
 				d.log.Warn("remote monitor shutdown join timed out")
 				return
 			}
-			// The runner owns its runtime's two-second cleanup join,
-			// so reaching here transitively joins the workers; the
-			// watcher join above runs on the same budget.
-			select {
-			case <-watcherDone:
-			case <-join.C:
-				d.log.Warn("remote directory watcher shutdown join timed out")
-			}
-		}()
-	}
+		}
+		select {
+		case <-watcherDone:
+		case <-join.C():
+			d.log.Warn("remote directory watcher shutdown join timed out")
+		}
+	}()
 
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)

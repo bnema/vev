@@ -52,8 +52,9 @@ type hostPolicy struct {
 	inventoryConfirmed  bool
 	// cacheSeeded records that the held cache entry was already applied
 	// to this registration: re-seeding identical content must not publish
-	// a revision on every poll, while a re-created policy (fresh false)
-	// still recovers through the retained entry after a registry flap.
+	// a revision on every poll. Seeding is one-shot: the applied entry is
+	// consumed from the pending cache, so a re-created policy after a
+	// registry flap only recovers once a fresh cache payload arrives.
 	cacheSeeded bool
 }
 
