@@ -477,10 +477,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	entry.core().mu.Lock()
 	_, owned := entry.core().attachments[ac]
 	position := protocol.RoutePosition{
-		Target: protocol.ExactSessionTarget{
-			LifecycleID: entry.core().incarnation,
-			SessionName: entry.core().name,
-		},
+		Target:      state.route.Target,
 		ActiveTabID: state.view.tabID,
 	}
 	entry.core().mu.Unlock()
@@ -535,8 +532,10 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	var sendTr ports.ServerConnection
 	var sendErr error
+	rc := attachmentRenderCoordinator(entry)
+	confirmUIFence := rc != nil && rc.needsUIFence(state.lease, state.uiFence)
 	suppressedGraphics := state.suppressedGraphics && !ac.terminalCapabilities.SupportsKittyGraphics()
-	if len(data) > 0 {
+	if len(data) > 0 || prepared.ansi.context != nil {
 		sendTransport := ac.transportSnapshot()
 		sendTr = sendTransport.transport
 		endEmit := marks.span(ports.RuntimeEmitStart, ports.RuntimeEmitEnd, uint64(len(data)))
@@ -555,7 +554,16 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				}
 			}
 			if sendErr == nil {
-				sendErr = prepared.send(ac.echoAck.Load(), send)
+				if len(data) > 0 {
+					sendErr = prepared.send(ac.echoAck.Load(), send)
+				} else {
+					sendErr = prepared.publishNoBytes(confirmUIFence, func(update protocol.UIViewUpdate) error {
+						if sendTr.Capabilities().AsyncSend {
+							return sendTr.SendServerAsync(update)
+						}
+						return sendTr.SendServer(update)
+					})
+				}
 			}
 			if marks.attachmentEffect != nil && interruptible {
 				if sendErr != nil {
@@ -627,6 +635,21 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				}
 				if sendErr == nil {
 					ac.output.lastRoutePosition = position
+				}
+			}
+		}
+		if sendErr == nil && rc != nil && prepared.ansi.boundary.ViewPublication != 0 &&
+			(marks.attachmentEffect == nil || marks.attachmentEffect.current()) {
+			if pending := rc.retireUIFence(state.lease, state.uiFence); pending != nil {
+				receipt := prepared.ansi.boundary
+				receipt.ActionID = pending.actionID
+				sendTransport := ac.transportSnapshot()
+				sendTr = sendTransport.transport
+				sendErr = sendUIReceiptLocked(marks.attachmentEffect, sendTransport, receipt)
+				if sendErr == nil {
+					rc.finishUIFence(state.lease, pending)
+				} else {
+					rc.failUIFence(state.lease, pending)
 				}
 			}
 		}

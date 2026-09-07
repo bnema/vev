@@ -86,7 +86,10 @@ type attachmentEffect struct {
 	lifecycle    *attachmentLifecycle
 	actionDaemon *Daemon
 	action       string
-	ended        atomic.Bool
+	// uiActionID belongs to this admitted input, not the attachment lifecycle.
+	// Set before routing and copy only into its exact delayed continuation.
+	uiActionID uint64
+	ended      atomic.Bool
 }
 
 func (t *attachmentEffect) bindActionEnd(d *Daemon, action string) {
@@ -197,6 +200,23 @@ func (t *attachmentEffect) sendControl(message protocol.ServerMessage) error {
 	defer t.ac.sendMu.Unlock()
 	if !t.current() || !t.ac.transportSnapshotCurrent(t.transport) || !t.beginTransportSend(t.transport) {
 		return errAttachmentTransition
+	}
+	// Bind navigation at its single admitted send boundary. Palette catalogue
+	// values remain reusable; a later action must never inherit an earlier
+	// template's cause or consult a mutable attachment-wide "latest action".
+	switch navigation := message.(type) {
+	case protocol.AttachTarget:
+		navigation.CauseActionID = t.uiActionID
+		message = navigation
+	case protocol.NavigationDirective:
+		navigation.CauseActionID = t.uiActionID
+		message = navigation
+	case protocol.RouteNavigationAction:
+		navigation.CauseActionID = t.uiActionID
+		message = navigation
+	case protocol.RouteCreateSessionAction:
+		navigation.CauseActionID = t.uiActionID
+		message = navigation
 	}
 	err := t.transport.transport.SendServer(message)
 	if err != nil {

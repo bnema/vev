@@ -36,17 +36,6 @@ func serverError(code uint16, text string) protocol.ErrorMsg {
 	return protocol.ErrorMsg{Code: code, Text: text}
 }
 
-func serverOutputState(data []byte, baseState, state, echoAck uint64) (protocol.Output, error) {
-	message := protocol.Output{
-		Epoch: 1, Base: baseState, New: state, Echo: echoAck,
-		Size: domain.Size{Cols: 1, Rows: 1}, Full: state != 0 && baseState == 0, Data: data,
-	}
-	if err := protocol.ValidateOutput(message); err != nil {
-		return protocol.Output{}, err
-	}
-	return message, nil
-}
-
 func serverDetached(reason uint8) protocol.Detached { return protocol.Detached{Reason: reason} }
 func serverPong() protocol.Pong                     { return protocol.Pong{} }
 func serverSessions(infos []protocol.SessionInfo) protocol.Sessions {

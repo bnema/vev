@@ -400,8 +400,8 @@ func TestTransportFloodClassification(t *testing.T) {
 		primerWritten := make(chan struct{}, 1)
 		primerAcknowledged := make(chan struct{}, 1)
 		ackWakeAccepted := make(chan struct{}, 128)
-		ackScheduled := make(chan struct{}, 128)
-		ackDispatched := make(chan struct{}, 128)
+		ackScheduled := make(chan bool, 128)
+		ackDispatched := make(chan bool, 128)
 		ackWritten := make(chan struct{}, 128)
 		aPC.replaceAfterWrite(func() {
 			select {
@@ -441,20 +441,24 @@ func TestTransportFloodClassification(t *testing.T) {
 			default:
 			}
 		}
-		b.afterACKScheduled = func() {
+		b.afterACKScheduled = func(armed bool) {
 			select {
-			case ackScheduled <- struct{}{}:
+			case ackScheduled <- armed:
 			default:
 			}
 		}
-		b.afterACKDispatched = func() {
+		b.afterACKDispatchAttempt = func(dispatched bool) {
 			select {
-			case ackDispatched <- struct{}{}:
+			case ackDispatched <- dispatched:
 			default:
 			}
 		}
 		b.mu.Unlock()
-		primer := mustMarshalOutput(protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 1, Rows: 1}, Full: true, Data: []byte("primer")})
+		// The RTT primer must be a single transport record fragment: the
+		// following barrier waits for its record ACK, not partial packet contact.
+		// Use ordered side-effect bytes so semantic state metadata does not turn
+		// this setup step into the fragmented flood exercised below.
+		primer := mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("primer")})
 		if err := a.SendAsync(wire.Frame{Type: wire.MsgOutput, Payload: primer}); err != nil {
 			t.Fatal(err)
 		}
@@ -464,13 +468,16 @@ func TestTransportFloodClassification(t *testing.T) {
 		for range 40 {
 			clk.advance(25 * time.Millisecond)
 			if awaitingPrimerACK {
+				if !awaitResult(t, ackDispatched, "primer ACK dispatch") {
+					t.Fatal("primer deadline did not dispatch its ACK")
+				}
 				awaitSignal(t, primerAcknowledged, "primer ACK write")
+				awaitSignal(t, ackWritten, "primer ACK write completion")
 				awaitingPrimerACK = false
 			}
 			if flushAndAwait(t, forward, bPC, processed) > 0 {
 				awaitSignal(t, ackWakeAccepted, "primer accepted ACK wake")
-				awaitSignal(t, ackScheduled, "primer ACK scheduling")
-				awaitingPrimerACK = true
+				awaitingPrimerACK = awaitResult(t, ackScheduled, "primer ACK scheduling")
 			}
 			flushAndAwait(t, reverse, aPC, processed)
 			a.mu.Lock()
@@ -582,15 +589,15 @@ func TestTransportFloodClassification(t *testing.T) {
 				}
 			}
 			if awaitingACKWrite {
-				awaitSignal(t, ackDispatched, "cumulative ACK dispatch")
-				awaitSignal(t, ackWritten, "cumulative ACK write")
+				if awaitResult(t, ackDispatched, "cumulative ACK dispatch attempt") {
+					awaitSignal(t, ackWritten, "cumulative ACK write")
+				}
 				awaitingACKWrite = false
 			}
 			if flushAndAwait(t, forward, bPC, processed) > 0 {
 				select {
 				case <-ackWakeAccepted:
-					awaitSignal(t, ackScheduled, "cumulative ACK scheduling")
-					awaitingACKWrite = true
+					awaitingACKWrite = awaitResult(t, ackScheduled, "cumulative ACK scheduling")
 				default:
 				}
 			}

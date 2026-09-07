@@ -298,6 +298,36 @@ func withoutPerformanceTraceEnv(env []string) []string {
 	return filtered
 }
 
+// spawnDaemonWithEnvironment launches an explicitly selected daemon binary
+// with the complete environment owned by a launch configuration. It retains
+// the same double-fork boundary as realSpawn without invoking a shell or
+// inheriting ambient variables.
+func spawnDaemonWithEnvironment(executable string, environment []string) error {
+	if executable == "" {
+		return errors.New("vev: missing launch executable")
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	var stderr bytes.Buffer
+	cmd := exec.Command(executable, "--daemon-launcher")
+	cmd.Env = append([]string(nil), environment...)
+	cmd.Dir = platform.DirOrHome("")
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := bytes.TrimSpace(stderr.Bytes()); len(detail) > 0 {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	}
+	return nil
+}
+
 // runDaemonLauncher is the intermediate half of the double-fork. It starts
 // the long-lived daemon in a new session and exits immediately; realSpawn
 // waits for this exit so the daemon is no longer descended from the client.

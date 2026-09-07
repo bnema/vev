@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -24,6 +25,15 @@ type DialerFactory struct {
 	observer ports.SerializedRuntimeObserver
 }
 
+// EndpointLaunch contains the absolute remote executable and complete child
+// environment selected by an explicit UI-driver launch configuration.
+type EndpointLaunch struct {
+	Binary      string
+	Root        string
+	OwnerToken  string
+	Environment []string
+}
+
 func NewDialerFactory() DialerFactory { return DialerFactory{} }
 
 func NewDialerFactoryWithRuntimeObserver(observer ports.SerializedRuntimeObserver) DialerFactory {
@@ -31,6 +41,19 @@ func NewDialerFactoryWithRuntimeObserver(observer ports.SerializedRuntimeObserve
 }
 
 func (f DialerFactory) DialerForRemote(target, session string, mode TransportMode, log *slog.Logger) (wire.Dialer, error) {
+	return f.dialerForRemote(target, session, mode, log, nil)
+}
+
+// DialerForRemoteWithLaunch selects the same normal carriage while using the
+// explicit endpoint executable/environment for remote child startup.
+func (f DialerFactory) DialerForRemoteWithLaunch(target, session string, mode TransportMode, log *slog.Logger, launch *EndpointLaunch) (wire.Dialer, error) {
+	if launch != nil && (launch.Binary == "" || launch.Root == "" || launch.OwnerToken == "") {
+		return nil, errors.New("vev: isolated remote launch requires a binary, root, and owner")
+	}
+	return f.dialerForRemote(target, session, mode, log, launch)
+}
+
+func (f DialerFactory) dialerForRemote(target, session string, mode TransportMode, log *slog.Logger, launch *EndpointLaunch) (wire.Dialer, error) {
 	switch mode {
 	case TransportUDP:
 		if log != nil {
@@ -38,12 +61,24 @@ func (f DialerFactory) DialerForRemote(target, session string, mode TransportMod
 		}
 		dialer := dgram.NewRemoteDialerWithLogger(target, "", log)
 		dialer.RuntimeObserver = f.observer
+		if launch != nil {
+			dialer.BootstrapBinary = launch.Binary
+			dialer.BootstrapRoot = launch.Root
+			dialer.BootstrapOwnerToken = launch.OwnerToken
+			dialer.BootstrapEnvironment = append([]string(nil), launch.Environment...)
+		}
 		return dialer, nil
 	case TransportStdio:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
-		return stdioDialer{target: target, log: log, observer: f.observer}, nil
+		var selected *EndpointLaunch
+		if launch != nil {
+			copyLaunch := *launch
+			copyLaunch.Environment = append([]string(nil), launch.Environment...)
+			selected = &copyLaunch
+		}
+		return stdioDialer{target: target, log: log, observer: f.observer, launch: selected}, nil
 	default:
 		return nil, fmt.Errorf("vev: unsupported remote transport %q", mode)
 	}
@@ -53,8 +88,12 @@ type stdioDialer struct {
 	target   string
 	log      *slog.Logger
 	observer ports.SerializedRuntimeObserver
+	launch   *EndpointLaunch
 }
 
 func (d stdioDialer) Dial(ctx context.Context) (wire.Transport, error) {
-	return sshstdio.DialContextWithRuntimeObserver(ctx, d.target, "", d.log, sshstdio.WithRuntimeObserver(d.observer))
+	if d.launch == nil {
+		return sshstdio.DialContextWithRuntimeObserver(ctx, d.target, "", d.log, sshstdio.WithRuntimeObserver(d.observer))
+	}
+	return sshstdio.DialContextWithIsolatedLaunch(ctx, d.target, d.launch.Root, d.launch.OwnerToken, d.launch.Binary, d.launch.Environment, d.log, sshstdio.WithRuntimeObserver(d.observer))
 }

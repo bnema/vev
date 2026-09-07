@@ -19,8 +19,8 @@ lint:
 
 mocks:
 	@version="$$(mockery version 2>/dev/null || true)"; \
-	if [ "$$version" != "v3.7.1" ]; then \
-		echo "mockery v3.7.1 required; install with: go install github.com/vektra/mockery/v3@v3.7.1" >&2; \
+	if [ "$$version" != "v3.7.4" ]; then \
+		echo "mockery v3.7.4 required; install with: go install github.com/vektra/mockery/v3@v3.7.4" >&2; \
 		exit 1; \
 	fi
 	mockery

@@ -834,8 +834,8 @@ func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attached
 	current.id = "current"
 	delete(d.sessions, domain.SessionID("manual"))
 	d.sessions[current.id] = current
-	recent := &session{sessionCore: sessionCore{id: "recent", name: "recent"}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
-	older := &session{sessionCore: sessionCore{id: "older", name: "older"}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p3, domain.Size{Cols: 80, Rows: 23})}}
+	recent := &session{sessionCore: sessionCore{id: "recent", name: "recent", incarnation: newTestLifecycle(t)}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p2, domain.Size{Cols: 80, Rows: 23})}}
+	older := &session{sessionCore: sessionCore{id: "older", name: "older", incarnation: newTestLifecycle(t)}, ctx: current.ctx, cancel: func() {}, tabs: []*tab{newTab(p3, domain.Size{Cols: 80, Rows: 23})}}
 	d.sessions[recent.id] = recent
 	d.sessions[older.id] = older
 	current.mruAt.Store(30)

@@ -161,6 +161,7 @@ type Dependencies struct {
 	// DisableCapabilityProbe skips active outer-terminal discovery for headless
 	// embedders and deterministic tests. Interactive clients leave it false.
 	DisableCapabilityProbe bool
+	UI                     *UI
 	Clipboard              ports.ClipboardReader
 	Logger                 *slog.Logger
 	RuntimeObserver        ports.SerializedRuntimeObserver
@@ -181,16 +182,20 @@ type Dependencies struct {
 // client-only presentation metadata. RemoteTarget is an optional exact picker
 // handoff and is serialized into Hello only when present.
 type AttachRequest struct {
-	Intent                 uint8
-	SessionName            string
-	Remote                 bool
-	Origin                 protocol.RouteOrigin
-	OriginKey              string
-	RemoteTarget           *domain.RemoteSessionTarget
-	ExactTarget            *protocol.ExactSessionTarget
-	PreferredTabID         domain.TabStableID
-	HostLabel              string
-	EnvironmentPolicy      protocol.EnvironmentPolicy
+	Intent            uint8
+	SessionName       string
+	Remote            bool
+	Origin            protocol.RouteOrigin
+	OriginKey         string
+	RemoteTarget      *domain.RemoteSessionTarget
+	ExactTarget       *protocol.ExactSessionTarget
+	PreferredTabID    domain.TabStableID
+	HostLabel         string
+	EnvironmentPolicy protocol.EnvironmentPolicy
+	// Environment, when non-nil, is the complete environment to advertise to
+	// a client-owned daemon endpoint. It is separate from the driver's process
+	// environment and is supplied only by explicit composition.
+	Environment            []string
 	NavigationCapabilities protocol.NavigationCapabilities
 	StartupOverlay         protocol.StartupOverlay
 }
@@ -217,6 +222,7 @@ func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attach
 }
 
 type Runner struct {
+	ui                *UI
 	dialer            ports.ClientDialer
 	term              ports.Terminal
 	clock             ports.Clock
@@ -246,6 +252,7 @@ func NewRunner(deps Dependencies) *Runner {
 		log = slog.Default()
 	}
 	return &Runner{
+		ui:                deps.UI,
 		dialer:            deps.Dialer,
 		term:              deps.Terminal,
 		clock:             deps.Clock,
@@ -369,6 +376,21 @@ func (r *Runner) rememberKittyDirectGraphics(value bool) bool {
 	return value
 }
 
+func attachEnvironment(environment []string) []string {
+	if environment == nil {
+		return os.Environ()
+	}
+	return append([]string(nil), environment...)
+}
+
+func cloneRouteNavigationAction(action *protocol.RouteNavigationAction) *protocol.RouteNavigationAction {
+	if action == nil {
+		return nil
+	}
+	copyAction := *action
+	return &copyAction
+}
+
 func validateAttachRequest(request AttachRequest) error {
 	if request.Origin != 0 {
 		if err := request.Origin.Validate(); err != nil {
@@ -426,6 +448,15 @@ func validateAttachRequest(request AttachRequest) error {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	var stopObserve context.CancelFunc
+	var observed chan struct{}
+	if r.ui != nil {
+		observeCtx, cancelObserve := context.WithCancel(ctx)
+		stopObserve = cancelObserve
+		observed = make(chan struct{})
+		go func() { defer close(observed); r.ui.Observe(observeCtx) }()
+		defer func() { stopObserve(); <-observed }()
+	}
 	request = cloneAttachRequest(request)
 	if request.Origin == 0 {
 		request.Origin = r.origin
@@ -517,6 +548,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 		}
 	}()
+	if r.ui != nil {
+		defer r.ui.status(ports.UIStatusDetached)
+	}
 	remote := request.Remote || r.remote
 	reconnect := &reconnectUI{
 		term:       r.term,
@@ -632,6 +666,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
 		transport, err := boundedDialWithTransition(handshakeCtx, dialer, transition)
 		if err != nil {
+			if r.ui != nil {
+				r.ui.failHandoff()
+			}
 			err = handshakeContextError(ctx, timedOut, err)
 			finishHandshake()
 			if killedSelection != nil {
@@ -728,6 +765,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			request:                  attemptRequest,
 			resumeToken:              resumeToken,
 			routeNavigationSelection: routeNavigationSelection,
+			routeNavigationAction:    cloneRouteNavigationAction(routeNavigationAction),
 			killedSelection:          killedSelection,
 			clientID:                 processClientID,
 			milestones:               &ms,
@@ -744,6 +782,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
+		if result.err != nil && r.ui != nil {
+			r.ui.failHandoff()
+		}
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
@@ -1264,6 +1305,7 @@ type attachAttempt struct {
 	request                  AttachRequest
 	resumeToken              uint64
 	routeNavigationSelection *routeNavigationSelection
+	routeNavigationAction    *protocol.RouteNavigationAction
 	killedSelection          *killedRouteSelection
 	clientID                 [16]byte
 	milestones               *milestones
@@ -1433,7 +1475,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		TrueColor:              trueColor,
 		KittyDirectGraphics:    kittyDirectGraphics,
 		MaxOutputInFlight:      requestedOutputWindow(transport),
-		Env:                    os.Environ(),
+		Env:                    attachEnvironment(request.Environment),
 		RemoteTarget:           request.RemoteTarget,
 		ExactTarget:            exactTarget,
 		PreferredTabID:         request.PreferredTabID,
@@ -1569,6 +1611,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	controlCh := make(chan protocol.ClientMessage, 1)
 	barrierCh := make(chan chan struct{})
 	inputGate := newSamePeerInputGate()
+	inputGate.ui = a.runner.ui
 	ackQueue := newCumulativeAckQueue()
 	sendErrCh := make(chan error, 1)
 	senderStarted := false
@@ -1678,6 +1721,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}
 	awaitingReconnectReset := false
 	outputState := outputApplyState{}
+	uiOutput, _ := term.(ports.UIOutputTransaction)
+	uiContext := ports.UIContext{Generation: 1}
+	ui := a.runner.ui
+	publishUIStatus := func(status ports.UIPresentationStatus) {
+		uiContext.Status = status
+		if ui != nil {
+			ui.status(status)
+		}
+	}
+	var uiGeneration uint64
 	outputResetRequested := false
 	transitionWaitingFull := false
 	var samePeerSwitch *samePeerSwitchPending
@@ -1737,6 +1790,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		foregroundCtx, foregroundCancel := context.WithCancel(loopCtx)
 		consumer := input.claim()
+		if ui != nil {
+			uiGeneration = ui.bindForeground(foregroundCtx, input, consumer)
+			uiContext.AttachmentHandle = ui.Handle()
+			uiContext.Generation = uiGeneration
+			publishUIStatus(ports.UIStatusTransitioning)
+		}
+		generation := uiGeneration
 		stdinDone := make(chan struct{})
 		resizeDone := make(chan struct{})
 		sendLease := newForegroundSendLease()
@@ -1747,7 +1807,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				foregroundCancel()
 				cancel()
 			}
-			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
+			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, uiGeneration: generation, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
 		}()
 		go func() {
 			defer close(resizeDone)
@@ -2037,6 +2097,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				continue
 			}
+			if ui != nil {
+				publishUIStatus(ports.UIStatusReconnecting)
+			}
 			stage := stageForLinkState(ev.State)
 			if reconnect.remote && reconnect.showing && reconnect.stage != stage {
 				reconnect.stage = stage
@@ -2056,6 +2119,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return welcomedResult(errLinkOffline)
 			}
 		case event := <-paletteEvents:
+			if event.kind == paletteEventUIBatchEnd {
+				close(event.batchApplied)
+				continue
+			}
 			if event.kind == paletteEventScheme {
 				retained := themeState.update(func(current *protocol.Theme) {
 					current.SchemeKnown = true
@@ -2063,12 +2130,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				})
 				actions := coordinator.start(retained, true)
 				activeGeneration.Store(uint64(coordinator.current.id))
-				if err := processPaletteActions(actions); err != nil {
+				err := processPaletteActions(actions)
+				event.applied()
+				if err != nil {
 					return welcomedResult(err)
 				}
 				continue
 			}
-			if err := processPaletteActions(coordinator.handle(event)); err != nil {
+			err := processPaletteActions(coordinator.handle(event))
+			event.applied()
+			if err != nil {
 				return welcomedResult(err)
 			}
 		case r := <-recvCh:
@@ -2099,7 +2170,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if parkedWaitingFull && !o.Full {
 					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
 				}
+				if ui != nil && o.Full && foreground == nil && (parkedWaitingFull || samePeerSwitch == nil) {
+					startForeground()
+				}
+				if uiOutput != nil {
+					status := ports.UIStatusAttached
+					if reconnect.showing {
+						status = ports.UIStatusReconnecting
+					} else if !o.Full && transition != nil && transition.active {
+						status = ports.UIStatusTransitioning
+					}
+					uiContext = nextState.uiContext(uiContext, status)
+					uiOutput.BeginOutput(uiContext)
+				}
 				if _, werr := term.Out().Write(o.Data); werr != nil {
+					if uiOutput != nil {
+						uiOutput.EndOutput(false)
+					}
 					return welcomedResult(fmt.Errorf("vev: writing terminal output: %w", werr))
 				}
 				if awaitingReconnectReset && o.Full && o.Base == 0 && o.New != 0 {
@@ -2108,15 +2195,33 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if reconnect.showing && reconnect.remote {
 					geometry, serr := term.Geometry()
 					if serr != nil {
+						if uiOutput != nil {
+							uiOutput.EndOutput(false)
+						}
 						return welcomedResult(fmt.Errorf("vev: reading terminal geometry for reconnect redraw: %w", serr))
 					}
 					if rerr := reconnect.redraw(geometry.Size); rerr != nil {
+						if uiOutput != nil {
+							uiOutput.EndOutput(false)
+						}
 						return welcomedResult(fmt.Errorf("vev: redrawing reconnect toast: %w", rerr))
 					}
 				} else if ferr := term.Flush(); ferr != nil {
+					if uiOutput != nil {
+						uiOutput.EndOutput(false)
+					}
 					return welcomedResult(fmt.Errorf("vev: flushing terminal: %w", ferr))
 				}
+				if uiOutput != nil {
+					uiOutput.EndOutput(true)
+				}
 				outputState = nextState
+				if ui != nil && o.New != 0 {
+					ui.published(uiGeneration)
+					if o.Full {
+						ui.destinationFull(uiGeneration)
+					}
+				}
 				if transition != nil && transition.active && (!transitionWaitingFull || o.Full) {
 					transitionWaitingFull = false
 					transition.stop()
@@ -2138,7 +2243,38 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					log.Debug("received first output")
 					endHandshake()
 				}
+			case protocol.UIViewUpdate:
+				nextState, accepted, needsReset := outputState.nextView(message)
+				if needsReset && !outputResetRequested {
+					select {
+					case sendCh <- protocol.OutputResetRequest{}:
+						outputResetRequested = true
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				}
+				if !accepted {
+					continue
+				}
+				if uiOutput != nil {
+					uiContext = nextState.uiContext(uiContext, uiContext.Status)
+					if err := uiOutput.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+						return welcomedResult(fmt.Errorf("vev: publishing UI context: %w", err))
+					}
+				}
+				outputState = nextState
+				if ui != nil {
+					ui.published(uiGeneration)
+				}
+			case protocol.UIReceipt:
+				if ui != nil {
+					ui.receipt(uiGeneration, message)
+				}
 			case protocol.AttachTarget:
+				if ui != nil {
+					ui.follow(uiGeneration, message.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
+				}
 				target := message
 				if transientPicker {
 					handoff := welcomedResult(nil)
@@ -2164,6 +2300,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						return welcomedResult(errors.New("vev: invalid same-peer switch"))
 					}
 					samePeerSwitch = &samePeerSwitchPending{requestID: nextSamePeerRequestID, target: *target.ExactTarget}
+					if ui != nil {
+						stopForeground()
+						ui.mu.Lock()
+						inputGate.retiredUI.Store(ui.nextAction)
+						ui.mu.Unlock()
+					}
 					inputGate.setPaused(true)
 					select {
 					case controlCh <- switchRequest:
@@ -2219,6 +2361,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 				}
 			case protocol.NavigationDirective:
+				if ui != nil {
+					ui.follow(uiGeneration, message.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
+				}
 				directive := message
 				datagramRoute := transport.Capabilities().PreferredOutputWindow == 1
 				if directive.Action == protocol.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
@@ -2251,6 +2397,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
+				if ui != nil {
+					ui.follow(uiGeneration, action.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
+				}
 				result := welcomedResult(nil)
 				result.routeCreateAction = &action
 				return result
@@ -2271,6 +2421,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				if noOp {
 					continue
+				}
+				if ui != nil {
+					ui.follow(uiGeneration, action.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
 				}
 				navigation := welcomedResult(nil)
 				navigation.routeAction = &action
@@ -2301,9 +2455,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case protocol.SamePeerSwitchFailure:
 				failure := message
 				if samePeerSwitch != nil && failure.RequestID == samePeerSwitch.requestID {
+					if ui != nil {
+						ui.failHandoff()
+					}
 					samePeerSwitch = nil
 					inputGate.setPaused(false)
-					if transition != nil && transition.showing {
+					if ui != nil || transition != nil && transition.showing {
 						transitionWaitingFull = true
 						if !outputResetRequested {
 							select {
@@ -2329,6 +2486,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case protocol.RouteNavigationFailure:
 				failure := message
 				log.Warn("route navigation rejected", "key", failure.Key, "generation", failure.Generation, "code", failure.Code)
+				if a.routeNavigationAction != nil && failure.Key == a.routeNavigationAction.Key && failure.Generation == a.routeNavigationAction.Generation && a.runner.ui != nil {
+					a.runner.ui.failHandoff()
+				}
 			case protocol.Detached:
 				d := message
 				ms.detached = true
@@ -2427,6 +2587,9 @@ func (q *cumulativeAckQueue) take() (uint64, uint64) {
 func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.ClientConnection, control <-chan protocol.ClientMessage, barriers <-chan chan struct{}, in <-chan protocol.ClientMessage, inputGate *samePeerInputGate, acks *cumulativeAckQueue, errCh chan<- error, log *slog.Logger) {
 	defer log.Debug("sender pump exited")
 	send := func(message protocol.ClientMessage) bool {
+		if inputGate.discardRetiredUI(message) {
+			return true
+		}
 		if err := transport.SendClient(message); err != nil {
 			select {
 			case errCh <- err:
@@ -2562,9 +2725,32 @@ func runSender(ctx context.Context, cancel context.CancelFunc, transport ports.C
 
 // terminalReadResult is copied by terminalInputPump before the next Read so
 // terminal input remains owned by one lifecycle reader across reconnects.
+type terminalInputSource uint8
+
+const (
+	terminalInputHuman terminalInputSource = iota
+	terminalInputReply
+	terminalInputAutomation
+)
+
 type terminalReadResult struct {
-	data []byte
-	err  error
+	data       []byte
+	err        error
+	source     terminalInputSource
+	generation uint64
+	actionID   uint64
+	endBatch   bool
+}
+
+// terminalAutomationRequest is admitted only by the foreground scanner owner.
+// Its reply is buffered so cancellation never holds up physical input.
+type terminalAutomationRequest struct {
+	ctx        context.Context
+	owner      *UI
+	consumer   uint64
+	record     terminalReadResult
+	admitted   chan bool
+	dispatched chan bool
 }
 
 // terminalInputPump is the sole consumer of the caller-owned terminal reader.
@@ -2573,8 +2759,9 @@ type terminalReadResult struct {
 // after Run exits; suspend drops any result received while inactive and never
 // closes caller-owned stdin. Reconnects and later runs never add another reader.
 type terminalInputPump struct {
-	in   io.Reader
-	done chan struct{}
+	in         io.Reader
+	done       chan struct{}
+	automation chan terminalAutomationRequest
 
 	mu sync.Mutex
 	// residual holds scanner bytes that were read but not delivered when an
@@ -2605,6 +2792,7 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	return &terminalInputPump{
 		in:         in,
 		done:       make(chan struct{}),
+		automation: make(chan terminalAutomationRequest),
 		activation: 1,
 		active:     true,
 		ready:      make(chan struct{}, 1),
@@ -2913,6 +3101,7 @@ type stdinPump struct {
 	in                  io.Reader // compatibility for isolated scanner tests
 	input               *terminalInputPump
 	consumer            uint64
+	uiGeneration        uint64
 	out                 chan<- protocol.ClientMessage
 	clock               ports.Clock
 	clipboard           ports.ClipboardReader
@@ -2930,6 +3119,16 @@ func (p *stdinPump) run() {
 	var scanner theme.Scanner
 	var markers paletteMarkerScanner
 	var inputSeq uint64
+	var actionID atomic.Uint64
+	var automated bool
+	var activeBatch *terminalAutomationRequest
+	var batchSent atomic.Bool
+	var batchComplete bool
+	defer func() {
+		if activeBatch != nil {
+			activeBatch.dispatched <- batchComplete
+		}
+	}()
 	var sendOK atomic.Bool
 	var undeliveredMu sync.Mutex
 	var undelivered []byte
@@ -2951,11 +3150,16 @@ func (p *stdinPump) run() {
 			}
 		})
 	}
+	var pendingEvents atomic.Int64
 	sendEvent := func(event paletteGenerationEvent) bool {
 		if !sendOK.Load() {
 			return false
 		}
-		return p.sendLease.send(func() bool {
+		if p.uiGeneration != 0 && event.kind != paletteEventUIBatchEnd {
+			event.pending = &pendingEvents
+			pendingEvents.Add(1)
+		}
+		ok := p.sendLease.send(func() bool {
 			select {
 			case p.paletteEvents <- event:
 				if p.afterPaletteEvent != nil {
@@ -2967,13 +3171,20 @@ func (p *stdinPump) run() {
 				return false
 			}
 		})
+		if !ok {
+			event.applied()
+		}
+		return ok
 	}
 	coalescer := newPasteCoalescer(p.clock, func(data []byte) {
 		if len(data) == 0 {
 			return
 		}
 		inputSeq++
-		if !send(protocol.Input{InputSeq: inputSeq, Data: append([]byte(nil), data...)}) {
+		if actionID.Load() != 0 {
+			batchSent.Store(true)
+		}
+		if !send(protocol.Input{InputSeq: inputSeq, ActionID: actionID.Load(), Data: append([]byte(nil), data...)}) {
 			undeliveredMu.Lock()
 			undelivered = append(undelivered, data...)
 			undeliveredMu.Unlock()
@@ -3014,7 +3225,7 @@ func (p *stdinPump) run() {
 	// that undecided suffix; the rest of its source read has already been
 	// delivered and must not be replayed by the next attempt.
 	defer func() {
-		if p.ctx.Err() != nil {
+		if p.ctx.Err() != nil && !automated {
 			// Closing flushes any bracketed-paste prefix or buffer through the
 			// coalescer's emit callback. Failed ordinary-input deliveries are
 			// retained ahead of a trailing undecided marker prefix, matching their
@@ -3067,86 +3278,143 @@ func (p *stdinPump) run() {
 	defer disarmMarkerDeadline()
 
 	for {
+		var result terminalReadResult
+		var batch *terminalAutomationRequest
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-markerTimerC:
 			flushMarkerPrefix()
+			continue
+		case request := <-input.automation:
+			input.mu.Lock()
+			clean := input.consumer == consumer && request.consumer == consumer && input.pending == nil && len(input.residual) == 0 && input.delivering == 0
+			input.mu.Unlock()
+			clean = clean && request.ctx.Err() == nil && p.ctx.Err() == nil && !scanner.Pending() && !markers.hasPendingPrefix() && coalescer.Idle() && pendingEvents.Load() == 0
+			clean = clean && request.record.source == terminalInputAutomation && request.record.actionID != 0 && request.record.generation != 0 && request.record.generation == p.uiGeneration && request.record.endBatch && len(request.record.data) > 0 && len(request.record.data) <= uiMaxInputBytes && validUIKeyBatch(request.record.data)
+			if clean && request.owner != nil {
+				clean = request.owner.accept(request.record.actionID, request.record.generation)
+			}
+			request.admitted <- clean
+			if !clean {
+				continue
+			}
+			batch = &request
+			activeBatch = batch
+			batchSent.Store(false)
+			batchComplete = false
+			result = request.record
+			automated = true
+			actionID.Store(result.actionID)
 		case <-input.ready:
-			result, ok := input.take(p.ctx, consumer)
+			var ok bool
+			result, ok = input.take(p.ctx, consumer)
 			if !ok {
 				if p.ctx.Err() != nil {
 					return
 				}
 				continue
 			}
-			if p.afterInputTake != nil {
-				p.afterInputTake()
-			}
-			// The lease is not acknowledged until scanner delivery completes.
-			// This second check closes the cancellation window after take.
-			if p.ctx.Err() != nil {
-				return
-			}
-			disarmMarkerDeadline()
-			// All scanner callbacks from this Read must retain this one generation.
-			// A scheme notification can start its replacement before a later byte in
-			// the same read is scanned; reloading there would misclassify an old
-			// completion marker as the replacement's drain response.
-			readGeneration := paletteGenerationID(p.activeGeneration.Load())
-			if len(result.data) > 0 {
-				scanner.Scan(result.data, func(kind int, rgb renderer.RGB) {
-					kindEvent := paletteEventForeground
-					if kind == 11 {
-						kindEvent = paletteEventBackground
-					}
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
-				}, func(slot int, rgb renderer.RGB) {
-					// Scanner implementations are independently testable; retain the
-					// protocol boundary here too so a malformed implementation cannot
-					// wrap a negative or oversized int into an ANSI palette slot.
-					slot8, ok := paletteSlot(slot)
-					if !ok {
-						return
-					}
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: slot8, rgb: rgb})
-				}, func(light bool) {
-					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
-				}, func(data []byte) {
-					markers.scan(data, sink, func() {
-						sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
-					})
-				})
-				if !sendOK.Load() {
-					// Commit the source read so callbacks accepted before cancellation
-					// are never replayed. The deferred handoff retains only ordinary
-					// bytes whose callback could not be delivered, plus any undecided
-					// trailing marker prefix.
-					input.ack(consumer)
+		}
+		if p.afterInputTake != nil {
+			p.afterInputTake()
+		}
+		// The lease is not acknowledged until scanner delivery completes.
+		// This second check closes the cancellation window after take.
+		if p.ctx.Err() != nil {
+			return
+		}
+		disarmMarkerDeadline()
+		// All scanner callbacks from this Read must retain this one generation.
+		// A scheme notification can start its replacement before a later byte in
+		// the same read is scanned; reloading there would misclassify an old
+		// completion marker as the replacement's drain response.
+		readGeneration := paletteGenerationID(p.activeGeneration.Load())
+		if len(result.data) > 0 {
+			scanner.Scan(result.data, func(kind int, rgb renderer.RGB) {
+				kindEvent := paletteEventForeground
+				if kind == 11 {
+					kindEvent = paletteEventBackground
+				}
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: kindEvent, rgb: rgb})
+			}, func(slot int, rgb renderer.RGB) {
+				// Scanner implementations are independently testable; retain the
+				// protocol boundary here too so a malformed implementation cannot
+				// wrap a negative or oversized int into an ANSI palette slot.
+				slot8, ok := paletteSlot(slot)
+				if !ok {
 					return
 				}
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventPalette, slot: slot8, rgb: rgb})
+			}, func(light bool) {
+				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
+			}, func(data []byte) {
+				markers.scan(data, sink, func() {
+					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
+				})
+			})
+			if !sendOK.Load() {
+				// Commit the source read so callbacks accepted before cancellation
+				// are never replayed. The deferred handoff retains only ordinary
+				// bytes whose callback could not be delivered, plus any undecided
+				// trailing marker prefix.
+				input.ack(consumer)
+				return
 			}
-			if markers.hasPendingPrefix() {
-				armMarkerDeadline()
+		}
+		if batch != nil {
+			scanner.EndBatch(func(data []byte) {
+				markers.scan(data, sink, func() { sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker}) })
+			})
+			markers.flush(sink)
+			ok := coalescer.EndBatch() && sendOK.Load()
+			batchComplete = ok && pendingEvents.Load() == 0
+			applied := make(chan struct{})
+			if ok {
+				ok = sendEvent(paletteGenerationEvent{kind: paletteEventUIBatchEnd, batchApplied: applied})
 			}
-			if result.err != nil {
-				disarmMarkerDeadline()
-				markers.flush(sink)
+			if ok {
 				select {
-				case p.out <- protocol.Detach{}:
+				case <-applied:
+					batchComplete = true
 				case <-p.ctx.Done():
+					ok = false
 				}
-				p.cancel()
+			}
+			if ok && batchSent.Load() {
+				ok = send(protocol.UIFence{ActionID: result.actionID})
+			} else if ok && batch.owner != nil {
+				batch.owner.completeLocal(result.generation, result.actionID)
+			}
+			batch.dispatched <- batchComplete
+			activeBatch = nil
+			if !ok {
 				return
 			}
-			// Commit every callback from this raw read before observing a
-			// concurrent cancellation. Any remaining marker prefix is retained
-			// by the deferred handoff above, so reconnects never duplicate the
-			// delivered bytes or lose a standalone Escape.
-			input.ack(consumer)
-			if p.ctx.Err() != nil {
-				return
+			actionID.Store(0)
+			automated = false
+			continue
+		}
+		if markers.hasPendingPrefix() {
+			armMarkerDeadline()
+		}
+		if result.err != nil {
+			disarmMarkerDeadline()
+			markers.flush(sink)
+			select {
+			case p.out <- protocol.Detach{}:
+			case <-p.ctx.Done():
 			}
+			p.cancel()
+			return
+		}
+		// Commit every callback from this raw read before observing a
+		// concurrent cancellation. Any remaining marker prefix is retained
+		// by the deferred handoff above, so reconnects never duplicate the
+		// delivered bytes or lose a standalone Escape.
+		input.ack(consumer)
+		if p.ctx.Err() != nil {
+			return
 		}
 	}
 }

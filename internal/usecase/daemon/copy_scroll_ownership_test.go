@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/stretchr/testify/require"
@@ -26,6 +27,8 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 			before := cloneComposeCache(ac.pipelineCache)
 			state.bars.topRight = "retry"
 			state.attachment = ac
+			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+			state.view.revision = ac.viewSnapshot().revision
 			pending := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
 			if failure == "prepare" {
 				pending.frame = renderer.Frame{Width: 1}
@@ -44,6 +47,7 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 				ac.replaceTransport(healthy)
 			}
 			pending = composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
+			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
 			require.True(t, d.emitFrame(sess, ac, &state, pending))
 			require.Equal(t, pending.cache, ac.pipelineCache)

@@ -8,6 +8,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -49,6 +50,8 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 
 			state := cacheState("next", 2)
 			state.attachment = ac
+			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
 			require.True(t, d.emitFrame(sess, ac, &state, pending))
 			require.Equal(t, before, cloneComposeCache(ac.pipelineCache), "failed emission must not publish any composed cache backing storage")
@@ -65,6 +68,8 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			pending = composeFrame(cacheState("next", 2), ac.pipelineCache, ac.pipelineScratch)
 			state = cacheState("next", 2)
 			state.attachment = ac
+			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
 			require.True(t, d.emitFrame(sess, ac, &state, pending))
 			require.Equal(t, pending.cache, ac.pipelineCache)
@@ -322,12 +327,15 @@ func cacheState(title string, generation uint64) capturedRenderState {
 	floating := renderer.NewFrame(2, 1)
 	floating.Set(0, 0, renderer.Cell{Rune: 'F', Style: renderer.DefaultStyle()})
 	return capturedRenderState{
-		reset:    false,
-		layout:   capturedTabLayout{area: domain.Rect{Width: 6, Height: 3}, valid: true, fingerprint: "layout"},
-		panes:    []capturedPaneRenderState{{id: "pane", frame: pane, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 6, Height: 1}, TitleBar: domain.Rect{Width: 6, Height: 1}}, title: title, titleGeneration: generation, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
-		floating: capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: floating, damage: []renderer.Damage{renderer.FullRedraw()}}, geometry: floatingGeometry{Mode: ui.PresentationFloating, Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}, generation: generation, titleGeneration: generation},
-		bars:     barState{topRight: title, bottomRight: title},
-		styles:   resolveStyles(nil),
+		route:         publicationTestContext().Route,
+		view:          attachmentView{tabID: "tab-1"},
+		focusedPaneID: "pane-1",
+		reset:         false,
+		layout:        capturedTabLayout{area: domain.Rect{Width: 6, Height: 3}, valid: true, fingerprint: "layout"},
+		panes:         []capturedPaneRenderState{{id: "pane", stableID: "pane-1", frame: pane, placement: layout.Placement{ID: "pane", Content: domain.Rect{Width: 6, Height: 1}, TitleBar: domain.Rect{Width: 6, Height: 1}}, title: title, titleGeneration: generation, focused: true, damage: []renderer.Damage{renderer.FullRedraw()}}},
+		floating:      capturedFloatingRenderState{visible: true, pane: capturedPaneRenderState{frame: floating, damage: []renderer.Damage{renderer.FullRedraw()}}, geometry: floatingGeometry{Mode: ui.PresentationFloating, Bounds: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}, Inner: domain.Rect{X: 2, Y: 1, Width: 2, Height: 1}}, generation: generation, titleGeneration: generation},
+		bars:          barState{topRight: title, bottomRight: title},
+		styles:        resolveStyles(nil),
 	}
 }
 

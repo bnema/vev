@@ -394,6 +394,12 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		ac.sendMu.Unlock()
 		return paintBlockedCapacity
 	}
+	var uiFence uint64
+	if lease != nil {
+		if rc := attachmentRenderCoordinator(entry); rc != nil {
+			uiFence = rc.captureUIFence(lease)
+		}
+	}
 	// Composition owns attachment sendMu; initialize its lazy overlay state
 	// under that same ownership so concurrent fallback paints cannot observe a
 	// partially published runtime.
@@ -471,6 +477,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		styleGeneration: applied.Generation,
 		reset:           reset,
 		lease:           lease,
+		uiFence:         uiFence,
 	})
 	endCapture(0, ok)
 	if !ok {

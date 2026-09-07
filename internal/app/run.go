@@ -41,7 +41,6 @@ import (
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
-	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/persist"
@@ -71,6 +70,8 @@ const (
 	kindUDPBootstrap
 	kindUDPProxy
 	kindRemotePreview
+	kindUIDriver
+	kindUIRemoteCleanup
 	kindHelp
 	kindVersion
 )
@@ -90,6 +91,10 @@ type command struct {
 	killDaemon           bool
 	cmd                  cmdInvocation
 	remotePreviewPayload string
+	uiDriver             uiDriverOptions
+	uiObserve            bool
+	uiControl            bool
+	uiSocket             string
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -120,6 +125,10 @@ usage:
   vev kill --all      kill all sessions and stop the daemon
   vev kill --daemon   stop the active vev daemon
   vev cmd <command>   run a control command (vev cmd --help)
+  vev --ui-observe    expose passive observation for this interactive client
+                      (optional: --ui-socket PATH)
+  vev --ui-control    expose observation and input control for this client
+                      (optional: --ui-socket PATH)
   vev --help          show this help
   vev --version       show version`
 
@@ -162,6 +171,46 @@ func parseArgs(args []string) (command, error) {
 	if len(args) == 0 {
 		return command{kind: kindAttach, intent: protocol.IntentEphemeral}, nil
 	}
+	if args[0] == "--ui-driver" {
+		options, err := parseUIDriverArgs(args[1:])
+		if err != nil {
+			return command{}, err
+		}
+		return command{kind: kindUIDriver, uiDriver: options}, nil
+	}
+
+	var uiObserve, uiControl bool
+	var uiSocket string
+	for len(args) > 0 {
+		switch args[0] {
+		case "--ui-observe":
+			uiObserve = true
+		case "--ui-control":
+			uiControl = true
+		case "--ui-socket":
+			if len(args) < 2 || args[1] == "" {
+				return command{}, usagef("`--ui-socket` requires a path")
+			}
+			uiSocket = args[1]
+			args = args[2:]
+			continue
+		default:
+			goto parsedUIFlags
+		}
+		args = args[1:]
+	}
+parsedUIFlags:
+	interactive, err := parseInteractiveUIFlags(nil, uiObserve, uiControl, uiSocket)
+	if err != nil {
+		return command{}, err
+	}
+	uiObserve, uiControl, uiSocket = interactive.observe, interactive.control, interactive.socket
+	if len(args) == 0 {
+		return command{kind: kindAttach, intent: protocol.IntentEphemeral, uiObserve: uiObserve, uiControl: uiControl, uiSocket: uiSocket}, nil
+	}
+	if (uiObserve || uiControl || uiSocket != "") && args[0] != "new" && args[0] != "attach" && args[0] != "a" {
+		return command{}, usagef("UI flags are only valid for an attach command")
+	}
 
 	switch args[0] {
 	case "--daemon":
@@ -188,23 +237,30 @@ func parseArgs(args []string) (command, error) {
 			return command{}, usagef("`_remote-preview` requires one encoded request")
 		}
 		return command{kind: kindRemotePreview, remotePreviewPayload: args[1]}, nil
+	case uiRemoteCleanupCommand:
+		if len(args) != 1 {
+			return command{}, usagef("`%s` does not accept arguments", uiRemoteCleanupCommand)
+		}
+		return command{kind: kindUIRemoteCleanup}, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
 		}
-		if len(args) > 2 {
-			return command{}, usagef("`new` does not support command overrides")
+		interactive, err := parseInteractiveUIFlags(args[2:], uiObserve, uiControl, uiSocket)
+		if err != nil {
+			return command{}, err
 		}
 		if err := domain.ValidateSessionName(args[1]); err != nil {
 			return command{}, err
 		}
-		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1]}, nil
+		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1], uiObserve: interactive.observe, uiControl: interactive.control, uiSocket: interactive.socket}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
 		}
-		if len(args) > 2 {
-			return command{}, usagef("`attach` accepts exactly one session name or remote target")
+		interactive, err := parseInteractiveUIFlags(args[2:], uiObserve, uiControl, uiSocket)
+		if err != nil {
+			return command{}, err
 		}
 		cmd := command{kind: kindAttach, intent: protocol.IntentAttach, name: args[1]}
 		if target, session, ok := parseRemoteAttachTarget(args[1]); ok {
@@ -222,6 +278,9 @@ func parseArgs(args []string) (command, error) {
 				cmd.intent = protocol.IntentEphemeral
 			}
 		}
+		cmd.uiObserve = interactive.observe
+		cmd.uiControl = interactive.control
+		cmd.uiSocket = interactive.socket
 		return cmd, nil
 	case "ls", "list":
 		return parseListArgs(args[1:])
@@ -284,6 +343,10 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runUDPProxy(ctx, os.Stdout)
 	case kindRemotePreview:
 		return runRemotePreview(ctx, cmd.remotePreviewPayload)
+	case kindUIRemoteCleanup:
+		return runUIRemoteCleanup(ctx)
+	case kindUIDriver:
+		return runUIDriver(ctx, cmd.uiDriver)
 	case kindList:
 		return runList(ctx, cmd)
 	case kindHost:
@@ -293,7 +356,7 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindCmd:
 		return runCmd(ctx, cmd.cmd)
 	case kindAttach:
-		return runAttach(ctx, cmd.intent, cmd.name, cmd.remoteTarget)
+		return runAttachWithOptions(ctx, cmd.intent, cmd.name, cmd.remoteTarget, interactiveUIOptions{observe: cmd.uiObserve, control: cmd.uiControl, socket: cmd.uiSocket})
 	default:
 		return usagef("unhandled command")
 	}
@@ -637,7 +700,16 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	remoteDiscoveryOpt, err := remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport))
+	allowedRemoteEndpoints, allowlistConfigured, err := remoteLaunchAllowlistFromEnv()
+	if err != nil {
+		return err
+	}
+	var remoteDiscoveryOpt daemon.Option
+	if allowlistConfigured {
+		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), allowedRemoteEndpoints)
+	} else {
+		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport))
+	}
 	if err != nil {
 		return err
 	}
@@ -785,7 +857,10 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	})
 }
 
-const envRemoteTransport = "VEV_REMOTE_TRANSPORT"
+const (
+	envRemoteTransport     = "VEV_REMOTE_TRANSPORT"
+	uiRemoteCleanupCommand = "_ui-cleanup"
+)
 
 func defaultLocalDialer() wire.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
 
@@ -802,6 +877,12 @@ type runAttachDeps struct {
 	runClient               runClientFunc
 	createDetached          func(context.Context, string) error
 	runtimeObserver         ports.SerializedRuntimeObserver
+	ui                      *client.UI
+	terminal                func() ports.Terminal
+	clock                   func() ports.Clock
+	disableCapabilityProbe  bool
+	localEnvironment        []string
+	remoteEnvironment       func(string) []string
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -845,17 +926,24 @@ func validateRemoteAttachHandoff(target protocol.AttachTarget) error {
 
 // remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
 // the same validated transport selection used by direct remote attach.
-func remoteDiscoveryDaemonOption(stateDir, transport string) (daemon.Option, error) {
+func remoteDiscoveryDaemonOption(stateDir, transport string, allowlists ...map[string]struct{}) (daemon.Option, error) {
 	_, err := remoteTransportModeFromEnv(transport)
 	if err != nil {
 		return nil, err
 	}
-	discovery := daemon.WithRemoteDiscovery(
-		newRemoteHostStore(remoteadapter.HostStorePath(stateDir)),
-		newRemoteCatalogClient(),
-		newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)),
-	)
-	preview := daemon.WithRemotePreview(newRemotePreviewClient())
+	store := ports.RemoteHostStore(newRemoteHostStore(remoteadapter.HostStorePath(stateDir)))
+	catalog := ports.RemoteCatalogClient(newRemoteCatalogClient())
+	cache := ports.RemoteCatalogCache(newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)))
+	previewClient := ports.RemotePreviewClient(newRemotePreviewClient())
+	if len(allowlists) > 0 {
+		allowed := allowlists[0]
+		store = allowlistedRemoteHostStore{delegate: store, allowed: allowed}
+		catalog = allowlistedRemoteCatalogClient{delegate: catalog, allowed: allowed}
+		cache = allowlistedRemoteCatalogCache{delegate: cache, allowed: allowed}
+		previewClient = allowlistedRemotePreviewClient{delegate: previewClient, allowed: allowed}
+	}
+	discovery := daemon.WithRemoteDiscovery(store, catalog, cache)
+	preview := daemon.WithRemotePreview(previewClient)
 	return func(d *daemon.Daemon) {
 		discovery(d)
 		preview(d)
@@ -932,6 +1020,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			Intent:            target.Intent,
 			SessionName:       target.Session,
 			Remote:            true,
+			Environment:       clientEnvironment(deps.remoteEnvironment, target.Endpoint),
 			Origin:            protocol.RouteOriginDiscovery,
 			OriginKey:         target.Endpoint,
 			RemoteTarget:      selection,
@@ -952,21 +1041,24 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return dialErr
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:            sessionwire.NewClientDialer(dialer),
-				Terminal:          term.New(),
-				Clock:             clock.New(),
-				Clipboard:         deps.clipboard,
-				Logger:            log,
-				RuntimeObserver:   deps.runtimeObserver,
-				RemoteHostLearner: attachRememberLearner(deps, remoteTarget, log),
-				AttachHandoff:     handoff,
-				Remote:            true,
-				Origin:            protocol.RouteOriginRemote,
-				OriginKey:         remoteTarget,
+				Dialer:                 sessionwire.NewClientDialer(dialer),
+				Terminal:               clientTerminal(deps),
+				Clock:                  clientClock(deps),
+				DisableCapabilityProbe: deps.disableCapabilityProbe,
+				UI:                     deps.ui,
+				Clipboard:              deps.clipboard,
+				Logger:                 log,
+				RuntimeObserver:        deps.runtimeObserver,
+				RemoteHostLearner:      attachRememberLearner(deps, remoteTarget, log),
+				AttachHandoff:          handoff,
+				Remote:                 true,
+				Origin:                 protocol.RouteOriginRemote,
+				OriginKey:              remoteTarget,
 			}, client.AttachRequest{
 				Intent:            intent,
 				SessionName:       name,
 				Remote:            true,
+				Environment:       clientEnvironment(deps.remoteEnvironment, remoteTarget),
 				Origin:            routeOrigin,
 				OriginKey:         routeOriginKey,
 				RemoteTarget:      remoteSelection,
@@ -978,17 +1070,19 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:          sessionwire.NewClientDialer(localDialer()),
-				Terminal:        term.New(),
-				Clock:           clock.New(),
-				Clipboard:       deps.clipboard,
-				Logger:          log,
-				RuntimeObserver: deps.runtimeObserver,
-				AttachHandoff:   handoff,
-				Remote:          false,
-				Origin:          protocol.RouteOriginLocal,
-				OriginKey:       "local",
-			}, client.AttachRequest{Intent: intent, SessionName: name, Origin: protocol.RouteOriginLocal, OriginKey: "local"})
+				Dialer:                 sessionwire.NewClientDialer(localDialer()),
+				Terminal:               clientTerminal(deps),
+				Clock:                  clientClock(deps),
+				DisableCapabilityProbe: deps.disableCapabilityProbe,
+				UI:                     deps.ui,
+				Clipboard:              deps.clipboard,
+				Logger:                 log,
+				RuntimeObserver:        deps.runtimeObserver,
+				AttachHandoff:          handoff,
+				Remote:                 false,
+				Origin:                 protocol.RouteOriginLocal,
+				OriginKey:              "local",
+			}, client.AttachRequest{Intent: intent, SessionName: name, Environment: append([]string(nil), deps.localEnvironment...), Origin: protocol.RouteOriginLocal, OriginKey: "local"})
 		}
 
 		var handoffErr *client.AttachTargetError
@@ -1029,9 +1123,13 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 
 const daemonStopTimeout = 2 * time.Second
 
+var errDaemonNotRunning = errors.New("vev: no daemon running")
+
 type localDaemonDialer struct {
-	dir      string
-	observer ports.SerializedRuntimeObserver
+	dir         string
+	observer    ports.SerializedRuntimeObserver
+	executable  string
+	environment []string
 }
 
 func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {
@@ -1041,7 +1139,11 @@ func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {
 			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
 		}
 	}
-	return ensureDaemonWithLifecycle(ctx, d.dir, dial, realSpawn, defaultBackoff)
+	spawn := realSpawn
+	if d.executable != "" {
+		spawn = func() error { return spawnDaemonWithEnvironment(d.executable, d.environment) }
+	}
+	return ensureDaemonWithLifecycle(ctx, d.dir, dial, spawn, defaultBackoff)
 }
 
 func detachedLocalHello(name, cwd string) protocol.Hello {
@@ -1107,6 +1209,20 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 	}
 }
 
+func runUIRemoteCleanup(ctx context.Context) error {
+	root := os.Getenv("VEV_ENV_ROOT")
+	if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
+		return errors.New("vev: remote UI cleanup requires a private absolute launch root")
+	}
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir == "" || runtimeDir != filepath.Join(root, "runtime") {
+		return errors.New("vev: remote UI cleanup requires the launch runtime directory")
+	}
+	if err := requestDaemonStop(ctx); err != nil && !errors.Is(err, errDaemonNotRunning) {
+		return err
+	}
+	return nil
+}
+
 func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 	defer cancel()
@@ -1116,7 +1232,7 @@ func requestDaemonStop(ctx context.Context) error {
 		return fmt.Errorf("vev: stopping daemon: %w", err)
 	}
 	if owner != nil {
-		return errors.Join(errors.New("vev: no daemon running"), owner.Release())
+		return errors.Join(errDaemonNotRunning, owner.Release())
 	}
 	defer func() { _ = transport.Close() }()
 	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillDaemon})}); err != nil {
@@ -1585,7 +1701,7 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 			printKillSuccess(name, all, daemon)
 			return nil
 		}
-		return fmt.Errorf("vev: no daemon running")
+		return errDaemonNotRunning
 	}
 	defer func() { _ = transport.Close() }()
 

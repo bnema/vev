@@ -13,15 +13,16 @@ import (
 )
 
 // Version is the negotiated vev session protocol version.
-const Version uint16 = 40
+const Version uint16 = 41
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.
 const HandshakeTimeout = 15 * time.Second
 
-// MaxOutputDataLen is the largest decoded terminal byte stream accepted by one
-// output publication in protocol version 37.
-const MaxOutputDataLen = (16 << 20) - 55
+// MaxOutputDataLen reserves the type byte, fixed Output fields, and the largest
+// valid ViewContext (publication, lifecycle, session name, ephemeral flag, tab
+// and pane IDs, including string lengths) within the 16 MiB frame limit.
+const MaxOutputDataLen = (16 << 20) - 1 - 55 - (8 + 16 + 2 + 64 + 1 + 2 + 128 + 2 + 128)
 
 // MaxOutputWindow caps output states sent before client acknowledgement.
 const MaxOutputWindow = 8
@@ -122,6 +123,7 @@ func (h Hello) Geometry() domain.Geometry {
 
 type Input struct {
 	InputSeq uint64
+	ActionID uint64
 	Data     []byte
 }
 
@@ -185,6 +187,26 @@ type ErrorMsg struct {
 	Text string
 }
 
+type ViewContext struct {
+	Publication   uint64
+	Route         CommittedRouteIdentity
+	TabID         domain.TabStableID
+	FocusedPaneID domain.PaneStableID
+}
+
+func (c ViewContext) Validate() error {
+	if c.Publication == 0 {
+		return errors.New("invalid view publication")
+	}
+	if err := c.Route.Validate(); err != nil {
+		return err
+	}
+	if err := domain.ValidateTabStableID(c.TabID); err != nil {
+		return err
+	}
+	return domain.ValidatePaneStableID(c.FocusedPaneID)
+}
+
 type Output struct {
 	Epoch        uint64
 	Base         uint64
@@ -193,10 +215,54 @@ type Output struct {
 	ViewRevision uint64
 	Size         domain.Size
 	Full         bool
+	Context      *ViewContext
 	Data         []byte
 }
 
+type UIFence struct{ ActionID uint64 }
+
+type UIReceiptOutcome uint8
+
+const (
+	UIReceiptProcessed UIReceiptOutcome = iota + 1
+	UIReceiptUnavailable
+)
+
+type UIReceipt struct {
+	ActionID        uint64
+	Epoch           uint64
+	State           uint64
+	ViewPublication uint64
+	Outcome         UIReceiptOutcome
+}
+
+// Validate requires a committed publication for success. Unavailable receipts
+// carry no boundary: expiry cannot claim that any captured view was processed.
+func (r UIReceipt) Validate() error {
+	if r.ActionID == 0 {
+		return errors.New("UI receipt requires an action ID")
+	}
+	switch r.Outcome {
+	case UIReceiptProcessed:
+		if r.Epoch != 0 && r.State != 0 && r.ViewPublication != 0 {
+			return nil
+		}
+	case UIReceiptUnavailable:
+		if r.Epoch == 0 && r.State == 0 && r.ViewPublication == 0 {
+			return nil
+		}
+	}
+	return errors.New("invalid UI receipt boundary or outcome")
+}
+
+type UIViewUpdate struct {
+	Epoch   uint64
+	State   uint64
+	Context ViewContext
+}
+
 type AttachTarget struct {
+	CauseActionID     uint64
 	RequestID         uint64
 	Endpoint          string
 	Session           string
@@ -355,14 +421,19 @@ func ValidateOutput(m Output) error {
 		return ErrInvalidOutput
 	}
 	if m.New == 0 {
-		if m.Base != 0 || m.Full {
+		if m.Base != 0 || m.Full || m.Context != nil {
 			return ErrInvalidOutput
 		}
-	} else if (m.Base == 0 && !m.Full) || (m.Base != 0 && (m.Full || m.New != m.Base+1)) {
+	} else if m.Context == nil || (m.Base == 0 && !m.Full) || (m.Base != 0 && (m.Full || m.New != m.Base+1)) {
 		return ErrInvalidOutput
 	}
 	if err := ValidateSize(m.Size); err != nil {
 		return fmt.Errorf("%w: size", ErrInvalidOutput)
+	}
+	if m.Context != nil {
+		if err := m.Context.Validate(); err != nil {
+			return fmt.Errorf("%w: context: %w", ErrInvalidOutput, err)
+		}
 	}
 	if uint64(len(m.Data)) > math.MaxUint32 || len(m.Data) > MaxOutputDataLen {
 		return ErrInvalidOutput

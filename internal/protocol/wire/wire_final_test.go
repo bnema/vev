@@ -12,8 +12,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if protocol.Version != 40 {
-		t.Fatalf("ProtocolVersion = %d, want 40", protocol.Version)
+	if protocol.Version != 41 {
+		t.Fatalf("ProtocolVersion = %d, want 41", protocol.Version)
 	}
 	payload := MarshalHello(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -27,7 +27,7 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 40, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 41, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	want = append(want, 0, 0)
 	got := MarshalHello(msg)
@@ -105,9 +105,10 @@ func TestFinalResizeGoldenStrict(t *testing.T) {
 }
 
 func TestFinalOutputGoldenStrict(t *testing.T) {
+	context := testViewContext()
 	msg := protocol.Output{
 		Epoch: 1, Base: 0, New: 7, Echo: 8, ViewRevision: 9,
-		Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("ok"),
+		Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Context: &context, Data: []byte("ok"),
 	}
 	want := []byte{
 		0, 0, 0, 0, 0, 0, 0, 1,
@@ -115,10 +116,10 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 		0, 0, 0, 0, 0, 0, 0, 7,
 		0, 0, 0, 0, 0, 0, 0, 8,
 		0, 0, 0, 0, 0, 0, 0, 9,
-		0, 80, 0, 24, 1,
-		0, 0, 0, 0, 2,
-		0, 0, 0, 2, 'o', 'k',
+		0, 80, 0, 24, 1, 1,
 	}
+	want = append(want, testViewContextGolden()...)
+	want = append(want, 0, 0, 0, 0, 2, 0, 0, 0, 2, 'o', 'k')
 	got, err := MarshalOutput(msg)
 	if err != nil {
 		t.Fatalf("MarshalOutput() error = %v", err)
@@ -135,11 +136,12 @@ func TestFinalOutputGoldenStrict(t *testing.T) {
 }
 
 func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
-	valid := protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true}
+	context := testViewContext()
+	valid := protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Context: &context}
 	for _, bad := range []protocol.Output{
 		{},
-		{Epoch: 1, Base: 0, New: 1, Size: valid.Size},
-		{Epoch: 1, Base: 0, New: 1, Full: true},
+		{Epoch: 1, Base: 0, New: 1, Size: valid.Size, Context: &context},
+		{Epoch: 1, Base: 0, New: 1, Full: true, Context: &context},
 	} {
 		if got, err := MarshalOutput(bad); err == nil || got != nil {
 			t.Fatalf("MarshalOutput(%+v) = (%x, %v), want nil payload and error", bad, got, err)
@@ -158,7 +160,10 @@ func TestFinalOutputSemanticValidationBeforeDataAllocation(t *testing.T) {
 		{name: "size zero", mutate: func(b []byte) { binary.BigEndian.PutUint16(b[40:42], 0) }},
 		{name: "full flag false for reset", mutate: func(b []byte) { b[44] = 0 }},
 		{name: "invalid bool", mutate: func(b []byte) { b[44] = 2 }},
-		{name: "impossible data length", mutate: func(b []byte) { binary.BigEndian.PutUint32(b[46:50], ^uint32(0)) }},
+		{name: "impossible data length", mutate: func(b []byte) {
+			offset := outputHeaderLen + len(testViewContextGolden()) + 1
+			binary.BigEndian.PutUint32(b[offset:offset+4], ^uint32(0))
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bad := append([]byte(nil), payload...)
@@ -197,6 +202,7 @@ func TestFinalAckGoldenStrict(t *testing.T) {
 func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 	msg := protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach}
 	want := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'h', 'o', 's', 't', 0, 4, 'w', 'o', 'r', 'k', 2, 0, 0, 0, 0, 0, 0}
+	want = append(want, make([]byte, 8)...)
 	got := MarshalAttachTarget(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AttachTarget bytes = %x, want %x", got, want)
@@ -213,6 +219,7 @@ func TestFinalAttachTargetGoldenStrict(t *testing.T) {
 		t.Fatal("MarshalAttachTarget rejected same-peer route handoff")
 	}
 	wantLocal := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 0, 0, 0, 0}
+	wantLocal = append(wantLocal, make([]byte, 8)...)
 	if !bytes.Equal(localPayload, wantLocal) {
 		t.Fatalf("same-peer bytes = %x, want %x", localPayload, wantLocal)
 	}
@@ -249,6 +256,7 @@ func TestAttachTargetExactTargetWireStrict(t *testing.T) {
 	want := append(make([]byte, 8), []byte{0, 0, 0, 4, 'w', 'o', 'r', 'k', protocol.IntentAttach, 0, 0, 1, 1}...)
 	want = append(want, make([]byte, 15)...)
 	want = append(want, 0, 4, 'w', 'o', 'r', 'k', 1, 0, 0)
+	want = append(want, make([]byte, 8)...)
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("exact target bytes = %x, want %x", payload, want)
 	}
@@ -302,7 +310,7 @@ func TestFinalClosedWireValuesRejectUnknownEnumsAndBooleans(t *testing.T) {
 			name: "attach target same-peer boolean",
 			payload: func() []byte {
 				b := MarshalAttachTarget(protocol.AttachTarget{Endpoint: "host", Session: "work", Intent: protocol.IntentAttach})
-				b[len(b)-1] = 2
+				b[len(b)-11] = 2
 				return b
 			}(),
 			decode: func(b []byte) error { _, err := UnmarshalAttachTarget(b); return err },

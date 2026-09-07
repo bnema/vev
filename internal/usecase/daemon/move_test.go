@@ -25,10 +25,10 @@ func TestMovePaneMutationSameSession(t *testing.T) {
 	moved.ctx, moved.cancel = movedCtx, movedCancel
 
 	err := d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: sess.id},
+		Source:           moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation},
 		SourceTabID:      domain.TabStableID(sourceTab.stableID),
 		SourcePaneID:     domain.PaneStableID(moved.stableID),
-		Destination:      moveSessionLocator{ID: sess.id},
+		Destination:      moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation},
 		DestinationTabID: domain.TabStableID(destinationTab.stableID),
 	})
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestMovePaneMutationCrossSession(t *testing.T) {
 	d.mu.Unlock()
 
 	err := d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: source.id},
+		Source:           moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
 		SourceTabID:      domain.TabStableID(sourceTab.stableID),
 		SourcePaneID:     domain.PaneStableID(moved.stableID),
 		Destination:      moveSessionLocator{ID: destination.id},
@@ -105,7 +105,7 @@ func TestMovePaneRetiresEmptySourceWithoutClosingTransferredResources(t *testing
 	d.mu.Unlock()
 
 	err = d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: source.id},
+		Source:           moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
 		SourceTabID:      domain.TabStableID(movedTab.stableID),
 		SourcePaneID:     domain.PaneStableID(moved.stableID),
 		Destination:      moveSessionLocator{ID: destination.id},
@@ -153,7 +153,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	d.mu.Unlock()
 
 	require.NoError(t, d.movePane(movePaneRequest{
-		Source:           moveSessionLocator{ID: source.id},
+		Source:           moveSessionLocator{ID: source.id, Incarnation: source.incarnation},
 		SourceTabID:      domain.TabStableID(movedTab.stableID),
 		SourcePaneID:     domain.PaneStableID(moved.stableID),
 		Destination:      moveSessionLocator{ID: destination.id},

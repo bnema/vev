@@ -13,6 +13,11 @@ import (
 )
 
 func mustMarshalOutput(m protocol.Output) []byte {
+	m.Context = &protocol.ViewContext{
+		Publication: m.New,
+		Route:       protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "replay"}},
+		TabID:       "tab-1", FocusedPaneID: "pane-1",
+	}
 	payload, err := wire.MarshalOutput(m)
 	if err != nil {
 		panic(err)

@@ -158,6 +158,32 @@ func (c *pasteCoalescer) Buffering() bool {
 	return c.buffering || len(c.pending) > 0
 }
 
+// Idle is the automation admission check. It observes both paste and ordinary
+// prefix ownership without flushing human input to manufacture a clean boundary.
+func (c *pasteCoalescer) Idle() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && !c.buffering && len(c.pending) == 0 && len(c.buf) == 0
+}
+
+// EndBatch flushes only ordinary undecided bytes after a validated automated
+// batch. An open paste is never terminated here; admission and input validation
+// must prevent automation from entering or inheriting one.
+func (c *pasteCoalescer) EndBatch() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.buffering {
+		return false
+	}
+	c.stopFlushTimer()
+	pending := c.pending
+	c.pending = nil
+	if len(pending) != 0 {
+		c.emit(pending)
+	}
+	return true
+}
+
 // Close stops any pending timers and their goroutines. Callers which hand input
 // to a replacement must first use CloseAndTakeHeld so undecided bytes survive.
 func (c *pasteCoalescer) Close() {

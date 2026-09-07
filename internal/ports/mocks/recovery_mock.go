@@ -657,8 +657,8 @@ func (_c *MockSnapshotRepository_DeleteIncarnation_Call) RunAndReturn(run func(c
 }
 
 // LoadCheckpoint provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) LoadCheckpoint(context1 context.Context, incarnationID domain.IncarnationID, s string, v ports.CheckpointRef) (ports.SnapshotGeneration, error) {
-	ret := _mock.Called(context1, incarnationID, s, v)
+func (_mock *MockSnapshotRepository) LoadCheckpoint(context1 context.Context, incarnationID domain.IncarnationID, s string, checkpointRef ports.CheckpointRef) (ports.SnapshotGeneration, error) {
+	ret := _mock.Called(context1, incarnationID, s, checkpointRef)
 
 	if len(ret) == 0 {
 		panic("no return value specified for LoadCheckpoint")
@@ -667,15 +667,15 @@ func (_mock *MockSnapshotRepository) LoadCheckpoint(context1 context.Context, in
 	var r0 ports.SnapshotGeneration
 	var r1 error
 	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.IncarnationID, string, ports.CheckpointRef) (ports.SnapshotGeneration, error)); ok {
-		return returnFunc(context1, incarnationID, s, v)
+		return returnFunc(context1, incarnationID, s, checkpointRef)
 	}
 	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.IncarnationID, string, ports.CheckpointRef) ports.SnapshotGeneration); ok {
-		r0 = returnFunc(context1, incarnationID, s, v)
+		r0 = returnFunc(context1, incarnationID, s, checkpointRef)
 	} else {
 		r0 = ret.Get(0).(ports.SnapshotGeneration)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, domain.IncarnationID, string, ports.CheckpointRef) error); ok {
-		r1 = returnFunc(context1, incarnationID, s, v)
+		r1 = returnFunc(context1, incarnationID, s, checkpointRef)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -691,12 +691,12 @@ type MockSnapshotRepository_LoadCheckpoint_Call struct {
 //   - context1 context.Context
 //   - incarnationID domain.IncarnationID
 //   - s string
-//   - v ports.CheckpointRef
-func (_e *MockSnapshotRepository_Expecter) LoadCheckpoint(context1 any, incarnationID any, s any, v any) *MockSnapshotRepository_LoadCheckpoint_Call {
-	return &MockSnapshotRepository_LoadCheckpoint_Call{Call: _e.mock.On("LoadCheckpoint", context1, incarnationID, s, v)}
+//   - checkpointRef ports.CheckpointRef
+func (_e *MockSnapshotRepository_Expecter) LoadCheckpoint(context1 any, incarnationID any, s any, checkpointRef any) *MockSnapshotRepository_LoadCheckpoint_Call {
+	return &MockSnapshotRepository_LoadCheckpoint_Call{Call: _e.mock.On("LoadCheckpoint", context1, incarnationID, s, checkpointRef)}
 }
 
-func (_c *MockSnapshotRepository_LoadCheckpoint_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID, s string, v ports.CheckpointRef)) *MockSnapshotRepository_LoadCheckpoint_Call {
+func (_c *MockSnapshotRepository_LoadCheckpoint_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID, s string, checkpointRef ports.CheckpointRef)) *MockSnapshotRepository_LoadCheckpoint_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -729,7 +729,7 @@ func (_c *MockSnapshotRepository_LoadCheckpoint_Call) Return(snapshotGeneration 
 	return _c
 }
 
-func (_c *MockSnapshotRepository_LoadCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, s string, v ports.CheckpointRef) (ports.SnapshotGeneration, error)) *MockSnapshotRepository_LoadCheckpoint_Call {
+func (_c *MockSnapshotRepository_LoadCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, s string, checkpointRef ports.CheckpointRef) (ports.SnapshotGeneration, error)) *MockSnapshotRepository_LoadCheckpoint_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -792,8 +792,8 @@ func (_c *MockSnapshotRepository_Publish_Call) RunAndReturn(run func(context1 co
 }
 
 // ReconcileCheckpoint provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) ReconcileCheckpoint(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error {
-	ret := _mock.Called(context1, incarnationID, v)
+func (_mock *MockSnapshotRepository) ReconcileCheckpoint(context1 context.Context, incarnationID domain.IncarnationID, checkpointRef ports.CheckpointRef) error {
+	ret := _mock.Called(context1, incarnationID, checkpointRef)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ReconcileCheckpoint")
@@ -801,7 +801,7 @@ func (_mock *MockSnapshotRepository) ReconcileCheckpoint(context1 context.Contex
 
 	var r0 error
 	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.IncarnationID, ports.CheckpointRef) error); ok {
-		r0 = returnFunc(context1, incarnationID, v)
+		r0 = returnFunc(context1, incarnationID, checkpointRef)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -816,12 +816,12 @@ type MockSnapshotRepository_ReconcileCheckpoint_Call struct {
 // ReconcileCheckpoint is a helper method to define mock.On call
 //   - context1 context.Context
 //   - incarnationID domain.IncarnationID
-//   - v ports.CheckpointRef
-func (_e *MockSnapshotRepository_Expecter) ReconcileCheckpoint(context1 any, incarnationID any, v any) *MockSnapshotRepository_ReconcileCheckpoint_Call {
-	return &MockSnapshotRepository_ReconcileCheckpoint_Call{Call: _e.mock.On("ReconcileCheckpoint", context1, incarnationID, v)}
+//   - checkpointRef ports.CheckpointRef
+func (_e *MockSnapshotRepository_Expecter) ReconcileCheckpoint(context1 any, incarnationID any, checkpointRef any) *MockSnapshotRepository_ReconcileCheckpoint_Call {
+	return &MockSnapshotRepository_ReconcileCheckpoint_Call{Call: _e.mock.On("ReconcileCheckpoint", context1, incarnationID, checkpointRef)}
 }
 
-func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef)) *MockSnapshotRepository_ReconcileCheckpoint_Call {
+func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) Run(run func(context1 context.Context, incarnationID domain.IncarnationID, checkpointRef ports.CheckpointRef)) *MockSnapshotRepository_ReconcileCheckpoint_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -849,7 +849,7 @@ func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) Return(err error) *Mo
 	return _c
 }
 
-func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, v ports.CheckpointRef) error) *MockSnapshotRepository_ReconcileCheckpoint_Call {
+func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, checkpointRef ports.CheckpointRef) error) *MockSnapshotRepository_ReconcileCheckpoint_Call {
 	_c.Call.Return(run)
 	return _c
 }

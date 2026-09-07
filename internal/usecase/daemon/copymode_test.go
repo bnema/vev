@@ -433,7 +433,10 @@ func TestScrollbackEvictionFeedsCopyModeYank(t *testing.T) {
 	hg.Go(func() { d.handleConn(tr) })
 	awaitFrame(t, sends, wire.MsgWelcome)
 	advanceRender() // initial coordinator invalidation
-	awaitFrame(t, sends, wire.MsgOutput)
+	initial, err := wire.UnmarshalOutput(awaitFrame(t, sends, wire.MsgOutput).Payload)
+	require.NoError(t, err)
+	require.NotNil(t, initial.Context)
+	require.NotEmpty(t, initial.Context.FocusedPaneID, "a small viewport must retain its input target even when layout cannot place its cells")
 
 	for i := range 12 {
 		reads <- fmt.Appendf(nil, "line-%02d\r\n", i)

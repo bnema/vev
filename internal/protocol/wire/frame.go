@@ -30,6 +30,7 @@ const (
 	MsgSamePeerSwitchRequest      MsgType = 33
 	MsgParkedRouteRequest         MsgType = 35
 	MsgSessionCreationFailure     MsgType = 37
+	MsgUIFence                    MsgType = 39
 
 	MsgWelcome                MsgType = 16
 	MsgError                  MsgType = 17
@@ -49,6 +50,8 @@ const (
 	MsgSamePeerSwitchFailure  MsgType = 34
 	MsgParkedRouteResponse    MsgType = 36
 	MsgRouteCreateSession     MsgType = 38
+	MsgUIReceipt              MsgType = 40
+	MsgUIViewUpdate           MsgType = 41
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

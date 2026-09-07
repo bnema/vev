@@ -165,6 +165,10 @@ type renderInvalidationReservation struct {
 func (c *renderCoordinator) reserveInvalidationForLeaseAtResizeEpoch(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) (*renderInvalidationReservation, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.reserveInvalidationForLeaseAtResizeEpochLocked(source, lease, epoch, inv)
+}
+
+func (c *renderCoordinator) reserveInvalidationForLeaseAtResizeEpochLocked(source *attachedClient, lease *attachmentLease, epoch uint64, inv renderInvalidation) (*renderInvalidationReservation, bool) {
 	if c.torndown || (lease != nil && (!c.leaseCurrentLocked(lease, true) || lease.attachment != source)) ||
 		(source != nil && !c.attachmentRegisteredLocked(source)) ||
 		(epoch != 0 && (c.resize.epoch != epoch || c.resize.source != source || (lease != nil && c.resize.lease != lease))) {
@@ -719,6 +723,7 @@ func (c *renderCoordinator) rebindAttachmentWithReadinessLocked(ac *attachedClie
 		return nil
 	}
 	if lease := c.leases[ac]; lease != nil {
+		lease.cancelUIFenceLocked()
 		lease.active = false
 		delete(c.leases, ac)
 	}
@@ -781,6 +786,7 @@ func (c *renderCoordinator) beginDetachLocked(ac *attachedClient) renderLifecycl
 	}
 	delete(c.attachments, ac)
 	if lease := c.leases[ac]; lease != nil {
+		lease.cancelUIFenceLocked()
 		lease.active = false
 		delete(c.leases, ac)
 	}
@@ -841,6 +847,7 @@ func (c *renderCoordinator) beginSessionTeardown() renderLifecycleCleanup {
 	}
 	c.torndown = true
 	for ac, lease := range c.leases {
+		lease.cancelUIFenceLocked()
 		lease.active = false
 		delete(c.attachments, ac)
 	}

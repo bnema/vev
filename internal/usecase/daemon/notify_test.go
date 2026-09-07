@@ -288,7 +288,8 @@ func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attach
 	for _, pane := range tb.panes {
 		pane.ctx, pane.cancel = wctx, wcancel
 	}
-	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
+	sess := &session{sessionCore: sessionCore{id: "manual", name: "work", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, ctx: sctx, cancel: cancel, tabs: []*tab{tb}}
+	ac.output.lastRoutePosition = protocol.RoutePosition{Target: protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}, ActiveTabID: domain.TabStableID(tb.stableID)}
 	ac.setSession(sess)
 	d.sessions[sess.id] = sess
 	t.Cleanup(cancel)

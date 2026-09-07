@@ -248,9 +248,9 @@ type Transport struct {
 	// authenticated packet has been fully processed. It is read under mu.
 	afterPacketProcessed func()
 	// ACK hooks are test-only and observers must be non-blocking.
-	afterACKWakeAccepted func()
-	afterACKScheduled    func()
-	afterACKDispatched   func()
+	afterACKWakeAccepted    func()
+	afterACKScheduled       func(armed bool)
+	afterACKDispatchAttempt func(dispatched bool)
 	// outboundMu orders first transmissions and paced batches. Retransmits use
 	// writeMu directly because they do not establish new sequence order.
 	outboundMu sync.Mutex

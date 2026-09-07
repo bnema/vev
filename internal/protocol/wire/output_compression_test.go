@@ -29,11 +29,13 @@ func TestOutputCompression(t *testing.T) {
 		{name: "small full snapshot", output: protocol.Output{Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 80, Rows: 24}, Full: true, Data: []byte("small")}, wantKind: outputCompressionNone},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			context := testViewContext()
+			tt.output.Context = &context
 			payload, err := MarshalOutput(tt.output)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := payload[outputHeaderLen]; got != tt.wantKind {
+			if got := payload[outputHeaderLen+len(testViewContextGolden())]; got != tt.wantKind {
 				t.Fatalf("compression kind = %d, want %d", got, tt.wantKind)
 			}
 			decoded, err := UnmarshalOutput(payload)
@@ -52,11 +54,14 @@ func TestCompressedOutputRejectsMalformedPayloads(t *testing.T) {
 		Epoch: 1, Base: 0, New: 1, Size: domain.Size{Cols: 120, Rows: 40}, Full: true,
 		Data: bytes.Repeat([]byte("\x1b[31mcompressed\x1b[0m\r\n"), 256),
 	}
+	context := testViewContext()
+	output.Context = &context
 	payload, err := MarshalOutput(output)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload[outputHeaderLen] != outputCompressionZlib {
+	compressionOffset := outputHeaderLen + len(testViewContextGolden())
+	if payload[compressionOffset] != outputCompressionZlib {
 		t.Fatal("test fixture was not compressed")
 	}
 
@@ -64,12 +69,12 @@ func TestCompressedOutputRejectsMalformedPayloads(t *testing.T) {
 		name   string
 		mutate func([]byte)
 	}{
-		{name: "unknown kind", mutate: func(b []byte) { b[outputHeaderLen] = 99 }},
+		{name: "unknown kind", mutate: func(b []byte) { b[compressionOffset] = 99 }},
 		{name: "decoded length mismatch", mutate: func(b []byte) {
-			binary.BigEndian.PutUint32(b[outputHeaderLen+1:outputHeaderLen+5], uint32(len(output.Data)-1))
+			binary.BigEndian.PutUint32(b[compressionOffset+1:compressionOffset+5], uint32(len(output.Data)-1))
 		}},
 		{name: "compressed incremental", mutate: func(b []byte) {
-			b[outputHeaderLen-1] = 0
+			b[44] = 0 // Full; byte45 is context presence, not the reset flag.
 			binary.BigEndian.PutUint64(b[16:24], 2)
 			binary.BigEndian.PutUint64(b[8:16], 1)
 		}},
@@ -84,7 +89,7 @@ func TestCompressedOutputRejectsMalformedPayloads(t *testing.T) {
 		})
 	}
 	trailingCompressed := append(append([]byte(nil), payload...), 0)
-	binary.BigEndian.PutUint32(trailingCompressed[outputHeaderLen+5:outputHeaderLen+9], uint32(len(trailingCompressed)-(outputHeaderLen+9)))
+	binary.BigEndian.PutUint32(trailingCompressed[compressionOffset+5:compressionOffset+9], uint32(len(trailingCompressed)-(compressionOffset+9)))
 	if _, err := UnmarshalOutput(trailingCompressed); err == nil {
 		t.Fatal("UnmarshalOutput accepted trailing compressed bytes")
 	}
@@ -108,6 +113,8 @@ func BenchmarkMarshalOutput(b *testing.B) {
 		},
 	}
 	for name, output := range fixtures {
+		context := testViewContext()
+		output.Context = &context
 		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(output.Data)))

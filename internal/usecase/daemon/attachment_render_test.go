@@ -365,7 +365,7 @@ func TestAttachmentMoveReconcilesSourceGeometryAfterOwnerRemoval(t *testing.T) {
 	require.True(t, source.geometry.reconcile(d, source, nil))
 
 	target := &session{
-		sessionCore: sessionCore{id: "target-geometry", name: "target-geometry"},
+		sessionCore: sessionCore{id: "target-geometry", name: "target-geometry", incarnation: newTestLifecycle(t)},
 		ctx:         source.ctx,
 		cancel:      func() {},
 		tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},

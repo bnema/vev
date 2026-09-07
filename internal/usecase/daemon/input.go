@@ -392,6 +392,7 @@ func (h daemonKeyHandler) acquireAttachmentEffect() (*session, *attachmentEffect
 		if !admitted {
 			return nil, nil, false
 		}
+		effect.uiActionID = h.effect.uiActionID
 		if h.d.afterAttachmentEffectAdmitted != nil {
 			h.d.afterAttachmentEffectAdmitted(effect.capability())
 		}
