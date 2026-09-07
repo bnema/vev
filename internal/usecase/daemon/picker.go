@@ -9,6 +9,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/keys"
@@ -75,7 +76,6 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	rt.pickerPreview = nil
 	rt.picker = model
 	rt.pickerGeneration++
-	instance := remotePickerInstance{ac: ac, generation: rt.pickerGeneration, model: model}
 	rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
 	rt.pickerIntent = intent
 	rt.pickerSource = source
@@ -85,10 +85,6 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	d.teardownPreviewSubscription(ac, previous, previousGeneration)
 	d.registerPreviewForSelection(ac)
 	d.invalidateRender(sess, ac, true, "picker.go")
-	if rt.beforeRemotePickerRegistration != nil {
-		rt.beforeRemotePickerRegistration()
-	}
-	d.remoteDiscoveryOpened(instance.discoveryInstance())
 }
 
 // pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
@@ -167,13 +163,16 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		})
 	}
 
-	catalog := d.remoteCatalogSnapshot()
-	sortRemoteCatalog(catalog, d.remoteHostRanks())
+	directory := d.remoteDirectorySnapshot()
+	monitored := d.remoteDirectory != nil
+	hosts := append([]ports.RemoteHostSnapshot(nil), directory.Hosts...)
+	sortDirectoryHosts(hosts)
+	now := d.daemonNow()
 
 	catalogRows := 0
-	for _, host := range catalog {
-		catalogRows += len(host.entry.Sessions)
-		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch || host.status == remoteHostMalformed) {
+	for _, host := range hosts {
+		catalogRows += len(host.Sessions)
+		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
 			catalogRows++
 		}
 	}
@@ -187,32 +186,42 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		views = append(views, view)
 	}
 	publishedRemote := false
-	for _, host := range catalog {
+	for _, host := range hosts {
 		publishedForHost := 0
-		for _, session := range host.entry.Sessions {
-			key := domain.RemoteSessionKey{Host: host.entry.Host, Name: session.Name}
+		for _, session := range host.Sessions {
+			key := domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}
 			if key.Validate() != nil {
 				continue
 			}
-			view := remotePickerView(key, session, host.status, host.entry.FetchedAt)
+			view := remotePickerView(key, session, host, now)
 			if grouped {
 				view.HideRemoteOrigin = true
 				if publishedForHost == 0 {
-					view.Section = "REMOTE  " + host.entry.Host
+					view.Section = "REMOTE  " + host.Endpoint
 				}
 			}
 			views = append(views, view)
 			publishedForHost++
 			publishedRemote = true
 		}
-		if len(host.entry.Sessions) == 0 && (host.status == remoteHostUnreachable || host.status == remoteHostVersionMismatch || host.status == remoteHostMalformed) {
-			view := remotePickerHostView(host.entry.Host, host.status)
+		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
+			view := remotePickerHostView(host, now)
 			if grouped {
-				view.Section = "REMOTE  " + host.entry.Host
+				view.Section = "REMOTE  " + host.Endpoint
 			}
 			views = append(views, view)
 			publishedRemote = true
 		}
+	}
+	// A nil directory means remote monitoring is not installed at all:
+	// only an installed-but-unpublished monitor reads as "checking".
+	if monitored && !directory.Initialized {
+		view := remotePickerCheckingView()
+		if grouped {
+			view.Section = "REMOTE"
+		}
+		views = append(views, view)
+		publishedRemote = true
 	}
 	for i, s := range stopped {
 		createdAt := s.createdAt
@@ -253,7 +262,7 @@ func attentionSuffix(label string) string {
 func (d *Daemon) notifyRemotePickerUnavailable(sess *session, target picker.Target) {
 	reason := target.UnavailableReason
 	if reason == "" {
-		reason = "identity_changed"
+		reason = domain.RemoteReasonIdentityChanged
 	}
 	message := "Remote session unavailable"
 	if target.RemoteTarget != nil {
@@ -267,21 +276,23 @@ func (d *Daemon) notifyRemotePickerUnavailable(sess *session, target picker.Targ
 
 func remotePickerReasonText(reason string) string {
 	switch reason {
-	case "catalog_stale":
+	case domain.RemoteReasonCatalogStale:
 		return "catalog stale"
-	case "host_unreachable":
+	case domain.RemoteReasonHostUnreachable:
 		return "host unreachable"
-	case "version_mismatch":
+	case domain.RemoteReasonVersionMismatch:
 		return "version mismatch"
-	case "session_stopped":
+	case domain.RemoteReasonSessionStopped:
 		return "session stopped"
-	case "session_broken":
+	case domain.RemoteReasonSessionBroken:
 		return "session broken"
-	case "malformed":
+	case domain.RemoteReasonMalformed:
 		return "catalog malformed"
-	case "refreshing":
+	case domain.RemoteReasonAuthFailure:
+		return "authentication failed"
+	case domain.RemoteReasonRefreshing:
 		return "refreshing"
-	case "identity_changed":
+	case domain.RemoteReasonIdentityChanged:
 		return "session identity changed"
 	default:
 		return "unavailable"
@@ -314,7 +325,6 @@ func pickerSearchSlashIndex(data, pending []byte) int {
 func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 	rt := ac.overlays
 	var previewGeneration uint64
-	var instance remotePickerInstance
 	return listInputState{
 		pending:  &rt.pickerPending,
 		esc:      &rt.pickerESC,
@@ -324,7 +334,6 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		unlock:   rt.pickerMu.Unlock,
 		active:   func() bool { return rt.picker != nil },
 		closeLocked: func() {
-			instance = remotePickerInstance{ac: ac, generation: rt.pickerGeneration, model: rt.picker}
 			rt.picker = nil
 			rt.pickerIntent = pickerNavigate
 			rt.pickerSource = moveSourceLocator{}
@@ -332,7 +341,6 @@ func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
 		},
 		afterClose: func() {
 			d.clearPreviewGeneration(ac, previewGeneration)
-			d.remoteDiscoveryClosed(instance.discoveryInstance())
 			if sess := ac.currentAttachmentSession(); sess != nil {
 				d.invalidateRender(sess, ac, true, "picker.go")
 			}
@@ -550,7 +558,7 @@ func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
 	ac.overlays.pickerMu.Lock()
 	// Selection may have changed while the target was resolved.
 	selected, stillSelected := ac.overlays.picker.Selected()
-	valid := ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerIntent == intent && stillSelected && pickerTargetsEqual(selected, target)
+	valid := ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerIntent == intent && stillSelected && pickerRouteTargetsEqual(selected, target)
 	if valid {
 		ac.overlays.pickerPreview = next
 		ac.overlays.pickerPreviewSession = targetSess
@@ -633,7 +641,7 @@ func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Targ
 			matching := false
 			if ac.overlays.pickerPreviewGeneration == generation && ac.overlays.picker != nil {
 				selected, stillSelected := ac.overlays.picker.Selected()
-				matching = stillSelected && pickerTargetsEqual(selected, target)
+				matching = stillSelected && pickerRouteTargetsEqual(selected, target)
 				if matching {
 					ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, "remote preview unavailable")
 				}
@@ -659,7 +667,7 @@ func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Targ
 			return
 		}
 		selected, stillSelected := ac.overlays.picker.Selected()
-		if !stillSelected || !pickerTargetsEqual(selected, target) {
+		if !stillSelected || !pickerRouteTargetsEqual(selected, target) {
 			ac.overlays.pickerMu.Unlock()
 			return
 		}
@@ -819,7 +827,6 @@ func (d *Daemon) closePickerIfCurrentRefresh(ac *attachedClient, model *picker.M
 		ac.overlays.pickerMu.Unlock()
 		return false
 	}
-	instance := remotePickerInstance{ac: ac, generation: ac.overlays.pickerGeneration, model: ac.overlays.picker}
 	ac.overlays.picker = nil
 	ac.overlays.pickerTitle = ""
 	ac.overlays.pickerIntent = pickerNavigate
@@ -829,16 +836,16 @@ func (d *Daemon) closePickerIfCurrentRefresh(ac *attachedClient, model *picker.M
 	previewGeneration := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerMu.Unlock()
 	d.clearPreviewGeneration(ac, previewGeneration)
-	if instance.model != nil {
-		d.remoteDiscoveryClosed(instance.discoveryInstance())
-	}
 	return true
 }
 
-func pickerTargetsEqual(left, right picker.Target) bool {
+// pickerRouteTargetsEqual compares the exact route identity of two picker
+// targets, ignoring presentation fields such as UnavailableReason that
+// render around the route on every observation.
+func pickerRouteTargetsEqual(left, right picker.Target) bool {
 	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name ||
 		left.RemoteHost != right.RemoteHost || left.TabID != right.TabID || left.TabIndex != right.TabIndex || left.Stopped != right.Stopped ||
-		left.UnavailableReason != right.UnavailableReason || !remoteKeysEqual(left.RemoteKey, right.RemoteKey) ||
+		!remoteKeysEqual(left.RemoteKey, right.RemoteKey) ||
 		!remoteTargetsEqual(left.RemoteTarget, right.RemoteTarget) {
 		return false
 	}
@@ -1107,29 +1114,19 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 	return nil
 }
 
-func (d *Daemon) remoteCatalogEntryLocked(host string) (catalogue.RemoteCatalogCacheEntry, bool) {
-	if d.remoteCatalog.status[host] != remoteHostFresh {
-		return catalogue.RemoteCatalogCacheEntry{}, false
-	}
-	entry, ok := d.remoteCatalog.cache[host]
-	if !ok || remoteCatalogExpired(entry.FetchedAt, d.clock.Now()) {
-		d.remoteCatalog.status[host] = remoteHostStale
-		return catalogue.RemoteCatalogCacheEntry{}, false
-	}
-	return entry, true
-}
-
+// remoteCatalogTargetReady validates an exact remote destination against
+// the latest known inventory at any age. Freshness is presentation
+// information, not attach authority: valid cached targets are attempted and
+// rejected precisely at the destination, never declared nonexistent by age.
 func (d *Daemon) remoteCatalogTargetReady(target domain.RemoteSessionTarget) bool {
 	if d == nil || target.Validate() != nil {
 		return false
 	}
-	d.remoteCatalog.mu.Lock()
-	defer d.remoteCatalog.mu.Unlock()
-	entry, ok := d.remoteCatalogEntryLocked(target.Endpoint)
-	if !ok {
+	host, ok := d.remoteDirectorySnapshot().Find(target.Endpoint)
+	if !ok || !host.InventoryKnown {
 		return false
 	}
-	for _, session := range entry.Sessions {
+	for _, session := range host.Sessions {
 		if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
 			continue
 		}

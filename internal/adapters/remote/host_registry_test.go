@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/bnema/vev/internal/domain"
 )
 
 func TestHostStorePath(t *testing.T) {
@@ -18,6 +20,23 @@ func TestHostStorePath(t *testing.T) {
 	want := filepath.Join(stateDir, "hosts.json")
 	if got := HostStorePath(stateDir); got != want {
 		t.Fatalf("HostStorePath(%q) = %q, want %q", stateDir, got, want)
+	}
+}
+
+func TestNewRemoteRegistrationSamplesUniqueIncarnations(t *testing.T) {
+	first, err := newRemoteRegistration("user@arch")
+	if err != nil {
+		t.Fatalf("newRemoteRegistration: %v", err)
+	}
+	second, err := newRemoteRegistration("user@arch")
+	if err != nil {
+		t.Fatalf("newRemoteRegistration: %v", err)
+	}
+	if first.Incarnation == second.Incarnation {
+		t.Fatal("incarnations must be unique per registration")
+	}
+	if _, err := newRemoteRegistration("not a host"); err == nil {
+		t.Fatal("invalid endpoint must be rejected")
 	}
 }
 
@@ -84,8 +103,25 @@ func TestHostStoreCrossProcessConcurrentRemember(t *testing.T) {
 	}
 	want := append(append([]string{}, left...), right...)
 	sort.Strings(want)
-	if !slices.Equal(learned, want) {
+	if !slices.Equal(registrationEndpoints(learned), want) {
 		t.Fatalf("learned len=%d want %d; missing merges under cross-process writers", len(learned), len(want))
+	}
+}
+
+func registrationEndpoints(registrations []domain.RemoteRegistration) []string {
+	endpoints := make([]string, 0, len(registrations))
+	for _, record := range registrations {
+		endpoints = append(endpoints, record.Endpoint)
+	}
+	return endpoints
+}
+
+func requireValidRegistrations(t *testing.T, registrations []domain.RemoteRegistration) {
+	t.Helper()
+	for _, record := range registrations {
+		if err := record.Validate(); err != nil {
+			t.Fatalf("registration %+v invalid: %v", record, err)
+		}
 	}
 }
 
@@ -146,12 +182,14 @@ func TestHostStore(t *testing.T) {
 		}
 		wantPinned := []string{"zebra", "arch"}
 		wantLearned := []string{"beta", "mule"}
-		if !slices.Equal(pinned, wantPinned) {
+		if !slices.Equal(registrationEndpoints(pinned), wantPinned) {
 			t.Fatalf("pinned = %v, want %v", pinned, wantPinned)
 		}
-		if !slices.Equal(learned, wantLearned) {
+		if !slices.Equal(registrationEndpoints(learned), wantLearned) {
 			t.Fatalf("learned = %v, want %v", learned, wantLearned)
 		}
+		requireValidRegistrations(t, pinned)
+		requireValidRegistrations(t, learned)
 
 		info, err := os.Stat(path)
 		if err != nil {
@@ -176,15 +214,31 @@ func TestHostStore(t *testing.T) {
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatalf("decode store: %v", err)
 		}
-		if decoded.Version != 2 {
-			t.Fatalf("version = %d, want 2", decoded.Version)
+		if decoded.Version != 3 {
+			t.Fatalf("version = %d, want 3", decoded.Version)
 		}
-		if !slices.Equal(decoded.Pinned, wantPinned) {
+		stored := make([]domain.RemoteRegistration, 0, len(decoded.Pinned)+len(decoded.Learned))
+		for _, record := range decoded.Pinned {
+			registration, err := decodeRecord(record)
+			if err != nil {
+				t.Fatalf("decode stored pinned: %v", err)
+			}
+			stored = append(stored, registration)
+		}
+		for _, record := range decoded.Learned {
+			registration, err := decodeRecord(record)
+			if err != nil {
+				t.Fatalf("decode stored learned: %v", err)
+			}
+			stored = append(stored, registration)
+		}
+		if !slices.Equal(registrationEndpoints(stored[:len(decoded.Pinned)]), wantPinned) {
 			t.Fatalf("stored pinned = %v, want %v", decoded.Pinned, wantPinned)
 		}
-		if !slices.Equal(decoded.Learned, wantLearned) {
+		if !slices.Equal(registrationEndpoints(stored[len(decoded.Pinned):]), wantLearned) {
 			t.Fatalf("stored learned = %v, want %v", decoded.Learned, wantLearned)
 		}
+		requireValidRegistrations(t, stored)
 	})
 
 	t.Run("overlap allowed across pinned and learned", func(t *testing.T) {
@@ -202,11 +256,16 @@ func TestHostStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Hosts() error = %v", err)
 		}
-		if !slices.Equal(pinned, []string{"arch"}) {
+		if !slices.Equal(registrationEndpoints(pinned), []string{"arch"}) {
 			t.Fatalf("pinned = %v, want [arch]", pinned)
 		}
-		if !slices.Equal(learned, []string{"arch"}) {
+		if !slices.Equal(registrationEndpoints(learned), []string{"arch"}) {
 			t.Fatalf("learned = %v, want [arch]", learned)
+		}
+		// Overlap shares one registration: pinning a learned host and
+		// remembering a pinned host retain the incarnation.
+		if !pinned[0].Equal(learned[0]) {
+			t.Fatalf("overlapping registrations differ: pinned %+v learned %+v", pinned[0], learned[0])
 		}
 	})
 
@@ -255,7 +314,7 @@ func TestHostStore(t *testing.T) {
 		if len(pinned) != 0 {
 			t.Fatalf("pinned after Remove(arch) = %v, want empty", pinned)
 		}
-		if !slices.Equal(learned, []string{"mule"}) {
+		if !slices.Equal(registrationEndpoints(learned), []string{"mule"}) {
 			t.Fatalf("learned after Remove(arch) = %v, want [mule]", learned)
 		}
 
@@ -303,7 +362,7 @@ func TestHostStore(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy version 1 migrates on mutation", func(t *testing.T) {
+	t.Run("legacy version 1 migrates on read with backup", func(t *testing.T) {
 		t.Parallel()
 		cases := []struct {
 			name        string
@@ -324,21 +383,13 @@ func TestHostStore(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Hosts() error = %v", err)
 				}
-				if len(pinned) != 0 || !slices.Equal(learned, tc.wantLearned) {
+				if len(pinned) != 0 || !slices.Equal(registrationEndpoints(learned), tc.wantLearned) {
 					t.Fatalf("Hosts() = pinned %v learned %v, want pinned empty learned %v", pinned, learned, tc.wantLearned)
 				}
+				requireValidRegistrations(t, learned)
+				// The read migrated: the file is now version 3 and the
+				// pre-migration bytes are preserved privately.
 				raw, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatalf("read legacy store: %v", err)
-				}
-				if string(raw) != tc.raw {
-					t.Fatalf("read-only Hosts rewrote file: got %q, want %q", raw, tc.raw)
-				}
-
-				if err := store.AddPinned("zebra"); err != nil {
-					t.Fatalf("AddPinned() error = %v", err)
-				}
-				raw, err = os.ReadFile(path)
 				if err != nil {
 					t.Fatalf("read migrated store: %v", err)
 				}
@@ -349,10 +400,160 @@ func TestHostStore(t *testing.T) {
 				if decoded.Version != hostsFileVersion {
 					t.Fatalf("migrated version = %d, want %d", decoded.Version, hostsFileVersion)
 				}
-				if !slices.Equal(decoded.Pinned, []string{"zebra"}) || !slices.Equal(decoded.Learned, tc.wantLearned) {
-					t.Fatalf("migrated store = pinned %v learned %v", decoded.Pinned, decoded.Learned)
+				backup, err := os.ReadFile(path + hostsBackupSuffix)
+				if err != nil {
+					t.Fatalf("read migration backup: %v", err)
+				}
+				if string(backup) != tc.raw {
+					t.Fatalf("backup = %q, want pre-migration %q", backup, tc.raw)
+				}
+				info, err := os.Stat(path + hostsBackupSuffix)
+				if err != nil {
+					t.Fatalf("stat backup: %v", err)
+				}
+				if perm := info.Mode().Perm(); perm != 0o600 {
+					t.Fatalf("backup permissions = %04o, want 0600", perm)
+				}
+				// A repeated load retains the migrated identity.
+				againPinned, againLearned, err := store.Hosts()
+				if err != nil {
+					t.Fatalf("Hosts() again error = %v", err)
+				}
+				if len(againPinned) != 0 || len(againLearned) != len(learned) {
+					t.Fatalf("Hosts() again = pinned %v learned %v", againPinned, againLearned)
+				}
+				for i := range learned {
+					if !learned[i].Equal(againLearned[i]) {
+						t.Fatalf("identity not retained: %+v vs %+v", learned[i], againLearned[i])
+					}
 				}
 			})
+		}
+	})
+
+	t.Run("legacy version 2 migrates on read preserving order", func(t *testing.T) {
+		t.Parallel()
+		path := storePath(t)
+		legacy := `{"version":2,"pinned":["zebra","arch"],"learned":["mule","beta"]}`
+		writeHosts(t, path, []byte(legacy))
+		store := NewFileHostStore(path)
+
+		pinned, learned, err := store.Hosts()
+		if err != nil {
+			t.Fatalf("Hosts() error = %v", err)
+		}
+		if !slices.Equal(registrationEndpoints(pinned), []string{"zebra", "arch"}) {
+			t.Fatalf("pinned = %v, want [zebra arch]", pinned)
+		}
+		if !slices.Equal(registrationEndpoints(learned), []string{"beta", "mule"}) {
+			t.Fatalf("learned = %v, want [beta mule]", learned)
+		}
+		requireValidRegistrations(t, pinned)
+		requireValidRegistrations(t, learned)
+
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read migrated store: %v", err)
+		}
+		var decoded hostsFile
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("decode migrated store: %v", err)
+		}
+		if decoded.Version != hostsFileVersion {
+			t.Fatalf("migrated version = %d, want %d", decoded.Version, hostsFileVersion)
+		}
+		backup, err := os.ReadFile(path + hostsBackupSuffix)
+		if err != nil {
+			t.Fatalf("read migration backup: %v", err)
+		}
+		if string(backup) != legacy {
+			t.Fatalf("backup = %q, want pre-migration %q", backup, legacy)
+		}
+	})
+
+	t.Run("legacy version 2 overlapping membership shares one registration", func(t *testing.T) {
+		t.Parallel()
+		path := storePath(t)
+		legacy := `{"version":2,"pinned":["arch"],"learned":["arch","mule"]}`
+		writeHosts(t, path, []byte(legacy))
+		store := NewFileHostStore(path)
+
+		pinned, learned, err := store.Hosts()
+		if err != nil {
+			t.Fatalf("Hosts() error = %v", err)
+		}
+		requireValidRegistrations(t, pinned)
+		requireValidRegistrations(t, learned)
+		if len(pinned) != 1 || len(learned) != 2 {
+			t.Fatalf("pinned = %v, learned = %v, want 1 pinned and 2 learned", pinned, learned)
+		}
+		if pinned[0] != learned[0] {
+			t.Fatalf("overlapping endpoint has two incarnations: pinned %+v vs learned %+v", pinned[0], learned[0])
+		}
+		// Removing only the pin must not surface a second identity
+		// for an endpoint that was never fully removed.
+		if err := store.RemovePinned("arch"); err != nil {
+			t.Fatalf("RemovePinned(arch) error = %v", err)
+		}
+		_, againLearned, err := store.Hosts()
+		if err != nil {
+			t.Fatalf("Hosts() error = %v", err)
+		}
+		if len(againLearned) != 2 || againLearned[0] != pinned[0] {
+			t.Fatalf("identity not retained after unpin: %+v vs %+v", againLearned, pinned)
+		}
+	})
+
+	t.Run("conflicting version 3 overlap fails closed", func(t *testing.T) {
+		t.Parallel()
+		path := storePath(t)
+		conflict := `{"version":3,"pinned":[{"endpoint":"arch","incarnation":"01000000000000000000000000000000","generation":1}],"learned":[{"endpoint":"arch","incarnation":"02000000000000000000000000000000","generation":1}]}`
+		writeHosts(t, path, []byte(conflict))
+		store := NewFileHostStore(path)
+
+		if _, _, err := store.Hosts(); err == nil {
+			t.Fatal("Hosts() error = nil, want conflicting identity rejection")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read store: %v", err)
+		}
+		if string(raw) != conflict {
+			t.Fatalf("rejected store changed: got %q, want %q", raw, conflict)
+		}
+	})
+
+	t.Run("remove and re-add creates a new incarnation", func(t *testing.T) {
+		t.Parallel()
+		path := storePath(t)
+		store := NewFileHostStore(path)
+		if err := store.Remember("arch"); err != nil {
+			t.Fatalf("Remember(arch) error = %v", err)
+		}
+		_, learned, err := store.Hosts()
+		if err != nil {
+			t.Fatalf("Hosts() error = %v", err)
+		}
+		first := learned[0]
+
+		if deleted, err := store.Remove("arch"); err != nil || !deleted {
+			t.Fatalf("Remove(arch) = %t, %v", deleted, err)
+		}
+		if err := store.Remember("arch"); err != nil {
+			t.Fatalf("Remember(arch) again error = %v", err)
+		}
+		_, relearned, err := store.Hosts()
+		if err != nil {
+			t.Fatalf("Hosts() again error = %v", err)
+		}
+		if len(relearned) != 1 {
+			t.Fatalf("Hosts() again = %v, want one registration", relearned)
+		}
+		if relearned[0].Equal(first) {
+			t.Fatalf("re-added registration %+v must not equal removed %+v", relearned[0], first)
+		}
+		if relearned[0].Incarnation == first.Incarnation {
+			t.Fatalf("re-added incarnation reused after full removal")
 		}
 	})
 
@@ -363,7 +564,7 @@ func TestHostStore(t *testing.T) {
 			raw       string
 			wantError string
 		}{
-			{name: "unsupported version", raw: `{"version":3,"pinned":["arch"],"learned":[]}`, wantError: "unsupported hosts file version 3"},
+			{name: "unsupported version", raw: `{"version":99,"pinned":[],"learned":[]}`, wantError: "unsupported hosts file version 99"},
 			{name: "null pinned", raw: `{"version":2,"pinned":null,"learned":[]}`, wantError: "malformed hosts file"},
 			{name: "null learned", raw: `{"version":2,"pinned":[],"learned":null}`, wantError: "malformed hosts file"},
 			{name: "duplicate pinned", raw: `{"version":2,"pinned":["arch","arch"],"learned":[]}`, wantError: "malformed hosts file"},
@@ -375,6 +576,13 @@ func TestHostStore(t *testing.T) {
 			{name: "legacy duplicate hosts", raw: `{"version":1,"hosts":["arch","arch"]}`, wantError: "malformed hosts file: duplicate learned host"},
 			{name: "legacy invalid target", raw: `{"version":1,"hosts":[" arch"]}`, wantError: "malformed hosts file"},
 			{name: "legacy invalid utf8", raw: "{\"version\":1,\"hosts\":[\"\xff\"]}", wantError: "malformed hosts file"},
+			{name: "v3 string pinned is malformed", raw: `{"version":3,"pinned":["arch"],"learned":[]}`, wantError: "malformed hosts file"},
+			{name: "v3 missing incarnation", raw: `{"version":3,"pinned":[{"endpoint":"arch","generation":1}],"learned":[]}`, wantError: "malformed hosts file"},
+			{name: "v3 malformed incarnation", raw: `{"version":3,"pinned":[{"endpoint":"arch","incarnation":"zzzz","generation":1}],"learned":[]}`, wantError: "malformed hosts file"},
+			{name: "v3 short incarnation", raw: `{"version":3,"pinned":[{"endpoint":"arch","incarnation":"0123","generation":1}],"learned":[]}`, wantError: "malformed hosts file"},
+			{name: "v3 zero incarnation", raw: `{"version":3,"pinned":[{"endpoint":"arch","incarnation":"00000000000000000000000000000000","generation":1}],"learned":[]}`, wantError: "malformed hosts file"},
+			{name: "v3 zero generation", raw: `{"version":3,"pinned":[{"endpoint":"arch","incarnation":"01000000000000000000000000000000","generation":0}],"learned":[]}`, wantError: "malformed hosts file"},
+			{name: "v3 duplicate pinned", raw: `{"version":3,"pinned":[{"endpoint":"arch","incarnation":"01000000000000000000000000000000","generation":1},{"endpoint":"arch","incarnation":"02000000000000000000000000000000","generation":1}],"learned":[]}`, wantError: "duplicate pinned host"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -402,28 +610,30 @@ func TestHostStore(t *testing.T) {
 		}
 	})
 
-	t.Run("sorts unsorted learned on read without rewriting until mutation", func(t *testing.T) {
+	t.Run("reads v3 without rewriting until mutation", func(t *testing.T) {
 		t.Parallel()
 		path := storePath(t)
-		unsorted := []byte(`{"version":2,"pinned":["zebra","arch"],"learned":["mule","beta"]}` + "\n")
-		writeHosts(t, path, unsorted)
+		seeded := `{"version":3,"pinned":[{"endpoint":"zebra","incarnation":"01000000000000000000000000000000","generation":1},{"endpoint":"arch","incarnation":"02000000000000000000000000000000","generation":1}],"learned":[{"endpoint":"mule","incarnation":"03000000000000000000000000000000","generation":1},{"endpoint":"beta","incarnation":"04000000000000000000000000000000","generation":1}]}` + "\n"
+		writeHosts(t, path, []byte(seeded))
 
 		store := NewFileHostStore(path)
 		pinned, learned, err := store.Hosts()
 		if err != nil {
 			t.Fatalf("Hosts() error = %v", err)
 		}
-		if !slices.Equal(pinned, []string{"zebra", "arch"}) {
+		if !slices.Equal(registrationEndpoints(pinned), []string{"zebra", "arch"}) {
 			t.Fatalf("pinned = %v, want [zebra arch]", pinned)
 		}
-		if !slices.Equal(learned, []string{"beta", "mule"}) {
+		if !slices.Equal(registrationEndpoints(learned), []string{"beta", "mule"}) {
 			t.Fatalf("learned = %v, want [beta mule]", learned)
 		}
+		// Identity survives the read; incarnations are stable.
+		beforePinned, beforeLearned := pinned, learned
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read store: %v", err)
 		}
-		if string(raw) != string(unsorted) {
+		if string(raw) != seeded {
 			t.Fatalf("read-only Hosts rewrote file: got %q", raw)
 		}
 
@@ -438,11 +648,33 @@ func TestHostStore(t *testing.T) {
 		if err := json.Unmarshal(raw, &decoded); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if !slices.Equal(decoded.Pinned, []string{"zebra", "arch"}) {
+		afterPinned, err := validatePinnedRecords(decoded.Pinned)
+		if err != nil {
+			t.Fatalf("decode pinned: %v", err)
+		}
+		afterLearned, err := validateLearnedRecords(decoded.Learned)
+		if err != nil {
+			t.Fatalf("decode learned: %v", err)
+		}
+		if !slices.Equal(registrationEndpoints(afterPinned), []string{"zebra", "arch"}) {
 			t.Fatalf("pinned after mutation = %v", decoded.Pinned)
 		}
-		if !slices.Equal(decoded.Learned, []string{"beta", "gamma", "mule"}) {
+		if !slices.Equal(registrationEndpoints(sortedRegistrations(afterLearned)), []string{"beta", "gamma", "mule"}) {
 			t.Fatalf("learned after mutation = %v", decoded.Learned)
+		}
+		// Unrelated registrations keep their incarnations across mutation.
+		for i := range beforePinned {
+			if !beforePinned[i].Equal(afterPinned[i]) {
+				t.Fatalf("pinned identity changed: %+v vs %+v", beforePinned[i], afterPinned[i])
+			}
+		}
+		for endpoint, before := range map[string]domain.RemoteRegistration{
+			"mule": beforeLearned[1], "beta": beforeLearned[0],
+		} {
+			after, ok := afterLearned[endpoint]
+			if !ok || !before.Equal(after) {
+				t.Fatalf("learned identity changed for %q: %+v vs %+v", endpoint, before, after)
+			}
 		}
 	})
 
@@ -650,15 +882,15 @@ func TestHostStore(t *testing.T) {
 		}
 		wantLearned := append([]string{}, left...)
 		sort.Strings(wantLearned)
-		if !slices.Equal(learned, wantLearned) {
+		if !slices.Equal(registrationEndpoints(learned), wantLearned) {
 			t.Fatalf("learned len=%d want %d; missing merges under dual writers", len(learned), len(wantLearned))
 		}
 		if len(pinned) != len(right) {
 			t.Fatalf("pinned len=%d want %d", len(pinned), len(right))
 		}
 		pinnedSet := make(map[string]struct{}, len(pinned))
-		for _, host := range pinned {
-			pinnedSet[host] = struct{}{}
+		for _, record := range pinned {
+			pinnedSet[record.Endpoint] = struct{}{}
 		}
 		for _, host := range right {
 			if _, ok := pinnedSet[host]; !ok {

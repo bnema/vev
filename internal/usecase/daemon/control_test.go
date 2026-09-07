@@ -737,6 +737,30 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 	require.Equal(t, true, decoded[0]["focused"])
 }
 
+func TestRemoteCatalogLeavesStoppedSessionsStopped(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.mu.Lock()
+	d.inactive["old"] = inactiveSession{name: "old", cwd: "/tmp/old", createdAt: 1, incarnation: domain.IncarnationID{3}, state: protocol.SessionDown}
+	d.mu.Unlock()
+
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
+	require.True(t, result.OK, result.Text)
+
+	// Observation is read-only: the stopped record stays stopped, is not
+	// resumed into a live session, and is not purged.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.inactive["old"]
+	require.True(t, ok, "stopped record must survive observation")
+	require.Equal(t, protocol.SessionDown, entry.state)
+	for _, sess := range d.sessions {
+		sess.mu.Lock()
+		name := sess.name
+		sess.mu.Unlock()
+		require.NotEqual(t, "old", name, "observation must not resume stopped sessions")
+	}
+}
+
 func TestRemoteCatalogJSONOutput(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	work := addControlSession(d, "work", "t_work", "p_work")

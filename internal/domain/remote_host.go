@@ -8,9 +8,10 @@ import (
 
 // RemoteHost is a merged remote host entry with its source markers.
 type RemoteHost struct {
-	Target  string
-	Pinned  bool
-	Learned bool
+	Target       string
+	Pinned       bool
+	Learned      bool
+	Registration RemoteRegistration
 }
 
 // ValidateRemoteHostTarget rejects empty targets, surrounding/internal whitespace,
@@ -39,6 +40,21 @@ func UniqueRemoteHostTargets(values []string) []string {
 			continue
 		}
 		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+// UniqueRemoteRegistrations returns a de-duplicated copy preserving first
+// occurrence order by endpoint.
+func UniqueRemoteRegistrations(values []RemoteRegistration) []RemoteRegistration {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]RemoteRegistration, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value.Endpoint]; ok {
+			continue
+		}
+		seen[value.Endpoint] = struct{}{}
 		out = append(out, value)
 	}
 	return out

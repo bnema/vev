@@ -748,7 +748,7 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 		reason := ""
 		if entry.broken() {
 			state = catalogue.RemoteCatalogSessionBroken
-			reason = "session_broken"
+			reason = domain.RemoteReasonSessionBroken
 		}
 		rows = append(rows, catalogue.RemoteCatalogSession{
 			LifecycleID: entry.incarnation,

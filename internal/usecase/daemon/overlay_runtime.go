@@ -39,10 +39,8 @@ type overlayRuntime struct {
 	pickerESC                 pendingByteTimer
 
 	// Test-only, unsynchronized lifecycle seams. Assign them before picker
-	// publication or goroutine startup. Hooks run without pickerMu or
-	// remoteCatalog.mu held.
-	beforeRemotePickerRegistration func()
-	afterPickerRefreshBuild        func(*picker.Model)
+	// publication or goroutine startup.
+	afterPickerRefreshBuild func(*picker.Model)
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model

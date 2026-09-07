@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -1418,15 +1419,15 @@ func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 	newRemoteCatalogClient = func() ports.RemoteCatalogClient { return nil }
 	newRemoteDialerFactoryWithRuntimeObserver = func(ports.SerializedRuntimeObserver) remoteDialerForTarget { return nil }
 
-	option, err := remoteDiscoveryDaemonOption(stateDir, "stdio")
+	option, err := remoteDiscoveryDaemonOption(stateDir, "stdio", clock.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	_ = daemon.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), option)
 	require.Equal(t, remoteadapter.HostStorePath(stateDir), hostPath)
 	require.Equal(t, remoteadapter.CatalogCachePath(stateDir), cachePath)
-	require.Equal(t, 1, cache.loads, "daemon startup must load the cache once")
+	require.Equal(t, 0, cache.loads, "daemon constructors must stay I/O-free; the cache warms asynchronously in Serve")
 }
 
 func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
-	_, err := remoteDiscoveryDaemonOption(t.TempDir(), "serial")
+	_, err := remoteDiscoveryDaemonOption(t.TempDir(), "serial", clock.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "udp" or "stdio")`)
 }

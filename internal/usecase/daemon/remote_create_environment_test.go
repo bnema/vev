@@ -12,17 +12,13 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/palette"
 )
 
 func TestPaletteRemoteCreateUsesDaemonEnvironment(t *testing.T) {
-	local := newRemotePickerDaemon(&remoteRefreshHostStore{hosts: []string{"remote.example"}})
-	local.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{Host: "remote.example", FetchedAt: time.Unix(10, 0)}})
-	local.remoteCatalog.mu.Lock()
-	local.remoteCatalog.status["remote.example"] = remoteHostFresh
-	local.remoteCatalog.mu.Unlock()
+	local := newRemotePickerDaemon()
+	seedRemoteDirectory(t, local, reachableDirectoryHost("remote.example", time.Unix(10, 0)))
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, local, "local")
 	effect := beginRecentRoutePaletteEffect(t, local, sess, ac)
 	result := palette.NewCreateSessionDestination(palette.CreateSessionOnRemoteHost, "remote.example", "remote.example", protocol.RouteRef{}, 0)

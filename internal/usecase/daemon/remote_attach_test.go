@@ -20,7 +20,7 @@ func remoteLifecycleForTest() domain.SessionLifecycleID {
 }
 
 func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
+	d := newRemotePickerDaemon()
 	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
 	target, _, _ := addRemoteRefreshPickerOwner(t, d, "target")
 	target.incarnation = remoteLifecycleForTest()
@@ -41,7 +41,7 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 }
 
 func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
+	d := newRemotePickerDaemon()
 	source, ac, sends := addRemoteRefreshPickerOwner(t, d, "source")
 	lifecycle := remoteLifecycleForTest()
 	d.inactive["stopped"] = inactiveSession{
@@ -74,16 +74,11 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 }
 
 func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
+	d := newRemotePickerDaemon()
 	lifecycle := remoteLifecycleForTest()
-	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
-			LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
-		}},
-	}})
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.status["arch"] = remoteHostFresh
-	d.remoteCatalog.mu.Unlock()
+	seedRemoteDirectory(t, d, reachableDirectoryHost("arch", time.Unix(10, 0), catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	}))
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
@@ -115,17 +110,12 @@ func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			d := newRemotePickerDaemon(nil)
+			d := newRemotePickerDaemon()
 			lifecycle := remoteLifecycleForTest()
-			d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
-				Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
-					LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
-					Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
-				}},
-			}})
-			d.remoteCatalog.mu.Lock()
-			d.remoteCatalog.status["arch"] = remoteHostFresh
-			d.remoteCatalog.mu.Unlock()
+			seedRemoteDirectory(t, d, reachableDirectoryHost("arch", time.Unix(10, 0), catalogue.RemoteCatalogSession{
+				LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+				Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1"}},
+			}))
 			sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
 			token := sess.captureAttachmentCapability(ac, ac.transport())
 			effect, admitted := ac.beginAttachmentEffect(token)
@@ -151,18 +141,13 @@ func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {
 }
 
 func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
-	d := newRemotePickerDaemon(nil)
+	d := newRemotePickerDaemon()
 	lifecycle := remoteLifecycleForTest()
 	cachedLifecycle := lifecycle
 	cachedLifecycle[0]++
-	d.remoteCatalog.replaceCache([]catalogue.RemoteCatalogCacheEntry{{
-		Host: "arch", FetchedAt: time.Unix(10, 0), Sessions: []catalogue.RemoteCatalogSession{{
-			LifecycleID: cachedLifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
-		}},
-	}})
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.status["arch"] = remoteHostFresh
-	d.remoteCatalog.mu.Unlock()
+	seedRemoteDirectory(t, d, reachableDirectoryHost("arch", time.Unix(10, 0), catalogue.RemoteCatalogSession{
+		LifecycleID: cachedLifecycle, Name: "work", State: "up", Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}},
+	}))
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)

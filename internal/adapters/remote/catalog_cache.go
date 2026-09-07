@@ -2,6 +2,7 @@ package remote
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +18,10 @@ import (
 )
 
 const (
-	catalogCacheFileName         = "remote-catalog-cache.json"
-	catalogCacheExactFileVersion = 2
-	catalogCacheFileVersion      = 3
+	catalogCacheFileName          = "remote-catalog-cache.json"
+	catalogCacheExactFileVersion  = 2
+	catalogCacheLegacyFileVersion = 3
+	catalogCacheFileVersion       = 4
 )
 
 // CatalogCachePath returns the canonical location of the remote catalog cache in stateDir.
@@ -37,6 +39,7 @@ type catalogCacheVersion struct {
 type catalogCacheHost struct {
 	Target            *string                `json:"target"`
 	FetchedAtUnixNano *int64                 `json:"fetched_at_unix_nano"`
+	Incarnation       *string                `json:"incarnation,omitempty"`
 	Sessions          *[]catalogCacheSession `json:"sessions"`
 }
 
@@ -109,8 +112,14 @@ func (c *fileCatalogCache) Load() ([]catalogue.RemoteCatalogCacheEntry, error) {
 	}
 
 	var file catalogCacheFile
+	requireIncarnation := false
 	switch *version.Version {
 	case catalogCacheFileVersion:
+		requireIncarnation = true
+		if err := decodeCatalogCacheFile(raw, true, &file); err != nil {
+			return nil, err
+		}
+	case catalogCacheLegacyFileVersion:
 		if err := decodeCatalogCacheFile(raw, true, &file); err != nil {
 			return nil, err
 		}
@@ -147,6 +156,17 @@ func (c *fileCatalogCache) Load() ([]catalogue.RemoteCatalogCacheEntry, error) {
 			FetchedAt: time.Unix(0, *host.FetchedAtUnixNano),
 			Sessions:  make([]catalogue.RemoteCatalogSession, 0, len(*host.Sessions)),
 		}
+		if host.Incarnation != nil {
+			raw, err := hex.DecodeString(*host.Incarnation)
+			if err != nil || len(raw) != 16 {
+				return nil, fmt.Errorf("remote catalog cache: malformed cache file: invalid incarnation for %q", *host.Target)
+			}
+			copy(entry.Incarnation[:], raw)
+		} else if requireIncarnation {
+			return nil, fmt.Errorf("remote catalog cache: malformed cache file: missing incarnation for %q", *host.Target)
+		}
+		// A zero incarnation is unbound advisory data: it loads but must
+		// never seed a registration.
 		for _, session := range *host.Sessions {
 			if session.LifecycleID == nil || session.Name == nil || session.State == nil || session.Ephemeral == nil || session.Attached == nil || session.Tabs == nil {
 				return nil, fmt.Errorf("remote catalog cache: malformed cache file: missing session fields")
@@ -238,6 +258,7 @@ func (c *fileCatalogCache) Store(entries []catalogue.RemoteCatalogCacheEntry) er
 	for _, entry := range normalized {
 		target := entry.Host
 		fetchedAt := entry.FetchedAt.UnixNano()
+		incarnation := hex.EncodeToString(entry.Incarnation[:])
 		sessions := make([]catalogCacheSession, 0, len(entry.Sessions))
 		for _, session := range entry.Sessions {
 			name := session.Name
@@ -261,6 +282,7 @@ func (c *fileCatalogCache) Store(entries []catalogue.RemoteCatalogCacheEntry) er
 		hosts = append(hosts, catalogCacheHost{
 			Target:            &target,
 			FetchedAtUnixNano: &fetchedAt,
+			Incarnation:       &incarnation,
 			Sessions:          &sessions,
 		})
 	}
@@ -291,9 +313,10 @@ func normalizeCatalogCacheEntries(entries []catalogue.RemoteCatalogCacheEntry) (
 		hosts[entry.Host] = struct{}{}
 
 		copyEntry := catalogue.RemoteCatalogCacheEntry{
-			Host:      entry.Host,
-			FetchedAt: entry.FetchedAt,
-			Sessions:  make([]catalogue.RemoteCatalogSession, 0, len(entry.Sessions)),
+			Host:        entry.Host,
+			FetchedAt:   entry.FetchedAt,
+			Incarnation: entry.Incarnation,
+			Sessions:    make([]catalogue.RemoteCatalogSession, 0, len(entry.Sessions)),
 		}
 		sessions := make(map[string]struct{}, len(entry.Sessions))
 		for _, session := range entry.Sessions {

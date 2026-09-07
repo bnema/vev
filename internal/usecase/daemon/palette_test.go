@@ -11,6 +11,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
@@ -62,15 +63,15 @@ func TestCreateSessionDestinationResultsUseStructuredRouteAuthority(t *testing.T
 			Target: testRouteTarget("home", 2), Name: "home",
 		}},
 	}
-	catalog := []remoteCatalogPresentationEntry{
-		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-a"}, status: remoteHostFresh},
-		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-b"}, status: remoteHostFresh},
-		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-c"}, status: remoteHostStale},
-		{entry: catalogue.RemoteCatalogCacheEntry{Host: "host-d"}, status: remoteHostFresh},
+	hosts := []ports.RemoteHostSnapshot{
+		{Endpoint: "host-a", Sessions: []catalogue.RemoteCatalogSession{{Name: "work", LifecycleID: lifecycle}}},
+		{Endpoint: "host-b"},
+		{Endpoint: "host-c"},
+		{Endpoint: "host-d"},
 	}
 
-	results := createSessionDestinationResults(snapshot, lifecycle, catalog, map[string]int{"host-a": 0, "host-b": 1, "host-c": 2})
-	require.Len(t, results, 3)
+	results := createSessionDestinationResults(snapshot, lifecycle, hosts)
+	require.Len(t, results, 5)
 	_, kind, _, endpoint, route, ok := results[0].CreateSessionDestination()
 	require.True(t, ok)
 	require.Equal(t, palette.CreateSessionOnLocalRoute, kind)
@@ -89,6 +90,13 @@ func TestCreateSessionDestinationResultsUseStructuredRouteAuthority(t *testing.T
 	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
 	require.Equal(t, "host-b", origin)
 	require.Equal(t, "host-b", endpoint)
+	// Stale inventory stays attemptable: freshness renders, registration
+	// authorizes. The destination rejects precisely on exact identity.
+	_, kind, origin, endpoint, _, ok = results[3].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
+	require.Equal(t, "host-c", origin)
+	require.Equal(t, "host-c", endpoint)
 }
 
 func TestRemoteCreateSessionDestinationRequiresAttachmentEffect(t *testing.T) {
@@ -97,6 +105,38 @@ func TestRemoteCreateSessionDestinationRequiresAttachmentEffect(t *testing.T) {
 	)
 	err := (paletteExec{}).validateCreateSessionDestination(nil, result)
 	require.ErrorIs(t, err, errCreateDestinationUnavailable)
+}
+
+// TestCreateSessionDestinationsKeepCollidingDisplayOrigins proves the
+// serving-daemon suppression compares exact endpoint identity, not display
+// labels: user@arch and ops@arch share the origin "arch", but only the
+// endpoint serving the active route is suppressed.
+func TestCreateSessionDestinationsKeepCollidingDisplayOrigins(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{7}
+	snapshot := protocol.RecentRouteSnapshot{
+		Generation: 1,
+		Active:     protocol.RouteRef{Key: 1, Generation: 1},
+		ActiveEntry: protocol.RecentRouteEntry{
+			Key: 1, Generation: 1, Kind: protocol.RouteKindRemote, HostLabel: "arch",
+			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
+		},
+	}
+	hosts := []ports.RemoteHostSnapshot{
+		{Endpoint: "user@arch", Sessions: []catalogue.RemoteCatalogSession{{Name: "work", LifecycleID: lifecycle}}},
+		{Endpoint: "ops@arch"},
+	}
+
+	results := createSessionDestinationResults(snapshot, lifecycle, hosts)
+	require.Len(t, results, 2)
+	_, kind, origin, endpoint, _, ok := results[0].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnServingDaemon, kind)
+	require.Equal(t, "arch", origin)
+	_, kind, origin, endpoint, _, ok = results[1].CreateSessionDestination()
+	require.True(t, ok)
+	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
+	require.Equal(t, "arch", origin)
+	require.Equal(t, "ops@arch", endpoint)
 }
 
 func TestCreateSessionDestinationResultsDoNotInferLocalFromRemoteHome(t *testing.T) {
@@ -110,7 +150,7 @@ func TestCreateSessionDestinationResultsDoNotInferLocalFromRemoteHome(t *testing
 			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
 		},
 	}
-	results := createSessionDestinationResults(snapshot, lifecycle, nil, nil)
+	results := createSessionDestinationResults(snapshot, lifecycle, nil)
 	require.Len(t, results, 1)
 	_, kind, _, _, _, ok := results[0].CreateSessionDestination()
 	require.True(t, ok)
@@ -508,16 +548,10 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	local := addControlSession(d, "vev", "tab-2", "pane-2")
 	local.ephemeral = false
 	remoteLifecycle := domain.SessionLifecycleID{21}
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["user@arch"] = catalogue.RemoteCatalogCacheEntry{
-		Host: "user@arch", FetchedAt: now,
-		Sessions: []catalogue.RemoteCatalogSession{{
-			LifecycleID: remoteLifecycle, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
-			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-remote", Index: 0, Name: "shell"}}, ActiveTabID: "tab-remote",
-		}},
-	}
-	d.remoteCatalog.status["user@arch"] = remoteHostFresh
-	d.remoteCatalog.mu.Unlock()
+	seedRemoteDirectory(t, d, reachableDirectoryHost("user@arch", now, catalogue.RemoteCatalogSession{
+		LifecycleID: remoteLifecycle, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-remote", Index: 0, Name: "shell"}}, ActiveTabID: "tab-remote",
+	}))
 
 	results := d.paletteResults(current, nil, protocol.RecentRouteSnapshot{})
 	var matching []palette.Result
@@ -595,18 +629,14 @@ func TestPaletteMatchesRecentRemoteRouteToCatalog(t *testing.T) {
 			current := addControlSession(d, "current", "tab-1", "pane-1")
 			current.ephemeral = false
 			lifecycle := domain.SessionLifecycleID{22}
-			d.remoteCatalog.mu.Lock()
+			hosts := make([]ports.RemoteHostSnapshot, 0, len(test.catalogEndpoints))
 			for _, endpoint := range test.catalogEndpoints {
-				d.remoteCatalog.cache[endpoint] = catalogue.RemoteCatalogCacheEntry{
-					Host: endpoint, FetchedAt: now,
-					Sessions: []catalogue.RemoteCatalogSession{{
-						LifecycleID: lifecycle, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
-						Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
-					}},
-				}
-				d.remoteCatalog.status[endpoint] = remoteHostFresh
+				hosts = append(hosts, reachableDirectoryHost(endpoint, now, catalogue.RemoteCatalogSession{
+					LifecycleID: lifecycle, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
+					Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
+				}))
 			}
-			d.remoteCatalog.mu.Unlock()
+			seedRemoteDirectory(t, d, hosts...)
 
 			results := d.paletteResults(current, nil, protocol.RecentRouteSnapshot{
 				Generation: 2,
@@ -646,16 +676,10 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	d.clock = fixedRemoteRefreshClock{now: now}
 	remoteLifecycle := domain.SessionLifecycleID{31}
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["user@arch"] = catalogue.RemoteCatalogCacheEntry{
-		Host: "user@arch", FetchedAt: now,
-		Sessions: []catalogue.RemoteCatalogSession{{
-			LifecycleID: remoteLifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
-			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-work", Index: 0, Name: "shell"}}, ActiveTabID: "tab-work",
-		}},
-	}
-	d.remoteCatalog.status["user@arch"] = remoteHostFresh
-	d.remoteCatalog.mu.Unlock()
+	seedRemoteDirectory(t, d, reachableDirectoryHost("user@arch", now, catalogue.RemoteCatalogSession{
+		LifecycleID: remoteLifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-work", Index: 0, Name: "shell"}}, ActiveTabID: "tab-work",
+	}))
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
@@ -674,27 +698,20 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 		RemoteTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, target)
 	require.False(t, ac.overlays.paletteActive())
-	d.remoteCatalog.mu.Lock()
-	require.Zero(t, d.remoteCatalog.consumers[ac]&remoteDiscoveryPalette)
-	d.remoteCatalog.mu.Unlock()
 }
 
-func TestPaletteCachedRemoteSelectionFailsClosed(t *testing.T) {
+func TestPaletteUnknownRemoteSelectionFailsClosed(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p)
 	now := time.Unix(1_000, 0)
 	d.clock = fixedRemoteRefreshClock{now: now}
-	d.remoteCatalog.mu.Lock()
-	d.remoteCatalog.cache["arch"] = catalogue.RemoteCatalogCacheEntry{
-		Host: "arch", FetchedAt: now,
-		Sessions: []catalogue.RemoteCatalogSession{{
-			LifecycleID: domain.SessionLifecycleID{32}, Name: "cached", State: catalogue.RemoteCatalogSessionUp,
-			Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-cached", Index: 0}}, ActiveTabID: "tab-cached",
-		}},
-	}
-	d.remoteCatalog.status["arch"] = remoteHostCached
-	d.remoteCatalog.mu.Unlock()
+	// Unknown host with no inventory offers no remote session rows: there
+	// is no exact target to validate, so the palette stays open without
+	// emitting a handoff or switching the source session.
+	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{
+		Endpoint: "arch", Availability: domain.RemoteAvailabilityUnknown, Checking: true,
+	})
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
@@ -703,10 +720,6 @@ func TestPaletteCachedRemoteSelectionFailsClosed(t *testing.T) {
 
 	require.Same(t, current, ac.currentAttachmentSession())
 	require.True(t, ac.overlays.paletteActive())
-	history := d.notices.history()
-	require.NotEmpty(t, history)
-	require.Contains(t, history[len(history)-1].Message, "refreshing")
-	require.NotContains(t, history[len(history)-1].Message, "identity changed")
 	for {
 		select {
 		case frame := <-sends:
@@ -717,25 +730,27 @@ func TestPaletteCachedRemoteSelectionFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRemoteRefreshUpdatesOpenPaletteAndPreservesQuery(t *testing.T) {
-	hosts := &remoteRefreshHostStore{hosts: []string{"user@arch"}}
-	d, catalog, cache := newRemoteRefreshDaemon(t, hosts, time.Unix(1_000, 0))
+func TestRemoteDirectoryUpdatesOpenPaletteAndPreservesQuery(t *testing.T) {
+	d := newRemotePickerDaemon()
+	seedRemoteDirectory(t, d)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "current")
 
 	d.enterPalette(sess, ac)
-	request := receiveRemotePicker(t, catalog.requests, "palette catalog request")
 	ac.overlays.paletteMu.Lock()
 	model := ac.overlays.palette
+	require.NotNil(t, model)
 	for _, r := range "vev" {
 		model.Insert(r)
 	}
 	ac.overlays.paletteMu.Unlock()
-	request.result <- remoteRefreshResult{catalog: remoteCatalogForTest(catalogue.RemoteCatalogSession{
+
+	// A new directory publication rebuilds the open palette in place:
+	// the model identity and the user's query survive the rebuild.
+	seedRemoteDirectory(t, d, reachableDirectoryHost("user@arch", time.Unix(1_000, 0), catalogue.RemoteCatalogSession{
 		LifecycleID: domain.SessionLifecycleID{41}, Name: "vev", State: catalogue.RemoteCatalogSessionUp,
 		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-vev", Index: 0}}, ActiveTabID: "tab-vev",
-	})}
-	receiveRemotePicker(t, cache.stores, "palette catalog cache store")
-	d.sessWg.Wait()
+	}))
+	d.refreshPalette(ac)
 
 	ac.overlays.paletteMu.Lock()
 	require.Same(t, model, ac.overlays.palette)
@@ -749,39 +764,27 @@ func TestRemoteRefreshUpdatesOpenPaletteAndPreservesQuery(t *testing.T) {
 	require.Contains(t, displayTexts, "Switch to session vev@arch")
 
 	d.closePalette(ac)
-	d.remoteCatalog.mu.Lock()
-	require.NotContains(t, d.remoteCatalog.consumers, ac)
-	require.Nil(t, d.remoteCatalog.cancel)
-	d.remoteCatalog.mu.Unlock()
+	require.False(t, ac.overlays.paletteActive(), "closing the palette releases view state only")
 }
 
-func TestRemoteRefreshTracksPickerAndPaletteOnSameAttachment(t *testing.T) {
-	hosts := &remoteRefreshHostStore{hosts: []string{"arch"}}
-	d, catalog, _ := newRemoteRefreshDaemon(t, hosts, time.Unix(1_100, 0))
+func TestRemoteDirectoryTracksPickerAndPaletteOnSameAttachment(t *testing.T) {
+	d := newRemotePickerDaemon()
+	seedRemoteDirectory(t, d, reachableDirectoryHost("arch", time.Unix(1_100, 0), directorySessionForTest("work")))
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 
+	// Opening overlays builds from the latest snapshot without requesting
+	// reconciliation; closing one overlay leaves the other intact.
 	d.publishPicker(sess, ac, d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	request := receiveRemotePicker(t, catalog.requests, "picker catalog request")
 	d.enterPalette(sess, ac)
-	receiveRemotePickerClose(t, request.ctx.Done(), "superseded picker catalog request")
-	request = receiveRemotePicker(t, catalog.requests, "shared catalog request")
+	require.True(t, ac.overlays.pickerActive())
+	require.True(t, ac.overlays.paletteActive())
 
 	d.closePalette(ac)
-	select {
-	case <-request.ctx.Done():
-		t.Fatal("refresh canceled while the picker remained open")
-	default:
-	}
-	d.remoteCatalog.mu.Lock()
-	require.Equal(t, remoteDiscoveryPicker, d.remoteCatalog.consumers[ac])
-	d.remoteCatalog.mu.Unlock()
+	require.False(t, ac.overlays.paletteActive())
+	require.True(t, ac.overlays.pickerActive(), "closing the palette must not disturb the open picker")
 
 	d.closePicker(ac)
-	receiveRemotePickerClose(t, request.ctx.Done(), "last discovery consumer cancellation")
-	d.remoteCatalog.mu.Lock()
-	require.Empty(t, d.remoteCatalog.consumers)
-	require.Nil(t, d.remoteCatalog.cancel)
-	d.remoteCatalog.mu.Unlock()
+	require.False(t, ac.overlays.pickerActive())
 }
 
 func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {

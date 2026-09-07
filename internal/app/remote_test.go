@@ -72,13 +72,32 @@ func TestDecodeSessionListErrorReply(t *testing.T) {
 	})
 }
 
+func testRemoteRegistrations(t *testing.T, endpoints ...string) []domain.RemoteRegistration {
+	t.Helper()
+	out := make([]domain.RemoteRegistration, 0, len(endpoints))
+	for i, endpoint := range endpoints {
+		var incarnation [16]byte
+		incarnation[0] = byte(i + 1)
+		out = append(out, domain.RemoteRegistration{Endpoint: endpoint, Incarnation: incarnation, Generation: 1})
+	}
+	return out
+}
+
 func TestMergeRemoteHostsOrderAndSource(t *testing.T) {
-	got := mergeRemoteHosts([]string{"zebra", "arch"}, []string{"mule", "arch", "beta"})
+	zebra := testRemoteRegistrations(t, "zebra")[0]
+	archPinned := testRemoteRegistrations(t, "arch")[0]
+	archLearned := testRemoteRegistrations(t, "x", "arch")[1]
+	beta := testRemoteRegistrations(t, "beta")[0]
+	mule := testRemoteRegistrations(t, "mule")[0]
+	got := mergeRemoteHosts(
+		[]domain.RemoteRegistration{zebra, archPinned},
+		[]domain.RemoteRegistration{mule, archLearned, beta},
+	)
 	require.Equal(t, []domain.RemoteHost{
-		{Target: "zebra", Pinned: true},
-		{Target: "arch", Pinned: true, Learned: true},
-		{Target: "beta", Learned: true},
-		{Target: "mule", Learned: true},
+		{Target: "zebra", Pinned: true, Registration: zebra},
+		{Target: "arch", Pinned: true, Learned: true, Registration: archPinned},
+		{Target: "beta", Learned: true, Registration: beta},
+		{Target: "mule", Learned: true, Registration: mule},
 	}, got)
 }
 
@@ -135,7 +154,7 @@ func TestRemoteHostCommands(t *testing.T) {
 			name: "list preserves source markers and order",
 			run: func(t *testing.T) {
 				store := portsmocks.NewMockRemoteHostStore(t)
-				store.EXPECT().Hosts().Return([]string{"zebra", "arch"}, []string{"mule", "arch", "beta"}, nil).Once()
+				store.EXPECT().Hosts().Return(testRemoteRegistrations(t, "zebra", "arch"), testRemoteRegistrations(t, "mule", "arch", "beta"), nil).Once()
 				var out bytes.Buffer
 				err := runHostCommand(context.Background(), command{hostAction: hostActionList}, newDeps(store, &out))
 				require.NoError(t, err)
@@ -173,7 +192,7 @@ func TestRemoteHostCommands(t *testing.T) {
 
 func TestRemoteHostListingUsesUnifiedStore(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
-	store.EXPECT().Hosts().Return([]string{"arch"}, []string{"beta"}, nil).Once()
+	store.EXPECT().Hosts().Return(testRemoteRegistrations(t, "arch"), testRemoteRegistrations(t, "beta"), nil).Once()
 	catalog := portsmocks.NewMockRemoteCatalogClient(t)
 	catalog.EXPECT().List(mock.Anything, "arch").Return(catalogue.RemoteCatalog{Sessions: []catalogue.RemoteCatalogSession{{Name: "build", State: "up"}}}, nil).Once()
 	var out bytes.Buffer
