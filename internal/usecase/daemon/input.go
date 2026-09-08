@@ -464,7 +464,8 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	}
 	switch action {
 	case keys.ActionOpenPalette:
-		h.d.enterPalette(sess, h.ac)
+		interaction := h.d.enterPalette(sess, h.ac)
+		h.d.sendPaletteInventoryDemand(h.ac, effect, true, interaction)
 	case keys.ActionJumpAttention:
 		if effect == nil {
 			if err := h.d.jumpAttention(sess, h.ac); err != nil {

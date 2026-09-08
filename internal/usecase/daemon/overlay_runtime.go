@@ -50,6 +50,18 @@ type overlayRuntime struct {
 	palettePreview       string
 	paletteFeedback      string
 	palettePending       []byte
+	// paletteInventory* carries the serving-daemon side of navigation
+	// inventory, guarded by paletteMu alongside the palette model. Open
+	// tracks the current interaction namespace; publication is the latest
+	// admitted publication generation (older/duplicates discard); groups
+	// holds the sanitized relayed rows; selected freezes the chosen row
+	// across select-close; demandSent records open-demand emission.
+	paletteInventoryOpen        bool
+	paletteInventoryInteraction uint64
+	paletteInventoryPublication uint64
+	paletteInventoryGroups      []protocol.NavigationInventorySourceGroup
+	paletteInventorySelected    *protocol.NavigationInventorySelection
+	paletteInventoryDemandSent  bool
 
 	promptMu               sync.Mutex
 	prompt                 *promptui.Model

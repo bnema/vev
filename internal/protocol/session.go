@@ -13,7 +13,7 @@ import (
 )
 
 // Version is the negotiated vev session protocol version.
-const Version uint16 = 41
+const Version uint16 = 42
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.

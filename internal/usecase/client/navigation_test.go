@@ -42,7 +42,7 @@ func TestValidateAttachRequestNavigationTable(t *testing.T) {
 		{name: "home picker on client-owned remote new route", request: AttachRequest{Intent: protocol.IntentNew, SessionName: "example", Remote: true, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned, NavigationCapabilities: protocol.NavigationCapabilityHomePicker}, valid: true},
 		{name: "back on client-owned route", request: AttachRequest{StartupOverlay: protocol.StartupOverlaySessionPicker, NavigationCapabilities: protocol.NavigationCapabilityBack}, valid: true},
 		{name: "back on remote-target route", request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", RemoteTarget: remoteRoute, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, StartupOverlay: protocol.StartupOverlaySessionPicker, NavigationCapabilities: protocol.NavigationCapabilityBack}, valid: false},
-		{name: "unknown capability", request: AttachRequest{NavigationCapabilities: 4}, valid: false},
+		{name: "unknown capability", request: AttachRequest{NavigationCapabilities: 8}, valid: false},
 		{name: "back without startup picker", request: AttachRequest{NavigationCapabilities: protocol.NavigationCapabilityBack}, valid: false},
 		{name: "startup picker without back", request: AttachRequest{StartupOverlay: protocol.StartupOverlaySessionPicker}, valid: false},
 	}

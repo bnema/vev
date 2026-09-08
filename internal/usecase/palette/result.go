@@ -19,6 +19,7 @@ const (
 	ResultKindRemoteSession
 	ResultKindRecentRoute
 	ResultKindCreateSessionDestination
+	ResultKindImportedSession
 )
 
 // CreateSessionDestinationKind identifies where a CNS result creates a session.
@@ -31,12 +32,14 @@ const (
 )
 
 // Result is an immutable palette target. Its kind is the sole discriminator
-// for its private command, local-session, remote-session, or route payload.
+// for its private command, local-session, remote-session, imported-session,
+// or route payload.
 type Result struct {
 	kind              ResultKind
 	command           command.Command
 	session           sessionPayload
 	remoteSession     remoteSessionPayload
+	importedSession   importedSessionPayload
 	route             routePayload
 	createDestination createSessionDestinationPayload
 }
@@ -51,6 +54,20 @@ type remoteSessionPayload struct {
 	key               domain.RemoteSessionKey
 	target            domain.RemoteSessionTarget
 	unavailableReason string
+}
+
+// importedSessionPayload is one sanitized navigation-inventory row relayed
+// from the client's local control source. It carries display facts and the
+// opaque selection keys only: no endpoint, connection parameters, CWD,
+// environment, preview, or pane content. Resolution happens source-side
+// through the keys.
+type importedSessionPayload struct {
+	sourceKey     string
+	entryKey      string
+	name          string
+	displayOrigin string
+	state         string
+	reason        string
 }
 
 type routePayload struct {
@@ -101,12 +118,24 @@ func NewStoppedSessionResultWithDisplayOrigin(target protocol.ExactSessionTarget
 	}
 }
 
-func newSessionPayload(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
-	display := target.SessionName
-	if displayOrigin != "" {
-		display = domain.RemoteSessionDisplay(target.SessionName, displayOrigin)
+// SessionDisplay qualifies palette destinations relative to the client.
+func SessionDisplay(name, origin string) string {
+	if origin == "" {
+		return name
 	}
-	return sessionPayload{display: display, createdAt: createdAt, target: target}
+	return name + "@" + domain.RemoteDisplayOrigin(origin)
+}
+
+func remoteSessionDisplay(key domain.RemoteSessionKey) string {
+	origin := key.DisplayOrigin
+	if origin == "" {
+		origin = domain.RemoteDisplayOrigin(key.Host)
+	}
+	return SessionDisplay(key.Name, origin)
+}
+
+func newSessionPayload(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
+	return sessionPayload{display: SessionDisplay(target.SessionName, displayOrigin), createdAt: createdAt, target: target}
 }
 
 // NewRemoteSessionResult creates an immutable catalog-backed remote target.
@@ -115,6 +144,19 @@ func NewRemoteSessionResult(key domain.RemoteSessionKey, target domain.RemoteSes
 		kind: ResultKindRemoteSession,
 		remoteSession: remoteSessionPayload{
 			key: key, target: target, unavailableReason: unavailableReason,
+		},
+	}
+}
+
+// NewImportedSessionResult creates an immutable inventory-relayed row.
+// Labels are never parsed back into selection authority: Enter resolves
+// through the opaque source/entry keys.
+func NewImportedSessionResult(sourceKey, entryKey, name, displayOrigin, state, reason string) Result {
+	return Result{
+		kind: ResultKindImportedSession,
+		importedSession: importedSessionPayload{
+			sourceKey: sourceKey, entryKey: entryKey, name: name,
+			displayOrigin: displayOrigin, state: state, reason: reason,
 		},
 	}
 }
@@ -150,6 +192,8 @@ func (r Result) sameTarget(other Result) bool {
 		return r.session.target == other.session.target
 	case ResultKindRemoteSession:
 		return r.remoteSession.key == other.remoteSession.key && r.remoteSession.target == other.remoteSession.target
+	case ResultKindImportedSession:
+		return r.importedSession.sourceKey == other.importedSession.sourceKey && r.importedSession.entryKey == other.importedSession.entryKey
 	case ResultKindRecentRoute:
 		return r.route.action == other.route.action
 	case ResultKindCreateSessionDestination:
@@ -167,7 +211,10 @@ func (r Result) DisplayText() string {
 		return r.command.Code
 	}
 	if r.kind == ResultKindRemoteSession {
-		return activeSessionDisplayPrefix + r.remoteSession.key.Display()
+		return activeSessionDisplayPrefix + remoteSessionDisplay(r.remoteSession.key)
+	}
+	if r.kind == ResultKindImportedSession {
+		return activeSessionDisplayPrefix + r.importedSession.display()
 	}
 	if r.kind == ResultKindRecentRoute {
 		return activeSessionDisplayPrefix + r.route.label
@@ -213,7 +260,9 @@ func (r Result) searchTerms() (identity, label string, offset int, ok bool) {
 	case ResultKindActiveSession, ResultKindStoppedSession:
 		return r.session.target.SessionName, r.session.display, utf8.RuneCountInString(r.sessionDisplayPrefix()), true
 	case ResultKindRemoteSession:
-		return r.remoteSession.key.Name, r.remoteSession.key.Display(), utf8.RuneCountInString(activeSessionDisplayPrefix), true
+		return r.remoteSession.key.Name, remoteSessionDisplay(r.remoteSession.key), utf8.RuneCountInString(activeSessionDisplayPrefix), true
+	case ResultKindImportedSession:
+		return r.importedSession.name, r.importedSession.display(), utf8.RuneCountInString(activeSessionDisplayPrefix), true
 	case ResultKindRecentRoute:
 		return r.route.name, r.route.label, utf8.RuneCountInString(activeSessionDisplayPrefix), true
 	default:
@@ -258,6 +307,51 @@ func (r Result) RemoteSessionKey() (domain.RemoteSessionKey, bool) {
 // for a remote session result.
 func (r Result) RemoteSessionUnavailableReason() (string, bool) {
 	return r.remoteSession.unavailableReason, r.kind == ResultKindRemoteSession
+}
+
+// importedDisplay qualifies an inventory row with its explicit origin.
+// Unqualified names would collapse homonyms across local and remote
+// sources into the wrong selection.
+func (p importedSessionPayload) qualified() string {
+	return SessionDisplay(p.name, p.displayOrigin)
+}
+
+func (p importedSessionPayload) display() string {
+	base := p.qualified()
+	// Remote vision is read-only availability tagging: availability
+	// reasons surface independently of lifecycle state (a cached-up row
+	// can still be unreachable), and any non-live state tags inline so
+	// stale or broken entries never look attachable. Live rows without a
+	// reason stay untagged.
+	tag := p.state
+	if tag == "" || tag == "up" {
+		tag = ""
+	}
+	if p.reason != "" {
+		if tag == "" {
+			return base + " (" + p.reason + ")"
+		}
+		return base + " (" + tag + ": " + p.reason + ")"
+	}
+	if tag == "" {
+		return base
+	}
+	return base + " (" + tag + ")"
+}
+
+// ImportedSessionKey returns the opaque inventory selection keys only for
+// an imported session result.
+func (r Result) ImportedSessionKey() (sourceKey, entryKey string, ok bool) {
+	return r.importedSession.sourceKey, r.importedSession.entryKey, r.kind == ResultKindImportedSession
+}
+
+// ImportedSessionDisplay returns the qualified display label and reason only
+// for an imported session result.
+func (r Result) ImportedSessionDisplay() (display, reason string, ok bool) {
+	if r.kind != ResultKindImportedSession {
+		return "", "", false
+	}
+	return r.importedSession.qualified(), r.importedSession.reason, true
 }
 
 // RouteNavigationAction returns the exact client-ledger target only for a

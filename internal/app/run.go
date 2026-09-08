@@ -1046,6 +1046,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			}
 			err = runClient(ctx, client.Dependencies{
 				Dialer:                 sessionwire.NewClientDialer(dialer),
+				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
 				Clock:                  clientClock(deps),
 				DisableCapabilityProbe: deps.disableCapabilityProbe,
@@ -1075,6 +1076,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			}
 			err = runClient(ctx, client.Dependencies{
 				Dialer:                 sessionwire.NewClientDialer(localDialer()),
+				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
 				Clock:                  clientClock(deps),
 				DisableCapabilityProbe: deps.disableCapabilityProbe,
@@ -1134,6 +1136,23 @@ type localDaemonDialer struct {
 	observer    ports.SerializedRuntimeObserver
 	executable  string
 	environment []string
+}
+
+// dialOnlyLocalDialer is the inventory control source: a typed dial-only
+// connection to the local daemon socket. Unlike localDaemonDialer it never
+// ensures, spawns, or starts the daemon and never creates an attachment: a
+// missing socket reports local control unavailability instead of starting
+// a daemon implicitly.
+type dialOnlyLocalDialer struct {
+	dir      string
+	observer ports.SerializedRuntimeObserver
+}
+
+func (d dialOnlyLocalDialer) Dial(ctx context.Context) (wire.Transport, error) {
+	if d.observer != nil {
+		return ipc.DialContext(ctx, d.dir, ipc.WithRuntimeObserver(d.observer))
+	}
+	return ipc.DialContext(ctx, d.dir)
 }
 
 func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {

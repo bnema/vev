@@ -556,7 +556,7 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	results := d.paletteResults(current, nil, protocol.RecentRouteSnapshot{})
 	var matching []palette.Result
 	for _, result := range results {
-		if result.DisplayText() == "Switch to session vev" || result.DisplayText() == "Switch to session vev@arch" {
+		if result.DisplayText() == "Switch to session vev@local" || result.DisplayText() == "Switch to session vev@arch" {
 			matching = append(matching, result)
 		}
 	}

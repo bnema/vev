@@ -169,6 +169,14 @@ type Dependencies struct {
 	// AttachHandoff keeps one Runner and one terminal/input ownership across a
 	// local daemon's structured remote handoff. It is nil for direct CLI attach.
 	AttachHandoff AttachHandoffFunc
+	// LocalControlDialer is an optional dial-only control source for the
+	// local daemon inventory. It must never start the daemon, create an
+	// attachment, or call the CLI: a missing socket reports local control
+	// unavailability. The relay enables it only after this client has a
+	// committed explicitly local route and while its serving attachment is
+	// remote; local-only and direct remote-only clients leave it nil and
+	// perform zero control dials.
+	LocalControlDialer ports.ClientDialer
 	// Remote selects client-side carriage presentation only; it never enters
 	// the daemon-facing session request.
 	Remote bool
@@ -214,6 +222,12 @@ type attachRoute struct {
 type attachHandoff struct {
 	target protocol.AttachTarget
 	source attachRoute
+	// Run captures inventory recovery from its rebased serving request.
+	inventory bool
+	// inventorySelection identifies the serving palette selection behind
+	// an inventory handoff. Run retains it so destination failure can
+	// report NavigationInventoryNavigationFailed after restoration.
+	inventorySelection protocol.NavigationInventorySelection
 }
 
 func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attachHandoff {
@@ -232,10 +246,16 @@ type Runner struct {
 	remoteHostLearner ports.RemoteHostLearner
 	attachHandoff     AttachHandoffFunc
 	remote            bool
-	origin            protocol.RouteOrigin
-	ledger            *routeLedger
-	routeFailure      *protocol.RouteNavigationFailure
-	creationFailure   *protocol.SessionCreationFailure
+	// localControlDialer is the dial-only inventory source. It never
+	// starts the daemon; the relay is its sole consumer.
+	localControlDialer ports.ClientDialer
+	origin             protocol.RouteOrigin
+	ledger             *routeLedger
+	routeFailure       *protocol.RouteNavigationFailure
+	creationFailure    *protocol.SessionCreationFailure
+	// inventoryFailure reports a failed inventory handoff to the restored
+	// serving daemon on the next successful handshake.
+	inventoryFailure *protocol.NavigationInventoryFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -252,19 +272,20 @@ func NewRunner(deps Dependencies) *Runner {
 		log = slog.Default()
 	}
 	return &Runner{
-		ui:                deps.UI,
-		dialer:            deps.Dialer,
-		term:              deps.Terminal,
-		clock:             deps.Clock,
-		clipboard:         deps.Clipboard,
-		logger:            log,
-		runtimeObserver:   deps.RuntimeObserver,
-		remoteHostLearner: deps.RemoteHostLearner,
-		attachHandoff:     deps.AttachHandoff,
-		remote:            deps.Remote,
-		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
-		probeCapabilities: !deps.DisableCapabilityProbe,
-		ledger:            newRouteLedger(),
+		ui:                 deps.UI,
+		dialer:             deps.Dialer,
+		term:               deps.Terminal,
+		clock:              deps.Clock,
+		clipboard:          deps.Clipboard,
+		logger:             log,
+		runtimeObserver:    deps.RuntimeObserver,
+		remoteHostLearner:  deps.RemoteHostLearner,
+		attachHandoff:      deps.AttachHandoff,
+		remote:             deps.Remote,
+		localControlDialer: deps.LocalControlDialer,
+		origin:             normalizeRouteOrigin(deps.Origin, deps.Remote),
+		probeCapabilities:  !deps.DisableCapabilityProbe,
+		ledger:             newRouteLedger(),
 	}
 }
 
@@ -496,16 +517,20 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	returnResumeFallback := false
 	homeNavigationPending := false
 	returnNavigationPending := false
-	routeNavigationPending := false
+	// navTransition owns creation and recent-route fallback lifecycle:
+	// the captured prior route, selected identity, and settle-once state.
+	// routeNavigationSelection and routeNavigationAction remain as the
+	// in-attempt payload consumed by attachAttempt (commit input and
+	// failure matching), not as cross-attempt fallback authority.
+	// routeNavigationResumeFallback stays as the transport-level exact-attach
+	// retry flag. Home-picker return state stays distinct per its overlay
+	// semantics.
+	var navTransition navigationTransition
 	routeNavigationResumeFallback := false
 	var routeNavigationSelection *routeNavigationSelection
 	var killedSelection *killedRouteSelection
 	killedResumeFallback := false
-	var routeNavigationFallback *attachRoute
 	var routeNavigationAction *protocol.RouteNavigationAction
-	creationPending := false
-	var creationFallback *attachRoute
-	var creationRequestID uint64
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -605,6 +630,27 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		return nil
 	}
+	// restorePendingInventory recovers the serving route of an unsettled
+	// inventory handoff whose destination dial failed. It reports whether a
+	// restore happened; callers redial the return route on true and fail
+	// with the dial error when the transition itself is broken.
+	restorePendingInventory := func() bool {
+		if !navTransition.pendingInventory() {
+			return false
+		}
+		failure, hasFailure := navTransition.inventoryNavigationFailure()
+		route, ok := navTransition.restore()
+		if !ok {
+			return false
+		}
+		navTransition.settleFailure()
+		if hasFailure {
+			pending := failure
+			r.inventoryFailure = &pending
+		}
+		restoreReturnRoute(route)
+		return true
+	}
 
 	runTransientHomePicker := func(attemptCtx context.Context) attachResult {
 		if homeRoute == nil {
@@ -674,14 +720,21 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if killedSelection != nil {
 				return errors.Join(err, r.ledger.retireKilled(*killedSelection))
 			}
-			if creationPending && creationFallback != nil && ctx.Err() == nil {
-				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(err)}
-				route := *creationFallback
-				creationFallback = nil
-				creationPending = false
-				creationRequestID = 0
+			if navTransition.pendingCreation() && ctx.Err() == nil {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: routeFailureCode(err)}
+				route, ok := navTransition.restore()
+				if !ok {
+					return err
+				}
+				navTransition.settleFailure()
 				returnNavigationPending = true
 				restoreReturnRoute(route)
+				continue
+			}
+			if navTransition.pendingInventory() {
+				if !restorePendingInventory() {
+					return err
+				}
 				continue
 			}
 			if resumeToken == 0 || ctx.Err() != nil {
@@ -715,14 +768,21 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if killedSelection != nil {
 				return errors.Join(err, r.ledger.retireKilled(*killedSelection))
 			}
-			if creationPending && creationFallback != nil {
-				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
-				route := *creationFallback
-				creationFallback = nil
-				creationPending = false
-				creationRequestID = 0
+			if navTransition.pendingCreation() {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: protocol.RouteFailureUnavailable}
+				route, ok := navTransition.restore()
+				if !ok {
+					return err
+				}
+				navTransition.settleFailure()
 				returnNavigationPending = true
 				restoreReturnRoute(route)
+				continue
+			}
+			if navTransition.pendingInventory() {
+				if !restorePendingInventory() {
+					return err
+				}
 				continue
 			}
 			return err
@@ -736,14 +796,21 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			stopHandshakeTransport()
 			finishHandshake()
 			_ = transport.Close()
-			if creationPending && creationFallback != nil {
-				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
-				route := *creationFallback
-				creationFallback = nil
-				creationPending = false
-				creationRequestID = 0
+			if navTransition.pendingCreation() {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: protocol.RouteFailureUnavailable}
+				route, ok := navTransition.restore()
+				if !ok {
+					return err
+				}
+				navTransition.settleFailure()
 				returnNavigationPending = true
 				restoreReturnRoute(route)
+				continue
+			}
+			if navTransition.pendingInventory() {
+				if !restorePendingInventory() {
+					return err
+				}
 				continue
 			}
 			return err
@@ -778,7 +845,14 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
-			openHomePicker: runTransientHomePicker,
+			openHomePicker:  runTransientHomePicker,
+			inventoryHome:   homeRoute,
+			inventoryDialer: r.localControlDialer,
+			onInventoryCommitted: func() {
+				if navTransition.pendingInventory() {
+					navTransition.settleSuccess()
+				}
+			},
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
@@ -816,21 +890,21 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.PreferredTabID = result.routePosition.ActiveTabID
 			attemptRequest.RemoteTarget = nil
 		}
-		if result.err == nil && result.welcomed && creationPending {
-			creationPending = false
-			creationFallback = nil
-			creationRequestID = 0
+		if result.err == nil && result.welcomed && navTransition.pendingCreation() {
+			navTransition.settleSuccess()
 		}
 		if result.err == nil && result.welcomed && killedSelection != nil {
 			killedSelection = nil
 			killedResumeFallback = false
 		}
-		if result.err == nil && result.welcomed && routeNavigationPending {
-			routeNavigationPending = false
+		if result.err == nil && result.welcomed && navTransition.pendingRecent() {
+			navTransition.settleSuccess()
 			routeNavigationSelection = nil
 			routeNavigationResumeFallback = false
-			routeNavigationFallback = nil
 			routeNavigationAction = nil
+		}
+		if result.err == nil && result.welcomed && navTransition.pendingInventory() {
+			navTransition.settleSuccess()
 		}
 		if result.routeCreateAction != nil {
 			action := *result.routeCreateAction
@@ -848,7 +922,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				restoreReturnRoute(source)
 				continue
 			}
-			creationFallback = &attachRoute{dialer: selection.prior.dialer, request: cloneAttachRequest(selection.prior.request), resumeToken: selection.prior.resumeToken}
+			priorRoute := attachRoute{dialer: selection.prior.dialer, request: cloneAttachRequest(selection.prior.request), resumeToken: selection.prior.resumeToken}
+			navTransition.beginCreation(priorRoute, action.RequestID)
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			attemptRequest.Intent = protocol.IntentNew
@@ -860,8 +935,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.NavigationCapabilities = 0
 			attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 			resumeToken = 0
-			creationPending = true
-			creationRequestID = action.RequestID
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
 			continue
@@ -879,7 +952,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			action := *result.routeAction
 			routeNavigationAction = &action
-			routeNavigationFallback = &attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
+			priorRoute := attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
+			navTransition.beginRecent(priorRoute)
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			if selection.selected.resumeToken != 0 {
@@ -896,7 +970,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
 			}
 			resumeToken = selection.selected.resumeToken
-			routeNavigationPending = true
 			routeNavigationSelection = &selection
 			routeNavigationResumeFallback = selection.selected.resumeToken != 0
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
@@ -1015,10 +1088,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return errors.New("vev: route handoff returned nil dialer")
 			}
 			if target.Intent == protocol.IntentNew && target.RequestID != 0 {
-				fallback := source
-				creationFallback = &fallback
-				creationPending = true
-				creationRequestID = target.RequestID
+				navTransition.beginCreation(source, target.RequestID)
+			}
+			if result.handoff != nil && result.handoff.inventory {
+				navTransition.beginInventory(attachRoute{dialer: dialer, request: cloneAttachRequest(attemptRequest), resumeToken: resumeToken}, result.handoff.inventorySelection)
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest
@@ -1065,9 +1138,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			returnRoute = nil
 			homeNavigationPending = false
 			returnNavigationPending = false
-			routeNavigationPending = false
+			if navTransition.operation == navigationOperationRecent {
+				navTransition.clear()
+			}
 			routeNavigationSelection = nil
-			routeNavigationFallback = nil
 			routeNavigationAction = nil
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
@@ -1093,31 +1167,40 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			restoreReturnRoute(route)
 			continue
 		}
-		if creationPending && creationFallback != nil {
-			r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(result.err)}
-			route := *creationFallback
-			creationFallback = nil
-			creationPending = false
-			creationRequestID = 0
+		if navTransition.pendingCreation() {
+			r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: routeFailureCode(result.err)}
+			route, ok := navTransition.restore()
+			if !ok {
+				return result.err
+			}
+			navTransition.settleFailure()
 			returnNavigationPending = true
 			restoreReturnRoute(route)
 			continue
 		}
-		if routeNavigationPending && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
+		if navTransition.pendingInventory() {
+			if !restorePendingInventory() {
+				return result.err
+			}
+			continue
+		}
+		if navTransition.pendingRecent() && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
 			attemptRequest.Intent = protocol.IntentAttach
 			resumeToken = 0
 			routeNavigationResumeFallback = false
 			continue
 		}
-		if routeNavigationPending && routeNavigationFallback != nil {
+		if navTransition.pendingRecent() {
 			if routeNavigationAction != nil {
 				action := *routeNavigationAction
 				r.routeFailure = &protocol.RouteNavigationFailure{Key: action.Key, Generation: action.Generation, Code: routeFailureCode(result.err)}
 				routeNavigationAction = nil
 			}
-			route := *routeNavigationFallback
-			routeNavigationFallback = nil
-			routeNavigationPending = false
+			route, ok := navTransition.restore()
+			if !ok {
+				return result.err
+			}
+			navTransition.settleFailure()
 			routeNavigationSelection = nil
 			routeNavigationResumeFallback = false
 			returnNavigationPending = true
@@ -1317,6 +1400,20 @@ type attachAttempt struct {
 	rememberRemoteHost       func()
 	terminalInput            func() *terminalInputPump
 	openHomePicker           func(context.Context) attachResult
+	// inventoryHome is the committed local route that authorises the
+	// navigation-inventory relay and its handoffs. Nil disables the relay:
+	// local-only and ledger-less attachments never dial control sources.
+	inventoryHome *attachRoute
+	// inventoryDialer is the dial-only control source for relay queries.
+	// It never starts the daemon; home.dialer stays the sole attachment
+	// authority.
+	inventoryDialer ports.ClientDialer
+	// onInventoryCommitted settles the inventory transition when the
+	// destination's initial publications commit. attachAttempt.run lives
+	// for the attachment lifetime, so the outer loop cannot settle there:
+	// a later transport failure must reconnect the active destination,
+	// not restore the old serving route.
+	onInventoryCommitted func()
 }
 
 type attachResult struct {
@@ -1392,6 +1489,17 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	transition := a.transition
 	linkEvents := a.linkEvents
 	remote := a.remote || a.request.Remote
+	// The inventory relay serves the serving daemon's palette from the
+	// dial-only local control source while this attachment is remote. It
+	// owns no goroutine: the attempt loop drives polling and publishes
+	// deltas, and bounded query workers report through the poll box and
+	// resolve channel. Advertising the capability in Hello is what lets
+	// the serving palette send demands at all.
+	var inventory *inventoryRelay
+	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote && !home.request.Remote, a.inventoryDialer) {
+		inventory = newInventoryRelay(clk, a.inventoryDialer)
+		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
+	}
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -1586,6 +1694,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		a.runner.routeFailure = nil
 	}
+	if a.runner.inventoryFailure != nil {
+		if err := sendHandshake(func() error {
+			return transport.SendClient(*a.runner.inventoryFailure)
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing inventory navigation failure: %w", err))
+		}
+		a.runner.inventoryFailure = nil
+	}
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
 	if err := enterRaw(); err != nil {
@@ -1597,6 +1713,63 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// coordinator owner.
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Poll and resolve workers report through the box and channel below;
+	// completions carry their originating interaction and query identity.
+	// The relay itself is created before Hello so the capability advertises.
+	inventoryBox := newInventoryPollBox()
+	var inventoryResolveC chan inventoryResolveOutcome
+	inventoryResolvePending := false
+	var nextInventoryRequestID uint64 = 1
+	inventoryOpen := false
+	var inventoryInteraction uint64
+	var inventoryTimer ports.Timer
+	var inventoryTickC <-chan time.Time
+	stopInventoryTimer := func() {
+		if inventoryTimer != nil {
+			inventoryTimer.Stop()
+			inventoryTimer = nil
+		}
+		inventoryTickC = nil
+	}
+	defer stopInventoryTimer()
+	armInventoryPoll := func() {
+		if inventory == nil || !inventoryOpen {
+			stopInventoryTimer()
+			return
+		}
+		if inventoryTimer != nil {
+			inventoryTimer.Stop()
+		}
+		inventoryTimer = clk.NewTimer(inventoryPollInterval)
+		inventoryTickC = inventoryTimer.C()
+	}
+	var cancelInventoryPoll context.CancelFunc
+	stopInventoryPoll := func() {
+		if cancelInventoryPoll != nil {
+			cancelInventoryPoll()
+			cancelInventoryPoll = nil
+		}
+	}
+	defer stopInventoryPoll()
+	startInventoryPoll := func() {
+		if inventory == nil || !inventoryOpen {
+			return
+		}
+		interaction := inventoryInteraction
+		query, ok := inventory.beginPoll()
+		if !ok {
+			return
+		}
+		queryID := nextInventoryRequestID
+		nextInventoryRequestID++
+		queryCtx, cancel := context.WithCancel(loopCtx)
+		cancelInventoryPoll = cancel
+		go func() {
+			defer cancel()
+			response, err := inventory.querySnapshot(queryCtx, queryID)
+			inventoryBox.offer(inventoryPollOutcome{interaction: interaction, query: query, response: response, err: err})
+		}()
+	}
 	input := (*terminalInputPump)(nil)
 	if a.terminalInput != nil {
 		input = a.terminalInput()
@@ -1774,6 +1947,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// handshake deadline must not own the long-lived runtime transport: a quiet
 	// or unchanged screen may legitimately produce no initial Output frame.
 	endHandshake()
+	if a.onInventoryCommitted != nil {
+		a.onInventoryCommitted()
+	}
 	senderStarted = true
 	go runSender(loopCtx, cancel, transport, controlCh, barrierCh, sendCh, inputGate, ackQueue, sendErrCh, log)
 
@@ -2069,6 +2245,106 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		case <-parkedFullC():
 			clearParkedFull()
 			return welcomedResult(errors.New("vev: timed out waiting for parked-route full output"))
+		case <-inventoryTickC:
+			startInventoryPoll()
+			armInventoryPoll()
+		case <-inventoryBox.wake:
+			pollOutcome, ok := inventoryBox.take()
+			if !ok {
+				continue
+			}
+			stopInventoryPoll()
+			if inventory != nil {
+				inventory.endPoll(pollOutcome.query)
+			}
+			if pollOutcome.interaction != inventoryInteraction {
+				startInventoryPoll()
+			}
+			if pollOutcome.err != nil || inventory == nil || !inventoryOpen ||
+				pollOutcome.interaction != inventoryInteraction {
+				armInventoryPoll()
+				continue
+			}
+			if groups, generation, changed := inventory.preparePublication(pollOutcome.response.Groups); changed {
+				publication := protocol.NavigationInventoryPublication{
+					InteractionGeneration: inventoryInteraction,
+					PublicationGeneration: generation, Groups: groups,
+				}
+				if err := protocol.ValidateNavigationInventoryPublication(publication); err != nil {
+					log.Debug("dropping invalid inventory publication", "err", err)
+					armInventoryPoll()
+					continue
+				}
+				select {
+				case controlCh <- publication:
+				case <-loopCtx.Done():
+					return loopCanceledResult()
+				}
+			}
+			armInventoryPoll()
+		case resolveOutcome := <-inventoryResolveC:
+			inventoryResolveC = nil
+			inventoryResolvePending = false
+			if inventory == nil {
+				continue
+			}
+			if resolveOutcome.err != nil {
+				// The serving palette already closed on selection; report
+				// the failure so its feedback names the dead entry.
+				code := protocol.NavigationInventoryStaleIdentity
+				if errors.Is(resolveOutcome.err, errInventorySourceUnavailable) {
+					code = protocol.NavigationInventorySourceGone
+				}
+				failure := protocol.NavigationInventoryFailure{
+					CauseActionID:         resolveOutcome.selection.CauseActionID,
+					InteractionGeneration: resolveOutcome.selection.InteractionGeneration,
+					SourceKey:             resolveOutcome.selection.SourceKey,
+					EntryKey:              resolveOutcome.selection.EntryKey,
+					Code:                  code,
+				}
+				if err := protocol.ValidateNavigationInventoryFailure(failure); err == nil {
+					select {
+					case controlCh <- failure:
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				}
+				continue
+			}
+			if err := inventory.validateSelection(resolveOutcome.selection); err != nil {
+				// The publication retired the key while the resolve was in
+				// flight. The serving palette already closed on selection,
+				// so report the stale identity instead of dropping it.
+				failure := protocol.NavigationInventoryFailure{
+					CauseActionID:         resolveOutcome.selection.CauseActionID,
+					InteractionGeneration: resolveOutcome.selection.InteractionGeneration,
+					SourceKey:             resolveOutcome.selection.SourceKey,
+					EntryKey:              resolveOutcome.selection.EntryKey,
+					Code:                  protocol.NavigationInventoryStaleIdentity,
+				}
+				if err := protocol.ValidateNavigationInventoryFailure(failure); err == nil {
+					select {
+					case controlCh <- failure:
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				}
+				continue
+			}
+			home := a.inventoryHome
+			if home == nil {
+				continue
+			}
+			if ui != nil {
+				ui.follow(uiGeneration, resolveOutcome.selection.CauseActionID)
+				publishUIStatus(ports.UIStatusTransitioning)
+			}
+			handoff := bindAttachHandoff(resolveOutcome.target, *home)
+			handoff.inventory = true
+			handoff.inventorySelection = resolveOutcome.selection
+			result := welcomedResult(nil)
+			result.handoff = handoff
+			return result
 		case ev, ok := <-linkEvents:
 			if !ok {
 				linkEvents = nil
@@ -2380,6 +2656,65 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				navigation := welcomedResult(nil)
 				navigation.action = directive.Action
 				return navigation
+			case protocol.NavigationInventoryDemand:
+				demand := message
+				if inventory == nil {
+					continue
+				}
+				if !demand.Open || demand.InteractionGeneration != inventoryInteraction {
+					stopInventoryPoll()
+				}
+				inventory.setOpen(demand.Open, demand.InteractionGeneration)
+				inventoryOpen = demand.Open
+				if demand.Open {
+					inventoryInteraction = demand.InteractionGeneration
+					startInventoryPoll()
+				}
+				armInventoryPoll()
+				continue
+			case protocol.NavigationInventorySelection:
+				selection := message
+				if inventory == nil || inventoryResolvePending {
+					continue
+				}
+				if err := inventory.validateSelection(selection); err != nil {
+					// The serving daemon rendered the row before the newer
+					// removal publication arrived. Its palette already
+					// closed on selection, so report the stale identity
+					// instead of leaving it without feedback.
+					failure := protocol.NavigationInventoryFailure{
+						CauseActionID:         selection.CauseActionID,
+						InteractionGeneration: selection.InteractionGeneration,
+						SourceKey:             selection.SourceKey,
+						EntryKey:              selection.EntryKey,
+						Code:                  protocol.NavigationInventoryStaleIdentity,
+					}
+					if verr := protocol.ValidateNavigationInventoryFailure(failure); verr == nil {
+						select {
+						case controlCh <- failure:
+						case <-loopCtx.Done():
+							return loopCanceledResult()
+						}
+					}
+					continue
+				}
+				inventoryResolvePending = true
+				inventoryResolveC = make(chan inventoryResolveOutcome, 1)
+				resolveID := nextInventoryRequestID
+				nextInventoryRequestID++
+				go func() {
+					outcome := inventoryResolveOutcome{selection: selection}
+					outcome.target, outcome.err = inventory.resolveEntry(loopCtx, resolveID, selection.SourceKey, selection.EntryKey, domain.RemoteRegistration{})
+					select {
+					case inventoryResolveC <- outcome:
+					case <-loopCtx.Done():
+					}
+				}()
+				continue
+			case protocol.NavigationInventoryResponse:
+				// Overlay-owned liveness. The relay never waits on it:
+				// publications carry the only state it tracks.
+				continue
 			case protocol.RouteCreateSessionAction:
 				action := message
 				if action.Validate() != nil {

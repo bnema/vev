@@ -158,6 +158,12 @@ func testDecodeClientFrame(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalSamePeerSwitchRequest(frame.Payload)
 	case wire.MsgParkedRouteRequest:
 		return wire.UnmarshalParkedRouteRequest(frame.Payload)
+	case wire.MsgNavigationInventoryRequest:
+		return wire.UnmarshalNavigationInventoryRequest(frame.Payload)
+	case wire.MsgNavigationInventoryPublication:
+		return wire.UnmarshalNavigationInventoryPublication(frame.Payload)
+	case wire.MsgNavigationInventoryFailure:
+		return wire.UnmarshalNavigationInventoryFailure(frame.Payload)
 	case wire.MsgRecentRouteSnapshot:
 		return wire.UnmarshalRecentRouteSnapshot(frame.Payload)
 	case wire.MsgRouteNavigationFailure:
@@ -316,6 +322,24 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 		return wire.Frame{Type: wire.MsgSamePeerSwitchFailure, Payload: payload}, err
 	case protocol.ParkedRouteResponse:
 		return wire.Frame{Type: wire.MsgParkedRouteResponse, Payload: wire.MarshalParkedRouteResponse(m)}, nil
+	case protocol.NavigationInventoryResponse:
+		payload := wire.MarshalNavigationInventoryResponse(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid inventory response")
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryResponse, Payload: payload}, nil
+	case protocol.NavigationInventoryDemand:
+		payload := wire.MarshalNavigationInventoryDemand(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid inventory demand")
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: payload}, nil
+	case protocol.NavigationInventorySelection:
+		payload := wire.MarshalNavigationInventorySelection(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid inventory selection")
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: payload}, nil
 	default:
 		return wire.Frame{}, errors.New("test server connection: unsupported server message")
 	}

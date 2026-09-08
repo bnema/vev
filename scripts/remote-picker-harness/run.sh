@@ -1,63 +1,29 @@
 #!/usr/bin/env bash
+# Disposable navigation acceptance with the real client, daemons and UI driver.
 set -euo pipefail
-
-usage() {
-  cat >&2 <<'USAGE'
-Usage: scripts/remote-picker-harness/run.sh
-
-Builds the current vev binary into a disposable two-container environment and
-runs the unified same-connection local-picker proof plus SSH-stdio, UDP,
-catalog, preview, lifecycle-fence, and environment acceptance checks. Docker is
-invoked normally,
-so DOCKER_HOST and the active
-Docker context select the daemon; no socket path is assumed.
-
-Environment:
-  DOCKER_HOST             Docker endpoint, when the active context does not
-                          already select the rootless daemon.
-  VEV_HARNESS_BASE_IMAGE  Base image for the disposable containers
-                          (default: ubuntu:24.04).
-  VEV_HARNESS_ARTIFACT_DIR Host directory for the bounded probe artifact.
-                          The JSON report is copied there before container
-                          cleanup; no report is written when unset.
-USAGE
-}
-
 case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  "") ;;
-  *)
-    usage
-    exit 2
-    ;;
+  -h|--help) printf 'Usage: scripts/remote-picker-harness/run.sh\nRequires Docker, Python 3 and ssh-keygen.\n'; exit 0 ;;
+  '') ;;
+  *) exit 2 ;;
 esac
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-base_image="${VEV_HARNESS_BASE_IMAGE:-ubuntu:24.04}"
-artifact_dir="${VEV_HARNESS_ARTIFACT_DIR:-}"
-if [ -n "$artifact_dir" ]; then
-  umask 077
-  mkdir -p "$artifact_dir"
-fi
+for tool in docker python3 ssh-keygen; do command -v "$tool" >/dev/null; done
+docker info >/dev/null
 run_id="$(date +%s)-$$"
-image="vev-remote-picker-harness:${run_id}"
-network="vev-remote-picker-harness-${run_id}"
+image="vev-acceptance:${run_id}"
+network="vev-acceptance-${run_id}"
 local_container="${network}-local"
 remote_container="${network}-remote"
-context_dir="$(mktemp -d "${TMPDIR:-/tmp}/vev-remote-picker-harness.XXXXXX")"
-
+context_dir="$(mktemp -d)"
 cleanup() {
   status=$?
   trap - EXIT INT TERM
   set +e
   if [ "$status" -ne 0 ]; then
-    printf 'remote picker harness: local container logs:\n' >&2
-    docker logs "$local_container" >&2
-    printf 'remote picker harness: remote container logs:\n' >&2
-    docker logs "$remote_container" >&2
+    for container in "$local_container" "$remote_container"; do
+      docker logs "$container" >&2
+      docker exec "$container" sh -c 'tail -n 40 ~/.local/state/vev/vev-daemon.log' >&2
+    done
   fi
   docker rm -f "$local_container" "$remote_container" >/dev/null 2>&1
   docker network rm "$network" >/dev/null 2>&1
@@ -65,68 +31,31 @@ cleanup() {
   rm -rf "$context_dir"
   exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-command -v docker >/dev/null || { echo 'remote picker harness: docker is required' >&2; exit 127; }
-command -v ssh-keygen >/dev/null || { echo 'remote picker harness: ssh-keygen is required' >&2; exit 127; }
-
-if ! docker info >/dev/null 2>&1; then
-  echo 'remote picker harness: Docker is unavailable through the active DOCKER_HOST/context' >&2
-  exit 1
-fi
-
-printf 'remote picker harness: building %s\n' "$image"
-docker pull "$base_image" >/dev/null
-image_arch="$(docker image inspect "$base_image" --format '{{.Architecture}}')"
-GOOS=linux GOARCH="$image_arch" CGO_ENABLED=0 go build -o "$context_dir/vev" "$repo_root"
-GOOS=linux GOARCH="$image_arch" CGO_ENABLED=0 go build -o "$context_dir/harness" "$repo_root/scripts/remote-picker-harness"
-ssh-keygen -q -t ed25519 -N '' -f "$context_dir/id_ed25519"
-cp "$repo_root/scripts/remote-picker-harness/Dockerfile" "$context_dir/Dockerfile"
-cp "$repo_root/scripts/remote-picker-harness/vev-wrapper" "$context_dir/vev-wrapper"
-printf '%s\n' 'id_ed25519' > "$context_dir/.dockerignore"
-chmod 0600 "$context_dir/id_ed25519"
-
-docker build --build-arg "BASE_IMAGE=$base_image" -t "$image" "$context_dir" >/dev/null
+docker build -f "$repo_root/scripts/demo/Dockerfile" -t "$image" "$repo_root" >/dev/null
 docker network create "$network" >/dev/null
-
-docker run -d --name "$remote_container" \
-  --network "$network" --network-alias remote \
-  -e VEV_UDP_PORT_RANGE=61000 \
-  "$image" >/dev/null
-
-docker create --name "$local_container" \
-  --network "$network" --network-alias local \
-  "$image" sleep infinity >/dev/null
-docker cp "$context_dir/id_ed25519" "$local_container:/home/test/.ssh/id_ed25519"
-docker start "$local_container" >/dev/null
-docker exec "$local_container" chown test:test /home/test/.ssh/id_ed25519
-docker exec "$local_container" chmod 0600 /home/test/.ssh/id_ed25519
-
-printf 'remote picker harness: waiting for SSH service\n'
-for _ in $(seq 1 60); do
-  if docker exec --user test -e HOME=/home/test "$local_container" ssh -o BatchMode=yes -o ConnectTimeout=1 test@remote true >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.2
+for role in local remote; do
+  docker run -d --name "${network}-${role}" --network "$network" \
+    --network-alias "$role" --entrypoint sleep "$image" infinity >/dev/null
 done
-if ! docker exec --user test -e HOME=/home/test "$local_container" ssh -o BatchMode=yes -o ConnectTimeout=2 test@remote true >/dev/null 2>&1; then
-  echo 'remote picker harness: SSH service did not become ready' >&2
-  exit 1
-fi
 
-printf 'remote picker harness: running acceptance checks\n'
-harness_status=0
-if [ -n "$artifact_dir" ]; then
-  docker exec --user test -e HOME=/home/test -e VEV_HARNESS_ARTIFACT_DIR=/tmp/vev-harness-artifact "$local_container" /usr/local/bin/remote-picker-harness || harness_status=$?
-  if ! docker cp "$local_container:/tmp/vev-harness-artifact/remote-picker-harness.json" "$artifact_dir/remote-picker-harness.json"; then
-    echo "remote picker harness: failed to collect probe artifact (acceptance status $harness_status)" >&2
-    if [ "$harness_status" -ne 0 ]; then
-      exit "$harness_status"
-    fi
-    exit 1
-  fi
-  chmod 0600 "$artifact_dir/remote-picker-harness.json"
-else
-  docker exec --user test -e HOME=/home/test "$local_container" /usr/local/bin/remote-picker-harness || harness_status=$?
-fi
-exit "$harness_status"
+# Only generated fixture credentials enter these containers; no host HOME or
+# sockets are mounted. Pin the fresh remote key instead of trusting keyscan.
+ssh-keygen -q -t ed25519 -N '' -C acceptance-client -f "$context_dir/client"
+ssh-keygen -q -t ed25519 -N '' -C acceptance-host -f "$context_dir/host"
+docker exec --user root "$remote_container" sh -c 'rm -f /etc/ssh/ssh_host_* /home/demo/.ssh/id_ed25519*; mkdir -p /run/sshd'
+docker cp "$context_dir/host" "$remote_container:/etc/ssh/ssh_host_ed25519_key"
+docker cp "$context_dir/host.pub" "$remote_container:/etc/ssh/ssh_host_ed25519_key.pub"
+docker cp "$context_dir/client.pub" "$remote_container:/home/demo/.ssh/authorized_keys"
+docker exec --user root "$remote_container" sh -c 'chmod 600 /etc/ssh/ssh_host_ed25519_key /home/demo/.ssh/authorized_keys; chown demo:demo /home/demo/.ssh/authorized_keys; /usr/sbin/sshd'
+docker cp "$context_dir/client" "$local_container:/home/demo/.ssh/id_ed25519"
+docker cp "$context_dir/client.pub" "$local_container:/home/demo/.ssh/id_ed25519.pub"
+{ printf 'remote '; cut -d' ' -f1-2 "$context_dir/host.pub"; } > "$context_dir/known_hosts"
+docker cp "$context_dir/known_hosts" "$local_container:/home/demo/.ssh/known_hosts"
+docker exec --user root "$local_container" sh -c 'chown demo:demo /home/demo/.ssh/id_ed25519* /home/demo/.ssh/known_hosts; chmod 600 /home/demo/.ssh/id_ed25519 /home/demo/.ssh/known_hosts'
+docker exec "$local_container" ssh -o BatchMode=yes -o ConnectTimeout=5 remote true
+docker exec "$local_container" vev host add remote
+python3 "$repo_root/scripts/remote-picker-harness/navigation_repro.py" "$local_container" "$remote_container"

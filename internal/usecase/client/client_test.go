@@ -551,7 +551,8 @@ func TestKilledSessionReturnsToPreviousLocalRoute(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(2), dialer.calls.Load())
 	hello := helloFromSend(t, previous)
-	require.Equal(t, protocol.IntentResume, hello.Intent)
+	require.Equal(t, protocol.IntentAttach, hello.Intent)
+	require.Zero(t, hello.ResumeToken)
 	require.Equal(t, firstTarget, *hello.ExactTarget)
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }

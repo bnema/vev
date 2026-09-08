@@ -1141,6 +1141,10 @@ func (d *Daemon) handleConn(tr ports.ServerConnection) {
 		if err := d.handleRemotePreview(tr, message); err != nil {
 			d.log.Warn("remote preview handler failed", "err", err)
 		}
+	case protocol.NavigationInventoryRequest:
+		stopTransport()
+		finishHandshake()
+		d.handleNavigationInventory(tr, message)
 	case protocol.Kill:
 		stopTransport()
 		finishHandshake()
@@ -1182,6 +1186,15 @@ func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.Server
 		send(serverError(protocol.ErrInternal, "malformed kill request"))
 	case protocol.DecodeMessageRemotePreview:
 		send(protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewMalformed})
+	case protocol.DecodeMessageNavigationInventory:
+		if !failure.HasRequestID {
+			return
+		}
+		status := protocol.NavigationInventoryInvalid
+		if failure.Version != 0 && failure.Version != protocol.Version {
+			status = protocol.NavigationInventoryVersionMismatch
+		}
+		send(protocol.NavigationInventoryResponse{RequestID: failure.RequestID, Operation: protocol.NavigationInventorySnapshot, Status: status})
 	default:
 		send(serverError(protocol.ErrInternal, "expected hello"))
 	}

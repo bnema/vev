@@ -435,6 +435,17 @@ func (l *routeLedger) commitLocked(candidate routeCandidate) (routeIdentity, err
 		resumeToken:  candidate.resumeToken,
 		home:         isHome,
 	}
+	// Resume credentials belong to attachments, which can move between
+	// sessions on one daemon. Only the newly committed route may retain
+	// this credential; older routes must use their exact attach targets.
+	if candidate.resumeToken != 0 {
+		for i := range l.entries {
+			previous := &l.entries[i]
+			if previous.origin == candidate.origin && previous.originKey == candidate.originKey && previous.resumeToken == candidate.resumeToken {
+				previous.resumeToken = 0
+			}
+		}
+	}
 	oldActive := l.active
 	l.moveToFrontLocked(index, entry)
 	if !oldActive.empty() && oldActive.key != identity.key {

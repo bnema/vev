@@ -217,6 +217,9 @@ func (t *attachmentEffect) sendControl(message protocol.ServerMessage) error {
 	case protocol.RouteCreateSessionAction:
 		navigation.CauseActionID = t.uiActionID
 		message = navigation
+	case protocol.NavigationInventorySelection:
+		navigation.CauseActionID = t.uiActionID
+		message = navigation
 	}
 	err := t.transport.transport.SendServer(message)
 	if err != nil {
