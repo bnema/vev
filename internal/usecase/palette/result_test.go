@@ -14,6 +14,33 @@ func testExactTarget(name string, marker byte) protocol.ExactSessionTarget {
 	return protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{marker}, SessionName: name}
 }
 
+func TestImportedSessionResultKeepsOpaqueKeysAndQualifiedDisplay(t *testing.T) {
+	local := NewImportedSessionResult("local", "aaa/one", "shared", "local", "up", "")
+	remote := NewImportedSessionResult("user@arch", "bbb/shared", "shared", "arch", "up", "")
+
+	require.Equal(t, ResultKindImportedSession, local.Kind())
+	require.Equal(t, "Switch to session shared@local", local.DisplayText())
+	require.Equal(t, "Switch to session shared@arch", remote.DisplayText())
+
+	source, entry, ok := local.ImportedSessionKey()
+	require.True(t, ok)
+	require.Equal(t, "local", source)
+	require.Equal(t, "aaa/one", entry)
+	display, reason, ok := remote.ImportedSessionDisplay()
+	require.True(t, ok)
+	require.Equal(t, "shared@arch", display)
+	require.Empty(t, reason)
+
+	// Homonyms across sources stay distinct: keys never collapse.
+	require.False(t, local.sameTarget(remote))
+	require.True(t, local.sameTarget(NewImportedSessionResult("local", "aaa/one", "renamed", "local", "up", "")))
+
+	// Other kinds expose no imported keys.
+	if _, _, ok := NewCommandResult(command.Command{Code: "NT"}).ImportedSessionKey(); ok {
+		t.Fatal("command results must not expose imported keys")
+	}
+}
+
 func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	created := time.Date(2026, time.March, 1, 2, 3, 4, 0, time.UTC)
 	commandResult := NewCommandResult(command.Command{Code: "NT", Desc: "Create tab"})

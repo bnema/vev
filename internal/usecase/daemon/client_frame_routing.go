@@ -193,6 +193,29 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 			return true
 		}
 		resultEffect.End()
+	case protocol.NavigationInventoryPublication:
+		overlays := effect.ac.overlays
+		if overlays == nil {
+			break
+		}
+		overlays.paletteMu.Lock()
+		admitted := admitPaletteInventoryPublication(overlays, message)
+		overlays.paletteMu.Unlock()
+		if admitted {
+			d.refreshPalette(effect.ac)
+			d.invalidateRender(effect.sess, effect.ac, true, "client_frame_routing.go:inventory-publication")
+		}
+	case protocol.NavigationInventoryFailure:
+		overlays := effect.ac.overlays
+		if overlays == nil {
+			break
+		}
+		overlays.paletteMu.Lock()
+		if overlays.palette != nil {
+			overlays.paletteFeedback = inventoryFailureNotice(message.Code)
+		}
+		overlays.paletteMu.Unlock()
+		d.invalidateRender(effect.sess, effect.ac, true, "client_frame_routing.go:inventory-failure")
 	case protocol.Ping:
 		if err := effect.sendControl(serverPong()); err != nil {
 			effect.End()

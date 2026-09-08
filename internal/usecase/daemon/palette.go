@@ -40,7 +40,7 @@ func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
 	return modal
 }
 
-func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
+func (d *Daemon) enterPalette(sess *session, ac *attachedClient) uint64 {
 	// Capture the client-owned route snapshot before taking paletteMu. The
 	// snapshot is immutable for this palette interaction and the daemon never
 	// consults its own session history for recent-route commands.
@@ -56,8 +56,10 @@ func (d *Daemon) enterPalette(sess *session, ac *attachedClient) {
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
+	interaction := openPaletteInventory(ac.overlays)
 	ac.overlays.paletteMu.Unlock()
 	d.invalidateRender(sess, ac, true, "palette.go")
+	return interaction
 }
 
 type paletteSessionIdentity struct {
@@ -314,6 +316,7 @@ func (d *Daemon) refreshPalette(ac *attachedClient) {
 	}
 
 	results := d.paletteResults(sess, d.paletteCommands(), routeSnapshot)
+	results = appendImportedResults(results, ac)
 	rt.paletteMu.Lock()
 	defer rt.paletteMu.Unlock()
 	if rt.paletteGeneration != generation || rt.palette != model {
@@ -398,6 +401,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var remoteKey domain.RemoteSessionKey
 	var remoteUnavailableReason string
 	var hasRemoteTarget bool
+	var importedSourceKey, importedEntryKey string
+	var hasImportedTarget bool
 	var routeTarget protocol.RouteNavigationAction
 	var hasRouteTarget bool
 	var createDestination palette.Result
@@ -406,6 +411,8 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var routeSnapshot protocol.RecentRouteSnapshot
 	var generation uint64
 	var rawQuery string
+	var cancelInventoryInteraction uint64
+	var hasCancelInventory bool
 	changed, cancel, execute, chooseDestination := false, false, false, false
 	var effect *attachmentEffect
 	if len(effects) != 0 {
@@ -489,6 +496,10 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 				remoteKey = key
 				remoteUnavailableReason, _ = selected.RemoteSessionUnavailableReason()
 				hasRemoteTarget = true
+			} else if sourceKey, entryKey, ok := selected.ImportedSessionKey(); ok {
+				importedSourceKey = sourceKey
+				importedEntryKey = entryKey
+				hasImportedTarget = true
 			} else if action, ok := selected.RouteNavigationAction(); ok {
 				routeTarget = action
 				hasRouteTarget = true
@@ -528,10 +539,14 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 	}
 	if cancel {
+		cancelInventoryInteraction, hasCancelInventory = takePaletteInventoryClose(ac.overlays)
 		ac.clearPaletteLocked()
 	}
 	ac.overlays.paletteMu.Unlock()
 	if cancel {
+		if hasCancelInventory {
+			d.sendPaletteInventoryDemand(ac, effect, false, cancelInventoryInteraction)
+		}
 		d.invalidateRender(entry, ac, true, "palette.go")
 		return
 	}
@@ -590,6 +605,46 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		if !errors.Is(err, errAttachmentTransition) {
 			ac.paletteFailure(generation, rawQuery, "requested remote session is unavailable")
 			d.invalidateRender(entry, ac, true, "palette.go")
+		}
+		return
+	}
+
+	if hasImportedTarget {
+		if effect == nil {
+			ac.paletteFailure(generation, rawQuery, "requested imported session is unavailable")
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		ac.overlays.paletteMu.Lock()
+		open := ac.overlays.paletteInventoryOpen
+		selection := protocol.NavigationInventorySelection{
+			CauseActionID:         effect.uiActionID,
+			InteractionGeneration: ac.overlays.paletteInventoryInteraction,
+			PublicationGeneration: ac.overlays.paletteInventoryPublication,
+			SourceKey:             importedSourceKey,
+			EntryKey:              importedEntryKey,
+		}
+		if open {
+			freezePaletteInventorySelection(ac.overlays, selection)
+		}
+		closeInteraction, hasClose := takePaletteInventoryClose(ac.overlays)
+		ac.overlays.paletteMu.Unlock()
+		if !open || protocol.ValidateNavigationInventorySelection(selection) != nil {
+			ac.paletteFailure(generation, rawQuery, "requested imported session is unavailable")
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		// Selection crosses before the close demand on the guarded serving
+		// connection; closing after selection must not cancel the client's
+		// pending navigation operation.
+		if err := effect.sendControl(selection); err != nil {
+			ac.paletteFailure(generation, rawQuery, "requested imported session is unavailable")
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
+		closed := d.closeExecutedPalette(ac, generation, rawQuery)
+		if closed && hasClose {
+			d.sendPaletteInventoryDemand(ac, effect, false, closeInteraction)
 		}
 		return
 	}
@@ -720,6 +775,7 @@ func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.palettePreview = ""
 	ac.overlays.paletteFeedback = ""
 	ac.overlays.palettePending = nil
+	closePaletteInventory(ac.overlays)
 }
 
 func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback string) {
