@@ -1,5 +1,7 @@
 package client
 
+import "github.com/bnema/vev/internal/protocol"
+
 // Home-picker overlays retain their separate navigation lifecycle.
 type navigationOperation uint8
 
@@ -17,6 +19,12 @@ type navigationTransition struct {
 	operation   navigationOperation
 	returnRoute attachRoute
 	requestID   uint64
+	// inventorySelection identifies the serving palette selection that
+	// caused the handoff. It survives destination dial/handshake failure
+	// so recovery can report NavigationInventoryNavigationFailed to the
+	// restored serving daemon.
+	inventorySelection    protocol.NavigationInventorySelection
+	hasInventorySelection bool
 }
 
 func (t *navigationTransition) active() bool {
@@ -43,8 +51,28 @@ func (t *navigationTransition) beginRecent(returnRoute attachRoute) {
 	*t = navigationTransition{operation: navigationOperationRecent, returnRoute: returnRoute}
 }
 
-func (t *navigationTransition) beginInventory(returnRoute attachRoute) {
-	*t = navigationTransition{operation: navigationOperationInventory, returnRoute: returnRoute}
+func (t *navigationTransition) beginInventory(returnRoute attachRoute, selection protocol.NavigationInventorySelection) {
+	*t = navigationTransition{operation: navigationOperationInventory, returnRoute: returnRoute, inventorySelection: selection, hasInventorySelection: true}
+}
+
+// inventoryNavigationFailure reports the failed handoff to the restored
+// serving daemon. It returns false when no selection was retained or the
+// failure does not validate.
+func (t *navigationTransition) inventoryNavigationFailure() (protocol.NavigationInventoryFailure, bool) {
+	if t == nil || !t.hasInventorySelection {
+		return protocol.NavigationInventoryFailure{}, false
+	}
+	failure := protocol.NavigationInventoryFailure{
+		CauseActionID:         t.inventorySelection.CauseActionID,
+		InteractionGeneration: t.inventorySelection.InteractionGeneration,
+		SourceKey:             t.inventorySelection.SourceKey,
+		EntryKey:              t.inventorySelection.EntryKey,
+		Code:                  protocol.NavigationInventoryNavigationFailed,
+	}
+	if err := protocol.ValidateNavigationInventoryFailure(failure); err != nil {
+		return protocol.NavigationInventoryFailure{}, false
+	}
+	return failure, true
 }
 
 func (t *navigationTransition) restore() (attachRoute, bool) {

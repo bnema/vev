@@ -224,6 +224,10 @@ type attachHandoff struct {
 	source attachRoute
 	// Run captures inventory recovery from its rebased serving request.
 	inventory bool
+	// inventorySelection identifies the serving palette selection behind
+	// an inventory handoff. Run retains it so destination failure can
+	// report NavigationInventoryNavigationFailed after restoration.
+	inventorySelection protocol.NavigationInventorySelection
 }
 
 func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attachHandoff {
@@ -249,6 +253,9 @@ type Runner struct {
 	ledger             *routeLedger
 	routeFailure       *protocol.RouteNavigationFailure
 	creationFailure    *protocol.SessionCreationFailure
+	// inventoryFailure reports a failed inventory handoff to the restored
+	// serving daemon on the next successful handshake.
+	inventoryFailure *protocol.NavigationInventoryFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -631,11 +638,16 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if !navTransition.pendingInventory() {
 			return false
 		}
+		failure, hasFailure := navTransition.inventoryNavigationFailure()
 		route, ok := navTransition.restore()
 		if !ok {
 			return false
 		}
 		navTransition.settleFailure()
+		if hasFailure {
+			pending := failure
+			r.inventoryFailure = &pending
+		}
 		restoreReturnRoute(route)
 		return true
 	}
@@ -836,6 +848,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			openHomePicker:  runTransientHomePicker,
 			inventoryHome:   homeRoute,
 			inventoryDialer: r.localControlDialer,
+			onInventoryCommitted: func() {
+				if navTransition.pendingInventory() {
+					navTransition.settleSuccess()
+				}
+			},
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
@@ -1074,7 +1091,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				navTransition.beginCreation(source, target.RequestID)
 			}
 			if result.handoff != nil && result.handoff.inventory {
-				navTransition.beginInventory(attachRoute{dialer: dialer, request: cloneAttachRequest(attemptRequest), resumeToken: resumeToken})
+				navTransition.beginInventory(attachRoute{dialer: dialer, request: cloneAttachRequest(attemptRequest), resumeToken: resumeToken}, result.handoff.inventorySelection)
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest
@@ -1391,6 +1408,12 @@ type attachAttempt struct {
 	// It never starts the daemon; home.dialer stays the sole attachment
 	// authority.
 	inventoryDialer ports.ClientDialer
+	// onInventoryCommitted settles the inventory transition when the
+	// destination's initial publications commit. attachAttempt.run lives
+	// for the attachment lifetime, so the outer loop cannot settle there:
+	// a later transport failure must reconnect the active destination,
+	// not restore the old serving route.
+	onInventoryCommitted func()
 }
 
 type attachResult struct {
@@ -1671,6 +1694,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		a.runner.routeFailure = nil
 	}
+	if a.runner.inventoryFailure != nil {
+		if err := sendHandshake(func() error {
+			return transport.SendClient(*a.runner.inventoryFailure)
+		}); err != nil {
+			return welcomedResult(fmt.Errorf("vev: publishing inventory navigation failure: %w", err))
+		}
+		a.runner.inventoryFailure = nil
+	}
 
 	// 3. Enter raw mode after Welcome; Run owns restoration.
 	if err := enterRaw(); err != nil {
@@ -1916,6 +1947,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// handshake deadline must not own the long-lived runtime transport: a quiet
 	// or unchanged screen may legitimately produce no initial Output frame.
 	endHandshake()
+	if a.onInventoryCommitted != nil {
+		a.onInventoryCommitted()
+	}
 	senderStarted = true
 	go runSender(loopCtx, cancel, transport, controlCh, barrierCh, sendCh, inputGate, ackQueue, sendErrCh, log)
 
@@ -2278,7 +2312,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				continue
 			}
 			if err := inventory.validateSelection(resolveOutcome.selection); err != nil {
-				log.Debug("dropping stale inventory resolve", "err", err)
+				// The publication retired the key while the resolve was in
+				// flight. The serving palette already closed on selection,
+				// so report the stale identity instead of dropping it.
+				failure := protocol.NavigationInventoryFailure{
+					CauseActionID:         resolveOutcome.selection.CauseActionID,
+					InteractionGeneration: resolveOutcome.selection.InteractionGeneration,
+					SourceKey:             resolveOutcome.selection.SourceKey,
+					EntryKey:              resolveOutcome.selection.EntryKey,
+					Code:                  protocol.NavigationInventoryStaleIdentity,
+				}
+				if err := protocol.ValidateNavigationInventoryFailure(failure); err == nil {
+					select {
+					case controlCh <- failure:
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				}
 				continue
 			}
 			home := a.inventoryHome
@@ -2291,6 +2341,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 			handoff := bindAttachHandoff(resolveOutcome.target, *home)
 			handoff.inventory = true
+			handoff.inventorySelection = resolveOutcome.selection
 			result := welcomedResult(nil)
 			result.handoff = handoff
 			return result
@@ -2627,7 +2678,24 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					continue
 				}
 				if err := inventory.validateSelection(selection); err != nil {
-					log.Debug("ignoring invalid inventory selection", "err", err)
+					// The serving daemon rendered the row before the newer
+					// removal publication arrived. Its palette already
+					// closed on selection, so report the stale identity
+					// instead of leaving it without feedback.
+					failure := protocol.NavigationInventoryFailure{
+						CauseActionID:         selection.CauseActionID,
+						InteractionGeneration: selection.InteractionGeneration,
+						SourceKey:             selection.SourceKey,
+						EntryKey:              selection.EntryKey,
+						Code:                  protocol.NavigationInventoryStaleIdentity,
+					}
+					if verr := protocol.ValidateNavigationInventoryFailure(failure); verr == nil {
+						select {
+						case controlCh <- failure:
+						case <-loopCtx.Done():
+							return loopCanceledResult()
+						}
+					}
 					continue
 				}
 				inventoryResolvePending = true
