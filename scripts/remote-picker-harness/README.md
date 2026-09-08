@@ -1,14 +1,22 @@
-# Remote picker container acceptance
+# Container acceptance (Arch, three roles)
 
-Run the disposable two-container acceptance harness with:
+Run the disposable three-container acceptance scaffold with:
 
 ```sh
 make remote-acceptance
 ```
 
-The harness builds the current binary, starts a local client container and an
-SSH-enabled remote daemon container on a private Docker network, and removes
-all resources when it exits. Docker uses the normal CLI configuration, so
+The runner builds the real Arch image (`scripts/demo/Dockerfile`) from the
+current worktree, starts local, remote-a, and remote-b roles with
+fixture-only SSH credentials and distinct A/B host keys on a private Docker
+network, verifies the Arch/SSH/binary prerequisites, records run identity
+into `matrix.json`, and removes all resources when it exits. The E3 case
+matrix and E4 vision review (plan P5) are not implemented yet: the scaffold
+exits 0 on prerequisites alone and must not be mistaken for V6.
+
+Legacy note: the Go controller in this directory still encodes the previous
+two-container proxy proof; its assertions are obsolete and will be replaced
+by real-client route-ownership checks in P5. Docker uses the normal CLI configuration, so
 `DOCKER_HOST` or the active context selects a rootless daemon; the harness does
 not assume a socket pathname.
 
