@@ -97,6 +97,8 @@ type attachedClient struct {
 	parkedRouteOutput          atomic.Bool
 	parkedRouteFullPending     atomic.Bool
 	routeAttentionSubscription protocol.RouteAttentionSubscription
+	routeSubscriptionTransport transportSnapshot
+	routeObservationAfter      map[protocol.RouteAttentionTarget]time.Time
 	// routeCreatedSession marks a session created by this attachment's route.
 	// A handshake that never commits Welcome must tear down that exact empty
 	// session, while an attachment routed to an existing session must not.
@@ -371,11 +373,23 @@ func (ac *attachedClient) routeSnapshotCopy() protocol.RecentRouteSnapshot {
 	return snapshot
 }
 
-func (ac *attachedClient) setRouteAttentionSubscription(subscription protocol.RouteAttentionSubscription) {
+func (ac *attachedClient) setRouteAttentionSubscription(subscription protocol.RouteAttentionSubscription, expected transportSnapshot, now time.Time) {
 	subscription.Targets = append([]protocol.RouteAttentionTarget(nil), subscription.Targets...)
 	ac.routeMu.Lock()
+	defer ac.routeMu.Unlock()
+	after := make(map[protocol.RouteAttentionTarget]time.Time, len(subscription.Targets))
+	for _, target := range subscription.Targets {
+		admitted := now
+		// Preserve the causal observation fence across unchanged republishes;
+		// a new connection must establish a fresh post-Welcome subscription.
+		if prior, ok := ac.routeObservationAfter[target]; ok && ac.routeSubscriptionTransport == expected {
+			admitted = prior
+		}
+		after[target] = admitted
+	}
+	ac.routeObservationAfter = after
+	ac.routeSubscriptionTransport = expected
 	ac.routeAttentionSubscription = subscription
-	ac.routeMu.Unlock()
 }
 
 func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.ExactSessionTarget, bool) {

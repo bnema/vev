@@ -29,7 +29,7 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 	})
 	ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{
 		Targets: []protocol.RouteAttentionTarget{{Ref: previous, Target: testRouteTarget("previous", 7)}},
-	})
+	}, ac.transportSnapshot(), d.clock.Now())
 
 	require.NoError(t, d.backSessionForAttachment(effect))
 	frames := transport.Sends()
@@ -83,7 +83,7 @@ func TestBackSessionOffersPreviousRouteOnCurrentDaemon(t *testing.T) {
 	})
 	ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{
 		Targets: []protocol.RouteAttentionTarget{{Ref: previous, Target: exact}},
-	})
+	}, ac.transportSnapshot(), d.clock.Now())
 
 	require.NoError(t, d.backSessionForAttachment(effect))
 	frames := transport.Sends()

@@ -53,7 +53,7 @@ func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
 					LifecycleID: tt.targetID,
 					SessionName: sess.name,
 				},
-			}}})
+			}}}, ac.transportSnapshot(), d.clock.Now())
 
 			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
 

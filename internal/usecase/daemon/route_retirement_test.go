@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -22,7 +23,8 @@ func TestPickerDeleteRetiresSubscribedHistory(t *testing.T) {
 			d.mu.Unlock()
 			target := protocol.ExactSessionTarget{LifecycleID: victim.incarnation, SessionName: victim.name}
 			ref := protocol.RouteRef{Key: 2, Generation: 1}
-			ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{Ref: ref, Target: target}}})
+			ac.installTestAttachmentCapability(source.captureAttachmentCapability(ac, ac.transport()))
+			ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{Ref: ref, Target: target}}}, ac.transportSnapshot(), d.clock.Now())
 			if stopped {
 				require.NoError(t, d.killSession(victim, protocol.ReasonSessionKilled, false))
 			}
@@ -37,11 +39,12 @@ func TestPickerDeleteRetiresSubscribedHistory(t *testing.T) {
 }
 
 func TestRemoteDirectoryDeletionRetiresHistoryWithPickerClosed(t *testing.T) {
-	d, _, ac, sends := newManualSessionWithPTYs(t, nil)
+	d, source, ac, sends := newManualSessionWithPTYs(t, nil)
+	ac.installTestAttachmentCapability(source.captureAttachmentCapability(ac, ac.transport()))
 	target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "remote-work"}
 	ref := protocol.RouteRef{Key: 3, Generation: 2}
-	ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{Ref: ref, Target: target, SourceKey: protocol.RemoteInventorySourceKey("remote")}}})
-	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{Endpoint: "remote", InventoryKnown: true, Availability: domain.RemoteAvailabilityReachable})
+	ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{Ref: ref, Target: target, SourceKey: protocol.RemoteInventorySourceKey("remote")}}}, ac.transportSnapshot(), d.clock.Now())
+	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{Endpoint: "remote", InventoryKnown: true, Availability: domain.RemoteAvailabilityReachable, LastAttempt: d.clock.Now().Add(time.Second), LastSuccess: d.clock.Now().Add(2 * time.Second)})
 	require.False(t, ac.overlays.pickerActive())
 	d.refreshRemoteDirectoryViews()
 	frame := awaitFrame(t, sends, wire.MsgRouteRetired)
@@ -79,7 +82,7 @@ func TestRetiredRoutesRequiresAuthoritativeAbsence(t *testing.T) {
 			}
 			if tc.remote {
 				sub.Targets[0].SourceKey = protocol.RemoteInventorySourceKey("remote")
-				host := ports.RemoteHostSnapshot{Endpoint: "remote", InventoryKnown: tc.known, Availability: domain.RemoteAvailabilityReachable}
+				host := ports.RemoteHostSnapshot{Endpoint: "remote", InventoryKnown: tc.known, Availability: domain.RemoteAvailabilityReachable, LastAttempt: time.Unix(2, 0), LastSuccess: time.Unix(3, 0)}
 				if tc.unreachable {
 					host.Availability = domain.RemoteAvailabilityUnreachable
 				}
@@ -90,7 +93,7 @@ func TestRetiredRoutesRequiresAuthoritativeAbsence(t *testing.T) {
 			} else if tc.present || tc.replacement {
 				inv.live = []inventoriedLiveSession{{view: sessionView{name: "work", incarnation: lifecycle}}}
 			}
-			require.Equal(t, tc.want, len(retiredRoutes(sub, inv)) == 1)
+			require.Equal(t, tc.want, len(retiredRoutes(sub, map[protocol.RouteAttentionTarget]time.Time{sub.Targets[0]: time.Unix(1, 0)}, inv)) == 1)
 		})
 	}
 }
