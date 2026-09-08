@@ -9,7 +9,6 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/keys"
@@ -87,48 +86,30 @@ func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.
 	d.invalidateRender(sess, ac, true, "picker.go")
 }
 
-// pickerViews captures one canonical lifecycle/tab snapshot. It intentionally
-// knows nothing about picker intent; picker.New owns all destination policy.
+// pickerViews projects the shared daemon inventory for the picker. It keeps
+// current/ephemeral rows, tabs/previews, grouping, and move eligibility;
+// lifecycle and remote facts come from the common capture.
 func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
-	d.mu.Lock()
-	sessions := make([]*session, 0, len(d.sessions))
-	for _, entry := range d.sessions {
-		if entry == nil {
-			continue
-		}
-		sessions = append(sessions, entry)
-	}
-	stopped := make([]inactiveSession, 0, len(d.inactive))
-	for _, s := range d.inactive {
-		if s.visible() {
-			stopped = append(stopped, s)
-		}
-	}
-	d.mu.Unlock()
-
-	for _, entry := range sessions {
-		if entry != nil {
-			d.refreshSessionFocusedTitles(entry)
-		}
+	if cur != nil && ac != nil {
+		cur.repairAttachmentView(ac)
 	}
 	opts := viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: d.currentTabsConfig().TerminalTitle}
+	inv := d.captureSessionInventory(opts, true)
+	stopped := inv.visibleStopped()
+	hosts := inv.hosts
+	now := inv.now
+	monitored := inv.monitored
+	initialized := inv.initialized
 
-	type liveSnapshot struct {
-		entry *session
-		view  sessionView
-	}
 	// One snapshot per live session: sorting and view building read the same
 	// capture, so comparators cannot observe a concurrent touchMRU or
 	// renameSession mid-sort. Remote-catalog locks are released before sorting
 	// and picker-row construction.
-	live := make([]liveSnapshot, 0, len(sessions))
+	live := inv.live
 	var current picker.SourceFilter
-	for _, entry := range sessions {
-		if entry == cur && ac != nil {
-			entry.repairAttachmentView(ac)
-		}
-		snap := entry.snapshotView(opts)
-		if entry == cur {
+	for _, item := range live {
+		snap := item.view
+		if item.sess == cur {
 			if ac != nil {
 				view := ac.viewSnapshot()
 				if view.tabID != "" {
@@ -138,7 +119,6 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.defaultTab].id}
 			}
 		}
-		live = append(live, liveSnapshot{entry: entry, view: snap})
 	}
 	sort.Slice(live, func(i, j int) bool {
 		if live[i].view.mruAt != live[j].view.mruAt {
@@ -162,12 +142,6 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 			return !live[i].view.ephemeral && live[j].view.ephemeral
 		})
 	}
-
-	directory := d.remoteDirectorySnapshot()
-	monitored := d.remoteDirectory != nil
-	hosts := append([]ports.RemoteHostSnapshot(nil), directory.Hosts...)
-	sortDirectoryHosts(hosts)
-	now := d.daemonNow()
 
 	catalogRows := 0
 	for _, host := range hosts {
@@ -215,7 +189,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 	}
 	// A nil directory means remote monitoring is not installed at all:
 	// only an installed-but-unpublished monitor reads as "checking".
-	if monitored && !directory.Initialized {
+	if monitored && !initialized {
 		view := remotePickerCheckingView()
 		if grouped {
 			view.Section = "REMOTE"

@@ -702,21 +702,13 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 	if !asJSON {
 		return "", command.ErrInvalidArguments
 	}
-	e.d.mu.Lock()
-	sessions := sessionsSnapshot(e.d.sessions)
-	stopped := make([]inactiveSession, 0, len(e.d.inactive))
-	for _, entry := range e.d.inactive {
-		if entry.visible() {
-			stopped = append(stopped, entry)
-		}
-	}
-	e.d.mu.Unlock()
+	inv := e.d.captureSessionInventory(viewOptions{tabDetails: true, focusedTitles: true}, true)
+	stopped := inv.visibleStopped()
 
-	rows := make([]catalogue.RemoteCatalogSession, 0, len(sessions)+len(stopped))
-	liveNames := make(map[string]struct{}, len(sessions))
-	for _, sess := range sessions {
-		e.d.refreshSessionFocusedTitles(sess)
-		snap := sess.snapshotView(viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: false})
+	rows := make([]catalogue.RemoteCatalogSession, 0, len(inv.live)+len(stopped))
+	liveNames := make(map[string]struct{}, len(inv.live))
+	for _, item := range inv.live {
+		snap := item.view
 		tabs, err := remoteCatalogTabs(snap)
 		if err != nil {
 			return "", err

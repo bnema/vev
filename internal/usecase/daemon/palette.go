@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
@@ -170,32 +169,18 @@ func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemon
 		paletteRemoteDisplayOrigin(entry.HostLabel) == daemonDisplayOrigin
 }
 
-func remotePaletteUnavailableReason(host ports.RemoteHostSnapshot, session catalogue.RemoteCatalogSession) string {
-	if session.State == catalogue.RemoteCatalogSessionBroken {
-		return domain.RemoteReasonSessionBroken
-	}
-	return directorySessionReason(host, session, mustRemotePaletteTarget(host.Endpoint, session))
-}
-
-func mustRemotePaletteTarget(endpoint string, session catalogue.RemoteCatalogSession) domain.RemoteSessionTarget {
-	_, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{Host: endpoint, Name: session.Name}, session)
-	return target
-}
-
-// paletteResults captures eligible named sessions before paletteMu so the
-// palette has an immutable lifecycle target without violating lock ordering.
+// paletteResults projects the shared daemon inventory for the palette. It keeps
+// quick-switch exclusions, compact labels, commands, and history behavior;
+// discovery, exact-target construction, and attemptability facts stay shared
+// with the picker through remoteCatalogSessionTarget/directorySessionReason.
 func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot protocol.RecentRouteSnapshot) []palette.Result {
-	d.mu.Lock()
-	sessions := d.sessionsSnapshotLocked()
-	stopped := make([]inactiveSession, 0, len(d.inactive))
-	represented := make(map[paletteSessionIdentity]struct{}, len(sessions)+len(d.inactive)+len(routeSnapshot.Entries))
-	for _, entry := range d.inactive {
+	inv := d.captureSessionInventory(viewOptions{}, false)
+	hosts := inv.hosts
+	stopped := inv.resumableStopped()
+	represented := make(map[paletteSessionIdentity]struct{}, len(inv.live)+len(inv.stopped)+len(routeSnapshot.Entries))
+	for _, entry := range inv.stopped {
 		represented[localPaletteSessionIdentity(entry.incarnation)] = struct{}{}
-		if entry.canResume() {
-			stopped = append(stopped, entry)
-		}
 	}
-	d.mu.Unlock()
 	var currentLifecycle domain.SessionLifecycleID
 	if current != nil {
 		current.mu.Lock()
@@ -204,28 +189,25 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 	}
 	daemonDisplayOrigin := paletteDaemonDisplayOrigin(routeSnapshot, currentLifecycle)
 
-	directory := d.remoteDirectorySnapshot()
-	hosts := append([]ports.RemoteHostSnapshot(nil), directory.Hosts...)
-	sortDirectoryHosts(hosts)
 	remoteSessionCount := 0
 	for _, host := range hosts {
 		remoteSessionCount += len(host.Sessions)
 	}
 
 	destinations := createSessionDestinationResults(routeSnapshot, currentLifecycle, hosts)
-	results := make([]palette.Result, 0, len(commands)+len(destinations)+len(sessions)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
+	results := make([]palette.Result, 0, len(commands)+len(destinations)+len(inv.live)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
 	}
 	results = append(results, destinations...)
-	active := make([]palette.Result, 0, len(sessions))
-	for _, candidate := range sessions {
-		snap := candidate.snapshotView(viewOptions{})
+	active := make([]palette.Result, 0, len(inv.live))
+	for _, candidate := range inv.live {
+		snap := candidate.view
 		if snap.name == "" || snap.ephemeral {
 			continue
 		}
 		represented[localPaletteSessionIdentity(snap.incarnation)] = struct{}{}
-		if candidate == current {
+		if candidate.sess == current {
 			continue
 		}
 		target := protocol.ExactSessionTarget{LifecycleID: snap.incarnation, SessionName: snap.name}
@@ -266,7 +248,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			}
 			discovered = append(discovered, discoveredRemote{
 				identity: identity,
-				result:   palette.NewRemoteSessionResult(key, target, remotePaletteUnavailableReason(host, session)),
+				result:   palette.NewRemoteSessionResult(key, target, directorySessionReason(host, session, target)),
 			})
 			discoveredByPresentation[presentation] = append(discoveredByPresentation[presentation], identity)
 		}
