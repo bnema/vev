@@ -499,28 +499,60 @@ func cloneRouteRecord(entry routeRecord) routeRecord {
 	return entry
 }
 
-// attentionSubscription publishes only routes served by the active route's
-// daemon. Other route origins remain private to their owning daemon.
-func (l *routeLedger) attentionSubscription() protocol.RouteAttentionSubscription {
+// attentionSubscriptionFor binds observation to the serving connection, which
+// can differ from the active ledger route while a home picker is open.
+func (l *routeLedger) attentionSubscriptionFor(request AttachRequest) protocol.RouteAttentionSubscription {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	origin := normalizeRouteOrigin(request.Origin, request.Remote)
+	return l.attentionSubscriptionLocked(origin, normalizeRouteOriginKey(request.OriginKey, origin))
+}
 
-	activeIndex := l.indexByIdentityLocked(l.active)
-	if activeIndex < 0 {
-		return protocol.RouteAttentionSubscription{}
-	}
-	active := l.entries[activeIndex]
+func (l *routeLedger) attentionSubscriptionLocked(origin protocol.RouteOrigin, originKey string) protocol.RouteAttentionSubscription {
 	subscription := protocol.RouteAttentionSubscription{Targets: make([]protocol.RouteAttentionTarget, 0, len(l.entries))}
 	for _, entry := range l.entries {
-		if entry.identity == active.identity || entry.origin != active.origin || entry.originKey != active.originKey {
+		if entry.identity == l.active {
 			continue
 		}
+		sourceKey := ""
+		if entry.originKey != originKey || (entry.origin == protocol.RouteOriginLocal) != (origin == protocol.RouteOriginLocal) {
+			if origin != protocol.RouteOriginLocal || entry.origin == protocol.RouteOriginLocal {
+				continue
+			}
+			sourceKey = protocol.RemoteInventorySourceKey(entry.originKey)
+		}
 		subscription.Targets = append(subscription.Targets, protocol.RouteAttentionTarget{
-			Ref:    entry.identity.wire(),
-			Target: entry.target,
+			Ref: entry.identity.wire(), Target: entry.target, SourceKey: sourceKey,
 		})
 	}
 	return subscription
+}
+
+func (l *routeLedger) retireRoute(retired protocol.RouteRetired, subscription protocol.RouteAttentionSubscription) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	identity := identityFromWire(retired.Ref)
+	index := l.indexByIdentityLocked(identity)
+	if index < 0 || identity == l.active || l.entries[index].target != retired.Target {
+		return false
+	}
+	for _, target := range subscription.Targets {
+		if target.Ref != retired.Ref || target.Target != retired.Target {
+			continue
+		}
+		l.removeAtLocked(index)
+		if l.previous.empty() {
+			for _, entry := range l.entries {
+				if entry.identity != l.active {
+					l.previous = entry.identity
+					break
+				}
+			}
+		}
+		l.generation++
+		return true
+	}
+	return false
 }
 
 func (r routeRecord) snapshotEntry() protocol.RecentRouteEntry {

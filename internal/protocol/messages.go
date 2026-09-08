@@ -46,6 +46,7 @@ func (RouteNavigationAction) serverMessage()        {}
 func (RouteCreateSessionAction) serverMessage()     {}
 func (RouteNavigationFailure) serverMessage()       {}
 func (RoutePosition) serverMessage()                {}
+func (RouteRetired) serverMessage()                 {}
 func (SamePeerSwitchFailure) serverMessage()        {}
 func (ParkedRouteResponse) serverMessage()          {}
 func (UIReceipt) serverMessage()                    {}

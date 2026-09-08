@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 
 	"github.com/bnema/vev/internal/domain"
@@ -149,8 +148,7 @@ func remoteInventoryGroup(host ports.RemoteHostSnapshot) protocol.NavigationInve
 // configured remote endpoint. The hash domain-separates inventory keys so
 // relayed identifiers disclose nothing about local SSH configuration.
 func remoteInventorySourceKey(endpoint string) string {
-	sum := sha256.Sum256([]byte("vev-inventory-remote\x00" + endpoint))
-	return protocol.NavigationInventoryRemoteSourcePrefix + hex.EncodeToString(sum[:12])
+	return protocol.RemoteInventorySourceKey(endpoint)
 }
 
 // navigationInventoryEncodedBudget mirrors the wire export budget without

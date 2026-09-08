@@ -150,6 +150,7 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 		}
 	case protocol.RouteAttentionSubscription:
 		effect.ac.setRouteAttentionSubscription(message)
+		d.reconcileRouteHistory(effect.ac)
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-attention")
 	case protocol.SessionCreationFailure:
 		notice := "couldn't create session"

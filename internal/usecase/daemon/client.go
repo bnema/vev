@@ -382,7 +382,7 @@ func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.
 	ac.routeMu.RLock()
 	defer ac.routeMu.RUnlock()
 	for _, target := range ac.routeAttentionSubscription.Targets {
-		if target.Ref == ref {
+		if target.Ref == ref && target.SourceKey == "" {
 			return target.Target, true
 		}
 	}

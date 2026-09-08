@@ -66,6 +66,7 @@ func (d *Daemon) refreshRemoteDirectoryViews() {
 			continue
 		}
 		for _, ac := range sess.snapshotAttachments() {
+			d.reconcileRouteHistory(ac)
 			d.refreshRemoteDirectoryViewsFor(ac)
 		}
 	}

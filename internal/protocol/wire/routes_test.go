@@ -182,7 +182,7 @@ func TestRouteAttentionSubscriptionCodecIsStrict(t *testing.T) {
 	}}}
 	encoded, err := MarshalRouteAttentionSubscription(want)
 	require.NoError(t, err)
-	require.Equal(t, "0100000000000000070000000000000003010203000000000000000000000000000004776f726b", hex.EncodeToString(encoded))
+	require.Equal(t, "0100000000000000070000000000000003010203000000000000000000000000000004776f726b0000", hex.EncodeToString(encoded))
 	assertAllPrefixesFail(t, encoded, UnmarshalRouteAttentionSubscription)
 	_, err = UnmarshalRouteAttentionSubscription(append(append([]byte(nil), encoded...), 0))
 	require.Error(t, err)

@@ -478,6 +478,9 @@ func validateRouteAttentionSubscription(subscription protocol.RouteAttentionSubs
 	}
 	refs := make(map[protocol.RouteRef]struct{}, len(subscription.Targets))
 	for _, target := range subscription.Targets {
+		if err := protocol.ValidateRouteLabel(target.SourceKey, true); err != nil {
+			return fmt.Errorf("%w: invalid route source", protocol.ErrInvalidRouteWire)
+		}
 		if err := validateRouteRef(target.Ref); err != nil || target.Ref.IsZero() {
 			return fmt.Errorf("%w: invalid attention route reference", protocol.ErrInvalidRouteWire)
 		}
@@ -503,6 +506,7 @@ func MarshalRouteAttentionSubscription(subscription protocol.RouteAttentionSubsc
 	for _, target := range subscription.Targets {
 		marshalRouteRef(&w, target.Ref)
 		marshalExactSessionTarget(&w, target.Target)
+		w.putString(target.SourceKey)
 	}
 	return w.b, nil
 }
@@ -528,7 +532,11 @@ func UnmarshalRouteAttentionSubscription(b []byte) (protocol.RouteAttentionSubsc
 		if err != nil {
 			return protocol.RouteAttentionSubscription{}, err
 		}
-		subscription.Targets = append(subscription.Targets, protocol.RouteAttentionTarget{Ref: ref, Target: target})
+		source, err := r.getString()
+		if err != nil {
+			return protocol.RouteAttentionSubscription{}, err
+		}
+		subscription.Targets = append(subscription.Targets, protocol.RouteAttentionTarget{Ref: ref, Target: target, SourceKey: source})
 	}
 	if err := r.done(); err != nil {
 		return protocol.RouteAttentionSubscription{}, err

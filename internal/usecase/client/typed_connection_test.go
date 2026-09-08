@@ -187,6 +187,8 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalRouteNavigationAction(frame.Payload)
 	case wire.MsgRouteNavigationFailure:
 		return wire.UnmarshalRouteNavigationFailure(frame.Payload)
+	case wire.MsgRouteRetired:
+		return wire.UnmarshalRouteRetired(frame.Payload)
 	case wire.MsgRoutePosition:
 		return wire.UnmarshalRoutePosition(frame.Payload)
 	case wire.MsgSamePeerSwitchFailure:

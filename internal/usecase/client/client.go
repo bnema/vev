@@ -1668,7 +1668,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			}
 		}
 		snapshot := a.runner.ledger.snapshot()
-		attention := a.runner.ledger.attentionSubscription()
+		attention := a.runner.ledger.attentionSubscriptionFor(request)
 		if err := sendHandshake(func() error {
 			if err := transport.SendClient(snapshot); err != nil {
 				return err
@@ -2174,7 +2174,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		messages := []protocol.ClientMessage{
 			a.runner.ledger.snapshot(),
-			a.runner.ledger.attentionSubscription(),
+			a.runner.ledger.attentionSubscriptionFor(request),
 		}
 		for _, message := range messages {
 			select {
@@ -2614,6 +2614,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					if response.Status != protocol.ParkedRouteResumed {
 						return welcomedResult(errors.New("vev: parked route could not resume"))
 					}
+					if err := publishRouteSnapshot(); err != nil {
+						return welcomedResult(err)
+					}
 					awaitParkedFull()
 				case protocol.ParkedRouteSwitch:
 					switch response.Status {
@@ -2818,6 +2821,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(fmt.Errorf("vev: remembering route position: %w", derr))
 				}
 				routePosition = cloneRoutePosition(&position)
+			case protocol.RouteRetired:
+				if a.runner.ledger != nil && a.runner.ledger.retireRoute(message, a.runner.ledger.attentionSubscriptionFor(request)) {
+					if err := publishRouteSnapshot(); err != nil {
+						return welcomedResult(err)
+					}
+				}
 			case protocol.RouteNavigationFailure:
 				failure := message
 				log.Warn("route navigation rejected", "key", failure.Key, "generation", failure.Generation, "code", failure.Code)

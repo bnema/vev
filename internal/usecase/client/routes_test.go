@@ -305,7 +305,7 @@ func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) 
 	_, err = ledger.commit(active)
 	require.NoError(t, err)
 
-	subscription := ledger.attentionSubscription()
+	subscription := ledger.attentionSubscriptionFor(AttachRequest{Origin: protocol.RouteOriginRemote, OriginKey: "host-a"})
 
 	require.Equal(t, []protocol.RouteAttentionTarget{{
 		Ref:    firstIdentity.wire(),

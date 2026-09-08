@@ -1301,6 +1301,7 @@ func (d *Daemon) retryStoppedPurgeContextExact(ctx context.Context, name string,
 		delete(d.inactive, name)
 	}
 	d.mu.Unlock()
+	d.reconcileAllRouteHistories()
 	return nil
 }
 
@@ -1853,6 +1854,9 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 			}
 			d.mu.Unlock()
 		}
+	}
+	if purge && purgeErr == nil {
+		d.reconcileAllRouteHistories()
 	}
 	if empty {
 		d.doneOnce.Do(func() { close(d.done) })

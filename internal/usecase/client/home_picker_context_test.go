@@ -18,9 +18,12 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 		udp         bool
 		rename      bool
 		selectLocal bool
+		retireLocal bool
 	}{
 		{name: "UDP", udp: true},
 		{name: "stdio"},
+		{name: "UDP local deletion", udp: true, retireLocal: true},
+		{name: "stdio local deletion", retireLocal: true},
 		{name: "UDP backing session renamed", udp: true, rename: true},
 		{name: "stdio backing session renamed", rename: true},
 		{name: "stdio select new local destination", selectLocal: true},
@@ -47,14 +50,34 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 			remoteDialer := &sequenceDialer{trs: []wire.Transport{remote, remoteReturn}}
 			if tc.udp {
 				prepareSent, resumeSent := make(chan struct{}), make(chan struct{})
+				var retiredSnapshot chan struct{}
+				if tc.retireLocal {
+					retiredSnapshot = make(chan struct{})
+				}
 				remote.onSend = hybridParkedRequestHandler(nil, nil, map[protocol.ParkedRouteAction]chan struct{}{
 					protocol.ParkedRoutePrepare: prepareSent,
 					protocol.ParkedRouteResume:  resumeSent,
 				})
+				if tc.retireLocal {
+					parkedHandler := remote.onSend
+					remote.onSend = func(frame wire.Frame) {
+						parkedHandler(frame)
+						if frame.Type == wire.MsgRecentRouteSnapshot {
+							snapshot, err := wire.UnmarshalRecentRouteSnapshot(frame.Payload)
+							if err == nil && snapshot.Generation > 2 && len(snapshot.Entries) == 0 {
+								select {
+								case <-retiredSnapshot:
+								default:
+									close(retiredSnapshot)
+								}
+							}
+						}
+					}
+				}
 				remote.recvs = append(remote.recvs,
 					recvItem{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady})), wait: prepareSent},
 					recvItem{f: frameOf(wire.MsgParkedRouteResponse, wire.MarshalParkedRouteResponse(protocol.ParkedRouteResponse{RequestID: 2, Status: protocol.ParkedRouteResumed})), wait: resumeSent},
-					recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+					recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})), wait: retiredSnapshot},
 				)
 				remoteDialer.trs = []wire.Transport{markedDatagramTransport{Transport: remote}}
 			}
@@ -63,6 +86,25 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 				localPicker.recvs = append(localPicker.recvs, recvItem{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
 					Target: protocol.ExactSessionTarget{LifecycleID: localLifecycle, SessionName: "renamed-local"},
 				}))})
+			}
+			var localRetiredSnapshot chan struct{}
+			if tc.retireLocal {
+				localRetiredSnapshot = make(chan struct{})
+				localPicker.onSend = func(frame wire.Frame) {
+					if frame.Type == wire.MsgRecentRouteSnapshot {
+						snapshot, err := wire.UnmarshalRecentRouteSnapshot(frame.Payload)
+						if err == nil && snapshot.Generation > 2 && len(snapshot.Entries) == 0 {
+							select {
+							case <-localRetiredSnapshot:
+							default:
+								close(localRetiredSnapshot)
+							}
+						}
+					}
+				}
+				payload, err := wire.MarshalRouteRetired(protocol.RouteRetired{Ref: protocol.RouteRef{Key: 1, Generation: 1}, Target: protocol.ExactSessionTarget{LifecycleID: localLifecycle, SessionName: "local"}})
+				require.NoError(t, err)
+				localPicker.recvs = append(localPicker.recvs, recvItem{f: frameOf(wire.MsgRouteRetired, payload)})
 			}
 			localDialer := &sequenceDialer{trs: []wire.Transport{initial, localPicker}}
 			var localDestination *recordingTransport
@@ -78,7 +120,7 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 				}}
 				localDialer.trs = append(localDialer.trs, localDestination)
 			} else {
-				localPicker.recvs = append(localPicker.recvs, recvItem{f: navigationDirectiveFrame(protocol.NavigationBack)})
+				localPicker.recvs = append(localPicker.recvs, recvItem{f: navigationDirectiveFrame(protocol.NavigationBack), wait: localRetiredSnapshot})
 			}
 			clock := &reconnectTestClock{}
 			deps := hybridPickerDependencies(localDialer, term, clock, map[string]ports.ClientDialer{"igor": remoteDialer})
@@ -104,9 +146,31 @@ func TestHomePickerPreservesActiveRouteSnapshot(t *testing.T) {
 				publications++
 				snapshot, err := wire.UnmarshalRecentRouteSnapshot(sent.Payload)
 				require.NoError(t, err)
-				require.Equal(t, source, snapshot, "rendering the home picker must not commit its backing session as the active route")
+				if tc.retireLocal && publications > 1 {
+					require.Empty(t, snapshot.Entries)
+					require.Equal(t, source.Active, snapshot.Active)
+				} else {
+					require.Equal(t, source, snapshot, "rendering the home picker must not commit its backing session as the active route")
+				}
 			}
 			require.Positive(t, publications)
+			if tc.retireLocal {
+				require.Greater(t, publications, 1)
+				returned := remoteReturn
+				if tc.udp {
+					returned = remote
+				}
+				var latest protocol.RecentRouteSnapshot
+				for _, sent := range returned.Sends() {
+					if sent.Type == wire.MsgRecentRouteSnapshot {
+						var err error
+						latest, err = wire.UnmarshalRecentRouteSnapshot(sent.Payload)
+						require.NoError(t, err)
+					}
+				}
+				require.Equal(t, source.ActiveEntry.Target, latest.ActiveEntry.Target)
+				require.Empty(t, latest.Entries, "returning to remote must publish the pruned ledger")
+			}
 			wantDials := int32(2)
 			if tc.udp || tc.selectLocal {
 				wantDials = 1
