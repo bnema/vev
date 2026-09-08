@@ -35,6 +35,15 @@ func TestImportedSessionResultKeepsOpaqueKeysAndQualifiedDisplay(t *testing.T) {
 	require.False(t, local.sameTarget(remote))
 	require.True(t, local.sameTarget(NewImportedSessionResult("local", "aaa/one", "renamed", "local", "up", "")))
 
+	// Remote vision tags availability inline: non-live states surface so
+	// stale or broken entries never look attachable. Live rows stay clean.
+	down := NewImportedSessionResult("arch", "aaa/db", "db", "arch", "down", "unreachable")
+	require.Equal(t, "Switch to session db@arch (down: unreachable)", down.DisplayText())
+	broken := NewImportedSessionResult("arch", "aaa/db", "db", "arch", "broken", "")
+	require.Equal(t, "Switch to session db@arch (broken)", broken.DisplayText())
+	stopped := NewImportedSessionResult("local", "aaa/old", "old", "local", "stopped", "")
+	require.Equal(t, "Switch to session old@local (stopped)", stopped.DisplayText())
+
 	// Other kinds expose no imported keys.
 	if _, _, ok := NewCommandResult(command.Command{Code: "NT"}).ImportedSessionKey(); ok {
 		t.Fatal("command results must not expose imported keys")

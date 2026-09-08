@@ -300,11 +300,25 @@ func (r Result) RemoteSessionUnavailableReason() (string, bool) {
 // importedDisplay qualifies an inventory row with its explicit origin.
 // Unqualified names would collapse homonyms across local and remote
 // sources into the wrong selection.
-func (p importedSessionPayload) display() string {
+func (p importedSessionPayload) qualified() string {
 	if p.displayOrigin == "" {
 		return p.name
 	}
 	return p.name + "@" + p.displayOrigin
+}
+
+func (p importedSessionPayload) display() string {
+	base := p.qualified()
+	// Remote vision is read-only availability tagging: non-live states
+	// surface inline so stale or broken entries never look attachable.
+	// Live local rows stay untagged.
+	if p.state == "" || p.state == "up" {
+		return base
+	}
+	if p.reason == "" {
+		return base + " (" + p.state + ")"
+	}
+	return base + " (" + p.state + ": " + p.reason + ")"
 }
 
 // ImportedSessionKey returns the opaque inventory selection keys only for
@@ -319,7 +333,7 @@ func (r Result) ImportedSessionDisplay() (display, reason string, ok bool) {
 	if r.kind != ResultKindImportedSession {
 		return "", "", false
 	}
-	return r.importedSession.display(), r.importedSession.reason, true
+	return r.importedSession.qualified(), r.importedSession.reason, true
 }
 
 // RouteNavigationAction returns the exact client-ledger target only for a

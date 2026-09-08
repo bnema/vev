@@ -615,6 +615,13 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
+		if importedSourceKey != protocol.NavigationInventoryLocalSourceKey {
+			// Remote vision is read-only: imported remote routes surface
+			// availability but never attach.
+			ac.paletteFailure(generation, rawQuery, "remote sessions are visible but cannot be attached")
+			d.invalidateRender(entry, ac, true, "palette.go")
+			return
+		}
 		ac.overlays.paletteMu.Lock()
 		open := ac.overlays.paletteInventoryOpen
 		selection := protocol.NavigationInventorySelection{

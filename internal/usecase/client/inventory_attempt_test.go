@@ -67,6 +67,13 @@ type inventoryScript int
 const (
 	inventoryScriptClose inventoryScript = iota
 	inventoryScriptSelect
+	// inventoryScriptSilent models an old daemon that never sends
+	// demands: the relay stays idle and dials nothing.
+	inventoryScriptSilent
+	// inventoryScriptLocalIgnore models demands on a local attachment:
+	// open and close cross back to back with no publication gate, so the
+	// single-threaded loop provably processes both before detach.
+	inventoryScriptLocalIgnore
 )
 
 // inventoryAttemptTransport scripts a remote serving daemon: welcome, open
@@ -106,10 +113,23 @@ func (t *inventoryAttemptTransport) Recv() (wire.Frame, error) {
 	case 1:
 		return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
 	case 2:
+		if t.script == inventoryScriptSilent {
+			select {
+			case <-t.detach:
+				return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
+			case <-t.release:
+				return wire.Frame{}, io.EOF
+			}
+		}
 		return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: wire.MarshalNavigationInventoryDemand(protocol.NavigationInventoryDemand{InteractionGeneration: 7, Open: true})}, nil
 	case 3:
+		if t.script == inventoryScriptLocalIgnore {
+			return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: wire.MarshalNavigationInventoryDemand(protocol.NavigationInventoryDemand{InteractionGeneration: 7})}, nil
+		}
 		select {
 		case <-t.published:
+		case <-t.detach:
+			return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
 		case <-t.release:
 			return wire.Frame{}, io.EOF
 		}
@@ -209,24 +229,36 @@ func (c *inventoryTestControlConn) LinkState() ports.LinkState         { return 
 func (c *inventoryTestControlConn) LinkEvents() <-chan ports.LinkEvent { return nil }
 func (c *inventoryTestControlConn) Close() error                       { return nil }
 
-type inventoryTestDialer struct{}
+type inventoryTestDialer struct {
+	mu    sync.Mutex
+	dials int
+}
 
-func (inventoryTestDialer) Dial(context.Context) (ports.ClientConnection, error) {
+func (d *inventoryTestDialer) Dial(context.Context) (ports.ClientConnection, error) {
+	d.mu.Lock()
+	d.dials++
+	d.mu.Unlock()
 	return &inventoryTestControlConn{}, nil
 }
 
-func runInventoryAttempt(t *testing.T, clock *inventoryTestClock, transport *inventoryAttemptTransport) attachResult {
+func (d *inventoryTestDialer) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dials
+}
+
+func runInventoryAttempt(t *testing.T, clock *inventoryTestClock, transport *inventoryAttemptTransport, remote bool, dialer *inventoryTestDialer) attachResult {
 	t.Helper()
 	input := newPaletteAttachReader(nil)
 	t.Cleanup(input.close)
 	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
 	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
 	attempt := &attachAttempt{
-		runner: runner, dialer: inventoryTestDialer{}, transport: transport,
+		runner: runner, dialer: dialer, transport: transport,
 		request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote-work"},
-		remote:  true,
+		remote:  remote,
 		inventoryHome: &attachRoute{
-			dialer:  inventoryTestDialer{},
+			dialer:  dialer,
 			request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "home"},
 		},
 		milestones: msForInventoryTest(), themeState: &terminalThemeState{},
@@ -250,7 +282,7 @@ func TestInventoryAttemptPublishesAndStops(t *testing.T) {
 	t.Cleanup(func() { close(transport.release) })
 
 	done := make(chan attachResult, 1)
-	go func() { done <- runInventoryAttempt(t, clock, transport) }()
+	go func() { done <- runInventoryAttempt(t, clock, transport, true, &inventoryTestDialer{}) }()
 
 	select {
 	case <-transport.published:
@@ -284,7 +316,7 @@ func TestInventoryAttemptResolvesSelectionToHandoff(t *testing.T) {
 	}
 	t.Cleanup(func() { close(transport.release) })
 
-	result := runInventoryAttempt(t, clock, transport)
+	result := runInventoryAttempt(t, clock, transport, true, &inventoryTestDialer{})
 	require.NoError(t, result.err)
 	require.NotNil(t, result.handoff)
 	require.Empty(t, result.handoff.target.Endpoint)
@@ -293,4 +325,49 @@ func TestInventoryAttemptResolvesSelectionToHandoff(t *testing.T) {
 	require.NotNil(t, result.handoff.inventory)
 	require.Equal(t, uint64(9), result.handoff.inventory.causeActionID)
 	require.Equal(t, "remote-work", result.handoff.inventory.returnRoute.request.SessionName)
+}
+
+// TestInventoryAttemptMatrixOldDaemon pins the old-daemon pairing: without
+// demands the relay stays idle, dials nothing, and publishes nothing, and
+// the attachment lifecycle is unaffected.
+func TestInventoryAttemptMatrixOldDaemon(t *testing.T) {
+	clock := newInventoryTestClock()
+	dialer := &inventoryTestDialer{}
+	transport := &inventoryAttemptTransport{
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), script: inventoryScriptSilent,
+	}
+	t.Cleanup(func() { close(transport.release) })
+
+	done := make(chan attachResult, 1)
+	go func() { done <- runInventoryAttempt(t, clock, transport, true, dialer) }()
+	clock.fire()
+	close(transport.detach)
+
+	result := <-done
+	require.NoError(t, result.err)
+	require.Nil(t, result.handoff)
+	require.Zero(t, dialer.count(), "an old daemon must trigger zero control dials")
+	require.Zero(t, transport.publicationCount())
+}
+
+// TestInventoryAttemptMatrixLocalAttachment pins the local-attachment
+// pairing: demands from a local serving daemon never enable the relay, so
+// no control dial crosses even though the frames decode.
+func TestInventoryAttemptMatrixLocalAttachment(t *testing.T) {
+	clock := newInventoryTestClock()
+	dialer := &inventoryTestDialer{}
+	transport := &inventoryAttemptTransport{
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), script: inventoryScriptLocalIgnore,
+	}
+	t.Cleanup(func() { close(transport.release) })
+
+	done := make(chan attachResult, 1)
+	go func() { done <- runInventoryAttempt(t, clock, transport, false, dialer) }()
+	close(transport.detach)
+
+	result := <-done
+	require.NoError(t, result.err)
+	require.Nil(t, result.handoff)
+	require.Zero(t, dialer.count())
+	require.Zero(t, transport.publicationCount())
 }

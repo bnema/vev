@@ -133,6 +133,54 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 	require.Nil(t, frozen, "overlay teardown drops relayed state; the client transition owns recovery")
 }
 
+// TestPaletteInventoryRemoteEnterNeverAttaches pins read-only remote
+// vision: Enter on a remote-origin row reports feedback, keeps the palette
+// open, and emits no Selection frame.
+func TestPaletteInventoryRemoteEnterNeverAttaches(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, sends := newManualSessionWithPTYs(t, p)
+	ac.navigationCapabilities = protocol.NavigationCapabilityInventory
+	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
+	effect.uiActionID = 123
+
+	interaction := d.enterPalette(current, ac)
+	published := protocol.NavigationInventoryPublication{
+		InteractionGeneration: interaction, PublicationGeneration: 1,
+		Groups: []protocol.NavigationInventorySourceGroup{
+			{
+				SourceKey: "local", Status: protocol.NavigationInventorySourceOK,
+				Entries: []protocol.NavigationInventoryEntry{
+					{SourceKey: "local", EntryKey: "aaa/zzqlocal", Name: "zzqlocal", DisplayOrigin: "local", State: "up"},
+				},
+			},
+			{
+				SourceKey: "arch", Status: protocol.NavigationInventorySourceOK,
+				Entries: []protocol.NavigationInventoryEntry{
+					{SourceKey: "arch", EntryKey: "aaa/zzqremote", Name: "zzqremote", DisplayOrigin: "arch", State: "down", Reason: "unreachable"},
+				},
+			},
+		},
+	}
+	ac.overlays.paletteMu.Lock()
+	require.True(t, admitPaletteInventoryPublication(ac.overlays, published))
+	ac.overlays.paletteMu.Unlock()
+	d.refreshPalette(ac)
+
+	d.handlePaletteInput(ac, []byte("zzqremote\r"), effect)
+
+	ac.overlays.paletteMu.Lock()
+	feedback := ac.overlays.paletteFeedback
+	ac.overlays.paletteMu.Unlock()
+	require.Equal(t, "remote sessions are visible but cannot be attached", feedback)
+	require.True(t, ac.overlays.paletteActive(), "refused remote selection keeps the palette open")
+	select {
+	case frame := <-sends:
+		require.NotEqual(t, wire.MsgNavigationInventorySelection, frame.Type, "remote Enter must not emit a selection")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestPaletteInventoryEscapeSendsCloseDemand pins the plain-cancel path: a
 // bare Escape cancels the unselected interaction and still stops polling.
 func TestPaletteInventoryEscapeSendsCloseDemand(t *testing.T) {
