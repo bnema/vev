@@ -14,39 +14,23 @@ into `matrix.json`, and removes all resources when it exits. The E3 case
 matrix and E4 vision review (plan P5) are not implemented yet: the scaffold
 exits 0 on prerequisites alone and must not be mistaken for V6.
 
-Legacy note: the Go controller in this directory still encodes the previous
-two-container proxy proof; its assertions are obsolete and will be replaced
-by real-client route-ownership checks in P5. Docker uses the normal CLI configuration, so
+Legacy note: an older Go controller in this directory encoded a previous
+two-container proxy proof; it is not executed by `run.sh` and its
+assertions are obsolete. Docker uses the normal CLI configuration, so
 `DOCKER_HOST` or the active context selects a rootless daemon; the harness does
 not assume a socket pathname.
 
 Environment overrides:
 
-- `VEV_HARNESS_BASE_IMAGE` selects the Docker base image used for both
-  containers (default: `ubuntu:24.04`).
-- `VEV_HARNESS_TARGET` selects the SSH target passed to the harness binary
-  (default: `test@remote`).
-- `VEV_HARNESS_ARTIFACT_DIR`, when set, writes a bounded
-  `remote-picker-harness.json` containing output-state, checkpoint, and event
-  metadata. It is unset by default; the artifact contains no terminal bytes,
-  raw screen text, credentials, or target output. `run.sh` copies the report to
-  that host directory before it removes the disposable containers.
+- `VEV_HARNESS_ARTIFACT_DIR`, when set, writes `matrix.json` containing
+  run identity (image ID, source HEAD, binary hash, protocol version)
+  with every acceptance case marked pending. It is unset by default; no
+  report is written then. `run.sh` copies the report to that host
+  directory before it removes the disposable containers.
 
-Each logical transport has one persistent `vt.Screen` and a client-equivalent
-output-state chain. The probe writes accepted full, incremental, and side-effect
-frames to that screen, ACKs only accepted state-bearing frames, and retains a
-bounded set of screen checkpoints plus non-sensitive event metadata. The local
-picker phase captures unified local/remote rows before selection, keeps the same
-local client transport while the daemon publishes proxied remote content,
-rejects direct `MsgAttachTarget` handoff and remote daemon chrome, verifies
-continued input, and captures the unified rows again from the remote view.
-
-The run exercises real SSH-stdio and UDP attachment, typed live catalog and
-preview requests, tab creation/removal fencing, exact lifecycle fencing after
-replacement, daemon restart resume, slow-preview cancellation, version
-mismatch, and unreachable-host handling. It checks environment values in
-memory without printing terminal viewport data.
-
-Stopped-selector restoration and daemon-owned environment assertions are also
+Stopped-selector restoration and daemon-owned environment assertions are
 covered by the repository's daemon and route integration tests, where the
-fixture can deterministically hold restoration at the stopped state.
+fixture can deterministically hold restoration at the stopped state. The
+container run exercises prerequisite verification only: SSH-stdio and UDP
+attachment, catalog, fencing, and resume checks belong to later matrix
+cases, not to this scaffold.

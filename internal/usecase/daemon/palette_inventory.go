@@ -30,12 +30,13 @@ func openPaletteInventory(rt *overlayRuntime) uint64 {
 	return rt.paletteInventoryInteraction
 }
 
-// closePaletteInventory ends the interaction and drops relayed state.
+// closePaletteInventory ends the interaction and drops relayed rows.
 // Imported rows vanish with the palette; a reopen starts a new namespace.
+// The pending selection survives the close so a late resolve failure still
+// correlates to the interaction that chose it; the next open clears it.
 func closePaletteInventory(rt *overlayRuntime) {
 	rt.paletteInventoryOpen = false
 	rt.paletteInventoryGroups = nil
-	rt.paletteInventorySelected = nil
 	rt.paletteInventoryDemandSent = false
 }
 

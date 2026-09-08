@@ -42,6 +42,7 @@ const (
 	NoticeAutoResume
 	NoticeConnection
 	NoticeUser
+	NoticeNavigationInventory
 
 	// noticeCodeLimit is an append-only declaration sentinel, not a persisted
 	// valid notice code. Keep it last when adding a NoticeCode.
@@ -49,27 +50,28 @@ const (
 )
 
 var noticeSlugs = map[NoticeCode]string{
-	NoticeInternal:           "internal",
-	NoticePaneSpawn:          "pane-spawn",
-	NoticeTabSpawn:           "tab-spawn",
-	NoticeFloatingSpawn:      "floating-spawn",
-	NoticeSessionSpawn:       "session-spawn",
-	NoticeLayoutTooSmall:     "layout-too-small",
-	NoticePaneNotFound:       "pane-not-found",
-	NoticeSessionUnavailable: "session-unavailable",
-	NoticePersistDisabled:    "persist-disabled",
-	NoticeSnapshotWrite:      "snapshot-write",
-	NoticeSnapshotRestore:    "snapshot-restore",
-	NoticeSnapshotSaturated:  "snapshot-saturated",
-	NoticePersistDelete:      "persist-delete",
-	NoticeConfigReload:       "config-reload",
-	NoticeInputDropped:       "input-dropped",
-	NoticeResizeFailed:       "resize-failed",
-	NoticeClipboard:          "clipboard",
-	NoticeClipboardTooLarge:  "clipboard-too-large",
-	NoticeAutoResume:         "auto-resume",
-	NoticeConnection:         "connection",
-	NoticeUser:               "user",
+	NoticeInternal:            "internal",
+	NoticePaneSpawn:           "pane-spawn",
+	NoticeTabSpawn:            "tab-spawn",
+	NoticeFloatingSpawn:       "floating-spawn",
+	NoticeSessionSpawn:        "session-spawn",
+	NoticeLayoutTooSmall:      "layout-too-small",
+	NoticePaneNotFound:        "pane-not-found",
+	NoticeSessionUnavailable:  "session-unavailable",
+	NoticePersistDisabled:     "persist-disabled",
+	NoticeSnapshotWrite:       "snapshot-write",
+	NoticeSnapshotRestore:     "snapshot-restore",
+	NoticeSnapshotSaturated:   "snapshot-saturated",
+	NoticePersistDelete:       "persist-delete",
+	NoticeConfigReload:        "config-reload",
+	NoticeInputDropped:        "input-dropped",
+	NoticeResizeFailed:        "resize-failed",
+	NoticeClipboard:           "clipboard",
+	NoticeClipboardTooLarge:   "clipboard-too-large",
+	NoticeAutoResume:          "auto-resume",
+	NoticeConnection:          "connection",
+	NoticeUser:                "user",
+	NoticeNavigationInventory: "navigation-inventory",
 }
 
 func (c NoticeCode) String() string {

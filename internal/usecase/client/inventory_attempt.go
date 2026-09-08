@@ -33,6 +33,13 @@ func newInventoryPollBox() *inventoryPollBox {
 
 func (b *inventoryPollBox) offer(outcome inventoryPollOutcome) {
 	b.mu.Lock()
+	// Keep the newest completion: a late outcome from an older query must
+	// not overwrite a newer one, or the newer query's completion is lost
+	// while its slot stays busy and polling stalls.
+	if b.has && outcome.query < b.outcome.query {
+		b.mu.Unlock()
+		return
+	}
 	b.outcome = outcome
 	b.has = true
 	b.mu.Unlock()

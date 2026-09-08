@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -131,7 +132,9 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 	ac.overlays.paletteMu.Lock()
 	frozen := ac.overlays.paletteInventorySelected
 	ac.overlays.paletteMu.Unlock()
-	require.Nil(t, frozen, "overlay teardown drops relayed state; the client transition owns recovery")
+	require.NotNil(t, frozen, "the pending selection survives the close so a late failure correlates")
+	require.Equal(t, interaction, frozen.InteractionGeneration)
+	require.Equal(t, "aaa/zzqimported", frozen.EntryKey)
 }
 
 // TestPaletteInventoryRemoteEnterNeverAttaches pins read-only remote
@@ -180,6 +183,59 @@ func TestPaletteInventoryRemoteEnterNeverAttaches(t *testing.T) {
 		require.NotEqual(t, wire.MsgNavigationInventorySelection, frame.Type, "remote Enter must not emit a selection")
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// TestPaletteInventoryFailureCorrelatesToPendingSelection pins durable
+// failure routing: a failure matching the frozen selection records a
+// notice even with the palette closed, shows contextual feedback while
+// the interaction is open, and drops when nothing matches.
+func TestPaletteInventoryFailureCorrelatesToPendingSelection(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, current, ac, _ := newManualSessionWithPTYs(t, p)
+
+	interaction := d.enterPalette(current, ac)
+	selection := protocol.NavigationInventorySelection{
+		InteractionGeneration: interaction, PublicationGeneration: 1,
+		SourceKey: "local", EntryKey: "aaa/zzqimported",
+	}
+	ac.overlays.paletteMu.Lock()
+	freezePaletteInventorySelection(ac.overlays, selection)
+	ac.overlays.paletteMu.Unlock()
+	d.closeExecutedPalette(ac, nil, 1, "")
+
+	matched := protocol.NavigationInventoryFailure{
+		InteractionGeneration: interaction, SourceKey: "local", EntryKey: "aaa/zzqimported",
+		Code: protocol.NavigationInventorySourceGone,
+	}
+	d.handleAttachmentClientMessage(captureAttachmentCapability(current, ac, ac.transport()), matched)
+	require.True(t, hasInventoryNotice(t, ac), "matched failure must record a durable notice")
+
+	stale := protocol.NavigationInventoryFailure{
+		InteractionGeneration: interaction + 1, SourceKey: "local", EntryKey: "aaa/zzqimported",
+		Code: protocol.NavigationInventorySourceGone,
+	}
+	before := countInventoryNotices(t, ac)
+	d.handleAttachmentClientMessage(captureAttachmentCapability(current, ac, ac.transport()), stale)
+	require.Equal(t, before, countInventoryNotices(t, ac), "unmatched failure must drop")
+}
+
+func hasInventoryNotice(t *testing.T, ac *attachedClient) bool {
+	t.Helper()
+	return countInventoryNotices(t, ac) != 0
+}
+
+func countInventoryNotices(t *testing.T, ac *attachedClient) int {
+	t.Helper()
+	ac.overlays.noticeMu.Lock()
+	defer ac.overlays.noticeMu.Unlock()
+	count := 0
+	for _, toast := range ac.overlays.noticeToasts {
+		if toast.n.Code == domain.NoticeNavigationInventory {
+			count++
+		}
+	}
+	return count
 }
 
 // TestPaletteInventoryEscapeSendsCloseDemand pins the plain-cancel path: a

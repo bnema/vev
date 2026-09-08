@@ -310,6 +310,21 @@ func runInventoryAttempt(t *testing.T, clock *inventoryTestClock, transport *inv
 
 func msForInventoryTest() *milestones { return &milestones{} }
 
+// TestInventoryPollBoxKeepsNewestCompletion pins out-of-order delivery:
+// a late outcome from an older query must not overwrite the newer one,
+// or the newer completion is lost while its slot stays busy.
+func TestInventoryPollBoxKeepsNewestCompletion(t *testing.T) {
+	box := newInventoryPollBox()
+	box.offer(inventoryPollOutcome{interaction: 2, query: 2})
+	box.offer(inventoryPollOutcome{interaction: 2, query: 1})
+	outcome, ok := box.take()
+	require.True(t, ok)
+	require.Equal(t, uint64(2), outcome.query)
+	if _, ok := box.take(); ok {
+		t.Fatal("take must drain the single coalesced outcome")
+	}
+}
+
 // TestInventoryAttemptPublishesAndStops pins the relay poll loop through a
 // scripted remote serving daemon: the open demand triggers an immediate
 // snapshot query and a delta publication, the tick re-polls without

@@ -1076,6 +1076,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			}
 			err = runClient(ctx, client.Dependencies{
 				Dialer:                 sessionwire.NewClientDialer(localDialer()),
+				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
 				Clock:                  clientClock(deps),
 				DisableCapabilityProbe: deps.disableCapabilityProbe,
