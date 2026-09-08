@@ -238,3 +238,37 @@ func TestNavigationInventoryVersionMismatchAndMalformed(t *testing.T) {
 	require.Equal(t, protocol.NavigationInventoryInvalid, malformed.Status)
 	require.Nil(t, malformed.Resolved)
 }
+
+// TestNeverVisitedLocalSessionRequiresRelay is the P0.2 known-red product
+// case: a palette served by daemon A cannot list daemon L's sessions, so a
+// local session the client never visited is unreachable from remote. It
+// currently asserts the deficiency (absence); the P4 relay must invert it
+// to presence plus successful local commit. No pass is claimed here.
+func TestNeverVisitedLocalSessionRequiresRelay(t *testing.T) {
+	local := newTestDaemon(t, nil, stubClock{})
+	addInventorySession(local, "local-unvisited", domain.SessionLifecycleID{33}, false)
+
+	remote := newTestDaemon(t, nil, stubClock{})
+	serving := addControlSession(remote, "remote-one", "tab-1", "pane-1")
+	serving.ephemeral = false
+	serving.incarnation = domain.SessionLifecycleID{44}
+
+	results := remote.paletteResults(serving, nil, protocol.RecentRouteSnapshot{})
+	for _, result := range results {
+		if name, ok := result.SessionName(); ok {
+			require.NotEqual(t, "local-unvisited", name, "cross-daemon leak would be a privacy violation, not the fix")
+		}
+		if _, ok := result.RemoteSessionTarget(); ok {
+			continue
+		}
+	}
+	localGroups := local.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 1, Operation: protocol.NavigationInventorySnapshot})
+	require.Equal(t, protocol.NavigationInventoryOK, localGroups.Status)
+	found := false
+	for _, entry := range localGroups.Groups[0].Entries {
+		if entry.Name == "local-unvisited" {
+			found = true
+		}
+	}
+	require.True(t, found, "the source control daemon exports the session; only the relay to the serving daemon is missing")
+}
