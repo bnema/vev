@@ -169,6 +169,14 @@ type Dependencies struct {
 	// AttachHandoff keeps one Runner and one terminal/input ownership across a
 	// local daemon's structured remote handoff. It is nil for direct CLI attach.
 	AttachHandoff AttachHandoffFunc
+	// LocalControlDialer is an optional dial-only control source for the
+	// local daemon inventory. It must never start the daemon, create an
+	// attachment, or call the CLI: a missing socket reports local control
+	// unavailability. The relay enables it only after this client has a
+	// committed explicitly local route and while its serving attachment is
+	// remote; local-only and direct remote-only clients leave it nil and
+	// perform zero control dials.
+	LocalControlDialer ports.ClientDialer
 	// Remote selects client-side carriage presentation only; it never enters
 	// the daemon-facing session request.
 	Remote bool
