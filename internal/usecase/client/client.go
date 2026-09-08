@@ -496,16 +496,20 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	returnResumeFallback := false
 	homeNavigationPending := false
 	returnNavigationPending := false
-	routeNavigationPending := false
+	// navTransition owns creation and recent-route fallback lifecycle:
+	// the captured prior route, selected identity, and settle-once state.
+	// routeNavigationSelection and routeNavigationAction remain as the
+	// in-attempt payload consumed by attachAttempt (commit input and
+	// failure matching), not as cross-attempt fallback authority.
+	// routeNavigationResumeFallback stays as the transport-level exact-attach
+	// retry flag. Home-picker return state stays distinct per its overlay
+	// semantics.
+	var navTransition navigationTransition
 	routeNavigationResumeFallback := false
 	var routeNavigationSelection *routeNavigationSelection
 	var killedSelection *killedRouteSelection
 	killedResumeFallback := false
-	var routeNavigationFallback *attachRoute
 	var routeNavigationAction *protocol.RouteNavigationAction
-	creationPending := false
-	var creationFallback *attachRoute
-	var creationRequestID uint64
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
 	var rememberOnce sync.Once
@@ -674,12 +678,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if killedSelection != nil {
 				return errors.Join(err, r.ledger.retireKilled(*killedSelection))
 			}
-			if creationPending && creationFallback != nil && ctx.Err() == nil {
-				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(err)}
-				route := *creationFallback
-				creationFallback = nil
-				creationPending = false
-				creationRequestID = 0
+			if navTransition.pendingCreation() && ctx.Err() == nil {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: routeFailureCode(err)}
+				route, ok := navTransition.restore()
+				if !ok {
+					return err
+				}
+				navTransition.settleFailure()
 				returnNavigationPending = true
 				restoreReturnRoute(route)
 				continue
@@ -715,12 +720,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			if killedSelection != nil {
 				return errors.Join(err, r.ledger.retireKilled(*killedSelection))
 			}
-			if creationPending && creationFallback != nil {
-				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
-				route := *creationFallback
-				creationFallback = nil
-				creationPending = false
-				creationRequestID = 0
+			if navTransition.pendingCreation() {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: protocol.RouteFailureUnavailable}
+				route, ok := navTransition.restore()
+				if !ok {
+					return err
+				}
+				navTransition.settleFailure()
 				returnNavigationPending = true
 				restoreReturnRoute(route)
 				continue
@@ -736,12 +742,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			stopHandshakeTransport()
 			finishHandshake()
 			_ = transport.Close()
-			if creationPending && creationFallback != nil {
-				r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: protocol.RouteFailureUnavailable}
-				route := *creationFallback
-				creationFallback = nil
-				creationPending = false
-				creationRequestID = 0
+			if navTransition.pendingCreation() {
+				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: protocol.RouteFailureUnavailable}
+				route, ok := navTransition.restore()
+				if !ok {
+					return err
+				}
+				navTransition.settleFailure()
 				returnNavigationPending = true
 				restoreReturnRoute(route)
 				continue
@@ -816,20 +823,17 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.PreferredTabID = result.routePosition.ActiveTabID
 			attemptRequest.RemoteTarget = nil
 		}
-		if result.err == nil && result.welcomed && creationPending {
-			creationPending = false
-			creationFallback = nil
-			creationRequestID = 0
+		if result.err == nil && result.welcomed && navTransition.pendingCreation() {
+			navTransition.settleSuccess()
 		}
 		if result.err == nil && result.welcomed && killedSelection != nil {
 			killedSelection = nil
 			killedResumeFallback = false
 		}
-		if result.err == nil && result.welcomed && routeNavigationPending {
-			routeNavigationPending = false
+		if result.err == nil && result.welcomed && navTransition.pendingRecent() {
+			navTransition.settleSuccess()
 			routeNavigationSelection = nil
 			routeNavigationResumeFallback = false
-			routeNavigationFallback = nil
 			routeNavigationAction = nil
 		}
 		if result.routeCreateAction != nil {
@@ -848,7 +852,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				restoreReturnRoute(source)
 				continue
 			}
-			creationFallback = &attachRoute{dialer: selection.prior.dialer, request: cloneAttachRequest(selection.prior.request), resumeToken: selection.prior.resumeToken}
+			priorRoute := attachRoute{dialer: selection.prior.dialer, request: cloneAttachRequest(selection.prior.request), resumeToken: selection.prior.resumeToken}
+			navTransition.beginCreation(priorRoute, priorRoute, action.RequestID)
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			attemptRequest.Intent = protocol.IntentNew
@@ -860,8 +865,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.NavigationCapabilities = 0
 			attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 			resumeToken = 0
-			creationPending = true
-			creationRequestID = action.RequestID
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
 			continue
@@ -879,7 +882,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			action := *result.routeAction
 			routeNavigationAction = &action
-			routeNavigationFallback = &attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
+			priorRoute := attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
+			navTransition.beginRecent(priorRoute, priorRoute, action.Key, action.Generation)
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			if selection.selected.resumeToken != 0 {
@@ -896,7 +900,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
 			}
 			resumeToken = selection.selected.resumeToken
-			routeNavigationPending = true
 			routeNavigationSelection = &selection
 			routeNavigationResumeFallback = selection.selected.resumeToken != 0
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
@@ -1015,10 +1018,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return errors.New("vev: route handoff returned nil dialer")
 			}
 			if target.Intent == protocol.IntentNew && target.RequestID != 0 {
-				fallback := source
-				creationFallback = &fallback
-				creationPending = true
-				creationRequestID = target.RequestID
+				navTransition.beginCreation(source, source, target.RequestID)
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest
@@ -1065,9 +1065,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			returnRoute = nil
 			homeNavigationPending = false
 			returnNavigationPending = false
-			routeNavigationPending = false
+			if navTransition.operation == navigationOperationRecent {
+				navTransition.clear()
+			}
 			routeNavigationSelection = nil
-			routeNavigationFallback = nil
 			routeNavigationAction = nil
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
@@ -1093,31 +1094,34 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			restoreReturnRoute(route)
 			continue
 		}
-		if creationPending && creationFallback != nil {
-			r.creationFailure = &protocol.SessionCreationFailure{RequestID: creationRequestID, Code: routeFailureCode(result.err)}
-			route := *creationFallback
-			creationFallback = nil
-			creationPending = false
-			creationRequestID = 0
+		if navTransition.pendingCreation() {
+			r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: routeFailureCode(result.err)}
+			route, ok := navTransition.restore()
+			if !ok {
+				return result.err
+			}
+			navTransition.settleFailure()
 			returnNavigationPending = true
 			restoreReturnRoute(route)
 			continue
 		}
-		if routeNavigationPending && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
+		if navTransition.pendingRecent() && routeNavigationResumeFallback && resumeNeedsExactAttach(result.err) {
 			attemptRequest.Intent = protocol.IntentAttach
 			resumeToken = 0
 			routeNavigationResumeFallback = false
 			continue
 		}
-		if routeNavigationPending && routeNavigationFallback != nil {
+		if navTransition.pendingRecent() {
 			if routeNavigationAction != nil {
 				action := *routeNavigationAction
 				r.routeFailure = &protocol.RouteNavigationFailure{Key: action.Key, Generation: action.Generation, Code: routeFailureCode(result.err)}
 				routeNavigationAction = nil
 			}
-			route := *routeNavigationFallback
-			routeNavigationFallback = nil
-			routeNavigationPending = false
+			route, ok := navTransition.restore()
+			if !ok {
+				return result.err
+			}
+			navTransition.settleFailure()
 			routeNavigationSelection = nil
 			routeNavigationResumeFallback = false
 			returnNavigationPending = true

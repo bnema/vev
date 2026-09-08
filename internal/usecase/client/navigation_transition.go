@@ -56,6 +56,18 @@ func (t *navigationTransition) active() bool {
 	return t != nil && t.operation != navigationOperationNone && !t.settled && t.stage != navigationStageSettled
 }
 
+// pendingCreation reports an unsettled creation handoff awaiting its
+// destination outcome. It replaces the former creation pending boolean.
+func (t *navigationTransition) pendingCreation() bool {
+	return t != nil && t.operation == navigationOperationCreation && t.active()
+}
+
+// pendingRecent reports an unsettled recent-route handoff awaiting its
+// destination outcome. It replaces the former recent pending boolean.
+func (t *navigationTransition) pendingRecent() bool {
+	return t != nil && t.operation == navigationOperationRecent && t.active()
+}
+
 // beginCreation captures the prior committed route before a creation handoff.
 // The authority route proves the source; the return route is the recovery
 // destination and is never overwritten by the authority.
