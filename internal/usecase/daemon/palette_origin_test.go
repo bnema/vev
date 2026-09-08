@@ -4,10 +4,38 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPaletteLocalQualificationDependsOnConfiguredHosts(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hosts []ports.RemoteHostSnapshot
+		want  string
+	}{
+		{name: "local only", want: "Switch to session sample"},
+		{name: "offline host without sessions", hosts: []ports.RemoteHostSnapshot{{Endpoint: "host-a"}}, want: "Switch to session sample@local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "sample", "tab-1", "pane-1")
+			sess.ephemeral = false
+			sess.incarnation = domain.SessionLifecycleID{1}
+			seedRemoteDirectory(t, d, tc.hosts...)
+			results := d.paletteResults(nil, nil, protocol.RecentRouteSnapshot{})
+			var labels []string
+			for _, result := range results {
+				if _, ok := result.SessionTarget(); ok {
+					labels = append(labels, result.DisplayText())
+				}
+			}
+			require.Equal(t, []string{tc.want}, labels)
+		})
+	}
+}
 
 func TestPaletteHistoryUsesClientRelativeOrigin(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
@@ -17,8 +45,8 @@ func TestPaletteHistoryUsesClientRelativeOrigin(t *testing.T) {
 	}}
 	results := d.paletteResults(nil, nil, snapshot)
 	require.Len(t, results, 2)
-	require.Equal(t, "Switch to session sample.local", results[0].DisplayText())
-	require.Equal(t, "Switch to session sample.host-a", results[1].DisplayText())
+	require.Equal(t, "Switch to session sample@local", results[0].DisplayText())
+	require.Equal(t, "Switch to session sample@host-a", results[1].DisplayText())
 }
 
 func TestPaletteImportedLocalSessionReplacesDuplicateHistoryRoute(t *testing.T) {

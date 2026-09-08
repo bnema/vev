@@ -58,12 +58,12 @@ def run(client_container, remote_container):
         initial = driver.call("capture")["context"]["session"]
         fixture = Driver(client_container, second)
         fixture.close()
-        driver.palette(second, "Switch to session " + second + ".local")
+        driver.palette(second, "Switch to session " + second + "@local")
         driver.call("keys", keys=["Enter"])
-        driver.palette(remote, "Switch to session " + remote + ".remote")
+        driver.palette(remote, "Switch to session " + remote + "@remote")
         entered = driver.call("keys", keys=["Enter"])
         assert entered["context"]["session"]["session_name"] == remote
-        label = "Switch to session " + first + ".local"
+        label = "Switch to session " + first + "@local"
         screen = driver.palette(first, label)
         assert screen.count(label) == 1, screen
         assert "Switch to session " + first + " " not in screen, screen

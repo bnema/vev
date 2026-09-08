@@ -121,9 +121,9 @@ func NewStoppedSessionResultWithDisplayOrigin(target protocol.ExactSessionTarget
 // SessionDisplay qualifies palette destinations relative to the client.
 func SessionDisplay(name, origin string) string {
 	if origin == "" {
-		origin = "local"
+		return name
 	}
-	return name + "." + domain.RemoteDisplayOrigin(origin)
+	return name + "@" + domain.RemoteDisplayOrigin(origin)
 }
 
 func remoteSessionDisplay(key domain.RemoteSessionKey) string {

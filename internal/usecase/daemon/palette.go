@@ -190,6 +190,13 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		current.mu.Unlock()
 	}
 	daemonDisplayOrigin := paletteDaemonDisplayOrigin(routeSnapshot, currentLifecycle)
+	hybrid := len(hosts) > 0 || daemonDisplayOrigin != ""
+	for _, entry := range routeSnapshot.Entries {
+		hybrid = hybrid || entry.Kind == protocol.RouteKindRemote
+	}
+	if daemonDisplayOrigin == "" && hybrid {
+		daemonDisplayOrigin = "local"
+	}
 
 	remoteSessionCount := 0
 	for _, host := range hosts {
@@ -259,7 +266,10 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		if entry.Name == "" {
 			continue
 		}
-		origin := "local"
+		origin := ""
+		if hybrid {
+			origin = "local"
+		}
 		if entry.Kind == protocol.RouteKindRemote {
 			origin = paletteRemoteDisplayOrigin(entry.HostLabel)
 		}

@@ -19,8 +19,8 @@ func TestImportedSessionResultKeepsOpaqueKeysAndQualifiedDisplay(t *testing.T) {
 	remote := NewImportedSessionResult("user@arch", "bbb/shared", "shared", "arch", "up", "")
 
 	require.Equal(t, ResultKindImportedSession, local.Kind())
-	require.Equal(t, "Switch to session shared.local", local.DisplayText())
-	require.Equal(t, "Switch to session shared.arch", remote.DisplayText())
+	require.Equal(t, "Switch to session shared@local", local.DisplayText())
+	require.Equal(t, "Switch to session shared@arch", remote.DisplayText())
 
 	source, entry, ok := local.ImportedSessionKey()
 	require.True(t, ok)
@@ -28,7 +28,7 @@ func TestImportedSessionResultKeepsOpaqueKeysAndQualifiedDisplay(t *testing.T) {
 	require.Equal(t, "aaa/one", entry)
 	display, reason, ok := remote.ImportedSessionDisplay()
 	require.True(t, ok)
-	require.Equal(t, "shared.arch", display)
+	require.Equal(t, "shared@arch", display)
 	require.Empty(t, reason)
 
 	// Homonyms across sources stay distinct: keys never collapse.
@@ -38,11 +38,11 @@ func TestImportedSessionResultKeepsOpaqueKeysAndQualifiedDisplay(t *testing.T) {
 	// Remote vision tags availability inline: non-live states surface so
 	// stale or broken entries never look attachable. Live rows stay clean.
 	down := NewImportedSessionResult("arch", "aaa/db", "db", "arch", "down", "unreachable")
-	require.Equal(t, "Switch to session db.arch (down: unreachable)", down.DisplayText())
+	require.Equal(t, "Switch to session db@arch (down: unreachable)", down.DisplayText())
 	broken := NewImportedSessionResult("arch", "aaa/db", "db", "arch", "broken", "")
-	require.Equal(t, "Switch to session db.arch (broken)", broken.DisplayText())
+	require.Equal(t, "Switch to session db@arch (broken)", broken.DisplayText())
 	stopped := NewImportedSessionResult("local", "aaa/old", "old", "local", "stopped", "")
-	require.Equal(t, "Switch to session old.local (stopped)", stopped.DisplayText())
+	require.Equal(t, "Switch to session old@local (stopped)", stopped.DisplayText())
 
 	// Other kinds expose no imported keys.
 	if _, _, ok := NewCommandResult(command.Command{Code: "NT"}).ImportedSessionKey(); ok {
@@ -74,12 +74,12 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	createdAt, ok := active.SessionCreatedAt()
 	require.True(t, ok)
 	require.Equal(t, created, createdAt)
-	require.Equal(t, "Switch to session work.local", active.DisplayText())
-	require.Equal(t, "Switch to session work.local", active.SearchText())
+	require.Equal(t, "Switch to session work", active.DisplayText())
+	require.Equal(t, "Switch to session work", active.SearchText())
 	target, ok := active.SessionTarget()
 	require.True(t, ok)
 	require.Equal(t, activeTarget, target)
-	require.Equal(t, "Switch to session work.remote-host", remoteActive.DisplayText())
+	require.Equal(t, "Switch to session work@remote-host", remoteActive.DisplayText())
 	name, ok = remoteActive.SessionName()
 	require.True(t, ok)
 	require.Equal(t, "work", name)
@@ -94,12 +94,12 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 	createdAt, ok = stopped.SessionCreatedAt()
 	require.True(t, ok)
 	require.Equal(t, created, createdAt)
-	require.Equal(t, "Resume session archive.local", stopped.DisplayText())
-	require.Equal(t, "Resume session archive.local", stopped.SearchText())
+	require.Equal(t, "Resume session archive", stopped.DisplayText())
+	require.Equal(t, "Resume session archive", stopped.SearchText())
 	target, ok = stopped.SessionTarget()
 	require.True(t, ok)
 	require.Equal(t, stoppedTarget, target)
-	require.Equal(t, "Resume session archive.remote-host", remoteStopped.DisplayText())
+	require.Equal(t, "Resume session archive@remote-host", remoteStopped.DisplayText())
 	name, ok = remoteStopped.SessionName()
 	require.True(t, ok)
 	require.Equal(t, "archive", name)
@@ -110,11 +110,11 @@ func TestResultKindsAndSessionLifecycleTargets(t *testing.T) {
 
 func TestRecentRouteResultCarriesExactNavigationAction(t *testing.T) {
 	action := protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 7, Generation: 3}
-	result := NewRecentRouteResult("logs", "logs.edge", action)
+	result := NewRecentRouteResult("logs", "logs@edge", action)
 
 	require.Equal(t, ResultKindRecentRoute, result.Kind())
-	require.Equal(t, "Switch to session logs.edge", result.DisplayText())
-	require.Equal(t, "Switch to session logs.edge", result.SearchText())
+	require.Equal(t, "Switch to session logs@edge", result.DisplayText())
+	require.Equal(t, "Switch to session logs@edge", result.SearchText())
 	got, ok := result.RouteNavigationAction()
 	require.True(t, ok)
 	require.Equal(t, action, got)

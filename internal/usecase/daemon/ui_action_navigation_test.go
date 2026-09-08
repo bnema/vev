@@ -124,7 +124,7 @@ func TestUIActionInputPaletteSubmissionCarriesItsOwnCause(t *testing.T) {
 	})
 	for _, input := range []protocol.Input{
 		{ActionID: 40, Data: []byte("\x1b ")},
-		{ActionID: 41, Data: []byte("logs.edge\r")},
+		{ActionID: 41, Data: []byte("logs@edge\r")},
 	} {
 		require.False(t, d.handleAttachmentClientMessage(captureAttachmentCapability(sess, ac, ac.transport()), input))
 	}

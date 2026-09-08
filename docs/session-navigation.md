@@ -1,8 +1,10 @@
 # Session navigation
 
-Palette destinations use `session.local` for the attaching client's local
-sessions and `session.host` for remote sessions, regardless of the serving
-daemon. Local inventory rows replace history rows for the same exact session;
+Palette destinations use bare session names in local-only mode. With remote
+hosts configured, local sessions use `session@local` and remote sessions use
+`session@host`, relative to the attaching client regardless of the serving
+daemon. Offline hosts still enable qualified local labels. Local inventory
+rows replace history rows for the same exact session;
 homonyms with different origins or lifecycles remain distinct. A resume
 credential belongs only to the route currently holding its attachment, so
 older sessions in history use exact attachment after a same-daemon switch.
