@@ -51,6 +51,29 @@ func TestNavigationTransitionSettlesOnce(t *testing.T) {
 	}
 }
 
+func TestNavigationTransitionPendingPredicates(t *testing.T) {
+	var transition navigationTransition
+	if transition.pendingInventory() {
+		t.Fatal("zero transition must not report pending inventory")
+	}
+	transition.beginCreation(testAttachRoute("a"), testAttachRoute("b"), 1)
+	if transition.pendingInventory() {
+		t.Fatal("creation must not report pending inventory")
+	}
+	transition.beginRecent(testAttachRoute("a"), testAttachRoute("b"), 1, 1)
+	if transition.pendingInventory() {
+		t.Fatal("recent must not report pending inventory")
+	}
+	transition.beginInventory(testAttachRoute("local"), testAttachRoute("remote"), 9)
+	if !transition.pendingInventory() {
+		t.Fatal("inventory must report pending until settled")
+	}
+	transition.settleSuccess()
+	if transition.pendingInventory() {
+		t.Fatal("settled inventory must not report pending")
+	}
+}
+
 func TestNavigationTransitionAuthorityNeverOverwritesReturn(t *testing.T) {
 	var transition navigationTransition
 	transition.beginInventory(testAttachRoute("local-source"), testAttachRoute("active-remote"), 11)

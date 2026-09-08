@@ -136,6 +136,24 @@ func testClientFrame(message protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationFailure:
 		p, e := wire.MarshalRouteNavigationFailure(m)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: p}, e
+	case protocol.NavigationInventoryRequest:
+		p := wire.MarshalNavigationInventoryRequest(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid inventory request")
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryRequest, Payload: p}, nil
+	case protocol.NavigationInventoryPublication:
+		p := wire.MarshalNavigationInventoryPublication(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid inventory publication")
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryPublication, Payload: p}, nil
+	case protocol.NavigationInventoryFailure:
+		p := wire.MarshalNavigationInventoryFailure(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid inventory failure")
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: p}, nil
 	default:
 		return wire.Frame{}, errors.New("test client connection: unsupported client message")
 	}
@@ -175,6 +193,12 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
 	case wire.MsgParkedRouteResponse:
 		return wire.UnmarshalParkedRouteResponse(frame.Payload)
+	case wire.MsgNavigationInventoryResponse:
+		return wire.UnmarshalNavigationInventoryResponse(frame.Payload)
+	case wire.MsgNavigationInventoryDemand:
+		return wire.UnmarshalNavigationInventoryDemand(frame.Payload)
+	case wire.MsgNavigationInventorySelection:
+		return wire.UnmarshalNavigationInventorySelection(frame.Payload)
 	default:
 		return nil, errors.New("test client connection: unsupported server frame")
 	}

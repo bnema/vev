@@ -192,6 +192,12 @@ func (r *inventoryRelay) validateSelection(selection protocol.NavigationInventor
 	if err := protocol.ValidateNavigationInventorySelection(selection); err != nil {
 		return err
 	}
+	// Remote-source resolution needs source registration the relay never
+	// carries; remote vision stays off until the E4 slice wires it. Local
+	// sources resolve registration-free on the control connection.
+	if selection.SourceKey != protocol.NavigationInventoryLocalSourceKey {
+		return errors.New("vev: inventory selection for a remote source is unavailable")
+	}
 	if selection.InteractionGeneration != r.interaction {
 		return errors.New("vev: inventory selection for a closed interaction")
 	}

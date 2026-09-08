@@ -68,6 +68,12 @@ func (t *navigationTransition) pendingRecent() bool {
 	return t != nil && t.operation == navigationOperationRecent && t.active()
 }
 
+// pendingInventory reports an unsettled inventory handoff awaiting its
+// destination outcome.
+func (t *navigationTransition) pendingInventory() bool {
+	return t != nil && t.operation == navigationOperationInventory && t.active()
+}
+
 // beginCreation captures the prior committed route before a creation handoff.
 // The authority route proves the source; the return route is the recovery
 // destination and is never overwritten by the authority.
