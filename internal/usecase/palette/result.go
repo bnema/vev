@@ -118,12 +118,24 @@ func NewStoppedSessionResultWithDisplayOrigin(target protocol.ExactSessionTarget
 	}
 }
 
-func newSessionPayload(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
-	display := target.SessionName
-	if displayOrigin != "" {
-		display = domain.RemoteSessionDisplay(target.SessionName, displayOrigin)
+// SessionDisplay qualifies palette destinations relative to the client.
+func SessionDisplay(name, origin string) string {
+	if origin == "" {
+		origin = "local"
 	}
-	return sessionPayload{display: display, createdAt: createdAt, target: target}
+	return name + "." + domain.RemoteDisplayOrigin(origin)
+}
+
+func remoteSessionDisplay(key domain.RemoteSessionKey) string {
+	origin := key.DisplayOrigin
+	if origin == "" {
+		origin = domain.RemoteDisplayOrigin(key.Host)
+	}
+	return SessionDisplay(key.Name, origin)
+}
+
+func newSessionPayload(target protocol.ExactSessionTarget, createdAt time.Time, displayOrigin string) sessionPayload {
+	return sessionPayload{display: SessionDisplay(target.SessionName, displayOrigin), createdAt: createdAt, target: target}
 }
 
 // NewRemoteSessionResult creates an immutable catalog-backed remote target.
@@ -199,7 +211,7 @@ func (r Result) DisplayText() string {
 		return r.command.Code
 	}
 	if r.kind == ResultKindRemoteSession {
-		return activeSessionDisplayPrefix + r.remoteSession.key.Display()
+		return activeSessionDisplayPrefix + remoteSessionDisplay(r.remoteSession.key)
 	}
 	if r.kind == ResultKindImportedSession {
 		return activeSessionDisplayPrefix + r.importedSession.display()
@@ -248,7 +260,7 @@ func (r Result) searchTerms() (identity, label string, offset int, ok bool) {
 	case ResultKindActiveSession, ResultKindStoppedSession:
 		return r.session.target.SessionName, r.session.display, utf8.RuneCountInString(r.sessionDisplayPrefix()), true
 	case ResultKindRemoteSession:
-		return r.remoteSession.key.Name, r.remoteSession.key.Display(), utf8.RuneCountInString(activeSessionDisplayPrefix), true
+		return r.remoteSession.key.Name, remoteSessionDisplay(r.remoteSession.key), utf8.RuneCountInString(activeSessionDisplayPrefix), true
 	case ResultKindImportedSession:
 		return r.importedSession.name, r.importedSession.display(), utf8.RuneCountInString(activeSessionDisplayPrefix), true
 	case ResultKindRecentRoute:
@@ -301,10 +313,7 @@ func (r Result) RemoteSessionUnavailableReason() (string, bool) {
 // Unqualified names would collapse homonyms across local and remote
 // sources into the wrong selection.
 func (p importedSessionPayload) qualified() string {
-	if p.displayOrigin == "" {
-		return p.name
-	}
-	return p.name + "@" + p.displayOrigin
+	return SessionDisplay(p.name, p.displayOrigin)
 }
 
 func (p importedSessionPayload) display() string {

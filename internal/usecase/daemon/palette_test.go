@@ -556,7 +556,7 @@ func TestPaletteIncludesExactRemoteCatalogTargetBesideSameNameLocalSession(t *te
 	results := d.paletteResults(current, nil, protocol.RecentRouteSnapshot{})
 	var matching []palette.Result
 	for _, result := range results {
-		if result.DisplayText() == "Switch to session vev" || result.DisplayText() == "Switch to session vev@arch" {
+		if result.DisplayText() == "Switch to session vev.local" || result.DisplayText() == "Switch to session vev.arch" {
 			matching = append(matching, result)
 		}
 	}
@@ -595,7 +595,7 @@ func TestPaletteQualifiesDaemonSessionForRemoteAttachment(t *testing.T) {
 
 	var matching []palette.Result
 	for _, result := range results {
-		if result.DisplayText() == "Switch to session target@remote-host" {
+		if result.DisplayText() == "Switch to session target.remote-host" {
 			matching = append(matching, result)
 		}
 	}
@@ -649,7 +649,7 @@ func TestPaletteMatchesRecentRemoteRouteToCatalog(t *testing.T) {
 			var actions []protocol.RouteNavigationAction
 			var catalogEndpoints []string
 			for _, result := range results {
-				if result.DisplayText() != "Switch to session vev@arch" {
+				if result.DisplayText() != "Switch to session vev.arch" {
 					continue
 				}
 				if action, ok := result.RouteNavigationAction(); ok {
@@ -684,7 +684,7 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, wire.MsgOutput)
-	d.handleInputForAttachment(token, []byte("work@arch\r"))
+	d.handleInputForAttachment(token, []byte("work.arch\r"))
 
 	frame := awaitFrame(t, sends, wire.MsgAttachTarget)
 	target, err := wire.UnmarshalAttachTarget(frame.Payload)
@@ -716,7 +716,7 @@ func TestPaletteUnknownRemoteSelectionFailsClosed(t *testing.T) {
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, wire.MsgOutput)
-	d.handleInputForAttachment(token, []byte("cached@arch\r"))
+	d.handleInputForAttachment(token, []byte("cached.arch\r"))
 
 	require.Same(t, current, ac.currentAttachmentSession())
 	require.True(t, ac.overlays.paletteActive())
@@ -761,7 +761,7 @@ func TestRemoteDirectoryUpdatesOpenPaletteAndPreservesQuery(t *testing.T) {
 	for i, match := range matches {
 		displayTexts[i] = match.Result.DisplayText()
 	}
-	require.Contains(t, displayTexts, "Switch to session vev@arch")
+	require.Contains(t, displayTexts, "Switch to session vev.arch")
 
 	d.closePalette(ac)
 	require.False(t, ac.overlays.paletteActive(), "closing the palette releases view state only")
@@ -823,8 +823,8 @@ func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
 		{SnapshotGeneration: 2, Key: 3, Generation: 1},
 		{SnapshotGeneration: 2, Key: 4, Generation: 1},
 	}, routeActions)
-	require.Equal(t, "Switch to session vev@arch", results[len(results)-2].DisplayText())
-	require.Equal(t, "Switch to session vev@arch", results[len(results)-1].DisplayText())
+	require.Equal(t, "Switch to session vev.arch", results[len(results)-2].DisplayText())
+	require.Equal(t, "Switch to session vev.arch", results[len(results)-1].DisplayText())
 }
 
 func TestPaletteLifecycleTargetRejectsSameNameReplacement(t *testing.T) {
@@ -868,7 +868,7 @@ func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
 	awaitFrame(t, sends, wire.MsgOutput)
-	d.handleInputForAttachment(token, []byte("logs@edge\r"))
+	d.handleInputForAttachment(token, []byte("logs.edge\r"))
 
 	actionFrame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
 	action, err := wire.UnmarshalRouteNavigationAction(actionFrame.Payload)

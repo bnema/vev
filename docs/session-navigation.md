@@ -1,5 +1,12 @@
 # Session navigation
 
+Palette destinations use `session.local` for the attaching client's local
+sessions and `session.host` for remote sessions, regardless of the serving
+daemon. Local inventory rows replace history rows for the same exact session;
+homonyms with different origins or lifecycles remain distinct. A resume
+credential belongs only to the route currently holding its attachment, so
+older sessions in history use exact attachment after a same-daemon switch.
+
 The command palette lists sessions from two origins: native results owned by
 the serving daemon (active, stopped, remote, recent routes) and imported rows
 relayed from the attaching client's own local daemon. Imported rows carry

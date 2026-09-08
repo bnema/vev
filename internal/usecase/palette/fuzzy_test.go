@@ -92,7 +92,7 @@ func TestFuzzyRanksExactSessionNameAheadOfPrefix(t *testing.T) {
 				NewActiveSessionResultWithDisplayOrigin(testExactTarget("vev-vt", 1), time.Time{}, "arch"),
 				NewActiveSessionResultWithDisplayOrigin(testExactTarget("vev", 2), time.Time{}, "arch"),
 			},
-			wantFirst: "Switch to session vev@arch",
+			wantFirst: "Switch to session vev.arch",
 			offset:    18,
 		},
 		{
@@ -101,7 +101,7 @@ func TestFuzzyRanksExactSessionNameAheadOfPrefix(t *testing.T) {
 				NewStoppedSessionResultWithDisplayOrigin(testExactTarget("vev-vt", 1), time.Time{}, "arch"),
 				NewStoppedSessionResultWithDisplayOrigin(testExactTarget("vev", 2), time.Time{}, "arch"),
 			},
-			wantFirst: "Resume session vev@arch",
+			wantFirst: "Resume session vev.arch",
 			offset:    15,
 		},
 		{
@@ -110,7 +110,7 @@ func TestFuzzyRanksExactSessionNameAheadOfPrefix(t *testing.T) {
 				NewRemoteSessionResult(domain.RemoteSessionKey{Host: "arch", Name: "vev-vt", DisplayOrigin: "arch"}, domain.RemoteSessionTarget{}, ""),
 				NewRemoteSessionResult(domain.RemoteSessionKey{Host: "arch", Name: "vev", DisplayOrigin: "arch"}, domain.RemoteSessionTarget{}, ""),
 			},
-			wantFirst: "Switch to session vev@arch",
+			wantFirst: "Switch to session vev.arch",
 			offset:    18,
 		},
 		{
@@ -156,7 +156,7 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				NewCommandResult(cmd("ZZZ", "", "work tools")),
 			},
 			query:         "work",
-			wantText:      []string{"WORK", "Switch to session work", "Resume session work", "WQORRK", "ZZZ"},
+			wantText:      []string{"WORK", "Switch to session work.local", "Resume session work.local", "WQORRK", "ZZZ"},
 			wantKinds:     []ResultKind{ResultKindCommand, ResultKindActiveSession, ResultKindStoppedSession, ResultKindCommand, ResultKindCommand},
 			wantPositions: [][]int{{0, 1, 2, 3}, {18, 19, 20, 21}, {15, 16, 17, 18}, {0, 2, 3, 5}, nil},
 		},
@@ -167,7 +167,7 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				NewStoppedSessionResult(testExactTarget("aAlpha", 2), time.Time{}),
 			},
 			query:         "a",
-			wantText:      []string{"Resume session aAlpha", "Resume session aBravo"},
+			wantText:      []string{"Resume session aAlpha.local", "Resume session aBravo.local"},
 			wantKinds:     []ResultKind{ResultKindStoppedSession, ResultKindStoppedSession},
 			wantPositions: [][]int{{15}, {15}},
 		},
@@ -182,7 +182,7 @@ func TestFuzzyOrdersMixedResults(t *testing.T) {
 				NewCommandResult(cmd("AX", "", "")),
 			},
 			query:         "a",
-			wantText:      []string{"AX", "Switch to session aEcho", "Switch to session aEcho", "Switch to session aZulu", "Resume session aAlpha", "Resume session aBravo"},
+			wantText:      []string{"AX", "Switch to session aEcho.local", "Switch to session aEcho.local", "Switch to session aZulu.local", "Resume session aAlpha.local", "Resume session aBravo.local"},
 			wantKinds:     []ResultKind{ResultKindCommand, ResultKindActiveSession, ResultKindActiveSession, ResultKindActiveSession, ResultKindStoppedSession, ResultKindStoppedSession},
 			wantPositions: [][]int{{0}, {18}, {18}, {18}, {15}, {15}},
 			wantActiveTargets: map[int]protocol.ExactSessionTarget{

@@ -139,7 +139,32 @@ func importedPaletteResults(groups []protocol.NavigationInventorySourceGroup) []
 // streamed publications. Stable opaque keys preserve cursor and query
 // across ReplaceResults.
 func appendImportedResults(results []palette.Result, ac *attachedClient) []palette.Result {
-	return append(results, importedPaletteResults(copyPaletteInventoryGroups(ac))...)
+	groups := copyPaletteInventoryGroups(ac)
+	if ac == nil || ac.overlays == nil {
+		return results
+	}
+	localKeys := make(map[string]bool)
+	for _, group := range groups {
+		if group.SourceKey == protocol.NavigationInventoryLocalSourceKey && group.Status == protocol.NavigationInventorySourceOK {
+			for _, entry := range group.Entries {
+				localKeys[entry.EntryKey] = true
+			}
+		}
+	}
+	ac.overlays.paletteMu.Lock()
+	snapshot := ac.overlays.paletteRouteSnapshot
+	ac.overlays.paletteMu.Unlock()
+	filtered := results[:0]
+	for _, result := range results {
+		if action, ok := result.RouteNavigationAction(); ok {
+			entry, found := routeEntryForRef(snapshot, protocol.RouteRef{Key: action.Key, Generation: action.Generation})
+			if found && entry.Kind == protocol.RouteKindLocal && localKeys[navigationInventoryEntryKey(entry.Target.LifecycleID, entry.Target.SessionName)] {
+				continue
+			}
+		}
+		filtered = append(filtered, result)
+	}
+	return append(filtered, importedPaletteResults(groups)...)
 }
 
 // inventoryFailureNotice maps a bounded relay failure code to palette

@@ -2280,6 +2280,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if home == nil {
 				continue
 			}
+			if ui != nil {
+				ui.follow(uiGeneration, resolveOutcome.selection.CauseActionID)
+				publishUIStatus(ports.UIStatusTransitioning)
+			}
 			handoff := bindAttachHandoff(resolveOutcome.target, *home)
 			handoff.inventory = &inventoryHandoff{
 				returnRoute:   attachRoute{dialer: a.dialer, request: cloneAttachRequest(a.request), resumeToken: resumeToken},

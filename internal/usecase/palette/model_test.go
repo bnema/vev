@@ -659,7 +659,7 @@ func TestModelUsesDefensiveTypedResultsAndKeepsSessionsCommandInert(t *testing.T
 	require.False(t, argument)
 
 	frame := m.Render(domain.Size{Cols: 28, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
-	require.Equal(t, "Switch to session work      ", frameRow(frame, 1))
+	require.Equal(t, "Switch to session work.local", frameRow(frame, 1))
 }
 
 func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
@@ -669,7 +669,7 @@ func TestRenderStoppedSessionHighlightsNameAfterResumePrefix(t *testing.T) {
 
 	frame := m.Render(domain.Size{Cols: 28, Rows: 2}, RenderOptions{Styles: DefaultRenderStyles()})
 
-	require.Equal(t, "Resume session work         ", frameRow(frame, 1))
+	require.Equal(t, "Resume session work.local   ", frameRow(frame, 1))
 	require.False(t, frame.At(14, 1).Style.Bold, "resume prefix is not highlighted")
 	require.True(t, frame.At(15, 1).Style.Bold, "first matched session rune is highlighted")
 	require.True(t, frame.At(18, 1).Style.Bold, "last matched session rune is highlighted")

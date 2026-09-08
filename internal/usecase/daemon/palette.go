@@ -255,15 +255,15 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 			discoveredByPresentation[presentation] = append(discoveredByPresentation[presentation], identity)
 		}
 	}
-	formattedRoutes := formatRecentRouteSnapshot(routeSnapshot)
-	for i, entry := range routeSnapshot.Entries {
-		if i >= len(formattedRoutes) {
-			break
-		}
-		label := formattedRoutes[i].name
-		if label == "" {
+	for _, entry := range routeSnapshot.Entries {
+		if entry.Name == "" {
 			continue
 		}
+		origin := "local"
+		if entry.Kind == protocol.RouteKindRemote {
+			origin = paletteRemoteDisplayOrigin(entry.HostLabel)
+		}
+		label := palette.SessionDisplay(entry.Name, origin)
 		identity := localPaletteSessionIdentity(entry.Target.LifecycleID)
 		if _, exists := represented[identity]; exists && paletteRouteRepresentsDaemonSession(entry, daemonDisplayOrigin) {
 			continue
