@@ -222,18 +222,8 @@ type attachRoute struct {
 type attachHandoff struct {
 	target protocol.AttachTarget
 	source attachRoute
-	// inventory carries the return route and admitted cause for a resolved
-	// imported-session selection. Nil for picker and creation handoffs.
-	inventory *inventoryHandoff
-}
-
-// inventoryHandoff binds a resolved imported-session target to the
-// inventory transition: the return route recovers the serving attachment
-// when the destination fails, and the cause matches the serving-daemon
-// selection to this client's destination attempt.
-type inventoryHandoff struct {
-	returnRoute   attachRoute
-	causeActionID uint64
+	// Run captures inventory recovery from its rebased serving request.
+	inventory bool
 }
 
 func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attachHandoff {
@@ -916,7 +906,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				continue
 			}
 			priorRoute := attachRoute{dialer: selection.prior.dialer, request: cloneAttachRequest(selection.prior.request), resumeToken: selection.prior.resumeToken}
-			navTransition.beginCreation(priorRoute, priorRoute, action.RequestID)
+			navTransition.beginCreation(priorRoute, action.RequestID)
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			attemptRequest.Intent = protocol.IntentNew
@@ -946,7 +936,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			action := *result.routeAction
 			routeNavigationAction = &action
 			priorRoute := attachRoute{dialer: selection.prior.dialer, request: selection.prior.request, resumeToken: selection.prior.resumeToken}
-			navTransition.beginRecent(priorRoute, priorRoute, action.Key, action.Generation)
+			navTransition.beginRecent(priorRoute)
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
 			if selection.selected.resumeToken != 0 {
@@ -1081,10 +1071,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				return errors.New("vev: route handoff returned nil dialer")
 			}
 			if target.Intent == protocol.IntentNew && target.RequestID != 0 {
-				navTransition.beginCreation(source, source, target.RequestID)
+				navTransition.beginCreation(source, target.RequestID)
 			}
-			if result.handoff != nil && result.handoff.inventory != nil {
-				navTransition.beginInventory(source, result.handoff.inventory.returnRoute, result.handoff.inventory.causeActionID)
+			if result.handoff != nil && result.handoff.inventory {
+				navTransition.beginInventory(attachRoute{dialer: dialer, request: cloneAttachRequest(attemptRequest), resumeToken: resumeToken})
 			}
 			dialer = nextDialer
 			attemptRequest = nextRequest
@@ -1722,6 +1712,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		inventoryTimer = clk.NewTimer(inventoryPollInterval)
 		inventoryTickC = inventoryTimer.C()
 	}
+	var cancelInventoryPoll context.CancelFunc
+	stopInventoryPoll := func() {
+		if cancelInventoryPoll != nil {
+			cancelInventoryPoll()
+			cancelInventoryPoll = nil
+		}
+	}
+	defer stopInventoryPoll()
 	startInventoryPoll := func() {
 		if inventory == nil || !inventoryOpen {
 			return
@@ -1733,8 +1731,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		queryID := nextInventoryRequestID
 		nextInventoryRequestID++
+		queryCtx, cancel := context.WithCancel(loopCtx)
+		cancelInventoryPoll = cancel
 		go func() {
-			response, err := inventory.querySnapshot(loopCtx, queryID)
+			defer cancel()
+			response, err := inventory.querySnapshot(queryCtx, queryID)
 			inventoryBox.offer(inventoryPollOutcome{interaction: interaction, query: query, response: response, err: err})
 		}()
 	}
@@ -2218,8 +2219,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if !ok {
 				continue
 			}
+			stopInventoryPoll()
 			if inventory != nil {
 				inventory.endPoll(pollOutcome.query)
+			}
+			if pollOutcome.interaction != inventoryInteraction {
+				startInventoryPoll()
 			}
 			if pollOutcome.err != nil || inventory == nil || !inventoryOpen ||
 				pollOutcome.interaction != inventoryInteraction {
@@ -2285,10 +2290,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				publishUIStatus(ports.UIStatusTransitioning)
 			}
 			handoff := bindAttachHandoff(resolveOutcome.target, *home)
-			handoff.inventory = &inventoryHandoff{
-				returnRoute:   attachRoute{dialer: a.dialer, request: cloneAttachRequest(a.request), resumeToken: resumeToken},
-				causeActionID: resolveOutcome.selection.CauseActionID,
-			}
+			handoff.inventory = true
 			result := welcomedResult(nil)
 			result.handoff = handoff
 			return result
@@ -2607,6 +2609,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				demand := message
 				if inventory == nil {
 					continue
+				}
+				if !demand.Open || demand.InteractionGeneration != inventoryInteraction {
+					stopInventoryPoll()
 				}
 				inventory.setOpen(demand.Open, demand.InteractionGeneration)
 				inventoryOpen = demand.Open

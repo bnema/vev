@@ -127,6 +127,11 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, closeDemand.Open)
 	require.Equal(t, interaction, closeDemand.InteractionGeneration)
+	// Input handling sends controls synchronously; no second close may be queued.
+	for len(sends) > 0 {
+		frame := <-sends
+		require.NotEqual(t, wire.MsgNavigationInventoryDemand, frame.Type, "selection emits exactly one close")
+	}
 
 	require.False(t, ac.overlays.paletteActive(), "select closes the overlay")
 	ac.overlays.paletteMu.Lock()

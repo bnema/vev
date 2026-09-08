@@ -372,7 +372,7 @@ func TestInventoryAttemptPublishesAndStops(t *testing.T) {
 // TestInventoryAttemptResolvesSelectionToHandoff pins the selection path:
 // the serving daemon's selection validates against published state, resolves
 // through the local control dialer, and returns a handoff bound to the home
-// authority with the serving route as the inventory return route.
+// authority; Run captures the serving recovery route after rebasing metadata.
 func TestInventoryAttemptResolvesSelectionToHandoff(t *testing.T) {
 	clock := newInventoryTestClock()
 	transport := &inventoryAttemptTransport{
@@ -389,9 +389,7 @@ func TestInventoryAttemptResolvesSelectionToHandoff(t *testing.T) {
 	require.Empty(t, result.handoff.target.Endpoint)
 	require.Equal(t, "alpha", result.handoff.target.Session)
 	require.NotNil(t, result.handoff.target.ExactTarget)
-	require.NotNil(t, result.handoff.inventory)
-	require.Equal(t, uint64(9), result.handoff.inventory.causeActionID)
-	require.Equal(t, "remote-work", result.handoff.inventory.returnRoute.request.SessionName)
+	require.True(t, result.handoff.inventory)
 }
 
 // TestInventoryAttemptIdleWithoutDemands pins the no-demand pairing: without

@@ -72,8 +72,8 @@ func (r *inventoryRelay) setOpen(open bool, interaction uint64) {
 		return
 	}
 	r.open = open
-	r.inFlight = 0
 	if open && interaction != r.interaction {
+		r.lastPoll = time.Time{}
 		r.interaction = interaction
 		r.publication = 0
 		r.published = nil

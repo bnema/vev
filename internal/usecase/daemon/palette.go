@@ -644,7 +644,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		if open {
 			freezePaletteInventorySelection(ac.overlays, selection)
 		}
-		closeInteraction, hasClose := takePaletteInventoryClose(ac.overlays)
 		ac.overlays.paletteMu.Unlock()
 		if !open || protocol.ValidateNavigationInventorySelection(selection) != nil {
 			ac.paletteFailure(generation, rawQuery, "requested imported session is unavailable")
@@ -659,10 +658,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		closed := d.closeExecutedPalette(ac, effect, generation, rawQuery)
-		if closed && hasClose {
-			d.sendPaletteInventoryDemand(ac, effect, false, closeInteraction)
-		}
+		d.closeExecutedPalette(ac, effect, generation, rawQuery)
 		return
 	}
 

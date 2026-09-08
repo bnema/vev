@@ -140,6 +140,10 @@ func externalClientFrame(m protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.SessionCreationFailure:
 		p, e := wire.MarshalSessionCreationFailure(x)
 		return wire.Frame{Type: wire.MsgSessionCreationFailure, Payload: p}, e
+	case protocol.NavigationInventoryPublication:
+		return wire.Frame{Type: wire.MsgNavigationInventoryPublication, Payload: wire.MarshalNavigationInventoryPublication(x)}, nil
+	case protocol.NavigationInventoryFailure:
+		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: wire.MarshalNavigationInventoryFailure(x)}, nil
 	default:
 		return wire.Frame{}, errors.New("test client: unsupported message")
 	}
@@ -148,6 +152,10 @@ func externalServerMessage(f wire.Frame) (protocol.ServerMessage, error) {
 	switch f.Type {
 	case wire.MsgWelcome:
 		return wire.UnmarshalWelcome(f.Payload)
+	case wire.MsgNavigationInventoryDemand:
+		return wire.UnmarshalNavigationInventoryDemand(f.Payload)
+	case wire.MsgNavigationInventorySelection:
+		return wire.UnmarshalNavigationInventorySelection(f.Payload)
 	case wire.MsgError:
 		return wire.UnmarshalErrorMsg(f.Payload)
 	case wire.MsgOutput:
