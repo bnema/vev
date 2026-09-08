@@ -21,8 +21,10 @@ func TestValidateNavigationInventoryRequest(t *testing.T) {
 		{name: "zero request", request: NavigationInventoryRequest{Operation: NavigationInventorySnapshot}, wantErr: true},
 		{name: "bad operation", request: NavigationInventoryRequest{Version: Version, RequestID: 1, Operation: 9}, wantErr: true},
 		{name: "snapshot with keys", request: NavigationInventoryRequest{Version: Version, RequestID: 1, Operation: NavigationInventorySnapshot, SourceKey: "local"}, wantErr: true},
-		{name: "resolve ok", request: NavigationInventoryRequest{Version: Version, RequestID: 2, Operation: NavigationInventoryResolve, SourceKey: "local", EntryKey: "abc", Registration: registration}},
-		{name: "resolve missing registration", request: NavigationInventoryRequest{Version: Version, RequestID: 2, Operation: NavigationInventoryResolve, SourceKey: "local", EntryKey: "abc"}, wantErr: true},
+		{name: "resolve ok", request: NavigationInventoryRequest{Version: Version, RequestID: 2, Operation: NavigationInventoryResolve, SourceKey: "remote-a", EntryKey: "abc", Registration: registration}},
+		{name: "resolve local ok", request: NavigationInventoryRequest{Version: Version, RequestID: 3, Operation: NavigationInventoryResolve, SourceKey: NavigationInventoryLocalSourceKey, EntryKey: "abc"}},
+		{name: "resolve local with registration", request: NavigationInventoryRequest{Version: Version, RequestID: 3, Operation: NavigationInventoryResolve, SourceKey: NavigationInventoryLocalSourceKey, EntryKey: "abc", Registration: registration}, wantErr: true},
+		{name: "resolve missing registration", request: NavigationInventoryRequest{Version: Version, RequestID: 2, Operation: NavigationInventoryResolve, SourceKey: "remote-a", EntryKey: "abc"}, wantErr: true},
 		{name: "resolve bad key", request: NavigationInventoryRequest{Version: Version, RequestID: 2, Operation: NavigationInventoryResolve, SourceKey: "a\x1b", EntryKey: "abc", Registration: registration}, wantErr: true},
 	}
 	for _, tt := range tests {

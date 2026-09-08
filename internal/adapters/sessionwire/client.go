@@ -111,6 +111,12 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
 	case wire.MsgParkedRouteResponse:
 		return wire.UnmarshalParkedRouteResponse(frame.Payload)
+	case wire.MsgNavigationInventoryResponse:
+		return wire.UnmarshalNavigationInventoryResponse(frame.Payload)
+	case wire.MsgNavigationInventoryDemand:
+		return wire.UnmarshalNavigationInventoryDemand(frame.Payload)
+	case wire.MsgNavigationInventorySelection:
+		return wire.UnmarshalNavigationInventorySelection(frame.Payload)
 	case wire.MsgUIReceipt:
 		return wire.UnmarshalUIReceipt(frame.Payload)
 	case wire.MsgUIViewUpdate:
@@ -120,7 +126,8 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		wire.MsgClientNotice, wire.MsgCommand, wire.MsgOutputResetRequest,
 		wire.MsgRemotePreviewRequest, wire.MsgRouteAttentionSubscription,
 		wire.MsgSamePeerSwitchRequest, wire.MsgParkedRouteRequest,
-		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure, wire.MsgUIFence:
+		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure, wire.MsgUIFence,
+		wire.MsgNavigationInventoryRequest, wire.MsgNavigationInventoryPublication, wire.MsgNavigationInventoryFailure:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -186,6 +193,24 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 			return wire.Frame{}, ErrInvalidMessage
 		}
 		return wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: payload}, nil
+	case protocol.NavigationInventoryRequest:
+		payload := wire.MarshalNavigationInventoryRequest(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryRequest, Payload: payload}, nil
+	case protocol.NavigationInventoryPublication:
+		payload := wire.MarshalNavigationInventoryPublication(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryPublication, Payload: payload}, nil
+	case protocol.NavigationInventoryFailure:
+		payload := wire.MarshalNavigationInventoryFailure(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: payload}, nil
 	case protocol.RecentRouteSnapshot:
 		payload, err := wire.MarshalRecentRouteSnapshot(m)
 		return wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: payload}, err
@@ -264,6 +289,18 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 			return encodeClient(*m)
 		}
 	case *protocol.ParkedRouteRequest:
+		if m != nil {
+			return encodeClient(*m)
+		}
+	case *protocol.NavigationInventoryRequest:
+		if m != nil {
+			return encodeClient(*m)
+		}
+	case *protocol.NavigationInventoryPublication:
+		if m != nil {
+			return encodeClient(*m)
+		}
+	case *protocol.NavigationInventoryFailure:
 		if m != nil {
 			return encodeClient(*m)
 		}

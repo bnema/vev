@@ -9,11 +9,16 @@ import (
 // Navigation inventory bounds. These are export limits for UI listings, not
 // limits on stored or running sessions.
 const (
-	NavigationInventoryMaxSourceGroups = 65
-	NavigationInventoryMaxLocalEntries = 4096
-	NavigationInventoryMaxDisplayBytes = 256
-	NavigationInventoryMaxKeyBytes     = 128
+	NavigationInventoryMaxSourceGroups           = 65
+	NavigationInventoryMaxLocalEntries           = 4096
+	NavigationInventoryMaxRemoteEntriesPerSource = 256
+	NavigationInventoryMaxDisplayBytes           = 256
+	NavigationInventoryMaxKeyBytes               = 128
 )
+
+// NavigationInventoryLocalSourceKey identifies the control daemon's own
+// sessions inside inventory groups.
+const NavigationInventoryLocalSourceKey = "local"
 
 // NavigationInventoryOperation selects the control-source query.
 type NavigationInventoryOperation uint8
@@ -201,6 +206,9 @@ func validInventoryDisplay(value string) bool {
 
 // ValidateNavigationInventoryRequest enforces nonzero IDs, operation-dependent
 // unions, key shape, registration identity for resolve, and display safety.
+// Local resolve carries a zero registration (the source is the control daemon
+// itself); remote resolve carries the configured registration to fence ABA
+// re-registration.
 func ValidateNavigationInventoryRequest(request NavigationInventoryRequest) error {
 	if request.RequestID == 0 || !validNavigationInventoryOperation(request.Operation) {
 		return ErrInvalidNavigation
@@ -213,6 +221,12 @@ func ValidateNavigationInventoryRequest(request NavigationInventoryRequest) erro
 	}
 	if !validInventoryKey(request.SourceKey) || !validInventoryKey(request.EntryKey) {
 		return ErrInvalidNavigation
+	}
+	if request.SourceKey == NavigationInventoryLocalSourceKey {
+		if !request.Registration.IsZero() {
+			return ErrInvalidNavigation
+		}
+		return nil
 	}
 	if request.Registration.Validate() != nil {
 		return ErrInvalidNavigation

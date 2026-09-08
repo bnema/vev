@@ -21,6 +21,7 @@ const (
 	DecodeMessageCommand
 	DecodeMessageKill
 	DecodeMessageRemotePreview
+	DecodeMessageNavigationInventory
 )
 
 // DecodeFailure describes rejected encoded input without retaining payload bytes.
