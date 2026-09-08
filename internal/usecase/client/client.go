@@ -252,10 +252,13 @@ type Runner struct {
 	remoteHostLearner ports.RemoteHostLearner
 	attachHandoff     AttachHandoffFunc
 	remote            bool
-	origin            protocol.RouteOrigin
-	ledger            *routeLedger
-	routeFailure      *protocol.RouteNavigationFailure
-	creationFailure   *protocol.SessionCreationFailure
+	// localControlDialer is the dial-only inventory source. It never
+	// starts the daemon; the relay is its sole consumer.
+	localControlDialer ports.ClientDialer
+	origin             protocol.RouteOrigin
+	ledger             *routeLedger
+	routeFailure       *protocol.RouteNavigationFailure
+	creationFailure    *protocol.SessionCreationFailure
 
 	inputMu sync.Mutex
 	input   *terminalInputPump
@@ -272,19 +275,20 @@ func NewRunner(deps Dependencies) *Runner {
 		log = slog.Default()
 	}
 	return &Runner{
-		ui:                deps.UI,
-		dialer:            deps.Dialer,
-		term:              deps.Terminal,
-		clock:             deps.Clock,
-		clipboard:         deps.Clipboard,
-		logger:            log,
-		runtimeObserver:   deps.RuntimeObserver,
-		remoteHostLearner: deps.RemoteHostLearner,
-		attachHandoff:     deps.AttachHandoff,
-		remote:            deps.Remote,
-		origin:            normalizeRouteOrigin(deps.Origin, deps.Remote),
-		probeCapabilities: !deps.DisableCapabilityProbe,
-		ledger:            newRouteLedger(),
+		ui:                 deps.UI,
+		dialer:             deps.Dialer,
+		term:               deps.Terminal,
+		clock:              deps.Clock,
+		clipboard:          deps.Clipboard,
+		logger:             log,
+		runtimeObserver:    deps.RuntimeObserver,
+		remoteHostLearner:  deps.RemoteHostLearner,
+		attachHandoff:      deps.AttachHandoff,
+		remote:             deps.Remote,
+		localControlDialer: deps.LocalControlDialer,
+		origin:             normalizeRouteOrigin(deps.Origin, deps.Remote),
+		probeCapabilities:  !deps.DisableCapabilityProbe,
+		ledger:             newRouteLedger(),
 	}
 }
 
@@ -839,8 +843,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
-			openHomePicker: runTransientHomePicker,
-			inventoryHome:  homeRoute,
+			openHomePicker:  runTransientHomePicker,
+			inventoryHome:   homeRoute,
+			inventoryDialer: r.localControlDialer,
 		}).run(ctx)
 		stopHandshakeTransport()
 		finishHandshake()
@@ -1392,6 +1397,10 @@ type attachAttempt struct {
 	// navigation-inventory relay and its handoffs. Nil disables the relay:
 	// local-only and ledger-less attachments never dial control sources.
 	inventoryHome *attachRoute
+	// inventoryDialer is the dial-only control source for relay queries.
+	// It never starts the daemon; home.dialer stays the sole attachment
+	// authority.
+	inventoryDialer ports.ClientDialer
 }
 
 type attachResult struct {
@@ -1467,6 +1476,17 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	transition := a.transition
 	linkEvents := a.linkEvents
 	remote := a.remote || a.request.Remote
+	// The inventory relay serves the serving daemon's palette from the
+	// dial-only local control source while this attachment is remote. It
+	// owns no goroutine: the attempt loop drives polling and publishes
+	// deltas, and bounded query workers report through the poll box and
+	// resolve channel. Advertising the capability in Hello is what lets
+	// the serving palette send demands at all.
+	var inventory *inventoryRelay
+	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote && !home.request.Remote, a.inventoryDialer) {
+		inventory = newInventoryRelay(clk, a.inventoryDialer)
+		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
+	}
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -1672,14 +1692,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// coordinator owner.
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// The inventory relay serves the serving daemon's palette from the
-	// committed local route while this attachment is remote. It owns no
-	// goroutine: the attempt loop drives polling and publishes deltas, and
-	// bounded query workers report through the poll box and resolve channel.
-	var inventory *inventoryRelay
-	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote && !home.request.Remote, home.dialer) {
-		inventory = newInventoryRelay(clk, home.dialer)
-	}
+	// Poll and resolve workers report through the box and channel below;
+	// completions carry their originating interaction and query identity.
+	// The relay itself is created before Hello so the capability advertises.
 	inventoryBox := newInventoryPollBox()
 	var inventoryResolveC chan inventoryResolveOutcome
 	inventoryResolvePending := false
@@ -1695,6 +1710,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		inventoryTickC = nil
 	}
+	defer stopInventoryTimer()
 	armInventoryPoll := func() {
 		if inventory == nil || !inventoryOpen {
 			stopInventoryTimer()
@@ -1707,14 +1723,19 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		inventoryTickC = inventoryTimer.C()
 	}
 	startInventoryPoll := func() {
-		if inventory == nil || !inventory.beginPoll() {
+		if inventory == nil || !inventoryOpen {
+			return
+		}
+		interaction := inventoryInteraction
+		query, ok := inventory.beginPoll()
+		if !ok {
 			return
 		}
 		queryID := nextInventoryRequestID
 		nextInventoryRequestID++
 		go func() {
 			response, err := inventory.querySnapshot(loopCtx, queryID)
-			inventoryBox.offer(inventoryPollOutcome{response: response, err: err})
+			inventoryBox.offer(inventoryPollOutcome{interaction: interaction, query: query, response: response, err: err})
 		}()
 	}
 	input := (*terminalInputPump)(nil)
@@ -2198,9 +2219,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				continue
 			}
 			if inventory != nil {
-				inventory.endPoll()
+				inventory.endPoll(pollOutcome.query)
 			}
-			if pollOutcome.err != nil || inventory == nil || !inventoryOpen {
+			if pollOutcome.err != nil || inventory == nil || !inventoryOpen ||
+				pollOutcome.interaction != inventoryInteraction {
 				armInventoryPoll()
 				continue
 			}

@@ -211,7 +211,11 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 			break
 		}
 		overlays.paletteMu.Lock()
-		if overlays.palette != nil {
+		// Failures bind to their interaction: a stale failure from a
+		// closed palette must not overwrite the new interaction, and a
+		// closed palette shows nothing (selection already tore it down).
+		if overlays.palette != nil && overlays.paletteInventoryOpen &&
+			overlays.paletteInventoryInteraction == message.InteractionGeneration {
 			overlays.paletteFeedback = inventoryFailureNotice(message.Code)
 		}
 		overlays.paletteMu.Unlock()

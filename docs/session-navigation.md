@@ -14,15 +14,18 @@ control socket: no Hello, no session creation, no attachment, no daemon
 startup.
 
 - The serving palette sends an open demand with an interaction generation
-  when it opens, and a close demand on cancel or select. Demands are
-  capability-gated on both sides.
+  when it opens, and a close demand on every successful close (execute,
+  select, or cancel). Demands are capability-gated on both sides: the
+  client advertises inventory in Hello only while a committed local route
+  and the dial-only control source are available.
 - While open, the relay polls the local source once per second with at most
   one query in flight plus one coalesced latest update. Only changed
   snapshots publish, with a monotonic publication generation per
   interaction. Admitted keys and retirements never cross interactions.
 - Enter on an imported row sends a selection with the opaque keys and the
-  admitted input cause. Selection crosses before the close demand on the
-  guarded serving connection.
+  admitted input cause, which stays zero for ordinary keyboard input.
+  Selection crosses before the close demand on the guarded serving
+  connection.
 - Resolve revalidates the key against a fresh capture and returns a
   non-mutating attach target. Endpoint-empty targets resolve against the
   committed local route as authority; the serving route stays the recovery
@@ -30,7 +33,8 @@ startup.
   every destination failure).
 - Failures (stale identity, gone source, incompatible, invalid target,
   navigation or restore failure) surface as palette feedback with the exact
-  cause. Native commands stay usable throughout.
+  cause while the originating interaction is still open; stale failures
+  from closed interactions drop. Native commands stay usable throughout.
 
 ## Remote vision
 
@@ -41,7 +45,11 @@ non-local sources reject before resolve. Non-OK groups project no rows.
 
 ## Compatibility
 
-Old clients ignore unknown server frames and never publish; old daemons
-never send demands so new relays stay idle with zero control dials. Local
-attachments ignore demands even when they decode. Version negotiation
-stays strict equality.
+Demands gate both sides on the negotiated inventory capability: a serving
+palette that never receives the bit never demands, and a client without a
+committed local route or control dialer ignores demands that decode. With
+no demands the relay stays idle with zero control dials, and local
+attachments ignore demands even when they decode. Unknown frame types
+stay ignored by the receive pump. Cross-version attachment still fails at
+the strict-equality handshake; graceful degradation applies only within
+one negotiated version.

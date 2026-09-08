@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,6 +24,7 @@ func TestNavigationInventoryRequestRoundTrip(t *testing.T) {
 	}{
 		{name: "snapshot", value: protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 1, Operation: protocol.NavigationInventorySnapshot}},
 		{name: "resolve", value: protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 2, Operation: protocol.NavigationInventoryResolve, SourceKey: "remote-a", EntryKey: "abc", Registration: inventoryRegistrationForTest()}},
+		{name: "local resolve carries zero registration", value: protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 3, Operation: protocol.NavigationInventoryResolve, SourceKey: "local", EntryKey: "abc"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -91,6 +93,23 @@ func TestNavigationInventoryResponseRoundTrip(t *testing.T) {
 	oversize := protocol.NavigationInventoryResponse{RequestID: 1, Operation: protocol.NavigationInventorySnapshot, Status: protocol.NavigationInventoryOK, Groups: []protocol.NavigationInventorySourceGroup{{SourceKey: "local", Status: protocol.NavigationInventorySourceOK, Entries: []protocol.NavigationInventoryEntry{{SourceKey: "local", EntryKey: "a", Name: strings.Repeat("x", protocol.NavigationInventoryMaxDisplayBytes+1)}}}}}
 	if MarshalNavigationInventoryResponse(oversize) != nil {
 		t.Fatal("MarshalNavigationInventoryResponse accepted oversize label")
+	}
+	remoteEntries := func(n int) []protocol.NavigationInventoryEntry {
+		entries := make([]protocol.NavigationInventoryEntry, 0, n)
+		for i := 0; i < n; i++ {
+			entries = append(entries, protocol.NavigationInventoryEntry{SourceKey: "remote-a", EntryKey: "e/" + strconv.Itoa(i), Name: "n"})
+		}
+		return entries
+	}
+	atLimit := protocol.NavigationInventoryResponse{RequestID: 5, Operation: protocol.NavigationInventorySnapshot, Status: protocol.NavigationInventoryOK, Groups: []protocol.NavigationInventorySourceGroup{{SourceKey: "remote-a", Status: protocol.NavigationInventorySourceOK, Entries: remoteEntries(protocol.NavigationInventoryMaxRemoteEntriesPerSource)}}}
+	if payload := MarshalNavigationInventoryResponse(atLimit); payload == nil {
+		t.Fatal("MarshalNavigationInventoryResponse rejected a remote group at its row limit")
+	} else if _, err := UnmarshalNavigationInventoryResponse(payload); err != nil {
+		t.Fatalf("UnmarshalNavigationInventoryResponse() error = %v", err)
+	}
+	overLimit := protocol.NavigationInventoryResponse{RequestID: 6, Operation: protocol.NavigationInventorySnapshot, Status: protocol.NavigationInventoryOK, Groups: []protocol.NavigationInventorySourceGroup{{SourceKey: "remote-a", Status: protocol.NavigationInventorySourceOK, Entries: remoteEntries(protocol.NavigationInventoryMaxRemoteEntriesPerSource + 1)}}}
+	if MarshalNavigationInventoryResponse(overLimit) != nil {
+		t.Fatal("MarshalNavigationInventoryResponse accepted a remote group past its row limit")
 	}
 }
 

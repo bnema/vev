@@ -85,7 +85,8 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 	d, current, ac, sends := newManualSessionWithPTYs(t, p)
 	ac.navigationCapabilities = protocol.NavigationCapabilityInventory
 	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
-	effect.uiActionID = 123
+	// No automation action ID: ordinary keyboard input carries cause zero,
+	// which must still select.
 
 	interaction := d.enterPalette(current, ac)
 	d.sendPaletteInventoryDemand(ac, effect, true, interaction)
@@ -114,7 +115,7 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 	selectionFrame := awaitFrame(t, sends, wire.MsgNavigationInventorySelection)
 	selection, err := wire.UnmarshalNavigationInventorySelection(selectionFrame.Payload)
 	require.NoError(t, err)
-	require.Equal(t, uint64(123), selection.CauseActionID, "sendControl binds the admitted input cause")
+	require.Equal(t, uint64(0), selection.CauseActionID, "keyboard input carries no automation cause")
 	require.Equal(t, interaction, selection.InteractionGeneration)
 	require.Equal(t, uint64(1), selection.PublicationGeneration)
 	require.Equal(t, "local", selection.SourceKey)

@@ -51,9 +51,33 @@ func TestNavigationInventorySnapshotHasNoSideEffects(t *testing.T) {
 	response := inventorySnapshot(t, d, 1)
 	require.Len(t, response.Groups, 2)
 	require.Equal(t, protocol.NavigationInventoryLocalSourceKey, response.Groups[0].SourceKey)
-	require.Equal(t, "user@arch", response.Groups[1].SourceKey)
+	require.Equal(t, remoteInventorySourceKey("user@arch"), response.Groups[1].SourceKey)
 	require.Len(t, d.sessions, before, "snapshot must not create sessions")
 	require.NotNil(t, current)
+}
+
+func TestNavigationInventoryRemoteSourceKeysNeverCollideWithLocal(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	d := newTestDaemon(t, nil, fixedRemoteRefreshClock{now: now})
+	seedRemoteDirectory(t, d, reachableDirectoryHost("local", now, catalogue.RemoteCatalogSession{
+		LifecycleID: domain.SessionLifecycleID{31}, Name: "doppel", State: catalogue.RemoteCatalogSessionUp,
+		Tabs:        []catalogue.RemoteCatalogTab{{ID: "tab-x", Index: 0, Name: "shell"}},
+		ActiveTabID: "tab-x",
+	}))
+
+	response := inventorySnapshot(t, d, 1)
+	require.NoError(t, protocol.ValidateNavigationInventoryResponse(response))
+	seen := map[string]int{}
+	for _, group := range response.Groups {
+		seen[group.SourceKey]++
+		if group.SourceKey != protocol.NavigationInventoryLocalSourceKey {
+			require.NotContains(t, group.SourceKey, "local", "relayed keys must not expose raw endpoints")
+			require.Equal(t, remoteInventorySourceKey("local"), group.SourceKey, "keys stay stable across snapshots")
+		}
+	}
+	for key, count := range seen {
+		require.Equal(t, 1, count, "source key %q must be unique", key)
+	}
 }
 
 func TestNavigationInventoryLocalBeyondRemoteBound(t *testing.T) {
@@ -127,7 +151,7 @@ func TestNavigationInventoryResolveRegistrationFencesReRegistration(t *testing.T
 	response := inventorySnapshot(t, d, 6)
 	var entryKey string
 	for _, group := range response.Groups {
-		if group.SourceKey != "user@arch" {
+		if group.SourceKey != remoteInventorySourceKey("user@arch") {
 			continue
 		}
 		for _, entry := range group.Entries {
@@ -138,7 +162,7 @@ func TestNavigationInventoryResolveRegistrationFencesReRegistration(t *testing.T
 	}
 	require.NotEmpty(t, entryKey)
 
-	good := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 7, Operation: protocol.NavigationInventoryResolve, SourceKey: "user@arch", EntryKey: entryKey, Registration: registration})
+	good := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 7, Operation: protocol.NavigationInventoryResolve, SourceKey: remoteInventorySourceKey("user@arch"), EntryKey: entryKey, Registration: registration})
 	require.Equal(t, protocol.NavigationInventoryOK, good.Status)
 	require.NotNil(t, good.Resolved)
 	require.Equal(t, "user@arch", good.Resolved.Endpoint)
@@ -146,7 +170,7 @@ func TestNavigationInventoryResolveRegistrationFencesReRegistration(t *testing.T
 
 	// Removal before resolve rejects.
 	seedRemoteDirectory(t, d)
-	gone := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 8, Operation: protocol.NavigationInventoryResolve, SourceKey: "user@arch", EntryKey: entryKey, Registration: registration})
+	gone := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 8, Operation: protocol.NavigationInventoryResolve, SourceKey: remoteInventorySourceKey("user@arch"), EntryKey: entryKey, Registration: registration})
 	require.NotEqual(t, protocol.NavigationInventoryOK, gone.Status)
 	require.Nil(t, gone.Resolved)
 
@@ -160,7 +184,7 @@ func TestNavigationInventoryResolveRegistrationFencesReRegistration(t *testing.T
 	})
 	readded.Registration = fresh
 	seedRemoteDirectory(t, d, readded)
-	stale := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 9, Operation: protocol.NavigationInventoryResolve, SourceKey: "user@arch", EntryKey: entryKey, Registration: registration})
+	stale := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 9, Operation: protocol.NavigationInventoryResolve, SourceKey: remoteInventorySourceKey("user@arch"), EntryKey: entryKey, Registration: registration})
 	require.NotEqual(t, protocol.NavigationInventoryOK, stale.Status)
 	require.Nil(t, stale.Resolved)
 }
@@ -184,7 +208,7 @@ func TestNavigationInventoryStaleObservationStaysAttemptable(t *testing.T) {
 	response := inventorySnapshot(t, d, 10)
 	var entryKey, reason string
 	for _, group := range response.Groups {
-		if group.SourceKey != "user@arch" {
+		if group.SourceKey != remoteInventorySourceKey("user@arch") {
 			continue
 		}
 		for _, entry := range group.Entries {
@@ -196,7 +220,7 @@ func TestNavigationInventoryStaleObservationStaysAttemptable(t *testing.T) {
 	require.NotEmpty(t, entryKey, "stale observations keep their rows")
 	require.NotEmpty(t, reason)
 
-	resolved := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 11, Operation: protocol.NavigationInventoryResolve, SourceKey: "user@arch", EntryKey: entryKey, Registration: registration})
+	resolved := d.answerNavigationInventory(protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 11, Operation: protocol.NavigationInventoryResolve, SourceKey: remoteInventorySourceKey("user@arch"), EntryKey: entryKey, Registration: registration})
 	require.Equal(t, protocol.NavigationInventoryOK, resolved.Status, "known valid cached targets stay attemptable")
 }
 

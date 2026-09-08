@@ -309,16 +309,25 @@ func (p importedSessionPayload) qualified() string {
 
 func (p importedSessionPayload) display() string {
 	base := p.qualified()
-	// Remote vision is read-only availability tagging: non-live states
-	// surface inline so stale or broken entries never look attachable.
-	// Live local rows stay untagged.
-	if p.state == "" || p.state == "up" {
+	// Remote vision is read-only availability tagging: availability
+	// reasons surface independently of lifecycle state (a cached-up row
+	// can still be unreachable), and any non-live state tags inline so
+	// stale or broken entries never look attachable. Live rows without a
+	// reason stay untagged.
+	tag := p.state
+	if tag == "" || tag == "up" {
+		tag = ""
+	}
+	if p.reason != "" {
+		if tag == "" {
+			return base + " (" + p.reason + ")"
+		}
+		return base + " (" + tag + ": " + p.reason + ")"
+	}
+	if tag == "" {
 		return base
 	}
-	if p.reason == "" {
-		return base + " (" + p.state + ")"
-	}
-	return base + " (" + p.state + ": " + p.reason + ")"
+	return base + " (" + tag + ")"
 }
 
 // ImportedSessionKey returns the opaque inventory selection keys only for

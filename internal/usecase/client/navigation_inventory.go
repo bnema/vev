@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
@@ -47,7 +48,12 @@ type inventoryRelay struct {
 	interaction uint64
 	publication uint64
 	lastPoll    time.Time
-	inFlight    bool
+	// inFlight is the outstanding query identity, or zero when the slot
+	// is free. Identities bind completions to their originating
+	// interaction: a late result from a closed interaction drops instead
+	// of polluting the new namespace or clearing its slot.
+	inFlight uint64
+	pollSeq  uint64
 
 	published []protocol.NavigationInventorySourceGroup
 	admitted  map[inventoryEntryID]uint64
@@ -66,7 +72,7 @@ func (r *inventoryRelay) setOpen(open bool, interaction uint64) {
 		return
 	}
 	r.open = open
-	r.inFlight = false
+	r.inFlight = 0
 	if open && interaction != r.interaction {
 		r.interaction = interaction
 		r.publication = 0
@@ -79,28 +85,32 @@ func (r *inventoryRelay) setOpen(open bool, interaction uint64) {
 // pollDue reports whether a refresh query may start: open, none in flight,
 // and at least one interval since the last poll.
 func (r *inventoryRelay) pollDue() bool {
-	if r == nil || !r.open || r.inFlight || r.clock == nil {
+	if r == nil || !r.open || r.inFlight != 0 || r.clock == nil {
 		return false
 	}
 	return !r.clock.Now().Before(r.lastPoll.Add(inventoryPollInterval))
 }
 
-// beginPoll claims the single in-flight query slot.
-func (r *inventoryRelay) beginPoll() bool {
+// beginPoll claims the single in-flight query slot, returning the query
+// identity the completion must present to endPoll.
+func (r *inventoryRelay) beginPoll() (uint64, bool) {
 	if r == nil || !r.pollDue() {
-		return false
+		return 0, false
 	}
-	r.inFlight = true
+	r.pollSeq++
+	r.inFlight = r.pollSeq
 	r.lastPoll = r.clock.Now()
-	return true
+	return r.inFlight, true
 }
 
-// endPoll releases the in-flight slot after success, failure, or cancel.
-func (r *inventoryRelay) endPoll() {
-	if r == nil {
+// endPoll releases the in-flight slot, but only for the query that owns
+// it. Stale completions from a closed interaction drop without touching
+// the new namespace.
+func (r *inventoryRelay) endPoll(query uint64) {
+	if r == nil || query == 0 || r.inFlight != query {
 		return
 	}
-	r.inFlight = false
+	r.inFlight = 0
 }
 
 // cancel stops polling and drops queued updates on close, reconnect,
@@ -110,7 +120,7 @@ func (r *inventoryRelay) cancel() {
 		return
 	}
 	r.open = false
-	r.inFlight = false
+	r.inFlight = 0
 }
 
 // canonicalInventoryGroups sorts groups and entries by key so change
@@ -217,6 +227,39 @@ func (r *inventoryRelay) validateSelection(selection protocol.NavigationInventor
 
 var errInventorySourceUnavailable = errors.New("vev: local inventory source unavailable")
 
+// watchQueryConn closes the exact connection when the attempt cancels or
+// the clock-driven query budget expires. Established IPC connections do
+// not retain the dial context, so without this a wedged source parks the
+// worker past teardown. The returned stop func releases the watcher.
+func (r *inventoryRelay) watchQueryConn(ctx context.Context, closeConn func()) func() {
+	noop := func() {}
+	if r == nil || closeConn == nil {
+		return noop
+	}
+	done := make(chan struct{})
+	var timer ports.Timer
+	var timerC <-chan time.Time
+	if r.clock != nil {
+		timer = r.clock.NewTimer(inventoryQueryTimeout)
+		timerC = timer.C()
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeConn()
+		case <-timerC:
+			closeConn()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+}
+
 // querySnapshot performs one bounded dial-only snapshot query without Hello,
 // session creation, attachment, or daemon startup. A nil dialer or dial
 // failure reports source unavailability; the serving attachment is
@@ -231,7 +274,11 @@ func (r *inventoryRelay) querySnapshot(ctx context.Context, requestID uint64) (p
 	if err != nil {
 		return protocol.NavigationInventoryResponse{}, errInventorySourceUnavailable
 	}
-	defer func() { _ = conn.Close() }()
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
+	stopWatch := r.watchQueryConn(ctx, closeConn)
+	defer stopWatch()
 	request := protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: requestID, Operation: protocol.NavigationInventorySnapshot}
 	if err := protocol.ValidateNavigationInventoryRequest(request); err != nil {
 		return protocol.NavigationInventoryResponse{}, err
@@ -269,7 +316,11 @@ func (r *inventoryRelay) resolveEntry(ctx context.Context, requestID uint64, sou
 	if err != nil {
 		return protocol.AttachTarget{}, errInventorySourceUnavailable
 	}
-	defer func() { _ = conn.Close() }()
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
+	stopWatch := r.watchQueryConn(ctx, closeConn)
+	defer stopWatch()
 	request := protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: requestID, Operation: protocol.NavigationInventoryResolve, SourceKey: source, EntryKey: entry, Registration: registration}
 	if err := protocol.ValidateNavigationInventoryRequest(request); err != nil {
 		return protocol.AttachTarget{}, err

@@ -6,12 +6,14 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// inventoryPollOutcome is one finished control-source snapshot query: either
-// a validated response or the query error. Failures keep native commands
-// usable; only changed snapshots publish.
+// inventoryPollOutcome is one finished control-source snapshot query. The
+// interaction and query identity bind the completion to its originating
+// namespace: stale results from a closed interaction drop.
 type inventoryPollOutcome struct {
-	response protocol.NavigationInventoryResponse
-	err      error
+	interaction uint64
+	query       uint64
+	response    protocol.NavigationInventoryResponse
+	err         error
 }
 
 // inventoryPollBox holds the latest finished poll outcome while the attempt

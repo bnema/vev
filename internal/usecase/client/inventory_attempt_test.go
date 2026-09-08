@@ -42,6 +42,12 @@ func (c *inventoryTestClock) NewTimer(time.Duration) ports.Timer {
 	return timer
 }
 
+func (c *inventoryTestClock) timerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
+}
+
 func (c *inventoryTestClock) fire() {
 	c.mu.Lock()
 	c.now = c.now.Add(2 * inventoryPollInterval)
@@ -82,23 +88,32 @@ const (
 type inventoryAttemptTransport struct {
 	mu            sync.Mutex
 	calls         int
+	sent          []wire.Frame
 	publications  []protocol.NavigationInventoryPublication
 	published     chan struct{}
 	publishedOnce sync.Once
 	release       chan struct{}
 	detach        chan struct{}
+	releaseClose  chan struct{}
 	script        inventoryScript
 }
 
 func (t *inventoryAttemptTransport) Send(frame wire.Frame) error {
+	var publication protocol.NavigationInventoryPublication
 	if frame.Type == wire.MsgNavigationInventoryPublication {
-		publication, err := wire.UnmarshalNavigationInventoryPublication(frame.Payload)
+		var err error
+		publication, err = wire.UnmarshalNavigationInventoryPublication(frame.Payload)
 		if err != nil {
 			return err
 		}
-		t.mu.Lock()
+	}
+	t.mu.Lock()
+	t.sent = append(t.sent, frame)
+	if frame.Type == wire.MsgNavigationInventoryPublication {
 		t.publications = append(t.publications, publication)
-		t.mu.Unlock()
+	}
+	t.mu.Unlock()
+	if frame.Type == wire.MsgNavigationInventoryPublication {
 		t.publishedOnce.Do(func() { close(t.published) })
 	}
 	return nil
@@ -132,6 +147,15 @@ func (t *inventoryAttemptTransport) Recv() (wire.Frame, error) {
 			return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
 		case <-t.release:
 			return wire.Frame{}, io.EOF
+		}
+		// The close script holds the close demand until the test releases
+		// it, so polling assertions run against an open interaction.
+		if t.script == inventoryScriptClose {
+			select {
+			case <-t.releaseClose:
+			case <-t.release:
+				return wire.Frame{}, io.EOF
+			}
 		}
 		if t.script == inventoryScriptSelect {
 			return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: wire.MarshalNavigationInventorySelection(protocol.NavigationInventorySelection{
@@ -177,6 +201,21 @@ func (t *inventoryAttemptTransport) publicationCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.publications)
+}
+
+func (t *inventoryAttemptTransport) hello() protocol.Hello {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, frame := range t.sent {
+		if frame.Type == wire.MsgHello {
+			hello, err := wire.UnmarshalHello(frame.Payload)
+			if err != nil {
+				panic(err)
+			}
+			return hello
+		}
+	}
+	return protocol.Hello{}
 }
 
 // inventoryTestControlConn answers one snapshot or resolve query from canned
@@ -261,7 +300,8 @@ func runInventoryAttempt(t *testing.T, clock *inventoryTestClock, transport *inv
 			dialer:  dialer,
 			request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "home"},
 		},
-		milestones: msForInventoryTest(), themeState: &terminalThemeState{},
+		inventoryDialer: dialer,
+		milestones:      msForInventoryTest(), themeState: &terminalThemeState{},
 		enterRaw:  func() error { return nil },
 		reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
 	}
@@ -276,27 +316,36 @@ func msForInventoryTest() *milestones { return &milestones{} }
 // republishing unchanged inventory, and the close demand stops polling.
 func TestInventoryAttemptPublishesAndStops(t *testing.T) {
 	clock := newInventoryTestClock()
+	dialer := &inventoryTestDialer{}
 	transport := &inventoryAttemptTransport{
-		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), script: inventoryScriptClose,
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), releaseClose: make(chan struct{}), script: inventoryScriptClose,
 	}
 	t.Cleanup(func() { close(transport.release) })
 
 	done := make(chan attachResult, 1)
-	go func() { done <- runInventoryAttempt(t, clock, transport, true, &inventoryTestDialer{}) }()
+	go func() { done <- runInventoryAttempt(t, clock, transport, true, dialer) }()
 
 	select {
 	case <-transport.published:
 	case <-time.After(5 * time.Second):
 		t.Fatal("relay did not publish after the open demand")
 	}
-	clock.fire()
+	// Fire until the tick lands: pushes buffer on every known timer, so a
+	// fire racing the post-publication re-arm is retried instead of lost
+	// on the discarded open timer.
+	require.Eventually(t, func() bool {
+		clock.fire()
+		return dialer.count() >= 2
+	}, 5*time.Second, 10*time.Millisecond, "the tick must drive a second poll")
 	require.Eventually(t, func() bool { return transport.publicationCount() == 1 }, 5*time.Second, 10*time.Millisecond,
 		"unchanged inventory must not republish, only release the poll slot")
+	close(transport.releaseClose)
 	close(transport.detach)
 
 	result := <-done
 	require.NoError(t, result.err)
 	require.Nil(t, result.handoff)
+	require.GreaterOrEqual(t, dialer.count(), 2, "the tick must drive a second poll that publishes nothing")
 	require.Len(t, transport.publications, 1)
 	publication := transport.publications[0]
 	require.Equal(t, uint64(7), publication.InteractionGeneration)
@@ -318,6 +367,9 @@ func TestInventoryAttemptResolvesSelectionToHandoff(t *testing.T) {
 
 	result := runInventoryAttempt(t, clock, transport, true, &inventoryTestDialer{})
 	require.NoError(t, result.err)
+	hello := transport.hello()
+	require.NotEqual(t, uint16(0), uint16(hello.NavigationCapabilities&protocol.NavigationCapabilityInventory),
+		"the attempt must advertise inventory in Hello so the serving palette sends demands")
 	require.NotNil(t, result.handoff)
 	require.Empty(t, result.handoff.target.Endpoint)
 	require.Equal(t, "alpha", result.handoff.target.Session)
@@ -327,10 +379,10 @@ func TestInventoryAttemptResolvesSelectionToHandoff(t *testing.T) {
 	require.Equal(t, "remote-work", result.handoff.inventory.returnRoute.request.SessionName)
 }
 
-// TestInventoryAttemptMatrixOldDaemon pins the old-daemon pairing: without
+// TestInventoryAttemptIdleWithoutDemands pins the no-demand pairing: without
 // demands the relay stays idle, dials nothing, and publishes nothing, and
 // the attachment lifecycle is unaffected.
-func TestInventoryAttemptMatrixOldDaemon(t *testing.T) {
+func TestInventoryAttemptIdleWithoutDemands(t *testing.T) {
 	clock := newInventoryTestClock()
 	dialer := &inventoryTestDialer{}
 	transport := &inventoryAttemptTransport{
@@ -346,14 +398,14 @@ func TestInventoryAttemptMatrixOldDaemon(t *testing.T) {
 	result := <-done
 	require.NoError(t, result.err)
 	require.Nil(t, result.handoff)
-	require.Zero(t, dialer.count(), "an old daemon must trigger zero control dials")
+	require.Zero(t, dialer.count(), "no demand must trigger zero control dials")
 	require.Zero(t, transport.publicationCount())
 }
 
-// TestInventoryAttemptMatrixLocalAttachment pins the local-attachment
-// pairing: demands from a local serving daemon never enable the relay, so
-// no control dial crosses even though the frames decode.
-func TestInventoryAttemptMatrixLocalAttachment(t *testing.T) {
+// TestInventoryAttemptIgnoresDemandsWhenLocal pins the local-attachment
+// pairing: demands on a local serving attachment never enable the relay,
+// so no control dial crosses even though the frames decode.
+func TestInventoryAttemptIgnoresDemandsWhenLocal(t *testing.T) {
 	clock := newInventoryTestClock()
 	dialer := &inventoryTestDialer{}
 	transport := &inventoryAttemptTransport{

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 
 	"github.com/bnema/vev/internal/domain"
@@ -96,10 +97,16 @@ func (d *Daemon) localInventoryGroup(inv sessionInventory) protocol.NavigationIn
 // auth-failed, and malformed observations stay attemptable with a
 // presentation reason, per the shared activation policy.
 func remoteInventoryGroup(host ports.RemoteHostSnapshot) protocol.NavigationInventorySourceGroup {
-	group := protocol.NavigationInventorySourceGroup{SourceKey: host.Endpoint, Status: protocol.NavigationInventorySourceOK}
 	if host.Endpoint == "" {
 		return protocol.NavigationInventorySourceGroup{Status: protocol.NavigationInventorySourceUnavailable}
 	}
+	// Remote source keys are opaque identifiers, never raw endpoints: the
+	// relay forwards them to the serving daemon, which only ever sees
+	// display origins. The endpoint hash keeps keys stable across polls
+	// (so refreshes do not churn admissions) while a host literally named
+	// "local" cannot collide with the reserved local source. Resolve maps
+	// back through the request registration, never the key.
+	group := protocol.NavigationInventorySourceGroup{SourceKey: remoteInventorySourceKey(host.Endpoint), Status: protocol.NavigationInventorySourceOK}
 	eligible := 0
 	for _, session := range host.Sessions {
 		if session.Ephemeral {
@@ -108,7 +115,7 @@ func remoteInventoryGroup(host ports.RemoteHostSnapshot) protocol.NavigationInve
 		eligible++
 	}
 	if eligible > protocol.NavigationInventoryMaxRemoteEntriesPerSource {
-		return protocol.NavigationInventorySourceGroup{SourceKey: host.Endpoint, Status: protocol.NavigationInventorySourceTooLarge}
+		return protocol.NavigationInventorySourceGroup{SourceKey: group.SourceKey, Status: protocol.NavigationInventorySourceTooLarge}
 	}
 	for _, session := range host.Sessions {
 		if session.Ephemeral {
@@ -136,6 +143,14 @@ func remoteInventoryGroup(host ports.RemoteHostSnapshot) protocol.NavigationInve
 		group.Status = protocol.NavigationInventorySourceUnavailable
 	}
 	return group
+}
+
+// remoteInventorySourceKey derives the stable opaque identifier for a
+// configured remote endpoint. The hash domain-separates inventory keys so
+// relayed identifiers disclose nothing about local SSH configuration.
+func remoteInventorySourceKey(endpoint string) string {
+	sum := sha256.Sum256([]byte("vev-inventory-remote\x00" + endpoint))
+	return protocol.NavigationInventoryRemoteSourcePrefix + hex.EncodeToString(sum[:12])
 }
 
 // navigationInventoryEncodedBudget mirrors the wire export budget without

@@ -51,8 +51,13 @@ func unmarshalInventoryRegistration(r *payloadReader) (domain.RemoteRegistration
 		return domain.RemoteRegistration{}, err
 	}
 	registration.Generation = domain.RemoteGeneration(generation)
-	if err := registration.Validate(); err != nil {
-		return domain.RemoteRegistration{}, err
+	// Zero registrations decode structurally: local resolve carries no
+	// registration, and the semantic union validator enforces the
+	// operation/source coupling afterward.
+	if !registration.IsZero() {
+		if err := registration.Validate(); err != nil {
+			return domain.RemoteRegistration{}, err
+		}
 	}
 	return registration, nil
 }
@@ -69,7 +74,7 @@ func marshalInventoryGroups(w *payloadWriter, groups []protocol.NavigationInvent
 			w.putUint32(0)
 			continue
 		}
-		if len(group.Entries) > protocol.NavigationInventoryMaxLocalEntries {
+		if len(group.Entries) > inventoryGroupEntryLimit(group.SourceKey) {
 			return false
 		}
 		w.putUint32(uint32(len(group.Entries)))
@@ -82,6 +87,15 @@ func marshalInventoryGroups(w *payloadWriter, groups []protocol.NavigationInvent
 		}
 	}
 	return true
+}
+
+// inventoryGroupEntryLimit mirrors semantic validation: the local source
+// streams live state, remote sources mirror bounded directory caches.
+func inventoryGroupEntryLimit(sourceKey string) int {
+	if sourceKey == protocol.NavigationInventoryLocalSourceKey {
+		return protocol.NavigationInventoryMaxLocalEntries
+	}
+	return protocol.NavigationInventoryMaxRemoteEntriesPerSource
 }
 
 func unmarshalInventoryGroups(r *payloadReader) ([]protocol.NavigationInventorySourceGroup, error) {
@@ -107,7 +121,7 @@ func unmarshalInventoryGroups(r *payloadReader) ([]protocol.NavigationInventoryS
 		if err != nil {
 			return nil, err
 		}
-		if entryCount > protocol.NavigationInventoryMaxLocalEntries {
+		if entryCount > uint32(inventoryGroupEntryLimit(group.SourceKey)) {
 			return nil, protocol.ErrInvalidNavigation
 		}
 		if group.Status != protocol.NavigationInventorySourceOK && entryCount != 0 {

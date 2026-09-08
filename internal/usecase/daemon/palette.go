@@ -565,7 +565,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if !d.closeExecutedPalette(ac, generation, rawQuery) {
+		if !d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 			return
 		}
 		if name == "" {
@@ -599,7 +599,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{}, "palette-remote-session")
 		if err == nil {
-			d.closeExecutedPalette(ac, generation, rawQuery)
+			d.closeExecutedPalette(ac, effect, generation, rawQuery)
 			return
 		}
 		if !errors.Is(err, errAttachmentTransition) {
@@ -649,7 +649,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		closed := d.closeExecutedPalette(ac, generation, rawQuery)
+		closed := d.closeExecutedPalette(ac, effect, generation, rawQuery)
 		if closed && hasClose {
 			d.sendPaletteInventoryDemand(ac, effect, false, closeInteraction)
 		}
@@ -666,7 +666,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if d.closeExecutedPalette(ac, generation, rawQuery) {
+		if d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
@@ -695,7 +695,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if d.closeExecutedPalette(ac, generation, rawQuery) {
+		if d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 			if current := ac.currentAttachmentSession(); current != nil {
 				d.invalidateRender(current, ac, true, "palette.go")
 			}
@@ -719,7 +719,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		if d.closeExecutedPalette(ac, generation, rawQuery) {
+		if d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 			d.recordPaletteUse(cmd.Code)
 			if current := ac.currentAttachmentSession(); current != nil {
 				d.invalidateRender(current, ac, true, "palette.go")
@@ -728,7 +728,7 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		return
 	}
 	attachmentHandoff := cmd.Slug == "back-session" || cmd.Slug == "detach"
-	if !attachmentHandoff && !d.closeExecutedPalette(ac, generation, rawQuery) {
+	if !attachmentHandoff && !d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 		return
 	}
 	sess.dispatchMu.Lock()
@@ -738,14 +738,14 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		if current := ac.currentSession(); current != nil {
 			currentToken := current.captureAttachmentCapability(ac, ac.transport())
 			fresh, admitted := ac.beginAttachmentEffect(currentToken)
-			if d.closeExecutedPalette(ac, generation, rawQuery) {
+			if d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 				d.invalidateRender(current, ac, true, "palette.go")
 			}
 			if admitted {
 				fresh.End()
 			}
 		} else {
-			d.closeExecutedPalette(ac, generation, rawQuery)
+			d.closeExecutedPalette(ac, effect, generation, rawQuery)
 		}
 	}
 	if errors.Is(err, errAttachmentTransition) {
@@ -794,14 +794,20 @@ func (ac *attachedClient) paletteFailure(generation uint64, rawQuery, feedback s
 	ac.overlays.paletteFeedback = feedback
 }
 
-func (d *Daemon) closeExecutedPalette(ac *attachedClient, generation uint64, rawQuery string) bool {
+func (d *Daemon) closeExecutedPalette(ac *attachedClient, effect *attachmentEffect, generation uint64, rawQuery string) bool {
 	ac.overlays.paletteMu.Lock()
 	if ac.overlays.palette == nil || ac.overlays.paletteGeneration != generation || ac.overlays.palette.Query() != rawQuery {
 		ac.overlays.paletteMu.Unlock()
 		return false
 	}
+	// Every successful close stops relay polling: take the close demand
+	// before clearing so no execute path leaks a 1/s poll loop.
+	closeInteraction, hasClose := takePaletteInventoryClose(ac.overlays)
 	ac.clearPaletteLocked()
 	ac.overlays.paletteMu.Unlock()
+	if hasClose {
+		d.sendPaletteInventoryDemand(ac, effect, false, closeInteraction)
+	}
 	return true
 }
 

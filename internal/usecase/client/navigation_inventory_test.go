@@ -133,10 +133,11 @@ func TestInventoryRelayZeroDialsWithoutSource(t *testing.T) {
 	}
 	relay := newInventoryRelay(&manualClock{now: time.Unix(1_000, 0)}, nil)
 	relay.setOpen(true, 1)
-	if !relay.beginPoll() {
+	query, ok := relay.beginPoll()
+	if !ok || query == 0 {
 		t.Fatal("poll slot should open without a source")
 	}
-	relay.endPoll()
+	relay.endPoll(query)
 }
 
 func TestInventoryRelaySnapshotAdmitsAndSuppressesUnchanged(t *testing.T) {
@@ -145,14 +146,15 @@ func TestInventoryRelaySnapshotAdmitsAndSuppressesUnchanged(t *testing.T) {
 	dialer := &inventoryFakeDialer{conn: conn}
 	relay := newInventoryRelay(clock, dialer)
 	relay.setOpen(true, 3)
-	if !relay.beginPoll() {
+	first, ok := relay.beginPoll()
+	if !ok || first == 0 {
 		t.Fatal("first poll should start")
 	}
 	response, err := relay.querySnapshot(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("querySnapshot() error = %v", err)
 	}
-	relay.endPoll()
+	relay.endPoll(first)
 	if dialer.dials != 1 || conn.closes != 1 {
 		t.Fatalf("dials = %d, closes = %d; want exactly one bounded query", dialer.dials, conn.closes)
 	}
@@ -162,14 +164,15 @@ func TestInventoryRelaySnapshotAdmitsAndSuppressesUnchanged(t *testing.T) {
 	}
 
 	clock.now = clock.now.Add(2 * time.Second)
-	if !relay.beginPoll() {
-		t.Fatal("second poll should start after the interval")
+	second, ok := relay.beginPoll()
+	if !ok || second == 0 || second == first {
+		t.Fatal("second poll should start after the interval with a new identity")
 	}
 	response, err = relay.querySnapshot(context.Background(), 8)
 	if err != nil {
 		t.Fatalf("second querySnapshot() error = %v", err)
 	}
-	relay.endPoll()
+	relay.endPoll(second)
 	if _, _, changed := relay.preparePublication(response.Groups); changed {
 		t.Fatal("unchanged inventory must not republish remotely")
 	}
@@ -221,7 +224,8 @@ func TestInventoryRelaySelectionRejects(t *testing.T) {
 		{name: "future generation", mutate: func(s *protocol.NavigationInventorySelection) { s.PublicationGeneration = 2 }, wantError: true},
 		{name: "unknown key", mutate: func(s *protocol.NavigationInventorySelection) { s.EntryKey = "zzz/nope" }, wantError: true},
 		{name: "closed interaction", mutate: func(s *protocol.NavigationInventorySelection) { s.InteractionGeneration = 4 }, wantError: true},
-		{name: "zero action", mutate: func(s *protocol.NavigationInventorySelection) { s.CauseActionID = 0 }, wantError: true},
+		{name: "zero publication", mutate: func(s *protocol.NavigationInventorySelection) { s.PublicationGeneration = 0 }, wantError: true},
+		{name: "zero cause stays valid for keyboard input", mutate: func(s *protocol.NavigationInventorySelection) { s.CauseActionID = 0 }, wantError: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -250,24 +254,64 @@ func TestInventoryRelaySelectionRejects(t *testing.T) {
 func TestInventoryRelayCancelAndPollGating(t *testing.T) {
 	clock := &manualClock{now: time.Unix(1_000, 0)}
 	relay := newInventoryRelay(clock, &inventoryFakeDialer{})
-	if relay.pollDue() || relay.beginPoll() {
+	if relay.pollDue() {
 		t.Fatal("closed relay must not poll")
 	}
+	if _, ok := relay.beginPoll(); ok {
+		t.Fatal("closed relay must not claim the slot")
+	}
 	relay.setOpen(true, 2)
-	if !relay.pollDue() || !relay.beginPoll() {
+	if !relay.pollDue() {
 		t.Fatal("open relay must poll")
 	}
-	if relay.beginPoll() {
+	first, ok := relay.beginPoll()
+	if !ok {
+		t.Fatal("open relay must claim the slot")
+	}
+	if _, ok := relay.beginPoll(); ok {
 		t.Fatal("at most one query in flight")
 	}
-	relay.endPoll()
+	relay.endPoll(first)
 	clock.now = clock.now.Add(inventoryPollInterval)
 	if !relay.pollDue() {
 		t.Fatal("poll due again after the interval")
 	}
 	relay.cancel()
-	if relay.pollDue() || relay.beginPoll() {
+	if relay.pollDue() {
 		t.Fatal("cancelled relay must not poll")
+	}
+	if _, ok := relay.beginPoll(); ok {
+		t.Fatal("cancelled relay must not claim the slot")
+	}
+}
+
+func TestInventoryRelayStaleCompletionDropsWithoutTouchingSlot(t *testing.T) {
+	clock := &manualClock{now: time.Unix(1_000, 0)}
+	relay := newInventoryRelay(clock, &inventoryFakeDialer{})
+	relay.setOpen(true, 2)
+	stale, ok := relay.beginPoll()
+	if !ok {
+		t.Fatal("first poll should start")
+	}
+	// Closing for a new interaction releases the slot without waiting
+	// for the outstanding worker.
+	relay.setOpen(true, 3)
+	relay.endPoll(stale)
+	if relay.inFlight != 0 {
+		t.Fatal("stale completion must not clear the new namespace slot")
+	}
+	clock.now = clock.now.Add(inventoryPollInterval)
+	fresh, ok := relay.beginPoll()
+	if !ok || fresh == stale {
+		t.Fatal("new interaction must claim a fresh slot identity")
+	}
+	relay.endPoll(fresh + 99)
+	if relay.inFlight != fresh {
+		t.Fatal("foreign identity must not release the slot")
+	}
+	relay.endPoll(fresh)
+	if relay.inFlight != 0 {
+		t.Fatal("owning identity must release the slot")
 	}
 }
 

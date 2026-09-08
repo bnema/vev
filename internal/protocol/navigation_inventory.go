@@ -20,6 +20,11 @@ const (
 // sessions inside inventory groups.
 const NavigationInventoryLocalSourceKey = "local"
 
+// NavigationInventoryRemoteSourcePrefix namespaces remote source keys so
+// relayed identifiers never expose raw configured endpoints and never
+// collide with the reserved local source.
+const NavigationInventoryRemoteSourcePrefix = "remote/"
+
 // NavigationInventoryOperation selects the control-source query.
 type NavigationInventoryOperation uint8
 
@@ -280,6 +285,15 @@ func validateNavigationInventoryGroups(groups []NavigationInventorySourceGroup, 
 		if !validInventoryKey(group.SourceKey) || !validNavigationInventorySourceStatus(group.Status) {
 			return ErrInvalidNavigation
 		}
+		// Row limits are source-specific: the local source streams live
+		// state, remote sources mirror bounded directory caches.
+		limit := NavigationInventoryMaxRemoteEntriesPerSource
+		if group.SourceKey == NavigationInventoryLocalSourceKey {
+			limit = NavigationInventoryMaxLocalEntries
+		}
+		if len(group.Entries) > limit {
+			return ErrInvalidNavigation
+		}
 		if _, dup := sources[group.SourceKey]; dup {
 			return ErrInvalidNavigation
 		}
@@ -326,10 +340,12 @@ func ValidateNavigationInventoryPublication(publication NavigationInventoryPubli
 }
 
 // ValidateNavigationInventorySelection rejects unknown keys only at resolve
-// time; wire validation enforces shape, nonzero IDs, and key safety.
+// time; wire validation enforces shape, nonzero generations, and key
+// safety. The cause correlates input when present and stays zero for
+// ordinary keyboard input, matching the optional UI-cause contract of
+// other navigation actions.
 func ValidateNavigationInventorySelection(selection NavigationInventorySelection) error {
-	if selection.CauseActionID == 0 || selection.InteractionGeneration == 0 ||
-		selection.PublicationGeneration == 0 {
+	if selection.InteractionGeneration == 0 || selection.PublicationGeneration == 0 {
 		return ErrInvalidNavigation
 	}
 	if !validInventoryKey(selection.SourceKey) || !validInventoryKey(selection.EntryKey) {
@@ -340,7 +356,7 @@ func ValidateNavigationInventorySelection(selection NavigationInventorySelection
 
 // ValidateNavigationInventoryFailure enforces matching IDs and bounded codes.
 func ValidateNavigationInventoryFailure(failure NavigationInventoryFailure) error {
-	if failure.CauseActionID == 0 || failure.InteractionGeneration == 0 {
+	if failure.InteractionGeneration == 0 {
 		return ErrInvalidNavigation
 	}
 	if !validInventoryKey(failure.SourceKey) || !validInventoryKey(failure.EntryKey) {
