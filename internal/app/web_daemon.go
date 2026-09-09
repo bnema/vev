@@ -54,6 +54,17 @@ func renewWebToken(ctx context.Context) error {
 
 func launchWebDaemon(ctx context.Context) error {
 	if token, err := webControlRequest(ctx, false); err == nil {
+		readyCtx, cancel := context.WithTimeout(ctx, webStartupTimeout)
+		defer cancel()
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for !webReachable(readyCtx, token) {
+			select {
+			case <-readyCtx.Done():
+				return fmt.Errorf("vev: existing web gateway not ready: %w", readyCtx.Err())
+			case <-ticker.C:
+			}
+		}
 		printWebLink(token)
 		return nil
 	}
