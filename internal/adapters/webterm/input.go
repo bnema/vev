@@ -67,13 +67,25 @@ func (t *Terminal) Handle(ctx context.Context, event browser.Event) error {
 	case browser.EventWheel:
 		e := event.Wheel
 		if modes.MouseTracking == 0 || !modes.MouseSGR || e.DeltaY == 0 || e.Row >= snapshot.Rows() || e.Column >= snapshot.Columns() {
+			t.resetWheel()
 			return nil
 		}
-		button := 65
-		if e.DeltaY < 0 {
-			button = 64
+		reports, button := t.consumeWheel(e.DeltaY, e.DeltaMode, e.Modifiers.Shift)
+		if reports == 0 {
+			return nil
 		}
-		data = fmt.Sprintf("\x1b[<%d;%d;%dM", button+mouseModifiers(e.Modifiers), e.Column+1, e.Row+1)
+		// Shift is consumed as the x10 fast-scroll multiplier, so it must
+		// not also leak into the SGR modifiers (buttons 68/69), which
+		// applications would not recognize as wheel reports.
+		modifiers := e.Modifiers
+		if e.Modifiers.Shift {
+			modifiers.Shift = false
+		}
+		var sb strings.Builder
+		for i := 0; i < reports; i++ {
+			fmt.Fprintf(&sb, "\x1b[<%d;%d;%dM", button+mouseModifiers(modifiers), e.Column+1, e.Row+1)
+		}
+		data = sb.String()
 	case browser.EventFocus:
 		// Focus reporting is not negotiated by the current client terminal contract.
 		return nil

@@ -24,6 +24,8 @@ const (
 // terminal query replies share one ordered writer, just like a physical TTY.
 type Terminal struct {
 	mu       sync.Mutex
+	wheelMu  sync.Mutex
+	wheelAcc float64
 	screen   *vt.Screen
 	geometry domain.Geometry
 	latest   vt.ScreenSnapshot

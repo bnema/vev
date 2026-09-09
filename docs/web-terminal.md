@@ -40,7 +40,7 @@ The header shows a connection-state indicator and the number of connected browse
 - Type directly into the terminal, including composed text and pasted plain text.
 - Use **Alt+Space**, or the **Palette** button, for commands such as `CNT`, `SPR`, `SPD` and `SSP`.
 - Use **Alt+h/j/k/l** to focus panes and **Alt+1…9** to switch tabs.
-- Click panes to focus them. Mouse reports and wheel events follow the multiplexer input path.
+- Click panes to focus them. Mouse reports and wheel events follow the multiplexer input path. One wheel notch sends one wheel report; hold **Shift** for ×10 fast scrolling.
 - The grid fits the browser window, up to 512 columns and 256 rows.
 - On touch devices, **Select** preserves native text selection without terminal mouse capture; **Keys** enables interaction and opens the keyboard. The initial view does not force the keyboard open.
 - **Ctrl+Shift+F6** moves focus out of terminal input to the Palette button for keyboard navigation.

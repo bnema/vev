@@ -107,8 +107,14 @@
       label: 'vev terminal multiplexer',
       decide(event) {
         if (event.type === 'resize' || event.type === 'focus') return { emit: false, preventDefault: false };
-        if (event.type === 'pointer' || event.type === 'wheel') {
+        if (event.type === 'pointer') {
           const capture = mouse && !selecting && !event.shift;
+          return { emit: capture, preventDefault: capture };
+        }
+        if (event.type === 'wheel') {
+          // Shift+wheel is fast scroll (x10 server-side); Shift+pointer stays
+          // reserved for native selection.
+          const capture = mouse && !selecting;
           return { emit: capture, preventDefault: capture };
         }
         // Ctrl+Shift+F6 releases terminal focus for keyboard navigation.
