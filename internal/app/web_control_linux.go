@@ -17,7 +17,7 @@ import (
 // the discoverability of this name, protect the local control interface.
 func webControlAddress() string {
 	path, _ := filepath.Abs(platform.StateDir())
-	return fmt.Sprintf("@vev-web-%d-%x", os.Getuid(), sha256.Sum256([]byte(path)))
+	return fmt.Sprintf("@vev-web-%d-%x", os.Geteuid(), sha256.Sum256([]byte(path)))
 }
 
 func sameWebUID(conn *net.UnixConn) bool {
@@ -30,7 +30,7 @@ func sameWebUID(conn *net.UnixConn) bool {
 	err = raw.Control(func(fd uintptr) {
 		credential, peerErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	})
-	return err == nil && peerErr == nil && credential != nil && credential.Uid == uint32(os.Getuid())
+	return err == nil && peerErr == nil && credential != nil && credential.Uid == uint32(os.Geteuid())
 }
 
 func bindWebControl() (*net.UnixListener, error) {

@@ -31,6 +31,9 @@ func TestHTTPTrustBoundary(t *testing.T) {
 		{"cross site", "GET", "/", Address, "", "cross-site", "", 403},
 		{"ws requires origin", "GET", "/ws", Address, "", "", token, 403},
 		{"health is read only", "POST", "/health", Address, Origin, "", token, 405},
+		{"license is read only", "POST", "/icons-license", Address, "", "", "", 405},
+		{"uppercase host", "GET", "/health", strings.ToUpper(Address), "", "", token, 204},
+		{"trailing dot host", "GET", "/health", "127.0.0.1.:8778", "", "", token, 204},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

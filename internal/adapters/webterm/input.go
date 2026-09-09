@@ -32,7 +32,7 @@ func (t *Terminal) Handle(ctx context.Context, event browser.Event) error {
 		data = encodeKey(*event.Key, snapshot.ApplicationCursorMode())
 	case browser.EventPointer:
 		e := event.Pointer
-		if modes.MouseTracking == 0 || !modes.MouseSGR || e.Row >= snapshot.Rows() || e.Column >= snapshot.Columns() {
+		if modes.MouseTracking == 0 || !modes.MouseSGR || e.Row < 0 || e.Column < 0 || e.Row >= snapshot.Rows() || e.Column >= snapshot.Columns() {
 			return nil
 		}
 		button := e.Button
@@ -66,8 +66,11 @@ func (t *Terminal) Handle(ctx context.Context, event browser.Event) error {
 		data = fmt.Sprintf("\x1b[<%d;%d;%d%s", button+mouseModifiers(e.Modifiers), e.Column+1, e.Row+1, final)
 	case browser.EventWheel:
 		e := event.Wheel
-		if modes.MouseTracking == 0 || !modes.MouseSGR || e.DeltaY == 0 || e.Row >= snapshot.Rows() || e.Column >= snapshot.Columns() {
+		if modes.MouseTracking == 0 || !modes.MouseSGR || e.Row < 0 || e.Column < 0 || e.Row >= snapshot.Rows() || e.Column >= snapshot.Columns() {
 			t.resetWheel()
+			return nil
+		}
+		if e.DeltaY == 0 {
 			return nil
 		}
 		reports, button := t.consumeWheel(e.DeltaY, e.DeltaMode, e.Modifiers.Shift)
@@ -207,6 +210,9 @@ func encodeKey(e browser.KeyEvent, applicationCursor bool) string {
 		key = "\x7f"
 	case "Tab":
 		if e.Modifiers.Shift {
+			if e.Modifiers.Alt {
+				return "\x1b\x1b[Z"
+			}
 			return "\x1b[Z"
 		}
 		key = "\t"

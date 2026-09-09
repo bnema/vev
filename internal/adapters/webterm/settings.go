@@ -79,8 +79,12 @@ func ParseSettings(listen, origin string) (Settings, error) {
 
 // ProbeAddress never resolves or contacts the public origin. Wildcard listeners
 // are reached through the matching loopback family on this machine.
+// A zero-value Settings yields an empty address instead of panicking.
 func (s Settings) ProbeAddress() string {
-	addr := netip.MustParseAddrPort(s.Listen)
+	addr, err := netip.ParseAddrPort(s.Listen)
+	if err != nil {
+		return ""
+	}
 	if addr.Addr().IsUnspecified() {
 		ip := netip.IPv6Loopback()
 		if addr.Addr().Is4() {

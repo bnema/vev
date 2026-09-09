@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -51,22 +52,29 @@ func bindWebControl() (*net.UnixListener, error) {
 			return nil, err
 		}
 		// Distinguish a live gateway from a stale socket left by a crash.
-		probe, probeErr := net.Dial("unix", path)
+		probeConn, probeErr := net.DialTimeout("unix", path, time.Second)
 		if probeErr == nil {
-			_ = probe.Close()
+			_ = probeConn.Close()
 			return nil, errors.New("vev: web gateway control is already bound")
 		}
 		if !errors.Is(probeErr, syscall.ECONNREFUSED) && !errors.Is(probeErr, syscall.ENOENT) {
-			return nil, probeErr
+			return nil, fmt.Errorf("vev: probing web control socket: %w", probeErr)
 		}
 		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
 			return nil, rmErr
 		}
-		return net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+		listener, err = net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+		if err != nil {
+			return nil, err
+		}
 	}
+	return listener, secureWebControlSocket(listener, path)
+}
+
+func secureWebControlSocket(listener *net.UnixListener, path string) error {
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = listener.Close()
-		return nil, fmt.Errorf("vev: securing web control socket: %w", err)
+		return fmt.Errorf("vev: securing web control socket: %w", err)
 	}
-	return listener, nil
+	return nil
 }

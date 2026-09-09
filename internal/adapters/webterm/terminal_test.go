@@ -92,6 +92,7 @@ func TestEncodeKey(t *testing.T) {
 		{"interrupt", "c", browser.Modifiers{Ctrl: true}, false, "\x03"},
 		{"alt letter", "h", browser.Modifiers{Alt: true}, false, "\x1bh"},
 		{"shift tab", "Tab", browser.Modifiers{Shift: true}, false, "\x1b[Z"},
+		{"alt shift tab", "Tab", browser.Modifiers{Shift: true, Alt: true}, false, "\x1b\x1b[Z"},
 		{"delete", "Delete", browser.Modifiers{}, false, "\x1b[3~"},
 		{"function", "F12", browser.Modifiers{}, false, "\x1b[24~"},
 		{"meta reserved", "c", browser.Modifiers{Meta: true}, false, ""},

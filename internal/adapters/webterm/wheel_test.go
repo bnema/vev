@@ -153,6 +153,28 @@ func TestConsumeWheelKeepsDirectionAcrossFractions(t *testing.T) {
 	}
 }
 
+func TestWheelHorizontalOnlyPreservesRemainder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	terminal, err := New(ctx, domain.Geometry{Size: domain.Size{Cols: 10, Rows: 4}})
+	require.NoError(t, err)
+	defer terminal.Close()
+	_, err = terminal.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	require.NoError(t, err)
+	require.NoError(t, terminal.Flush())
+	up := browser.Event{Kind: browser.EventWheel, Wheel: &browser.WheelEvent{DeltaY: 90, DeltaMode: 0, Row: 0, Column: 0}}
+	require.NoError(t, terminal.Handle(ctx, up))
+	if terminal.wheelAcc != 0.9 {
+		t.Fatalf("remainder = %v, want 0.9", terminal.wheelAcc)
+	}
+	// A pure horizontal swipe is ignored without wiping banked vertical.
+	horizontal := browser.Event{Kind: browser.EventWheel, Wheel: &browser.WheelEvent{DeltaX: 50, DeltaY: 0, DeltaMode: 0, Row: 0, Column: 0}}
+	require.NoError(t, terminal.Handle(ctx, horizontal))
+	if terminal.wheelAcc != 0.9 {
+		t.Fatalf("remainder = %v, want 0.9 (horizontal must not reset)", terminal.wheelAcc)
+	}
+}
+
 func TestWheelIgnoredInputResetsRemainder(t *testing.T) {
 	terminal := &Terminal{}
 	ctx := context.Background()

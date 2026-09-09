@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -82,7 +83,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
-	if r.Host != s.settings.Host() || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	if !strings.EqualFold(normalizeHost(r.Host), normalizeHost(s.settings.Host())) || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -100,6 +101,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(indexHTML))
 		return
 	case "/icons-license":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(iconsLicense))
 		return
@@ -173,6 +178,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
+// normalizeHost trims one trailing dot from the hostname portion of a Host
+// value so the legal FQDN form ("example.internal.:8778") matches the
+// normalized origin host.
+func normalizeHost(host string) string {
+	hostname, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return strings.TrimSuffix(host, ".")
+	}
+	return net.JoinHostPort(strings.TrimSuffix(hostname, "."), port)
+}
+
 func (s *Server) valid(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

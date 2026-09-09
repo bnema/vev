@@ -46,7 +46,7 @@ func TestWebConfigPrecedence(t *testing.T) {
 	dir := filepath.Join(root, "vev")
 	require.NoError(t, safedir.EnsurePrivate(dir))
 	path := filepath.Join(dir, "config")
-	got, err := loadWebSettings(webOptions{})
+	got, _, err := loadWebSettings(webOptions{})
 	require.NoError(t, err)
 	require.Equal(t, webterm.Settings{Listen: webterm.Address, Origin: webterm.Origin}, got)
 	for _, tt := range []struct {
@@ -59,16 +59,20 @@ func TestWebConfigPrecedence(t *testing.T) {
 		{"flags", "web.listen = invalid\nweb.origin = invalid\n", webOptions{"127.0.0.1:9001", "http://localhost:9001"}, "127.0.0.1:9001", "http://localhost:9001", false},
 		{"invalid config", "web.listen = invalid\n", webOptions{}, "", "", true},
 		{"explicit exposure", "web.listen = 0.0.0.0:9000\n", webOptions{}, "", "", true},
+		{"config warnings propagate", "web.listen = 127.0.0.1:9000\nweb.origin = https://terminal.example.internal\nbadline\n", webOptions{}, "127.0.0.1:9000", "https://terminal.example.internal", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.NoError(t, os.WriteFile(path, []byte(tt.config), 0600))
-			got, err := loadWebSettings(tt.flags)
+			got, warnings, err := loadWebSettings(tt.flags)
 			if tt.fail {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			require.Equal(t, webterm.Settings{Listen: tt.listen, Origin: tt.origin}, got)
+			if tt.name == "config warnings propagate" {
+				require.NotEmpty(t, warnings, "config warnings must reach the web launcher")
+			}
 		})
 	}
 }
@@ -84,14 +88,15 @@ func TestWebReadinessUsesLocalListener(t *testing.T) {
 	defer server.Close()
 	settings.Listen = server.Listener.Addr().String()
 	access := webAccess{Token: token, Settings: settings}
+	client := server.Client()
 	t.Setenv("HTTP_PROXY", "http://unresolvable.example.invalid")
-	require.True(t, webReachable(t.Context(), access, settings))
+	require.True(t, webReachable(t.Context(), client, access, settings))
 	other := settings
 	other.Origin = "https://other.example.invalid"
-	require.False(t, webReachable(t.Context(), access, other), "a healthy different gateway must not satisfy readiness")
+	require.False(t, webReachable(t.Context(), client, access, other), "a healthy different gateway must not satisfy readiness")
 	other = settings
 	other.Listen = "127.0.0.1:1"
-	require.False(t, webReachable(t.Context(), access, other), "the requested listener must match too")
+	require.False(t, webReachable(t.Context(), client, access, other), "the requested listener must match too")
 	access.Token = "wrong"
-	require.False(t, webReachable(t.Context(), access, settings))
+	require.False(t, webReachable(t.Context(), client, access, settings))
 }

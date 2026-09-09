@@ -68,7 +68,11 @@ func webControlRequest(ctx context.Context, renew bool) (webAccess, error) {
 		return webAccess{}, err
 	}
 	defer conn.Close()
-	if !sameWebUID(conn.(*net.UnixConn)) {
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return webAccess{}, errors.New("vev: unsafe web control peer")
+	}
+	if !sameWebUID(unixConn) {
 		return webAccess{}, errors.New("vev: unsafe web control peer")
 	}
 	deadline, _ := ctx.Deadline()

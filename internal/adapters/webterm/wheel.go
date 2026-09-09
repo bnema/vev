@@ -31,8 +31,8 @@ const (
 // delta was banked for later. Shift multiplies the notch count for
 // predictable fast scrolling.
 func (t *Terminal) consumeWheel(deltaY float64, deltaMode int, shift bool) (int, int) {
-	t.wheelMu.Lock()
-	defer t.wheelMu.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.wheelAcc += wheelNotches(deltaY, deltaMode)
 	if t.wheelAcc > wheelMaxAccumulated {
 		t.wheelAcc = wheelMaxAccumulated
@@ -76,8 +76,8 @@ func (t *Terminal) consumeWheel(deltaY float64, deltaMode int, shift bool) (int,
 // ignored (mouse tracking off, out-of-bounds cell) so a stale remainder
 // cannot leak into a later, unrelated scroll gesture.
 func (t *Terminal) resetWheel() {
-	t.wheelMu.Lock()
-	defer t.wheelMu.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.wheelAcc = 0
 }
 

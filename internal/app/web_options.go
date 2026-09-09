@@ -6,6 +6,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/config"
 	"github.com/bnema/vev/internal/adapters/webterm"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
 )
 
@@ -43,10 +44,10 @@ func parseWebArgs(args []string) (command, error) {
 	return cmd, nil
 }
 
-func loadWebSettings(options webOptions) (webterm.Settings, error) {
-	cfg, _, err := config.Load(platform.ConfigPath())
+func loadWebSettings(options webOptions) (webterm.Settings, []domain.Warning, error) {
+	cfg, warnings, err := config.Load(platform.ConfigPath())
 	if err != nil {
-		return webterm.Settings{}, fmt.Errorf("vev: loading web configuration: %w", err)
+		return webterm.Settings{}, nil, fmt.Errorf("vev: loading web configuration: %w", err)
 	}
 	if options.listen != "" {
 		cfg.WebListen = options.listen
@@ -54,5 +55,9 @@ func loadWebSettings(options webOptions) (webterm.Settings, error) {
 	if options.origin != "" {
 		cfg.WebOrigin = options.origin
 	}
-	return webterm.ParseSettings(cfg.WebListen, cfg.WebOrigin)
+	settings, err := webterm.ParseSettings(cfg.WebListen, cfg.WebOrigin)
+	if err != nil {
+		return webterm.Settings{}, warnings, err
+	}
+	return settings, warnings, nil
 }

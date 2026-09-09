@@ -24,7 +24,7 @@ import (
 
 const webStartupTimeout = 10 * time.Second
 
-func webReachable(ctx context.Context, access webAccess, expected webterm.Settings) bool {
+func webReachable(ctx context.Context, client *http.Client, access webAccess, expected webterm.Settings) bool {
 	if access.Settings != expected {
 		return false
 	}
@@ -34,8 +34,6 @@ func webReachable(ctx context.Context, access webAccess, expected webterm.Settin
 	}
 	request.Host = access.Settings.Host()
 	request.AddCookie(&http.Cookie{Name: "vev-web-session", Value: access.Token})
-	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	defer client.CloseIdleConnections()
 	response, err := client.Do(request)
 	if err != nil {
 		return false
@@ -58,10 +56,21 @@ func renewWebToken(ctx context.Context) error {
 }
 
 func launchWebDaemon(ctx context.Context, options webOptions) error {
-	settings, err := loadWebSettings(options)
+	settings, warnings, err := loadWebSettings(options)
 	if err != nil {
 		return err
 	}
+	for _, warning := range warnings {
+		if warning.Line > 0 {
+			fmt.Fprintf(os.Stderr, "vev: config warning (line %d): %s\n", warning.Line, warning.Msg)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "vev: config warning: %s\n", warning.Msg)
+	}
+	// One shared client for every readiness probe. Proxy stays disabled so
+	// probes only ever contact the local listener.
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
 	if token, err := webControlRequest(ctx, false); err == nil {
 		if token.Settings != settings {
 			return errors.New("vev: web gateway is running with different settings; stop and restart it to apply web.listen/web.origin")
@@ -70,7 +79,7 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 		defer cancel()
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
-		for !webReachable(readyCtx, token, settings) {
+		for !webReachable(readyCtx, client, token, settings) {
 			select {
 			case <-readyCtx.Done():
 				return fmt.Errorf("vev: existing web gateway not ready: %w", readyCtx.Err())
@@ -85,11 +94,15 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 		return fmt.Errorf("vev: web port unavailable: %w", err)
 	}
 	defer listener.Close()
-	inherited, err := listener.(*net.TCPListener).File()
+	inherited, ok := listener.(*net.TCPListener)
+	if !ok {
+		return fmt.Errorf("vev: web listener is not TCP")
+	}
+	inheritedFile, err := inherited.File()
 	if err != nil {
 		return err
 	}
-	defer inherited.Close()
+	defer inheritedFile.Close()
 	executable, err := selfExePath()
 	if err != nil {
 		return err
@@ -103,7 +116,7 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 	// Browser capabilities do not depend on the launcher's TTY.
 	child.Env = append(withoutPerformanceTraceEnv(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")
 	child.Stdin, child.Stdout, child.Stderr = null, null, null
-	child.ExtraFiles = []*os.File{inherited}
+	child.ExtraFiles = []*os.File{inheritedFile}
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := child.Start(); err != nil {
 		return err
@@ -116,13 +129,16 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 	defer ticker.Stop()
 	for {
 		token, err := webControlRequest(readyCtx, false)
-		if err == nil && webReachable(readyCtx, token, settings) {
+		if err == nil && webReachable(readyCtx, client, token, settings) {
 			printWebLink(token)
 			return nil
 		}
 		select {
 		case err := <-done:
-			return fmt.Errorf("vev: web process exited before readiness: %v", err)
+			if err != nil {
+				return fmt.Errorf("vev: web process exited before readiness: %w", err)
+			}
+			return errors.New("vev: web process exited before readiness")
 		case <-readyCtx.Done():
 			_ = child.Process.Kill()
 			<-done

@@ -42,6 +42,13 @@ func TestWebSettings(t *testing.T) {
 	}
 }
 
+func TestWebProbeAddressZeroValue(t *testing.T) {
+	var settings Settings
+	require.Equal(t, "", settings.ProbeAddress(), "zero-value settings must not panic")
+	settings.Listen = "not-an-address"
+	require.Equal(t, "", settings.ProbeAddress())
+}
+
 func TestWebProbeAddress(t *testing.T) {
 	for _, tt := range []struct{ listen, want string }{
 		{"0.0.0.0:9000", "127.0.0.1:9000"},
