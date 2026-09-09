@@ -178,6 +178,8 @@ func externalServerMessage(f wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalCommittedRouteIdentity(f.Payload)
 	case wire.MsgSamePeerSwitchFailure:
 		return wire.UnmarshalSamePeerSwitchFailure(f.Payload)
+	case wire.MsgRouteRetired:
+		return wire.UnmarshalRouteRetired(f.Payload)
 	case wire.MsgRoutePosition:
 		return wire.UnmarshalRoutePosition(f.Payload)
 	case wire.MsgRouteNavigationFailure:

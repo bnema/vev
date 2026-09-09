@@ -314,6 +314,9 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationFailure:
 		payload, err := wire.MarshalRouteNavigationFailure(m)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}, err
+	case protocol.RouteRetired:
+		payload, err := wire.MarshalRouteRetired(m)
+		return wire.Frame{Type: wire.MsgRouteRetired, Payload: payload}, err
 	case protocol.RoutePosition:
 		payload, err := wire.MarshalRoutePosition(m)
 		return wire.Frame{Type: wire.MsgRoutePosition, Payload: payload}, err

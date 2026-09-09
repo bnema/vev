@@ -7,8 +7,8 @@ import (
 )
 
 func TestProtocolVersion(t *testing.T) {
-	if protocol.Version != 42 {
-		t.Fatalf("ProtocolVersion = %d, want 42", protocol.Version)
+	if protocol.Version != 43 {
+		t.Fatalf("ProtocolVersion = %d, want 43", protocol.Version)
 	}
 }
 

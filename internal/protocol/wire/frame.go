@@ -10,7 +10,7 @@ type MsgType uint8
 // Frame message types use non-contiguous allocations: the legacy client range
 // is 1–13 and 15, and newer client controls use 32–33, 35, 37, 39, 42, 45,
 // and 47. Server-originated messages occupy 16–23, 25–31, 34, 36, 38, 40–41,
-// and 43–44 and 46. Values 14 and 24 remain reserved for future extensions.
+// and 43–44, 46, and 48. Values 14 and 24 remain reserved for future extensions.
 const (
 	MsgHello                          MsgType = 1
 	MsgInput                          MsgType = 2
@@ -58,6 +58,7 @@ const (
 	MsgNavigationInventoryResponse  MsgType = 43
 	MsgNavigationInventoryDemand    MsgType = 44
 	MsgNavigationInventorySelection MsgType = 46
+	MsgRouteRetired                 MsgType = 48
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"unicode"
@@ -172,15 +174,31 @@ type RouteRef struct {
 }
 
 // RouteAttentionTarget binds one displayed route reference to an exact
-// lifecycle on the daemon currently serving the client. It carries no dialer,
-// credential, or endpoint.
+// lifecycle on the serving daemon or a monitored inventory source. It carries
+// no dialer, credential, or endpoint.
 type RouteAttentionTarget struct {
+	Ref    RouteRef
+	Target ExactSessionTarget
+	// SourceKey is empty for the serving daemon, or an opaque monitored
+	// inventory source. It never carries an endpoint or credential.
+	SourceKey string
+}
+
+// RouteRetired invalidates one subscribed exact lifecycle, not its name.
+// The reference fences delayed notifications against replacement routes.
+type RouteRetired struct {
 	Ref    RouteRef
 	Target ExactSessionTarget
 }
 
+// RemoteInventorySourceKey identifies a configured endpoint without disclosing it.
+func RemoteInventorySourceKey(endpoint string) string {
+	sum := sha256.Sum256([]byte("vev-inventory-remote\x00" + endpoint))
+	return NavigationInventoryRemoteSourcePrefix + hex.EncodeToString(sum[:12])
+}
+
 // RouteAttentionSubscription is the bounded, client-owned mapping a daemon
-// uses solely to resolve live attention while rendering its route snapshot.
+// uses to resolve live attention and retire authoritatively absent lifecycles.
 type RouteAttentionSubscription struct {
 	Targets []RouteAttentionTarget
 }

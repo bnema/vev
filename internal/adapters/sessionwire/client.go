@@ -107,6 +107,8 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalRouteNavigationFailure(frame.Payload)
 	case wire.MsgRoutePosition:
 		return wire.UnmarshalRoutePosition(frame.Payload)
+	case wire.MsgRouteRetired:
+		return wire.UnmarshalRouteRetired(frame.Payload)
 	case wire.MsgSamePeerSwitchFailure:
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
 	case wire.MsgParkedRouteResponse:

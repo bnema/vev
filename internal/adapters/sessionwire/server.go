@@ -252,7 +252,7 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		wire.MsgCommittedRouteIdentity, wire.MsgNavigateRecentRoute, wire.MsgRouteCreateSession,
 		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure, wire.MsgParkedRouteResponse,
 		wire.MsgUIReceipt, wire.MsgUIViewUpdate, wire.MsgNavigationInventoryResponse,
-		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection:
+		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection, wire.MsgRouteRetired:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -319,6 +319,9 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.RouteNavigationFailure:
 		payload, err := wire.MarshalRouteNavigationFailure(m)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}, err
+	case protocol.RouteRetired:
+		payload, err := wire.MarshalRouteRetired(m)
+		return wire.Frame{Type: wire.MsgRouteRetired, Payload: payload}, err
 	case protocol.RoutePosition:
 		payload, err := wire.MarshalRoutePosition(m)
 		return wire.Frame{Type: wire.MsgRoutePosition, Payload: payload}, err
@@ -410,6 +413,10 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return encodeServer(*m)
 		}
 	case *protocol.RouteNavigationFailure:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.RouteRetired:
 		if m != nil {
 			return encodeServer(*m)
 		}
