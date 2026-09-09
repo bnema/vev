@@ -75,7 +75,7 @@
       socket.close();
       return;
     }
-    socket.send(JSON.stringify({ ...event, schemaVersion: 1 }));
+    socket.send(JSON.stringify({ ...event, schemaVersion: VevTerminal.schemaVersion }));
   }
 
   function fit() {
@@ -133,17 +133,23 @@
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
     status.textContent = 'Connecting…';
     reconnect.hidden = true;
-    // Presentation coalescing: at most one DOM commit per animation frame,
-    // preserving every incremental update in order. Never drops
-    // intermediate deltas. requestAnimationFrame is throttled to zero in
-    // hidden pages, so a timeout fallback keeps the terminal live there.
+    // Presentation coalescing: at most one scheduled present task per
+    // animation frame, preserving every incremental update in order. Each
+    // queued delta is still applied in order; never drops intermediate
+    // deltas. requestAnimationFrame is throttled to zero in hidden pages,
+    // so a timeout fallback keeps the terminal live there.
     let queuedUpdates = [];
     let presentScheduled = false;
     function flushUpdates() {
       presentScheduled = false;
       const batch = queuedUpdates;
       queuedUpdates = [];
-      for (const update of batch) terminal.apply(update);
+      try {
+        for (const update of batch) terminal.apply(update);
+      } catch {
+        status.textContent = 'Invalid terminal update — connection stopped.';
+        socket.close();
+      }
     }
     function scheduleFlush() {
       if (presentScheduled) return;
@@ -154,6 +160,7 @@
     socket.addEventListener('message', event => {
       try {
         const message = JSON.parse(event.data);
+        if (!message || typeof message.update !== 'object' || message.update === null) throw new Error('bad update');
         queuedUpdates.push(message.update);
         scheduleFlush();
         if (mouse !== message.mouse) {
@@ -161,7 +168,7 @@
           terminal.setMouseCapture(mouse && !selecting);
         }
         if (!received) { received = true; if (!coarsePointer.matches) terminal.focus(); fit(); refreshViews(); }
-        status.textContent = 'Connected';
+        if (status.textContent !== 'Connected') status.textContent = 'Connected';
       } catch {
         status.textContent = 'Invalid terminal update — connection stopped.';
         socket.close();
@@ -190,7 +197,6 @@
 
   async function start() {
     const token = new URLSearchParams(location.hash.slice(1)).get('token');
-    history.replaceState(null, '', '/');
     try {
       if (token) {
         const login = await fetch('/login', { method: 'POST', body: new URLSearchParams({ token }), credentials: 'same-origin' });
@@ -198,12 +204,18 @@
       }
       const health = await fetch('/health', { credentials: 'same-origin' });
       if (!health.ok) throw new Error('login');
+      history.replaceState(null, '', '/');
       document.querySelector('#help').hidden = true;
       connect();
-    } catch {
-      status.textContent = 'Authentication required';
-      reconnect.hidden = true;
-      document.querySelector('#help').hidden = false;
+    } catch (error) {
+      if (error?.message === 'login') {
+        status.textContent = 'Authentication required';
+        reconnect.hidden = true;
+        document.querySelector('#help').hidden = false;
+        return;
+      }
+      status.textContent = 'Disconnected — gateway unreachable. Reconnect to retry.';
+      reconnect.hidden = false;
     }
   }
   window.addEventListener('hashchange', () => {
