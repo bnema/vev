@@ -121,7 +121,8 @@ func launchWebDaemon(ctx context.Context) error {
 		}
 		defer null.Close()
 		child := exec.Command(executable, "--web-serve")
-		child.Env = withoutPerformanceTraceEnv(os.Environ())
+		// The browser terminal supports direct color regardless of the launcher's TTY.
+		child.Env = append(withoutPerformanceTraceEnv(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")
 		child.Stdin, child.Stdout, child.Stderr = null, null, null
 		child.ExtraFiles = []*os.File{inherited}
 		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

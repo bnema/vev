@@ -33,6 +33,23 @@ func TestTerminalFlushResizeAndClose(t *testing.T) {
 	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
 
+func TestTerminalDefaultColorQueries(t *testing.T) {
+	terminal, err := New(t.Context(), domain.Geometry{Size: domain.Size{Cols: 10, Rows: 4}})
+	require.NoError(t, err)
+	defer terminal.Close()
+	for _, tt := range []struct{ query, want string }{
+		{"\x1b]10;?\x1b\\", "\x1b]10;rgb:d8d8/d8d8/d8d8\x1b\\"},
+		{"\x1b]11;?\x1b\\", "\x1b]11;rgb:1010/1010/1010\x1b\\"},
+	} {
+		_, err := terminal.Write([]byte(tt.query))
+		require.NoError(t, err)
+		got := make([]byte, len(tt.want))
+		_, err = io.ReadFull(terminal.In(), got)
+		require.NoError(t, err)
+		require.Equal(t, tt.want, string(got))
+	}
+}
+
 func TestTerminalInput(t *testing.T) {
 	tests := []struct {
 		name  string

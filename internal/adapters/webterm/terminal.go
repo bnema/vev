@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	vt "github.com/bnema/vev-vt"
+	renderer "github.com/bnema/vev-vt/core"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -52,6 +53,9 @@ func New(ctx context.Context, geometry domain.Geometry) (*Terminal, error) {
 			cancel()
 		}
 	}
+	// Match #terminal's default colors in app.css so the ordinary theme
+	// discovery enables native inactive-pane and modal-backdrop dimming.
+	t.screen.SetDefaultColors(renderer.RGB{R: 216, G: 216, B: 216}, renderer.RGB{R: 16, G: 16, B: 16}, true)
 	t.latest = t.screen.Snapshot()
 	go func() {
 		defer close(t.done)
