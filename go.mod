@@ -3,7 +3,8 @@ module github.com/bnema/vev
 go 1.27
 
 require (
-	github.com/bnema/vev-vt v0.5.2-0.20260906085439-e69c4686b8bb
+	github.com/bnema/vev-vt v0.5.2-0.20260909080345-b79b6e9af50e
+	github.com/coder/websocket v1.8.15
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.42.0
 )

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vev · terminal</title>
+<link rel="stylesheet" href="/terminal.css">
+<script defer src="/terminal.js"></script>
+<script defer src="/app.js"></script>
+</head>
+<body>
+<header><strong>vev</strong><span id="status" role="status">Connecting…</span><button id="palette" type="button">Palette · Alt+Space</button><button id="reconnect" type="button" hidden>Reconnect</button></header>
+<main id="workspace"><div id="terminal"></div></main>
+<p id="help" hidden>Open the private link printed by <code>vev --web-daemon</code> to connect. Browser-reserved shortcuts remain owned by the browser.</p>
+<noscript>This terminal requires its small native JavaScript adapter. No frontend framework is used.</noscript>
+</body>
+</html>
