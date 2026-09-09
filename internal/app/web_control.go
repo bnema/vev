@@ -2,41 +2,15 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/webterm"
-	"github.com/bnema/vev/internal/platform"
 )
-
-// Linux abstract sockets have no filesystem artifact. Peer credentials, not
-// the discoverability of this name, protect the local control interface.
-func webControlAddress() string {
-	path, _ := filepath.Abs(platform.StateDir())
-	return fmt.Sprintf("@vev-web-%d-%x", os.Getuid(), sha256.Sum256([]byte(path)))
-}
-
-func sameWebUID(conn *net.UnixConn) bool {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return false
-	}
-	var credential *syscall.Ucred
-	var peerErr error
-	err = raw.Control(func(fd uintptr) {
-		credential, peerErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	})
-	return err == nil && peerErr == nil && credential != nil && credential.Uid == uint32(os.Getuid())
-}
 
 type webAccess struct {
 	Token    string           `json:"token"`
@@ -44,7 +18,7 @@ type webAccess struct {
 }
 
 func startWebControl(ctx context.Context, server *webterm.Server, settings webterm.Settings) (*net.UnixListener, error) {
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: webControlAddress(), Net: "unix"})
+	listener, err := bindWebControl()
 	if err != nil {
 		return nil, err
 	}
