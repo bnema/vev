@@ -133,10 +133,29 @@
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
     status.textContent = 'Connecting…';
     reconnect.hidden = true;
+    // Presentation coalescing: at most one DOM commit per animation frame,
+    // preserving every incremental update in order. Never drops
+    // intermediate deltas. requestAnimationFrame is throttled to zero in
+    // hidden pages, so a timeout fallback keeps the terminal live there.
+    let queuedUpdates = [];
+    let presentScheduled = false;
+    function flushUpdates() {
+      presentScheduled = false;
+      const batch = queuedUpdates;
+      queuedUpdates = [];
+      for (const update of batch) terminal.apply(update);
+    }
+    function scheduleFlush() {
+      if (presentScheduled) return;
+      presentScheduled = true;
+      if (document.visibilityState === 'visible') requestAnimationFrame(flushUpdates);
+      else setTimeout(flushUpdates, 0);
+    }
     socket.addEventListener('message', event => {
       try {
         const message = JSON.parse(event.data);
-        terminal.apply(message.update);
+        queuedUpdates.push(message.update);
+        scheduleFlush();
         if (mouse !== message.mouse) {
           mouse = message.mouse;
           terminal.setMouseCapture(mouse && !selecting);
