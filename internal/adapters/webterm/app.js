@@ -11,6 +11,34 @@
   let fitting = 0;
   let received = false;
 
+  function syncStatus() {
+    const text = status.textContent;
+    const indicator = document.querySelector('#connection');
+    indicator.title = text;
+    indicator.dataset.state = text === 'Connected' ? 'connected' : text === 'Connecting…' ? 'connecting' : text.startsWith('Disconnected') ? 'disconnected' : 'error';
+  }
+  new MutationObserver(syncStatus).observe(status, { childList: true, characterData: true, subtree: true });
+  let counting = false;
+  async function refreshViews() {
+    if (counting) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      document.querySelector('#view-count').textContent = '—';
+      return;
+    }
+    counting = true;
+    try {
+      const response = await fetch('/views', { signal: AbortSignal.timeout(3000) });
+      if (!response.ok) throw new Error('unavailable');
+      const { active } = await response.json();
+      if (!Number.isInteger(active) || active < 0) throw new Error('invalid count');
+      document.querySelector('#view-count').textContent = String(active);
+      document.querySelector('#views').setAttribute('aria-label', `Connected browser terminal views: ${active}`);
+    } catch {
+      document.querySelector('#view-count').textContent = '—';
+    } finally { counting = false; }
+  }
+  setInterval(refreshViews, 2000);
+
   function send(event) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     if (socket.bufferedAmount > 1 << 20) {
@@ -73,7 +101,7 @@
           mouse = message.mouse;
           terminal.setMouseCapture(mouse);
         }
-        if (!received) { received = true; terminal.focus(); fit(); }
+        if (!received) { received = true; terminal.focus(); fit(); refreshViews(); }
         status.textContent = 'Connected';
       } catch {
         status.textContent = 'Invalid terminal update — connection stopped.';
@@ -114,5 +142,8 @@
       document.querySelector('#help').hidden = false;
     }
   }
+  window.addEventListener('hashchange', () => {
+    if (new URLSearchParams(location.hash.slice(1)).has('token')) start();
+  });
   start();
 })();

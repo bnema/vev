@@ -3,7 +3,14 @@
 body { margin: 0; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 header { display: flex; align-items: center; gap: .75rem; padding: 2px 6px; min-height: 24px; border-bottom: 1px solid #303030; font-size: 12px; }
 header strong { color: inherit; font-size: inherit; }
-#status { flex: 1; }
+.header-space { flex: 1; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+header svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+#views { display: inline-flex; align-items: center; gap: 4px; color: #aaa; font-variant-numeric: tabular-nums; }
+#connection i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d9ad52; }
+#connection[data-state="connected"] i { background: #86b98b; }
+#connection[data-state="disconnected"] i { background: #888; }
+#connection[data-state="error"] i { background: #db7777; }
 button { font: inherit; color: inherit; background: transparent; border: 1px solid #555; border-radius: 0; padding: 1px 5px; cursor: pointer; }
 button:hover { background: #303030; }
 button:focus-visible { outline: 1px solid #ccc; outline-offset: 1px; }

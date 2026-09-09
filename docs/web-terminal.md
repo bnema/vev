@@ -10,6 +10,8 @@ The gateway connects ordinary client attachments to the vev daemon. The daemon o
 
 ## Controls
 
+The header shows a connection-state indicator and the number of connected browser terminal views, refreshed every two seconds. Background session shells are not counted. Button icons come from Lucide (ISC license, available at `/icons-license`).
+
 - Type directly into the terminal, including composed text and pasted plain text.
 - Use **Alt+Space**, or the **Palette** button, for commands such as `CNT`, `SPR`, `SPD` and `SSP`.
 - Use **Alt+h/j/k/l** to focus panes and **Alt+1…9** to switch tabs.
@@ -35,11 +37,11 @@ env VEV_ENV=web-visual .dev/vev-web ls
 
 Useful visual checks: palette search, horizontal and vertical splits, tab switching, pane focus, shell input, full-screen applications, paste, scrolling, window resize and reload. Record browser/version, viewport size, action and expected result when reporting a problem.
 
-`scripts/web-visual-smoke.cjs` exercises the local gateway with an installed Playwright module. Set `PLAYWRIGHT_MODULE` to that module's absolute path, `WEB_TOKEN_FILE` to the isolated profile's `state/vev/web-token`, and optionally `CHROMIUM_PATH` to an installed Chromium executable. It creates test sessions and panes; run it only against an isolated profile.
+`scripts/web-visual-smoke.cjs` exercises the local gateway with an installed Playwright module. Set `PLAYWRIGHT_MODULE` to that module's absolute path, `VEV_BINARY` to the built executable and `VEV_ENV=web-visual`, and optionally `CHROMIUM_PATH` to an installed Chromium executable. It creates test sessions and panes; run it only against an isolated profile. `scripts/web-access-smoke.cjs` uses the same variables to check the view counter and token rotation; it revokes all browser access on that isolated gateway.
 
 ## Security and implementation
 
-The listener binds IPv4 loopback only. A random credential is stored in a private state file. The access link carries it in a URL fragment; the page removes the fragment and exchanges it for an HttpOnly SameSite cookie. HTTP Host and Origin checks, authenticated WebSockets, a restrictive Content Security Policy, bounded input and connection limits protect the local terminal endpoint. Do not publish the credential or expose the port through a reverse proxy.
+The listener binds IPv4 loopback only. A fresh random 256-bit credential lives only in gateway memory and expires when that process stops. `vev --web-renew-token` replaces it on a running gateway, invalidates old links and cookies, disconnects browser views, and prints the new link without stopping session shells. The CLI retrieves or renews access through a profile-scoped Linux abstract Unix socket restricted by same-user peer credentials; no credential file is written. The access link carries it in a URL fragment; the page removes the fragment and exchanges it for an HttpOnly SameSite cookie. HTTP Host and Origin checks, authenticated WebSockets, a restrictive Content Security Policy, bounded input and connection limits protect the local terminal endpoint. Do not publish the credential or expose the port through a reverse proxy.
 
 The browser uses the dependency-free `vev-vt` DOM renderer and a small native JavaScript transport adapter. Go owns rendering state and terminal input encoding. Assets are embedded in the binary; there is no CDN, bundler, HTMX or frontend framework.
 
