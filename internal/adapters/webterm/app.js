@@ -124,7 +124,7 @@
       },
       send
     });
-    socket = new WebSocket(`ws://${location.host}/ws`);
+    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
     status.textContent = 'Connecting…';
     reconnect.hidden = true;
     socket.addEventListener('message', event => {

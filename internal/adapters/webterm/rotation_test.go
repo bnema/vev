@@ -17,7 +17,7 @@ func TestRotationRevokesViewsAndCookies(t *testing.T) {
 	defer cancel()
 	token, err := NewToken()
 	require.NoError(t, err)
-	h, err := NewServer(ctx, token, func(ctx context.Context, terminal *Terminal) error {
+	h, err := NewServer(ctx, Settings{}, token, func(ctx context.Context, terminal *Terminal) error {
 		if err := terminal.Flush(); err != nil {
 			return err
 		}

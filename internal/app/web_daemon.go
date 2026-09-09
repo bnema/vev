@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,12 +24,16 @@ import (
 
 const webStartupTimeout = 10 * time.Second
 
-func webReachable(ctx context.Context, token string) bool {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, webterm.Origin+"/health", nil)
+func webReachable(ctx context.Context, access webAccess, expected webterm.Settings) bool {
+	if access.Settings != expected {
+		return false
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+access.Settings.ProbeAddress()+"/health", nil)
 	if err != nil {
 		return false
 	}
-	request.AddCookie(&http.Cookie{Name: "vev-web-session", Value: token})
+	request.Host = access.Settings.Host()
+	request.AddCookie(&http.Cookie{Name: "vev-web-session", Value: access.Token})
 	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	response, err := client.Do(request)
@@ -39,8 +44,8 @@ func webReachable(ctx context.Context, token string) bool {
 	return response.StatusCode == http.StatusNoContent
 }
 
-func printWebLink(token string) {
-	fmt.Printf("vev web terminal: %s/#token=%s\nKeep this local access link private.\n", webterm.Origin, token)
+func printWebLink(access webAccess) {
+	fmt.Printf("vev web terminal: %s/#token=%s\nKeep this access link private.\n", access.Settings.Origin, access.Token)
 }
 
 func renewWebToken(ctx context.Context) error {
@@ -52,13 +57,20 @@ func renewWebToken(ctx context.Context) error {
 	return nil
 }
 
-func launchWebDaemon(ctx context.Context) error {
+func launchWebDaemon(ctx context.Context, options webOptions) error {
+	settings, err := loadWebSettings(options)
+	if err != nil {
+		return err
+	}
 	if token, err := webControlRequest(ctx, false); err == nil {
+		if token.Settings != settings {
+			return errors.New("vev: web gateway is running with different settings; stop and restart it to apply web.listen/web.origin")
+		}
 		readyCtx, cancel := context.WithTimeout(ctx, webStartupTimeout)
 		defer cancel()
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
-		for !webReachable(readyCtx, token) {
+		for !webReachable(readyCtx, token, settings) {
 			select {
 			case <-readyCtx.Done():
 				return fmt.Errorf("vev: existing web gateway not ready: %w", readyCtx.Err())
@@ -68,7 +80,7 @@ func launchWebDaemon(ctx context.Context) error {
 		printWebLink(token)
 		return nil
 	}
-	listener, err := net.Listen("tcp4", webterm.Address)
+	listener, err := listenWeb(settings.Listen)
 	if err != nil {
 		return fmt.Errorf("vev: web port unavailable: %w", err)
 	}
@@ -87,7 +99,7 @@ func launchWebDaemon(ctx context.Context) error {
 		return err
 	}
 	defer null.Close()
-	child := exec.Command(executable, "--web-serve")
+	child := exec.Command(executable, "--web-serve", "--web-listen", settings.Listen, "--web-origin", settings.Origin)
 	// Browser capabilities do not depend on the launcher's TTY.
 	child.Env = append(withoutPerformanceTraceEnv(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")
 	child.Stdin, child.Stdout, child.Stderr = null, null, null
@@ -104,7 +116,7 @@ func launchWebDaemon(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		token, err := webControlRequest(readyCtx, false)
-		if err == nil && webReachable(readyCtx, token) {
+		if err == nil && webReachable(readyCtx, token, settings) {
 			printWebLink(token)
 			return nil
 		}
@@ -120,7 +132,28 @@ func launchWebDaemon(ctx context.Context) error {
 	}
 }
 
-func runWebDaemon(parent context.Context) error {
+// Preserve the requested address family, including IPv4 wildcard listeners.
+func listenWeb(address string) (net.Listener, error) {
+	addr, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return nil, err
+	}
+	network := "tcp6"
+	if addr.Addr().Is4() {
+		network = "tcp4"
+	}
+	return net.Listen(network, address)
+}
+
+func runWebDaemon(parent context.Context, options webOptions) error {
+	// The launcher passes resolved settings; do not reload a changing config.
+	if options.listen == "" || options.origin == "" {
+		return errors.New("vev: web server requires its launcher settings")
+	}
+	settings, err := webterm.ParseSettings(options.listen, options.origin)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	inherited := os.NewFile(3, "web-listener")
@@ -133,8 +166,8 @@ func runWebDaemon(parent context.Context) error {
 		return fmt.Errorf("vev: inherited web listener: %w", err)
 	}
 	defer listener.Close()
-	if listener.Addr().String() != webterm.Address {
-		return errors.New("vev: web listener must be loopback on port 8778")
+	if listener.Addr().String() != settings.Listen {
+		return errors.New("vev: inherited web listener does not match web.listen")
 	}
 	token, err := webterm.NewToken()
 	if err != nil {
@@ -145,7 +178,7 @@ func runWebDaemon(parent context.Context) error {
 		return err
 	}
 	defer closer.Close()
-	handler, err := webterm.NewServer(ctx, token, func(ctx context.Context, terminal *webterm.Terminal) error {
+	handler, err := webterm.NewServer(ctx, settings, token, func(ctx context.Context, terminal *webterm.Terminal) error {
 		clk := clock.New()
 		deps := runAttachDeps{
 			terminal: func() ports.Terminal { return terminal }, clock: func() ports.Clock { return clk },
@@ -161,7 +194,7 @@ func runWebDaemon(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	control, err := startWebControl(ctx, handler)
+	control, err := startWebControl(ctx, handler, settings)
 	if err != nil {
 		return err
 	}

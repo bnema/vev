@@ -87,7 +87,7 @@ SSH bootstraps an authenticated direct UDP connection that resumes after sleep o
 
 `vev --web-daemon` starts a background web gateway on `127.0.0.1:8778` and prints a private access link. The browser displays the ordinary multiplexer UI, including its palette, tabs and splits, using HTML/CSS and a small native JavaScript adapter. No frontend framework or external assets are loaded.
 
-See [browser terminal](docs/web-terminal.md) for isolated visual testing, controls and current limitations.
+Use `--web-listen` and `--web-origin` (or `web.listen` and `web.origin` in config) for a private network or an HTTPS reverse proxy. VEV serves HTTP; the proxy owns TLS. See [browser terminal](docs/web-terminal.md) for setup, isolated visual testing, controls and current limitations.
 
 ## UI driver
 

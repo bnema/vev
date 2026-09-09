@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ const (
 type RunTerminal func(context.Context, *Terminal) error
 
 type Server struct {
+	settings    Settings
 	ctx         context.Context
 	token       string
 	authCtx     context.Context
@@ -44,12 +46,16 @@ type Server struct {
 	activeViews int
 }
 
-func NewServer(ctx context.Context, token string, run RunTerminal) (*Server, error) {
+func NewServer(ctx context.Context, settings Settings, token string, run RunTerminal) (*Server, error) {
+	settings, err := ParseSettings(settings.Listen, settings.Origin)
+	if err != nil {
+		return nil, err
+	}
 	if len(token) < 32 || run == nil {
 		return nil, errors.New("webterm: invalid server configuration")
 	}
 	authCtx, authCancel := context.WithCancel(ctx)
-	return &Server{ctx: ctx, token: token, authCtx: authCtx, authCancel: authCancel, run: run, slots: make(chan struct{}, maxConnections)}, nil
+	return &Server{settings: settings, ctx: ctx, token: token, authCtx: authCtx, authCancel: authCancel, run: run, slots: make(chan struct{}, maxConnections)}, nil
 }
 
 // Wait closes admission before draining all handlers, including handshakes.
@@ -76,11 +82,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
-	if r.Host != Address || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	if r.Host != s.settings.Host() || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != Origin {
+	if origin := r.Header.Get("Origin"); origin != "" && origin != s.settings.Origin {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -122,7 +128,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(htmlrenderer.Stylesheet() + appCSS))
 		return
 	case "/login":
-		if r.Method != http.MethodPost || r.Header.Get("Origin") != Origin {
+		if r.Method != http.MethodPost || r.Header.Get("Origin") != s.settings.Origin {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
@@ -131,7 +137,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: r.PostForm.Get("token"), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: r.PostForm.Get("token"), Path: "/", HttpOnly: true, Secure: strings.HasPrefix(s.settings.Origin, "https://"), SameSite: http.SameSiteStrictMode})
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "/health", "/ws", "/views":
@@ -158,7 +164,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if r.Header.Get("Origin") != Origin {
+		if r.Header.Get("Origin") != s.settings.Origin {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}

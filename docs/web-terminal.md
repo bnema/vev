@@ -4,9 +4,34 @@
 vev --web-daemon
 ```
 
-The command starts a detached web gateway on **127.0.0.1:8778** and prints a private access link. Open that link in a browser. Running the command again prints the same link when that gateway is reachable. The port is fixed; another process or development profile using it prevents startup.
+The command starts a detached web gateway on **127.0.0.1:8778** and prints a private access link. Open that link in a browser. Running the command again with the same settings prints the same link when that gateway is reachable. Another process or development profile using the selected address and port prevents startup.
 
 The gateway connects ordinary client attachments to the vev daemon. The daemon owns sessions, tabs, panes, palettes and PTYs. Each browser connection has its own terminal view. Closing the page detaches that view without killing its session shells. Reloading or choosing Reconnect creates a new ephemeral session; previous sessions remain available through the session picker (`SSP`). Repeated reloads can therefore accumulate shells: close unwanted sessions explicitly. Automatic reattachment is not implemented, and input is never automatically replayed.
+
+## Listener and public origin
+
+The gateway serves HTTP. A reverse proxy, such as a NetBird app, owns HTTPS and certificates. For a proxy on the same machine:
+
+```sh
+vev --web-daemon --web-listen 127.0.0.1:8778 \
+  --web-origin https://terminal.example.internal
+```
+
+Equivalent persistent settings in vev's flat configuration file (`$XDG_CONFIG_HOME/vev/config`, or `~/.config/vev/config`):
+
+```ini
+web.listen = 127.0.0.1:8778
+web.origin = https://terminal.example.internal
+```
+
+Flags override individual config values. Settings apply at gateway startup, not through live config reload. To change a running gateway's settings, stop that gateway and start it again; session shells survive. Token renewal uses the running gateway's origin even if the config file changes.
+
+- `web.listen` accepts a literal IPv4 or bracketed IPv6 address and port, for example `100.64.0.10:8778` or `[::1]:8778`. Select the local NetBird IP when the proxy reaches VEV through NetBird. Interface names and DNS names are not listener addresses.
+- `web.origin` is the browser-facing HTTP(S) origin, including a non-default port if needed. Paths, credentials, query strings and fragments are not accepted. A trailing `/` and default ports are normalized.
+- Without settings, VEV uses `127.0.0.1:8778` and `http://127.0.0.1:8778`. A loopback listener can derive its HTTP origin; any non-loopback or wildcard listener requires an explicit origin.
+- The proxy must preserve the public **Host** and browser **Origin**, forward WebSocket upgrades, and route the entire origin to VEV without a path prefix. VEV ignores `Forwarded` and `X-Forwarded-*`. HTTPS origins use `Secure` cookies and `wss://` in the browser.
+
+Prefer loopback for a co-located proxy, or one specific private IP. `0.0.0.0` and `[::]` deliberately expose broader interfaces; use firewall and NetBird access rules to restrict reachability. HTTP access on a private encrypted network is possible, but remote HTTP does not provide a browser secure context. VEV neither provisions TLS nor verifies your proxy or network policy. Its readiness probe checks the local HTTP listener, not public DNS, certificates or proxy routing.
 
 ## Controls
 
@@ -45,7 +70,7 @@ Useful visual checks: palette search, horizontal and vertical splits, tab switch
 
 ## Security and implementation
 
-The listener binds IPv4 loopback only. A fresh random 256-bit credential lives only in gateway memory and expires when that process stops. `vev --web-renew-token` replaces it on a running gateway, invalidates old links and cookies, disconnects browser views, and prints the new link without stopping session shells. The CLI retrieves or renews access through a profile-scoped Linux abstract Unix socket restricted by same-user peer credentials; no credential file is written. The access link carries it in a URL fragment; the page removes the fragment and exchanges it for an HttpOnly SameSite cookie. HTTP Host and Origin checks, authenticated WebSockets, a restrictive Content Security Policy, bounded input and connection limits protect the local terminal endpoint. Do not publish the credential or expose the port through a reverse proxy.
+The listener binds IPv4 loopback by default. Network exposure requires explicit configuration. A fresh random 256-bit credential lives only in gateway memory and expires when that process stops. `vev --web-renew-token` replaces it on a running gateway, invalidates old links and cookies, disconnects browser views, and prints the new link without stopping session shells. The CLI retrieves or renews access through a profile-scoped Linux abstract Unix socket restricted by same-user peer credentials; no credential file is written. The access link carries it in a URL fragment; the page removes the fragment and exchanges it for an HttpOnly SameSite cookie. HTTP Host and Origin checks, authenticated WebSockets, a restrictive Content Security Policy, bounded input and connection limits protect the local terminal endpoint. Do not publish the credential. Treat access to this endpoint as access to your shell; restrict any proxy and upstream listener to trusted clients.
 
 The browser uses the dependency-free `vev-vt` DOM renderer and a small native JavaScript transport adapter. Go owns rendering state and terminal input encoding. Assets are embedded in the binary; there is no CDN, bundler, HTMX or frontend framework.
 

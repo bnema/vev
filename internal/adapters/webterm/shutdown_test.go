@@ -11,7 +11,7 @@ import (
 
 func TestShutdownAdmissionRace(t *testing.T) {
 	for range 100 {
-		server, err := NewServer(t.Context(), strings.Repeat("d", 43), func(context.Context, *Terminal) error { return nil })
+		server, err := NewServer(t.Context(), Settings{}, strings.Repeat("d", 43), func(context.Context, *Terminal) error { return nil })
 		require.NoError(t, err)
 		var racers sync.WaitGroup
 		start := make(chan struct{})
@@ -46,7 +46,7 @@ func TestShutdownAdmissionRace(t *testing.T) {
 
 func TestCanceledServerRejectsAdmission(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	server, err := NewServer(ctx, strings.Repeat("e", 43), func(context.Context, *Terminal) error { return nil })
+	server, err := NewServer(ctx, Settings{}, strings.Repeat("e", 43), func(context.Context, *Terminal) error { return nil })
 	require.NoError(t, err)
 	cancel()
 	require.False(t, server.admit())

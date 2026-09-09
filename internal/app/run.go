@@ -99,6 +99,7 @@ type command struct {
 	uiObserve            bool
 	uiControl            bool
 	uiSocket             string
+	web                  webOptions
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -135,6 +136,7 @@ usage:
                       (optional: --ui-socket PATH)
   vev --web-daemon    start the private web terminal or print its current link
   vev --web-renew-token  revoke web access and print a fresh link
+  Web options: --web-listen IP:PORT --web-origin http(s)://HOST[:PORT]
   vev --help          show this help
   vev --version       show version`
 
@@ -219,17 +221,13 @@ parsedUIFlags:
 	}
 
 	switch args[0] {
-	case "--web-daemon", "--web-serve", "--web-renew-token":
+	case "--web-daemon", "--web-serve":
+		return parseWebArgs(args)
+	case "--web-renew-token":
 		if len(args) != 1 {
 			return command{}, usagef("`%s` does not accept arguments", args[0])
 		}
-		if args[0] == "--web-renew-token" {
-			return command{kind: kindWebRenew}, nil
-		}
-		if args[0] == "--web-serve" {
-			return command{kind: kindWebServe}, nil
-		}
-		return command{kind: kindWebDaemon}, nil
+		return command{kind: kindWebRenew}, nil
 	case "--daemon":
 		return command{kind: kindDaemon}, nil
 	case "--daemon-launcher":
@@ -351,9 +349,9 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindWebRenew:
 		return renewWebToken(ctx)
 	case kindWebDaemon:
-		return launchWebDaemon(ctx)
+		return launchWebDaemon(ctx, cmd.web)
 	case kindWebServe:
-		return runWebDaemon(ctx)
+		return runWebDaemon(ctx, cmd.web)
 	case kindDaemon:
 		return runDaemon()
 	case kindDaemonLauncher:

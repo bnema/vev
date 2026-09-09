@@ -17,7 +17,7 @@ import (
 
 func TestHTTPTrustBoundary(t *testing.T) {
 	token := strings.Repeat("a", 43)
-	server, err := NewServer(t.Context(), token, func(context.Context, *Terminal) error { return nil })
+	server, err := NewServer(t.Context(), Settings{}, token, func(context.Context, *Terminal) error { return nil })
 	require.NoError(t, err)
 	tests := []struct {
 		name, method, path, host, origin, site, credential string
@@ -52,7 +52,7 @@ func TestHTTPTrustBoundary(t *testing.T) {
 
 func TestLogin(t *testing.T) {
 	token := strings.Repeat("b", 43)
-	server, err := NewServer(t.Context(), token, func(context.Context, *Terminal) error { return nil })
+	server, err := NewServer(t.Context(), Settings{}, token, func(context.Context, *Terminal) error { return nil })
 	require.NoError(t, err)
 	for _, valid := range []bool{false, true} {
 		t.Run(map[bool]string{false: "invalid", true: "valid"}[valid], func(t *testing.T) {
@@ -83,7 +83,7 @@ func TestWebSocketRoundTripAndDetach(t *testing.T) {
 	defer cancel()
 	exited := make(chan struct{})
 	token := strings.Repeat("c", 43)
-	handler, err := NewServer(ctx, token, func(ctx context.Context, terminal *Terminal) error {
+	handler, err := NewServer(ctx, Settings{}, token, func(ctx context.Context, terminal *Terminal) error {
 		defer close(exited)
 		if _, err := terminal.EnterRaw(); err != nil {
 			return err

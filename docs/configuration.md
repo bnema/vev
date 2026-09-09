@@ -1,8 +1,12 @@
 # Configuration
 
-vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means defaults. The daemon picks up changes within a couple of seconds; no restart needed.
+vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means defaults. The session daemon picks up changes within a couple of seconds. Browser gateway settings (`web.listen` and `web.origin`) require a gateway restart; flags override their config values. See [browser terminal](web-terminal.md#listener-and-public-origin) for private-network and HTTPS proxy setup.
 
 ```text
+# Browser gateway: HTTP listener and browser-facing origin, read at startup.
+web.listen = 127.0.0.1:8778
+web.origin = http://127.0.0.1:8778
+
 # Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
 # In auto mode with palette inheritance enabled, infer a terminal accent.

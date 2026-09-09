@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,7 +38,12 @@ func sameWebUID(conn *net.UnixConn) bool {
 	return err == nil && peerErr == nil && credential != nil && credential.Uid == uint32(os.Getuid())
 }
 
-func startWebControl(ctx context.Context, server *webterm.Server) (*net.UnixListener, error) {
+type webAccess struct {
+	Token    string           `json:"token"`
+	Settings webterm.Settings `json:"settings"`
+}
+
+func startWebControl(ctx context.Context, server *webterm.Server, settings webterm.Settings) (*net.UnixListener, error) {
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: webControlAddress(), Net: "unix"})
 	if err != nil {
 		return nil, err
@@ -73,23 +79,23 @@ func startWebControl(ctx context.Context, server *webterm.Server) (*net.UnixList
 				default:
 					return
 				}
-				_, _ = io.WriteString(conn, token)
+				_ = json.NewEncoder(conn).Encode(webAccess{Token: token, Settings: settings})
 			}()
 		}
 	}()
 	return listener, nil
 }
 
-func webControlRequest(ctx context.Context, renew bool) (string, error) {
+func webControlRequest(ctx context.Context, renew bool) (webAccess, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", webControlAddress())
 	if err != nil {
-		return "", err
+		return webAccess{}, err
 	}
 	defer conn.Close()
 	if !sameWebUID(conn.(*net.UnixConn)) {
-		return "", errors.New("vev: unsafe web control peer")
+		return webAccess{}, errors.New("vev: unsafe web control peer")
 	}
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
@@ -98,15 +104,20 @@ func webControlRequest(ctx context.Context, renew bool) (string, error) {
 		command = 'R'
 	}
 	if _, err := conn.Write([]byte{command}); err != nil {
-		return "", err
+		return webAccess{}, err
 	}
-	data, err := io.ReadAll(io.LimitReader(conn, 44))
+	data, err := io.ReadAll(io.LimitReader(conn, 4097))
 	if err != nil {
-		return "", err
+		return webAccess{}, err
 	}
-	decoded, err := base64.RawURLEncoding.DecodeString(string(data))
-	if err != nil || len(decoded) != 32 {
-		return "", errors.New("vev: invalid web control response")
+	var access webAccess
+	if len(data) > 4096 || json.Unmarshal(data, &access) != nil {
+		return webAccess{}, errors.New("vev: invalid web control response")
 	}
-	return string(data), nil
+	decoded, err := base64.RawURLEncoding.DecodeString(access.Token)
+	settings, settingsErr := webterm.ParseSettings(access.Settings.Listen, access.Settings.Origin)
+	if err != nil || len(decoded) != 32 || settingsErr != nil || settings != access.Settings {
+		return webAccess{}, errors.New("vev: invalid web control response")
+	}
+	return access, nil
 }
