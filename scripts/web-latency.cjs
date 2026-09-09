@@ -1,7 +1,10 @@
 // Isolated gateway only; creates a retained ephemeral session per viewport.
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
 (async () => {
+  if (!process.env.VEV_BINARY || !process.env.VEV_ENV) throw new Error('VEV_BINARY and isolated VEV_ENV are required');
+  const output = execFileSync(process.env.VEV_BINARY, ['--web-daemon'], { encoding: 'utf8' });
+  const token = output.match(/#token=([A-Za-z0-9_-]+)/)[1];
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
   try {
     for (const viewport of [{width:800,height:500}, {width:1600,height:1000}, {width:2560,height:1440}, {width:3840,height:2160}]) {
@@ -22,7 +25,7 @@ const fs = require('node:fs');
           }
         };
       });
-      await page.goto(`http://127.0.0.1:8778/#token=${fs.readFileSync(process.env.WEB_TOKEN_FILE,'utf8').trim()}`);
+      await page.goto(`http://127.0.0.1:8778/#token=${token}`);
       await page.waitForFunction(() => document.querySelector('#status').textContent === 'Connected');
       await page.waitForTimeout(1000);
       if (process.env.WEB_LAYER) await page.evaluate(() => {

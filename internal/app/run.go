@@ -74,6 +74,7 @@ const (
 	kindUIDriver
 	kindUIRemoteCleanup
 	kindWebDaemon
+	kindWebRenew
 	kindWebServe
 	kindHelp
 	kindVersion
@@ -132,7 +133,8 @@ usage:
                       (optional: --ui-socket PATH)
   vev --ui-control    expose observation and input control for this client
                       (optional: --ui-socket PATH)
-  vev --web-daemon    start the private web terminal on 127.0.0.1:8778
+  vev --web-daemon    start the private web terminal or print its current link
+  vev --web-renew-token  revoke web access and print a fresh link
   vev --help          show this help
   vev --version       show version`
 
@@ -217,9 +219,12 @@ parsedUIFlags:
 	}
 
 	switch args[0] {
-	case "--web-daemon", "--web-serve":
+	case "--web-daemon", "--web-serve", "--web-renew-token":
 		if len(args) != 1 {
 			return command{}, usagef("`%s` does not accept arguments", args[0])
+		}
+		if args[0] == "--web-renew-token" {
+			return command{kind: kindWebRenew}, nil
 		}
 		if args[0] == "--web-serve" {
 			return command{kind: kindWebServe}, nil
@@ -343,6 +348,8 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindVersion:
 		fmt.Println(versionLine())
 		return nil
+	case kindWebRenew:
+		return renewWebToken(ctx)
 	case kindWebDaemon:
 		return launchWebDaemon(ctx)
 	case kindWebServe:

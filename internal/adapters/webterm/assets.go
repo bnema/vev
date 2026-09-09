@@ -10,3 +10,6 @@ var appJS string
 
 //go:embed app.css
 var appCSS string
+
+//go:embed ICONS-LICENSE
+var iconsLicense string

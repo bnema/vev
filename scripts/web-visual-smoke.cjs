@@ -1,11 +1,11 @@
-// Run against an isolated gateway. Supply PLAYWRIGHT_MODULE and WEB_TOKEN_FILE.
+// Run against an isolated gateway. Supply PLAYWRIGHT_MODULE, VEV_BINARY and VEV_ENV.
 // The test creates sessions/panes; it never targets an existing named session.
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
 const assert = require('node:assert/strict');
 
 (async () => {
-  if (!process.env.WEB_TOKEN_FILE) throw new Error('WEB_TOKEN_FILE is required');
+  if (!process.env.VEV_BINARY || !process.env.VEV_ENV) throw new Error('VEV_BINARY and isolated VEV_ENV are required');
   const browser = await chromium.launch({
     executablePath: process.env.CHROMIUM_PATH || undefined,
     headless: true
@@ -14,7 +14,8 @@ const assert = require('node:assert/strict');
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    const token = fs.readFileSync(process.env.WEB_TOKEN_FILE, 'utf8');
+    const output = execFileSync(process.env.VEV_BINARY, ['--web-daemon'], { encoding: 'utf8' });
+    const token = output.match(/#token=([A-Za-z0-9_-]+)/)[1];
     await page.goto(`http://127.0.0.1:8778/#token=${token}`);
     const connected = () => page.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Connected'));
     const contains = text => page.waitForFunction(text => document.querySelector('.vev-terminal__accessible-output').textContent.includes(text), text);

@@ -2,7 +2,9 @@ package webterm
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,20 +32,24 @@ const (
 type RunTerminal func(context.Context, *Terminal) error
 
 type Server struct {
-	ctx      context.Context
-	token    string
-	run      RunTerminal
-	slots    chan struct{}
-	workers  sync.WaitGroup
-	mu       sync.Mutex
-	stopping bool
+	ctx         context.Context
+	token       string
+	authCtx     context.Context
+	authCancel  context.CancelFunc
+	run         RunTerminal
+	slots       chan struct{}
+	workers     sync.WaitGroup
+	mu          sync.Mutex
+	stopping    bool
+	activeViews int
 }
 
 func NewServer(ctx context.Context, token string, run RunTerminal) (*Server, error) {
 	if len(token) < 32 || run == nil {
 		return nil, errors.New("webterm: invalid server configuration")
 	}
-	return &Server{ctx: ctx, token: token, run: run, slots: make(chan struct{}, maxConnections)}, nil
+	authCtx, authCancel := context.WithCancel(ctx)
+	return &Server{ctx: ctx, token: token, authCtx: authCtx, authCancel: authCancel, run: run, slots: make(chan struct{}, maxConnections)}, nil
 }
 
 // Wait closes admission before draining all handlers, including handshakes.
@@ -87,6 +93,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(indexHTML))
 		return
+	case "/icons-license":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(iconsLicense))
+		return
 	case "/app.js":
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -121,10 +131,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: s.token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: r.PostForm.Get("token"), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 		w.WriteHeader(http.StatusNoContent)
 		return
-	case "/health", "/ws":
+	case "/health", "/ws", "/views":
 		cookie, err := r.Cookie(cookieName)
 		if err != nil || !s.valid(cookie.Value) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -132,6 +142,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path == "/views" {
+			s.mu.Lock()
+			count := s.activeViews
+			s.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(struct {
+				Active int `json:"active"`
+			}{count})
 			return
 		}
 		if r.URL.Path == "/health" {
@@ -148,7 +168,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func (s *Server) valid(token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1
+}
+
+// Token returns the current credential to the trusted local control boundary.
+func (s *Server) Token() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.token
+}
+
+// RenewToken revokes existing cookies and attachments without stopping shells.
+func (s *Server) RenewToken() (string, error) {
+	token, err := NewToken()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authCancel()
+	s.authCtx, s.authCancel = context.WithCancel(s.ctx)
+	s.token = token
+	return token, nil
+}
+
+func NewToken() (string, error) {
+	var data [32]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data[:]), nil
 }
 
 func (s *Server) serveSocket(w http.ResponseWriter, r *http.Request) {
@@ -164,14 +215,28 @@ func (s *Server) serveSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { <-s.slots }()
+	// Bind this handshake to the authenticated generation under the same lock
+	// as rotation. A rotated credential cannot open a new-generation socket.
+	s.mu.Lock()
+	cookie, cookieErr := r.Cookie(cookieName)
+	if cookieErr != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(s.token)) != 1 {
+		s.mu.Unlock()
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	ctx, cancel := context.WithCancel(s.authCtx)
+	s.mu.Unlock()
+	defer cancel()
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.CloseNow()
+	s.mu.Lock()
+	s.activeViews++
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.activeViews--; s.mu.Unlock() }()
 	conn.SetReadLimit(maxEventBytes)
-	ctx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
 	stop := context.AfterFunc(ctx, func() { _ = conn.CloseNow() })
 	defer stop()
 	terminal, err := New(ctx, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
