@@ -89,6 +89,7 @@
 
   root.addEventListener('pointerdown', event => { if (!event.shift && terminal) terminal.focus(); });
   document.querySelector('#palette').addEventListener('click', () => {
+    if (!terminal) return;
     send({ type: 'key', key: ' ', code: 'Space', alt: true, ctrl: false, meta: false, shift: false, repeat: false, location: 0 });
     terminal.focus();
   });
