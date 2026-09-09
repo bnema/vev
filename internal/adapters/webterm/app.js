@@ -10,6 +10,31 @@
   let lastGeometry = '';
   let fitting = 0;
   let received = false;
+  const coarsePointer = matchMedia('(pointer: coarse)');
+  let selecting = coarsePointer.matches;
+  const selectButton = document.querySelector('#select-mode');
+  function setSelecting(value) {
+    selecting = value;
+    selectButton.setAttribute('aria-pressed', String(value));
+    if (terminal) terminal.setMouseCapture(mouse && !selecting);
+    if (value) root.querySelector('textarea')?.blur();
+  }
+  setSelecting(selecting);
+  selectButton.addEventListener('click', () => setSelecting(!selecting));
+  document.querySelector('#keyboard').addEventListener('click', () => {
+    setSelecting(false);
+    terminal?.focus();
+  });
+  function fitVisualViewport() {
+    const viewport = window.visualViewport;
+    // Pinch zoom must not resize the PTY or fight the browser's pan gesture.
+    if (!viewport || Math.abs(viewport.scale - 1) > 0.01) return;
+    document.body.style.setProperty('--app-height', `${viewport.height}px`);
+    window.scrollTo(0, 0);
+    fit();
+  }
+  window.visualViewport?.addEventListener('resize', fitVisualViewport);
+  fitVisualViewport();
 
   function syncStatus() {
     const text = status.textContent;
@@ -83,8 +108,13 @@
       decide(event) {
         if (event.type === 'resize' || event.type === 'focus') return { emit: false, preventDefault: false };
         if (event.type === 'pointer' || event.type === 'wheel') {
-          const capture = mouse && !event.shift;
+          const capture = mouse && !selecting && !event.shift;
           return { emit: capture, preventDefault: capture };
+        }
+        // Ctrl+Shift+F6 releases terminal focus for keyboard navigation.
+        if (event.type === 'key' && event.key === 'F6' && event.ctrl && event.shift) {
+          document.querySelector('#palette').focus();
+          return { emit: false, preventDefault: true };
         }
         // Preserve native copy/paste and browser/OS shortcuts.
         if (event.type === 'key' && (event.meta || (event.ctrl && event.shift && ['C', 'V', 'c', 'v'].includes(event.key)) || (event.ctrl && !event.alt && event.key.toLowerCase() === 'v'))) {
@@ -103,9 +133,9 @@
         terminal.apply(message.update);
         if (mouse !== message.mouse) {
           mouse = message.mouse;
-          terminal.setMouseCapture(mouse);
+          terminal.setMouseCapture(mouse && !selecting);
         }
-        if (!received) { received = true; terminal.focus(); fit(); refreshViews(); }
+        if (!received) { received = true; if (!coarsePointer.matches) terminal.focus(); fit(); refreshViews(); }
         status.textContent = 'Connected';
       } catch {
         status.textContent = 'Invalid terminal update — connection stopped.';
@@ -122,7 +152,7 @@
     socket.addEventListener('error', () => { status.textContent = 'Connection failed.'; });
   }
 
-  root.addEventListener('pointerdown', event => { if (!event.shift && terminal) terminal.focus(); });
+  root.addEventListener('pointerdown', event => { if (!event.shiftKey && !selecting && terminal) terminal.focus(); });
   document.querySelector('#palette').addEventListener('click', () => {
     if (!terminal) return;
     send({ type: 'key', key: ' ', code: 'Space', alt: true, ctrl: false, meta: false, shift: false, repeat: false, location: 0 });

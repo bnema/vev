@@ -17,6 +17,10 @@ The header shows a connection-state indicator and the number of connected browse
 - Use **Alt+h/j/k/l** to focus panes and **Alt+1…9** to switch tabs.
 - Click panes to focus them. Mouse reports and wheel events follow the multiplexer input path.
 - The grid fits the browser window, up to 512 columns and 256 rows.
+- On touch devices, **Select** preserves native text selection without terminal mouse capture; **Keys** enables interaction and opens the keyboard. The initial view does not force the keyboard open.
+- **Ctrl+Shift+F6** moves focus out of terminal input to the Palette button for keyboard navigation.
+
+Touch controls have 44px targets. The layout accounts for safe areas and the visual viewport while preserving pinch zoom. Real-device keyboard, composition and selection behavior still requires validation on iOS Safari and Android Chrome; desktop device emulation is not a substitute. Browser scrollback and touch-to-terminal scrolling are not implemented.
 
 Browser and window-manager shortcuts can intercept keys before vev receives them. The Palette button avoids the common Alt+Space window-menu conflict. Native clipboard shortcuts remain available; terminal copy-mode clipboard export is not implemented by the web adapter.
 
