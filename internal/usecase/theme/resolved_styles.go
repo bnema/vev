@@ -160,9 +160,25 @@ func neutralStyles(t Theme) Styles {
 	// PaletteDesc is a Phase 3 compatibility alias. It retains its legacy
 	// foreground-only bytes; rendered palette descriptions use PickerDescription.
 	styles.PaletteDesc = legacyMutedText(t)
-	// Neutral and indexed fallbacks retain their existing non-RGB hierarchy;
-	// MRU entries deliberately share the neutral recent surface.
-	return withMRUStyles(styles, Ramp{SurfaceBar: styles.SurfaceBar, SurfaceRecent: styles.SurfaceRecent})
+	styles = withMRUStyles(styles, Ramp{SurfaceBar: styles.SurfaceBar, SurfaceRecent: styles.SurfaceRecent})
+	if usable(t) {
+		styles.TabActive = EmphasisStyle(rgbSurface(t.Background, t.Foreground), t)
+		styles.TabNameActive = styles.TabActive
+		// Keep the neutral history ordered visually, even without a palette
+		// accent: recent entries fade into the bar as their rank increases.
+		for count := 1; count <= len(styles.mruStyles); count++ {
+			for index := range count {
+				amount := float64(index+1) / float64(count)
+				background := Blend(t.Foreground, status.BackgroundRGB, amount)
+				foreground, ok := primaryText(t, background)
+				if !ok {
+					foreground, _ = primaryText(Theme{Foreground: renderer.RGB{R: 255, G: 255, B: 255}}, background)
+				}
+				styles.mruStyles[count-1][index] = rgbSurface(foreground, background)
+			}
+		}
+	}
+	return styles
 }
 
 func withMRUStyles(styles Styles, ramp Ramp) Styles {
