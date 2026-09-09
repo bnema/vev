@@ -18,23 +18,27 @@
     indicator.dataset.state = text === 'Connected' ? 'connected' : text === 'Connecting…' ? 'connecting' : text.startsWith('Disconnected') ? 'disconnected' : 'error';
   }
   new MutationObserver(syncStatus).observe(status, { childList: true, characterData: true, subtree: true });
+  function setViewCount(count = null) {
+    document.querySelector('#view-count').textContent = count === null ? '—' : String(count);
+    document.querySelector('#view-description').textContent = `Connected browser terminal views: ${count === null ? 'unknown' : count}`;
+  }
   let counting = false;
   async function refreshViews() {
     if (counting) return;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      document.querySelector('#view-count').textContent = '—';
+      setViewCount();
       return;
     }
     counting = true;
+    const current = socket;
     try {
       const response = await fetch('/views', { signal: AbortSignal.timeout(3000) });
       if (!response.ok) throw new Error('unavailable');
       const { active } = await response.json();
       if (!Number.isInteger(active) || active < 0) throw new Error('invalid count');
-      document.querySelector('#view-count').textContent = String(active);
-      document.querySelector('#views').setAttribute('aria-label', `Connected browser terminal views: ${active}`);
+      if (socket === current && current.readyState === WebSocket.OPEN) setViewCount(active);
     } catch {
-      document.querySelector('#view-count').textContent = '—';
+      if (socket === current) setViewCount();
     } finally { counting = false; }
   }
   setInterval(refreshViews, 2000);
@@ -109,7 +113,10 @@
       }
     });
     socket.addEventListener('close', () => {
-      status.textContent = 'Disconnected — session shells remain in the daemon.';
+      if (status.textContent === 'Connected' || status.textContent === 'Connecting…') {
+        status.textContent = 'Disconnected — session shells remain in the daemon.';
+      }
+      setViewCount();
       reconnect.hidden = false;
     });
     socket.addEventListener('error', () => { status.textContent = 'Connection failed.'; });
@@ -121,7 +128,7 @@
     send({ type: 'key', key: ' ', code: 'Space', alt: true, ctrl: false, meta: false, shift: false, repeat: false, location: 0 });
     terminal.focus();
   });
-  reconnect.addEventListener('click', connect);
+  reconnect.addEventListener('click', start);
   new ResizeObserver(fit).observe(workspace);
   document.fonts.ready.then(fit);
   window.addEventListener('pagehide', () => { if (socket) socket.close(); });
@@ -136,9 +143,11 @@
       }
       const health = await fetch('/health', { credentials: 'same-origin' });
       if (!health.ok) throw new Error('login');
+      document.querySelector('#help').hidden = true;
       connect();
     } catch {
       status.textContent = 'Authentication required';
+      reconnect.hidden = true;
       document.querySelector('#help').hidden = false;
     }
   }

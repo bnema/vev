@@ -11,8 +11,8 @@ header svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke
 #connection[data-state="connected"] i { background: #86b98b; }
 #connection[data-state="disconnected"] i { background: #888; }
 #connection[data-state="error"] i { background: #db7777; }
-button { font: inherit; color: inherit; background: transparent; border: 1px solid #555; border-radius: 0; padding: 1px 5px; cursor: pointer; }
-button:hover { background: #303030; }
+button { font: inherit; color: #aaa; background: transparent; border: 0; border-radius: 0; padding: 2px 6px; cursor: pointer; }
+button:hover { color: #fff; }
 button:focus-visible { outline: 1px solid #ccc; outline-offset: 1px; }
 #workspace { flex: 1; min-height: 0; overflow: hidden; padding: 4px; }
 #terminal { display: inline-block; vertical-align: top; --vev-fg: #d8d8d8; --vev-bg: #101010; --vev-cursor: #ccc; --vev-selection-bg: #444; --vev-selection-fg: #fff; }
