@@ -39,7 +39,17 @@ func webToken() (string, error) {
 		return "", err
 	}
 	token := base64.RawURLEncoding.EncodeToString(data)
-	file, err := os.OpenFile(webTokenPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	file, err := os.CreateTemp(platform.StateDir(), ".web-token-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := io.WriteString(file, token)
+	if err := errors.Join(writeErr, file.Sync(), file.Close()); err != nil {
+		return "", err
+	}
+	// Publish a complete credential without replacing another launcher's token.
+	err = os.Link(file.Name(), webTokenPath())
 	if errors.Is(err, os.ErrExist) {
 		existing, err := os.OpenFile(webTokenPath(), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
@@ -66,8 +76,7 @@ func webToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, writeErr := io.WriteString(file, token)
-	return token, errors.Join(writeErr, file.Close())
+	return token, nil
 }
 
 func webReachable(ctx context.Context, token string) bool {
