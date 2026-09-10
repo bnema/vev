@@ -19,23 +19,6 @@ func pickerSnapshotForTest() protocol.PickerSnapshot {
 	}
 }
 
-func TestPickerOpenRoundTrip(t *testing.T) {
-	open := protocol.PickerOpen{InteractionID: 7}
-	payload := MarshalPickerOpen(open)
-	if payload == nil {
-		t.Fatal("MarshalPickerOpen returned nil")
-	}
-	decoded, err := UnmarshalPickerOpen(payload)
-	if err != nil || decoded != open {
-		t.Fatalf("UnmarshalPickerOpen() = %#v, %v; want %#v", decoded, err, open)
-	}
-	assertAllPrefixesFail(t, payload, UnmarshalPickerOpen)
-	assertTrailingGarbageFails(t, payload, UnmarshalPickerOpen)
-	if MarshalPickerOpen(protocol.PickerOpen{}) != nil {
-		t.Fatal("MarshalPickerOpen accepted zero interaction")
-	}
-}
-
 func TestPickerSnapshotRoundTrip(t *testing.T) {
 	snapshot := pickerSnapshotForTest()
 	payload := MarshalPickerSnapshot(snapshot)
@@ -149,10 +132,6 @@ func TestPickerMessageDirections(t *testing.T) {
 		name  string
 		frame func() Frame
 	}{
-		{name: "open", frame: func() Frame {
-			payload := MarshalPickerOpen(protocol.PickerOpen{InteractionID: 1})
-			return Frame{Type: MsgPickerOpen, Payload: payload}
-		}},
 		{name: "close-client", frame: func() Frame {
 			payload := MarshalPickerClose(protocol.PickerClose{InteractionID: 1})
 			return Frame{Type: MsgPickerCloseClient, Payload: payload}
@@ -185,7 +164,7 @@ func TestPickerMessageDirections(t *testing.T) {
 			if frame.Payload == nil {
 				t.Fatal("marshal returned nil")
 			}
-			if frame.Type != MsgPickerOpen && frame.Type != MsgPickerCloseClient && frame.Type != MsgPickerSelection {
+			if frame.Type != MsgPickerCloseClient && frame.Type != MsgPickerSelection {
 				t.Fatalf("client frame has unexpected type %d", frame.Type)
 			}
 		})

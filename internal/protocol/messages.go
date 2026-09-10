@@ -30,7 +30,6 @@ func (UIFence) clientMessage()                        {}
 func (NavigationInventoryRequest) clientMessage()     {}
 func (NavigationInventoryPublication) clientMessage() {}
 func (NavigationInventoryFailure) clientMessage()     {}
-func (PickerOpen) clientMessage()                     {}
 func (PickerClose) clientMessage()                    {}
 func (PickerSelection) clientMessage()                {}
 

@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
@@ -15,6 +17,13 @@ import (
 func pickerClientTestUnit(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Frame, *attachmentEffect) {
 	t.Helper()
 	p, releasePTY := newBlockingPTY(t)
+	return pickerClientTestUnitWithPTY(t, p, releasePTY)
+}
+
+// pickerClientTestUnitWithPTY builds the same fixture over a caller-owned
+// PTY, so tests can observe whether session input reached the child.
+func pickerClientTestUnitWithPTY(t *testing.T, p ports.PTY, releasePTY func()) (*Daemon, *session, *attachedClient, chan wire.Frame, *attachmentEffect) {
+	t.Helper()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	t.Cleanup(releasePTY)
 	d.ptys = newFactorySeq(t, newQuietPTY())
@@ -220,6 +229,79 @@ func TestPickerClientPaletteFramesOpenInteraction(t *testing.T) {
 	ac.overlays.pickerMu.Lock()
 	require.True(t, ac.overlays.pickerClientOpen)
 	require.Nil(t, ac.overlays.picker, "client mode never installs the overlay model")
+	ac.overlays.pickerMu.Unlock()
+}
+
+func TestPickerClientSelectionRequiresExactRevision(t *testing.T) {
+	d, sess, ac, sends, effect := pickerClientTestUnit(t)
+
+	d.openPickerClientForAttachment(ac, effect, 11)
+	first := awaitPickerSnapshot(t, sends)
+	// A refresh publishes a newer revision: the client may only commit the
+	// model it is displaying, so an older revision must fail even though it
+	// is not newer than the daemon's current one.
+	d.refreshPickerClientSnapshot(ac)
+	second := awaitPickerSnapshot(t, sends)
+	require.Greater(t, second.Revision, first.Revision)
+
+	capability := pickerClientCapability(t, ac, sess)
+	key := second.Rows[0].Key
+	for _, revision := range []uint64{second.Revision - 1, second.Revision + 1} {
+		require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerSelection{
+			CauseActionID: 9, InteractionID: second.InteractionID, Revision: revision, Key: key,
+		}))
+		failure := awaitPickerFailure(t, sends)
+		require.Equal(t, protocol.PickerStaleRevision, failure.Code, "revision %d must be rejected", revision)
+		ac.overlays.pickerMu.Lock()
+		require.True(t, ac.overlays.pickerClientOpen, "a rejected revision must not close the interaction")
+		ac.overlays.pickerMu.Unlock()
+	}
+}
+
+func TestPickerClientInteractionDropsRawInput(t *testing.T) {
+	writes := make(chan []byte, 8)
+	p, releasePTY := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends, effect := pickerClientTestUnitWithPTY(t, p, releasePTY)
+	capability := pickerClientCapability(t, ac, sess)
+
+	// A normal attachment forwards keys to the session.
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 1, ActionID: 1, Data: []byte("x")}))
+	require.Equal(t, []byte("x"), awaitTestValue(t, writes, "session input never reached the pty"))
+
+	d.openPickerClientForAttachment(ac, effect, 11)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	// While the client picker is open it owns user input: keys and mouse
+	// reports must not reach the session, and the interaction stays open.
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 2, ActionID: 2, Data: []byte("hidden")}))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 3, ActionID: 3, Data: []byte("\x1b[<0;5;5M")}))
+	select {
+	case frame := <-writes:
+		t.Fatalf("picker-owned input reached the pty: %q", frame)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Closing the interaction restores normal routing.
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision}))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 4, ActionID: 4, Data: []byte("visible")}))
+	require.Equal(t, []byte("visible"), awaitTestValue(t, writes, "session input did not resume after the close"))
+}
+
+func TestPickerClientSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
+	d, _, ac, sends, effect := pickerClientTestUnit(t)
+
+	d.openPickerClientForAttachment(ac, effect, 11)
+	first := awaitPickerSnapshot(t, sends)
+
+	// The catalogue notification path must reach the client picker even
+	// though it installs no overlay model: refreshRemoteDirectoryViews is
+	// the entry the directory subscription calls.
+	d.refreshRemoteDirectoryViews()
+	second := awaitPickerSnapshot(t, sends)
+	require.Equal(t, first.InteractionID, second.InteractionID)
+	require.Greater(t, second.Revision, first.Revision)
+	ac.overlays.pickerMu.Lock()
+	require.Nil(t, ac.overlays.picker, "a client-owned picker never installs the overlay model")
 	ac.overlays.pickerMu.Unlock()
 }
 

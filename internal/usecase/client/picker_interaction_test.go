@@ -23,7 +23,6 @@ func pickerSnapshotFixture() protocol.PickerSnapshot {
 func TestPickerInteractionAdmitsLatestRevision(t *testing.T) {
 	var rel *pickerInteraction
 	require.False(t, rel.admitSnapshot(pickerSnapshotFixture()))
-	require.False(t, rel.commitKey(3, "aa/work"))
 
 	rel = &pickerInteraction{}
 	snapshot := pickerSnapshotFixture()
@@ -31,9 +30,7 @@ func TestPickerInteractionAdmitsLatestRevision(t *testing.T) {
 
 	rel.setOpen(true, snapshot.InteractionID)
 	require.True(t, rel.admitSnapshot(snapshot))
-	require.True(t, rel.commitKey(snapshot.Revision, "bb/perso"))
-	require.False(t, rel.commitKey(snapshot.Revision, "ff/ghost"), "unknown key must not commit")
-	require.False(t, rel.commitKey(snapshot.Revision+1, "aa/work"), "future revision must not commit")
+	require.Equal(t, snapshot.Revision, rel.revision)
 
 	older := snapshot
 	older.Revision = snapshot.Revision - 1
@@ -43,9 +40,31 @@ func TestPickerInteractionAdmitsLatestRevision(t *testing.T) {
 	foreign.InteractionID = snapshot.InteractionID + 1
 	require.False(t, rel.admitSnapshot(foreign), "foreign interaction must drop")
 
-	rel.setOpen(false, 0)
+	rel.setOpen(false, snapshot.InteractionID)
 	require.False(t, rel.admitSnapshot(snapshot), "closed interaction drops late snapshots")
-	require.False(t, rel.commitKey(snapshot.Revision, "aa/work"))
+}
+
+func TestPickerInteractionRetirementIsPermanent(t *testing.T) {
+	snapshot := pickerSnapshotFixture()
+	var rel pickerInteraction
+	rel.setOpen(true, snapshot.InteractionID)
+	require.True(t, rel.admitSnapshot(snapshot))
+
+	// Closing retires the namespace: an in-flight snapshot for the same
+	// interaction can never reopen it, with or without a reopen flag.
+	rel.setOpen(false, snapshot.InteractionID)
+	require.Equal(t, snapshot.InteractionID, rel.retired)
+	require.False(t, rel.admitSnapshot(snapshot))
+	rel.setOpen(true, snapshot.InteractionID)
+	require.False(t, rel.admitSnapshot(snapshot), "a retired interaction is never reopened")
+
+	// A newer interaction is a new namespace and admits normally.
+	next := snapshot
+	next.InteractionID = snapshot.InteractionID + 1
+	next.Revision = 1
+	rel.setOpen(true, next.InteractionID)
+	require.True(t, rel.admitSnapshot(next))
+	require.False(t, rel.admitSnapshot(snapshot), "the retired namespace stays closed")
 }
 
 func TestPickerLoopCursorSearchCommit(t *testing.T) {

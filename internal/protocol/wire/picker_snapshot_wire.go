@@ -48,33 +48,6 @@ func unmarshalPickerRows(r *payloadReader) ([]protocol.PickerRow, error) {
 	return rows, nil
 }
 
-// MarshalPickerOpen encodes a client-generated interaction open.
-func MarshalPickerOpen(open protocol.PickerOpen) []byte {
-	if protocol.ValidatePickerOpen(open) != nil {
-		return nil
-	}
-	w := payloadWriter{}
-	w.putUint64(open.InteractionID)
-	return w.b
-}
-
-// UnmarshalPickerOpen decodes a strict interaction open.
-func UnmarshalPickerOpen(data []byte) (protocol.PickerOpen, error) {
-	r := payloadReader{b: data}
-	var open protocol.PickerOpen
-	var err error
-	if open.InteractionID, err = r.getUint64(); err != nil {
-		return protocol.PickerOpen{}, err
-	}
-	if err := r.done(); err != nil {
-		return protocol.PickerOpen{}, err
-	}
-	if err := protocol.ValidatePickerOpen(open); err != nil {
-		return protocol.PickerOpen{}, err
-	}
-	return open, nil
-}
-
 // MarshalPickerSnapshot encodes a full model replacement. Row order is
 // preserved verbatim.
 func MarshalPickerSnapshot(snapshot protocol.PickerSnapshot) []byte {

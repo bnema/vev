@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -43,10 +44,18 @@ type pickerE2EHarness struct {
 	ui        *UI
 	terminal  *uiterm.Terminal
 	input     *terminalInputPump
+	clock     *attachPaletteClock
 }
 
 // startPickerE2E boots the attach attempt and pushes the first full frame.
 func startPickerE2E(t *testing.T) *pickerE2EHarness {
+	return startPickerE2EWithInput(t, nil)
+}
+
+// startPickerE2EWithInput boots the same harness over a caller-owned
+// terminal reader, so tests can drive physical input instead of the
+// ui-driver automation channel.
+func startPickerE2EWithInput(t *testing.T, reader io.Reader) *pickerE2EHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -54,7 +63,13 @@ func startPickerE2E(t *testing.T) *pickerE2EHarness {
 	transport := newAttachPaletteTransport()
 	ms := &milestones{}
 	state := &terminalThemeState{}
-	input := newTerminalInputPump(nil)
+	input := newTerminalInputPump(reader)
+	if reader != nil {
+		// The harness owns this reader: start its loop so physical bytes
+		// reach the attach attempt. The nil case keeps the automation-only
+		// path used by the ui-driver scenarios.
+		input.start()
+	}
 	t.Cleanup(input.stop)
 	uiTerminal, _ := newPickerTestTerminal(t, ctx)
 	ui := NewUI(uiTerminal, systemClock{})
@@ -102,10 +117,66 @@ func startPickerE2E(t *testing.T) *pickerE2EHarness {
 	require.NoError(t, err)
 	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: output0}
 
-	return &pickerE2EHarness{attempt: attempt, transport: transport, ui: ui, terminal: uiTerminal, input: input}
+	return &pickerE2EHarness{attempt: attempt, transport: transport, ui: ui, terminal: uiTerminal, input: input, clock: clock}
 }
 
-// pickerSnapshot is the two-row snapshot both scenarios open the picker with.
+// fireDecodeDeadline fires the pump timer armed for one delay, skipping
+// unrelated timers the attempt owns.
+func (h *pickerE2EHarness) fireDecodeDeadline(t *testing.T, delay time.Duration) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case timer := <-h.clock.timers:
+			if timer.duration == delay {
+				timer.fire()
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no %s timer was armed", delay)
+			return
+		}
+	}
+}
+
+// awaitAfterAmbiguityDeadlines fires the 20 ms ambiguity timers the pump
+// arms until the wanted frame crosses the wire. The palette-marker scanner
+// and the picker decoder share that deadline, so an escape withheld as a
+// possible marker is flushed into the picker decoder before its own window
+// starts.
+func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport *attachPaletteTransport, frameType wire.MsgType) {
+	t.Helper()
+	hasFrame := func() bool {
+		transport.mu.Lock()
+		defer transport.mu.Unlock()
+		for _, frame := range transport.frames {
+			if frame.Type == frameType {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case timer := <-h.clock.timers:
+			if timer.duration == pickerEscapeDeadline {
+				timer.fire()
+			}
+		default:
+		}
+		if hasFrame() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("frame %d never crossed the wire", frameType)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// pickerSnapshot returns the two-row snapshot both scenarios open the picker with.
 func pickerSnapshot() protocol.PickerSnapshot {
 	return protocol.PickerSnapshot{
 		InteractionID: 7, Revision: 1, Title: " Sessions ",

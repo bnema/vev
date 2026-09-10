@@ -37,7 +37,6 @@ const (
 	MsgNavigationInventoryRequest     MsgType = 42
 	MsgNavigationInventoryPublication MsgType = 45
 	MsgNavigationInventoryFailure     MsgType = 47
-	MsgPickerOpen                     MsgType = 49
 	MsgPickerCloseClient              MsgType = 51
 	MsgPickerSelection                MsgType = 53
 

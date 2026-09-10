@@ -19,13 +19,6 @@ const (
 	PickerNavigationFailed
 )
 
-// PickerOpen asks the serving daemon for a client-picker interaction on the
-// current attachment. The ID is client-generated and nonzero, mirroring
-// inventory poll query identities.
-type PickerOpen struct {
-	InteractionID uint64
-}
-
 // PickerRow is one opaque selectable row. Key is daemon-assigned and
 // resolves to a navigation target daemon-side only; display strings carry
 // presentation facts, never endpoints, credentials, environment, CWD, or
@@ -101,14 +94,6 @@ func validPickerDisplay(value string) bool {
 		return false
 	}
 	return validInventoryDisplay(value)
-}
-
-// ValidatePickerOpen requires a nonzero client-generated interaction ID.
-func ValidatePickerOpen(open PickerOpen) error {
-	if open.InteractionID == 0 {
-		return ErrInvalidNavigation
-	}
-	return nil
 }
 
 // ValidatePickerSnapshot enforces nonzero interaction/revision, bounded

@@ -16,19 +16,19 @@ import (
 // ordered control channel, never picker bytes toward the PTY.
 
 // pickerInteraction tracks one client-picker namespace: the admitted
-// interaction ID, the latest displayed revision, and the key set that
-// revision published. Late snapshots for closed interactions drop;
-// stale revisions never step the display backward.
+// interaction ID, its latest admitted revision, and the newest interaction
+// this attachment retired. A retired interaction is never resurrected by a
+// late snapshot, and stale revisions never step the display backward.
 type pickerInteraction struct {
 	open        bool
 	interaction uint64
 	revision    uint64
-	keys        map[string]struct{}
-	displayed   uint64
+	retired     uint64
 }
 
-// setOpen starts or stops the interaction namespace. Opening keeps a fresh
-// namespace: admitted keys never cross interactions.
+// setOpen starts or stops the interaction namespace. Closing retires the
+// namespace for good: a snapshot for it can only be an in-flight message
+// from before the close.
 func (p *pickerInteraction) setOpen(open bool, interaction uint64) {
 	if p == nil {
 		return
@@ -37,17 +37,16 @@ func (p *pickerInteraction) setOpen(open bool, interaction uint64) {
 	if open && interaction != p.interaction {
 		p.interaction = interaction
 		p.revision = 0
-		p.displayed = 0
-		p.keys = make(map[string]struct{})
 	}
-	if !open {
-		p.keys = nil
+	if !open && interaction > p.retired {
+		p.retired = interaction
 	}
 }
 
 // admitSnapshot validates one snapshot against the open interaction and
-// reports whether it carries a newer revision worth displaying. Older or
-// duplicate revisions discard; foreign interactions drop silently.
+// reports whether it carries a newer revision worth displaying. Retired
+// interactions, foreign interactions, and older or duplicate revisions
+// discard.
 func (p *pickerInteraction) admitSnapshot(snapshot protocol.PickerSnapshot) bool {
 	if p == nil {
 		return false
@@ -55,42 +54,25 @@ func (p *pickerInteraction) admitSnapshot(snapshot protocol.PickerSnapshot) bool
 	if protocol.ValidatePickerSnapshot(snapshot) != nil {
 		return false
 	}
+	if snapshot.InteractionID <= p.retired {
+		return false
+	}
 	if !p.open || snapshot.InteractionID != p.interaction {
 		return false
 	}
-	if snapshot.Revision <= p.displayed {
-		return false
-	}
-	if snapshot.Revision < p.revision {
+	if snapshot.Revision <= p.revision {
 		return false
 	}
 	p.revision = snapshot.Revision
-	p.displayed = snapshot.Revision
-	keys := make(map[string]struct{}, len(snapshot.Rows))
-	for _, row := range snapshot.Rows {
-		keys[row.Key] = struct{}{}
-	}
-	p.keys = keys
 	return true
-}
-
-// commitKey checks one commit target against the displayed revision: the
-// key must be published at exactly the revision the user acted on.
-func (p *pickerInteraction) commitKey(revision uint64, key string) bool {
-	if p == nil || !p.open {
-		return false
-	}
-	if revision == 0 || revision != p.displayed {
-		return false
-	}
-	_, ok := p.keys[key]
-	return ok
 }
 
 // pickerLoop owns one admitted *picker.Model plus the snapshot revision it
 // was built from. Cursor and search are local-only presentation; commit
-// and cancel cross the wire as typed messages. Sort stays daemon-owned in
-// the pilot: the client never sees recency metadata, so `s` is a
+// and cancel cross the wire as typed messages. The daemon revalidates the
+// committed revision and key, so the client never keeps a second copy of
+// the row set: it commits from the model it is displaying. Sort stays
+// daemon-owned: the client never sees recency metadata, so `s` is a
 // documented no-op here and a refresh arrives as a new snapshot revision.
 type pickerLoop struct {
 	model       *picker.Model
@@ -348,18 +330,10 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close
 			} else {
 				loop.enterSearch()
 			}
-		case "s":
-			if active {
-				loop.insert('s')
-			}
-			// Normal-mode s is a documented no-op: sort stays
-			// daemon-owned in the pilot (see pickerLoop).
-		case "x":
-			if active {
-				loop.insert('x')
-			}
-			// Normal-mode x is a documented no-op: no key path to
-			// killPickerTarget exists in client-picker mode.
+		// Normal-mode "s" (sort) and "x" (kill) keep no client branch:
+		// they fall through to the default case, which acts only while
+		// search is active. Sort stays daemon-owned and no client key
+		// path kills a target.
 		case "q":
 			if active {
 				loop.insert('q')
@@ -382,80 +356,63 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close
 	return commit, false
 }
 
-// pickerConsumeRequest is one admitted automation op the pump offers to
-// the open loop before PTY delivery: the record carries the action ID
-// (for CauseActionID attribution), its generation, and the decoded
-// keys/text. Physical input leaves keys/text empty; the loop then falls
-// back to decodePickerBatch on the raw bytes.
-type pickerConsumeRequest struct {
-	record terminalReadResult
-}
-
-// pickerConsumeOutcome reports what the loop did with one admitted op:
-// repainted locally (complete the action once flushed), queued a typed
-// commit/cancel for controlCh (stay pending until the daemon resolves
-// it), or ignored (not for the picker after all). actionID echoes the
-// admitted record so the attach loop completes the right action.
+// pickerConsumeOutcome is one decoded operation reported by the stdin
+// pump to the attach loop. The pump decodes and identifies; the attach
+// loop is the only writer of the picker model, so the outcome carries the
+// tokens and their interaction identity, never a mutation or a message.
+// actionID echoes the admitted record so the loop completes the right
+// ui-driver action.
 type pickerConsumeOutcome struct {
-	consumed bool
-	repaint  bool
-	commit   bool
-	close    bool
-	actionID uint64
-	// send carries the typed commit/cancel message for controlCh.
-	// The attach loop flushes it in order on outcome drain.
-	send protocol.ClientMessage
+	consumed    bool
+	actionID    uint64
+	generation  uint64
+	interaction uint64
+	keys        []string
+	text        string
 }
 
-// decodePickerBatch inverts the ui-driver key/text encoding back into the
-// picker op tokens: single bytes map to their key names (Enter, Escape,
-// Backspace, arrows in either CSI or SS3 form, printable runes), other
-// text decodes as search runes. The second result is false when the bytes
-// are not a complete single picker op batch (multi-op or unrecognized),
-// leaving them for the ordinary PTY pipeline.
-func decodePickerBatch(data []byte, text string) ([]string, string, bool) {
-	if text != "" {
-		return nil, text, true
-	}
-	switch string(data) {
-	case "\r", "\n":
-		return []string{"Enter"}, "", true
-	case "\x1b":
-		return []string{"Escape"}, "", true
-	case "\x7f", "\x08":
-		return []string{"Backspace"}, "", true
-	case "\x1b[A", "\x1bOA":
-		return []string{"Up"}, "", true
-	case "\x1b[B", "\x1bOB":
-		return []string{"Down"}, "", true
-	case "/":
-		return []string{"/"}, "", true
-	case "q", "s", "x", "j", "k":
-		return []string{string(data)}, "", true
-	case "\x03":
-		return []string{"Ctrl+C"}, "", true
-	}
-	if len(data) == 1 && data[0] >= 0x20 && data[0] <= 0x7e {
-		return []string{string(data)}, "", true
-	}
-	return nil, "", false
+// acceptOutcome reports whether this operation still belongs to the
+// interaction the attachment currently presents. Retired generations and
+// interactions drop.
+func (o pickerConsumeOutcome) acceptOutcome(interaction, generation uint64) bool {
+	return o.consumed && o.interaction != 0 && o.interaction == interaction && o.generation == generation
 }
 
-// consumePickerBatch routes one admitted automation batch to the open
-// loop. The request carries the admitted record: keys/text when the op
-// came from ui-driver, raw bytes only for physical input (decoded via
-// decodePickerBatch). Cursor/search steps set repaint; commits and
-// cancels set commit/close with the typed message in send. It returns
-// consumed=false when no loop is open or the op is not for the picker,
-// leaving the batch for the ordinary PTY pipeline. The hook snapshot
-// comes from pickerHook, so install/clear on the attach loop never race
-// pump batches; the hook body touches only the loop model captured at
-// install plus values copied from the request, never attach-loop-owned
-// state like pickerLoop.
-func (u *UI) consumePickerBatch(request pickerConsumeRequest) pickerConsumeOutcome {
-	hook, _ := u.pickerHook()
-	if hook == nil {
-		return pickerConsumeOutcome{}
+// applyPickerBatch applies one decoded batch to the open loop, enforcing
+// the anti-paste rules: a batch is acted on as a command only when it is a
+// single key token. While search is active, printable runes insert and a
+// single control token still applies, but a control token riding along
+// with other bytes is dropped so a paste cannot become a command.
+func applyPickerBatch(loop *pickerLoop, keys []string, text string) (commit, close bool) {
+	if loop == nil || loop.model == nil {
+		return false, false
 	}
-	return hook(request)
+	if !loop.model.SearchActive() {
+		if len(keys) != 1 || text != "" {
+			return false, false
+		}
+		return pickerDriverOp(loop, keys, "")
+	}
+	var controls []string
+	for _, key := range keys {
+		if isPickerPrintable(key) {
+			loop.insert(rune(key[0]))
+			continue
+		}
+		controls = append(controls, key)
+	}
+	for _, r := range text {
+		loop.insert(r)
+	}
+	if len(controls) != 1 || len(keys) != 1 {
+		// A control token sharing a batch with other input is paste noise.
+		return false, false
+	}
+	return pickerDriverOp(loop, controls, "")
+}
+
+// isPickerPrintable reports whether one key token is a single printable
+// ASCII rune, which search inserts as text rather than acting on.
+func isPickerPrintable(key string) bool {
+	return len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e
 }

@@ -52,11 +52,11 @@ const (
 	pickerLeaseRelease
 )
 
-// pickerLease is the client's presentation identity for one
-// interaction: attachment UI generation, interaction ID, displayed
-// revision, and the acquisition barrier the snapshot was built against.
-// A generation change (reconnect) aborts the lease instead of carrying it
-// into a new attachment.
+// pickerLease is the client's presentation identity for one interaction:
+// attachment UI generation, interaction ID, displayed revision, and the
+// acquisition barrier the snapshot was built against. A generation change
+// (reconnect) aborts the lease instead of carrying it into a new
+// attachment.
 type pickerLease struct {
 	state        pickerLeaseState
 	generation   uint64
@@ -73,9 +73,13 @@ type pickerLease struct {
 	// consumed by the client) instead of through the daemon handoff.
 	releaseAction uint64
 	releaseLocal  bool
-	// inputHeld reports whether the lease paused foreground input and
-	// must resume it when the release completes.
-	inputHeld bool
+	// releaseEpoch/releaseState name the applied output boundary that was
+	// current when the close arrived. Only a full paint accepted after
+	// that boundary releases the terminal: a Full already in flight from
+	// before the close is a suppressed artifact, not the authoritative
+	// restore the release waits for.
+	releaseEpoch uint64
+	releaseState uint64
 }
 
 // active reports whether the lease owns picker presentation.
@@ -83,11 +87,10 @@ func (l *pickerLease) active() bool {
 	return l != nil && l.state != pickerLeaseClosed
 }
 
-// ownsTerminal reports whether the picker frame, not daemon output, owns
-// the terminal: the daemon frame must be applied and acknowledged but
-// never written.
-func (l *pickerLease) ownsTerminal() bool {
-	return l != nil && (l.state == pickerLeaseOwned || l.state == pickerLeaseReleasing)
+// releasing reports whether the interaction is retired and waiting for its
+// authoritative repaint.
+func (l *pickerLease) releasing() bool {
+	return l != nil && l.state == pickerLeaseReleasing
 }
 
 // reset returns the lease to closed presentation.
@@ -97,41 +100,44 @@ func (l *pickerLease) reset() {
 
 // abort ends the lease without a release paint (disconnect, generation
 // change, or a superseding interaction). It reports the pending local
-// action that can no longer complete and whether input was held.
-func (l *pickerLease) abort() (actionID uint64, local bool, held bool) {
+// action that can no longer complete.
+func (l *pickerLease) abort() (actionID uint64, local bool) {
 	if l == nil {
-		return 0, false, false
+		return 0, false
 	}
-	actionID, local, held = l.releaseAction, l.releaseLocal, l.inputHeld
+	actionID, local = l.releaseAction, l.releaseLocal
 	if actionID != 0 && !local {
 		// A handoff-bound action stays unresolved: the daemon owns its
 		// outcome and the caller reports the unknown outcome.
 		actionID, local = 0, false
 	}
 	l.reset()
-	return actionID, local, held
+	return actionID, local
 }
 
 // admitSnapshot admits one validated snapshot against the client's applied
 // output state. It reports ready=true when the barrier is already applied
-// and the caller must display the picker frame now. replaced reports that a
-// previous interaction ended, so its pending release can no longer complete.
+// and the caller must display the picker frame now. superseded is a copy of
+// the previous lease when a new interaction replaces it, so the caller can
+// resolve the old pending action without touching the newly installed
+// lease.
 //
 // A snapshot for the current interaction only replaces the pending model
 // with a newer revision, and never after the release started: a superseding
 // interaction is a new namespace whose close/full pair cannot release the
 // previous one.
-func (l *pickerLease) admitSnapshot(snapshot protocol.PickerSnapshot, loop *pickerLoop, applied outputApplyState, generation uint64) (ready, replaced bool) {
+func (l *pickerLease) admitSnapshot(snapshot protocol.PickerSnapshot, loop *pickerLoop, applied outputApplyState, generation uint64) (ready bool, superseded *pickerLease) {
 	if l == nil || snapshot.InteractionID == 0 {
-		return false, false
+		return false, nil
 	}
 	if l.active() {
 		if l.interaction == snapshot.InteractionID {
 			if l.state == pickerLeaseReleasing || snapshot.Revision <= l.revision {
-				return false, false
+				return false, nil
 			}
 		} else {
-			replaced = true
+			previous := *l
+			superseded = &previous
 		}
 	}
 	*l = pickerLease{
@@ -143,9 +149,9 @@ func (l *pickerLease) admitSnapshot(snapshot protocol.PickerSnapshot, loop *pick
 		// The barrier is already displayed: the client owns the terminal
 		// from this moment, before any later daemon frame can be written.
 		l.state = pickerLeaseOwned
-		return true, replaced
+		return true, superseded
 	}
-	return false, replaced
+	return false, superseded
 }
 
 // observe reports the presentation decision for one accepted daemon frame.
@@ -165,9 +171,11 @@ func (l *pickerLease) observe(output protocol.Output, applied outputApplyState) 
 	case pickerLeaseOwned:
 		return pickerLeaseSuppress
 	case pickerLeaseReleasing:
-		// Only an authoritative full paint releases the terminal: an
-		// incremental delta may itself be a suppressed artifact.
-		if output.Full {
+		// Only an authoritative full paint accepted after the close
+		// releases the terminal: an incremental delta, or a Full already
+		// in flight when the close arrived, may itself be a suppressed
+		// artifact.
+		if output.Full && stateAfter(applied, l.releaseEpoch, l.releaseState) {
 			return pickerLeaseRelease
 		}
 		return pickerLeaseSuppress
@@ -175,31 +183,49 @@ func (l *pickerLease) observe(output protocol.Output, applied outputApplyState) 
 	return pickerLeaseIdle
 }
 
+// stateAfter reports whether the applied output state is strictly newer
+// than the named (epoch, state) boundary. An uninitialized state has
+// applied only the implicit empty stream: epoch 1, state 0.
+func stateAfter(applied outputApplyState, epoch, state uint64) bool {
+	appliedEpoch, appliedState := applied.epoch, applied.state
+	if !applied.initialized {
+		appliedEpoch, appliedState = 1, 0
+	}
+	if appliedEpoch != epoch {
+		return appliedEpoch > epoch
+	}
+	return appliedState > state
+}
+
 // beginRelease retires the interaction named by one PickerClose. It reports
 // false for a duplicate or foreign close, which must not restart or extend
 // the release. The pending action completes after the release paint: local
 // for a cancel the client consumed, through the daemon handoff otherwise.
-func (l *pickerLease) beginRelease(interaction, actionID uint64, local, holdInput bool) bool {
+// applied names the output boundary that was current when the close
+// arrived, so the release only accepts a full paint newer than it.
+func (l *pickerLease) beginRelease(interaction, actionID uint64, local bool, applied outputApplyState) bool {
 	if l == nil || !l.active() || l.state == pickerLeaseReleasing || l.interaction != interaction {
 		return false
 	}
 	l.state = pickerLeaseReleasing
 	l.pending = nil
 	l.releaseAction, l.releaseLocal = actionID, local
-	l.inputHeld = holdInput
+	l.releaseEpoch, l.releaseState = applied.epoch, applied.state
+	if !applied.initialized {
+		l.releaseEpoch, l.releaseState = 1, 0
+	}
 	return true
 }
 
 // finishRelease clears the lease after the release paint was displayed and
-// published. It reports the pending local action to complete and whether
-// foreground input must resume.
-func (l *pickerLease) finishRelease() (actionID uint64, local bool, held bool) {
+// published. It reports the pending local action to complete.
+func (l *pickerLease) finishRelease() (actionID uint64, local bool) {
 	if l == nil {
-		return 0, false, false
+		return 0, false
 	}
-	actionID, local, held = l.releaseAction, l.releaseLocal, l.inputHeld
+	actionID, local = l.releaseAction, l.releaseLocal
 	l.reset()
-	return actionID, local, held
+	return actionID, local
 }
 
 // barrierReached reports whether the applied output state covers the

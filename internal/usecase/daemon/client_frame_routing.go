@@ -206,14 +206,6 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 			d.refreshPalette(effect.ac)
 			d.invalidateRender(effect.sess, effect.ac, true, "client_frame_routing.go:inventory-publication")
 		}
-	case protocol.PickerOpen:
-		if effect.ac == nil || effect.ac.overlays == nil {
-			break
-		}
-		// A failed open fails closed: no interaction survives without its
-		// client-side acquisition barrier, and the opener's UI fence
-		// expires into an unavailable receipt instead of a false success.
-		_ = d.openPickerClientForAttachment(effect.ac, effect, message.InteractionID)
 	case protocol.PickerClose:
 		if effect.ac == nil || effect.ac.overlays == nil {
 			break

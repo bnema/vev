@@ -11,62 +11,21 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
 )
 
 const uiActionHistory = 64
 
 // UI owns attachment-local action and waiter bookkeeping. It never holds its
 // mutex across terminal access, transport I/O, or predicate evaluation.
-// setPickerConsumer installs the pump-side consume hook and its outcome
-// queue for one open interaction. The attach loop calls it when the loop
-// opens and clears it (nil hook) when the loop closes. The pump snapshots
-// the hook under the UI mutex and invokes it without holding any lock, so
-// install/clear on the attach loop never race pump batches. Hook bodies
-// must not touch attach-loop-owned state (pickerLoop, revision): they
-// report outcomes and the attach loop applies them on drain.
-func (u *UI) setPickerConsumer(hook func(request pickerConsumeRequest) pickerConsumeOutcome, queue *pickerOutcomeQueue) {
-	if u == nil {
-		return
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.pickerConsumer = hook
-	u.pickerOutcomes = queue
-}
 
-// pickerHook snapshots the installed consume hook and outcome queue.
-// The pump calls the snapshot without holding the UI mutex.
-func (u *UI) pickerHook() (func(request pickerConsumeRequest) pickerConsumeOutcome, *pickerOutcomeQueue) {
-	if u == nil {
-		return nil, nil
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.pickerConsumer, u.pickerOutcomes
-}
-
-// clearPickerConsumer retires the pump-side consume hook while keeping the
-// outcome queue: the attach loop still drains outcomes already offered by
-// the pump. It is nil-safe for headless attachments.
-func (u *UI) clearPickerConsumer() {
-	if u == nil {
-		return
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.pickerConsumer = nil
-}
-
-// pickerOutcomeQueue carries consumed-op outcomes from the stdin-pump
-// goroutine to the attach loop. The pump never touches the terminal or
-// controlCh: it only reports what the loop did, and the attach loop
-// repaints through its sole terminal writer and flushes typed sends in
-// controlCh order.
+// pickerOutcomeQueue carries decoded picker operations from the stdin-pump
+// goroutine to the attach loop. The pump never touches the terminal, the
+// control channel, or the picker model: it only reports what the user
+// typed, and the attach loop applies it through its sole terminal writer
+// and flushes typed sends in controlCh order.
 type pickerOutcomeQueue struct {
 	mu       sync.Mutex
 	outcomes []pickerConsumeOutcome
-	sends    []protocol.ClientMessage
 	signal   chan struct{}
 }
 
@@ -74,15 +33,14 @@ func newPickerOutcomeQueue() *pickerOutcomeQueue {
 	return &pickerOutcomeQueue{signal: make(chan struct{}, 1)}
 }
 
-// offer queues one consumed outcome plus its typed sends. Dropped only
-// when the queue is nil; the attach loop drains it before new frames.
-func (q *pickerOutcomeQueue) offer(outcome pickerConsumeOutcome, sends ...protocol.ClientMessage) {
+// offer queues one decoded operation. Dropped only when the queue is nil;
+// the attach loop drains it before new frames.
+func (q *pickerOutcomeQueue) offer(outcome pickerConsumeOutcome) {
 	if q == nil {
 		return
 	}
 	q.mu.Lock()
 	q.outcomes = append(q.outcomes, outcome)
-	q.sends = append(q.sends, sends...)
 	q.mu.Unlock()
 	select {
 	case q.signal <- struct{}{}:
@@ -90,18 +48,18 @@ func (q *pickerOutcomeQueue) offer(outcome pickerConsumeOutcome, sends ...protoc
 	}
 }
 
-// take drains queued outcomes and sends in order. The caller holds no
-// locks; sends keep controlCh ordering because the attach loop flushes
-// them before processing new frames.
-func (q *pickerOutcomeQueue) take() ([]pickerConsumeOutcome, []protocol.ClientMessage) {
+// take drains queued operations in order. The caller holds no locks;
+// sends keep controlCh ordering because the attach loop flushes them
+// before processing new frames.
+func (q *pickerOutcomeQueue) take() []pickerConsumeOutcome {
 	if q == nil {
-		return nil, nil
+		return nil
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	outcomes, sends := q.outcomes, q.sends
-	q.outcomes, q.sends = nil, nil
-	return outcomes, sends
+	outcomes := q.outcomes
+	q.outcomes = nil
+	return outcomes
 }
 
 type UI struct {
@@ -124,14 +82,6 @@ type UI struct {
 	dispatched      map[uint64]bool
 	completion      map[uint64]chan struct{}
 	handoff         *uiActionHandoff
-	// pickerConsumer routes admitted pump batches to the open loop.
-	// The attach loop installs it alongside the loop lifetime; the
-	// pump calls it after accept, never holding UI or pump locks
-	// across the call. Nil when no interaction is open.
-	pickerConsumer func(request pickerConsumeRequest) pickerConsumeOutcome
-	// pickerOutcomes carries consumed-op outcomes to the attach loop
-	// for repaint and typed sends. Set once per attempt with the loop.
-	pickerOutcomes *pickerOutcomeQueue
 }
 
 type uiActionHandoff struct {

@@ -176,6 +176,20 @@ func (rt *overlayRuntime) pickerActive() bool {
 	return rt.picker != nil
 }
 
+// pickerClientActive reports whether a client-owned picker interaction is
+// open on this attachment. Such an interaction owns the user input: the
+// daemon must not route raw key or mouse events to the session while it is
+// open. Its typed PickerSelection/PickerClose messages are the only effect
+// it may have, and they arrive on the control path, not here.
+func (rt *overlayRuntime) pickerClientActive() bool {
+	if rt == nil {
+		return false
+	}
+	rt.pickerMu.Lock()
+	defer rt.pickerMu.Unlock()
+	return rt.pickerClientOpen
+}
+
 func (rt *overlayRuntime) noticesActive() bool {
 	if rt == nil {
 		return false

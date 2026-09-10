@@ -78,7 +78,11 @@ func (d *Daemon) refreshRemoteDirectoryViewsFor(ac *attachedClient) {
 	}
 	pickerOpen := ac.overlays.pickerActive()
 	paletteOpen := ac.overlays.paletteActive()
-	if !pickerOpen && !paletteOpen {
+	// A client-owned picker has no overlay model, so it must keep the
+	// refresher alive on its own: the old guard returned before its
+	// snapshot could be republished.
+	clientPickerOpen := ac.overlays.pickerClientActive()
+	if !pickerOpen && !paletteOpen && !clientPickerOpen {
 		return
 	}
 	if pickerOpen {

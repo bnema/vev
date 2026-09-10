@@ -238,8 +238,6 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalNavigationInventoryPublication(frame.Payload)
 	case wire.MsgNavigationInventoryFailure:
 		return wire.UnmarshalNavigationInventoryFailure(frame.Payload)
-	case wire.MsgPickerOpen:
-		return wire.UnmarshalPickerOpen(frame.Payload)
 	case wire.MsgPickerCloseClient:
 		return wire.UnmarshalPickerClose(frame.Payload)
 	case wire.MsgPickerSelection:

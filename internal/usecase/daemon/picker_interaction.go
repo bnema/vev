@@ -331,7 +331,7 @@ func (d *Daemon) resolvePickerClientSelection(effect *attachmentEffect, selectio
 		d.sendPickerClientFailure(effect, selection, protocol.PickerStaleRevision)
 		return
 	}
-	if selection.Revision > revision {
+	if selection.Revision != revision {
 		d.sendPickerClientFailure(effect, selection, protocol.PickerStaleRevision)
 		return
 	}

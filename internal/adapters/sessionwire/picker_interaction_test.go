@@ -26,8 +26,6 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 		message protocol.ClientMessage
 		typeID  wire.MsgType
 	}{
-		{name: "open", message: protocol.PickerOpen{InteractionID: 7}, typeID: wire.MsgPickerOpen},
-		{name: "open pointer", message: &protocol.PickerOpen{InteractionID: 7}, typeID: wire.MsgPickerOpen},
 		{name: "close", message: protocol.PickerClose{InteractionID: 7, Revision: 2}, typeID: wire.MsgPickerCloseClient},
 		{name: "close pointer", message: &protocol.PickerClose{InteractionID: 7, Revision: 2}, typeID: wire.MsgPickerCloseClient},
 		{name: "selection", message: protocol.PickerSelection{CauseActionID: 9, InteractionID: 7, Revision: 2, Key: "ab12/work"}, typeID: wire.MsgPickerSelection},
@@ -41,8 +39,6 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 			got, err := decodeClient(raw.sent)
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
-			case *protocol.PickerOpen:
-				require.Equal(t, *message, got)
 			case *protocol.PickerClose:
 				require.Equal(t, *message, got)
 			case *protocol.PickerSelection:
@@ -85,7 +81,6 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 func TestPickerMessagesRejectWrongDirection(t *testing.T) {
 	snapshot := pickerWireSnapshot()
 	clientFrames := []wire.Frame{
-		{Type: wire.MsgPickerOpen, Payload: wire.MarshalPickerOpen(protocol.PickerOpen{InteractionID: 1})},
 		{Type: wire.MsgPickerCloseClient, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: 1})},
 		{Type: wire.MsgPickerSelection, Payload: wire.MarshalPickerSelection(protocol.PickerSelection{InteractionID: 1, Revision: 1, Key: "a/b"})},
 	}
