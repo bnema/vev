@@ -1500,6 +1500,19 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		inventory = newInventoryRelay(clk, a.inventoryDialer)
 		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
 	}
+	// The client-picker loop owns navigate-intent presentation while the
+	// daemon keeps mutation authority. The capability advertises only where
+	// Hello navigation validation accepts capabilities: attach/resume on a
+	// home-picker route, or a fresh session intent. Advertising it
+	// unconditionally would make ephemeral/local Hellos fail validation.
+	homePickerRoute := request.RemoteTarget != nil || request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || request.Intent == protocol.IntentNew
+	if request.Intent == protocol.IntentAttach || request.Intent == protocol.IntentResume {
+		if homePickerRoute {
+			request.NavigationCapabilities |= protocol.NavigationCapabilityClientPicker
+		}
+	} else if request.Intent == protocol.IntentNew {
+		request.NavigationCapabilities |= protocol.NavigationCapabilityClientPicker
+	}
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -1722,6 +1735,22 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	var nextInventoryRequestID uint64 = 1
 	inventoryOpen := false
 	var inventoryInteraction uint64
+	// Client-picker loop state. picker tracks the admitted interaction
+	// namespace; pickerLoop owns the displayed model (nil when closed).
+	// The loop consumes terminal-pump records and renders through the
+	// attach loop's sole terminal writer; commits cross on controlCh.
+	// pickerSeq numbers PickerOpen interaction IDs, mirroring
+	// nextInventoryRequestID for inventory queries.
+	picker := &pickerInteraction{}
+	var pickerLoop *pickerLoop
+	pickerRenderer := newPickerRenderer()
+	termSize := func() domain.Size {
+		geometry, err := term.Geometry()
+		if err != nil {
+			return size
+		}
+		return geometry.Size
+	}
 	var inventoryTimer ports.Timer
 	var inventoryTickC <-chan time.Time
 	stopInventoryTimer := func() {
@@ -2717,6 +2746,41 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case protocol.NavigationInventoryResponse:
 				// Overlay-owned liveness. The relay never waits on it:
 				// publications carry the only state it tracks.
+				continue
+			case protocol.PickerSnapshot:
+				snapshot := message
+				if pickerLoop != nil {
+					// A superseding snapshot ends the current loop; the
+					// admitted revision below decides whether it replaces it.
+					pickerLoop = nil
+				}
+				if !picker.admitSnapshot(snapshot) {
+					continue
+				}
+				pickerLoop = openPickerLoop(snapshot)
+				// First display paints through the sole terminal writer
+				// below; later cursor/search updates repaint the same way.
+				if data := pickerRenderer.render(pickerLoop, termSize()); data != nil {
+					if _, werr := term.Out().Write(data); werr != nil {
+						return welcomedResult(fmt.Errorf("vev: writing picker frame: %w", werr))
+					}
+					if ferr := term.Flush(); ferr != nil {
+						return welcomedResult(fmt.Errorf("vev: flushing picker frame: %w", ferr))
+					}
+				}
+				continue
+			case protocol.PickerClose:
+				close := message
+				if pickerLoop != nil && close.InteractionID == picker.interaction {
+					pickerLoop = nil
+				}
+				picker.setOpen(false, 0)
+				continue
+			case protocol.PickerFailure:
+				// Commit rejections surface through the existing ui-driver
+				// action failure path: the failed commit's CauseActionID
+				// already correlates it. The loop stays open on the admitted
+				// revision so the user can retry.
 				continue
 			case protocol.RouteCreateSessionAction:
 				action := message

@@ -642,7 +642,7 @@ func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	require.Equal(t, request.SessionName, hello.Name)
 	require.Equal(t, target, hello.RemoteTarget)
 	require.Equal(t, request.EnvironmentPolicy, hello.EnvironmentPolicy)
-	require.Equal(t, request.NavigationCapabilities, hello.NavigationCapabilities)
+	require.Equal(t, request.NavigationCapabilities|protocol.NavigationCapabilityClientPicker, hello.NavigationCapabilities)
 	require.Equal(t, request.StartupOverlay, hello.StartupOverlay)
 }
 
@@ -1490,7 +1490,7 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: remoteLifecycle, SessionName: "created"}, returnHello.ExactTarget)
 	require.Nil(t, returnHello.RemoteTarget)
 	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, returnHello.EnvironmentPolicy)
-	require.Equal(t, protocol.NavigationCapabilityHomePicker, returnHello.NavigationCapabilities)
+	require.Equal(t, protocol.NavigationCapabilityHomePicker|protocol.NavigationCapabilityClientPicker, returnHello.NavigationCapabilities)
 }
 
 func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T) {
@@ -1576,7 +1576,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	remoteHello := helloFromSend(t, remote2)
 	require.NoError(t, err)
 
-	require.Equal(t, protocol.NavigationCapabilityHomePicker, remoteHello.NavigationCapabilities)
+	require.Equal(t, protocol.NavigationCapabilityHomePicker|protocol.NavigationCapabilityClientPicker, remoteHello.NavigationCapabilities)
 	remoteNewHello := helloFromSend(t, remote3)
 	require.Equal(t, "remote-new", remoteNewHello.Name)
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, remoteNewHello.ExactTarget)
