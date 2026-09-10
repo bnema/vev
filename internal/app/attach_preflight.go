@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -61,6 +62,26 @@ func consoleProbe(deps runAttachDeps) func(ports.Terminal) bool {
 	return terminalIsInteractive
 }
 
+// flushingWriter pushes every prompt write to the console before the
+// confirmer blocks on the answer. Terminal output is buffered, so without
+// this flush the user waits in front of a blank console until the client
+// repaints.
+type flushingWriter struct {
+	out   io.Writer
+	flush func() error
+}
+
+func (w flushingWriter) Write(data []byte) (int, error) {
+	written, err := w.out.Write(data)
+	if err != nil {
+		return written, err
+	}
+	if err := w.flush(); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
 // confirmMissingSessionCreate prompts to create an absent session and maps
 // the answer to the attach intent: IntentNew on confirmation, IntentAttach
 // on decline. A cancelled wait surfaces the cancellation error.
@@ -79,9 +100,15 @@ func confirmMissingSessionCreate(ctx context.Context, name string, deps runAttac
 	if in == nil || out == nil {
 		return protocol.IntentAttach, nil
 	}
-	create, err := confirm.NewConfirmer(in, out).ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
+	prompt := confirm.NewConfirmer(in, flushingWriter{out: out, flush: terminal.Flush})
+	create, err := prompt.ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
 	if err != nil {
-		return protocol.IntentAttach, err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return protocol.IntentAttach, ctxErr
+		}
+		// A console that cannot show the question must not consume an
+		// answer: keep the plain attach path and let the daemon decide.
+		return protocol.IntentAttach, nil
 	}
 	if !create {
 		return protocol.IntentAttach, nil

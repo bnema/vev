@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -50,6 +51,7 @@ func terminalStub(t *testing.T, in io.Reader, out io.Writer) func() ports.Termin
 	terminal := portsmocks.NewMockTerminal(t)
 	terminal.EXPECT().In().Return(in).Maybe()
 	terminal.EXPECT().Out().Return(out).Maybe()
+	terminal.EXPECT().Flush().Return(nil).Maybe()
 	return func() ports.Terminal { return terminal }
 }
 
@@ -123,6 +125,117 @@ func TestTerminalIsInteractive(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.False(t, terminalIsInteractive(terminalStub(t, tt.in, io.Discard)()))
+		})
+	}
+}
+
+// TestRunAttachWithDepsMissingSessionPromptFlushesQuestion drives the real
+// terminal adapter, whose output is buffered: the preflight has to flush the
+// question before it blocks on the answer, or the user waits in front of a
+// blank console and the question only shows up after the daemon replies.
+func TestRunAttachWithDepsMissingSessionPromptFlushesQuestion(t *testing.T) {
+	consoleIn, answers, err := os.Pipe()
+	require.NoError(t, err)
+	questions, consoleOut, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = consoleIn.Close()
+		_ = answers.Close()
+		_ = questions.Close()
+		_ = consoleOut.Close()
+	})
+
+	terminal := term.NewWithFiles(consoleIn, consoleOut)
+	var intents []uint8
+	done := make(chan error, 1)
+	go func() {
+		done <- runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+			localDialer:        sessionListDialer(t, nil),
+			terminal:           func() ports.Terminal { return terminal },
+			interactiveConsole: interactiveProbe(true),
+			runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+				intents = append(intents, request.Intent)
+				return nil
+			},
+		})
+	}()
+
+	question := readPrompt(t, questions)
+	require.Contains(t, question, "want to create and attach to it? [y/N] ", "the question must reach the console before the preflight reads an answer")
+
+	_, err = answers.WriteString("y\n")
+	require.NoError(t, err)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the preflight did not release after the answer")
+	}
+	require.Equal(t, []uint8{protocol.IntentNew}, intents)
+}
+
+// readPrompt returns the console output that ends the create question,
+// failing the test instead of hanging when nothing arrives.
+func readPrompt(t *testing.T, console *os.File) string {
+	t.Helper()
+	require.NoError(t, console.SetReadDeadline(time.Now().Add(5*time.Second)))
+	var output []byte
+	frame := make([]byte, 64)
+	for {
+		read, err := console.Read(frame)
+		output = append(output, frame[:read]...)
+		if strings.Contains(string(output), "[y/N] ") {
+			return string(output)
+		}
+		if err != nil {
+			t.Fatalf("preflight prompt never reached the console (read %q: %v)", output, err)
+		}
+	}
+}
+
+// TestRunAttachWithDepsMissingSessionPromptFailureAttaches covers a console
+// that cannot show the question: the preflight must keep the plain attach
+// path instead of consuming an answer nobody was asked for. The input blocks
+// forever, so a prompt that reads it would only return on context expiry.
+func TestRunAttachWithDepsMissingSessionPromptFailureAttaches(t *testing.T) {
+	closedOut, err := os.CreateTemp(t.TempDir(), "vev-console")
+	require.NoError(t, err)
+	require.NoError(t, closedOut.Close())
+
+	for _, tt := range []struct {
+		name     string
+		out      io.Writer
+		flushErr error
+	}{
+		{name: "write fails", out: closedOut},
+		{name: "flush fails", out: io.Discard, flushErr: errors.New("console gone")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			consoleIn, consoleOut, err := os.Pipe()
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				_ = consoleIn.Close()
+				_ = consoleOut.Close()
+			})
+			terminal := portsmocks.NewMockTerminal(t)
+			terminal.EXPECT().In().Return(consoleIn).Maybe()
+			terminal.EXPECT().Out().Return(tt.out).Maybe()
+			terminal.EXPECT().Flush().Return(tt.flushErr).Maybe()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			var intents []uint8
+			err = runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+				localDialer:        sessionListDialer(t, nil),
+				terminal:           func() ports.Terminal { return terminal },
+				interactiveConsole: interactiveProbe(true),
+				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+					intents = append(intents, request.Intent)
+					return nil
+				},
+			})
+			require.NoError(t, err, "an unusable console must not fail the attach")
+			require.Equal(t, []uint8{protocol.IntentAttach}, intents)
 		})
 	}
 }
