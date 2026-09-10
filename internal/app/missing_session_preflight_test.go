@@ -44,31 +44,19 @@ func failingSessionListDialer(t *testing.T, dialErr error) func() wire.Dialer {
 	return func() wire.Dialer { return dialer }
 }
 
-// closedStdinTerminal builds a stub terminal whose input is a closed
-// *os.File, exercising the non-terminal production path: the probe sees a
-// real file that is not a terminal, so no prompt may appear.
-func closedStdinTerminal(t *testing.T, out io.Writer) func() ports.Terminal {
+// terminalStub serves canned prompt I/O through a generated terminal mock.
+func terminalStub(t *testing.T, in io.Reader, out io.Writer) func() ports.Terminal {
 	t.Helper()
-	reader, writer, err := os.Pipe()
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
-	require.NoError(t, reader.Close())
 	terminal := portsmocks.NewMockTerminal(t)
-	terminal.EXPECT().In().Return(reader).Maybe()
+	terminal.EXPECT().In().Return(in).Maybe()
 	terminal.EXPECT().Out().Return(out).Maybe()
 	return func() ports.Terminal { return terminal }
 }
 
-// promptTerminalStub builds a stub terminal serving canned prompt I/O for
-// tests. The input is a pipe whose write end the test holds: closing it
-// releases a blocked prompt read, and test binaries never run on a real
-// terminal, so the production stdin probe stays meaningful.
-func promptTerminalStub(t *testing.T, answer string, out io.Writer) func() ports.Terminal {
-	t.Helper()
-	terminal := portsmocks.NewMockTerminal(t)
-	terminal.EXPECT().In().Return(strings.NewReader(answer)).Maybe()
-	terminal.EXPECT().Out().Return(out).Maybe()
-	return func() ports.Terminal { return terminal }
+// interactiveProbe injects the console decision, standing in for the
+// production probe so the prompt matrix runs without owning a real TTY.
+func interactiveProbe(interactive bool) func(ports.Terminal) bool {
+	return func(ports.Terminal) bool { return interactive }
 }
 
 func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
@@ -76,7 +64,7 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 		name           string
 		sessions       []protocol.SessionInfo
 		answer         string
-		closedStdin    bool
+		notInteractive bool
 		wantIntent     uint8
 		wantPromptPart string
 		wantNoPrompt   bool
@@ -86,19 +74,16 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 		{name: "missing empty answer attaches", sessions: nil, answer: "\n", wantIntent: protocol.IntentAttach},
 		{name: "missing unknown answer attaches", sessions: nil, answer: "later\n", wantIntent: protocol.IntentAttach, wantPromptPart: "[y/N]"},
 		{name: "present attaches without prompt", sessions: []protocol.SessionInfo{{Name: "scratch"}}, answer: "y\n", wantIntent: protocol.IntentAttach, wantNoPrompt: true},
-		{name: "non-terminal attaches without prompt", sessions: nil, answer: "y\n", wantIntent: protocol.IntentAttach, wantNoPrompt: true, closedStdin: true},
+		{name: "non-interactive console attaches without prompt", sessions: nil, answer: "y\n", notInteractive: true, wantIntent: protocol.IntentAttach, wantNoPrompt: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var intents []uint8
 			var promptOut strings.Builder
-			terminal := promptTerminalStub(t, tt.answer, &promptOut)
-			if tt.closedStdin {
-				terminal = closedStdinTerminal(t, &promptOut)
-			}
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-				localDialer: sessionListDialer(t, tt.sessions),
-				terminal:    terminal,
+				localDialer:        sessionListDialer(t, tt.sessions),
+				terminal:           terminalStub(t, strings.NewReader(tt.answer), &promptOut),
+				interactiveConsole: interactiveProbe(!tt.notInteractive),
 				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					return nil
@@ -112,6 +97,32 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 			if tt.wantNoPrompt {
 				require.Empty(t, promptOut.String())
 			}
+		})
+	}
+}
+
+// TestTerminalIsInteractive covers the production probe's non-console
+// paths. Reaching the true case needs a real PTY, which this suite does not
+// own; production always hands the probe an *os.File stdin.
+func TestTerminalIsInteractive(t *testing.T) {
+	require.False(t, terminalIsInteractive(nil), "a missing terminal cannot prompt")
+
+	console, writer, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = console.Close()
+		_ = writer.Close()
+	})
+
+	for _, tt := range []struct {
+		name string
+		in   io.Reader
+	}{
+		{name: "detached reader", in: strings.NewReader("y\n")},
+		{name: "non-terminal file", in: console},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.False(t, terminalIsInteractive(terminalStub(t, tt.in, io.Discard)()))
 		})
 	}
 }
@@ -134,7 +145,8 @@ func TestRunAttachWithDepsMissingSessionPreflightSkipsNonAttach(t *testing.T) {
 				session = "scratch"
 			}
 			err := runAttachWithDeps(context.Background(), tt.intent, session, tt.remote, "", nil, runAttachDeps{
-				terminal: promptTerminalStub(t, "y\n", &promptOut),
+				terminal:           terminalStub(t, strings.NewReader("y\n"), &promptOut),
+				interactiveConsole: interactiveProbe(true),
 				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					if tt.remote != "" {
@@ -170,8 +182,9 @@ func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.
 			var promptOut strings.Builder
 			var intents []uint8
 			err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-				localDialer: failingSessionListDialer(t, tt.dialErr),
-				terminal:    promptTerminalStub(t, "y\n", &promptOut),
+				localDialer:        failingSessionListDialer(t, tt.dialErr),
+				terminal:           terminalStub(t, strings.NewReader("y\n"), &promptOut),
+				interactiveConsole: interactiveProbe(true),
 				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					return nil

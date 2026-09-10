@@ -880,10 +880,13 @@ type runAttachDeps struct {
 	runtimeObserver         ports.SerializedRuntimeObserver
 	ui                      *client.UI
 	terminal                func() ports.Terminal
-	clock                   func() ports.Clock
-	disableCapabilityProbe  bool
-	localEnvironment        []string
-	remoteEnvironment       func(string) []string
+	// interactiveConsole decides whether the missing-session prompt may read
+	// its answer from a console. Nil probes the client terminal's input.
+	interactiveConsole     func(ports.Terminal) bool
+	clock                  func() ports.Clock
+	disableCapabilityProbe bool
+	localEnvironment       []string
+	remoteEnvironment      func(string) []string
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.

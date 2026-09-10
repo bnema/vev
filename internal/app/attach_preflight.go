@@ -39,19 +39,26 @@ func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttac
 	return protocol.IntentAttach, nil
 }
 
-// isInteractiveTerminal reports whether the prompt input runs on a
-// terminal. Only *os.File inputs are probed; anything else (pipes, test
-// stubs serving canned answers) counts as interactive so tests exercise
-// the prompt path. In production the terminal always wraps os.Stdin, so
-// the probe is meaningful there.
-func isInteractiveTerminal(terminal ports.Terminal) bool {
+// terminalIsInteractive reports whether the prompt can read its answer from
+// a console. The client terminal's input has to be a real terminal file:
+// pipes, redirected files, and detached readers are not consoles, so the
+// prompt never blocks on a stream nobody reads from the keyboard.
+func terminalIsInteractive(terminal ports.Terminal) bool {
 	if terminal == nil {
 		return false
 	}
-	if file, ok := terminal.In().(*os.File); ok {
-		return rawterm.IsTerminal(int(file.Fd()))
+	file, ok := terminal.In().(*os.File)
+	return ok && rawterm.IsTerminal(int(file.Fd()))
+}
+
+// consoleProbe returns the console probe used by the create prompt.
+// Production probes the client terminal's input; tests inject the decision
+// so the prompt matrix runs without owning a real TTY.
+func consoleProbe(deps runAttachDeps) func(ports.Terminal) bool {
+	if deps.interactiveConsole != nil {
+		return deps.interactiveConsole
 	}
-	return true
+	return terminalIsInteractive
 }
 
 // confirmMissingSessionCreate prompts to create an absent session and maps
@@ -65,7 +72,7 @@ func confirmMissingSessionCreate(ctx context.Context, name string, deps runAttac
 		return protocol.IntentAttach, nil
 	}
 	terminal := clientTerminal(deps)
-	if !isInteractiveTerminal(terminal) {
+	if !consoleProbe(deps)(terminal) {
 		return protocol.IntentAttach, nil
 	}
 	in, out := terminal.In(), terminal.Out()
