@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -124,97 +123,103 @@ func TestRunAttachWithDepsMissingSessionPreflightSkipsNonAttach(t *testing.T) {
 }
 
 func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.T) {
-	originalProbe := daemonLifecycleProbe
-	t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
-	// Fail lifecycle acquisition so the preflight cannot fall back to the
-	// on-disk catalogue: its error path must attach without prompting,
-	// independent of the machine's real daemon state.
-	lifecycleErr := errors.New("lifecycle unavailable")
-	daemonLifecycleProbe = fakeLifecycleProbe{err: lifecycleErr}
-	var promptOut strings.Builder
-	dialErr := errors.New("socket unreachable")
-	var intents []uint8
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-		localDialer:          fakeFailingListDialer(t, dialErr),
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-			intents = append(intents, request.Intent)
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
-	require.Empty(t, promptOut.String(), "an undeterminable preflight must not prompt; the daemon rejection decides")
+	for _, tt := range []struct {
+		name    string
+		dialErr error
+		cancel  bool
+	}{
+		{name: "dial fails", dialErr: errors.New("socket unreachable")},
+		{name: "context cancelled", dialErr: context.Canceled, cancel: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			originalProbe := daemonLifecycleProbe
+			t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
+			// Fail lifecycle acquisition so the preflight cannot fall back
+			// to the on-disk catalogue: its error path must attach without
+			// prompting, independent of the machine's real daemon state.
+			daemonLifecycleProbe = fakeLifecycleProbe{err: errors.New("lifecycle unavailable")}
+			ctx := context.Background()
+			if tt.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			var promptOut strings.Builder
+			var intents []uint8
+			err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+				localDialer:          fakeFailingListDialer(t, tt.dialErr),
+				attachPromptIn:       strings.NewReader("y\n"),
+				attachPromptOut:      &promptOut,
+				attachPromptTerminal: func() bool { return true },
+				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+					intents = append(intents, request.Intent)
+					return nil
+				},
+			})
+			require.NoError(t, err)
+			require.Equal(t, []uint8{protocol.IntentAttach}, intents)
+			require.Empty(t, promptOut.String(), "an undeterminable preflight must not prompt; the daemon rejection decides")
+		})
+	}
 }
 
-func TestRunAttachWithDepsMissingSessionCancelledPreflightSkipsPrompt(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var promptOut strings.Builder
-	var intents []uint8
-	err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-		localDialer:          fakeFailingListDialer(t, context.Canceled),
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-			intents = append(intents, request.Intent)
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
-	require.Empty(t, promptOut.String())
-}
-
+// blockingPreflightTransport blocks inside Send or Recv until closed,
+// letting tests park the list exchange mid-flight. entered fires when the
+// exchange reaches the blocked operation.
 type blockingPreflightTransport struct {
 	blockOnSend bool
 	entered     chan struct{}
-	enterOnce   sync.Once
 	closed      chan struct{}
-	closeOnce   sync.Once
 }
 
-func newBlockingPreflightTransport() *blockingPreflightTransport {
-	return &blockingPreflightTransport{entered: make(chan struct{}), closed: make(chan struct{})}
+func newBlockingPreflightTransport(blockOnSend bool) *blockingPreflightTransport {
+	return &blockingPreflightTransport{blockOnSend: blockOnSend, entered: make(chan struct{}), closed: make(chan struct{})}
 }
 
-func (t *blockingPreflightTransport) markEntered() {
-	t.enterOnce.Do(func() { close(t.entered) })
+func (t *blockingPreflightTransport) block() error {
+	select {
+	case <-t.entered:
+	default:
+		close(t.entered)
+	}
+	<-t.closed
+	return errors.New("transport closed")
 }
 
 func (t *blockingPreflightTransport) Send(wire.Frame) error {
 	if t.blockOnSend {
-		t.markEntered()
-		<-t.closed
-		return errors.New("transport closed")
+		return t.block()
 	}
 	return nil
 }
 
 func (t *blockingPreflightTransport) Recv() (wire.Frame, error) {
 	if !t.blockOnSend {
-		t.markEntered()
+		if err := t.block(); err != nil {
+			return wire.Frame{}, err
+		}
 	}
 	<-t.closed
 	return wire.Frame{}, errors.New("transport closed")
 }
 
 func (t *blockingPreflightTransport) Close() error {
-	t.closeOnce.Do(func() { close(t.closed) })
+	select {
+	case <-t.closed:
+	default:
+		close(t.closed)
+	}
 	return nil
 }
 
-func TestListLocalSessionsOnTimesOutOnSilentDaemon(t *testing.T) {
+func TestListLocalSessionsTimesOutOnSilentDaemon(t *testing.T) {
 	oldTimeout := preflightListTimeout
 	preflightListTimeout = 50 * time.Millisecond
 	defer func() { preflightListTimeout = oldTimeout }()
 
-	transport := newBlockingPreflightTransport()
+	transport := newBlockingPreflightTransport(false)
 	started := time.Now()
-	_, err := listLocalSessionsOn(context.Background(), func(context.Context) (wire.Transport, error) {
+	_, err := listLocalSessionsWithDialer(context.Background(), func(context.Context) (wire.Transport, error) {
 		return transport, nil
 	})
 	elapsed := time.Since(started)
@@ -227,7 +232,7 @@ func TestListLocalSessionsOnTimesOutOnSilentDaemon(t *testing.T) {
 	}
 }
 
-func TestListLocalSessionsOnHonorsCancellation(t *testing.T) {
+func TestListLocalSessionsHonorsCancellation(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		blockOnSend bool
@@ -236,13 +241,12 @@ func TestListLocalSessionsOnHonorsCancellation(t *testing.T) {
 		{name: "blocked recv", blockOnSend: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newBlockingPreflightTransport()
-			transport.blockOnSend = tt.blockOnSend
+			transport := newBlockingPreflightTransport(tt.blockOnSend)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				_, err := listLocalSessionsOn(ctx, func(context.Context) (wire.Transport, error) {
+				_, err := listLocalSessionsWithDialer(ctx, func(context.Context) (wire.Transport, error) {
 					return transport, nil
 				})
 				done <- err

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1459,12 +1460,21 @@ func TestConfirmWithContextReleasesOnCancel(t *testing.T) {
 	defer func() { _ = reader.Close() }()
 	defer func() { _ = writer.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
+	wrote := make(chan struct{})
 	var promptOut strings.Builder
+	out := &signalWriter{Builder: &promptOut, wrote: wrote}
+	done := make(chan error, 1)
 	go func() {
-		_, err := confirmWithContext(ctx, reader, &promptOut, "create?")
+		_, err := confirmWithContext(ctx, reader, out, "create?")
 		done <- err
 	}()
+	// Wait until the prompt is on screen before cancelling, so the test
+	// exercises release from a blocked read rather than startup.
+	select {
+	case <-wrote:
+	case <-time.After(5 * time.Second):
+		t.Fatal("confirm did not write its prompt")
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -1473,4 +1483,16 @@ func TestConfirmWithContextReleasesOnCancel(t *testing.T) {
 		t.Fatal("confirm did not release on context cancellation")
 	}
 	require.Contains(t, promptOut.String(), "[y/N]")
+}
+
+type signalWriter struct {
+	*strings.Builder
+	wrote chan struct{}
+	once  sync.Once
+}
+
+func (w *signalWriter) Write(p []byte) (int, error) {
+	n, err := w.Builder.Write(p)
+	w.once.Do(func() { close(w.wrote) })
+	return n, err
 }

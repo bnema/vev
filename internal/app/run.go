@@ -971,12 +971,10 @@ var preflightListTimeout = 5 * time.Second
 
 const maxAttachTargetHandoffs = 32
 
-// missingSessionPreflight checks whether a directly attached local session
-// exists before any client attempt runs. It returns found=true when the
-// session is present (attach proceeds), found=false with prompt=true when
-// the session is absent and the caller should offer creation, and an error
-// when existence itself cannot be determined (attach proceeds; a missing
-// session then surfaces the daemon rejection unchanged).
+// missingSessionPreflight reports whether a directly attached local
+// session exists before any client attempt runs. An error means existence
+// could not be determined; the caller then attaches normally and a missing
+// session surfaces the daemon rejection unchanged.
 //
 // The check runs before the client owns any console reader, so the create
 // prompt that follows is always the sole stdin consumer: no failed attempt
@@ -984,52 +982,33 @@ const maxAttachTargetHandoffs = 32
 // establishes provenance directly — the listing names this daemon's
 // sessions, so no error-text matching is needed and in-client navigation
 // handoffs can never trigger creation of the requested session.
-func missingSessionPreflight(ctx context.Context, name string, deps runAttachDeps) (found, prompt bool, err error) {
+func missingSessionPreflight(ctx context.Context, name string, deps runAttachDeps) (bool, error) {
 	if name == "" {
-		return false, false, nil
+		return false, nil
 	}
-	sessions, listErr := listLocalSessionsWithDeps(ctx, deps)
-	if listErr != nil {
-		return false, false, listErr
+	sessions, err := listLocalSessionsWithDeps(ctx, deps)
+	if err != nil {
+		return false, err
 	}
 	for _, session := range sessions {
 		if session.Name == name {
-			return true, false, nil
+			return true, nil
 		}
 	}
-	return false, true, nil
+	return false, nil
 }
 
 // offerMissingSessionCreate prompts to create a locally missing session
-// when the pre-flight existence check reports it absent. It returns
-// retry=true when the caller should attach with IntentNew instead.
-// Non-interactive consoles, unreadable input, a declined answer, or a
-// cancelled wait keep the attach intent unchanged. Only yes answers
-// confirm; empty, no, and unknown answers decline, matching
-// confirm.Confirmer.
+// when the pre-flight existence check reports it absent. It reports
+// whether the caller should attach with IntentNew instead.
+// Non-interactive consoles, a cancelled wait, a declined answer, or
+// unreadable input keep the attach intent unchanged. Only y/yes answers
+// confirm; empty, no, and unknown answers decline.
 func offerMissingSessionCreate(ctx context.Context, name string, deps runAttachDeps) (bool, error) {
-	if name == "" {
+	if name == "" || ctx.Err() != nil || !attachPromptInteractive(deps) {
 		return false, nil
 	}
-	terminal := deps.attachPromptTerminal
-	if terminal == nil {
-		terminal = func() bool { return rawterm.IsTerminal(int(os.Stdin.Fd())) }
-	}
-	if !terminal() {
-		return false, nil
-	}
-	if err := ctx.Err(); err != nil {
-		return false, nil
-	}
-	input := deps.attachPromptIn
-	if input == nil {
-		input = os.Stdin
-	}
-	output := deps.attachPromptOut
-	if output == nil {
-		output = os.Stderr
-	}
-	create, err := confirmWithContext(ctx, input, output, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
+	create, err := confirmWithContext(ctx, attachPromptInput(deps), attachPromptOutput(deps), fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
 	if err != nil {
 		return false, err
 	}
@@ -1039,41 +1018,56 @@ func offerMissingSessionCreate(ctx context.Context, name string, deps runAttachD
 	return create, nil
 }
 
-// confirmWithContext reads one confirmation answer while also observing
-// ctx. The prompt text is written before waiting; a cancelled context
-// releases the caller with the cancellation error. The reader goroutine may
-// stay blocked on input, so callers must only use this where the process
-// exits (or detaches from the console) afterward rather than continuing to
-// interact on the same stream.
+// attachPromptInteractive reports whether the create prompt may interact
+// with the console. Tests inject a stub; production probes stdin.
+func attachPromptInteractive(deps runAttachDeps) bool {
+	if deps.attachPromptTerminal != nil {
+		return deps.attachPromptTerminal()
+	}
+	return rawterm.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// attachPromptInput is the prompt's answer source: the process console
+// unless tests inject a buffer.
+func attachPromptInput(deps runAttachDeps) io.Reader {
+	if deps.attachPromptIn != nil {
+		return deps.attachPromptIn
+	}
+	return os.Stdin
+}
+
+// attachPromptOutput receives the prompt text: stderr unless tests inject
+// a buffer.
+func attachPromptOutput(deps runAttachDeps) io.Writer {
+	if deps.attachPromptOut != nil {
+		return deps.attachPromptOut
+	}
+	return os.Stderr
+}
+
+// confirmWithContext asks one confirmation question while also observing
+// ctx. A cancelled context releases the caller with the cancellation error
+// instead of blocking on input. The reader goroutine may stay blocked, so
+// callers must only use this where the process exits (or detaches from the
+// console) afterward rather than continuing to interact on the same stream.
 func confirmWithContext(ctx context.Context, input io.Reader, output io.Writer, question string) (bool, error) {
 	if ctx == nil {
 		return confirm.NewConfirmer(input, output).Confirm(question)
 	}
-	if _, err := fmt.Fprintf(output, "%s [y/N] ", question); err != nil {
-		return false, err
+	type outcome struct {
+		create bool
+		err    error
 	}
-	type answer struct {
-		text string
-		err  error
-	}
-	result := make(chan answer, 1)
+	result := make(chan outcome, 1)
 	go func() {
-		line, err := bufio.NewReader(input).ReadString('\n')
-		result <- answer{text: line, err: err}
+		create, err := confirm.NewConfirmer(input, output).Confirm(question)
+		result <- outcome{create: create, err: err}
 	}()
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
 	case reply := <-result:
-		if reply.err != nil && !errors.Is(reply.err, io.EOF) {
-			return false, reply.err
-		}
-		switch strings.ToLower(strings.TrimSpace(reply.text)) {
-		case "y", "yes":
-			return true, nil
-		default:
-			return false, nil
-		}
+		return reply.create, reply.err
 	}
 }
 
@@ -1086,8 +1080,13 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	}
 
 	if intent == protocol.IntentAttach && remoteTarget == "" {
-		found, prompt, preflightErr := missingSessionPreflight(ctx, name, deps)
-		if preflightErr == nil && !found && prompt {
+		exists, preflightErr := missingSessionPreflight(ctx, name, deps)
+		switch {
+		case preflightErr != nil:
+			if log != nil {
+				log.Debug("missing-session preflight unavailable; proceeding with attach", "err", preflightErr)
+			}
+		case !exists:
 			create, promptErr := offerMissingSessionCreate(ctx, name, deps)
 			if promptErr != nil {
 				return promptErr
@@ -1098,8 +1097,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				}
 				intent = protocol.IntentNew
 			}
-		} else if preflightErr != nil && log != nil {
-			log.Debug("missing-session preflight unavailable; proceeding with attach", "err", preflightErr)
 		}
 	}
 
@@ -1728,24 +1725,23 @@ func runList(ctx context.Context, cmd command) (retErr error) {
 }
 
 // listLocalSessionsWithDeps answers session existence for the attach
-// pre-flight through an injectable dialer. Production dials the local
-// daemon (spawning it when needed, like any attach); tests inject a stub.
+// pre-flight through the local dialer. Production dials the local daemon
+// (spawning it when needed, like any attach); tests inject mocks.
 func listLocalSessionsWithDeps(ctx context.Context, deps runAttachDeps) ([]protocol.SessionInfo, error) {
 	dial := deps.localDialer
 	if dial == nil {
 		dial = defaultLocalDialer
 	}
-	dialer := dial()
-	return listLocalSessionsOn(ctx, dialer.Dial)
+	return listLocalSessionsWithDialer(ctx, dial().Dial)
 }
 
 func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr error) {
-	return listLocalSessionsOn(ctx, func(ctx context.Context) (wire.Transport, error) {
+	return listLocalSessionsWithDialer(ctx, func(ctx context.Context) (wire.Transport, error) {
 		return realDial(ctx, ipc.SocketDir())
 	})
 }
 
-func listLocalSessionsOn(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
+func listLocalSessionsWithDialer(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, _ string) (wire.Transport, error) {
 		return dial(ctx)
 	}, defaultBackoff)
