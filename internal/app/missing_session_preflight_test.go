@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/bnema/vev/pkg/rawterm"
 )
 
 // sessionListDialer serves a canned session listing over generated mocks.
@@ -103,11 +105,12 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 	}
 }
 
-// TestTerminalIsInteractive covers the production probe's non-console
-// paths. Reaching the true case needs a real PTY, which this suite does not
-// own; production always hands the probe an *os.File stdin.
+// TestTerminalIsInteractive covers the production probe on both sides of the
+// console check: a real terminal file and the streams that are not consoles.
 func TestTerminalIsInteractive(t *testing.T) {
 	require.False(t, terminalIsInteractive(nil), "a missing terminal cannot prompt")
+	pty := openPtySlave(t)
+	require.True(t, terminalIsInteractive(term.NewWithFiles(pty, pty)), "a real terminal file is a console")
 
 	console, writer, err := os.Pipe()
 	require.NoError(t, err)
@@ -129,49 +132,78 @@ func TestTerminalIsInteractive(t *testing.T) {
 	}
 }
 
+// openPtySlave returns the slave side of a real PTY pair: the only way to
+// hand the probe an *os.File the kernel reports as a terminal.
+func openPtySlave(t *testing.T) *os.File {
+	t.Helper()
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("open /dev/ptmx: %v", err)
+	}
+	t.Cleanup(func() { _ = master.Close() })
+	slave, err := rawterm.PreparePty(int(master.Fd()))
+	require.NoError(t, err, "prepare pty")
+	t.Cleanup(func() { _ = slave.Close() })
+	return slave
+}
+
 // TestRunAttachWithDepsMissingSessionPromptFlushesQuestion drives the real
 // terminal adapter, whose output is buffered: the preflight has to flush the
 // question before it blocks on the answer, or the user waits in front of a
-// blank console and the question only shows up after the daemon replies.
+// blank console and the question only shows up after the daemon replies. The
+// observed wrapper used by `--ui-observe` embeds the port, so it has to keep
+// flushing end to end.
 func TestRunAttachWithDepsMissingSessionPromptFlushesQuestion(t *testing.T) {
-	consoleIn, answers, err := os.Pipe()
-	require.NoError(t, err)
-	questions, consoleOut, err := os.Pipe()
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = consoleIn.Close()
-		_ = answers.Close()
-		_ = questions.Close()
-		_ = consoleOut.Close()
-	})
+	for _, tt := range []struct {
+		name string
+		wrap func(ports.Terminal) ports.Terminal
+	}{
+		{name: "direct terminal", wrap: func(terminal ports.Terminal) ports.Terminal { return terminal }},
+		{name: "observed terminal", wrap: func(terminal ports.Terminal) ports.Terminal {
+			return observedTerminal{Terminal: terminal}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			consoleIn, answers, err := os.Pipe()
+			require.NoError(t, err)
+			questions, consoleOut, err := os.Pipe()
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				_ = consoleIn.Close()
+				_ = answers.Close()
+				_ = questions.Close()
+				_ = consoleOut.Close()
+			})
 
-	terminal := term.NewWithFiles(consoleIn, consoleOut)
-	var intents []uint8
-	done := make(chan error, 1)
-	go func() {
-		done <- runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-			localDialer:        sessionListDialer(t, nil),
-			terminal:           func() ports.Terminal { return terminal },
-			interactiveConsole: interactiveProbe(true),
-			runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-				intents = append(intents, request.Intent)
-				return nil
-			},
+			terminal := tt.wrap(term.NewWithFiles(consoleIn, consoleOut))
+			var intents []uint8
+			done := make(chan error, 1)
+			go func() {
+				done <- runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+					localDialer:        sessionListDialer(t, nil),
+					terminal:           func() ports.Terminal { return terminal },
+					interactiveConsole: interactiveProbe(true),
+					runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+						intents = append(intents, request.Intent)
+						return nil
+					},
+				})
+			}()
+
+			question := readPrompt(t, questions)
+			require.Contains(t, question, "want to create and attach to it? [y/N] ", "the question must reach the console before the preflight reads an answer")
+
+			_, err = answers.WriteString("y\n")
+			require.NoError(t, err)
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the preflight did not release after the answer")
+			}
+			require.Equal(t, []uint8{protocol.IntentNew}, intents)
 		})
-	}()
-
-	question := readPrompt(t, questions)
-	require.Contains(t, question, "want to create and attach to it? [y/N] ", "the question must reach the console before the preflight reads an answer")
-
-	_, err = answers.WriteString("y\n")
-	require.NoError(t, err)
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the preflight did not release after the answer")
 	}
-	require.Equal(t, []uint8{protocol.IntentNew}, intents)
 }
 
 // readPrompt returns the console output that ends the create question,
