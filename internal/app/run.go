@@ -900,10 +900,13 @@ type runAttachDeps struct {
 	runtimeObserver         ports.SerializedRuntimeObserver
 	ui                      *client.UI
 	terminal                func() ports.Terminal
-	clock                   func() ports.Clock
-	disableCapabilityProbe  bool
-	localEnvironment        []string
-	remoteEnvironment       func(string) []string
+	// interactiveConsole decides whether the missing-session prompt may read
+	// its answer from a console. Nil probes the client terminal's input.
+	interactiveConsole     func(ports.Terminal) bool
+	clock                  func() ports.Clock
+	disableCapabilityProbe bool
+	localEnvironment       []string
+	remoteEnvironment      func(string) []string
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -974,14 +977,20 @@ func remoteDiscoveryDaemonOption(stateDir, transport string, clk ports.Clock, lo
 	}, nil
 }
 
-const maxAttachTargetHandoffs = 32
-
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == protocol.IntentNew {
 			return deps.createDetached(ctx, name)
 		}
 		return errors.New("vev: sessions should be nested with care; unset VEV to force")
+	}
+
+	if intent == protocol.IntentAttach && remoteTarget == "" {
+		resolved, err := resolveMissingSessionAttach(ctx, name, deps, log)
+		if err != nil {
+			return err
+		}
+		intent = resolved
 	}
 
 	runClient := deps.runClient
@@ -1609,7 +1618,18 @@ func runList(ctx context.Context, cmd command) (retErr error) {
 }
 
 func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr error) {
-	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
+	return listSessionsWithDialer(ctx, func(ctx context.Context) (wire.Transport, error) {
+		return realDial(ctx, ipc.SocketDir())
+	})
+}
+
+// listSessionsWithDialer runs the session listing over an explicit dialer.
+// The attach pre-flight passes the local dialer (spawning the daemon when
+// needed, like any attach); tests inject mocks.
+func listSessionsWithDialer(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
+	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, _ string) (wire.Transport, error) {
+		return dial(ctx)
+	}, defaultBackoff)
 	if err != nil {
 		return nil, fmt.Errorf("vev: waiting for durable session state: %w", err)
 	}
@@ -1632,16 +1652,44 @@ func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr er
 		}
 		return infos, nil
 	}
+	reply, err := boundedListExchange(ctx, transport)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSessionListReply(reply)
+}
+
+// preflightListTimeout bounds the attach pre-flight session listing so a
+// socket that accepts but never replies cannot delay the attach fallback
+// or block termination.
+var preflightListTimeout = 5 * time.Second
+
+// boundedListExchange sends a session listing request and reads the reply,
+// closing the transport if the bound lapses or the parent context ends so
+// a socket that accepts but never replies neither delays the attach
+// fallback nor blocks Ctrl-C exit. Transport.Close interrupts blocked Send
+// and Recv.
+func boundedListExchange(ctx context.Context, transport wire.Transport) (wire.Frame, error) {
+	listCtx, cancel := context.WithTimeout(ctx, preflightListTimeout)
+	defer cancel()
+	stopClose := context.AfterFunc(listCtx, func() { _ = transport.Close() })
+	defer stopClose()
 	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}); err != nil {
-		return nil, fmt.Errorf("vev: requesting session list: %w", err)
+		if listCtx.Err() != nil {
+			return wire.Frame{}, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
+		}
+		return wire.Frame{}, fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
 	if err != nil {
-		return nil, fmt.Errorf("vev: reading session list: %w", err)
+		if listCtx.Err() != nil {
+			return wire.Frame{}, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
+		}
+		return wire.Frame{}, fmt.Errorf("vev: reading session list: %w", err)
 	}
-	return decodeSessionListReply(reply)
+	return reply, nil
 }
 
 func decodeSessionListReply(reply wire.Frame) ([]protocol.SessionInfo, error) {

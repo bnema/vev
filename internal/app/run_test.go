@@ -24,6 +24,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -900,11 +901,6 @@ func requireNamedClientDialer(t *testing.T, ctx context.Context, dialer ports.Cl
 	require.EqualError(t, err, "not used: "+name)
 }
 
-// fakeClipboardReader is a distinguishable ports.ClipboardReader used only to
-// verify identity (that runAttachWithDeps threads the *same* reader through),
-// never actually invoked in these wiring tests.
-type fakeClipboardReader struct{ ports.ClipboardReader }
-
 func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -920,7 +916,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 			var gotDialer string
 			var gotRemote bool
 			var gotClipboard ports.ClipboardReader
-			clip := &fakeClipboardReader{}
+			clip := portsmocks.NewMockClipboardReader(t)
 			factory := newRemoteDialerFactoryMock(t)
 			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 
@@ -1162,7 +1158,7 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	gotRemote := true
 	var gotClipboard ports.ClipboardReader
-	clip := &fakeClipboardReader{}
+	clip := portsmocks.NewMockClipboardReader(t)
 	factory := newRemoteDialerFactoryMock(t)
 	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
 		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
@@ -1430,4 +1426,25 @@ func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
 	_, err := remoteDiscoveryDaemonOption(t.TempDir(), "serial", clock.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "udp" or "stdio")`)
+}
+
+func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {
+	// The preflight found the session, but the daemon still rejects the
+	// attach (e.g. it died between listing and Hello): the rejection must
+	// surface unchanged and must never trigger a create prompt.
+	var promptOut strings.Builder
+	rejected := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: scratch"}
+	var intents []uint8
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+		localDialer:        sessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
+		terminal:           terminalStub(t, strings.NewReader("y\n"), &promptOut),
+		interactiveConsole: interactiveProbe(true),
+		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+			intents = append(intents, request.Intent)
+			return rejected
+		},
+	})
+	require.Equal(t, rejected, err)
+	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
+	require.Empty(t, promptOut.String())
 }
