@@ -28,19 +28,20 @@ func fakeSessionListDialer(t *testing.T, sessions []protocol.SessionInfo) func()
 		return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(protocol.Sessions{Sessions: sessions})}, nil
 	}).Once()
 	transport.EXPECT().Close().Return(nil)
-	return func() wire.Dialer { return stubPreflightDialer{transport: transport} }
+	dialer := wiremocks.NewMockDialer(t)
+	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(context.Context) (wire.Transport, error) {
+		return transport, nil
+	}).Once()
+	return func() wire.Dialer { return dialer }
 }
 
-type stubPreflightDialer struct{ transport wire.Transport }
-
-func (d stubPreflightDialer) Dial(context.Context) (wire.Transport, error) {
-	return d.transport, nil
-}
-
-type stubPreflightErrorDialer struct{ err error }
-
-func (d stubPreflightErrorDialer) Dial(context.Context) (wire.Transport, error) {
-	return nil, d.err
+func fakeFailingListDialer(t *testing.T, dialErr error) func() wire.Dialer {
+	t.Helper()
+	dialer := wiremocks.NewMockDialer(t)
+	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(context.Context) (wire.Transport, error) {
+		return nil, dialErr
+	}).Maybe()
+	return func() wire.Dialer { return dialer }
 }
 
 func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
@@ -53,18 +54,18 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 		wantPromptPart string
 		wantNoPrompt   bool
 	}{
-		{name: "missing confirm creates", sessions: nil, answer: "y\n", terminal: true, wantIntent: protocol.IntentNew, wantPromptPart: `vev: session "codejack" doesn't exist, want to create and attach to it? [y/N]`},
-		{name: "missing decline attaches", sessions: nil, answer: "n\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "codejack"},
+		{name: "missing confirm creates", sessions: nil, answer: "y\n", terminal: true, wantIntent: protocol.IntentNew, wantPromptPart: `vev: session "scratch" doesn't exist, want to create and attach to it? [y/N]`},
+		{name: "missing decline attaches", sessions: nil, answer: "n\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "scratch"},
 		{name: "missing empty answer attaches", sessions: nil, answer: "\n", terminal: true, wantIntent: protocol.IntentAttach},
 		{name: "missing unknown answer attaches", sessions: nil, answer: "later\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "[y/N]"},
 		{name: "missing non-terminal attaches", sessions: nil, answer: "y\n", terminal: false, wantIntent: protocol.IntentAttach, wantNoPrompt: true},
-		{name: "present attaches without prompt", sessions: []protocol.SessionInfo{{Name: "codejack"}}, answer: "y\n", terminal: true, wantIntent: protocol.IntentAttach, wantNoPrompt: true},
+		{name: "present attaches without prompt", sessions: []protocol.SessionInfo{{Name: "scratch"}}, answer: "y\n", terminal: true, wantIntent: protocol.IntentAttach, wantNoPrompt: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var intents []uint8
 			var promptOut strings.Builder
-			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
+			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
 				localDialer:          fakeSessionListDialer(t, tt.sessions),
 				attachPromptIn:       strings.NewReader(tt.answer),
 				attachPromptOut:      &promptOut,
@@ -101,7 +102,7 @@ func TestRunAttachWithDepsMissingSessionPreflightSkipsNonAttach(t *testing.T) {
 			var promptOut strings.Builder
 			session := ""
 			if tt.intent != protocol.IntentEphemeral {
-				session = "codejack"
+				session = "scratch"
 			}
 			err := runAttachWithDeps(context.Background(), tt.intent, session, tt.remote, "", nil, runAttachDeps{
 				attachPromptIn:       strings.NewReader("y\n"),
@@ -123,11 +124,18 @@ func TestRunAttachWithDepsMissingSessionPreflightSkipsNonAttach(t *testing.T) {
 }
 
 func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.T) {
+	originalProbe := daemonLifecycleProbe
+	t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
+	// Fail lifecycle acquisition so the preflight cannot fall back to the
+	// on-disk catalogue: its error path must attach without prompting,
+	// independent of the machine's real daemon state.
+	lifecycleErr := errors.New("lifecycle unavailable")
+	daemonLifecycleProbe = fakeLifecycleProbe{err: lifecycleErr}
 	var promptOut strings.Builder
 	dialErr := errors.New("socket unreachable")
 	var intents []uint8
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return stubPreflightErrorDialer{err: dialErr} },
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+		localDialer:          fakeFailingListDialer(t, dialErr),
 		attachPromptIn:       strings.NewReader("y\n"),
 		attachPromptOut:      &promptOut,
 		attachPromptTerminal: func() bool { return true },
@@ -146,8 +154,8 @@ func TestRunAttachWithDepsMissingSessionCancelledPreflightSkipsPrompt(t *testing
 	cancel()
 	var promptOut strings.Builder
 	var intents []uint8
-	err := runAttachWithDeps(ctx, protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return stubPreflightErrorDialer{err: context.Canceled} },
+	err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
+		localDialer:          fakeFailingListDialer(t, context.Canceled),
 		attachPromptIn:       strings.NewReader("y\n"),
 		attachPromptOut:      &promptOut,
 		attachPromptTerminal: func() bool { return true },
