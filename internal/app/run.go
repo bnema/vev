@@ -1633,32 +1633,44 @@ func listSessionsWithDialer(ctx context.Context, dial func(context.Context) (wir
 		}
 		return infos, nil
 	}
-	// Bound the list exchange and close the transport when the bound lapses:
-	// a socket that accepts but never replies must neither delay the attach
-	// fallback nor block Ctrl-C exit. Transport.Close interrupts blocked
-	// Send and Recv.
+	reply, err := boundedListExchange(ctx, transport)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSessionListReply(reply)
+}
+
+// preflightListTimeout bounds the attach pre-flight session listing so a
+// socket that accepts but never replies cannot delay the attach fallback
+// or block termination.
+var preflightListTimeout = 5 * time.Second
+
+// boundedListExchange sends a session listing request and reads the reply,
+// closing the transport if the bound lapses or the parent context ends so
+// a socket that accepts but never replies neither delays the attach
+// fallback nor blocks Ctrl-C exit. Transport.Close interrupts blocked Send
+// and Recv.
+func boundedListExchange(ctx context.Context, transport wire.Transport) (wire.Frame, error) {
 	listCtx, cancel := context.WithTimeout(ctx, preflightListTimeout)
 	defer cancel()
-	// Close the transport if the bound lapses OR the parent context ends:
-	// either way a blocked Send/Recv below must release promptly.
 	stopClose := context.AfterFunc(listCtx, func() { _ = transport.Close() })
 	defer stopClose()
 	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}); err != nil {
 		if listCtx.Err() != nil {
-			return nil, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
+			return wire.Frame{}, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
 		}
-		return nil, fmt.Errorf("vev: requesting session list: %w", err)
+		return wire.Frame{}, fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
 	if err != nil {
 		if listCtx.Err() != nil {
-			return nil, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
+			return wire.Frame{}, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
 		}
-		return nil, fmt.Errorf("vev: reading session list: %w", err)
+		return wire.Frame{}, fmt.Errorf("vev: reading session list: %w", err)
 	}
-	return decodeSessionListReply(reply)
+	return reply, nil
 }
 
 func decodeSessionListReply(reply wire.Frame) ([]protocol.SessionInfo, error) {

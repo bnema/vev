@@ -6,17 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/pkg/rawterm"
 )
-
-// preflightListTimeout bounds the attach pre-flight session listing so a
-// socket that accepts but never replies cannot delay the attach fallback
-// or block termination.
-var preflightListTimeout = 5 * time.Second
 
 const maxAttachTargetHandoffs = 32
 
@@ -70,19 +64,32 @@ func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttac
 			log.Debug("missing-session preflight unavailable; proceeding with attach", "err", err)
 		}
 	case !exists:
-		create, err := offerMissingSessionCreate(ctx, name, deps.attachPrompt)
-		if err != nil {
-			return protocol.IntentAttach, err
-		}
-		if !create {
-			break
-		}
-		if err := ctx.Err(); err != nil {
-			return protocol.IntentAttach, err
-		}
-		return protocol.IntentNew, nil
+		return confirmMissingSessionCreate(ctx, name, deps.attachPrompt)
 	}
 	return protocol.IntentAttach, nil
+}
+
+// confirmMissingSessionCreate prompts to create an absent session and maps
+// the answer to the attach intent: IntentNew on confirmation, IntentAttach
+// on decline. A cancelled wait surfaces the cancellation error.
+// Non-interactive consoles, a declined answer, or unreadable input keep
+// IntentAttach. Only y/yes answers confirm; empty, no, and unknown answers
+// decline.
+func confirmMissingSessionCreate(ctx context.Context, name string, prompt attachPrompt) (uint8, error) {
+	if name == "" || ctx.Err() != nil || !prompt.interactive() {
+		return protocol.IntentAttach, nil
+	}
+	create, err := confirm.NewConfirmer(prompt.input(), prompt.output()).ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
+	if err != nil {
+		return protocol.IntentAttach, err
+	}
+	if !create {
+		return protocol.IntentAttach, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return protocol.IntentAttach, err
+	}
+	return protocol.IntentNew, nil
 }
 
 // sessionExists reports whether a directly attached local session exists.
@@ -105,23 +112,4 @@ func sessionExists(ctx context.Context, name string, deps runAttachDeps) (bool, 
 		}
 	}
 	return false, nil
-}
-
-// offerMissingSessionCreate prompts to create a locally missing session.
-// It reports whether the caller should attach with IntentNew instead.
-// Non-interactive consoles, a cancelled wait, a declined answer, or
-// unreadable input keep the attach intent unchanged. Only y/yes answers
-// confirm; empty, no, and unknown answers decline.
-func offerMissingSessionCreate(ctx context.Context, name string, prompt attachPrompt) (bool, error) {
-	if name == "" || ctx.Err() != nil || !prompt.interactive() {
-		return false, nil
-	}
-	create, err := confirm.NewConfirmer(prompt.input(), prompt.output()).ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
-	if err != nil {
-		return false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	return create, nil
 }
