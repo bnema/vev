@@ -39,9 +39,11 @@ func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttac
 	return protocol.IntentAttach, nil
 }
 
-// isInteractiveTerminal reports whether the prompt runs on a terminal.
-// Test stubs serve In/Out without a backing console, so only the real
-// stdin file is probed; anything else counts as interactive.
+// isInteractiveTerminal reports whether the prompt input runs on a
+// terminal. Only *os.File inputs are probed; anything else (pipes, test
+// stubs serving canned answers) counts as interactive so tests exercise
+// the prompt path. In production the terminal always wraps os.Stdin, so
+// the probe is meaningful there.
 func isInteractiveTerminal(terminal ports.Terminal) bool {
 	if terminal == nil {
 		return false
