@@ -8,6 +8,7 @@ const (
 	NavigationCapabilityHomePicker NavigationCapabilities = 1 << iota
 	NavigationCapabilityBack
 	NavigationCapabilityInventory
+	NavigationCapabilityClientPicker
 )
 
 type StartupOverlay uint8
@@ -66,7 +67,7 @@ type ParkedRouteResponse struct {
 }
 
 func validNavigationCapabilities(capabilities NavigationCapabilities) bool {
-	return capabilities&^(NavigationCapabilityHomePicker|NavigationCapabilityBack|NavigationCapabilityInventory) == 0
+	return capabilities&^(NavigationCapabilityHomePicker|NavigationCapabilityBack|NavigationCapabilityInventory|NavigationCapabilityClientPicker) == 0
 }
 
 func validStartupOverlay(overlay StartupOverlay) bool {
