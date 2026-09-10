@@ -162,31 +162,36 @@ func TestRunAttachWithDepsMissingSessionCancelledPreflightSkipsPrompt(t *testing
 }
 
 type blockingPreflightTransport struct {
-	sendRelease chan struct{}
+	blockOnSend bool
+	entered     chan struct{}
+	enterOnce   sync.Once
 	closed      chan struct{}
 	closeOnce   sync.Once
 }
 
 func newBlockingPreflightTransport() *blockingPreflightTransport {
-	return &blockingPreflightTransport{sendRelease: make(chan struct{}), closed: make(chan struct{})}
+	return &blockingPreflightTransport{entered: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (t *blockingPreflightTransport) markEntered() {
+	t.enterOnce.Do(func() { close(t.entered) })
 }
 
 func (t *blockingPreflightTransport) Send(wire.Frame) error {
-	select {
-	case <-t.sendRelease:
-		return errors.New("send released")
-	case <-t.closed:
+	if t.blockOnSend {
+		t.markEntered()
+		<-t.closed
 		return errors.New("transport closed")
 	}
+	return nil
 }
 
 func (t *blockingPreflightTransport) Recv() (wire.Frame, error) {
-	select {
-	case <-t.sendRelease:
-		return wire.Frame{}, errors.New("recv released")
-	case <-t.closed:
-		return wire.Frame{}, errors.New("transport closed")
+	if !t.blockOnSend {
+		t.markEntered()
 	}
+	<-t.closed
+	return wire.Frame{}, errors.New("transport closed")
 }
 
 func (t *blockingPreflightTransport) Close() error {
@@ -215,20 +220,47 @@ func TestListLocalSessionsOnTimesOutOnSilentDaemon(t *testing.T) {
 }
 
 func TestListLocalSessionsOnHonorsCancellation(t *testing.T) {
-	transport := newBlockingPreflightTransport()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, err := listLocalSessionsOn(ctx, func(context.Context) (wire.Transport, error) {
-			return transport, nil
+	for _, tt := range []struct {
+		name        string
+		blockOnSend bool
+	}{
+		{name: "blocked send", blockOnSend: true},
+		{name: "blocked recv", blockOnSend: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := newBlockingPreflightTransport()
+			transport.blockOnSend = tt.blockOnSend
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := listLocalSessionsOn(ctx, func(context.Context) (wire.Transport, error) {
+					return transport, nil
+				})
+				done <- err
+			}()
+			// Wait until the exchange is blocked inside the transport
+			// before cancelling, so the test exercises in-flight
+			// cancellation rather than the earlier dial-path check.
+			select {
+			case <-transport.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("exchange did not reach the blocked transport")
+			}
+			started := time.Now()
+			cancel()
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, context.Canceled)
+				require.Less(t, time.Since(started), preflightListTimeout, "in-flight cancellation must beat the list bound")
+			case <-time.After(5 * time.Second):
+				t.Fatal("preflight did not release on context cancellation")
+			}
+			select {
+			case <-transport.closed:
+			default:
+				t.Fatal("cancellation must close the exchange transport")
+			}
 		})
-		done <- err
-	}()
-	cancel()
-	select {
-	case err := <-done:
-		require.Error(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("preflight did not release on context cancellation")
 	}
 }

@@ -1775,7 +1775,7 @@ func listLocalSessionsOn(ctx context.Context, dial func(context.Context) (wire.T
 	// a socket that accepts but never replies must neither delay the attach
 	// fallback nor block Ctrl-C exit. Transport.Close interrupts blocked
 	// Send and Recv.
-	listCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preflightListTimeout)
+	listCtx, cancel := context.WithTimeout(ctx, preflightListTimeout)
 	defer cancel()
 	stopExchange := make(chan struct{})
 	defer close(stopExchange)
