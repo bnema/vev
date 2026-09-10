@@ -1,7 +1,8 @@
 # Client modal approval gate (P5.3, design-only)
 
-Status: awaiting user decision. No implementation is authorized by this
-document. This plan does not authorize additional subagent launches.
+Status: APPROVED by user on 2026-09-10 — navigation-picker pilot. Pilot
+plan: `docs/plans/client-navigation-picker-pilot.md`. This approval covers
+the pilot only; expansion needs renewed approval after pilot evidence.
 
 ## Contracts presented
 
