@@ -55,7 +55,8 @@ func (p attachPrompt) output() io.Writer {
 // existence cannot be determined, it keeps IntentAttach and the daemon
 // rejection (if any) surfaces unchanged. When the session is absent it
 // offers creation on an interactive console and returns IntentNew on
-// confirmation.
+// confirmation; decline keeps IntentAttach, and a cancelled wait surfaces
+// the cancellation error.
 //
 // The check runs before the client owns any console reader, so the create
 // prompt is always the sole stdin consumer: no failed attempt can leave a
@@ -69,26 +70,19 @@ func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttac
 			log.Debug("missing-session preflight unavailable; proceeding with attach", "err", err)
 		}
 	case !exists:
-		return confirmSessionCreate(ctx, name, deps.attachPrompt)
+		create, err := offerMissingSessionCreate(ctx, name, deps.attachPrompt)
+		if err != nil {
+			return protocol.IntentAttach, err
+		}
+		if !create {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return protocol.IntentAttach, err
+		}
+		return protocol.IntentNew, nil
 	}
 	return protocol.IntentAttach, nil
-}
-
-// confirmSessionCreate offers creation of an absent session and maps the
-// answer to the attach intent: IntentNew on confirmation, IntentAttach on
-// decline. A cancelled wait surfaces the cancellation error.
-func confirmSessionCreate(ctx context.Context, name string, prompt attachPrompt) (uint8, error) {
-	create, err := offerMissingSessionCreate(ctx, name, prompt)
-	if err != nil {
-		return protocol.IntentAttach, err
-	}
-	if !create {
-		return protocol.IntentAttach, nil
-	}
-	if err := ctx.Err(); err != nil {
-		return protocol.IntentAttach, err
-	}
-	return protocol.IntentNew, nil
 }
 
 // sessionExists reports whether a directly attached local session exists.

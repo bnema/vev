@@ -16,30 +16,27 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
-func fakeSessionListDialer(t *testing.T, sessions []protocol.SessionInfo) func() wire.Dialer {
+// sessionListDialer serves a canned session listing over generated mocks.
+func sessionListDialer(t *testing.T, sessions []protocol.SessionInfo) func() wire.Dialer {
 	t.Helper()
 	transport := wiremocks.NewMockTransport(t)
 	transport.EXPECT().Send(mock.Anything).RunAndReturn(func(frame wire.Frame) error {
 		require.Equal(t, wire.MsgList, frame.Type)
 		return nil
 	}).Once()
-	transport.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
-		return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(protocol.Sessions{Sessions: sessions})}, nil
-	}).Once()
+	transport.EXPECT().Recv().Return(wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(protocol.Sessions{Sessions: sessions})}, nil).Once()
 	transport.EXPECT().Close().Return(nil)
 	dialer := wiremocks.NewMockDialer(t)
-	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(context.Context) (wire.Transport, error) {
-		return transport, nil
-	}).Once()
+	dialer.EXPECT().Dial(mock.Anything).Return(transport, nil).Once()
 	return func() wire.Dialer { return dialer }
 }
 
-func fakeFailingListDialer(t *testing.T, dialErr error) func() wire.Dialer {
+// failingSessionListDialer fails the listing dial so the preflight falls
+// back to a plain attach.
+func failingSessionListDialer(t *testing.T, dialErr error) func() wire.Dialer {
 	t.Helper()
 	dialer := wiremocks.NewMockDialer(t)
-	dialer.EXPECT().Dial(mock.Anything).RunAndReturn(func(context.Context) (wire.Transport, error) {
-		return nil, dialErr
-	}).Maybe()
+	dialer.EXPECT().Dial(mock.Anything).Return(nil, dialErr).Maybe()
 	return func() wire.Dialer { return dialer }
 }
 
@@ -65,7 +62,7 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 			var intents []uint8
 			var promptOut strings.Builder
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-				localDialer: fakeSessionListDialer(t, tt.sessions),
+				localDialer: sessionListDialer(t, tt.sessions),
 				attachPrompt: attachPrompt{
 					in:       strings.NewReader(tt.answer),
 					out:      &promptOut,
@@ -144,7 +141,7 @@ func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.
 			var promptOut strings.Builder
 			var intents []uint8
 			err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-				localDialer: fakeFailingListDialer(t, tt.dialErr),
+				localDialer: failingSessionListDialer(t, tt.dialErr),
 				attachPrompt: attachPrompt{
 					in:       strings.NewReader("y\n"),
 					out:      &promptOut,
@@ -171,53 +168,32 @@ func stubLifecycleUnavailable(t *testing.T) {
 	daemonLifecycleProbe = fakeLifecycleProbe{err: errors.New("lifecycle unavailable")}
 }
 
-// blockingPreflightTransport blocks inside Send or Recv until closed,
-// letting tests park the list exchange mid-flight. entered fires when the
-// exchange reaches the blocked operation.
-type blockingPreflightTransport struct {
-	blockOnSend bool
-	entered     chan struct{}
-	closed      chan struct{}
-}
-
-func newBlockingPreflightTransport(blockOnSend bool) *blockingPreflightTransport {
-	return &blockingPreflightTransport{blockOnSend: blockOnSend, entered: make(chan struct{}), closed: make(chan struct{})}
-}
-
-func (t *blockingPreflightTransport) block() error {
-	select {
-	case <-t.entered:
-	default:
-		close(t.entered)
+// stalledListTransport parks the list exchange inside one operation until
+// closed, letting tests exercise the preflight bound mid-flight. entered
+// fires when the exchange reaches the parked operation.
+func stalledListTransport(t *testing.T, blockOnSend bool) (*wiremocks.MockTransport, chan struct{}, chan struct{}) {
+	t.Helper()
+	entered := make(chan struct{})
+	closed := make(chan struct{})
+	transport := wiremocks.NewMockTransport(t)
+	block := func() {
+		close(entered)
+		<-closed
 	}
-	<-t.closed
-	return errors.New("transport closed")
-}
-
-func (t *blockingPreflightTransport) Send(wire.Frame) error {
-	if t.blockOnSend {
-		return t.block()
+	if blockOnSend {
+		transport.EXPECT().Send(mock.Anything).Run(func(wire.Frame) { block() }).Return(errors.New("transport closed")).Once()
+	} else {
+		transport.EXPECT().Send(mock.Anything).Return(nil).Once()
+		transport.EXPECT().Recv().Run(func() { block() }).Return(wire.Frame{}, errors.New("transport closed")).Once()
 	}
-	return nil
-}
-
-func (t *blockingPreflightTransport) Recv() (wire.Frame, error) {
-	if !t.blockOnSend {
-		if err := t.block(); err != nil {
-			return wire.Frame{}, err
+	transport.EXPECT().Close().Run(func() {
+		select {
+		case <-closed:
+		default:
+			close(closed)
 		}
-	}
-	<-t.closed
-	return wire.Frame{}, errors.New("transport closed")
-}
-
-func (t *blockingPreflightTransport) Close() error {
-	select {
-	case <-t.closed:
-	default:
-		close(t.closed)
-	}
-	return nil
+	}).Return(nil)
+	return transport, entered, closed
 }
 
 func TestListSessionsTimesOutOnSilentDaemon(t *testing.T) {
@@ -225,7 +201,7 @@ func TestListSessionsTimesOutOnSilentDaemon(t *testing.T) {
 	preflightListTimeout = 50 * time.Millisecond
 	defer func() { preflightListTimeout = oldTimeout }()
 
-	transport := newBlockingPreflightTransport(false)
+	transport, _, closed := stalledListTransport(t, false)
 	started := time.Now()
 	_, err := listSessionsWithDialer(context.Background(), func(context.Context) (wire.Transport, error) {
 		return transport, nil
@@ -234,7 +210,7 @@ func TestListSessionsTimesOutOnSilentDaemon(t *testing.T) {
 	require.Error(t, err)
 	require.Less(t, elapsed, 5*time.Second, "a silent daemon must not stall the preflight past its bound")
 	select {
-	case <-transport.closed:
+	case <-closed:
 	default:
 		t.Fatal("preflight timeout must close the exchange transport")
 	}
@@ -249,7 +225,7 @@ func TestListSessionsHonorsCancellation(t *testing.T) {
 		{name: "blocked recv", blockOnSend: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			transport := newBlockingPreflightTransport(tt.blockOnSend)
+			transport, entered, closed := stalledListTransport(t, tt.blockOnSend)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -263,7 +239,7 @@ func TestListSessionsHonorsCancellation(t *testing.T) {
 			// before cancelling, so the test exercises in-flight
 			// cancellation rather than the earlier dial-path check.
 			select {
-			case <-transport.entered:
+			case <-entered:
 			case <-time.After(5 * time.Second):
 				t.Fatal("exchange did not reach the blocked transport")
 			}
@@ -277,7 +253,7 @@ func TestListSessionsHonorsCancellation(t *testing.T) {
 				t.Fatal("preflight did not release on context cancellation")
 			}
 			select {
-			case <-transport.closed:
+			case <-closed:
 			default:
 				t.Fatal("cancellation must close the exchange transport")
 			}

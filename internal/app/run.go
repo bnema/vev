@@ -1639,15 +1639,10 @@ func listSessionsWithDialer(ctx context.Context, dial func(context.Context) (wir
 	// Send and Recv.
 	listCtx, cancel := context.WithTimeout(ctx, preflightListTimeout)
 	defer cancel()
-	stopExchange := make(chan struct{})
-	defer close(stopExchange)
-	go func() {
-		select {
-		case <-listCtx.Done():
-			_ = transport.Close()
-		case <-stopExchange:
-		}
-	}()
+	// Close the transport if the bound lapses OR the parent context ends:
+	// either way a blocked Send/Recv below must release promptly.
+	stopClose := context.AfterFunc(listCtx, func() { _ = transport.Close() })
+	defer stopClose()
 	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}); err != nil {

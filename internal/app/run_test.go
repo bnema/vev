@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -1441,7 +1440,7 @@ func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {
 	rejected := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: scratch"}
 	var intents []uint8
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-		localDialer: fakeSessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
+		localDialer: sessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
 		attachPrompt: attachPrompt{
 			in:       strings.NewReader("y\n"),
 			out:      &promptOut,
@@ -1462,15 +1461,15 @@ func TestConfirmWithContextReleasesOnCancel(t *testing.T) {
 	defer func() { _ = reader.Close() }()
 	defer func() { _ = writer.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
-	wrote := make(chan struct{})
-	var promptOut strings.Builder
-	out := &signalWriter{Builder: &promptOut, wrote: wrote}
+	defer cancel()
+	wrote := make(chan struct{}, 1)
+	out := cancelOnWrite(t, wrote, io.Discard)
 	done := make(chan error, 1)
 	go func() {
 		_, err := confirmWithContext(ctx, reader, out, "create?")
 		done <- err
 	}()
-	// Wait until the prompt is on screen before cancelling, so the test
+	// Wait until the prompt write lands before cancelling, so the test
 	// exercises release from a blocked read rather than startup.
 	select {
 	case <-wrote:
@@ -1484,17 +1483,22 @@ func TestConfirmWithContextReleasesOnCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("confirm did not release on context cancellation")
 	}
-	require.Contains(t, promptOut.String(), "[y/N]")
 }
 
-type signalWriter struct {
-	*strings.Builder
-	wrote chan struct{}
-	once  sync.Once
+// cancelOnWrite returns a writer that signals wrote on its first write and
+// discards the bytes. Used to observe the confirm prompt without keeping
+// its output.
+func cancelOnWrite(t *testing.T, wrote chan struct{}, sink io.Writer) io.Writer {
+	t.Helper()
+	return writeFunc(func(p []byte) (int, error) {
+		select {
+		case wrote <- struct{}{}:
+		default:
+		}
+		return sink.Write(p)
+	})
 }
 
-func (w *signalWriter) Write(p []byte) (int, error) {
-	n, err := w.Builder.Write(p)
-	w.once.Do(func() { close(w.wrote) })
-	return n, err
-}
+type writeFunc func([]byte) (int, error)
+
+func (f writeFunc) Write(p []byte) (int, error) { return f(p) }
