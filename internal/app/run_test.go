@@ -24,6 +24,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -900,11 +901,6 @@ func requireNamedClientDialer(t *testing.T, ctx context.Context, dialer ports.Cl
 	require.EqualError(t, err, "not used: "+name)
 }
 
-// fakeClipboardReader is a distinguishable ports.ClipboardReader used only to
-// verify identity (that runAttachWithDeps threads the *same* reader through),
-// never actually invoked in these wiring tests.
-type fakeClipboardReader struct{ ports.ClipboardReader }
-
 func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -920,7 +916,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 			var gotDialer string
 			var gotRemote bool
 			var gotClipboard ports.ClipboardReader
-			clip := &fakeClipboardReader{}
+			clip := portsmocks.NewMockClipboardReader(t)
 			factory := newRemoteDialerFactoryMock(t)
 			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 
@@ -1162,7 +1158,7 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	var gotDialer string
 	gotRemote := true
 	var gotClipboard ports.ClipboardReader
-	clip := &fakeClipboardReader{}
+	clip := portsmocks.NewMockClipboardReader(t)
 	factory := newRemoteDialerFactoryMock(t)
 	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
 		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
