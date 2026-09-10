@@ -964,6 +964,11 @@ func remoteDiscoveryDaemonOption(stateDir, transport string, clk ports.Clock, lo
 	}, nil
 }
 
+// preflightListTimeout bounds the attach pre-flight session listing so a
+// socket that accepts but never replies cannot delay the attach fallback
+// or block termination.
+var preflightListTimeout = 5 * time.Second
+
 const maxAttachTargetHandoffs = 32
 
 // missingSessionPreflight checks whether a directly attached local session
@@ -1766,13 +1771,34 @@ func listLocalSessionsOn(ctx context.Context, dial func(context.Context) (wire.T
 		}
 		return infos, nil
 	}
+	// Bound the list exchange and close the transport when the bound lapses:
+	// a socket that accepts but never replies must neither delay the attach
+	// fallback nor block Ctrl-C exit. Transport.Close interrupts blocked
+	// Send and Recv.
+	listCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preflightListTimeout)
+	defer cancel()
+	stopExchange := make(chan struct{})
+	defer close(stopExchange)
+	go func() {
+		select {
+		case <-listCtx.Done():
+			_ = transport.Close()
+		case <-stopExchange:
+		}
+	}()
 	defer func() { _ = transport.Close() }()
 
 	if err := transport.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}); err != nil {
+		if listCtx.Err() != nil {
+			return nil, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
+		}
 		return nil, fmt.Errorf("vev: requesting session list: %w", err)
 	}
 	reply, err := transport.Recv()
 	if err != nil {
+		if listCtx.Err() != nil {
+			return nil, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
+		}
 		return nil, fmt.Errorf("vev: reading session list: %w", err)
 	}
 	return decodeSessionListReply(reply)

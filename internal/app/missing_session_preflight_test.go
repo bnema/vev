@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -157,4 +159,76 @@ func TestRunAttachWithDepsMissingSessionCancelledPreflightSkipsPrompt(t *testing
 	require.NoError(t, err)
 	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
 	require.Empty(t, promptOut.String())
+}
+
+type blockingPreflightTransport struct {
+	sendRelease chan struct{}
+	closed      chan struct{}
+	closeOnce   sync.Once
+}
+
+func newBlockingPreflightTransport() *blockingPreflightTransport {
+	return &blockingPreflightTransport{sendRelease: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (t *blockingPreflightTransport) Send(wire.Frame) error {
+	select {
+	case <-t.sendRelease:
+		return errors.New("send released")
+	case <-t.closed:
+		return errors.New("transport closed")
+	}
+}
+
+func (t *blockingPreflightTransport) Recv() (wire.Frame, error) {
+	select {
+	case <-t.sendRelease:
+		return wire.Frame{}, errors.New("recv released")
+	case <-t.closed:
+		return wire.Frame{}, errors.New("transport closed")
+	}
+}
+
+func (t *blockingPreflightTransport) Close() error {
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func TestListLocalSessionsOnTimesOutOnSilentDaemon(t *testing.T) {
+	oldTimeout := preflightListTimeout
+	preflightListTimeout = 50 * time.Millisecond
+	defer func() { preflightListTimeout = oldTimeout }()
+
+	transport := newBlockingPreflightTransport()
+	started := time.Now()
+	_, err := listLocalSessionsOn(context.Background(), func(context.Context) (wire.Transport, error) {
+		return transport, nil
+	})
+	elapsed := time.Since(started)
+	require.Error(t, err)
+	require.Less(t, elapsed, 5*time.Second, "a silent daemon must not stall the preflight past its bound")
+	select {
+	case <-transport.closed:
+	default:
+		t.Fatal("preflight timeout must close the exchange transport")
+	}
+}
+
+func TestListLocalSessionsOnHonorsCancellation(t *testing.T) {
+	transport := newBlockingPreflightTransport()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := listLocalSessionsOn(ctx, func(context.Context) (wire.Transport, error) {
+			return transport, nil
+		})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("preflight did not release on context cancellation")
+	}
 }
