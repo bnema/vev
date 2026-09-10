@@ -894,6 +894,12 @@ type runAttachDeps struct {
 	// attachPromptTerminal reports whether the create prompt may
 	// interact. It defaults to probing the console; tests inject a stub.
 	attachPromptTerminal func() bool
+	// attachPromptProbe controls the kitty capability probe for the
+	// initial attach only. It defaults to probing; disabling it keeps
+	// stdin free of the probe's lifecycle reader so the create prompt
+	// owns the sole console read. The create retry always probes so a
+	// newly created session renders with full capabilities.
+	attachPromptProbe *bool
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -983,7 +989,12 @@ func confirmMissingSessionCreate(ctx context.Context, name, remoteTarget string,
 	if !errors.As(attachErr, &protocolErr) || protocolErr.Code != protocol.ErrNoSuchSession {
 		return false, nil
 	}
-	if !strings.Contains(protocolErr.Text, name) {
+	// The daemon reports a missing attach with the exact text
+	// "no such resumable session: <name>". Require that exact text so a
+	// missing "dev-old" never authorizes creating "dev", and so an
+	// in-client navigation handoff that fails on a different session keeps
+	// its own error.
+	if protocolErr.Text != "no such resumable session: "+name {
 		return false, nil
 	}
 	terminal := deps.attachPromptTerminal
@@ -1167,12 +1178,16 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			if log != nil {
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
+			probe := deps.disableCapabilityProbe
+			if intent == protocol.IntentAttach && remoteTarget == "" && deps.attachPromptProbe != nil {
+				probe = !*deps.attachPromptProbe
+			}
 			err = runClient(ctx, client.Dependencies{
 				Dialer:                 sessionwire.NewClientDialer(localDialer()),
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
 				Clock:                  clientClock(deps),
-				DisableCapabilityProbe: deps.disableCapabilityProbe,
+				DisableCapabilityProbe: probe,
 				UI:                     deps.ui,
 				Clipboard:              deps.clipboard,
 				Logger:                 log,

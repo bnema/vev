@@ -1489,6 +1489,73 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 	}
 }
 
+func TestRunAttachWithDepsMissingSessionProbeOwnership(t *testing.T) {
+	missing := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"}
+	var probes []bool
+	var intents []uint8
+	var promptOut strings.Builder
+	enableProbe := true
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
+		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
+		attachPromptIn:       strings.NewReader("y\n"),
+		attachPromptOut:      &promptOut,
+		attachPromptTerminal: func() bool { return true },
+		attachPromptProbe:    &enableProbe,
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			probes = append(probes, deps.DisableCapabilityProbe)
+			intents = append(intents, request.Intent)
+			if request.Intent == protocol.IntentNew {
+				return nil
+			}
+			return missing
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []uint8{protocol.IntentAttach, protocol.IntentNew}, intents)
+	require.Equal(t, []bool{false, false}, probes, "the create retry must probe so a new session renders with full capabilities")
+
+	disableProbe := false
+	probes = nil
+	intents = nil
+	promptOut.Reset()
+	err = runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
+		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
+		attachPromptIn:       strings.NewReader("y\n"),
+		attachPromptOut:      &promptOut,
+		attachPromptTerminal: func() bool { return true },
+		attachPromptProbe:    &disableProbe,
+		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+			probes = append(probes, deps.DisableCapabilityProbe)
+			intents = append(intents, request.Intent)
+			if request.Intent == protocol.IntentNew {
+				return nil
+			}
+			return missing
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, false}, probes, "disabling the initial probe keeps stdin free of the probe reader before the create prompt")
+}
+
+func TestRunAttachWithDepsMissingSessionPrefixCollisionSkipsPrompt(t *testing.T) {
+	var promptOut strings.Builder
+	other := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack-old"}
+	var intents []uint8
+	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
+		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
+		attachPromptIn:       strings.NewReader("y\n"),
+		attachPromptOut:      &promptOut,
+		attachPromptTerminal: func() bool { return true },
+		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+			intents = append(intents, request.Intent)
+			return other
+		},
+	})
+	require.Equal(t, other, err)
+	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
+	require.Empty(t, promptOut.String())
+}
+
 func TestRunAttachWithDepsMissingSessionNameMismatchSkipsPrompt(t *testing.T) {
 	var promptOut strings.Builder
 	other := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: other"}
