@@ -116,7 +116,7 @@ func offerMissingSessionCreate(ctx context.Context, name string, prompt attachPr
 	if name == "" || ctx.Err() != nil || !prompt.interactive() {
 		return false, nil
 	}
-	create, err := confirmWithContext(ctx, prompt.input(), prompt.output(), fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
+	create, err := confirm.NewConfirmer(prompt.input(), prompt.output()).ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
 	if err != nil {
 		return false, err
 	}
@@ -124,30 +124,4 @@ func offerMissingSessionCreate(ctx context.Context, name string, prompt attachPr
 		return false, err
 	}
 	return create, nil
-}
-
-// confirmWithContext asks one confirmation question while also observing
-// ctx. A cancelled context releases the caller with the cancellation error
-// instead of blocking on input. The reader goroutine may stay blocked, so
-// callers must only use this where the process exits (or detaches from the
-// console) afterward rather than continuing to interact on the same stream.
-func confirmWithContext(ctx context.Context, input io.Reader, output io.Writer, question string) (bool, error) {
-	if ctx == nil {
-		return confirm.NewConfirmer(input, output).Confirm(question)
-	}
-	type outcome struct {
-		create bool
-		err    error
-	}
-	result := make(chan outcome, 1)
-	go func() {
-		create, err := confirm.NewConfirmer(input, output).Confirm(question)
-		result <- outcome{create: create, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case reply := <-result:
-		return reply.create, reply.err
-	}
 }

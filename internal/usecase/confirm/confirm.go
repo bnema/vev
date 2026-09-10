@@ -2,6 +2,7 @@ package confirm
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,32 @@ type Confirmer struct {
 // n/no, and unknown answers all decline.
 func NewConfirmer(in io.Reader, out io.Writer) Confirmer {
 	return Confirmer{in: in, out: out}
+}
+
+// ConfirmContext writes question with a [y/N] default and reads one answer
+// line, releasing the caller with the cancellation error if ctx ends first.
+// The reader goroutine may stay blocked, so use this only where the process
+// exits (or detaches from the console) afterward rather than continuing to
+// interact on the same stream.
+func (c Confirmer) ConfirmContext(ctx context.Context, question string) (bool, error) {
+	if ctx == nil {
+		return c.Confirm(question)
+	}
+	type outcome struct {
+		ok  bool
+		err error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		ok, err := c.Confirm(question)
+		result <- outcome{ok: ok, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case reply := <-result:
+		return reply.ok, reply.err
+	}
 }
 
 // Confirm writes question with a [y/N] default and reads one answer line.
