@@ -1432,208 +1432,25 @@ func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
 	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "udp" or "stdio")`)
 }
 
-func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
-	missing := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"}
-	tests := []struct {
-		name           string
-		intent         uint8
-		remoteTarget   string
-		answer         string
-		terminal       bool
-		wantIntents    []uint8
-		wantErr        string
-		wantPromptPart string
-		wantNoPrompt   bool
-	}{
-		{name: "confirm creates", intent: protocol.IntentAttach, answer: "y\n", terminal: true, wantIntents: []uint8{protocol.IntentAttach, protocol.IntentNew}},
-		{name: "decline keeps error", intent: protocol.IntentAttach, answer: "n\n", terminal: true, wantIntents: []uint8{protocol.IntentAttach}, wantErr: "no such resumable session: codejack", wantPromptPart: `vev: session "codejack" doesn't exist, want to create it?`},
-		{name: "empty answer declines", intent: protocol.IntentAttach, answer: "\n", terminal: true, wantIntents: []uint8{protocol.IntentAttach}, wantErr: "no such resumable session: codejack"},
-		{name: "unknown answer declines", intent: protocol.IntentAttach, answer: "later\n", terminal: true, wantIntents: []uint8{protocol.IntentAttach}, wantErr: "no such resumable session: codejack", wantPromptPart: "[y/N]"},
-		{name: "non-terminal keeps error", intent: protocol.IntentAttach, answer: "y\n", terminal: false, wantIntents: []uint8{protocol.IntentAttach}, wantErr: "no such resumable session: codejack", wantNoPrompt: true},
-		{name: "remote skips prompt", intent: protocol.IntentAttach, remoteTarget: "remote.example", answer: "y\n", terminal: true, wantIntents: []uint8{protocol.IntentAttach}, wantErr: "no such resumable session: codejack", wantNoPrompt: true},
-		{name: "create intent skips prompt", intent: protocol.IntentNew, answer: "y\n", terminal: true, wantIntents: []uint8{protocol.IntentNew}, wantNoPrompt: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var intents []uint8
-			var promptOut strings.Builder
-			err := runAttachWithDeps(context.Background(), tt.intent, "codejack", tt.remoteTarget, "", nil, runAttachDeps{
-				localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-				attachPromptIn:       strings.NewReader(tt.answer),
-				attachPromptOut:      &promptOut,
-				attachPromptTerminal: func() bool { return tt.terminal },
-				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-					intents = append(intents, request.Intent)
-					if request.Intent == protocol.IntentNew {
-						return nil
-					}
-					return missing
-				},
-			})
-			if tt.wantErr != "" {
-				require.EqualError(t, err, "vev: "+tt.wantErr)
-			} else {
-				require.NoError(t, err)
-			}
-			require.Equal(t, tt.wantIntents, intents)
-			if tt.wantPromptPart != "" {
-				require.Contains(t, promptOut.String(), tt.wantPromptPart)
-			}
-			if tt.wantNoPrompt {
-				require.Empty(t, promptOut.String())
-			}
-			if tt.terminal && tt.remoteTarget == "" && tt.intent == protocol.IntentAttach {
-				require.Contains(t, promptOut.String(), "codejack")
-			}
-		})
-	}
-}
-
-func TestRunAttachWithDepsMissingSessionProbeOwnership(t *testing.T) {
-	missing := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"}
-	var probes []bool
-	var intents []uint8
+func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {
+	// The preflight found the session, but the daemon still rejects the
+	// attach (e.g. it died between listing and Hello): the rejection must
+	// surface unchanged and must never trigger a create prompt.
 	var promptOut strings.Builder
-	enableProbe := true
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		attachPromptProbe:    &enableProbe,
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			probes = append(probes, deps.DisableCapabilityProbe)
-			intents = append(intents, request.Intent)
-			if request.Intent == protocol.IntentNew {
-				return nil
-			}
-			return missing
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint8{protocol.IntentAttach, protocol.IntentNew}, intents)
-	require.Equal(t, []bool{false, false}, probes, "the create retry must probe so a new session renders with full capabilities")
-
-	disableProbe := false
-	probes = nil
-	intents = nil
-	promptOut.Reset()
-	err = runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		attachPromptProbe:    &disableProbe,
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			probes = append(probes, deps.DisableCapabilityProbe)
-			intents = append(intents, request.Intent)
-			if request.Intent == protocol.IntentNew {
-				return nil
-			}
-			return missing
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, false}, probes, "disabling the initial probe keeps stdin free of the probe reader before the create prompt")
-}
-
-func TestRunAttachWithDepsMissingSessionPrefixCollisionSkipsPrompt(t *testing.T) {
-	var promptOut strings.Builder
-	other := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack-old"}
+	rejected := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"}
 	var intents []uint8
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
+		localDialer:          fakeSessionListDialer(t, []protocol.SessionInfo{{Name: "codejack"}}),
 		attachPromptIn:       strings.NewReader("y\n"),
 		attachPromptOut:      &promptOut,
 		attachPromptTerminal: func() bool { return true },
 		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 			intents = append(intents, request.Intent)
-			return other
+			return rejected
 		},
 	})
-	require.Equal(t, other, err)
+	require.Equal(t, rejected, err)
 	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
-	require.Empty(t, promptOut.String())
-}
-
-func TestRunAttachWithDepsMissingSessionNameMismatchSkipsPrompt(t *testing.T) {
-	var promptOut strings.Builder
-	other := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: other"}
-	var intents []uint8
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-			intents = append(intents, request.Intent)
-			return other
-		},
-	})
-	require.Equal(t, other, err)
-	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
-	require.Empty(t, promptOut.String())
-}
-
-func TestRunAttachWithDepsMissingSessionWrappedErrorPrompts(t *testing.T) {
-	missing := fmt.Errorf("attach: %w", &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"})
-	var intents []uint8
-	var promptOut strings.Builder
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-			intents = append(intents, request.Intent)
-			if request.Intent == protocol.IntentNew {
-				return nil
-			}
-			return missing
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint8{protocol.IntentAttach, protocol.IntentNew}, intents)
-	require.Contains(t, promptOut.String(), "[y/N]")
-}
-
-func TestRunAttachWithDepsMissingSessionRetryFailureSurfaces(t *testing.T) {
-	missing := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"}
-	taken := &client.ProtocolError{Code: protocol.ErrNameTaken, Text: "session name already in use: codejack"}
-	var intents []uint8
-	var promptOut strings.Builder
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-			intents = append(intents, request.Intent)
-			if request.Intent == protocol.IntentNew {
-				return taken
-			}
-			return missing
-		},
-	})
-	require.Equal(t, taken, err)
-	require.Equal(t, []uint8{protocol.IntentAttach, protocol.IntentNew}, intents)
-}
-
-func TestRunAttachWithDepsMissingSessionCancelledContextSkipsPrompt(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var promptOut strings.Builder
-	missing := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: codejack"}
-	err := runAttachWithDeps(ctx, protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
-			return missing
-		},
-	})
-	require.Equal(t, missing, err)
 	require.Empty(t, promptOut.String())
 }
 
@@ -1656,20 +1473,4 @@ func TestConfirmWithContextReleasesOnCancel(t *testing.T) {
 		t.Fatal("confirm did not release on context cancellation")
 	}
 	require.Contains(t, promptOut.String(), "[y/N]")
-}
-
-func TestRunAttachWithDepsMissingSessionOtherErrorsSkipPrompt(t *testing.T) {
-	var promptOut strings.Builder
-	other := &client.ProtocolError{Code: protocol.ErrNameTaken, Text: "session name already in use: codejack"}
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "codejack", "", "", nil, runAttachDeps{
-		localDialer:          func() wire.Dialer { return namedDialer{name: "local"} },
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
-		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
-			return other
-		},
-	})
-	require.Equal(t, other, err)
-	require.Empty(t, promptOut.String())
 }
