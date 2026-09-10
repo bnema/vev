@@ -343,6 +343,24 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 			return wire.Frame{}, errors.New("test server connection: invalid inventory selection")
 		}
 		return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: payload}, nil
+	case protocol.PickerSnapshot:
+		payload := wire.MarshalPickerSnapshot(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid picker snapshot")
+		}
+		return wire.Frame{Type: wire.MsgPickerSnapshot, Payload: payload}, nil
+	case protocol.PickerClose:
+		payload := wire.MarshalPickerClose(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid picker close")
+		}
+		return wire.Frame{Type: wire.MsgPickerCloseServer, Payload: payload}, nil
+	case protocol.PickerFailure:
+		payload := wire.MarshalPickerFailure(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid picker failure")
+		}
+		return wire.Frame{Type: wire.MsgPickerFailure, Payload: payload}, nil
 	default:
 		return wire.Frame{}, errors.New("test server connection: unsupported server message")
 	}

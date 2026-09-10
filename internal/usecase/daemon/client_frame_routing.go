@@ -206,6 +206,18 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 			d.refreshPalette(effect.ac)
 			d.invalidateRender(effect.sess, effect.ac, true, "client_frame_routing.go:inventory-publication")
 		}
+	case protocol.PickerOpen:
+		if effect.ac == nil || effect.ac.overlays == nil {
+			break
+		}
+		d.openPickerClientForAttachment(effect.ac, effect, message.InteractionID)
+	case protocol.PickerClose:
+		if effect.ac == nil || effect.ac.overlays == nil {
+			break
+		}
+		d.closePickerClientForAttachment(effect.ac, effect, message.InteractionID)
+	case protocol.PickerSelection:
+		d.resolvePickerClientSelection(effect, message)
 	case protocol.NavigationInventoryFailure:
 		overlays := effect.ac.overlays
 		if overlays == nil {

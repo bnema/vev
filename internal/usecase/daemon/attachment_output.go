@@ -578,6 +578,18 @@ func (s *attachmentOutput) atCapacity() bool {
 	return s.outstandingAtomic.Load() >= maxOutstanding
 }
 
+// committedState reports the latest committed output state number. It takes
+// only the view lock, so barrier snapshots can read it without joining the
+// sendMu-ordered paint path.
+func (s *attachmentOutput) committedState() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.lockView()
+	defer s.unlockView()
+	return s.next
+}
+
 func (s *attachmentOutput) outstanding() uint64 {
 	if s == nil {
 		return 0
