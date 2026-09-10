@@ -1599,15 +1599,15 @@ func runList(ctx context.Context, cmd command) (retErr error) {
 }
 
 func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr error) {
-	return listLocalSessionsWithDialer(ctx, func(ctx context.Context) (wire.Transport, error) {
+	return listSessionsWithDialer(ctx, func(ctx context.Context) (wire.Transport, error) {
 		return realDial(ctx, ipc.SocketDir())
 	})
 }
 
-// listLocalSessionsWithDialer runs the session listing over an explicit
-// dialer. The attach pre-flight passes the local dialer (spawning the
-// daemon when needed, like any attach); tests inject mocks.
-func listLocalSessionsWithDialer(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
+// listSessionsWithDialer runs the session listing over an explicit dialer.
+// The attach pre-flight passes the local dialer (spawning the daemon when
+// needed, like any attach); tests inject mocks.
+func listSessionsWithDialer(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, _ string) (wire.Transport, error) {
 		return dial(ctx)
 	}, defaultBackoff)

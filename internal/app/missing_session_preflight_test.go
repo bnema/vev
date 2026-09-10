@@ -134,12 +134,7 @@ func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.
 		{name: "context cancelled", dialErr: context.Canceled, cancel: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			originalProbe := daemonLifecycleProbe
-			t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
-			// Fail lifecycle acquisition so the preflight cannot fall back
-			// to the on-disk catalogue: its error path must attach without
-			// prompting, independent of the machine's real daemon state.
-			daemonLifecycleProbe = fakeLifecycleProbe{err: errors.New("lifecycle unavailable")}
+			stubLifecycleUnavailable(t)
 			ctx := context.Background()
 			if tt.cancel {
 				var cancel context.CancelFunc
@@ -164,6 +159,16 @@ func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.
 			require.Empty(t, promptOut.String(), "an undeterminable preflight must not prompt; the daemon rejection decides")
 		})
 	}
+}
+
+// stubLifecycleUnavailable fails lifecycle acquisition so the preflight
+// cannot fall back to the on-disk catalogue, independent of the machine's
+// real daemon state.
+func stubLifecycleUnavailable(t *testing.T) {
+	t.Helper()
+	originalProbe := daemonLifecycleProbe
+	t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
+	daemonLifecycleProbe = fakeLifecycleProbe{err: errors.New("lifecycle unavailable")}
 }
 
 // blockingPreflightTransport blocks inside Send or Recv until closed,
@@ -215,14 +220,14 @@ func (t *blockingPreflightTransport) Close() error {
 	return nil
 }
 
-func TestListLocalSessionsTimesOutOnSilentDaemon(t *testing.T) {
+func TestListSessionsTimesOutOnSilentDaemon(t *testing.T) {
 	oldTimeout := preflightListTimeout
 	preflightListTimeout = 50 * time.Millisecond
 	defer func() { preflightListTimeout = oldTimeout }()
 
 	transport := newBlockingPreflightTransport(false)
 	started := time.Now()
-	_, err := listLocalSessionsWithDialer(context.Background(), func(context.Context) (wire.Transport, error) {
+	_, err := listSessionsWithDialer(context.Background(), func(context.Context) (wire.Transport, error) {
 		return transport, nil
 	})
 	elapsed := time.Since(started)
@@ -235,7 +240,7 @@ func TestListLocalSessionsTimesOutOnSilentDaemon(t *testing.T) {
 	}
 }
 
-func TestListLocalSessionsHonorsCancellation(t *testing.T) {
+func TestListSessionsHonorsCancellation(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		blockOnSend bool
@@ -249,7 +254,7 @@ func TestListLocalSessionsHonorsCancellation(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				_, err := listLocalSessionsWithDialer(ctx, func(context.Context) (wire.Transport, error) {
+				_, err := listSessionsWithDialer(ctx, func(context.Context) (wire.Transport, error) {
 					return transport, nil
 				})
 				done <- err

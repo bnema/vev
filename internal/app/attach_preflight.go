@@ -63,27 +63,32 @@ func (p attachPrompt) output() io.Writer {
 // the listing itself, so no error-text matching is needed and in-client
 // navigation handoffs can never trigger creation of the requested session.
 func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttachDeps, log *slog.Logger) (uint8, error) {
-	exists, err := sessionExists(ctx, name, deps)
-	if err != nil {
+	switch exists, err := sessionExists(ctx, name, deps); {
+	case err != nil:
 		if log != nil {
 			log.Debug("missing-session preflight unavailable; proceeding with attach", "err", err)
 		}
-		return protocol.IntentAttach, nil
+	case !exists:
+		return confirmSessionCreate(ctx, name, deps.attachPrompt)
 	}
-	if exists {
-		return protocol.IntentAttach, nil
-	}
-	create, err := offerMissingSessionCreate(ctx, name, deps.attachPrompt)
+	return protocol.IntentAttach, nil
+}
+
+// confirmSessionCreate offers creation of an absent session and maps the
+// answer to the attach intent: IntentNew on confirmation, IntentAttach on
+// decline. A cancelled wait surfaces the cancellation error.
+func confirmSessionCreate(ctx context.Context, name string, prompt attachPrompt) (uint8, error) {
+	create, err := offerMissingSessionCreate(ctx, name, prompt)
 	if err != nil {
 		return protocol.IntentAttach, err
 	}
-	if create {
-		if err := ctx.Err(); err != nil {
-			return protocol.IntentAttach, err
-		}
-		return protocol.IntentNew, nil
+	if !create {
+		return protocol.IntentAttach, nil
 	}
-	return protocol.IntentAttach, nil
+	if err := ctx.Err(); err != nil {
+		return protocol.IntentAttach, err
+	}
+	return protocol.IntentNew, nil
 }
 
 // sessionExists reports whether a directly attached local session exists.
@@ -96,7 +101,7 @@ func sessionExists(ctx context.Context, name string, deps runAttachDeps) (bool, 
 	if dial == nil {
 		dial = defaultLocalDialer
 	}
-	sessions, err := listLocalSessionsWithDialer(ctx, dial().Dial)
+	sessions, err := listSessionsWithDialer(ctx, dial().Dial)
 	if err != nil {
 		return false, err
 	}
