@@ -1,5 +1,9 @@
-github.com/bnema/vev-vt v0.5.2-0.20260906085439-e69c4686b8bb h1:WxEsAsS9bCVDgTCdBDMOsbZhOe4NtlDntCVvAt+YPVA=
-github.com/bnema/vev-vt v0.5.2-0.20260906085439-e69c4686b8bb/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
+github.com/bnema/vev-vt v0.5.2-0.20260909120837-2eca6e73b915 h1:x1DwndNSMPMsl0bWlWos8L/qFA4wuts9sGSYidY2kbQ=
+github.com/bnema/vev-vt v0.5.2-0.20260909120837-2eca6e73b915/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
+github.com/bnema/vev-vt v0.5.2-0.20260909134859-55a2b5aa1b3a h1:n25PbH+nlilKwrNHzR9OJjiKsAZDbDuSQzE/GDtArUY=
+github.com/bnema/vev-vt v0.5.2-0.20260909134859-55a2b5aa1b3a/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
+github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
+github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

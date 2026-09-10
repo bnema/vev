@@ -1,0 +1,32 @@
+:root { color-scheme: dark; font-family: ui-monospace, monospace; background: #101010; color: #d8d8d8; }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; height: var(--app-height, 100dvh); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); display: flex; flex-direction: column; overflow: hidden; }
+header { flex-shrink: 0; display: flex; align-items: center; gap: .75rem; padding: 2px 6px; min-height: 24px; border-bottom: 1px solid #303030; font-size: 12px; }
+header strong { color: inherit; font-size: inherit; }
+.header-space { flex: 1; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+header svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+#views svg { width: 14px; height: 14px; }
+#views { display: inline-flex; align-items: center; gap: 4px; color: #aaa; font-variant-numeric: tabular-nums; }
+#connection i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d9ad52; }
+#connection[data-state="connected"] i { background: #86b98b; }
+#connection[data-state="disconnected"] i { background: #888; }
+#connection[data-state="error"] i { background: #db7777; }
+button { font: inherit; color: #aaa; background: transparent; border: 0; border-radius: 0; padding: 2px 6px; cursor: pointer; }
+button:hover { color: #fff; }
+button:focus-visible { outline: 1px solid #ccc; outline-offset: 1px; }
+#workspace { flex: 1; min-height: 0; overflow: hidden; padding: 4px; }
+#terminal { display: inline-block; vertical-align: top; --vev-fg: #d8d8d8; --vev-bg: #101010; --vev-cursor: #ccc; --vev-selection-bg: #444; --vev-selection-fg: #fff; }
+/* Fixed-size rows do not need to relayout the rest of the terminal. */
+#terminal .vev-terminal__row { contain: strict; transform: translateZ(0); }
+#terminal:focus-within { outline: 1px solid #777; outline-offset: -1px; }
+.touch-control { display: none; }
+@media (pointer: coarse) {
+  header button { min-width: 44px; min-height: 44px; }
+  header { gap: .25rem; }
+  .touch-control { display: inline-block; }
+}
+button[aria-pressed="true"] { color: #fff; }
+#terminal.vev-terminal--mouse-capture { user-select: text; }
+#help, noscript { padding: 1rem; }
+[hidden] { display: none !important; }

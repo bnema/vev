@@ -108,6 +108,8 @@ func (c ScrollbackConfig) Valid() bool {
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
 type Config struct {
+	WebListen      string
+	WebOrigin      string
 	Theme          ThemeMode
 	ThemePalette   bool
 	ThemeAccent    ThemeAccent

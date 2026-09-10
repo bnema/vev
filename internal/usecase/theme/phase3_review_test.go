@@ -121,6 +121,8 @@ func TestLegacyAliasesPaletteOffAndForcedThemesRemainExact(t *testing.T) {
 			// PickerSeparator is now a semantic role with the SurfaceBar
 			// background; it was never a compatibility alias.
 			delete(want, "PickerSeparator")
+			// Active neutral tab names use a high-contrast history anchor.
+			want["TabNameActive"] = EmphasisStyle(rgbSurface(tt.theme.Background, tt.theme.Foreground), tt.theme)
 			for name, style := range want {
 				require.Equalf(t, style, legacyAndSemanticStyles(got)[name], "%s", name)
 			}

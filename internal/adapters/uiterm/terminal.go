@@ -366,12 +366,11 @@ func convertSnapshot(screen vt.ScreenSnapshot, geometry domain.Geometry, context
 		}
 	}
 	cursor := screen.Cursor()
-	modes := screen.Modes()
 	return ports.UISnapshot{
 		Revision: revision, Context: context,
 		Columns: geometry.Cols, Rows: geometry.Rows,
 		Cursor: ports.UICursor{Row: cursor.Row, Column: cursor.Col, Visible: cursor.Visible, Style: cursor.Style, StyleSet: cursor.StyleSet},
-		Cells:  cells, AutoWrap: modes.AutoWrap, ApplicationCursor: modes.ApplicationCursor,
+		Cells:  cells, AutoWrap: screen.AutoWrapMode(), ApplicationCursor: screen.ApplicationCursorMode(),
 	}
 }
 

@@ -36,6 +36,7 @@ vev ls [<host>|--all]            list sessions
 vev host add|rm <host>           manage remote hosts
 vev host list                    list remote hosts
 vev kill <name>|--all            kill sessions
+vev --web-daemon                 start the private browser terminal
 vev --ui-driver [options]        drive a headless attachment over JSONL
 vev --ui-observe ...              expose passive observation for an attach
 vev --ui-control ...              expose observation and input control
@@ -81,6 +82,12 @@ vev attach user@host[:session]
 ```
 
 SSH bootstraps an authenticated direct UDP connection that resumes after sleep or network changes. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. The remote host needs vev installed; see [remote resilience](docs/remote-resilience.md) for firewall, transport, and host-list details.
+
+## Browser terminal
+
+`vev --web-daemon` starts a background web gateway on `127.0.0.1:8778` and prints a private access link. The browser displays the ordinary multiplexer UI, including its palette, tabs and splits, using HTML/CSS and a small native JavaScript adapter. No frontend framework or external assets are loaded.
+
+Use `--web-listen` and `--web-origin` (or `web.listen` and `web.origin` in config) for a private network or an HTTPS reverse proxy. VEV serves HTTP; the proxy owns TLS. See [browser terminal](docs/web-terminal.md) for setup, isolated visual testing, controls and current limitations.
 
 ## UI driver
 

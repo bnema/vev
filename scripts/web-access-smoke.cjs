@@ -1,0 +1,53 @@
+// Isolated profile only: rotates access and disconnects all browser views.
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const { execFileSync } = require('node:child_process');
+const assert = require('node:assert/strict');
+(async () => {
+  if (!process.env.VEV_BINARY || !process.env.VEV_ENV) throw new Error('VEV_BINARY and isolated VEV_ENV are required');
+  const link = flag => execFileSync(process.env.VEV_BINARY, [flag], { encoding: 'utf8' }).match(/http:\/\/127\.0\.0\.1:8778\/#token=[A-Za-z0-9_-]+/)[0];
+  const first = link('--web-daemon');
+  assert.equal(link('--web-daemon'), first);
+  const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
+  try {
+    const page = await browser.newPage();
+    await page.goto(first);
+    await page.waitForFunction(() => document.querySelector('#status').textContent === 'Connected');
+    await page.waitForFunction(() => Number(document.querySelector('#view-count').textContent) >= 1);
+    const initial = Number(await page.locator('#view-count').textContent());
+    assert.equal(await page.locator('#view-description').textContent(), `Connected browser terminal views: ${initial}`);
+    const button = page.locator('#palette');
+    const normal = await button.evaluate(node => ({ color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor, border: getComputedStyle(node).borderTopWidth }));
+    await button.hover();
+    const hover = await button.evaluate(node => ({ color: getComputedStyle(node).color, background: getComputedStyle(node).backgroundColor }));
+    assert.equal(normal.border, '0px');
+    assert.equal(hover.background, normal.background);
+    assert.notEqual(hover.color, normal.color);
+    const other = await browser.newPage();
+    await other.goto(first);
+    await other.waitForFunction(() => document.querySelector('#status').textContent === 'Connected');
+    await page.waitForFunction(n => Number(document.querySelector('#view-count').textContent) === n + 1, initial);
+    assert.equal(await page.locator('#connection').getAttribute('data-state'), 'connected');
+    await other.close();
+    await page.waitForFunction(n => Number(document.querySelector('#view-count').textContent) === n, initial);
+    const next = link('--web-renew-token');
+    assert.notEqual(next, first);
+    await page.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Disconnected'));
+    const oldStatus = await page.evaluate(async () => (await fetch('/health')).status);
+    assert.equal(oldStatus, 401);
+    assert.equal(await page.locator('#view-description').textContent(), 'Connected browser terminal views: unknown');
+    await page.locator('#reconnect').click();
+    await page.waitForFunction(() => document.querySelector('#status').textContent === 'Authentication required');
+    assert.equal(await page.locator('#help').isVisible(), true);
+    assert.equal(await page.locator('#reconnect').isVisible(), false);
+    const revoked = await browser.newPage();
+    await revoked.goto(first);
+    await revoked.waitForFunction(() => document.querySelector('#status').textContent === 'Authentication required');
+    await revoked.goto(next);
+    await revoked.waitForFunction(() => document.querySelector('#status').textContent === 'Connected');
+    assert.equal(await revoked.locator('#help').isVisible(), false);
+    await revoked.close();
+    await page.goto(next);
+    await page.waitForFunction(() => document.querySelector('#status').textContent === 'Connected');
+    console.log('Web access smoke passed: stable live token, view count, rotation, cookie revocation, reconnect.');
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

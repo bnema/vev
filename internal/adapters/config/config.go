@@ -36,6 +36,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
 	seenScrollbackKeys := make(map[string]bool)
+	seenWebKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -63,6 +64,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 		}
 
 		switch {
+		case key == "web.listen" || key == "web.origin":
+			warnings = warnDuplicateKey(warnings, seenWebKeys, key, lineNo)
+			// Keep raw values for fail-closed validation at gateway startup.
+			if key == "web.listen" {
+				cfg.WebListen = value
+			} else {
+				cfg.WebOrigin = value
+			}
 		case key == "theme":
 			mode, ok := parseTheme(value)
 			if !ok {
