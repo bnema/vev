@@ -1029,7 +1029,7 @@ func offerMissingSessionCreate(ctx context.Context, name string, deps runAttachD
 	if output == nil {
 		output = os.Stderr
 	}
-	create, err := confirmWithContext(ctx, input, output, fmt.Sprintf("vev: session %q doesn't exist, want to create it?", name))
+	create, err := confirmWithContext(ctx, input, output, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
 	if err != nil {
 		return false, err
 	}

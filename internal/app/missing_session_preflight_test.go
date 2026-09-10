@@ -53,7 +53,7 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 		wantPromptPart string
 		wantNoPrompt   bool
 	}{
-		{name: "missing confirm creates", sessions: nil, answer: "y\n", terminal: true, wantIntent: protocol.IntentNew, wantPromptPart: `vev: session "codejack" doesn't exist, want to create it? [y/N]`},
+		{name: "missing confirm creates", sessions: nil, answer: "y\n", terminal: true, wantIntent: protocol.IntentNew, wantPromptPart: `vev: session "codejack" doesn't exist, want to create and attach to it? [y/N]`},
 		{name: "missing decline attaches", sessions: nil, answer: "n\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "codejack"},
 		{name: "missing empty answer attaches", sessions: nil, answer: "\n", terminal: true, wantIntent: protocol.IntentAttach},
 		{name: "missing unknown answer attaches", sessions: nil, answer: "later\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "[y/N]"},
