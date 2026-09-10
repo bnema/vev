@@ -969,15 +969,21 @@ const maxAttachTargetHandoffs = 32
 // confirmMissingSessionCreate offers to create a directly attached local
 // session when the daemon reports it missing. It returns retry=true when the
 // caller should re-attempt the attach with IntentNew. Non-interactive
-// consoles, unreadable input, a declined answer, or an unrelated error keep
-// the original attach error. Only yes answers confirm; empty, no, and
-// unknown answers decline, matching confirm.Confirmer.
+// consoles, unreadable input, a declined answer, a cancelled wait, or an
+// unrelated error keep the original attach error. Only yes answers confirm;
+// empty, no, and unknown answers decline, matching confirm.Confirmer.
+// The prompt answers only for a missing session whose name matches the
+// requested attach: errors from later in-client navigation handoffs concern
+// a different session and never trigger creation of this one.
 func confirmMissingSessionCreate(ctx context.Context, name, remoteTarget string, intent uint8, attachErr error, deps runAttachDeps) (bool, error) {
 	if remoteTarget != "" || intent != protocol.IntentAttach || name == "" {
 		return false, nil
 	}
 	var protocolErr *client.ProtocolError
 	if !errors.As(attachErr, &protocolErr) || protocolErr.Code != protocol.ErrNoSuchSession {
+		return false, nil
+	}
+	if !strings.Contains(protocolErr.Text, name) {
 		return false, nil
 	}
 	terminal := deps.attachPromptTerminal
@@ -998,11 +1004,49 @@ func confirmMissingSessionCreate(ctx context.Context, name, remoteTarget string,
 	if output == nil {
 		output = os.Stderr
 	}
-	create, err := confirm.NewConfirmer(input, output).Confirm(fmt.Sprintf("vev: session %q doesn't exist, want to create it?", name))
+	create, err := confirmWithContext(ctx, input, output, fmt.Sprintf("vev: session %q doesn't exist, want to create it?", name))
 	if err != nil {
 		return false, attachErr
 	}
+	if err := ctx.Err(); err != nil {
+		return false, nil
+	}
 	return create, nil
+}
+
+// confirmWithContext reads one confirmation answer while also observing ctx.
+// The prompt text is written before waiting; a cancelled context releases
+// the wait and reports no confirmation without consuming further input.
+func confirmWithContext(ctx context.Context, input io.Reader, output io.Writer, question string) (bool, error) {
+	if ctx == nil {
+		return confirm.NewConfirmer(input, output).Confirm(question)
+	}
+	if _, err := fmt.Fprintf(output, "%s [y/N] ", question); err != nil {
+		return false, err
+	}
+	type answer struct {
+		text string
+		err  error
+	}
+	result := make(chan answer, 1)
+	go func() {
+		line, err := bufio.NewReader(input).ReadString('\n')
+		result <- answer{text: line, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case reply := <-result:
+		if reply.err != nil && !errors.Is(reply.err, io.EOF) {
+			return false, reply.err
+		}
+		switch strings.ToLower(strings.TrimSpace(reply.text)) {
+		case "y", "yes":
+			return true, nil
+		default:
+			return false, nil
+		}
+	}
 }
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
@@ -1147,6 +1191,9 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return promptErr
 			}
 			if retry {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				intent = protocol.IntentNew
 				continue
 			}
