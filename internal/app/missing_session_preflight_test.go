@@ -65,11 +65,12 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 			var intents []uint8
 			var promptOut strings.Builder
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-				localDialer:          fakeSessionListDialer(t, tt.sessions),
-				attachPromptIn:       strings.NewReader(tt.answer),
-				attachPromptOut:      &promptOut,
-				attachPromptTerminal: func() bool { return tt.terminal },
-				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+				localDialer: fakeSessionListDialer(t, tt.sessions),
+				attachPrompt: attachPrompt{
+					in:       strings.NewReader(tt.answer),
+					out:      &promptOut,
+					terminal: func() bool { return tt.terminal },
+				}, runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					return nil
 				},
@@ -104,10 +105,11 @@ func TestRunAttachWithDepsMissingSessionPreflightSkipsNonAttach(t *testing.T) {
 				session = "scratch"
 			}
 			err := runAttachWithDeps(context.Background(), tt.intent, session, tt.remote, "", nil, runAttachDeps{
-				attachPromptIn:       strings.NewReader("y\n"),
-				attachPromptOut:      &promptOut,
-				attachPromptTerminal: func() bool { return true },
-				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+				attachPrompt: attachPrompt{
+					in:       strings.NewReader("y\n"),
+					out:      &promptOut,
+					terminal: func() bool { return true },
+				}, runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					if tt.remote != "" {
 						require.True(t, deps.Remote)
@@ -147,11 +149,12 @@ func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.
 			var promptOut strings.Builder
 			var intents []uint8
 			err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-				localDialer:          fakeFailingListDialer(t, tt.dialErr),
-				attachPromptIn:       strings.NewReader("y\n"),
-				attachPromptOut:      &promptOut,
-				attachPromptTerminal: func() bool { return true },
-				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+				localDialer: fakeFailingListDialer(t, tt.dialErr),
+				attachPrompt: attachPrompt{
+					in:       strings.NewReader("y\n"),
+					out:      &promptOut,
+					terminal: func() bool { return true },
+				}, runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					return nil
 				},

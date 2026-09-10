@@ -1441,10 +1441,12 @@ func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {
 	rejected := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: scratch"}
 	var intents []uint8
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-		localDialer:          fakeSessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
-		attachPromptIn:       strings.NewReader("y\n"),
-		attachPromptOut:      &promptOut,
-		attachPromptTerminal: func() bool { return true },
+		localDialer: fakeSessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
+		attachPrompt: attachPrompt{
+			in:       strings.NewReader("y\n"),
+			out:      &promptOut,
+			terminal: func() bool { return true },
+		},
 		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 			intents = append(intents, request.Intent)
 			return rejected

@@ -49,12 +49,10 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
-	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/internal/usecase/remotes"
 	pdgram "github.com/bnema/vev/pkg/dgram"
-	"github.com/bnema/vev/pkg/rawterm"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -886,14 +884,10 @@ type runAttachDeps struct {
 	disableCapabilityProbe  bool
 	localEnvironment        []string
 	remoteEnvironment       func(string) []string
-	// attachPromptIn reads one line for the missing-session create prompt
-	// and attachPromptOut receives the prompt text. Both default to the
-	// process console streams; tests inject buffers.
-	attachPromptIn  io.Reader
-	attachPromptOut io.Writer
-	// attachPromptTerminal reports whether the create prompt may
-	// interact. It defaults to probing the console; tests inject a stub.
-	attachPromptTerminal func() bool
+	// attachPrompt carries the console streams for the missing-session
+	// create prompt. The zero value uses the process console and probes
+	// stdin; tests inject buffers and a stub.
+	attachPrompt attachPrompt
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -964,113 +958,6 @@ func remoteDiscoveryDaemonOption(stateDir, transport string, clk ports.Clock, lo
 	}, nil
 }
 
-// preflightListTimeout bounds the attach pre-flight session listing so a
-// socket that accepts but never replies cannot delay the attach fallback
-// or block termination.
-var preflightListTimeout = 5 * time.Second
-
-const maxAttachTargetHandoffs = 32
-
-// missingSessionPreflight reports whether a directly attached local
-// session exists before any client attempt runs. An error means existence
-// could not be determined; the caller then attaches normally and a missing
-// session surfaces the daemon rejection unchanged.
-//
-// The check runs before the client owns any console reader, so the create
-// prompt that follows is always the sole stdin consumer: no failed attempt
-// can leave a blocked input-pump read behind to steal the answer. It also
-// establishes provenance directly — the listing names this daemon's
-// sessions, so no error-text matching is needed and in-client navigation
-// handoffs can never trigger creation of the requested session.
-func missingSessionPreflight(ctx context.Context, name string, deps runAttachDeps) (bool, error) {
-	if name == "" {
-		return false, nil
-	}
-	sessions, err := listLocalSessionsWithDeps(ctx, deps)
-	if err != nil {
-		return false, err
-	}
-	for _, session := range sessions {
-		if session.Name == name {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// offerMissingSessionCreate prompts to create a locally missing session
-// when the pre-flight existence check reports it absent. It reports
-// whether the caller should attach with IntentNew instead.
-// Non-interactive consoles, a cancelled wait, a declined answer, or
-// unreadable input keep the attach intent unchanged. Only y/yes answers
-// confirm; empty, no, and unknown answers decline.
-func offerMissingSessionCreate(ctx context.Context, name string, deps runAttachDeps) (bool, error) {
-	if name == "" || ctx.Err() != nil || !attachPromptInteractive(deps) {
-		return false, nil
-	}
-	create, err := confirmWithContext(ctx, attachPromptInput(deps), attachPromptOutput(deps), fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
-	if err != nil {
-		return false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	return create, nil
-}
-
-// attachPromptInteractive reports whether the create prompt may interact
-// with the console. Tests inject a stub; production probes stdin.
-func attachPromptInteractive(deps runAttachDeps) bool {
-	if deps.attachPromptTerminal != nil {
-		return deps.attachPromptTerminal()
-	}
-	return rawterm.IsTerminal(int(os.Stdin.Fd()))
-}
-
-// attachPromptInput is the prompt's answer source: the process console
-// unless tests inject a buffer.
-func attachPromptInput(deps runAttachDeps) io.Reader {
-	if deps.attachPromptIn != nil {
-		return deps.attachPromptIn
-	}
-	return os.Stdin
-}
-
-// attachPromptOutput receives the prompt text: stderr unless tests inject
-// a buffer.
-func attachPromptOutput(deps runAttachDeps) io.Writer {
-	if deps.attachPromptOut != nil {
-		return deps.attachPromptOut
-	}
-	return os.Stderr
-}
-
-// confirmWithContext asks one confirmation question while also observing
-// ctx. A cancelled context releases the caller with the cancellation error
-// instead of blocking on input. The reader goroutine may stay blocked, so
-// callers must only use this where the process exits (or detaches from the
-// console) afterward rather than continuing to interact on the same stream.
-func confirmWithContext(ctx context.Context, input io.Reader, output io.Writer, question string) (bool, error) {
-	if ctx == nil {
-		return confirm.NewConfirmer(input, output).Confirm(question)
-	}
-	type outcome struct {
-		create bool
-		err    error
-	}
-	result := make(chan outcome, 1)
-	go func() {
-		create, err := confirm.NewConfirmer(input, output).Confirm(question)
-		result <- outcome{create: create, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case reply := <-result:
-		return reply.create, reply.err
-	}
-}
-
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
 		if remoteTarget == "" && intent == protocol.IntentNew {
@@ -1080,24 +967,11 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	}
 
 	if intent == protocol.IntentAttach && remoteTarget == "" {
-		exists, preflightErr := missingSessionPreflight(ctx, name, deps)
-		switch {
-		case preflightErr != nil:
-			if log != nil {
-				log.Debug("missing-session preflight unavailable; proceeding with attach", "err", preflightErr)
-			}
-		case !exists:
-			create, promptErr := offerMissingSessionCreate(ctx, name, deps)
-			if promptErr != nil {
-				return promptErr
-			}
-			if create {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				intent = protocol.IntentNew
-			}
+		resolved, err := resolveMissingSessionAttach(ctx, name, deps, log)
+		if err != nil {
+			return err
 		}
+		intent = resolved
 	}
 
 	runClient := deps.runClient
@@ -1724,23 +1598,15 @@ func runList(ctx context.Context, cmd command) (retErr error) {
 	return nil
 }
 
-// listLocalSessionsWithDeps answers session existence for the attach
-// pre-flight through the local dialer. Production dials the local daemon
-// (spawning it when needed, like any attach); tests inject mocks.
-func listLocalSessionsWithDeps(ctx context.Context, deps runAttachDeps) ([]protocol.SessionInfo, error) {
-	dial := deps.localDialer
-	if dial == nil {
-		dial = defaultLocalDialer
-	}
-	return listLocalSessionsWithDialer(ctx, dial().Dial)
-}
-
 func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr error) {
 	return listLocalSessionsWithDialer(ctx, func(ctx context.Context) (wire.Transport, error) {
 		return realDial(ctx, ipc.SocketDir())
 	})
 }
 
+// listLocalSessionsWithDialer runs the session listing over an explicit
+// dialer. The attach pre-flight passes the local dialer (spawning the
+// daemon when needed, like any attach); tests inject mocks.
 func listLocalSessionsWithDialer(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, _ string) (wire.Transport, error) {
 		return dial(ctx)
