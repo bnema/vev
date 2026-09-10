@@ -3538,6 +3538,7 @@ func (p *stdinPump) run() {
 	sink := coalescer.Scan
 	if p.clipboard != nil {
 		ci := &clipboardIntercept{
+			ctx:       p.ctx,
 			coalescer: coalescer,
 			reader:    p.clipboard,
 			log:       p.logger,
