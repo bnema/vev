@@ -38,6 +38,12 @@ func (d *Daemon) handleImagePushForAttachment(effect *attachmentEffect, ip proto
 	if len(ip.Data) == 0 || len(ip.Data) > maxImagePushSize || !effect.current() {
 		return
 	}
+	// A client-owned picker owns the user input for this attachment: a
+	// clipboard path must not reach the session while it is open, exactly
+	// like a keystroke. The client re-sends after the interaction closes.
+	if effect.ac != nil && effect.ac.overlays != nil && effect.ac.overlays.pickerClientActive() {
+		return
+	}
 	path, err := d.writeClipboardImageForAttachment(effect, ip)
 	if err != nil {
 		d.log.Error("writing clipboard image failed", "err", err)
@@ -177,6 +183,11 @@ func (d *Daemon) injectClipboardPathToTarget(sess *session, path string, effect 
 		data = wrapped
 	}
 	if effect != nil && !effect.current() {
+		return
+	}
+	// The injection point is the last gate: the interaction may have opened
+	// between admission and here.
+	if effect != nil && effect.ac != nil && effect.ac.overlays != nil && effect.ac.overlays.pickerClientActive() {
 		return
 	}
 	d.writeToPane(sess, p, data)

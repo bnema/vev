@@ -49,13 +49,24 @@ type pickerE2EHarness struct {
 
 // startPickerE2E boots the attach attempt and pushes the first full frame.
 func startPickerE2E(t *testing.T) *pickerE2EHarness {
-	return startPickerE2EWithInput(t, nil)
+	return startPickerE2EHarness(t, nil, true)
 }
 
 // startPickerE2EWithInput boots the same harness over a caller-owned
 // terminal reader, so tests can drive physical input instead of the
 // ui-driver automation channel.
 func startPickerE2EWithInput(t *testing.T, reader io.Reader) *pickerE2EHarness {
+	return startPickerE2EHarness(t, reader, true)
+}
+
+// startPickerE2EHeadless boots the harness without the UI-driver
+// composition (runner.ui is nil), which is how the ordinary CLI runs. The
+// picker must own and complete physical input there too.
+func startPickerE2EHeadless(t *testing.T, reader io.Reader) *pickerE2EHarness {
+	return startPickerE2EHarness(t, reader, false)
+}
+
+func startPickerE2EHarness(t *testing.T, reader io.Reader, withUI bool) *pickerE2EHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -72,9 +83,12 @@ func startPickerE2EWithInput(t *testing.T, reader io.Reader) *pickerE2EHarness {
 	}
 	t.Cleanup(input.stop)
 	uiTerminal, _ := newPickerTestTerminal(t, ctx)
-	ui := NewUI(uiTerminal, systemClock{})
+	var ui *UI
 	runner := &Runner{term: uiTerminal, clock: clock, logger: slog.New(slog.DiscardHandler), ledger: newRouteLedger()}
-	runner.ui = ui
+	if withUI {
+		ui = NewUI(uiTerminal, systemClock{})
+		runner.ui = ui
+	}
 	source := routeTestCandidate(0, protocol.RouteOriginLocal)
 	source.target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "fixture"}
 	source.presentation.name = "fixture"
@@ -120,6 +134,31 @@ func startPickerE2EWithInput(t *testing.T, reader io.Reader) *pickerE2EHarness {
 	return &pickerE2EHarness{attempt: attempt, transport: transport, ui: ui, terminal: uiTerminal, input: input, clock: clock}
 }
 
+// frameCount reports how many client frames crossed the wire so far.
+func (t *attachPaletteTransport) frameCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.frames)
+}
+
+// fireAmbiguityDeadlines releases every armed 20 ms ambiguity deadline
+// within a short window, which is how a withheld escape prefix reaches the
+// decoder. Other timers are left alone.
+func (h *pickerE2EHarness) fireAmbiguityDeadlines(t *testing.T) {
+	t.Helper()
+	deadline := time.After(50 * time.Millisecond)
+	for {
+		select {
+		case timer := <-h.clock.timers:
+			if timer.duration == pickerEscapeDeadline {
+				timer.fire()
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 // fireDecodeDeadline fires the pump timer armed for one delay, skipping
 // unrelated timers the attempt owns.
 func (h *pickerE2EHarness) fireDecodeDeadline(t *testing.T, delay time.Duration) {
@@ -143,9 +182,12 @@ func (h *pickerE2EHarness) fireDecodeDeadline(t *testing.T, delay time.Duration)
 // arms until the wanted frame crosses the wire. The palette-marker scanner
 // and the picker decoder share that deadline, so an escape withheld as a
 // possible marker is flushed into the picker decoder before its own window
-// starts.
+// starts. More than a few deadlines for one escape means the window is
+// being re-armed instead of expiring, so the helper fails instead of
+// firing forever.
 func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport *attachPaletteTransport, frameType wire.MsgType) {
 	t.Helper()
+	const maxDeadlines = 4
 	hasFrame := func() bool {
 		transport.mu.Lock()
 		defer transport.mu.Unlock()
@@ -157,11 +199,16 @@ func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport 
 		return false
 	}
 	deadline := time.After(3 * time.Second)
+	fired := 0
 	for {
 		select {
 		case timer := <-h.clock.timers:
 			if timer.duration == pickerEscapeDeadline {
 				timer.fire()
+				fired++
+				if fired > maxDeadlines {
+					t.Fatalf("the escape deadline was re-armed %d times for one prefix", fired)
+				}
 			}
 		default:
 		}

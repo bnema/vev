@@ -343,12 +343,22 @@ func (d *Daemon) resolvePickerClientSelection(effect *attachmentEffect, selectio
 		d.sendPickerClientFailure(effect, selection, protocol.PickerRetiredTarget)
 		return
 	}
-	err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-client-select")
-	if err != nil {
-		d.sendPickerClientFailure(effect, selection, protocol.PickerNavigationFailed)
+	// Retire the interaction before the handoff. The client's release waits
+	// for a paint accepted after the daemon's own close, and the handoff's
+	// destination paint has to be that paint: closing afterwards would let it
+	// be suppressed while the client still owned the terminal, leaving the
+	// client drained with no restore in flight.
+	if !d.closePickerClientForAttachment(ac, effect, interaction) {
+		d.sendPickerClientFailure(effect, selection, protocol.PickerStaleRevision)
 		return
 	}
-	d.closePickerClientForAttachment(ac, effect, interaction)
+	if err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-client-select"); err != nil {
+		d.sendPickerClientFailure(effect, selection, protocol.PickerNavigationFailed)
+		// The interaction is already retired: the client drains until an
+		// authoritative paint, so publish one even though the handoff failed.
+		d.invalidateRender(effect.sess, ac, true, "picker-client-select-failed")
+		return
+	}
 }
 
 // pickerClientTargetCurrent revalidates a resolved target for lifecycle

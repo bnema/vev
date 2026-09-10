@@ -23,20 +23,43 @@ const uiActionHistory = 64
 // control channel, or the picker model: it only reports what the user
 // typed, and the attach loop applies it through its sole terminal writer
 // and flushes typed sends in controlCh order.
+//
+// The queue is bounded: physical input is now a producer, so an unbounded
+// queue would let a paste or a stuck attach loop accumulate operations
+// without limit. offer blocks until the loop drains or the attempt ends.
 type pickerOutcomeQueue struct {
 	mu       sync.Mutex
 	outcomes []pickerConsumeOutcome
 	signal   chan struct{}
+	slots    chan struct{}
+	done     <-chan struct{}
 }
 
-func newPickerOutcomeQueue() *pickerOutcomeQueue {
-	return &pickerOutcomeQueue{signal: make(chan struct{}, 1)}
+// pickerOutcomeCapacity bounds queued picker operations between the pump and
+// the attach loop.
+const pickerOutcomeCapacity = 256
+
+func newPickerOutcomeQueue(done <-chan struct{}) *pickerOutcomeQueue {
+	queue := &pickerOutcomeQueue{
+		signal: make(chan struct{}, 1),
+		slots:  make(chan struct{}, pickerOutcomeCapacity),
+		done:   done,
+	}
+	for i := 0; i < pickerOutcomeCapacity; i++ {
+		queue.slots <- struct{}{}
+	}
+	return queue
 }
 
-// offer queues one decoded operation. Dropped only when the queue is nil;
-// the attach loop drains it before new frames.
+// offer queues one decoded operation, waiting for room. A cancelled attempt
+// drops it: nothing can apply the operation any more.
 func (q *pickerOutcomeQueue) offer(outcome pickerConsumeOutcome) {
 	if q == nil {
+		return
+	}
+	select {
+	case <-q.slots:
+	case <-q.done:
 		return
 	}
 	q.mu.Lock()
@@ -48,17 +71,23 @@ func (q *pickerOutcomeQueue) offer(outcome pickerConsumeOutcome) {
 	}
 }
 
-// take drains queued operations in order. The caller holds no locks;
-// sends keep controlCh ordering because the attach loop flushes them
-// before processing new frames.
+// take drains queued operations in order and returns their capacity. The
+// caller holds no locks; sends keep controlCh ordering because the attach
+// loop flushes them before processing new frames.
 func (q *pickerOutcomeQueue) take() []pickerConsumeOutcome {
 	if q == nil {
 		return nil
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	outcomes := q.outcomes
 	q.outcomes = nil
+	q.mu.Unlock()
+	for range outcomes {
+		select {
+		case q.slots <- struct{}{}:
+		default:
+		}
+	}
 	return outcomes
 }
 

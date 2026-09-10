@@ -88,24 +88,41 @@ func TestPickerLeaseSuppressesOwnedOutputAndPublishesBoundary(t *testing.T) {
 	require.Equal(t, pickerLeaseOwned, lease.state)
 }
 
-func TestPickerLeaseReleasesOnlyOnAuthoritativeFullPaint(t *testing.T) {
+func TestPickerLeaseReleasesOnlyAfterTheDaemonCloseAndANewerFullPaint(t *testing.T) {
 	var lease pickerLease
 	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 4, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 2)
 	require.True(t, ready)
 
-	// The client cancels: the interaction is retired, the picker frame stays.
-	require.True(t, lease.beginRelease(7, 42, true, pickerLeaseTestState(4, 1)))
+	// The client cancels: the client-side retire alone never releases, because
+	// it cannot tell a post-close restore from a paint already in flight.
+	require.True(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
 	require.Equal(t, pickerLeaseReleasing, lease.state)
 	require.Equal(t, pickerLeaseSuppress, lease.observe(protocol.Output{Epoch: 4, New: 2, Base: 1}, pickerLeaseTestState(4, 2)))
-	require.Equal(t, pickerLeaseSuppress, lease.observe(protocol.Output{Epoch: 4, New: 3, Base: 2}, pickerLeaseTestState(4, 3)))
+	require.Equal(t, pickerLeaseSuppress, lease.observe(protocol.Output{Epoch: 5, New: 1, Full: true}, pickerLeaseTestState(5, 1)),
+		"a Full in flight before the daemon close must not release")
 
-	// The authoritative full paint releases it and completes the pending
-	// cancel locally; input resumes.
-	require.Equal(t, pickerLeaseRelease, lease.observe(protocol.Output{Epoch: 5, New: 1, Full: true}, pickerLeaseTestState(5, 1)))
+	// The daemon confirms the close at the applied boundary it was rendering:
+	// only paints accepted after that boundary release the terminal.
+	require.True(t, lease.confirmDaemonClose(7, pickerLeaseTestState(5, 1)))
+	require.False(t, lease.confirmDaemonClose(8, pickerLeaseTestState(5, 1)), "a foreign confirmation must not move the boundary")
+	require.Equal(t, pickerLeaseSuppress, lease.observe(protocol.Output{Epoch: 5, New: 1, Full: true}, pickerLeaseTestState(5, 1)),
+		"a paint at the close boundary is not newer than it")
+	require.Equal(t, pickerLeaseRelease, lease.observe(protocol.Output{Epoch: 5, New: 2, Full: true}, pickerLeaseTestState(5, 2)))
+
 	actionID, local := lease.finishRelease()
 	require.Equal(t, uint64(42), actionID)
 	require.True(t, local)
 	require.False(t, lease.active())
+}
+
+func TestPickerLeaseDaemonCloseReleasesWithoutAClientRetire(t *testing.T) {
+	var lease pickerLease
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	require.True(t, ready)
+
+	// A daemon-initiated close (a resolved selection) carries its own barrier.
+	require.True(t, lease.beginRelease(7, 0, false, true, pickerLeaseTestState(4, 1)))
+	require.Equal(t, pickerLeaseRelease, lease.observe(protocol.Output{Epoch: 5, New: 1, Full: true}, pickerLeaseTestState(5, 1)))
 }
 
 func TestPickerLeaseForeignAndDuplicateCloseNeverRelease(t *testing.T) {
@@ -113,10 +130,10 @@ func TestPickerLeaseForeignAndDuplicateCloseNeverRelease(t *testing.T) {
 	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
 
-	require.False(t, lease.beginRelease(6, 42, true, pickerLeaseTestState(4, 1)), "foreign interaction must not release")
-	require.False(t, lease.beginRelease(0, 42, true, pickerLeaseTestState(4, 1)), "zero interaction must not release")
-	require.True(t, lease.beginRelease(7, 42, true, pickerLeaseTestState(4, 1)))
-	require.False(t, lease.beginRelease(7, 43, true, pickerLeaseTestState(4, 1)), "duplicate close must not restart the release")
+	require.False(t, lease.beginRelease(6, 42, true, false, pickerLeaseTestState(4, 1)), "foreign interaction must not release")
+	require.False(t, lease.beginRelease(0, 42, true, false, pickerLeaseTestState(4, 1)), "zero interaction must not release")
+	require.True(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
+	require.False(t, lease.beginRelease(7, 43, true, false, pickerLeaseTestState(4, 1)), "duplicate close must not restart the release")
 	require.Equal(t, uint64(42), lease.releaseAction)
 }
 
@@ -124,7 +141,7 @@ func TestPickerLeaseSupersedingSnapshotStartsANewNamespace(t *testing.T) {
 	var lease pickerLease
 	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
-	require.True(t, lease.beginRelease(7, 42, true, pickerLeaseTestState(4, 1)))
+	require.True(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
 
 	// A superseding interaction cannot be released by the prior close.
 	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(8, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
@@ -133,7 +150,7 @@ func TestPickerLeaseSupersedingSnapshotStartsANewNamespace(t *testing.T) {
 	require.Equal(t, uint64(7), superseded.interaction)
 	require.Equal(t, uint64(8), lease.interaction)
 	require.Equal(t, pickerLeaseOwned, lease.state)
-	require.False(t, lease.beginRelease(7, 42, true, pickerLeaseTestState(4, 1)))
+	require.False(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
 }
 
 func TestPickerLeaseSameInteractionRevisionRules(t *testing.T) {
@@ -162,7 +179,7 @@ func TestPickerLeaseSameInteractionRevisionRules(t *testing.T) {
 
 	// A release in progress refuses revisions: the close/full pair cannot be
 	// replaced by a late refresh.
-	require.True(t, lease.beginRelease(7, 0, false, pickerLeaseTestState(4, 2)))
+	require.True(t, lease.beginRelease(7, 0, false, true, pickerLeaseTestState(4, 2)))
 	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 6, 4, 2), pickerLeaseTestLoop(), pickerLeaseTestState(4, 2), 1)
 	require.False(t, ready)
 	require.Nil(t, superseded)
@@ -171,7 +188,7 @@ func TestPickerLeaseSameInteractionRevisionRules(t *testing.T) {
 func TestPickerLeaseAbortReportsPendingLocalAction(t *testing.T) {
 	var lease pickerLease
 	lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
-	require.True(t, lease.beginRelease(7, 42, true, pickerLeaseTestState(4, 1)))
+	require.True(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
 
 	actionID, local := lease.abort()
 	require.Equal(t, uint64(42), actionID)
@@ -180,7 +197,7 @@ func TestPickerLeaseAbortReportsPendingLocalAction(t *testing.T) {
 
 	// A handoff-bound action stays unresolved: the daemon owns its outcome.
 	lease.admitSnapshot(pickerLeaseTestSnapshot(9, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
-	lease.beginRelease(9, 77, false, pickerLeaseTestState(4, 1))
+	lease.beginRelease(9, 77, false, false, pickerLeaseTestState(4, 1))
 	actionID, local = lease.abort()
 	require.Zero(t, actionID)
 	require.False(t, local)
@@ -192,21 +209,6 @@ func TestPickerLeaseRejectsUnusableSnapshots(t *testing.T) {
 	require.False(t, ready)
 	require.Nil(t, superseded)
 	require.False(t, lease.active())
-}
-
-func TestPickerLeaseReleaseRequiresAPostCloseFullPaint(t *testing.T) {
-	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 2), pickerLeaseTestLoop(), pickerLeaseTestState(4, 2), 1)
-	require.True(t, ready)
-	require.True(t, lease.beginRelease(7, 0, false, pickerLeaseTestState(4, 2)))
-
-	// A full paint that does not advance past the close boundary may itself
-	// be a suppressed artifact: it must not release the terminal.
-	require.Equal(t, pickerLeaseSuppress, lease.observe(protocol.Output{Epoch: 4, New: 3, Full: true}, pickerLeaseTestState(4, 2)))
-	require.Equal(t, pickerLeaseReleasing, lease.state)
-
-	// The first full paint accepted after the boundary releases it.
-	require.Equal(t, pickerLeaseRelease, lease.observe(protocol.Output{Epoch: 4, New: 4, Full: true}, pickerLeaseTestState(4, 3)))
 }
 
 func TestPickerLeaseClosedPresentationNeverSuppresses(t *testing.T) {

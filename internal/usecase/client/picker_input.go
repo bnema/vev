@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -27,6 +28,14 @@ const pickerPendingLimit = 8
 // apart without ever falling back to the session pipeline.
 const pickerEscapeDeadline = 20 * time.Millisecond
 
+// Bracketed-paste delimiters. Their content is dropped: a paste must never
+// become a run of modal commands, and the picker has no text field that
+// wants pasted input.
+const (
+	pasteOpenMarker  = "\x1b[200~"
+	pasteCloseMarker = "\x1b[201~"
+)
+
 // pickerInputState is the attach loop's publication of the current input
 // owner: zero interaction with drain unset means the session owns input.
 type pickerInputState struct {
@@ -37,24 +46,31 @@ type pickerInputState struct {
 	drain bool
 }
 
-// pickerConsumer is the slot shared between the attach loop and the stdin
-// pump. It protects the published owner and the withheld escape prefix; it
-// holds no picker model.
-type pickerConsumer struct {
-	mu      sync.Mutex
-	state   pickerInputState
-	pending []byte
+// pickerEventKind distinguishes a command token from a typed rune. Events
+// keep their arrival order: a batch must never reorder input.
+type pickerEventKind uint8
+
+const (
+	pickerEventKey pickerEventKind = iota
+	pickerEventRune
+)
+
+// pickerEvent is one decoded input event.
+type pickerEvent struct {
+	kind pickerEventKind
+	key  string
+	r    rune
 }
 
-// ownsInput reports whether the picker, rather than the session, owns the
-// terminal input right now.
-func (c *pickerConsumer) ownsInput() bool {
-	if c == nil {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.state.interaction != 0 || c.state.drain
+// pickerConsumer is the slot shared between the attach loop and the stdin
+// pump. It protects the published owner, the withheld escape or UTF-8
+// prefix, and the paste state; it holds no picker model.
+type pickerConsumer struct {
+	mu        sync.Mutex
+	state     pickerInputState
+	pending   []byte
+	pasting   bool
+	pasteTail []byte
 }
 
 // setOwned publishes the interaction that now owns user input.
@@ -64,7 +80,7 @@ func (c *pickerConsumer) setOwned(interaction, generation uint64) {
 	}
 	c.mu.Lock()
 	c.state = pickerInputState{interaction: interaction, generation: generation}
-	c.pending = nil
+	c.resetDecoderLocked()
 	c.mu.Unlock()
 }
 
@@ -77,19 +93,27 @@ func (c *pickerConsumer) setDrain(interaction, generation uint64) {
 	}
 	c.mu.Lock()
 	c.state = pickerInputState{interaction: interaction, generation: generation, drain: true}
-	c.pending = nil
+	c.resetDecoderLocked()
 	c.mu.Unlock()
 }
 
-// clear releases input back to the session and purges any withheld prefix.
+// clear releases input back to the session and purges the decoder state.
 func (c *pickerConsumer) clear() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	c.state = pickerInputState{}
-	c.pending = nil
+	c.resetDecoderLocked()
 	c.mu.Unlock()
+}
+
+// resetDecoderLocked drops a withheld prefix and any paste state. A retired
+// owner must never leak a half-decoded sequence into the next one.
+func (c *pickerConsumer) resetDecoderLocked() {
+	c.pending = nil
+	c.pasting = false
+	c.pasteTail = nil
 }
 
 // consume decodes one read or admitted automation batch into an identified
@@ -113,21 +137,22 @@ func (c *pickerConsumer) consume(record terminalReadResult) (pickerConsumeOutcom
 	switch {
 	case state.drain:
 		// Retired interaction: consume and drop, including any prefix.
-		c.pending = nil
+		c.resetDecoderLocked()
 	case record.keys == nil && record.text == "":
 		var batch pickerInputBatch
-		c.pending = decodePickerInto(c.pending, record.data, &batch)
-		outcome.keys, outcome.text = batch.keys, batch.text
+		c.pending, c.pasting, c.pasteTail = c.decodeLocked(record.data, &batch)
+		outcome.events = batch.events
 	default:
-		outcome.keys, outcome.text = record.keys, record.text
+		outcome.events = automationEvents(record.keys, record.text)
 	}
 	c.mu.Unlock()
 	return outcome, true
 }
 
-// flushPending resolves a withheld escape prefix once its disambiguation
-// window expired. A bare escape becomes Escape; any other withheld prefix
-// is an incomplete sequence and is discarded.
+// flushPending resolves a withheld prefix once its disambiguation window
+// expired. A bare escape becomes Escape; an incomplete escape sequence is
+// dropped; an incomplete UTF-8 prefix is dropped. A paste in progress stays
+// in progress: its content is never replayed as commands.
 func (c *pickerConsumer) flushPending() (pickerConsumeOutcome, bool) {
 	if c == nil {
 		return pickerConsumeOutcome{}, false
@@ -141,12 +166,12 @@ func (c *pickerConsumer) flushPending() (pickerConsumeOutcome, bool) {
 	}
 	outcome := pickerConsumeOutcome{consumed: true, generation: state.generation, interaction: state.interaction}
 	if string(pending) == "\x1b" {
-		outcome.keys = []string{"Escape"}
+		outcome.events = []pickerEvent{{kind: pickerEventKey, key: "Escape"}}
 	}
 	return outcome, true
 }
 
-// hasPending reports whether an escape prefix is currently withheld.
+// hasPending reports whether an escape or UTF-8 prefix is withheld.
 func (c *pickerConsumer) hasPending() bool {
 	if c == nil {
 		return false
@@ -156,84 +181,133 @@ func (c *pickerConsumer) hasPending() bool {
 	return len(c.pending) != 0
 }
 
-// pickerInputBatch is one decoded batch: command tokens plus typed runes.
-type pickerInputBatch struct {
-	keys []string
-	text string
+// automationEvents converts one admitted ui-driver op into ordered events.
+func automationEvents(keys []string, text string) []pickerEvent {
+	events := make([]pickerEvent, 0, len(keys)+len(text))
+	for _, key := range keys {
+		events = append(events, pickerEvent{kind: pickerEventKey, key: key})
+	}
+	for _, r := range text {
+		events = append(events, pickerEvent{kind: pickerEventRune, r: r})
+	}
+	return events
 }
 
-// decodePickerInto decodes terminal bytes into command tokens and typed
-// runes, carrying an incomplete escape prefix into the next read. Nothing
-// is ever left for the session: unrecognized, oversized and control
-// sequences are consumed.
-func decodePickerInto(pending, data []byte, batch *pickerInputBatch) []byte {
+// decoder carries the paste state across reads: a paste's boundaries can
+// span several terminal reads, and its content must never be interpreted.
+type decoder struct {
+	pending []byte
+	pasting bool
+	tail    []byte
+}
+
+// decodeLocked decodes bytes under the consumer lock and returns the next
+// pending prefix, paste state, and paste tail.
+func (c *pickerConsumer) decodeLocked(data []byte, batch *pickerInputBatch) ([]byte, bool, []byte) {
+	d := decoder{pending: c.pending, pasting: c.pasting, tail: c.pasteTail}
+	d.decode(data, batch)
+	return d.pending, d.pasting, d.tail
+}
+
+// decode consumes one read into ordered events. A non-nil pending result is
+// an incomplete escape or UTF-8 prefix to withhold until the next read.
+func (d *decoder) decode(data []byte, batch *pickerInputBatch) {
 	buf := data
-	if len(pending) != 0 {
-		buf = append(append([]byte(nil), pending...), data...)
+	if len(d.pending) != 0 {
+		buf = append(append([]byte(nil), d.pending...), data...)
+		d.pending = nil
+	}
+	if d.pasting {
+		buf = append(append([]byte(nil), d.tail...), buf...)
+		d.tail = nil
 	}
 	for i := 0; i < len(buf); {
+		if d.pasting {
+			end := bytes.Index(buf[i:], []byte(pasteCloseMarker))
+			if end < 0 {
+				// Hold only enough trailing bytes to recognize a marker split
+				// across reads; everything else in the paste is dropped.
+				keep := len(pasteCloseMarker) - 1
+				if len(buf)-i > keep {
+					d.tail = append([]byte(nil), buf[len(buf)-keep:]...)
+				} else {
+					d.tail = append([]byte(nil), buf[i:]...)
+				}
+				return
+			}
+			i += end + len(pasteCloseMarker)
+			d.pasting = false
+			continue
+		}
 		switch b := buf[i]; {
 		case b == '\r' || b == '\n':
-			batch.keys = append(batch.keys, "Enter")
+			batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Enter"})
 			i++
 		case b == 0x7f || b == 0x08:
-			batch.keys = append(batch.keys, "Backspace")
+			batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Backspace"})
 			i++
 		case b == 0x03:
-			batch.keys = append(batch.keys, "Ctrl+C")
+			batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Ctrl+C"})
 			i++
 		case b == 0x1b:
-			next, held := decodePickerEscape(buf[i:], batch)
+			consumed, held, paste := decodeEscape(buf[i:], batch)
 			if held != nil {
-				return held
+				d.pending = held
+				return
 			}
-			i += next
+			if paste {
+				d.pasting = true
+			}
+			i += consumed
 		case b < 0x20:
 			// Other control bytes carry no picker meaning; consume them so
 			// they cannot reach the session.
 			i++
 		case b < utf8.RuneSelf:
-			batch.keys = append(batch.keys, string(rune(b)))
+			batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: string(rune(b))})
 			i++
 		default:
 			r, size := utf8.DecodeRune(buf[i:])
 			if r == utf8.RuneError && size <= 1 {
-				// Invalid UTF-8: consume the byte and keep scanning.
-				i++
-				continue
+				if !utf8PrefixIncomplete(buf[i:]) {
+					i++ // Invalid UTF-8: consume the byte and keep scanning.
+					continue
+				}
+				d.pending = append([]byte(nil), buf[i:]...)
+				return
 			}
-			batch.text += string(r)
+			batch.events = append(batch.events, pickerEvent{kind: pickerEventRune, r: r})
 			i += size
 		}
 	}
-	return nil
 }
 
-// decodePickerEscape consumes one escape-led sequence starting at buf[0].
-// It returns the number of bytes consumed; a non-nil result is an
-// incomplete prefix to withhold until the next read.
-func decodePickerEscape(buf []byte, batch *pickerInputBatch) (int, []byte) {
+// decodeEscape consumes one escape-led sequence starting at buf[0]. It
+// returns the number of bytes consumed; a non-nil result is an incomplete
+// prefix to withhold until the next read. paste reports the bracketed-paste
+// start marker.
+func decodeEscape(buf []byte, batch *pickerInputBatch) (consumed int, held []byte, paste bool) {
 	if len(buf) == 1 {
-		return 0, append([]byte(nil), buf...)
+		return 0, append([]byte(nil), buf...), false
 	}
 	if buf[1] != '[' && buf[1] != 'O' {
 		// ESC followed by an ordinary byte: the escape stands alone.
-		batch.keys = append(batch.keys, "Escape")
-		return 1, nil
+		batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Escape"})
+		return 1, nil, false
 	}
 	if len(buf) == 2 {
-		return 0, append([]byte(nil), buf...)
+		return 0, append([]byte(nil), buf...), false
 	}
 	switch buf[2] {
 	case 'A':
-		batch.keys = append(batch.keys, "Up")
-		return 3, nil
+		batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Up"})
+		return 3, nil, false
 	case 'B':
-		batch.keys = append(batch.keys, "Down")
-		return 3, nil
+		batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Down"})
+		return 3, nil, false
 	}
-	// Any other CSI/SS3 sequence (mouse reports, bracketed-paste markers,
-	// probes) is consumed through its final byte and dropped.
+	// Any other CSI/SS3 sequence (mouse reports, probes, paste markers) is
+	// consumed through its final byte and dropped.
 	final := -1
 	for i := 2; i < len(buf); i++ {
 		if buf[i] >= 0x40 && buf[i] <= 0x7e {
@@ -243,9 +317,42 @@ func decodePickerEscape(buf []byte, batch *pickerInputBatch) (int, []byte) {
 	}
 	if final < 0 {
 		if len(buf) > pickerPendingLimit {
-			return len(buf), nil
+			return len(buf), nil, false
 		}
-		return 0, append([]byte(nil), buf...)
+		return 0, append([]byte(nil), buf...), false
 	}
-	return final + 1, nil
+	seq := buf[:final+1]
+	if string(seq) == pasteOpenMarker {
+		return final + 1, nil, true
+	}
+	return final + 1, nil, false
+}
+
+// utf8PrefixIncomplete reports whether b is a valid but incomplete UTF-8
+// sequence start, which must be withheld until its continuation bytes
+// arrive instead of being dropped.
+func utf8PrefixIncomplete(b []byte) bool {
+	if len(b) == 0 || !utf8.RuneStart(b[0]) {
+		return false
+	}
+	need := 0
+	switch {
+	case b[0]&0xe0 == 0xc0:
+		need = 2
+	case b[0]&0xf0 == 0xe0:
+		need = 3
+	case b[0]&0xf8 == 0xf0:
+		need = 4
+	default:
+		return false
+	}
+	if len(b) >= need {
+		return false
+	}
+	for _, c := range b[1:] {
+		if c&0xc0 != 0x80 {
+			return false
+		}
+	}
+	return true
 }

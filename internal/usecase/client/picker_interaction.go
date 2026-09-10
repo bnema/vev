@@ -26,12 +26,15 @@ type pickerInteraction struct {
 	retired     uint64
 }
 
-// setOpen starts or stops the interaction namespace. Closing retires the
-// namespace for good: a snapshot for it can only be an in-flight message
-// from before the close.
+// setOpen starts or stops the interaction namespace. Superseding an open
+// interaction retires it too: a late snapshot for the replaced ID must not
+// take presentation back. Closing retires the namespace for good.
 func (p *pickerInteraction) setOpen(open bool, interaction uint64) {
 	if p == nil {
 		return
+	}
+	if open && interaction != p.interaction && p.open && p.interaction > p.retired {
+		p.retired = p.interaction
 	}
 	p.open = open
 	if open && interaction != p.interaction {
@@ -356,19 +359,23 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close
 	return commit, false
 }
 
+// pickerInputBatch is one decoded batch: ordered input events.
+type pickerInputBatch struct {
+	events []pickerEvent
+}
+
 // pickerConsumeOutcome is one decoded operation reported by the stdin
 // pump to the attach loop. The pump decodes and identifies; the attach
 // loop is the only writer of the picker model, so the outcome carries the
-// tokens and their interaction identity, never a mutation or a message.
-// actionID echoes the admitted record so the loop completes the right
-// ui-driver action.
+// ordered events and their interaction identity, never a mutation or a
+// message. actionID echoes the admitted record so the loop completes the
+// right ui-driver action.
 type pickerConsumeOutcome struct {
 	consumed    bool
 	actionID    uint64
 	generation  uint64
 	interaction uint64
-	keys        []string
-	text        string
+	events      []pickerEvent
 }
 
 // acceptOutcome reports whether this operation still belongs to the
@@ -378,41 +385,33 @@ func (o pickerConsumeOutcome) acceptOutcome(interaction, generation uint64) bool
 	return o.consumed && o.interaction != 0 && o.interaction == interaction && o.generation == generation
 }
 
-// applyPickerBatch applies one decoded batch to the open loop, enforcing
-// the anti-paste rules: a batch is acted on as a command only when it is a
-// single key token. While search is active, printable runes insert and a
-// single control token still applies, but a control token riding along
-// with other bytes is dropped so a paste cannot become a command.
-func applyPickerBatch(loop *pickerLoop, keys []string, text string) (commit, close bool) {
-	if loop == nil || loop.model == nil {
-		return false, false
+// applyPickerBatch applies one decoded batch in arrival order. Every event
+// is applied: a terminal read can legitimately carry several keystrokes, so
+// batch size never decides whether input is a command. Paste protection is
+// the decoder's paste state, not a heuristic here: a bracketed paste's
+// content never reaches this function. changed reports whether the display
+// needs a repaint; a close ends the batch.
+func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (commit, close, changed bool) {
+	if loop == nil || loop.model == nil || len(events) == 0 {
+		return false, false, false
 	}
-	if !loop.model.SearchActive() {
-		if len(keys) != 1 || text != "" {
-			return false, false
-		}
-		return pickerDriverOp(loop, keys, "")
-	}
-	var controls []string
-	for _, key := range keys {
-		if isPickerPrintable(key) {
-			loop.insert(rune(key[0]))
+	for _, event := range events {
+		if event.kind == pickerEventRune {
+			if loop.model.SearchActive() {
+				loop.insert(event.r)
+				changed = true
+			}
 			continue
 		}
-		controls = append(controls, key)
+		before, searchBefore := loop.model.SelectedIndex(), loop.model.SearchActive()
+		opCommit, opClose := pickerDriverOp(loop, []string{event.key}, "")
+		if loop.model.SelectedIndex() != before || loop.model.SearchActive() != searchBefore {
+			changed = true
+		}
+		if opClose {
+			return commit, true, changed
+		}
+		commit = commit || opCommit
 	}
-	for _, r := range text {
-		loop.insert(r)
-	}
-	if len(controls) != 1 || len(keys) != 1 {
-		// A control token sharing a batch with other input is paste noise.
-		return false, false
-	}
-	return pickerDriverOp(loop, controls, "")
-}
-
-// isPickerPrintable reports whether one key token is a single printable
-// ASCII rune, which search inserts as text rather than acting on.
-func isPickerPrintable(key string) bool {
-	return len(key) == 1 && key[0] >= 0x20 && key[0] <= 0x7e
+	return commit, close, changed
 }

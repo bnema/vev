@@ -138,9 +138,10 @@ func TestPickerStaleRevisionClosesInteraction(t *testing.T) {
 	require.Equal(t, snapshot.InteractionID, closed.InteractionID)
 
 	// Input during the release window is dropped, then routing resumes once
-	// the authoritative repaint is displayed.
+	// the daemon confirms the close and its authoritative repaint is shown.
 	writeTerminal(t, writer, "leaked")
 	requireNoPickerInput(t, transport)
+	transport.detached <- wire.Frame{Type: wire.MsgPickerCloseServer, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision})}
 	require.NotNil(t, pickerReleasePaint(transport, "released"))
 	released := "released"
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &released}})

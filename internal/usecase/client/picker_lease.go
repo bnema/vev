@@ -64,7 +64,6 @@ type pickerLease struct {
 	revision     uint64
 	barrierEpoch uint64
 	barrierState uint64
-	sizeEpoch    uint64
 	// pending holds the validated model until the barrier is applied; it
 	// is nil in every other state.
 	pending *pickerLoop
@@ -74,12 +73,17 @@ type pickerLease struct {
 	releaseAction uint64
 	releaseLocal  bool
 	// releaseEpoch/releaseState name the applied output boundary that was
-	// current when the close arrived. Only a full paint accepted after
-	// that boundary releases the terminal: a Full already in flight from
-	// before the close is a suppressed artifact, not the authoritative
-	// restore the release waits for.
+	// current when the daemon's close for this interaction was observed.
+	// Only a full paint accepted after that boundary releases the terminal:
+	// a Full already in flight before the close is a suppressed artifact,
+	// not the authoritative restore the release waits for.
 	releaseEpoch uint64
 	releaseState uint64
+	// daemonClosed reports whether the serving daemon confirmed the close.
+	// A client-side retire alone never releases: the daemon sends the close
+	// before its restore paint, so waiting for it orders the release after
+	// the close instead of after an in-flight paint.
+	daemonClosed bool
 }
 
 // active reports whether the lease owns picker presentation.
@@ -87,10 +91,22 @@ func (l *pickerLease) active() bool {
 	return l != nil && l.state != pickerLeaseClosed
 }
 
+// owns reports whether the client has taken the terminal over: only then is
+// picker input applied to the displayed model.
+func (l *pickerLease) owns() bool {
+	return l != nil && l.state == pickerLeaseOwned
+}
+
 // releasing reports whether the interaction is retired and waiting for its
 // authoritative repaint.
 func (l *pickerLease) releasing() bool {
 	return l != nil && l.state == pickerLeaseReleasing
+}
+
+// releasingFor reports whether this lease is retiring the named
+// interaction, which is the only case where a close may extend its drain.
+func (l *pickerLease) releasingFor(interaction uint64) bool {
+	return l != nil && l.state == pickerLeaseReleasing && l.interaction == interaction
 }
 
 // reset returns the lease to closed presentation.
@@ -143,7 +159,7 @@ func (l *pickerLease) admitSnapshot(snapshot protocol.PickerSnapshot, loop *pick
 	*l = pickerLease{
 		state: pickerLeaseAcquiring, generation: generation, interaction: snapshot.InteractionID,
 		revision: snapshot.Revision, barrierEpoch: snapshot.BarrierEpoch, barrierState: snapshot.BarrierState,
-		sizeEpoch: snapshot.SizeEpoch, pending: loop,
+		pending: loop,
 	}
 	if barrierReached(applied, snapshot.BarrierEpoch, snapshot.BarrierState) {
 		// The barrier is already displayed: the client owns the terminal
@@ -171,11 +187,11 @@ func (l *pickerLease) observe(output protocol.Output, applied outputApplyState) 
 	case pickerLeaseOwned:
 		return pickerLeaseSuppress
 	case pickerLeaseReleasing:
-		// Only an authoritative full paint accepted after the close
-		// releases the terminal: an incremental delta, or a Full already
-		// in flight when the close arrived, may itself be a suppressed
-		// artifact.
-		if output.Full && stateAfter(applied, l.releaseEpoch, l.releaseState) {
+		// Only an authoritative full paint accepted after the serving
+		// daemon's close releases the terminal: an incremental delta, a Full
+		// already in flight before the close, or any paint seen before the
+		// close was confirmed may itself be a suppressed artifact.
+		if l.daemonClosed && output.Full && stateAfter(applied, l.releaseEpoch, l.releaseState) {
 			return pickerLeaseRelease
 		}
 		return pickerLeaseSuppress
@@ -197,19 +213,36 @@ func stateAfter(applied outputApplyState, epoch, state uint64) bool {
 	return appliedState > state
 }
 
-// beginRelease retires the interaction named by one PickerClose. It reports
+// beginRelease retires the interaction named by one close. It reports
 // false for a duplicate or foreign close, which must not restart or extend
-// the release. The pending action completes after the release paint: local
-// for a cancel the client consumed, through the daemon handoff otherwise.
-// applied names the output boundary that was current when the close
-// arrived, so the release only accepts a full paint newer than it.
-func (l *pickerLease) beginRelease(interaction, actionID uint64, local bool, applied outputApplyState) bool {
+// the release. fromDaemon marks the serving daemon's own close, which is
+// the ordering barrier for the release: a client-side retire waits for it
+// before any paint can release the terminal. The pending action completes
+// after the release paint: local for a cancel the client consumed, through
+// the daemon handoff otherwise.
+func (l *pickerLease) beginRelease(interaction, actionID uint64, local, fromDaemon bool, applied outputApplyState) bool {
 	if l == nil || !l.active() || l.state == pickerLeaseReleasing || l.interaction != interaction {
 		return false
 	}
 	l.state = pickerLeaseReleasing
 	l.pending = nil
 	l.releaseAction, l.releaseLocal = actionID, local
+	l.releaseEpoch, l.releaseState = applied.epoch, applied.state
+	if !applied.initialized {
+		l.releaseEpoch, l.releaseState = 1, 0
+	}
+	l.daemonClosed = fromDaemon
+	return true
+}
+
+// confirmDaemonClose records the serving daemon's close for the releasing
+// interaction and re-captures the release boundary at that point. Only
+// paints accepted after it can release the terminal.
+func (l *pickerLease) confirmDaemonClose(interaction uint64, applied outputApplyState) bool {
+	if l == nil || l.state != pickerLeaseReleasing || l.interaction != interaction {
+		return false
+	}
+	l.daemonClosed = true
 	l.releaseEpoch, l.releaseState = applied.epoch, applied.state
 	if !applied.initialized {
 		l.releaseEpoch, l.releaseState = 1, 0

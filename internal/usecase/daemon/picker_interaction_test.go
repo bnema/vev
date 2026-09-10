@@ -287,11 +287,90 @@ func TestPickerClientInteractionDropsRawInput(t *testing.T) {
 	require.Equal(t, []byte("visible"), awaitTestValue(t, writes, "session input did not resume after the close"))
 }
 
+func TestPickerClientSelectionClosesBeforeTheDestinationPaint(t *testing.T) {
+	d, sess, ac, sends, effect := pickerClientTestUnit(t)
+
+	d.openPickerClientForAttachment(ac, effect, 11)
+	snapshot := awaitPickerSnapshot(t, sends)
+	capability := pickerClientCapability(t, ac, sess)
+
+	// Selecting the current session is a same-peer handoff. The interaction
+	// must be retired before that handoff: the client releases only on a
+	// paint accepted after the daemon's close, so the destination paint has
+	// to follow it on the wire. Drain the open's own repaint first.
+	drainAllFrames(sends)
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerSelection{
+		CauseActionID: 9, InteractionID: snapshot.InteractionID, Revision: snapshot.Revision, Key: snapshot.Rows[0].Key,
+	}))
+
+	// Collect the handoff frames for a short settle window, then require the
+	// close to precede any paint: the client only releases on a paint
+	// accepted after the daemon's close, so a paint emitted during the
+	// handoff must follow it on the wire.
+	var order []wire.MsgType
+	for settled := false; !settled; {
+		select {
+		case frame := <-sends:
+			order = append(order, frame.Type)
+		case <-time.After(200 * time.Millisecond):
+			settled = true
+		}
+	}
+	require.NotEmpty(t, order, "the handoff published nothing")
+	require.Equal(t, wire.MsgPickerCloseServer, order[0], "the close must precede the handoff")
+	for i, frameType := range order {
+		if frameType == wire.MsgOutput {
+			require.NotZero(t, i, "a paint must not precede the close")
+		}
+	}
+	ac.overlays.pickerMu.Lock()
+	require.False(t, ac.overlays.pickerClientOpen)
+	ac.overlays.pickerMu.Unlock()
+}
+
+func TestPickerClientInteractionDropsClipboardImage(t *testing.T) {
+	writes := make(chan []byte, 8)
+	p, releasePTY := newBlockingPTYWithWrites(t, writes)
+	d, sess, ac, sends, effect := pickerClientTestUnitWithPTY(t, p, releasePTY)
+	capability := pickerClientCapability(t, ac, sess)
+
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	push := protocol.ImagePush{InputSeq: 1, Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}
+
+	d.openPickerClientForAttachment(ac, effect, 11)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	// An image push is user input too: the clipboard path must not reach the
+	// session while the picker owns input.
+	require.False(t, d.handleAttachmentClientMessage(capability, push))
+	select {
+	case frame := <-writes:
+		t.Fatalf("clipboard path reached the pty during the interaction: %q", frame)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// After the close the same push is delivered again.
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision}))
+	push.InputSeq = 2
+	require.False(t, d.handleAttachmentClientMessage(capability, push))
+	select {
+	case frame := <-writes:
+		require.Contains(t, string(frame), ".png")
+	case <-time.After(2 * time.Second):
+		t.Fatal("clipboard path did not resume after the close")
+	}
+}
+
 func TestPickerClientSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 
 	d.openPickerClientForAttachment(ac, effect, 11)
 	first := awaitPickerSnapshot(t, sends)
+
+	// The row set changes for real: a new session appears in the catalogue.
+	_, err := createSessionForTest(d, "third", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+	require.NoError(t, err)
 
 	// The catalogue notification path must reach the client picker even
 	// though it installs no overlay model: refreshRemoteDirectoryViews is
@@ -300,6 +379,7 @@ func TestPickerClientSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
 	second := awaitPickerSnapshot(t, sends)
 	require.Equal(t, first.InteractionID, second.InteractionID)
 	require.Greater(t, second.Revision, first.Revision)
+	require.Greater(t, len(second.Rows), len(first.Rows), "the new session must appear as a row")
 	ac.overlays.pickerMu.Lock()
 	require.Nil(t, ac.overlays.picker, "a client-owned picker never installs the overlay model")
 	ac.overlays.pickerMu.Unlock()
