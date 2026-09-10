@@ -26,6 +26,14 @@ const maxClipboardImagePush = 1 << 20 // 1 MiB
 // text may legitimately contain it) — is forwarded to next unchanged, so it
 // still gets the coalescer's marker-splitting treatment.
 type clipboardIntercept struct {
+	// ctx is the foreground lifetime owning this scanner. A slow
+	// workstation read (e.g. a hung wl-paste) must abort when the
+	// foreground is stopped for a route switch, so the pump cannot hold
+	// the switch waiting and a late result cannot reach a replacement
+	// owner. Adapters map cancellation onto ErrNoClipboardImage, which
+	// takes the existing forward path: the keystroke stays ordinary
+	// input and follows the standard undelivered-byte handoff.
+	ctx        context.Context
 	coalescer  *pasteCoalescer
 	reader     ports.ClipboardReader
 	log        *slog.Logger
@@ -97,7 +105,11 @@ func pasteMarkerBoundary(data []byte) int {
 }
 
 func (c *clipboardIntercept) handleCtrlV() {
-	mime, data, err := c.reader.ReadImage(context.Background())
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	mime, data, err := c.reader.ReadImage(ctx)
 	if err != nil {
 		if !errors.Is(err, ports.ErrNoClipboardImage) {
 			c.log.Warn("clipboard image read failed", "err", err)

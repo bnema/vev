@@ -45,6 +45,12 @@ startup.
   cause while the originating interaction is still open; stale failures
   from closed interactions drop. Native commands stay usable throughout.
 
+## Client-owned picker
+
+The navigation picker runs as a typed client interaction when the serving attachment advertises the client-picker capability: the palette command `SSP` (session picker) opens it, and a client with a home route answers that command with a home-picker navigation directive instead, so the picker stays daemon-rendered on the home route.
+
+The client renders the picker frame from the admitted snapshot rows, moves the cursor and filters with `/` locally, and sends only a typed selection (opaque row key plus displayed revision) or a close. The serving daemon re-resolves the key, revalidates the target lifecycle, and performs the unchanged navigation handoff; a stale revision, unknown key, retired target, or failed navigation returns a typed failure instead of committing. Escape closes the interaction without selecting, `s` (sort) and `x` (kill) are unavailable in this mode, and the cursor/search state is local to the interaction.
+
 ## Remote vision
 
 Remote-origin rows display availability tags (`down`, `broken`, stopped)

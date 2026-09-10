@@ -84,6 +84,9 @@ func (d *Daemon) refreshRemoteDirectoryViewsFor(ac *attachedClient) {
 	if pickerOpen {
 		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
 	}
+	// Client-owned presentation has no overlay model: the row set changed,
+	// so republish the interaction snapshot with a new revision instead.
+	d.refreshPickerClientSnapshot(ac)
 	if paletteOpen {
 		d.refreshPalette(ac)
 	}

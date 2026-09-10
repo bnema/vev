@@ -557,6 +557,66 @@ func TestKilledSessionReturnsToPreviousLocalRoute(t *testing.T) {
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }
 
+// TestSamePeerSwitchFailurePreservesSourceRouteHistory pins the
+// precommit-rejection boundary: a daemon SamePeerSwitchFailure leaves the
+// source attachment unchanged, commits no history, and dials no replacement
+// transport. The client keeps serving the source route it already owned.
+func TestSamePeerSwitchFailurePreservesSourceRouteHistory(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	sourceTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "source"}
+	destTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "destination"}
+	welcome := func(target protocol.ExactSessionTarget) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+			SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 1,
+			Capabilities:      protocol.CapabilityResume,
+			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
+		}))
+	}
+	switchSent := make(chan struct{})
+	var switchOnce sync.Once
+	active := &recordingTransport{recvs: []recvItem{
+		{f: welcome(sourceTarget)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "destination", Intent: protocol.IntentAttach, ExactTarget: &destTarget,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+		{f: frameOf(wire.MsgSamePeerSwitchFailure, mustMarshalSamePeerSwitchFailure(protocol.SamePeerSwitchFailure{
+			RequestID: 1, Code: protocol.SamePeerSwitchUnavailable,
+		})), wait: switchSent},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	active.onSend = func(frame wire.Frame) {
+		if frame.Type == wire.MsgSamePeerSwitchRequest {
+			switchOnce.Do(func() { close(switchSent) })
+		}
+	}
+	dialer := &sequenceDialer{trs: []wire.Transport{active}}
+
+	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "source", Origin: protocol.RouteOriginLocal,
+		OriginKey: "local", EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(1), dialer.calls.Load(), "a rejected same-peer switch must not dial a replacement transport")
+	var snapshots []protocol.RecentRouteSnapshot
+	for _, sent := range active.Sends() {
+		if sent.Type != wire.MsgRecentRouteSnapshot {
+			continue
+		}
+		snapshot, err := wire.UnmarshalRecentRouteSnapshot(sent.Payload)
+		require.NoError(t, err)
+		snapshots = append(snapshots, snapshot)
+	}
+	require.NotEmpty(t, snapshots, "the welcome commit must publish a route snapshot")
+	for _, snapshot := range snapshots {
+		require.Equal(t, sourceTarget, snapshot.ActiveEntry.Target, "a rejected switch must not change the active route")
+		require.Empty(t, snapshot.Entries, "a rejected switch must not append destination history")
+	}
+}
+
 func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
@@ -582,7 +642,7 @@ func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	require.Equal(t, request.SessionName, hello.Name)
 	require.Equal(t, target, hello.RemoteTarget)
 	require.Equal(t, request.EnvironmentPolicy, hello.EnvironmentPolicy)
-	require.Equal(t, request.NavigationCapabilities, hello.NavigationCapabilities)
+	require.Equal(t, request.NavigationCapabilities|protocol.NavigationCapabilityClientPicker, hello.NavigationCapabilities)
 	require.Equal(t, request.StartupOverlay, hello.StartupOverlay)
 }
 
@@ -1053,6 +1113,53 @@ func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 	require.Equal(t, int32(2), remoteDialer.calls.Load(), "an expired parked lease must use the traditional dial path")
 }
 
+// TestHybridStdioHomeOpenSkipsParking pins the SSH-stdio pairing: a home
+// directive on a non-datagram serving transport must not send a parked-route
+// Prepare. The client closes the serving connection and dials the retained
+// home route instead, and Back redials the remote endpoint from scratch.
+func TestHybridStdioHomeOpenSkipsParking(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	remoteLifecycle := domain.SessionLifecycleID{2}
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: remoteLifecycle,
+		SessionName: "work", LiveTabID: "work-tab",
+	}
+	localInitial := hybridLocalBootstrap(localLifecycle, remoteTarget)
+	// Plain recordingTransport: no DatagramTransport marker, so the
+	// attempt treats the serving route as SSH stdio, not UDP.
+	serving := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("work", remoteLifecycle)},
+		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
+	}}
+	remoteReturn := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("work", remoteLifecycle)},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("local", localLifecycle)},
+		{f: navigationDirectiveFrame(protocol.NavigationBack)},
+	}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{serving, remoteReturn}}
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
+
+	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+	}))
+	for _, sent := range serving.Sends() {
+		require.NotEqual(t, wire.MsgParkedRouteRequest, sent.Type, "stdio home open must not park the serving route")
+	}
+	require.Positive(t, serving.closed.Load(), "stdio home open must close the serving connection")
+	require.Equal(t, int32(2), localDialer.calls.Load())
+	require.Equal(t, int32(2), remoteDialer.calls.Load(), "Back must redial the remote endpoint from scratch")
+	pickerHello := helloFromSend(t, localPicker)
+	require.Equal(t, protocol.StartupOverlaySessionPicker, pickerHello.StartupOverlay)
+	require.NotZero(t, pickerHello.NavigationCapabilities&protocol.NavigationCapabilityBack)
+}
+
 func TestHybridPickerPrepareResponseTimeoutClosesRetainedTransport(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
@@ -1383,7 +1490,7 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: remoteLifecycle, SessionName: "created"}, returnHello.ExactTarget)
 	require.Nil(t, returnHello.RemoteTarget)
 	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, returnHello.EnvironmentPolicy)
-	require.Equal(t, protocol.NavigationCapabilityHomePicker, returnHello.NavigationCapabilities)
+	require.Equal(t, protocol.NavigationCapabilityHomePicker|protocol.NavigationCapabilityClientPicker, returnHello.NavigationCapabilities)
 }
 
 func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T) {
@@ -1469,7 +1576,7 @@ func TestRouteNavigationPreservesRemoteHomePickerAcrossLocalReturn(t *testing.T)
 	remoteHello := helloFromSend(t, remote2)
 	require.NoError(t, err)
 
-	require.Equal(t, protocol.NavigationCapabilityHomePicker, remoteHello.NavigationCapabilities)
+	require.Equal(t, protocol.NavigationCapabilityHomePicker|protocol.NavigationCapabilityClientPicker, remoteHello.NavigationCapabilities)
 	remoteNewHello := helloFromSend(t, remote3)
 	require.Equal(t, "remote-new", remoteNewHello.Name)
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: remoteNewLifecycle, SessionName: "remote-new"}, remoteNewHello.ExactTarget)
@@ -1501,6 +1608,14 @@ func mustMarshalRouteAction(action protocol.RouteNavigationAction) []byte {
 
 func mustMarshalRoutePosition(position protocol.RoutePosition) []byte {
 	payload, err := wire.MarshalRoutePosition(position)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+func mustMarshalSamePeerSwitchFailure(failure protocol.SamePeerSwitchFailure) []byte {
+	payload, err := wire.MarshalSamePeerSwitchFailure(failure)
 	if err != nil {
 		panic(err)
 	}

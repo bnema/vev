@@ -1000,6 +1000,12 @@ func (d *Daemon) resizeAttachmentGeometryForLease(effect *attachmentEffect, geom
 		// at the new bounded preview dimensions.
 		d.registerPreviewForSelection(ac)
 	}
+	if !sameSize {
+		// A client-owned interaction renders from its own size: a resize
+		// bumps the snapshot revision so the client never repaints against a
+		// stale size epoch.
+		d.refreshPickerClientSnapshot(ac)
+	}
 
 	sess := effect.sess
 	if sess == nil {

@@ -162,7 +162,7 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 	defer timer.Stop()
 	admissionCtx, cancelAdmission := context.WithCancel(ctx)
 	defer cancelAdmission()
-	batch := terminalAutomationRequest{ctx: admissionCtx, owner: u, consumer: consumer, record: terminalReadResult{data: data, source: terminalInputAutomation, generation: request.Generation, actionID: id, endBatch: true}, admitted: make(chan bool, 1), dispatched: make(chan bool, 1)}
+	batch := terminalAutomationRequest{ctx: admissionCtx, owner: u, consumer: consumer, record: terminalReadResult{data: data, source: terminalInputAutomation, generation: request.Generation, actionID: id, endBatch: true, keys: request.Keys, text: request.Text}, admitted: make(chan bool, 1), dispatched: make(chan bool, 1)}
 	reject := func(code ports.UIErrorCode) (ports.UIActionResult, error) {
 		u.mu.Lock()
 		delete(u.records, id)

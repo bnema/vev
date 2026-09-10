@@ -436,3 +436,46 @@ func TestInventoryAttemptIgnoresDemandsWhenLocal(t *testing.T) {
 	require.Zero(t, dialer.count())
 	require.Zero(t, transport.publicationCount())
 }
+
+// TestInventoryAttemptDirectRemoteNeverDialsControl pins the direct-remote
+// pairing: a serving daemon that sends inventory demands against an
+// attachment with no committed home route must not trigger a local control
+// dial. The relay is hybrid-only; without a home route no relay exists, so
+// demands decode to no-ops and the attachment lifecycle is unaffected.
+func TestInventoryAttemptDirectRemoteNeverDialsControl(t *testing.T) {
+	clock := newInventoryTestClock()
+	dialer := &inventoryTestDialer{}
+	transport := &inventoryAttemptTransport{
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), script: inventoryScriptLocalIgnore,
+	}
+	t.Cleanup(func() { close(transport.release) })
+
+	input := newPaletteAttachReader(nil)
+	t.Cleanup(input.close)
+	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
+	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
+	attempt := &attachAttempt{
+		runner: runner, dialer: dialer, transport: transport,
+		request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote-work"},
+		remote:  true,
+		// No inventoryHome: a direct-remote start has no committed home
+		// route, so no relay may exist even when demands arrive.
+		inventoryDialer: dialer,
+		milestones:      msForInventoryTest(), themeState: &terminalThemeState{},
+		enterRaw:  func() error { return nil },
+		reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
+	}
+
+	done := make(chan attachResult, 1)
+	go func() { done <- attempt.run(context.Background()) }()
+	close(transport.detach)
+
+	result := <-done
+	require.NoError(t, result.err)
+	require.Nil(t, result.handoff)
+	require.Zero(t, dialer.count(), "direct remote without a home route must never dial local control")
+	require.Zero(t, transport.publicationCount())
+	hello := transport.hello()
+	require.Zero(t, hello.NavigationCapabilities&protocol.NavigationCapabilityInventory,
+		"direct remote must not advertise inventory without a home route")
+}

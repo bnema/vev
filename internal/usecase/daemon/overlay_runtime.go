@@ -20,6 +20,16 @@ type overlayRuntime struct {
 
 	pickerMu sync.Mutex
 	picker   *picker.Model
+	// pickerClient* carries the serving-daemon side of the client-picker
+	// interaction, guarded by pickerMu alongside the overlay model. Open
+	// tracks the current interaction namespace; interaction is the latest
+	// admitted open ID (late selections for closed interactions reject);
+	// revision is the latest published model version (older/duplicates
+	// discard); keys maps opaque row keys to resolved navigation targets.
+	pickerClientOpen        bool
+	pickerClientInteraction uint64
+	pickerClientRevision    uint64
+	pickerClientKeys        map[string]picker.Target
 	// pickerGeneration identifies one open lifecycle. It advances only when a
 	// picker is published, so delayed close and registration work can prove it
 	// still owns the exact lifecycle it captured.

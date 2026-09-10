@@ -1176,8 +1176,38 @@ func (e paletteExec) OpenSessionPicker() error {
 	if e.ac != nil && e.ac.navigationCapabilities&protocol.NavigationCapabilityHomePicker != 0 && e.effect != nil {
 		return e.d.sendNavigationActionForAttachment(e.effect, protocol.NavigationOpenHomePicker)
 	}
-	e.d.enterPicker(e.sess, e.ac)
-	return nil
+	if e.ac == nil || e.effect == nil {
+		// No admitted effect carries the snapshot: the daemon-owned
+		// overlay picker stays the only presentation for direct and
+		// headless callers, byte-identical to the pre-pilot path.
+		e.d.enterPicker(e.sess, e.ac)
+		return nil
+	}
+	// The palette already closed on execute (see handlePaletteInput):
+	// only invalidate when the close actually changed overlay state,
+	// then open the client-picker interaction on the same effect so
+	// the opener's fence retires on the authoritative repaint below.
+	// The snapshot carries no fence of its own; the opener completes
+	// through the normal receipt path.
+	if e.ac.overlays != nil {
+		e.ac.overlays.paletteMu.Lock()
+		generation := e.ac.overlays.paletteGeneration
+		query := ""
+		if e.ac.overlays.palette != nil {
+			query = e.ac.overlays.palette.Query()
+		}
+		e.ac.overlays.paletteMu.Unlock()
+		if e.d.closeExecutedPalette(e.ac, e.effect, generation, query) {
+			e.d.invalidateRender(e.sess, e.ac, true, "palette.go:session-picker")
+		}
+	}
+	fresh, admitted := e.ac.beginAttachmentEffect(e.effect.capability())
+	if !admitted {
+		return errAttachmentTransition
+	}
+	fresh.uiActionID = e.effect.uiActionID
+	defer fresh.End()
+	return e.d.enterPickerForClient(e.sess, e.ac, fresh)
 }
 
 func (e paletteExec) OpenNotifications() error {

@@ -30,6 +30,9 @@ func (UIFence) clientMessage()                        {}
 func (NavigationInventoryRequest) clientMessage()     {}
 func (NavigationInventoryPublication) clientMessage() {}
 func (NavigationInventoryFailure) clientMessage()     {}
+func (PickerOpen) clientMessage()                     {}
+func (PickerClose) clientMessage()                    {}
+func (PickerSelection) clientMessage()                {}
 
 func (Welcome) serverMessage()                      {}
 func (ErrorMsg) serverMessage()                     {}
@@ -54,3 +57,6 @@ func (UIViewUpdate) serverMessage()                 {}
 func (NavigationInventoryResponse) serverMessage()  {}
 func (NavigationInventoryDemand) serverMessage()    {}
 func (NavigationInventorySelection) serverMessage() {}
+func (PickerSnapshot) serverMessage()               {}
+func (PickerClose) serverMessage()                  {}
+func (PickerFailure) serverMessage()                {}

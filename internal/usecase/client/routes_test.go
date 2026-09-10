@@ -287,6 +287,38 @@ func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	require.Nil(t, request.RemoteTarget)
 }
 
+// TestRouteLedgerSamePeerHandoffPreservesRemoteDaemonOwnedPolicy pins the
+// hybrid same-peer pairing: on a remote origin the handoff keeps the
+// serving daemon's policy, the explicit tab, and the request environment.
+// Local-origin downgrade rules must not leak into the remote path.
+func TestRouteLedgerSamePeerHandoffPreservesRemoteDaemonOwnedPolicy(t *testing.T) {
+	ledger := newRouteLedger()
+	work := routeTestCandidate(1, protocol.RouteOriginRemote)
+	work.originKey = "remote"
+	work.request.Remote = true
+	work.request.OriginKey = "remote"
+	work.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+	work.request.Environment = []string{"REMOTE=1"}
+	work.request.PreferredTabID = "remembered-tab"
+	_, err := ledger.commit(work)
+	require.NoError(t, err)
+
+	target := routeTestTarget(1)
+	request := ledger.samePeerHandoff(work.request, protocol.AttachTarget{
+		Session:           work.target.SessionName,
+		Intent:            protocol.IntentAttach,
+		ExactTarget:       &target,
+		PreferredTabID:    "chosen-tab",
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+	})
+
+	require.True(t, request.Remote)
+	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
+	require.Equal(t, domain.TabStableID("chosen-tab"), request.PreferredTabID)
+	require.Equal(t, []string{"REMOTE=1"}, request.Environment)
+	require.NoError(t, validateAttachRequest(request))
+}
+
 func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) {
 	ledger := newRouteLedger()
 	first := routeTestCandidate(0, protocol.RouteOriginRemote)

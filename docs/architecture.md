@@ -42,6 +42,12 @@ Interactive observation is a separate opt-in composition. `term.Terminal` remain
 
 `--web-daemon` launches a separate gateway with an inherited HTTP listener, loopback by default. App composition resolves `web.listen`/`web.origin` and CLI overrides before binding. The web adapter validates the configured browser-facing Host and Origin without trusting forwarded headers; a proxy owns TLS. The same-user local control socket returns the running gateway's settings and memory-only credential; readiness probes contact only its local listener. Each authenticated WebSocket owns a normal client runner and a `webterm.Terminal`. The adapter encodes browser events as terminal input, mirrors flushed client output through `vev-vt`, and sends transactional HTML updates. Disconnect cancels only that attachment. The multiplexer remains daemon-owned; browser input does not weaken the restricted UI-driver automation contract.
 
+## Client-owned picker presentation
+
+Attachments that advertise the client-picker capability receive the navigation picker as a typed interaction instead of a daemon-installed overlay: `PickerSnapshot` carries opaque row keys plus display text, `PickerSelection` commits a key at the displayed revision, and `PickerClose` retires the interaction in either direction. `rt.picker` stays nil in that mode, so `handlePickerInput` keeps serving the daemon-owned overlay for every other attachment.
+
+The client owns who writes the terminal for the interaction lifetime, while the daemon keeps mutation authority and resolves keys to navigation targets. `pickerLease` in `internal/usecase/client` tracks the presentation states: a snapshot is admitted only once the client applied output through the barrier epoch/state it carries, daemon paints are then applied to the output shadow and acknowledged inside the bounded window without being written, and the interaction is released only by the daemon's authoritative full paint after `PickerClose`. Locally composed frames and repaints go through the same single writer, UI transaction, and flush as daemon output, so a frame is never claimed before it is displayed.
+
 ## Session composition
 
 ```text
@@ -61,4 +67,4 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
 - Add remote catalogue schema fields and validation to `internal/protocol/catalogue`.
 - Add message IDs, binary layouts, strict decoding, compression, or raw carriage contracts to `internal/protocol/wire`.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `43`, including source-scoped route subscriptions and lifecycle retirement).
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `44`, including the client-picker interaction).

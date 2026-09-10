@@ -57,8 +57,35 @@ func (d *Daemon) togglePickerSort() {
 // publishes its model, including an empty one; only move entry can fail for a
 // missing destination.
 func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
+	_ = d.enterPickerForClient(sess, ac, nil)
+}
+
+// enterPickerForClient routes navigate-intent entry: attachments that
+// advertised the client-picker capability receive an interaction snapshot
+// instead of an overlay model. The overlay path stays byte-identical for
+// every other case (capability unset, or a daemon-driven entry without an
+// effect to carry the snapshot send). With no effect at all the overlay
+// stays the only presentation owner. A failed snapshot send fails closed:
+// the interaction is closed again, and the error reaches the caller rather
+// than silently installing a second presentation owner.
+func (d *Daemon) enterPickerForClient(sess *session, ac *attachedClient, effect *attachmentEffect) error {
+	if pickerClientEnabled(ac) && effect != nil {
+		ac.overlays.pickerMu.Lock()
+		var interaction uint64
+		if ac.overlays.pickerClientOpen {
+			interaction = ac.overlays.pickerClientInteraction
+		} else {
+			interaction = ac.overlays.pickerClientInteraction + 1
+			if interaction == 0 {
+				interaction = 1
+			}
+		}
+		ac.overlays.pickerMu.Unlock()
+		return d.openPickerClientForAttachment(ac, effect, interaction)
+	}
 	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
 	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
+	return nil
 }
 
 func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {

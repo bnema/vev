@@ -1500,6 +1500,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		inventory = newInventoryRelay(clk, a.inventoryDialer)
 		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
 	}
+	// The client-picker loop owns navigate-intent presentation while the
+	// daemon keeps mutation authority. The capability advertises on every
+	// Hello the client sends: it is orthogonal to the home-picker route
+	// rule (ValidateNavigation only constrains HomePicker/Back bits), so
+	// ephemeral/local Hellos validate with it set. The daemon gates
+	// snapshot publication on this bit; unset keeps overlay rendering.
+	request.NavigationCapabilities |= protocol.NavigationCapabilityClientPicker
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -1717,11 +1724,38 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// completions carry their originating interaction and query identity.
 	// The relay itself is created before Hello so the capability advertises.
 	inventoryBox := newInventoryPollBox()
+	// pickerOutcomes carries consumed-op outcomes from the stdin-pump
+	// goroutine to this attach loop for repaint and typed sends. The
+	// queue lives for the attempt; the snapshot-open path below
+	// installs the pump-side hook alongside each open loop. Wired here
+	// (after ui is bound below) would split lifetime across the
+	// function, so the hook install stays with the loop open/close.
+	pickerOutcomes := newPickerOutcomeQueue()
 	var inventoryResolveC chan inventoryResolveOutcome
 	inventoryResolvePending := false
 	var nextInventoryRequestID uint64 = 1
 	inventoryOpen := false
 	var inventoryInteraction uint64
+	// Client-picker loop state. picker tracks the admitted interaction
+	// namespace; pickerCurrent owns the displayed model (nil when closed).
+	// The loop consumes terminal-pump records and renders through the
+	// attach loop's sole terminal writer; commits cross on controlCh.
+	// pickerSeq numbers PickerOpen interaction IDs, mirroring
+	// nextInventoryRequestID for inventory queries.
+	picker := &pickerInteraction{}
+	var pickerCurrent *pickerLoop
+	// pickerPresentation owns who writes the terminal for the current
+	// client-picker interaction: acquisition barrier, local ownership,
+	// and ordered release. The daemon keeps mutation authority.
+	var pickerPresentation pickerLease
+	pickerRenderer := newPickerRenderer()
+	termSize := func() domain.Size {
+		geometry, err := term.Geometry()
+		if err != nil {
+			return size
+		}
+		return geometry.Size
+	}
 	var inventoryTimer ports.Timer
 	var inventoryTickC <-chan time.Time
 	stopInventoryTimer := func() {
@@ -1983,7 +2017,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				foregroundCancel()
 				cancel()
 			}
-			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, uiGeneration: generation, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
+			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, uiGeneration: generation, ui: ui, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
 		}()
 		go func() {
 			defer close(resizeDone)
@@ -2020,6 +2054,179 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return nil
 		case <-loopCtx.Done():
 			return context.Canceled
+		}
+	}
+	// displayPickerFrame composes the local picker modal and publishes it
+	// through the sole terminal writer, inside the UI observation
+	// transaction, exactly like daemon output. A locally admitted action
+	// completes only after that write and flush succeeded.
+	displayPickerFrame := func(loop *pickerLoop, completeAction uint64) error {
+		data := pickerRenderer.render(loop, termSize())
+		if data == nil {
+			return nil
+		}
+		if uiOutput != nil {
+			uiContext = outputState.uiContext(uiContext, uiContext.Status)
+			uiOutput.BeginOutput(uiContext)
+			if err := uiOutput.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+				uiOutput.EndOutput(false)
+				return fmt.Errorf("vev: publishing picker context: %w", err)
+			}
+		}
+		_, werr := term.Out().Write(data)
+		if uiOutput != nil {
+			uiOutput.EndOutput(werr == nil)
+		}
+		if werr != nil {
+			return fmt.Errorf("vev: writing picker frame: %w", werr)
+		}
+		if ferr := term.Flush(); ferr != nil {
+			return fmt.Errorf("vev: flushing picker frame: %w", ferr)
+		}
+		if ui != nil {
+			ui.published(uiGeneration)
+			if completeAction != 0 {
+				ui.completeLocal(uiGeneration, completeAction)
+			}
+		}
+		return nil
+	}
+	// publishSuppressedContext applies one daemon frame the client must not
+	// write while it owns presentation. The frame content is dropped, but
+	// the committed context boundary still advances so the daemon's UI
+	// fences retire against the same boundary exactly once: an opener
+	// action admitted before the picker opened completes here, and no
+	// suppression can pair a receipt with a stale boundary.
+	publishSuppressedContext := func(next outputApplyState) error {
+		if uiOutput == nil {
+			return nil
+		}
+		uiContext = next.uiContext(uiContext, uiContext.Status)
+		if err := uiOutput.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+			return fmt.Errorf("vev: publishing suppressed picker context: %w", err)
+		}
+		if ui != nil {
+			ui.published(uiGeneration)
+		}
+		return nil
+	}
+	holdPickerInput := func() {
+		// Picker-bound bytes must not reach the PTY while the interaction is
+		// retired but its authoritative paint is still in flight. Retire the
+		// queued automation boundary like an in-band switch, then hold raw
+		// input: it follows the attachment once the release paint lands.
+		if ui == nil {
+			return
+		}
+		ui.mu.Lock()
+		inputGate.retiredUI.Store(ui.nextAction)
+		ui.mu.Unlock()
+		inputGate.setPaused(true)
+	}
+	resumePickerInput := func() {
+		inputGate.setPaused(false)
+	}
+	installPickerHook := func(loop *pickerLoop, interaction, revision uint64) {
+		if ui == nil {
+			return
+		}
+		ui.setPickerConsumer(func(request pickerConsumeRequest) pickerConsumeOutcome {
+			keys, text := request.record.keys, request.record.text
+			if keys == nil && text == "" {
+				var ok bool
+				keys, text, ok = decodePickerBatch(request.record.data, "")
+				if !ok {
+					return pickerConsumeOutcome{}
+				}
+			}
+			commit, close := pickerDriverOp(loop, keys, text)
+			switch {
+			case close:
+				closeMsg := protocol.PickerClose{InteractionID: interaction, Revision: revision}
+				return pickerConsumeOutcome{consumed: true, close: true, actionID: request.record.actionID, send: closeMsg}
+			case commit:
+				selection, ok := commitSelection(loop, interaction, request.record.actionID)
+				if !ok {
+					return pickerConsumeOutcome{consumed: true, repaint: true, actionID: request.record.actionID}
+				}
+				selectionMsg := protocol.PickerSelection{
+					CauseActionID: request.record.actionID, InteractionID: interaction,
+					Revision: revision, Key: selection.Key,
+				}
+				return pickerConsumeOutcome{consumed: true, commit: true, actionID: request.record.actionID, send: selectionMsg}
+			}
+			return pickerConsumeOutcome{consumed: true, repaint: true, actionID: request.record.actionID}
+		}, pickerOutcomes)
+	}
+	installPickerDrainHook := func() {
+		// The interaction is retired and its authoritative paint is in
+		// flight. Picker-bound bytes are still consumed here so a modal key
+		// never becomes PTY input; they complete their own action locally
+		// because the modal, not the shell, consumed them.
+		if ui == nil {
+			return
+		}
+		ui.setPickerConsumer(func(request pickerConsumeRequest) pickerConsumeOutcome {
+			if request.record.keys == nil && request.record.text == "" {
+				if _, _, ok := decodePickerBatch(request.record.data, ""); !ok {
+					return pickerConsumeOutcome{}
+				}
+			}
+			return pickerConsumeOutcome{consumed: true, actionID: request.record.actionID}
+		}, pickerOutcomes)
+	}
+	acquirePicker := func() error {
+		loop := pickerPresentation.pending
+		if loop == nil {
+			pickerPresentation.reset()
+			return nil
+		}
+		pickerPresentation.pending = nil
+		pickerCurrent = loop
+		installPickerHook(loop, pickerPresentation.interaction, pickerPresentation.revision)
+		return displayPickerFrame(loop, 0)
+	}
+	finishPickerRelease := func() {
+		actionID, local, held := pickerPresentation.finishRelease()
+		pickerCurrent = nil
+		if held {
+			resumePickerInput()
+		}
+		if ui != nil {
+			ui.clearPickerConsumer()
+			if local && actionID != 0 {
+				ui.completeLocal(uiGeneration, actionID)
+			}
+		}
+	}
+	abortPickerLease := func(unknownOutcome bool) {
+		if !pickerPresentation.active() {
+			return
+		}
+		actionID, local, held := pickerPresentation.abort()
+		pickerCurrent = nil
+		if ui != nil {
+			ui.clearPickerConsumer()
+			if local && actionID != 0 {
+				ui.completeLocal(uiGeneration, actionID)
+			} else if unknownOutcome && actionID != 0 {
+				ui.mu.Lock()
+				if record, ok := ui.records[actionID]; ok && record.Status == ports.UIActionPending {
+					ui.finishLocked(actionID, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
+				}
+				ui.mu.Unlock()
+			}
+		}
+		if held {
+			resumePickerInput()
+		}
+	}
+	// syncPickerGeneration aborts a lease that belongs to a retired
+	// attachment generation instead of releasing a frame the daemon no
+	// longer associates with this interaction.
+	syncPickerGeneration := func() {
+		if pickerPresentation.active() && pickerPresentation.generation != uiGeneration {
+			abortPickerLease(true)
 		}
 	}
 	clearParkedFull := func() {
@@ -2235,6 +2442,62 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		select {
 		case <-loopCtx.Done():
 			return loopCanceledResult()
+		case <-pickerOutcomes.signal:
+			outcomes, sends := pickerOutcomes.take()
+			for _, message := range sends {
+				select {
+				case controlCh <- message:
+				case <-loopCtx.Done():
+					return loopCanceledResult()
+				}
+			}
+			for _, outcome := range outcomes {
+				if !outcome.consumed {
+					continue
+				}
+				if outcome.close {
+					// The client consumed an idle Escape: retire the
+					// interaction locally and wait for the daemon's
+					// authoritative paint before releasing. The cancel
+					// action completes only at that boundary, never at
+					// send time.
+					if pickerPresentation.beginRelease(pickerPresentation.interaction, outcome.actionID, true, true) {
+						installPickerDrainHook()
+						holdPickerInput()
+					} else if outcome.actionID != 0 && ui != nil {
+						ui.completeLocal(uiGeneration, outcome.actionID)
+					}
+					continue
+				}
+				if outcome.commit {
+					// The typed selection already crossed on controlCh. The
+					// commit stays pending through PickerClose and completes
+					// with the destination full paint or a typed failure.
+					continue
+				}
+				if outcome.repaint {
+					if pickerCurrent == nil {
+						continue
+					}
+					if outcome.actionID != 0 {
+						if err := displayPickerFrame(pickerCurrent, outcome.actionID); err != nil {
+							return welcomedResult(err)
+						}
+						continue
+					}
+					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+						return welcomedResult(err)
+					}
+					continue
+				}
+				// A picker-bound op the modal consumed without an effect (a
+				// swallowed key while the release paint is in flight):
+				// nothing to display and nothing to send, so its action
+				// completes locally.
+				if outcome.actionID != 0 && ui != nil {
+					ui.completeLocal(uiGeneration, outcome.actionID)
+				}
+			}
 		case <-transition.tickC():
 			if err := transition.advance(); err != nil {
 				return welcomedResult(err)
@@ -2446,6 +2709,22 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if parkedWaitingFull && !o.Full {
 					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
 				}
+				syncPickerGeneration()
+				pickerEvent := pickerPresentation.observe(o, nextState)
+				if pickerEvent == pickerLeaseSuppress {
+					// The client owns presentation: apply and ACK the daemon frame
+					// inside the bounded window without writing it, and advance the
+					// published context boundary so daemon-side fences retire.
+					outputState = nextState
+					if o.New != 0 {
+						ackQueue.offer(o.Epoch, o.New)
+						outputResetRequested = false
+					}
+					if err := publishSuppressedContext(nextState); err != nil {
+						return welcomedResult(err)
+					}
+					continue
+				}
 				if ui != nil && o.Full && foreground == nil && (parkedWaitingFull || samePeerSwitch == nil) {
 					startForeground()
 				}
@@ -2518,6 +2797,20 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					ms.firstOutput = true
 					log.Debug("received first output")
 					endHandshake()
+				}
+				switch pickerEvent {
+				case pickerLeaseAcquire:
+					// The acquisition barrier is displayed: the client may now
+					// paint and own the picker frame.
+					if err := acquirePicker(); err != nil {
+						return welcomedResult(err)
+					}
+				case pickerLeaseRelease:
+					// The authoritative full paint was written and published:
+					// release the terminal, resume input, and complete the
+					// pending cancel locally. A commit completes through the
+					// handoff instead.
+					finishPickerRelease()
 				}
 			case protocol.UIViewUpdate:
 				nextState, accepted, needsReset := outputState.nextView(message)
@@ -2717,6 +3010,75 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			case protocol.NavigationInventoryResponse:
 				// Overlay-owned liveness. The relay never waits on it:
 				// publications carry the only state it tracks.
+				continue
+			case protocol.PickerSnapshot:
+				snapshot := message
+				// Snapshots are self-opening: the daemon publishes them
+				// only for an interaction it admitted, so the first
+				// snapshot for an unknown ID opens the namespace.
+				if !picker.open || picker.interaction != snapshot.InteractionID {
+					picker.setOpen(true, snapshot.InteractionID)
+				}
+				syncPickerGeneration()
+				if !picker.admitSnapshot(snapshot) {
+					continue
+				}
+				// The lease decides presentation: a barrier still ahead keeps
+				// displaying daemon output until the exact epoch/state the
+				// snapshot was built against is applied, so no older paint can
+				// land after the picker frame.
+				ready, replaced := pickerPresentation.admitSnapshot(snapshot, openPickerLoop(snapshot), outputState, uiGeneration)
+				if replaced {
+					// A superseding interaction ended the previous one: the
+					// prior close/full pair can no longer release it.
+					abortPickerLease(true)
+				}
+				if !ready {
+					continue
+				}
+				if err := acquirePicker(); err != nil {
+					return welcomedResult(err)
+				}
+				continue
+			case protocol.PickerClose:
+				close := message
+				if pickerPresentation.beginRelease(close.InteractionID, 0, false, true) {
+					// The daemon retired the interaction (a resolved selection,
+					// a superseding overlay, or the echo of the client's own
+					// cancel). Keep the frame until the authoritative paint
+					// lands and keep picker-bound bytes off the PTY meanwhile.
+					installPickerDrainHook()
+					holdPickerInput()
+				}
+				if picker.interaction == close.InteractionID || !picker.open {
+					picker.setOpen(false, 0)
+				}
+				continue
+			case protocol.PickerFailure:
+				failure := message
+				// Commit rejections fail the exact ui-driver action
+				// that caused them via CauseActionID. Stale-revision
+				// and retired-target close the loop: the cursor it
+				// committed from no longer exists. Unknown-key and
+				// navigation failures keep the admitted revision so
+				// the user can retry.
+				if failure.InteractionID == picker.interaction && failure.CauseActionID != 0 && ui != nil {
+					ui.mu.Lock()
+					if record, ok := ui.records[failure.CauseActionID]; ok && record.Status == ports.UIActionPending {
+						ui.finishLocked(failure.CauseActionID, ports.UIActionNavigationFailed, ports.UIActionResult{})
+					}
+					ui.mu.Unlock()
+				}
+				switch failure.Code {
+				case protocol.PickerStaleRevision, protocol.PickerRetiredTarget:
+					// The interaction cannot be committed from anymore: end
+					// presentation without a release paint and refuse to
+					// resurrect it from a late snapshot.
+					if failure.InteractionID == picker.interaction || !picker.open {
+						picker.setOpen(false, 0)
+						abortPickerLease(false)
+					}
+				}
 				continue
 			case protocol.RouteCreateSessionAction:
 				action := message
@@ -3084,6 +3446,11 @@ type terminalReadResult struct {
 	generation uint64
 	actionID   uint64
 	endBatch   bool
+	// keys/text carry the decoded ui-driver op for picker interception.
+	// Physical input leaves both empty; the pump then falls back to
+	// decodePickerBatch on the raw bytes.
+	keys []string
+	text string
 }
 
 // terminalAutomationRequest is admitted only by the foreground scanner owner.
@@ -3446,6 +3813,7 @@ type stdinPump struct {
 	input               *terminalInputPump
 	consumer            uint64
 	uiGeneration        uint64
+	ui                  *UI
 	out                 chan<- protocol.ClientMessage
 	clock               ports.Clock
 	clipboard           ports.ClipboardReader
@@ -3538,6 +3906,7 @@ func (p *stdinPump) run() {
 	sink := coalescer.Scan
 	if p.clipboard != nil {
 		ci := &clipboardIntercept{
+			ctx:       p.ctx,
 			coalescer: coalescer,
 			reader:    p.clipboard,
 			log:       p.logger,
@@ -3647,6 +4016,33 @@ func (p *stdinPump) run() {
 			activeBatch = batch
 			batchSent.Store(false)
 			batchComplete = false
+			outcome := pickerConsumeOutcome{}
+			if p.ui != nil {
+				outcome = p.ui.consumePickerBatch(pickerConsumeRequest{record: request.record})
+			}
+			if outcome.consumed {
+				if _, queue := p.ui.pickerHook(); queue != nil {
+					if outcome.send != nil {
+						queue.offer(outcome, outcome.send)
+					} else {
+						queue.offer(outcome)
+					}
+				}
+				// The open picker loop consumed this admitted op:
+				// cursor/search repainted locally or a typed
+				// commit/cancel crossed on controlCh. Zero picker
+				// bytes enter the PTY pipeline, so the coalescer
+				// and fence below are skipped. Completion follows
+				// the action path: locally for presentation steps,
+				// via PickerFailure or the navigation handoff for
+				// commits and cancels.
+				request.admitted <- true
+				batch.dispatched <- true
+				activeBatch = nil
+				actionID.Store(0)
+				automated = false
+				continue
+			}
 			result = request.record
 			automated = true
 			actionID.Store(result.actionID)

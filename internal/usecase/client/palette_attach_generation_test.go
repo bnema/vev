@@ -129,7 +129,7 @@ func newAttachPaletteTransport() *attachPaletteTransport {
 	return &attachPaletteTransport{
 		themeCh:  make(chan protocol.Theme, 16),
 		inputCh:  make(chan protocol.Input, 16),
-		detached: make(chan wire.Frame, 1),
+		detached: make(chan wire.Frame, 16),
 	}
 }
 func (t *attachPaletteTransport) Send(frame wire.Frame) error {

@@ -8,6 +8,7 @@ const (
 	NavigationCapabilityHomePicker NavigationCapabilities = 1 << iota
 	NavigationCapabilityBack
 	NavigationCapabilityInventory
+	NavigationCapabilityClientPicker
 )
 
 type StartupOverlay uint8
@@ -66,7 +67,7 @@ type ParkedRouteResponse struct {
 }
 
 func validNavigationCapabilities(capabilities NavigationCapabilities) bool {
-	return capabilities&^(NavigationCapabilityHomePicker|NavigationCapabilityBack|NavigationCapabilityInventory) == 0
+	return capabilities&^(NavigationCapabilityHomePicker|NavigationCapabilityBack|NavigationCapabilityInventory|NavigationCapabilityClientPicker) == 0
 }
 
 func validStartupOverlay(overlay StartupOverlay) bool {
@@ -89,16 +90,27 @@ func ValidateNavigation(capabilities NavigationCapabilities, overlay StartupOver
 }
 
 func validateHelloNavigation(h Hello) error {
+	picker := h.NavigationCapabilities & NavigationCapabilityClientPicker
+	rest := h.NavigationCapabilities &^ NavigationCapabilityClientPicker
+	h = Hello{
+		Intent: h.Intent, Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight,
+		Name: h.Name, TermEnv: h.TermEnv, Cwd: h.Cwd, Env: h.Env,
+		PreferredTabID: h.PreferredTabID, ExactTarget: h.ExactTarget, RemoteTarget: h.RemoteTarget,
+		EnvironmentPolicy: h.EnvironmentPolicy, NavigationCapabilities: rest, StartupOverlay: h.StartupOverlay,
+	}
 	if h.Intent == IntentNew {
-		return ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, true)
+		if err := ValidateNavigation(rest, h.StartupOverlay, true); err != nil {
+			return err
+		}
+		return ValidateNavigation(picker, StartupOverlayNone, false)
 	}
 	if h.Intent != IntentAttach && h.Intent != IntentResume {
-		if h.NavigationCapabilities != 0 || h.StartupOverlay != StartupOverlayNone {
+		if rest != 0 || h.StartupOverlay != StartupOverlayNone {
 			return ErrInvalidNavigation
 		}
-		return nil
+		return ValidateNavigation(picker, StartupOverlayNone, false)
 	}
-	return ValidateNavigation(h.NavigationCapabilities, h.StartupOverlay, h.RemoteTarget != nil || h.EnvironmentPolicy == EnvironmentPolicyDaemonOwned)
+	return ValidateNavigation(rest, h.StartupOverlay, h.RemoteTarget != nil || h.EnvironmentPolicy == EnvironmentPolicyDaemonOwned)
 }
 
 func ValidateParkedRouteRequest(request ParkedRouteRequest) error {
