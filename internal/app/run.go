@@ -49,10 +49,12 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/internal/usecase/remotes"
 	pdgram "github.com/bnema/vev/pkg/dgram"
+	"github.com/bnema/vev/pkg/rawterm"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -884,6 +886,14 @@ type runAttachDeps struct {
 	disableCapabilityProbe  bool
 	localEnvironment        []string
 	remoteEnvironment       func(string) []string
+	// attachPromptIn reads one line for the missing-session create prompt
+	// and attachPromptOut receives the prompt text. Both default to the
+	// process console streams; tests inject buffers.
+	attachPromptIn  io.Reader
+	attachPromptOut io.Writer
+	// attachPromptTerminal reports whether the create prompt may
+	// interact. It defaults to probing the console; tests inject a stub.
+	attachPromptTerminal func() bool
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.
@@ -955,6 +965,45 @@ func remoteDiscoveryDaemonOption(stateDir, transport string, clk ports.Clock, lo
 }
 
 const maxAttachTargetHandoffs = 32
+
+// confirmMissingSessionCreate offers to create a directly attached local
+// session when the daemon reports it missing. It returns retry=true when the
+// caller should re-attempt the attach with IntentNew. Non-interactive
+// consoles, unreadable input, a declined answer, or an unrelated error keep
+// the original attach error. Only yes answers confirm; empty, no, and
+// unknown answers decline, matching confirm.Confirmer.
+func confirmMissingSessionCreate(ctx context.Context, name, remoteTarget string, intent uint8, attachErr error, deps runAttachDeps) (bool, error) {
+	if remoteTarget != "" || intent != protocol.IntentAttach || name == "" {
+		return false, nil
+	}
+	var protocolErr *client.ProtocolError
+	if !errors.As(attachErr, &protocolErr) || protocolErr.Code != protocol.ErrNoSuchSession {
+		return false, nil
+	}
+	terminal := deps.attachPromptTerminal
+	if terminal == nil {
+		terminal = func() bool { return rawterm.IsTerminal(int(os.Stdin.Fd())) }
+	}
+	if !terminal() {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, nil
+	}
+	input := deps.attachPromptIn
+	if input == nil {
+		input = os.Stdin
+	}
+	output := deps.attachPromptOut
+	if output == nil {
+		output = os.Stderr
+	}
+	create, err := confirm.NewConfirmer(input, output).Confirm(fmt.Sprintf("vev: session %q doesn't exist, want to create it?", name))
+	if err != nil {
+		return false, attachErr
+	}
+	return create, nil
+}
 
 func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
 	if activeSession != "" {
@@ -1093,6 +1142,14 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 
 		var handoffErr *client.AttachTargetError
 		if !errors.As(err, &handoffErr) {
+			retry, promptErr := confirmMissingSessionCreate(ctx, name, remoteTarget, intent, err, deps)
+			if promptErr != nil {
+				return promptErr
+			}
+			if retry {
+				intent = protocol.IntentNew
+				continue
+			}
 			return err
 		}
 		if handoffErr == nil {
