@@ -222,10 +222,32 @@ func (l *pickerLoop) commitKey() (string, bool) {
 type pickerRenderer struct {
 	renderer *ansirenderer.Renderer
 	size     domain.Size
+	// pasteMode records whether bracketed paste was enabled on the terminal
+	// for this interaction, so it is enabled once and disabled exactly once.
+	pasteMode bool
 }
 
 func newPickerRenderer() *pickerRenderer {
 	return &pickerRenderer{}
+}
+
+// Bracketed-paste mode is enabled while the picker owns the terminal: the
+// terminal then wraps pasted text in markers, which the input decoder drops
+// as a unit. Without it, a paste arrives as ordinary bytes and only the
+// event ordering distinguishes it from fast typing.
+const (
+	bracketedPasteEnable  = "\x1b[?2004h"
+	bracketedPasteDisable = "\x1b[?2004l"
+)
+
+// disableBracketedPaste returns the mode reset once, or nil when nothing was
+// enabled. The caller writes it through the terminal's sole writer.
+func (r *pickerRenderer) disableBracketedPaste() []byte {
+	if r == nil || !r.pasteMode {
+		return nil
+	}
+	r.pasteMode = false
+	return []byte(bracketedPasteDisable)
 }
 
 // render composes the loop model into terminal bytes for one display
@@ -249,6 +271,12 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size) []byte {
 	data, err := r.renderer.Draw(frame, []ansirenderer.Damage{ansirenderer.FullRedraw()})
 	if err != nil {
 		return nil
+	}
+	if !r.pasteMode {
+		// Enable bracketed paste with the first frame so the terminal marks
+		// every paste from the moment the picker owns the screen.
+		r.pasteMode = true
+		return append([]byte(bracketedPasteEnable), data...)
 	}
 	return data
 }

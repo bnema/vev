@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -163,11 +164,43 @@ func TestPickerApplyBatchAppliesEveryEvent(t *testing.T) {
 	require.False(t, loop.model.SearchActive())
 }
 
+// TestPickerOutcomeScope pins that a decoded operation only applies to the
+// interaction and attachment generation that admitted it: this is what makes
+// a generation change (reconnect) and a superseded interaction safe without
+// forwarding their input anywhere.
+func TestPickerOutcomeScope(t *testing.T) {
+	outcome := pickerConsumeOutcome{consumed: true, interaction: 7, generation: 3}
+	require.True(t, outcome.acceptOutcome(7, 3))
+	require.False(t, outcome.acceptOutcome(7, 4), "a new generation must not apply the old operation")
+	require.False(t, outcome.acceptOutcome(8, 3), "a superseding interaction must not apply it either")
+	require.False(t, pickerConsumeOutcome{interaction: 7, generation: 3}.acceptOutcome(7, 3), "an unconsumed outcome never applies")
+}
+
+// TestPickerRendererTogglesBracketedPaste pins that the picker enables the
+// terminal's bracketed-paste mode with its first frame and resets it once:
+// a marker-wrapped paste then arrives as one consumable unit instead of
+// ordinary bytes that could look like fast typing.
+func TestPickerRendererTogglesBracketedPaste(t *testing.T) {
+	renderer := newPickerRenderer()
+	loop := openPickerLoop(pickerSnapshot())
+
+	first := renderer.render(loop, domain.Size{Cols: 80, Rows: 24})
+	require.Contains(t, string(first), bracketedPasteEnable)
+	require.True(t, renderer.pasteMode, "the mode is enabled with the first frame")
+
+	// The reset is written exactly once, and the next frame re-enables mode.
+	require.Equal(t, []byte(bracketedPasteDisable), renderer.disableBracketedPaste())
+	require.False(t, renderer.pasteMode)
+	require.Nil(t, renderer.disableBracketedPaste(), "the reset is written once")
+
+	third := renderer.render(loop, domain.Size{Cols: 80, Rows: 24})
+	require.Contains(t, string(third), bracketedPasteEnable)
+}
+
 // TestPickerPhysicalInputWithoutUIDriver pins that the picker owns and
 // completes physical input in the ordinary CLI composition, where the
-// ui-driver (and its automation channel) does not exist. It asserts the
-// close path: the commit path shares the same decoder, apply step, and
-// control-channel send as the ui-driver variant.
+// ui-driver (and its automation channel) does not exist: the picker frame
+// is observed on the terminal itself, then real bytes drive it.
 func TestPickerPhysicalInputWithoutUIDriver(t *testing.T) {
 	reader, writer := io.Pipe()
 	t.Cleanup(func() { _ = writer.Close() })
@@ -176,10 +209,14 @@ func TestPickerPhysicalInputWithoutUIDriver(t *testing.T) {
 	transport := harness.transport
 
 	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(pickerSnapshot())}
+	// The drawn picker is the barrier: write only once it owns the screen.
+	awaitTerminalText(t, harness.terminal, "second")
 
-	// A physical Escape closes the interaction and never leaks the byte.
-	writeTerminal(t, writer, "\x1b")
-	harness.awaitAfterAmbiguityDeadlines(t, transport, wire.MsgPickerCloseClient)
+	// Down then Enter commits the row the physical keys selected.
+	writeTerminal(t, writer, "\x1b[B")
+	writeTerminal(t, writer, "\r")
+	selection := awaitPickerSelection(t, transport)
+	require.Equal(t, "bb/second", selection.Key)
 	requireNoPickerInput(t, transport)
 }
 

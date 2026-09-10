@@ -2150,10 +2150,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		pickerInput.setOwned(pickerPresentation.interaction, pickerPresentation.generation)
 		return displayPickerFrame(loop, 0)
 	}
+	// restoreTerminalModes undoes what the picker's presentation turned on.
+	// It runs through the same sole writer as the picker frames.
+	restoreTerminalModes := func() {
+		data := pickerRenderer.disableBracketedPaste()
+		if len(data) == 0 {
+			return
+		}
+		if _, err := term.Out().Write(data); err != nil {
+			return
+		}
+		_ = term.Flush()
+	}
 	finishPickerRelease := func() {
 		actionID, local := pickerPresentation.finishRelease()
 		pickerCurrent = nil
 		pickerInput.clear()
+		restoreTerminalModes()
 		if ui != nil && local && actionID != 0 {
 			ui.completeLocal(uiGeneration, actionID)
 		}
@@ -2165,6 +2178,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		actionID, local := pickerPresentation.abort()
 		pickerCurrent = nil
 		pickerInput.clear()
+		restoreTerminalModes()
 		if ui != nil {
 			if local && actionID != 0 {
 				ui.completeLocal(uiGeneration, actionID)

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -268,23 +269,37 @@ func TestPickerClientInteractionDropsRawInput(t *testing.T) {
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 1, ActionID: 1, Data: []byte("x")}))
 	require.Equal(t, []byte("x"), awaitTestValue(t, writes, "session input never reached the pty"))
 
+	// Positive control: with the pane reporting mouse mode, a mouse report
+	// reaches the pane's pty. Without this control the negative assertion
+	// below would pass even if mouse routing were broken outright.
+	tb := testAttachmentTab(sess)
+	require.NotNil(t, tb)
+	pane := tb.panes["pane-1"]
+	require.NotNil(t, pane)
+	pane.screen.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	mouseReport := []byte(fmt.Sprintf("\x1b[<0;2;%dM", clientTopBarRows+2))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 1, ActionID: 1, Data: mouseReport}))
+	require.NotEmpty(t, awaitTestValue(t, writes, "positive control: mouse never reached the pane"))
+
 	d.openPickerClientForAttachment(ac, effect, 11)
 	snapshot := awaitPickerSnapshot(t, sends)
 
 	// While the client picker is open it owns user input: keys and mouse
 	// reports must not reach the session, and the interaction stays open.
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 2, ActionID: 2, Data: []byte("hidden")}))
-	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 3, ActionID: 3, Data: []byte("\x1b[<0;5;5M")}))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 3, ActionID: 3, Data: mouseReport}))
 	select {
 	case frame := <-writes:
 		t.Fatalf("picker-owned input reached the pty: %q", frame)
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// Closing the interaction restores normal routing.
+	// Closing the interaction restores normal routing, mouse included.
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision}))
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 4, ActionID: 4, Data: []byte("visible")}))
 	require.Equal(t, []byte("visible"), awaitTestValue(t, writes, "session input did not resume after the close"))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 5, ActionID: 5, Data: mouseReport}))
+	require.NotEmpty(t, awaitTestValue(t, writes, "mouse routing did not resume after the close"))
 }
 
 func TestPickerClientSelectionClosesBeforeTheDestinationPaint(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,26 @@ func startPickerE2EHarness(t *testing.T, reader io.Reader, withUI bool) *pickerE
 	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: output0}
 
 	return &pickerE2EHarness{attempt: attempt, transport: transport, ui: ui, terminal: uiTerminal, input: input, clock: clock}
+}
+
+// awaitTerminalText waits until the terminal shows the fragment. It is the
+// headless replacement for UI.Wait: the picker frame is written to the same
+// terminal, so the drawn text is the barrier.
+func awaitTerminalText(t *testing.T, terminal *uiterm.Terminal, fragment string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		snapshot, err := terminal.Snapshot()
+		if err == nil && strings.Contains(uiSnapshotText(snapshot), fragment) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("terminal never showed %q", fragment)
+		case <-terminal.Changes():
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 // frameCount reports how many client frames crossed the wire so far.

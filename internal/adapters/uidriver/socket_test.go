@@ -191,9 +191,13 @@ func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
 	require.Zero(t, ready.ID)
 }
 
+// shortDir returns a private directory whose absolute path stays inside the
+// unix socket length limit. It is created under the system temporary
+// directory: the checkout's own path can already be long enough to overflow
+// the limit in a nested worktree.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp(".", "v")
+	directory, err := os.MkdirTemp("", "vev-ui")
 	require.NoError(t, err)
 	directory, err = filepath.Abs(directory)
 	require.NoError(t, err)
