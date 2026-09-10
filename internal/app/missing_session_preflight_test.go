@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
@@ -40,22 +43,29 @@ func failingSessionListDialer(t *testing.T, dialErr error) func() wire.Dialer {
 	return func() wire.Dialer { return dialer }
 }
 
+// promptTerminalStub builds a stub terminal serving canned prompt I/O for
+// tests.
+func promptTerminalStub(t *testing.T, in io.Reader, out io.Writer) func() ports.Terminal {
+	terminal := portsmocks.NewMockTerminal(t)
+	terminal.EXPECT().In().Return(in).Maybe()
+	terminal.EXPECT().Out().Return(out).Maybe()
+	return func() ports.Terminal { return terminal }
+}
+
 func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 	tests := []struct {
 		name           string
 		sessions       []protocol.SessionInfo
 		answer         string
-		terminal       bool
 		wantIntent     uint8
 		wantPromptPart string
 		wantNoPrompt   bool
 	}{
-		{name: "missing confirm creates", sessions: nil, answer: "y\n", terminal: true, wantIntent: protocol.IntentNew, wantPromptPart: `vev: session "scratch" doesn't exist, want to create and attach to it? [y/N]`},
-		{name: "missing decline attaches", sessions: nil, answer: "n\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "scratch"},
-		{name: "missing empty answer attaches", sessions: nil, answer: "\n", terminal: true, wantIntent: protocol.IntentAttach},
-		{name: "missing unknown answer attaches", sessions: nil, answer: "later\n", terminal: true, wantIntent: protocol.IntentAttach, wantPromptPart: "[y/N]"},
-		{name: "missing non-terminal attaches", sessions: nil, answer: "y\n", terminal: false, wantIntent: protocol.IntentAttach, wantNoPrompt: true},
-		{name: "present attaches without prompt", sessions: []protocol.SessionInfo{{Name: "scratch"}}, answer: "y\n", terminal: true, wantIntent: protocol.IntentAttach, wantNoPrompt: true},
+		{name: "missing confirm creates", sessions: nil, answer: "y\n", wantIntent: protocol.IntentNew, wantPromptPart: `vev: session "scratch" doesn't exist, want to create and attach to it? [y/N]`},
+		{name: "missing decline attaches", sessions: nil, answer: "n\n", wantIntent: protocol.IntentAttach, wantPromptPart: "scratch"},
+		{name: "missing empty answer attaches", sessions: nil, answer: "\n", wantIntent: protocol.IntentAttach},
+		{name: "missing unknown answer attaches", sessions: nil, answer: "later\n", wantIntent: protocol.IntentAttach, wantPromptPart: "[y/N]"},
+		{name: "present attaches without prompt", sessions: []protocol.SessionInfo{{Name: "scratch"}}, answer: "y\n", wantIntent: protocol.IntentAttach, wantNoPrompt: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -63,11 +73,8 @@ func TestRunAttachWithDepsMissingSessionCreatePrompt(t *testing.T) {
 			var promptOut strings.Builder
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
 				localDialer: sessionListDialer(t, tt.sessions),
-				attachPrompt: attachPrompt{
-					in:       strings.NewReader(tt.answer),
-					out:      &promptOut,
-					terminal: func() bool { return tt.terminal },
-				}, runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+				terminal:    promptTerminalStub(t, strings.NewReader(tt.answer), &promptOut),
+				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					return nil
 				},
@@ -102,11 +109,8 @@ func TestRunAttachWithDepsMissingSessionPreflightSkipsNonAttach(t *testing.T) {
 				session = "scratch"
 			}
 			err := runAttachWithDeps(context.Background(), tt.intent, session, tt.remote, "", nil, runAttachDeps{
-				attachPrompt: attachPrompt{
-					in:       strings.NewReader("y\n"),
-					out:      &promptOut,
-					terminal: func() bool { return true },
-				}, runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
+				terminal: promptTerminalStub(t, strings.NewReader("y\n"), &promptOut),
+				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					if tt.remote != "" {
 						require.True(t, deps.Remote)
@@ -142,11 +146,8 @@ func TestRunAttachWithDepsMissingSessionPreflightUnavailableAttaches(t *testing.
 			var intents []uint8
 			err := runAttachWithDeps(ctx, protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
 				localDialer: failingSessionListDialer(t, tt.dialErr),
-				attachPrompt: attachPrompt{
-					in:       strings.NewReader("y\n"),
-					out:      &promptOut,
-					terminal: func() bool { return true },
-				}, runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+				terminal:    promptTerminalStub(t, strings.NewReader("y\n"), &promptOut),
+				runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 					intents = append(intents, request.Intent)
 					return nil
 				},

@@ -3,46 +3,16 @@ package app
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/pkg/rawterm"
 )
 
 const maxAttachTargetHandoffs = 32
-
-// attachPrompt carries the console streams for the missing-session create
-// prompt. The zero value uses the process console and probes stdin for
-// interactivity; tests inject buffers and a stub.
-type attachPrompt struct {
-	in       io.Reader
-	out      io.Writer
-	terminal func() bool
-}
-
-func (p attachPrompt) interactive() bool {
-	if p.terminal != nil {
-		return p.terminal()
-	}
-	return rawterm.IsTerminal(int(os.Stdin.Fd()))
-}
-
-func (p attachPrompt) input() io.Reader {
-	if p.in != nil {
-		return p.in
-	}
-	return os.Stdin
-}
-
-func (p attachPrompt) output() io.Writer {
-	if p.out != nil {
-		return p.out
-	}
-	return os.Stderr
-}
 
 // resolveMissingSessionAttach decides the attach intent for a direct local
 // attach before any client attempt runs. When the session exists, or when
@@ -64,9 +34,22 @@ func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttac
 			log.Debug("missing-session preflight unavailable; proceeding with attach", "err", err)
 		}
 	case !exists:
-		return confirmMissingSessionCreate(ctx, name, deps.attachPrompt)
+		return confirmMissingSessionCreate(ctx, name, deps)
 	}
 	return protocol.IntentAttach, nil
+}
+
+// isInteractiveTerminal reports whether the prompt runs on a terminal.
+// Test stubs serve In/Out without a backing console, so only the real
+// stdin file is probed; anything else counts as interactive.
+func isInteractiveTerminal(terminal ports.Terminal) bool {
+	if terminal == nil {
+		return false
+	}
+	if file, ok := terminal.In().(*os.File); ok {
+		return rawterm.IsTerminal(int(file.Fd()))
+	}
+	return true
 }
 
 // confirmMissingSessionCreate prompts to create an absent session and maps
@@ -75,11 +58,19 @@ func resolveMissingSessionAttach(ctx context.Context, name string, deps runAttac
 // Non-interactive consoles, a declined answer, or unreadable input keep
 // IntentAttach. Only y/yes answers confirm; empty, no, and unknown answers
 // decline.
-func confirmMissingSessionCreate(ctx context.Context, name string, prompt attachPrompt) (uint8, error) {
-	if name == "" || ctx.Err() != nil || !prompt.interactive() {
+func confirmMissingSessionCreate(ctx context.Context, name string, deps runAttachDeps) (uint8, error) {
+	if name == "" || ctx.Err() != nil {
 		return protocol.IntentAttach, nil
 	}
-	create, err := confirm.NewConfirmer(prompt.input(), prompt.output()).ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
+	terminal := clientTerminal(deps)
+	if !isInteractiveTerminal(terminal) {
+		return protocol.IntentAttach, nil
+	}
+	in, out := terminal.In(), terminal.Out()
+	if in == nil || out == nil {
+		return protocol.IntentAttach, nil
+	}
+	create, err := confirm.NewConfirmer(in, out).ConfirmContext(ctx, fmt.Sprintf("vev: session %q doesn't exist, want to create and attach to it?", name))
 	if err != nil {
 		return protocol.IntentAttach, err
 	}

@@ -884,10 +884,6 @@ type runAttachDeps struct {
 	disableCapabilityProbe  bool
 	localEnvironment        []string
 	remoteEnvironment       func(string) []string
-	// attachPrompt carries the console streams for the missing-session
-	// create prompt. The zero value uses the process console and probes
-	// stdin; tests inject buffers and a stub.
-	attachPrompt attachPrompt
 	// clipboard reads a clipboard image on a remote route's Ctrl+V.
 	// The client retains it across local-to-remote handoffs and only enables
 	// interception while the active route is remote.

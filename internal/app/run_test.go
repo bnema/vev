@@ -1441,11 +1441,7 @@ func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {
 	var intents []uint8
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
 		localDialer: sessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
-		attachPrompt: attachPrompt{
-			in:       strings.NewReader("y\n"),
-			out:      &promptOut,
-			terminal: func() bool { return true },
-		},
+		terminal:    promptTerminalStub(t, strings.NewReader("y\n"), &promptOut),
 		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
 			intents = append(intents, request.Intent)
 			return rejected
