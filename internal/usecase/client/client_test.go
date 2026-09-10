@@ -1053,6 +1053,53 @@ func TestHybridPickerExpiredSwitchFallsBackToNewDial(t *testing.T) {
 	require.Equal(t, int32(2), remoteDialer.calls.Load(), "an expired parked lease must use the traditional dial path")
 }
 
+// TestHybridStdioHomeOpenSkipsParking pins the SSH-stdio pairing: a home
+// directive on a non-datagram serving transport must not send a parked-route
+// Prepare. The client closes the serving connection and dials the retained
+// home route instead, and Back redials the remote endpoint from scratch.
+func TestHybridStdioHomeOpenSkipsParking(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	localLifecycle := domain.SessionLifecycleID{1}
+	remoteLifecycle := domain.SessionLifecycleID{2}
+	remoteTarget := domain.RemoteSessionTarget{
+		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: remoteLifecycle,
+		SessionName: "work", LiveTabID: "work-tab",
+	}
+	localInitial := hybridLocalBootstrap(localLifecycle, remoteTarget)
+	// Plain recordingTransport: no DatagramTransport marker, so the
+	// attempt treats the serving route as SSH stdio, not UDP.
+	serving := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("work", remoteLifecycle)},
+		{f: navigationDirectiveFrame(protocol.NavigationOpenHomePicker)},
+	}}
+	remoteReturn := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("work", remoteLifecycle)},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	localPicker := &recordingTransport{recvs: []recvItem{
+		{f: hybridWelcomeFrame("local", localLifecycle)},
+		{f: navigationDirectiveFrame(protocol.NavigationBack)},
+	}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{localInitial, localPicker}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{serving, remoteReturn}}
+	deps := hybridPickerDependencies(localDialer, term, realClock{}, map[string]ports.ClientDialer{"remote": remoteDialer})
+
+	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+	}))
+	for _, sent := range serving.Sends() {
+		require.NotEqual(t, wire.MsgParkedRouteRequest, sent.Type, "stdio home open must not park the serving route")
+	}
+	require.Positive(t, serving.closed.Load(), "stdio home open must close the serving connection")
+	require.Equal(t, int32(2), localDialer.calls.Load())
+	require.Equal(t, int32(2), remoteDialer.calls.Load(), "Back must redial the remote endpoint from scratch")
+	pickerHello := helloFromSend(t, localPicker)
+	require.Equal(t, protocol.StartupOverlaySessionPicker, pickerHello.StartupOverlay)
+	require.NotZero(t, pickerHello.NavigationCapabilities&protocol.NavigationCapabilityBack)
+}
+
 func TestHybridPickerPrepareResponseTimeoutClosesRetainedTransport(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()

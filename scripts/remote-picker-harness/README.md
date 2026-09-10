@@ -8,13 +8,28 @@ keys authenticate SSH with host-key pinning. No host credentials, state or
 sockets are mounted. Containers, image, network and temporary keys are removed
 on success, failure or interruption.
 
-The real UI driver exercises local A → local B → remote → local A. It asserts
-qualified palette labels, exactly one imported local destination, the original
-session lifecycle at return, and a successfully committed navigation action.
+`navigation_repro.py CLIENT_CONTAINER REMOTE_CONTAINER` runs the original
+hybrid-UDP regression: local A → local B → remote → local A with qualified
+palette labels, exactly one imported local destination, the original session
+lifecycle at return, and a successfully committed navigation action.
+
+`acceptance.py CLIENT_CONTAINER REMOTE_CONTAINER SCENARIO[@stdio|@udp]` runs
+the table-driven baseline matrix. Every scenario asserts committed outcomes
+(action IDs, exact lifecycle/session/focus context, observed published
+output); sending a key is never success. Transport selection passes through
+the fixture process environment (`VEV_REMOTE_TRANSPORT=stdio` or unset for
+UDP). Direct-remote scenarios use `--remote` with no local daemon and never
+create a local home session as setup. The client needs a pinned `remote`
+SSH alias and `vev host add remote`. Scripts create uniquely named sessions
+and detach their clients; the container owner handles session cleanup.
+
+| Scenario | Modes |
+|---|---|
+| `local-palette-cycle` | M1 local IPC: palette open/action/close, committed output, stable lifecycle |
+| `direct-remote-ephemeral@udp` | M2 direct remote UDP: fresh attach, committed output, stable lifecycle |
+| `direct-remote-ephemeral@stdio` | M3 direct remote explicit stdio: same semantics, no UDP parking |
+| `hybrid-exact-return@udp` | M4 hybrid UDP: local→remote→exact local return with committed action |
+| `hybrid-exact-return@stdio` | M5 hybrid stdio: same shape across close/dial |
+
 A failed assertion fails the command. This is a targeted regression, not an
 exhaustive transport or geometry matrix.
-
-`navigation_repro.py CLIENT_CONTAINER REMOTE_CONTAINER` also runs against
-already prepared disposable demo containers. The client needs a pinned `remote`
-SSH alias and `vev host add remote`. The script creates uniquely named sessions
-and detaches its clients; the container owner handles session cleanup.
