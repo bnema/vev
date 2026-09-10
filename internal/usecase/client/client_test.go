@@ -557,6 +557,66 @@ func TestKilledSessionReturnsToPreviousLocalRoute(t *testing.T) {
 	require.Equal(t, int32(1), term.restoreCount.Load())
 }
 
+// TestSamePeerSwitchFailurePreservesSourceRouteHistory pins the
+// precommit-rejection boundary: a daemon SamePeerSwitchFailure leaves the
+// source attachment unchanged, commits no history, and dials no replacement
+// transport. The client keeps serving the source route it already owned.
+func TestSamePeerSwitchFailurePreservesSourceRouteHistory(t *testing.T) {
+	term := newRunTerminal()
+	defer term.in.unblock()
+
+	sourceTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "source"}
+	destTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "destination"}
+	welcome := func(target protocol.ExactSessionTarget) wire.Frame {
+		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+			SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 1,
+			Capabilities:      protocol.CapabilityResume,
+			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
+		}))
+	}
+	switchSent := make(chan struct{})
+	var switchOnce sync.Once
+	active := &recordingTransport{recvs: []recvItem{
+		{f: welcome(sourceTarget)},
+		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+			Session: "destination", Intent: protocol.IntentAttach, ExactTarget: &destTarget,
+			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
+		}))},
+		{f: frameOf(wire.MsgSamePeerSwitchFailure, mustMarshalSamePeerSwitchFailure(protocol.SamePeerSwitchFailure{
+			RequestID: 1, Code: protocol.SamePeerSwitchUnavailable,
+		})), wait: switchSent},
+		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+	}}
+	active.onSend = func(frame wire.Frame) {
+		if frame.Type == wire.MsgSamePeerSwitchRequest {
+			switchOnce.Do(func() { close(switchSent) })
+		}
+	}
+	dialer := &sequenceDialer{trs: []wire.Transport{active}}
+
+	err := runTestClient(context.Background(), testDependencies(dialer, term, realClock{}, nil, nil), client.AttachRequest{
+		Intent: protocol.IntentAttach, SessionName: "source", Origin: protocol.RouteOriginLocal,
+		OriginKey: "local", EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(1), dialer.calls.Load(), "a rejected same-peer switch must not dial a replacement transport")
+	var snapshots []protocol.RecentRouteSnapshot
+	for _, sent := range active.Sends() {
+		if sent.Type != wire.MsgRecentRouteSnapshot {
+			continue
+		}
+		snapshot, err := wire.UnmarshalRecentRouteSnapshot(sent.Payload)
+		require.NoError(t, err)
+		snapshots = append(snapshots, snapshot)
+	}
+	require.NotEmpty(t, snapshots, "the welcome commit must publish a route snapshot")
+	for _, snapshot := range snapshots {
+		require.Equal(t, sourceTarget, snapshot.ActiveEntry.Target, "a rejected switch must not change the active route")
+		require.Empty(t, snapshot.Entries, "a rejected switch must not append destination history")
+	}
+}
+
 func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
@@ -1548,6 +1608,14 @@ func mustMarshalRouteAction(action protocol.RouteNavigationAction) []byte {
 
 func mustMarshalRoutePosition(position protocol.RoutePosition) []byte {
 	payload, err := wire.MarshalRoutePosition(position)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+func mustMarshalSamePeerSwitchFailure(failure protocol.SamePeerSwitchFailure) []byte {
+	payload, err := wire.MarshalSamePeerSwitchFailure(failure)
 	if err != nil {
 		panic(err)
 	}
