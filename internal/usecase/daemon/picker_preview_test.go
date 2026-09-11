@@ -200,8 +200,8 @@ func TestPickerOpenSurvivesOneHostRegisteredTwice(t *testing.T) {
 		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "1"}},
 	}
 	seedRemoteDirectory(t, d,
-		reachableDirectoryHost("remote", time.Unix(10, 0), session),
-		reachableDirectoryHost("demo@remote", time.Unix(10, 0), session),
+		reachableDirectoryHost("remote", time.Unix(10, 0), session, secondRemoteSessionForTest()),
+		reachableDirectoryHost("demo@remote", time.Unix(10, 0), session, secondRemoteSessionForTest()),
 	)
 	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
 	effect := admitPickerEffectForTest(t, sess, ac)
@@ -212,7 +212,7 @@ func TestPickerOpenSurvivesOneHostRegisteredTwice(t *testing.T) {
 	snapshot := awaitPickerSnapshot(t, sends)
 
 	seen := make(map[string]struct{}, len(snapshot.Lines))
-	workRows := 0
+	workRows, sessionRows := 0, 0
 	for _, line := range snapshot.Lines {
 		if line.Key == "" {
 			continue
@@ -220,10 +220,26 @@ func TestPickerOpenSurvivesOneHostRegisteredTwice(t *testing.T) {
 		_, duplicate := seen[line.Key]
 		require.False(t, duplicate, "row key %q was published twice", line.Key)
 		seen[line.Key] = struct{}{}
-		if line.Kind == protocol.PickerLineSession && line.Label == "work" {
+		if line.Kind != protocol.PickerLineSession {
+			continue
+		}
+		sessionRows++
+		if line.Label == "work" {
 			workRows++
 		}
 	}
 	require.NotEmpty(t, snapshot.Lines)
 	require.Equal(t, 2, workRows, "both endpoints of the same host must publish their rows")
+	require.Equal(t, 5, sessionRows, "the local session and every remote session must publish its own row")
+}
+
+// secondRemoteSessionForTest is another live session on the same host: two live
+// sessions share an endpoint, so their rows must still be distinct.
+func secondRemoteSessionForTest() catalogue.RemoteCatalogSession {
+	lifecycle := remoteLifecycleForTest()
+	lifecycle[0]++
+	return catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "ticker", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-2", Index: 0, Name: "1"}},
+	}
 }

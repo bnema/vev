@@ -107,7 +107,11 @@ func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatal
 	}
 
 	return pickerSessionView{
-		ID:                 key.ID(),
+		ID: key.ID(),
+		// A remote row's incarnation is its session lifecycle. Leaving it zero
+		// would make every live session on one host share one row identity, so
+		// two of them would collide and the whole snapshot would be rejected.
+		Incarnation:        session.LifecycleID,
 		Name:               key.Display(),
 		RemoteKey:          &key,
 		RemoteTarget:       remoteTarget,
