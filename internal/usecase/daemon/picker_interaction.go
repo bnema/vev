@@ -364,6 +364,17 @@ func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient,
 		d.refreshPickerSnapshot(ac)
 		return
 	}
+	if intent == protocol.PickerIntentMoveTab {
+		target.TabID = source.TabID
+		if !d.closePickerForAttachment(ac, effect, interaction) {
+			d.sendPickerFailure(effect, selection, protocol.PickerStaleRevision)
+			return
+		}
+		if err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{allowSamePeer: true}, "picker-move-tab"); err != nil {
+			d.sendPickerFailure(effect, selection, protocol.PickerNavigationFailed)
+		}
+		return
+	}
 	d.sendPickerResult(effect, selection, interaction)
 	d.refreshPickerSnapshot(ac)
 }
