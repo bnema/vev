@@ -9,11 +9,11 @@ type MsgType uint8
 
 // Frame message types use non-contiguous allocations: the legacy client range
 // is 1–13 and 15, and newer client controls use 32–33, 35, 37, 39, 42, 45,
-// 47, 49, 51, 53, and 55 (49+ carry the client-picker interaction: begin,
-// close, selection). Server-originated messages occupy 16–23, 25–31, 34, 36,
-// 38, 40–41, 43–44, 46, 48, 50, 52, 54, 56, and 58 (50+ carry the
-// client-picker interaction: offer, snapshot, closed, failure, result). Values
-// 14 and 24 remain reserved for future extensions.
+// 47, 49, 51, 53, 55, and 57 (49+ carry the client-picker interaction: begin,
+// close, selection, preview request). Server-originated messages occupy 16–23,
+// 25–31, 34, 36, 38, 40–41, 43–44, 46, 48, 50, 52, 54, 56, 58, and 59 (50+
+// carry the client-picker interaction: offer, snapshot, closed, failure,
+// result, preview). Values 14 and 24 remain reserved for future extensions.
 const (
 	MsgHello                          MsgType = 1
 	MsgInput                          MsgType = 2
@@ -39,6 +39,7 @@ const (
 	MsgPickerCloseClient              MsgType = 51
 	MsgPickerSelection                MsgType = 53
 	MsgPickerBegin                    MsgType = 55
+	MsgPickerPreviewRequest           MsgType = 57
 
 	MsgWelcome                      MsgType = 16
 	MsgError                        MsgType = 17
@@ -67,6 +68,7 @@ const (
 	MsgPickerFailure                MsgType = 54
 	MsgPickerOffer                  MsgType = 56
 	MsgPickerResult                 MsgType = 58
+	MsgPickerPreview                MsgType = 59
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

@@ -1652,13 +1652,7 @@ func MarshalRemotePreview(preview protocol.RemotePreview) []byte {
 	w.putUint16(preview.Height)
 	w.putUint32(uint32(len(preview.Cells)))
 	for _, cell := range preview.Cells {
-		var flags uint8
-		if cell.Continuation {
-			flags = 1
-		}
-		w.putUint32(uint32(cell.Rune))
-		w.putUint8(flags)
-		putPreviewStyle(&w, cell.Style)
+		putPreviewCell(&w, cell)
 	}
 	return w.b
 }
@@ -1707,22 +1701,14 @@ func UnmarshalRemotePreview(data []byte) (protocol.RemotePreview, error) {
 	if count != 0 {
 		p.Cells = make([]renderer.Cell, 0, int(count))
 		for range int(count) {
-			runeValue, e := r.getUint32()
+			cell, e := getPreviewCell(&r)
 			if e != nil {
+				if errors.Is(e, errPreviewCellFlags) {
+					return p, protocol.ErrInvalidRemotePreview
+				}
 				return p, e
 			}
-			flags, e := r.getUint8()
-			if e != nil {
-				return p, e
-			}
-			if flags&^uint8(1) != 0 {
-				return p, protocol.ErrInvalidRemotePreview
-			}
-			style, e := getPreviewStyle(&r)
-			if e != nil {
-				return p, e
-			}
-			p.Cells = append(p.Cells, renderer.Cell{Rune: rune(runeValue), Continuation: flags&1 != 0, Style: style})
+			p.Cells = append(p.Cells, cell)
 		}
 	}
 	if err := r.done(); err != nil {

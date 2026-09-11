@@ -3,8 +3,6 @@ package protocol
 import (
 	"errors"
 	"math"
-	"unicode"
-	"unicode/utf8"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
@@ -97,25 +95,13 @@ func ValidateRemotePreview(preview RemotePreview) error {
 	if want > RemotePreviewMaxCells || len(preview.Cells) != want {
 		return ErrRemotePreviewTooLarge
 	}
-	width := int(preview.Width)
-	for i, cell := range preview.Cells {
-		if !utf8.ValidRune(cell.Rune) || (cell.Rune != 0 && unicode.IsControl(cell.Rune)) || !validRemotePreviewStyle(cell.Style) {
-			return ErrInvalidRemotePreview
-		}
-		rowStart := (i / width) * width
-		rowEnd := rowStart + width
-		if cell.Continuation {
-			if cell.Rune != 0 || i == rowStart || preview.Cells[i-1].Continuation || renderer.RuneWidth(preview.Cells[i-1].Rune) != 2 {
-				return ErrInvalidRemotePreview
-			}
-		} else if renderer.RuneWidth(cell.Rune) == 2 && (i+1 >= rowEnd || !preview.Cells[i+1].Continuation) {
-			return ErrInvalidRemotePreview
-		}
+	if !previewCellRunValid(int(preview.Width), preview.Cells) {
+		return ErrInvalidRemotePreview
 	}
 	return nil
 }
 
-func validRemotePreviewStyle(style renderer.Style) bool {
+func validPreviewCellStyle(style renderer.Style) bool {
 	return style.Attrs&^(renderer.AttrDim|renderer.AttrUnderline|renderer.AttrBlink|renderer.AttrStrikethrough) == 0 &&
 		style.UnderlineStyle <= renderer.UnderlineDashed &&
 		style.Foreground >= math.MinInt16 && style.Foreground <= math.MaxInt16 &&
