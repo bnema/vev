@@ -11,7 +11,7 @@ import (
 
 // line builds one selectable session line for the shared fixtures.
 func line(key, label string, actions protocol.PickerLineActions) protocol.PickerLine {
-	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineSession, Label: label, Actions: actions}
+	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineSession, Label: label, Focusable: true, Actions: actions}
 }
 
 func navLine(key, label string) protocol.PickerLine {
@@ -23,7 +23,13 @@ func section(label string) protocol.PickerLine {
 }
 
 func tabLine(key, label string, actions protocol.PickerLineActions) protocol.PickerLine {
-	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineTab, Label: label, Actions: actions}
+	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineTab, Label: label, Focusable: true, Actions: actions}
+}
+
+// inspectionLine builds one row the source keeps reachable without authorising
+// any action on it.
+func inspectionLine(key, label string) protocol.PickerLine {
+	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineHost, Label: label, Dim: true, Focusable: true}
 }
 
 func TestNewOrdersLinesAndSelectsTheCursorKey(t *testing.T) {
@@ -55,7 +61,7 @@ func TestUpDownSkipsSectionsAndUnselectableRows(t *testing.T) {
 	m := New([]protocol.PickerLine{
 		navLine("a/one", "one"),
 		// A host status row is focusable but carries no action.
-		{Key: "b/host", Kind: protocol.PickerLineHost, Label: "example.test", Dim: true},
+		inspectionLine("b/host", "example.test"),
 		navLine("c/three", "three"),
 	}, Config{Intent: protocol.PickerIntentNavigation})
 
@@ -79,9 +85,9 @@ func TestUpDownSkipsSectionsAndUnselectableRows(t *testing.T) {
 
 func TestSortGroupedPullsNamedLinesAheadOfEphemeralOnes(t *testing.T) {
 	lines := []protocol.PickerLine{
-		{Key: "e/eph", Kind: protocol.PickerLineSession, Label: "eph", Ephemeral: true, Actions: protocol.PickerCanNavigate},
+		{Key: "e/eph", Kind: protocol.PickerLineSession, Label: "eph", Ephemeral: true, Focusable: true, Actions: protocol.PickerCanNavigate},
 		navLine("a/named", "named"),
-		{Key: "e/eph2", Kind: protocol.PickerLineSession, Label: "eph2", Ephemeral: true, Actions: protocol.PickerCanNavigate},
+		{Key: "e/eph2", Kind: protocol.PickerLineSession, Label: "eph2", Ephemeral: true, Focusable: true, Actions: protocol.PickerCanNavigate},
 	}
 	recent := New(lines, Config{Intent: protocol.PickerIntentNavigation})
 	first, ok := recent.Cursor()
@@ -96,7 +102,7 @@ func TestSortGroupedPullsNamedLinesAheadOfEphemeralOnes(t *testing.T) {
 
 func TestSetSortKeepsTheSelectedKey(t *testing.T) {
 	m := New([]protocol.PickerLine{
-		{Key: "e/eph", Kind: protocol.PickerLineSession, Label: "eph", Ephemeral: true, Actions: protocol.PickerCanNavigate},
+		{Key: "e/eph", Kind: protocol.PickerLineSession, Label: "eph", Ephemeral: true, Focusable: true, Actions: protocol.PickerCanNavigate},
 		navLine("a/named", "named"),
 		navLine("b/other", "other"),
 	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "b/other", Index: 2}})
@@ -144,7 +150,67 @@ func TestSelectedHonoursSearchVisibility(t *testing.T) {
 
 	_, ok := m.Selected()
 	require.False(t, ok, "a cursor hidden by the search is never a commit target")
-	require.True(t, m.SelectionRejectedBySearch())
+	require.Equal(t, -1, m.SelectedIndex(), "a query without matches leaves no visible cursor")
+}
+
+func TestRowsTheSourceSkippedAreNeverCursorDestinations(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		// A session header the source did not authorise: rendered, skipped.
+		{Key: "a/one", Kind: protocol.PickerLineSession, Label: "one"},
+		tabLine("a/one#t1", "shell", protocol.PickerCanNavigate),
+		inspectionLine("b/host", "example.test"),
+	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "a/one", Index: 0}})
+
+	require.Equal(t, "a/one#t1", mustSelectedKey(t, m), "an unauthorised header is not a destination")
+	m.Up()
+	require.Equal(t, "a/one#t1", mustSelectedKey(t, m), "navigation never rests on the header")
+	m.Down()
+	require.Equal(t, "b/host", cursorKey(t, m), "an inspection row stays reachable")
+	_, ok := m.Selected()
+	require.False(t, ok, "an inspection row never commits")
+	m.Down()
+	require.Equal(t, "b/host", cursorKey(t, m), "the last eligible row holds the cursor")
+}
+
+func TestSearchWithoutMatchesClearsTheCursorAndMovementFollows(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		navLine("b/two", "two"),
+		navLine("c/three", "three"),
+	}, Config{Intent: protocol.PickerIntentNavigation})
+	m.EnterSearch()
+	m.InsertSearch('t')
+	require.Equal(t, 2, m.MatchCount())
+	m.Down()
+	require.Equal(t, "c/three", mustSelectedKey(t, m), "search movement only visits matching rows")
+	m.InsertSearch('z')
+	require.Equal(t, 0, m.MatchCount())
+	require.Equal(t, -1, m.SelectedIndex())
+	m.Down()
+	require.Equal(t, -1, m.SelectedIndex(), "movement cannot resurrect a hidden cursor")
+	m.BackspaceSearch()
+	require.Equal(t, 2, m.MatchCount())
+	require.Equal(t, "b/two", mustSelectedKey(t, m), "editing the query re-places the cursor on a shown row")
+	m.ClearSearch()
+	require.Equal(t, 3, m.MatchCount(), "an empty query shows every eligible row again")
+	require.Equal(t, "b/two", mustSelectedKey(t, m))
+}
+
+// mustSelectedKey reports the committed key, failing when the cursor holds no
+// committable row.
+func mustSelectedKey(t *testing.T, m *Model) string {
+	t.Helper()
+	selected, ok := m.Selected()
+	require.True(t, ok, "the cursor must hold a committable row")
+	return selected.Key
+}
+
+// cursorKey reports the raw cursor row key independently of committability.
+func cursorKey(t *testing.T, m *Model) string {
+	t.Helper()
+	line, ok := m.Cursor()
+	require.True(t, ok)
+	return line.Key
 }
 
 func TestSelectNearestRowSnapsForwardThenBackward(t *testing.T) {
@@ -219,12 +285,12 @@ func TestChooseGeometryReservesTheStatusRow(t *testing.T) {
 func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
 	m := New([]protocol.PickerLine{
 		{
-			Key: "a/live", Kind: protocol.PickerLineSession, Label: "live", Actions: protocol.PickerCanNavigate,
+			Key: "a/live", Kind: protocol.PickerLineSession, Label: "live", Focusable: true, Actions: protocol.PickerCanNavigate,
 			Status: protocol.PickerLineStatusUp, Detail: "up",
 		},
 		{
 			Key: "b/old", Kind: protocol.PickerLineSession, Label: "old", Stopped: true,
-			Status: protocol.PickerLineStatusStopped, Detail: "stopped", Actions: protocol.PickerCanNavigate,
+			Status: protocol.PickerLineStatusStopped, Detail: "stopped", Focusable: true, Actions: protocol.PickerCanNavigate,
 		},
 	}, Config{Intent: protocol.PickerIntentNavigation})
 
@@ -248,7 +314,7 @@ func TestRenderBlitsThePreviewIntoThePreviewRect(t *testing.T) {
 func TestRenderAttentionMarkerFollowsTheTabName(t *testing.T) {
 	m := New([]protocol.PickerLine{
 		tabLine("a/one#t1", "shell", protocol.PickerCanNavigate),
-		{Key: "a/one#t2", Kind: protocol.PickerLineTab, Label: "build", Attention: true, Actions: protocol.PickerCanNavigate},
+		{Key: "a/one#t2", Kind: protocol.PickerLineTab, Label: "build", Attention: true, Focusable: true, Actions: protocol.PickerCanNavigate},
 	}, Config{Intent: protocol.PickerIntentNavigation})
 	frame := m.Render(domain.Size{Cols: 60, Rows: 6}, Preview{})
 	require.Contains(t, rowText(frame.Row(1)), "build")
@@ -259,7 +325,7 @@ func TestSearchMatchesLabelsAndDetails(t *testing.T) {
 	m := New([]protocol.PickerLine{
 		navLine("a/one", "one"),
 		navLine("b/two", "two"),
-		{Key: "c/three", Kind: protocol.PickerLineTab, Label: "three", Detail: " (vim)", Actions: protocol.PickerCanNavigate},
+		{Key: "c/three", Kind: protocol.PickerLineTab, Label: "three", Detail: " (vim)", Focusable: true, Actions: protocol.PickerCanNavigate},
 	}, Config{Intent: protocol.PickerIntentNavigation})
 	m.EnterSearch()
 	m.InsertSearch('v')

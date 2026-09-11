@@ -138,7 +138,13 @@ func (r row) section() bool { return r.line.Kind == protocol.PickerLineSection }
 
 func (r row) selectable() bool { return r.line.Actions != 0 }
 
-func (r row) focusable() bool { return r.line.Kind != protocol.PickerLineSection }
+// focusable reports the source's authorisation to rest the cursor on this row.
+// A section header is never a destination; every other shape follows the
+// published flag, so a row the source kept for inspection stays reachable while
+// a row it skipped is passed over.
+func (r row) focusable() bool {
+	return r.line.Kind != protocol.PickerLineSection && r.line.Focusable
+}
 
 func (r row) rendersAsHeader() bool {
 	return r.line.Kind == protocol.PickerLineSession || r.line.Kind == protocol.PickerLineHost
@@ -195,25 +201,16 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 		return
 	}
 	key, hadKey := m.cursorKey()
-	searchActive, query := m.searchActive, m.query.Value()
 	m.lines = append(m.lines[:0], lines...)
 	if !hadKey {
 		key, hadKey = cursor.Key, cursor.Key != ""
 	}
 	m.rebuild(key, hadKey, cursor.Index)
-	m.searchActive = searchActive
-	m.query.SetValue(query)
-	m.searchMatches = nil
-	m.matchRows = nil
-	if !searchActive {
-		return
-	}
-	best := m.refreshSearch(false)
-	if query != "" && !m.rowMatches(m.selected) && best >= 0 {
-		m.selected = best
-	}
 }
 
+// rebuild recomputes the row list from the published lines. Search matches are
+// row-index keyed, so they are recomputed here, before the cursor is restored:
+// restoration consults them to keep the cursor on a row the query shows.
 func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 	m.rows = m.rows[:0]
 	run := make([]protocol.PickerLine, 0, len(m.lines))
@@ -235,6 +232,11 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 		run = append(run, line)
 	}
 	flush()
+	m.searchMatches = nil
+	m.matchRows = nil
+	if m.searchActive {
+		m.refreshSearch(false)
+	}
 	m.restoreSelection(key, hadKey, fallbackIndex)
 }
 
@@ -260,7 +262,7 @@ func (m *Model) sortRun(lines []protocol.PickerLine) []protocol.PickerLine {
 func (m *Model) restoreSelection(key string, hadKey bool, fallbackIndex int) {
 	if hadKey {
 		for idx, candidate := range m.rows {
-			if candidate.focusable() && candidate.key() == key {
+			if m.eligible(idx) && candidate.key() == key {
 				m.selected = idx
 				return
 			}
@@ -269,8 +271,32 @@ func (m *Model) restoreSelection(key string, hadKey bool, fallbackIndex int) {
 	m.selected = -1
 	m.SelectNearestRow(fallbackIndex)
 	if m.selected < 0 {
-		m.selected = m.firstFocusable()
+		m.selected = m.firstEligible()
 	}
+}
+
+// searchRestricted reports whether the active query narrows eligibility. An
+// empty query never hides a row.
+func (m *Model) searchRestricted() bool {
+	return m != nil && m.searchActive && m.query.Value() != ""
+}
+
+// eligible reports whether the cursor may rest on row i: the source authorised
+// the row as a destination and the typed query, when there is one, matches it.
+func (m *Model) eligible(i int) bool {
+	if m == nil || i < 0 || i >= len(m.rows) || !m.rows[i].focusable() {
+		return false
+	}
+	return !m.searchRestricted() || m.rowMatches(i)
+}
+
+// committable reports whether row i may be committed: it admits an action and
+// the typed query, when there is one, does not exclude it.
+func (m *Model) committable(i int) bool {
+	if m == nil || i < 0 || i >= len(m.rows) || !m.rows[i].selectable() {
+		return false
+	}
+	return !m.searchRestricted() || m.rowMatches(i)
 }
 
 func (m *Model) cursorKey() (string, bool) {
@@ -305,22 +331,19 @@ func (m *Model) Cursor() (protocol.PickerLine, bool) {
 	return m.rows[m.selected].line, true
 }
 
-// Selected reports the line under the cursor when it admits an action and
-// matches the active search.
+// Selected reports the line under the cursor when it admits an action and the
+// active query does not exclude it.
 func (m *Model) Selected() (protocol.PickerLine, bool) {
-	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
+	if !m.committable(m.selected) {
 		return protocol.PickerLine{}, false
 	}
-	line := m.rows[m.selected]
-	if !line.selectable() || m.searchActive && m.query.Value() != "" && !m.rowMatches(m.selected) {
-		return protocol.PickerLine{}, false
-	}
-	return line.line, true
+	return m.rows[m.selected].line, true
 }
 
-// SelectedIndex reports the raw selected row index. It is -1 only when the
-// model has no rows at all; otherwise it is a real row index even when that
-// row is not selectable (see Selected).
+// SelectedIndex reports the raw selected row index. It is -1 when the model has
+// no rows or when nothing in them qualifies as a cursor destination (see
+// Selected); otherwise it is a real row index even when that row is not
+// selectable.
 func (m *Model) SelectedIndex() int {
 	if m == nil {
 		return -1
@@ -328,21 +351,21 @@ func (m *Model) SelectedIndex() int {
 	return m.selected
 }
 
-// SelectNearestRow selects the first focusable row at or after idx, falling
-// back to the last focusable row before it.
+// SelectNearestRow selects the nearest eligible row at or after idx, falling
+// back to the last eligible row before it.
 func (m *Model) SelectNearestRow(idx int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
 	idx = clamp(idx, 0, len(m.rows)-1)
 	for i := idx; i < len(m.rows); i++ {
-		if m.rows[i].focusable() {
+		if m.eligible(i) {
 			m.selected = i
 			return
 		}
 	}
 	for i := idx - 1; i >= 0; i-- {
-		if m.rows[i].focusable() {
+		if m.eligible(i) {
 			m.selected = i
 			return
 		}
@@ -388,21 +411,21 @@ func (m *Model) move(delta int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
-	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].focusable() {
-		m.selected = m.firstFocusable()
+	if !m.eligible(m.selected) {
+		m.selected = m.firstEligible()
 		return
 	}
 	for i := m.selected + delta; i >= 0 && i < len(m.rows); i += delta {
-		if m.rows[i].focusable() {
+		if m.eligible(i) {
 			m.selected = i
 			return
 		}
 	}
 }
 
-func (m *Model) firstFocusable() int {
-	for i, r := range m.rows {
-		if r.focusable() {
+func (m *Model) firstEligible() int {
+	for i := range m.rows {
+		if m.eligible(i) {
 			return i
 		}
 	}
@@ -580,34 +603,43 @@ func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style rende
 		return
 	}
 	ui.FillRect(frame, rect, renderer.Cell{Rune: ' ', Style: style})
-	action := "open"
+	// The footer describes the effective selection: a row kept for inspection,
+	// a row the query hides, and an empty picker never promise a commit.
+	action := ""
 	deletable := false
 	selected := protocol.PickerLine{}
-	if m != nil && m.selected >= 0 && m.selected < len(m.rows) {
+	hasCursorRow := m != nil && m.selected >= 0 && m.selected < len(m.rows)
+	if hasCursorRow {
 		selected = m.rows[m.selected].line
+	}
+	if m != nil && m.committable(m.selected) {
 		action = actionVerb(selected, m.intent)
 		deletable = selected.Actions&protocol.PickerCanKill != 0
 	}
+	enter := "Enter " + action
+	if action == "" {
+		enter = "Enter unavailable"
+	}
 	var groups []string
 	if m != nil && m.searchActive {
-		groups = []string{fmt.Sprintf("%d matches", len(m.matchRows)), "Enter " + action, "arrows next"}
+		groups = []string{fmt.Sprintf("%d matches", len(m.matchRows)), enter, "arrows next"}
 		escape := "Esc exit"
 		if m.query.Value() != "" {
 			escape = "Esc clear"
 		}
 		groups = append(groups, escape)
 	} else {
-		if m != nil && selected.Dim && selected.StatusDetail != "" {
+		if hasCursorRow && selected.Dim && selected.StatusDetail != "" {
 			groups = append(groups, selected.StatusDetail)
 		}
 		if rect.Width < 60 {
-			groups = append(groups, "Enter "+action, "/", "Esc", "j/k")
+			groups = append(groups, enter, "/", "Esc", "j/k")
 			if deletable {
 				groups = append(groups, "x")
 			}
 			groups = append(groups, "s")
 		} else {
-			groups = append(groups, "j/k move", "Enter "+action)
+			groups = append(groups, "j/k move", enter)
 			if deletable {
 				groups = append(groups, "x delete")
 			}
