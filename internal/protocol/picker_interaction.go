@@ -4,7 +4,10 @@ import "fmt"
 
 // PickerServingSourceID names the source the serving daemon owns: every
 // attachment publishes its own rows under this one source identity.
-const PickerServingSourceID = "serving"
+const (
+	PickerServingSourceID = "serving"
+	PickerHomeSourceID    = "home"
+)
 
 // Client-picker interaction bounds. A source publishes at most
 // PickerInteractionMaxLines structured lines; the complete encoded snapshot
@@ -144,18 +147,59 @@ type PickerBegin struct {
 	Intent    PickerIntent
 }
 
-// PickerSnapshot publishes the complete line set of one source at one
-// revision. Row order is semantically significant and never canonicalized.
-// Revisions are per source: a refresh of one source never invalidates a
-// selection displayed from another.
+// PickerControlOperation selects a stateless request to the client's stable
+// local picker authority. It never creates an attachment.
+type PickerControlOperation uint8
+
+const (
+	PickerControlSnapshot PickerControlOperation = iota + 1
+	PickerControlResolve
+)
+
+// PickerControlRequest queries or resolves the navigation picker owned by the
+// client's local daemon. Version stays first for strict pre-handshake peeking.
+type PickerControlRequest struct {
+	Version        uint16
+	RequestID      uint64
+	Operation      PickerControlOperation
+	SourceRevision uint64
+	SourceID       string
+	Key            string
+}
+
+// PickerControlResponse returns either one complete authoritative snapshot or
+// one revalidated attach target. The unions are exclusive.
+type PickerControlResponse struct {
+	RequestID uint64
+	Operation PickerControlOperation
+	Status    PickerSourceStatus
+	Snapshot  *PickerSnapshot
+	Resolved  *AttachTarget
+}
+
+// PickerProjection is one complete daemon-authorised presentation. Recent and
+// Grouped contain the same destination keys and actions but may differ in
+// order, sections, and display labels.
+type PickerProjection struct {
+	Lines  []PickerLine
+	Cursor PickerCursor
+}
+
+// PickerSnapshot atomically publishes both presentation projections of one
+// source at one revision. The client chooses a projection but never derives
+// grouping or ordering policy from row metadata.
 type PickerSnapshot struct {
 	InteractionID  uint64
 	SourceID       string
 	SourceRevision uint64
 	Status         PickerSourceStatus
 	StatusDetail   string
-	Lines          []PickerLine
-	Cursor         PickerCursor
+	// Lines/Cursor are retained as construction aliases inside this v0 branch;
+	// normalization copies them into both projections before encoding.
+	Lines   []PickerLine
+	Cursor  PickerCursor
+	Recent  PickerProjection
+	Grouped PickerProjection
 }
 
 // PickerSelection commits the opaque row key displayed at SourceRevision.
@@ -221,6 +265,48 @@ type PickerClosed struct {
 	InteractionID uint64
 	BarrierEpoch  uint64
 	BarrierState  uint64
+}
+
+func validPickerControlOperation(operation PickerControlOperation) bool {
+	return operation == PickerControlSnapshot || operation == PickerControlResolve
+}
+
+func ValidatePickerControlRequest(request PickerControlRequest) error {
+	if request.Version == 0 || request.RequestID == 0 || !validPickerControlOperation(request.Operation) {
+		return ErrInvalidNavigation
+	}
+	if request.Operation == PickerControlSnapshot {
+		if request.SourceRevision != 0 || request.SourceID != "" || request.Key != "" {
+			return ErrInvalidNavigation
+		}
+		return nil
+	}
+	if request.SourceRevision == 0 || !validPickerSourceID(request.SourceID) || !validPickerKey(request.Key) {
+		return ErrInvalidNavigation
+	}
+	return nil
+}
+
+func ValidatePickerControlResponse(response PickerControlResponse) error {
+	if response.RequestID == 0 || !validPickerControlOperation(response.Operation) || !validPickerSourceStatus(response.Status) {
+		return ErrInvalidNavigation
+	}
+	if response.Status != PickerSourceOK {
+		if response.Snapshot != nil || response.Resolved != nil {
+			return ErrInvalidNavigation
+		}
+		return nil
+	}
+	if response.Operation == PickerControlSnapshot {
+		if response.Snapshot == nil || response.Resolved != nil {
+			return ErrInvalidNavigation
+		}
+		return ValidatePickerSnapshot(*response.Snapshot)
+	}
+	if response.Resolved == nil || response.Snapshot != nil {
+		return ErrInvalidNavigation
+	}
+	return ValidateAttachTarget(*response.Resolved)
 }
 
 func validPickerIntent(intent PickerIntent) bool {
@@ -327,6 +413,7 @@ func ValidatePickerBegin(begin PickerBegin) error {
 // ErrInvalidNavigation with the offending row, because a refused snapshot
 // otherwise leaves an operator with nothing but a silent, closed picker.
 func ValidatePickerSnapshot(snapshot PickerSnapshot) error {
+	snapshot = NormalizePickerSnapshot(snapshot)
 	if snapshot.InteractionID == 0 || snapshot.SourceRevision == 0 {
 		return fmt.Errorf("%w: snapshot envelope", ErrInvalidNavigation)
 	}
@@ -336,49 +423,80 @@ func ValidatePickerSnapshot(snapshot PickerSnapshot) error {
 	if !validPickerDisplay(snapshot.StatusDetail) {
 		return fmt.Errorf("%w: snapshot status detail", ErrInvalidNavigation)
 	}
-	if len(snapshot.Lines) > PickerInteractionMaxLines {
-		return fmt.Errorf("%w: %d lines", ErrInvalidNavigation, len(snapshot.Lines))
+	recentKeys, err := validatePickerProjection("recent", snapshot.Recent)
+	if err != nil {
+		return err
 	}
-	seen := make(map[string]struct{}, len(snapshot.Lines))
-	for i, line := range snapshot.Lines {
+	groupedKeys, err := validatePickerProjection("grouped", snapshot.Grouped)
+	if err != nil {
+		return err
+	}
+	if len(recentKeys) != len(groupedKeys) {
+		return fmt.Errorf("%w: projection destination count", ErrInvalidNavigation)
+	}
+	for key, recent := range recentKeys {
+		grouped, ok := groupedKeys[key]
+		if !ok || recent != grouped {
+			return fmt.Errorf("%w: projection destination %q", ErrInvalidNavigation, key)
+		}
+	}
+	return nil
+}
+
+func NormalizePickerSnapshot(snapshot PickerSnapshot) PickerSnapshot {
+	if len(snapshot.Recent.Lines) == 0 && len(snapshot.Lines) != 0 {
+		snapshot.Recent = PickerProjection{Lines: snapshot.Lines, Cursor: snapshot.Cursor}
+	}
+	if len(snapshot.Grouped.Lines) == 0 && len(snapshot.Lines) != 0 {
+		snapshot.Grouped = PickerProjection{Lines: snapshot.Lines, Cursor: snapshot.Cursor}
+	}
+	return snapshot
+}
+
+func validatePickerProjection(name string, projection PickerProjection) (map[string]PickerLineActions, error) {
+	if len(projection.Lines) > PickerInteractionMaxLines {
+		return nil, fmt.Errorf("%w: %s has %d lines", ErrInvalidNavigation, name, len(projection.Lines))
+	}
+	seen := make(map[string]PickerLineActions, len(projection.Lines))
+	for i, line := range projection.Lines {
 		if !validPickerLineKind(line.Kind) || !validPickerLineStatus(line.Status) || !validPickerLineActions(line.Actions) {
-			return fmt.Errorf("%w: line %d kind/status/actions", ErrInvalidNavigation, i)
+			return nil, fmt.Errorf("%w: %s line %d kind/status/actions", ErrInvalidNavigation, name, i)
 		}
 		if !validPickerDisplay(line.Label) || !validPickerDisplay(line.Detail) || !validPickerDisplay(line.StatusDetail) {
-			return fmt.Errorf("%w: line %d display", ErrInvalidNavigation, i)
+			return nil, fmt.Errorf("%w: %s line %d display", ErrInvalidNavigation, name, i)
 		}
 		// Focus eligibility is published explicitly: a row that admits an
 		// action is always a cursor destination, and a section header is never
 		// one. A row that is neither is rendered and skipped.
 		if line.Actions != 0 && !line.Focusable {
-			return fmt.Errorf("%w: line %d action without focus", ErrInvalidNavigation, i)
+			return nil, fmt.Errorf("%w: %s line %d action without focus", ErrInvalidNavigation, name, i)
 		}
 		if line.Kind == PickerLineSection {
 			if line.Key != "" || line.Focusable || line.Actions != 0 {
-				return fmt.Errorf("%w: line %d section key or action", ErrInvalidNavigation, i)
+				return nil, fmt.Errorf("%w: %s line %d section key or action", ErrInvalidNavigation, name, i)
 			}
 			continue
 		}
 		if !validPickerKey(line.Key) {
-			return fmt.Errorf("%w: line %d key %q", ErrInvalidNavigation, i, line.Key)
+			return nil, fmt.Errorf("%w: %s line %d key %q", ErrInvalidNavigation, name, i, line.Key)
 		}
 		if _, dup := seen[line.Key]; dup {
-			return fmt.Errorf("%w: line %d repeats key %q", ErrInvalidNavigation, i, line.Key)
+			return nil, fmt.Errorf("%w: %s line %d repeats key %q", ErrInvalidNavigation, name, i, line.Key)
 		}
-		seen[line.Key] = struct{}{}
+		seen[line.Key] = line.Actions
 	}
-	if snapshot.Cursor.Key != "" {
-		if !validPickerKey(snapshot.Cursor.Key) {
-			return fmt.Errorf("%w: cursor key %q", ErrInvalidNavigation, snapshot.Cursor.Key)
+	if projection.Cursor.Key != "" {
+		if !validPickerKey(projection.Cursor.Key) {
+			return nil, fmt.Errorf("%w: %s cursor key %q", ErrInvalidNavigation, name, projection.Cursor.Key)
 		}
-		if _, ok := seen[snapshot.Cursor.Key]; !ok {
-			return fmt.Errorf("%w: cursor key %q is not a published row", ErrInvalidNavigation, snapshot.Cursor.Key)
+		if _, ok := seen[projection.Cursor.Key]; !ok {
+			return nil, fmt.Errorf("%w: %s cursor key %q is not a published row", ErrInvalidNavigation, name, projection.Cursor.Key)
 		}
 	}
-	if snapshot.Cursor.Index < 0 || snapshot.Cursor.Index > len(snapshot.Lines) {
-		return fmt.Errorf("%w: cursor index %d of %d lines", ErrInvalidNavigation, snapshot.Cursor.Index, len(snapshot.Lines))
+	if projection.Cursor.Index < 0 || projection.Cursor.Index > len(projection.Lines) {
+		return nil, fmt.Errorf("%w: %s cursor index %d of %d lines", ErrInvalidNavigation, name, projection.Cursor.Index, len(projection.Lines))
 	}
-	return nil
+	return seen, nil
 }
 
 // ValidatePickerClose requires a nonzero interaction.

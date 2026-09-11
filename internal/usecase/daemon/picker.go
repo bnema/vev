@@ -28,6 +28,11 @@ const remotePickerPreviewDebounce = 80 * time.Millisecond
 // whenever the source has more than one origin group, so the presenting
 // client can order each run locally without inventing group labels.
 func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionView, pickerSourceFilter) {
+	_, grouped, current := d.pickerViewProjections(cur, ac)
+	return grouped, current
+}
+
+func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pickerSessionView, []pickerSessionView, pickerSourceFilter) {
 	if cur != nil && ac != nil {
 		cur.repairAttachmentView(ac)
 	}
@@ -82,22 +87,33 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionV
 		}
 	}
 	checking := monitored && !initialized
-	groups := 0
-	if len(live) > 0 || len(stopped) > 0 {
-		groups++
+	recent := make([]pickerSessionView, 0, len(live)+len(stopped)+catalogRows)
+	for _, item := range live {
+		recent = append(recent, item.view.pickerView())
 	}
-	if catalogRows > 0 {
-		groups++
+	for _, host := range hosts {
+		for _, session := range host.Sessions {
+			key := domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}
+			if key.Validate() == nil {
+				recent = append(recent, remotePickerView(key, session, host, now))
+			}
+		}
+		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
+			recent = append(recent, remotePickerHostView(host, now))
+		}
 	}
 	if checking {
-		groups++
+		recent = append(recent, remotePickerCheckingView())
 	}
-	labelled := groups > 1
+	for _, s := range stopped {
+		createdAt := s.createdAt
+		recent = append(recent, pickerSessionView{ID: domain.SessionID("stopped:" + s.name), Incarnation: s.incarnation, Name: s.name, TargetName: s.name, Stopped: true, ExpectedCreatedAt: &createdAt})
+	}
 
 	views := make([]pickerSessionView, 0, len(live)+len(stopped)+catalogRows)
 	for i, item := range live {
 		view := item.view.pickerView()
-		if labelled && i == 0 {
+		if i == 0 {
 			view.Section = "LOCAL"
 		}
 		views = append(views, view)
@@ -110,8 +126,8 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionV
 				continue
 			}
 			view := remotePickerView(key, session, host, now)
-			view.HideRemoteOrigin = labelled
-			if labelled && publishedForHost == 0 {
+			view.HideRemoteOrigin = true
+			if publishedForHost == 0 {
 				view.Section = "REMOTE  " + host.Endpoint
 			}
 			views = append(views, view)
@@ -119,9 +135,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionV
 		}
 		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
 			view := remotePickerHostView(host, now)
-			if labelled {
-				view.Section = "REMOTE  " + host.Endpoint
-			}
+			view.Section = "REMOTE  " + host.Endpoint
 			views = append(views, view)
 		}
 	}
@@ -129,9 +143,7 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionV
 	// only an installed-but-unpublished monitor reads as "checking".
 	if checking {
 		view := remotePickerCheckingView()
-		if labelled {
-			view.Section = "REMOTE"
-		}
+		view.Section = "REMOTE"
 		views = append(views, view)
 	}
 	for i, s := range stopped {
@@ -144,12 +156,12 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionV
 			Stopped:           true,
 			ExpectedCreatedAt: &createdAt,
 		}
-		if labelled && i == 0 && len(live) == 0 && catalogRows == 0 && !checking {
+		if i == 0 && len(live) == 0 && catalogRows == 0 && !checking {
 			view.Section = "LOCAL"
 		}
 		views = append(views, view)
 	}
-	return views, current
+	return recent, views, current
 }
 
 func attentionSuffix(label string) string {

@@ -213,6 +213,7 @@ func UnmarshalPickerBegin(data []byte) (protocol.PickerBegin, error) {
 // MarshalPickerSnapshot encodes one source publication. Line order is
 // preserved verbatim.
 func MarshalPickerSnapshot(snapshot protocol.PickerSnapshot) []byte {
+	snapshot = protocol.NormalizePickerSnapshot(snapshot)
 	if protocol.ValidatePickerSnapshot(snapshot) != nil {
 		return nil
 	}
@@ -222,10 +223,14 @@ func MarshalPickerSnapshot(snapshot protocol.PickerSnapshot) []byte {
 	w.putUint64(snapshot.SourceRevision)
 	w.putUint8(uint8(snapshot.Status))
 	w.putString(snapshot.StatusDetail)
-	if !marshalPickerLines(&w, snapshot.Lines) {
+	if !marshalPickerLines(&w, snapshot.Recent.Lines) {
 		return nil
 	}
-	marshalPickerCursor(&w, snapshot.Cursor)
+	marshalPickerCursor(&w, snapshot.Recent.Cursor)
+	if !marshalPickerLines(&w, snapshot.Grouped.Lines) {
+		return nil
+	}
+	marshalPickerCursor(&w, snapshot.Grouped.Cursor)
 	if len(w.b) > protocol.PickerInteractionMaxEncodedBytes {
 		return nil
 	}
@@ -257,10 +262,16 @@ func UnmarshalPickerSnapshot(data []byte) (protocol.PickerSnapshot, error) {
 	if snapshot.StatusDetail, err = r.getString(); err != nil {
 		return protocol.PickerSnapshot{}, err
 	}
-	if snapshot.Lines, err = unmarshalPickerLines(&r); err != nil {
+	if snapshot.Recent.Lines, err = unmarshalPickerLines(&r); err != nil {
 		return protocol.PickerSnapshot{}, err
 	}
-	if snapshot.Cursor, err = unmarshalPickerCursor(&r); err != nil {
+	if snapshot.Recent.Cursor, err = unmarshalPickerCursor(&r); err != nil {
+		return protocol.PickerSnapshot{}, err
+	}
+	if snapshot.Grouped.Lines, err = unmarshalPickerLines(&r); err != nil {
+		return protocol.PickerSnapshot{}, err
+	}
+	if snapshot.Grouped.Cursor, err = unmarshalPickerCursor(&r); err != nil {
 		return protocol.PickerSnapshot{}, err
 	}
 	if err := r.done(); err != nil {
@@ -269,6 +280,9 @@ func UnmarshalPickerSnapshot(data []byte) (protocol.PickerSnapshot, error) {
 	if err := protocol.ValidatePickerSnapshot(snapshot); err != nil {
 		return protocol.PickerSnapshot{}, err
 	}
+	// Keep construction aliases populated for internal callers while both
+	// authoritative projections remain available to client-owned sorting.
+	snapshot.Lines, snapshot.Cursor = snapshot.Recent.Lines, snapshot.Recent.Cursor
 	return snapshot, nil
 }
 

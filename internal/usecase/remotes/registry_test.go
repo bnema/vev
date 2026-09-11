@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -104,7 +103,7 @@ func TestHostRegistryReusesEndpointBindings(t *testing.T) {
 	dialB := registryTestDialer{name: "B"}
 	factory.dialers["a"] = dialA
 	factory.dialers["b"] = dialB
-	registry := NewHostRegistry(factory, &registryTestDirectory{}, nil, nil)
+	registry := NewHostRegistry(factory)
 
 	first, err := registry.ResolveEndpoint(context.Background(), "a")
 	require.NoError(t, err)
@@ -126,7 +125,7 @@ func TestHostRegistryReturnsDefensiveBindings(t *testing.T) {
 	factory.envs["a"] = []string{"FOO=1"}
 	factory.dialers["b"] = registryTestDialer{name: "B"}
 	factory.envs["b"] = []string{}
-	registry := NewHostRegistry(factory, &registryTestDirectory{}, nil, nil)
+	registry := NewHostRegistry(factory)
 
 	first, err := registry.ResolveEndpoint(context.Background(), "a")
 	require.NoError(t, err)
@@ -150,7 +149,7 @@ func TestHostRegistryDoesNotCacheResolutionFailures(t *testing.T) {
 	want := errors.New("launch policy refused this endpoint")
 	factory.errs["a"] = want
 	factory.dialers["a"] = registryTestDialer{name: "A"}
-	registry := NewHostRegistry(factory, &registryTestDirectory{}, nil, nil)
+	registry := NewHostRegistry(factory)
 
 	_, err := registry.ResolveEndpoint(context.Background(), "a")
 	require.ErrorIs(t, err, want, "the factory error is the only authority")
@@ -163,7 +162,7 @@ func TestHostRegistryDoesNotCacheResolutionFailures(t *testing.T) {
 }
 
 func TestHostRegistryRejectsEmptyEndpointAndMissingFactory(t *testing.T) {
-	registry := NewHostRegistry(newRegistryTestFactory(), &registryTestDirectory{}, nil, nil)
+	registry := NewHostRegistry(newRegistryTestFactory())
 	_, err := registry.ResolveEndpoint(context.Background(), "")
 	require.ErrorIs(t, err, ErrInvalidEndpoint)
 
@@ -171,67 +170,20 @@ func TestHostRegistryRejectsEmptyEndpointAndMissingFactory(t *testing.T) {
 	_, err = nilRegistry.ResolveEndpoint(context.Background(), "a")
 	require.ErrorIs(t, err, ErrInvalidEndpoint)
 
-	withoutFactory := NewHostRegistry(nil, &registryTestDirectory{}, nil, nil)
+	withoutFactory := NewHostRegistry(nil)
 	_, err = withoutFactory.ResolveEndpoint(context.Background(), "a")
 	require.ErrorIs(t, err, ErrInvalidEndpoint)
 
 	withoutDialer := newRegistryTestFactory()
-	registry = NewHostRegistry(withoutDialer, &registryTestDirectory{}, nil, nil)
+	registry = NewHostRegistry(withoutDialer)
 	_, err = registry.ResolveEndpoint(context.Background(), "a")
 	require.ErrorIs(t, err, ErrInvalidEndpoint)
-}
-
-func TestHostRegistryProjectsTheDiscoveryDirectory(t *testing.T) {
-	directory := &registryTestDirectory{snapshot: ports.RemoteDirectorySnapshot{Revision: 4, Initialized: true}}
-	registry := NewHostRegistry(newRegistryTestFactory(), directory, nil, nil)
-
-	require.Equal(t, uint64(4), registry.Snapshot().Revision)
-	subscription := registry.Subscribe()
-	require.NotNil(t, subscription)
-	registry.RequestReconcile("a")
-	registry.RegistryChanged()
-	require.Equal(t, []string{"a"}, directory.reconciled)
-	require.Equal(t, 1, directory.changed)
-
-	// A registry without a projectable directory stays inert instead of panicking.
-	bare := NewHostRegistry(newRegistryTestFactory(), nil, nil, nil)
-	require.Empty(t, bare.Snapshot().Hosts)
-	require.Nil(t, bare.Subscribe().Changed())
-	bare.RequestReconcile("a")
-	bare.RegistryChanged()
-}
-
-func TestHostRegistryRunJoinsTheDiscoveryLoop(t *testing.T) {
-	started := make(chan struct{})
-	stopped := make(chan struct{})
-	want := errors.New("monitor stopped")
-	registry := NewHostRegistry(newRegistryTestFactory(), &registryTestDirectory{}, func(ctx context.Context) error {
-		close(started)
-		<-ctx.Done()
-		close(stopped)
-		return want
-	}, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- registry.Run(ctx) }()
-	<-started
-	cancel()
-
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, want)
-	case <-time.After(time.Second):
-		t.Fatal("Run did not join the discovery loop after cancellation")
-	}
-	<-stopped
-	require.NoError(t, NewHostRegistry(newRegistryTestFactory(), nil, nil, nil).Run(context.Background()))
 }
 
 func TestHostRegistryConcurrentResolvesShareOneBinding(t *testing.T) {
 	factory := newRegistryTestFactory()
 	factory.dialers["a"] = registryTestDialer{name: "A"}
-	registry := NewHostRegistry(factory, &registryTestDirectory{}, nil, nil)
+	registry := NewHostRegistry(factory)
 
 	const workers = 16
 	bindings := make([]ports.RemoteEndpointBinding, workers)

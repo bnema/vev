@@ -21,11 +21,6 @@ type RemoteHostStore interface {
 	Remove(target string) (deleted bool, err error)
 }
 
-// RemoteHostLearner records the validated remote target after an attach.
-type RemoteHostLearner interface {
-	RememberRemoteHost() error
-}
-
 // RemoteCatalogClient fetches a versioned session catalogue from a remote host.
 type RemoteCatalogClient interface {
 	List(ctx context.Context, target string) (catalogue.RemoteCatalog, error)
@@ -59,12 +54,8 @@ type RemoteEndpointFactory interface {
 	ResolveEndpoint(ctx context.Context, endpoint string) (RemoteEndpointBinding, error)
 }
 
-// ClientHostRegistry is the client-owned host registry one runner uses: the
-// endpoint bindings it reuses across handoffs, plus the read-only discovery
-// projection the presentation subscribes to. Run owns its lifetime for the
-// runner, and construction performs no I/O.
+// ClientHostRegistry resolves and caches the endpoint bindings one runner
+// reuses across handoffs. Remote discovery remains daemon-owned.
 type ClientHostRegistry interface {
-	RemoteDirectory
 	ResolveEndpoint(ctx context.Context, endpoint string) (RemoteEndpointBinding, error)
-	Run(ctx context.Context) error
 }

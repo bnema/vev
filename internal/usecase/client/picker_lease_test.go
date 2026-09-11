@@ -27,7 +27,7 @@ func pickerLeaseTestSnapshot(interaction, revision uint64) protocol.PickerSnapsh
 }
 
 func pickerLeaseTestLoop() *pickerLoop {
-	return &pickerLoop{interaction: 1, sourceID: "serving", sourceRevision: 1}
+	return &pickerLoop{interaction: 1}
 }
 
 func TestPickerLeaseAcquiresOnlyAtTheBarrier(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 )
 
 func TestProtocolVersion(t *testing.T) {
-	if protocol.Version != 49 {
-		t.Fatalf("ProtocolVersion = %d, want 49", protocol.Version)
+	if protocol.Version != 50 {
+		t.Fatalf("ProtocolVersion = %d, want 50", protocol.Version)
 	}
 }
 
@@ -46,6 +46,7 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgPickerFailure", MsgPickerFailure}, {"MsgPickerResult", MsgPickerResult}, {"MsgPickerPreview", MsgPickerPreview},
 		{"MsgPickerBegin", MsgPickerBegin}, {"MsgPickerCloseClient", MsgPickerCloseClient}, {"MsgPickerSelection", MsgPickerSelection},
 		{"MsgPickerPreviewRequest", MsgPickerPreviewRequest},
+		{"MsgPickerControlRequest", MsgPickerControlRequest}, {"MsgPickerControlResponse", MsgPickerControlResponse},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

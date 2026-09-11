@@ -177,6 +177,7 @@ func (d *Daemon) publishPickerSourceForAttachment(ac *attachedClient, effect *at
 	snapshot := protocol.PickerSnapshot{
 		InteractionID: interaction, SourceID: servingPickerSourceID, SourceRevision: revision,
 		Status: protocol.PickerSourceOK, Lines: set.lines, Cursor: set.cursor,
+		Recent: protocol.PickerProjection{Lines: set.lines, Cursor: set.cursor}, Grouped: protocol.PickerProjection{Lines: set.lines, Cursor: set.cursor},
 	}
 	if err := protocol.ValidatePickerSnapshot(snapshot); err != nil {
 		attrs := []any{"err", err, "interaction", interaction, "lines", len(snapshot.Lines), "revision", revision}

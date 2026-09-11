@@ -304,43 +304,17 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 	}
 }
 
-func TestRunAttachWithDepsRemoteLearning(t *testing.T) {
+func TestRunAttachWithDepsDoesNotLearnDirectRemoteHost(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
-	store.EXPECT().Hosts().Return(nil, nil, nil).Maybe()
-	store.EXPECT().Remember("build@mule").Return(nil).Once()
 	factory := newRemoteDialerFactoryMock(t)
 	factory.EXPECT().DialerForRemote("build@mule", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
-	var learner ports.RemoteHostLearner
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "build@mule", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,
 		hostStore:           store,
-		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
-			learner = deps.RemoteHostLearner
+		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
 			return nil
 		},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, learner)
-	require.NoError(t, learner.RememberRemoteHost())
-}
-
-func TestRunAttachWithDepsAlwaysLearnsRemoteHost(t *testing.T) {
-	store := portsmocks.NewMockRemoteHostStore(t)
-	store.EXPECT().Hosts().Return(nil, nil, nil).Maybe()
-	store.EXPECT().Remember("arch").Return(nil).Once()
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-	var learner ports.RemoteHostLearner
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "arch", "", nil, runAttachDeps{
-		remoteDialerFactory: factory.DialerForRemote,
-		hostStore:           store,
-		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
-			learner = deps.RemoteHostLearner
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, learner)
-	require.NoError(t, learner.RememberRemoteHost())
 }

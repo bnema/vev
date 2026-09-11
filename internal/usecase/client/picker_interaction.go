@@ -1,6 +1,7 @@
 package client
 
 import (
+	"fmt"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
@@ -101,32 +102,85 @@ func (p *pickerInteraction) admitSnapshot(snapshot protocol.PickerSnapshot, want
 // the committed source revision and key, so the client never keeps a second
 // copy of the row set.
 type pickerLoop struct {
-	model          *picker.Model
-	interaction    uint64
-	intent         protocol.PickerIntent
+	model       *picker.Model
+	interaction uint64
+	intent      protocol.PickerIntent
+	sources     map[string]protocol.PickerSnapshot
+	order       []string
+	rows        map[string]pickerRowIdentity
+}
+
+type pickerRowIdentity struct {
 	sourceID       string
 	sourceRevision uint64
+	key            string
 }
 
-// pickerLoopFromSnapshot builds the local model from one admitted source
-// publication. Rows are rendered exactly as published: the daemon owns
-// eligibility and per-row actions, the client owns order, cursor, and search.
+// pickerLoopFromSnapshot builds the local model from the first admitted source.
+// Source-owned opaque keys are namespaced only inside the presentation model;
+// commits translate them back to the exact source identity published on wire.
 func pickerLoopFromSnapshot(snapshot protocol.PickerSnapshot, intent protocol.PickerIntent, sort picker.SortMode) *pickerLoop {
-	model := picker.New(snapshot.Lines, picker.Config{Intent: intent, Cursor: snapshot.Cursor, Sort: sort})
-	return &pickerLoop{
-		model: model, interaction: snapshot.InteractionID, intent: intent,
-		sourceID: snapshot.SourceID, sourceRevision: snapshot.SourceRevision,
+	snapshot = protocol.NormalizePickerSnapshot(snapshot)
+	loop := &pickerLoop{interaction: snapshot.InteractionID, intent: intent, sources: make(map[string]protocol.PickerSnapshot)}
+	loop.sources[snapshot.SourceID] = snapshot
+	loop.order = append(loop.order, snapshot.SourceID)
+	projection := pickerSnapshotProjection(snapshot, sort)
+	cursor := projection.Cursor
+	if cursor.Key != "" {
+		cursor.Key = fmt.Sprintf("%d:%s:%s", len(snapshot.SourceID), snapshot.SourceID, cursor.Key)
 	}
+	loop.rebuild(cursor, sort)
+	return loop
 }
 
-// replaceLines applies a newer publication of the already displayed source
-// while retaining the local search editor and cursor key.
+// replaceLines applies one source publication while retaining every other
+// source. Independent source revisions therefore cannot invalidate each other.
 func (l *pickerLoop) replaceLines(snapshot protocol.PickerSnapshot) {
-	if l == nil || l.model == nil || snapshot.SourceID != l.sourceID {
+	snapshot = protocol.NormalizePickerSnapshot(snapshot)
+	if l == nil || l.model == nil || snapshot.InteractionID != l.interaction {
 		return
 	}
-	l.model.ReplaceLines(snapshot.Lines, snapshot.Cursor)
-	l.sourceRevision = snapshot.SourceRevision
+	if _, exists := l.sources[snapshot.SourceID]; !exists {
+		l.order = append(l.order, snapshot.SourceID)
+	}
+	selectedKey := ""
+	if selected, ok := l.model.Selected(); ok {
+		selectedKey = selected.Key
+	}
+	l.sources[snapshot.SourceID] = snapshot
+	l.rebuild(protocol.PickerCursor{Key: selectedKey, Index: -1}, l.model.SortMode(), true)
+}
+
+func (l *pickerLoop) rebuild(cursor protocol.PickerCursor, sort picker.SortMode, preserveEditor ...bool) {
+	lines := make([]protocol.PickerLine, 0)
+	rows := make(map[string]pickerRowIdentity)
+	cursorKey := ""
+	for _, sourceID := range l.order {
+		snapshot, ok := l.sources[sourceID]
+		if !ok {
+			continue
+		}
+		projection := pickerSnapshotProjection(snapshot, sort)
+		for index, published := range projection.Lines {
+			line := published
+			if line.Key != "" {
+				presented := fmt.Sprintf("%d:%s:%s", len(sourceID), sourceID, line.Key)
+				rows[presented] = pickerRowIdentity{sourceID: sourceID, sourceRevision: snapshot.SourceRevision, key: line.Key}
+				if presented == cursor.Key || cursor.Key == "" && sourceID == snapshot.SourceID && index == projection.Cursor.Index {
+					cursorKey = presented
+				}
+				line.Key = presented
+			}
+			lines = append(lines, line)
+		}
+	}
+	l.rows = rows
+	modelCursor := protocol.PickerCursor{Key: cursorKey, Index: -1}
+	if len(preserveEditor) != 0 && preserveEditor[0] && l.model != nil {
+		l.model.ReplaceProjection(lines, modelCursor, sort)
+		return
+	}
+	l.model = picker.New(lines, picker.Config{Intent: l.intent, Cursor: modelCursor, Sort: sort})
 }
 
 // up moves the cursor one focusable row up.
@@ -196,8 +250,19 @@ func (l *pickerLoop) toggleSort() bool {
 	if l.model.SortMode() == picker.SortGrouped {
 		next = picker.SortRecent
 	}
-	l.model.SetSort(next)
+	selected := protocol.PickerCursor{Index: -1}
+	if line, ok := l.model.Selected(); ok {
+		selected.Key = line.Key
+	}
+	l.rebuild(selected, next, true)
 	return true
+}
+
+func pickerSnapshotProjection(snapshot protocol.PickerSnapshot, sort picker.SortMode) protocol.PickerProjection {
+	if sort == picker.SortGrouped {
+		return snapshot.Grouped
+	}
+	return snapshot.Recent
 }
 
 // selectedAction reports the action the displayed row authorises: navigation
@@ -252,7 +317,11 @@ func (l *pickerLoop) cursorKey() string {
 	if !ok {
 		return ""
 	}
-	return line.Key
+	identity, ok := l.rows[line.Key]
+	if !ok {
+		return ""
+	}
+	return identity.key
 }
 
 // pickerPreviewDebounce bounds how long the cursor may rest before the client
@@ -348,9 +417,6 @@ func clampPreviewDimension(value int, maxValue uint16) uint16 {
 type pickerRenderer struct {
 	renderer *ansirenderer.Renderer
 	size     domain.Size
-	// pasteMode records whether bracketed paste was enabled on the terminal
-	// for this interaction, so it is enabled once and disabled exactly once.
-	pasteMode bool
 	// prevBounds is the box drawn last: when it moves or resizes, its previous
 	// cells are blanked together with the new ones, and the rest of the screen
 	// stays untouched.
@@ -362,25 +428,6 @@ type pickerRenderer struct {
 
 func newPickerRenderer() *pickerRenderer {
 	return &pickerRenderer{}
-}
-
-// Bracketed-paste mode is enabled while the picker owns the terminal: the
-// terminal then wraps pasted text in markers, which the input decoder drops
-// as a unit. Without it, a paste arrives as ordinary bytes and only the
-// event ordering distinguishes it from fast typing.
-const (
-	bracketedPasteEnable  = "\x1b[?2004h"
-	bracketedPasteDisable = "\x1b[?2004l"
-)
-
-// disableBracketedPaste returns the mode reset once, or nil when nothing was
-// enabled. The caller writes it through the terminal's sole writer.
-func (r *pickerRenderer) disableBracketedPaste() []byte {
-	if r == nil || !r.pasteMode {
-		return nil
-	}
-	r.pasteMode = false
-	return []byte(bracketedPasteDisable)
 }
 
 // render composes the loop model into terminal bytes for one display
@@ -437,12 +484,6 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	if err != nil {
 		return nil
 	}
-	if !r.pasteMode {
-		// Enable bracketed paste with the first frame so the terminal marks
-		// every paste from the moment the picker owns the screen.
-		r.pasteMode = true
-		return append([]byte(bracketedPasteEnable), data...)
-	}
 	return data
 }
 
@@ -490,10 +531,14 @@ func commitSelection(loop *pickerLoop, action protocol.PickerAction, causeAction
 	if !ok {
 		return protocol.PickerSelection{}, false
 	}
+	identity, ok := loop.rows[line.Key]
+	if !ok {
+		return protocol.PickerSelection{}, false
+	}
 	selection := protocol.PickerSelection{
 		CauseActionID: causeActionID, InteractionID: loop.interaction,
-		SourceID: loop.sourceID, SourceRevision: loop.sourceRevision,
-		Key: line.Key, Action: action,
+		SourceID: identity.sourceID, SourceRevision: identity.sourceRevision,
+		Key: identity.key, Action: action,
 	}
 	if protocol.ValidatePickerSelection(selection) != nil {
 		return protocol.PickerSelection{}, false
@@ -512,10 +557,14 @@ func killSelection(loop *pickerLoop, causeActionID uint64) (protocol.PickerSelec
 	if !ok || line.Actions&protocol.PickerCanKill == 0 {
 		return protocol.PickerSelection{}, false
 	}
+	identity, ok := loop.rows[line.Key]
+	if !ok {
+		return protocol.PickerSelection{}, false
+	}
 	selection := protocol.PickerSelection{
 		CauseActionID: causeActionID, InteractionID: loop.interaction,
-		SourceID: loop.sourceID, SourceRevision: loop.sourceRevision,
-		Key: line.Key, Action: protocol.PickerActionKill,
+		SourceID: identity.sourceID, SourceRevision: identity.sourceRevision,
+		Key: identity.key, Action: protocol.PickerActionKill,
 	}
 	if protocol.ValidatePickerSelection(selection) != nil {
 		return protocol.PickerSelection{}, false

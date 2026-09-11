@@ -40,6 +40,7 @@ const (
 	MsgPickerSelection                MsgType = 53
 	MsgPickerBegin                    MsgType = 55
 	MsgPickerPreviewRequest           MsgType = 57
+	MsgPickerControlRequest           MsgType = 60
 
 	MsgWelcome                      MsgType = 16
 	MsgError                        MsgType = 17
@@ -69,6 +70,7 @@ const (
 	MsgPickerOffer                  MsgType = 56
 	MsgPickerResult                 MsgType = 58
 	MsgPickerPreview                MsgType = 59
+	MsgPickerControlResponse        MsgType = 61
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

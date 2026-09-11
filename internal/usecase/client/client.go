@@ -136,11 +136,6 @@ const sendQueueDepth = 64
 // budget, which now also covers connect and initial publication.
 const preWelcomeTimeout = protocol.HandshakeTimeout
 
-// remoteHostLearnerShutdownTimeout bounds how long Run waits for async remote
-// host learning after terminal restoration. Learning is best-effort; a stalled
-// learner must not block shell prompt return indefinitely.
-const remoteHostLearnerShutdownTimeout = time.Second
-
 const kittyCapabilityProbeTimeout = 150 * time.Millisecond
 
 var reconnectSleep = sleepReconnect
@@ -163,7 +158,6 @@ type Dependencies struct {
 	Clipboard              ports.ClipboardReader
 	Logger                 *slog.Logger
 	RuntimeObserver        ports.SerializedRuntimeObserver
-	RemoteHostLearner      ports.RemoteHostLearner
 	// HostRegistry resolves remote endpoints for handoffs and projects remote
 	// discovery, so one Runner owns one observation lifetime. It is nil only
 	// for embedders that accept no remote handoff at all.
@@ -297,15 +291,14 @@ func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attach
 }
 
 type Runner struct {
-	ui                *UI
-	dialer            ports.ClientDialer
-	term              ports.Terminal
-	clock             ports.Clock
-	clipboard         ports.ClipboardReader
-	logger            *slog.Logger
-	runtimeObserver   ports.SerializedRuntimeObserver
-	remoteHostLearner ports.RemoteHostLearner
-	hostRegistry      ports.ClientHostRegistry
+	ui              *UI
+	dialer          ports.ClientDialer
+	term            ports.Terminal
+	clock           ports.Clock
+	clipboard       ports.ClipboardReader
+	logger          *slog.Logger
+	runtimeObserver ports.SerializedRuntimeObserver
+	hostRegistry    ports.ClientHostRegistry
 	// launchedRemote records whether this runner was launched as a direct
 	// remote attach. It decides the handoff environment policy exactly like the
 	// composition root used to: a picker route from a locally launched client
@@ -345,7 +338,6 @@ func NewRunner(deps Dependencies) *Runner {
 		clipboard:          deps.Clipboard,
 		logger:             log,
 		runtimeObserver:    deps.RuntimeObserver,
-		remoteHostLearner:  deps.RemoteHostLearner,
 		hostRegistry:       deps.HostRegistry,
 		launchedRemote:     deps.Remote,
 		remote:             deps.Remote,
@@ -535,21 +527,6 @@ func validateAttachRequest(request AttachRequest) error {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
-	// The host registry owns remote discovery for this runner's whole
-	// lifetime: one observation loop survives every handoff, reconnect, and
-	// picker interaction, and stops when the runner exits.
-	if r.hostRegistry != nil {
-		registryCtx, stopRegistry := context.WithCancel(ctx)
-		registryDone := make(chan struct{})
-		go func() {
-			defer close(registryDone)
-			_ = r.hostRegistry.Run(registryCtx)
-		}()
-		defer func() {
-			stopRegistry()
-			<-registryDone
-		}()
-	}
 	var stopObserve context.CancelFunc
 	var observed chan struct{}
 	if r.ui != nil {
@@ -612,39 +589,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	var routeNavigationAction *protocol.RouteNavigationAction
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
-	var rememberOnce sync.Once
-	var rememberWG sync.WaitGroup
-	var learnerStarted bool
-	rememberRemoteHost := func() {
-		if r.remoteHostLearner == nil {
-			return
-		}
-		rememberOnce.Do(func() {
-			learnerStarted = true
-			rememberWG.Go(func() {
-				if err := r.remoteHostLearner.RememberRemoteHost(); err != nil {
-					r.logger.Warn("remembering remote host failed", "err", err)
-				}
-			})
-		})
-	}
-	defer func() {
-		if !learnerStarted {
-			return
-		}
-		done := make(chan struct{})
-		go func() {
-			rememberWG.Wait()
-			close(done)
-		}()
-		timer := r.clock.NewTimer(remoteHostLearnerShutdownTimeout)
-		defer timer.Stop()
-		select {
-		case <-done:
-		case <-timer.C():
-			r.logger.Warn("remote host learner stalled past shutdown timeout")
-		}
-	}()
 	defer func() {
 		if rawEntered {
 			if rerr := restore(); rerr != nil && retErr == nil {
@@ -852,7 +796,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			reconnect:                reconnect,
 			transition:               transition,
 			linkEvents:               linkEvents,
-			rememberRemoteHost:       rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
@@ -1336,7 +1279,6 @@ type attachAttempt struct {
 	reconnect                *reconnectUI
 	transition               *transitionUI
 	linkEvents               <-chan ports.LinkEvent
-	rememberRemoteHost       func()
 	terminalInput            func() *terminalInputPump
 	// inventoryHome is the committed local route that authorises the
 	// navigation-inventory relay and its handoffs. Nil disables the relay:
@@ -1430,8 +1372,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// resolve channel. Advertising the capability in Hello is what lets
 	// the serving palette send demands at all.
 	var inventory *inventoryRelay
+	var hybridPicker *pickerControl
 	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote && !home.request.Remote, a.inventoryDialer) {
 		inventory = newInventoryRelay(clk, a.inventoryDialer)
+		hybridPicker = &pickerControl{dialer: a.inventoryDialer}
 		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
 	}
 	// The client-picker loop owns navigate-intent presentation while the
@@ -1562,11 +1506,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		committedIdentity = cloneCommittedIdentity(welcome.CommittedIdentity)
 		ms.welcomed = true
 		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
-		if remote {
-			if remember := a.rememberRemoteHost; remember != nil {
-				remember()
-			}
-		}
 	case protocol.ErrorMsg:
 		return result(false, &ProtocolError{Code: message.Code, Text: message.Text})
 	default:
@@ -1651,6 +1590,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// completions carry their originating interaction and query identity.
 	// The relay itself is created before Hello so the capability advertises.
 	inventoryBox := newInventoryPollBox()
+	pickerControlBox := newPickerControlBox()
 	// pickerOutcomes carries consumed-op outcomes from the stdin-pump
 	// goroutine to this attach loop for repaint and typed sends. The
 	// queue lives for the attempt; the snapshot-open path below
@@ -2119,18 +2059,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		schedulePickerPreview()
 		return nil
 	}
-	// restoreTerminalModes undoes what the picker's presentation turned on.
-	// It runs through the same sole writer as the picker frames.
-	restoreTerminalModes := func() {
-		data := pickerRenderer.disableBracketedPaste()
-		if len(data) == 0 {
-			return
-		}
-		if _, err := term.Out().Write(data); err != nil {
-			return
-		}
-		_ = term.Flush()
-	}
+	restoreTerminalModes := func() {}
 	finishPickerRelease := func() {
 		actionID, local := pickerPresentation.finishRelease()
 		pickerCurrent = nil
@@ -2374,6 +2303,15 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						}
 						continue
 					}
+					if hybridPicker != nil && selection.SourceID == protocol.PickerHomeSourceID {
+						requestID := nextInventoryRequestID
+						nextInventoryRequestID++
+						go func(selection protocol.PickerSelection) {
+							target, err := hybridPicker.resolve(loopCtx, requestID, selection)
+							pickerControlBox.offer(pickerControlOutcome{selection: &selection, target: &target, err: err})
+						}(selection)
+						continue
+					}
 					select {
 					case controlCh <- selection:
 					case <-loopCtx.Done():
@@ -2399,6 +2337,57 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		case <-inventoryTickC:
 			startInventoryPoll()
 			armInventoryPoll()
+		case <-pickerControlBox.wake:
+			outcome, ok := pickerControlBox.take()
+			if !ok {
+				continue
+			}
+			if outcome.snapshot != nil && picker.open && outcome.snapshot.InteractionID == picker.interaction {
+				snapshot := *outcome.snapshot
+				if !picker.admitSnapshot(snapshot, false) {
+					continue
+				}
+				if pickerCurrent != nil && pickerCurrent.interaction == snapshot.InteractionID && pickerPresentation.owns() {
+					pickerCurrent.replaceLines(snapshot)
+					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+						return welcomedResult(err)
+					}
+					continue
+				}
+				ready, superseded := pickerPresentation.admitSnapshot(snapshot, pickerAcquireBarrier, pickerLoopFromSnapshot(snapshot, picker.intent, pickerSort), outputState, uiGeneration)
+				if superseded != nil {
+					resolveSupersededLease(superseded)
+				}
+				if ready {
+					if err := acquirePicker(); err != nil {
+						return welcomedResult(err)
+					}
+				}
+				continue
+			}
+			if outcome.selection != nil && outcome.err != nil {
+				log.Debug("hybrid picker resolve rejected", "err", outcome.err, "source", outcome.selection.SourceID)
+				if outcome.selection.CauseActionID != 0 && ui != nil {
+					ui.completeLocal(uiGeneration, outcome.selection.CauseActionID)
+				}
+				continue
+			}
+			if outcome.target != nil && outcome.selection != nil {
+				if err := sendPickerClose(outcome.selection.InteractionID); err != nil {
+					return welcomedResult(err)
+				}
+				pickerPresentation.beginRelease(outcome.selection.InteractionID, outcome.selection.CauseActionID, false, false, outputState)
+				handoff := welcomedResult(nil)
+				handoff.target = outcome.target
+				if outcome.selection.CauseActionID != 0 && ui != nil {
+					ui.follow(uiGeneration, outcome.selection.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
+				}
+				if home := a.inventoryHome; home != nil {
+					handoff.handoff = bindAttachHandoff(*outcome.target, *home)
+				}
+				return handoff
+			}
 		case <-inventoryBox.wake:
 			pollOutcome, ok := inventoryBox.take()
 			if !ok {
@@ -2832,9 +2821,27 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				picker.setIntent(offer.InteractionID, offer.Intent)
 				pickerAcquireBarrier = pickerBarrier{epoch: offer.BarrierEpoch, state: offer.BarrierState}
 				syncPickerGeneration()
+				if hybridPicker != nil && offer.Intent == protocol.PickerIntentNavigation {
+					requestID := nextInventoryRequestID
+					nextInventoryRequestID++
+					go func(interaction uint64) {
+						snapshot, err := hybridPicker.snapshot(loopCtx, requestID, interaction)
+						if err != nil {
+							log.Warn("hybrid picker authority unavailable", "err", err)
+							return
+						}
+						pickerControlBox.offer(pickerControlOutcome{snapshot: &snapshot})
+					}(offer.InteractionID)
+				}
 				continue
 			case protocol.PickerSnapshot:
 				snapshot := message
+				// A hybrid client presents only the stable home authority for
+				// navigation. The serving daemon still owns the offer/barrier and
+				// close lifecycle, but its rows must never be merged or duplicated.
+				if hybridPicker != nil && picker.intent == protocol.PickerIntentNavigation && snapshot.SourceID == protocol.PickerServingSourceID {
+					continue
+				}
 				if snapshot.InteractionID <= picker.retired {
 					// A late snapshot from before a close never reopens the
 					// interaction: retiring it is permanent.
@@ -2854,7 +2861,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// its lines in place, so the local cursor and search survive a
 				// background refresh. A first-or-foreign source installs a new
 				// model through the lease below.
-				if pickerCurrent != nil && pickerCurrent.interaction == snapshot.InteractionID && pickerCurrent.sourceID == snapshot.SourceID && pickerPresentation.owns() {
+				if pickerCurrent != nil && pickerCurrent.interaction == snapshot.InteractionID && pickerPresentation.owns() {
 					pickerCurrent.replaceLines(snapshot)
 					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
 						return welcomedResult(err)

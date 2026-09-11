@@ -3,7 +3,6 @@ package remotes
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
@@ -24,24 +23,16 @@ var ErrInvalidEndpoint = errors.New("vev: invalid remote endpoint")
 // are valid only for that runner's frozen launch policy, and Run owns the
 // discovery loop until the runner exits.
 type HostRegistry struct {
-	factory   ports.RemoteEndpointFactory
-	directory ports.RemoteDirectory
-	run       func(context.Context) error
-	log       *slog.Logger
+	factory ports.RemoteEndpointFactory
 
 	mu       sync.Mutex
 	bindings map[string]ports.RemoteEndpointBinding
 }
 
-// NewHostRegistry wires a registry from the endpoint factory and the discovery
-// directory it projects, plus the loop it drives. Construction performs no I/O
-// and starts nothing.
-func NewHostRegistry(factory ports.RemoteEndpointFactory, directory ports.RemoteDirectory, run func(context.Context) error, log *slog.Logger) *HostRegistry {
-	if log == nil {
-		log = slog.Default()
-	}
+// NewHostRegistry wires an endpoint cache. Construction performs no I/O.
+func NewHostRegistry(factory ports.RemoteEndpointFactory) *HostRegistry {
 	return &HostRegistry{
-		factory: factory, directory: directory, run: run, log: log,
+		factory:  factory,
 		bindings: make(map[string]ports.RemoteEndpointBinding),
 	}
 }
@@ -84,47 +75,6 @@ func (r *HostRegistry) ResolveEndpoint(ctx context.Context, endpoint string) (po
 	}
 	r.mu.Unlock()
 	return bindingCopy(resolved), nil
-}
-
-// Snapshot returns the newest discovery publication.
-func (r *HostRegistry) Snapshot() ports.RemoteDirectorySnapshot {
-	if r == nil || r.directory == nil {
-		return ports.RemoteDirectorySnapshot{}
-	}
-	return r.directory.Snapshot()
-}
-
-// Subscribe wakes the caller when a newer discovery publication exists.
-func (r *HostRegistry) Subscribe() ports.RemoteDirectorySubscription {
-	if r == nil || r.directory == nil {
-		return noDirectorySubscription{}
-	}
-	return r.directory.Subscribe()
-}
-
-// RequestReconcile asks the discovery loop to re-verify one endpoint.
-func (r *HostRegistry) RequestReconcile(endpoint string) {
-	if r == nil || r.directory == nil {
-		return
-	}
-	r.directory.RequestReconcile(endpoint)
-}
-
-// RegistryChanged tells the discovery loop that host registrations changed.
-func (r *HostRegistry) RegistryChanged() {
-	if r == nil || r.directory == nil {
-		return
-	}
-	r.directory.RegistryChanged()
-}
-
-// Run drives the discovery loop until ctx ends. One runner calls it once, so
-// every handoff and picker interaction shares the same observation lifetime.
-func (r *HostRegistry) Run(ctx context.Context) error {
-	if r == nil || r.run == nil {
-		return nil
-	}
-	return r.run(ctx)
 }
 
 // bindingCopy returns a binding whose environment the caller owns. A nil

@@ -8,7 +8,6 @@ import (
 
 	"github.com/bnema/vev/internal/usecase/picker"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -181,27 +180,6 @@ func TestPickerOutcomeScope(t *testing.T) {
 	require.False(t, outcome.acceptOutcome(7, 4), "a new generation must not apply the old operation")
 	require.False(t, outcome.acceptOutcome(8, 3), "a superseding interaction must not apply it either")
 	require.False(t, pickerConsumeOutcome{interaction: 7, generation: 3}.acceptOutcome(7, 3), "an unconsumed outcome never applies")
-}
-
-// TestPickerRendererTogglesBracketedPaste pins that the picker enables the
-// terminal's bracketed-paste mode with its first frame and resets it once:
-// a marker-wrapped paste then arrives as one consumable unit instead of
-// ordinary bytes that could look like fast typing.
-func TestPickerRendererTogglesBracketedPaste(t *testing.T) {
-	renderer := newPickerRenderer()
-	loop := pickerLoopFromSnapshot(pickerSnapshot(), protocol.PickerIntentNavigation, picker.SortRecent)
-
-	first := renderer.render(loop, domain.Size{Cols: 80, Rows: 24}, picker.Preview{})
-	require.Contains(t, string(first), bracketedPasteEnable)
-	require.True(t, renderer.pasteMode, "the mode is enabled with the first frame")
-
-	// The reset is written exactly once, and the next frame re-enables mode.
-	require.Equal(t, []byte(bracketedPasteDisable), renderer.disableBracketedPaste())
-	require.False(t, renderer.pasteMode)
-	require.Nil(t, renderer.disableBracketedPaste(), "the reset is written once")
-
-	third := renderer.render(loop, domain.Size{Cols: 80, Rows: 24}, picker.Preview{})
-	require.Contains(t, string(third), bracketedPasteEnable)
 }
 
 // TestPickerPhysicalInputWithoutUIDriver pins that the picker owns and

@@ -74,6 +74,52 @@ func TestPickerInteractionKeepsPerSourceRevisions(t *testing.T) {
 	require.Equal(t, uint64(1), rel.sourceRevisions["host-2"])
 }
 
+func TestPickerLoopMergesSourcesAndCommitsOwningIdentity(t *testing.T) {
+	local := pickerSnapshotFixture()
+	local.SourceID = "authority/local"
+	local.Lines = local.Lines[:1]
+	local.Cursor = protocol.PickerCursor{Key: "aa/work", Index: 0}
+	loop := pickerLoopFromSnapshot(local, protocol.PickerIntentNavigation, picker.SortRecent)
+
+	remote := local
+	remote.SourceID = "authority/remote-a"
+	remote.SourceRevision = 1
+	remote.Lines = []protocol.PickerLine{{Key: "aa/work", Kind: protocol.PickerLineSession, Label: "work@remote-a", Focusable: true, Actions: protocol.PickerCanNavigate}}
+	remote.Cursor = protocol.PickerCursor{Key: "aa/work", Index: 0}
+	loop.replaceLines(remote)
+
+	loop.down()
+	selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 9)
+	require.True(t, ok)
+	require.Equal(t, "authority/remote-a", selection.SourceID)
+	require.Equal(t, uint64(1), selection.SourceRevision)
+	require.Equal(t, "aa/work", selection.Key)
+}
+
+func TestPickerLoopRefreshesOneSourceWithoutInvalidatingAnother(t *testing.T) {
+	local := pickerSnapshotFixture()
+	local.SourceID = "authority/local"
+	local.Lines = local.Lines[:1]
+	local.Cursor = protocol.PickerCursor{Key: "aa/work", Index: 0}
+	loop := pickerLoopFromSnapshot(local, protocol.PickerIntentNavigation, picker.SortRecent)
+
+	remote := local
+	remote.SourceID = "authority/remote-a"
+	remote.SourceRevision = 1
+	remote.Lines = []protocol.PickerLine{{Key: "remote/session", Kind: protocol.PickerLineSession, Label: "remote", Focusable: true, Actions: protocol.PickerCanNavigate}}
+	remote.Cursor = protocol.PickerCursor{Key: "remote/session", Index: 0}
+	loop.replaceLines(remote)
+	loop.down()
+
+	local.SourceRevision++
+	local.Lines[0].Detail = "refreshed"
+	loop.replaceLines(local)
+	selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 0)
+	require.True(t, ok)
+	require.Equal(t, "authority/remote-a", selection.SourceID)
+	require.Equal(t, uint64(1), selection.SourceRevision)
+}
+
 func TestPickerInteractionRetirementIsPermanent(t *testing.T) {
 	snapshot := pickerSnapshotFixture()
 	var rel pickerInteraction

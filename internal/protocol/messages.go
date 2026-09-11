@@ -33,6 +33,7 @@ func (PickerBegin) clientMessage()                    {}
 func (PickerClose) clientMessage()                    {}
 func (PickerSelection) clientMessage()                {}
 func (PickerPreviewRequest) clientMessage()           {}
+func (PickerControlRequest) clientMessage()           {}
 
 func (Welcome) serverMessage()                      {}
 func (ErrorMsg) serverMessage()                     {}
@@ -61,3 +62,4 @@ func (PickerClosed) serverMessage()                 {}
 func (PickerResult) serverMessage()                 {}
 func (PickerFailure) serverMessage()                {}
 func (PickerPreview) serverMessage()                {}
+func (PickerControlResponse) serverMessage()        {}

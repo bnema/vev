@@ -855,7 +855,7 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 			d := newRemotePickerDaemon()
 			sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 			ac.resumeCapable = test.resumeCapable
-			interaction := openPickerStateForTest(ac)
+			_ = openPickerStateForTest(ac)
 
 			test.teardown(d, sess, ac)
 
@@ -867,8 +867,8 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 				return
 			}
 			require.True(t, ac.parked)
-			require.True(t, open, "a parked attachment keeps its interaction")
-			require.Equal(t, interaction, currentInteraction)
+			require.False(t, open, "parking retires picker state before resume")
+			require.NotZero(t, currentInteraction, "interaction IDs remain monotone after retirement")
 			d.mu.Lock()
 			parked := d.parked[ac.resumeToken]
 			d.mu.Unlock()

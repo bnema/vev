@@ -1055,7 +1055,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Clipboard:              deps.clipboard,
 				Logger:                 log,
 				RuntimeObserver:        deps.runtimeObserver,
-				RemoteHostLearner:      attachRememberLearner(deps, remoteTarget, log),
 				HostRegistry:           registry,
 				Remote:                 true,
 				Origin:                 protocol.RouteOriginRemote,

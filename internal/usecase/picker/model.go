@@ -208,6 +208,16 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 	m.rebuild(key, hadKey, cursor.Index)
 }
 
+// ReplaceProjection atomically changes the daemon-authored projection and its
+// local title mode while retaining search and selection state.
+func (m *Model) ReplaceProjection(lines []protocol.PickerLine, cursor protocol.PickerCursor, mode SortMode) {
+	if m == nil {
+		return
+	}
+	m.sort = mode
+	m.ReplaceLines(lines, cursor)
+}
+
 // rebuild recomputes the row list from the published lines. Search matches are
 // row-index keyed, so they are recomputed here, before the cursor is restored:
 // restoration consults them to keep the cursor on a row the query shows.

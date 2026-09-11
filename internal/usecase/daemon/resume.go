@@ -217,6 +217,10 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 	if !d.prepareParkAttachment(sess, ac) {
 		return false
 	}
+	// The client recreates picker state after reconnect. Retire the daemon-side
+	// interaction before publishing the parked attachment so resumed input is
+	// never swallowed by a stale overlay.
+	d.retirePicker(ac)
 	// A parked attachment has no session owner. Release pane snapshots before
 	// publishing it in the daemon registry so headless pane/session teardown
 	// cannot leave closed panes retained through its capture cache. This must

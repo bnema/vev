@@ -59,6 +59,8 @@ func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
 		failure.Kind = protocol.DecodeMessageNavigationInventory
 		failure.Version, _ = wire.PeekNavigationInventoryVersion(frame.Payload)
 		failure.RequestID, failure.HasRequestID = wire.PeekNavigationInventoryRequestID(frame.Payload)
+	case wire.MsgPickerControlRequest:
+		failure.Version, _ = wire.PeekPickerControlVersion(frame.Payload)
 	}
 	return nil, failure
 }
@@ -244,6 +246,8 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalPickerSelection(frame.Payload)
 	case wire.MsgPickerPreviewRequest:
 		return wire.UnmarshalPickerPreviewRequest(frame.Payload)
+	case wire.MsgPickerControlRequest:
+		return wire.UnmarshalPickerControlRequest(frame.Payload)
 	case wire.MsgRecentRouteSnapshot:
 		return wire.UnmarshalRecentRouteSnapshot(frame.Payload)
 	case wire.MsgRouteNavigationFailure:
@@ -259,7 +263,7 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		wire.MsgUIReceipt, wire.MsgUIViewUpdate, wire.MsgNavigationInventoryResponse,
 		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection, wire.MsgRouteRetired,
 		wire.MsgPickerOffer, wire.MsgPickerSnapshot, wire.MsgPickerClosedServer, wire.MsgPickerResult, wire.MsgPickerFailure,
-		wire.MsgPickerPreview:
+		wire.MsgPickerPreview, wire.MsgPickerControlResponse:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -377,6 +381,12 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return wire.Frame{}, ErrInvalidMessage
 		}
 		return wire.Frame{Type: wire.MsgPickerFailure, Payload: payload}, nil
+	case protocol.PickerControlResponse:
+		payload := wire.MarshalPickerControlResponse(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerControlResponse, Payload: payload}, nil
 	case protocol.PickerPreview:
 		payload := wire.MarshalPickerPreview(m)
 		if payload == nil {
@@ -488,6 +498,10 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return encodeServer(*m)
 		}
 	case *protocol.PickerPreview:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerControlResponse:
 		if m != nil {
 			return encodeServer(*m)
 		}

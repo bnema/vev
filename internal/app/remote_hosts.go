@@ -258,27 +258,3 @@ func mergeRemoteHosts(pinned, learned []domain.RemoteRegistration) []domain.Remo
 	}
 	return out
 }
-
-type remoteHostLearner struct {
-	store  ports.RemoteHostStore
-	target string
-}
-
-func (l remoteHostLearner) RememberRemoteHost() error {
-	return l.store.Remember(l.target)
-}
-
-func attachRememberLearner(deps runAttachDeps, remoteTarget string, _ *slog.Logger) ports.RemoteHostLearner {
-	if remoteTarget == "" {
-		return nil
-	}
-	store := deps.hostStore
-	if store == nil {
-		stateDir := deps.stateDir
-		if stateDir == nil {
-			stateDir = platform.StateDir
-		}
-		store = remoteadapter.NewFileHostStore(remoteadapter.HostStorePath(stateDir()))
-	}
-	return remoteHostLearner{store: store, target: remoteTarget}
-}
