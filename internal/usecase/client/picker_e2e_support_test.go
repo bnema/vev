@@ -162,43 +162,6 @@ func (t *attachPaletteTransport) frameCount() int {
 	return len(t.frames)
 }
 
-// fireAmbiguityDeadlines releases every armed 20 ms ambiguity deadline
-// within a short window, which is how a withheld escape prefix reaches the
-// decoder. Other timers are left alone.
-func (h *pickerE2EHarness) fireAmbiguityDeadlines(t *testing.T) {
-	t.Helper()
-	deadline := time.After(50 * time.Millisecond)
-	for {
-		select {
-		case timer := <-h.clock.timers:
-			if timer.duration == pickerEscapeDeadline {
-				timer.fire()
-			}
-		case <-deadline:
-			return
-		}
-	}
-}
-
-// fireDecodeDeadline fires the pump timer armed for one delay, skipping
-// unrelated timers the attempt owns.
-func (h *pickerE2EHarness) fireDecodeDeadline(t *testing.T, delay time.Duration) {
-	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case timer := <-h.clock.timers:
-			if timer.duration == delay {
-				timer.fire()
-				return
-			}
-		case <-deadline:
-			t.Fatalf("no %s timer was armed", delay)
-			return
-		}
-	}
-}
-
 // awaitAfterAmbiguityDeadlines fires the 20 ms ambiguity timers the pump
 // arms until the wanted frame crosses the wire. The palette-marker scanner
 // and the picker decoder share that deadline, so an escape withheld as a

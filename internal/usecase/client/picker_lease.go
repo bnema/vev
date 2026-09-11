@@ -97,12 +97,6 @@ func (l *pickerLease) owns() bool {
 	return l != nil && l.state == pickerLeaseOwned
 }
 
-// releasing reports whether the interaction is retired and waiting for its
-// authoritative repaint.
-func (l *pickerLease) releasing() bool {
-	return l != nil && l.state == pickerLeaseReleasing
-}
-
 // releasingFor reports whether this lease is retiring the named
 // interaction, which is the only case where a close may extend its drain.
 func (l *pickerLease) releasingFor(interaction uint64) bool {
