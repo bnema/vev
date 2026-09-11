@@ -220,8 +220,12 @@ func TestMovePickerMoveCommitsTab(t *testing.T) {
 	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "moved-tab", ""))
 	effect := pickActionEffectForTest(t, source, ac)
 	selection := moveSelectionForDestination(t, ac, destination.id)
-	effect.End()
-	d.resolvePickerSelection(effect, selection)
+	completed := make(chan struct{})
+	go func() {
+		d.resolvePickerSelection(effect, selection)
+		close(completed)
+	}()
+	awaitTestCompletion(t, completed, "move-tab picker selection deadlocked on its own attachment effect")
 
 	require.Nil(t, source.tabs)
 	require.Len(t, destination.tabs, 2)

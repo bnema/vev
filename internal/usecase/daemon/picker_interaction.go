@@ -346,6 +346,12 @@ func (d *Daemon) resolvePickerNavigate(effect *attachmentEffect, ac *attachedCli
 // move reports the same precise notice the palette path does: the client only
 // sees a bounded failure code.
 func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient, interaction uint64, intent protocol.PickerIntent, source moveSourceLocator, target picker.Target, selection protocol.PickerSelection) {
+	// Moving the final tab retires the source attachment. The move transaction
+	// freezes and drains that attachment's effects, so it must not wait on the
+	// PickerSelection effect that is synchronously executing this move.
+	if effect != nil {
+		effect.End()
+	}
 	if err := d.movePickerSourceError(source); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerRetiredTarget)
 		d.reportAttachmentError(effect.sess, movePickerUserError(err))
