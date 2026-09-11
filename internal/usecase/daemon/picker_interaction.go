@@ -380,6 +380,14 @@ func (d *Daemon) resolvePickerKill(effect *attachmentEffect, ac *attachedClient,
 // targetMatchesLifecycle. A renamed-or-recreated session between snapshot and
 // commit rejects as retired, never force-commits.
 func (d *Daemon) pickerTargetCurrent(target picker.Target) bool {
+	// A remote target names an endpoint-qualified remote session, not a local
+	// one: resolving it against the local session table would always miss and
+	// report a retired target. Its exact route is revalidated against the remote
+	// catalogue by the handoff itself (remoteCatalogTargetReady), which reports
+	// its own precise rejection.
+	if target.RemoteTarget != nil || target.RemoteKey != nil {
+		return true
+	}
 	if target.Name == "" {
 		d.mu.Lock()
 		sess := d.sessions[target.Session]

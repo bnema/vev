@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -480,6 +481,84 @@ func remoteCatalogForTest(sessions ...catalogue.RemoteCatalogSession) catalogue.
 func seedPickerDirectoryHost(t *testing.T, d *Daemon, endpoint string, fetchedAt time.Time, sessions ...catalogue.RemoteCatalogSession) {
 	t.Helper()
 	seedRemoteDirectory(t, d, reachableDirectoryHost(endpoint, fetchedAt, sessions...))
+}
+
+func TestRemotePickerNavigationCommitsARemoteRowThroughTheHandoff(t *testing.T) {
+	// A committed remote row names an endpoint-qualified session, never a local
+	// one. The selection gate must not resolve it as a local lifecycle, and the
+	// handoff must be what reaches the client.
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "main", Index: 0}}, ActiveTabID: "tab-1",
+	}
+	d := newRemotePickerDaemon()
+	seedPickerDirectoryHost(t, d, "arch", time.Unix(10, 0), remoteSession)
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	_ = awaitPickerOffer(t, sends)
+	snapshot := awaitPickerSnapshot(t, sends)
+	key := ""
+	for _, line := range snapshot.Lines {
+		if line.Actions&protocol.PickerCanNavigate != 0 && strings.HasPrefix(line.Key, "remote:") {
+			key = line.Key
+			break
+		}
+	}
+	require.NotEmpty(t, key, "the remote session's rows must authorise navigation")
+
+	d.resolvePickerSelection(effect, navigateSelection(snapshot, key))
+
+	frame := awaitFrame(t, sends, wire.MsgAttachTarget)
+	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, "arch", handoff.Endpoint)
+	require.Equal(t, "work", handoff.Session)
+}
+
+func TestRemotePickerNavigationRejectsARowTheCatalogNoLongerHolds(t *testing.T) {
+	// The handoff is the remote target's lifecycle gate, so a committed row
+	// whose session was replaced must fail precisely instead of attaching to a
+	// route the catalogue no longer publishes.
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "main", Index: 0}}, ActiveTabID: "tab-1",
+	}
+	d := newRemotePickerDaemon()
+	seedPickerDirectoryHost(t, d, "arch", time.Unix(10, 0), remoteSession)
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	_ = awaitPickerOffer(t, sends)
+	snapshot := awaitPickerSnapshot(t, sends)
+	key := ""
+	for _, line := range snapshot.Lines {
+		if line.Actions&protocol.PickerCanNavigate != 0 && strings.HasPrefix(line.Key, "remote:") {
+			key = line.Key
+			break
+		}
+	}
+	require.NotEmpty(t, key)
+
+	// The same session name now carries a different lifecycle.
+	replaced := remoteSession
+	replaced.LifecycleID = domain.SessionLifecycleID{9: 3}
+	seedPickerDirectoryHost(t, d, "arch", time.Unix(20, 0), replaced)
+
+	d.resolvePickerSelection(effect, navigateSelection(snapshot, key))
+
+	failure := awaitPickerFailure(t, sends)
+	require.Equal(t, protocol.PickerNavigationFailed, failure.Code)
 }
 
 func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
