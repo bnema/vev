@@ -1,9 +1,6 @@
 package daemon
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -28,13 +25,16 @@ func (d *Daemon) answerPickerControl(request protocol.PickerControlRequest) prot
 	recentViews, groupedViews, _ := d.pickerViewProjections(nil, nil)
 	recent := pickerLineSetFor(recentViews, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{})
 	grouped := pickerLineSetFor(groupedViews, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{})
-	revision := pickerControlRevision(recent.lines, grouped.lines)
+	// Resolution revalidates the opaque key against the current catalogue.
+	// A constant revision avoids rejecting an otherwise current target merely
+	// because unrelated presentation text changed after the client snapshot.
+	revision := uint64(1)
 	if request.Operation == protocol.PickerControlSnapshot {
 		snapshot := protocol.PickerSnapshot{InteractionID: controlPickerInteractionID, SourceID: protocol.PickerHomeSourceID, SourceRevision: revision, Status: protocol.PickerSourceOK, Lines: recent.lines, Cursor: recent.cursor, Recent: protocol.PickerProjection{Lines: recent.lines, Cursor: recent.cursor}, Grouped: protocol.PickerProjection{Lines: grouped.lines, Cursor: grouped.cursor}}
 		response.Status, response.Snapshot = protocol.PickerSourceOK, &snapshot
 		return response
 	}
-	if request.SourceID != protocol.PickerHomeSourceID || request.SourceRevision != revision {
+	if request.SourceID != protocol.PickerHomeSourceID {
 		return response
 	}
 	target, ok := recent.keys[request.Key]
@@ -47,26 +47,6 @@ func (d *Daemon) answerPickerControl(request protocol.PickerControlRequest) prot
 	}
 	response.Status, response.Resolved = protocol.PickerSourceOK, &resolved
 	return response
-}
-
-func pickerControlRevision(recent, grouped []protocol.PickerLine) uint64 {
-	snapshot := protocol.PickerSnapshot{InteractionID: controlPickerInteractionID, SourceID: protocol.PickerHomeSourceID, SourceRevision: 1, Status: protocol.PickerSourceOK, Recent: protocol.PickerProjection{Lines: recent}, Grouped: protocol.PickerProjection{Lines: grouped}}
-	sum := sha256.Sum256([]byte(protocolPickerSnapshotIdentity(snapshot)))
-	revision := binary.BigEndian.Uint64(sum[:8])
-	if revision == 0 {
-		return 1
-	}
-	return revision
-}
-
-func protocolPickerSnapshotIdentity(snapshot protocol.PickerSnapshot) string {
-	var out string
-	for _, projection := range []protocol.PickerProjection{snapshot.Recent, snapshot.Grouped} {
-		for _, line := range projection.Lines {
-			out += line.Key + "\x00" + line.Label + "\x00" + line.Detail + "\x00" + string(rune(line.Kind)) + string(rune(line.Actions))
-		}
-	}
-	return out
 }
 
 func (d *Daemon) pickerControlAttachTarget(target picker.Target) (protocol.AttachTarget, bool) {
