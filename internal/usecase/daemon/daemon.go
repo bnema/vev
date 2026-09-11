@@ -1473,7 +1473,6 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		resumeCapable:          true,
 		maxOutputInFlight:      normalizeOutputWindow(h.MaxOutputInFlight),
 		navigationCapabilities: h.NavigationCapabilities,
-		startupOverlay:         h.StartupOverlay,
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
 	}

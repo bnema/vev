@@ -22,7 +22,6 @@ func (OutputResetRequest) clientMessage()             {}
 func (RemotePreviewRequest) clientMessage()           {}
 func (RouteAttentionSubscription) clientMessage()     {}
 func (SamePeerSwitchRequest) clientMessage()          {}
-func (ParkedRouteRequest) clientMessage()             {}
 func (RecentRouteSnapshot) clientMessage()            {}
 func (RouteNavigationFailure) clientMessage()         {}
 func (SessionCreationFailure) clientMessage()         {}
@@ -41,7 +40,6 @@ func (Detached) serverMessage()                     {}
 func (Pong) serverMessage()                         {}
 func (Sessions) serverMessage()                     {}
 func (CommandResult) serverMessage()                {}
-func (NavigationDirective) serverMessage()          {}
 func (AttachTarget) serverMessage()                 {}
 func (RemotePreview) serverMessage()                {}
 func (CommittedRouteIdentity) serverMessage()       {}
@@ -51,7 +49,6 @@ func (RouteNavigationFailure) serverMessage()       {}
 func (RoutePosition) serverMessage()                {}
 func (RouteRetired) serverMessage()                 {}
 func (SamePeerSwitchFailure) serverMessage()        {}
-func (ParkedRouteResponse) serverMessage()          {}
 func (UIReceipt) serverMessage()                    {}
 func (UIViewUpdate) serverMessage()                 {}
 func (NavigationInventoryResponse) serverMessage()  {}

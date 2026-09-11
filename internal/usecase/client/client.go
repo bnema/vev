@@ -205,7 +205,6 @@ type AttachRequest struct {
 	// environment and is supplied only by explicit composition.
 	Environment            []string
 	NavigationCapabilities protocol.NavigationCapabilities
-	StartupOverlay         protocol.StartupOverlay
 }
 
 // attachRoute captures the dialer, request, and resume token needed to
@@ -437,8 +436,7 @@ func validateAttachRequest(request AttachRequest) error {
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
-	homePickerRoute := request.RemoteTarget != nil || request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || request.Intent == protocol.IntentNew
-	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, homePickerRoute); err != nil {
+	if err := protocol.ValidateNavigation(request.NavigationCapabilities); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
@@ -513,9 +511,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	attemptRequest := request
 	dialer := r.dialer
 	var homeRoute *attachRoute
-	var returnRoute *attachRoute
 	returnResumeFallback := false
-	homeNavigationPending := false
 	returnNavigationPending := false
 	// navTransition owns creation and recent-route fallback lifecycle:
 	// the captured prior route, selected identity, and settle-once state.
@@ -594,24 +590,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		} else {
 			attemptRequest.Intent = protocol.IntentAttach
 		}
-		attemptRequest.StartupOverlay = protocol.StartupOverlayNone
-		attemptRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack | protocol.NavigationCapabilityHomePicker
 		resumeToken = route.resumeToken
 		returnResumeFallback = route.resumeToken != 0
 		remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
-		backoff = defaultReconnectBackoff.initial
-	}
-	enterHomePicker := func() {
-		dialer = homeRoute.dialer
-		attemptRequest = homeRoute.request
-		attemptRequest.Intent = protocol.IntentAttach
-		attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityBack
-		attemptRequest.StartupOverlay = protocol.StartupOverlaySessionPicker
-		attemptRequest.RemoteTarget = nil
-		attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
-		attemptRequest.Remote = homeRoute.request.Remote || r.remote
-		resumeToken = 0
-		remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
 		backoff = defaultReconnectBackoff.initial
 	}
 	var input *terminalInputPump
@@ -650,59 +631,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		restoreReturnRoute(route)
 		return true
-	}
-
-	runTransientHomePicker := func(attemptCtx context.Context) attachResult {
-		if homeRoute == nil {
-			return attachResult{err: errors.New("vev: home route unavailable")}
-		}
-		request := cloneAttachRequest(homeRoute.request)
-		request.Intent = protocol.IntentAttach
-		request.NavigationCapabilities = protocol.NavigationCapabilityBack
-		request.StartupOverlay = protocol.StartupOverlaySessionPicker
-		request.RemoteTarget = nil
-		request.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
-		request.Remote = false
-		if err := validateAttachRequest(request); err != nil {
-			return attachResult{err: err}
-		}
-		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(attemptCtx, r.clock)
-		transport, err := boundedDial(handshakeCtx, homeRoute.dialer)
-		if err != nil {
-			err = handshakeContextError(attemptCtx, timedOut, err)
-			finishHandshake()
-			return attachResult{err: err}
-		}
-		connection, err := NewSessionConnection(transport, SessionTarget{Intent: request.Intent, SessionName: request.SessionName})
-		if err != nil {
-			finishHandshake()
-			_ = transport.Close()
-			return attachResult{err: err}
-		}
-		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
-		localReconnect := &reconnectUI{term: r.term, rawEntered: &rawEntered}
-		result := (&attachAttempt{
-			runner: r, dialer: homeRoute.dialer, connection: connection,
-			handshakeCtx: handshakeCtx, handshakeTimedOut: timedOut,
-			finishHandshake: finishHandshake, stopHandshakeTransport: stopHandshakeTransport,
-			request: request, clientID: processClientID, milestones: &ms,
-			themeState: themeState, enterRaw: enterRaw, reconnect: localReconnect,
-			terminalInput: func() *terminalInputPump { return input },
-		}).run(attemptCtx)
-		stopHandshakeTransport()
-		finishHandshake()
-		if !result.transportClosed {
-			_ = connection.Close()
-		}
-		if result.target != nil {
-			result.handoff = bindAttachHandoff(*result.target, attachRoute{
-				dialer:      homeRoute.dialer,
-				request:     cloneAttachRequest(homeRoute.request),
-				resumeToken: homeRoute.resumeToken,
-			})
-			result.target = nil
-		}
-		return result
 	}
 
 	for {
@@ -845,7 +773,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
-			openHomePicker:  runTransientHomePicker,
 			inventoryHome:   homeRoute,
 			inventoryDialer: r.localControlDialer,
 			onInventoryCommitted: func() {
@@ -931,7 +858,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.ExactTarget = nil
 			attemptRequest.RemoteTarget = nil
 			attemptRequest.PreferredTabID = ""
-			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
 			attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 			resumeToken = 0
@@ -961,55 +887,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			} else {
 				attemptRequest.Intent = protocol.IntentAttach
 			}
-			// Back is transient to the picker overlay. Re-derive the home-picker
-			// capability from the selected route instead of trusting request
-			// metadata, which may have been cleared after a daemon-side switch.
-			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
-			if homeRoute != nil && selection.selected.presentation.kind == protocol.RouteKindRemote {
-				attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
-			}
 			resumeToken = selection.selected.resumeToken
 			routeNavigationSelection = &selection
 			routeNavigationResumeFallback = selection.selected.resumeToken != 0
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
 			continue
-		}
-		if result.action != 0 {
-			switch result.action {
-			case protocol.NavigationOpenHomePicker:
-				// The daemon only sends this action after accepting a Hello that
-				// advertised Home support. The durable client-side prerequisite is
-				// the captured route itself; request metadata may have been rebased by
-				// committed identity or cursor updates since that Hello.
-				if homeRoute == nil {
-					return errors.New("vev: stale home navigation action")
-				}
-				returnRequest := attemptRequest
-				if result.sessionName != "" {
-					returnRequest.SessionName = result.sessionName
-				}
-				returnRoute = &attachRoute{dialer: dialer, request: returnRequest, resumeToken: result.resumeToken}
-				homeNavigationPending = true
-				enterHomePicker()
-				continue
-			case protocol.NavigationBack:
-				// As with Home, the daemon accepted Back in Hello before sending
-				// this action. The retained concrete route is the durable client
-				// prerequisite; request metadata may have been rebased meanwhile.
-				if returnRoute == nil {
-					return errors.New("vev: stale return navigation action")
-				}
-				route := *returnRoute
-				returnRoute = nil
-				homeNavigationPending = false
-				returnNavigationPending = true
-				restoreReturnRoute(route)
-				continue
-			default:
-				return errors.New("vev: unsupported navigation action")
-			}
 		}
 		if result.target != nil || result.handoff != nil {
 			target := result.target
@@ -1026,7 +910,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 					}
 					routeRequest.Intent = protocol.IntentAttach
 					routeRequest.NavigationCapabilities = 0
-					routeRequest.StartupOverlay = protocol.StartupOverlayNone
 					homeRoute = &attachRoute{dialer: dialer, request: routeRequest}
 				}
 			}
@@ -1058,15 +941,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			if target.ExactTarget != nil {
 				nextRequest.ExactTarget = target.ExactTarget
-			}
-			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || target.Intent == protocol.IntentNew) {
-				nextRequest.NavigationCapabilities |= protocol.NavigationCapabilityHomePicker
-			}
-			if attemptRequest.StartupOverlay == protocol.StartupOverlaySessionPicker {
-				returnRoute = nil
-				returnResumeFallback = false
-				nextRequest.StartupOverlay = protocol.StartupOverlayNone
-				nextRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack
 			}
 			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
@@ -1125,7 +999,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			killedSelection = &selection
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
-			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
 			resumeToken = selection.selected.resumeToken
 			killedResumeFallback = resumeToken != 0
@@ -1135,8 +1008,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				attemptRequest.Intent = protocol.IntentAttach
 			}
 			homeRoute = nil
-			returnRoute = nil
-			homeNavigationPending = false
 			returnNavigationPending = false
 			if navTransition.operation == navigationOperationRecent {
 				navTransition.clear()
@@ -1155,17 +1026,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				continue
 			}
 			return errors.Join(result.err, r.ledger.retireKilled(*killedSelection))
-		}
-		if result.welcomed {
-			homeNavigationPending = false
-		}
-		if homeNavigationPending && returnRoute != nil {
-			route := *returnRoute
-			returnRoute = nil
-			homeNavigationPending = false
-			returnNavigationPending = true
-			restoreReturnRoute(route)
-			continue
 		}
 		if navTransition.pendingCreation() {
 			r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: routeFailureCode(result.err)}
@@ -1211,12 +1071,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.Intent = protocol.IntentAttach
 			resumeToken = 0
 			returnResumeFallback = false
-			continue
-		}
-		if returnNavigationPending && !returnResumeFallback && homeRoute != nil {
-			returnRoute = nil
-			returnNavigationPending = false
-			enterHomePicker()
 			continue
 		}
 		if attemptRequest.Intent == protocol.IntentResume && !result.welcomed &&
@@ -1399,7 +1253,6 @@ type attachAttempt struct {
 	linkEvents               <-chan ports.LinkEvent
 	rememberRemoteHost       func()
 	terminalInput            func() *terminalInputPump
-	openHomePicker           func(context.Context) attachResult
 	// inventoryHome is the committed local route that authorises the
 	// navigation-inventory relay and its handoffs. Nil disables the relay:
 	// local-only and ledger-less attachments never dial control sources.
@@ -1425,7 +1278,6 @@ type attachResult struct {
 	transportClosed   bool
 	target            *protocol.AttachTarget
 	handoff           *attachHandoff
-	action            protocol.NavigationAction
 	routeAction       *protocol.RouteNavigationAction
 	routeCreateAction *protocol.RouteCreateSessionAction
 	err               error
@@ -1473,9 +1325,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		transport = a.connection.Connection()
 	}
 	request := a.request
-	// Both parked UDP and close-and-dial home pickers only borrow a local
-	// attachment for rendering. They do not own the client's active route.
-	transientPicker := request.StartupOverlay == protocol.StartupOverlaySessionPicker
 	term := a.runner.term
 	clk := a.runner.clock
 	intent := request.Intent
@@ -1501,12 +1350,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
 	}
 	// The client-picker loop owns navigate-intent presentation while the
-	// daemon keeps mutation authority. The capability advertises on every
-	// Hello the client sends: it is orthogonal to the home-picker route
-	// rule (ValidateNavigation only constrains HomePicker/Back bits), so
-	// ephemeral/local Hellos validate with it set. The daemon gates
-	// snapshot publication on this bit; unset keeps overlay rendering.
-	request.NavigationCapabilities |= protocol.NavigationCapabilityClientPicker
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -1596,7 +1439,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		PreferredTabID:         request.PreferredTabID,
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
-		StartupOverlay:         request.StartupOverlay,
 		Remote:                 remote,
 	}
 	if err := sendHandshake(func() error {
@@ -1659,7 +1501,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
-		if !transientPicker {
+		{
 			candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
 			var commitErr error
 			if a.killedSelection != nil {
@@ -1954,17 +1796,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	transitionWaitingFull := false
 	var samePeerSwitch *samePeerSwitchPending
 	var nextSamePeerRequestID uint64
-	type parkedRoutePending struct {
-		requestID uint64
-		action    protocol.ParkedRouteAction
-		leaseID   protocol.ParkedRouteLeaseID
-		fallback  *attachHandoff
-		timer     ports.Timer
-	}
-	var parkedPending *parkedRoutePending
-	var nextParkedRequestID uint64
-	parkedWaitingFull := false
-	var parkedFullTimer ports.Timer
 	transportFailed := make(chan struct{})
 	if reconnect.showing {
 		if reconnect.remote {
@@ -2052,20 +1883,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		for id := range completionTimers {
 			cancelTimer(completionTimers, id)
-		}
-	}
-	flushSender := func() error {
-		done := make(chan struct{})
-		select {
-		case barrierCh <- done:
-		case <-loopCtx.Done():
-			return context.Canceled
-		}
-		select {
-		case <-done:
-			return nil
-		case <-loopCtx.Done():
-			return context.Canceled
 		}
 	}
 	// displayPickerFrame composes the local picker modal and publishes it
@@ -2234,128 +2051,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			abortPickerLease(true)
 		}
 	}
-	clearParkedFull := func() {
-		parkedWaitingFull = false
-		if parkedFullTimer != nil {
-			parkedFullTimer.Stop()
-			parkedFullTimer = nil
-		}
-	}
-	awaitParkedFull := func() {
-		clearParkedFull()
-		parkedWaitingFull = true
-		parkedFullTimer = clk.NewTimer(protocol.HandshakeTimeout)
-	}
-	parkedFullC := func() <-chan time.Time {
-		if parkedFullTimer == nil {
-			return nil
-		}
-		return parkedFullTimer.C()
-	}
-	defer clearParkedFull()
-	clearParkedPending := func() {
-		if parkedPending != nil && parkedPending.timer != nil {
-			parkedPending.timer.Stop()
-		}
-		parkedPending = nil
-	}
-	parkedResponseC := func() <-chan time.Time {
-		if parkedPending == nil || parkedPending.timer == nil {
-			return nil
-		}
-		return parkedPending.timer.C()
-	}
-	defer clearParkedPending()
-
-	sendParkedRouteSize := func() error {
-		geometry, err := term.Geometry()
-		if err != nil {
-			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
-		}
-		geometry = geometry.NormalizePixels()
-		message := protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight}
-		if err := protocol.ValidateGeometry(message.Geometry()); err != nil {
-			return fmt.Errorf("validating terminal size for parked route: %w", err)
-		}
-		select {
-		case controlCh <- message:
-			return nil
-		case <-loopCtx.Done():
-			return context.Canceled
-		}
-	}
-	sendParkedRouteRequest := func(action protocol.ParkedRouteAction, leaseID protocol.ParkedRouteLeaseID, target *domain.RemoteSessionTarget) error {
-		if parkedPending != nil {
-			return errors.New("vev: parked-route request already pending")
-		}
-		nextParkedRequestID++
-		request := protocol.ParkedRouteRequest{RequestID: nextParkedRequestID, LeaseID: leaseID, Action: action, Target: target}
-		if protocol.ValidateParkedRouteRequest(request) != nil {
-			return errors.New("vev: invalid parked-route request")
-		}
-		select {
-		case controlCh <- request:
-			parkedPending = &parkedRoutePending{
-				requestID: request.RequestID, action: action, leaseID: leaseID,
-				timer: clk.NewTimer(protocol.HandshakeTimeout),
-			}
-			return nil
-		case <-loopCtx.Done():
-			return context.Canceled
-		}
-	}
-	handleParkedPicker := func(leaseID protocol.ParkedRouteLeaseID) (attachResult, bool) {
-		pickerCtx, cancelPicker := context.WithCancel(ctx)
-		pickerDone := make(chan struct{})
-		go func() {
-			select {
-			case <-transportFailed:
-				cancelPicker()
-			case <-pickerDone:
-			}
-		}()
-		selection := a.openHomePicker(pickerCtx)
-		close(pickerDone)
-		cancelPicker()
-		select {
-		case <-transportFailed:
-			return welcomedResult(errLinkOffline), true
-		default:
-		}
-		if selection.handoff != nil && transition != nil {
-			transitionWaitingFull = false
-			transition.start(selection.handoff.target)
-		}
-		if selection.handoff != nil && request.Remote && request.OriginKey != "" && selection.handoff.target.Endpoint == request.OriginKey && selection.handoff.target.RemoteTarget != nil {
-			target := *selection.handoff.target.RemoteTarget
-			if err := sendParkedRouteSize(); err != nil {
-				return welcomedResult(err), true
-			}
-			if err := sendParkedRouteRequest(protocol.ParkedRouteSwitch, leaseID, &target); err != nil {
-				return welcomedResult(fmt.Errorf("vev: switching parked route: %w", err)), true
-			}
-			fallback := *selection.handoff
-			parkedPending.fallback = &fallback
-			return attachResult{}, false
-		}
-		if selection.handoff != nil {
-			return selection, true
-		}
-		if selection.err != nil {
-			log.Warn("transient home picker failed; resuming parked route", "err", selection.err)
-		}
-		if err := sendParkedRouteSize(); err != nil {
-			return welcomedResult(err), true
-		}
-		if err := sendParkedRouteRequest(protocol.ParkedRouteResume, leaseID, nil); err != nil {
-			return welcomedResult(fmt.Errorf("vev: resuming parked route: %w", err)), true
-		}
-		return attachResult{}, false
-	}
-	startForeground()
-	defer stopForeground()
-
-	// 5. Output/main loop: the only goroutine that touches the terminal.
 	recvCh := make(chan recvResult, 1)
 	go runRecv(loopCtx, transport, recvCh, transportFailed, log)
 
@@ -2525,12 +2220,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if err := transition.advance(); err != nil {
 				return welcomedResult(err)
 			}
-		case <-parkedResponseC():
-			clearParkedPending()
-			return welcomedResult(errors.New("vev: timed out waiting for parked-route response"))
-		case <-parkedFullC():
-			clearParkedFull()
-			return welcomedResult(errors.New("vev: timed out waiting for parked-route full output"))
 		case <-inventoryTickC:
 			startInventoryPoll()
 			armInventoryPoll()
@@ -2729,9 +2418,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
-				if parkedWaitingFull && !o.Full {
-					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
-				}
 				syncPickerGeneration()
 				pickerEvent := pickerPresentation.observe(o, nextState)
 				if pickerEvent == pickerLeaseSuppress {
@@ -2748,7 +2434,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
-				if ui != nil && o.Full && foreground == nil && (parkedWaitingFull || samePeerSwitch == nil) {
+				if ui != nil && o.Full && foreground == nil && samePeerSwitch == nil {
 					startForeground()
 				}
 				if uiOutput != nil {
@@ -2803,10 +2489,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				if transition != nil && transition.active && (!transitionWaitingFull || o.Full) {
 					transitionWaitingFull = false
 					transition.stop()
-				}
-				if parkedWaitingFull {
-					clearParkedFull()
-					startForeground()
 				}
 				if o.New != 0 {
 					ackQueue.offer(o.Epoch, o.New)
@@ -2868,11 +2550,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					publishUIStatus(ports.UIStatusTransitioning)
 				}
 				target := message
-				if transientPicker {
-					handoff := welcomedResult(nil)
-					handoff.target = &target
-					return handoff
-				}
 				if transition != nil {
 					transitionWaitingFull = false
 					transition.start(target)
@@ -2909,72 +2586,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				handoff := welcomedResult(nil)
 				handoff.target = &target
 				return handoff
-			case protocol.ParkedRouteResponse:
-				response := message
-				if parkedPending == nil || response.RequestID != parkedPending.requestID {
-					return welcomedResult(errors.New("vev: unexpected parked-route response"))
-				}
-				pending := *parkedPending
-				clearParkedPending()
-				switch pending.action {
-				case protocol.ParkedRoutePrepare:
-					if response.Status != protocol.ParkedRouteReady {
-						fallback := welcomedResult(nil)
-						fallback.action = protocol.NavigationOpenHomePicker
-						return fallback
-					}
-					if selection, done := handleParkedPicker(pending.leaseID); done {
-						return selection
-					}
-				case protocol.ParkedRouteResume:
-					if response.Status != protocol.ParkedRouteResumed {
-						return welcomedResult(errors.New("vev: parked route could not resume"))
-					}
-					if err := publishRouteSnapshot(); err != nil {
-						return welcomedResult(err)
-					}
-					awaitParkedFull()
-				case protocol.ParkedRouteSwitch:
-					switch response.Status {
-					case protocol.ParkedRouteSwitched:
-						awaitParkedFull()
-						continue
-					case protocol.ParkedRouteStaleTarget:
-						if transition != nil {
-							transition.stop()
-						}
-						if selection, done := handleParkedPicker(pending.leaseID); done {
-							return selection
-						}
-					default:
-						if pending.fallback == nil {
-							return welcomedResult(errors.New("vev: parked route switch failed"))
-						}
-						fallback := welcomedResult(nil)
-						fallback.handoff = pending.fallback
-						return fallback
-					}
-				}
-			case protocol.NavigationDirective:
-				if ui != nil {
-					ui.follow(uiGeneration, message.CauseActionID)
-					publishUIStatus(ports.UIStatusTransitioning)
-				}
-				directive := message
-				datagramRoute := transport.Capabilities().PreferredOutputWindow == 1
-				if directive.Action == protocol.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
-					stopForeground()
-					if err := flushSender(); err != nil {
-						return welcomedResult(fmt.Errorf("vev: parking remote foreground: %w", err))
-					}
-					if err := sendParkedRouteRequest(protocol.ParkedRoutePrepare, directive.LeaseID, nil); err != nil {
-						return welcomedResult(fmt.Errorf("vev: preparing parked route: %w", err))
-					}
-					continue
-				}
-				navigation := welcomedResult(nil)
-				navigation.action = directive.Action
-				return navigation
 			case protocol.NavigationInventoryDemand:
 				demand := message
 				if inventory == nil {
@@ -3215,9 +2826,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				name = identity.Target.SessionName
 				committedIdentity = cloneCommittedIdentity(&identity)
-				if transientPicker {
-					continue
-				}
 				if a.runner.ledger == nil {
 					return welcomedResult(errors.New("vev: route ledger unavailable"))
 				}

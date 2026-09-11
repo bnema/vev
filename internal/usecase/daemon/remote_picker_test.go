@@ -628,41 +628,6 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	require.Equal(t, restored.tabs[0].stableID, string(attachment.viewSnapshot().tabID))
 }
 
-func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
-	tests := []struct {
-		name   string
-		action protocol.NavigationAction
-	}{
-		{name: "home picker", action: protocol.NavigationOpenHomePicker},
-		{name: "back", action: protocol.NavigationBack},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d := newRemotePickerDaemon()
-			sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-			if tt.action == protocol.NavigationOpenHomePicker {
-				ac.navigationCapabilities = protocol.NavigationCapabilityHomePicker
-			}
-			token := sess.captureAttachmentCapability(ac, ac.transport())
-			effect, admitted := ac.beginAttachmentEffect(token)
-			require.True(t, admitted)
-			defer effect.End()
-			require.NoError(t, d.sendNavigationActionForAttachment(effect, tt.action))
-			frame := receiveRemotePicker(t, sends, "navigation action")
-			require.Equal(t, wire.MsgNavigationAction, frame.Type)
-			directive, err := wire.UnmarshalNavigationDirective(frame.Payload)
-			require.NoError(t, err)
-			require.Equal(t, tt.action, directive.Action)
-			if tt.action == protocol.NavigationOpenHomePicker {
-				require.False(t, directive.LeaseID.IsZero())
-			} else {
-				require.True(t, directive.LeaseID.IsZero())
-			}
-		})
-	}
-}
-
 func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	remoteSession := catalogue.RemoteCatalogSession{

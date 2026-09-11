@@ -337,7 +337,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 
 	ac.sendMu.Lock()
 	if paintEffect != nil {
-		if !paintEffect.current() || ac.parkedRouteOutput.Load() {
+		if !paintEffect.current() {
 			ac.sendMu.Unlock()
 			return paintRejected
 		}
@@ -347,13 +347,10 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 		entry.core().mu.Lock()
 		_, owned := entry.core().attachments[ac]
 		entry.core().mu.Unlock()
-		if !owned || ac.currentAttachmentSession() != entry || ac.parkedRouteOutput.Load() {
+		if !owned || ac.currentAttachmentSession() != entry {
 			ac.sendMu.Unlock()
 			return paintRejected
 		}
-	}
-	if ac.parkedRouteFullPending.Load() {
-		reset = true
 	}
 	// Capacity is checked before any destructive capture. Refresh the atomic
 	// readiness snapshot while sendMu is held so direct test/setup mutations of
@@ -463,10 +460,7 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
-	full := state.reset
-	if d.emitFrame(entry, ac, state, composed, &marks) && full {
-		ac.parkedRouteFullPending.Store(false)
-	}
+	d.emitFrame(entry, ac, state, composed, &marks)
 	return paintEmitted
 }
 

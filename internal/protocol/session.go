@@ -13,7 +13,7 @@ import (
 )
 
 // Version is the negotiated vev session protocol version.
-const Version uint16 = 46
+const Version uint16 = 47
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication.
@@ -113,7 +113,6 @@ type Hello struct {
 	PreferredTabID         domain.TabStableID
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
-	StartupOverlay         StartupOverlay
 	Remote                 bool
 }
 

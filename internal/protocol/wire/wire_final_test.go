@@ -12,8 +12,8 @@ import (
 )
 
 func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
-	if protocol.Version != 46 {
-		t.Fatalf("ProtocolVersion = %d, want 46", protocol.Version)
+	if protocol.Version != 47 {
+		t.Fatalf("ProtocolVersion = %d, want 47", protocol.Version)
 	}
 	payload := MarshalHello(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}})
 	if len(payload) < 2 {
@@ -27,9 +27,9 @@ func TestFinalProtocolVersionAndNoV21Hello(t *testing.T) {
 
 func TestFinalHelloGoldenStrict(t *testing.T) {
 	msg := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}
-	want := append([]byte{0, 46, 2}, make([]byte, 16+8)...)
+	want := append([]byte{0, 47, 2}, make([]byte, 16+8)...)
 	want = append(want, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-	want = append(want, 0, 0)
+	want = append(want, 0)
 	got := MarshalHello(msg)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Hello bytes = %x, want %x", got, want)

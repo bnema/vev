@@ -132,8 +132,6 @@ func externalClientFrame(m protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.SamePeerSwitchRequest:
 		p, e := wire.MarshalSamePeerSwitchRequest(x)
 		return wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: p}, e
-	case protocol.ParkedRouteRequest:
-		return wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(x)}, nil
 	case protocol.RouteNavigationFailure:
 		p, e := wire.MarshalRouteNavigationFailure(x)
 		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: p}, e
@@ -166,10 +164,6 @@ func externalServerMessage(f wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalPong(f.Payload)
 	case wire.MsgAttachTarget:
 		return wire.UnmarshalAttachTarget(f.Payload)
-	case wire.MsgNavigationAction:
-		return wire.UnmarshalNavigationDirective(f.Payload)
-	case wire.MsgParkedRouteResponse:
-		return wire.UnmarshalParkedRouteResponse(f.Payload)
 	case wire.MsgNavigateRecentRoute:
 		return wire.UnmarshalRouteNavigationAction(f.Payload)
 	case wire.MsgRouteCreateSession:

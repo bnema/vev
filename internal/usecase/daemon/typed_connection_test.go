@@ -156,8 +156,6 @@ func testDecodeClientFrame(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalRouteAttentionSubscription(frame.Payload)
 	case wire.MsgSamePeerSwitchRequest:
 		return wire.UnmarshalSamePeerSwitchRequest(frame.Payload)
-	case wire.MsgParkedRouteRequest:
-		return wire.UnmarshalParkedRouteRequest(frame.Payload)
 	case wire.MsgNavigationInventoryRequest:
 		return wire.UnmarshalNavigationInventoryRequest(frame.Payload)
 	case wire.MsgNavigationInventoryPublication:
@@ -296,8 +294,6 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 		return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(m)}, nil
 	case protocol.CommandResult:
 		return wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(m)}, nil
-	case protocol.NavigationDirective:
-		return wire.Frame{Type: wire.MsgNavigationAction, Payload: wire.MarshalNavigationDirective(m)}, nil
 	case protocol.AttachTarget:
 		return wire.Frame{Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(m)}, nil
 	case protocol.RemotePreview:
@@ -323,8 +319,6 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.SamePeerSwitchFailure:
 		payload, err := wire.MarshalSamePeerSwitchFailure(m)
 		return wire.Frame{Type: wire.MsgSamePeerSwitchFailure, Payload: payload}, err
-	case protocol.ParkedRouteResponse:
-		return wire.Frame{Type: wire.MsgParkedRouteResponse, Payload: wire.MarshalParkedRouteResponse(m)}, nil
 	case protocol.NavigationInventoryResponse:
 		payload := wire.MarshalNavigationInventoryResponse(m)
 		if payload == nil {
@@ -819,24 +813,6 @@ func (t *countingOutputTransport) Capabilities() protocol.ConnectionCapabilities
 func (t *countingOutputTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t *countingOutputTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
-func (t *parkedRouteExpiryTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *parkedRouteExpiryTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *parkedRouteExpiryTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *parkedRouteExpiryTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *parkedRouteExpiryTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *parkedRouteExpiryTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t *parkedRouteExpiryTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
 func (t failingOutputTransport) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(t)
 }
@@ -870,24 +846,6 @@ func (t cacheFailTransport) Capabilities() protocol.ConnectionCapabilities {
 }
 func (t cacheFailTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t cacheFailTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
-
-func (t parkedRouteFailTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t parkedRouteFailTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t parkedRouteFailTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t parkedRouteFailTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t parkedRouteFailTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t parkedRouteFailTransport) LinkState() ports.LinkState         { return testLinkState(t) }
-func (t parkedRouteFailTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
 func (t *blockedRenderReplacementTransport) SendOutput(o protocol.Output) error {
 	return testSendOutput(t, o)
@@ -1081,14 +1039,6 @@ func (t *countingOutputTransport) SendOutputSynchronous(o protocol.Output) error
 	return testSendOutputSynchronous(t, o)
 }
 
-func (t *parkedRouteExpiryTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
-func (t *parkedRouteExpiryTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *parkedRouteExpiryTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
 func (t failingOutputTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
 func (t failingOutputTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
@@ -1102,13 +1052,5 @@ func (t cacheFailTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
 }
 func (t cacheFailTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t parkedRouteFailTransport) SendOutput(o protocol.Output) error { return testSendOutput(t, o) }
-func (t parkedRouteFailTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t parkedRouteFailTransport) SendOutputSynchronous(o protocol.Output) error {
 	return testSendOutputSynchronous(t, o)
 }

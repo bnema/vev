@@ -137,8 +137,6 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 		d.resetOutput(effect)
 	case protocol.SamePeerSwitchRequest:
 		d.switchSamePeerForAttachment(effect, message)
-	case protocol.ParkedRouteRequest:
-		d.handleParkedRouteRequest(effect, message)
 	case protocol.RecentRouteSnapshot:
 		replayIdentity := effect.ac.setRouteSnapshot(message)
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-snapshot")

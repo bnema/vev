@@ -31,7 +31,6 @@ const (
 	MsgRemotePreviewRequest           MsgType = 15
 	MsgRouteAttentionSubscription     MsgType = 32
 	MsgSamePeerSwitchRequest          MsgType = 33
-	MsgParkedRouteRequest             MsgType = 35
 	MsgSessionCreationFailure         MsgType = 37
 	MsgUIFence                        MsgType = 39
 	MsgNavigationInventoryRequest     MsgType = 42
@@ -48,7 +47,6 @@ const (
 	MsgPong                         MsgType = 20
 	MsgSessions                     MsgType = 21
 	MsgCommandResult                MsgType = 22
-	MsgNavigationAction             MsgType = 23
 	MsgAttachTarget                 MsgType = 25
 	MsgRemotePreviewResponse        MsgType = 26
 	MsgCommittedRouteIdentity       MsgType = 27
@@ -57,7 +55,6 @@ const (
 	MsgRouteNavigationFailure       MsgType = 30
 	MsgRoutePosition                MsgType = 31
 	MsgSamePeerSwitchFailure        MsgType = 34
-	MsgParkedRouteResponse          MsgType = 36
 	MsgRouteCreateSession           MsgType = 38
 	MsgUIReceipt                    MsgType = 40
 	MsgUIViewUpdate                 MsgType = 41

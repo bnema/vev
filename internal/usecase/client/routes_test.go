@@ -218,8 +218,7 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 	active := routeTestCandidate(2, protocol.RouteOriginLocal)
 	active.originKey = "local"
 	active.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-	active.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
-	active.request.StartupOverlay = protocol.StartupOverlaySessionPicker
+	active.request.NavigationCapabilities = protocol.NavigationCapabilityInventory
 
 	for _, tt := range []struct {
 		name    string
@@ -235,8 +234,7 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 				stored := routeTestCandidate(1, protocol.RouteOriginLocal)
 				stored.originKey = "local"
 				stored.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-				stored.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
-				stored.request.StartupOverlay = protocol.StartupOverlaySessionPicker
+				stored.request.NavigationCapabilities = protocol.NavigationCapabilityInventory
 				_, err := ledger.commit(stored)
 				require.NoError(t, err)
 			}
@@ -248,7 +246,6 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 
 			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
 			require.Zero(t, request.NavigationCapabilities)
-			require.Equal(t, protocol.StartupOverlayNone, request.StartupOverlay)
 			require.NoError(t, validateAttachRequest(request))
 		})
 	}

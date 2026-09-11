@@ -128,8 +128,6 @@ func testClientFrame(message protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.SamePeerSwitchRequest:
 		p, e := wire.MarshalSamePeerSwitchRequest(m)
 		return wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: p}, e
-	case protocol.ParkedRouteRequest:
-		return wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(m)}, nil
 	case protocol.RecentRouteSnapshot:
 		p, e := wire.MarshalRecentRouteSnapshot(m)
 		return wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: p}, e
@@ -187,8 +185,6 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalSessions(frame.Payload)
 	case wire.MsgCommandResult:
 		return wire.UnmarshalCommandResult(frame.Payload)
-	case wire.MsgNavigationAction:
-		return wire.UnmarshalNavigationDirective(frame.Payload)
 	case wire.MsgAttachTarget:
 		return wire.UnmarshalAttachTarget(frame.Payload)
 	case wire.MsgRemotePreviewResponse:
@@ -205,8 +201,6 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalRoutePosition(frame.Payload)
 	case wire.MsgSamePeerSwitchFailure:
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
-	case wire.MsgParkedRouteResponse:
-		return wire.UnmarshalParkedRouteResponse(frame.Payload)
 	case wire.MsgNavigationInventoryResponse:
 		return wire.UnmarshalNavigationInventoryResponse(frame.Payload)
 	case wire.MsgNavigationInventoryDemand:

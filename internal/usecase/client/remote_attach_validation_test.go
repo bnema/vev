@@ -18,7 +18,7 @@ func TestMalformedAttachRequestsNeverDial(t *testing.T) {
 		{name: "missing session name", request: AttachRequest{Intent: protocol.IntentAttach}},
 		{name: "unsafe session name", request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "bad name"}},
 		{name: "daemon-owned without remote", request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}},
-		{name: "ephemeral with navigation capability", request: AttachRequest{Intent: protocol.IntentEphemeral, NavigationCapabilities: protocol.NavigationCapabilityHomePicker}},
+		{name: "ephemeral with navigation capability", request: AttachRequest{Intent: protocol.IntentEphemeral, NavigationCapabilities: protocol.NavigationCapabilityInventory}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -54,7 +54,6 @@ func testTarget() domain.RemoteSessionTarget {
 func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 	target := testTarget()
 	exact := protocol.ExactSessionTarget{LifecycleID: target.LifecycleID, SessionName: target.SessionName}
-	lease := protocol.ParkedRouteLeaseID{1}
 	commandPayload, err := wire.MarshalCommandRequest(protocol.CommandRequest{Version: protocol.Version, RequestID: 7, Slug: "list-sessions"})
 	require.NoError(t, err)
 	resizePayload, err := wire.MarshalResize(protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}})
@@ -93,7 +92,6 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "preview", frame: wire.Frame{Type: wire.MsgRemotePreviewRequest, Payload: wire.MarshalRemotePreviewRequest(protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1})}, want: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}},
 		{name: "attention", frame: wire.Frame{Type: wire.MsgRouteAttentionSubscription, Payload: attentionPayload}, want: protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{}}},
 		{name: "same peer", frame: wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: switchPayload}, want: protocol.SamePeerSwitchRequest{RequestID: 3, Target: exact}},
-		{name: "parked", frame: wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(protocol.ParkedRouteRequest{RequestID: 4, LeaseID: lease, Action: protocol.ParkedRoutePrepare})}, want: protocol.ParkedRouteRequest{RequestID: 4, LeaseID: lease, Action: protocol.ParkedRoutePrepare}},
 		{name: "snapshot", frame: wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: snapshotPayload}, want: protocol.RecentRouteSnapshot{}},
 		{name: "route failure", frame: wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: failurePayload}, want: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}},
 		{name: "creation failure", frame: wire.Frame{Type: wire.MsgSessionCreationFailure, Payload: creationFailurePayload}, want: protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}},
@@ -110,7 +108,6 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 
 func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	exact := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}
-	lease := protocol.ParkedRouteLeaseID{1}
 	welcome := protocol.Welcome{SessionID: "session"}
 	errorMessage := protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"}
 	output := protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}
@@ -120,7 +117,6 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	pong := protocol.Pong{}
 	sessions := protocol.Sessions{}
 	commandResult := protocol.CommandResult{RequestID: 1, OK: true}
-	navigation := protocol.NavigationDirective{Action: protocol.NavigationOpenHomePicker, LeaseID: lease}
 	attachTarget := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}
 	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}
 	identity := protocol.CommittedRouteIdentity{Target: exact}
@@ -129,7 +125,6 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	routeFailure := protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}
 	routePosition := protocol.RoutePosition{Target: exact, ActiveTabID: "tab-1"}
 	switchFailure := protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchUnavailable}
-	parkedResponse := protocol.ParkedRouteResponse{RequestID: 1, Status: protocol.ParkedRouteReady}
 
 	outputPayload, err := wire.MarshalOutput(output)
 	require.NoError(t, err)
@@ -167,7 +162,6 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 		{name: "pong", message: pong, typeID: wire.MsgPong, payload: wire.MarshalPong(pong)},
 		{name: "sessions", message: sessions, typeID: wire.MsgSessions, payload: wire.MarshalSessions(sessions)},
 		{name: "command result", message: commandResult, typeID: wire.MsgCommandResult, payload: wire.MarshalCommandResult(commandResult)},
-		{name: "navigation", message: navigation, typeID: wire.MsgNavigationAction, payload: wire.MarshalNavigationDirective(navigation)},
 		{name: "attach target", message: attachTarget, typeID: wire.MsgAttachTarget, payload: wire.MarshalAttachTarget(attachTarget)},
 		{name: "preview", message: preview, typeID: wire.MsgRemotePreviewResponse, payload: wire.MarshalRemotePreview(preview)},
 		{name: "identity", message: identity, typeID: wire.MsgCommittedRouteIdentity, payload: identityPayload},
@@ -177,7 +171,6 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 		{name: "route failure", message: routeFailure, typeID: wire.MsgRouteNavigationFailure, payload: routeFailurePayload},
 		{name: "route position", message: routePosition, typeID: wire.MsgRoutePosition, payload: routePositionPayload},
 		{name: "switch failure", message: switchFailure, typeID: wire.MsgSamePeerSwitchFailure, payload: switchFailurePayload},
-		{name: "parked response", message: parkedResponse, typeID: wire.MsgParkedRouteResponse, payload: wire.MarshalParkedRouteResponse(parkedResponse)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

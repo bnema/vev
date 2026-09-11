@@ -388,17 +388,14 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	if !matches || !effect.current() {
 		return errAttachmentTransition
 	}
-	homePicker := effect.ac.startupOverlay == protocol.StartupOverlaySessionPicker
-	if !homePicker && targetSess != nil && target.TabID != "" {
-		// Ordinary local tab navigation keeps the attachment. A home picker
-		// only borrows it: selecting even its backing session must hand off
-		// to the client so the remote route and temporary attachment end.
+	if targetSess != nil && target.TabID != "" {
+		// Ordinary local tab navigation keeps the attachment.
 		return d.switchToTargetGuardedForAttachment(effect.sess, effect.ac, target, guard, effect, action)
 	}
 
 	// Ordinary live session rows can use the client-confirmed same-peer
-	// path. Temporary home pickers and stopped targets require a handoff.
-	samePeerEligible := !homePicker && guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
+	// path. Stopped targets require a handoff.
+	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
 	if exactTarget == nil {
 		return errAttachmentTransition
 	}

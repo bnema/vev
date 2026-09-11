@@ -622,7 +622,6 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.Atta
 		request.RemoteTarget = nil
 		if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 			request.NavigationCapabilities = 0
-			request.StartupOverlay = protocol.StartupOverlayNone
 		}
 		request.EnvironmentPolicy = environmentPolicy
 		request.ExactTarget = target.ExactTarget
@@ -640,7 +639,6 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.Atta
 	request.RemoteTarget = nil
 	if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 		request.NavigationCapabilities = 0
-		request.StartupOverlay = protocol.StartupOverlayNone
 	}
 	request.EnvironmentPolicy = environmentPolicy
 	return request

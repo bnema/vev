@@ -10,7 +10,7 @@ import (
 )
 
 func TestVersionRemainsWireCompatible(t *testing.T) {
-	require.Equal(t, uint16(46), Version)
+	require.Equal(t, uint16(47), Version)
 	require.Equal(t, (16<<20)-407, MaxOutputDataLen)
 }
 
@@ -24,7 +24,7 @@ func TestHelloSemanticValidation(t *testing.T) {
 		{name: "valid", mutate: func(*Hello) {}},
 		{name: "unknown intent", mutate: func(h *Hello) { h.Intent = 99 }, want: ErrInvalidHello},
 		{name: "invalid geometry", mutate: func(h *Hello) { h.Size.Rows = 0 }, want: ErrInvalidHello},
-		{name: "unsafe navigation", mutate: func(h *Hello) { h.NavigationCapabilities = NavigationCapabilityBack }, want: ErrInvalidHello},
+		{name: "unsafe navigation", mutate: func(h *Hello) { h.NavigationCapabilities = 8 }, want: ErrInvalidHello},
 		{name: "exact target name mismatch", mutate: func(h *Hello) {
 			h.ExactTarget = &ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "other"}
 		}, want: ErrInvalidHello},
@@ -85,5 +85,4 @@ func TestRouteAndPreviewSemanticValidation(t *testing.T) {
 func TestSemanticErrorsPreserveClassification(t *testing.T) {
 	require.True(t, errors.Is(ValidateAck(Ack{}), ErrInvalidAck))
 	require.True(t, errors.Is(ValidateAttachTarget(AttachTarget{}), ErrInvalidAttachTarget))
-	require.True(t, errors.Is(ValidateParkedRouteRequest(ParkedRouteRequest{}), ErrInvalidNavigation))
 }

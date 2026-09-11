@@ -64,7 +64,7 @@ func TestValidateNavigationInventoryResponseUnions(t *testing.T) {
 }
 
 func TestNavigationCapabilityInventoryValid(t *testing.T) {
-	if err := ValidateNavigation(NavigationCapabilityInventory, StartupOverlayNone, false); err != nil {
+	if err := ValidateNavigation(NavigationCapabilityInventory); err != nil {
 		t.Fatalf("ValidateNavigation(inventory) = %v", err)
 	}
 }

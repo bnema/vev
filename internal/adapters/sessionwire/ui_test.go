@@ -50,7 +50,6 @@ func TestUISynchronizationServerDispatch(t *testing.T) {
 		{"receipt", protocol.UIReceipt{ActionID: 7, Epoch: 2, State: 1, ViewPublication: 4, Outcome: protocol.UIReceiptProcessed}},
 		{"view update", protocol.UIViewUpdate{Epoch: 2, State: 1, Context: context}},
 		{"attach target", protocol.AttachTarget{CauseActionID: 7, Session: "work", Intent: protocol.IntentAttach}},
-		{"navigation", protocol.NavigationDirective{CauseActionID: 7, Action: protocol.NavigationBack}},
 		{"route action", protocol.RouteNavigationAction{CauseActionID: 7, SnapshotGeneration: 1, Key: 2, Generation: 3}},
 		{"route create", protocol.RouteCreateSessionAction{CauseActionID: 7, RequestID: 4, SnapshotGeneration: 1, Key: 2, Generation: 3, SessionName: "work"}},
 	} {

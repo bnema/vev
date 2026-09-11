@@ -103,29 +103,6 @@ func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTa
 	return d.createSessionLockedWithModeAndInactiveFence(target.SessionName, false, cwd, geometry, env, &expected, validate, expected.tabNames)
 }
 
-func (d *Daemon) sendNavigationActionForAttachment(effect *attachmentEffect, action protocol.NavigationAction) error {
-	directive := protocol.NavigationDirective{Action: action}
-	armed := false
-	if action == protocol.NavigationOpenHomePicker {
-		leaseID, err := d.armParkedRoute(effect)
-		if err != nil {
-			return err
-		}
-		directive.LeaseID = leaseID
-		armed = true
-	}
-	rollback := func() {
-		if armed {
-			effect.ac.clearParkedRoute()
-		}
-	}
-	if err := effect.sendControl(directive); err != nil {
-		rollback()
-		return err
-	}
-	return nil
-}
-
 func (d *Daemon) sendRecentRouteNavigationActionForAttachment(effect *attachmentEffect, action protocol.RouteNavigationAction) error {
 	if action.SnapshotGeneration == 0 || action.Key == 0 || action.Generation == 0 {
 		return errAttachmentTransition

@@ -91,8 +91,6 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalSessions(frame.Payload)
 	case wire.MsgCommandResult:
 		return wire.UnmarshalCommandResult(frame.Payload)
-	case wire.MsgNavigationAction:
-		return wire.UnmarshalNavigationDirective(frame.Payload)
 	case wire.MsgAttachTarget:
 		return wire.UnmarshalAttachTarget(frame.Payload)
 	case wire.MsgRemotePreviewResponse:
@@ -111,8 +109,6 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalRouteRetired(frame.Payload)
 	case wire.MsgSamePeerSwitchFailure:
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
-	case wire.MsgParkedRouteResponse:
-		return wire.UnmarshalParkedRouteResponse(frame.Payload)
 	case wire.MsgNavigationInventoryResponse:
 		return wire.UnmarshalNavigationInventoryResponse(frame.Payload)
 	case wire.MsgNavigationInventoryDemand:
@@ -137,7 +133,7 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		wire.MsgList, wire.MsgKill, wire.MsgTheme, wire.MsgAck, wire.MsgImagePush,
 		wire.MsgClientNotice, wire.MsgCommand, wire.MsgOutputResetRequest,
 		wire.MsgRemotePreviewRequest, wire.MsgRouteAttentionSubscription,
-		wire.MsgSamePeerSwitchRequest, wire.MsgParkedRouteRequest,
+		wire.MsgSamePeerSwitchRequest,
 		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure, wire.MsgUIFence,
 		wire.MsgNavigationInventoryRequest, wire.MsgNavigationInventoryPublication, wire.MsgNavigationInventoryFailure,
 		wire.MsgPickerBegin, wire.MsgPickerCloseClient, wire.MsgPickerSelection:
@@ -200,12 +196,6 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.SamePeerSwitchRequest:
 		payload, err := wire.MarshalSamePeerSwitchRequest(m)
 		return wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: payload}, err
-	case protocol.ParkedRouteRequest:
-		payload := wire.MarshalParkedRouteRequest(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: payload}, nil
 	case protocol.NavigationInventoryRequest:
 		payload := wire.MarshalNavigationInventoryRequest(m)
 		if payload == nil {
@@ -316,10 +306,6 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 			return encodeClient(*m)
 		}
 	case *protocol.SamePeerSwitchRequest:
-		if m != nil {
-			return encodeClient(*m)
-		}
-	case *protocol.ParkedRouteRequest:
 		if m != nil {
 			return encodeClient(*m)
 		}
