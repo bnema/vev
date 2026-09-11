@@ -15,7 +15,10 @@ import (
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
-var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
+// The picker's floating geometry lives in the picker package: the presenting
+// client draws the same box, and this daemon sizes the preview it captures from
+// it, so both sides always agree.
+var pickerModal = picker.Modal
 
 const remotePickerPreviewDebounce = 80 * time.Millisecond
 
@@ -194,9 +197,8 @@ func remotePickerReasonText(reason string) string {
 }
 
 func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
-	presentation := pickerModal.Resolve(size)
-	geometry := picker.ChooseGeometry(rectSize(presentation.Inner))
-	width, height := geometry.Preview.Width, geometry.Preview.Height
+	preview := picker.PreviewRect(size)
+	width, height := preview.Width, preview.Height
 	if width <= 0 || height <= 0 {
 		return 0, 0
 	}

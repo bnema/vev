@@ -2304,7 +2304,10 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			if key == "" || !pickerPresentation.owns() || !pickerPreview.needsRequest(pickerPresentation.interaction, key) {
 				continue
 			}
-			request, ok := pickerPreview.requestFor(pickerPresentation.interaction, key, termSize())
+			// The preview pane decides the viewport: ask for exactly the
+			// rectangle the modal will blit it into, the same geometry the
+			// serving daemon sizes its capture from.
+			request, ok := pickerPreview.requestFor(pickerPresentation.interaction, key, pickerPreviewSize(termSize()))
 			if !ok {
 				continue
 			}

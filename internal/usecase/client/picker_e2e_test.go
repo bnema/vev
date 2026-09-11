@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,8 +115,11 @@ func TestClientPickerRequestsAndRendersTheDisplayedRowPreview(t *testing.T) {
 	require.Equal(t, snapshot.InteractionID, request.InteractionID)
 	require.Equal(t, "serving", request.SourceID)
 	require.Equal(t, "aa/first", request.Key)
-	require.NotZero(t, request.Width)
-	require.NotZero(t, request.Height)
+	// The client asks for the preview pane it will draw into, not the whole
+	// terminal: both sides resolve the same modal geometry.
+	preview := picker.PreviewRect(domain.Size{Cols: 80, Rows: 24})
+	require.Equal(t, uint16(preview.Width), request.Width)
+	require.Equal(t, uint16(preview.Height), request.Height)
 
 	viewport := protocol.PickerPreview{
 		Version: protocol.PickerPreviewSchemaVersion, InteractionID: snapshot.InteractionID, SourceID: "serving",
@@ -204,4 +208,35 @@ func TestClientPickerCancelReleasesOnAuthoritativeFullPaint(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, uiSnapshotText(after), "second")
 	require.Contains(t, uiSnapshotText(after), "released")
+}
+
+// TestClientPickerDrawsAFloatingModalOverTheSession pins the presentation the
+// picker must keep: a centred bordered box over the session, not a full-screen
+// takeover. The session text painted before the picker opened stays visible
+// around the box, and only the box's own cells are written.
+func TestClientPickerDrawsAFloatingModalOverTheSession(t *testing.T) {
+	ctx := context.Background()
+	harness := startPickerE2E(t)
+	ui, transport := harness.ui, harness.transport
+	attached := ports.UIStatusAttached
+	ready := "ready"
+	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &ready}})
+	require.NoError(t, err, "the session owns the screen before the picker opens")
+
+	openPickerOnHarness(t, transport)
+	first := "first"
+	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
+	require.NoError(t, err)
+
+	text := uiSnapshotText(mustCapture(t, ui))
+	require.Contains(t, text, "first", "the picker rows must be drawn")
+	require.Contains(t, text, "ready", "the session must stay visible around the floating box")
+	require.Contains(t, text, "─", "the modal border must be drawn")
+
+	// The box is the shared picker modal, not the whole terminal.
+	size := domain.Size{Cols: 80, Rows: 24}
+	presentation := picker.Modal.Resolve(size)
+	require.Less(t, presentation.Bounds.Width, size.Cols)
+	require.Less(t, presentation.Bounds.Height, size.Rows)
+	require.Contains(t, text, picker.Modal.Title, "the picker box keeps its title")
 }

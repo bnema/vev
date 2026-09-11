@@ -3,6 +3,7 @@ package client
 import (
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
 	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -232,6 +233,12 @@ func (l *pickerLoop) killAction() bool {
 // defaultPickerSort is the client-local initial ordering mode.
 func defaultPickerSort() picker.SortMode { return picker.SortRecent }
 
+// pickerPreviewSize is the viewport the modal can display for one terminal: the
+// preview pane inside the shared picker geometry.
+func pickerPreviewSize(terminal domain.Size) domain.Size {
+	return picker.Size(picker.PreviewRect(terminal))
+}
+
 // emptyPickerPreview is the zero preview used until the daemon publishes one.
 func emptyPickerPreview() picker.Preview { return picker.Preview{} }
 
@@ -344,6 +351,13 @@ type pickerRenderer struct {
 	// pasteMode records whether bracketed paste was enabled on the terminal
 	// for this interaction, so it is enabled once and disabled exactly once.
 	pasteMode bool
+	// prevBounds is the box drawn last: when it moves or resizes, its previous
+	// cells are blanked together with the new ones, and the rest of the screen
+	// stays untouched.
+	prevBounds *domain.Rect
+	// primed records that the renderer shadow was seeded with the screen as it
+	// is, so the first box is diffed against it instead of replacing the screen.
+	primed bool
 }
 
 func newPickerRenderer() *pickerRenderer {
@@ -373,6 +387,11 @@ func (r *pickerRenderer) disableBracketedPaste() []byte {
 // refresh. Previews arrive as source data (picker_preview.go) and are attached
 // to the model by the caller; a full redraw every refresh keeps the shadow
 // trivially consistent: the frame is small and modal, never a PTY stream.
+// render composes one floating modal over the session: the picker never takes
+// the whole screen. The box is resolved from the shared picker geometry, its
+// inner content is rendered into that rectangle, and only the box's own cells
+// are written, so the session stays visible around it until the daemon's
+// authoritative repaint after the close.
 func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview picker.Preview) []byte {
 	if r == nil || loop == nil || loop.model == nil {
 		return nil
@@ -383,9 +402,38 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	if r.renderer == nil || r.size != size {
 		r.renderer = ansirenderer.New(ansirenderer.Capabilities{})
 		r.size = size
+		r.prevBounds = nil
+		r.primed = false
 	}
-	frame := loop.model.Render(size, preview)
-	data, err := r.renderer.Draw(frame, []ansirenderer.Damage{ansirenderer.FullRedraw()})
+	// The picker is a floating box over a screen the client does not own: a
+	// fresh renderer would repaint the whole terminal from its empty shadow and
+	// wipe the session. Seed the shadow with the empty screen instead, without
+	// emitting anything, so only the box's own cells are ever written.
+	if !r.primed {
+		if prepared, err := r.renderer.Prepare(renderer.NewFrame(size.Cols, size.Rows), nil, false); err == nil {
+			prepared.Commit()
+			r.primed = true
+		}
+	}
+	presentation := picker.Modal.Resolve(size)
+	base := renderer.NewFrame(size.Cols, size.Rows)
+	border := renderer.DefaultStyle()
+	border.Attrs |= renderer.AttrDim
+	picker.Modal.CompositePresentation(base, presentation, border, renderer.DefaultStyle())
+	inner := loop.model.Render(picker.Size(presentation.Inner), preview)
+	copyFrameRect(base, presentation.Inner, inner)
+
+	// Only the box is written: the session stays on screen around it. A box
+	// that moved (a resize, or a wider title) blanks the cells it used to own.
+	var damage []ansirenderer.Damage
+	if r.prevBounds != nil && *r.prevBounds != presentation.Bounds {
+		damage = append(damage, damageRect(*r.prevBounds))
+	}
+	damage = append(damage, damageRect(presentation.Bounds))
+	bounds := presentation.Bounds
+	r.prevBounds = &bounds
+
+	data, err := r.renderer.Draw(base, damage)
 	if err != nil {
 		return nil
 	}
@@ -396,6 +444,38 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 		return append([]byte(bracketedPasteEnable), data...)
 	}
 	return data
+}
+
+// damageRect is the damage one rectangle of a composed frame produces.
+func damageRect(rect domain.Rect) ansirenderer.Damage {
+	return ansirenderer.Damage{
+		Kind: renderer.DamageText,
+		X:    rect.X, Y: rect.Y,
+		Width: rect.Width, Height: rect.Height, Count: 1,
+	}
+}
+
+// copyFrameRect blits src into dst at the target rectangle, clipped to both.
+func copyFrameRect(dst renderer.Frame, target domain.Rect, src renderer.Frame) {
+	left := max(target.X, 0)
+	top := max(target.Y, 0)
+	right := min(target.X+target.Width, dst.Width)
+	bottom := min(target.Y+target.Height, dst.Height)
+	if left >= right || top >= bottom {
+		return
+	}
+	sourceX := left - target.X
+	sourceY := top - target.Y
+	width := min(right-left, src.Width-sourceX)
+	height := min(bottom-top, src.Height-sourceY)
+	if width <= 0 || height <= 0 {
+		return
+	}
+	for y := range height {
+		for x := range width {
+			dst.Set(left+x, top+y, src.Cell(sourceX+x, sourceY+y))
+		}
+	}
 }
 
 // commitSelection builds the typed commit for the row under the cursor at the
