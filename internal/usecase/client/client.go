@@ -152,8 +152,6 @@ const (
 )
 
 // Dependencies supplies the collaborators required by a Runner.
-type AttachHandoffFunc func(protocol.AttachTarget) (ports.ClientDialer, AttachRequest, error)
-
 type Dependencies struct {
 	Dialer   ports.ClientDialer
 	Terminal ports.Terminal
