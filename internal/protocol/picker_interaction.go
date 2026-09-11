@@ -1,5 +1,7 @@
 package protocol
 
+import "fmt"
+
 // PickerServingSourceID names the source the serving daemon owns: every
 // attachment publishes its own rows under this one source identity.
 const PickerServingSourceID = "serving"
@@ -314,51 +316,55 @@ func ValidatePickerBegin(begin PickerBegin) error {
 // ValidatePickerSnapshot enforces a nonzero interaction/source revision, a
 // bounded source identity, and unique opaque keys with display safety. Order
 // is preserved verbatim: lines are never re-sorted here.
+// ValidatePickerSnapshot enforces the envelope, the per-line shape, unique row
+// keys, and a cursor that names a published row. Every rejection wraps
+// ErrInvalidNavigation with the offending row, because a refused snapshot
+// otherwise leaves an operator with nothing but a silent, closed picker.
 func ValidatePickerSnapshot(snapshot PickerSnapshot) error {
 	if snapshot.InteractionID == 0 || snapshot.SourceRevision == 0 {
-		return ErrInvalidNavigation
+		return fmt.Errorf("%w: snapshot envelope", ErrInvalidNavigation)
 	}
 	if !validPickerSourceID(snapshot.SourceID) || !validPickerSourceStatus(snapshot.Status) {
-		return ErrInvalidNavigation
+		return fmt.Errorf("%w: snapshot source %q", ErrInvalidNavigation, snapshot.SourceID)
 	}
 	if !validPickerDisplay(snapshot.StatusDetail) {
-		return ErrInvalidNavigation
+		return fmt.Errorf("%w: snapshot status detail", ErrInvalidNavigation)
 	}
 	if len(snapshot.Lines) > PickerInteractionMaxLines {
-		return ErrInvalidNavigation
+		return fmt.Errorf("%w: %d lines", ErrInvalidNavigation, len(snapshot.Lines))
 	}
 	seen := make(map[string]struct{}, len(snapshot.Lines))
-	for _, line := range snapshot.Lines {
+	for i, line := range snapshot.Lines {
 		if !validPickerLineKind(line.Kind) || !validPickerLineStatus(line.Status) || !validPickerLineActions(line.Actions) {
-			return ErrInvalidNavigation
+			return fmt.Errorf("%w: line %d kind/status/actions", ErrInvalidNavigation, i)
 		}
 		if !validPickerDisplay(line.Label) || !validPickerDisplay(line.Detail) || !validPickerDisplay(line.StatusDetail) {
-			return ErrInvalidNavigation
+			return fmt.Errorf("%w: line %d display", ErrInvalidNavigation, i)
 		}
 		if line.Kind == PickerLineSection {
 			if line.Key != "" {
-				return ErrInvalidNavigation
+				return fmt.Errorf("%w: line %d section key", ErrInvalidNavigation, i)
 			}
 			continue
 		}
 		if !validPickerKey(line.Key) {
-			return ErrInvalidNavigation
+			return fmt.Errorf("%w: line %d key %q", ErrInvalidNavigation, i, line.Key)
 		}
 		if _, dup := seen[line.Key]; dup {
-			return ErrInvalidNavigation
+			return fmt.Errorf("%w: line %d repeats key %q", ErrInvalidNavigation, i, line.Key)
 		}
 		seen[line.Key] = struct{}{}
 	}
 	if snapshot.Cursor.Key != "" {
 		if !validPickerKey(snapshot.Cursor.Key) {
-			return ErrInvalidNavigation
+			return fmt.Errorf("%w: cursor key %q", ErrInvalidNavigation, snapshot.Cursor.Key)
 		}
 		if _, ok := seen[snapshot.Cursor.Key]; !ok {
-			return ErrInvalidNavigation
+			return fmt.Errorf("%w: cursor key %q is not a published row", ErrInvalidNavigation, snapshot.Cursor.Key)
 		}
 	}
 	if snapshot.Cursor.Index < 0 || snapshot.Cursor.Index > len(snapshot.Lines) {
-		return ErrInvalidNavigation
+		return fmt.Errorf("%w: cursor index %d of %d lines", ErrInvalidNavigation, snapshot.Cursor.Index, len(snapshot.Lines))
 	}
 	return nil
 }

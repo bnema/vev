@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"fmt"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -13,6 +15,24 @@ import (
 
 // servingPickerSourceID names the source the serving daemon itself owns.
 const servingPickerSourceID = protocol.PickerServingSourceID
+
+// pickerDuplicateRows reports the first repeated row key with a readable
+// identity for both rows. A refused snapshot otherwise says only that a key
+// repeated, which is not enough to find the two rows that collided.
+func pickerDuplicateRows(lines []protocol.PickerLine) (first, second string, duplicated bool) {
+	seen := make(map[string]string, len(lines))
+	for _, line := range lines {
+		if line.Key == "" {
+			continue
+		}
+		identity := fmt.Sprintf("%s %q (%s)", line.Label, line.Detail, line.StatusDetail)
+		if previous, ok := seen[line.Key]; ok {
+			return previous, identity, true
+		}
+		seen[line.Key] = identity
+	}
+	return "", "", false
+}
 
 // pickerClientKey derives a stable opaque key for an unchanged navigation
 // target (lifecycle, name). Presentation-only updates keep the key; a changed
@@ -89,9 +109,10 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 		MoveSourceKey: pickerMoveSourceKey(source), Title: picker.SortRecent.Title(),
 		BarrierEpoch: barrierEpoch, BarrierState: barrierState, SizeEpoch: sizeEpoch,
 	}
-	if protocol.ValidatePickerOffer(offer) != nil {
+	if err := protocol.ValidatePickerOffer(offer); err != nil {
+		d.log.Error("picker offer rejected", "err", err, "interaction", interaction, "intent", intent)
 		d.closePickerForAttachment(ac, effect, interaction)
-		return protocol.ErrInvalidNavigation
+		return err
 	}
 	if err := effect.sendControl(offer); err != nil {
 		d.closePickerForAttachment(ac, effect, interaction)
@@ -157,8 +178,13 @@ func (d *Daemon) publishPickerSourceForAttachment(ac *attachedClient, effect *at
 		InteractionID: interaction, SourceID: servingPickerSourceID, SourceRevision: revision,
 		Status: protocol.PickerSourceOK, Lines: set.lines, Cursor: set.cursor,
 	}
-	if protocol.ValidatePickerSnapshot(snapshot) != nil {
-		return protocol.ErrInvalidNavigation
+	if err := protocol.ValidatePickerSnapshot(snapshot); err != nil {
+		attrs := []any{"err", err, "interaction", interaction, "lines", len(snapshot.Lines), "revision", revision}
+		if first, second, dup := pickerDuplicateRows(snapshot.Lines); dup {
+			attrs = append(attrs, "first_row", first, "second_row", second)
+		}
+		d.log.Error("picker snapshot rejected", attrs...)
+		return err
 	}
 	return effect.sendControl(snapshot)
 }
