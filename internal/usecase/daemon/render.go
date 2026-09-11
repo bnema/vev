@@ -30,9 +30,7 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	attached := len(sess.attachments) != 0
 	sess.mu.Unlock()
 
-	// The normal attached render path needs no cross-session picker lookup.
-	// Only inactive or headless tabs can be renderable as a picker preview.
-	if (!active || !attached) && !d.tabIsPickerPreview(tb) {
+	if !active || !attached {
 		return false
 	}
 	tb.mu.Lock()
@@ -47,32 +45,6 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	for _, placement := range placements {
 		if placement.ID == p.id && !placement.Collapsed && placement.Content.Width > 0 && placement.Content.Height > 0 {
 			return true
-		}
-	}
-	return false
-}
-
-// tabIsPickerPreview reports whether any attached client currently composes
-// tb as a picker preview. It snapshots daemon ownership before taking overlay
-// locks, preserving the Daemon -> session -> tab -> pane lock order.
-func (d *Daemon) tabIsPickerPreview(tb *tab) bool {
-	if d == nil || tb == nil {
-		return false
-	}
-	d.mu.Lock()
-	sessions := sessionsSnapshot(d.sessions)
-	d.mu.Unlock()
-	for _, sess := range sessions {
-		for _, ac := range sess.snapshotAttachments() {
-			if ac == nil || ac.overlays == nil {
-				continue
-			}
-			ac.overlays.pickerMu.Lock()
-			preview := ac.overlays.pickerPreview == tb
-			ac.overlays.pickerMu.Unlock()
-			if preview {
-				return true
-			}
 		}
 	}
 	return false
@@ -416,13 +388,6 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 			d.repaintAllAttachedClients()
 		}
 	}()
-	preview := snapshotPickerPreview(nil)
-	if local && overlays.previewTab != tb {
-		preview = snapshotPickerPreview(overlays.previewTab)
-		if overlays.previewTab == nil && overlays.remotePreview.Height > 0 {
-			preview = overlays.remotePreview
-		}
-	}
 	if local {
 		d.refreshSessionFocusedTitles(sess)
 	}
@@ -464,14 +429,13 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 
 	capturedOverlays := capturedOverlayRenderState{
 		copyActive: overlays.copyActive, copySearchActive: overlays.copySearchModel != nil,
-		pickerActive: overlays.pickerActive, paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
+		paletteActive: overlays.paletteActive, promptActive: overlays.promptActive,
 		resizeActive: overlays.resizeActive, statusFeedback: statusFeedback,
 	}
 	endCapture := marks.span(ports.RuntimeCaptureStart, ports.RuntimeCaptureEnd, 0)
 	state, ok := entry.captureRenderState(ac, renderCaptureRequest{
 		bars:            bars,
 		overlays:        capturedOverlays,
-		preview:         preview,
 		floatingCfg:     floatingCfg,
 		styles:          applied.Resolved.Styles,
 		styleGeneration: applied.Generation,
@@ -486,12 +450,6 @@ func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *at
 	}
 	if ac.renderStages.capture != nil {
 		ac.renderStages.capture()
-	}
-	if local && overlays.pickerActive && overlays.previewTab == tb {
-		previewState := *state
-		previewState.overlays = capturedOverlayRenderState{}
-		previewState.reset = true
-		state.preview = pickerPreviewFromCapturedRender(previewState)
 	}
 	captureOverlayLayers(state, overlays, paletteCfg)
 	endCompose := marks.span(ports.RuntimeComposeStart, ports.RuntimeComposeEnd, 0)

@@ -238,6 +238,8 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalNavigationInventoryPublication(frame.Payload)
 	case wire.MsgNavigationInventoryFailure:
 		return wire.UnmarshalNavigationInventoryFailure(frame.Payload)
+	case wire.MsgPickerBegin:
+		return wire.UnmarshalPickerBegin(frame.Payload)
 	case wire.MsgPickerCloseClient:
 		return wire.UnmarshalPickerClose(frame.Payload)
 	case wire.MsgPickerSelection:
@@ -257,7 +259,7 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure, wire.MsgParkedRouteResponse,
 		wire.MsgUIReceipt, wire.MsgUIViewUpdate, wire.MsgNavigationInventoryResponse,
 		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection, wire.MsgRouteRetired,
-		wire.MsgPickerSnapshot, wire.MsgPickerCloseServer, wire.MsgPickerFailure:
+		wire.MsgPickerOffer, wire.MsgPickerSnapshot, wire.MsgPickerClosedServer, wire.MsgPickerResult, wire.MsgPickerFailure:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -357,18 +359,30 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return wire.Frame{}, ErrInvalidMessage
 		}
 		return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: payload}, nil
+	case protocol.PickerOffer:
+		payload := wire.MarshalPickerOffer(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerOffer, Payload: payload}, nil
 	case protocol.PickerSnapshot:
 		payload := wire.MarshalPickerSnapshot(m)
 		if payload == nil {
 			return wire.Frame{}, ErrInvalidMessage
 		}
 		return wire.Frame{Type: wire.MsgPickerSnapshot, Payload: payload}, nil
-	case protocol.PickerClose:
-		payload := wire.MarshalPickerClose(m)
+	case protocol.PickerClosed:
+		payload := wire.MarshalPickerClosed(m)
 		if payload == nil {
 			return wire.Frame{}, ErrInvalidMessage
 		}
-		return wire.Frame{Type: wire.MsgPickerCloseServer, Payload: payload}, nil
+		return wire.Frame{Type: wire.MsgPickerClosedServer, Payload: payload}, nil
+	case protocol.PickerResult:
+		payload := wire.MarshalPickerResult(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerResult, Payload: payload}, nil
 	case protocol.PickerFailure:
 		payload := wire.MarshalPickerFailure(m)
 		if payload == nil {
@@ -467,11 +481,19 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 		if m != nil {
 			return encodeServer(*m)
 		}
+	case *protocol.PickerOffer:
+		if m != nil {
+			return encodeServer(*m)
+		}
 	case *protocol.PickerSnapshot:
 		if m != nil {
 			return encodeServer(*m)
 		}
-	case *protocol.PickerClose:
+	case *protocol.PickerClosed:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerResult:
 		if m != nil {
 			return encodeServer(*m)
 		}

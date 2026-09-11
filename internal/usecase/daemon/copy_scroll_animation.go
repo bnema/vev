@@ -96,7 +96,7 @@ func (d *Daemon) advanceCopyScrollLocked(sess *session, ac *attachedClient) (boo
 			// Check presentation ownership before entering the copy lock. A
 			// callback never locks another overlay or a session under copyMu.
 			visible := ac.currentSession() == sess && !rt.promptActive() && !rt.paletteActive() &&
-				!rt.pickerActive() && !rt.noticesActive() && !rt.resizeModeActive()
+				!rt.pickerClientActive() && !rt.noticesActive() && !rt.resizeModeActive()
 			rt.copyMu.Lock()
 			if rt.copyScroll.timer.timer != timer {
 				rt.copyMu.Unlock()

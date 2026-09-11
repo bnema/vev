@@ -83,7 +83,7 @@ func (d *Daemon) handleMouseMutation(ac *attachedClient, ev mouse.Event) {
 	frameEvent := ev
 	ac.initOverlays()
 	rt := ac.overlays
-	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.resizeModeActive() {
+	if rt.promptActive() || rt.paletteActive() || rt.pickerClientActive() || rt.noticesActive() || rt.resizeModeActive() {
 		return
 	}
 	sess := ac.currentSession()

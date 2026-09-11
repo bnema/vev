@@ -65,7 +65,6 @@ type capturedRenderState struct {
 	// that cannot emit graphics. Capture keeps the scene out of the output but
 	// lets the daemon issue one bounded user warning after pane locks release.
 	suppressedGraphics bool
-	preview            picker.Preview
 	cursor             capturedCursorInputs
 	tabGeneration      uint64
 	floatingGeneration uint64
@@ -125,15 +124,15 @@ type capturedFloatingRenderState struct {
 }
 
 type capturedOverlayRenderState struct {
-	copyActive, copySearchActive, pickerActive, paletteActive, promptActive bool
-	noticesOverlayActive, resizeActive                                      bool
-	copyMode                                                                *scopy.Mode
-	copyPaneID                                                              layout.PaneID
-	statusFeedback                                                          string
-	paletteGuidance                                                         string
-	copySearch, picker, palette, prompt, noticesOverlay                     capturedModal
-	notices                                                                 []domain.Notification
-	noticeOverflow                                                          int
+	copyActive, copySearchActive, paletteActive, promptActive bool
+	noticesOverlayActive, resizeActive                        bool
+	copyMode                                                 *scopy.Mode
+	copyPaneID                                               layout.PaneID
+	statusFeedback                                           string
+	paletteGuidance                                          string
+	copySearch, palette, prompt, noticesOverlay              capturedModal
+	notices                                                  []domain.Notification
+	noticeOverflow                                           int
 }
 
 type capturedModal struct {
@@ -145,7 +144,7 @@ type capturedModal struct {
 }
 
 func (o capturedOverlayRenderState) active() bool {
-	return o.copyActive || o.copySearchActive || o.pickerActive || o.paletteActive || o.promptActive || o.noticesOverlayActive
+	return o.copyActive || o.copySearchActive || o.paletteActive || o.promptActive || o.noticesOverlayActive
 }
 
 type capturedCursorInputs struct {
@@ -269,7 +268,6 @@ func uncertainDamage(damage []renderer.Damage, width, height int) bool {
 type renderCaptureRequest struct {
 	bars            barState
 	overlays        capturedOverlayRenderState
-	preview         picker.Preview
 	floatingCfg     domain.FloatingConfig
 	styles          themeui.Styles
 	styleGeneration uint64
@@ -289,7 +287,6 @@ func captureLocalRenderState(
 ) (*capturedRenderState, bool) {
 	bars := request.bars
 	overlays := request.overlays
-	preview := request.preview
 	floatingCfg := request.floatingCfg
 	reset := request.reset
 	lease := request.lease
@@ -335,14 +332,9 @@ func captureLocalRenderState(
 		scratch.ranked = copyRankedRecentInto(scratch.ranked, bars.rankedRecent)
 		bars.rankedRecent = scratch.ranked
 	}
-	if len(preview.Rows) > 0 {
-		preview = clonePickerPreview(preview)
-	} else {
-		preview = picker.Preview{Width: preview.Width, Height: preview.Height}
-	}
-
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
+
 	area := domain.Rect{Width: tb.size.Cols, Height: tb.size.Rows}
 	var focus layout.PaneID
 	var focusedPaneID domain.PaneStableID
@@ -392,7 +384,7 @@ func captureLocalRenderState(
 		uiFence:       request.uiFence,
 		focusedPaneID: focusedPaneID,
 		styles:        request.styles, styleGeneration: request.styleGeneration,
-		overlays: overlays, preview: preview,
+		overlays: overlays,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
 		receipts:           scratch.receipts[:0],
@@ -486,16 +478,8 @@ func copyRankedRecentInto(dst, src []rankedRecent) []rankedRecent {
 
 func captureCursorInputsLocked(p *pane, content domain.Rect, overlays capturedOverlayRenderState) capturedCursorInputs {
 	style, hasStyle := p.screen.CursorStyle()
-	hidden := overlays.copyActive || overlays.copySearchActive || overlays.pickerActive || overlays.paletteActive || overlays.promptActive || overlays.noticesOverlayActive
+	hidden := overlays.copyActive || overlays.copySearchActive || overlays.paletteActive || overlays.promptActive || overlays.noticesOverlayActive
 	return capturedCursorInputs{row: p.screen.CursorRow(), col: p.screen.CursorCol(), style: style, hasStyle: hasStyle, visible: p.screen.CursorVisible(), renderable: content.Width > 0 && content.Height > 0, hiddenByOverlay: hidden, content: content}
-}
-
-func clonePickerPreview(in picker.Preview) picker.Preview {
-	out := picker.Preview{Width: in.Width, Height: in.Height, Rows: make([][]renderer.Cell, len(in.Rows))}
-	for i := range in.Rows {
-		out.Rows[i] = append([]renderer.Cell(nil), in.Rows[i]...)
-	}
-	return out
 }
 
 // appendStackPaneIDs returns exactly the panes whose solved placement can own a

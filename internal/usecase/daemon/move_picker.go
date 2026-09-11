@@ -3,8 +3,26 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
+
+// moveSourceLocator captures the exact source of one move at command time. The
+// presenting client never supplies it: only the daemon resolves it, and only
+// for the interaction that captured it.
+type moveSessionLocator struct {
+	ID          domain.SessionID
+	Incarnation domain.IncarnationID
+	Name        string
+}
+
+type moveSourceLocator struct {
+	Session              moveSessionLocator
+	TabID                domain.TabStableID
+	PaneID               domain.PaneStableID
+	Attachment           *attachedClient
+	AttachmentCapability attachmentCapability
+}
 
 func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
 	if d == nil || source.Session.ID == "" || source.TabID == "" {
@@ -37,62 +55,11 @@ func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
 	return nil
 }
 
-type pickerIntent uint8
-
-const (
-	pickerNavigate pickerIntent = iota
-	pickerMovePane
-	pickerMoveTab
-)
-
-type moveSessionLocator struct {
-	ID          domain.SessionID
-	Incarnation domain.IncarnationID
-	Name        string
-}
-
-type moveSourceLocator struct {
-	Session              moveSessionLocator
-	TabID                domain.TabStableID
-	PaneID               domain.PaneStableID
-	Attachment           *attachedClient
-	AttachmentCapability attachmentCapability
-}
-
-// enterPickerForIntent returns errNoMoveDestination only for move intents.
-func (d *Daemon) enterPickerForIntent(sess *session, ac *attachedClient, intent pickerIntent, source moveSourceLocator) error {
-	if intent != pickerNavigate && !sess.capabilities().yieldsMoves() {
-		return errSessionCannotYieldMoves
-	}
-	if source.Attachment != nil && source.AttachmentCapability.ac == nil {
-		source.AttachmentCapability = sess.captureAttachmentCapability(source.Attachment, source.Attachment.transport())
-	}
-	model := d.newPickerModel(sess, ac, intent, source, picker.SourceFilter{})
-	if intent != pickerNavigate {
-		if _, ok := model.Selected(); !ok {
-			return errNoMoveDestination
-		}
-	}
-
-	d.publishPicker(sess, ac, model, intent, source)
-	return nil
-}
-
-func pickerSelectionMode(intent pickerIntent) picker.SelectionMode {
-	switch intent {
-	case pickerMovePane:
-		return picker.SelectMovePaneTab
-	case pickerMoveTab:
-		return picker.SelectMoveTabSession
-	default:
-		return picker.SelectNavigationTab
-	}
-}
-
-func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourceLocator, target picker.Target) error {
+// commitMovePickerSelection performs the move the owning source authorised.
+func (d *Daemon) commitMovePickerSelection(intent protocol.PickerIntent, source moveSourceLocator, target picker.Target) error {
 	destination := moveSessionLocator{ID: target.Session, Incarnation: target.Incarnation, Name: target.Name}
 	switch intent {
-	case pickerMovePane:
+	case protocol.PickerIntentMovePane:
 		if target.TabID == "" {
 			return errMovePaneInvalid
 		}
@@ -105,7 +72,7 @@ func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourc
 			Destination:          destination,
 			DestinationTabID:     target.TabID,
 		})
-	case pickerMoveTab:
+	case protocol.PickerIntentMoveTab:
 		return d.moveTab(moveTabRequest{
 			Attachment:           source.Attachment,
 			AttachmentCapability: source.AttachmentCapability,
@@ -118,7 +85,7 @@ func (d *Daemon) commitMovePickerSelection(intent pickerIntent, source moveSourc
 	}
 }
 
-func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*session, *tab) {
+func (d *Daemon) previewTarget(target picker.Target, intent protocol.PickerIntent) (*session, *tab) {
 	d.mu.Lock()
 	sess := d.sessions[target.Session]
 	if sess == nil {
@@ -131,7 +98,7 @@ func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*sess
 	if sess.incarnation != target.Incarnation || !targetMatchesLifecycle(target, sess.name, sess.createdAt, sess.incarnation) {
 		return nil, nil
 	}
-	if intent == pickerMoveTab {
+	if intent == protocol.PickerIntentMoveTab {
 		if len(sess.tabs) == 0 {
 			return nil, nil
 		}
@@ -149,73 +116,4 @@ func (d *Daemon) previewTarget(target picker.Target, intent pickerIntent) (*sess
 		return nil, nil
 	}
 	return sess, sess.tabs[target.TabIndex]
-}
-
-type pickerRefreshOptions struct {
-	// preserveSelection keeps the currently selected target selected across the
-	// rebuild even for navigate intent (used by the sort toggle).
-	preserveSelection bool
-	// nearestRow, when >= 0, selects the row occupying this index after the
-	// rebuild (used after deletes). -1 disables it.
-	nearestRow int
-}
-
-func (d *Daemon) refreshPickerOpts(ac *attachedClient, opts pickerRefreshOptions) {
-	sess := ac.currentSession()
-	if sess == nil {
-		return
-	}
-	rt := ac.overlays
-	rt.pickerMu.Lock()
-	if rt.picker == nil {
-		rt.pickerMu.Unlock()
-		return
-	}
-	intent, source := rt.pickerIntent, rt.pickerSource
-	observedModel, observedGeneration := rt.picker, rt.pickerGeneration
-	rt.pickerRefreshSequence++
-	refreshSequence := rt.pickerRefreshSequence
-	current := picker.SourceFilter{}
-	if intent != pickerNavigate || opts.preserveSelection {
-		cursor, _ := rt.picker.Cursor()
-		current = picker.SourceFilter{
-			Session: cursor.Session, Incarnation: cursor.Incarnation, TabID: cursor.TabID, RemoteKey: cursor.RemoteKey,
-		}
-	}
-	rt.pickerMu.Unlock()
-	model := d.newPickerModel(sess, ac, intent, source, current)
-	if rt.afterPickerRefreshBuild != nil {
-		rt.afterPickerRefreshBuild(model)
-	}
-	if intent != pickerNavigate {
-		if _, ok := model.Selected(); !ok {
-			d.closePickerIfCurrentRefresh(ac, observedModel, observedGeneration, refreshSequence)
-			return
-		}
-	}
-	rt.pickerMu.Lock()
-	updated := rt.picker == observedModel && rt.pickerGeneration == observedGeneration && rt.pickerRefreshSequence == refreshSequence && rt.pickerIntent == intent && rt.pickerSource == source
-	var before, after picker.Target
-	var haveBefore, haveAfter bool
-	if updated {
-		before, haveBefore = rt.picker.Selected()
-		rt.picker.ReplaceFrom(model)
-		if intent == pickerNavigate && opts.nearestRow >= 0 {
-			rt.picker.SelectNearestRow(opts.nearestRow)
-		}
-		rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
-		after, haveAfter = rt.picker.Selected()
-	}
-	rt.pickerMu.Unlock()
-	if !updated {
-		return
-	}
-	// A directory publication rebuilds rows around the same selection:
-	// keep an in-flight remote preview when the exact selected route did
-	// not change instead of cancelling it on every revision. Availability
-	// reasons render around the route and are ignored here.
-	if haveBefore && haveAfter && pickerRouteTargetsEqual(before, after) {
-		return
-	}
-	d.registerPreviewForSelection(ac)
 }

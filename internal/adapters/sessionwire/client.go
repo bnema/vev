@@ -119,10 +119,14 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalNavigationInventoryDemand(frame.Payload)
 	case wire.MsgNavigationInventorySelection:
 		return wire.UnmarshalNavigationInventorySelection(frame.Payload)
+	case wire.MsgPickerOffer:
+		return wire.UnmarshalPickerOffer(frame.Payload)
 	case wire.MsgPickerSnapshot:
 		return wire.UnmarshalPickerSnapshot(frame.Payload)
-	case wire.MsgPickerCloseServer:
-		return wire.UnmarshalPickerClose(frame.Payload)
+	case wire.MsgPickerClosedServer:
+		return wire.UnmarshalPickerClosed(frame.Payload)
+	case wire.MsgPickerResult:
+		return wire.UnmarshalPickerResult(frame.Payload)
 	case wire.MsgPickerFailure:
 		return wire.UnmarshalPickerFailure(frame.Payload)
 	case wire.MsgUIReceipt:
@@ -136,7 +140,7 @@ func decodeServer(frame wire.Frame) (protocol.ServerMessage, error) {
 		wire.MsgSamePeerSwitchRequest, wire.MsgParkedRouteRequest,
 		wire.MsgRecentRouteSnapshot, wire.MsgSessionCreationFailure, wire.MsgUIFence,
 		wire.MsgNavigationInventoryRequest, wire.MsgNavigationInventoryPublication, wire.MsgNavigationInventoryFailure,
-		wire.MsgPickerCloseClient, wire.MsgPickerSelection:
+		wire.MsgPickerBegin, wire.MsgPickerCloseClient, wire.MsgPickerSelection:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -220,6 +224,12 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 			return wire.Frame{}, ErrInvalidMessage
 		}
 		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: payload}, nil
+	case protocol.PickerBegin:
+		payload := wire.MarshalPickerBegin(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerBegin, Payload: payload}, nil
 	case protocol.PickerClose:
 		payload := wire.MarshalPickerClose(m)
 		if payload == nil {
@@ -322,6 +332,10 @@ func encodeClient(message protocol.ClientMessage) (wire.Frame, error) {
 			return encodeClient(*m)
 		}
 	case *protocol.NavigationInventoryFailure:
+		if m != nil {
+			return encodeClient(*m)
+		}
+	case *protocol.PickerBegin:
 		if m != nil {
 			return encodeClient(*m)
 		}

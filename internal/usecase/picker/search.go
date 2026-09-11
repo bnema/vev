@@ -143,20 +143,22 @@ func (m *Model) MatchCount() int {
 }
 
 // ReplaceFrom applies a fresh canonical row snapshot while retaining the
-// attachment-local search editor and exact cursor when that target still
-// exists. Callers serialize this mutation with their picker ownership lock.
+// attachment-local search editor and exact cursor when that key still exists.
+// Callers serialize this mutation with their picker ownership lock.
 func (m *Model) ReplaceFrom(next *Model) {
 	if m == nil || next == nil {
 		return
 	}
-	cursor, hadCursor := m.Cursor()
+	key, hadKey := m.cursorKey()
 	searchActive, query := m.searchActive, m.query.Value()
-	m.mode = next.mode
+	m.intent = next.intent
+	m.sort = next.sort
+	m.lines = append(m.lines[:0], next.lines...)
 	m.rows = append(m.rows[:0], next.rows...)
 	m.selected = next.selected
-	if hadCursor {
+	if hadKey {
 		for idx, candidate := range m.rows {
-			if candidate.focusable && sameTarget(candidate.target(), cursor) {
+			if candidate.focusable() && candidate.key() == key {
 				m.selected = idx
 				break
 			}
@@ -173,30 +175,6 @@ func (m *Model) ReplaceFrom(next *Model) {
 	if query != "" && !m.rowMatches(m.selected) && best >= 0 {
 		m.selected = best
 	}
-}
-
-func sameTarget(left, right Target) bool {
-	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name || left.RemoteHost != right.RemoteHost || left.TabID != right.TabID || left.Stopped != right.Stopped || !sameOptionalInt64(left.ExpectedCreatedAt, right.ExpectedCreatedAt) {
-		return false
-	}
-	if left.RemoteKey == nil || right.RemoteKey == nil {
-		if left.RemoteKey != nil || right.RemoteKey != nil {
-			return false
-		}
-	} else if *left.RemoteKey != *right.RemoteKey {
-		return false
-	}
-	if left.RemoteTarget == nil || right.RemoteTarget == nil {
-		return left.RemoteTarget == nil && right.RemoteTarget == nil
-	}
-	return *left.RemoteTarget == *right.RemoteTarget
-}
-
-func sameOptionalInt64(left, right *int64) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
 }
 
 // SelectionRejectedBySearch reports that the retained cursor is only a hidden
@@ -273,20 +251,8 @@ func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
 		kind matchField
 		text string
 	}{
-		{matchName, row.foldedName},
+		{matchName, row.foldedLabel},
 		{matchDetail, row.foldedDetail},
-	}
-	if row.kind == rowTab {
-		fields = append(fields, struct {
-			kind matchField
-			text string
-		}{matchContext, row.foldedSession})
-	}
-	if row.foldedHost != "" {
-		fields = append(fields, struct {
-			kind matchField
-			text string
-		}{matchContext, row.foldedHost})
 	}
 
 	var result searchMatch
