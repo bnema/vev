@@ -32,6 +32,11 @@ type overlayRuntime struct {
 	pickerIntent      protocol.PickerIntent
 	pickerMoveSource  moveSourceLocator
 	pickerRequestID   uint64
+	// pickerPreview* track the row the client asked to preview. The generation
+	// supersedes an in-flight capture and names the render subscription, so a
+	// delayed preview can never replace the row the user is displaying.
+	pickerPreviewGeneration uint64
+	pickerPreviewKey        string
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model

@@ -79,6 +79,8 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 	ac.overlays.pickerRequestID = requestID
 	ac.overlays.pickerRevisions = make(map[string]uint64)
 	ac.overlays.pickerKeys = nil
+	ac.overlays.pickerPreviewGeneration = 0
+	ac.overlays.pickerPreviewKey = ""
 	ac.overlays.pickerMu.Unlock()
 
 	barrierEpoch, barrierState, sizeEpoch := pickerClientBarrier(ac)
@@ -212,10 +214,24 @@ func (d *Daemon) closePickerForAttachment(ac *attachedClient, effect *attachment
 		ac.overlays.pickerMu.Unlock()
 		return false
 	}
+	previewGeneration := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerOpen = false
 	ac.overlays.pickerKeys = nil
 	ac.overlays.pickerRevisions = nil
+	ac.overlays.pickerPreviewGeneration = 0
+	ac.overlays.pickerPreviewKey = ""
 	ac.overlays.pickerMu.Unlock()
+	// A retired interaction stops observing: its row is no longer displayed,
+	// and a later preview must not resurrect it.
+	if previewGeneration != 0 {
+		sess := ac.currentAttachmentSession()
+		if sess == nil && effect != nil {
+			sess = effect.sess
+		}
+		if coordinator := attachmentRenderCoordinator(sess); coordinator != nil {
+			coordinator.teardownPreviewFor(ac, previewGeneration)
+		}
+	}
 	if effect == nil {
 		return true
 	}

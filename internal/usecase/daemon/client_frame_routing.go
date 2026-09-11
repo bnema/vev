@@ -226,6 +226,8 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 	case protocol.PickerSelection:
 		effect.uiActionID = message.CauseActionID
 		d.resolvePickerSelection(effect, message)
+	case protocol.PickerPreviewRequest:
+		d.handlePickerPreviewForAttachment(effect, message)
 	case protocol.NavigationInventoryFailure:
 		overlays := effect.ac.overlays
 		if overlays == nil {

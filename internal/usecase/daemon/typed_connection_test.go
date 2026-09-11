@@ -162,6 +162,8 @@ func testDecodeClientFrame(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalNavigationInventoryPublication(frame.Payload)
 	case wire.MsgNavigationInventoryFailure:
 		return wire.UnmarshalNavigationInventoryFailure(frame.Payload)
+	case wire.MsgPickerPreviewRequest:
+		return wire.UnmarshalPickerPreviewRequest(frame.Payload)
 	case wire.MsgRecentRouteSnapshot:
 		return wire.UnmarshalRecentRouteSnapshot(frame.Payload)
 	case wire.MsgRouteNavigationFailure:
@@ -367,6 +369,12 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 			return wire.Frame{}, errors.New("test server connection: invalid picker failure")
 		}
 		return wire.Frame{Type: wire.MsgPickerFailure, Payload: payload}, nil
+	case protocol.PickerPreview:
+		payload := wire.MarshalPickerPreview(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid picker preview")
+		}
+		return wire.Frame{Type: wire.MsgPickerPreview, Payload: payload}, nil
 	default:
 		return wire.Frame{}, errors.New("test server connection: unsupported server message")
 	}

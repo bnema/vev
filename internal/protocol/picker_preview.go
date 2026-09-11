@@ -93,15 +93,21 @@ func ValidatePickerPreview(preview PickerPreview) error {
 		}
 		return nil
 	}
-	if preview.Width == 0 || preview.Height == 0 ||
-		int(preview.Width) > PickerPreviewMaxWidth || int(preview.Height) > PickerPreviewMaxHeight {
+	return ValidatePickerPreviewViewport(preview.Width, preview.Height, preview.Cells)
+}
+
+// ValidatePickerPreviewViewport checks only the viewport shape, so a capture can
+// be validated before its interaction identity is stamped onto it.
+func ValidatePickerPreviewViewport(width, height uint16, cells []renderer.Cell) error {
+	if width == 0 || height == 0 ||
+		int(width) > PickerPreviewMaxWidth || int(height) > PickerPreviewMaxHeight {
 		return ErrInvalidPickerPreview
 	}
-	want := int(preview.Width) * int(preview.Height)
-	if want > PickerPreviewMaxCells || len(preview.Cells) != want {
+	want := int(width) * int(height)
+	if want > PickerPreviewMaxCells || len(cells) != want {
 		return ErrInvalidPickerPreview
 	}
-	if !previewCellRunValid(int(preview.Width), preview.Cells) {
+	if !previewCellRunValid(int(width), cells) {
 		return ErrInvalidPickerPreview
 	}
 	return nil
