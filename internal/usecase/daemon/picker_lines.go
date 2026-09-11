@@ -134,8 +134,11 @@ func pickerLineSetFor(views []pickerSessionView, intent protocol.PickerIntent, s
 		}
 	}
 	if set.cursor.Key == "" && len(set.lines) > 0 {
+		// Last resort: the first row the source authorised as a cursor
+		// destination. A row kept for inspection or skipped by the source is
+		// never hinted.
 		for i, line := range set.lines {
-			if line.Kind == protocol.PickerLineSection {
+			if !line.Focusable {
 				continue
 			}
 			if target, ok := set.keys[line.Key]; ok && !target.Stopped {
@@ -196,7 +199,7 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 	}
 	headerLine := pickerLine{
 		line: protocol.PickerLine{
-			Key: pickerRowKey(view, common.Name), Kind: protocol.PickerLineSession,
+			Key: pickerRowKey(view, common.Name), Kind: pickerLineKindForView(view),
 			Label: view.Name, Detail: pickerStatusDetailFor(view, stopped), Stopped: stopped,
 			Status: pickerStatusFor(view, stopped), StatusDetail: view.RemoteDetail, Ephemeral: pickerEphemeral(view),
 		},
@@ -212,6 +215,7 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 	header := headerLine
 	headerSelectable, headerFocusable, headerDim := pickerHeaderEligibility(view, intent, stopped)
 	header.line.Actions = pickerActionsFor(view, intent, headerSelectable)
+	header.line.Focusable = headerFocusable
 	header.line.Dim = headerDim
 	if headerFocusable && pickerSelectionMatches(header, current, intent) {
 		header.cursor = true
@@ -244,6 +248,7 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 		}
 		selectable, focusable, dim := pickerTabEligibility(view, intent, tab, i)
 		tabLine.line.Actions = pickerActionsFor(view, intent, selectable)
+		tabLine.line.Focusable = focusable
 		tabLine.line.Dim = dim
 		if !focusable {
 			tabLine.line.Actions = 0
@@ -365,6 +370,22 @@ func pickerActionsFor(view pickerSessionView, intent protocol.PickerIntent, sele
 
 func pickerViewHasTarget(view pickerSessionView) bool {
 	return view.ID != "" && view.Name != ""
+}
+
+// pickerLineKindForView names one published header row's shape. A remote host
+// status row carries no session key and no structured route: it is published
+// for inspection, so it is a host row rather than a session row.
+func pickerLineKindForView(view pickerSessionView) protocol.PickerLineKind {
+	if pickerViewHostStatus(view) {
+		return protocol.PickerLineHost
+	}
+	return protocol.PickerLineSession
+}
+
+// pickerViewHostStatus reports a catalogue host line: an endpoint with no
+// session identity behind it.
+func pickerViewHostStatus(view pickerSessionView) bool {
+	return view.RemoteHost != "" && view.RemoteKey == nil && view.RemoteTarget == nil
 }
 
 func pickerViewIsRemote(view pickerSessionView) bool {

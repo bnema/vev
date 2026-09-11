@@ -20,7 +20,7 @@ func pickerLeaseTestSnapshot(interaction, revision uint64) protocol.PickerSnapsh
 		InteractionID: interaction, SourceID: "serving", SourceRevision: revision,
 		Status: protocol.PickerSourceOK,
 		Lines: []protocol.PickerLine{
-			{Key: "aa/first", Kind: protocol.PickerLineSession, Label: "first", Actions: protocol.PickerCanNavigate},
+			{Key: "aa/first", Kind: protocol.PickerLineSession, Label: "first", Focusable: true, Actions: protocol.PickerCanNavigate},
 		},
 		Cursor: protocol.PickerCursor{Key: "aa/first", Index: 0},
 	}

@@ -146,6 +146,69 @@ func TestPickerOfferAndSnapshotPublishResolvableLines(t *testing.T) {
 	require.NotZero(t, selectable)
 }
 
+func TestPickerSnapshotPublishesFocusEligibility(t *testing.T) {
+	d, _, ac, sends, effect := pickerClientTestUnit(t)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	headers, tabs := 0, 0
+	for _, line := range snapshot.Lines {
+		switch line.Kind {
+		case protocol.PickerLineSection:
+			require.False(t, line.Focusable, "section %q is not a cursor destination", line.Label)
+			require.Zero(t, line.Actions, "section %q admits no action", line.Label)
+		case protocol.PickerLineSession:
+			headers++
+			// A live session header names a group of tabs: navigation belongs
+			// to its tab rows, so the header is rendered and skipped.
+			require.False(t, line.Focusable, "session header %q is not a destination", line.Label)
+			require.Zero(t, line.Actions)
+		case protocol.PickerLineTab:
+			tabs++
+			require.True(t, line.Focusable, "tab %q must be reachable", line.Label)
+			require.NotZero(t, line.Actions, "a reachable tab admits the action that made it reachable")
+		}
+	}
+	require.NotZero(t, headers)
+	require.NotZero(t, tabs)
+
+	// The published cursor hint never names a row the client may not rest on.
+	require.NotEmpty(t, snapshot.Cursor.Key)
+	for _, line := range snapshot.Lines {
+		if line.Key == snapshot.Cursor.Key {
+			require.True(t, line.Focusable)
+		}
+	}
+}
+
+func TestRemotePickerHostRowStaysReachableWithoutCommitting(t *testing.T) {
+	d := newRemotePickerDaemon()
+	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{
+		Endpoint: "arch", Availability: domain.RemoteAvailabilityUnreachable,
+		InventoryKnown: true, LastSuccess: time.Unix(10, 0),
+	})
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	_ = awaitPickerOffer(t, sends)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	hostRows := 0
+	for _, line := range snapshot.Lines {
+		if line.Kind != protocol.PickerLineHost {
+			continue
+		}
+		hostRows++
+		require.True(t, line.Focusable, "a host status row stays reachable for inspection")
+		require.Zero(t, line.Actions, "a host status row never commits")
+	}
+	require.NotZero(t, hostRows, "an unreachable host publishes a status row")
+}
+
 func TestPickerOpenInstallsNoPresentationModel(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 

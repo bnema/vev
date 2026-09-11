@@ -84,7 +84,7 @@ func TestPickerReplaceAbortsSupersededLease(t *testing.T) {
 	superseding := protocol.PickerSnapshot{
 		InteractionID: first.InteractionID + 1, SourceID: "serving", SourceRevision: 1, Status: protocol.PickerSourceOK,
 		Lines: []protocol.PickerLine{
-			{Key: "cc/third", Kind: protocol.PickerLineSession, Label: "third", Actions: protocol.PickerCanNavigate},
+			{Key: "cc/third", Kind: protocol.PickerLineSession, Label: "third", Focusable: true, Actions: protocol.PickerCanNavigate},
 		},
 		Cursor: protocol.PickerCursor{Key: "cc/third", Index: 0},
 	}

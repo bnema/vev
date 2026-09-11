@@ -22,8 +22,8 @@ func pickerWireSnapshot() protocol.PickerSnapshot {
 		InteractionID: 7, SourceID: "serving", SourceRevision: 2, Status: protocol.PickerSourceOK,
 		Lines: []protocol.PickerLine{
 			{Kind: protocol.PickerLineSection, Label: "LOCAL", Dim: true},
-			{Key: "ab12/work", Kind: protocol.PickerLineSession, Label: "work", Actions: protocol.PickerCanNavigate},
-			{Key: "ab12/work#tab-1", Kind: protocol.PickerLineTab, Label: "editor", Detail: " (vim)", Attention: true, Actions: protocol.PickerCanMove},
+			{Key: "ab12/work", Kind: protocol.PickerLineSession, Label: "work", Focusable: true, Actions: protocol.PickerCanNavigate},
+			{Key: "ab12/work#tab-1", Kind: protocol.PickerLineTab, Label: "editor", Detail: " (vim)", Attention: true, Focusable: true, Actions: protocol.PickerCanMove},
 		},
 		Cursor: protocol.PickerCursor{Key: "ab12/work", Index: 1},
 	}

@@ -4,12 +4,13 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// pickerLineFlags packs the three independent line booleans into one byte so
-// the wire layout stays compact and explicit.
+// pickerLineFlags packs the independent line booleans into one byte so the
+// wire layout stays compact and explicit.
 const (
 	pickerLineAttention uint8 = 1 << iota
 	pickerLineStopped
 	pickerLineDim
+	pickerLineFocusable
 )
 
 // marshalPickerLines encodes structured lines, enforcing the semantic
@@ -35,6 +36,9 @@ func marshalPickerLines(w *payloadWriter, lines []protocol.PickerLine) bool {
 		}
 		if line.Dim {
 			flags |= pickerLineDim
+		}
+		if line.Focusable {
+			flags |= pickerLineFocusable
 		}
 		w.putUint8(flags)
 		w.putUint8(uint8(line.Actions))
@@ -83,6 +87,7 @@ func unmarshalPickerLines(r *payloadReader) ([]protocol.PickerLine, error) {
 		line.Attention = flags&pickerLineAttention != 0
 		line.Stopped = flags&pickerLineStopped != 0
 		line.Dim = flags&pickerLineDim != 0
+		line.Focusable = flags&pickerLineFocusable != 0
 		actions, err := r.getUint8()
 		if err != nil {
 			return nil, err

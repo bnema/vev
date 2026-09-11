@@ -245,8 +245,8 @@ func pickerSnapshot() protocol.PickerSnapshot {
 	return protocol.PickerSnapshot{
 		InteractionID: 7, SourceID: "serving", SourceRevision: 1, Status: protocol.PickerSourceOK,
 		Lines: []protocol.PickerLine{
-			{Key: "aa/first", Kind: protocol.PickerLineSession, Label: "first", Actions: protocol.PickerCanNavigate},
-			{Key: "bb/second", Kind: protocol.PickerLineSession, Label: "second", Actions: protocol.PickerCanNavigate},
+			{Key: "aa/first", Kind: protocol.PickerLineSession, Label: "first", Focusable: true, Actions: protocol.PickerCanNavigate},
+			{Key: "bb/second", Kind: protocol.PickerLineSession, Label: "second", Focusable: true, Actions: protocol.PickerCanNavigate},
 		},
 		Cursor: protocol.PickerCursor{Key: "aa/first", Index: 0},
 	}

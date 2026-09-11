@@ -14,9 +14,9 @@ func pickerSnapshotFixture() protocol.PickerSnapshot {
 	return protocol.PickerSnapshot{
 		InteractionID: 11, SourceID: "serving", SourceRevision: 3, Status: protocol.PickerSourceOK,
 		Lines: []protocol.PickerLine{
-			{Key: "aa/work", Kind: protocol.PickerLineSession, Label: "work", Detail: "2 tabs", Actions: protocol.PickerCanNavigate | protocol.PickerCanKill},
-			{Key: "bb/perso", Kind: protocol.PickerLineSession, Label: "perso", Detail: "stopped", Stopped: true, Actions: protocol.PickerCanNavigate},
-			{Key: "cc/remote", Kind: protocol.PickerLineSession, Label: "remote@host", Actions: protocol.PickerCanNavigate},
+			{Key: "aa/work", Kind: protocol.PickerLineSession, Label: "work", Detail: "2 tabs", Focusable: true, Actions: protocol.PickerCanNavigate | protocol.PickerCanKill},
+			{Key: "bb/perso", Kind: protocol.PickerLineSession, Label: "perso", Detail: "stopped", Stopped: true, Focusable: true, Actions: protocol.PickerCanNavigate},
+			{Key: "cc/remote", Kind: protocol.PickerLineSession, Label: "remote@host", Focusable: true, Actions: protocol.PickerCanNavigate},
 		},
 		Cursor: protocol.PickerCursor{Key: "aa/work", Index: 0},
 	}

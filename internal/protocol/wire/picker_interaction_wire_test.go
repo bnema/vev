@@ -23,17 +23,17 @@ func pickerSnapshotForTest() protocol.PickerSnapshot {
 			{Kind: protocol.PickerLineSection, Label: "LOCAL", Dim: true},
 			{
 				Key: "ab12/work", Kind: protocol.PickerLineSession, Label: "work", Detail: "stopped",
-				Status: protocol.PickerLineStatusStopped, Stopped: true,
+				Status: protocol.PickerLineStatusStopped, Stopped: true, Focusable: true,
 				Actions: protocol.PickerCanNavigate | protocol.PickerCanKill,
 			},
 			{
 				Key: "ab12/work#tab-1", Kind: protocol.PickerLineTab, Label: "editor",
-				Detail: " (vim)", Attention: true, StatusDetail: "stale catalog",
+				Detail: " (vim)", Attention: true, StatusDetail: "stale catalog", Focusable: true,
 				Actions: protocol.PickerCanNavigate, Ephemeral: true,
 			},
 			{
 				Key: "cd34/host", Kind: protocol.PickerLineHost, Label: "example.test",
-				Dim: true, Status: protocol.PickerLineStatusDown, StatusDetail: "unreachable",
+				Dim: true, Focusable: true, Status: protocol.PickerLineStatusDown, StatusDetail: "unreachable",
 			},
 		},
 		Cursor: protocol.PickerCursor{Key: "ab12/work#tab-1", Index: 2},
@@ -162,6 +162,31 @@ func TestPickerCloseSelectionResultFailureRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPickerLineFocusFlagLayout(t *testing.T) {
+	line := protocol.PickerLine{
+		Key: "aa/host", Kind: protocol.PickerLineHost, Label: "host",
+		Status: protocol.PickerLineStatusDown, Focusable: true, Attention: true,
+	}
+	w := &payloadWriter{}
+	if !marshalPickerLines(w, []protocol.PickerLine{line}) {
+		t.Fatal("marshalPickerLines rejected a focusable inspection row")
+	}
+	// The flags byte is the third from the end of a single-line payload:
+	// flags, actions, ephemeral. Attention is bit 0 and focus bit 3.
+	flags := w.b[len(w.b)-3]
+	if flags != pickerLineAttention|pickerLineFocusable {
+		t.Fatalf("line flags = %#x, want attention|focusable", flags)
+	}
+	r := payloadReader{b: w.b}
+	lines, err := unmarshalPickerLines(&r)
+	if err != nil {
+		t.Fatalf("unmarshalPickerLines() error = %v", err)
+	}
+	if len(lines) != 1 || lines[0] != line {
+		t.Fatalf("unmarshalPickerLines() = %#v, want %#v", lines, line)
+	}
+}
+
 func TestPickerSnapshotBounds(t *testing.T) {
 	snapshot := pickerSnapshotForTest()
 	oversize := snapshot
@@ -184,6 +209,16 @@ func TestPickerSnapshotBounds(t *testing.T) {
 	keyedSection.Lines = []protocol.PickerLine{{Kind: protocol.PickerLineSection, Label: "LOCAL", Key: "nope"}}
 	if MarshalPickerSnapshot(keyedSection) != nil {
 		t.Fatal("MarshalPickerSnapshot accepted a keyed section line")
+	}
+	focusableSection := snapshot
+	focusableSection.Lines = []protocol.PickerLine{{Kind: protocol.PickerLineSection, Label: "LOCAL", Focusable: true}}
+	if MarshalPickerSnapshot(focusableSection) != nil {
+		t.Fatal("MarshalPickerSnapshot accepted a focusable section line")
+	}
+	actionWithoutFocus := snapshot
+	actionWithoutFocus.Lines = []protocol.PickerLine{{Key: "aa/one", Kind: protocol.PickerLineSession, Label: "one", Actions: protocol.PickerCanNavigate}}
+	if MarshalPickerSnapshot(actionWithoutFocus) != nil {
+		t.Fatal("MarshalPickerSnapshot accepted an action row the source never made focusable")
 	}
 	unknownCursor := snapshot
 	unknownCursor.Cursor = protocol.PickerCursor{Key: "ff00/ghost", Index: 0}

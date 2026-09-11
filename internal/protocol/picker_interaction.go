@@ -100,8 +100,14 @@ type PickerLine struct {
 	Attention    bool
 	Stopped      bool
 	Dim          bool
-	Actions      PickerLineActions
-	Ephemeral    bool
+	// Focusable reports that the source authorises this row as a cursor
+	// destination for this interaction, independently of whether it admits an
+	// action. A Focusable row with no Actions is deliberately inspectable and
+	// never committable; a row that is neither Focusable nor actionable is
+	// rendered but skipped by cursor navigation.
+	Focusable bool
+	Actions   PickerLineActions
+	Ephemeral bool
 }
 
 // Selectable reports whether the row admits at least one action.
@@ -341,9 +347,15 @@ func ValidatePickerSnapshot(snapshot PickerSnapshot) error {
 		if !validPickerDisplay(line.Label) || !validPickerDisplay(line.Detail) || !validPickerDisplay(line.StatusDetail) {
 			return fmt.Errorf("%w: line %d display", ErrInvalidNavigation, i)
 		}
+		// Focus eligibility is published explicitly: a row that admits an
+		// action is always a cursor destination, and a section header is never
+		// one. A row that is neither is rendered and skipped.
+		if line.Actions != 0 && !line.Focusable {
+			return fmt.Errorf("%w: line %d action without focus", ErrInvalidNavigation, i)
+		}
 		if line.Kind == PickerLineSection {
-			if line.Key != "" {
-				return fmt.Errorf("%w: line %d section key", ErrInvalidNavigation, i)
+			if line.Key != "" || line.Focusable || line.Actions != 0 {
+				return fmt.Errorf("%w: line %d section key or action", ErrInvalidNavigation, i)
 			}
 			continue
 		}
