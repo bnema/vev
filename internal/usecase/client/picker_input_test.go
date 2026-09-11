@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/usecase/picker"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -121,47 +123,52 @@ func TestPickerInputConsumerOwnership(t *testing.T) {
 // decides whether input is a command. Paste protection is the decoder's
 // paste state, which is covered by the decoding table.
 func TestPickerApplyBatchAppliesEveryEvent(t *testing.T) {
-	open := func() *pickerLoop { return openPickerLoop(pickerSnapshot()) }
+	open := func() *pickerLoop {
+		return pickerLoopFromSnapshot(pickerSnapshot(), protocol.PickerIntentNavigation, picker.SortRecent)
+	}
+	selectedKey := func(t *testing.T, loop *pickerLoop) string {
+		t.Helper()
+		selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 0)
+		require.True(t, ok)
+		return selection.Key
+	}
 
 	loop := open()
-	commit, closeOp, changed := applyPickerBatch(loop, keyEvents("Down"))
-	require.False(t, commit)
-	require.False(t, closeOp)
+	op, changed := applyPickerBatch(loop, keyEvents("Down"))
+	require.False(t, op.commit)
+	require.False(t, op.close)
 	require.True(t, changed, "a cursor move repaints")
-	key, ok := loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "bb/second", key)
 
 	// Two keystrokes in one read both act, in order.
 	loop = open()
-	_, _, changed = applyPickerBatch(loop, keyEvents("Down", "Down"))
+	_, changed = applyPickerBatch(loop, keyEvents("Down", "Down"))
 	require.True(t, changed)
-	key, _ = loop.commitKey()
-	require.Equal(t, "bb/second", key, "the second Down is clamped at the last row")
+	require.Equal(t, "bb/second", selectedKey(t, loop), "the second Down is clamped at the last row")
 	loop.up()
-	key, _ = loop.commitKey()
-	require.Equal(t, "aa/first", key, "both Downs moved the cursor")
+	require.Equal(t, "aa/first", selectedKey(t, loop), "both Downs moved the cursor")
 
 	loop = open()
-	_, closeOp, _ = applyPickerBatch(loop, keyEvents("Escape"))
-	require.True(t, closeOp)
+	op, _ = applyPickerBatch(loop, keyEvents("Escape"))
+	require.True(t, op.close)
 
 	// A close inside a batch ends it: events after it do not act.
 	loop = open()
-	_, closeOp, _ = applyPickerBatch(loop, keyEvents("Escape", "Down"))
-	require.True(t, closeOp)
+	op, _ = applyPickerBatch(loop, keyEvents("Escape", "Down"))
+	require.True(t, op.close)
 
 	// Search inserts runes and printable keys in arrival order.
 	loop = open()
 	loop.enterSearch()
-	_, _, changed = applyPickerBatch(loop, []pickerEvent{
+	_, changed = applyPickerBatch(loop, []pickerEvent{
 		{kind: pickerEventRune, r: 'é'},
 		{kind: pickerEventKey, key: "a"},
 	})
 	require.True(t, changed)
-	_, closeOp, _ = applyPickerBatch(loop, keyEvents("Escape"))
-	require.False(t, closeOp, "Escape leaves search first")
+	op, _ = applyPickerBatch(loop, keyEvents("Escape"))
+	require.False(t, op.close, "Escape leaves search first")
 	require.False(t, loop.model.SearchActive())
+	op, _ = applyPickerBatch(loop, keyEvents("Escape"))
+	require.True(t, op.close, "a second Escape closes the picker")
 }
 
 // TestPickerOutcomeScope pins that a decoded operation only applies to the
@@ -182,9 +189,9 @@ func TestPickerOutcomeScope(t *testing.T) {
 // ordinary bytes that could look like fast typing.
 func TestPickerRendererTogglesBracketedPaste(t *testing.T) {
 	renderer := newPickerRenderer()
-	loop := openPickerLoop(pickerSnapshot())
+	loop := pickerLoopFromSnapshot(pickerSnapshot(), protocol.PickerIntentNavigation, picker.SortRecent)
 
-	first := renderer.render(loop, domain.Size{Cols: 80, Rows: 24})
+	first := renderer.render(loop, domain.Size{Cols: 80, Rows: 24}, picker.Preview{})
 	require.Contains(t, string(first), bracketedPasteEnable)
 	require.True(t, renderer.pasteMode, "the mode is enabled with the first frame")
 
@@ -193,7 +200,7 @@ func TestPickerRendererTogglesBracketedPaste(t *testing.T) {
 	require.False(t, renderer.pasteMode)
 	require.Nil(t, renderer.disableBracketedPaste(), "the reset is written once")
 
-	third := renderer.render(loop, domain.Size{Cols: 80, Rows: 24})
+	third := renderer.render(loop, domain.Size{Cols: 80, Rows: 24}, picker.Preview{})
 	require.Contains(t, string(third), bracketedPasteEnable)
 }
 
@@ -299,7 +306,7 @@ func TestPickerReleaseDropsInputWithoutReplay(t *testing.T) {
 
 	// Close the interaction from the daemon side, then keep typing: the
 	// release paint has not landed, so those bytes belong to the picker.
-	transport.detached <- wire.Frame{Type: wire.MsgPickerCloseServer, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: 7, Revision: 1})}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: 7, BarrierEpoch: 2, BarrierState: 1})}
 	writeTerminal(t, writer, "leaked")
 	requireNoPickerInput(t, transport)
 

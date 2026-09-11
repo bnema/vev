@@ -370,6 +370,7 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (op pickerOp, 
 	for _, key := range keys {
 		active := loop.model.SearchActive()
 		beforeIndex, beforeSearch := loop.model.SelectedIndex(), active
+		beforeQuery := loop.model.Query()
 		switch key {
 		case "Up":
 			loop.up()
@@ -432,7 +433,7 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (op pickerOp, 
 				insertLit(rune(key[0]))
 			}
 		}
-		if loop.model.SelectedIndex() != beforeIndex || loop.model.SearchActive() != beforeSearch {
+		if loop.model.SelectedIndex() != beforeIndex || loop.model.SearchActive() != beforeSearch || loop.model.Query() != beforeQuery {
 			changed = true
 		}
 	}

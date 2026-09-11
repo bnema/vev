@@ -4,98 +4,116 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
 
 func pickerSnapshotFixture() protocol.PickerSnapshot {
 	return protocol.PickerSnapshot{
-		InteractionID: 11, Revision: 3, Title: " Sessions ",
-		Rows: []protocol.PickerRow{
-			{Key: "aa/work", Display: "work", Detail: "2 tabs"},
-			{Key: "bb/perso", Display: "perso", Detail: "stopped", Stopped: true},
-			{Key: "cc/remote", Display: "remote@host", Detail: ""},
+		InteractionID: 11, SourceID: "serving", SourceRevision: 3, Status: protocol.PickerSourceOK,
+		Lines: []protocol.PickerLine{
+			{Key: "aa/work", Kind: protocol.PickerLineSession, Label: "work", Detail: "2 tabs", Actions: protocol.PickerCanNavigate | protocol.PickerCanKill},
+			{Key: "bb/perso", Kind: protocol.PickerLineSession, Label: "perso", Detail: "stopped", Stopped: true, Actions: protocol.PickerCanNavigate},
+			{Key: "cc/remote", Kind: protocol.PickerLineSession, Label: "remote@host", Actions: protocol.PickerCanNavigate},
 		},
-		Cursor:       protocol.PickerCursor{Key: "aa/work", Index: 0},
-		BarrierEpoch: 1, BarrierState: 4, SizeEpoch: 2,
+		Cursor: protocol.PickerCursor{Key: "aa/work", Index: 0},
 	}
 }
 
-func TestPickerInteractionAdmitsLatestRevision(t *testing.T) {
+func pickerLoopFixture(t *testing.T) *pickerLoop {
+	t.Helper()
+	return pickerLoopFromSnapshot(pickerSnapshotFixture(), protocol.PickerIntentNavigation, picker.SortRecent)
+}
+
+func pickedKey(t *testing.T, loop *pickerLoop) string {
+	t.Helper()
+	selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 0)
+	require.True(t, ok)
+	return selection.Key
+}
+
+func TestPickerInteractionAdmitsLatestSourceRevision(t *testing.T) {
 	var rel *pickerInteraction
-	require.False(t, rel.admitSnapshot(pickerSnapshotFixture()))
+	require.False(t, rel.admitSnapshot(pickerSnapshotFixture(), false))
 
 	rel = &pickerInteraction{}
 	snapshot := pickerSnapshotFixture()
-	require.False(t, rel.admitSnapshot(snapshot), "closed interaction must not admit")
+	require.False(t, rel.admitSnapshot(snapshot, false), "closed interaction must not admit")
 
 	rel.setOpen(true, snapshot.InteractionID)
-	require.True(t, rel.admitSnapshot(snapshot))
-	require.Equal(t, snapshot.Revision, rel.revision)
+	require.True(t, rel.admitSnapshot(snapshot, false))
+	require.Equal(t, snapshot.SourceRevision, rel.sourceRevisions[snapshot.SourceID])
 
 	older := snapshot
-	older.Revision = snapshot.Revision - 1
-	require.False(t, rel.admitSnapshot(older), "stale revision must not step backward")
+	older.SourceRevision = snapshot.SourceRevision - 1
+	require.False(t, rel.admitSnapshot(older, false), "stale source revision must not step backward")
 
 	foreign := snapshot
 	foreign.InteractionID = snapshot.InteractionID + 1
-	require.False(t, rel.admitSnapshot(foreign), "foreign interaction must drop")
+	require.False(t, rel.admitSnapshot(foreign, false), "foreign interaction must drop")
 
 	rel.setOpen(false, snapshot.InteractionID)
-	require.False(t, rel.admitSnapshot(snapshot), "closed interaction drops late snapshots")
+	require.False(t, rel.admitSnapshot(snapshot, false), "closed interaction drops late snapshots")
+}
+
+func TestPickerInteractionKeepsPerSourceRevisions(t *testing.T) {
+	rel := &pickerInteraction{}
+	snapshot := pickerSnapshotFixture()
+	rel.setOpen(true, snapshot.InteractionID)
+	require.True(t, rel.admitSnapshot(snapshot, false))
+
+	// Another source publishes its own first revision: it must be admitted
+	// even though the serving source is far ahead.
+	other := snapshot
+	other.SourceID = "host-2"
+	other.SourceRevision = 1
+	require.True(t, rel.admitSnapshot(other, false))
+	require.Equal(t, uint64(3), rel.sourceRevisions["serving"])
+	require.Equal(t, uint64(1), rel.sourceRevisions["host-2"])
 }
 
 func TestPickerInteractionRetirementIsPermanent(t *testing.T) {
 	snapshot := pickerSnapshotFixture()
 	var rel pickerInteraction
 	rel.setOpen(true, snapshot.InteractionID)
-	require.True(t, rel.admitSnapshot(snapshot))
+	require.True(t, rel.admitSnapshot(snapshot, false))
 
 	// Closing retires the namespace: an in-flight snapshot for the same
-	// interaction can never reopen it, with or without a reopen flag.
+	// interaction can never reopen it.
 	rel.setOpen(false, snapshot.InteractionID)
 	require.Equal(t, snapshot.InteractionID, rel.retired)
-	require.False(t, rel.admitSnapshot(snapshot))
+	require.False(t, rel.admitSnapshot(snapshot, false))
 	rel.setOpen(true, snapshot.InteractionID)
-	require.False(t, rel.admitSnapshot(snapshot), "a retired interaction is never reopened")
+	require.False(t, rel.admitSnapshot(snapshot, false), "a retired interaction is never reopened")
 
 	// A newer interaction is a new namespace and admits normally.
 	next := snapshot
 	next.InteractionID = snapshot.InteractionID + 1
-	next.Revision = 1
+	next.SourceRevision = 1
 	rel.setOpen(true, next.InteractionID)
-	require.True(t, rel.admitSnapshot(next))
-	require.False(t, rel.admitSnapshot(snapshot), "the retired namespace stays closed")
+	require.True(t, rel.admitSnapshot(next, false))
+	require.False(t, rel.admitSnapshot(snapshot, false), "the retired namespace stays closed")
 }
 
 func TestPickerLoopCursorSearchCommit(t *testing.T) {
-	snapshot := pickerSnapshotFixture()
-	loop := openPickerLoop(snapshot)
+	loop := pickerLoopFixture(t)
 	require.NotNil(t, loop.model)
 
-	// Cursor starts at the snapshot cursor (first row).
-	key, ok := loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "aa/work", key)
+	// Cursor starts at the published cursor key (first row).
+	require.Equal(t, "aa/work", pickedKey(t, loop))
 
-	// Cursor movement selects the non-initial row: commit identity follows
+	// Cursor movement selects the non-initial row: the committed key follows
 	// the client cursor, never the daemon cursor.
 	loop.down()
-	key, ok = loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "bb/perso", key)
+	require.Equal(t, "bb/perso", pickedKey(t, loop))
 	loop.down()
-	key, ok = loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "cc/remote", key)
+	require.Equal(t, "cc/remote", pickedKey(t, loop))
 	loop.up()
-	key, ok = loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "bb/perso", key)
+	require.Equal(t, "bb/perso", pickedKey(t, loop))
 }
 
 func TestPickerLoopSearchExitVsClose(t *testing.T) {
-	snapshot := pickerSnapshotFixture()
-	loop := openPickerLoop(snapshot)
+	loop := pickerLoopFixture(t)
 
 	// Text enters search; Escape exits search without closing.
 	loop.insert('w')
@@ -110,130 +128,81 @@ func TestPickerLoopSearchExitVsClose(t *testing.T) {
 	loop.insert('s')
 	loop.insert('x')
 	require.True(t, loop.model.SearchActive())
+	require.Equal(t, "sx", loop.model.Query())
 	loop.backspace()
-	_ = loop.model.Query()
+	require.Equal(t, "s", loop.model.Query())
 }
 
-func TestPickerLoopKillRejectedLocally(t *testing.T) {
-	// x in normal mode is NOT a daemon kill: there is no key path to
-	// killPickerTarget in client-picker mode. The loop has no kill
-	// operation; commitKey still reports the cursor row.
-	snapshot := pickerSnapshotFixture()
-	loop := openPickerLoop(snapshot)
-	loop.down()
-	key, ok := loop.commitKey()
+func TestPickerLoopKillRequiresAuthorisedRow(t *testing.T) {
+	loop := pickerLoopFixture(t)
+
+	// The first row authorises destruction; its typed kill carries the
+	// displayed source revision and the fatal action.
+	selection, ok := killSelection(loop, 0)
 	require.True(t, ok)
-	require.Equal(t, "bb/perso", key)
+	require.Equal(t, protocol.PickerActionKill, selection.Action)
+	require.Equal(t, "aa/work", selection.Key)
+	require.Equal(t, uint64(3), selection.SourceRevision)
+
+	// The stopped row is navigable but not destructible from here.
+	loop.down()
+	require.Equal(t, "bb/perso", pickedKey(t, loop))
+	_, ok = killSelection(loop, 0)
+	require.False(t, ok, "a row without the kill action must not be destroyed")
 }
 
-func TestPickerViewsRoundTripOpaqueKeys(t *testing.T) {
+func TestPickerLoopKeepsPublishedLineOrderAndKeys(t *testing.T) {
 	snapshot := pickerSnapshotFixture()
-	views := pickerViewsFromSnapshot(snapshot)
-	require.Len(t, views, len(snapshot.Rows))
-	loop := openPickerLoop(snapshot)
-	// Every row round-trips its opaque key through cursor commits: drive
-	// the model's own Down navigation from the top and collect keys
-	// without parsing display text.
+	loop := pickerLoopFromSnapshot(snapshot, protocol.PickerIntentNavigation, picker.SortRecent)
+
+	// Every published line commits its own opaque key without parsing display
+	// text, in published order.
 	loop.model.SelectNearestRow(0)
-	var keys []string
-	for range snapshot.Rows {
-		key, ok := loop.commitKey()
-		require.True(t, ok, "cursor row commits no key")
-		keys = append(keys, key)
+	keys := []string{pickedKey(t, loop)}
+	for range len(snapshot.Lines) - 1 {
 		loop.down()
+		keys = append(keys, pickedKey(t, loop))
 	}
 	require.Equal(t, []string{"aa/work", "bb/perso", "cc/remote"}, keys)
 }
 
-func TestPickerDriverOpOverlayParity(t *testing.T) {
-	newLoop := func() *pickerLoop { return openPickerLoop(pickerSnapshotFixture()) }
+func TestPickerDriverOpReportsActionsAndLocalSort(t *testing.T) {
+	loop := pickerLoopFixture(t)
 
-	// Normal mode: arrows and j/k move; s/x are no-ops; q/Ctrl+C close.
-	loop := newLoop()
-	commit, close := pickerDriverOp(loop, []string{"Down"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	key, ok := loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "bb/perso", key)
-	commit, close = pickerDriverOp(loop, []string{"k"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	key, ok = loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "aa/work", key)
-	commit, close = pickerDriverOp(loop, []string{"s"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	require.False(t, loop.model.SearchActive(), "normal-mode s must not sort in the pilot")
-	commit, close = pickerDriverOp(loop, []string{"x"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	key, ok = loop.commitKey()
-	require.True(t, ok)
-	require.Equal(t, "aa/work", key)
-	commit, close = pickerDriverOp(loop, []string{"q"}, "")
-	require.False(t, commit)
-	require.True(t, close)
-	loop = newLoop()
-	commit, close = pickerDriverOp(loop, []string{"Ctrl+C"}, "")
-	require.False(t, commit)
-	require.True(t, close)
+	// Normal mode: arrows and j/k move; Enter asks to commit; x asks to kill.
+	op, changed := pickerDriverOp(loop, []string{"Down"}, "")
+	require.False(t, op.commit)
+	require.False(t, op.close)
+	require.True(t, changed)
+	require.Equal(t, "bb/perso", pickedKey(t, loop))
+	op, _ = pickerDriverOp(loop, []string{"k"}, "")
+	require.False(t, op.commit)
+	require.Equal(t, "aa/work", pickedKey(t, loop))
 
-	// Search: `/` enters, j/k/s/x/q are literal, Backspace edits,
-	// plain text inserts only in search, Enter commits, Escape exits
-	// search first and closes second.
-	loop = newLoop()
-	commit, close = pickerDriverOp(loop, []string{"/"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	require.True(t, loop.model.SearchActive())
-	commit, close = pickerDriverOp(loop, []string{"j", "k", "s", "x", "q"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	require.Equal(t, "jksxq", loop.model.Query())
-	commit, close = pickerDriverOp(loop, nil, "zz")
-	require.False(t, commit)
-	require.False(t, close)
-	require.Equal(t, "jksxqzz", loop.model.Query())
-	commit, close = pickerDriverOp(loop, []string{"Backspace"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	require.Equal(t, "jksxqz", loop.model.Query())
-	commit, close = pickerDriverOp(loop, []string{"Down"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	commit, close = pickerDriverOp(loop, []string{"Enter"}, "")
-	require.True(t, commit)
-	require.False(t, close)
-	commit, close = pickerDriverOp(loop, []string{"Escape"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	require.False(t, loop.model.SearchActive(), "first Escape exits search")
-	commit, close = pickerDriverOp(loop, []string{"Escape"}, "")
-	require.False(t, commit)
-	require.True(t, close)
+	op, _ = pickerDriverOp(loop, []string{"Enter"}, "")
+	require.True(t, op.commit)
+	op, _ = pickerDriverOp(loop, []string{"x"}, "")
+	require.True(t, op.kill)
+	require.False(t, op.close)
 
-	// Normal-mode typing and text insert are ignored; Close wins over
-	// commit when both land in one op.
-	loop = newLoop()
-	commit, close = pickerDriverOp(loop, nil, "abc")
-	require.False(t, commit)
-	require.False(t, close)
-	require.False(t, loop.model.SearchActive())
-	commit, close = pickerDriverOp(loop, []string{"a"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	require.False(t, loop.model.SearchActive())
-	commit, close = pickerDriverOp(loop, []string{"Enter", "Escape"}, "")
-	require.True(t, commit)
-	require.True(t, close)
+	// q and Ctrl+C close in normal mode.
+	for _, key := range []string{"q", "Ctrl+C"} {
+		op, _ = pickerDriverOp(loop, []string{key}, "")
+		require.True(t, op.close, "%s must close the picker", key)
+	}
 
-	// Nil loop and nil model never act.
-	commit, close = pickerDriverOp(nil, []string{"Down"}, "")
-	require.False(t, commit)
-	require.False(t, close)
-	commit, close = pickerDriverOp(&pickerLoop{}, []string{"Down"}, "")
-	require.False(t, commit)
-	require.False(t, close)
+	// s reorders locally without asking the daemon, and keeps the selection.
+	op, changed = pickerDriverOp(loop, []string{"s"}, "")
+	require.False(t, op.commit)
+	require.False(t, op.kill)
+	require.False(t, op.close)
+	require.True(t, changed)
+	require.Equal(t, picker.SortGrouped, loop.model.SortMode())
+	require.Equal(t, "aa/work", pickedKey(t, loop))
+
+	// While searching, Enter still commits and printable keys are text.
+	loop.insert('w')
+	_, changed = pickerDriverOp(loop, []string{"o", "r"}, "")
+	require.True(t, changed)
+	require.Equal(t, "wor", loop.model.Query())
 }

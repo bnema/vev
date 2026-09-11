@@ -41,15 +41,14 @@ func TestPickerRetireRejectsLateSnapshot(t *testing.T) {
 	harness := startPickerE2E(t)
 	ui, transport := harness.ui, harness.transport
 
-	snapshot := pickerSnapshot()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	snapshot := openPickerOnHarness(t, transport)
 	attached := ports.UIStatusAttached
 	first := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
 	require.NoError(t, err)
 
 	// The daemon retires the interaction and repaints authoritatively.
-	transport.detached <- wire.Frame{Type: wire.MsgPickerCloseServer, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision})}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
 	require.NotNil(t, pickerReleasePaint(transport, "released"))
 	released := "released"
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &released}})
@@ -57,7 +56,7 @@ func TestPickerRetireRejectsLateSnapshot(t *testing.T) {
 
 	// A late snapshot for the retired interaction must not restore the modal.
 	late := snapshot
-	late.Revision = snapshot.Revision + 1
+	late.SourceRevision = snapshot.SourceRevision + 1
 	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(late)}
 	time.Sleep(100 * time.Millisecond)
 	captured, err := ui.Capture(ui.Handle())
@@ -75,8 +74,7 @@ func TestPickerReplaceAbortsSupersededLease(t *testing.T) {
 	harness := startPickerE2E(t)
 	ui, transport := harness.ui, harness.transport
 
-	first := pickerSnapshot()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(first)}
+	first := openPickerOnHarness(t, transport)
 	attached := ports.UIStatusAttached
 	firstText := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &firstText}})
@@ -84,10 +82,11 @@ func TestPickerReplaceAbortsSupersededLease(t *testing.T) {
 
 	// A new interaction arrives without a close for the previous one.
 	superseding := protocol.PickerSnapshot{
-		InteractionID: first.InteractionID + 1, Revision: 1, Title: " Sessions ",
-		Rows:         []protocol.PickerRow{{Key: "cc/third", Display: "third"}},
-		Cursor:       protocol.PickerCursor{Key: "cc/third", Index: 0},
-		BarrierEpoch: 1, BarrierState: 1, SizeEpoch: 1,
+		InteractionID: first.InteractionID + 1, SourceID: "serving", SourceRevision: 1, Status: protocol.PickerSourceOK,
+		Lines: []protocol.PickerLine{
+			{Key: "cc/third", Kind: protocol.PickerLineSession, Label: "third", Actions: protocol.PickerCanNavigate},
+		},
+		Cursor: protocol.PickerCursor{Key: "cc/third", Index: 0},
 	}
 	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(superseding)}
 	third := "third"
@@ -117,8 +116,7 @@ func TestPickerStaleRevisionClosesInteraction(t *testing.T) {
 	harness := startPickerE2EWithInput(t, reader)
 	ui, transport := harness.ui, harness.transport
 
-	snapshot := pickerSnapshot()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	snapshot := openPickerOnHarness(t, transport)
 	attached := ports.UIStatusAttached
 	first := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
@@ -127,7 +125,8 @@ func TestPickerStaleRevisionClosesInteraction(t *testing.T) {
 	// The daemon refuses the committed revision: the client must close the
 	// interaction so it stops owning input on the daemon side.
 	failure := wire.MarshalPickerFailure(protocol.PickerFailure{
-		CauseActionID: 0, InteractionID: snapshot.InteractionID, Key: "aa/first", Code: protocol.PickerStaleRevision,
+		CauseActionID: 3, InteractionID: snapshot.InteractionID, SourceID: "serving",
+		Key: "aa/first", Action: protocol.PickerActionNavigate, Code: protocol.PickerStaleRevision,
 	})
 	require.NotNil(t, failure)
 	transport.detached <- wire.Frame{Type: wire.MsgPickerFailure, Payload: failure}
@@ -141,7 +140,7 @@ func TestPickerStaleRevisionClosesInteraction(t *testing.T) {
 	// the daemon confirms the close and its authoritative repaint is shown.
 	writeTerminal(t, writer, "leaked")
 	requireNoPickerInput(t, transport)
-	transport.detached <- wire.Frame{Type: wire.MsgPickerCloseServer, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision})}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
 	require.NotNil(t, pickerReleasePaint(transport, "released"))
 	released := "released"
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &released}})

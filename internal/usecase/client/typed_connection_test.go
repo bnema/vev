@@ -213,10 +213,14 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalNavigationInventoryDemand(frame.Payload)
 	case wire.MsgNavigationInventorySelection:
 		return wire.UnmarshalNavigationInventorySelection(frame.Payload)
+	case wire.MsgPickerOffer:
+		return wire.UnmarshalPickerOffer(frame.Payload)
 	case wire.MsgPickerSnapshot:
 		return wire.UnmarshalPickerSnapshot(frame.Payload)
-	case wire.MsgPickerCloseServer:
-		return wire.UnmarshalPickerClose(frame.Payload)
+	case wire.MsgPickerClosedServer:
+		return wire.UnmarshalPickerClosed(frame.Payload)
+	case wire.MsgPickerResult:
+		return wire.UnmarshalPickerResult(frame.Payload)
 	case wire.MsgPickerFailure:
 		return wire.UnmarshalPickerFailure(frame.Payload)
 	default:

@@ -207,17 +207,36 @@ func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport 
 	}
 }
 
-// pickerSnapshot returns the two-row snapshot both scenarios open the picker with.
-func pickerSnapshot() protocol.PickerSnapshot {
-	return protocol.PickerSnapshot{
-		InteractionID: 7, Revision: 1, Title: " Sessions ",
-		Rows: []protocol.PickerRow{
-			{Key: "aa/first", Display: "first"},
-			{Key: "bb/second", Display: "second"},
-		},
-		Cursor:       protocol.PickerCursor{Key: "aa/first", Index: 0},
+// pickerOffer opens the interaction both scenarios drive.
+func pickerOffer() protocol.PickerOffer {
+	return protocol.PickerOffer{
+		InteractionID: 7, Intent: protocol.PickerIntentNavigation, Title: " Sessions · recent ",
 		BarrierEpoch: 1, BarrierState: 1, SizeEpoch: 1,
 	}
+}
+
+// pickerSnapshot returns the two-row source publication both scenarios open
+// the picker with.
+func pickerSnapshot() protocol.PickerSnapshot {
+	return protocol.PickerSnapshot{
+		InteractionID: 7, SourceID: "serving", SourceRevision: 1, Status: protocol.PickerSourceOK,
+		Lines: []protocol.PickerLine{
+			{Key: "aa/first", Kind: protocol.PickerLineSession, Label: "first", Actions: protocol.PickerCanNavigate},
+			{Key: "bb/second", Kind: protocol.PickerLineSession, Label: "second", Actions: protocol.PickerCanNavigate},
+		},
+		Cursor: protocol.PickerCursor{Key: "aa/first", Index: 0},
+	}
+}
+
+// openPickerOnHarness publishes the offer and first snapshot the serving daemon
+// would send, so the client takes over presentation.
+func openPickerOnHarness(t *testing.T, transport *attachPaletteTransport) protocol.PickerSnapshot {
+	t.Helper()
+	offer := pickerOffer()
+	transport.detached <- wire.Frame{Type: wire.MsgPickerOffer, Payload: wire.MarshalPickerOffer(offer)}
+	snapshot := pickerSnapshot()
+	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	return snapshot
 }
 
 // awaitWireFrame waits for one client frame of the requested type.

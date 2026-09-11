@@ -12,19 +12,22 @@ func pickerLeaseTestState(epoch, state uint64) outputApplyState {
 	return outputApplyState{epoch: epoch, state: state, initialized: true}
 }
 
-// pickerLeaseTestSnapshot builds one validated snapshot for the lease.
-func pickerLeaseTestSnapshot(interaction, revision, barrierEpoch, barrierState uint64) protocol.PickerSnapshot {
+// pickerLeaseTestSnapshot builds one validated source publication for the
+// lease. The acquisition barrier travels in the offer, so it is passed
+// separately to admitSnapshot.
+func pickerLeaseTestSnapshot(interaction, revision uint64) protocol.PickerSnapshot {
 	return protocol.PickerSnapshot{
-		InteractionID: interaction, Revision: revision,
-		Title:        " Sessions ",
-		Rows:         []protocol.PickerRow{{Key: "aa/first", Display: "first"}},
-		Cursor:       protocol.PickerCursor{Key: "aa/first", Index: 0},
-		BarrierEpoch: barrierEpoch, BarrierState: barrierState, SizeEpoch: 1,
+		InteractionID: interaction, SourceID: "serving", SourceRevision: revision,
+		Status: protocol.PickerSourceOK,
+		Lines: []protocol.PickerLine{
+			{Key: "aa/first", Kind: protocol.PickerLineSession, Label: "first", Actions: protocol.PickerCanNavigate},
+		},
+		Cursor: protocol.PickerCursor{Key: "aa/first", Index: 0},
 	}
 }
 
 func pickerLeaseTestLoop() *pickerLoop {
-	return &pickerLoop{interaction: 1, revision: 1}
+	return &pickerLoop{interaction: 1, sourceID: "serving", sourceRevision: 1}
 }
 
 func TestPickerLeaseAcquiresOnlyAtTheBarrier(t *testing.T) {
@@ -46,7 +49,7 @@ func TestPickerLeaseAcquiresOnlyAtTheBarrier(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var lease pickerLease
-			ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, test.barrierEpoch, test.barrierState), pickerLeaseTestLoop(), test.applied, 3)
+			ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: test.barrierEpoch, state: test.barrierState}, pickerLeaseTestLoop(), test.applied, 3)
 			require.Nil(t, superseded)
 			require.Equal(t, test.ready, ready)
 			require.Equal(t, test.owned, lease.state == pickerLeaseOwned)
@@ -58,7 +61,7 @@ func TestPickerLeaseAcquiresOnlyAtTheBarrier(t *testing.T) {
 
 func TestPickerLeaseAcquiresWhenAHeldBarrierArrives(t *testing.T) {
 	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 2), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: 4, state: 2}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.False(t, ready)
 	require.Equal(t, pickerLeaseAcquiring, lease.state)
 
@@ -79,7 +82,7 @@ func TestPickerLeaseAcquiresWhenAHeldBarrierArrives(t *testing.T) {
 func TestPickerLeaseSuppressesOwnedOutputAndPublishesBoundary(t *testing.T) {
 	var lease pickerLease
 	require.True(t, func() bool {
-		ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+		ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 		return ready
 	}())
 
@@ -90,7 +93,7 @@ func TestPickerLeaseSuppressesOwnedOutputAndPublishesBoundary(t *testing.T) {
 
 func TestPickerLeaseReleasesOnlyAfterTheDaemonCloseAndANewerFullPaint(t *testing.T) {
 	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 4, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 2)
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 4), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 2)
 	require.True(t, ready)
 
 	// The client cancels: the client-side retire alone never releases, because
@@ -117,7 +120,7 @@ func TestPickerLeaseReleasesOnlyAfterTheDaemonCloseAndANewerFullPaint(t *testing
 
 func TestPickerLeaseDaemonCloseReleasesWithoutAClientRetire(t *testing.T) {
 	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
 
 	// A daemon-initiated close (a resolved selection) carries its own barrier.
@@ -127,7 +130,7 @@ func TestPickerLeaseDaemonCloseReleasesWithoutAClientRetire(t *testing.T) {
 
 func TestPickerLeaseForeignAndDuplicateCloseNeverRelease(t *testing.T) {
 	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
 
 	require.False(t, lease.beginRelease(6, 42, true, false, pickerLeaseTestState(4, 1)), "foreign interaction must not release")
@@ -139,12 +142,12 @@ func TestPickerLeaseForeignAndDuplicateCloseNeverRelease(t *testing.T) {
 
 func TestPickerLeaseSupersedingSnapshotStartsANewNamespace(t *testing.T) {
 	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
 	require.True(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
 
 	// A superseding interaction cannot be released by the prior close.
-	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(8, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(8, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
 	require.NotNil(t, superseded)
 	require.Equal(t, uint64(7), superseded.interaction)
@@ -155,39 +158,39 @@ func TestPickerLeaseSupersedingSnapshotStartsANewNamespace(t *testing.T) {
 
 func TestPickerLeaseSameInteractionRevisionRules(t *testing.T) {
 	var lease pickerLease
-	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 3, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, _ := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 3), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, ready)
 
 	// Duplicate and older revisions never replace the displayed model.
-	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 3, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(7, 3), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.False(t, ready)
 	require.Nil(t, superseded)
-	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 2, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 2), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.False(t, ready)
 	require.Nil(t, superseded)
 
 	// A newer revision refreshes in place.
-	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 4, 4, 2), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 4), pickerBarrier{epoch: 4, state: 2}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.False(t, ready)
 	require.Nil(t, superseded)
 	require.Equal(t, uint64(4), lease.revision)
 
 	// A newer revision that also moved the barrier to an applied state
 	// acquires immediately.
-	ready, _ = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 5, 4, 2), pickerLeaseTestLoop(), pickerLeaseTestState(4, 2), 1)
+	ready, _ = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 5), pickerBarrier{epoch: 4, state: 2}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 2), 1)
 	require.True(t, ready)
 
 	// A release in progress refuses revisions: the close/full pair cannot be
 	// replaced by a late refresh.
 	require.True(t, lease.beginRelease(7, 0, false, true, pickerLeaseTestState(4, 2)))
-	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 6, 4, 2), pickerLeaseTestLoop(), pickerLeaseTestState(4, 2), 1)
+	ready, superseded = lease.admitSnapshot(pickerLeaseTestSnapshot(7, 6), pickerBarrier{epoch: 4, state: 2}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 2), 1)
 	require.False(t, ready)
 	require.Nil(t, superseded)
 }
 
 func TestPickerLeaseAbortReportsPendingLocalAction(t *testing.T) {
 	var lease pickerLease
-	lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	lease.admitSnapshot(pickerLeaseTestSnapshot(7, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	require.True(t, lease.beginRelease(7, 42, true, false, pickerLeaseTestState(4, 1)))
 
 	actionID, local := lease.abort()
@@ -196,7 +199,7 @@ func TestPickerLeaseAbortReportsPendingLocalAction(t *testing.T) {
 	require.False(t, lease.active())
 
 	// A handoff-bound action stays unresolved: the daemon owns its outcome.
-	lease.admitSnapshot(pickerLeaseTestSnapshot(9, 1, 4, 1), pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
+	lease.admitSnapshot(pickerLeaseTestSnapshot(9, 1), pickerBarrier{epoch: 4, state: 1}, pickerLeaseTestLoop(), pickerLeaseTestState(4, 1), 1)
 	lease.beginRelease(9, 77, false, false, pickerLeaseTestState(4, 1))
 	actionID, local = lease.abort()
 	require.Zero(t, actionID)
@@ -205,7 +208,7 @@ func TestPickerLeaseAbortReportsPendingLocalAction(t *testing.T) {
 
 func TestPickerLeaseRejectsUnusableSnapshots(t *testing.T) {
 	var lease pickerLease
-	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(0, 1, 1, 0), pickerLeaseTestLoop(), outputApplyState{}, 1)
+	ready, superseded := lease.admitSnapshot(pickerLeaseTestSnapshot(0, 1), pickerBarrier{epoch: 1, state: 0}, pickerLeaseTestLoop(), outputApplyState{}, 1)
 	require.False(t, ready)
 	require.Nil(t, superseded)
 	require.False(t, lease.active())

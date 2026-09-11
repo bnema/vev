@@ -25,8 +25,7 @@ func TestClientPickerLoopEndToEnd(t *testing.T) {
 	ui, transport := harness.ui, harness.transport
 
 	// Daemon opens the picker: two rows, cursor on the first.
-	snapshot := pickerSnapshot()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	snapshot := openPickerOnHarness(t, transport)
 	attached := ports.UIStatusAttached
 	pickerText := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &pickerText}})
@@ -60,16 +59,18 @@ func TestClientPickerLoopEndToEnd(t *testing.T) {
 	}()
 	selection := awaitPickerSelection(t, transport)
 	require.Equal(t, uint64(7), selection.InteractionID)
-	require.Equal(t, uint64(1), selection.Revision)
+	require.Equal(t, "serving", selection.SourceID)
+	require.Equal(t, uint64(1), selection.SourceRevision)
+	require.Equal(t, protocol.PickerActionNavigate, selection.Action)
 	require.Equal(t, "bb/second", selection.Key)
 	require.NotZero(t, selection.CauseActionID)
 	requireNoPickerInput(t, transport)
 
-	// Daemon resolves: PickerClose ends the client interaction exactly
-	// like resolvePickerClientSelection, then the same-peer handoff and
-	// full paint commit the session.
+	// Daemon resolves: the close confirmation ends the client interaction
+	// exactly like a resolved selection, then the same-peer handoff and full
+	// paint commit the session.
 	second := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "second"}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerCloseServer, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision})}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
 	transport.detached <- wire.Frame{Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(protocol.AttachTarget{Session: second.SessionName, Intent: protocol.IntentAttach, ExactTarget: &second, SamePeer: true, CauseActionID: selection.CauseActionID})}
 	identityPayload, err := wire.MarshalCommittedRouteIdentity(protocol.CommittedRouteIdentity{Target: second})
 	require.NoError(t, err)
@@ -100,8 +101,7 @@ func TestClientPickerCancelReleasesOnAuthoritativeFullPaint(t *testing.T) {
 	harness := startPickerE2E(t)
 	ui, transport := harness.ui, harness.transport
 
-	snapshot := pickerSnapshot()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	snapshot := openPickerOnHarness(t, transport)
 	attached := ports.UIStatusAttached
 	pickerText := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &pickerText}})
@@ -119,10 +119,9 @@ func TestClientPickerCancelReleasesOnAuthoritativeFullPaint(t *testing.T) {
 		cancelled <- action
 	}()
 	closePayload := awaitWireFrame(t, transport, wire.MsgPickerCloseClient)
-	close, err := wire.UnmarshalPickerClose(closePayload)
+	closeMessage, err := wire.UnmarshalPickerClose(closePayload)
 	require.NoError(t, err)
-	require.Equal(t, snapshot.InteractionID, close.InteractionID)
-	require.Equal(t, snapshot.Revision, close.Revision)
+	require.Equal(t, snapshot.InteractionID, closeMessage.InteractionID)
 	requireNoPickerInput(t, transport)
 
 	// The close alone releases nothing: the action is still pending and the
@@ -138,7 +137,7 @@ func TestClientPickerCancelReleasesOnAuthoritativeFullPaint(t *testing.T) {
 
 	// The daemon confirms and repaints authoritatively: the frame is
 	// displayed and the pending cancel completes against that boundary.
-	transport.detached <- wire.Frame{Type: wire.MsgPickerCloseServer, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision})}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
 	view := protocol.ViewContext{Publication: 2, Route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "fixture"}}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
 	outputPayload, err := wire.MarshalOutput(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hreleased")})
 	require.NoError(t, err)

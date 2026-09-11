@@ -3067,7 +3067,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// its lines in place, so the local cursor and search survive a
 				// background refresh. A first-or-foreign source installs a new
 				// model through the lease below.
-				if pickerCurrent != nil && pickerCurrent.sourceID == snapshot.SourceID && pickerPresentation.owns() {
+				if pickerCurrent != nil && pickerCurrent.interaction == snapshot.InteractionID && pickerCurrent.sourceID == snapshot.SourceID && pickerPresentation.owns() {
 					pickerCurrent.replaceLines(snapshot)
 					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
 						return welcomedResult(err)
