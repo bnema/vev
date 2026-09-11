@@ -182,17 +182,24 @@ func TestRuntimeBlockedWriterDoesNotStallOtherLanes(t *testing.T) {
 		t.Fatalf("observes = %d, want 4", observes)
 	}
 
-	// A second store while the writer is occupied queues behind it; a third
-	// concurrent store cannot enter the lane and retires with a lane-busy
-	// failure instead of wedging dispatch. The service never issues either:
-	// it keeps one active write plus one replaceable pending snapshot.
-	second := appports.RemoteJob{Kind: appports.RemoteJobCacheStore, Entries: []catalogue.RemoteCatalogCacheEntry{{Host: "second"}}}
-	third := appports.RemoteJob{Kind: appports.RemoteJobCacheStore, Entries: []catalogue.RemoteCatalogCacheEntry{{Host: "third"}}}
+	// Two further stores arrive while the writer is occupied. The lane admits
+	// exactly one of them and retires the other as lane-busy rather than
+	// queueing without bound; which of the two wins is admission timing, so
+	// the assertions follow the reported outcome instead of naming a winner.
+	second := appports.RemoteJob{Kind: appports.RemoteJobCacheStore, Endpoint: "second", Entries: []catalogue.RemoteCatalogCacheEntry{{Host: "second"}}}
+	third := appports.RemoteJob{Kind: appports.RemoteJobCacheStore, Endpoint: "third", Entries: []catalogue.RemoteCatalogCacheEntry{{Host: "third"}}}
 	jobs <- second
 	jobs <- third
-	duplicate := receiveResult(t, results, "duplicate store")
-	if duplicate.Kind != appports.RemoteJobCacheStore || !errors.Is(duplicate.Err, errRemoteLaneBusy) {
-		t.Fatalf("duplicate store result = %+v, want lane-busy failure", duplicate)
+	busy := receiveResult(t, results, "lane-busy store")
+	if busy.Kind != appports.RemoteJobCacheStore || !errors.Is(busy.Err, errRemoteLaneBusy) {
+		t.Fatalf("bounded-lane store result = %+v, want lane-busy failure", busy)
+	}
+	if busy.Endpoint != second.Endpoint && busy.Endpoint != third.Endpoint {
+		t.Fatalf("lane-busy store endpoint = %q, want one of the two admitted stores", busy.Endpoint)
+	}
+	admitted := second.Endpoint
+	if busy.Endpoint == second.Endpoint {
+		admitted = third.Endpoint
 	}
 
 	close(cache.release)
@@ -200,15 +207,15 @@ func TestRuntimeBlockedWriterDoesNotStallOtherLanes(t *testing.T) {
 	if firstStored.Kind != appports.RemoteJobCacheStore || firstStored.Err != nil {
 		t.Fatalf("store result = %+v", firstStored)
 	}
-	secondStored := receiveResult(t, results, "queued cache store")
-	if secondStored.Kind != appports.RemoteJobCacheStore || secondStored.Err != nil {
-		t.Fatalf("queued store result = %+v", secondStored)
+	admittedStored := receiveResult(t, results, "admitted cache store")
+	if admittedStored.Kind != appports.RemoteJobCacheStore || admittedStored.Err != nil || admittedStored.Endpoint != admitted {
+		t.Fatalf("admitted store result = %+v, want the store the lane accepted (%s)", admittedStored, admitted)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if len(cache.stores) != 2 || len(cache.stores[0]) != 1 || cache.stores[0][0].Host != "user@arch" ||
-		len(cache.stores[1]) != 1 || cache.stores[1][0].Host != "second" {
-		t.Fatalf("stored payloads = %+v, want serialized first then second", cache.stores)
+		len(cache.stores[1]) != 1 || cache.stores[1][0].Host != admitted {
+		t.Fatalf("stored payloads = %+v, want the blocked store first then %s", cache.stores, admitted)
 	}
 }
 
