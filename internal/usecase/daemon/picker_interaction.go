@@ -12,7 +12,7 @@ import (
 // kill the client asked for. It never owns a presentation model.
 
 // servingPickerSourceID names the source the serving daemon itself owns.
-const servingPickerSourceID = "serving"
+const servingPickerSourceID = protocol.PickerServingSourceID
 
 // pickerClientKey derives a stable opaque key for an unchanged navigation
 // target (lifecycle, name). Presentation-only updates keep the key; a changed
