@@ -33,7 +33,8 @@ func TestValidateAttachRequestNavigationTable(t *testing.T) {
 		valid   bool
 	}{
 		{name: "ordinary route", request: AttachRequest{}, valid: true},
-		{name: "inventory capability", request: AttachRequest{NavigationCapabilities: protocol.NavigationCapabilityInventory}, valid: true},
+		{name: "inventory capability", request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", NavigationCapabilities: protocol.NavigationCapabilityInventory}, valid: true},
+		{name: "ephemeral inventory capability", request: AttachRequest{NavigationCapabilities: protocol.NavigationCapabilityInventory}},
 		{name: "unknown capability", request: AttachRequest{NavigationCapabilities: 16}, valid: false},
 	}
 

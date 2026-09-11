@@ -14,24 +14,21 @@ func validNavigationCapabilities(capabilities NavigationCapabilities) bool {
 	return capabilities&^NavigationCapabilityInventory == 0
 }
 
-// validateHelloNavigation accepts the optional inventory capability on the
-// intents that can consume it and rejects any other advertised feature.
-func validateHelloNavigation(h Hello) error {
-	switch h.Intent {
-	case IntentAttach, IntentResume, IntentNew:
-		return ValidateNavigation(h.NavigationCapabilities)
+// ValidateNavigation rejects capabilities this protocol does not define and
+// accepts the inventory capability only on the intents whose attachment can
+// serve it. Both the client before dialing and the serving daemon on Hello use
+// this rule, so a request the client admits is one the daemon accepts.
+func ValidateNavigation(intent uint8, capabilities NavigationCapabilities) error {
+	if !validNavigationCapabilities(capabilities) {
+		return ErrInvalidNavigation
+	}
+	switch intent {
+	case IntentNew, IntentAttach, IntentResume:
+		return nil
 	default:
-		if h.NavigationCapabilities != 0 {
+		if capabilities != 0 {
 			return ErrInvalidNavigation
 		}
 		return nil
 	}
-}
-
-// ValidateNavigation rejects capabilities this protocol does not define.
-func ValidateNavigation(capabilities NavigationCapabilities) error {
-	if !validNavigationCapabilities(capabilities) {
-		return ErrInvalidNavigation
-	}
-	return nil
 }

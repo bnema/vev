@@ -64,7 +64,34 @@ func TestValidateNavigationInventoryResponseUnions(t *testing.T) {
 }
 
 func TestNavigationCapabilityInventoryValid(t *testing.T) {
-	if err := ValidateNavigation(NavigationCapabilityInventory); err != nil {
+	if err := ValidateNavigation(IntentAttach, NavigationCapabilityInventory); err != nil {
 		t.Fatalf("ValidateNavigation(inventory) = %v", err)
+	}
+}
+
+// TestValidateNavigationBindsInventoryToTheIntentsThatServeIt pins the shared
+// client/daemon rule: inventory is negotiable on the intents whose attachment
+// owns a relay, and no capability is admissible on the others.
+func TestValidateNavigationBindsInventoryToTheIntentsThatServeIt(t *testing.T) {
+	tests := []struct {
+		name         string
+		intent       uint8
+		capabilities NavigationCapabilities
+		wantErr      bool
+	}{
+		{name: "attach inventory", intent: IntentAttach, capabilities: NavigationCapabilityInventory},
+		{name: "resume inventory", intent: IntentResume, capabilities: NavigationCapabilityInventory},
+		{name: "new inventory", intent: IntentNew, capabilities: NavigationCapabilityInventory},
+		{name: "ephemeral inventory", intent: IntentEphemeral, capabilities: NavigationCapabilityInventory, wantErr: true},
+		{name: "ephemeral clean", intent: IntentEphemeral},
+		{name: "unknown bit", intent: IntentAttach, capabilities: 1 << 7, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateNavigation(tt.intent, tt.capabilities)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateNavigation(%d, %d) = %v, wantErr %t", tt.intent, tt.capabilities, err, tt.wantErr)
+			}
+		})
 	}
 }

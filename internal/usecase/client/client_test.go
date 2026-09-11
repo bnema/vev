@@ -885,6 +885,10 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote1, remote2}}
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	// The remote return attach relays the palette inventory from the retained
+	// local home route; without a control source it must not claim the
+	// capability. The mock admits no dial: this route receives no demand.
+	deps.LocalControlDialer = portsmocks.NewMockClientDialer(t)
 	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
 		require.Equal(t, createRemote, target)
 		return remoteDialer, client.AttachRequest{
