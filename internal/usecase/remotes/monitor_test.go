@@ -283,6 +283,26 @@ func TestMonitorBootstrapsRegistryAndCacheIndependently(t *testing.T) {
 	}
 }
 
+func TestMonitorEmptyRegistryStillPublishesInitialized(t *testing.T) {
+	clock := newFakeClock(time.Unix(1_000, 0))
+	runtime := newFakeRuntime()
+	monitor, _ := startMonitor(t, clock, runtime)
+	sub := monitor.Subscribe()
+	defer sub.Close()
+
+	_ = receiveJob(t, runtime.incoming, "registry read")
+	_ = receiveJob(t, runtime.incoming, "cache load")
+
+	// A registry read with no registration is an authoritative empty state,
+	// not an unfinished check: readers must stop reporting "checking".
+	runtime.outgoing <- ports.RemoteJobResult{Kind: ports.RemoteJobRegistryRead}
+	waitWake(t, sub.Changed(), "empty registry publication")
+	snapshot := monitor.Snapshot()
+	if !snapshot.Initialized || len(snapshot.Hosts) != 0 || snapshot.Revision == 0 {
+		t.Fatalf("empty registry snapshot = %+v, want initialized with no hosts", snapshot)
+	}
+}
+
 func TestMonitorCacheSeedingRules(t *testing.T) {
 	clock := newFakeClock(time.Unix(1_000, 0))
 	runtime := newFakeRuntime()

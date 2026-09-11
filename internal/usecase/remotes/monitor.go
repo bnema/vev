@@ -341,9 +341,13 @@ func (m *Monitor) applyResult(now time.Time, state *serviceState, result ports.R
 			return
 		}
 		state.registryDone = true
+		wasInitialized := state.registryInit
 		state.registryInit = true
 		state.registryError = nil
-		if m.reconcileRegistrations(now, state, result.Registrations) {
+		if m.reconcileRegistrations(now, state, result.Registrations) || !wasInitialized {
+			// The first successful registry read is itself a publication: an
+			// empty registry is a known state, and a monitor that never
+			// publishes it leaves every reader reporting "checking remotes".
 			state.dirty = true
 		}
 		if expedited {
