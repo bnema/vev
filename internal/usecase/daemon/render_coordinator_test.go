@@ -1153,7 +1153,12 @@ func TestProducerInvalidations(t *testing.T) {
 		name     string
 		tabs     int
 		producer string
-		run      func(t *testing.T, d *Daemon, sess *session, ac *attachedClient)
+		// interaction marks producers that publish their own control frames
+		// (the picker offer and snapshot): the coordinator-invalidation
+		// assertion below covers their repaint, and those frames are pinned
+		// by the interaction suites.
+		interaction bool
+		run         func(t *testing.T, d *Daemon, sess *session, ac *attachedClient)
 	}{
 		{
 			file: "attention.go",
@@ -1216,8 +1221,9 @@ func TestProducerInvalidations(t *testing.T) {
 			},
 		},
 		{
-			file: "picker.go",
-			name: "picker entry",
+			file:        "picker.go",
+			name:        "picker entry",
+			interaction: true,
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				effect := admitPickerEffectForTest(t, sess, ac)
 				require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
@@ -1288,6 +1294,11 @@ func TestProducerInvalidations(t *testing.T) {
 				require.Equal(t, tc.producer, inv.producer)
 			}
 			requireNoInvalidation(t, invs)
+			if tc.interaction {
+				// The picker publishes offer/snapshot/restore frames of its own;
+				// drain them so the frame assertion below covers the repaint.
+				drainAllFrames(sends)
+			}
 			requireNoCoordinatorOutputFrame(t, sends)
 		})
 	}

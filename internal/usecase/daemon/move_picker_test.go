@@ -18,7 +18,14 @@ func setupMovePickerSessions(t *testing.T, extraDestinationTabs int) (*Daemon, *
 func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
 	t.Helper()
 	sourcePTY, releaseSource := newBlockingPTY(t)
-	d, source, ac, _ := newManualSessionWithPTYsClock(t, clock, sourcePTY)
+	d, source, ac, sends := newManualSessionWithPTYsClock(t, clock, sourcePTY)
+	// The move suites drive typed interactions, so the daemon publishes offers
+	// and snapshots to this attachment: drain them in the background so a
+	// guarded send never blocks the fixture.
+	go func() {
+		for range sends {
+		}
+	}()
 	source.id, source.name, source.incarnation = "source", "source", domain.IncarnationID{1}
 	d.mu.Lock()
 	delete(d.sessions, domain.SessionID("manual"))
@@ -49,30 +56,49 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 	return d, source, ac, destination, destinationTab, releases
 }
 
-// moveSourceForSession names the exact source a move command captures.
-func moveSourceForSession(sess *session, tabID domain.TabStableID, paneID domain.PaneStableID) moveSourceLocator {
+// moveSourceForSession names the exact source a move command captures. The
+// attachment carrying the command travels with it, exactly like the palette
+// entry: the move transaction must freeze every other effect but this one.
+func moveSourceForSession(sess *session, ac *attachedClient, tabID domain.TabStableID, paneID domain.PaneStableID) moveSourceLocator {
 	return moveSourceLocator{
-		Session: moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: sess.name},
-		TabID:   tabID,
-		PaneID:  paneID,
+		Session:    moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: sess.name},
+		TabID:      tabID,
+		PaneID:     paneID,
+		Attachment: ac,
 	}
 }
 
-// openMovePickerForTest opens one move interaction on a freshly admitted
-// effect, exactly like the palette command does.
-func openMovePickerForTest(t *testing.T, d *Daemon, ac *attachedClient, sess *session, intent protocol.PickerIntent, source moveSourceLocator) *attachmentEffect {
+// openMovePickerForTest opens one move interaction, exactly like the palette
+// command does, and releases the effect that carried the offer: the
+// interaction namespace lives on the attachment, and a later move must be able
+// to freeze every other effect on the source.
+func openMovePickerForTest(t *testing.T, d *Daemon, ac *attachedClient, sess *session, intent protocol.PickerIntent, source moveSourceLocator) {
 	t.Helper()
 	current := ac.transportSnapshot()
 	_, effect, admitted := ac.beginCurrentAttachmentEffect(sess, current.transport)
+	if !admitted {
+		// A test may deliberately drop the source attachment before opening;
+		// the captured capability still admits the open.
+		effect, admitted = ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	}
 	require.True(t, admitted)
-	t.Cleanup(effect.End)
 	require.NoError(t, d.openPickerForAttachment(ac, effect, intent, source, 0))
+	effect.End()
+}
+
+// pickActionEffectForTest admits one effect for a typed action. A move drains
+// every live effect on its source, so the caller ends it right before the
+// commit, exactly like a client frame that has already been consumed.
+func pickActionEffectForTest(t *testing.T, sess *session, ac *attachedClient) *attachmentEffect {
+	t.Helper()
+	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	require.True(t, admitted)
 	return effect
 }
 
 // moveSelectionForDestination builds the typed move the client would send for
 // the destination session's first selectable line.
-func moveSelectionForDestination(t *testing.T, ac *attachedClient, effect *attachmentEffect, destination domain.SessionID) protocol.PickerSelection {
+func moveSelectionForDestination(t *testing.T, ac *attachedClient, destination domain.SessionID) protocol.PickerSelection {
 	t.Helper()
 	ac.overlays.pickerMu.Lock()
 	interaction := ac.overlays.pickerInteraction
@@ -152,14 +178,13 @@ func TestPaletteMoveWithoutDestinationShowsToastAndNoPicker(t *testing.T) {
 func TestMovePickerMoveCommitsPane(t *testing.T) {
 	d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
-	source.mu.Lock()
-	clearAttachmentsForTestLocked(source)
-	source.mu.Unlock()
 	sourceTab := source.tabs[0]
 	moved := sourceTab.focusedPane()
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, "source-tab", "source-pane"))
-	selection := moveSelectionForDestination(t, ac, effect, destination.id)
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
+	effect.End()
 	d.resolvePickerSelection(effect, selection)
 
 	require.Nil(t, source.tabs)
@@ -170,19 +195,16 @@ func TestMovePickerMoveCommitsPane(t *testing.T) {
 func TestMovePickerCommitMovePaneViaSharedAPI(t *testing.T) {
 	d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
-	source.mu.Lock()
-	clearAttachmentsForTestLocked(source)
-	source.mu.Unlock()
 	sourceTab := source.tabs[0]
 	moved := sourceTab.focusedPane()
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, "source-tab", "source-pane"))
-	selection := moveSelectionForDestination(t, ac, effect, destination.id)
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+	selection := moveSelectionForDestination(t, ac, destination.id)
 	ac.overlays.pickerMu.Lock()
 	target, ok := ac.overlays.pickerKeys[selection.Key]
 	ac.overlays.pickerMu.Unlock()
 	require.True(t, ok)
-	require.NoError(t, d.commitMovePickerSelection(protocol.PickerIntentMovePane, moveSourceForSession(source, "source-tab", "source-pane"), target))
+	require.NoError(t, d.commitMovePickerSelection(protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"), target))
 
 	require.Nil(t, source.tabs)
 	require.Same(t, moved, destinationTab.panes[moved.id])
@@ -192,14 +214,13 @@ func TestMovePickerCommitMovePaneViaSharedAPI(t *testing.T) {
 func TestMovePickerMoveCommitsTab(t *testing.T) {
 	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
-	source.mu.Lock()
-	clearAttachmentsForTestLocked(source)
-	source.mu.Unlock()
 	movedTab := source.tabs[0]
 	movedTab.stableID = "moved-tab"
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, "moved-tab", ""))
-	selection := moveSelectionForDestination(t, ac, effect, destination.id)
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "moved-tab", ""))
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
+	effect.End()
 	d.resolvePickerSelection(effect, selection)
 
 	require.Nil(t, source.tabs)
@@ -212,7 +233,8 @@ func TestMovePickerCancelPerformsNoMutation(t *testing.T) {
 	defer releaseAll(releases)
 	before := len(source.tabs)
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, "source-tab", "source-pane"))
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+	effect := pickActionEffectForTest(t, source, ac)
 	ac.overlays.pickerMu.Lock()
 	interaction := ac.overlays.pickerInteraction
 	ac.overlays.pickerMu.Unlock()
@@ -226,12 +248,14 @@ func TestMovePickerStaleDestinationReportsNotice(t *testing.T) {
 	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, "source-tab", "source-pane"))
-	selection := moveSelectionForDestination(t, ac, effect, destination.id)
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
 	d.mu.Lock()
 	delete(d.sessions, destination.id)
 	d.mu.Unlock()
 
+	effect.End()
 	d.resolvePickerSelection(effect, selection)
 
 	history := d.notices.history()
@@ -245,12 +269,14 @@ func TestMovePickerStaleSourcePaneReportsPreciseFeedback(t *testing.T) {
 	defer releaseAll(releases)
 	sourceTab := source.tabs[0]
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, "source-tab", "source-pane"))
-	selection := moveSelectionForDestination(t, ac, effect, destination.id)
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"))
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
 	sourceTab.mu.Lock()
 	delete(sourceTab.panes, sourceTab.tree.Focus)
 	sourceTab.mu.Unlock()
 
+	effect.End()
 	d.resolvePickerSelection(effect, selection)
 
 	require.True(t, ac.overlays.pickerClientActive())
@@ -263,12 +289,14 @@ func TestMovePickerStaleSourceTabReportsPreciseFeedback(t *testing.T) {
 	d, source, ac, destination, _, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
 
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, "source-tab", ""))
-	selection := moveSelectionForDestination(t, ac, effect, destination.id)
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "source-tab", ""))
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
 	source.mu.Lock()
 	source.tabs = nil
 	source.mu.Unlock()
 
+	effect.End()
 	d.resolvePickerSelection(effect, selection)
 
 	require.True(t, ac.overlays.pickerClientActive())
@@ -283,8 +311,9 @@ func TestMovePickerStaleSourceTabReportsPreciseFeedback(t *testing.T) {
 func TestMovePickerSupersedingOpenRetiresTheEarlierNamespace(t *testing.T) {
 	d, source, ac, _, _, releases := setupMovePickerSessions(t, 0)
 	defer releaseAll(releases)
-	sourceSnapshot := moveSourceForSession(source, "source-tab", "source-pane")
-	effect := openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, sourceSnapshot)
+	sourceSnapshot := moveSourceForSession(source, ac, "source-tab", "source-pane")
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMovePane, sourceSnapshot)
+	effect := pickActionEffectForTest(t, source, ac)
 	ac.overlays.pickerMu.Lock()
 	firstInteraction := ac.overlays.pickerInteraction
 	firstRevision := ac.overlays.pickerRevisions[servingPickerSourceID]

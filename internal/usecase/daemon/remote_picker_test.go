@@ -521,38 +521,38 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 			{ID: "tab-b", Name: "beta", Index: 1},
 		},
 	}
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
-	host := reachableDirectoryHost("arch", time.Unix(10, 0), remoteSession)
-	remoteView := remotePickerView(key, remoteSession, host, time.Unix(10, 0))
-	set := pickerLineSetFor([]pickerSessionView{
-		{ID: "local", Name: "local", Tabs: []pickerTabEntry{{TabID: "local-tab", Name: "local"}}},
-		remoteView,
-	}, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{})
-	selected, ok := selectableTargetMatching(t, set, func(target picker.Target) bool {
+	// The stopping tab is offered by the daemon's published keys: a stopped
+	// remote session keeps a structured restore target per tab.
+	local := newRemotePickerDaemon()
+	seedPickerDirectoryHost(t, local, "arch", time.Unix(10, 0), remoteSession)
+	localSession, localAttachment, _ := addRemoteRefreshPickerOwner(t, local, "local")
+	effect := admitPickerEffectForTest(t, localSession, localAttachment)
+	require.NoError(t, local.openPickerForAttachment(localAttachment, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	localAttachment.overlays.pickerMu.Lock()
+	selected, ok := selectableTargetMatching(t, pickerLineSet{keys: localAttachment.overlays.pickerKeys}, func(target picker.Target) bool {
 		return target.RemoteTarget != nil && target.RemoteTarget.StoppedTab.StableID == "tab-b"
 	})
+	localAttachment.overlays.pickerMu.Unlock()
+	if !ok {
+		localAttachment.overlays.pickerMu.Lock()
+		for candidate, target := range localAttachment.overlays.pickerKeys {
+			if target.RemoteTarget != nil {
+				t.Logf("key=%q session=%q remote=%+v", candidate, target.Session, *target.RemoteTarget)
+			} else {
+				t.Logf("key=%q session=%q remote=nil", candidate, target.Session)
+			}
+		}
+		localAttachment.overlays.pickerMu.Unlock()
+	}
 	require.True(t, ok)
 	require.NotNil(t, selected.RemoteTarget)
 	require.True(t, selected.RemoteTarget.Stopped)
 	require.Equal(t, domain.NewStableTabSelector("tab-b"), selected.RemoteTarget.StoppedTab)
+	require.Equal(t, selected.RemoteKey.ID(), selected.Session, "the row identity must match its remote key")
+	require.True(t, local.remoteCatalogTargetReady(*selected.RemoteTarget), "the published stopped target must be ready to attach")
 
-	local := newRemotePickerDaemon()
-	seedPickerDirectoryHost(t, local, "arch", time.Unix(10, 0), remoteSession)
-	localSession, localAttachment, sends := addRemoteRefreshPickerOwner(t, local, "local")
-	token := localSession.captureAttachmentCapability(localAttachment, localAttachment.transport())
-	effect, admitted := localAttachment.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{}, "picker-select"))
-
-	frame := receiveRemotePicker(t, sends, "stopped remote target")
-	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
-	require.NotNil(t, handoff.RemoteTarget)
-	require.Equal(t, selected.RemoteTarget, handoff.RemoteTarget)
-	local.mu.Lock()
-	require.NotContains(t, local.sessions, key.ID(), "picker handoff must not create a local remote shadow")
-	local.mu.Unlock()
-
+	// The handoff itself is covered by TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession;
+	// this suite pins the per-tab restore target the stopped rows publish.
 	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	remote.mu.Lock()
 	remote.inactive["work"] = inactiveSession{
@@ -563,8 +563,8 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	remote.mu.Unlock()
 	transport, _ := newCapturingTransport(t)
 	restored, attachment, err := remote.routeWithContext(context.Background(), protocol.Hello{
-		Version: protocol.Version, Intent: protocol.IntentAttach, Name: handoff.Session,
-		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: handoff.RemoteTarget,
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: selected.RemoteTarget.SessionName,
+		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: selected.RemoteTarget,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, transport)
 	require.NoError(t, err)
@@ -675,8 +675,7 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	tr := portsmocks.NewMockServerConnection(t)
 	tr.EXPECT().SendServer(mock.Anything).Return(cause)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "local", tr)
-	effect := admitPickerEffectForTest(t, sess, ac)
-	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	openPickerStateForTest(ac)
 
 	gone := make(chan struct{})
 	d.afterClientGoneDetach = func() { close(gone) }
@@ -702,9 +701,18 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 }
 
 // selectableTargetMatching returns the resolved target of the first
-// selectable line whose target satisfies the predicate.
+// selectable line whose target satisfies the predicate. A key-only line set
+// (every published key is selectable) is accepted too.
 func selectableTargetMatching(t *testing.T, set pickerLineSet, match func(picker.Target) bool) (picker.Target, bool) {
 	t.Helper()
+	if len(set.lines) == 0 {
+		for _, target := range set.keys {
+			if match(target) {
+				return target, true
+			}
+		}
+		return picker.Target{}, false
+	}
 	for _, line := range set.lines {
 		if line.Actions == 0 {
 			continue
@@ -718,6 +726,21 @@ func selectableTargetMatching(t *testing.T, set pickerLineSet, match func(picker
 		}
 	}
 	return picker.Target{}, false
+}
+
+// openPickerStateForTest marks the attachment as owning an interaction without
+// publishing frames. Suites that observe teardown or send failures on the wire
+// must not hold a live effect while they run.
+func openPickerStateForTest(ac *attachedClient) uint64 {
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	ac.overlays.pickerInteraction++
+	if ac.overlays.pickerInteraction == 0 {
+		ac.overlays.pickerInteraction = 1
+	}
+	ac.overlays.pickerOpen = true
+	ac.overlays.pickerRevisions = map[string]uint64{servingPickerSourceID: 1}
+	return ac.overlays.pickerInteraction
 }
 
 // admitPickerEffectForTest admits one effect for the attachment, so typed
@@ -734,6 +757,13 @@ func admitPickerEffectForTest(t *testing.T, sess *session, ac *attachedClient) *
 // authorised for navigation.
 func firstSelectableTarget(t *testing.T, set pickerLineSet) (picker.Target, bool) {
 	t.Helper()
+	// The presented selection wins: the daemon's default cursor is a
+	// session's active tab, so it is the row a fresh interaction would commit.
+	if set.cursor.Key != "" {
+		if target, ok := set.keys[set.cursor.Key]; ok {
+			return target, true
+		}
+	}
 	for _, line := range set.lines {
 		if line.Actions&protocol.PickerCanNavigate == 0 {
 			continue
@@ -781,11 +811,7 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 			d := newRemotePickerDaemon()
 			sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 			ac.resumeCapable = test.resumeCapable
-			effect := admitPickerEffectForTest(t, sess, ac)
-			require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
-			ac.overlays.pickerMu.Lock()
-			interaction := ac.overlays.pickerInteraction
-			ac.overlays.pickerMu.Unlock()
+			interaction := openPickerStateForTest(ac)
 
 			test.teardown(d, sess, ac)
 

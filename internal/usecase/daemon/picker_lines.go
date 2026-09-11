@@ -80,11 +80,14 @@ type pickerSourceFilter struct {
 	RemoteKey   *domain.RemoteSessionKey
 }
 
-// pickerLine is one published line plus its source-private target.
+// pickerLine is one published line plus its source-private target. cursor
+// marks the row the attachment currently displays; defaultCursor marks the row
+// a fresh interaction starts on when nothing matches the current view.
 type pickerLine struct {
-	line   protocol.PickerLine
-	target picker.Target
-	cursor bool
+	line          protocol.PickerLine
+	target        picker.Target
+	cursor        bool
+	defaultCursor bool
 }
 
 // pickerLineSet is one published source: ordered lines, the opaque key map,
@@ -99,21 +102,33 @@ type pickerLineSet struct {
 // view order (never canonicalized: order is semantically significant).
 func pickerLineSetFor(views []pickerSessionView, intent protocol.PickerIntent, source, current pickerSourceFilter) pickerLineSet {
 	set := pickerLineSet{keys: make(map[string]picker.Target)}
-	index := -1
+	entries := make([]pickerLine, 0)
 	for _, view := range views {
 		if view.Section != "" {
-			index++
-			set.lines = append(set.lines, protocol.PickerLine{Kind: protocol.PickerLineSection, Label: view.Section, Dim: true})
+			entries = append(entries, pickerLine{line: protocol.PickerLine{Kind: protocol.PickerLineSection, Label: view.Section, Dim: true}})
 		}
-		for _, entry := range pickerSessionLines(view, intent, source, current) {
-			index++
-			set.lines = append(set.lines, entry.line)
-			if _, dup := set.keys[entry.line.Key]; !dup {
-				set.keys[entry.line.Key] = entry.target
+		entries = append(entries, pickerSessionLines(view, intent, source, current)...)
+	}
+	for i, entry := range entries {
+		set.lines = append(set.lines, entry.line)
+		if entry.line.Key == "" {
+			continue
+		}
+		if _, dup := set.keys[entry.line.Key]; !dup {
+			set.keys[entry.line.Key] = entry.target
+		}
+		if entry.cursor {
+			set.cursor = protocol.PickerCursor{Key: entry.line.Key, Index: i}
+		}
+	}
+	if set.cursor.Key == "" {
+		// Prefer the active tab of a session over the first published row.
+		for i, entry := range entries {
+			if !entry.defaultCursor {
+				continue
 			}
-			if entry.cursor {
-				set.cursor = protocol.PickerCursor{Key: entry.line.Key, Index: index}
-			}
+			set.cursor = protocol.PickerCursor{Key: entry.line.Key, Index: i}
+			break
 		}
 	}
 	if set.cursor.Key == "" && len(set.lines) > 0 {
@@ -195,6 +210,11 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 		}
 		tabTarget := common
 		tabTarget.TabID, tabTarget.TabIndex = tab.TabID, i
+		// Each tab row carries its own structured remote target: a stopped row
+		// restores the tab it names, a live row binds its stable tab ID.
+		if resolved, ok := pickerTabRemoteTarget(view, tab, i); ok {
+			tabTarget.RemoteTarget = &resolved
+		}
 		tabLine := pickerLine{
 			line: protocol.PickerLine{
 				Key:   pickerClientKey(view.Incarnation, common.Name+"#"+string(tab.TabID)),
@@ -213,6 +233,11 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 		}
 		if focusable && pickerSelectionMatches(tabLine, current, intent) {
 			tabLine.cursor = true
+		}
+		// A fresh navigation starts on the session's active tab, exactly like
+		// the daemon-owned model did.
+		if focusable && intent == protocol.PickerIntentNavigation && i == normalizedActiveTab(view) {
+			tabLine.defaultCursor = true
 		}
 		lines = append(lines, tabLine)
 	}
@@ -250,30 +275,12 @@ func pickerHeaderEligibility(view pickerSessionView, intent protocol.PickerInten
 func pickerTabEligibility(view pickerSessionView, intent protocol.PickerIntent, tab pickerTabEntry, index int) (selectable, focusable, dim bool) {
 	selectable, focusable = intent != protocol.PickerIntentMoveTab, intent != protocol.PickerIntentMoveTab
 	if pickerViewIsRemote(view) {
-		target := domain.RemoteSessionTarget{}
-		if view.RemoteTarget != nil {
-			target = *view.RemoteTarget
-			if target.Stopped {
-				target.LiveTabID = ""
-				if tab.TabID != "" {
-					target.StoppedTab = domain.NewStableTabSelector(tab.TabID)
-				} else if target.StoppedTab != (domain.TabSelector{}) {
-					selector, ok := remoteStoppedOrdinalSelector(index, tab.RawName, len(view.Tabs))
-					target.StoppedTab = selector
-					if !ok {
-						target = domain.RemoteSessionTarget{}
-					}
-				}
-			} else {
-				target.StoppedTab = domain.TabSelector{}
-				target.LiveTabID = tab.TabID
-			}
-		}
 		if view.RemoteTarget == nil {
 			focusable, selectable = false, false
 		} else {
+			resolved, resolvable := pickerTabRemoteTarget(view, tab, index)
 			focusable = true
-			selectable = target.Validate() == nil && intent == protocol.PickerIntentNavigation && pickerRemoteActivatable(view)
+			selectable = resolvable && resolved.Validate() == nil && intent == protocol.PickerIntentNavigation && pickerRemoteActivatable(view)
 		}
 		dim = view.RemoteActivation == pickerRemoteUnavailable
 	}
@@ -283,9 +290,47 @@ func pickerTabEligibility(view pickerSessionView, intent protocol.PickerIntent, 
 	return selectable, focusable, dim
 }
 
+// pickerTabRemoteTarget resolves the per-tab copy of a remote session's exact
+// route. A stopped session targets the tab the row names (stable ID when known,
+// otherwise its ordinal and raw name); a live session binds the tab's stable
+// ID. The second result is false when no exact target can be expressed.
+func pickerTabRemoteTarget(view pickerSessionView, tab pickerTabEntry, index int) (domain.RemoteSessionTarget, bool) {
+	if view.RemoteTarget == nil {
+		return domain.RemoteSessionTarget{}, false
+	}
+	target := *view.RemoteTarget
+	if target.Stopped {
+		target.LiveTabID = ""
+		if tab.TabID != "" {
+			target.StoppedTab = domain.NewStableTabSelector(tab.TabID)
+			return target, true
+		}
+		if target.StoppedTab == (domain.TabSelector{}) {
+			return target, true
+		}
+		selector, ok := remoteStoppedOrdinalSelector(index, tab.RawName, len(view.Tabs))
+		if !ok {
+			return domain.RemoteSessionTarget{}, false
+		}
+		target.StoppedTab = selector
+		return target, true
+	}
+	target.StoppedTab = domain.TabSelector{}
+	target.LiveTabID = tab.TabID
+	return target, true
+}
+
 // pickerActionsFor maps eligibility to the actions the source authorises. The
 // daemon revalidates key and lifecycle at commit, so these bits are a
 // presentation contract, never authority.
+// normalizedActiveTab clamps a session's active tab index into its tab range.
+func normalizedActiveTab(view pickerSessionView) int {
+	if view.Active < 0 || view.Active >= len(view.Tabs) {
+		return 0
+	}
+	return view.Active
+}
+
 func pickerActionsFor(view pickerSessionView, intent protocol.PickerIntent, selectable bool) protocol.PickerLineActions {
 	if !selectable {
 		return 0

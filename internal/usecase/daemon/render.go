@@ -31,7 +31,12 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	sess.mu.Unlock()
 
 	if !active || !attached {
-		return false
+		// A headless tab is still renderable while a preview subscriber
+		// watches it: the preview service composes its frames from this tab.
+		rc := sess.renderCoordinator()
+		if rc == nil || !rc.hasPreviewSubscribers() {
+			return false
+		}
 	}
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

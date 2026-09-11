@@ -260,7 +260,11 @@ func (d *Daemon) resolvePickerSelection(effect *attachmentEffect, selection prot
 		d.sendPickerFailure(effect, selection, protocol.PickerUnknownKey)
 		return
 	}
-	if !d.pickerTargetCurrent(target) {
+	// Navigation commits through the handoff, which must not accept a target
+	// whose lifecycle already moved on. Move and kill revalidate source and
+	// destination themselves (move_lifecycle.go / killPickerTarget), so they
+	// report their own precise rejection instead of a generic retire.
+	if selection.Action == protocol.PickerActionNavigate && !d.pickerTargetCurrent(target) {
 		d.sendPickerFailure(effect, selection, protocol.PickerRetiredTarget)
 		return
 	}
@@ -292,15 +296,19 @@ func (d *Daemon) resolvePickerNavigate(effect *attachmentEffect, ac *attachedCli
 }
 
 // resolvePickerMove commits the move and keeps the picker open, so the client
-// can refresh its rows and let the user move another pane or tab.
+// can refresh its rows and let the user move another pane or tab. A rejected
+// move reports the same precise notice the palette path does: the client only
+// sees a bounded failure code.
 func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient, interaction uint64, intent protocol.PickerIntent, source moveSourceLocator, target picker.Target, selection protocol.PickerSelection) {
 	if err := d.movePickerSourceError(source); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerRetiredTarget)
+		d.reportAttachmentError(effect.sess, movePickerUserError(err))
 		d.refreshPickerSnapshot(ac)
 		return
 	}
 	if err := d.commitMovePickerSelection(intent, source, target); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerActionFailed)
+		d.reportAttachmentError(effect.sess, movePickerUserError(err))
 		d.refreshPickerSnapshot(ac)
 		return
 	}

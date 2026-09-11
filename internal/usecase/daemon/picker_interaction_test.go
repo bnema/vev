@@ -39,7 +39,12 @@ func pickerClientTestUnitWithPTY(t *testing.T, p ports.PTY, releasePTY func()) (
 func openTestPicker(t *testing.T, d *Daemon, ac *attachedClient, effect *attachmentEffect, sends chan wire.Frame, intent protocol.PickerIntent) protocol.PickerOffer {
 	t.Helper()
 	require.NoError(t, d.openPickerForAttachment(ac, effect, intent, moveSourceLocator{}, 0))
-	return awaitPickerOffer(t, sends)
+	offer := awaitPickerOffer(t, sends)
+	// The interaction namespace lives on the attachment, so the effect that
+	// carried the offer is released here: a later transition or move must be
+	// able to drain every other effect on this attachment.
+	effect.End()
+	return offer
 }
 
 func awaitPickerOffer(t *testing.T, sends chan wire.Frame) protocol.PickerOffer {
@@ -254,6 +259,9 @@ func TestPickerCancelPublishesClosedAndAuthoritativeFullPaint(t *testing.T) {
 
 	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	snapshot := awaitPickerSnapshot(t, sends)
+	// The open publishes its own restore paint after the snapshot; the release
+	// assertion below is about the paint that follows the close.
+	drainAllFrames(sends)
 
 	// The client cancels: the daemon retires the interaction, confirms the
 	// close with its restore barrier, and publishes the authoritative full
@@ -496,6 +504,7 @@ func TestPickerRefreshPublishesNewerSourceRevision(t *testing.T) {
 
 	// A closed interaction republishes nothing: only the close confirmation
 	// and the authoritative repaint may follow.
+	effect = admitPickerEffectForTest(t, testAttachmentSession(t, ac), ac)
 	require.True(t, d.closePickerForAttachment(ac, effect, first.InteractionID))
 	for _, frame := range drainAllFrames(sends) {
 		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "closed interaction republished a snapshot")
