@@ -142,6 +142,10 @@ func externalClientFrame(m protocol.ClientMessage) (wire.Frame, error) {
 		return wire.Frame{Type: wire.MsgNavigationInventoryPublication, Payload: wire.MarshalNavigationInventoryPublication(x)}, nil
 	case protocol.NavigationInventoryFailure:
 		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: wire.MarshalNavigationInventoryFailure(x)}, nil
+	case protocol.PickerSelection:
+		return wire.Frame{Type: wire.MsgPickerSelection, Payload: wire.MarshalPickerSelection(x)}, nil
+	case protocol.PickerClose:
+		return wire.Frame{Type: wire.MsgPickerCloseClient, Payload: wire.MarshalPickerClose(x)}, nil
 	default:
 		return wire.Frame{}, errors.New("test client: unsupported message")
 	}
@@ -178,6 +182,16 @@ func externalServerMessage(f wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalRoutePosition(f.Payload)
 	case wire.MsgRouteNavigationFailure:
 		return wire.UnmarshalRouteNavigationFailure(f.Payload)
+	case wire.MsgPickerOffer:
+		return wire.UnmarshalPickerOffer(f.Payload)
+	case wire.MsgPickerSnapshot:
+		return wire.UnmarshalPickerSnapshot(f.Payload)
+	case wire.MsgPickerClosedServer:
+		return wire.UnmarshalPickerClosed(f.Payload)
+	case wire.MsgPickerResult:
+		return wire.UnmarshalPickerResult(f.Payload)
+	case wire.MsgPickerFailure:
+		return wire.UnmarshalPickerFailure(f.Payload)
 	default:
 		return nil, errors.New("test client: unsupported server frame")
 	}
