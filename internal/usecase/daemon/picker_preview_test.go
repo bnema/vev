@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
@@ -184,4 +185,45 @@ func TestPickerPreviewCapturesRemoteRowsThroughThePreviewClient(t *testing.T) {
 	require.Equal(t, protocol.PickerPreviewUnavailable, failed.Status)
 	require.Zero(t, failed.Width)
 	require.Empty(t, failed.Cells)
+}
+
+// TestPickerOpenSurvivesOneHostRegisteredTwice pins the row-key contract: the
+// same machine can be registered under more than one target (a pinned alias and
+// a target learned by attach), and both endpoints legitimately expose the same
+// session lifecycle and name. Row keys must therefore stay unique per endpoint,
+// or the snapshot is rejected and the picker never opens at all.
+func TestPickerOpenSurvivesOneHostRegisteredTwice(t *testing.T) {
+	d := newRemotePickerDaemon()
+	lifecycle := remoteLifecycleForTest()
+	session := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "1"}},
+	}
+	seedRemoteDirectory(t, d,
+		reachableDirectoryHost("remote", time.Unix(10, 0), session),
+		reachableDirectoryHost("demo@remote", time.Unix(10, 0), session),
+	)
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	effect := admitPickerEffectForTest(t, sess, ac)
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	offer := awaitPickerOffer(t, sends)
+	require.Equal(t, protocol.PickerIntentNavigation, offer.Intent)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	seen := make(map[string]struct{}, len(snapshot.Lines))
+	workRows := 0
+	for _, line := range snapshot.Lines {
+		if line.Key == "" {
+			continue
+		}
+		_, duplicate := seen[line.Key]
+		require.False(t, duplicate, "row key %q was published twice", line.Key)
+		seen[line.Key] = struct{}{}
+		if line.Kind == protocol.PickerLineSession && line.Label == "work" {
+			workRows++
+		}
+	}
+	require.NotEmpty(t, snapshot.Lines)
+	require.Equal(t, 2, workRows, "both endpoints of the same host must publish their rows")
 }

@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
@@ -145,6 +147,22 @@ func pickerLineSetFor(views []pickerSessionView, intent protocol.PickerIntent, s
 	return set
 }
 
+// pickerRowKey derives the opaque key of one picker row. Local rows are keyed by
+// incarnation and name, which stays readable for the common case. A remote row
+// also carries its owning endpoint: the same machine can be registered under
+// more than one target (a pinned alias and one learned by attach), and two
+// endpoints may legitimately expose the same session lifecycle and name, so an
+// unqualified key would collide and the whole snapshot would be rejected. The
+// digest keeps the key unique per endpoint while staying inside the bounded key
+// length.
+func pickerRowKey(view pickerSessionView, name string) string {
+	if view.RemoteKey == nil {
+		return pickerClientKey(view.Incarnation, name)
+	}
+	digest := sha256.Sum256([]byte(view.RemoteKey.Host + "\x00" + string(view.Incarnation[:]) + "\x00" + name))
+	return "remote:" + base64.RawURLEncoding.EncodeToString(digest[:16])
+}
+
 // pickerSessionLines is the sole owner of intent-specific destination
 // eligibility. The daemon supplies canonical lifecycle/tab snapshots without
 // prefiltering.
@@ -178,7 +196,7 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 	}
 	headerLine := pickerLine{
 		line: protocol.PickerLine{
-			Key: pickerClientKey(view.Incarnation, common.Name), Kind: protocol.PickerLineSession,
+			Key: pickerRowKey(view, common.Name), Kind: protocol.PickerLineSession,
 			Label: view.Name, Detail: pickerStatusDetailFor(view, stopped), Stopped: stopped,
 			Status: pickerStatusFor(view, stopped), StatusDetail: view.RemoteDetail, Ephemeral: pickerEphemeral(view),
 		},
@@ -217,7 +235,7 @@ func pickerSessionLines(view pickerSessionView, intent protocol.PickerIntent, so
 		}
 		tabLine := pickerLine{
 			line: protocol.PickerLine{
-				Key:   pickerClientKey(view.Incarnation, common.Name+"#"+string(tab.TabID)),
+				Key:   pickerRowKey(view, common.Name+"#"+string(tab.TabID)),
 				Kind:  protocol.PickerLineTab,
 				Label: tab.Name, Detail: tab.Detail, Attention: tab.Attention,
 				Stopped: stopped, StatusDetail: view.RemoteDetail, Ephemeral: pickerEphemeral(view),
