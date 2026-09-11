@@ -918,7 +918,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 			var gotClipboard ports.ClipboardReader
 			clip := portsmocks.NewMockClipboardReader(t)
 			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("remote.example", "work", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
+			factory.EXPECT().DialerForRemote("remote.example", "", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 				remoteDialerFactory:     factory.DialerForRemote,
@@ -954,33 +954,36 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 	}
 }
 
-func TestRunAttachWithDepsDirectLegacyCallbackPreservesClientOwnership(t *testing.T) {
+// TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority pins that the
+// launching client resolves its endpoint through the registry the composition
+// root injects: the runner receives that registry, and the endpoint is resolved
+// exactly once for the route it starts on.
+func TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
 
+	var registryDials int
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			require.True(t, request.Remote)
 			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
-			nextDialer, nextRequest, err := deps.AttachHandoff(protocol.AttachTarget{
-				Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach,
-				EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
-			})
-			require.NoError(t, err)
-			require.NotNil(t, nextDialer)
-			require.Equal(t, protocol.EnvironmentPolicyClientOwned, nextRequest.EnvironmentPolicy)
+			require.NotNil(t, deps.HostRegistry, "a launched client must own a host registry")
+			binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), "remote.example")
+			require.NoError(t, resolveErr)
+			require.NotNil(t, binding.Dialer)
+			registryDials++
 			return nil
 		},
 	})
 	require.NoError(t, err)
+	require.Equal(t, 1, registryDials)
 }
 
 func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 	var calls int
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,
@@ -999,29 +1002,37 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 	require.Equal(t, 2, calls, "a picker handoff must close the old connection and open a fresh direct connection")
 }
 
-func TestRunAttachWithDepsAllowsRevisitingRemoteHandoff(t *testing.T) {
+// TestRunAttachWithDepsReusesOneEndpointBinding pins that the registry the
+// runner receives resolves each endpoint once: revisiting a host, even for a
+// different session, hands back the same typed dialer and never rebuilds the
+// carriage.
+func TestRunAttachWithDepsReusesOneEndpointBinding(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-revisit"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
+	var first, second ports.ClientDialer
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
-			dialer, request, err := deps.AttachHandoff(protocol.AttachTarget{
-				Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach,
-			})
-			require.NoError(t, err)
-			require.NotNil(t, dialer)
-			require.Equal(t, "work", request.SessionName)
+			resolve := func() ports.ClientDialer {
+				binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), "remote.example")
+				require.NoError(t, resolveErr)
+				return binding.Dialer
+			}
+			first, second = resolve(), resolve()
 			return nil
 		},
 	})
 	require.NoError(t, err)
+	require.NotNil(t, first)
+	require.Equal(t, first, second, "revisiting an endpoint must reuse its binding")
 }
 
 func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(maxAttachTargetHandoffs + 1)
+	// The registry resolves the endpoint once: every repeated handoff reuses
+	// that binding, and the attempt bound is what the loop still enforces.
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	calls := 0
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
@@ -1047,7 +1058,7 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("selected.example", "picked", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Times(2)
+			factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 			target := protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: tt.intent, RequestID: tt.requestID, EnvironmentPolicy: tt.policy}
 			want := client.AttachRequest{Intent: tt.intent, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
 			localCalls, remoteCalls := 0, 0
@@ -1062,9 +1073,9 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 					}
 					localCalls++
 					require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local"}, request)
-					_, next, err := deps.AttachHandoff(target)
-					require.NoError(t, err)
-					require.Equal(t, want, next, "in-run handoff must preserve environment ownership")
+					binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), target.Endpoint)
+					require.NoError(t, resolveErr)
+					require.NotNil(t, binding.Dialer)
 					return &client.AttachTargetError{Target: target}
 				},
 			})
@@ -1098,7 +1109,7 @@ func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+			factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 			calls := 0
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 				remoteDialerFactory: factory.DialerForRemote,
@@ -1136,7 +1147,7 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 	factoryErr := errors.New("factory failed")
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportUDP, mock.Anything).Return(nil, factoryErr)
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(nil, factoryErr)
 	runClientCalled := false
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{

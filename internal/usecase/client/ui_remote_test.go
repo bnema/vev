@@ -82,10 +82,12 @@ func TestUIRunnerRemoteHandoffRequiresDestinationFull(t *testing.T) {
 	remoteDialer := portsmocks.NewMockClientDialer(t)
 	remoteDialer.EXPECT().Dial(mock.Anything).Return(destination.connection, nil).Once()
 	target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "remote"}
-	runner := NewRunner(Dependencies{Dialer: localDialer, Terminal: terminal, Clock: systemClock{}, UI: ui, DisableCapabilityProbe: true, AttachHandoff: func(offer protocol.AttachTarget) (ports.ClientDialer, AttachRequest, error) {
-		require.Equal(t, "isolated-fixture", offer.Endpoint)
-		return remoteDialer, AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote", Remote: true, Origin: protocol.RouteOriginRemote, OriginKey: "isolated-fixture", ExactTarget: &target}, nil
-	}})
+	deps := Dependencies{Dialer: localDialer, Terminal: terminal, Clock: systemClock{}, UI: ui, DisableCapabilityProbe: true}
+	deps.HostRegistry = internalStubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		require.Equal(t, "isolated-fixture", endpoint)
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
+	runner := NewRunner(deps)
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx, AttachRequest{Intent: protocol.IntentAttach, SessionName: "local"}) }()
 	t.Cleanup(func() {
@@ -116,7 +118,7 @@ func TestUIRunnerRemoteHandoffRequiresDestinationFull(t *testing.T) {
 		results <- result
 	}()
 	fence := awaitUIClientMessage[protocol.UIFence](t, source)
-	source.incoming <- protocol.AttachTarget{Endpoint: "isolated-fixture", Session: "remote", ExactTarget: &target, CauseActionID: fence.ActionID}
+	source.incoming <- protocol.AttachTarget{Endpoint: "isolated-fixture", Session: "remote", Intent: protocol.IntentAttach, ExactTarget: &target, CauseActionID: fence.ActionID}
 	awaitUIClientMessage[protocol.Hello](t, destination)
 	remoteView := view
 	remoteView.Route.Target = target

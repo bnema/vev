@@ -286,14 +286,10 @@ func TestHybridPickerSameHostSwitchKeepsTheServingTransport(t *testing.T) {
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote}}
 	localDialer := &sequenceDialer{trs: []wire.Transport{local}}
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
-	deps.AttachHandoff = func(handoff protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-		handoffEndpoints <- handoff.Endpoint
-		return remoteDialer, client.AttachRequest{
-			Intent: protocol.IntentAttach, SessionName: handoff.Session, Remote: true,
-			Origin: protocol.RouteOriginRemote, OriginKey: handoff.Endpoint, HostLabel: handoff.Endpoint,
-			EnvironmentPolicy: handoff.EnvironmentPolicy,
-		}, nil
-	}
+	deps.HostRegistry = stubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		handoffEndpoints <- endpoint
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
 
 	done := make(chan error, 1)
 	go func() {
@@ -379,23 +375,13 @@ func TestHybridPickerDifferentHostDialsTheTargetEndpoint(t *testing.T) {
 	targetDialer := &sequenceDialer{trs: []wire.Transport{targetTransport}}
 	localDialer := &sequenceDialer{trs: []wire.Transport{local}}
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
-	deps.AttachHandoff = func(handoff protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-		handoffEndpoints <- handoff.Endpoint
-		if handoff.Endpoint == targetHost.Endpoint {
-			require.NotNil(t, handoff.RemoteTarget)
-			require.Equal(t, targetHost, *handoff.RemoteTarget)
-			return targetDialer, client.AttachRequest{
-				Intent: protocol.IntentAttach, SessionName: handoff.Session, Remote: true, RemoteTarget: handoff.RemoteTarget,
-				Origin: protocol.RouteOriginRemote, OriginKey: handoff.Endpoint, HostLabel: handoff.Endpoint,
-				EnvironmentPolicy: handoff.EnvironmentPolicy,
-			}, nil
+	deps.HostRegistry = stubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		handoffEndpoints <- endpoint
+		if endpoint == targetHost.Endpoint {
+			return ports.RemoteEndpointBinding{Dialer: targetDialer}, nil
 		}
-		return remoteDialer, client.AttachRequest{
-			Intent: protocol.IntentAttach, SessionName: handoff.Session, Remote: true,
-			Origin: protocol.RouteOriginRemote, OriginKey: handoff.Endpoint, HostLabel: handoff.Endpoint,
-			EnvironmentPolicy: handoff.EnvironmentPolicy,
-		}, nil
-	}
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
 
 	done := make(chan error, 1)
 	go func() {

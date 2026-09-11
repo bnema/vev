@@ -166,9 +166,10 @@ type Dependencies struct {
 	Logger                 *slog.Logger
 	RuntimeObserver        ports.SerializedRuntimeObserver
 	RemoteHostLearner      ports.RemoteHostLearner
-	// AttachHandoff keeps one Runner and one terminal/input ownership across a
-	// local daemon's structured remote handoff. It is nil for direct CLI attach.
-	AttachHandoff AttachHandoffFunc
+	// HostRegistry resolves remote endpoints for handoffs and projects remote
+	// discovery, so one Runner owns one observation lifetime. It is nil only
+	// for embedders that accept no remote handoff at all.
+	HostRegistry ports.ClientHostRegistry
 	// LocalControlDialer is an optional dial-only control source for the
 	// local daemon inventory. It must never start the daemon, create an
 	// attachment, or call the CLI: a missing socket reports local control
@@ -207,6 +208,69 @@ type AttachRequest struct {
 	NavigationCapabilities protocol.NavigationCapabilities
 }
 
+// resolveHandoff resolves one remote handoff target through the runner's host
+// registry. The registry owns the endpoint binding (dialer and environment);
+// the request is derived here from the validated target and that binding, so
+// every handoff shares one endpoint authority and one observation lifetime.
+func (r *Runner) resolveHandoff(ctx context.Context, target protocol.AttachTarget) (ports.ClientDialer, AttachRequest, error) {
+	if err := validateHandoffTarget(target); err != nil {
+		return nil, AttachRequest{}, err
+	}
+	binding, err := r.hostRegistry.ResolveEndpoint(ctx, target.Endpoint)
+	if err != nil {
+		return nil, AttachRequest{}, err
+	}
+	if binding.Dialer == nil {
+		return nil, AttachRequest{}, errors.New("vev: remote endpoint resolved without a dialer")
+	}
+	hostLabel := domain.RemoteDisplayOrigin(target.Endpoint)
+	if target.RemoteTarget != nil {
+		hostLabel = target.RemoteTarget.DisplayOrigin
+	}
+	return binding.Dialer, AttachRequest{
+		Intent:            target.Intent,
+		SessionName:       target.Session,
+		Remote:            true,
+		Environment:       binding.Environment,
+		Origin:            protocol.RouteOriginDiscovery,
+		OriginKey:         target.Endpoint,
+		RemoteTarget:      target.RemoteTarget,
+		HostLabel:         hostLabel,
+		EnvironmentPolicy: r.handoffEnvironmentPolicy(target),
+	}, nil
+}
+
+// handoffEnvironmentPolicy mirrors the composition root's picker rule: a route
+// chosen from a locally launched client has no explicit remote selection, so
+// its environment belongs to the daemon; every other target keeps the policy
+// the serving daemon authorised.
+func (r *Runner) handoffEnvironmentPolicy(target protocol.AttachTarget) protocol.EnvironmentPolicy {
+	if !r.launchedRemote && target.RemoteTarget == nil && target.Intent != protocol.IntentNew {
+		return protocol.EnvironmentPolicyDaemonOwned
+	}
+	return target.EnvironmentPolicy
+}
+
+// validateHandoffTarget revalidates one daemon-authored handoff before the
+// runner resolves it, so a malformed target never reaches registry policy.
+func validateHandoffTarget(target protocol.AttachTarget) error {
+	if err := protocol.ValidateAttachTarget(target); err != nil {
+		return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+	}
+	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
+		return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+	}
+	if target.RemoteTarget != nil {
+		if target.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
+			return errors.New("vev: remote picker handoff must use daemon-owned environment")
+		}
+		if target.RemoteTarget.Endpoint != target.Endpoint || target.RemoteTarget.SessionName != target.Session {
+			return errors.New("vev: remote picker handoff identity does not match route")
+		}
+	}
+	return nil
+}
+
 // attachRoute captures the dialer, request, and resume token needed to
 // restore a previous attachment route after a navigation handoff.
 type attachRoute struct {
@@ -243,8 +307,13 @@ type Runner struct {
 	logger            *slog.Logger
 	runtimeObserver   ports.SerializedRuntimeObserver
 	remoteHostLearner ports.RemoteHostLearner
-	attachHandoff     AttachHandoffFunc
-	remote            bool
+	hostRegistry      ports.ClientHostRegistry
+	// launchedRemote records whether this runner was launched as a direct
+	// remote attach. It decides the handoff environment policy exactly like the
+	// composition root used to: a picker route from a locally launched client
+	// has no explicit remote selection, so its environment is daemon-owned.
+	launchedRemote bool
+	remote         bool
 	// localControlDialer is the dial-only inventory source. It never
 	// starts the daemon; the relay is its sole consumer.
 	localControlDialer ports.ClientDialer
@@ -279,7 +348,8 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:             log,
 		runtimeObserver:    deps.RuntimeObserver,
 		remoteHostLearner:  deps.RemoteHostLearner,
-		attachHandoff:      deps.AttachHandoff,
+		hostRegistry:       deps.HostRegistry,
+		launchedRemote:     deps.Remote,
 		remote:             deps.Remote,
 		localControlDialer: deps.LocalControlDialer,
 		origin:             normalizeRouteOrigin(deps.Origin, deps.Remote),
@@ -467,6 +537,21 @@ func validateAttachRequest(request AttachRequest) error {
 // above attach attempts so raw mode remains active while a live client process
 // redials a lost link.
 func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) {
+	// The host registry owns remote discovery for this runner's whole
+	// lifetime: one observation loop survives every handoff, reconnect, and
+	// picker interaction, and stops when the runner exits.
+	if r.hostRegistry != nil {
+		registryCtx, stopRegistry := context.WithCancel(ctx)
+		registryDone := make(chan struct{})
+		go func() {
+			defer close(registryDone)
+			_ = r.hostRegistry.Run(registryCtx)
+		}()
+		defer func() {
+			stopRegistry()
+			<-registryDone
+		}()
+	}
 	var stopObserve context.CancelFunc
 	var observed chan struct{}
 	if r.ui != nil {
@@ -925,10 +1010,12 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				nextDialer = source.dialer
 				nextRequest = r.ledger.samePeerHandoff(source.request, *target)
 			} else {
-				if r.attachHandoff == nil {
+				if r.hostRegistry == nil {
+					// A registry-less embedder keeps the historical handoff
+					// error, so its caller can dial the endpoint itself.
 					return &AttachTargetError{Target: *target}
 				}
-				nextDialer, nextRequest, handoffErr = r.attachHandoff(*target)
+				nextDialer, nextRequest, handoffErr = r.resolveHandoff(ctx, *target)
 				if handoffErr != nil {
 					if target.Intent == protocol.IntentNew && target.RequestID != 0 {
 						r.creationFailure = &protocol.SessionCreationFailure{RequestID: target.RequestID, Code: routeFailureCode(handoffErr)}

@@ -76,9 +76,7 @@ func TestInventoryFailureRestoresLatestRemoteIdentityAfterResumeRejection(t *tes
 	}).Twice()
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
 	deps.LocalControlDialer = control
-	deps.AttachHandoff = func(protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-		return remoteDialer, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: first.SessionName, Remote: true, Origin: protocol.RouteOriginRemote, OriginKey: "remote", HostLabel: "remote", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, nil
-	}
+	deps.HostRegistry = dialerForEndpoints(map[string]ports.ClientDialer{"remote": remoteDialer})
 	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: local.SessionName, Origin: protocol.RouteOriginLocal, OriginKey: "local"}))
 	for _, tr := range []*recordingTransport{resume, restored} {
 		hello := helloFromSend(t, tr)

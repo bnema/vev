@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -237,6 +238,64 @@ func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int3
 
 func isType(typ wire.MsgType) any {
 	return mock.MatchedBy(func(f wire.Frame) bool { return f.Type == typ })
+}
+
+// stubHostRegistry is the test host registry: it resolves endpoints from a
+// table and projects an empty directory. Run parks until the runner exits, so
+// the registry lifecycle is joined exactly like production.
+type stubHostRegistry struct {
+	resolve func(endpoint string) (ports.RemoteEndpointBinding, error)
+}
+
+func (r stubHostRegistry) ResolveEndpoint(_ context.Context, endpoint string) (ports.RemoteEndpointBinding, error) {
+	if r.resolve == nil {
+		return ports.RemoteEndpointBinding{}, fmt.Errorf("stub host registry has no resolver for %q", endpoint)
+	}
+	return r.resolve(endpoint)
+}
+func (stubHostRegistry) Snapshot() ports.RemoteDirectorySnapshot {
+	return ports.RemoteDirectorySnapshot{}
+}
+func (stubHostRegistry) Subscribe() ports.RemoteDirectorySubscription { return nil }
+func (stubHostRegistry) RequestReconcile(string)                      {}
+func (stubHostRegistry) RegistryChanged()                             {}
+func (stubHostRegistry) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
+// countingHostRegistry records the discovery loop's lifetime, so a test can
+// prove one loop serves a whole run and is joined before the client returns.
+type countingHostRegistry struct {
+	runs   atomic.Int32
+	joined chan struct{}
+}
+
+func (r *countingHostRegistry) ResolveEndpoint(context.Context, string) (ports.RemoteEndpointBinding, error) {
+	return ports.RemoteEndpointBinding{Dialer: &sequenceDialer{}}, nil
+}
+func (*countingHostRegistry) Snapshot() ports.RemoteDirectorySnapshot {
+	return ports.RemoteDirectorySnapshot{}
+}
+func (*countingHostRegistry) Subscribe() ports.RemoteDirectorySubscription { return nil }
+func (*countingHostRegistry) RequestReconcile(string)                      {}
+func (*countingHostRegistry) RegistryChanged()                             {}
+func (r *countingHostRegistry) Run(ctx context.Context) error {
+	r.runs.Add(1)
+	<-ctx.Done()
+	close(r.joined)
+	return nil
+}
+
+// dialerForEndpoints builds a registry that serves one dialer per endpoint.
+func dialerForEndpoints(dialers map[string]ports.ClientDialer) stubHostRegistry {
+	return stubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		dialer := dialers[endpoint]
+		if dialer == nil {
+			return ports.RemoteEndpointBinding{}, fmt.Errorf("hybrid picker endpoint %q has no dialer", endpoint)
+		}
+		return ports.RemoteEndpointBinding{Dialer: dialer}, nil
+	}}
 }
 
 // transportDialer adapts one already-open test transport to the Runner API.
@@ -702,21 +761,7 @@ func hybridLocalBootstrap(lifecycle domain.SessionLifecycleID, target domain.Rem
 
 func hybridPickerDependencies(localDialer ports.ClientDialer, term ports.Terminal, clock ports.Clock, remoteByEndpoint map[string]ports.ClientDialer) client.Dependencies {
 	deps := testDependencies(localDialer, term, clock, nil, nil)
-	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-		if target.RemoteTarget == nil {
-			return nil, client.AttachRequest{}, errors.New("hybrid picker target is not remote")
-		}
-		dialer := remoteByEndpoint[target.Endpoint]
-		if dialer == nil {
-			return nil, client.AttachRequest{}, errors.New("hybrid picker endpoint has no dialer")
-		}
-		selection := *target.RemoteTarget
-		return dialer, client.AttachRequest{
-			Intent: protocol.IntentAttach, SessionName: target.Session, Remote: true,
-			Origin: protocol.RouteOriginDiscovery, OriginKey: target.Endpoint,
-			RemoteTarget: &selection, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-		}, nil
-	}
+	deps.HostRegistry = dialerForEndpoints(remoteByEndpoint)
 	return deps
 }
 
@@ -811,17 +856,15 @@ func TestRemoteCreationFailuresRestoreSourceAndReportCorrelation(t *testing.T) {
 			sourceDialer := &sequenceDialer{trs: []wire.Transport{initial, restored}}
 			targetDialer := &sequenceDialer{errs: []error{tt.dialErr}}
 			deps := testDependencies(sourceDialer, term, realClock{}, nil, nil)
-			deps.AttachHandoff = func(got protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-				require.Equal(t, target, got)
+			resolved := 0
+			deps.HostRegistry = stubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+				resolved++
+				require.Equal(t, target.Endpoint, endpoint)
 				if tt.handoffErr != nil {
-					return nil, client.AttachRequest{}, tt.handoffErr
+					return ports.RemoteEndpointBinding{}, tt.handoffErr
 				}
-				return targetDialer, client.AttachRequest{
-					Intent: protocol.IntentNew, SessionName: "example", Remote: true,
-					Origin: protocol.RouteOriginDiscovery, OriginKey: "host-a", HostLabel: "host-a",
-					EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
-				}, nil
-			}
+				return ports.RemoteEndpointBinding{Dialer: targetDialer}, nil
+			}}
 
 			require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{
 				Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local",
@@ -889,14 +932,10 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	// local home route; without a control source it must not claim the
 	// capability. The mock admits no dial: this route receives no demand.
 	deps.LocalControlDialer = portsmocks.NewMockClientDialer(t)
-	deps.AttachHandoff = func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-		require.Equal(t, createRemote, target)
-		return remoteDialer, client.AttachRequest{
-			Intent: protocol.IntentNew, SessionName: target.Session, Remote: true,
-			Origin: protocol.RouteOriginDiscovery, OriginKey: target.Endpoint,
-			EnvironmentPolicy: target.EnvironmentPolicy,
-		}, nil
-	}
+	deps.HostRegistry = stubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		require.Equal(t, createRemote.Endpoint, endpoint)
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
 
 	err := runTestClient(context.Background(), deps, client.AttachRequest{
 		Intent: protocol.IntentAttach, SessionName: "misc", Origin: protocol.RouteOriginLocal, OriginKey: "local",
@@ -2112,4 +2151,53 @@ func TestRunExitsCleanlyWhenKilledSessionHasNoPriorRoute(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), d.calls.Load())
 	require.Equal(t, int32(1), term.restoreCount.Load())
+}
+
+// TestRunnerOwnsOneRegistryLoopPerRun pins the discovery lifetime: the runner
+// starts the registry once, keeps it across a handoff and a reconnect, and
+// joins it before it returns, including on the failure path.
+func TestRunnerOwnsOneRegistryLoopPerRun(t *testing.T) {
+	tests := []struct {
+		name      string
+		runClient func(t *testing.T, deps client.Dependencies) error
+		wantErr   bool
+	}{
+		{
+			name: "completed run",
+			runClient: func(t *testing.T, deps client.Dependencies) error {
+				transport := &recordingTransport{recvs: []recvItem{
+					{f: hybridWelcomeFrame("local", domain.SessionLifecycleID{1})},
+					{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+				}}
+				deps.Dialer = &sequenceDialer{trs: []wire.Transport{transport}}
+				return runTestClient(context.Background(), deps, client.AttachRequest{
+					Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+				})
+			},
+		},
+		{
+			name: "rejected request still stops the loop",
+			runClient: func(t *testing.T, deps client.Dependencies) error {
+				err := runTestClient(context.Background(), deps, client.AttachRequest{Intent: protocol.IntentAttach})
+				require.Error(t, err)
+				return nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := &countingHostRegistry{joined: make(chan struct{})}
+			term := newRunTerminal()
+			defer term.in.unblock()
+			deps := testDependencies(&sequenceDialer{}, term, realClock{}, nil, nil)
+			deps.HostRegistry = registry
+			require.NoError(t, tt.runClient(t, deps))
+			require.Equal(t, int32(1), registry.runs.Load(), "one registry loop must serve the whole run")
+			select {
+			case <-registry.joined:
+			default:
+				t.Fatal("the runner returned before its registry loop was joined")
+			}
+		})
+	}
 }

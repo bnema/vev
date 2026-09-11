@@ -25,8 +25,12 @@ import (
 // configuration, and endpoint environment are frozen here by the composition
 // root; the client only receives the resulting typed dialer.
 type clientEndpointFactory struct {
-	factory     remoteDialerForTarget
-	mode        remoteadapter.TransportMode
+	factory remoteDialerForTarget
+	mode    remoteadapter.TransportMode
+	// modeErr is the transport-mode validation failure, reported for every
+	// endpoint so an invalid configured mode fails a handoff instead of
+	// silently selecting another carriage.
+	modeErr     error
 	environment func(string) []string
 	allowed     map[string]struct{}
 	// restricted reports whether an allowlist was configured at all. A
@@ -43,6 +47,9 @@ func (f clientEndpointFactory) ResolveEndpoint(ctx context.Context, endpoint str
 	}
 	if err := domain.ValidateRemoteHostTarget(endpoint); err != nil {
 		return ports.RemoteEndpointBinding{}, fmt.Errorf("vev: invalid remote endpoint: %w", err)
+	}
+	if f.modeErr != nil {
+		return ports.RemoteEndpointBinding{}, f.modeErr
 	}
 	if f.restricted && !allowlistedRemoteEndpoint(f.allowed, endpoint) {
 		return ports.RemoteEndpointBinding{}, fmt.Errorf("vev: remote endpoint %q is not allowed", endpoint)
@@ -68,7 +75,7 @@ func (f clientEndpointFactory) ResolveEndpoint(ctx context.Context, endpoint str
 // newClientHostRegistry composes the runner-scoped client host registry: the
 // endpoint factory above, the discovery monitor over the client's own store,
 // catalogue client, and runner-local cache, and the loop the runner joins.
-func newClientHostRegistry(deps runAttachDeps, mode remoteadapter.TransportMode, clk ports.Clock, log *slog.Logger) (ports.ClientHostRegistry, error) {
+func newClientHostRegistry(deps runAttachDeps, mode remoteadapter.TransportMode, modeErr error, clk ports.Clock, log *slog.Logger) (ports.ClientHostRegistry, error) {
 	allowed, restricted, err := remoteLaunchAllowlistFromEnv()
 	if err != nil {
 		return nil, err
@@ -94,7 +101,7 @@ func newClientHostRegistry(deps runAttachDeps, mode remoteadapter.TransportMode,
 	runtime := remoteadapter.NewRuntime(store, catalog, cache, log)
 	monitor := remotes.NewMonitor(runtime, clk, log)
 	factory := clientEndpointFactory{
-		factory: deps.remoteDialerFactory, mode: mode, environment: deps.remoteEnvironment,
+		factory: deps.remoteDialerFactory, mode: mode, modeErr: modeErr, environment: deps.remoteEnvironment,
 		allowed: allowed, restricted: restricted, log: log,
 	}
 	return remotes.NewHostRegistry(factory, monitor, monitor.Run, log), nil

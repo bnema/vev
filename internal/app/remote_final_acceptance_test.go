@@ -123,6 +123,7 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 	outputs := make(chan string, 4)
 	factory := &acceptanceRemoteFactory{outputs: outputs}
 	hostStore := portsmocks.NewMockRemoteHostStore(t)
+	hostStore.EXPECT().Hosts().Return(nil, nil, nil).Maybe()
 	for _, host := range []string{"direct.example", "picker.example", "picked.example"} {
 		hostStore.EXPECT().Remember(host).Return(nil).Once()
 	}

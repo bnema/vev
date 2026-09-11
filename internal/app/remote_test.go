@@ -306,9 +306,10 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 
 func TestRunAttachWithDepsRemoteLearning(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
+	store.EXPECT().Hosts().Return(nil, nil, nil).Maybe()
 	store.EXPECT().Remember("build@mule").Return(nil).Once()
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("build@mule", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("build@mule", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	var learner ports.RemoteHostLearner
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "build@mule", "", nil, runAttachDeps{
@@ -326,9 +327,10 @@ func TestRunAttachWithDepsRemoteLearning(t *testing.T) {
 
 func TestRunAttachWithDepsAlwaysLearnsRemoteHost(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
+	store.EXPECT().Hosts().Return(nil, nil, nil).Maybe()
 	store.EXPECT().Remember("arch").Return(nil).Once()
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("arch", "work", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 	var learner ports.RemoteHostLearner
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "arch", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,

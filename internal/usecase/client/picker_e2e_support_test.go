@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -15,6 +16,29 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
+
+// internalStubHostRegistry is the internal tests' host registry: it resolves
+// endpoints from a table and parks its discovery loop until the runner exits.
+type internalStubHostRegistry struct {
+	resolve func(endpoint string) (ports.RemoteEndpointBinding, error)
+}
+
+func (r internalStubHostRegistry) ResolveEndpoint(_ context.Context, endpoint string) (ports.RemoteEndpointBinding, error) {
+	if r.resolve == nil {
+		return ports.RemoteEndpointBinding{}, errors.New("stub host registry has no resolver")
+	}
+	return r.resolve(endpoint)
+}
+func (internalStubHostRegistry) Snapshot() ports.RemoteDirectorySnapshot {
+	return ports.RemoteDirectorySnapshot{}
+}
+func (internalStubHostRegistry) Subscribe() ports.RemoteDirectorySubscription { return nil }
+func (internalStubHostRegistry) RequestReconcile(string)                      {}
+func (internalStubHostRegistry) RegistryChanged()                             {}
+func (internalStubHostRegistry) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
 
 // newPickerTestTerminal builds the headless terminal backing both the UI
 // state and the test's snapshot observations.
