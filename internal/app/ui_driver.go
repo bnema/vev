@@ -573,11 +573,18 @@ func clientClock(deps runAttachDeps) ports.Clock {
 	return clock.New()
 }
 
+// clientEnvironment returns the endpoint's environment as a defensive copy. An
+// endpoint configured with an explicitly empty environment stays empty: only an
+// endpoint with no configured environment reports nil.
 func clientEnvironment(factory func(string) []string, target string) []string {
 	if factory == nil {
 		return nil
 	}
-	return append([]string(nil), factory(target)...)
+	environment := factory(target)
+	if environment == nil {
+		return nil
+	}
+	return append([]string{}, environment...)
 }
 
 func runUIDriver(ctx context.Context, options uiDriverOptions) error {
