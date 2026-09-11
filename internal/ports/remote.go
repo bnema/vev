@@ -42,3 +42,29 @@ type RemoteCatalogCache interface {
 	Load() ([]catalogue.RemoteCatalogCacheEntry, error)
 	Store([]catalogue.RemoteCatalogCacheEntry) error
 }
+
+// RemoteEndpointBinding is one endpoint's resolved client carriage: the typed
+// dialer every session on that endpoint attaches through, and the environment
+// to advertise when the remote environment is daemon-owned. It never carries
+// session identity, a resume token, or discovered inventory.
+type RemoteEndpointBinding struct {
+	Dialer      ClientDialer
+	Environment []string
+}
+
+// RemoteEndpointFactory resolves one endpoint into its binding. The composition
+// root implements it from the configured transport mode, the launch allowlist,
+// and the endpoint environment; consumers never inspect those policies.
+type RemoteEndpointFactory interface {
+	ResolveEndpoint(ctx context.Context, endpoint string) (RemoteEndpointBinding, error)
+}
+
+// ClientHostRegistry is the client-owned host registry one runner uses: the
+// endpoint bindings it reuses across handoffs, plus the read-only discovery
+// projection the presentation subscribes to. Run owns its lifetime for the
+// runner, and construction performs no I/O.
+type ClientHostRegistry interface {
+	RemoteDirectory
+	ResolveEndpoint(ctx context.Context, endpoint string) (RemoteEndpointBinding, error)
+	Run(ctx context.Context) error
+}
