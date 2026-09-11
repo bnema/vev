@@ -58,7 +58,6 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},
-		preview:     pickerPreviewEmpty(),
 		floatingCfg: domain.FloatingConfig{},
 		reset:       false,
 		lease:       nil,
@@ -254,7 +253,6 @@ func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClien
 	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},
-		preview:     pickerPreviewEmpty(),
 		floatingCfg: domain.FloatingConfig{},
 		reset:       false,
 		lease:       nil,
@@ -262,5 +260,3 @@ func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClien
 	require.True(t, ok)
 	return state, composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
 }
-
-func pickerPreviewEmpty() picker.Preview { return picker.Preview{} }

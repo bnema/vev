@@ -1026,7 +1026,6 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 		state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 			bars:        bars,
 			overlays:    capturedOverlayRenderState{},
-			preview:     picker.Preview{},
 			floatingCfg: domain.FloatingConfig{},
 			reset:       false,
 			lease:       nil,

@@ -472,7 +472,7 @@ func TestPickerSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
 	// The catalogue notification path must reach the picker even though the
 	// daemon installs no overlay model: refreshRemoteDirectoryViews is the
 	// entry the directory subscription calls.
-	d.refreshRemoteDirectoryViews(testAttachmentSession(t, ac))
+	d.refreshRemoteDirectoryViews()
 	second := awaitPickerSnapshot(t, sends)
 	require.Equal(t, first.InteractionID, second.InteractionID)
 	require.Greater(t, second.SourceRevision, first.SourceRevision)
