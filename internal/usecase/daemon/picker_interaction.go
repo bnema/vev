@@ -310,6 +310,9 @@ func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient,
 
 // resolvePickerKill destroys the target and keeps the picker open.
 func (d *Daemon) resolvePickerKill(effect *attachmentEffect, ac *attachedClient, interaction uint64, target picker.Target, selection protocol.PickerSelection) {
+	// The kill holds this admission until it finishes, so a replacement
+	// initiator cannot make the destructive action look unattributed.
+	effect.bindActionEnd(d, "picker-delete")
 	if err := d.killPickerTargetForAttachment(target, effect); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerActionFailed)
 		d.refreshPickerSnapshot(ac)
