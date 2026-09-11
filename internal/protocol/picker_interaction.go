@@ -1,5 +1,9 @@
 package protocol
 
+// PickerServingSourceID names the source the serving daemon owns: every
+// attachment publishes its own rows under this one source identity.
+const PickerServingSourceID = "serving"
+
 // Client-picker interaction bounds. A source publishes at most
 // PickerInteractionMaxLines structured lines; the complete encoded snapshot
 // stays below PickerInteractionMaxEncodedBytes, the same 4 MiB export budget

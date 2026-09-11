@@ -164,6 +164,12 @@ func testClientFrame(message protocol.ClientMessage) (wire.Frame, error) {
 			return wire.Frame{}, errors.New("test client connection: invalid picker close")
 		}
 		return wire.Frame{Type: wire.MsgPickerCloseClient, Payload: p}, nil
+	case protocol.PickerPreviewRequest:
+		p := wire.MarshalPickerPreviewRequest(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid picker preview request")
+		}
+		return wire.Frame{Type: wire.MsgPickerPreviewRequest, Payload: p}, nil
 	default:
 		return wire.Frame{}, errors.New("test client connection: unsupported client message")
 	}
@@ -217,6 +223,8 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalPickerResult(frame.Payload)
 	case wire.MsgPickerFailure:
 		return wire.UnmarshalPickerFailure(frame.Payload)
+	case wire.MsgPickerPreview:
+		return wire.UnmarshalPickerPreview(frame.Payload)
 	default:
 		return nil, errors.New("test client connection: unsupported server frame")
 	}

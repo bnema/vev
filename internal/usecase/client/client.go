@@ -1591,6 +1591,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// serving daemon published for the displayed source.
 	var pickerSort = defaultPickerSort()
 	var pickerPreviewFrame = emptyPickerPreview()
+	// pickerPreview owns the client half of the row preview: the row whose
+	// request is on the wire and the viewport the daemon published for it.
+	var pickerPreview pickerPreviewClient
 	// pickerAcquireBarrier is the daemon output boundary the offer named: the
 	// client displays admitted output through it before it owns the terminal.
 	var pickerAcquireBarrier pickerBarrier
@@ -1609,6 +1612,46 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return size
 		}
 		return geometry.Size
+	}
+	// The preview request is debounced: the cursor may pass several rows while
+	// the user scrolls, and only the row that rests is worth capturing. The
+	// daemon keeps publishing the requested row afterwards, so one request per
+	// settled cursor is enough.
+	var previewTimer ports.Timer
+	var previewTimerCancel chan struct{}
+	pickerPreviewC := func() <-chan time.Time {
+		if previewTimer == nil {
+			return nil
+		}
+		return previewTimer.C()
+	}
+	clearPreviewTimer := func() {
+		if previewTimer != nil {
+			previewTimer.Stop()
+			previewTimer = nil
+		}
+		if previewTimerCancel != nil {
+			close(previewTimerCancel)
+			previewTimerCancel = nil
+		}
+	}
+	previewEvents := make(chan struct{}, 1)
+	armPreviewTimer := func() {
+		clearPreviewTimer()
+		timer := clk.NewTimer(pickerPreviewDebounce)
+		cancel := make(chan struct{})
+		previewTimer, previewTimerCancel = timer, cancel
+		go func() {
+			select {
+			case <-timer.C():
+				select {
+				case previewEvents <- struct{}{}:
+				default:
+				}
+			case <-cancel:
+			case <-loopCtx.Done():
+			}
+		}()
 	}
 	var inventoryTimer ports.Timer
 	var inventoryTickC <-chan time.Time
@@ -1964,6 +2007,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			return context.Canceled
 		}
 	}
+	// schedulePickerPreview (re)arms the debounce for the row the modal
+	// displays. A row already requested is never asked for twice, so a
+	// background refresh of the same row keeps its published viewport.
+	schedulePickerPreview := func() {
+		if pickerCurrent == nil || !pickerPresentation.owns() {
+			return
+		}
+		if !pickerPreview.needsRequest(pickerPresentation.interaction, pickerCurrent.cursorKey()) {
+			return
+		}
+		armPreviewTimer()
+	}
 	acquirePicker := func() error {
 		loop := pickerPresentation.pending
 		if loop == nil {
@@ -1973,7 +2028,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		pickerPresentation.pending = nil
 		pickerCurrent = loop
 		pickerInput.setOwned(pickerPresentation.interaction, pickerPresentation.generation)
-		return displayPickerFrame(loop, 0)
+		if err := displayPickerFrame(loop, 0); err != nil {
+			return err
+		}
+		schedulePickerPreview()
+		return nil
 	}
 	// restoreTerminalModes undoes what the picker's presentation turned on.
 	// It runs through the same sole writer as the picker frames.
@@ -1990,6 +2049,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	finishPickerRelease := func() {
 		actionID, local := pickerPresentation.finishRelease()
 		pickerCurrent = nil
+		pickerPreview.resetFor()
+		pickerPreviewFrame = emptyPickerPreview()
+		clearPreviewTimer()
 		pickerInput.clear()
 		restoreTerminalModes()
 		if ui != nil && local && actionID != 0 {
@@ -2002,6 +2064,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		actionID, local := pickerPresentation.abort()
 		pickerCurrent = nil
+		pickerPreview.resetFor()
+		pickerPreviewFrame = emptyPickerPreview()
+		clearPreviewTimer()
 		pickerInput.clear()
 		restoreTerminalModes()
 		if ui != nil {
@@ -2145,6 +2210,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		select {
 		case <-loopCtx.Done():
 			return loopCanceledResult()
+		case <-pickerPreviewC():
+			clearPreviewTimer()
+			key := ""
+			if pickerCurrent != nil {
+				key = pickerCurrent.cursorKey()
+			}
+			if key == "" || !pickerPresentation.owns() || !pickerPreview.needsRequest(pickerPresentation.interaction, key) {
+				continue
+			}
+			request, ok := pickerPreview.requestFor(pickerPresentation.interaction, key, termSize())
+			if !ok {
+				continue
+			}
+			select {
+			case controlCh <- request:
+				pickerPreview.markSent(pickerPresentation.interaction, key)
+			case <-loopCtx.Done():
+				return loopCanceledResult()
+			}
 		case <-pickerOutcomes.signal:
 			for _, outcome := range pickerOutcomes.take() {
 				if !outcome.acceptOutcome(picker.interaction, uiGeneration) || pickerCurrent == nil || !pickerPresentation.owns() {
@@ -2211,6 +2295,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					if err := displayPickerFrame(pickerCurrent, outcome.actionID); err != nil {
 						return welcomedResult(err)
 					}
+					schedulePickerPreview()
 				default:
 					// The batch changed nothing visible: complete its action
 					// without composing a frame.
@@ -2686,6 +2771,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
 						return welcomedResult(err)
 					}
+					schedulePickerPreview()
 					continue
 				}
 				// The lease decides presentation: a barrier still ahead keeps
@@ -2722,6 +2808,20 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				if picker.interaction == closed.InteractionID || !picker.open {
 					picker.setOpen(false, closed.InteractionID)
+				}
+				continue
+			case protocol.PickerPreview:
+				if pickerCurrent == nil || !pickerPresentation.owns() {
+					continue
+				}
+				if !pickerPreview.accept(message, pickerPresentation.interaction, pickerCurrent.cursorKey()) {
+					// A late answer for a row the user already left, or a
+					// viewport that cannot be displayed: keep the current one.
+					continue
+				}
+				pickerPreviewFrame = pickerPreview.frame
+				if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+					return welcomedResult(err)
 				}
 				continue
 			case protocol.PickerResult:

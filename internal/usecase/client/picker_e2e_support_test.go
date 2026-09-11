@@ -239,6 +239,32 @@ func openPickerOnHarness(t *testing.T, transport *attachPaletteTransport) protoc
 	return snapshot
 }
 
+// awaitPreviewTimer returns the first armed preview debounce. Other timers
+// (palette deadlines, escape windows) are left untouched for their own helpers.
+func (h *pickerE2EHarness) awaitPreviewTimer(t *testing.T) *attachPaletteTimer {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	var held []*attachPaletteTimer
+	defer func() {
+		for _, timer := range held {
+			h.clock.timers <- timer
+		}
+	}()
+	for {
+		select {
+		case timer := <-h.clock.timers:
+			if timer.duration != pickerPreviewDebounce {
+				held = append(held, timer)
+				continue
+			}
+			return timer
+		case <-deadline:
+			t.Fatal("the picker preview debounce was never armed")
+			return nil
+		}
+	}
+}
+
 // awaitWireFrame waits for one client frame of the requested type.
 func awaitWireFrame(t *testing.T, transport *attachPaletteTransport, frameType wire.MsgType) []byte {
 	t.Helper()

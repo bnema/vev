@@ -3,6 +3,8 @@ package client
 import (
 	"testing"
 
+	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
@@ -205,4 +207,46 @@ func TestPickerDriverOpReportsActionsAndLocalSort(t *testing.T) {
 	_, changed = pickerDriverOp(loop, []string{"o", "r"}, "")
 	require.True(t, changed)
 	require.Equal(t, "wor", loop.model.Query())
+}
+
+// TestPickerPreviewClientTracksTheDisplayedRow pins the client half of the
+// preview: one request per settled row, the daemon's own source identity, a
+// bounded viewport ask, and a late answer that never replaces the displayed one.
+func TestPickerPreviewClientTracksTheDisplayedRow(t *testing.T) {
+	var preview pickerPreviewClient
+	require.False(t, preview.needsRequest(7, ""), "a row without a key needs no request")
+	require.True(t, preview.needsRequest(7, "aa/first"))
+
+	request, ok := preview.requestFor(7, "aa/first", domain.Size{Cols: 500, Rows: 0})
+	require.True(t, ok)
+	require.Equal(t, protocol.PickerPreviewSchemaVersion, request.Version)
+	require.Equal(t, uint64(7), request.InteractionID)
+	require.Equal(t, protocol.PickerServingSourceID, request.SourceID)
+	require.Equal(t, uint16(protocol.PickerPreviewMaxWidth), request.Width, "the client asks for what it can display")
+	require.Equal(t, uint16(1), request.Height, "a degenerate size still asks for one row")
+
+	preview.markSent(7, "aa/first")
+	require.False(t, preview.needsRequest(7, "aa/first"), "a row already requested is not asked twice")
+	require.True(t, preview.needsRequest(7, "bb/second"))
+	require.True(t, preview.needsRequest(8, "aa/first"), "a new interaction asks again")
+
+	viewport := protocol.PickerPreview{
+		Version: protocol.PickerPreviewSchemaVersion, InteractionID: 7, SourceID: protocol.PickerServingSourceID,
+		Key: "aa/first", Status: protocol.PickerPreviewOK, Width: 2, Height: 1,
+		Cells: []renderer.Cell{{Rune: 'o'}, {Rune: 'k'}},
+	}
+	require.False(t, preview.accept(viewport, 7, "bb/second"), "a late answer must not replace the displayed row")
+	require.True(t, preview.accept(viewport, 7, "aa/first"))
+	require.Equal(t, 2, preview.frame.Width)
+	require.Equal(t, 'o', preview.frame.Rows[0][0].Rune)
+
+	stale := viewport
+	stale.Status = protocol.PickerPreviewNoSuchTarget
+	stale.Width, stale.Height, stale.Cells = 0, 0, nil
+	require.True(t, preview.accept(stale, 7, "aa/first"))
+	require.Empty(t, preview.frame.Rows, "a rejected row clears the displayed viewport")
+
+	preview.resetFor()
+	require.True(t, preview.needsRequest(7, "aa/first"))
+	require.Empty(t, preview.frame.Rows)
 }

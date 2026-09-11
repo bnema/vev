@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	renderer "github.com/bnema/vev-vt"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -89,6 +91,54 @@ func TestClientPickerLoopEndToEnd(t *testing.T) {
 		t.Fatal("commit never completed after daemon resolve")
 	}
 	requireNoPickerInput(t, transport)
+}
+
+// TestClientPickerRequestsAndRendersTheDisplayedRowPreview drives the preview
+// path end to end: the debounce settles on the displayed row, the request names
+// it, the daemon's viewport is drawn in the modal, and a late answer for a row
+// the user already left leaves the displayed viewport untouched.
+func TestClientPickerRequestsAndRendersTheDisplayedRowPreview(t *testing.T) {
+	ctx := context.Background()
+	harness := startPickerE2E(t)
+	ui, transport := harness.ui, harness.transport
+
+	snapshot := openPickerOnHarness(t, transport)
+	attached := ports.UIStatusAttached
+	first := "first"
+	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
+	require.NoError(t, err)
+
+	harness.awaitPreviewTimer(t).fire()
+	request, err := wire.UnmarshalPickerPreviewRequest(awaitWireFrame(t, transport, wire.MsgPickerPreviewRequest))
+	require.NoError(t, err)
+	require.Equal(t, snapshot.InteractionID, request.InteractionID)
+	require.Equal(t, "serving", request.SourceID)
+	require.Equal(t, "aa/first", request.Key)
+	require.NotZero(t, request.Width)
+	require.NotZero(t, request.Height)
+
+	viewport := protocol.PickerPreview{
+		Version: protocol.PickerPreviewSchemaVersion, InteractionID: snapshot.InteractionID, SourceID: "serving",
+		Key: "aa/first", Status: protocol.PickerPreviewOK, Width: 4, Height: 1,
+		Cells: []renderer.Cell{{Rune: 'v'}, {Rune: 'i'}, {Rune: 'e'}, {Rune: 'w'}},
+	}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerPreview, Payload: wire.MarshalPickerPreview(viewport)}
+	awaitTerminalText(t, harness.terminal, "view")
+
+	// A late viewport for a row the user left must not replace the displayed one.
+	late := viewport
+	late.Key = "bb/second"
+	late.Cells = []renderer.Cell{{Rune: 's'}, {Rune: 't'}, {Rune: 'a'}, {Rune: 'l'}}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerPreview, Payload: wire.MarshalPickerPreview(late)}
+	awaitTerminalText(t, harness.terminal, "view")
+	require.NotContains(t, uiSnapshotText(mustCapture(t, ui)), "stal")
+}
+
+func mustCapture(t *testing.T, ui *UI) ports.UISnapshot {
+	t.Helper()
+	snapshot, err := ui.Capture(ui.Handle())
+	require.NoError(t, err)
+	return snapshot
 }
 
 // TestClientPickerCancelReleasesOnAuthoritativeFullPaint drives the cancel
