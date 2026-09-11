@@ -3,6 +3,7 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -441,4 +442,97 @@ func drainStrings(ch chan string) []string {
 			return out
 		}
 	}
+}
+
+// TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers pins the registry
+// invariant the client now owns: a picker route that moves to another serving
+// peer resolves that endpoint once, and returning to the first peer reuses the
+// binding it already had instead of rebuilding the carriage.
+func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
+	term := newHybridPickerTerminal()
+	defer term.reader.unblock()
+
+	source, _ := hybridPickerTargets()
+	otherHost := domain.RemoteSessionTarget{
+		Endpoint: "target-host", DisplayOrigin: "target-host", LifecycleID: domain.SessionLifecycleID{4},
+		SessionName: "other", LiveTabID: "other-tab",
+	}
+	local := newHybridPickerTransport()
+	remote := newHybridPickerTransport()
+	remoteReturn := newHybridPickerTransport()
+	other := newHybridPickerTransport()
+	resolutions := make(chan string, 8)
+
+	local.push(hybridPickerWelcome("local", domain.SessionLifecycleID{1}))
+	local.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		Endpoint: "remote", Session: "source", Intent: protocol.IntentAttach, RemoteTarget: &source,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+	})))
+
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote, remoteReturn}}
+	otherDialer := &sequenceDialer{trs: []wire.Transport{other}}
+	localDialer := &sequenceDialer{trs: []wire.Transport{local}}
+	dialers := map[string]ports.ClientDialer{"remote": remoteDialer, "target-host": otherDialer}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.HostRegistry = stubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		resolutions <- endpoint
+		dialer := dialers[endpoint]
+		if dialer == nil {
+			return ports.RemoteEndpointBinding{}, errors.New("unknown endpoint")
+		}
+		return ports.RemoteEndpointBinding{Dialer: dialer}, nil
+	}}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runTestClient(context.Background(), deps, client.AttachRequest{
+			Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local",
+		})
+	}()
+
+	remote.push(hybridPickerWelcome("source", source.LifecycleID))
+	openHybridPicker(t, remote, protocol.ExactSessionTarget{LifecycleID: source.LifecycleID, SessionName: "source"})
+	term.awaitDisplay(t, "second")
+
+	// The serving peer hands the client to another host.
+	term.reader.pressEnter()
+	selection, err := wire.UnmarshalPickerSelection(mustAwaitSend(t, remote, wire.MsgPickerSelection))
+	require.NoError(t, err)
+	remote.push(frameOf(wire.MsgPickerClosedServer, wire.MarshalPickerClosed(protocol.PickerClosed{
+		InteractionID: hybridPickerInteraction, BarrierEpoch: 1, BarrierState: 1,
+	})))
+	remote.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		Endpoint: otherHost.Endpoint, Session: otherHost.SessionName, Intent: protocol.IntentAttach,
+		RemoteTarget: &otherHost, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+		CauseActionID: selection.CauseActionID,
+	})))
+	other.push(hybridPickerWelcome("other", otherHost.LifecycleID))
+	// The new peer offers the return route to the first host.
+	other.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		Endpoint: "remote", Session: source.SessionName, Intent: protocol.IntentAttach,
+		RemoteTarget: &source, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+	})))
+	remoteReturn.push(hybridPickerWelcome("source", source.LifecycleID))
+	remoteReturn.push(frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not finish the cross-peer picker route")
+	}
+	// Returning to the first peer resolves that endpoint again and dials a fresh
+	// connection through it: the registry owns binding reuse, and a route
+	// crossing serving peers never invalidates the client's own resolution.
+	require.Equal(t, int32(2), remoteDialer.calls.Load())
+	require.Equal(t, int32(1), otherDialer.calls.Load())
+	require.Equal(t, []string{"remote", "target-host", "remote"}, drainStrings(resolutions))
+}
+
+// mustAwaitSend waits for one client frame of the requested type.
+func mustAwaitSend(t *testing.T, transport *hybridPickerTransport, typ wire.MsgType) []byte {
+	t.Helper()
+	payload, ok := transport.awaitSend(typ)
+	require.True(t, ok, "frame %d never crossed the wire", typ)
+	return payload
 }

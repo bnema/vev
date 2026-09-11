@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/stretchr/testify/require"
@@ -154,4 +156,32 @@ func TestClampPickerPreviewFitsTheRequestedBounds(t *testing.T) {
 
 	require.Equal(t, protocol.PickerPreviewUnavailable, clampPickerPreview(picker.Preview{}, 4, 2).Status)
 	require.Equal(t, protocol.PickerPreviewUnavailable, clampPickerPreview(captured, 0, 2).Status)
+}
+
+// TestPickerPreviewCapturesRemoteRowsThroughThePreviewClient pins the daemon
+// half of the coexistence contract: a remote picker row is still previewed
+// through the daemon's own remote viewport client and its cache, independent of
+// whatever the launching client resolves for itself.
+func TestPickerPreviewCapturesRemoteRowsThroughThePreviewClient(t *testing.T) {
+	clock := &remotePreviewTestClock{now: time.Unix(100, 0)}
+	client := &remotePreviewTestClient{result: remotePreviewCacheResult(remotePreviewCacheTarget(), 1)}
+	d := newTestDaemon(t, nil, clock)
+	d.remotePreviewClient = client
+	target := remotePreviewCacheTarget()
+
+	viewport := d.capturePickerPreview(picker.Target{RemoteTarget: &target}, protocol.PickerIntentNavigation, 1, 1)
+	require.Equal(t, protocol.PickerPreviewOK, viewport.Status)
+	require.Equal(t, uint16(1), viewport.Width)
+	require.Equal(t, 'x', viewport.Cells[0].Rune)
+	require.Equal(t, target, client.lastTarget)
+	require.Equal(t, uint16(1), client.lastWidth)
+
+	// A failed remote fetch reports unavailable instead of a stale viewport.
+	client.err = errors.New("remote host unreachable")
+	client.calls = 0
+	d.remotePreview.cache = nil
+	failed := d.capturePickerPreview(picker.Target{RemoteTarget: &target}, protocol.PickerIntentNavigation, 1, 1)
+	require.Equal(t, protocol.PickerPreviewUnavailable, failed.Status)
+	require.Zero(t, failed.Width)
+	require.Empty(t, failed.Cells)
 }
