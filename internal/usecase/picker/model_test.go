@@ -1,1060 +1,288 @@
 package picker
 
 import (
-	"fmt"
-	"math"
-	"reflect"
-	"strings"
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	themeui "github.com/bnema/vev/internal/usecase/theme"
-	"github.com/bnema/vev/internal/usecase/ui"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	_ domain.TabStableID = TabEntry{}.TabID
-	_ domain.TabStableID = Target{}.TabID
-	_ domain.TabStableID = SourceFilter{}.TabID
-)
-
-func TestStableIdentityTypesAreDistinct(t *testing.T) {
-	require.NotEqual(t, reflect.TypeFor[domain.TabStableID](), reflect.TypeFor[domain.PaneStableID]())
-	require.NotEqual(t, reflect.TypeFor[domain.TabStableID](), reflect.TypeFor[domain.TabID]())
+// line builds one selectable session line for the shared fixtures.
+func line(key, label string, actions protocol.PickerLineActions) protocol.PickerLine {
+	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineSession, Label: label, Actions: actions}
 }
 
-func TestNewFlattensAndSelectsCurrentTab(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "s1", Name: "one", Tabs: []TabEntry{{TabID: "shell", Name: "shell"}, {TabID: "logs", Name: "logs"}}, Active: 0},
-		{ID: "s2", Name: "two", Tabs: []TabEntry{{TabID: "api", Name: "api"}}, Active: 0},
-	}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "s1", TabID: "logs"}})
-
-	got, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s1", TabID: "logs", TabIndex: 1}, got)
-	frame := m.Render(domain.Size{Cols: 20, Rows: 5}, Preview{})
-	require.Equal(t, 'o', frame.At(0, 0).Rune)
-	require.Equal(t, ' ', frame.At(0, 2).Rune)
-	require.Equal(t, 'l', frame.At(2, 2).Rune)
-	require.True(t, frame.At(0, 2).Style.Inverse)
+func navLine(key, label string) protocol.PickerLine {
+	return line(key, label, protocol.PickerCanNavigate)
 }
 
-func TestNewFallsBackToActiveThenFirstLeaf(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "shell"}, {Name: "logs"}}, Active: 1}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "missing"}})
-	got, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s1", TabIndex: 1}, got)
-
-	m = New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "shell"}}, Active: 4}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "missing"}})
-	got, ok = m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s1", TabIndex: 0}, got)
+func section(label string) protocol.PickerLine {
+	return protocol.PickerLine{Kind: protocol.PickerLineSection, Label: label, Dim: true}
 }
 
-func TestUpDownSkipsHeadersClampsAndCrossesSessions(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a"}, {Name: "b"}}, Active: 0},
-		{ID: "s2", Name: "two", Tabs: []TabEntry{{Name: "c"}}, Active: 0},
-	}, SelectionConfig{Mode: SelectNavigationTab})
+func tabLine(key, label string, actions protocol.PickerLineActions) protocol.PickerLine {
+	return protocol.PickerLine{Key: key, Kind: protocol.PickerLineTab, Label: label, Actions: actions}
+}
 
+func TestNewOrdersLinesAndSelectsTheCursorKey(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		section("LOCAL"),
+		navLine("a/one", "one"),
+		tabLine("a/one#t2", "logs", protocol.PickerCanNavigate),
+		tabLine("a/one#t1", "shell", protocol.PickerCanNavigate),
+	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "a/one#t1", Index: 3}})
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "a/one#t1", selected.Key, "the published cursor key wins over the index hint")
+}
+
+func TestNewSelectsTheNearestFocusableRowForAnUnknownCursor(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		section("LOCAL"),
+		navLine("a/one", "one"),
+		tabLine("a/one#t1", "shell", protocol.PickerCanNavigate),
+	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "gone", Index: 2}})
+
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "a/one#t1", selected.Key)
+}
+
+func TestUpDownSkipsSectionsAndUnselectableRows(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		// A host status row is focusable but carries no action.
+		{Key: "b/host", Kind: protocol.PickerLineHost, Label: "example.test", Dim: true},
+		navLine("c/three", "three"),
+	}, Config{Intent: protocol.PickerIntentNavigation})
+
+	m.SelectNearestRow(0)
+	m.Down()
+	selected, ok := m.Selected()
+	require.False(t, ok, "a row without actions is never selectable")
+	m.Down()
+	selected, ok = m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "c/three", selected.Key)
 	m.Up()
-	got, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s1", TabIndex: 0}, got, "up at first tab clamps")
-	m.Down()
-	got, ok = m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s1", TabIndex: 1}, got)
-	m.Down()
-	got, ok = m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s2", TabIndex: 0}, got, "down skips second session header")
-	m.Down()
-	got, ok = m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "s2", TabIndex: 0}, got, "down at last tab clamps")
+	cursor, ok := m.Cursor()
+	require.True(t, ok, "the cursor parks on the host row without activating it")
+	require.Equal(t, "b/host", cursor.Key)
 	m.Up()
-	got, ok = m.Selected()
+	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, Target{Session: "s1", TabIndex: 1}, got, "up skips second session header")
+	require.Equal(t, "a/one", selected.Key)
 }
 
-func TestModelConstructsTargetsForSelectionModes(t *testing.T) {
-	incarnationOne := domain.IncarnationID{1}
-	incarnationTwo := domain.IncarnationID{2}
-	sessions := []SessionView{
-		{ID: "s1", Name: "one", TargetName: "one", Incarnation: incarnationOne, Tabs: []TabEntry{{TabID: "t1", Name: "shell"}, {TabID: "t2", Name: "logs"}}, Active: 1},
-		{ID: "s2", Name: "two", TargetName: "two", Incarnation: incarnationTwo, Tabs: []TabEntry{{TabID: "t3", Name: "api"}}, Active: 0},
+func TestSortGroupedPullsNamedLinesAheadOfEphemeralOnes(t *testing.T) {
+	lines := []protocol.PickerLine{
+		{Key: "e/eph", Kind: protocol.PickerLineSession, Label: "eph", Ephemeral: true, Actions: protocol.PickerCanNavigate},
+		navLine("a/named", "named"),
+		{Key: "e/eph2", Kind: protocol.PickerLineSession, Label: "eph2", Ephemeral: true, Actions: protocol.PickerCanNavigate},
 	}
-	tests := []struct {
-		name   string
-		config SelectionConfig
-		want   Target
-	}{
-		{
-			name:   "navigation selects tab row",
-			config: SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "s1", TabID: "t2"}},
-			want:   Target{Session: "s1", Incarnation: incarnationOne, TabID: "t2", TabIndex: 1},
-		},
-		{
-			name:   "move pane selects eligible tab row",
-			config: SelectionConfig{Mode: SelectMovePaneTab, Current: SourceFilter{Session: "s1", TabID: "t1"}, Source: SourceFilter{Session: "s1", TabID: "t2"}},
-			want:   Target{Session: "s1", Incarnation: incarnationOne, Name: "one", TabID: "t1", TabIndex: 0},
-		},
-		{
-			name:   "move tab selects destination session header",
-			config: SelectionConfig{Mode: SelectMoveTabSession, Current: SourceFilter{Session: "s2"}, Source: SourceFilter{Session: "s1"}},
-			want:   Target{Session: "s2", Incarnation: incarnationTwo, Name: "two", TabIndex: -1},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			model := New(sessions, tt.config)
+	recent := New(lines, Config{Intent: protocol.PickerIntentNavigation})
+	first, ok := recent.Cursor()
+	require.True(t, ok)
+	require.Equal(t, "e/eph", first.Key, "recency keeps the published order")
 
-			got, ok := model.Selected()
-			require.True(t, ok)
-			require.Equal(t, tt.want, got)
-		})
-	}
+	grouped := New(lines, Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	first, ok = grouped.Cursor()
+	require.True(t, ok)
+	require.Equal(t, "a/named", first.Key, "grouped moves named sessions ahead")
 }
 
-func TestModelMoveModesApplyExactDestinationFiltering(t *testing.T) {
-	incarnation := domain.IncarnationID{1}
-	sessions := []SessionView{
-		{ID: "source", Incarnation: incarnation, Name: "source", Tabs: []TabEntry{{TabID: "source-tab", Name: "source"}, {TabID: "other-tab", Name: "other"}}},
-		{ID: "only-source", Incarnation: incarnation, Name: "only-source", Tabs: []TabEntry{{TabID: "only-tab", Name: "only"}}},
-		{ID: "destination", Incarnation: incarnation, Name: "destination", Tabs: []TabEntry{{TabID: "destination-tab", Name: "destination"}}},
-		{ID: "empty", Incarnation: incarnation, Name: "empty"},
-		{ID: "stopped", Incarnation: incarnation, Name: "stopped", Stopped: true, Tabs: []TabEntry{{TabID: "stopped-tab", Name: "stopped"}}},
-	}
-	type rowIdentity struct {
-		kind    rowKind
-		session domain.SessionID
-		tab     domain.TabStableID
-	}
-	identities := func(model *Model) []rowIdentity {
-		got := make([]rowIdentity, 0, len(model.rows))
-		for _, pickerRow := range model.rows {
-			got = append(got, rowIdentity{kind: pickerRow.kind, session: pickerRow.session, tab: pickerRow.tabID})
-		}
-		return got
-	}
+func TestSetSortKeepsTheSelectedKey(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		{Key: "e/eph", Kind: protocol.PickerLineSession, Label: "eph", Ephemeral: true, Actions: protocol.PickerCanNavigate},
+		navLine("a/named", "named"),
+		navLine("b/other", "other"),
+	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "b/other", Index: 2}})
 
-	paneModel := New(sessions, SelectionConfig{Mode: SelectMovePaneTab, Source: SourceFilter{
-		Session: "only-source", Incarnation: incarnation, TabID: "only-tab",
-	}})
-	require.Equal(t, []rowIdentity{
-		{kind: rowSession, session: "source"},
-		{kind: rowTab, session: "source", tab: "source-tab"},
-		{kind: rowTab, session: "source", tab: "other-tab"},
-		{kind: rowSession, session: "destination"},
-		{kind: rowTab, session: "destination", tab: "destination-tab"},
-	}, identities(paneModel))
+	m.SetSort(SortGrouped)
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "b/other", selected.Key)
+	require.Equal(t, SortGrouped, m.SortMode())
 
-	tabModel := New(sessions, SelectionConfig{Mode: SelectMoveTabSession, Source: SourceFilter{
-		Session: "source", Incarnation: incarnation,
-	}})
-	require.Equal(t, []rowIdentity{
-		{kind: rowSession, session: "only-source"},
-		{kind: rowTab, session: "only-source", tab: "only-tab"},
-		{kind: rowSession, session: "destination"},
-		{kind: rowTab, session: "destination", tab: "destination-tab"},
-	}, identities(tabModel))
-
-	replacementIncarnation := domain.IncarnationID{2}
-	replacementModel := New([]SessionView{
-		{ID: "same", Incarnation: incarnation, Tabs: []TabEntry{{TabID: "same-tab"}}},
-		{ID: "same", Incarnation: replacementIncarnation, Tabs: []TabEntry{{TabID: "same-tab"}}},
-	}, SelectionConfig{Mode: SelectMovePaneTab, Source: SourceFilter{
-		Session: "same", Incarnation: incarnation, TabID: "same-tab",
-	}})
-	require.Len(t, replacementModel.rows, 2, "only the exact source lifecycle is filtered")
-	require.Equal(t, replacementIncarnation, replacementModel.rows[0].incarnation)
-	require.Equal(t, replacementIncarnation, replacementModel.rows[1].incarnation)
+	m.SetSort(SortRecent)
+	selected, ok = m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "b/other", selected.Key)
 }
 
-func TestRowKindDefinesRenderingAndSelectability(t *testing.T) {
-	tests := []struct {
-		name       string
-		kind       rowKind
-		mode       SelectionMode
-		header     bool
-		selectable bool
-	}{
-		{name: "navigation session", kind: rowSession, mode: SelectNavigationTab, header: true},
-		{name: "navigation tab", kind: rowTab, mode: SelectNavigationTab, selectable: true},
-		{name: "move pane session", kind: rowSession, mode: SelectMovePaneTab, header: true},
-		{name: "move pane tab", kind: rowTab, mode: SelectMovePaneTab, selectable: true},
-		{name: "move tab session", kind: rowSession, mode: SelectMoveTabSession, header: true, selectable: true},
-		{name: "move tab tab", kind: rowTab, mode: SelectMoveTabSession},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.header, tt.kind.rendersAsHeader())
-			require.Equal(t, tt.selectable, tt.kind.selectable(tt.mode))
-		})
-	}
+func TestReplaceLinesKeepsSearchAndCursor(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		navLine("b/two", "two"),
+	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "b/two", Index: 1}})
+	m.EnterSearch()
+	m.InsertSearch('t')
+
+	m.ReplaceLines([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		navLine("b/two", "two"),
+		navLine("c/three", "three"),
+	}, protocol.PickerCursor{})
+
+	require.True(t, m.SearchActive())
+	require.Equal(t, "t", m.Query())
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "b/two", selected.Key, "the cursor survives a background refresh by key")
 }
 
-func TestModelMovePaneFallsBackToFirstEligibleTab(t *testing.T) {
-	model := New([]SessionView{
-		{ID: "source", Name: "source", Active: 0, Tabs: []TabEntry{{TabID: "source-tab", Name: "source"}, {TabID: "sibling", Name: "sibling"}}},
-		{ID: "destination", Name: "destination", Active: 0, Tabs: []TabEntry{{TabID: "destination-tab", Name: "destination"}}},
-	}, SelectionConfig{Mode: SelectMovePaneTab, Source: SourceFilter{Session: "source", TabID: "source-tab"}})
+func TestSelectedHonoursSearchVisibility(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		navLine("b/two", "two"),
+	}, Config{Intent: protocol.PickerIntentNavigation, Cursor: protocol.PickerCursor{Key: "a/one"}})
+	m.EnterSearch()
+	m.InsertSearch('z')
 
-	got, ok := model.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("sibling"), got.TabID)
+	_, ok := m.Selected()
+	require.False(t, ok, "a cursor hidden by the search is never a commit target")
+	require.True(t, m.SelectionRejectedBySearch())
 }
 
-func TestModelMoveNavigationSkipsRowsNotSelectableForMode(t *testing.T) {
-	sessions := []SessionView{
-		{ID: "s1", Name: "one", Tabs: []TabEntry{{TabID: "t1", Name: "one"}}},
-		{ID: "s2", Name: "two", Tabs: []TabEntry{{TabID: "t2", Name: "two"}}},
-	}
+func TestSelectNearestRowSnapsForwardThenBackward(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		section("LOCAL"),
+		navLine("b/two", "two"),
+	}, Config{Intent: protocol.PickerIntentNavigation})
 
-	paneModel := New(sessions, SelectionConfig{Mode: SelectMovePaneTab, Current: SourceFilter{Session: "s1", TabID: "t1"}})
-	paneModel.Down()
-	got, ok := paneModel.Selected()
+	m.SelectNearestRow(1)
+	selected, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("t2"), got.TabID, "move-pane navigation skips the second session header")
-
-	tabModel := New(sessions, SelectionConfig{Mode: SelectMoveTabSession, Current: SourceFilter{Session: "s1"}})
-	tabModel.Down()
-	got, ok = tabModel.Selected()
+	require.Equal(t, "b/two", selected.Key)
+	m.SelectNearestRow(40)
+	selected, ok = m.Selected()
 	require.True(t, ok)
-	require.Equal(t, domain.SessionID("s2"), got.Session, "move-tab navigation skips tab rows")
+	require.Equal(t, "b/two", selected.Key)
+	m.SelectNearestRow(-3)
+	selected, ok = m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "a/one", selected.Key)
 }
 
-func TestModelSelectedKeepsImmutableLifecycleAndStableTabAcrossRefresh(t *testing.T) {
-	createdAt := int64(41)
-	views := []SessionView{{
-		ID: "same-id", Name: "same-name", TargetName: "same-name", Incarnation: domain.IncarnationID{1}, ExpectedCreatedAt: &createdAt,
-		Tabs: []TabEntry{{TabID: "first", Name: "first"}, {TabID: "stable", Name: "stable"}}, Active: 1,
-	}}
-	model := New(views, SelectionConfig{Mode: SelectMovePaneTab, Current: SourceFilter{Session: "same-id", TabID: "stable"}})
-
-	views[0].Incarnation = domain.IncarnationID{9}
-	views[0].TargetName = "replacement"
-	views[0].Tabs[1].TabID = "replacement-tab"
-	createdAt = 99
-	got, ok := model.Selected()
+func TestCloneIsIndependent(t *testing.T) {
+	m := New([]protocol.PickerLine{navLine("a/one", "one"), navLine("b/two", "two")}, Config{Intent: protocol.PickerIntentNavigation})
+	clone := m.Clone()
+	clone.Down()
+	original, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, Target{
-		Session: "same-id", Incarnation: domain.IncarnationID{1}, Name: "same-name", TabID: "stable", TabIndex: 1,
-		ExpectedCreatedAt: int64Pointer(41),
-	}, got, "model target remains bound to the lifecycle captured during construction")
-
-	refreshed := New([]SessionView{{
-		ID: "same-id", Name: "same-name", TargetName: "same-name", Incarnation: domain.IncarnationID{1},
-		Tabs: []TabEntry{{TabID: "stable", Name: "stable"}, {TabID: "first", Name: "first"}}, Active: 1,
-	}}, SelectionConfig{Mode: SelectMovePaneTab, Current: SourceFilter{Session: got.Session, TabID: got.TabID}})
-	got, ok = refreshed.Selected()
+	cloneSelected, ok := clone.Selected()
 	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("stable"), got.TabID)
-	require.Equal(t, 0, got.TabIndex, "mutable index follows the stable tab after refresh")
+	require.Equal(t, "a/one", original.Key)
+	require.Equal(t, "b/two", cloneSelected.Key)
 }
 
-func TestModelClonePreservesModeAndImmutableTarget(t *testing.T) {
-	createdAt := int64(7)
-	model := New([]SessionView{{
-		ID: "s", Name: "session", TargetName: "session", Incarnation: domain.IncarnationID{3}, ExpectedCreatedAt: &createdAt,
-		Tabs: []TabEntry{{TabID: "tab", Name: "tab"}},
-	}}, SelectionConfig{Mode: SelectMovePaneTab})
-	clone := model.Clone()
-
-	require.Equal(t, SelectMovePaneTab, clone.mode)
-	got, ok := clone.Selected()
-	require.True(t, ok)
-	*got.ExpectedCreatedAt = 100
-	gotAgain, ok := clone.Selected()
-	require.True(t, ok)
-	require.Equal(t, int64(7), *gotAgain.ExpectedCreatedAt, "returned targets cannot mutate the cloned model locator")
-	require.Equal(t, domain.TabStableID("tab"), gotAgain.TabID)
-	require.Equal(t, domain.IncarnationID{3}, gotAgain.Incarnation)
-}
-
-func int64Pointer(value int64) *int64 {
-	return new(value)
+func TestIntentIsReported(t *testing.T) {
+	m := New([]protocol.PickerLine{tabLine("a/one#t1", "shell", protocol.PickerCanMove)}, Config{Intent: protocol.PickerIntentMovePane})
+	require.Equal(t, protocol.PickerIntentMovePane, m.Intent())
+	require.Equal(t, " Sessions · recent ", SortRecent.Title())
+	require.Equal(t, " Sessions · grouped ", SortGrouped.Title())
 }
 
 func TestChooseLayoutResponsiveBoundaries(t *testing.T) {
 	tests := []struct {
-		name string
-		size domain.Size
-		want Layout
+		name    string
+		size    domain.Size
+		mode    LayoutMode
+		list    domain.Rect
+		preview domain.Rect
 	}{
-		{
-			name: "horizontal rows minus one is list only", size: domain.Size{Cols: 69, Rows: 3},
-			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 69, Height: 3}},
-		},
-		{
-			name: "horizontal preview minus one is list only", size: domain.Size{Cols: 68, Rows: 4},
-			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 68, Height: 4}},
-		},
-		{
-			name: "horizontal exact minimum preview", size: domain.Size{Cols: 69, Rows: 4},
-			want: Layout{Mode: LayoutHorizontal, List: domain.Rect{Width: 20, Height: 4}, Separator: domain.Rect{X: 20, Width: 1, Height: 4}, Preview: domain.Rect{X: 21, Width: 48, Height: 4}},
-		},
-		{
-			name: "horizontal preview plus one", size: domain.Size{Cols: 70, Rows: 4},
-			want: Layout{Mode: LayoutHorizontal, List: domain.Rect{Width: 21, Height: 4}, Separator: domain.Rect{X: 21, Width: 1, Height: 4}, Preview: domain.Rect{X: 22, Width: 48, Height: 4}},
-		},
-		{
-			name: "stacked columns minus one is list only", size: domain.Size{Cols: 23, Rows: 12},
-			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 23, Height: 12}},
-		},
-		{
-			name: "stacked rows minus one is list only", size: domain.Size{Cols: 24, Rows: 11},
-			want: Layout{Mode: LayoutListOnly, List: domain.Rect{Width: 24, Height: 11}},
-		},
-		{
-			name: "stacked exact minimum", size: domain.Size{Cols: 24, Rows: 12},
-			want: Layout{Mode: LayoutStacked, List: domain.Rect{Width: 24, Height: 4}, Separator: domain.Rect{Y: 4, Width: 24, Height: 1}, Preview: domain.Rect{Y: 5, Width: 24, Height: 7}},
-		},
-		{
-			name: "stacked list height plus one", size: domain.Size{Cols: 24, Rows: 13},
-			want: Layout{Mode: LayoutStacked, List: domain.Rect{Width: 24, Height: 5}, Separator: domain.Rect{Y: 5, Width: 24, Height: 1}, Preview: domain.Rect{Y: 6, Width: 24, Height: 7}},
-		},
+		{name: "too small", size: domain.Size{Cols: 0, Rows: 0}, mode: LayoutListOnly},
+		{name: "list only", size: domain.Size{Cols: 40, Rows: 10}, mode: LayoutListOnly, list: domain.Rect{Width: 40, Height: 10}},
+		{name: "stacked", size: domain.Size{Cols: 40, Rows: 20}, mode: LayoutStacked, list: domain.Rect{Width: 40, Height: 8}, preview: domain.Rect{Y: 9, Width: 40, Height: 11}},
+		{name: "horizontal", size: domain.Size{Cols: 120, Rows: 20}, mode: LayoutHorizontal, list: domain.Rect{Width: 44, Height: 20}, preview: domain.Rect{X: 45, Width: 75, Height: 20}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, ChooseLayout(tt.size))
+			layout := ChooseLayout(tt.size)
+			require.Equal(t, tt.mode, layout.Mode)
+			require.Equal(t, tt.list, layout.List)
+			require.Equal(t, tt.preview, layout.Preview)
 		})
 	}
 }
 
-func TestRenderDrawsCustomOrientedSeparators(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	separator := renderer.Style{Foreground: 8, Attrs: renderer.AttrDim}
-	styles := RenderStyles{Separator: separator}
-	tests := []struct {
-		name string
-		size domain.Size
-		rect domain.Rect
-		rune rune
-	}{
-		{"horizontal layout", domain.Size{Cols: 69, Rows: 5}, domain.Rect{X: 20, Width: 1, Height: 4}, '│'},
-		{"stacked layout", domain.Size{Cols: 24, Rows: 13}, domain.Rect{Y: 4, Width: 24, Height: 1}, '─'},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			frame := m.Render(tt.size, Preview{}, styles)
-			for y := tt.rect.Y; y < tt.rect.Y+tt.rect.Height; y++ {
-				for x := tt.rect.X; x < tt.rect.X+tt.rect.Width; x++ {
-					got := frame.At(x, y)
-					require.Equal(t, tt.rune, got.Rune)
-					require.True(t, got.Style.Equal(separator))
-				}
-			}
-		})
-	}
+func TestChooseGeometryReservesTheStatusRow(t *testing.T) {
+	geometry := ChooseGeometry(domain.Size{Cols: 80, Rows: 24})
+	require.Equal(t, domain.Rect{Width: 80, Height: 23}, geometry.Content)
+	require.Equal(t, domain.Rect{Y: 23, Width: 80, Height: 1}, geometry.Status)
 }
 
-func TestRenderListOnlyOmitsSeparatorAndPreview(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	frame := m.Render(domain.Size{Cols: 23, Rows: 11}, Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{cell('x')}}}, RenderStyles{Separator: renderer.Style{Foreground: 8}})
-
-	require.NotEqual(t, 'x', frame.At(22, 10).Rune)
-	require.Equal(t, 'E', frame.At(0, 10).Rune, "the final inner row is reserved for status")
-}
-
-func TestRenderPreviewAnchorsOversizedSourceToFinalRows(t *testing.T) {
-	m := New(nil, SelectionConfig{Mode: SelectNavigationTab})
-	preview := Preview{Width: 24, Height: 9, Rows: previewRows(24, "abcdefghi")}
-
-	frame := m.Render(domain.Size{Cols: 24, Rows: 13}, preview)
-	require.Equal(t, 'c', frame.At(0, 5).Rune)
-	require.Equal(t, 'i', frame.At(0, 11).Rune)
-	require.Equal(t, 'E', frame.At(0, 12).Rune)
-}
-
-func TestRenderPreviewBottomPlacesShortSource(t *testing.T) {
-	m := New(nil, SelectionConfig{Mode: SelectNavigationTab})
-	preview := Preview{Width: 24, Height: 1, Rows: previewRows(24, "z")}
-
-	frame := m.Render(domain.Size{Cols: 24, Rows: 13}, preview)
-	require.Equal(t, ' ', frame.At(0, 5).Rune)
-	require.Equal(t, 'z', frame.At(0, 11).Rune)
-	require.Equal(t, 'E', frame.At(0, 12).Rune)
-}
-
-func TestRenderAttentionMarkerSmokeWithResponsiveLayout(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab", Attention: true}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	frame := m.Render(domain.Size{Cols: 69, Rows: 4}, Preview{})
-
-	require.Equal(t, rune(ui.AttentionGlyph), frame.At(6, 1).Rune)
-}
-
-func previewRows(width int, labels string) [][]renderer.Cell {
-	rows := make([][]renderer.Cell, len(labels))
-	for y, label := range labels {
-		rows[y] = make([]renderer.Cell, width)
-		for x := range rows[y] {
-			rows[y][x] = cell(' ')
-		}
-		rows[y][0] = cell(label)
-	}
-	return rows
-}
-
-func TestSelectedMapping(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "alpha", Name: "alpha", Tabs: []TabEntry{{TabID: "one", Name: "one"}}, Active: 0},
-		{ID: "beta", Name: "beta", Tabs: []TabEntry{{TabID: "two", Name: "two"}, {TabID: "three", Name: "three"}}, Active: 0},
-	}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "beta", TabID: "three"}})
-
-	got, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, Target{Session: "beta", TabID: "three", TabIndex: 1}, got)
-}
-
-func TestSelectNearestRow(t *testing.T) {
-	// Three single-tab sessions: rows are [hdrA, tabA, hdrB, tabB, hdrC, tabC].
-	sessions := []SessionView{
-		{ID: "a", Name: "a", Tabs: []TabEntry{{TabID: "ta", Name: "ta"}}},
-		{ID: "b", Name: "b", Tabs: []TabEntry{{TabID: "tb", Name: "tb"}}},
-		{ID: "c", Name: "c", Tabs: []TabEntry{{TabID: "tc", Name: "tc"}}},
-	}
-	tests := []struct {
-		name string
-		idx  int
-		cfg  SelectionConfig
-		// wantStart, when set, pins the selection New produced before
-		// SelectNearestRow runs, so a case cannot silently degrade into one a
-		// no-op implementation would also pass.
-		wantStart domain.SessionID
-		want      domain.SessionID
-	}{
-		{name: "exact selectable row", idx: 3, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
-		{name: "header row snaps to its tab", idx: 2, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "b"},
-		{name: "past end clamps to last selectable", idx: 40, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
+func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
+	m := New([]protocol.PickerLine{
 		{
-			// Starts selection on "c" (via Current) so a no-op SelectNearestRow
-			// would leave the selection on "c" and this case would fail; the
-			// plain SelectNavigationTab config used above starts on "a" already,
-			// which can't tell a real clamp-to-first from a no-op.
-			name:      "negative clamps to first selectable",
-			idx:       -2,
-			cfg:       SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "c", TabID: "tc"}},
-			wantStart: "c",
-			want:      "a",
+			Key: "a/live", Kind: protocol.PickerLineSession, Label: "live", Actions: protocol.PickerCanNavigate,
+			Status: protocol.PickerLineStatusUp, Detail: "up",
 		},
-		{name: "last row is a tab and stays put", idx: 5, cfg: SelectionConfig{Mode: SelectNavigationTab}, want: "c"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := New(sessions, tc.cfg)
-			if tc.wantStart != "" {
-				pre, ok := m.Selected()
-				require.True(t, ok)
-				require.Equal(t, tc.wantStart, pre.Session, "guard: starting selection must not already be the expected result")
-			}
-			m.SelectNearestRow(tc.idx)
-			target, ok := m.Selected()
-			require.True(t, ok)
-			require.Equal(t, tc.want, target.Session)
-		})
-	}
+		{
+			Key: "b/old", Kind: protocol.PickerLineSession, Label: "old", Stopped: true,
+			Status: protocol.PickerLineStatusStopped, Detail: "stopped", Actions: protocol.PickerCanNavigate,
+		},
+	}, Config{Intent: protocol.PickerIntentNavigation})
+
+	frame := m.Render(domain.Size{Cols: 60, Rows: 8}, Preview{})
+	require.Equal(t, 60, frame.Width)
+	require.Equal(t, 8, frame.Height)
+	require.Contains(t, rowText(frame.Row(0)), "[up]")
+	require.Contains(t, rowText(frame.Row(1)), "[stopped]")
 }
 
-func TestSelectNearestRowFallsBackBackwardAndToleratesEmptyModels(t *testing.T) {
-	// Move-tab mode makes only session headers selectable, so the trailing tab
-	// row has no selectable row at or after it.
-	m := New([]SessionView{
-		{ID: "a", Name: "a", Tabs: []TabEntry{{TabID: "ta", Name: "ta"}}},
-		{ID: "b", Name: "b", Tabs: []TabEntry{{TabID: "tb", Name: "tb"}}},
-	}, SelectionConfig{Mode: SelectMoveTabSession, Source: SourceFilter{Session: "zzz"}})
-	require.Equal(t, 0, m.SelectedIndex(), "guard: the backward fallback below must move the selection off this starting row")
-	m.SelectNearestRow(3)
-	target, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.SessionID("b"), target.Session)
-	require.Equal(t, 2, m.SelectedIndex())
-
-	empty := New(nil, SelectionConfig{Mode: SelectNavigationTab})
-	empty.SelectNearestRow(0)
-	_, ok = empty.Selected()
-	require.False(t, ok)
-	require.Equal(t, -1, empty.SelectedIndex())
-
-	var nilModel *Model
-	nilModel.SelectNearestRow(3)
-	require.Equal(t, -1, nilModel.SelectedIndex())
+func TestRenderBlitsThePreviewIntoThePreviewRect(t *testing.T) {
+	m := New([]protocol.PickerLine{navLine("a/one", "one")}, Config{Intent: protocol.PickerIntentNavigation})
+	preview := Preview{Rows: [][]renderer.Cell{{{Rune: 'X'}}}, Width: 1, Height: 1}
+	frame := m.Render(domain.Size{Cols: 120, Rows: 12}, preview)
+	geometry := ChooseGeometry(domain.Size{Cols: 120, Rows: 12})
+	x := geometry.Preview.X
+	y := geometry.Preview.Y + geometry.Preview.Height - 1
+	require.Equal(t, 'X', frame.Cell(x, y).Rune)
 }
 
-func TestSelectedIndexReportsRawSelectedRow(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "alpha", Name: "alpha", Tabs: []TabEntry{{TabID: "one", Name: "one"}, {TabID: "two", Name: "two"}}},
-	}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "alpha", TabID: "two"}})
-
-	require.Equal(t, 2, m.SelectedIndex())
-	m.Up()
-	require.Equal(t, 1, m.SelectedIndex())
+func TestRenderAttentionMarkerFollowsTheTabName(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		tabLine("a/one#t1", "shell", protocol.PickerCanNavigate),
+		{Key: "a/one#t2", Kind: protocol.PickerLineTab, Label: "build", Attention: true, Actions: protocol.PickerCanNavigate},
+	}, Config{Intent: protocol.PickerIntentNavigation})
+	frame := m.Render(domain.Size{Cols: 60, Rows: 6}, Preview{})
+	require.Contains(t, rowText(frame.Row(1)), "build")
+	require.NotEqual(t, rowText(frame.Row(0)), rowText(frame.Row(1)))
 }
 
-func TestStoppedSessionUsesOneSelectableHeaderWithRightAlignedStatus(t *testing.T) {
-	for _, tt := range []struct {
-		name        string
-		sessionID   domain.SessionID
-		sessionName string
-		size        domain.Size
-		wantRow     string
-	}{
-		{name: "normal", sessionID: "stopped:work", sessionName: "work", size: domain.Size{Cols: 24, Rows: 4}, wantRow: "work           [stopped]"},
-		{name: "constrained", sessionID: "stopped:long", sessionName: "long-session", size: domain.Size{Cols: 12, Rows: 2}, wantRow: "l… [stopped]"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			m := New([]SessionView{{ID: tt.sessionID, Name: tt.sessionName, Stopped: true}}, SelectionConfig{Mode: SelectNavigationTab})
-			got, ok := m.Selected()
-			require.True(t, ok)
-			require.Equal(t, Target{Session: tt.sessionID, Name: tt.sessionName, TabIndex: -1, Stopped: true}, got)
-			require.Len(t, m.rows, 1)
-
-			frame := m.Render(tt.size, Preview{})
-			var label strings.Builder
-			for _, cell := range frame.Row(0) {
-				label.WriteRune(cell.Rune)
-			}
-			require.Equal(t, tt.wantRow, strings.TrimRight(label.String(), " "))
-		})
-	}
-}
-
-func TestRemoteStatusBadgesAlignRightAndStatusOmitsDelete(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
-	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab"}
-	m := New([]SessionView{{
-		ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &target, RemoteHost: "arch",
-		RemoteActivation: RemoteAttach, Tabs: []TabEntry{{TabID: "tab", Name: "shell"}},
-	}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 24, Rows: 4}, Preview{})
-	require.Equal(t, "work@arch           [up]", strings.TrimRight(rowText(frame.Row(0)), " "))
-	status := rowText(frame.Row(3))
-	require.Contains(t, status, "Enter open")
-	require.NotContains(t, status, "x delete")
-}
-
-func rowText(row []renderer.Cell) string {
-	var text strings.Builder
-	for _, cell := range row {
-		if cell.Continuation {
-			continue
-		}
-		text.WriteRune(cell.Rune)
-	}
-	return text.String()
-}
-
-func TestRenderStopsStoppedRowsDimItalic(t *testing.T) {
-	live := SessionView{ID: "live", Name: "work", Tabs: []TabEntry{{TabID: "t1", Name: "tab"}}}
-	halted := SessionView{ID: "stopped:old", Name: "old", TargetName: "old", Stopped: true}
-	m := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab})
-
-	stoppedStyle := renderer.Style{Foreground: -1, Background: -1, Italic: true, Attrs: renderer.AttrDim}
-	styles := defaultRenderStyles()
-	require.Equal(t, stoppedStyle, styles.Stopped)
-
-	frame := m.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
-	// Rows: 0 "work" header, 1 "  tab" (selected), 2 "old [stopped]" header.
-	require.Equal(t, stoppedStyle, frame.Row(2)[0].Style, "stopped header must be dim italic")
-	require.NotEqual(t, stoppedStyle, frame.Row(0)[0].Style, "live header keeps base style")
-
-	selected := New([]SessionView{live, halted}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: halted.ID}})
-	selectedFrame := selected.Render(domain.Size{Cols: 15, Rows: 6}, Preview{})
-	require.NotEqual(t, stoppedStyle, selectedFrame.Row(2)[0].Style, "selected stopped row keeps selection style, not Stopped")
-	require.True(t, selectedFrame.Row(2)[0].Style.Inverse, "selected stopped row still shows selection")
-}
-
-func TestRenderPreviewClipsPadsDropsWideRuneAndInvertsSelection(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	preview := Preview{
-		Width:  25,
-		Height: 1,
-		Rows: [][]renderer.Cell{{
-			cell('a'), cell('b'), cell('c'), cell('d'), cell('e'), cell('f'), cell('g'), cell('h'), cell('i'), cell('j'),
-			cell('k'), cell('l'), cell('m'), cell('n'), cell('o'), cell('p'), cell('q'), cell('r'), cell('s'), cell('t'),
-			cell('u'), cell('v'), cell('w'), {Rune: '界', Style: renderer.DefaultStyle()}, {Continuation: true, Style: renderer.DefaultStyle()},
-		}},
-	}
-
-	frame := m.Render(domain.Size{Cols: 24, Rows: 13}, preview)
-	require.True(t, frame.At(0, 1).Style.Inverse)
-	require.Equal(t, 'a', frame.At(0, 11).Rune)
-	require.Equal(t, 'w', frame.At(22, 11).Rune)
-	require.Equal(t, ' ', frame.At(23, 11).Rune, "wide rune crossing preview pane is dropped")
-	require.Equal(t, ' ', frame.At(0, 5).Rune, "short preview is bottom anchored")
-	require.Equal(t, 'E', frame.At(0, 12).Rune)
-}
-
-func TestRenderListScrollsSelectionIntoView(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"}, {Name: "e"}, {Name: "f"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	for range 5 {
-		m.Down()
-	}
-
-	frame := m.Render(domain.Size{Cols: 23, Rows: 4}, Preview{})
-	require.Equal(t, ' ', frame.At(0, 2).Rune)
-	require.Equal(t, 'f', frame.At(2, 2).Rune)
-	require.True(t, frame.At(0, 2).Style.Inverse)
-	require.Equal(t, 'E', frame.At(0, 3).Rune)
-}
-
-func TestRenderListTruncatesLabelWithEllipsis(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "a-really-long-focused-pane-tab-label"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
-
-	layout := ChooseGeometry(domain.Size{Cols: 69, Rows: 5})
-	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
-	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "truncated label should end with an ellipsis at the list edge")
-	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
-}
-
-func TestRenderListOnlyDoesNotDrawPreview(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	preview := Preview{Width: 1, Height: 1, Rows: [][]renderer.Cell{{cell('x')}}}
-
-	frame := m.Render(domain.Size{Cols: 23, Rows: 11}, preview)
-	require.Equal(t, 'o', frame.At(0, 0).Rune)
-	require.Equal(t, ' ', frame.At(0, 1).Rune)
-	require.NotEqual(t, 'x', frame.At(0, 0).Rune)
-}
-
-func TestRenderListDrawsNameAndDetailSegmentsWithDistinctStyles(t *testing.T) {
-	nameStyle := renderer.Style{Bold: true}
-	detailStyle := renderer.Style{Italic: true}
-	baseStyle := renderer.DefaultStyle()
-	selectionStyle := renderer.Style{Inverse: true}
-	selectionNameStyle := renderer.Style{Inverse: true, Bold: true}
-	selectionMutedStyle := renderer.Style{Inverse: true, Italic: true}
-	styles := RenderStyles{
-		Selection: selectionStyle, SelectionName: selectionNameStyle, SelectionMuted: selectionMutedStyle,
-		Name: nameStyle, Detail: detailStyle, Base: baseStyle,
-	}
-
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
-		{Name: "alpha", Detail: " (up)"},
-		{Name: "beta", Detail: " (idle)", Attention: true},
-	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 30, Rows: 5}, Preview{}, styles)
-
-	// Row 1 is the selected tab ("alpha"): name uses SelectionName, detail uses SelectionMuted.
-	require.Equal(t, 'a', frame.At(2, 1).Rune)
-	require.True(t, frame.At(2, 1).Style.Equal(selectionNameStyle), "selected name segment style")
-	require.Equal(t, ' ', frame.At(7, 1).Rune)
-	require.True(t, frame.At(7, 1).Style.Equal(selectionMutedStyle), "selected detail segment style")
-	require.Equal(t, '(', frame.At(8, 1).Rune)
-	require.True(t, frame.At(8, 1).Style.Equal(selectionMutedStyle), "selected detail segment style")
-
-	// Row 2 is the non-selected tab ("beta"): name uses Name, then the
-	// attention marker (right after the name, before detail) uses the row's
-	// base style (not muted), then detail uses Detail.
-	require.Equal(t, 'b', frame.At(2, 2).Rune)
-	require.True(t, frame.At(2, 2).Style.Equal(nameStyle), "name segment style")
-	require.Equal(t, ' ', frame.At(6, 2).Rune, "attention marker leading space")
-	require.True(t, frame.At(6, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
-	require.Equal(t, rune(ui.AttentionGlyph), frame.At(7, 2).Rune)
-	require.True(t, frame.At(7, 2).Style.Equal(baseStyle), "attention marker uses the base style, not muted")
-	require.Equal(t, ' ', frame.At(8, 2).Rune)
-	require.True(t, frame.At(8, 2).Style.Equal(detailStyle), "detail segment style")
-	require.Equal(t, '(', frame.At(9, 2).Rune)
-	require.True(t, frame.At(9, 2).Style.Equal(detailStyle), "detail segment style")
-}
-
-func TestRenderListTruncatesDetailBeforeName(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
-		{Name: "short-name", Detail: " (a very long detail text)"},
-	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
-	layout := ChooseGeometry(domain.Size{Cols: 69, Rows: 5})
-	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
-
-	want := "  short-name (a ver…"
-	for i, r := range want {
-		require.Equal(t, r, frame.At(i, 1).Rune, "cell %d", i)
-	}
-	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "detail is ellipsized to fit, the intact name is not touched")
-	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
-}
-
-func TestRenderListTruncatesNameWhenAloneExceedsWidth(t *testing.T) {
-	m := New([]SessionView{{ID: "s1", Name: "one", Tabs: []TabEntry{
-		{Name: "a-really-long-focused-pane-tab-label", Detail: " (detail)"},
-	}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 69, Rows: 5}, Preview{})
-	layout := ChooseGeometry(domain.Size{Cols: 69, Rows: 5})
-	require.Equal(t, 20, layout.List.Width, "test assumes a narrow list column")
-
-	require.Equal(t, '…', frame.At(layout.List.Width-1, 1).Rune, "the name segment itself is ellipsized once it alone exceeds the width")
-	require.Equal(t, '│', frame.At(layout.List.Width, 1).Rune, "the separator occupies the cell after the list")
-}
-
-func TestSearchSelectsBestMatchAndPreservesExactTarget(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "backend", Name: "backend", Tabs: []TabEntry{{TabID: "api-tab", Name: "api-server"}, {TabID: "logs-tab", Name: "logs"}}},
-		{ID: "frontend", Name: "frontend", Tabs: []TabEntry{{TabID: "web-tab", Name: "web"}}},
-	}, SelectionConfig{Mode: SelectNavigationTab})
-
+func TestSearchMatchesLabelsAndDetails(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		navLine("a/one", "one"),
+		navLine("b/two", "two"),
+		{Key: "c/three", Kind: protocol.PickerLineTab, Label: "three", Detail: " (vim)", Actions: protocol.PickerCanNavigate},
+	}, Config{Intent: protocol.PickerIntentNavigation})
 	m.EnterSearch()
-	for _, r := range "api" {
-		m.InsertSearch(r)
-	}
+	m.InsertSearch('v')
+	m.InsertSearch('i')
+	m.InsertSearch('m')
 
-	require.True(t, m.SearchActive())
-	require.Equal(t, "api", m.Query())
 	require.Equal(t, 1, m.MatchCount())
 	selected, ok := m.Selected()
 	require.True(t, ok)
-	require.Equal(t, Target{Session: "backend", TabID: "api-tab", TabIndex: 0}, selected)
-	require.Equal(t, " Search sessions & tabs: api_ ", m.SearchTitle())
+	require.Equal(t, "c/three", selected.Key)
+	m.BackspaceSearch()
+	require.Equal(t, "vi", m.Query())
+	m.ClearSearch()
+	require.Equal(t, "", m.Query())
+	require.True(t, m.SearchActive(), "clearing the query keeps the search editor open")
+	m.ExitSearch()
+	require.False(t, m.SearchActive())
 }
 
-func TestSearchUsesContextWithoutHighlightingUnrelatedText(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "backend", Name: "backend", Tabs: []TabEntry{{TabID: "logs-tab", Name: "logs"}}},
-		{ID: "frontend", Name: "frontend", Tabs: []TabEntry{{TabID: "web-tab", Name: "web"}}},
-	}, SelectionConfig{Mode: SelectNavigationTab})
-	m.EnterSearch()
-	for _, r := range "back" {
-		m.InsertSearch(r)
+func rowText(row []renderer.Cell) string {
+	out := make([]rune, 0, len(row))
+	for _, cell := range row {
+		out = append(out, cell.Rune)
 	}
-
-	selected, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("logs-tab"), selected.TabID, "a parent-session match keeps its tab target navigable")
-
-	matchStyle := renderer.Style{Bold: true, Foreground: 2}
-	frame := m.Render(domain.Size{Cols: 40, Rows: 6}, Preview{}, RenderStyles{
-		Background: renderer.DefaultStyle(), Base: renderer.DefaultStyle(), Name: renderer.DefaultStyle(), Detail: renderer.DefaultStyle(),
-		Selection: renderer.Style{Inverse: true}, SelectionName: renderer.Style{Inverse: true}, SelectionMuted: renderer.Style{Inverse: true},
-		SearchMatch: matchStyle, SelectionMatch: matchStyle,
-	})
-	for x := 2; x < 6; x++ {
-		require.False(t, frame.At(x, 1).Style.Equal(matchStyle), "context matches must not highlight unrelated rendered tab text")
-	}
-	require.True(t, frame.At(0, 3).Style.Attrs&renderer.AttrDim != 0, "non-matching rows are dimmed")
-}
-
-func TestSearchZeroMatchesSuppressesActivationAndRetainsCursorAnchor(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}, SelectionConfig{Mode: SelectNavigationTab})
-	before, ok := m.Cursor()
-	require.True(t, ok)
-
-	m.EnterSearch()
-	for _, r := range "absent" {
-		m.InsertSearch(r)
-	}
-
-	require.Zero(t, m.MatchCount())
-	_, ok = m.Selected()
-	require.False(t, ok)
-	after, ok := m.Cursor()
-	require.True(t, ok)
-	require.Equal(t, before, after)
-}
-
-func TestSearchTitleKeepsQueryTailAndCaretAtNarrowWidth(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}, SelectionConfig{Mode: SelectNavigationTab})
-	m.EnterSearch()
-	for _, r := range "abcdefghijklmnopqrstuv" {
-		m.InsertSearch(r)
-	}
-
-	title := m.SearchTitle(20)
-	require.LessOrEqual(t, textCellWidth(title), 20)
-	require.True(t, strings.HasPrefix(title, " / "))
-	require.True(t, strings.HasSuffix(title, "v_ "), "the visible title keeps the query tail and caret")
-
-	for width := 0; width < 5; width++ {
-		t.Run(fmt.Sprintf("degenerate width %d", width), func(t *testing.T) {
-			got := m.SearchTitle(width)
-			require.LessOrEqual(t, textCellWidth(got), width)
-			require.NotContains(t, got, "v", "degenerate titles must not force a query cell")
-		})
-	}
-}
-
-func TestSearchDoesNotHighlightEllipsisForTruncatedWideMatch(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "tab", Name: "abcdefghijklmnopq界"}}}}, SelectionConfig{Mode: SelectNavigationTab})
-	m.EnterSearch()
-	m.InsertSearch('界')
-	matchStyle := renderer.Style{Foreground: 2, Bold: true}
-	frame := m.Render(domain.Size{Cols: 20, Rows: 3}, Preview{}, RenderStyles{
-		Background: renderer.DefaultStyle(), Base: renderer.DefaultStyle(), Name: renderer.DefaultStyle(), Detail: renderer.DefaultStyle(),
-		Selection: renderer.Style{Inverse: true}, SelectionName: renderer.Style{Inverse: true}, SelectionMuted: renderer.Style{Inverse: true},
-		SearchMatch: matchStyle, SelectionMatch: matchStyle,
-	})
-
-	require.Equal(t, '…', frame.At(19, 1).Rune)
-	require.False(t, frame.At(19, 1).Style.Equal(matchStyle), "a dropped wide-rune match must not style the truncation ellipsis")
-}
-
-func TestReplaceFromMovesStoppedHeaderCursorToNewFocusableTab(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
-	emptyTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", Stopped: true}
-	m := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &emptyTarget, Stopped: true, RemoteActivation: RemoteRestart}}, SelectionConfig{Mode: SelectNavigationTab})
-	require.Equal(t, 0, m.SelectedIndex())
-
-	tabTarget := emptyTarget
-	tabTarget.StoppedTab = domain.NewStableTabSelector("tab")
-	retained := []SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &tabTarget, Stopped: true, RemoteActivation: RemoteRestart, Tabs: []TabEntry{{TabID: "tab", Name: "shell"}}}}
-	next := New(retained, SelectionConfig{Mode: SelectNavigationTab})
-	direct := New(retained, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: key.ID(), RemoteKey: &key}})
-	directSelected, ok := direct.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("tab"), directSelected.TabID, "retained tabs must not pin the current cursor to the contextual header")
-
-	m.ReplaceFrom(next)
-
-	selected, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("tab"), selected.TabID)
-	require.Equal(t, 1, m.SelectedIndex(), "the contextual stopped header must not retain focus after real tabs appear")
-}
-
-func TestReplaceFromPreservesStableTabAcrossReordering(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "first", Name: "first"}, {TabID: "selected", Name: "selected"}}}}, SelectionConfig{Mode: SelectNavigationTab, Current: SourceFilter{Session: "s", TabID: "selected"}})
-	next := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{TabID: "selected", Name: "selected"}, {TabID: "first", Name: "first"}}}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	m.ReplaceFrom(next)
-
-	selected, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("selected"), selected.TabID)
-	require.Equal(t, 0, selected.TabIndex)
-}
-
-func TestFilteredSessionDoesNotLeaveOrphanSection(t *testing.T) {
-	m := New([]SessionView{{ID: "stopped", Section: "LOCAL", Name: "stopped", Stopped: true}}, SelectionConfig{Mode: SelectMovePaneTab})
-	require.Empty(t, m.rows)
-}
-
-func TestUnavailableStoppedRemoteUsesAvailabilityBadgeAndHint(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
-	target := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", Stopped: true}
-	m := New([]SessionView{{ID: key.ID(), Name: key.Display(), RemoteKey: &key, RemoteTarget: &target, Stopped: true, RemoteReason: domain.RemoteReasonCatalogStale, RemoteDetail: "catalog stale", RemoteActivation: RemoteUnavailable}}, SelectionConfig{Mode: SelectNavigationTab})
-
-	frame := m.Render(domain.Size{Cols: 40, Rows: 3}, Preview{})
-	require.Contains(t, rowText(frame.Row(0)), "[stale]")
-	require.Contains(t, rowText(frame.Row(2)), "Enter unavailable")
-	require.NotContains(t, rowText(frame.Row(2)), "Enter restart")
-}
-
-func TestSearchNavigationUsesCanonicalVisualOrderAfterBestRank(t *testing.T) {
-	m := New([]SessionView{
-		{ID: "first", Name: "first", Tabs: []TabEntry{{TabID: "zeta", Name: "zeta"}}},
-		{ID: "second", Name: "second", Tabs: []TabEntry{{TabID: "a", Name: "a"}}},
-		{ID: "third", Name: "third", Tabs: []TabEntry{{TabID: "alpha", Name: "alpha"}}},
-	}, SelectionConfig{Mode: SelectNavigationTab})
-	m.EnterSearch()
-	m.InsertSearch('a')
-
-	selected, ok := m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("a"), selected.TabID, "exact match wins initial ranking")
-	m.Up()
-	selected, ok = m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("zeta"), selected.TabID, "navigation follows visual order rather than rank order")
-	m.Down()
-	m.Down()
-	selected, ok = m.Selected()
-	require.True(t, ok)
-	require.Equal(t, domain.TabStableID("alpha"), selected.TabID)
-}
-
-func cell(r rune) renderer.Cell {
-	return renderer.Cell{Rune: r, Style: renderer.DefaultStyle()}
-}
-
-func TestRenderStylesFillBackgroundRowsAndSelection(t *testing.T) {
-	m := New([]SessionView{{ID: "s", Name: "session", Tabs: []TabEntry{{Name: "tab"}}, Active: 0}}, SelectionConfig{Mode: SelectNavigationTab})
-	background := renderer.Style{Foreground: 1, Background: 2}
-	base := renderer.Style{Foreground: 3, Background: 4}
-	selection := renderer.Style{Foreground: 5, Background: 6}
-	frame := m.Render(domain.Size{Cols: 20, Rows: 5}, Preview{}, RenderStyles{
-		Background: background, Base: base, Name: base, Detail: base,
-		Selection: selection, SelectionName: selection, SelectionMuted: selection,
-		Separator: base, Status: base,
-	})
-
-	require.True(t, frame.At(19, 3).Style.Equal(background), "unused content keeps modal base")
-	require.True(t, frame.At(19, 4).Style.Equal(base), "status owns the final inner row")
-	require.True(t, frame.At(19, 0).Style.Equal(base), "ordinary row owns inactive surface")
-	require.True(t, frame.At(19, 1).Style.Equal(selection), "selected row owns active surface")
-}
-
-func TestPickerRowsKeepTerminalBackgroundAcrossAccentFallbacks(t *testing.T) {
-	palette := [16]renderer.RGB{}
-	palette[2] = renderer.RGB{R: 10, G: 230, B: 120}
-	palette[10] = palette[2]
-	accentTheme := themeui.Theme{
-		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
-		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
-		Palette: palette, PaletteKnown: 1<<2 | 1<<10,
-	}
-	indexedTheme := accentTheme
-	indexedTheme.TrueColor = false
-	paletteOffTheme := accentTheme
-	paletteOffTheme.UsePalette = false
-	neutralTheme := accentTheme
-	neutralTheme.UsePalette = false
-	neutralTheme.PaletteKnown = 0
-
-	tests := []struct {
-		name   string
-		theme  themeui.Theme
-		policy domain.ThemeAccent
-	}{
-		{name: "truecolor accent", theme: accentTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
-		{name: "indexed only", theme: indexedTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
-		{name: "palette off", theme: paletteOffTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
-		{name: "forced dark", theme: themeui.BuiltinDark, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
-		{name: "forced light", theme: themeui.BuiltinLight, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
-		{name: "neutral fallback", theme: neutralTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
-	}
-
-	model := New([]SessionView{
-		{ID: "selected", Name: "selected", Tabs: []TabEntry{{Name: "one"}}, Active: 0},
-		{ID: "inactive", Name: "inactive", Tabs: []TabEntry{{Name: "two", Detail: " (detail)"}}, Active: 0},
-	}, SelectionConfig{Mode: SelectNavigationTab})
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			styles := themeui.Resolve(tt.theme, tt.policy).Styles
-			require.True(t, styles.PickerBase.Equal(renderer.DefaultStyle()))
-			require.False(t, styles.PickerDescription.HasBackgroundRGB)
-			require.False(t, styles.PickerSeparator.HasBackgroundRGB)
-			if tt.name == "indexed only" {
-				require.Equal(t, 2, styles.PickerDescription.Foreground)
-				require.Equal(t, 2, styles.PickerSeparator.Foreground)
-			}
-
-			frame := model.Render(domain.Size{Cols: 32, Rows: 4}, Preview{}, RenderStyles{
-				Background: styles.PickerBase, Base: styles.PickerBase, Name: styles.PickerName,
-				Detail: styles.PickerDescription, Selection: styles.PickerSelection,
-				SelectionName: styles.PickerSelection, SelectionMuted: styles.PickerSelection,
-				Separator: styles.PickerSeparator, Status: styles.PickerDescription,
-			})
-			require.True(t, frame.At(5, 3).Style.Equal(styles.PickerDescription), "status text keeps a contrast-derived foreground without a background tint")
-			require.True(t, frame.At(31, 3).Style.Equal(styles.PickerDescription), "status filler owns the final row")
-		})
-	}
-}
-
-func TestStructuredRemoteTargetOwnsStoppedState(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		viewStopped   bool
-		targetStopped bool
-	}{
-		{name: "down target overrides live presentation flag", targetStopped: true},
-		{name: "live target overrides stopped presentation flag", viewStopped: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: domain.SessionLifecycleID{1}, DisplayOrigin: "arch"}
-			remoteTarget := domain.RemoteSessionTarget{
-				Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: key.LifecycleID,
-				SessionName: "work", LiveTabID: "tab-1", Stopped: test.targetStopped,
-			}
-			activation := RemoteAttach
-			if test.targetStopped {
-				remoteTarget.LiveTabID = ""
-				remoteTarget.StoppedTab = domain.NewStableTabSelector("tab-1")
-				activation = RemoteRestart
-			}
-			model := New([]SessionView{{
-				ID: key.ID(), Name: key.Display(), Tabs: []TabEntry{{TabID: "tab-1", Name: "main"}},
-				RemoteKey: &key, RemoteTarget: &remoteTarget, RemoteActivation: activation,
-				Stopped: test.viewStopped,
-			}}, SelectionConfig{Mode: SelectNavigationTab})
-
-			selected, ok := model.Selected()
-			require.True(t, ok)
-			require.Equal(t, test.targetStopped, selected.Stopped)
-			require.NotNil(t, selected.RemoteTarget)
-			require.Equal(t, test.targetStopped, selected.RemoteTarget.Stopped)
-		})
-	}
-}
-
-func TestRemoteStoppedOrdinalSelectorBounds(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		index    int
-		tabCount int
-		want     domain.TabSelector
-		ok       bool
-	}{
-		{name: "largest representable", index: math.MaxUint16 - 1, tabCount: math.MaxUint16, want: domain.NewOrdinalTabSelector(math.MaxUint16-1, "tab", math.MaxUint16), ok: true},
-		{name: "unrepresentable count", index: math.MaxUint16, tabCount: math.MaxUint16 + 1},
-		{name: "negative index", index: -1, tabCount: 1},
-		{name: "index equals count", index: 1, tabCount: 1},
-		{name: "empty count", index: 0, tabCount: 0},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			selector, ok := remoteStoppedOrdinalSelector(test.index, "tab", test.tabCount)
-			require.Equal(t, test.ok, ok)
-			require.Equal(t, test.want, selector)
-		})
-	}
-}
-
-func TestRemoteRowsCannotAcceptMovesInEitherMoveMode(t *testing.T) {
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work"}
-	local := SessionView{ID: "local", Name: "local", Tabs: []TabEntry{{TabID: "local-tab", Name: "local"}}}
-	availability := []struct {
-		name  string
-		state RemoteAvailability
-	}{
-		{name: "cached", state: RemoteCached},
-		{name: "fresh", state: RemoteFresh},
-		{name: "stale", state: RemoteStale},
-		{name: "version mismatch", state: RemoteVersionMismatch},
-	}
-	modes := []struct {
-		name string
-		mode SelectionMode
-	}{
-		{name: "move pane", mode: SelectMovePaneTab},
-		{name: "move tab", mode: SelectMoveTabSession},
-	}
-
-	for _, availabilityCase := range availability {
-		t.Run(availabilityCase.name, func(t *testing.T) {
-			remote := SessionView{
-				ID:                 key.ID(),
-				Name:               key.Display(),
-				Tabs:               []TabEntry{{TabID: "remote-tab", Name: "metadata"}},
-				RemoteKey:          &key,
-				RemoteAvailability: availabilityCase.state,
-				RemoteActivation:   RemoteAttach,
-				CannotAcceptMoves:  true,
-			}
-			for _, mode := range modes {
-				t.Run(mode.name, func(t *testing.T) {
-					model := New([]SessionView{local, remote}, SelectionConfig{Mode: mode.mode, Source: SourceFilter{Session: "source"}})
-					var remoteRow *row
-					for i := range model.rows {
-						if model.rows[i].session == key.ID() {
-							remoteRow = &model.rows[i]
-							break
-						}
-					}
-					require.NotNil(t, remoteRow)
-					require.True(t, remoteRow.dim)
-					require.False(t, remoteRow.selectable)
-				})
-			}
-		})
-	}
+	return string(out)
 }
