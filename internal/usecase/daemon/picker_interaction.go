@@ -116,7 +116,10 @@ func pickerMoveSourceKey(source moveSourceLocator) string {
 }
 
 // publishPickerSourceForAttachment builds the serving line set, bumps its
-// per-source revision, and publishes it. Callers must not hold pickerMu.
+// per-source revision, and publishes it. Callers must not hold pickerMu. Every
+// refresh publishes a full snapshot with a newer revision: the client may only
+// commit the model it is displaying, so a refresh the client has not observed
+// must invalidate an older displayed revision even when the rows are equal.
 func (d *Daemon) publishPickerSourceForAttachment(ac *attachedClient, effect *attachmentEffect, interaction uint64) error {
 	if ac == nil || ac.overlays == nil || effect == nil {
 		return errAttachmentTransition

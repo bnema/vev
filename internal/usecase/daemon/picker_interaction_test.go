@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/stretchr/testify/require"
 )
 
@@ -324,6 +327,140 @@ func testAttachmentSession(t *testing.T, ac *attachedClient) *session {
 	sess := ac.currentAttachmentSession()
 	require.NotNil(t, sess)
 	return sess
+}
+
+// secondSessionForTest returns the fixture's extra session, the one the attach
+// itself does not display.
+func secondSessionForTest(t *testing.T, d *Daemon) *session {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, sess := range d.sessions {
+		if sess == nil {
+			continue
+		}
+		sess.mu.Lock()
+		name := sess.name
+		sess.mu.Unlock()
+		if name == "second" {
+			return sess
+		}
+	}
+	t.Fatal("fixture second session missing")
+	return nil
+}
+
+// pickerBellLines reports the session headers carrying the bell glyph and the
+// tab rows carrying the structured attention marker.
+func pickerBellLines(snapshot protocol.PickerSnapshot) (headers int, tabRows int) {
+	bell := string(ui.AttentionGlyph)
+	for _, line := range snapshot.Lines {
+		switch line.Kind {
+		case protocol.PickerLineSession:
+			if strings.HasSuffix(line.Label, " "+bell) {
+				headers++
+			}
+		case protocol.PickerLineTab:
+			if line.Attention {
+				tabRows++
+			}
+		}
+	}
+	return headers, tabRows
+}
+
+// TestPickerSnapshotCarriesAttentionBellsToTheClient pins the notification path
+// into the client-owned modal: the daemon publishes the bell on the ringing
+// session's header and the structured marker on its tab row, and the client
+// renders both.
+func TestPickerSnapshotCarriesAttentionBellsToTheClient(t *testing.T) {
+	d, _, ac, sends, effect := pickerClientTestUnit(t)
+	ringing := secondSessionForTest(t, d)
+	ringing.mu.Lock()
+	ringing.tabs[0].attention = true
+	ringing.tabs[0].attentionAt = time.Unix(1, 0)
+	ringing.mu.Unlock()
+
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	headers, tabRows := pickerBellLines(snapshot)
+	require.Equal(t, 1, headers, "the ringing session header must carry the bell glyph")
+	require.Equal(t, 1, tabRows, "the ringing tab row must carry the structured attention marker")
+}
+
+// TestAttentionPulseRepublishesTheOpenPickerSource pins that a bell raised
+// while the client presents the modal reaches it: client-owned presentation
+// suppresses the daemon's paints, so the pulse must advance the picker source
+// the client presents from. A closed interaction republishes nothing.
+func TestAttentionPulseRepublishesTheOpenPickerSource(t *testing.T) {
+	d, sess, ac, sends, releases := newManualTabSession(t, 2)
+	defer releases[0]()
+	defer releases[1]()
+	clk := newManualAttentionClock()
+	d.clock = clk
+	require.True(t, selectTestAttachmentTab(sess, 0))
+
+	effect := admitPickerEffectForTest(t, sess, ac)
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	require.Equal(t, protocol.PickerIntentNavigation, awaitPickerOffer(t, sends).Intent)
+	first := awaitPickerSnapshot(t, sends)
+	require.Equal(t, 0, pickerBellCount(first), "a quiet session must publish no bell")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		d.attentionAnimator(ctx)
+		close(done)
+	}()
+
+	// A background tab rings while the modal is open. The client owns
+	// presentation, so only a newer source revision can update its rows.
+	sess.mu.Lock()
+	sess.tabs[1].attention = true
+	sess.tabs[1].attentionAt = time.Unix(1, 0)
+	sess.mu.Unlock()
+	d.pokeAttentionTicker()
+
+	timer := clk.nextTimer(t)
+	timer.fire()
+	second := awaitPickerSnapshot(t, sends)
+	require.Greater(t, second.SourceRevision, first.SourceRevision)
+	headers, tabRows := pickerBellLines(second)
+	require.Equal(t, 1, headers, "the pulse must publish the new bell on the session header")
+	require.Equal(t, 1, tabRows, "the pulse must publish the new bell on the tab row")
+
+	// A retired interaction must not be reopened by a later pulse. The
+	// animator keeps one timer while attention exists, so the same fired timer
+	// carries the next pulse.
+	retireEffect := admitPickerEffectForTest(t, sess, ac)
+	require.True(t, d.closePickerForAttachment(ac, retireEffect, second.InteractionID))
+	_ = drainAllFrames(sends)
+	sess.mu.Lock()
+	sess.tabs[0].attention = true
+	sess.tabs[0].attentionAt = time.Unix(2, 0)
+	sess.mu.Unlock()
+	d.pokeAttentionTicker()
+	timer.fire()
+	for _, frame := range drainAllFrames(sends) {
+		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "a closed interaction republished a snapshot")
+	}
+
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+}
+
+func pickerBellCount(snapshot protocol.PickerSnapshot) int {
+	headers, tabRows := pickerBellLines(snapshot)
+	return headers + tabRows
 }
 
 func TestPickerSelectionRequiresExactSourceRevision(t *testing.T) {
