@@ -784,16 +784,16 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	require.Equal(t, 1, testAttachmentTabIndex(target))
 }
 
-// openPickerForTestSession opens a navigation interaction on an attachment and
-// returns the effect that carries it plus a kill selection for the named
-// session. Kill now arrives as a typed selection, so the gate tests drive the
-// same destructive action the client would send.
-func openPickerForTestSession(t *testing.T, d *Daemon, sess *session, ac *attachedClient, killSession domain.SessionID) (*attachmentEffect, protocol.PickerSelection) {
+// openPickerForSession opens a navigation interaction on the attachment and
+// returns a kill selection for the named session. The open runs on a
+// short-lived effect: the interaction namespace lives on the attachment, not
+// on the effect that carried its offer.
+func openPickerForSession(t *testing.T, d *Daemon, sess *session, ac *attachedClient, killSession domain.SessionID) protocol.PickerSelection {
 	t.Helper()
-	effect, ok := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
-	require.True(t, ok)
-	t.Cleanup(effect.End)
+	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	require.True(t, admitted)
 	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	effect.End()
 	ac.overlays.pickerMu.Lock()
 	interaction := ac.overlays.pickerInteraction
 	revision := ac.overlays.pickerRevisions[servingPickerSourceID]
@@ -806,7 +806,7 @@ func openPickerForTestSession(t *testing.T, d *Daemon, sess *session, ac *attach
 	}
 	ac.overlays.pickerMu.Unlock()
 	require.NotEmpty(t, key, "no picker key resolves to session %s", killSession)
-	return effect, protocol.PickerSelection{
+	return protocol.PickerSelection{
 		InteractionID: interaction, SourceID: servingPickerSourceID,
 		SourceRevision: revision, Key: key, Action: protocol.PickerActionKill,
 	}
@@ -816,13 +816,15 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
-	effect, selection := openPickerForTestSession(t, d, sess, old, sess.id)
+	selection := openPickerForSession(t, d, sess, old, sess.id)
 
 	oldTransport := old.transport()
 	rc := d.attachCoordinator(sess, nil, old, true)
 	token := sess.captureAttachmentCapability(old, oldTransport)
 	token.lease = rc.attachmentLease(old)
 	old.installTestAttachmentCapability(token)
+	actionEffect, admitted := old.beginAttachmentEffect(token)
+	require.True(t, admitted)
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
@@ -837,7 +839,7 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 	}
 	actionDone := make(chan struct{})
 	go func() {
-		d.resolvePickerSelection(effect, selection)
+		d.resolvePickerSelection(actionEffect, selection)
 		close(actionDone)
 	}()
 	<-admissionEnded
@@ -862,13 +864,15 @@ func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	effect, selection := openPickerForTestSession(t, d, sess, ac, sess.id)
+	selection := openPickerForSession(t, d, sess, ac, sess.id)
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
+	actionEffect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
 
-	d.resolvePickerSelection(effect, selection)
+	d.resolvePickerSelection(actionEffect, selection)
 
 	d.mu.Lock()
 	_, registered := d.sessions[sess.id]

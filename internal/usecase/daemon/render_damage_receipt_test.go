@@ -8,7 +8,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
 

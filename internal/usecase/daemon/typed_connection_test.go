@@ -349,12 +349,24 @@ func testServerFrame(message protocol.ServerMessage) (wire.Frame, error) {
 			return wire.Frame{}, errors.New("test server connection: invalid picker snapshot")
 		}
 		return wire.Frame{Type: wire.MsgPickerSnapshot, Payload: payload}, nil
-	case protocol.PickerClose:
-		payload := wire.MarshalPickerClose(m)
+	case protocol.PickerOffer:
+		payload := wire.MarshalPickerOffer(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid picker offer")
+		}
+		return wire.Frame{Type: wire.MsgPickerOffer, Payload: payload}, nil
+	case protocol.PickerClosed:
+		payload := wire.MarshalPickerClosed(m)
 		if payload == nil {
 			return wire.Frame{}, errors.New("test server connection: invalid picker close")
 		}
-		return wire.Frame{Type: wire.MsgPickerCloseServer, Payload: payload}, nil
+		return wire.Frame{Type: wire.MsgPickerClosedServer, Payload: payload}, nil
+	case protocol.PickerResult:
+		payload := wire.MarshalPickerResult(m)
+		if payload == nil {
+			return wire.Frame{}, errors.New("test server connection: invalid picker result")
+		}
+		return wire.Frame{Type: wire.MsgPickerResult, Payload: payload}, nil
 	case protocol.PickerFailure:
 		payload := wire.MarshalPickerFailure(m)
 		if payload == nil {

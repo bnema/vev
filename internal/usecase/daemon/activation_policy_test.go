@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 // TestActivationPolicyTable drives the D5 contract through the picker

@@ -1219,7 +1219,8 @@ func TestProducerInvalidations(t *testing.T) {
 			file: "picker.go",
 			name: "picker entry",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				d.enterPicker(sess, ac)
+				effect := admitPickerEffectForTest(t, sess, ac)
+				require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
 			},
 		},
 		{

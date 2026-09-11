@@ -45,7 +45,7 @@ func TestRemoteDirectoryDeletionRetiresHistoryWithPickerClosed(t *testing.T) {
 	ref := protocol.RouteRef{Key: 3, Generation: 2}
 	ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{Ref: ref, Target: target, SourceKey: protocol.RemoteInventorySourceKey("remote")}}}, ac.transportSnapshot(), d.clock.Now())
 	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{Endpoint: "remote", InventoryKnown: true, Availability: domain.RemoteAvailabilityReachable, LastAttempt: d.clock.Now().Add(time.Second), LastSuccess: d.clock.Now().Add(2 * time.Second)})
-	require.False(t, ac.overlays.pickerActive())
+	require.False(t, ac.overlays.pickerClientActive())
 	d.refreshRemoteDirectoryViews()
 	frame := awaitFrame(t, sends, wire.MsgRouteRetired)
 	message, err := wire.UnmarshalRouteRetired(frame.Payload)
