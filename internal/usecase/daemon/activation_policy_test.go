@@ -26,7 +26,7 @@ func TestActivationPolicyTable(t *testing.T) {
 		name       string
 		host       ports.RemoteHostSnapshot
 		session    catalogue.RemoteCatalogSession
-		activation picker.RemoteActivation
+		activation pickerRemoteActivation
 		reason     string
 		rowPresent bool
 	}{
@@ -34,21 +34,21 @@ func TestActivationPolicyTable(t *testing.T) {
 			name:       "live reachable attaches",
 			host:       reachableDirectoryHost("user@arch", now),
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: tabs, ActiveTabID: "tab-1"},
-			activation: picker.RemoteAttach,
+			activation: pickerRemoteAttach,
 			rowPresent: true,
 		},
 		{
 			name:       "stopped reachable restarts",
 			host:       reachableDirectoryHost("user@arch", now),
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionDown, Tabs: tabs},
-			activation: picker.RemoteRestart,
+			activation: pickerRemoteRestart,
 			rowPresent: true,
 		},
 		{
 			name:       "broken is diagnostic only",
 			host:       reachableDirectoryHost("user@arch", now),
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionBroken, Tabs: tabs},
-			activation: picker.RemoteUnavailable,
+			activation: pickerRemoteUnavailable,
 			reason:     domain.RemoteReasonSessionBroken,
 			rowPresent: true,
 		},
@@ -59,7 +59,7 @@ func TestActivationPolicyTable(t *testing.T) {
 				LastSuccess: now, InventoryKnown: true,
 			},
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: tabs, ActiveTabID: "tab-1"},
-			activation: picker.RemoteUnavailable,
+			activation: pickerRemoteUnavailable,
 			reason:     domain.RemoteReasonVersionMismatch,
 			rowPresent: true,
 		},
@@ -70,7 +70,7 @@ func TestActivationPolicyTable(t *testing.T) {
 				return host
 			}(),
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: tabs, ActiveTabID: "tab-1"},
-			activation: picker.RemoteAttach,
+			activation: pickerRemoteAttach,
 			rowPresent: true,
 		},
 		{
@@ -80,7 +80,7 @@ func TestActivationPolicyTable(t *testing.T) {
 				LastSuccess: now.Add(-time.Hour), InventoryKnown: true,
 			},
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: tabs, ActiveTabID: "tab-1"},
-			activation: picker.RemoteAttach,
+			activation: pickerRemoteAttach,
 			reason:     domain.RemoteReasonHostUnreachable,
 			rowPresent: true,
 		},
@@ -91,7 +91,7 @@ func TestActivationPolicyTable(t *testing.T) {
 				LastSuccess: now.Add(-time.Hour), InventoryKnown: true,
 			},
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: tabs, ActiveTabID: "tab-1"},
-			activation: picker.RemoteAttach,
+			activation: pickerRemoteAttach,
 			reason:     domain.RemoteReasonAuthFailure,
 			rowPresent: true,
 		},
@@ -102,7 +102,7 @@ func TestActivationPolicyTable(t *testing.T) {
 				LastSuccess: now.Add(-time.Hour), InventoryKnown: true,
 			},
 			session:    catalogue.RemoteCatalogSession{LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: tabs, ActiveTabID: "tab-1"},
-			activation: picker.RemoteAttach,
+			activation: pickerRemoteAttach,
 			reason:     domain.RemoteReasonMalformed,
 			rowPresent: true,
 		},
@@ -117,7 +117,7 @@ func TestActivationPolicyTable(t *testing.T) {
 			seedRemoteDirectory(t, d, host)
 
 			views, _ := d.pickerViews(current, nil)
-			var found *picker.SessionView
+			var found *pickerSessionView
 			for i, view := range views {
 				if view.RemoteHost == "user@arch" && view.Name == "work@arch" {
 					found = &views[i]

@@ -825,26 +825,6 @@ func (t *parkedRouteExpiryTransport) Capabilities() protocol.ConnectionCapabilit
 func (t *parkedRouteExpiryTransport) LinkState() ports.LinkState         { return testLinkState(t) }
 func (t *parkedRouteExpiryTransport) LinkEvents() <-chan ports.LinkEvent { return testLinkEvents(t) }
 
-func (t *remotePickerSendErrorTransport) ReceiveClient() (protocol.ClientMessage, error) {
-	return testReceiveClient(t)
-}
-func (t *remotePickerSendErrorTransport) SendServer(m protocol.ServerMessage) error {
-	return testSendServer(t, m)
-}
-func (t *remotePickerSendErrorTransport) SendServerAsync(m protocol.ServerMessage) error {
-	return testSendServerAsync(t, m)
-}
-func (t *remotePickerSendErrorTransport) SendServerSynchronous(m protocol.ServerMessage) error {
-	return testSendServerSynchronous(t, m)
-}
-func (t *remotePickerSendErrorTransport) Capabilities() protocol.ConnectionCapabilities {
-	return testServerCapabilities(t)
-}
-func (t *remotePickerSendErrorTransport) LinkState() ports.LinkState { return testLinkState(t) }
-func (t *remotePickerSendErrorTransport) LinkEvents() <-chan ports.LinkEvent {
-	return testLinkEvents(t)
-}
-
 func (t failingOutputTransport) ReceiveClient() (protocol.ClientMessage, error) {
 	return testReceiveClient(t)
 }
@@ -1094,16 +1074,6 @@ func (t *parkedRouteExpiryTransport) SendOutputAsync(o protocol.Output) error {
 	return testSendOutputAsync(t, o)
 }
 func (t *parkedRouteExpiryTransport) SendOutputSynchronous(o protocol.Output) error {
-	return testSendOutputSynchronous(t, o)
-}
-
-func (t *remotePickerSendErrorTransport) SendOutput(o protocol.Output) error {
-	return testSendOutput(t, o)
-}
-func (t *remotePickerSendErrorTransport) SendOutputAsync(o protocol.Output) error {
-	return testSendOutputAsync(t, o)
-}
-func (t *remotePickerSendErrorTransport) SendOutputSynchronous(o protocol.Output) error {
 	return testSendOutputSynchronous(t, o)
 }
 

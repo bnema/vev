@@ -31,11 +31,10 @@ func TestOverlayRuntimeHandleInputPrecedence(t *testing.T) {
 		check func(t *testing.T, ac *attachedClient)
 	}{
 		{
-			name: "prompt before palette picker copy",
+			name: "prompt before palette copy",
 			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
-				d.enterPicker(sess, ac)
 				d.enterPalette(sess, ac)
 				d.enterPrompt(sess, ac, "Rename", "", func(string) error { return nil })
 			},
@@ -44,39 +43,20 @@ func TestOverlayRuntimeHandleInputPrecedence(t *testing.T) {
 				t.Helper()
 				require.Equal(t, "x", ac.overlays.prompt.Value())
 				require.Equal(t, "", ac.overlays.palette.Query())
-				require.True(t, ac.overlays.pickerActive())
 				require.True(t, ac.overlays.copyActive())
 			},
 		},
 		{
-			name: "palette before picker copy",
+			name: "palette before copy",
 			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
-				d.enterPicker(sess, ac)
 				d.enterPalette(sess, ac)
 			},
 			input: []byte("x"),
 			check: func(t *testing.T, ac *attachedClient) {
 				t.Helper()
 				require.Equal(t, "x", ac.overlays.palette.Query())
-				require.True(t, ac.overlays.pickerActive())
-				require.True(t, ac.overlays.copyActive())
-			},
-		},
-		{
-			name: "picker before copy",
-			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				t.Helper()
-				d.enterCopyMode(sess, ac)
-				d.enterPicker(sess, ac)
-			},
-			input: []byte("j"),
-			check: func(t *testing.T, ac *attachedClient) {
-				t.Helper()
-				target, ok := ac.overlays.picker.Selected()
-				require.True(t, ok)
-				require.Equal(t, 1, target.TabIndex)
 				require.True(t, ac.overlays.copyActive())
 			},
 		},

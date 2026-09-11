@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pickerClientTestUnit builds a fixture attachment with the client-picker
-// capability set and one extra session so snapshots are non-empty. It
-// returns an admitted effect for the guarded sends.
+// pickerClientTestUnit builds a fixture attachment and one extra session so
+// snapshots are non-empty. It returns an admitted effect for the guarded
+// sends.
 func pickerClientTestUnit(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Frame, *attachmentEffect) {
 	t.Helper()
 	p, releasePTY := newBlockingPTY(t)
@@ -30,11 +30,29 @@ func pickerClientTestUnitWithPTY(t *testing.T, p ports.PTY, releasePTY func()) (
 	d.ptys = newFactorySeq(t, newQuietPTY())
 	_, err := createSessionForTest(d, "second", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
 	require.NoError(t, err)
-	ac.navigationCapabilities |= protocol.NavigationCapabilityClientPicker
 	effect, ok := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
 	require.True(t, ok)
 	t.Cleanup(effect.End)
 	return d, sess, ac, sends, effect
+}
+
+func openTestPicker(t *testing.T, d *Daemon, ac *attachedClient, effect *attachmentEffect, sends chan wire.Frame, intent protocol.PickerIntent) protocol.PickerOffer {
+	t.Helper()
+	require.NoError(t, d.openPickerForAttachment(ac, effect, intent, moveSourceLocator{}, 0))
+	return awaitPickerOffer(t, sends)
+}
+
+func awaitPickerOffer(t *testing.T, sends chan wire.Frame) protocol.PickerOffer {
+	t.Helper()
+	for {
+		frame := awaitTestValue(t, sends, "picker offer was not published")
+		if frame.Type != wire.MsgPickerOffer {
+			continue
+		}
+		offer, err := wire.UnmarshalPickerOffer(frame.Payload)
+		require.NoError(t, err)
+		return offer
+	}
 }
 
 func awaitPickerSnapshot(t *testing.T, sends chan wire.Frame) protocol.PickerSnapshot {
@@ -68,96 +86,135 @@ func pickerClientCapability(t *testing.T, ac *attachedClient, sess *session) att
 	return captureAttachmentCapability(sess, ac, ac.transport())
 }
 
-func TestPickerClientSnapshotMirrorsOverlayModel(t *testing.T) {
-	d, _, ac, sends, effect := pickerClientTestUnit(t)
-
-	d.openPickerClientForAttachment(ac, effect, 11)
-	snapshot := awaitPickerSnapshot(t, sends)
-
-	require.Equal(t, uint64(11), snapshot.InteractionID)
-	require.Equal(t, uint64(1), snapshot.Revision)
-	require.NotEmpty(t, snapshot.Rows)
-	require.NotEmpty(t, snapshot.Title)
-
-	// Every snapshot row resolves through the published keys, and the keys
-	// carry session names for the unchanged handoff.
-	ac.overlays.pickerMu.Lock()
-	keys := ac.overlays.pickerClientKeys
-	ac.overlays.pickerMu.Unlock()
-	require.Len(t, keys, len(snapshot.Rows))
-	for _, row := range snapshot.Rows {
-		target, ok := keys[row.Key]
-		require.True(t, ok, "snapshot row %q has no resolved target", row.Key)
-		require.NotEmpty(t, target.Name, "resolved target carries no session name")
+// navigateSelection builds one typed commit for the displayed snapshot.
+func navigateSelection(snapshot protocol.PickerSnapshot, key string) protocol.PickerSelection {
+	return protocol.PickerSelection{
+		InteractionID: snapshot.InteractionID, SourceID: servingPickerSourceID,
+		SourceRevision: snapshot.SourceRevision, Key: key, Action: protocol.PickerActionNavigate,
 	}
 }
 
-func TestPickerClientOpenLeavesOverlayUnpublished(t *testing.T) {
+// firstSelectableKey returns the first line the source authorised for the
+// requested action.
+func firstSelectableKey(t *testing.T, snapshot protocol.PickerSnapshot, action protocol.PickerLineActions) string {
+	t.Helper()
+	for _, line := range snapshot.Lines {
+		if line.Actions&action != 0 {
+			return line.Key
+		}
+	}
+	t.Fatalf("snapshot published no line admitting %d", action)
+	return ""
+}
+
+func TestPickerOfferAndSnapshotPublishResolvableLines(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	offer := openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	require.NotZero(t, offer.InteractionID)
+	require.Equal(t, protocol.PickerIntentNavigation, offer.Intent)
+	require.Equal(t, offer.InteractionID, snapshot.InteractionID)
+	require.Equal(t, servingPickerSourceID, snapshot.SourceID)
+	require.Equal(t, uint64(1), snapshot.SourceRevision)
+	require.NotEmpty(t, snapshot.Lines)
+
+	// Every selectable line resolves through the published keys, and the keys
+	// carry session names for the unchanged handoff.
+	ac.overlays.pickerMu.Lock()
+	keys := ac.overlays.pickerKeys
+	ac.overlays.pickerMu.Unlock()
+	selectable := 0
+	for _, line := range snapshot.Lines {
+		if line.Actions == 0 {
+			continue
+		}
+		selectable++
+		target, ok := keys[line.Key]
+		require.True(t, ok, "line %q has no resolved target", line.Key)
+		require.NotEmpty(t, target.Name, "resolved target carries no session name")
+	}
+	require.NotZero(t, selectable)
+}
+
+func TestPickerOpenInstallsNoPresentationModel(t *testing.T) {
+	d, _, ac, sends, effect := pickerClientTestUnit(t)
+
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	_ = awaitPickerSnapshot(t, sends)
 
-	// rt.picker stays nil: commit flows through typed selection, never
-	// handlePickerInput — yet the interaction is open.
+	// The daemon publishes data and actions only: no model, no cursor, no
+	// search state of its own.
 	ac.overlays.pickerMu.Lock()
-	require.Nil(t, ac.overlays.picker)
-	require.True(t, ac.overlays.pickerClientOpen)
-	require.Equal(t, uint64(11), ac.overlays.pickerClientInteraction)
+	require.True(t, ac.overlays.pickerOpen)
+	require.NotZero(t, ac.overlays.pickerInteraction)
+	require.NotEmpty(t, ac.overlays.pickerKeys)
 	ac.overlays.pickerMu.Unlock()
 }
 
-func TestPickerClientSelectionRejectsStaleAndUnknown(t *testing.T) {
+func TestPickerSelectionRejectsStaleAndUnknown(t *testing.T) {
 	d, sess, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	snapshot := awaitPickerSnapshot(t, sends)
 
 	capability := pickerClientCapability(t, ac, sess)
 	// Unknown key on the open interaction reports UnknownKey without
 	// closing the interaction.
-	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerSelection{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision, Key: "ff00/ghost"}))
+	require.False(t, d.handleAttachmentClientMessage(capability, navigateSelection(snapshot, "ff00/ghost")))
 	failure := awaitPickerFailure(t, sends)
 	require.Equal(t, protocol.PickerUnknownKey, failure.Code)
 	require.Equal(t, snapshot.InteractionID, failure.InteractionID)
 
-	// Closed interaction reports StaleRevision.
-	d.closePickerClientForAttachment(ac, effect, snapshot.InteractionID)
-	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerSelection{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision, Key: snapshot.Rows[0].Key}))
-	closed := awaitPickerFailure(t, sends)
-	require.Equal(t, protocol.PickerStaleRevision, closed.Code)
+	// A foreign source is rejected before any key lookup.
+	foreign := navigateSelection(snapshot, firstSelectableKey(t, snapshot, protocol.PickerCanNavigate))
+	foreign.SourceID = "elsewhere"
+	require.False(t, d.handleAttachmentClientMessage(capability, foreign))
+	require.Equal(t, protocol.PickerUnknownSource, awaitPickerFailure(t, sends).Code)
+
+	// A retired interaction reports StaleRevision.
+	d.closePickerForAttachment(ac, effect, snapshot.InteractionID)
+	require.False(t, d.handleAttachmentClientMessage(capability, navigateSelection(snapshot, firstSelectableKey(t, snapshot, protocol.PickerCanNavigate))))
+	require.Equal(t, protocol.PickerStaleRevision, awaitPickerFailure(t, sends).Code)
 }
 
-func TestPickerClientMoveIntentNeverSnapshots(t *testing.T) {
-	_, _, ac, _, _ := pickerClientTestUnit(t)
-	// Move intents always render through the overlay picker, even when the
-	// capability is advertised: enterPickerForClient is only invoked for
-	// navigate intent, so a fresh attachment has no client interaction.
+func TestPickerMoveIntentPublishesMoveLinesOnly(t *testing.T) {
+	d, sess, ac, sends, effect := pickerClientTestUnit(t)
+	source := moveSourceLocator{
+		Session: moveSessionLocator{ID: sess.id, Incarnation: sess.incarnation, Name: sess.name},
+		TabID:   domain.TabStableID(testAttachmentTab(sess).stableID),
+	}
 	ac.overlays.pickerMu.Lock()
-	require.False(t, ac.overlays.pickerClientOpen)
+	require.False(t, ac.overlays.pickerOpen)
 	ac.overlays.pickerMu.Unlock()
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentMoveTab, source, 0))
+	offer := awaitPickerOffer(t, sends)
+	snapshot := awaitPickerSnapshot(t, sends)
+	require.Equal(t, protocol.PickerIntentMoveTab, offer.Intent)
+
+	// The source session never appears as its own destination, and rows that
+	// cannot accept a move carry no action.
+	for _, line := range snapshot.Lines {
+		require.NotEqual(t, sourceMoveKey(source), line.Key)
+		if line.Actions != 0 {
+			require.Equal(t, protocol.PickerCanMove, line.Actions)
+		}
+	}
 }
 
-func TestPickerClientWithoutCapabilityRendersOverlay(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	t.Cleanup(releasePTY)
-	// No capability: enterPicker installs the overlay model byte-identically
-	// to the pre-pilot path.
-	d.enterPicker(sess, ac)
-	ac.overlays.pickerMu.Lock()
-	require.NotNil(t, ac.overlays.picker)
-	require.False(t, ac.overlays.pickerClientOpen)
-	ac.overlays.pickerMu.Unlock()
+func sourceMoveKey(source moveSourceLocator) string {
+	return pickerMoveSourceKey(source)
 }
 
-func TestPickerClientOpenRepaintsWithoutSessionChange(t *testing.T) {
+func TestPickerOpenRepaintsWithoutSessionChange(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 
 	// The open invalidates the session even when nothing else changed:
 	// without this repaint the opener's fence would never retire and
 	// the palette Enter would hang until its deadline.
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	_ = awaitPickerSnapshot(t, sends)
 	select {
 	case frame := <-sends:
@@ -167,11 +224,10 @@ func TestPickerClientOpenRepaintsWithoutSessionChange(t *testing.T) {
 	}
 }
 
-func TestPickerClientSessionPickerCommandOpensSnapshot(t *testing.T) {
+func TestPickerSessionPickerCommandOpensInteraction(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, current, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.navigationCapabilities = protocol.NavigationCapabilityClientPicker
 	effect := beginRecentRoutePaletteEffect(t, d, current, ac)
 	effect.uiActionID = 77
 
@@ -183,39 +239,61 @@ func TestPickerClientSessionPickerCommandOpensSnapshot(t *testing.T) {
 	require.NotNil(t, ac.overlays.palette)
 	d.handlePaletteInput(ac, []byte("\r"), effect)
 
+	offer := awaitPickerOffer(t, sends)
 	snapshot := awaitPickerSnapshot(t, sends)
-	require.NotZero(t, snapshot.InteractionID)
-	require.NotZero(t, snapshot.Revision)
-	require.NotEmpty(t, snapshot.Rows)
+	require.NotZero(t, offer.InteractionID)
+	require.Equal(t, protocol.PickerIntentNavigation, offer.Intent)
+	require.NotEmpty(t, snapshot.Lines)
 	ac.overlays.pickerMu.Lock()
-	require.True(t, ac.overlays.pickerClientOpen)
+	require.True(t, ac.overlays.pickerOpen)
 	ac.overlays.pickerMu.Unlock()
 }
 
-func TestPickerClientCancelPublishesAuthoritativeFullPaint(t *testing.T) {
+func TestPickerCancelPublishesClosedAndAuthoritativeFullPaint(t *testing.T) {
 	d, sess, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	snapshot := awaitPickerSnapshot(t, sends)
 
-	// The client cancels: the daemon retires the interaction and must send
-	// the authoritative full paint the client's release path waits for.
+	// The client cancels: the daemon retires the interaction, confirms the
+	// close with its restore barrier, and publishes the authoritative full
+	// paint the client's release path waits for.
 	capability := pickerClientCapability(t, ac, sess)
-	d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision})
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID}))
 	ac.overlays.pickerMu.Lock()
-	require.False(t, ac.overlays.pickerClientOpen)
+	require.False(t, ac.overlays.pickerOpen)
 	ac.overlays.pickerMu.Unlock()
-	var output protocol.Output
-	frame := awaitTestValue(t, sends, "cancel published no authoritative paint")
-	require.Equal(t, wire.MsgOutput, frame.Type)
-	output, err := wire.UnmarshalOutput(frame.Payload)
-	require.NoError(t, err)
-	require.True(t, output.Full, "cancel release paint must be authoritative")
+
+	var sawClosed bool
+	for settled := false; !settled; {
+		select {
+		case frame := <-sends:
+			if frame.Type == wire.MsgPickerClosedServer {
+				closed, err := wire.UnmarshalPickerClosed(frame.Payload)
+				require.NoError(t, err)
+				require.Equal(t, snapshot.InteractionID, closed.InteractionID)
+				sawClosed = true
+				continue
+			}
+			if frame.Type == wire.MsgOutput {
+				output, err := wire.UnmarshalOutput(frame.Payload)
+				require.NoError(t, err)
+				require.True(t, sawClosed, "the restore paint must follow the close")
+				require.True(t, output.Full, "cancel release paint must be authoritative")
+				settled = true
+			}
+		case <-time.After(200 * time.Millisecond):
+			settled = true
+		}
+	}
+	require.True(t, sawClosed, "cancel published no close confirmation")
 }
 
-func TestPickerClientPaletteFramesOpenInteraction(t *testing.T) {
-	d, sess, ac, sends, _ := pickerClientTestUnit(t)
-	capability := pickerClientCapability(t, ac, sess)
+func TestPickerPaletteFramesOpenInteraction(t *testing.T) {
+	p, release := newBlockingPTY(t)
+	defer release()
+	d, _, ac, sends := newManualSessionWithPTYs(t, p)
+	capability := pickerClientCapability(t, ac, testAttachmentSession(t, ac))
 
 	// Drive the real attached-client frame path instead of calling the
 	// palette handler: Alt+Space opens the palette, the query selects the
@@ -224,42 +302,49 @@ func TestPickerClientPaletteFramesOpenInteraction(t *testing.T) {
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 2, ActionID: 5, Data: []byte("SSP")}))
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 3, ActionID: 6, Data: []byte("\r")}))
 
+	_ = awaitPickerOffer(t, sends)
 	snapshot := awaitPickerSnapshot(t, sends)
 	require.NotZero(t, snapshot.InteractionID)
-	require.NotEmpty(t, snapshot.Rows)
+	require.NotEmpty(t, snapshot.Lines)
 	ac.overlays.pickerMu.Lock()
-	require.True(t, ac.overlays.pickerClientOpen)
-	require.Nil(t, ac.overlays.picker, "client mode never installs the overlay model")
+	require.True(t, ac.overlays.pickerOpen)
 	ac.overlays.pickerMu.Unlock()
 }
 
-func TestPickerClientSelectionRequiresExactRevision(t *testing.T) {
+func testAttachmentSession(t *testing.T, ac *attachedClient) *session {
+	t.Helper()
+	sess := ac.currentAttachmentSession()
+	require.NotNil(t, sess)
+	return sess
+}
+
+func TestPickerSelectionRequiresExactSourceRevision(t *testing.T) {
 	d, sess, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	first := awaitPickerSnapshot(t, sends)
 	// A refresh publishes a newer revision: the client may only commit the
 	// model it is displaying, so an older revision must fail even though it
 	// is not newer than the daemon's current one.
-	d.refreshPickerClientSnapshot(ac)
+	d.refreshPickerSnapshot(ac)
 	second := awaitPickerSnapshot(t, sends)
-	require.Greater(t, second.Revision, first.Revision)
+	require.Greater(t, second.SourceRevision, first.SourceRevision)
 
 	capability := pickerClientCapability(t, ac, sess)
-	key := second.Rows[0].Key
-	for _, revision := range []uint64{second.Revision - 1, second.Revision + 1} {
-		require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerSelection{
-			CauseActionID: 9, InteractionID: second.InteractionID, Revision: revision, Key: key,
-		}))
+	key := firstSelectableKey(t, second, protocol.PickerCanNavigate)
+	for _, revision := range []uint64{second.SourceRevision - 1, second.SourceRevision + 1} {
+		selection := navigateSelection(second, key)
+		selection.SourceRevision = revision
+		require.False(t, d.handleAttachmentClientMessage(capability, selection))
 		failure := awaitPickerFailure(t, sends)
 		require.Equal(t, protocol.PickerStaleRevision, failure.Code, "revision %d must be rejected", revision)
 		ac.overlays.pickerMu.Lock()
-		require.True(t, ac.overlays.pickerClientOpen, "a rejected revision must not close the interaction")
+		require.True(t, ac.overlays.pickerOpen, "a rejected revision must not close the interaction")
 		ac.overlays.pickerMu.Unlock()
 	}
 }
 
-func TestPickerClientInteractionDropsRawInput(t *testing.T) {
+func TestPickerInteractionDropsRawInput(t *testing.T) {
 	writes := make(chan []byte, 8)
 	p, releasePTY := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends, effect := pickerClientTestUnitWithPTY(t, p, releasePTY)
@@ -281,11 +366,11 @@ func TestPickerClientInteractionDropsRawInput(t *testing.T) {
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 1, ActionID: 1, Data: mouseReport}))
 	require.NotEmpty(t, awaitTestValue(t, writes, "positive control: mouse never reached the pane"))
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	snapshot := awaitPickerSnapshot(t, sends)
 
-	// While the client picker is open it owns user input: keys and mouse
-	// reports must not reach the session, and the interaction stays open.
+	// While the picker is open it owns user input: keys and mouse reports
+	// must not reach the session, and the interaction stays open.
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 2, ActionID: 2, Data: []byte("hidden")}))
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 3, ActionID: 3, Data: mouseReport}))
 	select {
@@ -295,17 +380,17 @@ func TestPickerClientInteractionDropsRawInput(t *testing.T) {
 	}
 
 	// Closing the interaction restores normal routing, mouse included.
-	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision}))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID}))
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 4, ActionID: 4, Data: []byte("visible")}))
 	require.Equal(t, []byte("visible"), awaitTestValue(t, writes, "session input did not resume after the close"))
 	require.False(t, d.handleAttachmentClientMessage(capability, protocol.Input{InputSeq: 5, ActionID: 5, Data: mouseReport}))
 	require.NotEmpty(t, awaitTestValue(t, writes, "mouse routing did not resume after the close"))
 }
 
-func TestPickerClientSelectionClosesBeforeTheDestinationPaint(t *testing.T) {
+func TestPickerSelectionClosesBeforeTheDestinationPaint(t *testing.T) {
 	d, sess, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	snapshot := awaitPickerSnapshot(t, sends)
 	capability := pickerClientCapability(t, ac, sess)
 
@@ -314,14 +399,11 @@ func TestPickerClientSelectionClosesBeforeTheDestinationPaint(t *testing.T) {
 	// paint accepted after the daemon's close, so the destination paint has
 	// to follow it on the wire. Drain the open's own repaint first.
 	drainAllFrames(sends)
-	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerSelection{
-		CauseActionID: 9, InteractionID: snapshot.InteractionID, Revision: snapshot.Revision, Key: snapshot.Rows[0].Key,
-	}))
+	key := firstSelectableKey(t, snapshot, protocol.PickerCanNavigate)
+	require.False(t, d.handleAttachmentClientMessage(capability, navigateSelection(snapshot, key)))
 
 	// Collect the handoff frames for a short settle window, then require the
-	// close to precede any paint: the client only releases on a paint
-	// accepted after the daemon's close, so a paint emitted during the
-	// handoff must follow it on the wire.
+	// close to precede any paint.
 	var order []wire.MsgType
 	for settled := false; !settled; {
 		select {
@@ -332,18 +414,18 @@ func TestPickerClientSelectionClosesBeforeTheDestinationPaint(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, order, "the handoff published nothing")
-	require.Equal(t, wire.MsgPickerCloseServer, order[0], "the close must precede the handoff")
+	require.Equal(t, wire.MsgPickerClosedServer, order[0], "the close must precede the handoff")
 	for i, frameType := range order {
 		if frameType == wire.MsgOutput {
 			require.NotZero(t, i, "a paint must not precede the close")
 		}
 	}
 	ac.overlays.pickerMu.Lock()
-	require.False(t, ac.overlays.pickerClientOpen)
+	require.False(t, ac.overlays.pickerOpen)
 	ac.overlays.pickerMu.Unlock()
 }
 
-func TestPickerClientInteractionDropsClipboardImage(t *testing.T) {
+func TestPickerInteractionDropsClipboardImage(t *testing.T) {
 	writes := make(chan []byte, 8)
 	p, releasePTY := newBlockingPTYWithWrites(t, writes)
 	d, sess, ac, sends, effect := pickerClientTestUnitWithPTY(t, p, releasePTY)
@@ -353,7 +435,7 @@ func TestPickerClientInteractionDropsClipboardImage(t *testing.T) {
 	t.Setenv("TMPDIR", temp)
 	push := protocol.ImagePush{InputSeq: 1, Mime: "image/png", Data: []byte("\x89PNG\r\n\x1a\n")}
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	snapshot := awaitPickerSnapshot(t, sends)
 
 	// An image push is user input too: the clipboard path must not reach the
@@ -366,7 +448,7 @@ func TestPickerClientInteractionDropsClipboardImage(t *testing.T) {
 	}
 
 	// After the close the same push is delivered again.
-	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID, Revision: snapshot.Revision}))
+	require.False(t, d.handleAttachmentClientMessage(capability, protocol.PickerClose{InteractionID: snapshot.InteractionID}))
 	push.InputSeq = 2
 	require.False(t, d.handleAttachmentClientMessage(capability, push))
 	select {
@@ -377,47 +459,44 @@ func TestPickerClientInteractionDropsClipboardImage(t *testing.T) {
 	}
 }
 
-func TestPickerClientSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
+func TestPickerSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	first := awaitPickerSnapshot(t, sends)
 
 	// The row set changes for real: a new session appears in the catalogue.
 	_, err := createSessionForTest(d, "third", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
 	require.NoError(t, err)
 
-	// The catalogue notification path must reach the client picker even
-	// though it installs no overlay model: refreshRemoteDirectoryViews is
-	// the entry the directory subscription calls.
-	d.refreshRemoteDirectoryViews()
+	// The catalogue notification path must reach the picker even though the
+	// daemon installs no overlay model: refreshRemoteDirectoryViews is the
+	// entry the directory subscription calls.
+	d.refreshRemoteDirectoryViews(testAttachmentSession(t, ac))
 	second := awaitPickerSnapshot(t, sends)
 	require.Equal(t, first.InteractionID, second.InteractionID)
-	require.Greater(t, second.Revision, first.Revision)
-	require.Greater(t, len(second.Rows), len(first.Rows), "the new session must appear as a row")
-	ac.overlays.pickerMu.Lock()
-	require.Nil(t, ac.overlays.picker, "a client-owned picker never installs the overlay model")
-	ac.overlays.pickerMu.Unlock()
+	require.Greater(t, second.SourceRevision, first.SourceRevision)
+	require.Greater(t, len(second.Lines), len(first.Lines), "the new session must appear as a line")
 }
 
-func TestPickerClientRefreshPublishesNewerRevision(t *testing.T) {
+func TestPickerRefreshPublishesNewerSourceRevision(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 
-	d.openPickerClientForAttachment(ac, effect, 11)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	first := awaitPickerSnapshot(t, sends)
-	require.Equal(t, uint64(1), first.Revision)
+	require.Equal(t, uint64(1), first.SourceRevision)
 
 	// A row-set or size change republishes a full snapshot with a newer
 	// revision through the current attachment capability.
-	d.refreshPickerClientSnapshot(ac)
+	d.refreshPickerSnapshot(ac)
 	second := awaitPickerSnapshot(t, sends)
 	require.Equal(t, first.InteractionID, second.InteractionID)
-	require.Greater(t, second.Revision, first.Revision)
-	require.Equal(t, len(first.Rows), len(second.Rows))
+	require.Greater(t, second.SourceRevision, first.SourceRevision)
+	require.Len(t, second.Lines, len(first.Lines))
 
-	// A closed interaction republishes nothing: only the close notification
+	// A closed interaction republishes nothing: only the close confirmation
 	// and the authoritative repaint may follow.
-	require.True(t, d.closePickerClientForAttachment(ac, effect, first.InteractionID))
+	require.True(t, d.closePickerForAttachment(ac, effect, first.InteractionID))
 	for _, frame := range drainAllFrames(sends) {
 		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "closed interaction republished a snapshot")
 	}
