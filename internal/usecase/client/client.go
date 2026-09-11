@@ -436,7 +436,7 @@ func validateAttachRequest(request AttachRequest) error {
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
-	if err := protocol.ValidateNavigation(request.NavigationCapabilities); err != nil {
+	if err := protocol.ValidateNavigation(request.Intent, request.NavigationCapabilities); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
@@ -2051,6 +2051,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			abortPickerLease(true)
 		}
 	}
+	startForeground()
+	defer stopForeground()
+
 	recvCh := make(chan recvResult, 1)
 	go runRecv(loopCtx, transport, recvCh, transportFailed, log)
 
