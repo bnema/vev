@@ -3,6 +3,7 @@ package sessionwire
 import (
 	"testing"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
@@ -35,10 +36,26 @@ func pickerWireSelection() protocol.PickerSelection {
 	}
 }
 
+func pickerWirePreviewRequest() protocol.PickerPreviewRequest {
+	return protocol.PickerPreviewRequest{
+		Version: protocol.PickerPreviewSchemaVersion, InteractionID: 7, SourceID: "serving",
+		Key: "ab12/work#tab-1", Width: 80, Height: 24,
+	}
+}
+
+func pickerWirePreview() protocol.PickerPreview {
+	return protocol.PickerPreview{
+		Version: protocol.PickerPreviewSchemaVersion, InteractionID: 7, SourceID: "serving",
+		Key: "ab12/work#tab-1", Status: protocol.PickerPreviewOK, Width: 2, Height: 1,
+		Cells: []renderer.Cell{{Rune: 'o'}, {Rune: 'k'}},
+	}
+}
+
 func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 	begin := protocol.PickerBegin{RequestID: 3, Intent: protocol.PickerIntentNavigation}
 	closeMessage := protocol.PickerClose{InteractionID: 7, RequestID: 3}
 	selection := pickerWireSelection()
+	previewRequest := pickerWirePreviewRequest()
 	tests := []struct {
 		name    string
 		message protocol.ClientMessage
@@ -50,6 +67,8 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 		{name: "close pointer", message: &closeMessage, typeID: wire.MsgPickerCloseClient},
 		{name: "selection", message: selection, typeID: wire.MsgPickerSelection},
 		{name: "selection pointer", message: &selection, typeID: wire.MsgPickerSelection},
+		{name: "preview request", message: previewRequest, typeID: wire.MsgPickerPreviewRequest},
+		{name: "preview request pointer", message: &previewRequest, typeID: wire.MsgPickerPreviewRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -65,6 +84,8 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 				require.Equal(t, *message, got)
 			case *protocol.PickerSelection:
 				require.Equal(t, *message, got)
+			case *protocol.PickerPreviewRequest:
+				require.Equal(t, *message, got)
 			default:
 				require.Equal(t, tt.message, got)
 			}
@@ -78,6 +99,7 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 	closed := protocol.PickerClosed{InteractionID: 7, BarrierEpoch: 3, BarrierState: 9}
 	result := protocol.PickerResult{CauseActionID: 9, InteractionID: 7, SourceID: "serving", Key: "ab12/work", Action: protocol.PickerActionKill}
 	failure := protocol.PickerFailure{CauseActionID: 9, InteractionID: 7, SourceID: "serving", Key: "ab12/work", Action: protocol.PickerActionNavigate, Code: protocol.PickerRetiredTarget}
+	preview := pickerWirePreview()
 	tests := []struct {
 		name    string
 		message protocol.ServerMessage
@@ -94,6 +116,8 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 		{name: "result pointer", message: &result, typeID: wire.MsgPickerResult, payload: wire.MarshalPickerResult(result)},
 		{name: "failure", message: failure, typeID: wire.MsgPickerFailure, payload: wire.MarshalPickerFailure(failure)},
 		{name: "failure pointer", message: &failure, typeID: wire.MsgPickerFailure, payload: wire.MarshalPickerFailure(failure)},
+		{name: "preview", message: preview, typeID: wire.MsgPickerPreview, payload: wire.MarshalPickerPreview(preview)},
+		{name: "preview pointer", message: &preview, typeID: wire.MsgPickerPreview, payload: wire.MarshalPickerPreview(preview)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,6 +138,7 @@ func TestPickerMessagesRejectWrongDirection(t *testing.T) {
 		{Type: wire.MsgPickerBegin, Payload: wire.MarshalPickerBegin(protocol.PickerBegin{RequestID: 1, Intent: protocol.PickerIntentNavigation})},
 		{Type: wire.MsgPickerCloseClient, Payload: wire.MarshalPickerClose(protocol.PickerClose{InteractionID: 1})},
 		{Type: wire.MsgPickerSelection, Payload: wire.MarshalPickerSelection(selection)},
+		{Type: wire.MsgPickerPreviewRequest, Payload: wire.MarshalPickerPreviewRequest(pickerWirePreviewRequest())},
 	}
 	serverFrames := []wire.Frame{
 		{Type: wire.MsgPickerOffer, Payload: wire.MarshalPickerOffer(offer)},
@@ -121,6 +146,7 @@ func TestPickerMessagesRejectWrongDirection(t *testing.T) {
 		{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: 1})},
 		{Type: wire.MsgPickerResult, Payload: wire.MarshalPickerResult(protocol.PickerResult{InteractionID: 1, SourceID: "serving", Key: "a/b", Action: protocol.PickerActionKill})},
 		{Type: wire.MsgPickerFailure, Payload: wire.MarshalPickerFailure(protocol.PickerFailure{InteractionID: 1, Action: protocol.PickerActionKill, Code: protocol.PickerUnknownKey})},
+		{Type: wire.MsgPickerPreview, Payload: wire.MarshalPickerPreview(pickerWirePreview())},
 	}
 	for _, frame := range clientFrames {
 		require.NotNil(t, frame.Payload)

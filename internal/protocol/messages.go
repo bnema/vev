@@ -32,6 +32,7 @@ func (NavigationInventoryFailure) clientMessage()     {}
 func (PickerBegin) clientMessage()                    {}
 func (PickerClose) clientMessage()                    {}
 func (PickerSelection) clientMessage()                {}
+func (PickerPreviewRequest) clientMessage()           {}
 
 func (Welcome) serverMessage()                      {}
 func (ErrorMsg) serverMessage()                     {}
@@ -59,3 +60,4 @@ func (PickerSnapshot) serverMessage()               {}
 func (PickerClosed) serverMessage()                 {}
 func (PickerResult) serverMessage()                 {}
 func (PickerFailure) serverMessage()                {}
+func (PickerPreview) serverMessage()                {}
