@@ -7,7 +7,6 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/layout"
-	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -126,13 +125,13 @@ type capturedFloatingRenderState struct {
 type capturedOverlayRenderState struct {
 	copyActive, copySearchActive, paletteActive, promptActive bool
 	noticesOverlayActive, resizeActive                        bool
-	copyMode                                                 *scopy.Mode
-	copyPaneID                                               layout.PaneID
-	statusFeedback                                           string
-	paletteGuidance                                          string
-	copySearch, palette, prompt, noticesOverlay              capturedModal
-	notices                                                  []domain.Notification
-	noticeOverflow                                           int
+	copyMode                                                  *scopy.Mode
+	copyPaneID                                                layout.PaneID
+	statusFeedback                                            string
+	paletteGuidance                                           string
+	copySearch, palette, prompt, noticesOverlay               capturedModal
+	notices                                                   []domain.Notification
+	noticeOverflow                                            int
 }
 
 type capturedModal struct {
@@ -384,7 +383,7 @@ func captureLocalRenderState(
 		uiFence:       request.uiFence,
 		focusedPaneID: focusedPaneID,
 		styles:        request.styles, styleGeneration: request.styleGeneration,
-		overlays: overlays,
+		overlays:           overlays,
 		layout:             capturedTabLayout{area: layoutSnap.area, focus: layoutSnap.focus, placements: scratch.placements, dividers: scratch.dividers, fingerprint: layoutSnap.fingerprint, valid: layoutSnap.ok},
 		floatingGeneration: tb.floating.generation,
 		receipts:           scratch.receipts[:0],

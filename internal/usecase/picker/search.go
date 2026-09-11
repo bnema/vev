@@ -216,7 +216,7 @@ func (m *Model) refreshSearch(selectBest bool) int {
 	query := strings.ToLower(m.query.Value())
 	if query == "" {
 		for idx, row := range m.rows {
-			if row.focusable {
+			if row.focusable() {
 				m.matchRows = append(m.matchRows, idx)
 			}
 		}
@@ -227,7 +227,7 @@ func (m *Model) refreshSearch(selectBest bool) int {
 	bestIdx := -1
 	var best fieldMatch
 	for idx, row := range m.rows {
-		if !row.focusable {
+		if !row.focusable() {
 			continue
 		}
 		matched, ok := matchRow(row, query, needleRunes)

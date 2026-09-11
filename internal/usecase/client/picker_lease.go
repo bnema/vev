@@ -125,37 +125,45 @@ func (l *pickerLease) abort() (actionID uint64, local bool) {
 	return actionID, local
 }
 
+// pickerBarrier is the daemon output boundary one offer names: the client
+// must display admitted output through it before it takes the terminal.
+type pickerBarrier struct {
+	epoch uint64
+	state uint64
+}
+
 // admitSnapshot admits one validated snapshot against the client's applied
-// output state. It reports ready=true when the barrier is already applied
-// and the caller must display the picker frame now. superseded is a copy of
-// the previous lease when a new interaction replaces it, so the caller can
-// resolve the old pending action without touching the newly installed
-// lease.
+// output state. It reports ready=true when the barrier named by the offer is
+// already applied and the caller must display the picker frame now.
+// superseded is a copy of the previous lease when a new interaction replaces
+// it, so the caller can resolve the old pending action without touching the
+// newly installed lease.
 //
 // A snapshot for the current interaction only replaces the pending model
-// with a newer revision, and never after the release started: a superseding
-// interaction is a new namespace whose close/full pair cannot release the
-// previous one.
-func (l *pickerLease) admitSnapshot(snapshot protocol.PickerSnapshot, loop *pickerLoop, applied outputApplyState, generation uint64) (ready bool, superseded *pickerLease) {
+// with a newer source revision, and never after the release started: a
+// superseding interaction is a new namespace whose close/full pair cannot
+// release the previous one.
+func (l *pickerLease) admitSnapshot(snapshot protocol.PickerSnapshot, barrier pickerBarrier, loop *pickerLoop, applied outputApplyState, generation uint64) (ready bool, superseded *pickerLease) {
 	if l == nil || snapshot.InteractionID == 0 {
 		return false, nil
 	}
 	if l.active() {
 		if l.interaction == snapshot.InteractionID {
-			if l.state == pickerLeaseReleasing || snapshot.Revision <= l.revision {
+			if l.state == pickerLeaseReleasing || snapshot.SourceRevision <= l.revision {
 				return false, nil
 			}
-		} else {
-			previous := *l
-			superseded = &previous
 		}
+	}
+	if l.active() && l.interaction != snapshot.InteractionID {
+		previous := *l
+		superseded = &previous
 	}
 	*l = pickerLease{
 		state: pickerLeaseAcquiring, generation: generation, interaction: snapshot.InteractionID,
-		revision: snapshot.Revision, barrierEpoch: snapshot.BarrierEpoch, barrierState: snapshot.BarrierState,
+		revision: snapshot.SourceRevision, barrierEpoch: barrier.epoch, barrierState: barrier.state,
 		pending: loop,
 	}
-	if barrierReached(applied, snapshot.BarrierEpoch, snapshot.BarrierState) {
+	if barrierReached(applied, barrier.epoch, barrier.state) {
 		// The barrier is already displayed: the client owns the terminal
 		// from this moment, before any later daemon frame can be written.
 		l.state = pickerLeaseOwned

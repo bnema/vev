@@ -1744,6 +1744,14 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// namespace it was handed and retires it permanently on close.
 	picker := &pickerInteraction{}
 	var pickerCurrent *pickerLoop
+	// pickerSort is the client-local ordering mode; the daemon never shares it
+	// between attachments. pickerPreviewFrame carries the newest preview the
+	// serving daemon published for the displayed source.
+	var pickerSort = defaultPickerSort()
+	var pickerPreviewFrame = emptyPickerPreview()
+	// pickerAcquireBarrier is the daemon output boundary the offer named: the
+	// client displays admitted output through it before it owns the terminal.
+	var pickerAcquireBarrier pickerBarrier
 	// pickerInput publishes who owns the terminal input to the stdin pump:
 	// the open interaction, the release drain window, or the session. The
 	// pump decodes and identifies operations; this loop applies them.
@@ -2065,7 +2073,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// transaction, exactly like daemon output. A locally admitted action
 	// completes only after that write and flush succeeded.
 	displayPickerFrame := func(loop *pickerLoop, completeAction uint64) error {
-		data := pickerRenderer.render(loop, termSize())
+		data := pickerRenderer.render(loop, termSize(), pickerPreviewFrame)
 		if data == nil {
 			return nil
 		}
@@ -2130,8 +2138,8 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// sendPickerClose retires the daemon-side interaction so it stops owning
 	// input and repaints authoritatively. A duplicate close is harmless: the
 	// daemon rejects a close for an interaction it no longer holds.
-	sendPickerClose := func(interaction, revision uint64) error {
-		closeMsg := protocol.PickerClose{InteractionID: interaction, Revision: revision}
+	sendPickerClose := func(interaction uint64) error {
+		closeMsg := protocol.PickerClose{InteractionID: interaction}
 		select {
 		case controlCh <- closeMsg:
 			return nil
@@ -2450,13 +2458,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
-				commit, closeOp, changed := applyPickerBatch(pickerCurrent, outcome.events)
+				op, changed := applyPickerBatch(pickerCurrent, outcome.events)
 				switch {
-				case closeOp:
+				case op.close:
 					// The client retired the interaction: tell the daemon so it
 					// stops owning input and repaints authoritatively, then keep
 					// consuming and dropping until that paint lands.
-					if err := sendPickerClose(picker.interaction, pickerCurrent.revision); err != nil {
+					if err := sendPickerClose(picker.interaction); err != nil {
 						return welcomedResult(err)
 					}
 					if pickerPresentation.beginRelease(picker.interaction, outcome.actionID, true, false, outputState) {
@@ -2464,13 +2472,33 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					} else if outcome.actionID != 0 && ui != nil {
 						ui.completeLocal(uiGeneration, outcome.actionID)
 					}
-				case commit:
+				case op.kill:
+					// x destroys the cursor row. The typed selection carries the
+					// revision of the model actually presented; the picker stays
+					// open and refreshes from the resulting revision.
+					selection, ok := killSelection(pickerCurrent, outcome.actionID)
+					if !ok {
+						if outcome.actionID != 0 && ui != nil {
+							ui.completeLocal(uiGeneration, outcome.actionID)
+						}
+						continue
+					}
+					select {
+					case controlCh <- selection:
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				case op.commit:
 					// The typed selection crosses on controlCh: it carries the
 					// revision of the model actually presented. It stays pending
-					// through PickerClose and completes with the destination full
-					// paint or a typed failure.
-					selection, ok := commitSelection(pickerCurrent, picker.interaction, outcome.actionID)
-					if !ok {
+					// through the daemon close and completes with the destination
+					// full paint or a typed failure.
+					action, ok := pickerCurrent.selectedAction()
+					selection, committed := protocol.PickerSelection{}, false
+					if ok {
+						selection, committed = commitSelection(pickerCurrent, action, outcome.actionID)
+					}
+					if !committed {
 						if err := displayPickerFrame(pickerCurrent, outcome.actionID); err != nil {
 							return welcomedResult(err)
 						}
@@ -3006,6 +3034,18 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// Overlay-owned liveness. The relay never waits on it:
 				// publications carry the only state it tracks.
 				continue
+			case protocol.PickerOffer:
+				offer := message
+				if offer.InteractionID <= picker.retired {
+					continue
+				}
+				if !picker.open || picker.interaction != offer.InteractionID {
+					picker.setOpen(true, offer.InteractionID)
+				}
+				picker.setIntent(offer.InteractionID, offer.Intent)
+				pickerAcquireBarrier = pickerBarrier{epoch: offer.BarrierEpoch, state: offer.BarrierState}
+				syncPickerGeneration()
+				continue
 			case protocol.PickerSnapshot:
 				snapshot := message
 				if snapshot.InteractionID <= picker.retired {
@@ -3020,14 +3060,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					picker.setOpen(true, snapshot.InteractionID)
 				}
 				syncPickerGeneration()
-				if !picker.admitSnapshot(snapshot) {
+				if !picker.admitSnapshot(snapshot, false) {
+					continue
+				}
+				// A newer publication of the source already on display replaces
+				// its lines in place, so the local cursor and search survive a
+				// background refresh. A first-or-foreign source installs a new
+				// model through the lease below.
+				if pickerCurrent != nil && pickerCurrent.sourceID == snapshot.SourceID && pickerPresentation.owns() {
+					pickerCurrent.replaceLines(snapshot)
+					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+						return welcomedResult(err)
+					}
 					continue
 				}
 				// The lease decides presentation: a barrier still ahead keeps
 				// displaying daemon output until the exact epoch/state the
 				// snapshot was built against is applied, so no older paint can
 				// land after the picker frame.
-				ready, superseded := pickerPresentation.admitSnapshot(snapshot, openPickerLoop(snapshot), outputState, uiGeneration)
+				ready, superseded := pickerPresentation.admitSnapshot(snapshot, pickerAcquireBarrier, pickerLoopFromSnapshot(snapshot, picker.intent, pickerSort), outputState, uiGeneration)
 				if superseded != nil {
 					// A superseding interaction ended the previous one: resolve
 					// that lease, never the one just installed.
@@ -3040,23 +3091,32 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					return welcomedResult(err)
 				}
 				continue
-			case protocol.PickerClose:
-				close := message
-				if !pickerPresentation.beginRelease(close.InteractionID, 0, false, true, outputState) {
+			case protocol.PickerClosed:
+				closed := message
+				if !pickerPresentation.beginRelease(closed.InteractionID, 0, false, true, outputState) {
 					// The client already retired this interaction: the daemon's own
 					// close is the ordering barrier its release waits for, so
-					// record it and re-capture the boundary here.
-					pickerPresentation.confirmDaemonClose(close.InteractionID, outputState)
+					// record it and re-capture the boundary the daemon named.
+					pickerPresentation.confirmDaemonClose(closed.InteractionID, outputState)
 				}
-				if pickerPresentation.releasingFor(close.InteractionID) {
+				if pickerPresentation.releasingFor(closed.InteractionID) {
 					// The daemon retired the interaction (a resolved selection,
 					// a superseding overlay, or the echo of the client's own
 					// cancel). Keep consuming and dropping input until the
 					// authoritative paint lands.
-					drainPickerInput(close.InteractionID)
+					drainPickerInput(closed.InteractionID)
 				}
-				if picker.interaction == close.InteractionID || !picker.open {
-					picker.setOpen(false, close.InteractionID)
+				if picker.interaction == closed.InteractionID || !picker.open {
+					picker.setOpen(false, closed.InteractionID)
+				}
+				continue
+			case protocol.PickerResult:
+				// A completed in-place mutation (kill or move). The daemon
+				// republishes the source right after, so the picker needs no
+				// local model change: complete the action and keep presenting.
+				result := message
+				if result.CauseActionID != 0 && ui != nil {
+					ui.completeLocal(uiGeneration, result.CauseActionID)
 				}
 				continue
 			case protocol.PickerFailure:
@@ -3089,7 +3149,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 						continue
 					}
 					picker.setOpen(false, failure.InteractionID)
-					if err := sendPickerClose(failure.InteractionID, picker.revision); err != nil {
+					if err := sendPickerClose(failure.InteractionID); err != nil {
 						return welcomedResult(err)
 					}
 					if pickerPresentation.beginRelease(failure.InteractionID, 0, false, false, outputState) {

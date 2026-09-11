@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 // directoryInventoryStaleAge is the presentation freshness threshold: past
@@ -64,12 +63,12 @@ func directoryInventoryStale(host ports.RemoteHostSnapshot, now time.Time) bool 
 	return !now.Before(host.LastSuccess.Add(directoryInventoryStaleAge))
 }
 
-func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatalogSession, host ports.RemoteHostSnapshot, now time.Time) picker.SessionView {
+func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatalogSession, host ports.RemoteHostSnapshot, now time.Time) pickerSessionView {
 	key, target := remoteCatalogSessionTarget(key, session)
 	stopped := remoteSessionStateStopped(session.State)
 	broken := session.State == catalogue.RemoteCatalogSessionBroken
 	tabs := catalogue.CatalogTabs(session)
-	viewTabs := make([]picker.TabEntry, 0, len(tabs))
+	viewTabs := make([]pickerTabEntry, 0, len(tabs))
 	active := 0
 	for i, tab := range tabs {
 		if session.ActiveTabID != "" && tab.ID == session.ActiveTabID {
@@ -79,7 +78,7 @@ func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatal
 		if name == "" {
 			name = fmt.Sprintf("%d", int(tab.Index)+1)
 		}
-		viewTabs = append(viewTabs, picker.TabEntry{
+		viewTabs = append(viewTabs, pickerTabEntry{
 			TabID:     domain.TabStableID(tab.ID),
 			Name:      name,
 			RawName:   tab.Name,
@@ -94,20 +93,20 @@ func remotePickerView(key domain.RemoteSessionKey, session catalogue.RemoteCatal
 	remoteTarget := &target
 	reason := directorySessionReason(host, session, target)
 	targetValid := remoteTarget.Validate() == nil
-	activation := picker.RemoteUnavailable
+	activation := pickerRemoteUnavailable
 	if !broken && targetValid && host.Availability != domain.RemoteAvailabilityIncompatible {
 		// Known inventory is attemptable at any age: freshness is
 		// presentation information, not attach authority. Exact session,
 		// lifecycle and tab validation still applies at submit, and the
 		// destination rejects precisely.
 		if stopped {
-			activation = picker.RemoteRestart
+			activation = pickerRemoteRestart
 		} else {
-			activation = picker.RemoteAttach
+			activation = pickerRemoteAttach
 		}
 	}
 
-	return picker.SessionView{
+	return pickerSessionView{
 		ID:                 key.ID(),
 		Name:               key.Display(),
 		RemoteKey:          &key,
@@ -153,26 +152,26 @@ func directorySessionReason(host ports.RemoteHostSnapshot, session catalogue.Rem
 	}
 }
 
-func directoryPickerAvailability(host ports.RemoteHostSnapshot, now time.Time) picker.RemoteAvailability {
+func directoryPickerAvailability(host ports.RemoteHostSnapshot, now time.Time) pickerRemoteAvailability {
 	switch host.Availability {
 	case domain.RemoteAvailabilityReachable:
 		if directoryInventoryStale(host, now) {
-			return picker.RemoteStale
+			return pickerRemoteStale
 		}
-		return picker.RemoteFresh
+		return pickerRemoteFresh
 	case domain.RemoteAvailabilityIncompatible:
-		return picker.RemoteVersionMismatch
+		return pickerRemoteVersionMismatch
 	case domain.RemoteAvailabilityUnknown:
-		return picker.RemoteCached
+		return pickerRemoteCached
 	default:
 		if host.Checking {
-			return picker.RemoteCached
+			return pickerRemoteCached
 		}
-		return picker.RemoteStale
+		return pickerRemoteStale
 	}
 }
 
-func directoryPickerDetail(host ports.RemoteHostSnapshot, session catalogue.RemoteCatalogSession, reason string, activation picker.RemoteActivation, now time.Time) string {
+func directoryPickerDetail(host ports.RemoteHostSnapshot, session catalogue.RemoteCatalogSession, reason string, activation pickerRemoteActivation, now time.Time) string {
 	if host.Checking {
 		return "checking remote…"
 	}
@@ -202,7 +201,7 @@ func directoryPickerDetail(host ports.RemoteHostSnapshot, session catalogue.Remo
 		return "session broken"
 	case reason == domain.RemoteReasonIdentityChanged:
 		return "identity changed"
-	case activation == picker.RemoteRestart:
+	case activation == pickerRemoteRestart:
 		return "stopped — Enter to restart"
 	case session.State == catalogue.RemoteCatalogSessionUp:
 		return "up"
@@ -217,24 +216,24 @@ func directoryPickerDetail(host ports.RemoteHostSnapshot, session catalogue.Remo
 // while the remote directory has never been initialized: it distinguishes
 // "still checking remotes" from "no remotes configured". Enter on the
 // row fails safe through the usual unavailable-target path.
-func remotePickerCheckingView() picker.SessionView {
-	return picker.SessionView{
+func remotePickerCheckingView() pickerSessionView {
+	return pickerSessionView{
 		ID:                domain.SessionID("remote:checking"),
 		Name:              "checking remotes…",
-		RemoteActivation:  picker.RemoteUnavailable,
+		RemoteActivation:  pickerRemoteUnavailable,
 		CannotAcceptMoves: true,
 	}
 }
 
-func remotePickerHostView(host ports.RemoteHostSnapshot, now time.Time) picker.SessionView {
-	return picker.SessionView{
+func remotePickerHostView(host ports.RemoteHostSnapshot, now time.Time) pickerSessionView {
+	return pickerSessionView{
 		ID:                 domain.SessionID("remote-host:" + base64.RawURLEncoding.EncodeToString([]byte(host.Endpoint))),
 		Name:               host.Endpoint,
 		RemoteHost:         host.Endpoint,
 		RemoteReason:       directoryHostReason(host),
 		RemoteAvailability: directoryPickerAvailability(host, now),
 		RemoteDetail:       directoryHostDetail(host),
-		RemoteActivation:   picker.RemoteUnavailable,
+		RemoteActivation:   pickerRemoteUnavailable,
 		CannotAcceptMoves:  true,
 	}
 }

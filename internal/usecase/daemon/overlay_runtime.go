@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -26,13 +25,13 @@ type overlayRuntime struct {
 	// (older or duplicate revisions discard); keys maps opaque row keys of the
 	// serving source to resolved targets; intent and moverSource are the
 	// daemon-side facts captured at open; requestID echoes a client PickerBegin.
-	pickerOpen       bool
+	pickerOpen        bool
 	pickerInteraction uint64
-	pickerRevisions  map[string]uint64
-	pickerKeys       map[string]picker.Target
-	pickerIntent     protocol.PickerIntent
-	pickerMoveSource moveSourceLocator
-	pickerRequestID  uint64
+	pickerRevisions   map[string]uint64
+	pickerKeys        map[string]picker.Target
+	pickerIntent      protocol.PickerIntent
+	pickerMoveSource  moveSourceLocator
+	pickerRequestID   uint64
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model

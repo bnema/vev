@@ -22,6 +22,23 @@ func pickerClientKey(lifecycle domain.IncarnationID, name string) string {
 	return navigationInventoryEntryKey(lifecycle, name)
 }
 
+// retirePicker closes the picker interaction of an attachment that is going
+// away. It never sends: the transport is already failing or parked, and the
+// client's own lease retires on its generation change.
+func (d *Daemon) retirePicker(ac *attachedClient) {
+	if ac == nil || ac.overlays == nil {
+		return
+	}
+	ac.overlays.pickerMu.Lock()
+	open := ac.overlays.pickerOpen
+	interaction := ac.overlays.pickerInteraction
+	ac.overlays.pickerMu.Unlock()
+	if !open {
+		return
+	}
+	d.closePickerForAttachment(ac, nil, interaction)
+}
+
 // pickerState reports the open interaction under the picker mutex.
 func (ac *attachedClient) pickerState() (open bool, interaction uint64, intent protocol.PickerIntent, source moveSourceLocator, requestID uint64) {
 	if ac == nil || ac.overlays == nil {

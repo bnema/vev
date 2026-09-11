@@ -7,23 +7,28 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
-// This file owns the client side of the client-picker interaction:
-// snapshot admission, local model ownership, and typed commit/cancel.
-// It mirrors the inventoryRelay admission discipline
-// (navigation_inventory.go) but never canonicalizes row order: picker
-// order is semantically significant. The loop consumes terminal-pump
-// records, never raw reads; commit sends a typed PickerSelection on the
-// ordered control channel, never picker bytes toward the PTY.
+// This file owns the client side of the picker interaction: source admission,
+// local model ownership, and typed commit/cancel. It mirrors the
+// inventoryRelay admission discipline (navigation_inventory.go) but never
+// canonicalizes line order: picker order is semantically significant. The
+// loop consumes terminal-pump records, never raw reads; commit sends a typed
+// PickerSelection on the ordered control channel, never picker bytes toward
+// the PTY.
 
-// pickerInteraction tracks one client-picker namespace: the admitted
-// interaction ID, its latest admitted revision, and the newest interaction
-// this attachment retired. A retired interaction is never resurrected by a
-// late snapshot, and stale revisions never step the display backward.
+// pickerInteraction tracks one picker namespace: the admitted interaction ID
+// and the newest interaction this attachment retired. A retired interaction is
+// never resurrected by a late snapshot.
 type pickerInteraction struct {
 	open        bool
 	interaction uint64
-	revision    uint64
 	retired     uint64
+	// intent is the intent the serving daemon published for this interaction.
+	// Move intents present destination rows instead of navigation rows.
+	intent protocol.PickerIntent
+	// sourceRevisions tracks the newest admitted revision per source. Every
+	// source publishes its own revision, so one source's refresh never
+	// invalidates a selection displayed from another.
+	sourceRevisions map[string]uint64
 }
 
 // setOpen starts or stops the interaction namespace. Superseding an open
@@ -39,18 +44,31 @@ func (p *pickerInteraction) setOpen(open bool, interaction uint64) {
 	p.open = open
 	if open && interaction != p.interaction {
 		p.interaction = interaction
-		p.revision = 0
+		p.sourceRevisions = make(map[string]uint64)
 	}
 	if !open && interaction > p.retired {
 		p.retired = interaction
 	}
+	if !open {
+		p.intent = 0
+		p.sourceRevisions = nil
+	}
 }
 
-// admitSnapshot validates one snapshot against the open interaction and
-// reports whether it carries a newer revision worth displaying. Retired
-// interactions, foreign interactions, and older or duplicate revisions
+// setIntent records the intent published with the offer that opened the
+// interaction.
+func (p *pickerInteraction) setIntent(interaction uint64, intent protocol.PickerIntent) {
+	if p == nil || !p.open || p.interaction != interaction {
+		return
+	}
+	p.intent = intent
+}
+
+// admitSnapshot validates one source publication against the open interaction
+// and reports whether it carries a newer revision worth displaying. Retired
+// interactions, foreign interactions, and older or duplicate source revisions
 // discard.
-func (p *pickerInteraction) admitSnapshot(snapshot protocol.PickerSnapshot) bool {
+func (p *pickerInteraction) admitSnapshot(snapshot protocol.PickerSnapshot, wantsEvent bool) bool {
 	if p == nil {
 		return false
 	}
@@ -63,76 +81,49 @@ func (p *pickerInteraction) admitSnapshot(snapshot protocol.PickerSnapshot) bool
 	if !p.open || snapshot.InteractionID != p.interaction {
 		return false
 	}
-	if snapshot.Revision <= p.revision {
+	if snapshot.SourceRevision <= p.sourceRevisions[snapshot.SourceID] {
 		return false
 	}
-	p.revision = snapshot.Revision
+	if wantsEvent && p.intent == 0 {
+		// The offer carries the intent; a snapshot that arrives first is
+		// still admitted so a lost offer cannot wedge the interaction.
+	}
+	p.sourceRevisions[snapshot.SourceID] = snapshot.SourceRevision
 	return true
 }
 
-// pickerLoop owns one admitted *picker.Model plus the snapshot revision it
-// was built from. Cursor and search are local-only presentation; commit
-// and cancel cross the wire as typed messages. The daemon revalidates the
-// committed revision and key, so the client never keeps a second copy of
-// the row set: it commits from the model it is displaying. Sort stays
-// daemon-owned: the client never sees recency metadata, so `s` is a
-// documented no-op here and a refresh arrives as a new snapshot revision.
+// pickerLoop owns one admitted *picker.Model plus the source publication it
+// was built from. Cursor, search, and sort are local-only presentation;
+// commit and cancel cross the wire as typed messages. The daemon revalidates
+// the committed source revision and key, so the client never keeps a second
+// copy of the row set.
 type pickerLoop struct {
-	model       *picker.Model
-	interaction uint64
-	revision    uint64
+	model          *picker.Model
+	interaction    uint64
+	intent         protocol.PickerIntent
+	sourceID       string
+	sourceRevision uint64
 }
 
-// openPickerLoop builds the local model from one admitted snapshot. Views
-// are reconstructed display-first: the daemon sent display-ready rows and
-// the client rebuilds equivalent SessionViews so picker.New applies the
-// same selection geometry as the daemon model.
-func openPickerLoop(snapshot protocol.PickerSnapshot) *pickerLoop {
-	views := pickerViewsFromSnapshot(snapshot)
-	model := picker.New(views, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
-	loop := &pickerLoop{model: model, interaction: snapshot.InteractionID, revision: snapshot.Revision}
-	loop.restoreCursor(snapshot.Cursor)
-	return loop
-}
-
-// pickerViewsFromSnapshot rebuilds session views from opaque rows. Each
-// row becomes one single-tab session view: the row key round-trips in the
-// tab ID namespace reserved for client-picker rows, so commitKey recovers
-// the exact opaque key without parsing display text. TargetName stays
-// empty — the client never invents navigation authority; commit sends the
-// opaque key back and the daemon resolves it. Stopped rows keep a header
-// fallback because rowsForSession makes stopped session headers selectable
-// for navigate intent; live rows commit through their tab entry.
-func pickerViewsFromSnapshot(snapshot protocol.PickerSnapshot) []picker.SessionView {
-	views := make([]picker.SessionView, 0, len(snapshot.Rows))
-	for _, row := range snapshot.Rows {
-		view := picker.SessionView{
-			ID:      domain.SessionID("picker-client:" + row.Key),
-			Name:    row.Display,
-			Stopped: row.Stopped,
-			Tabs: []picker.TabEntry{
-				{TabID: domain.TabStableID("picker-client:" + row.Key), Name: row.Display, Detail: row.Detail},
-			},
-		}
-		if row.Stopped {
-			view.Tabs = nil
-		}
-		views = append(views, view)
+// pickerLoopFromSnapshot builds the local model from one admitted source
+// publication. Rows are rendered exactly as published: the daemon owns
+// eligibility and per-row actions, the client owns order, cursor, and search.
+func pickerLoopFromSnapshot(snapshot protocol.PickerSnapshot, intent protocol.PickerIntent, sort picker.SortMode) *pickerLoop {
+	model := picker.New(snapshot.Lines, picker.Config{Intent: intent, Cursor: snapshot.Cursor, Sort: sort})
+	return &pickerLoop{
+		model: model, interaction: snapshot.InteractionID, intent: intent,
+		sourceID: snapshot.SourceID, sourceRevision: snapshot.SourceRevision,
 	}
-	return views
 }
 
-// restoreCursor moves the model cursor to the snapshot cursor by index,
-// clamped to the model bounds. The daemon's cursor key identifies the row;
-// the index positions it without parsing display text.
-func (l *pickerLoop) restoreCursor(cursor protocol.PickerCursor) {
-	if l == nil || l.model == nil {
+// replaceLines applies a newer publication of the already displayed source
+// while retaining the local search editor and cursor key.
+func (l *pickerLoop) replaceLines(snapshot protocol.PickerSnapshot) {
+	if l == nil || l.model == nil || snapshot.SourceID != l.sourceID {
 		return
 	}
-	if cursor.Index < 0 {
-		return
-	}
-	l.model.SelectNearestRow(cursor.Index)
+	l.model.ReplaceLines(snapshot.Lines, snapshot.Cursor)
+	l.sourceRevision = snapshot.SourceRevision
 }
 
 // up moves the cursor one focusable row up.
@@ -192,28 +183,55 @@ func (l *pickerLoop) escape() bool {
 	return true
 }
 
-// commitKey returns the opaque key under the cursor for a typed commit.
-// The second result is false when no row is selectable there. The key
-// round-trips through the reserved tab-ID namespace from
-// pickerViewsFromSnapshot, so no display text is ever parsed. Stopped
-// rows commit through their selectable session header (session ID
-// namespace); live rows commit through their tab entry.
-func (l *pickerLoop) commitKey() (string, bool) {
+// toggleSort flips the local ordering between recency and grouped and reports
+// whether the display changed.
+func (l *pickerLoop) toggleSort() bool {
 	if l == nil || l.model == nil {
-		return "", false
+		return false
 	}
-	target, ok := l.model.Selected()
-	if !ok {
-		return "", false
+	next := picker.SortGrouped
+	if l.model.SortMode() == picker.SortGrouped {
+		next = picker.SortRecent
 	}
-	const prefix = "picker-client:"
-	for _, id := range []string{string(target.TabID), string(target.Session)} {
-		if len(id) > len(prefix) && id[:len(prefix)] == prefix {
-			return id[len(prefix):], true
-		}
-	}
-	return "", false
+	l.model.SetSort(next)
+	return true
 }
+
+// selectedAction reports the action the displayed row authorises: navigation
+// rows navigate, move rows move. The daemon publishes the bits, so the client
+// never invents authority.
+func (l *pickerLoop) selectedAction() (protocol.PickerAction, bool) {
+	if l == nil || l.model == nil {
+		return 0, false
+	}
+	line, ok := l.model.Selected()
+	if !ok {
+		return 0, false
+	}
+	switch {
+	case line.Actions&protocol.PickerCanNavigate != 0:
+		return protocol.PickerActionNavigate, true
+	case line.Actions&protocol.PickerCanMove != 0:
+		return protocol.PickerActionMove, true
+	default:
+		return 0, false
+	}
+}
+
+// killAction reports whether the cursor row authorises destruction.
+func (l *pickerLoop) killAction() bool {
+	if l == nil || l.model == nil {
+		return false
+	}
+	line, ok := l.model.Selected()
+	return ok && line.Actions&protocol.PickerCanKill != 0
+}
+
+// defaultPickerSort is the client-local initial ordering mode.
+func defaultPickerSort() picker.SortMode { return picker.SortRecent }
+
+// emptyPickerPreview is the zero preview used until the daemon publishes one.
+func emptyPickerPreview() picker.Preview { return picker.Preview{} }
 
 // pickerRenderer encodes one picker frame to terminal bytes. It owns a
 // dedicated ANSI renderer shadow (never the daemon output shadow): the
@@ -251,12 +269,10 @@ func (r *pickerRenderer) disableBracketedPaste() []byte {
 }
 
 // render composes the loop model into terminal bytes for one display
-// refresh. Preview is empty in the pilot: local preview stays
-// daemon-composed inside ordinary paints and remote preview stays on the
-// RemotePreview path; cursor movement is local-only and notifies nothing.
-// A full redraw every refresh keeps the shadow trivially consistent: the
-// frame is small and modal, never a PTY stream.
-func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size) []byte {
+// refresh. Previews arrive as source data (picker_preview.go) and are attached
+// to the model by the caller; a full redraw every refresh keeps the shadow
+// trivially consistent: the frame is small and modal, never a PTY stream.
+func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview picker.Preview) []byte {
 	if r == nil || loop == nil || loop.model == nil {
 		return nil
 	}
@@ -267,7 +283,7 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size) []byte {
 		r.renderer = ansirenderer.New(ansirenderer.Capabilities{})
 		r.size = size
 	}
-	frame := loop.model.Render(size, picker.Preview{})
+	frame := loop.model.Render(size, preview)
 	data, err := r.renderer.Draw(frame, []ansirenderer.Damage{ansirenderer.FullRedraw()})
 	if err != nil {
 		return nil
@@ -281,21 +297,22 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size) []byte {
 	return data
 }
 
-// commitSelection builds the typed commit for the row under the cursor at
-// the displayed revision. Zero picker bytes travel toward the PTY: the
+// commitSelection builds the typed commit for the row under the cursor at the
+// displayed source revision. Zero picker bytes travel toward the PTY: the
 // opaque key plus revision ride a PickerSelection on the ordered control
-// channel and the daemon resolves them.
-func commitSelection(loop *pickerLoop, interaction uint64, causeActionID uint64) (protocol.PickerSelection, bool) {
-	if loop == nil {
+// channel and the owning source resolves them.
+func commitSelection(loop *pickerLoop, action protocol.PickerAction, causeActionID uint64) (protocol.PickerSelection, bool) {
+	if loop == nil || loop.model == nil {
 		return protocol.PickerSelection{}, false
 	}
-	key, ok := loop.commitKey()
+	line, ok := loop.model.Selected()
 	if !ok {
 		return protocol.PickerSelection{}, false
 	}
 	selection := protocol.PickerSelection{
-		CauseActionID: causeActionID, InteractionID: interaction,
-		Revision: loop.revision, Key: key,
+		CauseActionID: causeActionID, InteractionID: loop.interaction,
+		SourceID: loop.sourceID, SourceRevision: loop.sourceRevision,
+		Key: line.Key, Action: action,
 	}
 	if protocol.ValidatePickerSelection(selection) != nil {
 		return protocol.PickerSelection{}, false
@@ -303,21 +320,47 @@ func commitSelection(loop *pickerLoop, interaction uint64, causeActionID uint64)
 	return selection, true
 }
 
-// pickerDriverOp is one ui-driver operation applied to an open loop. Keys
-// drive cursor/search/exit with daemon-overlay parity: arrows and j/k move
-// in normal mode (j/k are literal in search), `/` enters search, `s`/`x`
-// are commands in normal mode and literal in search, `q`/Ctrl-C/Escape
-// close in normal mode (Escape exits search first), Backspace edits the
-// query. Text runes insert only while search is active; normal-mode typing
-// is ignored exactly like the overlay. The commit result reports whether
-// the caller must build a typed commit for the cursor row; the close
-// result reports whether the caller must send PickerClose. Close wins over
-// commit when both land in one op, mirroring the overlay exit
-// short-circuit. Commit and failure handling stay at the call site so
-// CauseActionID attribution is exact.
-func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close bool) {
+// killSelection builds the typed kill for the row under the cursor. It is a
+// distinct commit so the source can verify the row still authorises
+// destruction.
+func killSelection(loop *pickerLoop, causeActionID uint64) (protocol.PickerSelection, bool) {
 	if loop == nil || loop.model == nil {
-		return false, false
+		return protocol.PickerSelection{}, false
+	}
+	line, ok := loop.model.Selected()
+	if !ok || line.Actions&protocol.PickerCanKill == 0 {
+		return protocol.PickerSelection{}, false
+	}
+	selection := protocol.PickerSelection{
+		CauseActionID: causeActionID, InteractionID: loop.interaction,
+		SourceID: loop.sourceID, SourceRevision: loop.sourceRevision,
+		Key: line.Key, Action: protocol.PickerActionKill,
+	}
+	if protocol.ValidatePickerSelection(selection) != nil {
+		return protocol.PickerSelection{}, false
+	}
+	return selection, true
+}
+
+// pickerOp is the presentation decision one driver operation asks the attach
+// loop to carry out. Close wins over commit when both land in one op,
+// mirroring the overlay exit short-circuit.
+type pickerOp struct {
+	commit bool
+	kill   bool
+	close  bool
+}
+
+// pickerDriverOp is one ui-driver operation applied to an open loop. Keys
+// drive cursor/search/exit: arrows and j/k move in normal mode (j/k are
+// literal in search), `/` enters search, `s` reorders locally, `x` asks to
+// destroy the cursor row, `q`/Ctrl-C/Escape close in normal mode (Escape
+// exits search first), Backspace edits the query. Text runes insert only
+// while search is active; normal-mode typing is ignored exactly like the
+// overlay.
+func pickerDriverOp(loop *pickerLoop, keys []string, text string) (op pickerOp, changed bool) {
+	if loop == nil || loop.model == nil {
+		return pickerOp{}, false
 	}
 	insertLit := func(r rune) {
 		if loop.model.SearchActive() {
@@ -326,6 +369,7 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close
 	}
 	for _, key := range keys {
 		active := loop.model.SearchActive()
+		beforeIndex, beforeSearch := loop.model.SelectedIndex(), active
 		switch key {
 		case "Up":
 			loop.up()
@@ -346,10 +390,10 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close
 		case "Enter":
 			// Commit is typed at the call site via commitSelection; the
 			// key itself sends zero bytes toward the PTY.
-			commit = true
+			op.commit = true
 		case "Escape":
 			if loop.escape() {
-				return commit, true
+				return pickerOp{close: true}, changed
 			}
 		case "Backspace":
 			if active {
@@ -361,30 +405,44 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (commit, close
 			} else {
 				loop.enterSearch()
 			}
-		// Normal-mode "s" (sort) and "x" (kill) keep no client branch:
-		// they fall through to the default case, which acts only while
-		// search is active. Sort stays daemon-owned and no client key
-		// path kills a target.
+		case "s":
+			if active {
+				loop.insert('s')
+			} else {
+				changed = loop.toggleSort() || changed
+			}
+		case "x":
+			if active {
+				loop.insert('x')
+			} else {
+				op.kill = true
+			}
 		case "q":
 			if active {
 				loop.insert('q')
 			} else {
-				return commit, true
+				return pickerOp{close: true}, changed
 			}
 		case "Ctrl+C":
 			// The overlay exits on Ctrl-C in both modes; the byte
 			// itself never reaches the query.
-			return commit, true
+			return pickerOp{close: true}, changed
 		default:
 			if len(key) == 1 {
 				insertLit(rune(key[0]))
 			}
 		}
+		if loop.model.SelectedIndex() != beforeIndex || loop.model.SearchActive() != beforeSearch {
+			changed = true
+		}
 	}
 	for _, r := range text {
-		insertLit(r)
+		if loop.model.SearchActive() {
+			loop.insert(r)
+			changed = true
+		}
 	}
-	return commit, false
+	return op, changed
 }
 
 // pickerInputBatch is one decoded batch: ordered input events.
@@ -417,11 +475,10 @@ func (o pickerConsumeOutcome) acceptOutcome(interaction, generation uint64) bool
 // is applied: a terminal read can legitimately carry several keystrokes, so
 // batch size never decides whether input is a command. Paste protection is
 // the decoder's paste state, not a heuristic here: a bracketed paste's
-// content never reaches this function. changed reports whether the display
-// needs a repaint; a close ends the batch.
-func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (commit, close, changed bool) {
+// content never reaches this function.
+func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (op pickerOp, changed bool) {
 	if loop == nil || loop.model == nil || len(events) == 0 {
-		return false, false, false
+		return pickerOp{}, false
 	}
 	for _, event := range events {
 		if event.kind == pickerEventRune {
@@ -431,15 +488,13 @@ func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (commit, close, ch
 			}
 			continue
 		}
-		before, searchBefore := loop.model.SelectedIndex(), loop.model.SearchActive()
-		opCommit, opClose := pickerDriverOp(loop, []string{event.key}, "")
-		if loop.model.SelectedIndex() != before || loop.model.SearchActive() != searchBefore {
-			changed = true
+		eventOp, eventChanged := pickerDriverOp(loop, []string{event.key}, "")
+		changed = changed || eventChanged
+		if eventOp.close {
+			return pickerOp{close: true}, changed
 		}
-		if opClose {
-			return commit, true, changed
-		}
-		commit = commit || opCommit
+		op.commit = op.commit || eventOp.commit
+		op.kill = op.kill || eventOp.kill
 	}
-	return commit, close, changed
+	return op, changed
 }

@@ -995,16 +995,10 @@ func (d *Daemon) resizeAttachmentGeometryForLease(effect *attachmentEffect, geom
 	ac.sendMu.Unlock()
 
 	if !sameSize && ac.overlays != nil && ac.overlays.pickerClientActive() {
-		// The picker preview geometry is attachment-local. A resize must
-		// invalidate any in-flight remote request and fetch the selected row
-		// at the new bounded preview dimensions.
-		d.registerPreviewForSelection(ac)
-	}
-	if !sameSize {
 		// A client-owned interaction renders from its own size: a resize
 		// bumps the snapshot revision so the client never repaints against a
 		// stale size epoch.
-		d.refreshPickerClientSnapshot(ac)
+		d.refreshPickerSnapshot(ac)
 	}
 
 	sess := effect.sess

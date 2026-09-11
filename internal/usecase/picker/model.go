@@ -112,15 +112,15 @@ type Geometry struct {
 // target resolution and no mutation authority: the source that published a
 // line resolves its opaque key when the client commits it.
 type Model struct {
-	intent       protocol.PickerIntent
-	sort         SortMode
-	lines        []protocol.PickerLine
-	rows         []row
-	selected     int
-	searchActive bool
-	query        ui.TextInput
+	intent        protocol.PickerIntent
+	sort          SortMode
+	lines         []protocol.PickerLine
+	rows          []row
+	selected      int
+	searchActive  bool
+	query         ui.TextInput
 	searchMatches map[int]searchMatch
-	matchRows    []int
+	matchRows     []int
 }
 
 // row is one rendered line plus its case-folded search fields.

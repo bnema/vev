@@ -78,19 +78,14 @@ func (d *Daemon) refreshRemoteDirectoryViewsFor(ac *attachedClient) {
 	}
 	pickerOpen := ac.overlays.pickerClientActive()
 	paletteOpen := ac.overlays.paletteActive()
-	// A client-owned picker has no overlay model, so it must keep the
-	// refresher alive on its own: the old guard returned before its
-	// snapshot could be republished.
-	clientPickerOpen := ac.overlays.pickerClientActive()
-	if !pickerOpen && !paletteOpen && !clientPickerOpen {
+	if !pickerOpen && !paletteOpen {
 		return
 	}
+	// The picker and the palette both read the directory: republish the
+	// interaction snapshot with a new revision when the row set changed.
 	if pickerOpen {
-		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		d.refreshPickerSnapshot(ac)
 	}
-	// Client-owned presentation has no overlay model: the row set changed,
-	// so republish the interaction snapshot with a new revision instead.
-	d.refreshPickerClientSnapshot(ac)
 	if paletteOpen {
 		d.refreshPalette(ac)
 	}

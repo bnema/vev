@@ -3,7 +3,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -20,7 +18,6 @@ import (
 var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
 
 const remotePickerPreviewDebounce = 80 * time.Millisecond
-
 
 // pickerViews projects the shared daemon inventory for the picker. It keeps
 // current/ephemeral rows, tabs, grouping, and move eligibility; lifecycle and
@@ -332,13 +329,6 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(effect *attachmentEffect
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
 	}
-	if guard.closePicker {
-		fresh, admitted := effect.ac.beginAttachmentEffect(transition.published)
-		if admitted {
-			d.closePickerForGuard(effect.ac, guard)
-			fresh.End()
-		}
-	}
 	d.touchMRU(targetSess)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
@@ -441,9 +431,6 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	// handoff instead of losing their target-specific transition semantics.
 	// Keep the source link open until the client receives the ordered cleanup
 	// and handoff frames, then let the client's close drive ordinary parking.
-	if guard.closePicker {
-		d.closePickerForGuard(effect.ac, guard)
-	}
 	effect.bindActionEnd(d, "detach")
 	effect.End()
 	return nil
@@ -480,9 +467,6 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 	}
 	if err := effect.sendControl(handoff); err != nil {
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
-	}
-	if guard.closePicker {
-		d.closePickerForGuard(effect.ac, guard)
 	}
 	d.clientGoneForAttachment(effect, false)
 	return nil
@@ -577,17 +561,6 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 		}
 		d.invalidateRender(from, ac, true, "picker.go")
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", cause)
-	}
-	if guard.closePicker {
-		if sourceEffect != nil {
-			fresh, admitted := ac.beginAttachmentEffect(transition.published)
-			if admitted {
-				d.closePickerForGuard(ac, guard)
-				fresh.End()
-			}
-		} else {
-			d.closePickerForGuard(ac, guard)
-		}
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	if targetSess == from {

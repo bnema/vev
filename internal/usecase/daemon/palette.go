@@ -1046,7 +1046,7 @@ func (e paletteExec) OpenMovePanePicker() error {
 	if target.tab == nil || target.pane == nil {
 		return errMovePaneInvalid
 	}
-	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMovePane, moveSourceLocator{
+	return e.openMovePicker(protocol.PickerIntentMovePane, moveSourceLocator{
 		Session:    sessionMoveLocator(e.sess),
 		TabID:      domain.TabStableID(target.tab.stableID),
 		PaneID:     domain.PaneStableID(target.pane.stableID),
@@ -1059,11 +1059,31 @@ func (e paletteExec) OpenMoveTabPicker() error {
 	if target.tab == nil {
 		return errMovePaneInvalid
 	}
-	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMoveTab, moveSourceLocator{
+	return e.openMovePicker(protocol.PickerIntentMoveTab, moveSourceLocator{
 		Session:    sessionMoveLocator(e.sess),
 		TabID:      domain.TabStableID(target.tab.stableID),
 		Attachment: e.ac,
 	})
+}
+
+// openMovePicker opens one move picker on an admitted effect. The captured
+// source is daemon-side state: it is bound to the interaction at open and
+// revalidated at commit, never supplied by the presenting client.
+func (e paletteExec) openMovePicker(intent protocol.PickerIntent, source moveSourceLocator) error {
+	if e.ac == nil || e.ac.overlays == nil {
+		return errAttachmentTransition
+	}
+	effect := e.effect
+	if effect == nil {
+		current := e.ac.transportSnapshot()
+		_, fresh, admitted := e.ac.beginCurrentAttachmentEffect(e.sess, current.transport)
+		if !admitted {
+			return errAttachmentTransition
+		}
+		defer fresh.End()
+		effect = fresh
+	}
+	return e.d.openPickerForAttachment(e.ac, effect, intent, source, 0)
 }
 
 func (e paletteExec) focus(direction layout.Direction) error {
@@ -1173,41 +1193,43 @@ func (e paletteExec) RenameTabTo(name string) error {
 }
 
 func (e paletteExec) OpenSessionPicker() error {
-	if e.ac != nil && e.ac.navigationCapabilities&protocol.NavigationCapabilityHomePicker != 0 && e.effect != nil {
-		return e.d.sendNavigationActionForAttachment(e.effect, protocol.NavigationOpenHomePicker)
-	}
-	if e.ac == nil || e.effect == nil {
-		// No admitted effect carries the snapshot: the daemon-owned
-		// overlay picker stays the only presentation for direct and
-		// headless callers, byte-identical to the pre-pilot path.
-		e.d.enterPicker(e.sess, e.ac)
-		return nil
-	}
-	// The palette already closed on execute (see handlePaletteInput):
-	// only invalidate when the close actually changed overlay state,
-	// then open the client-picker interaction on the same effect so
-	// the opener's fence retires on the authoritative repaint below.
-	// The snapshot carries no fence of its own; the opener completes
-	// through the normal receipt path.
-	if e.ac.overlays != nil {
-		e.ac.overlays.paletteMu.Lock()
-		generation := e.ac.overlays.paletteGeneration
-		query := ""
-		if e.ac.overlays.palette != nil {
-			query = e.ac.overlays.palette.Query()
-		}
-		e.ac.overlays.paletteMu.Unlock()
-		if e.d.closeExecutedPalette(e.ac, e.effect, generation, query) {
-			e.d.invalidateRender(e.sess, e.ac, true, "palette.go:session-picker")
-		}
-	}
-	fresh, admitted := e.ac.beginAttachmentEffect(e.effect.capability())
-	if !admitted {
+	if e.ac == nil || e.ac.overlays == nil {
 		return errAttachmentTransition
 	}
-	fresh.uiActionID = e.effect.uiActionID
-	defer fresh.End()
-	return e.d.enterPickerForClient(e.sess, e.ac, fresh)
+	// The palette already closed on execute (see handlePaletteInput):
+	// only invalidate when the close actually changed overlay state, then
+	// open the picker interaction on a freshly admitted effect so the
+	// opener's fence retires on the authoritative repaint below.
+	overlays := e.ac.overlays
+	overlays.paletteMu.Lock()
+	generation := overlays.paletteGeneration
+	query := ""
+	if overlays.palette != nil {
+		query = overlays.palette.Query()
+	}
+	overlays.paletteMu.Unlock()
+	if e.d.closeExecutedPalette(e.ac, e.effect, generation, query) {
+		e.d.invalidateRender(e.sess, e.ac, true, "palette.go:session-picker")
+	}
+	effect := e.effect
+	if effect == nil {
+		current := e.ac.transportSnapshot()
+		_, fresh, admitted := e.ac.beginCurrentAttachmentEffect(e.sess, current.transport)
+		if !admitted {
+			return errAttachmentTransition
+		}
+		defer fresh.End()
+		effect = fresh
+	} else {
+		fresh, admitted := e.ac.beginAttachmentEffect(effect.capability())
+		if !admitted {
+			return errAttachmentTransition
+		}
+		fresh.uiActionID = effect.uiActionID
+		defer fresh.End()
+		effect = fresh
+	}
+	return e.d.openPickerForAttachment(e.ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0)
 }
 
 func (e paletteExec) OpenNotifications() error {

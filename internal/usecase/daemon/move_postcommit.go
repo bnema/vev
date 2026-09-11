@@ -143,7 +143,6 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 		)
 	}
 	for _, attachment := range p.retiredAttachments {
-		d.unregisterPreview(attachment.ac)
 		attachment.ac.clearCaptureFrames()
 		if err := d.cleanupAttachmentOutput(attachment.ac); err != nil {
 			d.log.Warn("move attachment output cleanup failed", "err", err, "operation", p.operation, "source_session", p.sourceName)
@@ -154,7 +153,6 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 		if retirement.parked == nil || retirement.parked.ac == nil {
 			continue
 		}
-		d.unregisterPreview(retirement.parked.ac)
 		retirement.parked.ac.clearCaptureFrames()
 	}
 	d.finishParkedAttachmentRetirements(p.retiredParked)

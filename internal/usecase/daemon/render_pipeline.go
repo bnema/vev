@@ -11,7 +11,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -348,8 +347,8 @@ func capturedCopyTarget(state capturedRenderState, content domain.Rect) domain.R
 func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage) (renderer.Frame, []renderer.Damage) {
 	o := state.overlays
 	// Paint in reverse keyboard priority so the same layer that owns input is
-	// visually topmost: prompt > palette > picker > notices > copy search.
-	for _, modal := range []capturedModal{o.copySearch, o.noticesOverlay, o.picker, o.palette, o.prompt} {
+	// visually topmost: prompt > palette > notices > copy search.
+	for _, modal := range []capturedModal{o.copySearch, o.noticesOverlay, o.palette, o.prompt} {
 		if !modal.active {
 			continue
 		}
