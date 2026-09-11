@@ -21,6 +21,8 @@ type moveTopology interface {
 }
 
 type moveTransactionRequest struct {
+	follow               bool
+	beforeFollow         func() error
 	operation            string
 	attachment           *attachedClient
 	attachmentCapability attachmentCapability
@@ -56,6 +58,8 @@ type moveTransaction struct {
 	sourceTransports  map[*attachedClient]transportSnapshot
 	frozenEffects     attachmentTransitionGuard
 	effectsFrozen     bool
+
+	followResult attachmentTransitionResult
 
 	publication moveTopologyPublication
 	publishErr  error
@@ -121,6 +125,11 @@ func (d *Daemon) executeMove(topology moveTopology) (result error) {
 		return err
 	}
 	t.topology.afterAdmission(d)
+	if t.follows() && t.request.beforeFollow != nil {
+		if err := t.request.beforeFollow(); err != nil {
+			return err
+		}
+	}
 	if err := t.freezeSourceAttachments(); err != nil {
 		return err
 	}
@@ -210,11 +219,18 @@ func (t *moveTransaction) admit() error {
 // attachment lifecycle Module. Move uses nonblocking acquisition to preserve
 // its ordering with final teardown.
 func (t *moveTransaction) freezeSourceAttachments() error {
-	if !t.topology.willRetireSource() || len(t.sourceAttachments) == 0 {
+	if (!t.topology.willRetireSource() && !t.follows()) || len(t.sourceAttachments) == 0 {
 		return nil
 	}
-	interrupts := make([]attachmentTransportInterrupt, 0, len(t.sourceAttachments))
-	for _, attachment := range t.sourceAttachments {
+	participants := t.sourceAttachments
+	if !t.topology.willRetireSource() {
+		participants = []*attachedClient{t.request.attachment}
+	}
+	interrupts := make([]attachmentTransportInterrupt, 0, len(participants))
+	for _, attachment := range participants {
+		if t.follows() && attachment == t.request.attachment {
+			continue // The following connection must remain usable for first paint.
+		}
 		if transport := t.sourceTransports[attachment]; transport.transport != nil {
 			interrupts = append(interrupts, attachmentTransportInterrupt{ac: attachment, transport: transport})
 		}
@@ -227,7 +243,7 @@ func (t *moveTransaction) freezeSourceAttachments() error {
 				t.daemon.afterAttachmentEffectGateFrozen("move-"+t.request.operation, attachment)
 			}
 		},
-	}, t.sourceAttachments...)
+	}, participants...)
 	if !frozen.acquired || !frozen.drained {
 		frozen.unfreeze()
 		return errMovePaneInvalid
@@ -260,11 +276,40 @@ func (t *moveTransaction) publishLocked() error {
 		return errMoveStaleTarget
 	}
 
+	var follow *attachmentPublication
+	if t.follows() {
+		req := attachmentTransitionRequest{
+			source: t.source, target: t.destination, next: t.request.attachment,
+			expectedTransport: t.sourceTransports[t.request.attachment],
+			preflighted:       true, attachmentEffectsFrozen: true, ready: true,
+		}
+		if t.request.attachmentCapability.ac != nil {
+			req.sourceCapability = &t.request.attachmentCapability
+		}
+		var err error
+		follow, err = d.validateAttachmentTransitionPrelocked(req)
+		if err != nil {
+			return errMoveStaleTarget
+		}
+		// Topology sync migration takes coordinator locks itself. Session locks
+		// and the frozen gate keep membership/lease authority pinned meanwhile.
+		follow.unlockCoordinators()
+	}
 	publication, err := t.topology.publishLocked(d, t.source, t.destination)
 	if err != nil {
 		return err
 	}
 	t.publication = publication
+	if follow != nil {
+		follow.releaseCoordinators = lockAttachmentCoordinators(t.source, follow.sourceCoordinator, t.destination, follow.targetCoordinator)
+		follow.req.activateTargetTab = true
+		follow.req.targetTabIndex = indexMoveTabLocked(t.destination, publication.destinationTab)
+		t.followResult = d.publishAttachmentTransitionPrelocked(follow)
+		follow.unlockCoordinators()
+		if t.source != t.destination && !publication.sourceEmpty {
+			t.followResult.sourceGeometrySession = t.source
+		}
+	}
 	if publication.sourceEmpty {
 		d.unregisterSessionLocked(t.source)
 		t.retiredAttachments = detachMoveAttachmentsLocked(t.source, t.sourceTransports)
@@ -288,6 +333,7 @@ func (t *moveTransaction) publishLocked() error {
 func (t *moveTransaction) postcommitPlan(unlockDispatch func(), reservation *moveLifecycleReservation) movePostcommitPlan {
 	publication := t.publication
 	return movePostcommitPlan{
+		followResult:             t.followResult,
 		source:                   t.source,
 		destination:              t.destination,
 		sourceName:               t.sourceName,
@@ -313,4 +359,11 @@ func (t *moveTransaction) postcommitPlan(unlockDispatch func(), reservation *mov
 		destinationMetadata:      t.destMetadata,
 		destinationMetadataValid: t.destMetadataOK,
 	}
+}
+
+// Picker pane moves follow only when their source retires; tab moves always
+// follow. Command/API moves retain their existing topology-only semantics.
+func (t *moveTransaction) follows() bool {
+	return t.request.follow && t.request.attachment != nil &&
+		(t.request.operation == "tab" || t.topology.willRetireSource())
 }

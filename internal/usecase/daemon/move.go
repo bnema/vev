@@ -10,6 +10,8 @@ import (
 // immutable identity. Session names are advisory; the ID and incarnation are
 // the commit-time authority.
 type movePaneRequest struct {
+	Follow               bool
+	BeforeFollow         func() error
 	Attachment           *attachedClient
 	AttachmentCapability attachmentCapability
 	Source               moveSessionLocator
@@ -20,6 +22,8 @@ type movePaneRequest struct {
 }
 
 type moveTabRequest struct {
+	Follow               bool
+	BeforeFollow         func() error
 	Attachment           *attachedClient
 	AttachmentCapability attachmentCapability
 	Source               moveSessionLocator

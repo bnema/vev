@@ -56,7 +56,11 @@ func (d *Daemon) movePickerSourceError(source moveSourceLocator) error {
 }
 
 // commitMovePickerSelection performs the move the owning source authorised.
-func (d *Daemon) commitMovePickerSelection(intent protocol.PickerIntent, source moveSourceLocator, target picker.Target) error {
+func (d *Daemon) commitMovePickerSelection(intent protocol.PickerIntent, source moveSourceLocator, target picker.Target, beforeFollow ...func() error) error {
+	var prepare func() error
+	if len(beforeFollow) != 0 {
+		prepare = beforeFollow[0]
+	}
 	destination := moveSessionLocator{ID: target.Session, Incarnation: target.Incarnation, Name: target.Name}
 	switch intent {
 	case protocol.PickerIntentMovePane:
@@ -64,6 +68,8 @@ func (d *Daemon) commitMovePickerSelection(intent protocol.PickerIntent, source 
 			return errMovePaneInvalid
 		}
 		return d.movePane(movePaneRequest{
+			Follow:               true,
+			BeforeFollow:         prepare,
 			Attachment:           source.Attachment,
 			AttachmentCapability: source.AttachmentCapability,
 			Source:               source.Session,
@@ -74,6 +80,8 @@ func (d *Daemon) commitMovePickerSelection(intent protocol.PickerIntent, source 
 		})
 	case protocol.PickerIntentMoveTab:
 		return d.moveTab(moveTabRequest{
+			Follow:               true,
+			BeforeFollow:         prepare,
 			Attachment:           source.Attachment,
 			AttachmentCapability: source.AttachmentCapability,
 			Source:               source.Session,

@@ -20,6 +20,7 @@ func firstMovePane(panes []*pane) *pane {
 }
 
 type movePostcommitPlan struct {
+	followResult      attachmentTransitionResult
 	source            *session
 	destination       *session
 	sourceName        string
@@ -82,6 +83,13 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
+	if p.followResult.published.ac != nil {
+		result, err := d.finishAttachmentTransition(attachmentTransitionRequest{ready: true}, p.followResult)
+		if err == nil {
+			d.deferAttachmentTransitionCleanups(result)
+			d.firstPaintForTransition(result.published)
+		}
+	}
 	attrs := []any{
 		"operation", p.operation,
 		"source_session", p.sourceName,

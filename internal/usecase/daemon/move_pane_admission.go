@@ -26,6 +26,8 @@ type movePaneAdmission struct {
 func (p *movePaneTopology) transactionRequest() moveTransactionRequest {
 	req := p.req
 	return moveTransactionRequest{
+		follow:               req.Follow,
+		beforeFollow:         req.BeforeFollow,
 		operation:            "pane",
 		attachment:           req.Attachment,
 		attachmentCapability: req.AttachmentCapability,

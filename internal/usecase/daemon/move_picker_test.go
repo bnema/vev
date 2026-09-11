@@ -346,3 +346,82 @@ func TestMovePickerSupersedingOpenRetiresTheEarlierNamespace(t *testing.T) {
 	require.Equal(t, secondInteraction, ac.overlays.pickerInteraction)
 	ac.overlays.pickerMu.Unlock()
 }
+
+// Exercise the real selection admission (not a pre-ended test effect), and
+// observe the publication boundary without sleeps or concurrent state reads.
+func TestMovePickerCompositeFollow(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		intent       protocol.PickerIntent
+		retainSource bool
+	}{
+		{"final-tab", protocol.PickerIntentMoveTab, false},
+		{"retained-source-tab", protocol.PickerIntentMoveTab, true},
+		{"final-pane", protocol.PickerIntentMovePane, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, source, ac, destination, destinationTab, releases := setupMovePickerSessions(t, 0)
+			defer releaseAll(releases)
+			movedTab := source.tabs[0]
+			if tt.retainSource {
+				pty, release := newBlockingPTY(t)
+				defer release()
+				source.tabs = append(source.tabs, newTabWithStableID("remaining", "remaining-pane", pty, movedTab.size))
+				publishTiledPaneOwners(source, source.tabs[1])
+			}
+			peer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: ac.size}
+			peer.setSession(source)
+			source.registerAttachment(peer)
+			destinationPeer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: ac.size}
+			destinationPeer.setSession(destination)
+			destination.registerAttachment(destinationPeer)
+			destination.selectAttachmentTabLocked(destinationPeer, domain.TabStableID(destinationTab.stableID))
+			old := captureAttachmentCapability(source, ac, ac.transport())
+			locator := moveSourceForSession(source, ac, "source-tab", "")
+			locator.AttachmentCapability = old
+			if tt.intent == protocol.PickerIntentMovePane {
+				locator.PaneID = "source-pane"
+			}
+			openMovePickerForTest(t, d, ac, source, tt.intent, locator)
+			effect := pickActionEffectForTest(t, source, ac)
+			selection := moveSelectionForDestination(t, ac, destination.id)
+			closedAtCommit := false
+			rebased := make(chan struct{}, 1)
+			ac.renderStages.handoffRebase = func() { rebased <- struct{}{} }
+			hook := func() { closedAtCommit = !ac.overlays.pickerClientActive() }
+			d.beforeMoveTabCommit = hook
+			d.beforeMovePaneCommit = hook
+			done := make(chan struct{})
+			go func() {
+				d.resolvePickerSelection(effect, selection)
+				close(done)
+			}()
+			awaitTestCompletion(t, done, "composite move waited on its own effect")
+			require.True(t, closedAtCommit)
+			select {
+			case <-rebased:
+			default:
+				t.Fatal("composite move skipped transition first-paint rebase")
+			}
+			require.True(t, destination.attachmentRegistered(destinationPeer))
+			require.Same(t, destinationTab, destination.tabForAttachment(destinationPeer))
+			require.False(t, ac.overlays.pickerClientActive())
+			require.Same(t, destination, ac.currentSession())
+			require.True(t, destination.attachmentRegistered(ac))
+			require.False(t, source.attachmentRegistered(ac))
+			require.False(t, old.current())
+			if tt.intent == protocol.PickerIntentMoveTab {
+				require.Same(t, movedTab, destination.tabForAttachment(ac))
+			} else {
+				require.Same(t, destinationTab, destination.tabForAttachment(ac))
+			}
+			if tt.retainSource {
+				require.True(t, source.attachmentRegistered(peer))
+				require.Same(t, source, d.sessionByID(source.id))
+			} else {
+				require.False(t, source.attachmentRegistered(peer))
+				require.Nil(t, d.sessionByID(source.id))
+			}
+		})
+	}
+}

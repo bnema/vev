@@ -153,6 +153,12 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if err != nil {
 		return result, err
 	}
+	return d.finishAttachmentTransition(req, result)
+}
+
+// finishAttachmentTransition shares committed identity and geometry effects with
+// composite topology transactions. It runs after publication locks are released.
+func (d *Daemon) finishAttachmentTransition(req attachmentTransitionRequest, result attachmentTransitionResult) (attachmentTransitionResult, error) {
 	// A not-ready publication is still inside the Hello handshake. Welcome
 	// carries the committed identity for those attachments and must remain the
 	// first server frame. Ready transitions notify an already-running client.

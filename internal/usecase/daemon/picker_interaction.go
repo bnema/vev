@@ -341,42 +341,41 @@ func (d *Daemon) resolvePickerNavigate(effect *attachmentEffect, ac *attachedCli
 	}
 }
 
-// resolvePickerMove commits the move and keeps the picker open, so the client
-// can refresh its rows and let the user move another pane or tab. A rejected
-// move reports the same precise notice the palette path does: the client only
-// sees a bounded failure code.
+// resolvePickerMove closes before committing a composite move+follow. The
+// calling effect must end before the transaction freezes attachment admission.
 func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient, interaction uint64, intent protocol.PickerIntent, source moveSourceLocator, target picker.Target, selection protocol.PickerSelection) {
-	// Moving the final tab retires the source attachment. The move transaction
-	// freezes and drains that attachment's effects, so it must not wait on the
-	// PickerSelection effect that is synchronously executing this move.
-	if effect != nil {
-		effect.End()
-	}
 	if err := d.movePickerSourceError(source); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerRetiredTarget)
 		d.reportAttachmentError(effect.sess, movePickerUserError(err))
 		d.refreshPickerSnapshot(ac)
 		return
 	}
-	if err := d.commitMovePickerSelection(intent, source, target); err != nil {
+	closed := false
+	beforeFollow := func() error {
+		if !d.closePickerForAttachment(ac, effect, interaction) {
+			return errMoveStaleTarget
+		}
+		closed = true
+		effect.End()
+		return nil
+	}
+	// Non-following pane moves retain the open interaction. The transaction
+	// calls beforeFollow only after admission proves that it will follow.
+	defer effect.End()
+	if err := d.commitMovePickerSelection(intent, source, target, beforeFollow); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerActionFailed)
 		d.reportAttachmentError(effect.sess, movePickerUserError(err))
+		if closed {
+			d.invalidateRender(effect.sess, ac, true, "picker-move-failed")
+		} else {
+			d.refreshPickerSnapshot(ac)
+		}
+		return
+	}
+	if !closed {
+		d.sendPickerResult(effect, selection, interaction)
 		d.refreshPickerSnapshot(ac)
-		return
 	}
-	if intent == protocol.PickerIntentMoveTab {
-		target.TabID = source.TabID
-		if !d.closePickerForAttachment(ac, effect, interaction) {
-			d.sendPickerFailure(effect, selection, protocol.PickerStaleRevision)
-			return
-		}
-		if err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{allowSamePeer: true}, "picker-move-tab"); err != nil {
-			d.sendPickerFailure(effect, selection, protocol.PickerNavigationFailed)
-		}
-		return
-	}
-	d.sendPickerResult(effect, selection, interaction)
-	d.refreshPickerSnapshot(ac)
 }
 
 // resolvePickerKill destroys the target and keeps the picker open.
