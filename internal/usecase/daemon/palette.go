@@ -737,6 +737,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	if !attachmentHandoff && !d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 		return
 	}
+	// A client-owned picker may acquire presentation as soon as its offer's
+	// output barrier is displayed. Commit the palette-free base first so that
+	// barrier can never name a frame which still contains the command palette.
+	if cmd.Slug == "session-picker" {
+		d.invalidateRenderNow(sess, ac, true, "palette.go:session-picker-base")
+	}
 	sess.dispatchMu.Lock()
 	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect, redrawClosedPalette: true}, args)
 	sess.dispatchMu.Unlock()

@@ -139,6 +139,7 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 		d.switchSamePeerForAttachment(effect, message)
 	case protocol.RecentRouteSnapshot:
 		replayIdentity := effect.ac.setRouteSnapshot(message)
+		d.pokeAttentionTicker()
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-snapshot")
 		if !replayIdentity {
 			break

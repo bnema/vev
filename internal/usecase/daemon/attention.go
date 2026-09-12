@@ -277,6 +277,14 @@ func (d *Daemon) anyAttention() bool {
 		if sess.anyAttention() {
 			return true
 		}
+		for _, ac := range sess.snapshotAttachments() {
+			snapshot := ac.routeSnapshotCopy()
+			for _, entry := range snapshot.Entries {
+				if entry.Attention {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }

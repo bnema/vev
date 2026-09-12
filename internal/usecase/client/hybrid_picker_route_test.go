@@ -302,6 +302,7 @@ func TestHybridPickerSameHostSwitchKeepsTheServingTransport(t *testing.T) {
 	remote.push(hybridPickerWelcome("source", source.LifecycleID))
 	openHybridPicker(t, remote, protocol.ExactSessionTarget{LifecycleID: source.LifecycleID, SessionName: "source"})
 	term.awaitDisplay(t, "second")
+	require.Contains(t, term.screen(), "\x1b[?25l", "the client-owned picker must hide the hardware cursor")
 
 	// The commit crosses as a typed selection; the daemon then retires the
 	// interaction and offers the same-host target on the same connection.

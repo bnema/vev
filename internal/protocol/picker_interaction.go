@@ -154,10 +154,40 @@ type PickerControlOperation uint8
 const (
 	PickerControlSnapshot PickerControlOperation = iota + 1
 	PickerControlResolve
+	PickerControlObserve
 )
 
-// PickerControlRequest queries or resolves the navigation picker owned by the
-// client's local daemon. Version stays first for strict pre-handshake peeking.
+// PickerControlMaxTargets bounds one observation request. A periodic Runner
+// polls a small fixed working set of exact targets per query; a full directory
+// belongs to navigation inventory, not to this stateless probe.
+const PickerControlMaxTargets = 64
+
+// PickerRoutePresence reports whether an exact target still resolves to one
+// live route. Unknown is a first-class answer: an unanswerable probe must
+// never be reported as Absent, because the caller would otherwise act on a
+// false negative.
+type PickerRoutePresence uint8
+
+const (
+	PickerRoutePresent PickerRoutePresence = iota + 1
+	PickerRouteAbsent
+	PickerRouteUnknown
+)
+
+// PickerRouteObservation is one exact-target answer. Attention is meaningful
+// only for Present targets: Absent and Unknown observations always carry
+// false, so a stale flag can never be mistaken for live attention.
+type PickerRouteObservation struct {
+	Target    ExactSessionTarget
+	Presence  PickerRoutePresence
+	Attention bool
+}
+
+// PickerControlRequest queries, resolves, or observes the navigation picker
+// owned by the client's local daemon. Version stays first for strict
+// pre-handshake peeking. The operation payloads are exclusive: snapshot and
+// resolve carry source/key identity, observe carries one bounded exact-target
+// list, and every field an operation does not own stays zero.
 type PickerControlRequest struct {
 	Version        uint16
 	RequestID      uint64
@@ -165,16 +195,19 @@ type PickerControlRequest struct {
 	SourceRevision uint64
 	SourceID       string
 	Key            string
+	Targets        []ExactSessionTarget
 }
 
-// PickerControlResponse returns either one complete authoritative snapshot or
-// one revalidated attach target. The unions are exclusive.
+// PickerControlResponse returns one complete authoritative snapshot, one
+// revalidated attach target, or the observation list for an observe request.
+// The operation payloads are exclusive.
 type PickerControlResponse struct {
-	RequestID uint64
-	Operation PickerControlOperation
-	Status    PickerSourceStatus
-	Snapshot  *PickerSnapshot
-	Resolved  *AttachTarget
+	RequestID    uint64
+	Operation    PickerControlOperation
+	Status       PickerSourceStatus
+	Snapshot     *PickerSnapshot
+	Resolved     *AttachTarget
+	Observations []PickerRouteObservation
 }
 
 // PickerProjection is one complete daemon-authorised presentation. Recent and
@@ -268,45 +301,117 @@ type PickerClosed struct {
 }
 
 func validPickerControlOperation(operation PickerControlOperation) bool {
-	return operation == PickerControlSnapshot || operation == PickerControlResolve
+	return operation == PickerControlSnapshot || operation == PickerControlResolve || operation == PickerControlObserve
 }
 
+func validPickerRoutePresence(presence PickerRoutePresence) bool {
+	switch presence {
+	case PickerRoutePresent, PickerRouteAbsent, PickerRouteUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidatePickerControlRequest enforces explicit, exclusive operation payloads.
+// Snapshot and resolve must carry no targets; observe must carry 1..
+// PickerControlMaxTargets distinct valid exact targets and no source/key
+// identity, so a query can never smuggle a second payload shape.
 func ValidatePickerControlRequest(request PickerControlRequest) error {
 	if request.Version == 0 || request.RequestID == 0 || !validPickerControlOperation(request.Operation) {
 		return ErrInvalidNavigation
 	}
-	if request.Operation == PickerControlSnapshot {
-		if request.SourceRevision != 0 || request.SourceID != "" || request.Key != "" {
+	switch request.Operation {
+	case PickerControlSnapshot:
+		if request.SourceRevision != 0 || request.SourceID != "" || request.Key != "" || len(request.Targets) != 0 {
 			return ErrInvalidNavigation
 		}
 		return nil
+	case PickerControlResolve:
+		if len(request.Targets) != 0 {
+			return ErrInvalidNavigation
+		}
+		if request.SourceRevision == 0 || !validPickerSourceID(request.SourceID) || !validPickerKey(request.Key) {
+			return ErrInvalidNavigation
+		}
+		return nil
+	default:
+		if request.SourceRevision != 0 || request.SourceID != "" || request.Key != "" {
+			return ErrInvalidNavigation
+		}
+		if len(request.Targets) == 0 || len(request.Targets) > PickerControlMaxTargets {
+			return ErrInvalidNavigation
+		}
+		seen := make(map[ExactSessionTarget]struct{}, len(request.Targets))
+		for _, target := range request.Targets {
+			if err := target.Validate(); err != nil {
+				return ErrInvalidNavigation
+			}
+			if _, dup := seen[target]; dup {
+				return ErrInvalidNavigation
+			}
+			seen[target] = struct{}{}
+		}
+		return nil
 	}
-	if request.SourceRevision == 0 || !validPickerSourceID(request.SourceID) || !validPickerKey(request.Key) {
+}
+
+// validatePickerRouteObservations requires one bounded, distinct observation
+// per requested target and refuses an attention flag on anything but a present
+// target.
+func validatePickerRouteObservations(observations []PickerRouteObservation) error {
+	if len(observations) == 0 || len(observations) > PickerControlMaxTargets {
 		return ErrInvalidNavigation
+	}
+	seen := make(map[ExactSessionTarget]struct{}, len(observations))
+	for _, observation := range observations {
+		if !validPickerRoutePresence(observation.Presence) {
+			return ErrInvalidNavigation
+		}
+		if err := observation.Target.Validate(); err != nil {
+			return ErrInvalidNavigation
+		}
+		if observation.Presence != PickerRoutePresent && observation.Attention {
+			return ErrInvalidNavigation
+		}
+		if _, dup := seen[observation.Target]; dup {
+			return ErrInvalidNavigation
+		}
+		seen[observation.Target] = struct{}{}
 	}
 	return nil
 }
 
+// ValidatePickerControlResponse enforces the exclusive response union: exactly
+// the payload owned by the operation and status is present, and a failed
+// status never carries payload bytes at all.
 func ValidatePickerControlResponse(response PickerControlResponse) error {
 	if response.RequestID == 0 || !validPickerControlOperation(response.Operation) || !validPickerSourceStatus(response.Status) {
 		return ErrInvalidNavigation
 	}
 	if response.Status != PickerSourceOK {
-		if response.Snapshot != nil || response.Resolved != nil {
+		if response.Snapshot != nil || response.Resolved != nil || len(response.Observations) != 0 {
 			return ErrInvalidNavigation
 		}
 		return nil
 	}
-	if response.Operation == PickerControlSnapshot {
-		if response.Snapshot == nil || response.Resolved != nil {
+	switch response.Operation {
+	case PickerControlSnapshot:
+		if response.Snapshot == nil || response.Resolved != nil || len(response.Observations) != 0 {
 			return ErrInvalidNavigation
 		}
 		return ValidatePickerSnapshot(*response.Snapshot)
+	case PickerControlResolve:
+		if response.Resolved == nil || response.Snapshot != nil || len(response.Observations) != 0 {
+			return ErrInvalidNavigation
+		}
+		return ValidateAttachTarget(*response.Resolved)
+	default:
+		if response.Snapshot != nil || response.Resolved != nil {
+			return ErrInvalidNavigation
+		}
+		return validatePickerRouteObservations(response.Observations)
 	}
-	if response.Resolved == nil || response.Snapshot != nil {
-		return ErrInvalidNavigation
-	}
-	return ValidateAttachTarget(*response.Resolved)
 }
 
 func validPickerIntent(intent PickerIntent) bool {

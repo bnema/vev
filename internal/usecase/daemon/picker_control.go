@@ -34,6 +34,11 @@ func (d *Daemon) answerPickerControl(request protocol.PickerControlRequest) prot
 		response.Status, response.Snapshot = protocol.PickerSourceOK, &snapshot
 		return response
 	}
+	if request.Operation == protocol.PickerControlObserve {
+		response.Status = protocol.PickerSourceOK
+		response.Observations = d.observePickerRoutes(request.Targets)
+		return response
+	}
 	if request.SourceID != protocol.PickerHomeSourceID {
 		return response
 	}
@@ -47,6 +52,27 @@ func (d *Daemon) answerPickerControl(request protocol.PickerControlRequest) prot
 	}
 	response.Status, response.Resolved = protocol.PickerSourceOK, &resolved
 	return response
+}
+
+func (d *Daemon) observePickerRoutes(targets []protocol.ExactSessionTarget) []protocol.PickerRouteObservation {
+	observations := make([]protocol.PickerRouteObservation, len(targets))
+	d.mu.Lock()
+	sessions := d.sessionsSnapshotLocked()
+	d.mu.Unlock()
+	for i, target := range targets {
+		observation := protocol.PickerRouteObservation{Target: target, Presence: protocol.PickerRouteAbsent}
+		for _, sess := range sessions {
+			view := sess.snapshotView(viewOptions{})
+			if view.incarnation != target.LifecycleID || view.name != target.SessionName {
+				continue
+			}
+			observation.Presence = protocol.PickerRoutePresent
+			observation.Attention = view.hasAttention
+			break
+		}
+		observations[i] = observation
+	}
+	return observations
 }
 
 func (d *Daemon) pickerControlAttachTarget(target picker.Target) (protocol.AttachTarget, bool) {

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
@@ -55,6 +56,26 @@ func (c pickerControl) snapshot(ctx context.Context, requestID, interaction uint
 	snapshot := *response.Snapshot
 	snapshot.InteractionID = interaction
 	return snapshot, nil
+}
+
+func (c pickerControl) observe(ctx context.Context, requestID uint64, targets []protocol.ExactSessionTarget) ([]protocol.PickerRouteObservation, error) {
+	response, err := c.request(ctx, protocol.PickerControlRequest{Version: protocol.Version, RequestID: requestID, Operation: protocol.PickerControlObserve, Targets: targets})
+	if err != nil {
+		return nil, fmt.Errorf("vev: picker authority observation unavailable: %w", err)
+	}
+	if response.Status != protocol.PickerSourceOK || len(response.Observations) != len(targets) {
+		return nil, errors.New("vev: picker authority observation unavailable")
+	}
+	requested := make(map[protocol.ExactSessionTarget]struct{}, len(targets))
+	for _, target := range targets {
+		requested[target] = struct{}{}
+	}
+	for _, observation := range response.Observations {
+		if _, ok := requested[observation.Target]; !ok {
+			return nil, errors.New("vev: picker authority returned an unexpected observation target")
+		}
+	}
+	return response.Observations, nil
 }
 
 func (c pickerControl) resolve(ctx context.Context, requestID uint64, selection protocol.PickerSelection) (protocol.AttachTarget, error) {

@@ -13,6 +13,98 @@ func PeekPickerControlVersion(data []byte) (uint16, bool) {
 	return binary.BigEndian.Uint16(data), true
 }
 
+// marshalPickerControlTargets encodes a bounded exact-target list. The count
+// guard mirrors semantic validation so a malformed caller can never write an
+// unbounded frame.
+func marshalPickerControlTargets(w *payloadWriter, targets []protocol.ExactSessionTarget) bool {
+	if len(targets) > protocol.PickerControlMaxTargets {
+		return false
+	}
+	w.putUint16(uint16(len(targets)))
+	for _, target := range targets {
+		marshalExactSessionTarget(w, target)
+	}
+	return true
+}
+
+func unmarshalPickerControlTargets(r *payloadReader) ([]protocol.ExactSessionTarget, error) {
+	count, err := r.getUint16()
+	if err != nil {
+		return nil, err
+	}
+	if int(count) > protocol.PickerControlMaxTargets {
+		return nil, protocol.ErrInvalidNavigation
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	targets := make([]protocol.ExactSessionTarget, 0, int(count))
+	for range int(count) {
+		target, err := unmarshalExactSessionTarget(r)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+// marshalPickerRouteObservations encodes the observation payload carried inside
+// the response union. The exact-target helper keeps the target layout shared
+// with the rest of the wire.
+func marshalPickerRouteObservations(w *payloadWriter, observations []protocol.PickerRouteObservation) bool {
+	if len(observations) > protocol.PickerControlMaxTargets {
+		return false
+	}
+	w.putUint16(uint16(len(observations)))
+	for _, observation := range observations {
+		marshalExactSessionTarget(w, observation.Target)
+		w.putUint8(uint8(observation.Presence))
+		w.putBool(observation.Attention)
+	}
+	return true
+}
+
+// unmarshalPickerRouteObservations decodes the observation payload carried
+// inside the response union and rejects an overlong count or trailing bytes.
+// Semantic checks stay with ValidatePickerControlResponse, which runs after the
+// complete response is decoded.
+func unmarshalPickerRouteObservations(data []byte) ([]protocol.PickerRouteObservation, error) {
+	r := payloadReader{b: data}
+	count, err := r.getUint16()
+	if err != nil {
+		return nil, err
+	}
+	if int(count) > protocol.PickerControlMaxTargets {
+		return nil, protocol.ErrInvalidNavigation
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	observations := make([]protocol.PickerRouteObservation, 0, int(count))
+	for range int(count) {
+		var observation protocol.PickerRouteObservation
+		target, err := unmarshalExactSessionTarget(&r)
+		if err != nil {
+			return nil, err
+		}
+		observation.Target = target
+		presence, err := r.getUint8()
+		if err != nil {
+			return nil, err
+		}
+		observation.Presence = protocol.PickerRoutePresence(presence)
+		if observation.Attention, err = r.getBool(); err != nil {
+			return nil, err
+		}
+		observations = append(observations, observation)
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return observations, nil
+}
+
 func MarshalPickerControlRequest(request protocol.PickerControlRequest) []byte {
 	if protocol.ValidatePickerControlRequest(request) != nil {
 		return nil
@@ -24,6 +116,9 @@ func MarshalPickerControlRequest(request protocol.PickerControlRequest) []byte {
 	w.putUint64(request.SourceRevision)
 	w.putString(request.SourceID)
 	w.putString(request.Key)
+	if !marshalPickerControlTargets(&w, request.Targets) {
+		return nil
+	}
 	return w.b
 }
 
@@ -51,6 +146,9 @@ func UnmarshalPickerControlRequest(data []byte) (protocol.PickerControlRequest, 
 	if request.Key, err = r.getString(); err != nil {
 		return request, err
 	}
+	if request.Targets, err = unmarshalPickerControlTargets(&r); err != nil {
+		return request, err
+	}
 	if err := r.done(); err != nil {
 		return request, err
 	}
@@ -76,6 +174,15 @@ func MarshalPickerControlResponse(response protocol.PickerControlResponse) []byt
 	if response.Resolved != nil {
 		payload := MarshalAttachTarget(*response.Resolved)
 		w.putLongBytes(payload)
+	} else {
+		w.putLongBytes(nil)
+	}
+	if len(response.Observations) != 0 {
+		inner := payloadWriter{}
+		if !marshalPickerRouteObservations(&inner, response.Observations) {
+			return nil
+		}
+		w.putLongBytes(inner.b)
 	} else {
 		w.putLongBytes(nil)
 	}
@@ -120,6 +227,17 @@ func UnmarshalPickerControlResponse(data []byte) (protocol.PickerControlResponse
 			return response, err
 		}
 		response.Resolved = &target
+	}
+	observationsData, err := r.getLongBytes()
+	if err != nil {
+		return response, err
+	}
+	if len(observationsData) != 0 {
+		observations, err := unmarshalPickerRouteObservations(observationsData)
+		if err != nil {
+			return response, err
+		}
+		response.Observations = observations
 	}
 	if err := r.done(); err != nil {
 		return response, err

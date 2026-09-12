@@ -296,7 +296,7 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	if ranked != nil {
 		state.rankedRecent = ranked
 	} else if routeSnapshot.Generation != 0 {
-		state.mru = d.formatRecentRouteSnapshotForAttachment(ac, routeSnapshot)
+		state.mru = formatRecentRouteSnapshot(routeSnapshot)
 	}
 	return state
 }

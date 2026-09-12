@@ -310,6 +310,7 @@ type Runner struct {
 	localControlDialer ports.ClientDialer
 	origin             protocol.RouteOrigin
 	ledger             *routeLedger
+	routeObservers     *routeObserverRegistry
 	routeFailure       *protocol.RouteNavigationFailure
 	creationFailure    *protocol.SessionCreationFailure
 	// inventoryFailure reports a failed inventory handoff to the restored
@@ -345,6 +346,7 @@ func NewRunner(deps Dependencies) *Runner {
 		origin:             normalizeRouteOrigin(deps.Origin, deps.Remote),
 		probeCapabilities:  !deps.DisableCapabilityProbe,
 		ledger:             newRouteLedger(),
+		routeObservers:     newRouteObserverRegistry(),
 	}
 }
 
@@ -858,6 +860,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		if result.err == nil && result.welcomed && navTransition.pendingInventory() {
 			navTransition.settleSuccess()
+		}
+		if result.err == nil && result.welcomed {
+			r.routeObservers.register(attemptRequest, dialer)
 		}
 		if result.routeCreateAction != nil {
 			action := *result.routeCreateAction
@@ -1373,7 +1378,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// the serving palette send demands at all.
 	var inventory *inventoryRelay
 	var hybridPicker *pickerControl
-	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote && !home.request.Remote, a.inventoryDialer) {
+	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote, a.inventoryDialer) {
 		inventory = newInventoryRelay(clk, a.inventoryDialer)
 		hybridPicker = &pickerControl{dialer: a.inventoryDialer}
 		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
@@ -1601,6 +1606,25 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	var inventoryResolveC chan inventoryResolveOutcome
 	inventoryResolvePending := false
 	var nextInventoryRequestID uint64 = 1
+	type routeObservationOutcome struct {
+		authority    routeObserverAuthority
+		observations []protocol.PickerRouteObservation
+		err          error
+	}
+	routeObservationC := make(chan routeObservationOutcome, 1)
+	var routeObservationTimer ports.Timer
+	var routeObservationTick <-chan time.Time
+	var routeObservationRequestID uint64 = 1
+	routeObservationPending := 0
+	if a.runner.routeObservers == nil {
+		a.runner.routeObservers = newRouteObserverRegistry()
+	}
+	a.runner.routeObservers.register(request, a.dialer)
+	currentRouteOrigin := normalizeRouteOrigin(request.Origin, request.Remote)
+	currentRouteObserverKey := routeObserverKey{origin: currentRouteOrigin, originKey: normalizeRouteOriginKey(request.OriginKey, currentRouteOrigin)}
+	if home := a.inventoryHome; home != nil {
+		a.runner.routeObservers.register(home.request, home.dialer)
+	}
 	inventoryOpen := false
 	var inventoryInteraction uint64
 	// Client-picker loop state. picker tracks the admitted interaction
@@ -1707,6 +1731,63 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 	}
 	defer stopInventoryPoll()
+	defer func() {
+		if routeObservationTimer != nil {
+			routeObservationTimer.Stop()
+		}
+	}()
+	hasRouteObservationTargets := func() bool {
+		for _, authority := range a.runner.routeObservers.snapshot() {
+			var excluded *protocol.ExactSessionTarget
+			if authority.key == currentRouteObserverKey {
+				excluded = request.ExactTarget
+			}
+			if len(a.runner.ledger.observationTargetsExcept(authority.key.origin, authority.key.originKey, excluded)) != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	armRouteObservation := func() {
+		if !hasRouteObservationTargets() {
+			routeObservationTick = nil
+			return
+		}
+		if routeObservationTimer != nil {
+			routeObservationTimer.Stop()
+		}
+		routeObservationTimer = clk.NewTimer(inventoryPollInterval)
+		routeObservationTick = routeObservationTimer.C()
+	}
+	startRouteObservation := func() {
+		if routeObservationPending != 0 {
+			return
+		}
+		authorities := a.runner.routeObservers.snapshot()
+		for _, authority := range authorities {
+			var excluded *protocol.ExactSessionTarget
+			if authority.key == currentRouteObserverKey {
+				excluded = request.ExactTarget
+			}
+			targets := a.runner.ledger.observationTargetsExcept(authority.key.origin, authority.key.originKey, excluded)
+			if len(targets) == 0 {
+				continue
+			}
+			requestID := routeObservationRequestID
+			routeObservationRequestID++
+			routeObservationPending++
+			go func(authority routeObserverAuthority, targets []protocol.ExactSessionTarget) {
+				observations, err := (pickerControl{dialer: authority.dialer}).observe(loopCtx, requestID, targets)
+				select {
+				case routeObservationC <- routeObservationOutcome{authority: authority, observations: observations, err: err}:
+				case <-loopCtx.Done():
+				}
+			}(authority, targets)
+		}
+		if routeObservationPending == 0 {
+			armRouteObservation()
+		}
+	}
 	startInventoryPoll := func() {
 		if inventory == nil || !inventoryOpen {
 			return
@@ -1905,6 +1986,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		stdinDone, resizeDone chan struct{}
 	}
 	var foreground *foregroundRuntime
+	resizeEvents := make(chan domain.Geometry, 1)
 	startForeground := func() {
 		if foreground != nil {
 			return
@@ -1932,7 +2014,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}()
 		go func() {
 			defer close(resizeDone)
-			runResize(foregroundCtx, term.ResizeEvents(), sendCh, sendLease, log)
+			runResize(foregroundCtx, term.ResizeEvents(), sendCh, resizeEvents, sendLease, log)
 		}()
 	}
 	stopForeground := func() {
@@ -1970,6 +2052,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				return fmt.Errorf("vev: publishing picker context: %w", err)
 			}
 		}
+		data = append([]byte("\x1b[?25l"), data...)
 		_, werr := term.Out().Write(data)
 		if uiOutput != nil {
 			uiOutput.EndOutput(werr == nil)
@@ -2135,6 +2218,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 
 	recvCh := make(chan recvResult, 1)
 	go runRecv(loopCtx, transport, recvCh, transportFailed, log)
+	armRouteObservation()
 
 	requestReconnectReset := func() error {
 		if awaitingReconnectReset {
@@ -2224,6 +2308,28 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		select {
 		case <-loopCtx.Done():
 			return loopCanceledResult()
+		case <-resizeEvents:
+			if pickerCurrent != nil && pickerPresentation.owns() {
+				if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+					return welcomedResult(err)
+				}
+				pickerPreview.sent = ""
+				schedulePickerPreview()
+			}
+		case <-routeObservationTick:
+			routeObservationTick = nil
+			startRouteObservation()
+		case outcome := <-routeObservationC:
+			routeObservationPending--
+			if outcome.err == nil && a.runner.routeObservers.current(outcome.authority) &&
+				a.runner.ledger.applyObservations(outcome.authority.key.origin, outcome.authority.key.originKey, outcome.observations) {
+				if err := publishRouteSnapshot(); err != nil {
+					return welcomedResult(err)
+				}
+			}
+			if routeObservationPending == 0 {
+				armRouteObservation()
+			}
 		case <-pickerPreviewC():
 			clearPreviewTimer()
 			key := ""
@@ -4116,10 +4222,26 @@ func (p *stdinPump) run() {
 	}
 }
 
+func offerLatestGeometry(out chan domain.Geometry, geometry domain.Geometry) {
+	select {
+	case out <- geometry:
+		return
+	default:
+	}
+	select {
+	case <-out:
+	default:
+	}
+	select {
+	case out <- geometry:
+	default:
+	}
+}
+
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- protocol.ClientMessage, sendLease *foregroundSendLease, log *slog.Logger) {
+func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- protocol.ClientMessage, local chan domain.Geometry, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {
 		select {
@@ -4136,6 +4258,7 @@ func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- pr
 			if !sendLease.send(func() bool {
 				select {
 				case out <- message:
+					offerLatestGeometry(local, geometry)
 					return true
 				case <-ctx.Done():
 					return false
