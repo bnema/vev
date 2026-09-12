@@ -136,11 +136,6 @@ const sendQueueDepth = 64
 // budget, which now also covers connect and initial publication.
 const preWelcomeTimeout = protocol.HandshakeTimeout
 
-// remoteHostLearnerShutdownTimeout bounds how long Run waits for async remote
-// host learning after terminal restoration. Learning is best-effort; a stalled
-// learner must not block shell prompt return indefinitely.
-const remoteHostLearnerShutdownTimeout = time.Second
-
 const kittyCapabilityProbeTimeout = 150 * time.Millisecond
 
 var reconnectSleep = sleepReconnect
@@ -152,8 +147,6 @@ const (
 )
 
 // Dependencies supplies the collaborators required by a Runner.
-type AttachHandoffFunc func(protocol.AttachTarget) (ports.ClientDialer, AttachRequest, error)
-
 type Dependencies struct {
 	Dialer   ports.ClientDialer
 	Terminal ports.Terminal
@@ -165,10 +158,10 @@ type Dependencies struct {
 	Clipboard              ports.ClipboardReader
 	Logger                 *slog.Logger
 	RuntimeObserver        ports.SerializedRuntimeObserver
-	RemoteHostLearner      ports.RemoteHostLearner
-	// AttachHandoff keeps one Runner and one terminal/input ownership across a
-	// local daemon's structured remote handoff. It is nil for direct CLI attach.
-	AttachHandoff AttachHandoffFunc
+	// HostRegistry resolves remote endpoints for handoffs and projects remote
+	// discovery, so one Runner owns one observation lifetime. It is nil only
+	// for embedders that accept no remote handoff at all.
+	HostRegistry ports.ClientHostRegistry
 	// LocalControlDialer is an optional dial-only control source for the
 	// local daemon inventory. It must never start the daemon, create an
 	// attachment, or call the CLI: a missing socket reports local control
@@ -205,7 +198,69 @@ type AttachRequest struct {
 	// environment and is supplied only by explicit composition.
 	Environment            []string
 	NavigationCapabilities protocol.NavigationCapabilities
-	StartupOverlay         protocol.StartupOverlay
+}
+
+// resolveHandoff resolves one remote handoff target through the runner's host
+// registry. The registry owns the endpoint binding (dialer and environment);
+// the request is derived here from the validated target and that binding, so
+// every handoff shares one endpoint authority and one observation lifetime.
+func (r *Runner) resolveHandoff(ctx context.Context, target protocol.AttachTarget) (ports.ClientDialer, AttachRequest, error) {
+	if err := validateHandoffTarget(target); err != nil {
+		return nil, AttachRequest{}, err
+	}
+	binding, err := r.hostRegistry.ResolveEndpoint(ctx, target.Endpoint)
+	if err != nil {
+		return nil, AttachRequest{}, err
+	}
+	if binding.Dialer == nil {
+		return nil, AttachRequest{}, errors.New("vev: remote endpoint resolved without a dialer")
+	}
+	hostLabel := domain.RemoteDisplayOrigin(target.Endpoint)
+	if target.RemoteTarget != nil {
+		hostLabel = target.RemoteTarget.DisplayOrigin
+	}
+	return binding.Dialer, AttachRequest{
+		Intent:            target.Intent,
+		SessionName:       target.Session,
+		Remote:            true,
+		Environment:       binding.Environment,
+		Origin:            protocol.RouteOriginDiscovery,
+		OriginKey:         target.Endpoint,
+		RemoteTarget:      target.RemoteTarget,
+		HostLabel:         hostLabel,
+		EnvironmentPolicy: r.handoffEnvironmentPolicy(target),
+	}, nil
+}
+
+// handoffEnvironmentPolicy mirrors the composition root's picker rule: a route
+// chosen from a locally launched client has no explicit remote selection, so
+// its environment belongs to the daemon; every other target keeps the policy
+// the serving daemon authorised.
+func (r *Runner) handoffEnvironmentPolicy(target protocol.AttachTarget) protocol.EnvironmentPolicy {
+	if !r.launchedRemote && target.RemoteTarget == nil && target.Intent != protocol.IntentNew {
+		return protocol.EnvironmentPolicyDaemonOwned
+	}
+	return target.EnvironmentPolicy
+}
+
+// validateHandoffTarget revalidates one daemon-authored handoff before the
+// runner resolves it, so a malformed target never reaches registry policy.
+func validateHandoffTarget(target protocol.AttachTarget) error {
+	if err := protocol.ValidateAttachTarget(target); err != nil {
+		return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+	}
+	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
+		return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
+	}
+	if target.RemoteTarget != nil {
+		if target.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
+			return errors.New("vev: remote picker handoff must use daemon-owned environment")
+		}
+		if target.RemoteTarget.Endpoint != target.Endpoint || target.RemoteTarget.SessionName != target.Session {
+			return errors.New("vev: remote picker handoff identity does not match route")
+		}
+	}
+	return nil
 }
 
 // attachRoute captures the dialer, request, and resume token needed to
@@ -236,21 +291,26 @@ func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attach
 }
 
 type Runner struct {
-	ui                *UI
-	dialer            ports.ClientDialer
-	term              ports.Terminal
-	clock             ports.Clock
-	clipboard         ports.ClipboardReader
-	logger            *slog.Logger
-	runtimeObserver   ports.SerializedRuntimeObserver
-	remoteHostLearner ports.RemoteHostLearner
-	attachHandoff     AttachHandoffFunc
-	remote            bool
+	ui              *UI
+	dialer          ports.ClientDialer
+	term            ports.Terminal
+	clock           ports.Clock
+	clipboard       ports.ClipboardReader
+	logger          *slog.Logger
+	runtimeObserver ports.SerializedRuntimeObserver
+	hostRegistry    ports.ClientHostRegistry
+	// launchedRemote records whether this runner was launched as a direct
+	// remote attach. It decides the handoff environment policy exactly like the
+	// composition root used to: a picker route from a locally launched client
+	// has no explicit remote selection, so its environment is daemon-owned.
+	launchedRemote bool
+	remote         bool
 	// localControlDialer is the dial-only inventory source. It never
 	// starts the daemon; the relay is its sole consumer.
 	localControlDialer ports.ClientDialer
 	origin             protocol.RouteOrigin
 	ledger             *routeLedger
+	routeObservers     *routeObserverRegistry
 	routeFailure       *protocol.RouteNavigationFailure
 	creationFailure    *protocol.SessionCreationFailure
 	// inventoryFailure reports a failed inventory handoff to the restored
@@ -279,13 +339,14 @@ func NewRunner(deps Dependencies) *Runner {
 		clipboard:          deps.Clipboard,
 		logger:             log,
 		runtimeObserver:    deps.RuntimeObserver,
-		remoteHostLearner:  deps.RemoteHostLearner,
-		attachHandoff:      deps.AttachHandoff,
+		hostRegistry:       deps.HostRegistry,
+		launchedRemote:     deps.Remote,
 		remote:             deps.Remote,
 		localControlDialer: deps.LocalControlDialer,
 		origin:             normalizeRouteOrigin(deps.Origin, deps.Remote),
 		probeCapabilities:  !deps.DisableCapabilityProbe,
 		ledger:             newRouteLedger(),
+		routeObservers:     newRouteObserverRegistry(),
 	}
 }
 
@@ -437,8 +498,7 @@ func validateAttachRequest(request AttachRequest) error {
 	if err := (SessionTarget{Intent: request.Intent, SessionName: request.SessionName}).validate(); err != nil {
 		return fmt.Errorf("vev: invalid session target: %w", err)
 	}
-	homePickerRoute := request.RemoteTarget != nil || request.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || request.Intent == protocol.IntentNew
-	if err := protocol.ValidateNavigation(request.NavigationCapabilities, request.StartupOverlay, homePickerRoute); err != nil {
+	if err := protocol.ValidateNavigation(request.Intent, request.NavigationCapabilities); err != nil {
 		return fmt.Errorf("vev: invalid navigation route: %w", err)
 	}
 	if request.RemoteTarget == nil {
@@ -513,9 +573,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	attemptRequest := request
 	dialer := r.dialer
 	var homeRoute *attachRoute
-	var returnRoute *attachRoute
 	returnResumeFallback := false
-	homeNavigationPending := false
 	returnNavigationPending := false
 	// navTransition owns creation and recent-route fallback lifecycle:
 	// the captured prior route, selected identity, and settle-once state.
@@ -533,39 +591,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 	var routeNavigationAction *protocol.RouteNavigationAction
 	backoff := defaultReconnectBackoff.initial
 	themeState := &terminalThemeState{}
-	var rememberOnce sync.Once
-	var rememberWG sync.WaitGroup
-	var learnerStarted bool
-	rememberRemoteHost := func() {
-		if r.remoteHostLearner == nil {
-			return
-		}
-		rememberOnce.Do(func() {
-			learnerStarted = true
-			rememberWG.Go(func() {
-				if err := r.remoteHostLearner.RememberRemoteHost(); err != nil {
-					r.logger.Warn("remembering remote host failed", "err", err)
-				}
-			})
-		})
-	}
-	defer func() {
-		if !learnerStarted {
-			return
-		}
-		done := make(chan struct{})
-		go func() {
-			rememberWG.Wait()
-			close(done)
-		}()
-		timer := r.clock.NewTimer(remoteHostLearnerShutdownTimeout)
-		defer timer.Stop()
-		select {
-		case <-done:
-		case <-timer.C():
-			r.logger.Warn("remote host learner stalled past shutdown timeout")
-		}
-	}()
 	defer func() {
 		if rawEntered {
 			if rerr := restore(); rerr != nil && retErr == nil {
@@ -594,24 +619,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		} else {
 			attemptRequest.Intent = protocol.IntentAttach
 		}
-		attemptRequest.StartupOverlay = protocol.StartupOverlayNone
-		attemptRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack | protocol.NavigationCapabilityHomePicker
 		resumeToken = route.resumeToken
 		returnResumeFallback = route.resumeToken != 0
 		remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
-		backoff = defaultReconnectBackoff.initial
-	}
-	enterHomePicker := func() {
-		dialer = homeRoute.dialer
-		attemptRequest = homeRoute.request
-		attemptRequest.Intent = protocol.IntentAttach
-		attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityBack
-		attemptRequest.StartupOverlay = protocol.StartupOverlaySessionPicker
-		attemptRequest.RemoteTarget = nil
-		attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
-		attemptRequest.Remote = homeRoute.request.Remote || r.remote
-		resumeToken = 0
-		remote = syncReconnectRemote(reconnect, homeRoute.request.Remote || r.remote)
 		backoff = defaultReconnectBackoff.initial
 	}
 	var input *terminalInputPump
@@ -650,59 +660,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		restoreReturnRoute(route)
 		return true
-	}
-
-	runTransientHomePicker := func(attemptCtx context.Context) attachResult {
-		if homeRoute == nil {
-			return attachResult{err: errors.New("vev: home route unavailable")}
-		}
-		request := cloneAttachRequest(homeRoute.request)
-		request.Intent = protocol.IntentAttach
-		request.NavigationCapabilities = protocol.NavigationCapabilityBack
-		request.StartupOverlay = protocol.StartupOverlaySessionPicker
-		request.RemoteTarget = nil
-		request.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
-		request.Remote = false
-		if err := validateAttachRequest(request); err != nil {
-			return attachResult{err: err}
-		}
-		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(attemptCtx, r.clock)
-		transport, err := boundedDial(handshakeCtx, homeRoute.dialer)
-		if err != nil {
-			err = handshakeContextError(attemptCtx, timedOut, err)
-			finishHandshake()
-			return attachResult{err: err}
-		}
-		connection, err := NewSessionConnection(transport, SessionTarget{Intent: request.Intent, SessionName: request.SessionName})
-		if err != nil {
-			finishHandshake()
-			_ = transport.Close()
-			return attachResult{err: err}
-		}
-		stopHandshakeTransport := watchHandshakeTransport(handshakeCtx, transport)
-		localReconnect := &reconnectUI{term: r.term, rawEntered: &rawEntered}
-		result := (&attachAttempt{
-			runner: r, dialer: homeRoute.dialer, connection: connection,
-			handshakeCtx: handshakeCtx, handshakeTimedOut: timedOut,
-			finishHandshake: finishHandshake, stopHandshakeTransport: stopHandshakeTransport,
-			request: request, clientID: processClientID, milestones: &ms,
-			themeState: themeState, enterRaw: enterRaw, reconnect: localReconnect,
-			terminalInput: func() *terminalInputPump { return input },
-		}).run(attemptCtx)
-		stopHandshakeTransport()
-		finishHandshake()
-		if !result.transportClosed {
-			_ = connection.Close()
-		}
-		if result.target != nil {
-			result.handoff = bindAttachHandoff(*result.target, attachRoute{
-				dialer:      homeRoute.dialer,
-				request:     cloneAttachRequest(homeRoute.request),
-				resumeToken: homeRoute.resumeToken,
-			})
-			result.target = nil
-		}
-		return result
 	}
 
 	for {
@@ -841,11 +798,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			reconnect:                reconnect,
 			transition:               transition,
 			linkEvents:               linkEvents,
-			rememberRemoteHost:       rememberRemoteHost,
 			terminalInput: func() *terminalInputPump {
 				return input
 			},
-			openHomePicker:  runTransientHomePicker,
 			inventoryHome:   homeRoute,
 			inventoryDialer: r.localControlDialer,
 			onInventoryCommitted: func() {
@@ -906,6 +861,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if result.err == nil && result.welcomed && navTransition.pendingInventory() {
 			navTransition.settleSuccess()
 		}
+		if result.err == nil && result.welcomed {
+			r.routeObservers.register(attemptRequest, dialer)
+		}
 		if result.routeCreateAction != nil {
 			action := *result.routeCreateAction
 			source := attachRoute{dialer: dialer, request: cloneAttachRequest(attemptRequest), resumeToken: resumeToken}
@@ -931,7 +889,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.ExactTarget = nil
 			attemptRequest.RemoteTarget = nil
 			attemptRequest.PreferredTabID = ""
-			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
 			attemptRequest.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned
 			resumeToken = 0
@@ -961,55 +918,13 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			} else {
 				attemptRequest.Intent = protocol.IntentAttach
 			}
-			// Back is transient to the picker overlay. Re-derive the home-picker
-			// capability from the selected route instead of trusting request
-			// metadata, which may have been cleared after a daemon-side switch.
-			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
-			if homeRoute != nil && selection.selected.presentation.kind == protocol.RouteKindRemote {
-				attemptRequest.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
-			}
 			resumeToken = selection.selected.resumeToken
 			routeNavigationSelection = &selection
 			routeNavigationResumeFallback = selection.selected.resumeToken != 0
 			remote = syncReconnectRemote(reconnect, attemptRequest.Remote || r.remote)
 			backoff = defaultReconnectBackoff.initial
 			continue
-		}
-		if result.action != 0 {
-			switch result.action {
-			case protocol.NavigationOpenHomePicker:
-				// The daemon only sends this action after accepting a Hello that
-				// advertised Home support. The durable client-side prerequisite is
-				// the captured route itself; request metadata may have been rebased by
-				// committed identity or cursor updates since that Hello.
-				if homeRoute == nil {
-					return errors.New("vev: stale home navigation action")
-				}
-				returnRequest := attemptRequest
-				if result.sessionName != "" {
-					returnRequest.SessionName = result.sessionName
-				}
-				returnRoute = &attachRoute{dialer: dialer, request: returnRequest, resumeToken: result.resumeToken}
-				homeNavigationPending = true
-				enterHomePicker()
-				continue
-			case protocol.NavigationBack:
-				// As with Home, the daemon accepted Back in Hello before sending
-				// this action. The retained concrete route is the durable client
-				// prerequisite; request metadata may have been rebased meanwhile.
-				if returnRoute == nil {
-					return errors.New("vev: stale return navigation action")
-				}
-				route := *returnRoute
-				returnRoute = nil
-				homeNavigationPending = false
-				returnNavigationPending = true
-				restoreReturnRoute(route)
-				continue
-			default:
-				return errors.New("vev: unsupported navigation action")
-			}
 		}
 		if result.target != nil || result.handoff != nil {
 			target := result.target
@@ -1026,7 +941,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 					}
 					routeRequest.Intent = protocol.IntentAttach
 					routeRequest.NavigationCapabilities = 0
-					routeRequest.StartupOverlay = protocol.StartupOverlayNone
 					homeRoute = &attachRoute{dialer: dialer, request: routeRequest}
 				}
 			}
@@ -1042,10 +956,12 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				nextDialer = source.dialer
 				nextRequest = r.ledger.samePeerHandoff(source.request, *target)
 			} else {
-				if r.attachHandoff == nil {
+				if r.hostRegistry == nil {
+					// A registry-less embedder keeps the historical handoff
+					// error, so its caller can dial the endpoint itself.
 					return &AttachTargetError{Target: *target}
 				}
-				nextDialer, nextRequest, handoffErr = r.attachHandoff(*target)
+				nextDialer, nextRequest, handoffErr = r.resolveHandoff(ctx, *target)
 				if handoffErr != nil {
 					if target.Intent == protocol.IntentNew && target.RequestID != 0 {
 						r.creationFailure = &protocol.SessionCreationFailure{RequestID: target.RequestID, Code: routeFailureCode(handoffErr)}
@@ -1058,15 +974,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			}
 			if target.ExactTarget != nil {
 				nextRequest.ExactTarget = target.ExactTarget
-			}
-			if homeRoute != nil && (nextRequest.RemoteTarget != nil || nextRequest.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned || target.Intent == protocol.IntentNew) {
-				nextRequest.NavigationCapabilities |= protocol.NavigationCapabilityHomePicker
-			}
-			if attemptRequest.StartupOverlay == protocol.StartupOverlaySessionPicker {
-				returnRoute = nil
-				returnResumeFallback = false
-				nextRequest.StartupOverlay = protocol.StartupOverlayNone
-				nextRequest.NavigationCapabilities &^= protocol.NavigationCapabilityBack
 			}
 			nextRequest = cloneAttachRequest(nextRequest)
 			if err := validateAttachRequest(nextRequest); err != nil {
@@ -1125,7 +1032,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			killedSelection = &selection
 			dialer = selection.selected.dialer
 			attemptRequest = cloneAttachRequest(selection.selected.request)
-			attemptRequest.StartupOverlay = protocol.StartupOverlayNone
 			attemptRequest.NavigationCapabilities = 0
 			resumeToken = selection.selected.resumeToken
 			killedResumeFallback = resumeToken != 0
@@ -1135,8 +1041,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				attemptRequest.Intent = protocol.IntentAttach
 			}
 			homeRoute = nil
-			returnRoute = nil
-			homeNavigationPending = false
 			returnNavigationPending = false
 			if navTransition.operation == navigationOperationRecent {
 				navTransition.clear()
@@ -1155,17 +1059,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 				continue
 			}
 			return errors.Join(result.err, r.ledger.retireKilled(*killedSelection))
-		}
-		if result.welcomed {
-			homeNavigationPending = false
-		}
-		if homeNavigationPending && returnRoute != nil {
-			route := *returnRoute
-			returnRoute = nil
-			homeNavigationPending = false
-			returnNavigationPending = true
-			restoreReturnRoute(route)
-			continue
 		}
 		if navTransition.pendingCreation() {
 			r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: routeFailureCode(result.err)}
@@ -1211,12 +1104,6 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			attemptRequest.Intent = protocol.IntentAttach
 			resumeToken = 0
 			returnResumeFallback = false
-			continue
-		}
-		if returnNavigationPending && !returnResumeFallback && homeRoute != nil {
-			returnRoute = nil
-			returnNavigationPending = false
-			enterHomePicker()
 			continue
 		}
 		if attemptRequest.Intent == protocol.IntentResume && !result.welcomed &&
@@ -1397,9 +1284,7 @@ type attachAttempt struct {
 	reconnect                *reconnectUI
 	transition               *transitionUI
 	linkEvents               <-chan ports.LinkEvent
-	rememberRemoteHost       func()
 	terminalInput            func() *terminalInputPump
-	openHomePicker           func(context.Context) attachResult
 	// inventoryHome is the committed local route that authorises the
 	// navigation-inventory relay and its handoffs. Nil disables the relay:
 	// local-only and ledger-less attachments never dial control sources.
@@ -1425,7 +1310,6 @@ type attachResult struct {
 	transportClosed   bool
 	target            *protocol.AttachTarget
 	handoff           *attachHandoff
-	action            protocol.NavigationAction
 	routeAction       *protocol.RouteNavigationAction
 	routeCreateAction *protocol.RouteCreateSessionAction
 	err               error
@@ -1473,9 +1357,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		transport = a.connection.Connection()
 	}
 	request := a.request
-	// Both parked UDP and close-and-dial home pickers only borrow a local
-	// attachment for rendering. They do not own the client's active route.
-	transientPicker := request.StartupOverlay == protocol.StartupOverlaySessionPicker
 	term := a.runner.term
 	clk := a.runner.clock
 	intent := request.Intent
@@ -1496,10 +1377,13 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// resolve channel. Advertising the capability in Hello is what lets
 	// the serving palette send demands at all.
 	var inventory *inventoryRelay
-	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote && !home.request.Remote, a.inventoryDialer) {
+	var hybridPicker *pickerControl
+	if home := a.inventoryHome; home != nil && inventoryRelayEnabled(true, remote, a.inventoryDialer) {
 		inventory = newInventoryRelay(clk, a.inventoryDialer)
+		hybridPicker = &pickerControl{dialer: a.inventoryDialer}
 		request.NavigationCapabilities |= protocol.NavigationCapabilityInventory
 	}
+	// The client-picker loop owns navigate-intent presentation while the
 	clipboard := a.runner.clipboard
 	log := a.runner.logger
 	observer := a.runner.runtimeObserver
@@ -1589,7 +1473,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		PreferredTabID:         request.PreferredTabID,
 		EnvironmentPolicy:      request.EnvironmentPolicy,
 		NavigationCapabilities: request.NavigationCapabilities,
-		StartupOverlay:         request.StartupOverlay,
 		Remote:                 remote,
 	}
 	if err := sendHandshake(func() error {
@@ -1628,11 +1511,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		committedIdentity = cloneCommittedIdentity(welcome.CommittedIdentity)
 		ms.welcomed = true
 		log.Debug("welcomed by daemon", "resume_token_present", resumeToken != 0)
-		if remote {
-			if remember := a.rememberRemoteHost; remember != nil {
-				remember()
-			}
-		}
 	case protocol.ErrorMsg:
 		return result(false, &ProtocolError{Code: message.Code, Text: message.Text})
 	default:
@@ -1652,7 +1530,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != committedIdentity.Target.LifecycleID || request.RemoteTarget.SessionName != committedIdentity.Target.SessionName) {
 			return welcomedResult(errRouteTargetChanged)
 		}
-		if !transientPicker {
+		{
 			candidate := routeCandidateForAttach(request, *committedIdentity, a.dialer, resumeToken)
 			var commitErr error
 			if a.killedSelection != nil {
@@ -1717,11 +1595,113 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// completions carry their originating interaction and query identity.
 	// The relay itself is created before Hello so the capability advertises.
 	inventoryBox := newInventoryPollBox()
+	pickerControlBox := newPickerControlBox()
+	// pickerOutcomes carries consumed-op outcomes from the stdin-pump
+	// goroutine to this attach loop for repaint and typed sends. The
+	// queue lives for the attempt; the snapshot-open path below
+	// installs the pump-side hook alongside each open loop. Wired here
+	// (after ui is bound below) would split lifetime across the
+	// function, so the hook install stays with the loop open/close.
+	pickerOutcomes := newPickerOutcomeQueue(loopCtx.Done())
 	var inventoryResolveC chan inventoryResolveOutcome
 	inventoryResolvePending := false
 	var nextInventoryRequestID uint64 = 1
+	type routeObservationOutcome struct {
+		authority    routeObserverAuthority
+		observations []protocol.PickerRouteObservation
+		err          error
+	}
+	routeObservationC := make(chan routeObservationOutcome, 1)
+	var routeObservationTimer ports.Timer
+	var routeObservationTick <-chan time.Time
+	var routeObservationRequestID uint64 = 1
+	routeObservationPending := 0
+	if a.runner.routeObservers == nil {
+		a.runner.routeObservers = newRouteObserverRegistry()
+	}
+	a.runner.routeObservers.register(request, a.dialer)
+	currentRouteOrigin := normalizeRouteOrigin(request.Origin, request.Remote)
+	currentRouteObserverKey := routeObserverKey{origin: currentRouteOrigin, originKey: normalizeRouteOriginKey(request.OriginKey, currentRouteOrigin)}
+	if home := a.inventoryHome; home != nil {
+		a.runner.routeObservers.register(home.request, home.dialer)
+	}
 	inventoryOpen := false
 	var inventoryInteraction uint64
+	// Client-picker loop state. picker tracks the admitted interaction
+	// namespace; pickerCurrent owns the displayed model (nil when closed).
+	// The loop consumes terminal-pump records and renders through the
+	// attach loop's sole terminal writer; commits cross on controlCh.
+	// Interaction IDs are daemon-assigned: the client only admits the
+	// namespace it was handed and retires it permanently on close.
+	picker := &pickerInteraction{}
+	var pickerCurrent *pickerLoop
+	// pickerSort is the client-local ordering mode; the daemon never shares it
+	// between attachments. pickerPreviewFrame carries the newest preview the
+	// serving daemon published for the displayed source.
+	var pickerSort = defaultPickerSort()
+	var pickerPreviewFrame = emptyPickerPreview()
+	// pickerPreview owns the client half of the row preview: the row whose
+	// request is on the wire and the viewport the daemon published for it.
+	var pickerPreview pickerPreviewClient
+	// pickerAcquireBarrier is the daemon output boundary the offer named: the
+	// client displays admitted output through it before it owns the terminal.
+	var pickerAcquireBarrier pickerBarrier
+	// pickerInput publishes who owns the terminal input to the stdin pump:
+	// the open interaction, the release drain window, or the session. The
+	// pump decodes and identifies operations; this loop applies them.
+	pickerInput := &pickerConsumer{}
+	// pickerPresentation owns who writes the terminal for the current
+	// client-picker interaction: acquisition barrier, local ownership,
+	// and ordered release. The daemon keeps mutation authority.
+	var pickerPresentation pickerLease
+	pickerRenderer := newPickerRenderer()
+	termSize := func() domain.Size {
+		geometry, err := term.Geometry()
+		if err != nil {
+			return size
+		}
+		return geometry.Size
+	}
+	// The preview request is debounced: the cursor may pass several rows while
+	// the user scrolls, and only the row that rests is worth capturing. The
+	// daemon keeps publishing the requested row afterwards, so one request per
+	// settled cursor is enough.
+	var previewTimer ports.Timer
+	var previewTimerCancel chan struct{}
+	pickerPreviewC := func() <-chan time.Time {
+		if previewTimer == nil {
+			return nil
+		}
+		return previewTimer.C()
+	}
+	clearPreviewTimer := func() {
+		if previewTimer != nil {
+			previewTimer.Stop()
+			previewTimer = nil
+		}
+		if previewTimerCancel != nil {
+			close(previewTimerCancel)
+			previewTimerCancel = nil
+		}
+	}
+	previewEvents := make(chan struct{}, 1)
+	armPreviewTimer := func() {
+		clearPreviewTimer()
+		timer := clk.NewTimer(pickerPreviewDebounce)
+		cancel := make(chan struct{})
+		previewTimer, previewTimerCancel = timer, cancel
+		go func() {
+			select {
+			case <-timer.C():
+				select {
+				case previewEvents <- struct{}{}:
+				default:
+				}
+			case <-cancel:
+			case <-loopCtx.Done():
+			}
+		}()
+	}
 	var inventoryTimer ports.Timer
 	var inventoryTickC <-chan time.Time
 	stopInventoryTimer := func() {
@@ -1751,6 +1731,63 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 	}
 	defer stopInventoryPoll()
+	defer func() {
+		if routeObservationTimer != nil {
+			routeObservationTimer.Stop()
+		}
+	}()
+	hasRouteObservationTargets := func() bool {
+		for _, authority := range a.runner.routeObservers.snapshot() {
+			var excluded *protocol.ExactSessionTarget
+			if authority.key == currentRouteObserverKey {
+				excluded = request.ExactTarget
+			}
+			if len(a.runner.ledger.observationTargetsExcept(authority.key.origin, authority.key.originKey, excluded)) != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	armRouteObservation := func() {
+		if !hasRouteObservationTargets() {
+			routeObservationTick = nil
+			return
+		}
+		if routeObservationTimer != nil {
+			routeObservationTimer.Stop()
+		}
+		routeObservationTimer = clk.NewTimer(inventoryPollInterval)
+		routeObservationTick = routeObservationTimer.C()
+	}
+	startRouteObservation := func() {
+		if routeObservationPending != 0 {
+			return
+		}
+		authorities := a.runner.routeObservers.snapshot()
+		for _, authority := range authorities {
+			var excluded *protocol.ExactSessionTarget
+			if authority.key == currentRouteObserverKey {
+				excluded = request.ExactTarget
+			}
+			targets := a.runner.ledger.observationTargetsExcept(authority.key.origin, authority.key.originKey, excluded)
+			if len(targets) == 0 {
+				continue
+			}
+			requestID := routeObservationRequestID
+			routeObservationRequestID++
+			routeObservationPending++
+			go func(authority routeObserverAuthority, targets []protocol.ExactSessionTarget) {
+				observations, err := (pickerControl{dialer: authority.dialer}).observe(loopCtx, requestID, targets)
+				select {
+				case routeObservationC <- routeObservationOutcome{authority: authority, observations: observations, err: err}:
+				case <-loopCtx.Done():
+				}
+			}(authority, targets)
+		}
+		if routeObservationPending == 0 {
+			armRouteObservation()
+		}
+	}
 	startInventoryPoll := func() {
 		if inventory == nil || !inventoryOpen {
 			return
@@ -1908,17 +1945,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	transitionWaitingFull := false
 	var samePeerSwitch *samePeerSwitchPending
 	var nextSamePeerRequestID uint64
-	type parkedRoutePending struct {
-		requestID uint64
-		action    protocol.ParkedRouteAction
-		leaseID   protocol.ParkedRouteLeaseID
-		fallback  *attachHandoff
-		timer     ports.Timer
-	}
-	var parkedPending *parkedRoutePending
-	var nextParkedRequestID uint64
-	parkedWaitingFull := false
-	var parkedFullTimer ports.Timer
 	transportFailed := make(chan struct{})
 	if reconnect.showing {
 		if reconnect.remote {
@@ -1960,6 +1986,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		stdinDone, resizeDone chan struct{}
 	}
 	var foreground *foregroundRuntime
+	resizeEvents := make(chan domain.Geometry, 1)
 	startForeground := func() {
 		if foreground != nil {
 			return
@@ -1983,11 +2010,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				foregroundCancel()
 				cancel()
 			}
-			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, uiGeneration: generation, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease}).run()
+			(&stdinPump{ctx: foregroundCtx, cancel: cancelAll, input: input, consumer: consumer, uiGeneration: generation, out: sendCh, clock: clk, clipboard: clip, logger: log, paletteEvents: paletteEvents, activeGeneration: &activeGeneration, sendLease: sendLease, picker: pickerInput, pickerOutcomes: pickerOutcomes}).run()
 		}()
 		go func() {
 			defer close(resizeDone)
-			runResize(foregroundCtx, term.ResizeEvents(), sendCh, sendLease, log)
+			runResize(foregroundCtx, term.ResizeEvents(), sendCh, resizeEvents, sendLease, log)
 		}()
 	}
 	stopForeground := func() {
@@ -2008,144 +2035,190 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			cancelTimer(completionTimers, id)
 		}
 	}
-	flushSender := func() error {
-		done := make(chan struct{})
-		select {
-		case barrierCh <- done:
-		case <-loopCtx.Done():
-			return context.Canceled
-		}
-		select {
-		case <-done:
-			return nil
-		case <-loopCtx.Done():
-			return context.Canceled
-		}
-	}
-	clearParkedFull := func() {
-		parkedWaitingFull = false
-		if parkedFullTimer != nil {
-			parkedFullTimer.Stop()
-			parkedFullTimer = nil
-		}
-	}
-	awaitParkedFull := func() {
-		clearParkedFull()
-		parkedWaitingFull = true
-		parkedFullTimer = clk.NewTimer(protocol.HandshakeTimeout)
-	}
-	parkedFullC := func() <-chan time.Time {
-		if parkedFullTimer == nil {
+	// displayPickerFrame composes the local picker modal and publishes it
+	// through the sole terminal writer, inside the UI observation
+	// transaction, exactly like daemon output. A locally admitted action
+	// completes only after that write and flush succeeded.
+	displayPickerFrame := func(loop *pickerLoop, completeAction uint64) error {
+		data := pickerRenderer.render(loop, termSize(), pickerPreviewFrame)
+		if data == nil {
 			return nil
 		}
-		return parkedFullTimer.C()
-	}
-	defer clearParkedFull()
-	clearParkedPending := func() {
-		if parkedPending != nil && parkedPending.timer != nil {
-			parkedPending.timer.Stop()
-		}
-		parkedPending = nil
-	}
-	parkedResponseC := func() <-chan time.Time {
-		if parkedPending == nil || parkedPending.timer == nil {
-			return nil
-		}
-		return parkedPending.timer.C()
-	}
-	defer clearParkedPending()
-
-	sendParkedRouteSize := func() error {
-		geometry, err := term.Geometry()
-		if err != nil {
-			return fmt.Errorf("reading terminal geometry for parked route: %w", err)
-		}
-		geometry = geometry.NormalizePixels()
-		message := protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight}
-		if err := protocol.ValidateGeometry(message.Geometry()); err != nil {
-			return fmt.Errorf("validating terminal size for parked route: %w", err)
-		}
-		select {
-		case controlCh <- message:
-			return nil
-		case <-loopCtx.Done():
-			return context.Canceled
-		}
-	}
-	sendParkedRouteRequest := func(action protocol.ParkedRouteAction, leaseID protocol.ParkedRouteLeaseID, target *domain.RemoteSessionTarget) error {
-		if parkedPending != nil {
-			return errors.New("vev: parked-route request already pending")
-		}
-		nextParkedRequestID++
-		request := protocol.ParkedRouteRequest{RequestID: nextParkedRequestID, LeaseID: leaseID, Action: action, Target: target}
-		if protocol.ValidateParkedRouteRequest(request) != nil {
-			return errors.New("vev: invalid parked-route request")
-		}
-		select {
-		case controlCh <- request:
-			parkedPending = &parkedRoutePending{
-				requestID: request.RequestID, action: action, leaseID: leaseID,
-				timer: clk.NewTimer(protocol.HandshakeTimeout),
+		if uiOutput != nil {
+			uiContext = outputState.uiContext(uiContext, uiContext.Status)
+			uiOutput.BeginOutput(uiContext)
+			if err := uiOutput.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+				uiOutput.EndOutput(false)
+				return fmt.Errorf("vev: publishing picker context: %w", err)
 			}
+		}
+		data = append([]byte("\x1b[?25l"), data...)
+		_, werr := term.Out().Write(data)
+		if uiOutput != nil {
+			uiOutput.EndOutput(werr == nil)
+		}
+		if werr != nil {
+			return fmt.Errorf("vev: writing picker frame: %w", werr)
+		}
+		if ferr := term.Flush(); ferr != nil {
+			return fmt.Errorf("vev: flushing picker frame: %w", ferr)
+		}
+		if ui != nil {
+			ui.published(uiGeneration)
+			if completeAction != 0 {
+				ui.completeLocal(uiGeneration, completeAction)
+			}
+		}
+		return nil
+	}
+	// publishSuppressedContext applies one daemon frame the client must not
+	// write while it owns presentation. The frame content is dropped, but
+	// the committed context boundary still advances so the daemon's UI
+	// fences retire against the same boundary exactly once: an opener
+	// action admitted before the picker opened completes here, and no
+	// suppression can pair a receipt with a stale boundary.
+	publishSuppressedContext := func(next outputApplyState) error {
+		if uiOutput == nil {
+			return nil
+		}
+		uiContext = next.uiContext(uiContext, uiContext.Status)
+		if err := uiOutput.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+			return fmt.Errorf("vev: publishing suppressed picker context: %w", err)
+		}
+		if ui != nil {
+			ui.published(uiGeneration)
+		}
+		return nil
+	}
+	drainPickerInput := func(interaction uint64) {
+		// The interaction is retired but its authoritative paint is still in
+		// flight: the pump consumes and drops every batch until the repaint
+		// lands, so a picker-bound key can never reach the session. The
+		// queued automation boundary is retired with it.
+		pickerInput.setDrain(interaction, uiGeneration)
+		if ui == nil {
+			return
+		}
+		ui.mu.Lock()
+		inputGate.retiredUI.Store(ui.nextAction)
+		ui.mu.Unlock()
+	}
+	// sendPickerClose retires the daemon-side interaction so it stops owning
+	// input and repaints authoritatively. A duplicate close is harmless: the
+	// daemon rejects a close for an interaction it no longer holds.
+	sendPickerClose := func(interaction uint64) error {
+		closeMsg := protocol.PickerClose{InteractionID: interaction}
+		select {
+		case controlCh <- closeMsg:
 			return nil
 		case <-loopCtx.Done():
 			return context.Canceled
 		}
 	}
-	handleParkedPicker := func(leaseID protocol.ParkedRouteLeaseID) (attachResult, bool) {
-		pickerCtx, cancelPicker := context.WithCancel(ctx)
-		pickerDone := make(chan struct{})
-		go func() {
-			select {
-			case <-transportFailed:
-				cancelPicker()
-			case <-pickerDone:
+	// schedulePickerPreview (re)arms the debounce for the row the modal
+	// displays. A row already requested is never asked for twice, so a
+	// background refresh of the same row keeps its published viewport.
+	schedulePickerPreview := func() {
+		if pickerCurrent == nil || !pickerPresentation.owns() {
+			return
+		}
+		if !pickerPreview.needsRequest(pickerPresentation.interaction, pickerCurrent.cursorKey()) {
+			return
+		}
+		armPreviewTimer()
+	}
+	acquirePicker := func() error {
+		loop := pickerPresentation.pending
+		if loop == nil {
+			pickerPresentation.reset()
+			return nil
+		}
+		pickerPresentation.pending = nil
+		pickerCurrent = loop
+		pickerInput.setOwned(pickerPresentation.interaction, pickerPresentation.generation)
+		if err := displayPickerFrame(loop, 0); err != nil {
+			return err
+		}
+		schedulePickerPreview()
+		return nil
+	}
+	restoreTerminalModes := func() {}
+	finishPickerRelease := func() {
+		actionID, local := pickerPresentation.finishRelease()
+		pickerCurrent = nil
+		pickerPreview.resetFor()
+		pickerPreviewFrame = emptyPickerPreview()
+		clearPreviewTimer()
+		pickerInput.clear()
+		restoreTerminalModes()
+		if ui != nil && local && actionID != 0 {
+			ui.completeLocal(uiGeneration, actionID)
+		}
+	}
+	abortPickerLease := func(unknownOutcome bool) {
+		if !pickerPresentation.active() {
+			return
+		}
+		actionID, local := pickerPresentation.abort()
+		pickerCurrent = nil
+		pickerPreview.resetFor()
+		pickerPreviewFrame = emptyPickerPreview()
+		clearPreviewTimer()
+		pickerInput.clear()
+		restoreTerminalModes()
+		if ui != nil {
+			if local && actionID != 0 {
+				ui.completeLocal(uiGeneration, actionID)
+			} else if unknownOutcome && actionID != 0 {
+				ui.mu.Lock()
+				if record, ok := ui.records[actionID]; ok && record.Status == ports.UIActionPending {
+					ui.finishLocked(actionID, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
+				}
+				ui.mu.Unlock()
 			}
-		}()
-		selection := a.openHomePicker(pickerCtx)
-		close(pickerDone)
-		cancelPicker()
-		select {
-		case <-transportFailed:
-			return welcomedResult(errLinkOffline), true
-		default:
 		}
-		if selection.handoff != nil && transition != nil {
-			transitionWaitingFull = false
-			transition.start(selection.handoff.target)
+	}
+	// resolveSupersededLease ends a lease that a newer interaction replaced:
+	// its pending action can no longer complete through a release paint. The
+	// terminal stays owned until the replacing interaction displays, because
+	// the replaced picker frame is still on screen: input must not reach the
+	// session in that window.
+	resolveSupersededLease := func(superseded *pickerLease) {
+		if superseded == nil {
+			return
 		}
-		if selection.handoff != nil && request.Remote && request.OriginKey != "" && selection.handoff.target.Endpoint == request.OriginKey && selection.handoff.target.RemoteTarget != nil {
-			target := *selection.handoff.target.RemoteTarget
-			if err := sendParkedRouteSize(); err != nil {
-				return welcomedResult(err), true
-			}
-			if err := sendParkedRouteRequest(protocol.ParkedRouteSwitch, leaseID, &target); err != nil {
-				return welcomedResult(fmt.Errorf("vev: switching parked route: %w", err)), true
-			}
-			fallback := *selection.handoff
-			parkedPending.fallback = &fallback
-			return attachResult{}, false
+		actionID, local := superseded.releaseAction, superseded.releaseLocal
+		pickerInput.setDrain(picker.interaction, uiGeneration)
+		if ui == nil || actionID == 0 {
+			return
 		}
-		if selection.handoff != nil {
-			return selection, true
+		if local {
+			ui.completeLocal(superseded.generation, actionID)
+			return
 		}
-		if selection.err != nil {
-			log.Warn("transient home picker failed; resuming parked route", "err", selection.err)
+		ui.mu.Lock()
+		if record, ok := ui.records[actionID]; ok && record.Status == ports.UIActionPending {
+			ui.finishLocked(actionID, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
 		}
-		if err := sendParkedRouteSize(); err != nil {
-			return welcomedResult(err), true
+		ui.mu.Unlock()
+	}
+	// syncPickerGeneration aborts a lease that belongs to a retired
+	// attachment generation instead of releasing a frame the daemon no
+	// longer associates with this interaction. No PickerClose is sent: a
+	// generation change means a new attachment attempt on a new connection,
+	// and the previous connection's interaction died with it (the daemon
+	// starts every attachment with no client interaction open).
+	syncPickerGeneration := func() {
+		if pickerPresentation.active() && pickerPresentation.generation != uiGeneration {
+			abortPickerLease(true)
 		}
-		if err := sendParkedRouteRequest(protocol.ParkedRouteResume, leaseID, nil); err != nil {
-			return welcomedResult(fmt.Errorf("vev: resuming parked route: %w", err)), true
-		}
-		return attachResult{}, false
 	}
 	startForeground()
 	defer stopForeground()
 
-	// 5. Output/main loop: the only goroutine that touches the terminal.
 	recvCh := make(chan recvResult, 1)
 	go runRecv(loopCtx, transport, recvCh, transportFailed, log)
+	armRouteObservation()
 
 	requestReconnectReset := func() error {
 		if awaitingReconnectReset {
@@ -2235,19 +2308,192 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		select {
 		case <-loopCtx.Done():
 			return loopCanceledResult()
+		case <-resizeEvents:
+			if pickerCurrent != nil && pickerPresentation.owns() {
+				if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+					return welcomedResult(err)
+				}
+				pickerPreview.sent = ""
+				schedulePickerPreview()
+			}
+		case <-routeObservationTick:
+			routeObservationTick = nil
+			startRouteObservation()
+		case outcome := <-routeObservationC:
+			routeObservationPending--
+			if outcome.err == nil && a.runner.routeObservers.current(outcome.authority) &&
+				a.runner.ledger.applyObservations(outcome.authority.key.origin, outcome.authority.key.originKey, outcome.observations) {
+				if err := publishRouteSnapshot(); err != nil {
+					return welcomedResult(err)
+				}
+			}
+			if routeObservationPending == 0 {
+				armRouteObservation()
+			}
+		case <-pickerPreviewC():
+			clearPreviewTimer()
+			key := ""
+			if pickerCurrent != nil {
+				key = pickerCurrent.cursorKey()
+			}
+			if key == "" || !pickerPresentation.owns() || !pickerPreview.needsRequest(pickerPresentation.interaction, key) {
+				continue
+			}
+			// The preview pane decides the viewport: ask for exactly the
+			// rectangle the modal will blit it into, the same geometry the
+			// serving daemon sizes its capture from.
+			request, ok := pickerPreview.requestFor(pickerPresentation.interaction, key, pickerPreviewSize(termSize()))
+			if !ok {
+				continue
+			}
+			select {
+			case controlCh <- request:
+				pickerPreview.markSent(pickerPresentation.interaction, key)
+			case <-loopCtx.Done():
+				return loopCanceledResult()
+			}
+		case <-pickerOutcomes.signal:
+			for _, outcome := range pickerOutcomes.take() {
+				if !outcome.acceptOutcome(picker.interaction, uiGeneration) || pickerCurrent == nil || !pickerPresentation.owns() {
+					// Retired generation, interaction, or presentation: the pump
+					// already consumed the batch, so nothing reaches the session.
+					// Complete the admitted action so it never stays pending.
+					if outcome.actionID != 0 && ui != nil {
+						ui.completeLocal(uiGeneration, outcome.actionID)
+					}
+					continue
+				}
+				op, changed := applyPickerBatch(pickerCurrent, outcome.events)
+				switch {
+				case op.close:
+					// The client retired the interaction: tell the daemon so it
+					// stops owning input and repaints authoritatively, then keep
+					// consuming and dropping until that paint lands.
+					if err := sendPickerClose(picker.interaction); err != nil {
+						return welcomedResult(err)
+					}
+					if pickerPresentation.beginRelease(picker.interaction, outcome.actionID, true, false, outputState) {
+						drainPickerInput(picker.interaction)
+					} else if outcome.actionID != 0 && ui != nil {
+						ui.completeLocal(uiGeneration, outcome.actionID)
+					}
+				case op.kill:
+					// x destroys the cursor row. The typed selection carries the
+					// revision of the model actually presented; the picker stays
+					// open and refreshes from the resulting revision.
+					selection, ok := killSelection(pickerCurrent, outcome.actionID)
+					if !ok {
+						if outcome.actionID != 0 && ui != nil {
+							ui.completeLocal(uiGeneration, outcome.actionID)
+						}
+						continue
+					}
+					select {
+					case controlCh <- selection:
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				case op.commit:
+					// The typed selection crosses on controlCh: it carries the
+					// revision of the model actually presented. It stays pending
+					// through the daemon close and completes with the destination
+					// full paint or a typed failure.
+					action, ok := pickerCurrent.selectedAction()
+					selection, committed := protocol.PickerSelection{}, false
+					if ok {
+						selection, committed = commitSelection(pickerCurrent, action, outcome.actionID)
+					}
+					if !committed {
+						if err := displayPickerFrame(pickerCurrent, outcome.actionID); err != nil {
+							return welcomedResult(err)
+						}
+						continue
+					}
+					if hybridPicker != nil && selection.SourceID == protocol.PickerHomeSourceID {
+						requestID := nextInventoryRequestID
+						nextInventoryRequestID++
+						go func(selection protocol.PickerSelection) {
+							target, err := hybridPicker.resolve(loopCtx, requestID, selection)
+							pickerControlBox.offer(pickerControlOutcome{selection: &selection, target: &target, err: err})
+						}(selection)
+						continue
+					}
+					select {
+					case controlCh <- selection:
+					case <-loopCtx.Done():
+						return loopCanceledResult()
+					}
+				case changed:
+					if err := displayPickerFrame(pickerCurrent, outcome.actionID); err != nil {
+						return welcomedResult(err)
+					}
+					schedulePickerPreview()
+				default:
+					// The batch changed nothing visible: complete its action
+					// without composing a frame.
+					if outcome.actionID != 0 && ui != nil {
+						ui.completeLocal(uiGeneration, outcome.actionID)
+					}
+				}
+			}
 		case <-transition.tickC():
 			if err := transition.advance(); err != nil {
 				return welcomedResult(err)
 			}
-		case <-parkedResponseC():
-			clearParkedPending()
-			return welcomedResult(errors.New("vev: timed out waiting for parked-route response"))
-		case <-parkedFullC():
-			clearParkedFull()
-			return welcomedResult(errors.New("vev: timed out waiting for parked-route full output"))
 		case <-inventoryTickC:
 			startInventoryPoll()
 			armInventoryPoll()
+		case <-pickerControlBox.wake:
+			outcome, ok := pickerControlBox.take()
+			if !ok {
+				continue
+			}
+			if outcome.snapshot != nil && picker.open && outcome.snapshot.InteractionID == picker.interaction {
+				snapshot := *outcome.snapshot
+				if !picker.admitSnapshot(snapshot, false) {
+					continue
+				}
+				if pickerCurrent != nil && pickerCurrent.interaction == snapshot.InteractionID && pickerPresentation.owns() {
+					pickerCurrent.replaceLines(snapshot)
+					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+						return welcomedResult(err)
+					}
+					continue
+				}
+				ready, superseded := pickerPresentation.admitSnapshot(snapshot, pickerAcquireBarrier, pickerLoopFromSnapshot(snapshot, picker.intent, pickerSort), outputState, uiGeneration)
+				if superseded != nil {
+					resolveSupersededLease(superseded)
+				}
+				if ready {
+					if err := acquirePicker(); err != nil {
+						return welcomedResult(err)
+					}
+				}
+				continue
+			}
+			if outcome.selection != nil && outcome.err != nil {
+				log.Debug("hybrid picker resolve rejected", "err", outcome.err, "source", outcome.selection.SourceID)
+				if outcome.selection.CauseActionID != 0 && ui != nil {
+					ui.completeLocal(uiGeneration, outcome.selection.CauseActionID)
+				}
+				continue
+			}
+			if outcome.target != nil && outcome.selection != nil {
+				if err := sendPickerClose(outcome.selection.InteractionID); err != nil {
+					return welcomedResult(err)
+				}
+				pickerPresentation.beginRelease(outcome.selection.InteractionID, outcome.selection.CauseActionID, false, false, outputState)
+				handoff := welcomedResult(nil)
+				handoff.target = outcome.target
+				if outcome.selection.CauseActionID != 0 && ui != nil {
+					ui.follow(uiGeneration, outcome.selection.CauseActionID)
+					publishUIStatus(ports.UIStatusTransitioning)
+				}
+				if home := a.inventoryHome; home != nil {
+					handoff.handoff = bindAttachHandoff(*outcome.target, *home)
+				}
+				return handoff
+			}
 		case <-inventoryBox.wake:
 			pollOutcome, ok := inventoryBox.take()
 			if !ok {
@@ -2443,10 +2689,23 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
-				if parkedWaitingFull && !o.Full {
-					return welcomedResult(errors.New("vev: parked route resumed without an authoritative full output"))
+				syncPickerGeneration()
+				pickerEvent := pickerPresentation.observe(o, nextState)
+				if pickerEvent == pickerLeaseSuppress {
+					// The client owns presentation: apply and ACK the daemon frame
+					// inside the bounded window without writing it, and advance the
+					// published context boundary so daemon-side fences retire.
+					outputState = nextState
+					if o.New != 0 {
+						ackQueue.offer(o.Epoch, o.New)
+						outputResetRequested = false
+					}
+					if err := publishSuppressedContext(nextState); err != nil {
+						return welcomedResult(err)
+					}
+					continue
 				}
-				if ui != nil && o.Full && foreground == nil && (parkedWaitingFull || samePeerSwitch == nil) {
+				if ui != nil && o.Full && foreground == nil && samePeerSwitch == nil {
 					startForeground()
 				}
 				if uiOutput != nil {
@@ -2502,10 +2761,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					transitionWaitingFull = false
 					transition.stop()
 				}
-				if parkedWaitingFull {
-					clearParkedFull()
-					startForeground()
-				}
 				if o.New != 0 {
 					ackQueue.offer(o.Epoch, o.New)
 					outputResetRequested = false
@@ -2518,6 +2773,20 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					ms.firstOutput = true
 					log.Debug("received first output")
 					endHandshake()
+				}
+				switch pickerEvent {
+				case pickerLeaseAcquire:
+					// The acquisition barrier is displayed: the client may now
+					// paint and own the picker frame.
+					if err := acquirePicker(); err != nil {
+						return welcomedResult(err)
+					}
+				case pickerLeaseRelease:
+					// The authoritative full paint was written and published:
+					// release the terminal, resume input, and complete the
+					// pending cancel locally. A commit completes through the
+					// handoff instead.
+					finishPickerRelease()
 				}
 			case protocol.UIViewUpdate:
 				nextState, accepted, needsReset := outputState.nextView(message)
@@ -2552,11 +2821,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					publishUIStatus(ports.UIStatusTransitioning)
 				}
 				target := message
-				if transientPicker {
-					handoff := welcomedResult(nil)
-					handoff.target = &target
-					return handoff
-				}
 				if transition != nil {
 					transitionWaitingFull = false
 					transition.start(target)
@@ -2593,72 +2857,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				handoff := welcomedResult(nil)
 				handoff.target = &target
 				return handoff
-			case protocol.ParkedRouteResponse:
-				response := message
-				if parkedPending == nil || response.RequestID != parkedPending.requestID {
-					return welcomedResult(errors.New("vev: unexpected parked-route response"))
-				}
-				pending := *parkedPending
-				clearParkedPending()
-				switch pending.action {
-				case protocol.ParkedRoutePrepare:
-					if response.Status != protocol.ParkedRouteReady {
-						fallback := welcomedResult(nil)
-						fallback.action = protocol.NavigationOpenHomePicker
-						return fallback
-					}
-					if selection, done := handleParkedPicker(pending.leaseID); done {
-						return selection
-					}
-				case protocol.ParkedRouteResume:
-					if response.Status != protocol.ParkedRouteResumed {
-						return welcomedResult(errors.New("vev: parked route could not resume"))
-					}
-					if err := publishRouteSnapshot(); err != nil {
-						return welcomedResult(err)
-					}
-					awaitParkedFull()
-				case protocol.ParkedRouteSwitch:
-					switch response.Status {
-					case protocol.ParkedRouteSwitched:
-						awaitParkedFull()
-						continue
-					case protocol.ParkedRouteStaleTarget:
-						if transition != nil {
-							transition.stop()
-						}
-						if selection, done := handleParkedPicker(pending.leaseID); done {
-							return selection
-						}
-					default:
-						if pending.fallback == nil {
-							return welcomedResult(errors.New("vev: parked route switch failed"))
-						}
-						fallback := welcomedResult(nil)
-						fallback.handoff = pending.fallback
-						return fallback
-					}
-				}
-			case protocol.NavigationDirective:
-				if ui != nil {
-					ui.follow(uiGeneration, message.CauseActionID)
-					publishUIStatus(ports.UIStatusTransitioning)
-				}
-				directive := message
-				datagramRoute := transport.Capabilities().PreferredOutputWindow == 1
-				if directive.Action == protocol.NavigationOpenHomePicker && a.openHomePicker != nil && datagramRoute {
-					stopForeground()
-					if err := flushSender(); err != nil {
-						return welcomedResult(fmt.Errorf("vev: parking remote foreground: %w", err))
-					}
-					if err := sendParkedRouteRequest(protocol.ParkedRoutePrepare, directive.LeaseID, nil); err != nil {
-						return welcomedResult(fmt.Errorf("vev: preparing parked route: %w", err))
-					}
-					continue
-				}
-				navigation := welcomedResult(nil)
-				navigation.action = directive.Action
-				return navigation
 			case protocol.NavigationInventoryDemand:
 				demand := message
 				if inventory == nil {
@@ -2718,6 +2916,164 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				// Overlay-owned liveness. The relay never waits on it:
 				// publications carry the only state it tracks.
 				continue
+			case protocol.PickerOffer:
+				offer := message
+				if offer.InteractionID <= picker.retired {
+					continue
+				}
+				if !picker.open || picker.interaction != offer.InteractionID {
+					picker.setOpen(true, offer.InteractionID)
+				}
+				picker.setIntent(offer.InteractionID, offer.Intent)
+				pickerAcquireBarrier = pickerBarrier{epoch: offer.BarrierEpoch, state: offer.BarrierState}
+				syncPickerGeneration()
+				if hybridPicker != nil && offer.Intent == protocol.PickerIntentNavigation {
+					requestID := nextInventoryRequestID
+					nextInventoryRequestID++
+					go func(interaction uint64) {
+						snapshot, err := hybridPicker.snapshot(loopCtx, requestID, interaction)
+						if err != nil {
+							log.Warn("hybrid picker authority unavailable", "err", err)
+							return
+						}
+						pickerControlBox.offer(pickerControlOutcome{snapshot: &snapshot})
+					}(offer.InteractionID)
+				}
+				continue
+			case protocol.PickerSnapshot:
+				snapshot := message
+				// A hybrid client presents only the stable home authority for
+				// navigation. The serving daemon still owns the offer/barrier and
+				// close lifecycle, but its rows must never be merged or duplicated.
+				if hybridPicker != nil && picker.intent == protocol.PickerIntentNavigation && snapshot.SourceID == protocol.PickerServingSourceID {
+					continue
+				}
+				if snapshot.InteractionID <= picker.retired {
+					// A late snapshot from before a close never reopens the
+					// interaction: retiring it is permanent.
+					continue
+				}
+				// Snapshots are self-opening: the daemon publishes them
+				// only for an interaction it admitted, so the first
+				// snapshot for an unknown ID opens the namespace.
+				if !picker.open || picker.interaction != snapshot.InteractionID {
+					picker.setOpen(true, snapshot.InteractionID)
+				}
+				syncPickerGeneration()
+				if !picker.admitSnapshot(snapshot, false) {
+					continue
+				}
+				// A newer publication of the source already on display replaces
+				// its lines in place, so the local cursor and search survive a
+				// background refresh. A first-or-foreign source installs a new
+				// model through the lease below.
+				if pickerCurrent != nil && pickerCurrent.interaction == snapshot.InteractionID && pickerPresentation.owns() {
+					pickerCurrent.replaceLines(snapshot)
+					if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+						return welcomedResult(err)
+					}
+					schedulePickerPreview()
+					continue
+				}
+				// The lease decides presentation: a barrier still ahead keeps
+				// displaying daemon output until the exact epoch/state the
+				// snapshot was built against is applied, so no older paint can
+				// land after the picker frame.
+				ready, superseded := pickerPresentation.admitSnapshot(snapshot, pickerAcquireBarrier, pickerLoopFromSnapshot(snapshot, picker.intent, pickerSort), outputState, uiGeneration)
+				if superseded != nil {
+					// A superseding interaction ended the previous one: resolve
+					// that lease, never the one just installed.
+					resolveSupersededLease(superseded)
+				}
+				if !ready {
+					continue
+				}
+				if err := acquirePicker(); err != nil {
+					return welcomedResult(err)
+				}
+				continue
+			case protocol.PickerClosed:
+				closed := message
+				if !pickerPresentation.beginRelease(closed.InteractionID, 0, false, true, outputState) {
+					// The client already retired this interaction: the daemon's own
+					// close is the ordering barrier its release waits for, so
+					// record it and re-capture the boundary the daemon named.
+					pickerPresentation.confirmDaemonClose(closed.InteractionID, outputState)
+				}
+				if pickerPresentation.releasingFor(closed.InteractionID) {
+					// The daemon retired the interaction (a resolved selection,
+					// a superseding overlay, or the echo of the client's own
+					// cancel). Keep consuming and dropping input until the
+					// authoritative paint lands.
+					drainPickerInput(closed.InteractionID)
+				}
+				if picker.interaction == closed.InteractionID || !picker.open {
+					picker.setOpen(false, closed.InteractionID)
+				}
+				continue
+			case protocol.PickerPreview:
+				if pickerCurrent == nil || !pickerPresentation.owns() {
+					continue
+				}
+				if !pickerPreview.accept(message, pickerPresentation.interaction, pickerCurrent.cursorKey()) {
+					// A late answer for a row the user already left, or a
+					// viewport that cannot be displayed: keep the current one.
+					continue
+				}
+				pickerPreviewFrame = pickerPreview.frame
+				if err := displayPickerFrame(pickerCurrent, 0); err != nil {
+					return welcomedResult(err)
+				}
+				continue
+			case protocol.PickerResult:
+				// A completed in-place mutation (kill or move). The daemon
+				// republishes the source right after, so the picker needs no
+				// local model change: complete the action and keep presenting.
+				result := message
+				if result.CauseActionID != 0 && ui != nil {
+					ui.completeLocal(uiGeneration, result.CauseActionID)
+				}
+				continue
+			case protocol.PickerFailure:
+				failure := message
+				// Commit rejections fail the exact ui-driver action
+				// that caused them via CauseActionID. Stale-revision
+				// and retired-target close the loop: the cursor it
+				// committed from no longer exists. Unknown-key and
+				// navigation failures keep the admitted revision so
+				// the user can retry.
+				if failure.InteractionID == picker.interaction && failure.CauseActionID != 0 && ui != nil {
+					ui.mu.Lock()
+					if record, ok := ui.records[failure.CauseActionID]; ok && record.Status == ports.UIActionPending {
+						ui.finishLocked(failure.CauseActionID, ports.UIActionNavigationFailed, ports.UIActionResult{})
+					}
+					ui.mu.Unlock()
+				}
+				switch failure.Code {
+				case protocol.PickerStaleRevision, protocol.PickerRetiredTarget:
+					// The interaction can no longer be committed from. Close it
+					// daemon-side so it stops owning input and restores the screen
+					// authoritatively, then drain until that paint lands instead of
+					// dropping the lease and leaving the daemon interaction open.
+					// A second rejection for an interaction already draining must
+					// not restart or cancel that release.
+					if failure.InteractionID != picker.interaction && picker.open {
+						continue
+					}
+					if pickerPresentation.releasingFor(failure.InteractionID) {
+						continue
+					}
+					picker.setOpen(false, failure.InteractionID)
+					if err := sendPickerClose(failure.InteractionID); err != nil {
+						return welcomedResult(err)
+					}
+					if pickerPresentation.beginRelease(failure.InteractionID, 0, false, false, outputState) {
+						drainPickerInput(failure.InteractionID)
+					} else {
+						abortPickerLease(false)
+					}
+				}
+				continue
 			case protocol.RouteCreateSessionAction:
 				action := message
 				if action.Validate() != nil {
@@ -2774,9 +3130,6 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 				}
 				name = identity.Target.SessionName
 				committedIdentity = cloneCommittedIdentity(&identity)
-				if transientPicker {
-					continue
-				}
 				if a.runner.ledger == nil {
 					return welcomedResult(errors.New("vev: route ledger unavailable"))
 				}
@@ -3084,6 +3437,11 @@ type terminalReadResult struct {
 	generation uint64
 	actionID   uint64
 	endBatch   bool
+	// keys/text carry the decoded ui-driver op for picker interception.
+	// Physical input leaves both empty; the picker consumer then decodes the
+	// raw bytes itself.
+	keys []string
+	text string
 }
 
 // terminalAutomationRequest is admitted only by the foreground scanner owner.
@@ -3456,6 +3814,12 @@ type stdinPump struct {
 	afterInputTake      func()                       // test synchronization hook
 	afterInputDelivered func()                       // test synchronization hook
 	sendLease           *foregroundSendLease
+	// picker publishes who owns terminal input and decodes batches into
+	// identified operations. The pump never touches the picker model.
+	picker *pickerConsumer
+	// pickerOutcomes carries those operations to the attach loop, which
+	// applies them and flushes typed sends in controlCh order.
+	pickerOutcomes *pickerOutcomeQueue
 }
 
 func (p *stdinPump) run() {
@@ -3538,6 +3902,7 @@ func (p *stdinPump) run() {
 	sink := coalescer.Scan
 	if p.clipboard != nil {
 		ci := &clipboardIntercept{
+			ctx:       p.ctx,
 			coalescer: coalescer,
 			reader:    p.clipboard,
 			log:       p.logger,
@@ -3551,6 +3916,20 @@ func (p *stdinPump) run() {
 			next: coalescer.Scan,
 		}
 		sink = ci.Scan
+	}
+	// routeInput keeps the marker/palette demultiplexing intact while a
+	// client-owned picker owns the terminal: the scanner still resolves
+	// probe replies, but every byte that would have become session input is
+	// decoded for the picker instead. There is no fallback to the PTY
+	// pipeline while the picker owns input.
+	routeInput := func(data []byte) {
+		if p.picker != nil {
+			if outcome, consumed := p.picker.consume(terminalReadResult{data: data, source: terminalInputHuman}); consumed {
+				p.pickerOutcomes.offer(outcome)
+				return
+			}
+		}
+		sink(data)
 	}
 	input := p.input
 	ownedInput := input == nil
@@ -3587,7 +3966,7 @@ func (p *stdinPump) run() {
 	var markerTimer ports.Timer
 	var markerTimerC <-chan time.Time
 	flushMarkerPrefix := func() {
-		markers.flush(sink)
+		markers.flush(routeInput)
 		markerTimer = nil
 		markerTimerC = nil
 	}
@@ -3621,7 +4000,61 @@ func (p *stdinPump) run() {
 	}
 	defer disarmMarkerDeadline()
 
+	var pickerTimer ports.Timer
+	var pickerTimerC <-chan time.Time
+	disarmPickerDeadline := func() {
+		if pickerTimer == nil {
+			return
+		}
+		pickerTimer.Stop()
+		pickerTimer = nil
+		pickerTimerC = nil
+	}
+	// armPickerDeadline bounds the escape ambiguity window while the picker
+	// owns input: a lone ESC is Escape unless a sequence byte follows before
+	// the deadline. The withheld prefix never falls back to the session.
+	armPickerDeadline := func() {
+		disarmPickerDeadline()
+		pickerTimer = p.clock.NewTimer(pickerEscapeDeadline)
+		pickerTimerC = pickerTimer.C()
+	}
+	defer disarmPickerDeadline()
+	// syncPickerDeadline arms the escape window once per withheld prefix:
+	// re-arming on every loop turn would postpone the deadline whenever an
+	// unrelated event wakes the pump.
+	syncPickerDeadline := func() {
+		if !p.picker.hasPending() {
+			disarmPickerDeadline()
+			return
+		}
+		if pickerTimer == nil {
+			armPickerDeadline()
+		}
+	}
+	// resolveExpiredPickerDeadline applies a deadline that already fired
+	// before a later suffix may complete the withheld prefix.
+	resolveExpiredPickerDeadline := func() {
+		if pickerTimerC == nil {
+			return
+		}
+		select {
+		case <-pickerTimerC:
+			disarmPickerDeadline()
+			if outcome, ok := p.picker.flushPending(); ok {
+				p.pickerOutcomes.offer(outcome)
+			}
+		default:
+		}
+	}
+
 	for {
+		// A withheld prefix needs a bounded disambiguation window whichever
+		// path withheld it: the palette-marker scanner can flush ordinary
+		// bytes into the picker decoder, so the deadline is synced here rather
+		// than at one producer site. An already-expired deadline resolves
+		// first so a later suffix cannot complete the prefix.
+		resolveExpiredPickerDeadline()
+		syncPickerDeadline()
 		var result terminalReadResult
 		var batch *terminalAutomationRequest
 		select {
@@ -3630,6 +4063,11 @@ func (p *stdinPump) run() {
 		case <-markerTimerC:
 			flushMarkerPrefix()
 			continue
+		case <-pickerTimerC:
+			disarmPickerDeadline()
+			if outcome, ok := p.picker.flushPending(); ok {
+				p.pickerOutcomes.offer(outcome)
+			}
 		case request := <-input.automation:
 			input.mu.Lock()
 			clean := input.consumer == consumer && request.consumer == consumer && input.pending == nil && len(input.residual) == 0 && input.delivering == 0
@@ -3647,6 +4085,27 @@ func (p *stdinPump) run() {
 			activeBatch = batch
 			batchSent.Store(false)
 			batchComplete = false
+			outcome, consumed := pickerConsumeOutcome{}, false
+			if p.picker != nil {
+				outcome, consumed = p.picker.consume(request.record)
+			}
+			if consumed {
+				p.pickerOutcomes.offer(outcome)
+				// The open picker loop consumed this admitted op:
+				// cursor/search repainted locally or a typed
+				// commit/cancel crossed on controlCh. Zero picker
+				// bytes enter the PTY pipeline, so the coalescer
+				// and fence below are skipped. Completion follows
+				// the action path: locally for presentation steps,
+				// via PickerFailure or the navigation handoff for
+				// commits and cancels.
+				request.admitted <- true
+				batch.dispatched <- true
+				activeBatch = nil
+				actionID.Store(0)
+				automated = false
+				continue
+			}
 			result = request.record
 			automated = true
 			actionID.Store(result.actionID)
@@ -3693,7 +4152,7 @@ func (p *stdinPump) run() {
 			}, func(light bool) {
 				sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventScheme, light: light})
 			}, func(data []byte) {
-				markers.scan(data, sink, func() {
+				markers.scan(data, routeInput, func() {
 					sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker})
 				})
 			})
@@ -3708,9 +4167,9 @@ func (p *stdinPump) run() {
 		}
 		if batch != nil {
 			scanner.EndBatch(func(data []byte) {
-				markers.scan(data, sink, func() { sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker}) })
+				markers.scan(data, routeInput, func() { sendEvent(paletteGenerationEvent{id: readGeneration, kind: paletteEventMarker}) })
 			})
-			markers.flush(sink)
+			markers.flush(routeInput)
 			ok := coalescer.EndBatch() && sendOK.Load()
 			batchComplete = ok && pendingEvents.Load() == 0
 			applied := make(chan struct{})
@@ -3744,7 +4203,7 @@ func (p *stdinPump) run() {
 		}
 		if result.err != nil {
 			disarmMarkerDeadline()
-			markers.flush(sink)
+			markers.flush(routeInput)
 			select {
 			case p.out <- protocol.Detach{}:
 			case <-p.ctx.Done():
@@ -3763,10 +4222,26 @@ func (p *stdinPump) run() {
 	}
 }
 
+func offerLatestGeometry(out chan domain.Geometry, geometry domain.Geometry) {
+	select {
+	case out <- geometry:
+		return
+	default:
+	}
+	select {
+	case <-out:
+	default:
+	}
+	select {
+	case out <- geometry:
+	default:
+	}
+}
+
 // runResize forwards coalesced terminal resize events to the daemon. It
 // tolerates an already-closed resize channel (which the terminal adapter
 // hands back when restore ran before ResizeEvents was first called).
-func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- protocol.ClientMessage, sendLease *foregroundSendLease, log *slog.Logger) {
+func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- protocol.ClientMessage, local chan domain.Geometry, sendLease *foregroundSendLease, log *slog.Logger) {
 	defer log.Debug("resize pump exited")
 	for {
 		select {
@@ -3783,6 +4258,7 @@ func runResize(ctx context.Context, events <-chan domain.Geometry, out chan<- pr
 			if !sendLease.send(func() bool {
 				select {
 				case out <- message:
+					offerLatestGeometry(local, geometry)
 					return true
 				case <-ctx.Done():
 					return false

@@ -12,7 +12,7 @@ make test
 go test ./internal/usecase/daemon -race -run TestName
 make lint
 make mocks
-go test ./pkg/renderer ./pkg/vt ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem
+go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -benchmem
 ```
 
 - Format with **goimports**.
@@ -68,7 +68,7 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 Typed messages and negotiated version live in `internal/protocol`. Remote discovery JSON lives in `internal/protocol/catalogue`. Message IDs, frames, strict codecs, compression, encoded bounds, and raw carriage interfaces live in `internal/protocol/wire`. Connection framing lives in concrete carriage adapters such as `internal/adapters/ipc`.
 
 - IPC frames on a connection are 4-byte big-endian length, 1 type byte, then payload.
-- Client message types occupy `1–13`, `15`, `32–33`, and `35` (`MsgParkedRouteRequest`); server types occupy `16–23`, `25–31`, `34`, and `36` (`MsgParkedRouteResponse`). Types `14` and `24` remain reserved.
+- Client message types occupy `1–13`, `15`, `32–33`, `35` (`MsgParkedRouteRequest`), and `49`/`51`/`53` (`MsgPickerOpen`/`MsgPickerCloseClient`/`MsgPickerSelection`); server types occupy `16–23`, `25–31`, `34`, `36` (`MsgParkedRouteResponse`), and `50`/`52`/`54` (`MsgPickerSnapshot`/`MsgPickerCloseServer`/`MsgPickerFailure`). Types `14` and `24` remain reserved.
 - Version negotiation requires strict equality.
 - `Hello.Version` and `CommandRequest.Version` must stay first so their version peekers work.
 - Bump `ProtocolVersion` for any message layout change.

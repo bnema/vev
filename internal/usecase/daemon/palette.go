@@ -737,6 +737,12 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	if !attachmentHandoff && !d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 		return
 	}
+	// A client-owned picker may acquire presentation as soon as its offer's
+	// output barrier is displayed. Commit the palette-free base first so that
+	// barrier can never name a frame which still contains the command palette.
+	if cmd.Slug == "session-picker" {
+		d.invalidateRenderNow(sess, ac, true, "palette.go:session-picker-base")
+	}
 	sess.dispatchMu.Lock()
 	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect, redrawClosedPalette: true}, args)
 	sess.dispatchMu.Unlock()
@@ -1046,7 +1052,7 @@ func (e paletteExec) OpenMovePanePicker() error {
 	if target.tab == nil || target.pane == nil {
 		return errMovePaneInvalid
 	}
-	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMovePane, moveSourceLocator{
+	return e.openMovePicker(protocol.PickerIntentMovePane, moveSourceLocator{
 		Session:    sessionMoveLocator(e.sess),
 		TabID:      domain.TabStableID(target.tab.stableID),
 		PaneID:     domain.PaneStableID(target.pane.stableID),
@@ -1059,11 +1065,31 @@ func (e paletteExec) OpenMoveTabPicker() error {
 	if target.tab == nil {
 		return errMovePaneInvalid
 	}
-	return e.d.enterPickerForIntent(e.sess, e.ac, pickerMoveTab, moveSourceLocator{
+	return e.openMovePicker(protocol.PickerIntentMoveTab, moveSourceLocator{
 		Session:    sessionMoveLocator(e.sess),
 		TabID:      domain.TabStableID(target.tab.stableID),
 		Attachment: e.ac,
 	})
+}
+
+// openMovePicker opens one move picker on an admitted effect. The captured
+// source is daemon-side state: it is bound to the interaction at open and
+// revalidated at commit, never supplied by the presenting client.
+func (e paletteExec) openMovePicker(intent protocol.PickerIntent, source moveSourceLocator) error {
+	if e.ac == nil || e.ac.overlays == nil {
+		return errAttachmentTransition
+	}
+	effect := e.effect
+	if effect == nil {
+		current := e.ac.transportSnapshot()
+		_, fresh, admitted := e.ac.beginCurrentAttachmentEffect(e.sess, current.transport)
+		if !admitted {
+			return errAttachmentTransition
+		}
+		defer fresh.End()
+		effect = fresh
+	}
+	return e.d.openPickerForAttachment(e.ac, effect, intent, source, 0)
 }
 
 func (e paletteExec) focus(direction layout.Direction) error {
@@ -1173,11 +1199,43 @@ func (e paletteExec) RenameTabTo(name string) error {
 }
 
 func (e paletteExec) OpenSessionPicker() error {
-	if e.ac != nil && e.ac.navigationCapabilities&protocol.NavigationCapabilityHomePicker != 0 && e.effect != nil {
-		return e.d.sendNavigationActionForAttachment(e.effect, protocol.NavigationOpenHomePicker)
+	if e.ac == nil || e.ac.overlays == nil {
+		return errAttachmentTransition
 	}
-	e.d.enterPicker(e.sess, e.ac)
-	return nil
+	// The palette already closed on execute (see handlePaletteInput):
+	// only invalidate when the close actually changed overlay state, then
+	// open the picker interaction on a freshly admitted effect so the
+	// opener's fence retires on the authoritative repaint below.
+	overlays := e.ac.overlays
+	overlays.paletteMu.Lock()
+	generation := overlays.paletteGeneration
+	query := ""
+	if overlays.palette != nil {
+		query = overlays.palette.Query()
+	}
+	overlays.paletteMu.Unlock()
+	if e.d.closeExecutedPalette(e.ac, e.effect, generation, query) {
+		e.d.invalidateRender(e.sess, e.ac, true, "palette.go:session-picker")
+	}
+	effect := e.effect
+	if effect == nil {
+		current := e.ac.transportSnapshot()
+		_, fresh, admitted := e.ac.beginCurrentAttachmentEffect(e.sess, current.transport)
+		if !admitted {
+			return errAttachmentTransition
+		}
+		defer fresh.End()
+		effect = fresh
+	} else {
+		fresh, admitted := e.ac.beginAttachmentEffect(effect.capability())
+		if !admitted {
+			return errAttachmentTransition
+		}
+		fresh.uiActionID = effect.uiActionID
+		defer fresh.End()
+		effect = fresh
+	}
+	return e.d.openPickerForAttachment(e.ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0)
 }
 
 func (e paletteExec) OpenNotifications() error {

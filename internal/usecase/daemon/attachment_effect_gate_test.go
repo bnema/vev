@@ -784,17 +784,47 @@ func TestJumpAttentionAdmittedHandoffCrossesSessions(t *testing.T) {
 	require.Equal(t, 1, testAttachmentTabIndex(target))
 }
 
+// openPickerForSession opens a navigation interaction on the attachment and
+// returns a kill selection for the named session. The open runs on a
+// short-lived effect: the interaction namespace lives on the attachment, not
+// on the effect that carried its offer.
+func openPickerForSession(t *testing.T, d *Daemon, sess *session, ac *attachedClient, killSession domain.SessionID) protocol.PickerSelection {
+	t.Helper()
+	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	require.True(t, admitted)
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	effect.End()
+	ac.overlays.pickerMu.Lock()
+	interaction := ac.overlays.pickerInteraction
+	revision := ac.overlays.pickerRevisions[servingPickerSourceID]
+	key := ""
+	for candidate, target := range ac.overlays.pickerKeys {
+		if target.Session == killSession {
+			key = candidate
+			break
+		}
+	}
+	ac.overlays.pickerMu.Unlock()
+	require.NotEmpty(t, key, "no picker key resolves to session %s", killSession)
+	return protocol.PickerSelection{
+		InteractionID: interaction, SourceID: servingPickerSourceID,
+		SourceRevision: revision, Key: key, Action: protocol.PickerActionKill,
+	}
+}
+
 func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, old, _ := newManualSessionWithPTYs(t, p)
-	d.enterPicker(sess, old)
+	selection := openPickerForSession(t, d, sess, old, sess.id)
 
 	oldTransport := old.transport()
 	rc := d.attachCoordinator(sess, nil, old, true)
 	token := sess.captureAttachmentCapability(old, oldTransport)
 	token.lease = rc.attachmentLease(old)
 	old.installTestAttachmentCapability(token)
+	actionEffect, admitted := old.beginAttachmentEffect(token)
+	require.True(t, admitted)
 
 	admissionEnded := make(chan struct{})
 	releaseAction := make(chan struct{})
@@ -809,7 +839,7 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 	}
 	actionDone := make(chan struct{})
 	go func() {
-		d.handleAttachmentClientFrame(token, frameInput([]byte("x")))
+		d.resolvePickerSelection(actionEffect, selection)
 		close(actionDone)
 	}()
 	<-admissionEnded
@@ -834,13 +864,15 @@ func TestPickerDeleteSourceForCurrentInitiatorDoesNotDeadlock(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	d.enterPicker(sess, ac)
+	selection := openPickerForSession(t, d, sess, ac, sess.id)
 	rc := d.attachCoordinator(sess, nil, ac, true)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	token.lease = rc.attachmentLease(ac)
 	ac.installTestAttachmentCapability(token)
+	actionEffect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
 
-	d.handleAttachmentClientFrame(token, frameInput([]byte("x")))
+	d.resolvePickerSelection(actionEffect, selection)
 
 	d.mu.Lock()
 	_, registered := d.sessions[sess.id]

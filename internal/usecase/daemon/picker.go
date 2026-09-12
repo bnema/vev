@@ -3,7 +3,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"time"
 
@@ -11,85 +10,29 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
-var pickerModal = ui.Modal{WidthPct: 80, HeightPct: 80, MinWidth: 24, MinHeight: 8, Title: " Sessions ", Anchor: domain.AnchorCenter, Margins: ui.Margins{}}
+// The picker's floating geometry lives in the picker package: the presenting
+// client draws the same box, and this daemon sizes the preview it captures from
+// it, so both sides always agree.
+var pickerModal = picker.Modal
 
-// pickerSortMode orders the picker's live sessions. It lives for the daemon's
-// lifetime only and is never persisted.
-type pickerSortMode uint32
-
-const (
-	pickerSortRecent pickerSortMode = iota
-	pickerSortGrouped
-
-	remotePickerPreviewDebounce = 80 * time.Millisecond
-)
-
-func pickerTitle(mode pickerSortMode) string {
-	if mode == pickerSortGrouped {
-		return " Sessions · grouped "
-	}
-	return " Sessions · recent "
-}
-
-// togglePickerSort flips the daemon's picker sort mode between the two known
-// modes with a CompareAndSwap loop, so a concurrent double-press can't lose
-// an update the way a bare Load-then-Store XOR can.
-func (d *Daemon) togglePickerSort() {
-	for {
-		cur := pickerSortMode(d.pickerSort.Load())
-		next := pickerSortRecent
-		if cur == pickerSortRecent {
-			next = pickerSortGrouped
-		}
-		if d.pickerSort.CompareAndSwap(uint32(cur), uint32(next)) {
-			return
-		}
-	}
-}
-
-// enterPicker preserves the existing navigation entry point. Navigation always
-// publishes its model, including an empty one; only move entry can fail for a
-// missing destination.
-func (d *Daemon) enterPicker(sess *session, ac *attachedClient) {
-	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
-}
-
-func (d *Daemon) publishPicker(sess *session, ac *attachedClient, model *picker.Model, intent pickerIntent, source moveSourceLocator) {
-	rt := ac.overlays
-	rt.pickerMu.Lock()
-	previous, previousGeneration := rt.pickerPreviewSession, rt.pickerPreviewGeneration
-	rt.pickerPreviewGeneration++
-	if rt.pickerRemotePreviewCancel != nil {
-		rt.pickerRemotePreviewCancel()
-		rt.pickerRemotePreviewCancel = nil
-	}
-	rt.pickerPreviewSession = nil
-	rt.pickerRemotePreview = picker.Preview{}
-	rt.pickerPreview = nil
-	rt.picker = model
-	rt.pickerGeneration++
-	rt.pickerTitle = pickerTitle(pickerSortMode(d.pickerSort.Load()))
-	rt.pickerIntent = intent
-	rt.pickerSource = source
-	rt.pickerPending = nil
-	rt.pickerESC.stop()
-	rt.pickerMu.Unlock()
-	d.teardownPreviewSubscription(ac, previous, previousGeneration)
-	d.registerPreviewForSelection(ac)
-	d.invalidateRender(sess, ac, true, "picker.go")
-}
+const remotePickerPreviewDebounce = 80 * time.Millisecond
 
 // pickerViews projects the shared daemon inventory for the picker. It keeps
-// current/ephemeral rows, tabs/previews, grouping, and move eligibility;
-// lifecycle and remote facts come from the common capture.
-func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.SessionView, picker.SourceFilter) {
+// current/ephemeral rows, tabs, grouping, and move eligibility; lifecycle and
+// remote facts come from the common capture. Section lines are published
+// whenever the source has more than one origin group, so the presenting
+// client can order each run locally without inventing group labels.
+func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionView, pickerSourceFilter) {
+	_, grouped, current := d.pickerViewProjections(cur, ac)
+	return grouped, current
+}
+
+func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pickerSessionView, []pickerSessionView, pickerSourceFilter) {
 	if cur != nil && ac != nil {
 		cur.repairAttachmentView(ac)
 	}
@@ -106,17 +49,17 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 	// renameSession mid-sort. Remote-catalog locks are released before sorting
 	// and picker-row construction.
 	live := inv.live
-	var current picker.SourceFilter
+	var current pickerSourceFilter
 	for _, item := range live {
 		snap := item.view
 		if item.sess == cur {
 			if ac != nil {
 				view := ac.viewSnapshot()
 				if view.tabID != "" {
-					current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: view.tabID}
+					current = pickerSourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: view.tabID}
 				}
 			} else if len(snap.tabs) > 0 {
-				current = picker.SourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.defaultTab].id}
+				current = pickerSourceFilter{Session: snap.id, Incarnation: snap.incarnation, TabID: snap.tabs[snap.defaultTab].id}
 			}
 		}
 	}
@@ -135,13 +78,6 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 		}
 		return stopped[i].name < stopped[j].name
 	})
-	if pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped {
-		// Stable partition: named sessions first, ephemeral after, each keeping
-		// its MRU order from the sort above.
-		sort.SliceStable(live, func(i, j int) bool {
-			return !live[i].view.ephemeral && live[j].view.ephemeral
-		})
-	}
 
 	catalogRows := 0
 	for _, host := range hosts {
@@ -150,16 +86,38 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 			catalogRows++
 		}
 	}
-	views := make([]picker.SessionView, 0, len(live)+len(stopped)+catalogRows)
-	grouped := pickerSortMode(d.pickerSort.Load()) == pickerSortGrouped
+	checking := monitored && !initialized
+	recent := make([]pickerSessionView, 0, len(live)+len(stopped)+catalogRows)
+	for _, item := range live {
+		recent = append(recent, item.view.pickerView())
+	}
+	for _, host := range hosts {
+		for _, session := range host.Sessions {
+			key := domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}
+			if key.Validate() == nil {
+				recent = append(recent, remotePickerView(key, session, host, now))
+			}
+		}
+		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
+			recent = append(recent, remotePickerHostView(host, now))
+		}
+	}
+	if checking {
+		recent = append(recent, remotePickerCheckingView())
+	}
+	for _, s := range stopped {
+		createdAt := s.createdAt
+		recent = append(recent, pickerSessionView{ID: domain.SessionID("stopped:" + s.name), Incarnation: s.incarnation, Name: s.name, TargetName: s.name, Stopped: true, ExpectedCreatedAt: &createdAt})
+	}
+
+	views := make([]pickerSessionView, 0, len(live)+len(stopped)+catalogRows)
 	for i, item := range live {
 		view := item.view.pickerView()
-		if grouped && i == 0 {
+		if i == 0 {
 			view.Section = "LOCAL"
 		}
 		views = append(views, view)
 	}
-	publishedRemote := false
 	for _, host := range hosts {
 		publishedForHost := 0
 		for _, session := range host.Sessions {
@@ -168,38 +126,29 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 				continue
 			}
 			view := remotePickerView(key, session, host, now)
-			if grouped {
-				view.HideRemoteOrigin = true
-				if publishedForHost == 0 {
-					view.Section = "REMOTE  " + host.Endpoint
-				}
-			}
-			views = append(views, view)
-			publishedForHost++
-			publishedRemote = true
-		}
-		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
-			view := remotePickerHostView(host, now)
-			if grouped {
+			view.HideRemoteOrigin = true
+			if publishedForHost == 0 {
 				view.Section = "REMOTE  " + host.Endpoint
 			}
 			views = append(views, view)
-			publishedRemote = true
+			publishedForHost++
+		}
+		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
+			view := remotePickerHostView(host, now)
+			view.Section = "REMOTE  " + host.Endpoint
+			views = append(views, view)
 		}
 	}
 	// A nil directory means remote monitoring is not installed at all:
 	// only an installed-but-unpublished monitor reads as "checking".
-	if monitored && !initialized {
+	if checking {
 		view := remotePickerCheckingView()
-		if grouped {
-			view.Section = "REMOTE"
-		}
+		view.Section = "REMOTE"
 		views = append(views, view)
-		publishedRemote = true
 	}
 	for i, s := range stopped {
 		createdAt := s.createdAt
-		view := picker.SessionView{
+		view := pickerSessionView{
 			ID:                domain.SessionID("stopped:" + s.name),
 			Incarnation:       s.incarnation,
 			Name:              s.name,
@@ -207,26 +156,12 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]picker.Session
 			Stopped:           true,
 			ExpectedCreatedAt: &createdAt,
 		}
-		if grouped && i == 0 && (len(live) == 0 || publishedRemote) {
+		if i == 0 && len(live) == 0 && catalogRows == 0 && !checking {
 			view.Section = "LOCAL"
 		}
 		views = append(views, view)
 	}
-	return views, current
-}
-
-func (d *Daemon) newPickerModel(cur *session, ac *attachedClient, intent pickerIntent, source moveSourceLocator, current picker.SourceFilter) *picker.Model {
-	views, attachedCurrent := d.pickerViews(cur, ac)
-	if intent == pickerNavigate && current == (picker.SourceFilter{}) {
-		current = attachedCurrent
-	}
-	return picker.New(views, picker.SelectionConfig{
-		Mode:    pickerSelectionMode(intent),
-		Current: current,
-		Source: picker.SourceFilter{
-			Session: source.Session.ID, Incarnation: source.Session.Incarnation, TabID: source.TabID,
-		},
-	})
+	return recent, views, current
 }
 
 func attentionSuffix(label string) string {
@@ -273,391 +208,9 @@ func remotePickerReasonText(reason string) string {
 	}
 }
 
-func pickerSearchSlashIndex(data, pending []byte) int {
-	if len(pending) != 0 {
-		return -1
-	}
-	for offset := 0; offset < len(data); {
-		if data[offset] == '/' {
-			return offset
-		}
-		if data[offset] != keys.ESC {
-			offset++
-			continue
-		}
-		if consumed, _ := routeListEscape(data[offset:]); consumed > 0 {
-			offset += consumed
-			continue
-		}
-		// An incomplete or unknown escape owns the rest of this input chunk;
-		// slash bytes inside it cannot transition the picker into search mode.
-		return -1
-	}
-	return -1
-}
-
-func (d *Daemon) pickerListInputState(ac *attachedClient) listInputState {
-	rt := ac.overlays
-	var previewGeneration uint64
-	return listInputState{
-		pending:  &rt.pickerPending,
-		esc:      &rt.pickerESC,
-		moveUp:   rt.picker.Up,
-		moveDown: rt.picker.Down,
-		lock:     rt.pickerMu.Lock,
-		unlock:   rt.pickerMu.Unlock,
-		active:   func() bool { return rt.picker != nil },
-		closeLocked: func() {
-			rt.picker = nil
-			rt.pickerIntent = pickerNavigate
-			rt.pickerSource = moveSourceLocator{}
-			previewGeneration = rt.pickerPreviewGeneration
-		},
-		afterClose: func() {
-			d.clearPreviewGeneration(ac, previewGeneration)
-			if sess := ac.currentAttachmentSession(); sess != nil {
-				d.invalidateRender(sess, ac, true, "picker.go")
-			}
-		},
-	}
-}
-
-func (d *Daemon) handlePickerInput(ac *attachedClient, data []byte, effects ...*attachmentEffect) {
-	sess := ac.currentAttachmentSession()
-	if sess == nil {
-		return
-	}
-	rt := ac.overlays
-	rt.pickerMu.Lock()
-	if rt.picker == nil {
-		rt.pickerPending = nil
-		rt.pickerESC.stop()
-		rt.pickerMu.Unlock()
-		return
-	}
-	normalAction := func(b byte) listInputResult {
-		switch b {
-		case 'x', 's':
-			return listInputResult{action: b, stop: true}
-		case '\r', '\n':
-			return listInputResult{action: b, exit: true}
-		default:
-			return listInputResult{}
-		}
-	}
-	var result listInputResult
-	if rt.picker.SearchActive() {
-		result = d.handlePickerSearchInputLocked(ac, data)
-	} else if slash := pickerSearchSlashIndex(data, rt.pickerPending); slash >= 0 {
-		result = handleListInputLocked(d.clock, data[:slash], d.pickerListInputState(ac), normalAction)
-		if result.action == 0 && !result.exit && len(rt.pickerPending) == 0 {
-			rt.picker.EnterSearch()
-			result.changed = true
-			if slash+1 < len(data) {
-				searchResult := d.handlePickerSearchInputLocked(ac, data[slash+1:])
-				searchResult.changed = searchResult.changed || result.changed
-				result = searchResult
-			}
-		}
-	} else {
-		result = handleListInputLocked(d.clock, data, d.pickerListInputState(ac), normalAction)
-	}
-	var target picker.Target
-	var cursor picker.Target
-	var ok bool
-	var cursorOK bool
-	var rejectedBySearch bool
-	observedPicker := rt.picker
-	observedGeneration := rt.pickerGeneration
-	var intent pickerIntent
-	var source moveSourceLocator
-	// prevIdx is the row the victim occupied; -1 means "no post-delete hint".
-	prevIdx := -1
-	if result.action == 'x' || result.action == '\r' || result.action == '\n' {
-		target, ok = rt.picker.Selected()
-		cursor, cursorOK = rt.picker.Cursor()
-		rejectedBySearch = rt.picker.SelectionRejectedBySearch()
-		prevIdx = rt.picker.SelectedIndex()
-	}
-	intent, source = rt.pickerIntent, rt.pickerSource
-	rt.pickerMu.Unlock()
-
-	if !d.pickerInstanceCurrent(ac, observedPicker, observedGeneration) {
-		return
-	}
-	if result.action == 's' {
-		d.togglePickerSort()
-		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-		d.invalidateRender(sess, ac, true, "picker.go")
-		return
-	}
-	if (result.action == '\r' || result.action == '\n') && !ok && rejectedBySearch {
-		d.invalidateRender(sess, ac, true, "picker search no match")
-		return
-	}
-	if (result.action == '\r' || result.action == '\n') && !ok && cursorOK && (cursor.RemoteTarget != nil || cursor.RemoteHost != "") {
-		d.notifyRemotePickerUnavailable(sess, cursor)
-		d.invalidateRender(sess, ac, true, "picker.go")
-		return
-	}
-	if result.action == 'x' {
-		var effect *attachmentEffect
-		if len(effects) != 0 {
-			effect = effects[0]
-		}
-		if ok {
-			var err error
-			if effect != nil {
-				effect.bindActionEnd(d, "picker-delete")
-				err = d.killPickerTargetForAttachment(target, effect)
-			} else {
-				err = d.killPickerTarget(target)
-			}
-			if err != nil {
-				d.reportAttachmentError(sess, err)
-			}
-		}
-		if effect != nil && !effect.current() {
-			fresh, admitted := ac.beginAttachmentEffect(effect.capability())
-			if !admitted {
-				return
-			}
-			defer fresh.End()
-		}
-		d.refreshPickerOpts(ac, pickerRefreshOptions{nearestRow: prevIdx})
-		d.invalidateRender(sess, ac, true, "picker.go")
-		return
-	}
-	if result.changed {
-		d.registerPreviewForSelection(ac)
-	}
-	committing := (result.action == '\r' || result.action == '\n') && ok
-	backNavigationSent := false
-	if result.exit && !committing {
-		back := ac.startupOverlay == protocol.StartupOverlaySessionPicker && ac.navigationCapabilities&protocol.NavigationCapabilityBack != 0
-		if back {
-			if len(effects) == 0 || effects[0] == nil {
-				d.invalidateRender(sess, ac, true, "picker.go")
-				return
-			}
-			effect := effects[0]
-			if err := d.sendNavigationActionForAttachment(effect, protocol.NavigationBack); err != nil {
-				d.reportAttachmentError(sess, err)
-				d.invalidateRender(sess, ac, true, "picker.go")
-				return
-			}
-			backNavigationSent = true
-		}
-		d.closePickerIfCurrent(ac, observedPicker, observedGeneration)
-	}
-	if committing {
-		if intent == pickerMovePane || intent == pickerMoveTab {
-			if err := d.movePickerSourceError(source); err != nil {
-				d.reportAttachmentError(sess, err)
-				d.invalidateRender(sess, ac, true, "picker.go")
-				return
-			}
-			if len(effects) != 0 && effects[0] != nil {
-				effects[0].End()
-			}
-			if !d.closePickerIfCurrent(ac, observedPicker, observedGeneration) {
-				return
-			}
-			err := d.commitMovePickerSelection(intent, source, target)
-			if err != nil {
-				d.reportAttachmentError(sess, movePickerUserError(err))
-				d.invalidateRender(sess, ac, true, "picker.go")
-				return
-			}
-			d.invalidateRender(sess, ac, true, "picker.go")
-			return
-		}
-		var err error
-		if len(effects) != 0 && effects[0] != nil {
-			err = d.switchToTargetForAttachment(effects[0], target, sessionHandoffGuard{closePicker: true, allowSamePeer: true, pickerModel: observedPicker, pickerGeneration: observedGeneration}, "picker-select")
-		} else {
-			if !d.closePickerIfCurrent(ac, observedPicker, observedGeneration) {
-				return
-			}
-			err = d.switchToTarget(sess, ac, target)
-		}
-		if errors.Is(err, errAttachmentTransition) {
-			return
-		}
-		if err != nil {
-			d.reportAttachmentError(sess, err)
-			return
-		}
-		return
-	}
-	if (result.exit || result.changed) && !backNavigationSent {
-		d.invalidateRender(sess, ac, true, "picker.go")
-	}
-}
-
-func (d *Daemon) registerPreviewForSelection(ac *attachedClient) {
-	if ac == nil || ac.overlays == nil {
-		return
-	}
-	ac.overlays.pickerMu.Lock()
-	var target picker.Target
-	var ok bool
-	intent := ac.overlays.pickerIntent
-	if ac.overlays.picker != nil {
-		target, ok = ac.overlays.picker.Selected()
-	}
-	previous, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
-	ac.overlays.pickerPreviewGeneration++
-	generation := ac.overlays.pickerPreviewGeneration
-	if ac.overlays.pickerRemotePreviewCancel != nil {
-		ac.overlays.pickerRemotePreviewCancel()
-		ac.overlays.pickerRemotePreviewCancel = nil
-	}
-	ac.overlays.pickerPreviewSession = nil
-	ac.overlays.pickerRemotePreview = picker.Preview{}
-	ac.overlays.pickerPreview = nil
-	ac.overlays.pickerMu.Unlock()
-	d.teardownPreviewSubscription(ac, previous, previousGeneration)
-	if !ok {
-		return
-	}
-	if target.RemoteTarget != nil {
-		d.startRemotePickerPreview(ac, target, generation)
-		return
-	}
-	targetSess, next := d.previewTarget(target, intent)
-	if next == nil || targetSess == nil {
-		return
-	}
-	ac.overlays.pickerMu.Lock()
-	// Selection may have changed while the target was resolved.
-	selected, stillSelected := ac.overlays.picker.Selected()
-	valid := ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerIntent == intent && stillSelected && pickerRouteTargetsEqual(selected, target)
-	if valid {
-		ac.overlays.pickerPreview = next
-		ac.overlays.pickerPreviewSession = targetSess
-	}
-	ac.overlays.pickerMu.Unlock()
-	if !valid {
-		return
-	}
-	// A same-session preview is already invalidated by its own coordinator.
-	// Cross-session previews subscribe to the target's producer wake instead
-	// of starting a direct paint/timer path.
-	if targetSess == ac.currentAttachmentSession() {
-		return
-	}
-	rc := d.attachCoordinator(targetSess, nil, nil, false)
-	rc.subscribePreviewFor(ac, generation, func(renderWake) {
-		if pickerPreviewCurrent(ac, targetSess, next, generation) {
-			if owner := ac.currentAttachmentSession(); owner != nil {
-				d.invalidateRender(owner, ac, false, "picker preview")
-			}
-		}
-	})
-	// subscribePreviewFor is deliberately outside pickerMu. Revalidate after it
-	// returns and remove only this generation if selection changed meanwhile.
-	d.revalidatePreviewSubscription(ac, rc, targetSess, next, generation)
-}
-
-func (d *Daemon) startRemotePickerPreview(ac *attachedClient, target picker.Target, generation uint64) {
-	if d == nil || ac == nil || target.RemoteTarget == nil || (d.remotePreviewClient == nil && !target.RemoteTarget.Stopped) {
-		return
-	}
-	width, height := remotePickerPreviewSize(ac.sizeSnapshot())
-	if width == 0 || height == 0 {
-		return
-	}
-	ctx := d.serveCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	previewCtx, cancel := context.WithCancel(ctx)
-	ac.overlays.pickerMu.Lock()
-	if ac.overlays.picker == nil || ac.overlays.pickerPreviewGeneration != generation {
-		ac.overlays.pickerMu.Unlock()
-		cancel()
-		return
-	}
-	ac.overlays.pickerRemotePreviewCancel = cancel
-	remoteTarget := *target.RemoteTarget
-	message := "loading remote preview…"
-	if remoteTarget.Stopped {
-		message = "stopped session — preview unavailable"
-	}
-	ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, message)
-	if remoteTarget.Stopped {
-		ac.overlays.pickerRemotePreviewCancel = nil
-		ac.overlays.pickerMu.Unlock()
-		cancel()
-		if sess := ac.currentAttachmentSession(); sess != nil {
-			d.invalidateRender(sess, ac, false, "remote picker preview")
-		}
-		return
-	}
-	ac.overlays.pickerMu.Unlock()
-	go func() {
-		defer cancel()
-		previewClock := d.clock
-		if previewClock == nil {
-			previewClock = systemClock{}
-		}
-		debounce := previewClock.NewTimer(remotePickerPreviewDebounce)
-		defer debounce.Stop()
-		select {
-		case <-debounce.C():
-		case <-previewCtx.Done():
-			return
-		}
-		preview, err := d.fetchRemotePreview(previewCtx, remoteTarget, width, height)
-		if err != nil {
-			ac.overlays.pickerMu.Lock()
-			matching := false
-			if ac.overlays.pickerPreviewGeneration == generation && ac.overlays.picker != nil {
-				selected, stillSelected := ac.overlays.picker.Selected()
-				matching = stillSelected && pickerRouteTargetsEqual(selected, target)
-				if matching {
-					ac.overlays.pickerRemotePreview = staticRemotePickerPreview(width, height, "remote preview unavailable")
-				}
-			}
-			ac.overlays.pickerMu.Unlock()
-			if matching {
-				if sess := ac.currentAttachmentSession(); sess != nil {
-					d.invalidateRender(sess, ac, false, "remote picker preview")
-				}
-			}
-			return
-		}
-		if refreshed, refreshErr := d.awaitRemotePreviewRefresh(previewCtx, remoteTarget, width, height); refreshErr == nil {
-			preview = refreshed
-		} else if previewCtx.Err() != nil {
-			return
-		}
-		rows := preview.FrameRows()
-		candidate := picker.Preview{Rows: rows, Width: int(preview.Width), Height: int(preview.Height)}
-		ac.overlays.pickerMu.Lock()
-		if ac.overlays.pickerPreviewGeneration != generation || ac.overlays.picker == nil {
-			ac.overlays.pickerMu.Unlock()
-			return
-		}
-		selected, stillSelected := ac.overlays.picker.Selected()
-		if !stillSelected || !pickerRouteTargetsEqual(selected, target) {
-			ac.overlays.pickerMu.Unlock()
-			return
-		}
-		ac.overlays.pickerRemotePreview = candidate
-		ac.overlays.pickerRemotePreviewCancel = nil
-		ac.overlays.pickerMu.Unlock()
-		if sess := ac.currentAttachmentSession(); sess != nil {
-			d.invalidateRender(sess, ac, false, "remote picker preview")
-		}
-	}()
-}
-
 func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
-	presentation := pickerModal.Resolve(size)
-	geometry := picker.ChooseGeometry(rectSize(presentation.Inner))
-	width, height := geometry.Preview.Width, geometry.Preview.Height
+	preview := picker.PreviewRect(size)
+	width, height := preview.Width, preview.Height
 	if width <= 0 || height <= 0 {
 		return 0, 0
 	}
@@ -680,137 +233,6 @@ func staticRemotePickerPreview(width, height uint16, message string) picker.Prev
 		rows[0][x] = renderer.Cell{Rune: r, Style: style}
 	}
 	return picker.Preview{Rows: rows, Width: int(width), Height: len(rows)}
-}
-
-func pickerPreviewCurrent(ac *attachedClient, targetSess *session, next *tab, generation uint64) bool {
-	ac.overlays.pickerMu.Lock()
-	defer ac.overlays.pickerMu.Unlock()
-	return ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewSession == targetSess && ac.overlays.pickerPreview == next
-}
-
-// revalidatePreviewSubscription removes a subscription that lost the picker
-// selection race after it was installed.
-func (d *Daemon) revalidatePreviewSubscription(ac *attachedClient, rc *renderCoordinator, targetSess *session, next *tab, generation uint64) {
-	if !pickerPreviewCurrent(ac, targetSess, next, generation) {
-		rc.teardownPreviewFor(ac, generation)
-	}
-}
-
-func (d *Daemon) teardownPreviewSubscription(ac *attachedClient, previous *session, generation uint64) {
-	if previous != nil {
-		if rc := previous.renderCoordinator(); rc != nil {
-			rc.teardownPreviewFor(ac, generation)
-		}
-	}
-}
-
-func (d *Daemon) unregisterPreview(ac *attachedClient) {
-	if ac == nil || ac.overlays == nil {
-		return
-	}
-	ac.overlays.pickerMu.Lock()
-	generation := ac.overlays.pickerPreviewGeneration
-	ac.overlays.pickerMu.Unlock()
-	d.clearPreviewGeneration(ac, generation)
-}
-
-// clearPreviewGeneration removes the preview only if it is still the observed
-// selection. Teardown paths may race a new picker selection.
-func (d *Daemon) clearPreviewGeneration(ac *attachedClient, generation uint64) bool {
-	ac.overlays.pickerMu.Lock()
-	if ac.overlays.pickerPreviewGeneration != generation {
-		ac.overlays.pickerMu.Unlock()
-		return false
-	}
-	previous := ac.overlays.pickerPreviewSession
-	ac.overlays.pickerPreviewGeneration++
-	if ac.overlays.pickerRemotePreviewCancel != nil {
-		ac.overlays.pickerRemotePreviewCancel()
-		ac.overlays.pickerRemotePreviewCancel = nil
-	}
-	ac.overlays.pickerPreviewSession = nil
-	ac.overlays.pickerRemotePreview = picker.Preview{}
-	ac.overlays.pickerPreview = nil
-	ac.overlays.pickerMu.Unlock()
-	d.teardownPreviewSubscription(ac, previous, generation)
-	return true
-}
-
-// clearDestroyedTabPreview clears coordinator-owned picker state for clients
-// that were previewing a removed tab. Tabs do not route render ownership.
-func (d *Daemon) clearDestroyedTabPreview(tb *tab) {
-	if d == nil || d.sessions == nil {
-		return
-	}
-	d.mu.Lock()
-	var clients []*attachedClient
-	for _, sess := range d.sessions {
-		if sess == nil {
-			continue
-		}
-		sess.mu.Lock()
-		clients = append(clients, sess.snapshotAttachmentsLocked()...)
-		sess.mu.Unlock()
-	}
-	d.mu.Unlock()
-	for _, ac := range clients {
-		if ac == nil || ac.overlays == nil {
-			continue
-		}
-		ac.overlays.pickerMu.Lock()
-		generation := ac.overlays.pickerPreviewGeneration
-		observed := ac.overlays.pickerPreview == tb
-		ac.overlays.pickerMu.Unlock()
-		if observed && d.clearPreviewGeneration(ac, generation) {
-			if sess := ac.currentAttachmentSession(); sess != nil {
-				d.invalidateRender(sess, ac, true, "picker.go")
-			}
-		}
-	}
-}
-
-func (d *Daemon) closePicker(ac *attachedClient) {
-	d.closePickerIfCurrent(ac, nil, 0)
-}
-
-func (d *Daemon) pickerInstanceCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
-	if ac == nil || ac.overlays == nil {
-		return false
-	}
-	ac.overlays.pickerMu.Lock()
-	defer ac.overlays.pickerMu.Unlock()
-	return ac.overlays.picker == model && ac.overlays.pickerGeneration == generation
-}
-
-// closePickerIfCurrent closes only the observed picker lifecycle. A nonzero
-// generation guards terminal parked cleanup even when a refresh replaced the
-// model within that generation.
-func (d *Daemon) closePickerIfCurrent(ac *attachedClient, model *picker.Model, generation uint64) bool {
-	return d.closePickerIfCurrentRefresh(ac, model, generation, 0)
-}
-
-func (d *Daemon) closePickerIfCurrentRefresh(ac *attachedClient, model *picker.Model, generation, refreshSequence uint64) bool {
-	if ac == nil || ac.overlays == nil {
-		return false
-	}
-	ac.overlays.pickerMu.Lock()
-	refreshChanged := refreshSequence != 0 && ac.overlays.pickerRefreshSequence != refreshSequence
-	modelChanged := model != nil && (ac.overlays.picker != model || ac.overlays.pickerGeneration != generation)
-	generationChanged := model == nil && generation != 0 && ac.overlays.pickerGeneration != generation
-	if refreshChanged || modelChanged || generationChanged {
-		ac.overlays.pickerMu.Unlock()
-		return false
-	}
-	ac.overlays.picker = nil
-	ac.overlays.pickerTitle = ""
-	ac.overlays.pickerIntent = pickerNavigate
-	ac.overlays.pickerSource = moveSourceLocator{}
-	ac.overlays.pickerPending = nil
-	ac.overlays.pickerESC.stop()
-	previewGeneration := ac.overlays.pickerPreviewGeneration
-	ac.overlays.pickerMu.Unlock()
-	d.clearPreviewGeneration(ac, previewGeneration)
-	return true
 }
 
 // pickerRouteTargetsEqual compares the exact route identity of two picker
@@ -853,19 +275,8 @@ func (d *Daemon) sessionByID(id domain.SessionID) *session {
 // one active-session handoff. Its zero value keeps daemon-owned transitions on
 // their established path.
 type sessionHandoffGuard struct {
-	expectedSource   *tab
-	closePicker      bool
-	allowSamePeer    bool
-	pickerModel      *picker.Model
-	pickerGeneration uint64
-}
-
-func (d *Daemon) closePickerForGuard(ac *attachedClient, guard sessionHandoffGuard) bool {
-	if guard.pickerModel != nil || guard.pickerGeneration != 0 {
-		return d.closePickerIfCurrent(ac, guard.pickerModel, guard.pickerGeneration)
-	}
-	d.closePicker(ac)
-	return true
+	expectedSource *tab
+	allowSamePeer  bool
 }
 
 // switchActiveTargetForAttachment hands a frame-bound navigation request to the
@@ -932,13 +343,6 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(effect *attachmentEffect
 		}
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", err)
 	}
-	if guard.closePicker {
-		fresh, admitted := effect.ac.beginAttachmentEffect(transition.published)
-		if admitted {
-			d.closePickerForGuard(effect.ac, guard)
-			fresh.End()
-		}
-	}
 	d.touchMRU(targetSess)
 	d.deferAttachmentTransitionCleanups(transition)
 	d.firstPaintForTransition(transition.published)
@@ -998,17 +402,14 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	if !matches || !effect.current() {
 		return errAttachmentTransition
 	}
-	homePicker := effect.ac.startupOverlay == protocol.StartupOverlaySessionPicker
-	if !homePicker && targetSess != nil && target.TabID != "" {
-		// Ordinary local tab navigation keeps the attachment. A home picker
-		// only borrows it: selecting even its backing session must hand off
-		// to the client so the remote route and temporary attachment end.
+	if targetSess != nil && target.TabID != "" {
+		// Ordinary local tab navigation keeps the attachment.
 		return d.switchToTargetGuardedForAttachment(effect.sess, effect.ac, target, guard, effect, action)
 	}
 
 	// Ordinary live session rows can use the client-confirmed same-peer
-	// path. Temporary home pickers and stopped targets require a handoff.
-	samePeerEligible := !homePicker && guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
+	// path. Stopped targets require a handoff.
+	samePeerEligible := guard.allowSamePeer && targetSess != nil && target.TabIndex <= 0
 	if exactTarget == nil {
 		return errAttachmentTransition
 	}
@@ -1041,9 +442,6 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	// handoff instead of losing their target-specific transition semantics.
 	// Keep the source link open until the client receives the ordered cleanup
 	// and handoff frames, then let the client's close drive ordinary parking.
-	if guard.closePicker {
-		d.closePickerForGuard(effect.ac, guard)
-	}
 	effect.bindActionEnd(d, "detach")
 	effect.End()
 	return nil
@@ -1080,9 +478,6 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 	}
 	if err := effect.sendControl(handoff); err != nil {
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
-	}
-	if guard.closePicker {
-		d.closePickerForGuard(effect.ac, guard)
 	}
 	d.clientGoneForAttachment(effect, false)
 	return nil
@@ -1177,17 +572,6 @@ func (d *Daemon) switchToTargetGuardedForAttachment(from *session, ac *attachedC
 		}
 		d.invalidateRender(from, ac, true, "picker.go")
 		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't switch to that session", cause)
-	}
-	if guard.closePicker {
-		if sourceEffect != nil {
-			fresh, admitted := ac.beginAttachmentEffect(transition.published)
-			if admitted {
-				d.closePickerForGuard(ac, guard)
-				fresh.End()
-			}
-		} else {
-			d.closePickerForGuard(ac, guard)
-		}
 	}
 	d.deferAttachmentTransitionCleanups(transition)
 	if targetSess == from {

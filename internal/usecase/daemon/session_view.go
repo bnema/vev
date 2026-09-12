@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/picker"
 )
 
 // viewOptions controls optional (costly) fields captured by snapshotView.
@@ -92,16 +91,15 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 	return view
 }
 
-// pickerView renders this snapshot as the picker's value type. Field-for-field
-// equivalent to the inline construction previously in pickerViews.
-func (view sessionView) pickerView() picker.SessionView {
-	out := picker.SessionView{
+// pickerView renders this snapshot as the picker's daemon-private value type.
+func (view sessionView) pickerView() pickerSessionView {
+	out := pickerSessionView{
 		ID:          view.id,
 		Incarnation: view.incarnation,
 		Name:        view.name,
 		TargetName:  view.name,
 		Active:      view.defaultTab,
-		Tabs:        make([]picker.TabEntry, 0, len(view.tabs)),
+		Tabs:        make([]pickerTabEntry, 0, len(view.tabs)),
 	}
 	if !view.ephemeral {
 		createdAt := view.createdAt
@@ -109,7 +107,7 @@ func (view sessionView) pickerView() picker.SessionView {
 	}
 	attention := false
 	for _, tb := range view.tabs {
-		out.Tabs = append(out.Tabs, picker.TabEntry{
+		out.Tabs = append(out.Tabs, pickerTabEntry{
 			TabID:     tb.id,
 			Name:      tb.name,
 			Detail:    tabTitleDetail(tb.name, tb.focusedTitle),

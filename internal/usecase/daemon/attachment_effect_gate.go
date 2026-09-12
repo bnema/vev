@@ -208,9 +208,6 @@ func (t *attachmentEffect) sendControl(message protocol.ServerMessage) error {
 	case protocol.AttachTarget:
 		navigation.CauseActionID = t.uiActionID
 		message = navigation
-	case protocol.NavigationDirective:
-		navigation.CauseActionID = t.uiActionID
-		message = navigation
 	case protocol.RouteNavigationAction:
 		navigation.CauseActionID = t.uiActionID
 		message = navigation

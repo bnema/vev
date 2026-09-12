@@ -139,6 +139,26 @@ func (d *Daemon) repaintAttachedClients(sess *session) {
 	}
 }
 
+// refreshClientPickers republishes the picker source of every attachment whose
+// interaction the client presents. A bell raised or cleared while that modal is
+// open must reach it, and client-owned presentation suppresses the daemon's own
+// paints: only a newer source revision updates the client's rows. Unchanged
+// line sets publish nothing, so the attention pulse stays cheap.
+func (d *Daemon) refreshClientPickers() {
+	d.mu.Lock()
+	sessions := sessionsSnapshot(d.sessions)
+	d.mu.Unlock()
+
+	for _, sess := range sessions {
+		for _, ac := range sess.snapshotAttachments() {
+			if ac.overlays == nil || !ac.overlays.pickerClientActive() {
+				continue
+			}
+			d.refreshPickerSnapshot(ac)
+		}
+	}
+}
+
 func (d *Daemon) repaintAllAttachedClients() {
 	d.mu.Lock()
 	sessions := sessionsSnapshot(d.sessions)
@@ -236,6 +256,7 @@ func (d *Daemon) attentionAnimator(ctx context.Context) {
 			}
 		case <-timer.C():
 			d.advanceAttentionFrame()
+			d.refreshClientPickers()
 			d.repaintAllAttachedClients()
 		}
 
@@ -255,6 +276,14 @@ func (d *Daemon) anyAttention() bool {
 	for _, sess := range sessions {
 		if sess.anyAttention() {
 			return true
+		}
+		for _, ac := range sess.snapshotAttachments() {
+			snapshot := ac.routeSnapshotCopy()
+			for _, entry := range snapshot.Entries {
+				if entry.Attention {
+					return true
+				}
+			}
 		}
 	}
 	return false

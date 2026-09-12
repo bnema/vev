@@ -29,6 +29,12 @@ func (d *Daemon) handleSequencedInputForAttachment(effect *attachmentEffect, _ u
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.initOverlays()
+	if ac.overlays.pickerClientActive() {
+		// The client-owned picker owns the input: raw keys and mouse events
+		// must not reach the session while it is open. Only its typed
+		// selection and close messages act, on the control path.
+		return
+	}
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
@@ -43,6 +49,11 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 func (d *Daemon) handleInputForAttachment(effect *attachmentEffect, data []byte) {
 	ac := effect.ac
 	ac.initOverlays()
+	if ac.overlays.pickerClientActive() {
+		// Same rule as handleInput: the client-owned picker consumes user
+		// input, mouse included, until it closes.
+		return
+	}
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) {
 			if effect.current() {
@@ -72,7 +83,7 @@ func (d *Daemon) handleMouseMutation(ac *attachedClient, ev mouse.Event) {
 	frameEvent := ev
 	ac.initOverlays()
 	rt := ac.overlays
-	if rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.resizeModeActive() {
+	if rt.promptActive() || rt.paletteActive() || rt.pickerClientActive() || rt.noticesActive() || rt.resizeModeActive() {
 		return
 	}
 	sess := ac.currentSession()

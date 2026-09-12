@@ -59,6 +59,8 @@ func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
 		failure.Kind = protocol.DecodeMessageNavigationInventory
 		failure.Version, _ = wire.PeekNavigationInventoryVersion(frame.Payload)
 		failure.RequestID, failure.HasRequestID = wire.PeekNavigationInventoryRequestID(frame.Payload)
+	case wire.MsgPickerControlRequest:
+		failure.Version, _ = wire.PeekPickerControlVersion(frame.Payload)
 	}
 	return nil, failure
 }
@@ -230,14 +232,22 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 		return wire.UnmarshalRouteAttentionSubscription(frame.Payload)
 	case wire.MsgSamePeerSwitchRequest:
 		return wire.UnmarshalSamePeerSwitchRequest(frame.Payload)
-	case wire.MsgParkedRouteRequest:
-		return wire.UnmarshalParkedRouteRequest(frame.Payload)
 	case wire.MsgNavigationInventoryRequest:
 		return wire.UnmarshalNavigationInventoryRequest(frame.Payload)
 	case wire.MsgNavigationInventoryPublication:
 		return wire.UnmarshalNavigationInventoryPublication(frame.Payload)
 	case wire.MsgNavigationInventoryFailure:
 		return wire.UnmarshalNavigationInventoryFailure(frame.Payload)
+	case wire.MsgPickerBegin:
+		return wire.UnmarshalPickerBegin(frame.Payload)
+	case wire.MsgPickerCloseClient:
+		return wire.UnmarshalPickerClose(frame.Payload)
+	case wire.MsgPickerSelection:
+		return wire.UnmarshalPickerSelection(frame.Payload)
+	case wire.MsgPickerPreviewRequest:
+		return wire.UnmarshalPickerPreviewRequest(frame.Payload)
+	case wire.MsgPickerControlRequest:
+		return wire.UnmarshalPickerControlRequest(frame.Payload)
 	case wire.MsgRecentRouteSnapshot:
 		return wire.UnmarshalRecentRouteSnapshot(frame.Payload)
 	case wire.MsgRouteNavigationFailure:
@@ -247,12 +257,13 @@ func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
 	case wire.MsgUIFence:
 		return wire.UnmarshalUIFence(frame.Payload)
 	case wire.MsgWelcome, wire.MsgError, wire.MsgOutput, wire.MsgDetached, wire.MsgPong,
-		wire.MsgSessions, wire.MsgCommandResult, wire.MsgNavigationAction,
-		wire.MsgAttachTarget, wire.MsgRemotePreviewResponse,
+		wire.MsgSessions, wire.MsgCommandResult, wire.MsgAttachTarget, wire.MsgRemotePreviewResponse,
 		wire.MsgCommittedRouteIdentity, wire.MsgNavigateRecentRoute, wire.MsgRouteCreateSession,
-		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure, wire.MsgParkedRouteResponse,
+		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure,
 		wire.MsgUIReceipt, wire.MsgUIViewUpdate, wire.MsgNavigationInventoryResponse,
-		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection, wire.MsgRouteRetired:
+		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection, wire.MsgRouteRetired,
+		wire.MsgPickerOffer, wire.MsgPickerSnapshot, wire.MsgPickerClosedServer, wire.MsgPickerResult, wire.MsgPickerFailure,
+		wire.MsgPickerPreview, wire.MsgPickerControlResponse:
 		return nil, ErrWrongDirection
 	default:
 		return nil, ErrUnknownMessageType
@@ -289,12 +300,6 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 		return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(m)}, nil
 	case protocol.CommandResult:
 		return wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(m)}, nil
-	case protocol.NavigationDirective:
-		payload := wire.MarshalNavigationDirective(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgNavigationAction, Payload: payload}, nil
 	case protocol.AttachTarget:
 		payload := wire.MarshalAttachTarget(m)
 		if payload == nil {
@@ -328,12 +333,6 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 	case protocol.SamePeerSwitchFailure:
 		payload, err := wire.MarshalSamePeerSwitchFailure(m)
 		return wire.Frame{Type: wire.MsgSamePeerSwitchFailure, Payload: payload}, err
-	case protocol.ParkedRouteResponse:
-		payload := wire.MarshalParkedRouteResponse(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgParkedRouteResponse, Payload: payload}, nil
 	case protocol.NavigationInventoryResponse:
 		payload := wire.MarshalNavigationInventoryResponse(m)
 		if payload == nil {
@@ -352,6 +351,48 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return wire.Frame{}, ErrInvalidMessage
 		}
 		return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: payload}, nil
+	case protocol.PickerOffer:
+		payload := wire.MarshalPickerOffer(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerOffer, Payload: payload}, nil
+	case protocol.PickerSnapshot:
+		payload := wire.MarshalPickerSnapshot(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerSnapshot, Payload: payload}, nil
+	case protocol.PickerClosed:
+		payload := wire.MarshalPickerClosed(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerClosedServer, Payload: payload}, nil
+	case protocol.PickerResult:
+		payload := wire.MarshalPickerResult(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerResult, Payload: payload}, nil
+	case protocol.PickerFailure:
+		payload := wire.MarshalPickerFailure(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerFailure, Payload: payload}, nil
+	case protocol.PickerControlResponse:
+		payload := wire.MarshalPickerControlResponse(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerControlResponse, Payload: payload}, nil
+	case protocol.PickerPreview:
+		payload := wire.MarshalPickerPreview(m)
+		if payload == nil {
+			return wire.Frame{}, ErrInvalidMessage
+		}
+		return wire.Frame{Type: wire.MsgPickerPreview, Payload: payload}, nil
 	case *protocol.Welcome:
 		if m != nil {
 			return encodeServer(*m)
@@ -385,10 +426,6 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return encodeServer(*m)
 		}
 	case *protocol.CommandResult:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.NavigationDirective:
 		if m != nil {
 			return encodeServer(*m)
 		}
@@ -428,10 +465,6 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 		if m != nil {
 			return encodeServer(*m)
 		}
-	case *protocol.ParkedRouteResponse:
-		if m != nil {
-			return encodeServer(*m)
-		}
 	case *protocol.NavigationInventoryResponse:
 		if m != nil {
 			return encodeServer(*m)
@@ -441,6 +474,34 @@ func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
 			return encodeServer(*m)
 		}
 	case *protocol.NavigationInventorySelection:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerOffer:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerSnapshot:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerClosed:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerResult:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerFailure:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerPreview:
+		if m != nil {
+			return encodeServer(*m)
+		}
+	case *protocol.PickerControlResponse:
 		if m != nil {
 			return encodeServer(*m)
 		}

@@ -42,6 +42,9 @@ func (d *Daemon) moveTab(req moveTabRequest) error {
 func (p *moveTabTopology) transactionRequest() moveTransactionRequest {
 	req := p.req
 	return moveTransactionRequest{
+		follow:               req.Follow,
+		beforeFollow:         req.BeforeFollow,
+		afterFollow:          req.AfterFollow,
 		operation:            "tab",
 		attachment:           req.Attachment,
 		attachmentCapability: req.AttachmentCapability,

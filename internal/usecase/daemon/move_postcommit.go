@@ -20,6 +20,8 @@ func firstMovePane(panes []*pane) *pane {
 }
 
 type movePostcommitPlan struct {
+	followResult      attachmentTransitionResult
+	afterFollow       func(*attachmentEffect)
 	source            *session
 	destination       *session
 	sourceName        string
@@ -82,6 +84,45 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 	}
 	p.unlockDispatch()
 	p.reservation.Release()
+	if p.followResult.published.ac != nil {
+		result, err := d.finishAttachmentTransition(attachmentTransitionRequest{ready: true}, p.followResult)
+		if err != nil {
+			d.log.Warn("composite move follow route identity failed",
+				"err", err, "operation", p.operation,
+				"source_session", p.sourceName, "destination_session", p.destinationName)
+		} else {
+			d.deferAttachmentTransitionCleanups(result)
+			d.firstPaintForTransition(result.published)
+			if p.afterFollow != nil {
+				if d.beforeMoveFollowCompletion != nil {
+					d.beforeMoveFollowCompletion(result.published)
+				}
+				// The committing effect ended so the transaction could freeze
+				// admission. Report completion from a fresh effect on the exact
+				// capability the follow published on the destination.
+				effect, admitted := result.published.ac.beginAttachmentEffect(result.published)
+				if !admitted {
+					// The exact published capability stopped being admissible
+					// between the follow's identity send and this completion. That
+					// is either a concurrent transition superseding the capability
+					// while the attachment stays live, or the attachment being torn
+					// down. Re-admit only the attachment's current capability so the
+					// pending client action is completed exactly once through the
+					// existing admission seam. A detached attachment admits nothing,
+					// so its teardown resolves the pending action; no stale
+					// capability or retired transport is reused.
+					_, effect, admitted = admitCurrentAttachmentCapabilityEffect(result.published)
+				}
+				if admitted {
+					p.afterFollow(effect)
+					effect.End()
+				} else {
+					d.log.Warn("composite move follow completion not admitted",
+						"operation", p.operation, "destination_session", p.destinationName)
+				}
+			}
+		}
+	}
 	attrs := []any{
 		"operation", p.operation,
 		"source_session", p.sourceName,
@@ -143,7 +184,6 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 		)
 	}
 	for _, attachment := range p.retiredAttachments {
-		d.unregisterPreview(attachment.ac)
 		attachment.ac.clearCaptureFrames()
 		if err := d.cleanupAttachmentOutput(attachment.ac); err != nil {
 			d.log.Warn("move attachment output cleanup failed", "err", err, "operation", p.operation, "source_session", p.sourceName)
@@ -154,7 +194,6 @@ func (p movePostcommitPlan) execute(d *Daemon) {
 		if retirement.parked == nil || retirement.parked.ac == nil {
 			continue
 		}
-		d.unregisterPreview(retirement.parked.ac)
 		retirement.parked.ac.clearCaptureFrames()
 	}
 	d.finishParkedAttachmentRetirements(p.retiredParked)

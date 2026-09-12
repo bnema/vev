@@ -18,7 +18,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/picker"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -1026,7 +1025,6 @@ func TestCapturePrimaryRenderStatePreservesContextualMRUModeThroughScratchReuse(
 		state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 			bars:        bars,
 			overlays:    capturedOverlayRenderState{},
-			preview:     picker.Preview{},
 			floatingCfg: domain.FloatingConfig{},
 			reset:       false,
 			lease:       nil,

@@ -48,7 +48,7 @@ func TestCountingSnapshotRepositoryDoesNotRewriteKnownObjects(t *testing.T) {
 }
 
 func TestIncrementalSnapshotMetricsWriteNoUnchangedHistoryBlobsAndBoundCache(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: perfHistoryRows})
 
 	publishBenchmarkSnapshot(t, fixture, 1)
 	fixture.snapshots.reset()
@@ -64,7 +64,7 @@ func TestIncrementalSnapshotMetricsWriteNoUnchangedHistoryBlobsAndBoundCache(t *
 }
 
 func TestDaemonSnapshotDoesNotResupplyUnchangedTenThousandChunkHistory(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: perfHistoryRows})
 
 	// This contract concerns capture and publication bytes, not queue latency.
 	// Publish synchronously so the 10k-row setup cannot race the test deadline.
@@ -120,8 +120,8 @@ func TestIncrementalSnapshotMetricScenarios(t *testing.T) {
 		mutate      func(*performanceFixture, int)
 		wantHistory bool
 	}{
-		{name: "tail-only", historyRows: 9_999, mutate: mutateBenchmarkTail},
-		{name: "new-sealed-chunk", historyRows: 10_000, mutate: mutateBenchmarkSealedChunk, wantHistory: true},
+		{name: "tail-only", historyRows: perfHistoryRows - 1, mutate: mutateBenchmarkTail},
+		{name: "new-sealed-chunk", historyRows: perfHistoryRows, mutate: mutateBenchmarkSealedChunk, wantHistory: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: tt.historyRows})
@@ -142,11 +142,14 @@ func TestIncrementalSnapshotMetricScenarios(t *testing.T) {
 }
 
 func TestPerformanceFixtureByteLimitedHistory(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 400, Rows: 40}, panes: 1, historyRows: 10_000})
+	if raceEnabled {
+		t.Skip("byte eviction budget is calibrated without the race detector")
+	}
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 400, Rows: 40}, panes: 1, historyRows: perfHistoryRows})
 	fixture.activePane.mu.Lock()
 	rows, bytes, budget := fixture.activePane.history.Len(), fixture.activePane.history.LogicalBytes(), fixture.activePane.history.ByteCap()
 	fixture.activePane.mu.Unlock()
-	require.Less(t, rows, 10_000, "byte eviction must happen before the line ceiling")
+	require.Less(t, rows, perfHistoryRows, "byte eviction must happen before the line ceiling")
 	require.Positive(t, bytes)
 	require.LessOrEqual(t, bytes, budget)
 }
@@ -296,25 +299,25 @@ func TestTransactionalResizeMetrics(t *testing.T) {
 }
 
 func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: 4, panes: 4, historyRows: 10_000})
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: 4, panes: 4, historyRows: perfHistoryRows})
 
 	require.Len(t, fixture.sess.tabs, 4)
 	for _, tb := range fixture.sess.tabs {
 		require.Len(t, tb.panes, 4)
 		for _, p := range tb.panes {
-			require.Equal(t, 10_000, p.history.Len())
+			require.Equal(t, perfHistoryRows, p.history.Len())
 		}
 	}
 }
 
 func TestPerformanceFixtureSnapshotCaptureRetainsSealedHistory(t *testing.T) {
-	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000})
+	fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, historyRows: perfHistoryRows})
 
 	first, ok := fixture.d.captureSnapshotState(fixture.sess, 1)
 	require.True(t, ok)
 	require.Len(t, first.tabs, 1)
 	require.Len(t, first.tabs[0].panes, 2)
-	require.Equal(t, 10_000, first.tabs[0].panes[0].sealed.Len())
+	require.Equal(t, perfHistoryRows, first.tabs[0].panes[0].sealed.Len())
 	require.Positive(t, first.tabs[0].panes[0].sealed.ChunkCount())
 
 	second, ok := fixture.d.captureSnapshotState(fixture.sess, 2)
@@ -434,7 +437,7 @@ func benchmarkDaemonLargeHistory(b *testing.B, workload string, run func(*perfor
 	for _, topology := range daemonHistoryTopologies {
 		b.Run(topology.name, func(b *testing.B) {
 			fixture := newPerformanceFixture(b, performanceConfig{
-				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000,
+				size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: perfHistoryRows,
 			})
 			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
 				b.Fatal("invalid daemon history fixture")
@@ -483,7 +486,7 @@ func benchmarkDaemonCopySearch(b *testing.B, fixture *performanceFixture, run fu
 func benchmarkDaemonSnapshotCapture(b *testing.B) {
 	for _, topology := range daemonSnapshotTopologies {
 		b.Run(topology.name, func(b *testing.B) {
-			fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: 10_000})
+			fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: topology.tabs, panes: topology.panes, historyRows: perfHistoryRows})
 			if !fixture.hasHistoryTopology(topology.tabs, topology.panes, 10_000) {
 				b.Fatal("invalid daemon snapshot capture fixture")
 			}
@@ -525,14 +528,14 @@ type snapshotBenchmarkScenario struct {
 }
 
 var snapshotBenchmarkScenarios = []snapshotBenchmarkScenario{
-	{name: "initial-10k-x-120", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000},
-	{name: "unchanged", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, unchanged: true},
-	{name: "transcript-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkTranscript},
+	{name: "initial-10k-x-120", size: domain.Size{Cols: 120, Rows: 40}, historyRows: perfHistoryRows},
+	{name: "unchanged", size: domain.Size{Cols: 120, Rows: 40}, historyRows: perfHistoryRows, baseline: true, unchanged: true},
+	{name: "transcript-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: perfHistoryRows, baseline: true, mutate: mutateBenchmarkTranscript},
 	// Leave one row below the retention cap so the mutation changes only the
 	// mutable tail and cannot evict a sealed chunk.
 	{name: "tail-only", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 9_999, baseline: true, mutate: mutateBenchmarkTail},
-	{name: "new-sealed-chunk", size: domain.Size{Cols: 120, Rows: 40}, historyRows: 10_000, baseline: true, mutate: mutateBenchmarkSealedChunk},
-	{name: "byte-limited-400-columns", size: domain.Size{Cols: 400, Rows: 40}, historyRows: 10_000, byteLimited: true},
+	{name: "new-sealed-chunk", size: domain.Size{Cols: 120, Rows: 40}, historyRows: perfHistoryRows, baseline: true, mutate: mutateBenchmarkSealedChunk},
+	{name: "byte-limited-400-columns", size: domain.Size{Cols: 400, Rows: 40}, historyRows: perfHistoryRows, byteLimited: true},
 }
 
 func benchmarkIncrementalSnapshotRepository(b *testing.B, scenario snapshotBenchmarkScenario) {
@@ -685,7 +688,7 @@ func benchmarkReportSnapshotRepositoryMetrics(b *testing.B, metrics countingSnap
 }
 
 func benchmarkDaemonSnapshotRestore(b *testing.B) {
-	fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: 10_000})
+	fixture := newPerformanceFixture(b, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: 1, historyRows: perfHistoryRows})
 	if !fixture.hasHistoryTopology(1, 1, 10_000) {
 		b.Fatal("invalid daemon snapshot restore fixture")
 	}
@@ -837,7 +840,7 @@ func TestLivePaintAllocationBudget(t *testing.T) {
 		{name: "1tab-4panes", panes: 4},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: 10_000})
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: tt.panes, historyRows: perfHistoryRows})
 			run := func() {
 				fixture.paintLive()
 				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
@@ -866,7 +869,7 @@ func TestCopyEnterAllocationBudget(t *testing.T) {
 		{name: "8tabs-1pane", tabs: 8, panes: 1, max: 106},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: 10_000})
+			fixture := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, tabs: tt.tabs, panes: tt.panes, historyRows: perfHistoryRows})
 			run := func() {
 				fixture.d.enterCopyMode(fixture.sess, fixture.ac)
 				fixture.ac.ackOutputState(fixture.ac.output.currentEpoch(), fixture.ac.output.next)
@@ -1244,7 +1247,7 @@ func (f *performanceFixture) searchMatches() int {
 func (f *performanceFixture) copyModeActive() bool {
 	f.ac.overlays.copyMu.Lock()
 	defer f.ac.overlays.copyMu.Unlock()
-	return f.ac.overlays.copyMode != nil && f.ac.overlays.copyDocument != nil && f.ac.overlays.copyDocument.Len() >= 10_000
+	return f.ac.overlays.copyMode != nil && f.ac.overlays.copyDocument != nil && f.ac.overlays.copyDocument.Len() >= perfHistoryRows
 }
 
 func (f *performanceFixture) resize() {

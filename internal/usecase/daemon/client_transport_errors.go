@@ -70,7 +70,6 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		return
 	}
 	ac.clearSamePeerOffer()
-	ac.clearParkedRoute()
 	if d.afterClientGoneDetach != nil {
 		d.afterClientGoneDetach()
 	}
@@ -99,7 +98,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 	// attachment parking marker left by a raced non-explicit teardown so
 	// IntentResume waiters are not stranded on a never-published park.
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
-	d.closePicker(ac)
+	d.retirePicker(ac)
 	d.closePalette(ac)
 	if err := d.cleanupAttachmentOutput(ac); err != nil {
 		d.log.Warn("output cleanup failed during detach", "err", err, "session", name)
@@ -180,7 +179,6 @@ func (d *Daemon) reserveAttachmentSendErrorCleanup(token attachmentCapability, f
 
 func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed ports.ServerConnection) {
 	ac.clearSamePeerOffer()
-	ac.clearParkedRoute()
 	name := sess.nameSnapshot()
 	if rc := sess.renderCoordinator(); rc != nil {
 		rc.noteDetach(ac)
@@ -192,7 +190,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 		return
 	}
 	d.clearParkingInFlight(d.resumeTokenSnapshot(ac), ac)
-	d.closePicker(ac)
+	d.retirePicker(ac)
 	d.closePalette(ac)
 	if err := d.cleanupAttachmentOutput(ac); err != nil {
 		d.log.Warn("output cleanup failed after send error", "err", err, "session", name)

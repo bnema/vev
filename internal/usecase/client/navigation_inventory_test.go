@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/require"
 )
 
 // manualClock is a fake ports.Clock with explicit time control: no sleeps.
@@ -176,6 +177,23 @@ func TestInventoryRelaySnapshotAdmitsAndSuppressesUnchanged(t *testing.T) {
 	if _, _, changed := relay.preparePublication(response.Groups); changed {
 		t.Fatal("unchanged inventory must not republish remotely")
 	}
+}
+
+func TestInventoryRelayPublishesOnlyLocalSource(t *testing.T) {
+	relay := newInventoryRelay(&manualClock{now: time.Unix(1_000, 0)}, &inventoryFakeDialer{})
+	relay.setOpen(true, 5)
+	groups := append(inventoryTestGroups(), protocol.NavigationInventorySourceGroup{
+		SourceKey: "remote", Status: protocol.NavigationInventorySourceOK,
+		Entries: []protocol.NavigationInventoryEntry{{SourceKey: "remote", EntryKey: "ticker", Name: "ticker"}},
+	})
+
+	published, _, changed := relay.preparePublication(groups)
+	require.True(t, changed)
+	require.Equal(t, inventoryTestGroups(), published)
+
+	groups[1].Entries[0].Name = "changed-remote"
+	_, _, changed = relay.preparePublication(groups)
+	require.False(t, changed, "unsupported remote inventory must not alter local publication")
 }
 
 func TestInventoryRelaySelectionSurvivesRefreshLag(t *testing.T) {

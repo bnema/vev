@@ -137,10 +137,9 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 		d.resetOutput(effect)
 	case protocol.SamePeerSwitchRequest:
 		d.switchSamePeerForAttachment(effect, message)
-	case protocol.ParkedRouteRequest:
-		d.handleParkedRouteRequest(effect, message)
 	case protocol.RecentRouteSnapshot:
 		replayIdentity := effect.ac.setRouteSnapshot(message)
+		d.pokeAttentionTicker()
 		d.invalidateRender(effect.sess, effect.ac, false, "client_frame_routing.go:route-snapshot")
 		if !replayIdentity {
 			break
@@ -206,6 +205,30 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 			d.refreshPalette(effect.ac)
 			d.invalidateRender(effect.sess, effect.ac, true, "client_frame_routing.go:inventory-publication")
 		}
+	case protocol.PickerBegin:
+		if effect.ac == nil || effect.ac.overlays == nil {
+			break
+		}
+		if err := d.openPickerForAttachment(effect.ac, effect, message.Intent, moveSourceLocator{}, message.RequestID); err != nil {
+			d.reportAttachmentError(effect.sess, err)
+		}
+	case protocol.PickerClose:
+		if effect.ac == nil || effect.ac.overlays == nil {
+			break
+		}
+		if d.closePickerForAttachment(effect.ac, effect, message.InteractionID) {
+			// The client retired the interaction: force the authoritative
+			// full paint its release path waits for before normal input and
+			// action completion resume.
+			if sess := effect.ac.currentAttachmentSession(); sess != nil {
+				d.invalidateRender(sess, effect.ac, true, "client_frame_routing.go:picker-close")
+			}
+		}
+	case protocol.PickerSelection:
+		effect.uiActionID = message.CauseActionID
+		d.resolvePickerSelection(effect, message)
+	case protocol.PickerPreviewRequest:
+		d.handlePickerPreviewForAttachment(effect, message)
 	case protocol.NavigationInventoryFailure:
 		overlays := effect.ac.overlays
 		if overlays == nil {

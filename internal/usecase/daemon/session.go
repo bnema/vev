@@ -1195,7 +1195,6 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 	d.log.Info("tab closed", "session", name)
 	markSnapshotDirty(sess)
 
-	d.clearDestroyedTabPreview(tb)
 	tb.mu.Lock()
 	panes := tb.panesSnapshot()
 	tb.mu.Unlock()
@@ -1814,7 +1813,6 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		rc.waitForTimerWorkers()
 	}
 	for _, attachment := range attachments {
-		d.unregisterPreview(attachment.ac)
 		attachment.ac.clearCaptureFrames()
 	}
 
@@ -1828,7 +1826,6 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	sess.clipFiles = nil
 	sess.mu.Unlock()
 	for _, tb := range tabs {
-		d.clearDestroyedTabPreview(tb)
 		for _, attachment := range attachments {
 			d.teardownFloating(tb, attachment.ac)
 		}

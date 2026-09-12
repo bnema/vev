@@ -76,13 +76,15 @@ func (d *Daemon) refreshRemoteDirectoryViewsFor(ac *attachedClient) {
 	if ac == nil || ac.overlays == nil {
 		return
 	}
-	pickerOpen := ac.overlays.pickerActive()
+	pickerOpen := ac.overlays.pickerClientActive()
 	paletteOpen := ac.overlays.paletteActive()
 	if !pickerOpen && !paletteOpen {
 		return
 	}
+	// The picker and the palette both read the directory: republish the
+	// interaction snapshot with a new revision when the row set changed.
 	if pickerOpen {
-		d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
+		d.refreshPickerSnapshot(ac)
 	}
 	if paletteOpen {
 		d.refreshPalette(ac)

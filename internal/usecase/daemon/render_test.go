@@ -97,29 +97,6 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 	}
 }
 
-func TestPaletteBackdropDimsSimultaneousPicker(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
-	ac.setThemeForTest(backdropTheme())
-	client := vt.NewScreen(80, 25)
-	pane := sess.tabs[0].focusedPane()
-	pane.screen.Write([]byte("X"))
-
-	d.enterPicker(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	pickerTitle := client.Cell(31, 2)
-	require.Equal(t, 'S', pickerTitle.Rune, "fixture must address the picker title")
-	undimmedPane := client.Cell(0, 1)
-
-	d.enterPalette(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
-	dimmedPickerTitle := pickerTitle
-	dimmedPickerTitle.Style = themeui.NewDimmer(backdropTheme()).Dim(pickerTitle.Style).Canonical()
-	require.Equal(t, dimmedPickerTitle, client.Cell(31, 2), "the lower-priority picker must be part of the palette backdrop")
-	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmedPane.Style).Canonical(), client.Cell(0, 1).Style.Canonical(), "pane content outside overlays must use the theme dim style")
-}
-
 func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	p, release := newBlockingPTY(t)
 	defer release()
@@ -388,12 +365,9 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		d.clock = clock.clock
 		rc := d.attachCoordinator(target, nil, targetClient, true)
 
-		// A viewer in a different session is previewing the headless target.
+		// A viewer in a different session subscribes to the headless target.
 		viewer := &attachedClient{}
 		viewer.initOverlays()
-		viewer.overlays.pickerMu.Lock()
-		viewer.overlays.pickerPreview = target.tabs[0]
-		viewer.overlays.pickerMu.Unlock()
 		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
 		previews := make(chan renderWake, 2)
 		rc.subscribePreviewFor(viewer, 1, func(w renderWake) { previews <- w })
@@ -495,25 +469,6 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 	})
 }
 
-// S2 keeps damage pending until the owning render capture consumes it. In
-// particular, a pane becoming invisible must not let a PTY reader erase data
-// that a later attachment or picker preview needs to render.
-func TestPaneRenderableActiveAttachmentDoesNotScanPickerPreviews(t *testing.T) {
-	p, release := newBlockingPTY(t)
-	defer release()
-	d, sess, _, _ := newManualSessionWithPTYs(t, p)
-	tb := testAttachmentTab(sess)
-	pane := tb.focusedPane()
-
-	// Holding daemon ownership makes a picker scan block. An active attached
-	// tab must decide renderability from its session state without that scan.
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	done := make(chan bool, 1)
-	go func() { done <- d.paneRenderable(sess, tb, pane) }()
-	require.True(t, awaitTestValue(t, done, "active attached renderability scanned picker previews"))
-}
-
 func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan wire.Frame) {
 		t.Helper()
@@ -561,23 +516,11 @@ func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
 		}
 	})
 
-	t.Run("retains active and picker-preview pane damage", func(t *testing.T) {
+	t.Run("retains active pane damage", func(t *testing.T) {
 		d, sess, tb, p, _ := newFixture(t)
 		p.screen.Write([]byte("active"))
 		_ = d.paneRenderable(sess, tb, p)
 		require.NotEmpty(t, p.screen.Damage(), "active pane damage belongs to coordinator composition")
-		p.screen.ClearDamage()
-
-		clearAttachmentsForTest(sess)
-		viewer := &attachedClient{}
-		viewer.initOverlays()
-		viewer.overlays.pickerMu.Lock()
-		viewer.overlays.pickerPreview = tb
-		viewer.overlays.pickerMu.Unlock()
-		d.sessions["viewer"] = &session{sessionCore: sessionCore{id: "viewer", attachments: map[*attachedClient]struct{}{viewer: {}}}}
-		p.screen.Write([]byte("preview"))
-		_ = d.paneRenderable(sess, tb, p)
-		require.NotEmpty(t, p.screen.Damage(), "picker preview damage must remain for coordinator composition")
 	})
 }
 
@@ -796,13 +739,6 @@ func TestOverlayPaintInvalidationShowsAndRestoresBaseFrame(t *testing.T) {
 			close:      func(d *Daemon, _ *session, ac *attachedClient) { d.handlePaletteInput(ac, []byte("\x1b")) },
 			visible:    "Commands",
 			notVisible: "Commands",
-		},
-		{
-			name:       "picker",
-			open:       func(d *Daemon, sess *session, ac *attachedClient) { d.enterPicker(sess, ac) },
-			close:      func(d *Daemon, sess *session, ac *attachedClient) { d.closePicker(ac); d.paint(sess, ac, true, nil) },
-			visible:    "Sessions",
-			notVisible: "Sessions",
 		},
 		{
 			name:  "copy mode",

@@ -22,7 +22,6 @@ func (OutputResetRequest) clientMessage()             {}
 func (RemotePreviewRequest) clientMessage()           {}
 func (RouteAttentionSubscription) clientMessage()     {}
 func (SamePeerSwitchRequest) clientMessage()          {}
-func (ParkedRouteRequest) clientMessage()             {}
 func (RecentRouteSnapshot) clientMessage()            {}
 func (RouteNavigationFailure) clientMessage()         {}
 func (SessionCreationFailure) clientMessage()         {}
@@ -30,6 +29,11 @@ func (UIFence) clientMessage()                        {}
 func (NavigationInventoryRequest) clientMessage()     {}
 func (NavigationInventoryPublication) clientMessage() {}
 func (NavigationInventoryFailure) clientMessage()     {}
+func (PickerBegin) clientMessage()                    {}
+func (PickerClose) clientMessage()                    {}
+func (PickerSelection) clientMessage()                {}
+func (PickerPreviewRequest) clientMessage()           {}
+func (PickerControlRequest) clientMessage()           {}
 
 func (Welcome) serverMessage()                      {}
 func (ErrorMsg) serverMessage()                     {}
@@ -38,7 +42,6 @@ func (Detached) serverMessage()                     {}
 func (Pong) serverMessage()                         {}
 func (Sessions) serverMessage()                     {}
 func (CommandResult) serverMessage()                {}
-func (NavigationDirective) serverMessage()          {}
 func (AttachTarget) serverMessage()                 {}
 func (RemotePreview) serverMessage()                {}
 func (CommittedRouteIdentity) serverMessage()       {}
@@ -48,9 +51,15 @@ func (RouteNavigationFailure) serverMessage()       {}
 func (RoutePosition) serverMessage()                {}
 func (RouteRetired) serverMessage()                 {}
 func (SamePeerSwitchFailure) serverMessage()        {}
-func (ParkedRouteResponse) serverMessage()          {}
 func (UIReceipt) serverMessage()                    {}
 func (UIViewUpdate) serverMessage()                 {}
 func (NavigationInventoryResponse) serverMessage()  {}
 func (NavigationInventoryDemand) serverMessage()    {}
 func (NavigationInventorySelection) serverMessage() {}
+func (PickerOffer) serverMessage()                  {}
+func (PickerSnapshot) serverMessage()               {}
+func (PickerClosed) serverMessage()                 {}
+func (PickerResult) serverMessage()                 {}
+func (PickerFailure) serverMessage()                {}
+func (PickerPreview) serverMessage()                {}
+func (PickerControlResponse) serverMessage()        {}

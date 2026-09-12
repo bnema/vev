@@ -21,7 +21,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/picker"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -592,8 +591,7 @@ func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {
 		higher string
 	}{
 		{name: "notices above copy search", lower: "copy search", higher: "notices"},
-		{name: "picker above notices", lower: "notices", higher: "picker"},
-		{name: "palette above picker", lower: "picker", higher: "palette"},
+		{name: "palette above notices", lower: "notices", higher: "palette"},
 		{name: "prompt above palette", lower: "palette", higher: "prompt"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -604,8 +602,6 @@ func TestComposeCapturedOverlaysMatchesKeyboardPriority(t *testing.T) {
 					state.overlays.copySearch = modal
 				case "notices":
 					state.overlays.noticesOverlay = modal
-				case "picker":
-					state.overlays.picker = modal
 				case "palette":
 					state.overlays.palette = modal
 				case "prompt":
@@ -634,8 +630,6 @@ func TestCaptureOverlayLayersRendersEveryModelToResolvedInner(t *testing.T) {
 	snapshot := scopy.NewSnapshotFromRows(nil, 79, 38)
 	snap := &overlayRenderSnapshot{
 		copySearchModel:      visualsearch.New(snapshot),
-		pickerActive:         true,
-		pickerModel:          picker.New(nil, picker.SelectionConfig{}),
 		noticesOverlayActive: true,
 		noticesOverlayModel:  notices.New(nil, time.Time{}),
 		paletteActive:        true,
@@ -648,7 +642,6 @@ func TestCaptureOverlayLayersRendersEveryModelToResolvedInner(t *testing.T) {
 
 	for name, modal := range map[string]capturedModal{
 		"copy search": state.overlays.copySearch,
-		"picker":      state.overlays.picker,
 		"notices":     state.overlays.noticesOverlay,
 		"palette":     state.overlays.palette,
 		"prompt":      state.overlays.prompt,

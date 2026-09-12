@@ -143,66 +143,20 @@ func (m *Model) MatchCount() int {
 }
 
 // ReplaceFrom applies a fresh canonical row snapshot while retaining the
-// attachment-local search editor and exact cursor when that target still
-// exists. Callers serialize this mutation with their picker ownership lock.
+// attachment-local search editor and exact cursor when that key still exists.
+// Callers serialize this mutation with their picker ownership lock.
 func (m *Model) ReplaceFrom(next *Model) {
 	if m == nil || next == nil {
 		return
 	}
-	cursor, hadCursor := m.Cursor()
+	key, hadKey := m.cursorKey()
 	searchActive, query := m.searchActive, m.query.Value()
-	m.mode = next.mode
-	m.rows = append(m.rows[:0], next.rows...)
-	m.selected = next.selected
-	if hadCursor {
-		for idx, candidate := range m.rows {
-			if candidate.focusable && sameTarget(candidate.target(), cursor) {
-				m.selected = idx
-				break
-			}
-		}
-	}
+	m.intent = next.intent
+	m.sort = next.sort
+	m.lines = append(m.lines[:0], next.lines...)
 	m.searchActive = searchActive
 	m.query.SetValue(query)
-	m.searchMatches = nil
-	m.matchRows = nil
-	if !searchActive {
-		return
-	}
-	best := m.refreshSearch(false)
-	if query != "" && !m.rowMatches(m.selected) && best >= 0 {
-		m.selected = best
-	}
-}
-
-func sameTarget(left, right Target) bool {
-	if left.Session != right.Session || left.Incarnation != right.Incarnation || left.Name != right.Name || left.RemoteHost != right.RemoteHost || left.TabID != right.TabID || left.Stopped != right.Stopped || !sameOptionalInt64(left.ExpectedCreatedAt, right.ExpectedCreatedAt) {
-		return false
-	}
-	if left.RemoteKey == nil || right.RemoteKey == nil {
-		if left.RemoteKey != nil || right.RemoteKey != nil {
-			return false
-		}
-	} else if *left.RemoteKey != *right.RemoteKey {
-		return false
-	}
-	if left.RemoteTarget == nil || right.RemoteTarget == nil {
-		return left.RemoteTarget == nil && right.RemoteTarget == nil
-	}
-	return *left.RemoteTarget == *right.RemoteTarget
-}
-
-func sameOptionalInt64(left, right *int64) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
-}
-
-// SelectionRejectedBySearch reports that the retained cursor is only a hidden
-// anchor and must not be interpreted as an unavailable activation target.
-func (m *Model) SelectionRejectedBySearch() bool {
-	return m != nil && m.searchActive && m.query.Value() != "" && !m.rowMatches(m.selected)
+	m.rebuild(key, hadKey, next.selected)
 }
 
 func (m *Model) rowMatches(idx int) bool {
@@ -214,7 +168,12 @@ func (m *Model) rowMatches(idx int) bool {
 }
 
 func (m *Model) moveSearch(delta int) {
-	if m == nil || len(m.matchRows) == 0 {
+	if m == nil {
+		return
+	}
+	if len(m.matchRows) == 0 {
+		// The query shows nothing, so no row may hold the cursor.
+		m.selected = -1
 		return
 	}
 	position := slices.Index(m.matchRows, m.selected)
@@ -232,15 +191,20 @@ func (m *Model) moveSearch(delta int) {
 	}
 }
 
+// refreshSearch recomputes the rows the active query shows and re-places the
+// cursor: the editor never leaves it on a row the query hides.
 func (m *Model) refreshSearch(selectBest bool) int {
 	m.searchMatches = make(map[int]searchMatch)
 	m.matchRows = make([]int, 0, len(m.rows))
 	query := strings.ToLower(m.query.Value())
 	if query == "" {
 		for idx, row := range m.rows {
-			if row.focusable {
+			if row.focusable() {
 				m.matchRows = append(m.matchRows, idx)
 			}
+		}
+		if selectBest {
+			m.normalizeCursor(-1)
 		}
 		return -1
 	}
@@ -249,7 +213,7 @@ func (m *Model) refreshSearch(selectBest bool) int {
 	bestIdx := -1
 	var best fieldMatch
 	for idx, row := range m.rows {
-		if !row.focusable {
+		if !row.focusable() {
 			continue
 		}
 		matched, ok := matchRow(row, query, needleRunes)
@@ -262,10 +226,35 @@ func (m *Model) refreshSearch(selectBest bool) int {
 			bestIdx, best = idx, matched.best
 		}
 	}
-	if selectBest && bestIdx >= 0 {
-		m.selected = bestIdx
+	if selectBest {
+		if bestIdx >= 0 {
+			m.selected = bestIdx
+		} else {
+			m.selected = -1
+		}
+		m.normalizeCursor(bestIdx)
 	}
 	return bestIdx
+}
+
+// normalizeCursor places the cursor on a row the active query still shows. It
+// keeps the current row when it qualifies, otherwise it takes the best match,
+// then the nearest eligible row, and finally clears the cursor when nothing
+// qualifies.
+func (m *Model) normalizeCursor(best int) {
+	if m == nil || m.eligible(m.selected) {
+		return
+	}
+	if best >= 0 {
+		m.selected = best
+		return
+	}
+	hint := m.selected
+	m.selected = -1
+	m.SelectNearestRow(hint)
+	if m.selected < 0 {
+		m.selected = m.firstEligible()
+	}
 }
 
 func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
@@ -273,20 +262,8 @@ func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
 		kind matchField
 		text string
 	}{
-		{matchName, row.foldedName},
+		{matchName, row.foldedLabel},
 		{matchDetail, row.foldedDetail},
-	}
-	if row.kind == rowTab {
-		fields = append(fields, struct {
-			kind matchField
-			text string
-		}{matchContext, row.foldedSession})
-	}
-	if row.foldedHost != "" {
-		fields = append(fields, struct {
-			kind matchField
-			text string
-		}{matchContext, row.foldedHost})
 	}
 
 	var result searchMatch

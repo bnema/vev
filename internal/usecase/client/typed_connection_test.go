@@ -128,8 +128,6 @@ func testClientFrame(message protocol.ClientMessage) (wire.Frame, error) {
 	case protocol.SamePeerSwitchRequest:
 		p, e := wire.MarshalSamePeerSwitchRequest(m)
 		return wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: p}, e
-	case protocol.ParkedRouteRequest:
-		return wire.Frame{Type: wire.MsgParkedRouteRequest, Payload: wire.MarshalParkedRouteRequest(m)}, nil
 	case protocol.RecentRouteSnapshot:
 		p, e := wire.MarshalRecentRouteSnapshot(m)
 		return wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: p}, e
@@ -154,6 +152,24 @@ func testClientFrame(message protocol.ClientMessage) (wire.Frame, error) {
 			return wire.Frame{}, errors.New("test client connection: invalid inventory failure")
 		}
 		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: p}, nil
+	case protocol.PickerSelection:
+		p := wire.MarshalPickerSelection(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid picker selection")
+		}
+		return wire.Frame{Type: wire.MsgPickerSelection, Payload: p}, nil
+	case protocol.PickerClose:
+		p := wire.MarshalPickerClose(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid picker close")
+		}
+		return wire.Frame{Type: wire.MsgPickerCloseClient, Payload: p}, nil
+	case protocol.PickerPreviewRequest:
+		p := wire.MarshalPickerPreviewRequest(m)
+		if p == nil {
+			return wire.Frame{}, errors.New("test client connection: invalid picker preview request")
+		}
+		return wire.Frame{Type: wire.MsgPickerPreviewRequest, Payload: p}, nil
 	default:
 		return wire.Frame{}, errors.New("test client connection: unsupported client message")
 	}
@@ -175,8 +191,6 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalSessions(frame.Payload)
 	case wire.MsgCommandResult:
 		return wire.UnmarshalCommandResult(frame.Payload)
-	case wire.MsgNavigationAction:
-		return wire.UnmarshalNavigationDirective(frame.Payload)
 	case wire.MsgAttachTarget:
 		return wire.UnmarshalAttachTarget(frame.Payload)
 	case wire.MsgRemotePreviewResponse:
@@ -193,14 +207,24 @@ func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
 		return wire.UnmarshalRoutePosition(frame.Payload)
 	case wire.MsgSamePeerSwitchFailure:
 		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
-	case wire.MsgParkedRouteResponse:
-		return wire.UnmarshalParkedRouteResponse(frame.Payload)
 	case wire.MsgNavigationInventoryResponse:
 		return wire.UnmarshalNavigationInventoryResponse(frame.Payload)
 	case wire.MsgNavigationInventoryDemand:
 		return wire.UnmarshalNavigationInventoryDemand(frame.Payload)
 	case wire.MsgNavigationInventorySelection:
 		return wire.UnmarshalNavigationInventorySelection(frame.Payload)
+	case wire.MsgPickerOffer:
+		return wire.UnmarshalPickerOffer(frame.Payload)
+	case wire.MsgPickerSnapshot:
+		return wire.UnmarshalPickerSnapshot(frame.Payload)
+	case wire.MsgPickerClosedServer:
+		return wire.UnmarshalPickerClosed(frame.Payload)
+	case wire.MsgPickerResult:
+		return wire.UnmarshalPickerResult(frame.Payload)
+	case wire.MsgPickerFailure:
+		return wire.UnmarshalPickerFailure(frame.Payload)
+	case wire.MsgPickerPreview:
+		return wire.UnmarshalPickerPreview(frame.Payload)
 	default:
 		return nil, errors.New("test client connection: unsupported server frame")
 	}

@@ -96,7 +96,6 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 	}
 
 	if fresh, admitted := effect.ac.beginAttachmentEffect(transition.published); admitted {
-		d.closePicker(effect.ac)
 		fresh.End()
 	}
 	d.touchMRU(target)

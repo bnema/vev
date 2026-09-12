@@ -225,7 +225,7 @@ func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
 	t.Cleanup(func() { newPerformanceTrace = originalTrace })
 
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "work", remoteadapter.TransportStdio, mock.Anything).Return(namedDialer{name: "remote"}, nil)
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportStdio, mock.Anything).Return(namedDialer{name: "remote"}, nil)
 	originalFactory := newRemoteDialerFactoryWithRuntimeObserver
 	factoryCalls := 0
 	newRemoteDialerFactoryWithRuntimeObserver = func(got ports.SerializedRuntimeObserver) remoteDialerForTarget {

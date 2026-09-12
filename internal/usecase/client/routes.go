@@ -569,6 +569,57 @@ func (r routeRecord) snapshotEntry() protocol.RecentRouteEntry {
 	}
 }
 
+func (l *routeLedger) observationTargets(origin protocol.RouteOrigin, originKey string) []protocol.ExactSessionTarget {
+	return l.observationTargetsExcept(origin, originKey, nil)
+}
+
+func (l *routeLedger) observationTargetsExcept(origin protocol.RouteOrigin, originKey string, excluded *protocol.ExactSessionTarget) []protocol.ExactSessionTarget {
+	if l == nil {
+		return nil
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	targets := make([]protocol.ExactSessionTarget, 0, len(l.entries))
+	for _, entry := range l.entries {
+		if entry.origin == origin && entry.originKey == originKey && (excluded == nil || entry.target != *excluded) {
+			targets = append(targets, entry.target)
+		}
+	}
+	return targets
+}
+
+func (l *routeLedger) applyObservations(origin protocol.RouteOrigin, originKey string, observations []protocol.PickerRouteObservation) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	byTarget := make(map[protocol.ExactSessionTarget]protocol.PickerRouteObservation, len(observations))
+	for _, observation := range observations {
+		byTarget[observation.Target] = observation
+	}
+	changed := false
+	for i := range l.entries {
+		entry := &l.entries[i]
+		if entry.origin != origin || entry.originKey != originKey {
+			continue
+		}
+		observation, ok := byTarget[entry.target]
+		if !ok || observation.Presence == protocol.PickerRouteUnknown {
+			continue
+		}
+		attention := observation.Presence == protocol.PickerRoutePresent && observation.Attention
+		if entry.presentation.attention != attention {
+			entry.presentation.attention = attention
+			changed = true
+		}
+	}
+	if changed {
+		l.generation++
+	}
+	return changed
+}
+
 func (l *routeLedger) snapshot() protocol.RecentRouteSnapshot {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -622,7 +673,6 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.Atta
 		request.RemoteTarget = nil
 		if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 			request.NavigationCapabilities = 0
-			request.StartupOverlay = protocol.StartupOverlayNone
 		}
 		request.EnvironmentPolicy = environmentPolicy
 		request.ExactTarget = target.ExactTarget
@@ -640,7 +690,6 @@ func (l *routeLedger) samePeerHandoff(active AttachRequest, target protocol.Atta
 	request.RemoteTarget = nil
 	if request.EnvironmentPolicy != environmentPolicy && environmentPolicy == protocol.EnvironmentPolicyClientOwned {
 		request.NavigationCapabilities = 0
-		request.StartupOverlay = protocol.StartupOverlayNone
 	}
 	request.EnvironmentPolicy = environmentPolicy
 	return request

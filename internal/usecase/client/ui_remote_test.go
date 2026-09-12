@@ -68,7 +68,7 @@ func awaitUIClientMessage[T protocol.ClientMessage](t *testing.T, p *uiTestPeer)
 	}
 }
 
-func TestUIRunnerRemoteAndParkedHandoffsRequireDestinationFull(t *testing.T) {
+func TestUIRunnerRemoteHandoffRequiresDestinationFull(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: 8, Rows: 2}}, "")
@@ -77,17 +77,17 @@ func TestUIRunnerRemoteAndParkedHandoffsRequireDestinationFull(t *testing.T) {
 	ui := NewUI(terminal, systemClock{})
 	source := newUITestPeer(t, protocol.ConnectionCapabilities{})
 	destination := newUITestPeer(t, protocol.ConnectionCapabilities{PreferredOutputWindow: 1})
-	picker := newUITestPeer(t, protocol.ConnectionCapabilities{})
 	localDialer := portsmocks.NewMockClientDialer(t)
 	localDialer.EXPECT().Dial(mock.Anything).Return(source.connection, nil).Once()
-	localDialer.EXPECT().Dial(mock.Anything).Return(picker.connection, nil).Once()
 	remoteDialer := portsmocks.NewMockClientDialer(t)
 	remoteDialer.EXPECT().Dial(mock.Anything).Return(destination.connection, nil).Once()
 	target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "remote"}
-	runner := NewRunner(Dependencies{Dialer: localDialer, Terminal: terminal, Clock: systemClock{}, UI: ui, DisableCapabilityProbe: true, AttachHandoff: func(offer protocol.AttachTarget) (ports.ClientDialer, AttachRequest, error) {
-		require.Equal(t, "isolated-fixture", offer.Endpoint)
-		return remoteDialer, AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote", Remote: true, Origin: protocol.RouteOriginRemote, OriginKey: "isolated-fixture", ExactTarget: &target}, nil
-	}})
+	deps := Dependencies{Dialer: localDialer, Terminal: terminal, Clock: systemClock{}, UI: ui, DisableCapabilityProbe: true}
+	deps.HostRegistry = internalStubHostRegistry{resolve: func(endpoint string) (ports.RemoteEndpointBinding, error) {
+		require.Equal(t, "isolated-fixture", endpoint)
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
+	runner := NewRunner(deps)
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx, AttachRequest{Intent: protocol.IntentAttach, SessionName: "local"}) }()
 	t.Cleanup(func() {
@@ -118,7 +118,7 @@ func TestUIRunnerRemoteAndParkedHandoffsRequireDestinationFull(t *testing.T) {
 		results <- result
 	}()
 	fence := awaitUIClientMessage[protocol.UIFence](t, source)
-	source.incoming <- protocol.AttachTarget{Endpoint: "isolated-fixture", Session: "remote", ExactTarget: &target, CauseActionID: fence.ActionID}
+	source.incoming <- protocol.AttachTarget{Endpoint: "isolated-fixture", Session: "remote", Intent: protocol.IntentAttach, ExactTarget: &target, CauseActionID: fence.ActionID}
 	awaitUIClientMessage[protocol.Hello](t, destination)
 	remoteView := view
 	remoteView.Route.Target = target
@@ -143,50 +143,4 @@ func TestUIRunnerRemoteAndParkedHandoffsRequireDestinationFull(t *testing.T) {
 		t.Fatal("destination full did not complete handoff")
 	}
 	awaitUIClientMessage[protocol.Theme](t, destination)
-	startAction := func(generation uint64) {
-		go func() {
-			result, err := ui.Action(ctx, ports.UIActionRequest{Attachment: ui.Handle(), Generation: generation, Keys: []string{"Enter"}})
-			if err != nil {
-				failures <- err
-				return
-			}
-			results <- result
-		}()
-	}
-	awaitAction := func(generation uint64, target protocol.ExactSessionTarget) {
-		t.Helper()
-		select {
-		case result := <-results:
-			require.Equal(t, ports.UIActionProcessed, result.Status)
-			require.Equal(t, generation, result.Context.Generation)
-			require.Equal(t, target, result.Context.Route.Target)
-		case err := <-failures:
-			t.Fatal(err)
-		case <-time.After(time.Second):
-			t.Fatal("parked handoff did not complete")
-		}
-	}
-	startAction(2)
-	openPicker := awaitUIClientMessage[protocol.UIFence](t, destination)
-	destination.incoming <- protocol.NavigationDirective{Action: protocol.NavigationOpenHomePicker, LeaseID: protocol.ParkedRouteLeaseID{1}, CauseActionID: openPicker.ActionID}
-	prepare := awaitUIClientMessage[protocol.ParkedRouteRequest](t, destination)
-	require.Equal(t, protocol.ParkedRoutePrepare, prepare.Action)
-	destination.incoming <- protocol.ParkedRouteResponse{RequestID: prepare.RequestID, Status: protocol.ParkedRouteReady}
-	awaitUIClientMessage[protocol.Hello](t, picker)
-	picker.incoming <- protocol.Welcome{SessionID: "local-session", SessionName: "local", CommittedIdentity: &view.Route}
-	awaitUIClientMessage[protocol.Theme](t, picker)
-	awaitUIClientMessage[protocol.Theme](t, picker)
-	picker.incoming <- protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 8, Rows: 2}, Context: &view, Data: []byte("\x1b[2J\x1b[Hpicker")}
-	awaitAction(3, view.Route.Target)
-	startAction(3)
-	selectRemote := awaitUIClientMessage[protocol.UIFence](t, picker)
-	remoteTarget := domain.RemoteSessionTarget{Endpoint: "isolated-fixture", DisplayOrigin: "isolated-fixture", LifecycleID: target.LifecycleID, SessionName: target.SessionName, LiveTabID: "tab"}
-	picker.incoming <- protocol.AttachTarget{Endpoint: "isolated-fixture", Session: "remote", RemoteTarget: &remoteTarget, CauseActionID: selectRemote.ActionID}
-	switchRequest := awaitUIClientMessage[protocol.ParkedRouteRequest](t, destination)
-	require.Equal(t, protocol.ParkedRouteSwitch, switchRequest.Action)
-	destination.incoming <- protocol.ParkedRouteResponse{RequestID: switchRequest.RequestID, Status: protocol.ParkedRouteSwitched}
-	resumedView := remoteView
-	resumedView.Publication = 2
-	destination.incoming <- protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 8, Rows: 2}, Context: &resumedView, Data: []byte("\x1b[2J\x1b[Hresumed")}
-	awaitAction(4, target)
 }

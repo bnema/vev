@@ -3,7 +3,6 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
@@ -26,41 +25,20 @@ func TestAttachmentStatusUsesClientRouteSnapshot(t *testing.T) {
 	require.Equal(t, []string{"logs@edge", "work"}, []string{state.mru[0].name, state.mru[1].name})
 }
 
-func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		targetID  domain.SessionLifecycleID
-		attention bool
-	}{
-		{name: "matching lifecycle", targetID: domain.SessionLifecycleID{9}, attention: true},
-		{name: "stale lifecycle", targetID: domain.SessionLifecycleID{8}, attention: false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
-			sess.mu.Lock()
-			sess.incarnation = domain.SessionLifecycleID{9}
-			sess.tabs[0].attention = true
-			sess.mu.Unlock()
-			ref := protocol.RouteRef{Key: 2, Generation: 1}
-			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
-				Generation: 2,
-				Active:     protocol.RouteRef{Key: 3, Generation: 2},
-				Entries:    []protocol.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Target: protocol.ExactSessionTarget{LifecycleID: tt.targetID, SessionName: sess.name}, Name: sess.name, Kind: protocol.RouteKindLocal}},
-			})
-			ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{
-				Ref: ref,
-				Target: protocol.ExactSessionTarget{
-					LifecycleID: tt.targetID,
-					SessionName: sess.name,
-				},
-			}}}, ac.transportSnapshot(), d.clock.Now())
+func TestAttachmentStatusUsesClientPublishedAttention(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
+		Generation: 2,
+		Active:     protocol.RouteRef{Key: 3, Generation: 2},
+		Entries: []protocol.RecentRouteEntry{{
+			Key: 2, Generation: 1, Target: testRouteTarget("local", 9), Name: "local", Kind: protocol.RouteKindLocal, Attention: true,
+		}},
+	})
 
-			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
+	state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
 
-			require.Len(t, state.mru, 1)
-			require.Equal(t, tt.attention, state.mru[0].attention)
-		})
-	}
+	require.Len(t, state.mru, 1)
+	require.True(t, state.mru[0].attention)
 }
 
 func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {

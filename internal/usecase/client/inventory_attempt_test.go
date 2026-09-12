@@ -197,6 +197,22 @@ func (t *inventoryAttemptTransport) LinkState() ports.LinkState         { return
 func (t *inventoryAttemptTransport) LinkEvents() <-chan ports.LinkEvent { return nil }
 func (t *inventoryAttemptTransport) Close() error                       { return nil }
 
+func (t *inventoryAttemptTransport) latestRouteSnapshot() (protocol.RecentRouteSnapshot, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := len(t.sent) - 1; i >= 0; i-- {
+		if t.sent[i].Type != wire.MsgRecentRouteSnapshot {
+			continue
+		}
+		snapshot, err := wire.UnmarshalRecentRouteSnapshot(t.sent[i].Payload)
+		if err != nil {
+			panic(err)
+		}
+		return snapshot, true
+	}
+	return protocol.RecentRouteSnapshot{}, false
+}
+
 func (t *inventoryAttemptTransport) publicationCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -221,23 +237,39 @@ func (t *inventoryAttemptTransport) hello() protocol.Hello {
 // inventoryTestControlConn answers one snapshot or resolve query from canned
 // groups without Hello, session creation, or attachment.
 type inventoryTestControlConn struct {
-	request protocol.NavigationInventoryRequest
+	inventoryRequest protocol.NavigationInventoryRequest
+	pickerRequest    protocol.PickerControlRequest
+	onPicker         func()
 }
 
 func (c *inventoryTestControlConn) SendClient(message protocol.ClientMessage) error {
-	request, ok := message.(protocol.NavigationInventoryRequest)
-	if !ok {
+	switch request := message.(type) {
+	case protocol.NavigationInventoryRequest:
+		c.inventoryRequest = request
+	case protocol.PickerControlRequest:
+		c.pickerRequest = request
+		if c.onPicker != nil {
+			c.onPicker()
+		}
+	default:
 		return io.ErrUnexpectedEOF
 	}
-	c.request = request
 	return nil
 }
 
 func (c *inventoryTestControlConn) ReceiveServer() (protocol.ServerMessage, error) {
-	switch c.request.Operation {
+	if c.pickerRequest.Operation == protocol.PickerControlObserve {
+		observations := make([]protocol.PickerRouteObservation, len(c.pickerRequest.Targets))
+		for i, target := range c.pickerRequest.Targets {
+			observations[i] = protocol.PickerRouteObservation{Target: target, Presence: protocol.PickerRoutePresent, Attention: true}
+		}
+		return protocol.PickerControlResponse{RequestID: c.pickerRequest.RequestID, Operation: protocol.PickerControlObserve, Status: protocol.PickerSourceOK, Observations: observations}, nil
+	}
+	request := c.inventoryRequest
+	switch request.Operation {
 	case protocol.NavigationInventorySnapshot:
 		return protocol.NavigationInventoryResponse{
-			RequestID: c.request.RequestID, Operation: protocol.NavigationInventorySnapshot,
+			RequestID: request.RequestID, Operation: protocol.NavigationInventorySnapshot,
 			Status: protocol.NavigationInventoryOK,
 			Groups: []protocol.NavigationInventorySourceGroup{{
 				SourceKey: "local", Status: protocol.NavigationInventorySourceOK,
@@ -249,7 +281,7 @@ func (c *inventoryTestControlConn) ReceiveServer() (protocol.ServerMessage, erro
 	case protocol.NavigationInventoryResolve:
 		lifecycle := domain.SessionLifecycleID{7}
 		return protocol.NavigationInventoryResponse{
-			RequestID: c.request.RequestID, Operation: protocol.NavigationInventoryResolve,
+			RequestID: request.RequestID, Operation: protocol.NavigationInventoryResolve,
 			Status: protocol.NavigationInventoryOK,
 			Resolved: &protocol.AttachTarget{
 				Session: "alpha", Intent: protocol.IntentAttach,
@@ -269,15 +301,28 @@ func (c *inventoryTestControlConn) LinkEvents() <-chan ports.LinkEvent { return 
 func (c *inventoryTestControlConn) Close() error                       { return nil }
 
 type inventoryTestDialer struct {
-	mu    sync.Mutex
-	dials int
+	mu             sync.Mutex
+	dials          int
+	pickerRequests int
 }
 
 func (d *inventoryTestDialer) Dial(context.Context) (ports.ClientConnection, error) {
 	d.mu.Lock()
 	d.dials++
 	d.mu.Unlock()
-	return &inventoryTestControlConn{}, nil
+	return &inventoryTestControlConn{onPicker: d.notePickerRequest}, nil
+}
+
+func (d *inventoryTestDialer) notePickerRequest() {
+	d.mu.Lock()
+	d.pickerRequests++
+	d.mu.Unlock()
+}
+
+func (d *inventoryTestDialer) pickerCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pickerRequests
 }
 
 func (d *inventoryTestDialer) count() int {
@@ -291,7 +336,7 @@ func runInventoryAttempt(t *testing.T, clock *inventoryTestClock, transport *inv
 	input := newPaletteAttachReader(nil)
 	t.Cleanup(input.close)
 	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
-	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
+	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler), ledger: newRouteLedger()}
 	attempt := &attachAttempt{
 		runner: runner, dialer: dialer, transport: transport,
 		request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote-work"},
@@ -313,6 +358,106 @@ func msForInventoryTest() *milestones { return &milestones{} }
 // TestInventoryPollBoxKeepsNewestCompletion pins out-of-order delivery:
 // a late outcome from an older query must not overwrite the newer one,
 // or the newer completion is lost while its slot stays busy.
+func TestRemoteAttemptPublishesLocalAttentionObservation(t *testing.T) {
+	clock := newInventoryTestClock()
+	dialer := &inventoryTestDialer{}
+	transport := &inventoryAttemptTransport{
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), releaseClose: make(chan struct{}), script: inventoryScriptSilent,
+	}
+	t.Cleanup(func() { close(transport.release) })
+	input := newPaletteAttachReader(nil)
+	t.Cleanup(input.close)
+	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
+	ledger := newRouteLedger()
+	localTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "local"}
+	_, err := ledger.commitAttach(routeCandidateForAttach(AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local", EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned}, protocol.CommittedRouteIdentity{Target: localTarget}, dialer, 0))
+	require.NoError(t, err)
+	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler), ledger: ledger}
+	attempt := &attachAttempt{
+		runner: runner, dialer: dialer, transport: transport, remote: true,
+		request:         AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote-work", Origin: protocol.RouteOriginRemote, OriginKey: "remote", Remote: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned},
+		inventoryHome:   &attachRoute{dialer: dialer, request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local", EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned}},
+		inventoryDialer: dialer, milestones: msForInventoryTest(), themeState: &terminalThemeState{}, enterRaw: func() error { return nil }, reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
+	}
+	done := make(chan attachResult, 1)
+	go func() { done <- attempt.run(context.Background()) }()
+
+	require.Eventually(t, func() bool { return clock.timerCount() >= 2 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		clock.fire()
+		return dialer.pickerCount() > 0
+	}, 5*time.Second, 10*time.Millisecond, "the observation worker must query the stable authority")
+	require.Eventually(t, func() bool {
+		clock.fire()
+		snapshot, ok := transport.latestRouteSnapshot()
+		if !ok {
+			return false
+		}
+		for _, entry := range append(snapshot.Entries, snapshot.ActiveEntry) {
+			if entry.Target == localTarget && entry.Attention {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond)
+	close(transport.detach)
+	result := <-done
+	require.NoError(t, result.err)
+}
+
+func TestLocalAttemptPublishesRemoteAttentionObservation(t *testing.T) {
+	clock := newInventoryTestClock()
+	localDialer := &inventoryTestDialer{}
+	remoteDialer := &inventoryTestDialer{}
+	transport := &inventoryAttemptTransport{
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), releaseClose: make(chan struct{}), script: inventoryScriptSilent,
+	}
+	t.Cleanup(func() { close(transport.release) })
+	input := newPaletteAttachReader(nil)
+	t.Cleanup(input.close)
+	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
+	ledger := newRouteLedger()
+	remoteTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "work"}
+	remoteRequest := AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginDiscovery, OriginKey: "remote.test", Remote: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
+	_, err := ledger.commitAttach(routeCandidateForAttach(remoteRequest, protocol.CommittedRouteIdentity{Target: remoteTarget}, remoteDialer, 0))
+	require.NoError(t, err)
+	observers := newRouteObserverRegistry()
+	observers.register(remoteRequest, remoteDialer)
+	require.Len(t, ledger.observationTargets(protocol.RouteOriginDiscovery, "remote.test"), 1)
+	require.Len(t, observers.snapshot(), 1)
+	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler), ledger: ledger, routeObservers: observers}
+	attempt := &attachAttempt{
+		runner: runner, dialer: localDialer, transport: transport,
+		request:    AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local", EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned},
+		milestones: msForInventoryTest(), themeState: &terminalThemeState{}, enterRaw: func() error { return nil }, reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
+	}
+	done := make(chan attachResult, 1)
+	go func() { done <- attempt.run(context.Background()) }()
+
+	require.Eventually(t, func() bool { return clock.timerCount() >= 2 }, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		clock.fire()
+		return remoteDialer.pickerCount() > 0
+	}, 5*time.Second, 10*time.Millisecond, "the local attempt must query the retained remote authority")
+	require.Eventually(t, func() bool {
+		clock.fire()
+		snapshot, ok := transport.latestRouteSnapshot()
+		if !ok {
+			return false
+		}
+		for _, entry := range append(snapshot.Entries, snapshot.ActiveEntry) {
+			if entry.Target == remoteTarget && entry.Attention {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond)
+	close(transport.detach)
+	result := <-done
+	require.NoError(t, result.err)
+	require.Zero(t, localDialer.pickerCount(), "the active local authority has no committed target to observe")
+}
+
 func TestInventoryPollBoxKeepsNewestCompletion(t *testing.T) {
 	box := newInventoryPollBox()
 	box.offer(inventoryPollOutcome{interaction: 2, query: 2})
@@ -435,4 +580,47 @@ func TestInventoryAttemptIgnoresDemandsWhenLocal(t *testing.T) {
 	require.Nil(t, result.handoff)
 	require.Zero(t, dialer.count())
 	require.Zero(t, transport.publicationCount())
+}
+
+// TestInventoryAttemptDirectRemoteNeverDialsControl pins the direct-remote
+// pairing: a serving daemon that sends inventory demands against an
+// attachment with no committed home route must not trigger a local control
+// dial. The relay is hybrid-only; without a home route no relay exists, so
+// demands decode to no-ops and the attachment lifecycle is unaffected.
+func TestInventoryAttemptDirectRemoteNeverDialsControl(t *testing.T) {
+	clock := newInventoryTestClock()
+	dialer := &inventoryTestDialer{}
+	transport := &inventoryAttemptTransport{
+		published: make(chan struct{}), release: make(chan struct{}), detach: make(chan struct{}), script: inventoryScriptLocalIgnore,
+	}
+	t.Cleanup(func() { close(transport.release) })
+
+	input := newPaletteAttachReader(nil)
+	t.Cleanup(input.close)
+	term := &paletteAttachTerminal{in: input, resize: make(chan domain.Geometry)}
+	runner := &Runner{term: term, clock: clock, logger: slog.New(slog.DiscardHandler)}
+	attempt := &attachAttempt{
+		runner: runner, dialer: dialer, transport: transport,
+		request: AttachRequest{Intent: protocol.IntentAttach, SessionName: "remote-work"},
+		remote:  true,
+		// No inventoryHome: a direct-remote start has no committed home
+		// route, so no relay may exist even when demands arrive.
+		inventoryDialer: dialer,
+		milestones:      msForInventoryTest(), themeState: &terminalThemeState{},
+		enterRaw:  func() error { return nil },
+		reconnect: &reconnectUI{term: term, rawEntered: new(bool)},
+	}
+
+	done := make(chan attachResult, 1)
+	go func() { done <- attempt.run(context.Background()) }()
+	close(transport.detach)
+
+	result := <-done
+	require.NoError(t, result.err)
+	require.Nil(t, result.handoff)
+	require.Zero(t, dialer.count(), "direct remote without a home route must never dial local control")
+	require.Zero(t, transport.publicationCount())
+	hello := transport.hello()
+	require.Zero(t, hello.NavigationCapabilities&protocol.NavigationCapabilityInventory,
+		"direct remote must not advertise inventory without a home route")
 }

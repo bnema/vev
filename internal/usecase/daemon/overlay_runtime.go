@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -19,28 +18,45 @@ type overlayRuntime struct {
 	ac *attachedClient
 
 	pickerMu sync.Mutex
-	picker   *picker.Model
-	// pickerGeneration identifies one open lifecycle. It advances only when a
-	// picker is published, so delayed close and registration work can prove it
-	// still owns the exact lifecycle it captured.
-	pickerGeneration uint64
-	// pickerRefreshSequence advances for every rebuild attempt in one open
-	// lifecycle. A zero close token deliberately disables this extra fence.
-	pickerRefreshSequence     uint64
-	pickerTitle               string
-	pickerIntent              pickerIntent
-	pickerSource              moveSourceLocator
-	pickerPreview             *tab
-	pickerPreviewSession      *session
-	pickerRemotePreview       picker.Preview
-	pickerRemotePreviewCancel context.CancelFunc
-	pickerPreviewGeneration   uint64
-	pickerPending             []byte
-	pickerESC                 pendingByteTimer
-
-	// Test-only, unsynchronized lifecycle seams. Assign them before picker
-	// publication or goroutine startup.
-	afterPickerRefreshBuild func(*picker.Model)
+	// pickerPublishMu serializes snapshot publication for this attachment. A
+	// publisher reserves the sole right to publish, builds, validates, and
+	// sends its snapshot, and only then commits the revision it announced. It
+	// is held across the transport send so two concurrent publishers cannot
+	// interleave or reorder authoritative revisions. pickerMu is still the
+	// state lock and is never held across the send; the lock order is
+	// pickerPublishMu -> pickerMu, and it is never taken while sendMu is held.
+	pickerPublishMu sync.Mutex
+	// picker* carries the serving-daemon side of the picker interaction,
+	// guarded by pickerMu. Open tracks the current interaction namespace;
+	// interaction is the latest admitted open ID (late selections for closed
+	// interactions reject); revisions are the per-source published versions
+	// (older or duplicate revisions discard); keys maps opaque row keys of the
+	// serving source to resolved targets; intent and moverSource are the
+	// daemon-side facts captured at open; requestID echoes a client PickerBegin.
+	pickerOpen        bool
+	pickerInteraction uint64
+	pickerRevisions   map[string]uint64
+	pickerKeys        map[string]picker.Target
+	// pickerSourcePublished distinguishes "never published" from "published an
+	// empty set" for the current interaction. pickerRecent and pickerGrouped
+	// are the exact projections last published: a refresh whose projections
+	// equal them is not authority-relevant, so it must not bump the revision
+	// nor send a snapshot the client never needed to see.
+	pickerSourcePublished bool
+	pickerRecent          protocol.PickerProjection
+	pickerGrouped         protocol.PickerProjection
+	pickerIntent          protocol.PickerIntent
+	pickerMoveSource      moveSourceLocator
+	pickerRequestID       uint64
+	// pickerPreview* track the row the client asked to preview. The generation
+	// supersedes an in-flight capture and names the render subscription, so a
+	// delayed preview can never replace the row the user is displaying.
+	// pickerPreviewSession pins the recorded subscription to the coordinator
+	// that owns it (the target session, or the viewer for a remote row), so
+	// teardown removes the exact target subscription.
+	pickerPreviewGeneration uint64
+	pickerPreviewKey        string
+	pickerPreviewSession    *session
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model
@@ -136,7 +152,7 @@ func (rt *overlayRuntime) Active() bool {
 	if rt == nil || rt.ac == nil {
 		return false
 	}
-	return rt.promptActive() || rt.paletteActive() || rt.pickerActive() || rt.noticesActive() || rt.resizeModeActive() || rt.copyActive()
+	return rt.promptActive() || rt.paletteActive() || rt.pickerClientActive() || rt.noticesActive() || rt.resizeModeActive() || rt.copyActive()
 }
 
 func (rt *overlayRuntime) promptActive() bool {
@@ -157,13 +173,18 @@ func (rt *overlayRuntime) paletteActive() bool {
 	return rt.palette != nil
 }
 
-func (rt *overlayRuntime) pickerActive() bool {
+// pickerClientActive reports whether a picker interaction is open on this
+// attachment. Such an interaction owns the user input: the daemon must not
+// route raw key or mouse events to the session while it is open. Its typed
+// PickerSelection/PickerClose messages are the only effect it may have, and
+// they arrive on the control path, not here.
+func (rt *overlayRuntime) pickerClientActive() bool {
 	if rt == nil {
 		return false
 	}
 	rt.pickerMu.Lock()
 	defer rt.pickerMu.Unlock()
-	return rt.picker != nil
+	return rt.pickerOpen
 }
 
 func (rt *overlayRuntime) noticesActive() bool {
@@ -282,10 +303,6 @@ func (rt *overlayRuntime) HandleInput(d *Daemon, data []byte, effects ...*attach
 		d.handlePaletteInput(ac, data, effect)
 		return true
 	}
-	if rt.pickerActive() {
-		d.handlePickerInput(ac, data, effect)
-		return true
-	}
 	if rt.noticesActive() {
 		d.handleNoticesInput(ac, data)
 		return true
@@ -310,12 +327,6 @@ type overlayRenderSnapshot struct {
 	copySearchModel *visualsearch.Model
 	statusFeedback  string
 	resizeActive    bool
-
-	pickerActive  bool
-	pickerModel   *picker.Model
-	pickerTitle   string
-	previewTab    *tab
-	remotePreview picker.Preview
 
 	noticesOverlayActive bool
 	noticesOverlayModel  *notices.Model
@@ -382,14 +393,6 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	rt.resizeMu.Lock()
 	snap.resizeActive = rt.resizeActive
 	rt.resizeMu.Unlock()
-
-	rt.pickerMu.Lock()
-	snap.pickerActive = rt.picker != nil
-	snap.pickerModel = rt.picker.Clone()
-	snap.pickerTitle = rt.pickerTitle
-	snap.previewTab = rt.pickerPreview
-	snap.remotePreview = clonePickerPreview(rt.pickerRemotePreview)
-	rt.pickerMu.Unlock()
 
 	rt.paletteMu.Lock()
 	snap.paletteModel = rt.palette

@@ -218,8 +218,7 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 	active := routeTestCandidate(2, protocol.RouteOriginLocal)
 	active.originKey = "local"
 	active.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-	active.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
-	active.request.StartupOverlay = protocol.StartupOverlaySessionPicker
+	active.request.NavigationCapabilities = protocol.NavigationCapabilityInventory
 
 	for _, tt := range []struct {
 		name    string
@@ -235,8 +234,7 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 				stored := routeTestCandidate(1, protocol.RouteOriginLocal)
 				stored.originKey = "local"
 				stored.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
-				stored.request.NavigationCapabilities = protocol.NavigationCapabilityHomePicker
-				stored.request.StartupOverlay = protocol.StartupOverlaySessionPicker
+				stored.request.NavigationCapabilities = protocol.NavigationCapabilityInventory
 				_, err := ledger.commit(stored)
 				require.NoError(t, err)
 			}
@@ -248,7 +246,6 @@ func TestRouteLedgerSamePeerHandoffClearsDaemonOwnedNavigationForLocalRoutes(t *
 
 			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
 			require.Zero(t, request.NavigationCapabilities)
-			require.Equal(t, protocol.StartupOverlayNone, request.StartupOverlay)
 			require.NoError(t, validateAttachRequest(request))
 		})
 	}
@@ -285,6 +282,61 @@ func TestRouteLedgerSamePeerHandoffDropsOriginalRemoteTarget(t *testing.T) {
 	require.Equal(t, protocol.RouteOriginRemote, request.Origin)
 	require.Equal(t, "remote", request.OriginKey)
 	require.Nil(t, request.RemoteTarget)
+}
+
+// TestRouteLedgerSamePeerHandoffPreservesRemoteDaemonOwnedPolicy pins the
+// hybrid same-peer pairing: on a remote origin the handoff keeps the
+// serving daemon's policy, the explicit tab, and the request environment.
+// Local-origin downgrade rules must not leak into the remote path.
+func TestRouteLedgerSamePeerHandoffPreservesRemoteDaemonOwnedPolicy(t *testing.T) {
+	ledger := newRouteLedger()
+	work := routeTestCandidate(1, protocol.RouteOriginRemote)
+	work.originKey = "remote"
+	work.request.Remote = true
+	work.request.OriginKey = "remote"
+	work.request.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+	work.request.Environment = []string{"REMOTE=1"}
+	work.request.PreferredTabID = "remembered-tab"
+	_, err := ledger.commit(work)
+	require.NoError(t, err)
+
+	target := routeTestTarget(1)
+	request := ledger.samePeerHandoff(work.request, protocol.AttachTarget{
+		Session:           work.target.SessionName,
+		Intent:            protocol.IntentAttach,
+		ExactTarget:       &target,
+		PreferredTabID:    "chosen-tab",
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+	})
+
+	require.True(t, request.Remote)
+	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
+	require.Equal(t, domain.TabStableID("chosen-tab"), request.PreferredTabID)
+	require.Equal(t, []string{"REMOTE=1"}, request.Environment)
+	require.NoError(t, validateAttachRequest(request))
+}
+
+func TestRouteLedgerAppliesExactOriginObservationsWithoutReordering(t *testing.T) {
+	ledger := newRouteLedger()
+	local := routeCandidateForAttach(AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned}, protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "local"}}, nil, 0)
+	_, err := ledger.commitAttach(local)
+	require.NoError(t, err)
+	remote := routeCandidateForAttach(AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginRemote, OriginKey: "remote", Remote: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "work"}}, nil, 0)
+	_, err = ledger.commitAttach(remote)
+	require.NoError(t, err)
+	before := ledger.snapshot()
+
+	changed := ledger.applyObservations(protocol.RouteOriginLocal, normalizeRouteOriginKey("", protocol.RouteOriginLocal), []protocol.PickerRouteObservation{{
+		Target: local.target, Presence: protocol.PickerRoutePresent, Attention: true,
+	}})
+
+	require.True(t, changed)
+	after := ledger.snapshot()
+	require.Equal(t, before.Active, after.Active)
+	require.Equal(t, before.Previous, after.Previous)
+	require.Equal(t, []string{"local"}, []string{after.Entries[0].Name})
+	require.True(t, after.Entries[0].Attention)
+	require.False(t, after.ActiveEntry.Attention)
 }
 
 func TestRouteAttentionSubscriptionIncludesOnlyActiveOriginRoutes(t *testing.T) {

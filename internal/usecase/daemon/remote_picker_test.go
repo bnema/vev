@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ func TestRemotePickerStoppedRowsUseCanonicalStateAndSafeSelection(t *testing.T) 
 	require.True(t, view.Stopped)
 	require.NotNil(t, view.RemoteTarget)
 	require.True(t, view.RemoteTarget.Stopped)
-	require.Equal(t, picker.RemoteRestart, view.RemoteActivation, "structured stopped rows have an explicit safe restore target")
+	require.Equal(t, pickerRemoteRestart, view.RemoteActivation, "structured stopped rows have an explicit safe restore target")
 	require.Equal(t, "stopped — Enter to restart", view.RemoteDetail)
 
 }
@@ -179,8 +180,8 @@ func TestRemoteCatalogTargetReadyIgnoresAge(t *testing.T) {
 
 	views, _ := d.pickerViews(nil, nil)
 	require.Len(t, views, 1)
-	require.Equal(t, picker.RemoteAttach, views[0].RemoteActivation)
-	require.Equal(t, picker.RemoteStale, views[0].RemoteAvailability)
+	require.Equal(t, pickerRemoteAttach, views[0].RemoteActivation)
+	require.Equal(t, pickerRemoteStale, views[0].RemoteAvailability)
 }
 
 func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
@@ -241,8 +242,8 @@ func TestRemotePickerSelectsCatalogActiveTab(t *testing.T) {
 			require.NotNil(t, views[0].RemoteTarget)
 			require.Equal(t, test.wantTabID, views[0].RemoteTarget.LiveTabID)
 
-			model := d.newPickerModel(nil, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-			target, ok := model.Selected()
+			set := pickerLineSetFor(views, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{})
+			target, ok := firstSelectableTarget(t, set)
 			require.True(t, ok)
 			require.NotNil(t, target.RemoteTarget)
 			require.Equal(t, test.wantTabID, target.RemoteTarget.LiveTabID)
@@ -258,7 +259,7 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 	tests := []struct {
 		name         string
 		host         ports.RemoteHostSnapshot
-		want         picker.RemoteAvailability
+		want         pickerRemoteAvailability
 		wantActivate bool
 	}{
 		{
@@ -267,7 +268,7 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 				Endpoint: "arch", Availability: domain.RemoteAvailabilityUnknown,
 				Checking: true, InventoryKnown: true, Sessions: []catalogue.RemoteCatalogSession{session},
 			},
-			want: picker.RemoteCached, wantActivate: true,
+			want: pickerRemoteCached, wantActivate: true,
 		},
 		{
 			name: "unreachable with inventory renders stale and stays attemptable",
@@ -276,7 +277,7 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 				LastSuccess: time.Unix(10, 0), InventoryKnown: true,
 				Sessions: []catalogue.RemoteCatalogSession{session},
 			},
-			want: picker.RemoteStale, wantActivate: true,
+			want: pickerRemoteStale, wantActivate: true,
 		},
 		{
 			name: "version mismatch gates activation",
@@ -284,7 +285,7 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 				Endpoint: "arch", Availability: domain.RemoteAvailabilityIncompatible,
 				InventoryKnown: true, Sessions: []catalogue.RemoteCatalogSession{session},
 			},
-			want: picker.RemoteVersionMismatch, wantActivate: false,
+			want: pickerRemoteVersionMismatch, wantActivate: false,
 		},
 	}
 
@@ -298,9 +299,9 @@ func TestRemotePickerAvailabilityUsesCachedRowsForFailures(t *testing.T) {
 			require.Len(t, views, 1)
 			require.Equal(t, test.want, views[0].RemoteAvailability)
 			if test.wantActivate {
-				require.NotEqual(t, picker.RemoteUnavailable, views[0].RemoteActivation)
+				require.NotEqual(t, pickerRemoteUnavailable, views[0].RemoteActivation)
 			} else {
-				require.Equal(t, picker.RemoteUnavailable, views[0].RemoteActivation)
+				require.Equal(t, pickerRemoteUnavailable, views[0].RemoteActivation)
 			}
 		})
 	}
@@ -326,19 +327,19 @@ func TestRemotePickerNoSessionHostFailuresRemainVisible(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		host       ports.RemoteHostSnapshot
-		want       picker.RemoteAvailability
+		want       pickerRemoteAvailability
 		wantDetail string
 	}{
 		{
 			name:       "unreachable",
 			host:       ports.RemoteHostSnapshot{Endpoint: "arch", Availability: domain.RemoteAvailabilityUnreachable},
-			want:       picker.RemoteStale,
+			want:       pickerRemoteStale,
 			wantDetail: "unreachable",
 		},
 		{
 			name:       "version mismatch",
 			host:       ports.RemoteHostSnapshot{Endpoint: "arch", Availability: domain.RemoteAvailabilityIncompatible},
-			want:       picker.RemoteVersionMismatch,
+			want:       pickerRemoteVersionMismatch,
 			wantDetail: "version mismatch",
 		},
 	} {
@@ -352,7 +353,7 @@ func TestRemotePickerNoSessionHostFailuresRemainVisible(t *testing.T) {
 			require.Equal(t, "arch", views[0].Name)
 			require.Equal(t, test.want, views[0].RemoteAvailability)
 			require.Equal(t, test.wantDetail, views[0].RemoteDetail)
-			model := picker.New(views, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
+			model := picker.New(pickerLineSetFor(views, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{}).lines, picker.Config{Intent: protocol.PickerIntentNavigation})
 			_, selectable := model.Selected()
 			require.False(t, selectable)
 		})
@@ -387,7 +388,7 @@ func TestRemotePickerStaleAndCheckingInventoryRemainsAttemptable(t *testing.T) {
 				domain.RemoteSessionKey{Host: "arch", Name: "work"},
 				session, test.host, now,
 			)
-			require.Equal(t, picker.RemoteAttach, view.RemoteActivation)
+			require.Equal(t, pickerRemoteAttach, view.RemoteActivation)
 			require.NotNil(t, view.RemoteTarget)
 			require.NoError(t, view.RemoteTarget.Validate())
 		})
@@ -404,11 +405,13 @@ func TestRemotePickerOverlayCausesNoDirectoryIO(t *testing.T) {
 	}
 	d.remoteDirectory = directory
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-
-	model := d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-	d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
-	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-	d.closePicker(ac)
+	effect := admitPickerEffectForTest(t, sess, ac)
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	d.refreshPickerSnapshot(ac)
+	ac.overlays.pickerMu.Lock()
+	interaction := ac.overlays.pickerInteraction
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, d.closePickerForAttachment(ac, effect, interaction))
 
 	require.Zero(t, directory.reconciles, "overlay lifecycle must never request reconciliation")
 	require.GreaterOrEqual(t, directory.snapshots, 1, "presentation renders from snapshots")
@@ -480,6 +483,84 @@ func seedPickerDirectoryHost(t *testing.T, d *Daemon, endpoint string, fetchedAt
 	seedRemoteDirectory(t, d, reachableDirectoryHost(endpoint, fetchedAt, sessions...))
 }
 
+func TestRemotePickerNavigationCommitsARemoteRowThroughTheHandoff(t *testing.T) {
+	// A committed remote row names an endpoint-qualified session, never a local
+	// one. The selection gate must not resolve it as a local lifecycle, and the
+	// handoff must be what reaches the client.
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "main", Index: 0}}, ActiveTabID: "tab-1",
+	}
+	d := newRemotePickerDaemon()
+	seedPickerDirectoryHost(t, d, "arch", time.Unix(10, 0), remoteSession)
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	_ = awaitPickerOffer(t, sends)
+	snapshot := awaitPickerSnapshot(t, sends)
+	key := ""
+	for _, line := range snapshot.Lines {
+		if line.Actions&protocol.PickerCanNavigate != 0 && strings.HasPrefix(line.Key, "remote:") {
+			key = line.Key
+			break
+		}
+	}
+	require.NotEmpty(t, key, "the remote session's rows must authorise navigation")
+
+	d.resolvePickerSelection(effect, navigateSelection(snapshot, key))
+
+	frame := awaitFrame(t, sends, wire.MsgAttachTarget)
+	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
+	require.NoError(t, err)
+	require.Equal(t, "arch", handoff.Endpoint)
+	require.Equal(t, "work", handoff.Session)
+}
+
+func TestRemotePickerNavigationRejectsARowTheCatalogNoLongerHolds(t *testing.T) {
+	// The handoff is the remote target's lifecycle gate, so a committed row
+	// whose session was replaced must fail precisely instead of attaching to a
+	// route the catalogue no longer publishes.
+	lifecycle := remoteLifecycleForTest()
+	remoteSession := catalogue.RemoteCatalogSession{
+		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
+		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "main", Index: 0}}, ActiveTabID: "tab-1",
+	}
+	d := newRemotePickerDaemon()
+	seedPickerDirectoryHost(t, d, "arch", time.Unix(10, 0), remoteSession)
+	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
+	token := sess.captureAttachmentCapability(ac, ac.transport())
+	effect, admitted := ac.beginAttachmentEffect(token)
+	require.True(t, admitted)
+	defer effect.End()
+
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	_ = awaitPickerOffer(t, sends)
+	snapshot := awaitPickerSnapshot(t, sends)
+	key := ""
+	for _, line := range snapshot.Lines {
+		if line.Actions&protocol.PickerCanNavigate != 0 && strings.HasPrefix(line.Key, "remote:") {
+			key = line.Key
+			break
+		}
+	}
+	require.NotEmpty(t, key)
+
+	// The same session name now carries a different lifecycle.
+	replaced := remoteSession
+	replaced.LifecycleID = domain.SessionLifecycleID{9: 3}
+	seedPickerDirectoryHost(t, d, "arch", time.Unix(20, 0), replaced)
+
+	d.resolvePickerSelection(effect, navigateSelection(snapshot, key))
+
+	failure := awaitPickerFailure(t, sends)
+	require.Equal(t, protocol.PickerNavigationFailed, failure.Code)
+}
+
 func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	remoteSession := catalogue.RemoteCatalogSession{
@@ -495,7 +576,7 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "attach target")
 	require.Equal(t, wire.MsgAttachTarget, frame.Type)
@@ -519,43 +600,38 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 			{ID: "tab-b", Name: "beta", Index: 1},
 		},
 	}
-	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
-	host := reachableDirectoryHost("arch", time.Unix(10, 0), remoteSession)
-	remoteView := remotePickerView(key, remoteSession, host, time.Unix(10, 0))
-	model := picker.New([]picker.SessionView{
-		{ID: "local", Name: "local", Tabs: []picker.TabEntry{{TabID: "local-tab", Name: "local"}}},
-		remoteView,
-	}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
-	var selected picker.Target
-	for range 4 {
-		candidate, ok := model.Selected()
-		if ok && candidate.RemoteTarget != nil && candidate.RemoteTarget.StoppedTab.StableID == "tab-b" {
-			selected = candidate
-			break
+	// The stopping tab is offered by the daemon's published keys: a stopped
+	// remote session keeps a structured restore target per tab.
+	local := newRemotePickerDaemon()
+	seedPickerDirectoryHost(t, local, "arch", time.Unix(10, 0), remoteSession)
+	localSession, localAttachment, _ := addRemoteRefreshPickerOwner(t, local, "local")
+	effect := admitPickerEffectForTest(t, localSession, localAttachment)
+	require.NoError(t, local.openPickerForAttachment(localAttachment, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+	localAttachment.overlays.pickerMu.Lock()
+	selected, ok := selectableTargetMatching(t, pickerLineSet{keys: localAttachment.overlays.pickerKeys}, func(target picker.Target) bool {
+		return target.RemoteTarget != nil && target.RemoteTarget.StoppedTab.StableID == "tab-b"
+	})
+	localAttachment.overlays.pickerMu.Unlock()
+	if !ok {
+		localAttachment.overlays.pickerMu.Lock()
+		for candidate, target := range localAttachment.overlays.pickerKeys {
+			if target.RemoteTarget != nil {
+				t.Logf("key=%q session=%q remote=%+v", candidate, target.Session, *target.RemoteTarget)
+			} else {
+				t.Logf("key=%q session=%q remote=nil", candidate, target.Session)
+			}
 		}
-		model.Down()
+		localAttachment.overlays.pickerMu.Unlock()
 	}
+	require.True(t, ok)
 	require.NotNil(t, selected.RemoteTarget)
 	require.True(t, selected.RemoteTarget.Stopped)
 	require.Equal(t, domain.NewStableTabSelector("tab-b"), selected.RemoteTarget.StoppedTab)
+	require.Equal(t, selected.RemoteKey.ID(), selected.Session, "the row identity must match its remote key")
+	require.True(t, local.remoteCatalogTargetReady(*selected.RemoteTarget), "the published stopped target must be ready to attach")
 
-	local := newRemotePickerDaemon()
-	seedPickerDirectoryHost(t, local, "arch", time.Unix(10, 0), remoteSession)
-	localSession, localAttachment, sends := addRemoteRefreshPickerOwner(t, local, "local")
-	token := localSession.captureAttachmentCapability(localAttachment, localAttachment.transport())
-	effect, admitted := localAttachment.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
-
-	frame := receiveRemotePicker(t, sends, "stopped remote target")
-	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
-	require.NotNil(t, handoff.RemoteTarget)
-	require.Equal(t, selected.RemoteTarget, handoff.RemoteTarget)
-	local.mu.Lock()
-	require.NotContains(t, local.sessions, key.ID(), "picker handoff must not create a local remote shadow")
-	local.mu.Unlock()
-
+	// The handoff itself is covered by TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession;
+	// this suite pins the per-tab restore target the stopped rows publish.
 	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	remote.mu.Lock()
 	remote.inactive["work"] = inactiveSession{
@@ -566,8 +642,8 @@ func TestRemotePickerSelectsStoppedRemoteTabAndRestoresIt(t *testing.T) {
 	remote.mu.Unlock()
 	transport, _ := newCapturingTransport(t)
 	restored, attachment, err := remote.routeWithContext(context.Background(), protocol.Hello{
-		Version: protocol.Version, Intent: protocol.IntentAttach, Name: handoff.Session,
-		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: handoff.RemoteTarget,
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: selected.RemoteTarget.SessionName,
+		Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: selected.RemoteTarget,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}, transport)
 	require.NoError(t, err)
@@ -587,21 +663,16 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	host := reachableDirectoryHost("arch", time.Unix(10, 0), remoteSession)
 	remoteView := remotePickerView(key, remoteSession, host, time.Unix(10, 0))
-	require.Equal(t, picker.RemoteRestart, remoteView.RemoteActivation)
+	require.Equal(t, pickerRemoteRestart, remoteView.RemoteActivation)
 
-	model := picker.New([]picker.SessionView{
-		{ID: "local", Name: "local", Tabs: []picker.TabEntry{{TabID: "local-tab", Name: "local"}}},
+	set := pickerLineSetFor([]pickerSessionView{
+		{ID: "local", Name: "local", Tabs: []pickerTabEntry{{TabID: "local-tab", Name: "local"}}},
 		remoteView,
-	}, picker.SelectionConfig{Mode: picker.SelectNavigationTab})
-	var selected picker.Target
-	for range 3 {
-		model.Down()
-		candidate, ok := model.Selected()
-		if ok && candidate.RemoteTarget != nil {
-			selected = candidate
-			break
-		}
-	}
+	}, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{})
+	selected, ok := selectableTargetMatching(t, set, func(target picker.Target) bool {
+		return target.RemoteTarget != nil
+	})
+	require.True(t, ok)
 	require.NotNil(t, selected.RemoteTarget)
 	require.True(t, selected.RemoteTarget.Stopped)
 	require.Equal(t, domain.TabSelector{}, selected.RemoteTarget.StoppedTab)
@@ -612,7 +683,7 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	token := localSession.captureAttachmentCapability(localAttachment, localAttachment.transport())
 	effect, admitted := localAttachment.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target without tab metadata")
 	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
@@ -636,41 +707,6 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	require.Equal(t, restored.tabs[0].stableID, string(attachment.viewSnapshot().tabID))
 }
 
-func TestNavigationActionHandoffSendsBoundedAction(t *testing.T) {
-	tests := []struct {
-		name   string
-		action protocol.NavigationAction
-	}{
-		{name: "home picker", action: protocol.NavigationOpenHomePicker},
-		{name: "back", action: protocol.NavigationBack},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			d := newRemotePickerDaemon()
-			sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-			if tt.action == protocol.NavigationOpenHomePicker {
-				ac.navigationCapabilities = protocol.NavigationCapabilityHomePicker
-			}
-			token := sess.captureAttachmentCapability(ac, ac.transport())
-			effect, admitted := ac.beginAttachmentEffect(token)
-			require.True(t, admitted)
-			defer effect.End()
-			require.NoError(t, d.sendNavigationActionForAttachment(effect, tt.action))
-			frame := receiveRemotePicker(t, sends, "navigation action")
-			require.Equal(t, wire.MsgNavigationAction, frame.Type)
-			directive, err := wire.UnmarshalNavigationDirective(frame.Payload)
-			require.NoError(t, err)
-			require.Equal(t, tt.action, directive.Action)
-			if tt.action == protocol.NavigationOpenHomePicker {
-				require.False(t, directive.LeaseID.IsZero())
-			} else {
-				require.True(t, directive.LeaseID.IsZero())
-			}
-		})
-	}
-}
-
 func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	lifecycle := remoteLifecycleForTest()
 	remoteSession := catalogue.RemoteCatalogSession{
@@ -683,32 +719,104 @@ func TestRemotePickerHandoffSendFailureKeepsPickerOpen(t *testing.T) {
 	tr := portsmocks.NewMockServerConnection(t)
 	tr.EXPECT().SendServer(mock.Anything).Return(cause)
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "local", tr)
-	ac.overlays.pickerMu.Lock()
-	ac.overlays.picker = picker.New(nil, picker.SelectionConfig{})
-	ac.overlays.pickerGeneration++
-	ac.overlays.pickerMu.Unlock()
+	openPickerStateForTest(ac)
 
 	gone := make(chan struct{})
 	d.afterClientGoneDetach = func() { close(gone) }
 	token := sess.captureAttachmentCapability(ac, tr)
-	effect, admitted := ac.beginAttachmentEffect(token)
+	sendEffect, admitted := ac.beginAttachmentEffect(token)
 	require.True(t, admitted)
-	defer effect.End()
+	defer sendEffect.End()
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	err := d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select")
+	err := d.sendRemoteAttachTargetForAttachment(sendEffect, target, sessionHandoffGuard{}, "picker-select")
 	var userErr *domain.UserError
 	require.ErrorAs(t, err, &userErr)
 	require.Equal(t, "couldn't attach to remote session", userErr.Msg)
 	require.ErrorIs(t, err, cause)
-	require.True(t, ac.overlays.pickerActive(), "failed control send must leave the picker open")
+	require.True(t, ac.overlays.pickerClientActive(), "failed control send must leave the picker open")
 	select {
 	case <-gone:
 		t.Fatal("failed control send reached clientGoneForAttachment")
 	default:
 	}
 	require.Same(t, sess, ac.currentAttachmentSession())
+}
+
+// selectableTargetMatching returns the resolved target of the first
+// selectable line whose target satisfies the predicate. A key-only line set
+// (every published key is selectable) is accepted too.
+func selectableTargetMatching(t *testing.T, set pickerLineSet, match func(picker.Target) bool) (picker.Target, bool) {
+	t.Helper()
+	if len(set.lines) == 0 {
+		for _, target := range set.keys {
+			if match(target) {
+				return target, true
+			}
+		}
+		return picker.Target{}, false
+	}
+	for _, line := range set.lines {
+		if line.Actions == 0 {
+			continue
+		}
+		target, ok := set.keys[line.Key]
+		if !ok {
+			continue
+		}
+		if match(target) {
+			return target, true
+		}
+	}
+	return picker.Target{}, false
+}
+
+// openPickerStateForTest marks the attachment as owning an interaction without
+// publishing frames. Suites that observe teardown or send failures on the wire
+// must not hold a live effect while they run.
+func openPickerStateForTest(ac *attachedClient) uint64 {
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	ac.overlays.pickerInteraction++
+	if ac.overlays.pickerInteraction == 0 {
+		ac.overlays.pickerInteraction = 1
+	}
+	ac.overlays.pickerOpen = true
+	ac.overlays.pickerRevisions = map[string]uint64{servingPickerSourceID: 1}
+	return ac.overlays.pickerInteraction
+}
+
+// admitPickerEffectForTest admits one effect for the attachment, so typed
+// picker opens and closes travel the same path a client frame would.
+func admitPickerEffectForTest(t *testing.T, sess *session, ac *attachedClient) *attachmentEffect {
+	t.Helper()
+	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	require.True(t, admitted)
+	t.Cleanup(effect.End)
+	return effect
+}
+
+// firstSelectableTarget returns the resolved target of the first line a source
+// authorised for navigation.
+func firstSelectableTarget(t *testing.T, set pickerLineSet) (picker.Target, bool) {
+	t.Helper()
+	// The presented selection wins: the daemon's default cursor is a
+	// session's active tab, so it is the row a fresh interaction would commit.
+	if set.cursor.Key != "" {
+		if target, ok := set.keys[set.cursor.Key]; ok {
+			return target, true
+		}
+	}
+	for _, line := range set.lines {
+		if line.Actions&protocol.PickerCanNavigate == 0 {
+			continue
+		}
+		target, ok := set.keys[line.Key]
+		require.True(t, ok, "selectable line %q has no resolved target", line.Key)
+		return target, true
+	}
+	return picker.Target{}, false
 }
 
 func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...appports.ServerConnection) (*session, *attachedClient, chan wire.Frame) {
@@ -747,24 +855,20 @@ func TestRemotePickerTeardownLifecycle(t *testing.T) {
 			d := newRemotePickerDaemon()
 			sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 			ac.resumeCapable = test.resumeCapable
-			model := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-			d.publishPicker(sess, ac, model, pickerNavigate, moveSourceLocator{})
-			ac.overlays.pickerMu.Lock()
-			generation := ac.overlays.pickerGeneration
-			ac.overlays.pickerMu.Unlock()
+			_ = openPickerStateForTest(ac)
 
 			test.teardown(d, sess, ac)
 
 			ac.overlays.pickerMu.Lock()
-			current, currentGeneration := ac.overlays.picker, ac.overlays.pickerGeneration
+			open, currentInteraction := ac.overlays.pickerOpen, ac.overlays.pickerInteraction
 			ac.overlays.pickerMu.Unlock()
 			if !test.resumeCapable {
-				require.Nil(t, current)
+				require.False(t, open)
 				return
 			}
 			require.True(t, ac.parked)
-			require.Same(t, model, current)
-			require.Equal(t, generation, currentGeneration)
+			require.False(t, open, "parking retires picker state before resume")
+			require.NotZero(t, currentInteraction, "interaction IDs remain monotone after retirement")
 			d.mu.Lock()
 			parked := d.parked[ac.resumeToken]
 			d.mu.Unlock()
@@ -785,10 +889,10 @@ func TestPickerShowsCheckingRowUntilDirectoryInitializes(t *testing.T) {
 	d.remoteDirectory = &stubRemoteDirectory{}
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
 
-	findChecking := func(views []picker.SessionView) bool {
+	findChecking := func(views []pickerSessionView) bool {
 		for _, view := range views {
 			if view.ID == domain.SessionID("remote:checking") {
-				if view.RemoteActivation != picker.RemoteUnavailable || !view.CannotAcceptMoves {
+				if view.RemoteActivation != pickerRemoteUnavailable || !view.CannotAcceptMoves {
 					t.Fatal("checking row must be non-actionable")
 				}
 				return true
@@ -803,156 +907,4 @@ func TestPickerShowsCheckingRowUntilDirectoryInitializes(t *testing.T) {
 	seedRemoteDirectory(t, d)
 	views, _ = d.pickerViews(sess, ac)
 	require.False(t, findChecking(views), "initialized directory must retire the checking row")
-}
-
-// TestRemoteDirectoryRefreshPreservesBlockedPreview proves an unchanged
-// directory revision does not interrupt an in-flight remote preview: the
-// rebuild keeps the selected exact target, so the preview cancel func is
-// never invoked and its content survives. A changed selection still
-// re-registers (and cancels) the preview.
-func TestRemoteDirectoryRefreshPreservesBlockedPreview(t *testing.T) {
-	d := newRemotePickerDaemon()
-	session := catalogue.RemoteCatalogSession{
-		LifecycleID: remoteLifecycleForTest(), Name: "work", State: catalogue.RemoteCatalogSessionUp,
-		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "main"}}, ActiveTabID: "tab-1",
-	}
-	seedRemoteDirectory(t, d, reachableDirectoryHost("arch", time.Unix(10, 0), session))
-	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	d.publishPicker(sess, ac, d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	// Move the cursor onto the remote row.
-	ac.overlays.pickerMu.Lock()
-	for range 8 {
-		target, ok := ac.overlays.picker.Selected()
-		if ok && target.RemoteTarget != nil {
-			break
-		}
-		ac.overlays.picker.Down()
-	}
-	target, ok := ac.overlays.picker.Selected()
-	ac.overlays.pickerMu.Unlock()
-	require.True(t, ok && target.RemoteTarget != nil, "picker must offer the seeded remote row")
-
-	// Simulate a blocked remote preview fetch.
-	cancelled := make(chan struct{})
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ac.overlays.pickerMu.Lock()
-	ac.overlays.pickerRemotePreviewCancel = func() {
-		close(cancelled)
-		cancel()
-	}
-	ac.overlays.pickerRemotePreview = picker.Preview{Width: 8, Height: 4}
-	ac.overlays.pickerMu.Unlock()
-
-	// An identical directory revision rebuilds rows around the same
-	// exact target: the preview survives untouched.
-	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-	select {
-	case <-cancelled:
-		t.Fatal("unchanged directory revision cancelled the blocked preview")
-	default:
-	}
-	ac.overlays.pickerMu.Lock()
-	kept := ac.overlays.pickerRemotePreview
-	ac.overlays.pickerMu.Unlock()
-	require.Equal(t, 8, kept.Width, "blocked preview content must survive an unchanged refresh")
-
-	// Removing the remote session moves the selection: the preview
-	// re-registers and the blocked fetch is cancelled.
-	seedRemoteDirectory(t, d)
-	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-	select {
-	case <-cancelled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("changed selection did not cancel the blocked preview")
-	}
-}
-
-func TestParkedPickerRetirementClosesCapturedGenerationOnly(t *testing.T) {
-	d := newRemotePickerDaemon()
-	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	ac.resumeCapable = true
-	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	d.refreshPickerOpts(ac, pickerRefreshOptions{preserveSelection: true, nearestRow: -1})
-	ac.overlays.pickerMu.Lock()
-	refreshed := ac.overlays.picker
-	ac.overlays.pickerMu.Unlock()
-	require.NotNil(t, refreshed)
-	require.True(t, d.parkAttachment(sess, ac))
-	token := ac.resumeToken
-	d.mu.Lock()
-	parked := d.parked[token]
-	d.mu.Unlock()
-	require.NotNil(t, parked)
-
-	d.mu.Lock()
-	retirement := d.retireParkedAttachmentLocked(token, parked)
-	d.mu.Unlock()
-	d.finishParkedAttachmentRetirements([]parkedAttachmentRetirement{retirement})
-	ac.overlays.pickerMu.Lock()
-	require.Nil(t, ac.overlays.picker, "terminal retirement closes a refreshed model in its captured generation")
-	ac.overlays.pickerMu.Unlock()
-}
-
-func TestParkedPickerTokenReplacementRetiresPreviousGeneration(t *testing.T) {
-	d := newRemotePickerDaemon()
-	firstSession, first, _ := addRemoteRefreshPickerOwner(t, d, "first")
-	secondSession, second, _ := addRemoteRefreshPickerOwner(t, d, "second")
-	first.resumeCapable, second.resumeCapable = true, true
-	d.publishPicker(firstSession, first, d.newPickerModel(firstSession, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	require.True(t, d.parkAttachment(firstSession, first))
-	token := first.resumeToken
-	d.publishPicker(secondSession, second, d.newPickerModel(secondSession, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	second.resumeToken = token
-	require.True(t, d.parkAttachment(secondSession, second))
-
-	first.overlays.pickerMu.Lock()
-	require.Nil(t, first.overlays.picker)
-	first.overlays.pickerMu.Unlock()
-	second.overlays.pickerMu.Lock()
-	require.NotNil(t, second.overlays.picker)
-	second.overlays.pickerMu.Unlock()
-}
-
-func TestParkedPickerResumePreservesGeneration(t *testing.T) {
-	d := newRemotePickerDaemon()
-	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	ac.resumeCapable = true
-	ac.clientID = [16]byte{1, 2, 3, 4}
-	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	ac.overlays.pickerMu.Lock()
-	model, generation := ac.overlays.picker, ac.overlays.pickerGeneration
-	ac.overlays.pickerMu.Unlock()
-	d.clientGone(sess, ac, ac.transport(), false)
-	token := ac.resumeToken
-	tr := &closeTrackingTransport{}
-	resumedSess, resumedAC, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, sess.name, token), tr, domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Same(t, sess, resumedSess)
-	require.Same(t, ac, resumedAC)
-	ac.overlays.pickerMu.Lock()
-	require.Same(t, model, ac.overlays.picker)
-	require.Equal(t, generation, ac.overlays.pickerGeneration)
-	ac.overlays.pickerMu.Unlock()
-}
-
-func TestStaleParkedPickerExpiryPreservesNewGeneration(t *testing.T) {
-	d := newRemotePickerDaemon()
-	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
-	ac.resumeCapable = true
-	d.publishPicker(sess, ac, d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
-	require.True(t, d.parkAttachment(sess, ac))
-	token := ac.resumeToken
-	d.mu.Lock()
-	parked := d.parked[token]
-	d.mu.Unlock()
-	require.NotNil(t, parked)
-
-	newer := d.newPickerModel(sess, nil, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{})
-	d.publishPicker(sess, ac, newer, pickerNavigate, moveSourceLocator{})
-	d.expireParked(token, parked)
-	ac.overlays.pickerMu.Lock()
-	require.Same(t, newer, ac.overlays.picker)
-	ac.overlays.pickerMu.Unlock()
 }

@@ -635,11 +635,10 @@ func TestOverlayInputPrecedence(t *testing.T) {
 		check func(t *testing.T, ac *attachedClient, writes chan []byte)
 	}{
 		{
-			name: "prompt before palette picker copy and normal",
+			name: "prompt before palette copy and normal",
 			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
-				d.enterPicker(sess, ac)
 				d.enterPalette(sess, ac)
 				d.enterPrompt(sess, ac, "Rename", "", func(string) error { return nil })
 			},
@@ -648,41 +647,21 @@ func TestOverlayInputPrecedence(t *testing.T) {
 				t.Helper()
 				require.Equal(t, "x", ac.overlays.prompt.Value())
 				require.Equal(t, "", ac.overlays.palette.Query())
-				require.True(t, ac.overlays.pickerActive())
 				require.True(t, ac.overlays.copyActive())
 				requireNoPTYWrite(t, writes)
 			},
 		},
 		{
-			name: "palette before picker copy and normal",
+			name: "palette before copy and normal",
 			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
-				d.enterPicker(sess, ac)
 				d.enterPalette(sess, ac)
 			},
 			input: []byte("x"),
 			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
 				t.Helper()
 				require.Equal(t, "x", ac.overlays.palette.Query())
-				require.True(t, ac.overlays.pickerActive())
-				require.True(t, ac.overlays.copyActive())
-				requireNoPTYWrite(t, writes)
-			},
-		},
-		{
-			name: "picker before copy and normal",
-			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame) {
-				t.Helper()
-				d.enterCopyMode(sess, ac)
-				d.enterPicker(sess, ac)
-			},
-			input: []byte("j"),
-			check: func(t *testing.T, ac *attachedClient, writes chan []byte) {
-				t.Helper()
-				target, ok := ac.overlays.picker.Selected()
-				require.True(t, ok)
-				require.Equal(t, 1, target.TabIndex)
 				require.True(t, ac.overlays.copyActive())
 				requireNoPTYWrite(t, writes)
 			},

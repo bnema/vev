@@ -2,11 +2,11 @@ package picker
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
@@ -20,85 +20,25 @@ const (
 	MinStackHeight            = 12
 )
 
-type RemoteAvailability uint8
+// SortMode orders the rows of one source locally. The source publishes its
+// lines with rank and ephemeral markers; the presenting client decides the
+// order, so two attachments of the same daemon never share a sort mode.
+type SortMode uint8
 
 const (
-	RemoteNone RemoteAvailability = iota
-	RemoteCached
-	RemoteFresh
-	RemoteStale
-	RemoteVersionMismatch
+	// SortRecent orders every run by the source's recency rank.
+	SortRecent SortMode = iota
+	// SortGrouped puts named sessions before ephemeral ones inside each run,
+	// each keeping recency order.
+	SortGrouped
 )
 
-// RemoteActivation is the picker action authorized by the current remote
-// catalog snapshot. It is presentation state only; RemoteSessionTarget remains
-// the exact route and is revalidated when the picker hands off the client.
-type RemoteActivation uint8
-
-const (
-	RemoteUnavailable RemoteActivation = iota
-	RemoteAttach
-	RemoteRestart
-)
-
-type SessionView struct {
-	ID                domain.SessionID
-	Section           string
-	Incarnation       domain.IncarnationID
-	Name              string
-	TargetName        string
-	Tabs              []TabEntry
-	Active            int
-	Stopped           bool
-	ExpectedCreatedAt *int64
-	RemoteKey         *domain.RemoteSessionKey
-	HideRemoteOrigin  bool
-	// RemoteTarget is the structured route/lifecycle identity for picker rows.
-	// It is never reconstructed from Name or a rendered label.
-	RemoteTarget *domain.RemoteSessionTarget
-	// RemoteHost marks remote host status rows that have no session key.
-	RemoteHost         string
-	RemoteAvailability RemoteAvailability
-	RemoteDetail       string
-	RemoteReason       string
-	RemoteActivation   RemoteActivation
-	// CannotAcceptMoves reports whether this session cannot receive a moved tab
-	// or pane. False for ordinary local (and stopped) sessions; true for
-	// restricted remote rows.
-	CannotAcceptMoves bool
-}
-
-// TabEntry is one tab row; Name is drawn emphasized, Detail muted.
-type TabEntry struct {
-	TabID     domain.TabStableID // stable tab identity; independent of its current index
-	Name      string             // tab display name
-	RawName   string             // unformatted name used by exact remote selectors
-	Detail    string             // " (paneTitle)" or "", drawn muted
-	Attention bool               // draw the attention marker right after Name, before Detail
-}
-
-type SelectionMode uint8
-
-const (
-	SelectNavigationTab SelectionMode = iota
-	SelectMovePaneTab
-	SelectMoveTabSession
-)
-
-type SourceFilter struct {
-	Session     domain.SessionID
-	Incarnation domain.IncarnationID
-	TabID       domain.TabStableID
-	RemoteKey   *domain.RemoteSessionKey
-}
-
-// SelectionConfig describes which rows are selectable, which stable target
-// should remain selected, and which source must not be offered as a move
-// destination.
-type SelectionConfig struct {
-	Mode    SelectionMode
-	Current SourceFilter
-	Source  SourceFilter
+// Config describes one presented model: which intent produced the lines, the
+// source's cursor hint, and the local sort order.
+type Config struct {
+	Intent protocol.PickerIntent
+	Cursor protocol.PickerCursor
+	Sort   SortMode
 }
 
 // RenderStyles are the styles Render uses to draw list rows. The zero value
@@ -138,23 +78,6 @@ func defaultRenderStyles() RenderStyles {
 	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Stopped: stopped, Status: separator, SearchMatch: searchMatch, SelectionMatch: selectionMatch}
 }
 
-type Target struct {
-	Session           domain.SessionID
-	Incarnation       domain.IncarnationID
-	Name              string
-	RemoteKey         *domain.RemoteSessionKey
-	RemoteTarget      *domain.RemoteSessionTarget
-	RemoteHost        string
-	UnavailableReason string
-	TabID             domain.TabStableID
-	TabIndex          int
-	Stopped           bool
-	// ExpectedCreatedAt optionally pins this target to a particular named
-	// session lifecycle. Callers that obtain a snapshot outside the daemon use
-	// it to reject a same-name replacement at commit time.
-	ExpectedCreatedAt *int64
-}
-
 // Preview is a bounded view of the selected pane's visible frame.
 type Preview = ui.FrameView
 
@@ -174,7 +97,7 @@ type Layout struct {
 }
 
 // Geometry is the single picker layout contract consumed by rendering and
-// remote preview sizing. Status always reserves the final available inner row.
+// preview sizing. Status always reserves the final available inner row.
 type Geometry struct {
 	Content   domain.Rect
 	Status    domain.Rect
@@ -184,8 +107,14 @@ type Geometry struct {
 	Preview   domain.Rect
 }
 
+// Model is the pure presentation state of one picker: the published lines,
+// the local cursor, the search editor, and the local sort order. It owns no
+// target resolution and no mutation authority: the source that published a
+// line resolves its opaque key when the client commits it.
 type Model struct {
-	mode          SelectionMode
+	intent        protocol.PickerIntent
+	sort          SortMode
+	lines         []protocol.PickerLine
 	rows          []row
 	selected      int
 	searchActive  bool
@@ -194,380 +123,197 @@ type Model struct {
 	matchRows     []int
 }
 
-type rowKind uint8
-
-const (
-	rowSession rowKind = iota
-	rowTab
-	rowSection
-)
-
-type rowStatus uint8
-
-const (
-	rowStatusNone rowStatus = iota
-	rowStatusUp
-	rowStatusStopped
-	rowStatusDown
-	rowStatusStale
-	rowStatusVersion
-	rowStatusError
-)
-
-func (s rowStatus) badge() string {
-	switch s {
-	case rowStatusUp:
-		return "[up]"
-	case rowStatusStopped:
-		return "[stopped]"
-	case rowStatusDown:
-		return "[down]"
-	case rowStatusStale:
-		return "[stale]"
-	case rowStatusVersion:
-		return "[version]"
-	case rowStatusError:
-		return "[error]"
-	default:
-		return ""
-	}
-}
-
-func (k rowKind) rendersAsHeader() bool {
-	return k == rowSession
-}
-
-func (k rowKind) selectable(mode SelectionMode) bool {
-	switch mode {
-	case SelectNavigationTab, SelectMovePaneTab:
-		return k == rowTab
-	case SelectMoveTabSession:
-		return k == rowSession
-	default:
-		return false
-	}
-}
-
+// row is one rendered line plus its case-folded search fields.
 type row struct {
-	kind        rowKind
-	dispName    string // display name segment; bold on truecolor
-	detail      string // " (paneTitle)" segment, muted; "" for session rows
-	attention   bool   // draw the attention marker right after the name, before detail; tab rows only
-	session     domain.SessionID
-	incarnation domain.IncarnationID
-	// targetName is the named-session lookup name threaded into Target;
-	// distinct from dispName, which is what gets drawn.
-	targetName           string
-	sessionDisplay       string
-	tabID                domain.TabStableID
-	tabIndex             int
-	stopped              bool
-	expectedCreatedAt    int64
-	hasExpectedCreatedAt bool
-	remoteKey            domain.RemoteSessionKey
-	hasRemoteKey         bool
-	remote               bool
-	remoteTarget         domain.RemoteSessionTarget
-	hasRemoteTarget      bool
-	remoteHost           string
-	unavailableReason    string
-	selectable           bool
-	focusable            bool
-	dim                  bool
-	status               rowStatus
-	statusDetail         string
-	foldedName           string
-	foldedDetail         string
-	foldedSession        string
-	foldedHost           string
+	line         protocol.PickerLine
+	foldedLabel  string
+	foldedDetail string
 }
 
-func New(sessions []SessionView, config SelectionConfig) *Model {
-	m := &Model{mode: config.Mode, selected: -1}
-	activeSelection := -1
-	for _, session := range sessions {
-		sessionRows := rowsForSession(session, config)
-		if len(sessionRows) == 0 {
-			continue
-		}
-		if session.Section != "" {
-			m.rows = append(m.rows, row{kind: rowSection, dispName: session.Section, dim: true})
-		}
-		for _, pickerRow := range sessionRows {
-			idx := len(m.rows)
-			m.rows = append(m.rows, pickerRow)
-			if selectionMatches(pickerRow, config.Current, config.Mode) {
-				m.selected = idx
-			}
-			if config.Mode == SelectNavigationTab && activeSelection < 0 && pickerRow.focusable && pickerRow.kind == rowTab && pickerRow.tabIndex == normalizedActive(session) {
-				activeSelection = idx
-			}
-		}
-	}
-	if m.selected < 0 {
-		m.selected = activeSelection
-	}
-	if m.selected < 0 {
-		m.selected = m.firstFocusable()
-	}
-	if m.selected < 0 && len(m.rows) > 0 {
-		m.selected = 0
-	}
+func (r row) key() string { return r.line.Key }
+
+func (r row) kind() protocol.PickerLineKind { return r.line.Kind }
+
+func (r row) section() bool { return r.line.Kind == protocol.PickerLineSection }
+
+func (r row) selectable() bool { return r.line.Actions != 0 }
+
+// focusable reports the source's authorisation to rest the cursor on this row.
+// A section header is never a destination; every other shape follows the
+// published flag, so a row the source kept for inspection stays reachable while
+// a row it skipped is passed over.
+func (r row) focusable() bool {
+	return r.line.Kind != protocol.PickerLineSection && r.line.Focusable
+}
+
+func (r row) rendersAsHeader() bool {
+	return r.line.Kind == protocol.PickerLineSession || r.line.Kind == protocol.PickerLineHost
+}
+
+// New builds a model from one source's published lines. Order is applied
+// locally: recency or grouped, inside each section run.
+func New(lines []protocol.PickerLine, config Config) *Model {
+	m := &Model{intent: config.Intent, sort: config.Sort}
+	m.setLines(lines, config.Cursor)
 	return m
 }
 
-// rowsForSession is the sole owner of mode-specific destination eligibility.
-// The daemon supplies canonical lifecycle/tab snapshots without prefiltering.
-func rowsForSession(session SessionView, config SelectionConfig) []row {
-	stopped := session.Stopped
-	if session.RemoteTarget != nil {
-		stopped = session.RemoteTarget.Stopped
-	}
-	if config.Mode != SelectNavigationTab && stopped {
-		return nil
-	}
-	if config.Mode == SelectMoveTabSession && sourceMatchesSession(config.Source, session) {
-		return nil
-	}
-	if config.Mode == SelectMoveTabSession && len(session.Tabs) == 0 && !session.CannotAcceptMoves {
-		return nil
-	}
-
-	targetName := session.TargetName
-	if config.Mode == SelectNavigationTab && !stopped && session.ExpectedCreatedAt == nil {
-		targetName = ""
-	} else if targetName == "" {
-		targetName = session.Name
-	}
-	expectedCreatedAt, hasExpectedCreatedAt := int64Value(session.ExpectedCreatedAt)
-	common := row{
-		session: session.ID, incarnation: session.Incarnation, targetName: targetName, sessionDisplay: session.Name,
-		stopped: stopped, status: statusForSession(session, stopped), statusDetail: session.RemoteDetail, expectedCreatedAt: expectedCreatedAt,
-		hasExpectedCreatedAt: hasExpectedCreatedAt,
-	}
-	if session.RemoteKey != nil {
-		common.remoteKey, common.hasRemoteKey = *session.RemoteKey, true
-	}
-	if session.RemoteTarget != nil {
-		common.remoteTarget, common.hasRemoteTarget = *session.RemoteTarget, true
-	}
-	common.remoteHost = session.RemoteHost
-	common.remote = common.hasRemoteKey || common.hasRemoteTarget || session.RemoteHost != ""
-	header := common
-	header.kind, header.dispName, header.tabIndex = rowSession, session.Name, -1
-	if common.hasRemoteKey {
-		header.dispName = common.remoteKey.Name
-		if !session.HideRemoteOrigin {
-			display := common.remoteKey.Display()
-			header.detail = display[len(common.remoteKey.Name):]
-		}
-	}
-	header.selectable = header.kind.selectable(config.Mode)
-	header.focusable = header.selectable
-	if config.Mode == SelectNavigationTab && stopped && len(session.Tabs) == 0 {
-		header.selectable, header.focusable = true, true
-	}
-	if common.remote {
-		if common.hasRemoteTarget {
-			header.selectable = config.Mode == SelectNavigationTab && stopped && len(session.Tabs) == 0 && remoteActivatable(session) && common.remoteTarget.Validate() == nil
-			header.focusable = config.Mode == SelectNavigationTab && len(session.Tabs) == 0
-		} else {
-			header.selectable = false
-			header.focusable = config.Mode == SelectNavigationTab && session.RemoteHost != ""
-		}
-		header.unavailableReason = session.RemoteReason
-		header.dim = session.RemoteActivation == RemoteUnavailable
-	}
-	if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
-		header.selectable, header.focusable, header.dim = false, false, true
-	}
-	header.prepareSearch()
-	rows := []row{header}
-	for i, tab := range session.Tabs {
-		if config.Mode == SelectMovePaneTab && sourceMatchesTab(config.Source, session, tab) {
-			continue
-		}
-		tabRow := common
-		remoteTargetResolvable := true
-		tabRow.kind, tabRow.dispName, tabRow.detail, tabRow.attention = rowTab, tab.Name, tab.Detail, tab.Attention
-		tabRow.tabID, tabRow.tabIndex = tab.TabID, i
-		tabRow.selectable = tabRow.kind.selectable(config.Mode)
-		tabRow.focusable = tabRow.selectable
-		if common.remote {
-			tabRow.unavailableReason = session.RemoteReason
-			if common.hasRemoteTarget {
-				remoteTarget := common.remoteTarget
-				if remoteTarget.Stopped {
-					remoteTarget.LiveTabID = ""
-					if tab.TabID != "" {
-						remoteTarget.StoppedTab = domain.NewStableTabSelector(tab.TabID)
-					} else if remoteTarget.StoppedTab != (domain.TabSelector{}) {
-						remoteTarget.StoppedTab, remoteTargetResolvable = remoteStoppedOrdinalSelector(i, tab.RawName, len(session.Tabs))
-					}
-				} else {
-					remoteTarget.StoppedTab = domain.TabSelector{}
-					remoteTarget.LiveTabID = tab.TabID
-				}
-				// Keep the selected tab's structured identity even when it is
-				// invalid. Focus remains possible for diagnostics, while both
-				// the readiness gate and daemon wire validation reject it.
-				tabRow.remoteTarget = remoteTarget
-				tabRow.hasRemoteTarget = true
-			}
-			if !tabRow.hasRemoteTarget {
-				tabRow.focusable = false
-				tabRow.selectable = false
-			} else {
-				tabRow.focusable = true
-				tabRow.selectable = remoteTargetResolvable && tabRow.remoteTarget.Validate() == nil && config.Mode == SelectNavigationTab && remoteActivatable(session)
-			}
-			tabRow.dim = session.RemoteActivation == RemoteUnavailable
-		}
-		if config.Mode != SelectNavigationTab && session.CannotAcceptMoves {
-			tabRow.selectable, tabRow.focusable, tabRow.dim = false, false, true
-		}
-		tabRow.prepareSearch()
-		rows = append(rows, tabRow)
-	}
-	if config.Mode == SelectMovePaneTab && len(rows) == 1 && !session.CannotAcceptMoves {
-		return nil
-	}
-	return rows
-}
-
-func (r *row) prepareSearch() {
-	r.foldedName = strings.ToLower(r.dispName)
-	r.foldedDetail = strings.ToLower(r.detail)
-	r.foldedSession = strings.ToLower(r.sessionDisplay)
-	r.foldedHost = strings.ToLower(r.remoteHost)
-}
-
-func remoteStoppedOrdinalSelector(index int, rawName string, tabCount int) (domain.TabSelector, bool) {
-	if tabCount > math.MaxUint16 || index < 0 || index >= tabCount {
-		return domain.TabSelector{}, false
-	}
-	return domain.NewOrdinalTabSelector(uint16(index), rawName, uint16(tabCount)), true
-}
-
-func statusForSession(session SessionView, stopped bool) rowStatus {
-	remote := session.RemoteKey != nil || session.RemoteTarget != nil || session.RemoteHost != ""
-	if remote {
-		switch session.RemoteReason {
-		case domain.RemoteReasonHostUnreachable:
-			return rowStatusDown
-		case domain.RemoteReasonVersionMismatch:
-			return rowStatusVersion
-		case domain.RemoteReasonRefreshing, domain.RemoteReasonCatalogStale:
-			return rowStatusStale
-		case domain.RemoteReasonMalformed, domain.RemoteReasonSessionBroken, domain.RemoteReasonIdentityChanged, domain.RemoteReasonAuthFailure:
-			return rowStatusError
-		}
-	}
-	if stopped {
-		return rowStatusStopped
-	}
-	if !remote {
-		return rowStatusNone
-	}
-	if session.RemoteActivation == RemoteAttach {
-		return rowStatusUp
-	}
-	return rowStatusError
-}
-
-func remoteActivatable(session SessionView) bool {
-	return session.RemoteActivation == RemoteAttach || session.RemoteActivation == RemoteRestart
-}
-
-func sourceMatchesSession(source SourceFilter, session SessionView) bool {
-	if source.Session != session.ID {
-		return false
-	}
-	return source.Incarnation == (domain.IncarnationID{}) || source.Incarnation == session.Incarnation
-}
-
-func sourceMatchesTab(source SourceFilter, session SessionView, tab TabEntry) bool {
-	return sourceMatchesSession(source, session) && source.TabID == tab.TabID
-}
-
-func normalizedActive(session SessionView) int {
-	if session.Active < 0 || session.Active >= len(session.Tabs) {
+// Intent reports which picker produced this model.
+func (m *Model) Intent() protocol.PickerIntent {
+	if m == nil {
 		return 0
 	}
-	return session.Active
+	return m.intent
 }
 
-func selectionMatches(pickerRow row, current SourceFilter, mode SelectionMode) bool {
-	if pickerRow.session != current.Session || (current.Incarnation != (domain.IncarnationID{}) && pickerRow.incarnation != current.Incarnation) {
-		return false
+// SortMode reports the local ordering mode.
+func (m *Model) SortMode() SortMode {
+	if m == nil {
+		return SortRecent
 	}
-	if pickerRow.hasRemoteKey && pickerRow.kind == rowSession {
-		return pickerRow.focusable && (current.RemoteKey == nil || pickerRow.remoteKey == *current.RemoteKey)
-	}
-	if mode == SelectMoveTabSession {
-		return pickerRow.kind == rowSession
-	}
-	// A stopped session with no retained tab metadata uses its selectable
-	// header as the default restart target and matches on exact session identity.
-	if current.TabID == "" && pickerRow.stopped {
-		return pickerRow.kind == rowSession && pickerRow.selectable
-	}
-	if pickerRow.kind != rowTab {
-		return false
-	}
-	return pickerRow.tabID == current.TabID
+	return m.sort
 }
 
-func int64Value(value *int64) (int64, bool) {
-	if value == nil {
-		return 0, false
+// SetSort re-orders the rows locally, preserving the selected key.
+func (m *Model) SetSort(mode SortMode) {
+	if m == nil {
+		return
 	}
-	return *value, true
+	m.sort = mode
+	key, hadKey := m.cursorKey()
+	m.rebuild(key, hadKey, m.selected)
 }
 
-// ChooseGeometry reserves the final inner row for picker-local status before
-// solving the list and preview layout.
-func ChooseGeometry(inner domain.Size) Geometry {
-	if inner.Cols <= 0 || inner.Rows <= 0 {
-		return Geometry{}
+// setLines replaces the published lines and restores the cursor by key,
+// falling back to the source hint and then to the nearest focusable row.
+func (m *Model) setLines(lines []protocol.PickerLine, cursor protocol.PickerCursor) {
+	if m == nil {
+		return
 	}
-	contentRows := max(inner.Rows-1, 0)
-	layout := ChooseLayout(domain.Size{Cols: inner.Cols, Rows: contentRows})
-	return Geometry{
-		Content: domain.Rect{Width: inner.Cols, Height: contentRows},
-		Status:  domain.Rect{Y: contentRows, Width: inner.Cols, Height: 1},
-		Mode:    layout.Mode, List: layout.List, Separator: layout.Separator, Preview: layout.Preview,
-	}
+	m.lines = append(m.lines[:0], lines...)
+	m.rebuild(cursor.Key, cursor.Key != "", cursor.Index)
 }
 
-func ChooseLayout(inner domain.Size) Layout {
-	if inner.Cols <= 0 || inner.Rows <= 0 {
-		return Layout{}
+// ReplaceLines applies a fresh publication of the same source while retaining
+// the local search editor and the selected key when it still exists.
+func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.PickerCursor) {
+	if m == nil {
+		return
 	}
-	if inner.Rows >= MinPaneHeight {
-		listWidth := clamp(inner.Cols*40/100, MinListWidth, MaxListWidth)
-		listWidth = min(listWidth, inner.Cols-MinHorizontalPreviewWidth-1)
-		previewWidth := inner.Cols - listWidth - 1
-		if listWidth >= MinHorizontalListWidth && previewWidth >= MinHorizontalPreviewWidth {
-			return Layout{
-				Mode:      LayoutHorizontal,
-				List:      domain.Rect{Width: listWidth, Height: inner.Rows},
-				Separator: domain.Rect{X: listWidth, Width: 1, Height: inner.Rows},
-				Preview:   domain.Rect{X: listWidth + 1, Width: previewWidth, Height: inner.Rows},
+	key, hadKey := m.cursorKey()
+	m.lines = append(m.lines[:0], lines...)
+	if !hadKey {
+		key, hadKey = cursor.Key, cursor.Key != ""
+	}
+	m.rebuild(key, hadKey, cursor.Index)
+}
+
+// ReplaceProjection atomically changes the daemon-authored projection and its
+// local title mode while retaining search and selection state.
+func (m *Model) ReplaceProjection(lines []protocol.PickerLine, cursor protocol.PickerCursor, mode SortMode) {
+	if m == nil {
+		return
+	}
+	m.sort = mode
+	m.ReplaceLines(lines, cursor)
+}
+
+// rebuild recomputes the row list from the published lines. Search matches are
+// row-index keyed, so they are recomputed here, before the cursor is restored:
+// restoration consults them to keep the cursor on a row the query shows.
+func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
+	m.rows = m.rows[:0]
+	run := make([]protocol.PickerLine, 0, len(m.lines))
+	flush := func() {
+		if len(run) == 0 {
+			return
+		}
+		for _, line := range m.sortRun(run) {
+			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label), foldedDetail: strings.ToLower(line.Detail)})
+		}
+		run = run[:0]
+	}
+	for _, line := range m.lines {
+		if line.Kind == protocol.PickerLineSection {
+			flush()
+			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label)})
+			continue
+		}
+		run = append(run, line)
+	}
+	flush()
+	m.searchMatches = nil
+	m.matchRows = nil
+	if m.searchActive {
+		m.refreshSearch(false)
+	}
+	m.restoreSelection(key, hadKey, fallbackIndex)
+}
+
+// sortRun orders one section run locally. Recency keeps the source's
+// published order; grouped moves ephemeral sessions behind named ones without
+// disturbing the relative order inside each group.
+func (m *Model) sortRun(lines []protocol.PickerLine) []protocol.PickerLine {
+	if len(lines) < 2 || m.sort != SortGrouped {
+		return lines
+	}
+	named := make([]protocol.PickerLine, 0, len(lines))
+	ephemeral := make([]protocol.PickerLine, 0, len(lines))
+	for _, line := range lines {
+		if line.Ephemeral {
+			ephemeral = append(ephemeral, line)
+			continue
+		}
+		named = append(named, line)
+	}
+	return append(named, ephemeral...)
+}
+
+func (m *Model) restoreSelection(key string, hadKey bool, fallbackIndex int) {
+	if hadKey {
+		for idx, candidate := range m.rows {
+			if m.eligible(idx) && candidate.key() == key {
+				m.selected = idx
+				return
 			}
 		}
 	}
-	if inner.Rows >= MinStackHeight && inner.Cols >= MinPreviewWidth {
-		listHeight := max(MinPaneHeight, inner.Rows*40/100)
-		previewHeight := inner.Rows - listHeight - 1
-		return Layout{
-			Mode:      LayoutStacked,
-			List:      domain.Rect{Width: inner.Cols, Height: listHeight},
-			Separator: domain.Rect{Y: listHeight, Width: inner.Cols, Height: 1},
-			Preview:   domain.Rect{Y: listHeight + 1, Width: inner.Cols, Height: previewHeight},
-		}
+	m.selected = -1
+	m.SelectNearestRow(fallbackIndex)
+	if m.selected < 0 {
+		m.selected = m.firstEligible()
 	}
-	return Layout{Mode: LayoutListOnly, List: domain.Rect{Width: inner.Cols, Height: inner.Rows}}
+}
+
+// searchRestricted reports whether the active query narrows eligibility. An
+// empty query never hides a row.
+func (m *Model) searchRestricted() bool {
+	return m != nil && m.searchActive && m.query.Value() != ""
+}
+
+// eligible reports whether the cursor may rest on row i: the source authorised
+// the row as a destination and the typed query, when there is one, matches it.
+func (m *Model) eligible(i int) bool {
+	if m == nil || i < 0 || i >= len(m.rows) || !m.rows[i].focusable() {
+		return false
+	}
+	return !m.searchRestricted() || m.rowMatches(i)
+}
+
+// committable reports whether row i may be committed: it admits an action and
+// the typed query, when there is one, does not exclude it.
+func (m *Model) committable(i int) bool {
+	if m == nil || i < 0 || i >= len(m.rows) || !m.rows[i].selectable() {
+		return false
+	}
+	return !m.searchRestricted() || m.rowMatches(i)
+}
+
+func (m *Model) cursorKey() (string, bool) {
+	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
+		return "", false
+	}
+	return m.rows[m.selected].key(), true
 }
 
 func (m *Model) Up() {
@@ -586,31 +332,28 @@ func (m *Model) Down() {
 	m.move(1)
 }
 
-// Cursor reports the identity under the picker cursor independently from
-// whether that row may be activated. Remote refreshes use it to preserve a
-// structured remote session key while Selected continues to enforce safety.
-func (m *Model) Cursor() (Target, bool) {
+// Cursor reports the line under the picker cursor independently from whether
+// that row may be activated, so a refresh can preserve an anchor row.
+func (m *Model) Cursor() (protocol.PickerLine, bool) {
 	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
-		return Target{}, false
+		return protocol.PickerLine{}, false
 	}
-	return m.rows[m.selected].target(), true
+	return m.rows[m.selected].line, true
 }
 
-func (m *Model) Selected() (Target, bool) {
-	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
-		return Target{}, false
+// Selected reports the line under the cursor when it admits an action and the
+// active query does not exclude it.
+func (m *Model) Selected() (protocol.PickerLine, bool) {
+	if !m.committable(m.selected) {
+		return protocol.PickerLine{}, false
 	}
-	r := m.rows[m.selected]
-	if !r.selectable || m.searchActive && m.query.Value() != "" && !m.rowMatches(m.selected) {
-		return Target{}, false
-	}
-	return r.target(), true
+	return m.rows[m.selected].line, true
 }
 
-// SelectedIndex reports the raw selected row index. It is -1 only when the
-// model is nil or has no rows at all; otherwise it is a real row index even
-// when that row is not selectable (see Selected). Row indices are only
-// meaningful against this exact model.
+// SelectedIndex reports the raw selected row index. It is -1 when the model has
+// no rows or when nothing in them qualifies as a cursor destination (see
+// Selected); otherwise it is a real row index even when that row is not
+// selectable.
 func (m *Model) SelectedIndex() int {
 	if m == nil {
 		return -1
@@ -618,22 +361,21 @@ func (m *Model) SelectedIndex() int {
 	return m.selected
 }
 
-// SelectNearestRow selects the first selectable row at or after idx, falling
-// back to the last selectable row before it. Callers use it to keep the
-// cursor on the row that takes a removed item's place.
+// SelectNearestRow selects the nearest eligible row at or after idx, falling
+// back to the last eligible row before it.
 func (m *Model) SelectNearestRow(idx int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
 	idx = clamp(idx, 0, len(m.rows)-1)
 	for i := idx; i < len(m.rows); i++ {
-		if m.rows[i].focusable {
+		if m.eligible(i) {
 			m.selected = i
 			return
 		}
 	}
 	for i := idx - 1; i >= 0; i-- {
-		if m.rows[i].focusable {
+		if m.eligible(i) {
 			m.selected = i
 			return
 		}
@@ -645,6 +387,7 @@ func (m *Model) Clone() *Model {
 		return nil
 	}
 	clone := *m
+	clone.lines = append([]protocol.PickerLine(nil), m.lines...)
 	clone.rows = append([]row(nil), m.rows...)
 	clone.query.SetValue(m.query.Value())
 	// Search results are copy-on-write: every query mutation publishes a new
@@ -678,60 +421,58 @@ func (m *Model) move(delta int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
-	if m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].focusable {
-		m.selected = m.firstFocusable()
+	if !m.eligible(m.selected) {
+		m.selected = m.firstEligible()
 		return
 	}
 	for i := m.selected + delta; i >= 0 && i < len(m.rows); i += delta {
-		if m.rows[i].focusable {
+		if m.eligible(i) {
 			m.selected = i
 			return
 		}
 	}
 }
 
-func (m *Model) firstFocusable() int {
-	for i, r := range m.rows {
-		if r.focusable {
+func (m *Model) firstEligible() int {
+	for i := range m.rows {
+		if m.eligible(i) {
 			return i
 		}
 	}
 	return -1
 }
 
-func (r row) target() Target {
-	var remoteTarget *domain.RemoteSessionTarget
-	if r.hasRemoteTarget {
-		copyTarget := r.remoteTarget
-		remoteTarget = &copyTarget
+func (s SortMode) Title() string {
+	if s == SortGrouped {
+		return " Sessions · grouped "
 	}
-	return Target{
-		Session: r.session, Incarnation: r.incarnation, Name: r.targetName, RemoteKey: r.remoteKeyPointer(), RemoteTarget: remoteTarget,
-		RemoteHost: r.remoteHost, UnavailableReason: r.unavailableReason, TabID: r.tabID, TabIndex: r.tabIndex, Stopped: r.stopped, ExpectedCreatedAt: r.expectedCreatedAtPointer(),
-	}
+	return " Sessions · recent "
 }
 
-func (r row) expectedCreatedAtPointer() *int64 {
-	if !r.hasExpectedCreatedAt {
-		return nil
+func lineStatusBadge(status protocol.PickerLineStatus) string {
+	switch status {
+	case protocol.PickerLineStatusUp:
+		return "[up]"
+	case protocol.PickerLineStatusStopped:
+		return "[stopped]"
+	case protocol.PickerLineStatusDown:
+		return "[down]"
+	case protocol.PickerLineStatusStale:
+		return "[stale]"
+	case protocol.PickerLineStatusVersion:
+		return "[version]"
+	case protocol.PickerLineStatusError:
+		return "[error]"
+	default:
+		return ""
 	}
-	value := r.expectedCreatedAt
-	return &value
-}
-
-func (r row) remoteKeyPointer() *domain.RemoteSessionKey {
-	if !r.hasRemoteKey {
-		return nil
-	}
-	key := r.remoteKey
-	return &key
 }
 
 // renderList draws each visible row as up to three segments: a name segment
 // (bold when styles came from a truecolor theme), a base-styled attention
-// marker right after the name, and a muted detail segment (tab rows only) —
-// or a base-styled "(down)" suffix for down session headers. A tight width
-// ellipsizes the detail segment before eating into the name.
+// marker right after the name, and a muted detail segment — or a base-styled
+// status badge for header rows. A tight width ellipsizes the detail segment
+// before eating into the name.
 func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles RenderStyles) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
@@ -746,29 +487,29 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		}
 		r := m.rows[idx]
 		base, nameStyle, detailStyle := styles.Base, styles.Name, styles.Detail
-		if r.kind == rowSection {
+		if r.section() {
 			nameStyle = styles.Detail
 		}
 		if idx == m.selected {
 			base, nameStyle, detailStyle = styles.Selection, styles.SelectionName, styles.SelectionMuted
 		}
-		if r.stopped && idx != m.selected {
+		if r.line.Stopped && idx != m.selected {
 			base, nameStyle, detailStyle = styles.Stopped, styles.Stopped, styles.Stopped
 		}
-		if r.dim || m.searchActive && m.query.Value() != "" && !m.rowMatches(idx) {
+		if r.line.Dim || m.searchActive && m.query.Value() != "" && !m.rowMatches(idx) {
 			base.Attrs |= renderer.AttrDim
 			nameStyle.Attrs |= renderer.AttrDim
 			detailStyle.Attrs |= renderer.AttrDim
 		}
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 
-		name := r.dispName
-		if r.kind == rowTab {
+		name := r.line.Label
+		if r.kind() == protocol.PickerLineTab {
 			name = "  " + name
 		}
 		badge := ""
-		if r.kind.rendersAsHeader() {
-			badge = r.status.badge()
+		if r.rendersAsHeader() {
+			badge = lineStatusBadge(r.line.Status)
 		}
 		contentClipX := clipX
 		nameWidth := rect.Width
@@ -784,18 +525,18 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			nameMatchStyle = styles.SelectionMatch
 		}
 		namePositions := m.matchPositions(idx, matchName)
-		if r.kind == rowTab {
+		if r.kind() == protocol.PickerLineTab {
 			namePositions = shiftPositions(namePositions, 2)
 		}
 		namePositions = visibleMatchPositions(namePositions, name, name != originalName)
 		x := drawMatchedText(frame, rect.X, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
 
-		if r.kind == rowSection {
+		if r.section() {
 			continue
 		}
-		if r.kind.rendersAsHeader() {
-			detail := ui.TruncateText(r.detail, contentClipX-x)
-			detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.detail)
+		if r.rendersAsHeader() {
+			detail := ui.TruncateText(r.line.Detail, contentClipX-x)
+			detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
 			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			if badge != "" {
 				badgeX := max(rect.X, clipX-badgeWidth)
@@ -804,12 +545,12 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			continue
 		}
 
-		if r.attention {
+		if r.line.Attention {
 			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(ui.AttentionGlyph), base)
 		}
 
-		detail := ui.TruncateText(r.detail, clipX-x)
-		detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.detail)
+		detail := ui.TruncateText(r.line.Detail, clipX-x)
+		detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
 		drawMatchedText(frame, x, rect.Y+y, clipX, detail, detailStyle, nameMatchStyle, detailPositions)
 	}
 }
@@ -872,37 +613,43 @@ func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style rende
 		return
 	}
 	ui.FillRect(frame, rect, renderer.Cell{Rune: ' ', Style: style})
-	action := "open"
+	// The footer describes the effective selection: a row kept for inspection,
+	// a row the query hides, and an empty picker never promise a commit.
+	action := ""
 	deletable := false
-	if m != nil && m.selected >= 0 && m.selected < len(m.rows) {
-		selected := m.rows[m.selected]
-		if !selected.selectable {
-			action = "unavailable"
-		} else if selected.stopped {
-			action = "restart"
-		}
-		deletable = selected.selectable && !selected.remote
+	selected := protocol.PickerLine{}
+	hasCursorRow := m != nil && m.selected >= 0 && m.selected < len(m.rows)
+	if hasCursorRow {
+		selected = m.rows[m.selected].line
+	}
+	if m != nil && m.committable(m.selected) {
+		action = actionVerb(selected, m.intent)
+		deletable = selected.Actions&protocol.PickerCanKill != 0
+	}
+	enter := "Enter " + action
+	if action == "" {
+		enter = "Enter unavailable"
 	}
 	var groups []string
 	if m != nil && m.searchActive {
-		groups = []string{fmt.Sprintf("%d matches", len(m.matchRows)), "Enter " + action, "arrows next"}
+		groups = []string{fmt.Sprintf("%d matches", len(m.matchRows)), enter, "arrows next"}
 		escape := "Esc exit"
 		if m.query.Value() != "" {
 			escape = "Esc clear"
 		}
 		groups = append(groups, escape)
 	} else {
-		if m != nil && m.selected >= 0 && m.selected < len(m.rows) && m.rows[m.selected].dim && m.rows[m.selected].statusDetail != "" {
-			groups = append(groups, m.rows[m.selected].statusDetail)
+		if hasCursorRow && selected.Dim && selected.StatusDetail != "" {
+			groups = append(groups, selected.StatusDetail)
 		}
 		if rect.Width < 60 {
-			groups = append(groups, "Enter "+action, "/", "Esc", "j/k")
+			groups = append(groups, enter, "/", "Esc", "j/k")
 			if deletable {
 				groups = append(groups, "x")
 			}
 			groups = append(groups, "s")
 		} else {
-			groups = append(groups, "j/k move", "Enter "+action)
+			groups = append(groups, "j/k move", enter)
 			if deletable {
 				groups = append(groups, "x delete")
 			}
@@ -911,6 +658,24 @@ func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style rende
 	}
 	text := strings.Join(groups, "  ")
 	ui.DrawText(frame, rect.X, rect.Y, rect.X+rect.Width, ui.TruncateText(text, rect.Width), style)
+}
+
+// actionVerb names what Enter does on one row, so the footer never promises
+// an action the source did not authorise.
+func actionVerb(line protocol.PickerLine, intent protocol.PickerIntent) string {
+	if line.Actions == 0 {
+		return "unavailable"
+	}
+	if line.Actions&protocol.PickerCanMove != 0 {
+		if intent == protocol.PickerIntentMoveTab {
+			return "move"
+		}
+		return "move pane"
+	}
+	if line.Stopped {
+		return "restart"
+	}
+	return "open"
 }
 
 func (m *Model) scrollOffset(visible int) int {
@@ -932,4 +697,49 @@ func clamp(n, low, high int) int {
 		return high
 	}
 	return n
+}
+
+// ChooseGeometry reserves the final inner row for picker-local status before
+// solving the list and preview layout.
+func ChooseGeometry(inner domain.Size) Geometry {
+	if inner.Cols <= 0 || inner.Rows <= 0 {
+		return Geometry{}
+	}
+	contentRows := max(inner.Rows-1, 0)
+	layout := ChooseLayout(domain.Size{Cols: inner.Cols, Rows: contentRows})
+	return Geometry{
+		Content: domain.Rect{Width: inner.Cols, Height: contentRows},
+		Status:  domain.Rect{Y: contentRows, Width: inner.Cols, Height: 1},
+		Mode:    layout.Mode, List: layout.List, Separator: layout.Separator, Preview: layout.Preview,
+	}
+}
+
+func ChooseLayout(inner domain.Size) Layout {
+	if inner.Cols <= 0 || inner.Rows <= 0 {
+		return Layout{}
+	}
+	if inner.Rows >= MinPaneHeight {
+		listWidth := clamp(inner.Cols*40/100, MinListWidth, MaxListWidth)
+		listWidth = min(listWidth, inner.Cols-MinHorizontalPreviewWidth-1)
+		previewWidth := inner.Cols - listWidth - 1
+		if listWidth >= MinHorizontalListWidth && previewWidth >= MinHorizontalPreviewWidth {
+			return Layout{
+				Mode:      LayoutHorizontal,
+				List:      domain.Rect{Width: listWidth, Height: inner.Rows},
+				Separator: domain.Rect{X: listWidth, Width: 1, Height: inner.Rows},
+				Preview:   domain.Rect{X: listWidth + 1, Width: previewWidth, Height: inner.Rows},
+			}
+		}
+	}
+	if inner.Rows >= MinStackHeight && inner.Cols >= MinPreviewWidth {
+		listHeight := max(MinPaneHeight, inner.Rows*40/100)
+		previewHeight := inner.Rows - listHeight - 1
+		return Layout{
+			Mode:      LayoutStacked,
+			List:      domain.Rect{Width: inner.Cols, Height: listHeight},
+			Separator: domain.Rect{Y: listHeight, Width: inner.Cols, Height: 1},
+			Preview:   domain.Rect{Y: listHeight + 1, Width: inner.Cols, Height: previewHeight},
+		}
+	}
+	return Layout{Mode: LayoutListOnly, List: domain.Rect{Width: inner.Cols, Height: inner.Rows}}
 }

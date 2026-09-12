@@ -21,11 +21,6 @@ type RemoteHostStore interface {
 	Remove(target string) (deleted bool, err error)
 }
 
-// RemoteHostLearner records the validated remote target after an attach.
-type RemoteHostLearner interface {
-	RememberRemoteHost() error
-}
-
 // RemoteCatalogClient fetches a versioned session catalogue from a remote host.
 type RemoteCatalogClient interface {
 	List(ctx context.Context, target string) (catalogue.RemoteCatalog, error)
@@ -41,4 +36,26 @@ type RemotePreviewClient interface {
 type RemoteCatalogCache interface {
 	Load() ([]catalogue.RemoteCatalogCacheEntry, error)
 	Store([]catalogue.RemoteCatalogCacheEntry) error
+}
+
+// RemoteEndpointBinding is one endpoint's resolved client carriage: the typed
+// dialer every session on that endpoint attaches through, and the environment
+// to advertise when the remote environment is daemon-owned. It never carries
+// session identity, a resume token, or discovered inventory.
+type RemoteEndpointBinding struct {
+	Dialer      ClientDialer
+	Environment []string
+}
+
+// RemoteEndpointFactory resolves one endpoint into its binding. The composition
+// root implements it from the configured transport mode, the launch allowlist,
+// and the endpoint environment; consumers never inspect those policies.
+type RemoteEndpointFactory interface {
+	ResolveEndpoint(ctx context.Context, endpoint string) (RemoteEndpointBinding, error)
+}
+
+// ClientHostRegistry resolves and caches the endpoint bindings one runner
+// reuses across handoffs. Remote discovery remains daemon-owned.
+type ClientHostRegistry interface {
+	ResolveEndpoint(ctx context.Context, endpoint string) (RemoteEndpointBinding, error)
 }

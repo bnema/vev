@@ -58,4 +58,21 @@ docker cp "$context_dir/known_hosts" "$local_container:/home/demo/.ssh/known_hos
 docker exec --user root "$local_container" sh -c 'chown demo:demo /home/demo/.ssh/id_ed25519* /home/demo/.ssh/known_hosts; chmod 600 /home/demo/.ssh/id_ed25519 /home/demo/.ssh/known_hosts'
 docker exec "$local_container" ssh -o BatchMode=yes -o ConnectTimeout=5 remote true
 docker exec "$local_container" vev host add remote
+# Baseline matrix: local IPC, direct remote (UDP + explicit stdio, no local
+# daemon), and hybrid exact-return (UDP + stdio). Each scenario asserts
+# committed outcomes, not sent keys. navigation_repro.py keeps the original
+# hybrid-UDP regression alongside the table-driven runner.
 python3 "$repo_root/scripts/remote-picker-harness/navigation_repro.py" "$local_container" "$remote_container"
+python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" local-palette-cycle
+python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" direct-remote-ephemeral@udp
+python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" direct-remote-ephemeral@stdio
+python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" hybrid-exact-return@udp
+python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" hybrid-exact-return@stdio
+# Client-owned navigation picker where the serving attachment answers the
+# palette session-picker command itself: local IPC and direct remote (UDP and
+# explicit stdio). A hybrid client advertises the home-picker capability, so
+# its session-picker command delegates to the home route overlay (an R1
+# behavior pinned by hybrid-exact-return) instead of this interaction.
+VEV_ACCEPTANCE_TOPOLOGY=local python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" client-picker-navigate@udp
+VEV_ACCEPTANCE_TOPOLOGY=direct python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" client-picker-navigate@udp
+VEV_ACCEPTANCE_TOPOLOGY=direct python3 "$repo_root/scripts/remote-picker-harness/acceptance.py" "$local_container" "$remote_container" client-picker-navigate@stdio

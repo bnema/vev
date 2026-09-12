@@ -631,6 +631,18 @@ func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient, generatio
 	c.mu.Unlock()
 }
 
+// hasPreviewSubscribers reports whether any presentation is currently
+// previewing this coordinator's tab. A headless tab stays renderable while a
+// preview subscriber watches it.
+func (c *renderCoordinator) hasPreviewSubscribers() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.previewWakes) != 0
+}
+
 func (c *renderCoordinator) attachmentRegisteredLocked(ac *attachedClient) bool {
 	if ac == nil {
 		return false

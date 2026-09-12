@@ -153,12 +153,33 @@ func (d *Daemon) transitionAttachment(req attachmentTransitionRequest) (attachme
 	if err != nil {
 		return result, err
 	}
+	return d.finishAttachmentTransition(req, result)
+}
+
+// finishAttachmentTransition shares committed identity and geometry effects with
+// composite topology transactions. It runs after publication locks are released.
+func (d *Daemon) finishAttachmentTransition(req attachmentTransitionRequest, result attachmentTransitionResult) (attachmentTransitionResult, error) {
 	// A not-ready publication is still inside the Hello handshake. Welcome
 	// carries the committed identity for those attachments and must remain the
 	// first server frame. Ready transitions notify an already-running client.
 	if req.ready && result.published.ac != nil && result.published.ac.routeSnapshotCopy().Generation != 0 {
+		if d.beforeAttachmentTransitionIdentityAdmission != nil {
+			d.beforeAttachmentTransitionIdentityAdmission(result.published)
+		}
 		identityErr := errAttachmentTransition
 		if effect, admitted := result.published.ac.beginAttachmentEffect(result.published); admitted {
+			identityErr = d.sendCommittedRouteIdentityForAttachment(effect)
+			effect.End()
+		} else if token, effect, admitted := admitCurrentAttachmentCapabilityEffect(result.published); admitted {
+			// The exact published capability stopped being admissible while its
+			// attachment stayed live: a concurrent transition or link replacement
+			// superseded it after publication released the architecture locks. The
+			// committed identity is still owed to that live attachment, so re-admit
+			// its current capability and report it back so the caller's first paint
+			// and correlated completion use the same authority. A detached attachment
+			// or one whose current session no longer registers this link admits
+			// nothing and fails closed below; no stale transport is retried.
+			result.published = token
 			identityErr = d.sendCommittedRouteIdentityForAttachment(effect)
 			effect.End()
 		}

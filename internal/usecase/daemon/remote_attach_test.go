@@ -59,7 +59,7 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 
 	require.NoError(t, d.switchToTargetForAttachment(effect, picker.Target{
 		Name: "stopped", Incarnation: lifecycle,
-	}, sessionHandoffGuard{closePicker: true, allowSamePeer: true}, "picker-select"))
+	}, sessionHandoffGuard{allowSamePeer: true}, "picker-select"))
 
 	cleanup := receiveRemotePicker(t, sends, "graphics cleanup")
 	require.Equal(t, wire.MsgOutput, cleanup.Type)
@@ -87,7 +87,7 @@ func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 	key := domain.RemoteSessionKey{Host: "arch", Name: "work", LifecycleID: lifecycle, DisplayOrigin: "arch"}
 	remoteTarget := domain.RemoteSessionTarget{Endpoint: "arch", DisplayOrigin: "arch", LifecycleID: lifecycle, SessionName: "work", LiveTabID: "tab-1"}
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
-	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{closePicker: true}, "picker-select"))
+	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{}, "picker-select"))
 	frame := receiveRemotePicker(t, sends, "rich attach target")
 	got, err := wire.UnmarshalAttachTarget(frame.Payload)
 	require.NoError(t, err)

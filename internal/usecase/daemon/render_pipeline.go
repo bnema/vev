@@ -11,7 +11,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/notices"
 	"github.com/bnema/vev/internal/usecase/palette"
-	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/prompt"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -175,7 +174,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		damage = floatingDamage
 	}
 	copyOnly := state.overlays.copyMode != nil && state.overlays.copyActive &&
-		!state.overlays.copySearchActive && !state.overlays.pickerActive &&
+		!state.overlays.copySearchActive &&
 		!state.overlays.paletteActive && !state.overlays.promptActive &&
 		!state.overlays.noticesOverlayActive && !state.overlays.resizeActive && !state.floating.visible
 	var copyViewport copyViewportState
@@ -269,7 +268,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		return
 	}
 	o := &state.overlays
-	o.copyActive, o.copySearchActive, o.pickerActive, o.paletteActive, o.promptActive = snap.copyActive, snap.copySearchModel != nil, snap.pickerActive, snap.paletteActive, snap.promptActive
+	o.copyActive, o.copySearchActive, o.paletteActive, o.promptActive = snap.copyActive, snap.copySearchModel != nil, snap.paletteActive, snap.promptActive
 	o.noticesOverlayActive = snap.noticesOverlayActive
 	o.copyMode = snap.copyMode
 	o.notices, o.noticeOverflow = snap.notices, snap.noticeOverflow
@@ -287,21 +286,6 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		presentation := copySearchModal.Resolve(size)
 		o.copySearch = capturedModal{active: true, title: copySearchModal.Title, presentation: presentation, focused: true}
 		o.copySearch.inner = snap.copySearchModel.RenderStyled(rectSize(presentation.Inner), visualsearch.RenderStyles{Base: styles.PromptBase, Selection: styles.SearchSelection})
-	}
-	if snap.pickerActive && snap.pickerModel != nil {
-		presentation := pickerModal.Resolve(size)
-		title := snap.pickerTitle
-		if searchTitle := snap.pickerModel.SearchTitle(presentation.Bounds.Width - 2); searchTitle != "" {
-			title = searchTitle
-		} else if title == "" {
-			title = pickerModal.Title
-		}
-		o.picker = capturedModal{active: true, title: title, presentation: presentation, focused: true}
-		stoppedStyle := styles.PickerName
-		stoppedStyle.Attrs |= renderer.AttrDim
-		stoppedStyle.Italic = true
-		renderStyles := picker.RenderStyles{Background: styles.PickerBase, Selection: styles.PickerSelection, SelectionName: styles.PickerSelectionName, SelectionMuted: styles.PickerSelectionMuted, Name: styles.PickerName, Detail: styles.PickerDescription, Base: styles.PickerBase, Separator: styles.PickerSeparator, Stopped: stoppedStyle, Status: styles.PickerDescription, SearchMatch: styles.SearchSelection, SelectionMatch: styles.HintKey}
-		o.picker.inner = snap.pickerModel.Render(rectSize(presentation.Inner), state.preview, renderStyles)
 	}
 	if snap.noticesOverlayActive && snap.noticesOverlayModel != nil {
 		presentation := noticesModal.Resolve(size)
@@ -363,8 +347,8 @@ func capturedCopyTarget(state capturedRenderState, content domain.Rect) domain.R
 func composeCapturedOverlays(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage) (renderer.Frame, []renderer.Damage) {
 	o := state.overlays
 	// Paint in reverse keyboard priority so the same layer that owns input is
-	// visually topmost: prompt > palette > picker > notices > copy search.
-	for _, modal := range []capturedModal{o.copySearch, o.noticesOverlay, o.picker, o.palette, o.prompt} {
+	// visually topmost: prompt > palette > notices > copy search.
+	for _, modal := range []capturedModal{o.copySearch, o.noticesOverlay, o.palette, o.prompt} {
 		if !modal.active {
 			continue
 		}

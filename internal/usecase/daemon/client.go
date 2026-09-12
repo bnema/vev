@@ -43,7 +43,6 @@ type attachedClient struct {
 	clientID               [16]byte
 	terminalCapabilities   terminalcap.Capabilities
 	navigationCapabilities protocol.NavigationCapabilities
-	startupOverlay         protocol.StartupOverlay
 	// lifecycle is the sole authority for attachment capability publication,
 	// effect admission, transition freeze/drain, and connection generation.
 	lifecycle     attachmentLifecycle
@@ -92,10 +91,6 @@ type attachedClient struct {
 	pendingRouteIdentity       bool
 	samePeerOfferMu            sync.Mutex
 	samePeerOffer              *protocol.ExactSessionTarget
-	parkedRouteMu              sync.Mutex
-	parkedRoute                *parkedRouteLease
-	parkedRouteOutput          atomic.Bool
-	parkedRouteFullPending     atomic.Bool
 	routeAttentionSubscription protocol.RouteAttentionSubscription
 	routeSubscriptionTransport transportSnapshot
 	routeObservationAfter      map[protocol.RouteAttentionTarget]time.Time
@@ -392,15 +387,15 @@ func (ac *attachedClient) setRouteAttentionSubscription(subscription protocol.Ro
 	ac.routeAttentionSubscription = subscription
 }
 
-func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.ExactSessionTarget, bool) {
+func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.RouteAttentionTarget, bool) {
 	ac.routeMu.RLock()
 	defer ac.routeMu.RUnlock()
 	for _, target := range ac.routeAttentionSubscription.Targets {
-		if target.Ref == ref && target.SourceKey == "" {
-			return target.Target, true
+		if target.Ref == ref {
+			return target, true
 		}
 	}
-	return protocol.ExactSessionTarget{}, false
+	return protocol.RouteAttentionTarget{}, false
 }
 
 func (ac *attachedClient) ackOutputState(epoch, state uint64) {
@@ -508,9 +503,6 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		if !ac.transportSnapshotCurrent(expected) {
 			return expected.transport, errTransportReplaced
 		}
-		if ac.parkedRouteOutput.Load() || ac.parkedRouteFullPending.Load() {
-			return expected.transport, nil
-		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
 		output, err := ac.output.sideEffectLocked(b, ac.echoAck.Load())
@@ -524,9 +516,6 @@ func (d *Daemon) boundedSendOutputErrTransport(ac *attachedClient, b []byte) (po
 		defer ac.sendMu.Unlock()
 		if !ac.transportSnapshotCurrent(expected) {
 			return errTransportReplaced
-		}
-		if ac.parkedRouteOutput.Load() || ac.parkedRouteFullPending.Load() {
-			return nil
 		}
 		ac.output.lockView()
 		defer ac.output.unlockView()
@@ -630,7 +619,6 @@ type attachClientOptions struct {
 	terminalCapabilities   terminalcap.Capabilities
 	capabilitiesSet        bool
 	navigationCapabilities protocol.NavigationCapabilities
-	startupOverlay         protocol.StartupOverlay
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -709,7 +697,6 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		clientID:               opts.clientID,
 		terminalCapabilities:   opts.terminalCapabilities,
 		navigationCapabilities: opts.navigationCapabilities,
-		startupOverlay:         opts.startupOverlay,
 		resumeCapable:          opts.resumeCapable,
 		resumeToken:            resumeToken,
 	}
@@ -802,8 +789,7 @@ func (d *Daemon) ensureAttachmentRenderCoordinatorPrelocked(entry *session) *ren
 			// attachmentOutput publishes capacity atomically. Do not take
 			// attached.sendMu here: a slow transport may be holding it for an
 			// in-flight Send, and that peer must not gate healthy attachments.
-			return attached == nil ||
-				(!attached.parkedRouteOutput.Load() && (attached.output == nil || !attached.output.atCapacity()))
+			return attached == nil || attached.output == nil || !attached.output.atCapacity()
 		},
 	})
 	installAttachmentRenderCoordinator(entry, rc)
@@ -994,11 +980,11 @@ func (d *Daemon) resizeAttachmentGeometryForLease(effect *attachmentEffect, geom
 	}
 	ac.sendMu.Unlock()
 
-	if !sameSize && ac.overlays != nil && ac.overlays.pickerActive() {
-		// The picker preview geometry is attachment-local. A resize must
-		// invalidate any in-flight remote request and fetch the selected row
-		// at the new bounded preview dimensions.
-		d.registerPreviewForSelection(ac)
+	if !sameSize && ac.overlays != nil && ac.overlays.pickerClientActive() {
+		// A client-owned interaction renders from its own size: a resize
+		// bumps the snapshot revision so the client never repaints against a
+		// stale size epoch.
+		d.refreshPickerSnapshot(ac)
 	}
 
 	sess := effect.sess

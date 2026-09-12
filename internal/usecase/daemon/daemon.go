@@ -84,9 +84,6 @@ type Daemon struct {
 	lastAllocatedCreatedAt int64
 	mruSeq                 atomic.Uint64
 	creationRequestSeq     atomic.Uint64
-	// pickerSort is the picker ordering mode for this daemon's lifetime
-	// (pickerSortMode); not persisted across restarts.
-	pickerSort atomic.Uint32
 	// closing marks that shutdown has irreversibly begun. It is set under mu,
 	// atomically with the event that makes shutdown inevitable (the registry
 	// emptying in killSession, or shutdownAll starting), and checked by route
@@ -170,6 +167,11 @@ type Daemon struct {
 	// afterAttachmentEffectsFrozen observes the lock-free boundary after all affected
 	// attachment gates are frozen and drained, before architecture publication.
 	afterAttachmentEffectsFrozen func()
+	// beforeAttachmentTransitionIdentityAdmission is a deterministic test seam
+	// after a ready transition published its capability and before the committed
+	// route identity is admitted, so tests can supersede that exact capability in
+	// the window before the transition's first paint and completion.
+	beforeAttachmentTransitionIdentityAdmission func(attachmentCapability)
 	// afterAttachmentTransitionCoordinatorsLocked is a deterministic lock-order
 	// seam used by transition validation tests.
 	afterAttachmentTransitionCoordinatorsLocked func()
@@ -186,6 +188,10 @@ type Daemon struct {
 	afterMoveTabSourceSnapshot                func()
 	beforeMovePaneCommit                      func()
 	beforeMoveTabCommit                       func()
+	// beforeMoveFollowCompletion is a deterministic test seam after the composite
+	// follow's first paint and before the postcommit admits the capability that
+	// reports completion, so tests can supersede the published capability.
+	beforeMoveFollowCompletion func(attachmentCapability)
 	// afterDetachAttachmentEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
 	afterDetachAttachmentEffectsFrozen func()
@@ -1145,6 +1151,10 @@ func (d *Daemon) handleConn(tr ports.ServerConnection) {
 		stopTransport()
 		finishHandshake()
 		d.handleNavigationInventory(tr, message)
+	case protocol.PickerControlRequest:
+		stopTransport()
+		finishHandshake()
+		d.handlePickerControl(tr, message)
 	case protocol.Kill:
 		stopTransport()
 		finishHandshake()
@@ -1414,9 +1424,6 @@ func (d *Daemon) handleHelloWithContext(handshakeCtx context.Context, timedOut <
 		failAttachment()
 		return
 	}
-	if ac.startupOverlay == protocol.StartupOverlaySessionPicker {
-		d.enterPicker(sess, ac)
-	}
 	postWelcomeTicket.End()
 	stopHandshakeTransport()
 	finishHandshake()
@@ -1479,7 +1486,6 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		resumeCapable:          true,
 		maxOutputInFlight:      normalizeOutputWindow(h.MaxOutputInFlight),
 		navigationCapabilities: h.NavigationCapabilities,
-		startupOverlay:         h.StartupOverlay,
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
 	}

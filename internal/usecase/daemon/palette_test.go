@@ -771,20 +771,26 @@ func TestRemoteDirectoryTracksPickerAndPaletteOnSameAttachment(t *testing.T) {
 	d := newRemotePickerDaemon()
 	seedRemoteDirectory(t, d, reachableDirectoryHost("arch", time.Unix(1_100, 0), directorySessionForTest("work")))
 	sess, ac, _ := addRemoteRefreshPickerOwner(t, d, "owner")
+	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	require.True(t, admitted)
+	t.Cleanup(effect.End)
 
 	// Opening overlays builds from the latest snapshot without requesting
 	// reconciliation; closing one overlay leaves the other intact.
-	d.publishPicker(sess, ac, d.newPickerModel(sess, ac, pickerNavigate, moveSourceLocator{}, picker.SourceFilter{}), pickerNavigate, moveSourceLocator{})
+	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
 	d.enterPalette(sess, ac)
-	require.True(t, ac.overlays.pickerActive())
+	require.True(t, ac.overlays.pickerClientActive())
 	require.True(t, ac.overlays.paletteActive())
 
 	d.closePalette(ac)
 	require.False(t, ac.overlays.paletteActive())
-	require.True(t, ac.overlays.pickerActive(), "closing the palette must not disturb the open picker")
+	require.True(t, ac.overlays.pickerClientActive(), "closing the palette must not disturb the open picker")
 
-	d.closePicker(ac)
-	require.False(t, ac.overlays.pickerActive())
+	ac.overlays.pickerMu.Lock()
+	interaction := ac.overlays.pickerInteraction
+	ac.overlays.pickerMu.Unlock()
+	require.True(t, d.closePickerForAttachment(ac, effect, interaction))
+	require.False(t, ac.overlays.pickerClientActive())
 }
 
 func TestPaletteResultsDeduplicateByLifecycleAndKeepEqualLabels(t *testing.T) {
@@ -1573,8 +1579,14 @@ func TestPaletteExecMethods(t *testing.T) {
 	d.closePrompt(ac)
 	require.True(t, sess.ephemeral)
 	require.NoError(t, exec.OpenSessionPicker())
-	require.True(t, ac.overlays.pickerActive())
-	d.closePicker(ac)
+	require.True(t, ac.overlays.pickerClientActive())
+	ac.overlays.pickerMu.Lock()
+	interaction := ac.overlays.pickerInteraction
+	ac.overlays.pickerMu.Unlock()
+	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
+	require.True(t, admitted)
+	require.True(t, d.closePickerForAttachment(ac, effect, interaction))
+	effect.End()
 	require.NoError(t, exec.EnterVisualMode())
 	require.True(t, ac.overlays.copyActive())
 	d.exitCopyMode(ac)

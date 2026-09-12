@@ -9,8 +9,11 @@ type MsgType uint8
 
 // Frame message types use non-contiguous allocations: the legacy client range
 // is 1–13 and 15, and newer client controls use 32–33, 35, 37, 39, 42, 45,
-// and 47. Server-originated messages occupy 16–23, 25–31, 34, 36, 38, 40–41,
-// and 43–44, 46, and 48. Values 14 and 24 remain reserved for future extensions.
+// 47, 49, 51, 53, 55, and 57 (49+ carry the client-picker interaction: begin,
+// close, selection, preview request). Server-originated messages occupy 16–23,
+// 25–31, 34, 36, 38, 40–41, 43–44, 46, 48, 50, 52, 54, 56, 58, and 59 (50+
+// carry the client-picker interaction: offer, snapshot, closed, failure,
+// result, preview). Values 14 and 24 remain reserved for future extensions.
 const (
 	MsgHello                          MsgType = 1
 	MsgInput                          MsgType = 2
@@ -28,12 +31,16 @@ const (
 	MsgRemotePreviewRequest           MsgType = 15
 	MsgRouteAttentionSubscription     MsgType = 32
 	MsgSamePeerSwitchRequest          MsgType = 33
-	MsgParkedRouteRequest             MsgType = 35
 	MsgSessionCreationFailure         MsgType = 37
 	MsgUIFence                        MsgType = 39
 	MsgNavigationInventoryRequest     MsgType = 42
 	MsgNavigationInventoryPublication MsgType = 45
 	MsgNavigationInventoryFailure     MsgType = 47
+	MsgPickerCloseClient              MsgType = 51
+	MsgPickerSelection                MsgType = 53
+	MsgPickerBegin                    MsgType = 55
+	MsgPickerPreviewRequest           MsgType = 57
+	MsgPickerControlRequest           MsgType = 60
 
 	MsgWelcome                      MsgType = 16
 	MsgError                        MsgType = 17
@@ -42,7 +49,6 @@ const (
 	MsgPong                         MsgType = 20
 	MsgSessions                     MsgType = 21
 	MsgCommandResult                MsgType = 22
-	MsgNavigationAction             MsgType = 23
 	MsgAttachTarget                 MsgType = 25
 	MsgRemotePreviewResponse        MsgType = 26
 	MsgCommittedRouteIdentity       MsgType = 27
@@ -51,7 +57,6 @@ const (
 	MsgRouteNavigationFailure       MsgType = 30
 	MsgRoutePosition                MsgType = 31
 	MsgSamePeerSwitchFailure        MsgType = 34
-	MsgParkedRouteResponse          MsgType = 36
 	MsgRouteCreateSession           MsgType = 38
 	MsgUIReceipt                    MsgType = 40
 	MsgUIViewUpdate                 MsgType = 41
@@ -59,6 +64,13 @@ const (
 	MsgNavigationInventoryDemand    MsgType = 44
 	MsgNavigationInventorySelection MsgType = 46
 	MsgRouteRetired                 MsgType = 48
+	MsgPickerSnapshot               MsgType = 50
+	MsgPickerClosedServer           MsgType = 52
+	MsgPickerFailure                MsgType = 54
+	MsgPickerOffer                  MsgType = 56
+	MsgPickerResult                 MsgType = 58
+	MsgPickerPreview                MsgType = 59
+	MsgPickerControlResponse        MsgType = 61
 )
 
 // Frame is the unit of exchange over a Transport: a typed, length-delimited

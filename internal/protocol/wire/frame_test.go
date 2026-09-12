@@ -7,8 +7,8 @@ import (
 )
 
 func TestProtocolVersion(t *testing.T) {
-	if protocol.Version != 43 {
-		t.Fatalf("ProtocolVersion = %d, want 43", protocol.Version)
+	if protocol.Version != 51 {
+		t.Fatalf("ProtocolVersion = %d, want 51", protocol.Version)
 	}
 }
 
@@ -25,9 +25,6 @@ func TestControlMsgTypes(t *testing.T) {
 }
 
 func TestMsgTypeUnique(t *testing.T) {
-	if MsgNavigationAction != 23 {
-		t.Fatalf("MsgNavigationAction = %d, want 23", MsgNavigationAction)
-	}
 	tests := []struct {
 		name string
 		typ  MsgType
@@ -37,14 +34,19 @@ func TestMsgTypeUnique(t *testing.T) {
 		{"MsgKill", MsgKill}, {"MsgTheme", MsgTheme}, {"MsgAck", MsgAck},
 		{"MsgImagePush", MsgImagePush}, {"MsgClientNotice", MsgClientNotice},
 		{"MsgCommand", MsgCommand}, {"MsgOutputResetRequest", MsgOutputResetRequest}, {"MsgRemotePreviewRequest", MsgRemotePreviewRequest},
-		{"MsgRouteAttentionSubscription", MsgRouteAttentionSubscription}, {"MsgSamePeerSwitchRequest", MsgSamePeerSwitchRequest}, {"MsgParkedRouteRequest", MsgParkedRouteRequest}, {"MsgSessionCreationFailure", MsgSessionCreationFailure},
+		{"MsgRouteAttentionSubscription", MsgRouteAttentionSubscription}, {"MsgSamePeerSwitchRequest", MsgSamePeerSwitchRequest}, {"MsgSessionCreationFailure", MsgSessionCreationFailure},
 		{"MsgWelcome", MsgWelcome}, {"MsgError", MsgError}, {"MsgOutput", MsgOutput},
 		{"MsgDetached", MsgDetached}, {"MsgPong", MsgPong}, {"MsgSessions", MsgSessions},
 		{"MsgCommandResult", MsgCommandResult},
-		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget}, {"MsgNavigationAction", MsgNavigationAction},
+		{"MsgRemotePreviewResponse", MsgRemotePreviewResponse}, {"MsgAttachTarget", MsgAttachTarget},
 		{"MsgCommittedRouteIdentity", MsgCommittedRouteIdentity}, {"MsgRecentRouteSnapshot", MsgRecentRouteSnapshot},
 		{"MsgNavigateRecentRoute", MsgNavigateRecentRoute}, {"MsgRouteNavigationFailure", MsgRouteNavigationFailure},
-		{"MsgRoutePosition", MsgRoutePosition}, {"MsgSamePeerSwitchFailure", MsgSamePeerSwitchFailure}, {"MsgParkedRouteResponse", MsgParkedRouteResponse}, {"MsgRouteCreateSession", MsgRouteCreateSession},
+		{"MsgRoutePosition", MsgRoutePosition}, {"MsgSamePeerSwitchFailure", MsgSamePeerSwitchFailure}, {"MsgRouteCreateSession", MsgRouteCreateSession},
+		{"MsgPickerOffer", MsgPickerOffer}, {"MsgPickerSnapshot", MsgPickerSnapshot}, {"MsgPickerClosedServer", MsgPickerClosedServer},
+		{"MsgPickerFailure", MsgPickerFailure}, {"MsgPickerResult", MsgPickerResult}, {"MsgPickerPreview", MsgPickerPreview},
+		{"MsgPickerBegin", MsgPickerBegin}, {"MsgPickerCloseClient", MsgPickerCloseClient}, {"MsgPickerSelection", MsgPickerSelection},
+		{"MsgPickerPreviewRequest", MsgPickerPreviewRequest},
+		{"MsgPickerControlRequest", MsgPickerControlRequest}, {"MsgPickerControlResponse", MsgPickerControlResponse},
 	}
 
 	seen := make(map[MsgType]string, len(tests))

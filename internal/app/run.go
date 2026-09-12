@@ -1002,7 +1002,9 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		localDialer = defaultLocalDialer
 	}
 	mode, modeErr := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
-	factory := deps.remoteDialerFactory
+	if deps.remoteDialerFactory == nil {
+		deps.remoteDialerFactory = defaultRemoteDialerFactory()
+	}
 	var remoteSelection *domain.RemoteSessionTarget
 	var remoteEnvironmentPolicy protocol.EnvironmentPolicy
 	remoteDisplayOrigin := domain.RemoteDisplayOrigin(remoteTarget)
@@ -1014,9 +1016,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		if modeErr != nil {
 			return modeErr
 		}
-		if factory == nil {
-			factory = defaultRemoteDialerFactory()
-		}
 	}
 	pickerHandoff := remoteTarget == ""
 	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, intent uint8, policy protocol.EnvironmentPolicy) protocol.EnvironmentPolicy {
@@ -1025,42 +1024,10 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		return policy
 	}
-	handoff := func(target protocol.AttachTarget) (ports.ClientDialer, client.AttachRequest, error) {
-		if err := validateRemoteAttachHandoff(target); err != nil {
-			return nil, client.AttachRequest{}, fmt.Errorf("vev: invalid remote attach handoff: %w", err)
-		}
-		if modeErr != nil {
-			return nil, client.AttachRequest{}, modeErr
-		}
-		if factory == nil {
-			factory = defaultRemoteDialerFactory()
-		}
-		var selection *domain.RemoteSessionTarget
-		if target.RemoteTarget != nil {
-			copyTarget := *target.RemoteTarget
-			selection = &copyTarget
-		}
-		dialer, err := factory(target.Endpoint, target.Session, mode, log)
-		if err != nil {
-			return nil, client.AttachRequest{}, err
-		}
-		policy := pickerEnvironmentPolicy(selection, target.Intent, target.EnvironmentPolicy)
-		displayOrigin := domain.RemoteDisplayOrigin(target.Endpoint)
-		if selection != nil {
-			displayOrigin = selection.DisplayOrigin
-		}
-		return sessionwire.NewClientDialer(dialer), client.AttachRequest{
-			Intent:            target.Intent,
-			SessionName:       target.Session,
-			Remote:            true,
-			Environment:       clientEnvironment(deps.remoteEnvironment, target.Endpoint),
-			Origin:            protocol.RouteOriginDiscovery,
-			OriginKey:         target.Endpoint,
-			RemoteTarget:      selection,
-			HostLabel:         displayOrigin,
-			EnvironmentPolicy: policy,
-		}, nil
-	}
+	// The launching client owns one host registry for the whole run: endpoint
+	// bindings are resolved once and reused by every later handoff, and the
+	// discovery loop it drives lives exactly as long as the runner.
+	registry := newClientHostRegistry(deps, mode, modeErr, log)
 
 	handoffAttempts := 0
 	for {
@@ -1069,12 +1036,14 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 			if log != nil {
 				log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
 			}
-			dialer, dialErr := factory(remoteTarget, name, mode, log)
-			if dialErr != nil {
-				return dialErr
+			// The initial remote attach resolves through the same registry as
+			// every later handoff, so one endpoint has one carriage authority.
+			binding, resolveErr := registry.ResolveEndpoint(ctx, remoteTarget)
+			if resolveErr != nil {
+				return resolveErr
 			}
 			err = runClient(ctx, client.Dependencies{
-				Dialer:                 sessionwire.NewClientDialer(dialer),
+				Dialer:                 binding.Dialer,
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
 				Clock:                  clientClock(deps),
@@ -1083,8 +1052,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Clipboard:              deps.clipboard,
 				Logger:                 log,
 				RuntimeObserver:        deps.runtimeObserver,
-				RemoteHostLearner:      attachRememberLearner(deps, remoteTarget, log),
-				AttachHandoff:          handoff,
+				HostRegistry:           registry,
 				Remote:                 true,
 				Origin:                 protocol.RouteOriginRemote,
 				OriginKey:              remoteTarget,
@@ -1092,7 +1060,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Intent:            intent,
 				SessionName:       name,
 				Remote:            true,
-				Environment:       clientEnvironment(deps.remoteEnvironment, remoteTarget),
+				Environment:       binding.Environment,
 				Origin:            routeOrigin,
 				OriginKey:         routeOriginKey,
 				RemoteTarget:      remoteSelection,
@@ -1113,7 +1081,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				Clipboard:              deps.clipboard,
 				Logger:                 log,
 				RuntimeObserver:        deps.runtimeObserver,
-				AttachHandoff:          handoff,
+				HostRegistry:           registry,
 				Remote:                 false,
 				Origin:                 protocol.RouteOriginLocal,
 				OriginKey:              "local",
@@ -1149,9 +1117,6 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.Intent, handoffErr.Target.EnvironmentPolicy)
 		if modeErr != nil {
 			return modeErr
-		}
-		if factory == nil {
-			factory = defaultRemoteDialerFactory()
 		}
 	}
 }
