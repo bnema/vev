@@ -12,6 +12,7 @@ import (
 type movePaneRequest struct {
 	Follow               bool
 	BeforeFollow         func() error
+	AfterFollow          func(*attachmentEffect)
 	Attachment           *attachedClient
 	AttachmentCapability attachmentCapability
 	Source               moveSessionLocator
@@ -24,6 +25,7 @@ type movePaneRequest struct {
 type moveTabRequest struct {
 	Follow               bool
 	BeforeFollow         func() error
+	AfterFollow          func(*attachmentEffect)
 	Attachment           *attachedClient
 	AttachmentCapability attachmentCapability
 	Source               moveSessionLocator

@@ -23,6 +23,7 @@ type moveTopology interface {
 type moveTransactionRequest struct {
 	follow               bool
 	beforeFollow         func() error
+	afterFollow          func(*attachmentEffect)
 	operation            string
 	attachment           *attachedClient
 	attachmentCapability attachmentCapability
@@ -334,6 +335,7 @@ func (t *moveTransaction) postcommitPlan(unlockDispatch func(), reservation *mov
 	publication := t.publication
 	return movePostcommitPlan{
 		followResult:             t.followResult,
+		afterFollow:              t.request.afterFollow,
 		source:                   t.source,
 		destination:              t.destination,
 		sourceName:               t.sourceName,

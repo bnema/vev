@@ -30,17 +30,69 @@ func (d *Daemon) handlePickerPreviewForAttachment(effect *attachmentEffect, requ
 	}
 	ac.overlays.pickerMu.Lock()
 	target, known := ac.overlays.pickerKeys[request.Key]
+	previousSession, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerPreviewGeneration++
 	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerPreviewKey = request.Key
+	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerMu.Unlock()
+	// The superseded row stops observing before the new subscription is
+	// installed, so moving between rows cannot leave a live observer on the
+	// previous target's coordinator.
+	d.teardownPickerPreviewSubscription(ac, previousSession, previousGeneration)
 
-	if coordinator := attachmentRenderCoordinator(effect.sess); coordinator != nil {
-		coordinator.subscribePreviewFor(ac, generation, func(renderWake) {
-			d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, known)
-		})
+	coordinator, targetSession := d.pickerPreviewWakeCoordinator(effect, target, intent)
+	if coordinator != nil && coordinator.subscribePreviewFor(ac, generation, func(renderWake) {
+		d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, known)
+	}) {
+		// subscribePreviewFor is deliberately outside pickerMu. Revalidate after
+		// it returns so a concurrent close or newer request tears the
+		// subscription it just installed back down before it can outlive its row.
+		ac.overlays.pickerMu.Lock()
+		current := ac.overlays.pickerOpen && ac.overlays.pickerInteraction == request.InteractionID &&
+			ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewKey == request.Key
+		if current {
+			ac.overlays.pickerPreviewSession = targetSession
+		}
+		ac.overlays.pickerMu.Unlock()
+		if !current {
+			coordinator.teardownPreviewFor(ac, generation)
+			return
+		}
 	}
 	d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, known)
+}
+
+// pickerPreviewWakeCoordinator resolves the render coordinator whose wakes
+// refresh the displayed row. A local row is rendered by its target session, so
+// the subscription lives there: a headless target still gets its own
+// coordinator, which keeps the previewed tab renderable and turns target
+// output into a fresh capture. A remote row has no local renderer, so the
+// viewer's own session remains the only wake that can re-capture its cached
+// viewport.
+func (d *Daemon) pickerPreviewWakeCoordinator(effect *attachmentEffect, target picker.Target, intent protocol.PickerIntent) (*renderCoordinator, *session) {
+	if target.RemoteTarget == nil {
+		if targetSession, _ := d.previewTarget(target, intent); targetSession != nil {
+			return d.ensureRenderCoordinator(targetSession), targetSession
+		}
+	}
+	if effect == nil {
+		return nil, nil
+	}
+	return attachmentRenderCoordinator(effect.sess), effect.sess
+}
+
+// teardownPickerPreviewSubscription removes one generation from the exact
+// coordinator that owns it. The recorded session pins the subscription to its
+// target coordinator, so a superseded or closed row cannot leave a live
+// observer, or a renderable headless target, behind.
+func (d *Daemon) teardownPickerPreviewSubscription(ac *attachedClient, targetSession *session, generation uint64) {
+	if ac == nil || generation == 0 {
+		return
+	}
+	if coordinator := attachmentRenderCoordinator(targetSession); coordinator != nil {
+		coordinator.teardownPreviewFor(ac, generation)
+	}
 }
 
 // publishPickerPreviewForAttachment captures the requested row and sends one
@@ -50,11 +102,7 @@ func (d *Daemon) publishPickerPreviewForAttachment(ac *attachedClient, request p
 	if ac == nil || ac.overlays == nil {
 		return
 	}
-	ac.overlays.pickerMu.Lock()
-	current := ac.overlays.pickerOpen && ac.overlays.pickerInteraction == request.InteractionID &&
-		ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewKey == request.Key
-	ac.overlays.pickerMu.Unlock()
-	if !current {
+	if !pickerPreviewRequestCurrent(ac, request, generation) {
 		return
 	}
 	sess := ac.currentAttachmentSession()
@@ -81,6 +129,18 @@ func (d *Daemon) publishPickerPreviewForAttachment(ac *attachedClient, request p
 		return
 	}
 	_ = effect.sendControl(preview)
+}
+
+// pickerPreviewRequestCurrent reports whether request is still the displayed
+// preview generation. Callers must not hold pickerMu.
+func pickerPreviewRequestCurrent(ac *attachedClient, request protocol.PickerPreviewRequest, generation uint64) bool {
+	if ac == nil || ac.overlays == nil {
+		return false
+	}
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	return ac.overlays.pickerOpen && ac.overlays.pickerInteraction == request.InteractionID &&
+		ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewKey == request.Key
 }
 
 // capturePickerPreview resolves one picker row to its displayed viewport. A row

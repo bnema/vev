@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func setupMovePickerSessions(t *testing.T, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
@@ -17,8 +19,7 @@ func setupMovePickerSessions(t *testing.T, extraDestinationTabs int) (*Daemon, *
 
 func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func()) {
 	t.Helper()
-	sourcePTY, releaseSource := newBlockingPTY(t)
-	d, source, ac, sends := newManualSessionWithPTYsClock(t, clock, sourcePTY)
+	d, source, ac, destination, destinationTab, releases, sends := setupMovePickerSessionsCore(t, clock, extraDestinationTabs)
 	// The move suites drive typed interactions, so the daemon publishes offers
 	// and snapshots to this attachment: drain them in the background so a
 	// guarded send never blocks the fixture.
@@ -26,6 +27,15 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 		for range sends {
 		}
 	}()
+	return d, source, ac, destination, destinationTab, releases
+}
+
+// setupMovePickerSessionsCore builds the move fixture without draining the
+// attachment transport, so a regression can read exactly what the daemon sent.
+func setupMovePickerSessionsCore(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func(), chan wire.Frame) {
+	t.Helper()
+	sourcePTY, releaseSource := newBlockingPTY(t)
+	d, source, ac, sends := newManualSessionWithPTYsClock(t, clock, sourcePTY)
 	source.id, source.name, source.incarnation = "source", "source", domain.IncarnationID{1}
 	d.mu.Lock()
 	delete(d.sessions, domain.SessionID("manual"))
@@ -53,7 +63,7 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 	d.mu.Lock()
 	d.sessions[destination.id] = destination
 	d.mu.Unlock()
-	return d, source, ac, destination, destinationTab, releases
+	return d, source, ac, destination, destinationTab, releases, sends
 }
 
 // moveSourceForSession names the exact source a move command captures. The
@@ -204,7 +214,7 @@ func TestMovePickerCommitMovePaneViaSharedAPI(t *testing.T) {
 	target, ok := ac.overlays.pickerKeys[selection.Key]
 	ac.overlays.pickerMu.Unlock()
 	require.True(t, ok)
-	require.NoError(t, d.commitMovePickerSelection(protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"), target))
+	require.NoError(t, d.commitMovePickerSelection(protocol.PickerIntentMovePane, moveSourceForSession(source, ac, "source-tab", "source-pane"), target, nil, nil))
 
 	require.Nil(t, source.tabs)
 	require.Same(t, moved, destinationTab.panes[moved.id])
@@ -423,5 +433,279 @@ func TestMovePickerCompositeFollow(t *testing.T) {
 				require.Nil(t, d.sessionByID(source.id))
 			}
 		})
+	}
+}
+
+// A composite follow ends the committing effect so the move can drain its
+// source. Its completion must still reach the client: the postcommit admits a
+// fresh effect on the published destination capability and reports the
+// correlated PickerResult the ui-driver action waits for.
+func TestMovePickerCompositeFollowReportsCorrelatedResult(t *testing.T) {
+	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	defer releaseAll(releases)
+	old := captureAttachmentCapability(source, ac, ac.transport())
+	locator := moveSourceForSession(source, ac, "source-tab", "")
+	locator.AttachmentCapability = old
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
+	selection.CauseActionID = 4242
+	done := make(chan struct{})
+	go func() {
+		d.resolvePickerSelection(effect, selection)
+		close(done)
+	}()
+	awaitTestCompletion(t, done, "composite follow never reported completion")
+
+	result := awaitSentPickerResult(t, sends)
+	require.Equal(t, selection.CauseActionID, result.CauseActionID)
+	require.Equal(t, selection.InteractionID, result.InteractionID)
+	require.Equal(t, selection.Key, result.Key)
+	require.Equal(t, protocol.PickerActionMove, result.Action)
+	assertNoFurtherFrame(t, sends, wire.MsgPickerResult, "composite follow reported its result more than once")
+}
+
+// TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability pins the
+// non-admission window: when the exact capability the follow published stops
+// being admissible between its identity send and the postcommit completion (a
+// concurrent link replacement while the attachment stays live), the completion
+// must be re-admitted on the attachment's current capability and reported
+// exactly once, instead of only logging while the ui-driver action runs to its
+// deadline.
+func TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability(t *testing.T) {
+	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	defer releaseAll(releases)
+	base, ok := ac.transport().(*mockServerConnection)
+	require.True(t, ok, "fixture transport is not the capturing mock")
+	old := captureAttachmentCapability(source, ac, ac.transport())
+	locator := moveSourceForSession(source, ac, "source-tab", "")
+	locator.AttachmentCapability = old
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
+	selection.CauseActionID = 5252
+
+	// Supersede the exact published capability after the follow's identity send
+	// and first paint but before completion admission. The replacement keeps the
+	// attachment live on its current session while retiring the published link.
+	// A render effect may still be in flight, so this reproduces the transition's
+	// end state (a newer published capability for the replacement link) rather
+	// than requiring a drained gate.
+	replaced := make(chan attachmentCapability, 1)
+	d.beforeMoveFollowCompletion = func(published attachmentCapability) {
+		supersedeAttachmentCapabilityForTest(published, base)
+		replaced <- published
+	}
+	done := make(chan struct{})
+	go func() {
+		d.resolvePickerSelection(effect, selection)
+		close(done)
+	}()
+	awaitTestCompletion(t, done, "composite follow never reported completion")
+	published := <-replaced
+	require.False(t, published.current(), "the superseded published capability was still admissible")
+
+	// The completion must arrive through the current capability, exactly once.
+	result := awaitSentPickerResult(t, sends)
+	require.Equal(t, selection.CauseActionID, result.CauseActionID)
+	require.Equal(t, selection.InteractionID, result.InteractionID)
+	require.Equal(t, protocol.PickerActionMove, result.Action)
+	assertNoFurtherFrame(t, sends, wire.MsgPickerResult, "composite follow reported its result more than once")
+}
+
+// supersedeAttachmentCapabilityForTest retires an attachment's exact published
+// capability for a replacement link that keeps the attachment live, modelling a
+// concurrent reconnect or transition that won the gate after publication. It
+// republishes the current capability directly so it also works while a render
+// effect may still be in flight.
+func supersedeAttachmentCapabilityForTest(published attachmentCapability, base *mockServerConnection) {
+	wrapper := &pickerSnapshotFailTransport{mockServerConnection: base}
+	published.ac.replaceTransport(wrapper)
+	current := captureAttachmentCapability(published.ac.currentAttachmentSession(), published.ac, wrapper)
+	gate := &published.ac.lifecycle
+	gate.mu.Lock()
+	gate.initLocked()
+	current.generation = gate.generation.Add(1)
+	gate.capability = current
+	gate.failedTransport = transportSnapshot{}
+	gate.mu.Unlock()
+}
+
+// TestMovePickerCompositeFollowReadmitsSupersededCapabilityBeforeIdentity pins
+// the earlier non-admission window: when the exact capability the follow
+// published is superseded before finishAttachmentTransition admits its
+// committed route identity (a concurrent link replacement while the attachment
+// stays live), the transition must still send the committed identity, perform
+// the authoritative first paint, and report completion exactly once on the
+// attachment's current capability. Aborting instead would leave the post-close
+// drain and the ui-driver action pending forever.
+func TestMovePickerCompositeFollowReadmitsSupersededCapabilityBeforeIdentity(t *testing.T) {
+	d, source, ac, destination, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	defer releaseAll(releases)
+	base, ok := ac.transport().(*mockServerConnection)
+	require.True(t, ok, "fixture transport is not the capturing mock")
+	// A published route ledger is what makes a ready transition owe its
+	// committed identity to the client.
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+	old := captureAttachmentCapability(source, ac, ac.transport())
+	locator := moveSourceForSession(source, ac, "source-tab", "")
+	locator.AttachmentCapability = old
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+	effect := pickActionEffectForTest(t, source, ac)
+	selection := moveSelectionForDestination(t, ac, destination.id)
+	selection.CauseActionID = 6161
+
+	rebased := make(chan struct{}, 1)
+	ac.renderStages.handoffRebase = func() { rebased <- struct{}{} }
+
+	// Supersede the published capability before the transition admits its
+	// committed route identity, exactly in the window final review flagged.
+	superseded := make(chan attachmentCapability, 1)
+	d.beforeAttachmentTransitionIdentityAdmission = func(published attachmentCapability) {
+		supersedeAttachmentCapabilityForTest(published, base)
+		superseded <- published
+	}
+	done := make(chan struct{})
+	go func() {
+		d.resolvePickerSelection(effect, selection)
+		close(done)
+	}()
+	awaitTestCompletion(t, done, "superseded composite follow never completed")
+	published := <-superseded
+	require.False(t, published.current(), "the superseded published capability was still admissible")
+
+	select {
+	case <-rebased:
+	default:
+		t.Fatal("superseded composite follow skipped its authoritative first paint")
+	}
+
+	// The committed identity must reach the live replacement link for the
+	// session the attachment actually holds, exactly once, and the correlated
+	// completion must follow exactly once.
+	identity := awaitSentCommittedIdentity(t, sends)
+	require.Equal(t, destination.name, identity.Target.SessionName)
+	require.Equal(t, destination.incarnation, identity.Target.LifecycleID)
+	result := awaitSentPickerResult(t, sends)
+	require.Equal(t, selection.CauseActionID, result.CauseActionID)
+	require.Equal(t, selection.InteractionID, result.InteractionID)
+	require.Equal(t, protocol.PickerActionMove, result.Action)
+	assertNoFurtherFrame(t, sends, wire.MsgCommittedRouteIdentity, "composite follow published its committed identity more than once")
+	assertNoFurtherFrame(t, sends, wire.MsgPickerResult, "composite follow reported its result more than once")
+}
+
+// awaitSentCommittedIdentity reads the next committed route identity the daemon
+// published, skipping unrelated frames.
+func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Frame) protocol.CommittedRouteIdentity {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case frame := <-sends:
+			if frame.Type != wire.MsgCommittedRouteIdentity {
+				continue
+			}
+			identity, err := wire.UnmarshalCommittedRouteIdentity(frame.Payload)
+			require.NoError(t, err)
+			return identity
+		case <-deadline:
+			t.Fatal("composite follow sent no committed route identity")
+			return protocol.CommittedRouteIdentity{}
+		}
+	}
+}
+
+// assertNoFurtherFrame proves a frame was produced exactly once: no later frame
+// of that type may follow the one the caller already observed.
+func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Frame, frameType wire.MsgType, failure string) {
+	t.Helper()
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case frame := <-sends:
+			require.NotEqual(t, frameType, frame.Type, failure)
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// A rejection after the picker closed must not touch the ended effect. It
+// delivers bounded feedback and a repaint through the attachment's current
+// capability so the client's post-close drain can release the terminal.
+func TestMovePickerClosedRejectionUsesFreshEffect(t *testing.T) {
+	d, source, ac, destination, destinationTab, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	defer releaseAll(releases)
+	old := captureAttachmentCapability(source, ac, ac.transport())
+	locator := moveSourceForSession(source, ac, "source-tab", "")
+	locator.AttachmentCapability = old
+	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, locator)
+	effect := pickActionEffectForTest(t, source, ac)
+	// Publication must reject after the picker closed: changing the destination
+	// tab geometry re-admits the already-validated topology as stale.
+	d.afterMoveTabSourceSnapshot = func() {
+		destinationTab.mu.Lock()
+		destinationTab.size = domain.Size{Cols: 79, Rows: 22}
+		destinationTab.mu.Unlock()
+	}
+	selection := moveSelectionForDestination(t, ac, destination.id)
+	selection.CauseActionID = 99
+	done := make(chan struct{})
+	go func() {
+		d.resolvePickerSelection(effect, selection)
+		close(done)
+	}()
+	awaitTestCompletion(t, done, "closed rejection never returned")
+
+	failure, result := collectSentPickerOutcome(t, sends)
+	require.Nil(t, result, "rejected composite move reported success")
+	require.Equal(t, selection.CauseActionID, failure.CauseActionID)
+	require.Equal(t, protocol.PickerActionFailed, failure.Code)
+}
+
+// awaitSentPickerResult blocks until the daemon reports a completed mutation.
+func awaitSentPickerResult(t *testing.T, sends <-chan wire.Frame) protocol.PickerResult {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case frame := <-sends:
+			if frame.Type != wire.MsgPickerResult {
+				continue
+			}
+			result, err := wire.UnmarshalPickerResult(frame.Payload)
+			require.NoError(t, err)
+			return result
+		case <-deadline:
+			t.Fatal("composite follow sent no correlated PickerResult")
+			return protocol.PickerResult{}
+		}
+	}
+}
+
+// collectSentPickerOutcome drains the bounded set of frames one rejection can
+// produce and returns the PickerFailure, plus any PickerResult that must not
+// exist on the rejection path.
+func collectSentPickerOutcome(t *testing.T, sends <-chan wire.Frame) (failure protocol.PickerFailure, result *protocol.PickerResult) {
+	t.Helper()
+	found := false
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case frame := <-sends:
+			switch frame.Type {
+			case wire.MsgPickerFailure:
+				decoded, err := wire.UnmarshalPickerFailure(frame.Payload)
+				require.NoError(t, err)
+				failure, found = decoded, true
+			case wire.MsgPickerResult:
+				decoded, err := wire.UnmarshalPickerResult(frame.Payload)
+				require.NoError(t, err)
+				result = &decoded
+			}
+		case <-deadline:
+			require.True(t, found, "closed rejection sent no bounded failure")
+			return failure, result
+		}
 	}
 }

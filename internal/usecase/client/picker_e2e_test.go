@@ -94,6 +94,77 @@ func TestClientPickerLoopEndToEnd(t *testing.T) {
 	requireNoPickerInput(t, transport)
 }
 
+// TestClientPickerCompositeMoveCompletesFromResult drives the ui-driver action
+// through the composite move+follow sequence: the daemon closes the
+// interaction, publishes the destination route and its full paint on the same
+// connection, then reports the correlated PickerResult. The action must
+// complete as processed without a same-peer handoff, exactly like an in-place
+// mutation.
+func TestClientPickerCompositeMoveCompletesFromResult(t *testing.T) {
+	ctx := context.Background()
+	harness := startPickerE2E(t)
+	ui, transport := harness.ui, harness.transport
+
+	offer := pickerOffer()
+	offer.Intent = protocol.PickerIntentMoveTab
+	offer.Title = " Move "
+	transport.detached <- wire.Frame{Type: wire.MsgPickerOffer, Payload: wire.MarshalPickerOffer(offer)}
+	snapshot := pickerSnapshot()
+	for i := range snapshot.Lines {
+		snapshot.Lines[i].Actions = protocol.PickerCanMove
+	}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	attached := ports.UIStatusAttached
+	first := "first"
+	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
+	require.NoError(t, err)
+
+	committed := make(chan ports.UIActionResult, 1)
+	commitErr := make(chan error, 1)
+	go func() {
+		action, err := ui.Action(ctx, ports.UIActionRequest{Attachment: ui.Handle(), Generation: 1, Keys: []string{"Enter"}})
+		if err != nil {
+			commitErr <- err
+			return
+		}
+		committed <- action
+	}()
+	selection := awaitPickerSelection(t, transport)
+	require.Equal(t, protocol.PickerActionMove, selection.Action)
+	require.NotZero(t, selection.CauseActionID)
+	requireNoPickerInput(t, transport)
+
+	// The daemon retires the interaction, then publishes the destination route
+	// and full paint without a same-peer attach offer.
+	second := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "second"}
+	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
+	identityPayload, err := wire.MarshalCommittedRouteIdentity(protocol.CommittedRouteIdentity{Target: second})
+	require.NoError(t, err)
+	transport.detached <- wire.Frame{Type: wire.MsgCommittedRouteIdentity, Payload: identityPayload}
+	view := protocol.ViewContext{Publication: 2, Route: protocol.CommittedRouteIdentity{Target: second}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
+	outputPayload, err := wire.MarshalOutput(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hsecond")})
+	require.NoError(t, err)
+	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: outputPayload}
+	// Completion rides the fresh effect the move postcommit admitted on the
+	// published destination capability.
+	resultPayload := wire.MarshalPickerResult(protocol.PickerResult{
+		CauseActionID: selection.CauseActionID, InteractionID: snapshot.InteractionID,
+		SourceID: "serving", Key: selection.Key, Action: protocol.PickerActionMove,
+	})
+	transport.detached <- wire.Frame{Type: wire.MsgPickerResult, Payload: resultPayload}
+
+	select {
+	case action := <-committed:
+		require.Equal(t, ports.UIActionProcessed, action.Status)
+		require.Equal(t, "second", action.Context.Route.Target.SessionName)
+	case err := <-commitErr:
+		t.Fatalf("composite move failed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("move action never completed from the correlated PickerResult")
+	}
+	requireNoPickerInput(t, transport)
+}
+
 // TestClientPickerRequestsAndRendersTheDisplayedRowPreview drives the preview
 // path end to end: the debounce settles on the displayed row, the request names
 // it, the daemon's viewport is drawn in the modal, and a late answer for a row

@@ -26,9 +26,15 @@ type clientEndpointFactory struct {
 	// modeErr is the transport-mode validation failure, reported for every
 	// endpoint so an invalid configured mode fails a handoff instead of
 	// silently selecting another carriage.
-	modeErr     error
-	environment func(string) []string
-	allowed     map[string]struct{}
+	modeErr error
+	// allowlistErr is the launch-allowlist validation failure, reported for
+	// every endpoint so a malformed configured allowlist fails remote
+	// resolution instead of admitting an unvetted endpoint. It is deliberately
+	// not fatal to construction: a local attach never resolves an endpoint and
+	// must keep working with a malformed allowlist in the environment.
+	allowlistErr error
+	environment  func(string) []string
+	allowed      map[string]struct{}
 	// restricted reports whether an allowlist was configured at all. A
 	// configured allowlist is authoritative even when it lists nothing.
 	restricted bool
@@ -46,6 +52,9 @@ func (f clientEndpointFactory) ResolveEndpoint(ctx context.Context, endpoint str
 	}
 	if f.modeErr != nil {
 		return ports.RemoteEndpointBinding{}, f.modeErr
+	}
+	if f.allowlistErr != nil {
+		return ports.RemoteEndpointBinding{}, f.allowlistErr
 	}
 	if f.restricted && !allowlistedRemoteEndpoint(f.allowed, endpoint) {
 		return ports.RemoteEndpointBinding{}, fmt.Errorf("vev: remote endpoint %q is not allowed", endpoint)
@@ -68,15 +77,15 @@ func (f clientEndpointFactory) ResolveEndpoint(ctx context.Context, endpoint str
 	}, nil
 }
 
-// newClientHostRegistry composes the runner-scoped endpoint cache.
-func newClientHostRegistry(deps runAttachDeps, mode remoteadapter.TransportMode, modeErr error, _ ports.Clock, log *slog.Logger) (ports.ClientHostRegistry, error) {
-	allowed, restricted, err := remoteLaunchAllowlistFromEnv()
-	if err != nil {
-		return nil, err
-	}
+// newClientHostRegistry composes the runner-scoped endpoint cache. A malformed
+// launch allowlist is stored on the factory and deferred to ResolveEndpoint, so
+// it can only fail a remote target's resolution, never construction or a local
+// attach. Without a configured allowlist every endpoint is admitted.
+func newClientHostRegistry(deps runAttachDeps, mode remoteadapter.TransportMode, modeErr error, log *slog.Logger) ports.ClientHostRegistry {
+	allowed, restricted, allowlistErr := remoteLaunchAllowlistFromEnv()
 	factory := clientEndpointFactory{
-		factory: deps.remoteDialerFactory, mode: mode, modeErr: modeErr, environment: deps.remoteEnvironment,
-		allowed: allowed, restricted: restricted, log: log,
+		factory: deps.remoteDialerFactory, mode: mode, modeErr: modeErr, allowlistErr: allowlistErr,
+		environment: deps.remoteEnvironment, allowed: allowed, restricted: restricted, log: log,
 	}
-	return remotes.NewHostRegistry(factory), nil
+	return remotes.NewHostRegistry(factory)
 }

@@ -58,6 +58,33 @@ func (s *session) captureAttachmentCapability(ac *attachedClient, tr ports.Serve
 	return captureAttachmentCapability(s, ac, tr)
 }
 
+// admitCurrentAttachmentCapabilityEffect re-admits the attachment's current
+// capability after an exact capability stopped being admissible. It re-reads the
+// attachment's current session and transport, so it never sends through a stale
+// capability or resurrects a detached transport. A detached attachment, or one
+// whose current session no longer registers this link, admits nothing.
+func admitCurrentAttachmentCapabilityEffect(capability attachmentCapability) (attachmentCapability, *attachmentEffect, bool) {
+	ac := capability.ac
+	if ac == nil {
+		return attachmentCapability{}, nil, false
+	}
+	sess := ac.currentAttachmentSession()
+	if sess == nil {
+		return attachmentCapability{}, nil, false
+	}
+	token, effect, admitted := ac.beginCurrentAttachmentEffect(sess, ac.transport())
+	if !admitted {
+		return attachmentCapability{}, nil, false
+	}
+	// The re-admitted link replaces the superseded capability's identity but
+	// inherits its post-publication paint semantics, so a recovered cross-session
+	// first paint still rebases the output chain on the current link.
+	if capability.rebase {
+		token.rebase = true
+	}
+	return token, effect, true
+}
+
 func (t attachmentCapability) sameIdentity(other attachmentCapability) bool {
 	return t.sess != nil && t.ac != nil && t.sess == other.sess && t.ac == other.ac &&
 		t.generation == other.generation && t.transport.transport == other.transport.transport &&

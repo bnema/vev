@@ -8,6 +8,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -242,4 +243,85 @@ func secondRemoteSessionForTest() catalogue.RemoteCatalogSession {
 		LifecycleID: lifecycle, Name: "ticker", State: catalogue.RemoteCatalogSessionUp,
 		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-2", Index: 0, Name: "1"}},
 	}
+}
+
+// pickerPreviewKeyForSession returns the opaque row key whose target resolves
+// to sess. The preview request names a key, so a cross-session test must read
+// the same mapping the serving source published.
+func pickerPreviewKeyForSession(t *testing.T, ac *attachedClient, sess *session) string {
+	t.Helper()
+	ac.overlays.pickerMu.Lock()
+	defer ac.overlays.pickerMu.Unlock()
+	for key, target := range ac.overlays.pickerKeys {
+		if target.RemoteTarget == nil && target.Session == sess.id {
+			return key
+		}
+	}
+	return ""
+}
+
+// TestPickerPreviewCrossSessionFollowsTheTargetsRenderCoordinator pins the
+// cross-session contract: the subscription that refreshes the displayed row
+// lives on the target session's coordinator. A target render wakes the preview
+// and keeps the headless target renderable, while a viewer-session render must
+// not drive the target's preview at all.
+func TestPickerPreviewCrossSessionFollowsTheTargetsRenderCoordinator(t *testing.T) {
+	viewerPTY, releaseViewer := newBlockingPTY(t)
+	t.Cleanup(releaseViewer)
+	d, viewerSess, ac, sends := newManualSessionWithPTYs(t, viewerPTY)
+	d.ptys = newFactorySeq(t, newQuietPTY())
+	targetSess, err := createSessionForTest(d, "second", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+	require.NoError(t, err)
+
+	effect, ok := ac.beginAttachmentEffect(captureAttachmentCapability(viewerSess, ac, ac.transport()))
+	require.True(t, ok)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	snapshot := awaitPickerSnapshot(t, sends)
+	key := pickerPreviewKeyForSession(t, ac, targetSess)
+	require.NotEmpty(t, key, "the snapshot must offer a navigable row for the target session")
+
+	clock := newCoordinatorMockClock(t, 16)
+	d.clock = clock.clock
+	viewerCoordinator := attachmentRenderCoordinator(viewerSess)
+	require.Nil(t, attachmentRenderCoordinator(targetSess), "an un-previewed target owns no coordinator")
+
+	d.handleAttachmentClientMessage(pickerClientCapability(t, ac, viewerSess), pickerPreviewRequestFor(snapshot, key, 20, 5))
+	first := awaitPickerPreview(t, sends)
+	require.Equal(t, protocol.PickerPreviewOK, first.Status)
+
+	targetCoordinator := attachmentRenderCoordinator(targetSess)
+	require.NotNil(t, targetCoordinator, "the preview must subscribe on the target session's coordinator")
+	require.True(t, targetCoordinator.hasPreviewSubscribers())
+	if viewerCoordinator != nil {
+		require.False(t, viewerCoordinator.hasPreviewSubscribers(), "the viewer session must not own the target's subscription")
+	}
+	targetTab := targetSess.tabs[0]
+	require.True(t, d.paneRenderable(targetSess, targetTab, targetTab.focusedPane()),
+		"a previewed headless target must stay renderable")
+
+	// A target render wakes the target's subscription and republishes.
+	d.processPTYData(targetSess, targetTab, targetTab.focusedPane(), []byte("target repaint"), false)
+	fireCoordinatorTimer(t, targetCoordinator, drainCoordinatorTimers(clock), minOutputRenderDeadline)
+	refreshed := awaitPickerPreview(t, sends)
+	require.Equal(t, key, refreshed.Key)
+	require.Equal(t, protocol.PickerPreviewOK, refreshed.Status)
+
+	// A viewer-session render must not publish the target's preview. The direct
+	// invalidateRender path is urgent, so it arms the urgent deadline.
+	viewerCoordinator = d.attachCoordinator(viewerSess, nil, ac, true)
+	d.invalidateRender(viewerSess, ac, true, "picker_preview_test.go:viewer")
+	fireCoordinatorTimer(t, viewerCoordinator, drainCoordinatorTimers(clock), urgentRenderDeadline)
+	for _, frame := range drainAllFrames(sends) {
+		require.NotEqual(t, wire.MsgPickerPreview, frame.Type,
+			"a viewer-session render must not publish the target's preview")
+	}
+
+	// Retiring the interaction removes the subscription from the target's own
+	// coordinator, so the headless target stops being renderable. A nil effect
+	// retires the interaction without a close confirmation.
+	require.True(t, d.closePickerForAttachment(ac, nil, snapshot.InteractionID))
+	require.False(t, targetCoordinator.hasPreviewSubscribers(),
+		"teardown must remove the exact target subscription")
+	require.False(t, d.paneRenderable(targetSess, targetTab, targetTab.focusedPane()),
+		"a retired preview must stop keeping the target renderable")
 }

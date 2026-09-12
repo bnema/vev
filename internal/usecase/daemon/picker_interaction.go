@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -88,6 +89,7 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 		}
 	}
 	ac.overlays.pickerMu.Lock()
+	previousSession, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
 	interaction := ac.overlays.pickerInteraction + 1
 	if interaction == 0 {
 		interaction = 1
@@ -99,9 +101,16 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 	ac.overlays.pickerRequestID = requestID
 	ac.overlays.pickerRevisions = make(map[string]uint64)
 	ac.overlays.pickerKeys = nil
+	ac.overlays.pickerSourcePublished = false
+	ac.overlays.pickerRecent = protocol.PickerProjection{}
+	ac.overlays.pickerGrouped = protocol.PickerProjection{}
 	ac.overlays.pickerPreviewGeneration = 0
 	ac.overlays.pickerPreviewKey = ""
+	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerMu.Unlock()
+	// A previous interaction's row must stop observing before this one owns the
+	// namespace, exactly as retiring the interaction would.
+	d.teardownPickerPreviewSubscription(ac, previousSession, previousGeneration)
 
 	barrierEpoch, barrierState, sizeEpoch := pickerClientBarrier(ac)
 	offer := protocol.PickerOffer{
@@ -138,11 +147,21 @@ func pickerMoveSourceKey(source moveSourceLocator) string {
 	return pickerClientKey(source.Session.Incarnation, string(source.Session.ID)+"#"+string(source.TabID))
 }
 
-// publishPickerSourceForAttachment builds the serving line set, bumps its
-// per-source revision, and publishes it. Callers must not hold pickerMu. Every
-// refresh publishes a full snapshot with a newer revision: the client may only
-// commit the model it is displaying, so a refresh the client has not observed
-// must invalidate an older displayed revision even when the rows are equal.
+// publishPickerSourceForAttachment builds the serving projection pair and
+// publishes it only when the authoritative presentation changed. Recent is the
+// flat recency order the default client sort consumes; Grouped is the sectioned
+// order the grouped sort consumes. They always carry the same destination keys
+// and actions, but their lines differ, so each client sort runs on the input
+// its mode expects instead of re-deriving one projection from the other. A
+// refresh whose projections equal the last published pair is not
+// authority-relevant — an attention pulse whose rows already reached the client
+// is the common case — and must neither bump the revision nor send a snapshot,
+// or a revision the client never observed would stale its next selection. The
+// revision and recorded projections commit only after the snapshot reached the
+// client, so a rejected validation or failed send leaves the client's last
+// observed authority intact and an identical retry republishes instead of
+// being suppressed.
+// Callers must not hold pickerMu.
 func (d *Daemon) publishPickerSourceForAttachment(ac *attachedClient, effect *attachmentEffect, interaction uint64) error {
 	if ac == nil || ac.overlays == nil || effect == nil {
 		return errAttachmentTransition
@@ -158,26 +177,39 @@ func (d *Daemon) publishPickerSourceForAttachment(ac *attachedClient, effect *at
 	if sess == nil {
 		return errAttachmentTransition
 	}
-	views, current := d.pickerViews(sess, ac)
-	set := pickerLineSetFor(views, intent, pickerSourceFilter{
+	recentViews, groupedViews, current := d.pickerViewProjections(sess, ac)
+	filter := pickerSourceFilter{
 		Session: source.Session.ID, Incarnation: source.Session.Incarnation, TabID: source.TabID,
-	}, current)
-	if intent != protocol.PickerIntentNavigation && !pickerLineSetHasMove(set) {
+	}
+	groupedSet := pickerLineSetFor(groupedViews, intent, filter, current)
+	if intent != protocol.PickerIntentNavigation && !pickerLineSetHasMove(groupedSet) {
 		return errNoMoveDestination
 	}
+	recent := setProjection(pickerLineSetFor(recentViews, intent, filter, current))
+	grouped := setProjection(groupedSet)
+	ac.overlays.pickerPublishMu.Lock()
+	defer ac.overlays.pickerPublishMu.Unlock()
 	ac.overlays.pickerMu.Lock()
 	if !ac.overlays.pickerOpen || ac.overlays.pickerInteraction != interaction {
 		ac.overlays.pickerMu.Unlock()
 		return nil
 	}
-	ac.overlays.pickerRevisions[servingPickerSourceID]++
-	revision := ac.overlays.pickerRevisions[servingPickerSourceID]
-	ac.overlays.pickerKeys = set.keys
+	if ac.overlays.pickerSourcePublished &&
+		pickerProjectionEqual(ac.overlays.pickerRecent, recent) &&
+		pickerProjectionEqual(ac.overlays.pickerGrouped, grouped) {
+		ac.overlays.pickerMu.Unlock()
+		return nil
+	}
+	// Reserve the next revision without committing it: a revision the client
+	// never observed must not become the recorded authority. pickerPublishMu
+	// keeps this reservation exclusive, so the send below cannot be reordered
+	// behind another publisher's.
+	revision := ac.overlays.pickerRevisions[servingPickerSourceID] + 1
 	ac.overlays.pickerMu.Unlock()
 	snapshot := protocol.PickerSnapshot{
 		InteractionID: interaction, SourceID: servingPickerSourceID, SourceRevision: revision,
-		Status: protocol.PickerSourceOK, Lines: set.lines, Cursor: set.cursor,
-		Recent: protocol.PickerProjection{Lines: set.lines, Cursor: set.cursor}, Grouped: protocol.PickerProjection{Lines: set.lines, Cursor: set.cursor},
+		Status: protocol.PickerSourceOK, Lines: groupedSet.lines, Cursor: groupedSet.cursor,
+		Recent: recent, Grouped: grouped,
 	}
 	if err := protocol.ValidatePickerSnapshot(snapshot); err != nil {
 		attrs := []any{"err", err, "interaction", interaction, "lines", len(snapshot.Lines), "revision", revision}
@@ -187,7 +219,35 @@ func (d *Daemon) publishPickerSourceForAttachment(ac *attachedClient, effect *at
 		d.log.Error("picker snapshot rejected", attrs...)
 		return err
 	}
-	return effect.sendControl(snapshot)
+	if err := effect.sendControl(snapshot); err != nil {
+		return err
+	}
+	// The client now observes this revision: commit the keys and projections
+	// its selection will validate against. A concurrent close or replacement
+	// interaction owns a newer namespace, so a superseded commit is dropped
+	// instead of reviving the retired source.
+	ac.overlays.pickerMu.Lock()
+	if ac.overlays.pickerOpen && ac.overlays.pickerInteraction == interaction {
+		ac.overlays.pickerRevisions[servingPickerSourceID] = revision
+		ac.overlays.pickerKeys = groupedSet.keys
+		ac.overlays.pickerSourcePublished = true
+		ac.overlays.pickerRecent = recent
+		ac.overlays.pickerGrouped = grouped
+	}
+	ac.overlays.pickerMu.Unlock()
+	return nil
+}
+
+// setProjection presents one resolved line set as a publishable projection.
+func setProjection(set pickerLineSet) protocol.PickerProjection {
+	return protocol.PickerProjection{Lines: set.lines, Cursor: set.cursor}
+}
+
+// pickerProjectionEqual reports whether two published projections present the
+// same authoritative facts. Order stays significant: a reordering changes the
+// row a cursor index names, which is authority the client must observe.
+func pickerProjectionEqual(left, right protocol.PickerProjection) bool {
+	return left.Cursor == right.Cursor && slices.Equal(left.Lines, right.Lines)
 }
 
 // pickerLineSetHasMove reports whether a move line set offers any destination,
@@ -241,24 +301,22 @@ func (d *Daemon) closePickerForAttachment(ac *attachedClient, effect *attachment
 		ac.overlays.pickerMu.Unlock()
 		return false
 	}
+	previewSession := ac.overlays.pickerPreviewSession
 	previewGeneration := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerOpen = false
 	ac.overlays.pickerKeys = nil
 	ac.overlays.pickerRevisions = nil
+	ac.overlays.pickerSourcePublished = false
+	ac.overlays.pickerRecent = protocol.PickerProjection{}
+	ac.overlays.pickerGrouped = protocol.PickerProjection{}
 	ac.overlays.pickerPreviewGeneration = 0
 	ac.overlays.pickerPreviewKey = ""
+	ac.overlays.pickerPreviewSession = nil
 	ac.overlays.pickerMu.Unlock()
 	// A retired interaction stops observing: its row is no longer displayed,
-	// and a later preview must not resurrect it.
-	if previewGeneration != 0 {
-		sess := ac.currentAttachmentSession()
-		if sess == nil && effect != nil {
-			sess = effect.sess
-		}
-		if coordinator := attachmentRenderCoordinator(sess); coordinator != nil {
-			coordinator.teardownPreviewFor(ac, previewGeneration)
-		}
-	}
+	// and a later preview must not resurrect it. The recorded session pins the
+	// teardown to the exact coordinator that owns the subscription.
+	d.teardownPickerPreviewSubscription(ac, previewSession, previewGeneration)
 	if effect == nil {
 		return true
 	}
@@ -344,9 +402,10 @@ func (d *Daemon) resolvePickerNavigate(effect *attachmentEffect, ac *attachedCli
 // resolvePickerMove closes before committing a composite move+follow. The
 // calling effect must end before the transaction freezes attachment admission.
 func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient, interaction uint64, intent protocol.PickerIntent, source moveSourceLocator, target picker.Target, selection protocol.PickerSelection) {
+	sess := effect.sess
 	if err := d.movePickerSourceError(source); err != nil {
 		d.sendPickerFailure(effect, selection, protocol.PickerRetiredTarget)
-		d.reportAttachmentError(effect.sess, movePickerUserError(err))
+		d.reportAttachmentError(sess, movePickerUserError(err))
 		d.refreshPickerSnapshot(ac)
 		return
 	}
@@ -359,15 +418,25 @@ func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient,
 		effect.End()
 		return nil
 	}
+	// A composite follow reports completion from the move postcommit, which
+	// admits a fresh effect on the published destination capability once the
+	// committing effect has ended and the destination paint is authoritative.
+	afterFollow := func(published *attachmentEffect) {
+		d.sendPickerResult(published, selection, interaction)
+	}
 	// Non-following pane moves retain the open interaction. The transaction
 	// calls beforeFollow only after admission proves that it will follow.
 	defer effect.End()
-	if err := d.commitMovePickerSelection(intent, source, target, beforeFollow); err != nil {
-		d.sendPickerFailure(effect, selection, protocol.PickerActionFailed)
-		d.reportAttachmentError(effect.sess, movePickerUserError(err))
+	if err := d.commitMovePickerSelection(intent, source, target, beforeFollow, afterFollow); err != nil {
 		if closed {
-			d.invalidateRender(effect.sess, ac, true, "picker-move-failed")
+			// The committing effect already ended so the transaction could drain
+			// it. Reject and repaint through the attachment's current capability
+			// instead of reusing an effect that is no longer admitted.
+			d.reportAttachmentError(sess, movePickerUserError(err))
+			d.rejectClosedPickerMove(ac, selection)
 		} else {
+			d.sendPickerFailure(effect, selection, protocol.PickerActionFailed)
+			d.reportAttachmentError(sess, movePickerUserError(err))
 			d.refreshPickerSnapshot(ac)
 		}
 		return
@@ -376,6 +445,25 @@ func (d *Daemon) resolvePickerMove(effect *attachmentEffect, ac *attachedClient,
 		d.sendPickerResult(effect, selection, interaction)
 		d.refreshPickerSnapshot(ac)
 	}
+}
+
+// rejectClosedPickerMove delivers bounded rejection feedback and an
+// authoritative repaint after a composite move closed the picker and ended its
+// committing effect. It never sends through that ended effect: a fresh effect
+// on the attachment's current capability carries the failure, and the paint
+// releases the client's post-close drain.
+func (d *Daemon) rejectClosedPickerMove(ac *attachedClient, selection protocol.PickerSelection) {
+	sess := ac.currentAttachmentSession()
+	if sess == nil {
+		return
+	}
+	d.invalidateRender(sess, ac, true, "picker-move-failed")
+	_, effect, admitted := ac.beginCurrentAttachmentEffect(sess, ac.transport())
+	if !admitted {
+		return
+	}
+	d.sendPickerFailure(effect, selection, protocol.PickerActionFailed)
+	effect.End()
 }
 
 // resolvePickerKill destroys the target and keeps the picker open.

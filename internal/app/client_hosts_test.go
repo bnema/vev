@@ -11,8 +11,10 @@ import (
 
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/usecase/client"
 )
 
 type clientHostsTestDialer struct{ name string }
@@ -94,6 +96,42 @@ func TestClientEndpointFactoryHonoursContextCancellation(t *testing.T) {
 	cancel()
 	_, err := resolver.ResolveEndpoint(ctx, "arch")
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestClientHostRegistryDefersMalformedLaunchAllowlist pins that a malformed
+// configured allowlist is stored on the endpoint factory instead of failing
+// registry construction: a local attach never resolves a remote endpoint, so
+// construction and local attach keep working, while remote resolution stays
+// fail-closed.
+func TestClientHostRegistryDefersMalformedLaunchAllowlist(t *testing.T) {
+	t.Setenv(launchAllowedRemoteEndpointsEnv, "user@bad host")
+	factory := newRemoteDialerFactoryMock(t)
+
+	registry := newClientHostRegistry(runAttachDeps{remoteDialerFactory: factory.DialerForRemote}, remoteadapter.TransportUDP, nil, slog.New(slog.DiscardHandler))
+	require.NotNil(t, registry, "a malformed allowlist must not fail registry construction")
+
+	_, err := registry.ResolveEndpoint(context.Background(), "arch")
+	require.ErrorContains(t, err, "invalid configured remote endpoint allowlist")
+}
+
+// TestRunAttachWithDepsLocalAttachSurvivesMalformedLaunchAllowlist pins the
+// local attach path end to end: a malformed remote allowlist in the
+// environment is deferred, so a local session still attaches.
+func TestRunAttachWithDepsLocalAttachSurvivesMalformedLaunchAllowlist(t *testing.T) {
+	t.Setenv(launchAllowedRemoteEndpointsEnv, "user@bad host")
+	factory := newRemoteDialerFactoryMock(t)
+	attached := false
+	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
+		localDialer:         func() wire.Dialer { return clientHostsTestDialer{name: "local"} },
+		remoteDialerFactory: factory.DialerForRemote,
+		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
+			require.False(t, request.Remote)
+			attached = true
+			return nil
+		},
+	})
+	require.NoError(t, err, "a malformed remote allowlist must not break local attach")
+	require.True(t, attached)
 }
 
 func TestClientEndpointFactoryKeepsNilEnvironmentDistinct(t *testing.T) {

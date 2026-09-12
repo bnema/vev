@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -531,9 +533,11 @@ func TestPickerSelectionRequiresExactSourceRevision(t *testing.T) {
 
 	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	first := awaitPickerSnapshot(t, sends)
-	// A refresh publishes a newer revision: the client may only commit the
-	// model it is displaying, so an older revision must fail even though it
-	// is not newer than the daemon's current one.
+	// A refresh that observes a real row change publishes a newer revision: the
+	// client may only commit the model it is displaying, so an older revision
+	// must fail even though it is not newer than the daemon's current one.
+	_, err := createSessionForTest(d, "third", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+	require.NoError(t, err)
 	d.refreshPickerSnapshot(ac)
 	second := awaitPickerSnapshot(t, sends)
 	require.Greater(t, second.SourceRevision, first.SourceRevision)
@@ -687,20 +691,77 @@ func TestPickerSnapshotRefreshThroughDirectoryNotification(t *testing.T) {
 	require.Greater(t, len(second.Lines), len(first.Lines), "the new session must appear as a line")
 }
 
-func TestPickerRefreshPublishesNewerSourceRevision(t *testing.T) {
+// TestPickerSnapshotPublishesDistinctRecentAndGroupedProjections pins that the
+// serving daemon publishes the actual Recent and Grouped projections instead of
+// one line set copied into both. Recent carries the flat recency order the
+// default client sort consumes; Grouped carries the sectioned order the grouped
+// sort consumes. Both stay one authority: the same keys admit the same actions.
+func TestPickerSnapshotPublishesDistinctRecentAndGroupedProjections(t *testing.T) {
+	d, _, ac, sends, effect := pickerClientTestUnit(t)
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	recentSections, groupedSections := 0, 0
+	recentActions := make(map[string]protocol.PickerLineActions, len(snapshot.Recent.Lines))
+	groupedActions := make(map[string]protocol.PickerLineActions, len(snapshot.Grouped.Lines))
+	for _, line := range snapshot.Recent.Lines {
+		if line.Kind == protocol.PickerLineSection {
+			recentSections++
+		}
+		if line.Key != "" {
+			recentActions[line.Key] = line.Actions
+		}
+	}
+	for _, line := range snapshot.Grouped.Lines {
+		if line.Kind == protocol.PickerLineSection {
+			groupedSections++
+		}
+		if line.Key != "" {
+			groupedActions[line.Key] = line.Actions
+		}
+	}
+
+	// The sort inputs differ: the grouped order is sectioned so its run
+	// boundaries reach the grouped sort, and the recent order stays flat so the
+	// recency sort never inherits grouping it did not ask for.
+	require.Zero(t, recentSections, "recent projection published grouped section runs")
+	require.NotZero(t, groupedSections, "grouped projection published no section runs")
+	require.NotEqual(t, snapshot.Recent.Lines, snapshot.Grouped.Lines, "both projections carry the same sort input")
+	require.Equal(t, recentActions, groupedActions, "projections disagree on destination actions")
+}
+
+// TestPickerRefreshPublishesOnlyChangedSource pins the revision contract: a
+// repeated publish of an unchanged projection pair neither bumps the source
+// revision nor reaches the client, while a real row-set change republishes a
+// full snapshot with a newer revision.
+func TestPickerRefreshPublishesOnlyChangedSource(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 
 	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
 	first := awaitPickerSnapshot(t, sends)
 	require.Equal(t, uint64(1), first.SourceRevision)
+	_ = drainAllFrames(sends)
 
-	// A row-set or size change republishes a full snapshot with a newer
-	// revision through the current attachment capability.
+	// The rows did not change, so the revision the client is displaying stays
+	// current: a refresh must publish nothing and send nothing.
+	d.refreshPickerSnapshot(ac)
+	d.refreshPickerSnapshot(ac)
+	for _, frame := range drainAllFrames(sends) {
+		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "unchanged source republished a snapshot")
+	}
+	ac.overlays.pickerMu.Lock()
+	require.Equal(t, first.SourceRevision, ac.overlays.pickerRevisions[servingPickerSourceID], "unchanged source bumped the revision")
+	ac.overlays.pickerMu.Unlock()
+
+	// A real row-set change republishes a full snapshot with a newer revision
+	// through the current attachment capability.
+	_, err := createSessionForTest(d, "third", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+	require.NoError(t, err)
 	d.refreshPickerSnapshot(ac)
 	second := awaitPickerSnapshot(t, sends)
 	require.Equal(t, first.InteractionID, second.InteractionID)
 	require.Greater(t, second.SourceRevision, first.SourceRevision)
-	require.Len(t, second.Lines, len(first.Lines))
+	require.Greater(t, len(second.Lines), len(first.Lines))
 
 	// A closed interaction republishes nothing: only the close confirmation
 	// and the authoritative repaint may follow.
@@ -708,5 +769,92 @@ func TestPickerRefreshPublishesNewerSourceRevision(t *testing.T) {
 	require.True(t, d.closePickerForAttachment(ac, effect, first.InteractionID))
 	for _, frame := range drainAllFrames(sends) {
 		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "closed interaction republished a snapshot")
+	}
+}
+
+// pickerSnapshotFailTransport delegates to the fixture's capturing transport
+// but rejects the next authoritative snapshot, modelling a link that drops one
+// publication while the daemon still owns it.
+type pickerSnapshotFailTransport struct {
+	*mockServerConnection
+	failNext atomic.Bool
+}
+
+func (t *pickerSnapshotFailTransport) SendServer(message protocol.ServerMessage) error {
+	if _, ok := message.(protocol.PickerSnapshot); ok && t.failNext.CompareAndSwap(true, false) {
+		return errPickerSnapshotSend
+	}
+	return t.mockServerConnection.SendServer(message)
+}
+
+var errPickerSnapshotSend = errors.New("picker snapshot send failed")
+
+// TestPickerSnapshotRetryAfterFailedSend pins the publication commit point: a
+// snapshot whose send fails must not advance the recorded revision or replace
+// the keys the client is still selecting against, and the identical retry must
+// republish instead of being suppressed as unchanged.
+func TestPickerSnapshotRetryAfterFailedSend(t *testing.T) {
+	d, sess, ac, sends, effect := pickerClientTestUnit(t)
+
+	offer := openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	first := awaitPickerSnapshot(t, sends)
+	require.Equal(t, uint64(1), first.SourceRevision)
+
+	// Swap in a link whose next snapshot send fails, then install it as the
+	// attachment authority so publication effects are admitted against it.
+	captured, ok := ac.transport().(*mockServerConnection)
+	require.True(t, ok, "fixture transport is not the capturing mock")
+	failTransport := &pickerSnapshotFailTransport{mockServerConnection: captured}
+	failTransport.failNext.Store(true)
+	ac.replaceTransport(failTransport)
+	ac.installTestAttachmentCapability(captureAttachmentCapability(sess, ac, ac.transport()))
+
+	// A real row-set change is attempted while the send fails.
+	_, err := createSessionForTest(d, "third", false, "", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+	require.NoError(t, err)
+	failedEffect := admitPickerEffectForTest(t, sess, ac)
+	failErr := d.publishPickerSourceForAttachment(ac, failedEffect, offer.InteractionID)
+	require.ErrorIs(t, failErr, errPickerSnapshotSend)
+	failedEffect.End()
+
+	// The failed publication committed nothing: the revision the client is
+	// displaying still validates, and its keys still resolve.
+	ac.overlays.pickerMu.Lock()
+	require.Equal(t, first.SourceRevision, ac.overlays.pickerRevisions[servingPickerSourceID], "failed send advanced the revision")
+	require.True(t, ac.overlays.pickerSourcePublished, "failed send dropped the last published source")
+	displayedKeys := ac.overlays.pickerKeys
+	ac.overlays.pickerMu.Unlock()
+	for _, line := range first.Lines {
+		if line.Actions != 0 {
+			require.Contains(t, displayedKeys, line.Key, "failed send invalidated a displayed key")
+		}
+	}
+
+	// The identical retry must reach the client with the next revision, and the
+	// committed keys must resolve every row of that snapshot.
+	failTransport.failNext.Store(false)
+	retryEffect := admitPickerEffectForTest(t, sess, ac)
+	require.NoError(t, d.publishPickerSourceForAttachment(ac, retryEffect, offer.InteractionID))
+	second := awaitPickerSnapshot(t, sends)
+	require.Equal(t, offer.InteractionID, second.InteractionID)
+	require.Equal(t, first.SourceRevision+1, second.SourceRevision)
+
+	ac.overlays.pickerMu.Lock()
+	require.Equal(t, second.SourceRevision, ac.overlays.pickerRevisions[servingPickerSourceID], "retry revision and client revision diverged")
+	require.Equal(t, second.Recent, ac.overlays.pickerRecent)
+	require.Equal(t, second.Grouped, ac.overlays.pickerGrouped)
+	retryKeys := ac.overlays.pickerKeys
+	ac.overlays.pickerMu.Unlock()
+	for _, line := range second.Lines {
+		if line.Actions != 0 {
+			require.Contains(t, retryKeys, line.Key, "retry committed no key for a displayed row")
+		}
+	}
+
+	// A further identical publish is genuinely unchanged and must stay silent.
+	quietEffect := admitPickerEffectForTest(t, sess, ac)
+	require.NoError(t, d.publishPickerSourceForAttachment(ac, quietEffect, offer.InteractionID))
+	for _, frame := range drainAllFrames(sends) {
+		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "committed retry republished an unchanged source")
 	}
 }

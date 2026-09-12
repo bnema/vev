@@ -18,6 +18,14 @@ type overlayRuntime struct {
 	ac *attachedClient
 
 	pickerMu sync.Mutex
+	// pickerPublishMu serializes snapshot publication for this attachment. A
+	// publisher reserves the sole right to publish, builds, validates, and
+	// sends its snapshot, and only then commits the revision it announced. It
+	// is held across the transport send so two concurrent publishers cannot
+	// interleave or reorder authoritative revisions. pickerMu is still the
+	// state lock and is never held across the send; the lock order is
+	// pickerPublishMu -> pickerMu, and it is never taken while sendMu is held.
+	pickerPublishMu sync.Mutex
 	// picker* carries the serving-daemon side of the picker interaction,
 	// guarded by pickerMu. Open tracks the current interaction namespace;
 	// interaction is the latest admitted open ID (late selections for closed
@@ -29,14 +37,26 @@ type overlayRuntime struct {
 	pickerInteraction uint64
 	pickerRevisions   map[string]uint64
 	pickerKeys        map[string]picker.Target
-	pickerIntent      protocol.PickerIntent
-	pickerMoveSource  moveSourceLocator
-	pickerRequestID   uint64
+	// pickerSourcePublished distinguishes "never published" from "published an
+	// empty set" for the current interaction. pickerRecent and pickerGrouped
+	// are the exact projections last published: a refresh whose projections
+	// equal them is not authority-relevant, so it must not bump the revision
+	// nor send a snapshot the client never needed to see.
+	pickerSourcePublished bool
+	pickerRecent          protocol.PickerProjection
+	pickerGrouped         protocol.PickerProjection
+	pickerIntent          protocol.PickerIntent
+	pickerMoveSource      moveSourceLocator
+	pickerRequestID       uint64
 	// pickerPreview* track the row the client asked to preview. The generation
 	// supersedes an in-flight capture and names the render subscription, so a
 	// delayed preview can never replace the row the user is displaying.
+	// pickerPreviewSession pins the recorded subscription to the coordinator
+	// that owns it (the target session, or the viewer for a remote row), so
+	// teardown removes the exact target subscription.
 	pickerPreviewGeneration uint64
 	pickerPreviewKey        string
+	pickerPreviewSession    *session
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model

@@ -1027,10 +1027,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	// The launching client owns one host registry for the whole run: endpoint
 	// bindings are resolved once and reused by every later handoff, and the
 	// discovery loop it drives lives exactly as long as the runner.
-	registry, registryErr := newClientHostRegistry(deps, mode, modeErr, clientClock(deps), log)
-	if registryErr != nil {
-		return registryErr
-	}
+	registry := newClientHostRegistry(deps, mode, modeErr, log)
 
 	handoffAttempts := 0
 	for {

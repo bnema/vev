@@ -167,6 +167,11 @@ type Daemon struct {
 	// afterAttachmentEffectsFrozen observes the lock-free boundary after all affected
 	// attachment gates are frozen and drained, before architecture publication.
 	afterAttachmentEffectsFrozen func()
+	// beforeAttachmentTransitionIdentityAdmission is a deterministic test seam
+	// after a ready transition published its capability and before the committed
+	// route identity is admitted, so tests can supersede that exact capability in
+	// the window before the transition's first paint and completion.
+	beforeAttachmentTransitionIdentityAdmission func(attachmentCapability)
 	// afterAttachmentTransitionCoordinatorsLocked is a deterministic lock-order
 	// seam used by transition validation tests.
 	afterAttachmentTransitionCoordinatorsLocked func()
@@ -183,6 +188,10 @@ type Daemon struct {
 	afterMoveTabSourceSnapshot                func()
 	beforeMovePaneCommit                      func()
 	beforeMoveTabCommit                       func()
+	// beforeMoveFollowCompletion is a deterministic test seam after the composite
+	// follow's first paint and before the postcommit admits the capability that
+	// reports completion, so tests can supersede the published capability.
+	beforeMoveFollowCompletion func(attachmentCapability)
 	// afterDetachAttachmentEffectsFrozen observes terminal detach after it wins the
 	// attachment gate but before it checks session ownership.
 	afterDetachAttachmentEffectsFrozen func()
