@@ -164,7 +164,13 @@ func (r *inventoryRelay) preparePublication(groups []protocol.NavigationInventor
 	if r == nil {
 		return nil, 0, false
 	}
-	canonical := canonicalInventoryGroups(groups)
+	localGroups := make([]protocol.NavigationInventorySourceGroup, 0, 1)
+	for _, group := range groups {
+		if group.SourceKey == protocol.NavigationInventoryLocalSourceKey {
+			localGroups = append(localGroups, group)
+		}
+	}
+	canonical := canonicalInventoryGroups(localGroups)
 	if inventoryGroupsEqual(canonical, r.published) {
 		return nil, 0, false
 	}
