@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -61,6 +63,33 @@ func TestAttachmentStatusResolvesSubscribedRouteAttention(t *testing.T) {
 			require.Equal(t, tt.attention, state.mru[0].attention)
 		})
 	}
+}
+
+func TestAttachmentStatusResolvesRemoteDirectoryAttention(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+	ref := protocol.RouteRef{Key: 2, Generation: 1}
+	target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{9}, SessionName: "work"}
+	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{
+		Generation: 2,
+		Active:     protocol.RouteRef{Key: 3, Generation: 2},
+		Entries:    []protocol.RecentRouteEntry{{Key: ref.Key, Generation: ref.Generation, Target: target, Name: target.SessionName, HostLabel: "remote", Kind: protocol.RouteKindRemote}},
+	})
+	ac.setRouteAttentionSubscription(protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{
+		Ref: ref, Target: target, SourceKey: protocol.RemoteInventorySourceKey("remote"),
+	}}}, ac.transportSnapshot(), d.clock.Now())
+	d.remoteDirectory = &stubRemoteDirectory{snapshot: ports.RemoteDirectorySnapshot{Hosts: []ports.RemoteHostSnapshot{{
+		Endpoint: "remote",
+		Sessions: []catalogue.RemoteCatalogSession{{
+			LifecycleID: target.LifecycleID,
+			Name:        target.SessionName,
+			Tabs:        []catalogue.RemoteCatalogTab{{ID: "1", Attention: true}},
+		}},
+	}}}}
+
+	state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
+
+	require.Len(t, state.mru, 1)
+	require.True(t, state.mru[0].attention)
 }
 
 func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {

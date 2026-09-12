@@ -387,15 +387,15 @@ func (ac *attachedClient) setRouteAttentionSubscription(subscription protocol.Ro
 	ac.routeAttentionSubscription = subscription
 }
 
-func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.ExactSessionTarget, bool) {
+func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.RouteAttentionTarget, bool) {
 	ac.routeMu.RLock()
 	defer ac.routeMu.RUnlock()
 	for _, target := range ac.routeAttentionSubscription.Targets {
-		if target.Ref == ref && target.SourceKey == "" {
-			return target.Target, true
+		if target.Ref == ref {
+			return target, true
 		}
 	}
-	return protocol.ExactSessionTarget{}, false
+	return protocol.RouteAttentionTarget{}, false
 }
 
 func (ac *attachedClient) ackOutputState(epoch, state uint64) {

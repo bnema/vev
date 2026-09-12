@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -47,13 +48,39 @@ func (d *Daemon) formatRecentRouteSnapshotForAttachment(ac *attachedClient, snap
 	if d == nil || ac == nil {
 		return formatRecentRoutePresentations(presentations)
 	}
+	directory := d.remoteDirectorySnapshot()
 	for i, entry := range snapshot.Entries {
 		target, ok := ac.routeAttentionTarget(protocol.RouteRef{Key: entry.Key, Generation: entry.Generation})
-		if ok {
-			presentations[i].attention = d.routeHasAttention(target)
+		if !ok {
+			continue
 		}
+		if target.SourceKey == "" {
+			presentations[i].attention = d.routeHasAttention(target.Target)
+			continue
+		}
+		presentations[i].attention = directoryRouteHasAttention(directory, target)
 	}
 	return formatRecentRoutePresentations(presentations)
+}
+
+func directoryRouteHasAttention(directory ports.RemoteDirectorySnapshot, target protocol.RouteAttentionTarget) bool {
+	for _, host := range directory.Hosts {
+		if protocol.RemoteInventorySourceKey(host.Endpoint) != target.SourceKey {
+			continue
+		}
+		for _, sess := range host.Sessions {
+			if sess.LifecycleID != target.Target.LifecycleID || sess.Name != target.Target.SessionName {
+				continue
+			}
+			for _, tab := range sess.Tabs {
+				if tab.Attention {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
 }
 
 func (d *Daemon) routeHasAttention(target protocol.ExactSessionTarget) bool {

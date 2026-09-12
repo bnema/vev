@@ -23,7 +23,8 @@ func (d *Daemon) backSessionForAttachment(effect *attachmentEffect) error {
 	if snapshot.Previous.Key == 0 || snapshot.Previous.Generation == 0 {
 		return nil
 	}
-	if target, ok := effect.ac.routeAttentionTarget(snapshot.Previous); ok {
+	if subscribed, ok := effect.ac.routeAttentionTarget(snapshot.Previous); ok && subscribed.SourceKey == "" {
+		target := subscribed.Target
 		targetSession, _, live := d.samePeerTarget(protocol.SamePeerSwitchRequest{Target: target})
 		if live && targetSession != effect.sess {
 			return offerSamePeerAttachTarget(effect, target)
