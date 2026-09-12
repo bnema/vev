@@ -197,7 +197,9 @@ func TestBridgeUsesExistingSocketWithoutCreatingAttachment(t *testing.T) {
 // the limit in a nested worktree.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("", "vev-ui")
+	base, err := filepath.EvalSymlinks(os.TempDir())
+	require.NoError(t, err)
+	directory, err := os.MkdirTemp(base, "vev-ui")
 	require.NoError(t, err)
 	directory, err = filepath.Abs(directory)
 	require.NoError(t, err)
