@@ -66,7 +66,7 @@ func routeCreateSessionActionFromWire(message *wire.RouteCreateSessionAction) (p
 }
 
 func routeRetiredToWire(message protocol.RouteRetired) (*wire.RouteRetired, error) {
-	if err := message.Target.Validate(); err != nil {
+	if err := message.Validate(); err != nil {
 		return nil, err
 	}
 	return &wire.RouteRetired{Ref: routeRefToWire(message.Ref), Target: exactTargetToWire(&message.Target)}, nil
@@ -81,7 +81,7 @@ func routeRetiredFromWire(message *wire.RouteRetired) (protocol.RouteRetired, er
 		return protocol.RouteRetired{}, protocol.ErrInvalidRouteWire
 	}
 	retired := protocol.RouteRetired{Ref: routeRefFromWire(message.GetRef()), Target: *target}
-	if err := retired.Target.Validate(); err != nil {
+	if err := retired.Validate(); err != nil {
 		return protocol.RouteRetired{}, err
 	}
 	return retired, nil

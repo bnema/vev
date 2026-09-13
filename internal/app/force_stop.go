@@ -150,13 +150,27 @@ func forceStopDaemon(ctx context.Context, runtimeDir string, hooks forceStopHook
 	// The prompt is interactive and may stay open arbitrarily long, so the
 	// confirmed incarnation is re-verified before SIGTERM exactly as it is
 	// before SIGKILL: a PID reused while the operator was answering is never
-	// signalled.
+	// signalled. If the verified process vanished or changed, ownership may
+	// already be free because the daemon exited on its own; then only stale
+	// runtime artifacts are removed, without signalling anything.
 	current, found, findErr := hooks.finder.Find(ctx, runtimeDir)
 	if findErr != nil {
 		return fmt.Errorf("vev: re-identifying daemon process: %w", findErr)
 	}
 	if !found || current.PID != candidate.PID || current.Start != candidate.Start {
-		return fmt.Errorf("vev: %w (process identity changed before SIGTERM)", errForceStopTimeout)
+		owner, acquireErr := hooks.probe.TryAcquire(runtimeDir)
+		if acquireErr != nil {
+			if !errors.Is(acquireErr, lifecycle.ErrBusy) {
+				return fmt.Errorf("vev: probing daemon ownership: %w", acquireErr)
+			}
+			return fmt.Errorf("vev: %w (process identity changed before SIGTERM)", errForceStopTimeout)
+		}
+		defer func() { retErr = errors.Join(retErr, owner.Release()) }()
+		if err := removeStaleRuntimeArtifacts(runtimeDir, hooks); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(hooks.stdout, "vev: daemon already exited; removed stale runtime artifacts\n")
+		return err
 	}
 
 	if err := hooks.signal(candidate.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {

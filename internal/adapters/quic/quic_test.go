@@ -527,3 +527,114 @@ func TestQUICLinkEventsReportTerminalOffline(t *testing.T) {
 	_, ok = readLinkEvent(t, client.LinkEvents())
 	require.False(t, ok, "peer event stream must close after the terminal event")
 }
+
+func (r *markRecorder) snapshot() []ports.RuntimeMark {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ports.RuntimeMark(nil), r.marks...)
+}
+
+// assertBalancedQUICMarks proves every started adapter operation also closed:
+// the transport must never leak a start mark when Close (or a failure) ends an
+// operation.
+func assertBalancedQUICMarks(t *testing.T, marks []ports.RuntimeMark) {
+	t.Helper()
+	starts := make(map[uint64]ports.RuntimeMarkKind)
+	for _, mark := range marks {
+		switch mark.Kind {
+		case ports.RuntimeAdapterSendStart, ports.RuntimeAdapterReceiveStart:
+			_, duplicate := starts[mark.Sequence]
+			require.False(t, duplicate, "duplicate start mark for one operation")
+			starts[mark.Sequence] = mark.Kind
+		case ports.RuntimeAdapterSendEnd, ports.RuntimeAdapterReceiveEnd:
+			start, ok := starts[mark.Sequence]
+			require.True(t, ok, "end mark without a start mark")
+			want := ports.RuntimeAdapterSendEnd
+			if start == ports.RuntimeAdapterReceiveStart {
+				want = ports.RuntimeAdapterReceiveEnd
+			}
+			require.Equal(t, want, mark.Kind)
+			delete(starts, mark.Sequence)
+		}
+	}
+	require.Empty(t, starts, "start marks without an end mark")
+}
+
+// dialObservedTestPair dials a listener configured with observer, so the
+// accepted (accept-side) transport carries runtime marks.
+func dialObservedTestPair(t *testing.T, observer ports.SerializedRuntimeObserver) (wire.Transport, wire.Transport) {
+	t.Helper()
+	cert, fingerprint, err := GenerateEphemeralCert()
+	require.NoError(t, err)
+	listener, err := ListenConfig("127.0.0.1:0", cert, Config{}, 4, WithListenerRuntimeObserver(observer))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	accepted := make(chan wire.Transport, 1)
+	go func() {
+		if transport, err := listener.Accept(); err == nil {
+			accepted <- transport
+		}
+	}()
+
+	client, err := DialConfig(listener.Addr(), "vev-bootstrap", fingerprint, Config{}, 10*time.Second).Dial(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	select {
+	case server := <-accepted:
+		t.Cleanup(func() { _ = server.Close() })
+		return client, server
+	case <-time.After(10 * time.Second):
+		t.Fatal("listener did not accept")
+		return nil, nil
+	}
+}
+
+// TestQUICAcceptObserverEmitsAdapterMarks proves the observer wired through
+// the listener (not just DialConfig) reaches the accepted transport.
+func TestQUICAcceptObserverEmitsAdapterMarks(t *testing.T) {
+	recorder := &markRecorder{}
+	client, server := dialObservedTestPair(t, recorder)
+
+	require.NoError(t, client.Send(wire.Envelope{Payload: []byte("observed")}))
+	got, err := server.Recv()
+	require.NoError(t, err)
+	require.Equal(t, []byte("observed"), got.Payload)
+	require.NoError(t, server.Send(wire.Envelope{Payload: []byte("ack")}))
+	_, err = client.Recv()
+	require.NoError(t, err)
+
+	marks := recorder.snapshot()
+	require.NotEmpty(t, marks, "accept side must observe carriage marks")
+	for _, mark := range marks {
+		require.Equal(t, "quic", mark.Component)
+	}
+	assertBalancedQUICMarks(t, marks)
+}
+
+// TestQUICObserverMarksBalanceAcrossClose proves Close gates new observed
+// operations and waits for an in-flight blocked Recv to close its mark pair.
+func TestQUICObserverMarksBalanceAcrossClose(t *testing.T) {
+	recorder := &markRecorder{}
+	client, server := dialObservedTestPair(t, recorder)
+
+	require.NoError(t, client.Send(wire.Envelope{Payload: []byte("before close")}))
+	_, err := server.Recv()
+	require.NoError(t, err)
+
+	blocked := make(chan struct{})
+	go func() {
+		_, _ = server.Recv()
+		close(blocked)
+	}()
+	require.NoError(t, server.Close())
+	<-blocked
+
+	before := len(recorder.snapshot())
+	// A Send after Close fails closed without opening a new observed operation.
+	_ = server.Send(wire.Envelope{Payload: []byte("late")})
+	marks := recorder.snapshot()
+	require.Equal(t, before, len(marks), "operations after Close must not be observed")
+	assertBalancedQUICMarks(t, marks)
+}

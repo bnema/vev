@@ -181,9 +181,10 @@ func (d Dialer) finishDial(ctx context.Context, conn *quicgo.Conn, packetConn ne
 	// The server observes the connection once this stream carries data:
 	// quic-go only surfaces the accepted connection after the peer's
 	// AcceptStream fires, which requires stream activity. The probe is a
-	// framed zero-length envelope the scanner rejects deterministically
-	// (ErrZeroLength); the server's first Recv surfaces that error and
-	// the stream stays usable for application envelopes afterwards.
+	// framed zero-length envelope: the receiver's scanner reports
+	// ErrZeroLength for it, and both Recv paths skip that error without
+	// reaching application decoders, so the stream stays usable for
+	// application envelopes afterwards.
 	if _, err := stream.Write([]byte{0, 0, 0, 0}); err != nil {
 		return nil, err
 	}
@@ -254,6 +255,7 @@ type Listener struct {
 	config     Config
 	cert       tls.Certificate
 	addr       string
+	observer   ports.SerializedRuntimeObserver
 	pendingMu  sync.Mutex
 	pending    int
 	maxPending int
@@ -264,14 +266,25 @@ type Listener struct {
 
 var _ wire.Listener = (*Listener)(nil)
 
+// ListenerOption tunes a listener.
+type ListenerOption func(*Listener)
+
+// WithListenerRuntimeObserver enables process-local adapter marks on every
+// accepted transport, mirroring the dial-side WithRuntimeObserver. A nil
+// observer leaves observation disabled.
+func WithListenerRuntimeObserver(observer ports.SerializedRuntimeObserver) ListenerOption {
+	return func(l *Listener) { l.observer = observer }
+}
+
 // ListenConfig bounds admission and validates its inputs. Empty addr
 // selects loopback (never the wildcard); negative durations and stream
 // limits are rejected. MaxPendingUnauthenticated defaults to 4 per the
-// normative table; the auth deadline is the handshake idle timeout
-// (default 5s, P6.2 tightens to 3s at the bootstrap layer). A zero stream
+// normative table; the generic accept budget defaults to 5s. The bootstrap
+// server passes its own 3s auth deadline as that budget and sets the
+// matching handshake idle timeout, so both bounds agree there. A zero stream
 // limit means "no streams", translated to quic-go's negative semantics
 // inside the role-specific config.
-func ListenConfig(addr string, cert tls.Certificate, config Config, maxPending int) (*Listener, error) {
+func ListenConfig(addr string, cert tls.Certificate, config Config, maxPending int, opts ...ListenerOption) (*Listener, error) {
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
@@ -291,13 +304,19 @@ func ListenConfig(addr string, cert tls.Certificate, config Config, maxPending i
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{
+	l := &Listener{
 		listener:   listener,
 		config:     config,
 		cert:       cert,
 		addr:       listener.Addr().String(),
 		maxPending: maxPending,
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(l)
+		}
+	}
+	return l, nil
 }
 
 // admitted is one connection whose admission slot is still held. deadline
@@ -353,7 +372,7 @@ func (l *Listener) admitOne(ctx context.Context, budget time.Duration) (admitted
 		}
 		deadline := time.Now().Add(budget)
 		streamCtx, cancel := context.WithDeadline(ctx, deadline)
-		transport, err := acceptSingleStream(streamCtx, conn)
+		transport, err := acceptSingleStream(streamCtx, conn, l.observer)
 		cancel()
 		if err != nil {
 			l.release()
@@ -391,7 +410,7 @@ func (l *Listener) release() {
 // fails when the peer opens none or the caller's deadline expires. The
 // transport's lifetime guard enforces the stream contract on every later
 // stream.
-func acceptSingleStream(ctx context.Context, conn *quicgo.Conn) (*Transport, error) {
+func acceptSingleStream(ctx context.Context, conn *quicgo.Conn, observer ports.SerializedRuntimeObserver) (*Transport, error) {
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -402,7 +421,7 @@ func acceptSingleStream(ctx context.Context, conn *quicgo.Conn) (*Transport, err
 	if stream == nil {
 		return nil, errNoStream
 	}
-	return newTransport(conn, stream, nil, nil), nil
+	return newTransport(conn, stream, nil, observer), nil
 }
 
 // Close stops the listener; established transports are unaffected.

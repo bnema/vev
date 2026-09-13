@@ -137,6 +137,22 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			wantErr: errProtoConvertRange,
 		},
 		{
+			name: "route failure decode identity",
+			run: func(t *testing.T) error {
+				_, err := navigationFailureFromWire(&wire.RouteNavigationFailure{Code: uint32(protocol.RouteFailureUnavailable)})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "route failure encode identity",
+			run: func(t *testing.T) error {
+				_, err := navigationFailureToWire(protocol.RouteNavigationFailure{Code: protocol.RouteFailureUnavailable})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
 			name: "same peer switch failure code",
 			run: func(t *testing.T) error {
 				_, err := samePeerSwitchFailureFromWire(&wire.SamePeerSwitchFailure{Code: 256})

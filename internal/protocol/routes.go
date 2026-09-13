@@ -191,6 +191,18 @@ type RouteRetired struct {
 	Target ExactSessionTarget
 }
 
+// Validate rejects a retirement without the nonzero reference that fences it
+// and without a valid lifecycle target. Both encode and decode call it.
+func (r RouteRetired) Validate() error {
+	if r.Ref.IsZero() || r.Ref.Validate() != nil {
+		return fmt.Errorf("%w: retired route reference is zero", ErrInvalidRouteWire)
+	}
+	if err := r.Target.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid retired route target: %v", ErrInvalidRouteWire, err)
+	}
+	return nil
+}
+
 // RemoteInventorySourceKey identifies a configured endpoint without disclosing it.
 func RemoteInventorySourceKey(endpoint string) string {
 	sum := sha256.Sum256([]byte("vev-inventory-remote\x00" + endpoint))
@@ -485,6 +497,16 @@ func (c RouteFailureCode) Validate() error {
 		return ErrInvalidRouteWire
 	}
 	return nil
+}
+
+// Validate requires the nonzero entry identity that correlates the failure
+// with its navigation action, plus a bounded failure code. Both encode and
+// decode call it so a zero identity never ships.
+func (f RouteNavigationFailure) Validate() error {
+	if f.Key == 0 || f.Generation == 0 {
+		return fmt.Errorf("%w: failure identity is zero", ErrInvalidRouteWire)
+	}
+	return f.Code.Validate()
 }
 
 // SessionCreationFailure reports a correlated pre-commit create transition

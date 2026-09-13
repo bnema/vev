@@ -186,12 +186,23 @@ type Transport struct {
 
 	observer ports.SerializedRuntimeObserver
 
+	// Observation bookkeeping mirrors the IPC transport: an accepted
+	// operation always closes its mark pair, and Close stops accepting new
+	// marks and then waits for in-flight ones to finish.
+	operationMu     sync.Mutex
+	operationCount  int
+	observedClosing bool
+	operationsDone  chan struct{}
+
 	linkMu    sync.Mutex
 	linkState ports.LinkState
 	events    chan ports.LinkEvent
 
 	closeOnce    sync.Once
 	terminalOnce sync.Once
+	// teardownDone closes when the deferred hard close after an orderly
+	// Close has run.
+	teardownDone chan struct{}
 	closeErr     error
 }
 
@@ -206,12 +217,13 @@ var (
 // receives process-local adapter marks for send and receive.
 func newTransport(conn *quicgo.Conn, stream *quicgo.Stream, packetConn net.PacketConn, observer ports.SerializedRuntimeObserver) *Transport {
 	t := &Transport{
-		conn:       conn,
-		stream:     stream,
-		packetConn: packetConn,
-		observer:   observer,
-		linkState:  ports.LinkStateConnected,
-		events:     make(chan ports.LinkEvent, 4),
+		conn:         conn,
+		stream:       stream,
+		packetConn:   packetConn,
+		observer:     observer,
+		linkState:    ports.LinkStateConnected,
+		events:       make(chan ports.LinkEvent, 4),
+		teardownDone: make(chan struct{}),
 	}
 	t.framer = streamframe.NewFramer(stream, stream, t.closeStream)
 	// The single-stream contract is enforced for the whole connection
@@ -291,9 +303,13 @@ func (t *Transport) SendAsync(envelope wire.Envelope) error {
 }
 
 // observe opens one process-local adapter mark pair, or returns a no-op end
-// when observation is disabled.
+// when observation is disabled or Close has already begun. An accepted
+// operation always emits its end mark, so Close can safely wait for it.
 func (t *Transport) observe(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
 	if t.observer == nil {
+		return func(bool) {}
+	}
+	if !t.beginObservedOperation() {
 		return func(bool) {}
 	}
 	correlation := ports.NewRuntimeCorrelation()
@@ -303,8 +319,43 @@ func (t *Transport) observe(start ports.RuntimeMarkKind, bytes uint64) func(bool
 		end = ports.RuntimeAdapterReceiveEnd
 	}
 	return func(valid bool) {
+		defer t.finishObservedOperation()
 		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("quic", correlation, end, bytes, valid))
 	}
+}
+
+func (t *Transport) beginObservedOperation() bool {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	if t.observedClosing {
+		return false
+	}
+	if t.operationCount == 0 {
+		t.operationsDone = make(chan struct{})
+	}
+	t.operationCount++
+	return true
+}
+
+func (t *Transport) finishObservedOperation() {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.operationCount--
+	if t.operationCount == 0 {
+		close(t.operationsDone)
+	}
+}
+
+// beginShutdown stops accepting new observed operations and returns a channel
+// closed when the in-flight ones finish, or nil when none were running.
+func (t *Transport) beginShutdown() <-chan struct{} {
+	t.operationMu.Lock()
+	defer t.operationMu.Unlock()
+	t.observedClosing = true
+	if t.operationCount == 0 {
+		return nil
+	}
+	return t.operationsDone
 }
 
 // Recv reads one complete envelope, blocking until arrival or close.
@@ -396,6 +447,9 @@ const gracefulCloseWindow = time.Second
 // Offline link event and closes the event stream.
 func (t *Transport) Close() error {
 	t.closeOnce.Do(func() {
+		// Stop accepting observed operation marks and wait for in-flight
+		// ones to close their pairs before returning.
+		operationsDone := t.beginShutdown()
 		// Publish the graceful terminal event before closing the
 		// connection so a local Close reports a nil cause instead of
 		// racing the peer-failure watcher.
@@ -408,8 +462,26 @@ func (t *Transport) Close() error {
 		// before the FIN so an in-flight write is not cut short.
 		t.closeErr = t.framer.Close()
 		_ = t.stream.Close()
+		if operationsDone != nil {
+			<-operationsDone
+		}
 	})
 	return t.closeErr
+}
+
+// WaitGracefulTeardown blocks until the deferred hard connection close that
+// follows an orderly Close has run: the graceful window elapsed or the peer
+// closed first. A process-owning caller (the _quic-proxy) waits after Close so
+// the final synchronous envelope is not discarded by process exit; ctx bounds
+// the wait. It returns ctx.Err() when the wait is cut short, and blocks until
+// ctx expires when Close was never called.
+func (t *Transport) WaitGracefulTeardown(ctx context.Context) error {
+	select {
+	case <-t.teardownDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // deferCloseConnection keeps the connection alive long enough to transmit a
@@ -417,6 +489,7 @@ func (t *Transport) Close() error {
 // already did. Closing the connection first would send CONNECTION_CLOSE ahead
 // of the buffered stream data and discard it.
 func (t *Transport) deferCloseConnection() {
+	defer close(t.teardownDone)
 	timer := time.NewTimer(gracefulCloseWindow)
 	defer timer.Stop()
 	select {

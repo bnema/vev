@@ -102,7 +102,7 @@ func recentRouteEntryFromWire(message *wire.RecentRouteEntry) (protocol.RecentRo
 }
 
 func navigationFailureToWire(failure protocol.RouteNavigationFailure) (*wire.RouteNavigationFailure, error) {
-	if err := failure.Code.Validate(); err != nil {
+	if err := failure.Validate(); err != nil {
 		return nil, err
 	}
 	return &wire.RouteNavigationFailure{Key: failure.Key, Generation: failure.Generation, Code: uint32(failure.Code)}, nil
@@ -120,7 +120,7 @@ func navigationFailureFromWire(message *wire.RouteNavigationFailure) (protocol.R
 		return protocol.RouteNavigationFailure{}, err
 	}
 	failure.Code = code
-	if err := failure.Code.Validate(); err != nil {
+	if err := failure.Validate(); err != nil {
 		return protocol.RouteNavigationFailure{}, err
 	}
 	return failure, nil

@@ -314,6 +314,66 @@ func TestForceStopReverifiesIdentityAfterConfirmation(t *testing.T) {
 	}
 }
 
+// TestForceStopCleansArtifactsWhenProcessVanishesAndOwnershipFreed covers the
+// daemon exiting while the operator answers the prompt: the verified process
+// disappears and lifecycle ownership is free, so only stale runtime artifacts
+// are removed and no signal is ever sent.
+func TestForceStopCleansArtifactsWhenProcessVanishesAndOwnershipFreed(t *testing.T) {
+	f := newForceStopFixture(t, "y\n")
+	runtimeDir, stateDir := forceStopRuntime(t)
+	reverified := false
+	f.hooks.finder = fakeDaemonFinder{find: func(context.Context, string) (daemonProcess, bool, error) {
+		if reverified {
+			return daemonProcess{}, false, nil
+		}
+		return daemonProcess{PID: f.pid, Command: "/proc/self/exe --daemon", Start: "start-1"}, true, nil
+	}}
+	f.hooks.probe = funcLifecycleProbe{tryAcquire: func(string) (lifecycleOwnership, error) {
+		if reverified {
+			return freeLifecycleOwnership(), nil
+		}
+		return nil, lifecycle.ErrBusy
+	}}
+	f.hooks.stdin = promptChangeReader{
+		reader: strings.NewReader("y\n"),
+		onRead: func() { reverified = true },
+	}
+
+	err := forceStopDaemon(context.Background(), runtimeDir, f.hooks)
+
+	require.NoError(t, err)
+	require.Empty(t, f.signals, "an already-exited daemon must never be signalled")
+	require.NoFileExists(t, ipc.SocketPath(runtimeDir))
+	require.NoDirExists(t, filepath.Join(runtimeDir, spawnLockName))
+	assertDurableStateIntact(t, stateDir)
+}
+
+// TestForceStopFailsWhenProcessChangesButOwnershipStaysBusy keeps the
+// conservative path: a reused PID with ownership still held is never signalled
+// and its runtime artifacts are left in place.
+func TestForceStopFailsWhenProcessChangesButOwnershipStaysBusy(t *testing.T) {
+	f := newForceStopFixture(t, "y\n")
+	runtimeDir, stateDir := forceStopRuntime(t)
+	reverified := false
+	f.hooks.finder = fakeDaemonFinder{find: func(context.Context, string) (daemonProcess, bool, error) {
+		if reverified {
+			return daemonProcess{PID: f.pid, Command: "unrelated", Start: "start-2"}, true, nil
+		}
+		return daemonProcess{PID: f.pid, Command: "/proc/self/exe --daemon", Start: "start-1"}, true, nil
+	}}
+	f.hooks.stdin = promptChangeReader{
+		reader: strings.NewReader("y\n"),
+		onRead: func() { reverified = true },
+	}
+
+	err := forceStopDaemon(context.Background(), runtimeDir, f.hooks)
+
+	require.ErrorIs(t, err, errForceStopTimeout)
+	require.Empty(t, f.signals)
+	require.FileExists(t, ipc.SocketPath(runtimeDir), "artifacts stay while another process holds ownership")
+	assertDurableStateIntact(t, stateDir)
+}
+
 func TestForceStopIsBoundedWhenOwnershipNeverTransfers(t *testing.T) {
 	f := newForceStopFixture(t, "y\n")
 	runtimeDir, _ := forceStopRuntime(t)

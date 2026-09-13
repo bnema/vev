@@ -1409,8 +1409,35 @@ func runQUICProxy(ctx context.Context) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = transport.Close() }()
+	defer func() {
+		_ = transport.Close()
+		_ = waitGracefulTeardown(transport)
+	}()
 	return proxyQUICBootstrap(ctx, transport)
+}
+
+// gracefulTeardownWaiter is implemented by carriages (QUIC) whose Close defers
+// a bounded connection close past its return. The _quic-proxy owns its
+// process, so it must wait for that close before returning: exiting first
+// would discard the final synchronous envelope Close already handed to the
+// stream.
+type gracefulTeardownWaiter interface {
+	WaitGracefulTeardown(ctx context.Context) error
+}
+
+// proxyTeardownTimeout bounds the proxy's wait for a deferred graceful close,
+// leaving headroom beyond the adapter's own graceful window. A carriage that
+// does not defer its close is not waited on.
+const proxyTeardownTimeout = 2 * time.Second
+
+func waitGracefulTeardown(transport wire.Transport) error {
+	waiter, ok := transport.(gracefulTeardownWaiter)
+	if !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), proxyTeardownTimeout)
+	defer cancel()
+	return waiter.WaitGracefulTeardown(ctx)
 }
 
 // proxyQUICBootstrap bridges the single authenticated QUIC stream to the

@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"github.com/bnema/vev/internal/adapters/quic"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
@@ -432,6 +433,67 @@ func TestProxyTransportsCopiesBothDirections(t *testing.T) {
 	require.Equal(t, payload, got.Payload)
 	_ = client.Close()
 	_ = daemon.Close()
+}
+
+// TestQUICProxyLifecycleDeliversFinalEnvelope exercises the production proxy
+// bridge instead of a bare same-process Transport.Close: the daemon direction
+// emits one final synchronous envelope, the proxy forwards it, tears both
+// carriages down, and then performs the bounded graceful teardown wait the
+// detached _quic-proxy uses before process exit. The envelope must survive.
+func TestQUICProxyLifecycleDeliversFinalEnvelope(t *testing.T) {
+	cert, fingerprint, err := quic.GenerateEphemeralCert()
+	require.NoError(t, err)
+	listener, err := quic.ListenConfig("127.0.0.1:0", cert, quic.Config{}, 4)
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan wire.Transport, 1)
+	go func() {
+		if transport, err := listener.Accept(); err == nil {
+			accepted <- transport
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := quic.DialConfig(listener.Addr(), "vev-bootstrap", fingerprint, quic.Config{}, 5*time.Second).Dial(ctx)
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	var proxySide wire.Transport
+	select {
+	case proxySide = <-accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("listener did not accept")
+	}
+
+	daemonPipe, peerPipe := net.Pipe()
+	daemon := ipc.NewTransport(daemonPipe)
+	peer := ipc.NewTransport(peerPipe)
+	defer func() { _ = peer.Close() }()
+
+	proxyDone := make(chan error, 1)
+	go func() { proxyDone <- proxyTransports(ctx, proxySide, daemon, nil) }()
+
+	final := []byte("final envelope survives the proxy lifecycle")
+	require.NoError(t, peer.Send(wire.Envelope{Payload: final}))
+	_ = peer.Close()
+
+	select {
+	case <-proxyDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("proxy did not stop after the daemon side closed")
+	}
+
+	// The proxy waits for deferred graceful teardown before returning; this is
+	// what keeps the final envelope from being discarded at process exit.
+	require.NoError(t, waitGracefulTeardown(proxySide))
+
+	got, err := client.Recv()
+	require.NoError(t, err, "the final envelope must survive proxy teardown")
+	require.Equal(t, final, got.Payload)
+	_, err = client.Recv()
+	require.ErrorIs(t, err, io.EOF)
 }
 
 func TestDevelopmentTempDirOption(t *testing.T) {

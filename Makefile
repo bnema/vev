@@ -47,8 +47,8 @@ protocol-check:
 	trap 'rm -rf "$$tmp"' EXIT; \
 	go tool buf generate --output "$$tmp"; \
 	genfile="$$(find "$$tmp" -name 'envelope.pb.go' -print -quit)"; \
+	test -n "$$genfile" || { echo "buf generate produced no envelope.pb.go"; exit 1; }; \
 	genroot="$$(dirname "$$genfile")"; \
-	test -n "$$genroot"; \
 	for f in internal/protocol/wire/*.pb.go; do b="$$(basename "$$f")"; cmp -s "$$genroot/$$b" "$$f" || { echo "stale generated file: $$f"; exit 1; }; done; \
 	genfiles="$$(cd "$$genroot" && ls *.pb.go | sort)"; \
 	repofiles="$$(cd internal/protocol/wire && ls *.pb.go | sort)"; \

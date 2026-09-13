@@ -105,10 +105,34 @@ func TestScanEnvelopeRejectsUint32Overflow(t *testing.T) {
 // (ten-byte sign-extended varint) still passes: it is a real value, not a
 // truncating overflow.
 func TestScanEnvelopeAllowsSignExtendedInt32(t *testing.T) {
-	style := protowire.AppendTag(nil, 5, protowire.VarintType) // CellStyle.foreground
-	style = protowire.AppendVarint(style, math.MaxUint64)      // -1
-	if err := ScanEnvelope(&CellStyle{}, style); err != nil {
-		t.Fatalf("ScanEnvelope() = %v, want nil", err)
+	for _, value := range []uint64{math.MaxUint64, math.MaxUint64 - uint64(math.MaxInt32)} {
+		style := protowire.AppendTag(nil, 5, protowire.VarintType) // CellStyle.foreground
+		style = protowire.AppendVarint(style, value)
+		if err := ScanEnvelope(&CellStyle{}, style); err != nil {
+			t.Fatalf("ScanEnvelope(value %d) = %v, want nil", value, err)
+		}
+	}
+}
+
+// TestScanEnvelopeRejectsBoolAboveOne proves the strict scanner refuses the
+// non-canonical bool encodings that generated unmarshal would coerce to true.
+func TestScanEnvelopeRejectsBoolAboveOne(t *testing.T) {
+	accepted := protowire.AppendTag(nil, 8, protowire.VarintType) // PreambleResponse.accepted
+	accepted = protowire.AppendVarint(accepted, 2)
+	if err := ScanEnvelope(&PreambleResponse{}, accepted); !errors.Is(err, ErrScanVarintRange) {
+		t.Fatalf("ScanEnvelope() = %v, want ErrScanVarintRange", err)
+	}
+}
+
+// TestScanEnvelopeRejectsInt32Overflow proves a varint that truncates to a
+// different int32 is rejected while canonical sign-extended negatives pass.
+func TestScanEnvelopeRejectsInt32Overflow(t *testing.T) {
+	for _, value := range []uint64{math.MaxUint32, 1 << 32} {
+		style := protowire.AppendTag(nil, 5, protowire.VarintType) // CellStyle.foreground
+		style = protowire.AppendVarint(style, value)
+		if err := ScanEnvelope(&CellStyle{}, style); !errors.Is(err, ErrScanVarintRange) {
+			t.Fatalf("ScanEnvelope(value %d) = %v, want ErrScanVarintRange", value, err)
+		}
 	}
 }
 

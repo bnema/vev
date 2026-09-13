@@ -23,12 +23,11 @@ import (
 // envelope could inflate; semantic validators apply tighter per-message
 // limits afterwards.
 const (
-	maxScanDepth          = 16
-	maxScanFields         = 65536
-	maxScanRepeated       = 8192
-	maxScanBytesField     = AbsoluteEnvelopeLimit
-	maxScanStringField    = 4 << 20
-	maxScanEnvelopeFields = 1 // exactly one top-level variant occurrence
+	maxScanDepth       = 16
+	maxScanFields      = 65536
+	maxScanRepeated    = 8192
+	maxScanBytesField  = AbsoluteEnvelopeLimit
+	maxScanStringField = 4 << 20
 )
 
 var (
@@ -133,7 +132,6 @@ func (s *envelopeScanner) scanMessage(descriptor protoreflect.MessageDescriptor,
 	}
 	spec := specForMessage(descriptor)
 	consumed := 0
-	variantCount := 0
 	variantSeen := false
 	repeated := 0
 	seen := map[protoreflect.FieldNumber]bool{}
@@ -154,21 +152,13 @@ func (s *envelopeScanner) scanMessage(descriptor protoreflect.MessageDescriptor,
 			return 0, ErrScanFields
 		}
 		if spec.oneofs[number] {
-			variantCount++
 			// Oneof members are exclusive: any second occurrence —
-			// same variant or another — is a duplicate. The top
-			// level additionally requires exactly one variant.
+			// same variant or another — is a duplicate, and the
+			// top level requires exactly one variant.
 			if variantSeen {
 				return 0, fmt.Errorf("%w: oneof field %d", ErrScanDuplicate, number)
 			}
 			variantSeen = true
-			if variantCount > maxScanEnvelopeFields && depth == 0 {
-				return 0, fmt.Errorf("%w: top-level variant %d", ErrScanDuplicate, number)
-			}
-			if seen[number] {
-				return 0, fmt.Errorf("%w: field %d", ErrScanDuplicate, number)
-			}
-			seen[number] = true
 		} else if !field.isList {
 			if seen[number] {
 				return 0, fmt.Errorf("%w: field %d", ErrScanDuplicate, number)
@@ -188,7 +178,7 @@ func (s *envelopeScanner) scanMessage(descriptor protoreflect.MessageDescriptor,
 		consumed += length + n
 		payload = payload[length+n:]
 	}
-	if depth == 0 && isEnvelopeDescriptor(descriptor) && variantCount != 1 {
+	if depth == 0 && isEnvelopeDescriptor(descriptor) && !variantSeen {
 		return 0, ErrScanEmpty
 	}
 	return consumed, nil
@@ -202,15 +192,27 @@ func isEnvelopeDescriptor(descriptor protoreflect.MessageDescriptor) bool {
 }
 
 // checkVarintRange rejects a raw varint that cannot be represented by the
-// declared 32-bit scalar kind. Generated unmarshal truncates the high bits of
-// uint32 and enum fields, so a hostile 64-bit varint could otherwise alias a
-// legitimate small value (for example an in-range enum code). Signed 32-bit
-// fields are intentionally not bounded here: a canonical negative int32 is
-// sign-extended to ten bytes and would be indistinguishable from an overflow.
+// declared scalar kind. Generated unmarshal truncates the high bits of 32-bit
+// fields, so a hostile 64-bit varint could otherwise alias a legitimate value
+// (for example an in-range enum code, a bool, or a negative int32).
 func checkVarintRange(kind protoreflect.Kind, value uint64) error {
 	switch kind {
-	case protoreflect.Uint32Kind, protoreflect.EnumKind:
+	case protoreflect.BoolKind:
+		// Protobuf treats any nonzero varint as true, so a strict scanner
+		// rejects the non-canonical values above one.
+		if value > 1 {
+			return fmt.Errorf("%w: kind %v", ErrScanVarintRange, kind)
+		}
+	case protoreflect.Uint32Kind, protoreflect.Sint32Kind, protoreflect.EnumKind:
 		if value > math.MaxUint32 {
+			return fmt.Errorf("%w: kind %v", ErrScanVarintRange, kind)
+		}
+	case protoreflect.Int32Kind:
+		// A canonical negative int32 sign-extends into ten bytes, so the
+		// valid encodings are 0..MaxInt32 and the sign-extended range
+		// [MaxUint64-MaxInt32, MaxUint64]. Anything between the two
+		// truncates to a different int32 and is rejected.
+		if value > math.MaxInt32 && value < math.MaxUint64-uint64(math.MaxInt32) {
 			return fmt.Errorf("%w: kind %v", ErrScanVarintRange, kind)
 		}
 	}

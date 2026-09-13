@@ -95,8 +95,9 @@ type Server struct {
 // the remote SSH peer, not only over a local tunnel: it binds the
 // wildcard address so both IPv4 and IPv6 (dual-stack where the OS
 // supports it) are served. Generic ListenConfig callers retain the
-// safe loopback default.
-func NewServer() (*Server, Readiness, error) {
+// safe loopback default. Listener options (for example
+// WithListenerRuntimeObserver) forward to the underlying listener.
+func NewServer(opts ...ListenerOption) (*Server, Readiness, error) {
 	cert, fingerprint, err := GenerateEphemeralCert()
 	if err != nil {
 		return nil, Readiness{}, err
@@ -111,7 +112,7 @@ func NewServer() (*Server, Readiness, error) {
 		return nil, Readiness{}, err
 	}
 	defer zeroBytes(nonce)
-	listener, err := ListenConfig(":0", cert, Config{HandshakeIdleTimeout: bootstrapAuthDeadline}, bootstrapMaxPending)
+	listener, err := ListenConfig(":0", cert, Config{HandshakeIdleTimeout: bootstrapAuthDeadline}, bootstrapMaxPending, opts...)
 	if err != nil {
 		return nil, Readiness{}, err
 	}
