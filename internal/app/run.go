@@ -1644,6 +1644,9 @@ func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
 func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) {
 	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
 	if err != nil {
+		if daemon && errors.Is(err, ErrDaemonUnreachable) {
+			return forceStopDaemonFallback(ctx, fmt.Errorf("vev: waiting for durable session state: %w", err))
+		}
 		return fmt.Errorf("vev: waiting for durable session state: %w", err)
 	}
 	if owner != nil {
@@ -1667,15 +1670,27 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 		scope = protocol.KillDaemon
 	}
 	if err := connection.SendClient(protocol.Kill{Name: name, Scope: scope}); err != nil {
-		return fmt.Errorf("vev: requesting kill: %w", err)
+		cause := fmt.Errorf("vev: requesting kill: %w", err)
+		if daemon {
+			return forceStopDaemonFallback(ctx, cause)
+		}
+		return cause
 	}
 	reply, err := connection.ReceiveServer()
 	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("vev: reading kill reply: %w", err)
+		cause := fmt.Errorf("vev: reading kill reply: %w", err)
+		if daemon {
+			return forceStopDaemonFallback(ctx, cause)
+		}
+		return cause
 	}
 	if err == nil {
 		if em, ok := reply.(protocol.ErrorMsg); ok {
-			return fmt.Errorf("vev: %s", em.Text)
+			cause := fmt.Errorf("vev: %s", em.Text)
+			if daemon {
+				return forceStopDaemonFallback(ctx, cause)
+			}
+			return cause
 		}
 	}
 	if all || daemon {
@@ -1683,7 +1698,11 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 		defer cancel()
 		owner, waitErr := waitForLifecycleAvailability(waitCtx, ipc.SocketDir(), defaultBackoff)
 		if waitErr != nil {
-			return fmt.Errorf("vev: waiting for daemon ownership transfer: %w", waitErr)
+			cause := fmt.Errorf("vev: waiting for daemon ownership transfer: %w", waitErr)
+			if daemon {
+				return forceStopDaemonFallback(ctx, cause)
+			}
+			return cause
 		}
 		if releaseErr := owner.Release(); releaseErr != nil {
 			return fmt.Errorf("vev: releasing daemon ownership probe: %w", releaseErr)
