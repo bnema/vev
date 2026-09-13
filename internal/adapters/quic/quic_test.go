@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
+	quicgo "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,6 +68,12 @@ func TestQUICWrongFingerprintFails(t *testing.T) {
 	dialer := DialConfig(listener.Addr(), "vev-bootstrap", wrong, Config{}, 5*time.Second)
 	_, err = dialer.Dial(context.Background())
 	require.Error(t, err)
+}
+
+func TestQUICConfigUsesTunnelSafeInitialPacketSize(t *testing.T) {
+	for _, config := range []*quicgo.Config{clientQUICConfig(Config{}), serverQUICConfig(Config{})} {
+		require.Equal(t, uint16(1200), config.InitialPacketSize)
+	}
 }
 
 func TestQUICConfigValidation(t *testing.T) {

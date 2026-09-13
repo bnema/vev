@@ -97,6 +97,11 @@ func baseQUICConfig(config Config) *quicgo.Config {
 		handshakeIdle = 5 * time.Second
 	}
 	return &quicgo.Config{
+		// 1200-byte QUIC packets fit IPv6's minimum 1280-byte link MTU after
+		// UDP/IP headers. This matters for VPN interfaces such as NetBird's
+		// wt0, where quic-go's larger default initial packet fails with
+		// EMSGSIZE before path MTU discovery can run.
+		InitialPacketSize:     1200,
 		KeepAlivePeriod:       keepAlive,
 		MaxIdleTimeout:        maxIdle,
 		HandshakeIdleTimeout:  handshakeIdle,
