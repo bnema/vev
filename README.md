@@ -81,7 +81,7 @@ Scroll up to enter copy mode; use vim motions, `v` to select, and `y` to copy. A
 vev attach user@host[:session]
 ```
 
-SSH bootstraps an authenticated direct UDP connection that resumes after sleep or network changes. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. The remote host needs vev installed; see [remote resilience](docs/remote-resilience.md) for firewall, transport, and host-list details.
+SSH bootstraps an authenticated direct QUIC connection. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. The remote host needs vev installed; see [remote resilience](docs/remote-resilience.md) for firewall, transport, and host-list details.
 
 ## Browser terminal
 

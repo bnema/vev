@@ -12,11 +12,12 @@ The canonical matrix is [`testdata/perf/manifest.json`](../testdata/perf/manifes
 - `120x40` terminal content with 10,000 history rows per pane;
 - idle, active output, all/inactive output, interactive flood, copy search,
   resize sweep, snapshot/output/resize, and attach/restore/tab switch;
-- local, SSH stdio, direct UDP, UDP with 25/100 ms latency, and UDP with 0%/1%
-  loss.
+- local Unix IPC and SSH stdio.
 
-The matrix contains 252 scenarios (4 topologies × 9 workloads × 7
-transports). Inapplicable scenarios stay present with an explicit reason.
+The matrix contains 72 scenarios (4 topologies × 9 workloads × 2 transports).
+QUIC clean/adverse transport evidence is owned by the real-QUIC integration
+suite described below rather than simulated by the process launcher.
+Inapplicable scenarios stay present with an explicit reason.
 Multiple-attachment scenarios measure shared session mutations together with
 independent attachment views and output streams.
 
@@ -79,7 +80,7 @@ less than 30 seconds measured, or fewer than 10 repetitions.
 Before a full run, validate the manifest and harness:
 
 ```sh
-jq -e '(.topologies|length)==4 and (.workloads|length)==9 and (.transports|length)==7 and (.scenarios|length)==252' testdata/perf/manifest.json
+jq -e '(.topologies|length)==4 and (.workloads|length)==9 and (.transports|length)==2 and (.scenarios|length)==72' testdata/perf/manifest.json
 go test ./cmd/vev-perf-harness
 ```
 
@@ -96,15 +97,80 @@ uncompressed. The wire carries a closed compression kind and exact decoded
 length; decoding rejects unknown kinds, truncation, trailing bytes, integrity
 failures, and output beyond the frame bound.
 
-Measure the representative snapshot encoder with:
+Measure the complete production Output path with:
 
 ```sh
-go test ./internal/ports -run '^$' -bench '^BenchmarkMarshalOutput$' -benchmem
+go test ./internal/adapters/sessionwire -run '^$' \
+  -bench '^BenchmarkOutputProductionRoundTrip$' -benchmem -count=5
 ```
 
-The benchmark reports source throughput, encoded bytes, allocations, and time
-for empty and styled `120×40` snapshots plus a styled `200×60` snapshot. It is
-an encoder benchmark, not a mobile-link latency measurement.
+It includes semantic conversion, compression policy, Protobuf marshal, strict
+wire scanning, unmarshal, decompression, validation, and semantic conversion
+back. Its incremental, compressible snapshot, and deterministic random
+incompressible snapshot fixtures are valid `protocol.Output` state chains.
+It is a codec benchmark, not a mobile-link latency measurement.
+
+## Protobuf and QUIC budgets
+
+The production Output benchmark covers incremental, compressible snapshot, and
+incompressible snapshot traffic. The zlib writer pool is part of the production
+path because it materially reduces compression time and allocation volume. The
+harness boundary is successful writing of bytes read from the client PTY; it
+deliberately does not call `file.Sync`, which measures filesystem durability
+rather than terminal delivery.
+
+The release budgets are:
+
+- local p95 input-to-terminal-write ratio ≤1.10× on calm and active-output work;
+- steady-state CPU/work ratio ≤1.15× when captured on the same host;
+- no unbounded heap, goroutine, or queue growth under slow-reader/adverse tests;
+- real QUIC must preserve ordered, duplicate-free typed traffic through the
+  clean path and the train profile (25 ms base latency, 15 ms jitter, 4% loss,
+  6% duplication, 10% reordering, 500 ms blackout), and through NAT rebinding.
+
+The real-QUIC integration tests are:
+
+```sh
+go test ./internal/adapters/quicnettest -race \
+  -run 'TestRealQUICTypedConversationOverTrainProfile|TestRealQUICNATRebindKeepsTypedConversation' \
+  -count=10
+```
+
+They exercise the production QUIC and sessionwire adapters. Latency under the
+train profile reflects configured impairment and QUIC recovery, so it is not
+compared to the local IPC budget.
+
+The representative QUIC workload is `Input` → validated incremental `Output` →
+`Ack`, with 512-byte Input and Output bodies. The evidence test logs latency
+percentiles, process CPU, allocations, GC, retained heap, goroutines, wire
+amplification, blackout recovery, NAT-rebind recovery, and proxy accounting.
+Reproduce the bounded evidence and isolated benchmarks with:
+
+```sh
+go test ./internal/adapters/quicnettest -race \
+  -run TestRealQUICPerformanceEvidence -count=3 -v
+go test ./internal/adapters/quicnettest -run '^$' \
+  -bench 'BenchmarkRealQUICExchange|BenchmarkRealQUICBlackoutRecovery|BenchmarkRealQUICNATRebindRecovery' \
+  -benchtime=50x -benchmem
+```
+
+Process CPU is collected with `getrusage(RUSAGE_SELF)`. It provides an absolute
+CPU/work signal for QUIC. Track it together with bounded retained heap and zero
+queue overflow; treat the train profile as a resilience workload rather than a
+local-latency gate.
+
+Application recovery after irreversible QUIC loss is covered separately by
+`TestRealQUICApplicationReconnectResumesTypedSession`. It runs the real client
+use case over two distinct production QUIC connections and two sessionwire
+preambles. Closing the first accepted connection must trigger a second dial
+whose `Hello` uses `IntentResume`, preserves the client ID and previous resume
+token, receives a rotated token, accepts a fresh full Output, presents it, and
+returns the matching ACK without requesting an Output reset. Run it with:
+
+```sh
+go test ./internal/adapters/quicnettest -race \
+  -run TestRealQUICApplicationReconnectResumesTypedSession -count=10
+```
 
 ## In-process checks
 

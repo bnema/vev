@@ -2,8 +2,9 @@
 
 `manifest.json` is the complete, measurement-only public-CLI matrix: four
 120x40 topologies (`1x4`, `4x1`, `4x4`, `8x1`), 10,000 history rows per pane,
-nine workloads, and seven transports (local, SSH stdio, UDP baseline, UDP 25 ms,
-UDP 100 ms, and UDP with 0% or 1% loss). It contains 252 scenario combinations;
+nine workloads, and two transports (local and SSH stdio). It contains 72
+scenario combinations; real QUIC clean/adverse evidence is produced by the
+`internal/adapters/quicnettest` integration suite rather than a fake CLI mode;
 there are no omitted combinations. A genuinely unavailable combination must
 remain listed with `inapplicable_reason` and no launched roles.
 
@@ -62,7 +63,7 @@ compression, and loss behavior are unchanged.
 Before a measurement, validate the manifest shape and run the harness tests without launching the full matrix:
 
 ```sh
-jq -e '(.topologies|length)==4 and (.workloads|length)==9 and (.transports|length)==7 and (.scenarios|length)==252' testdata/perf/manifest.json
+jq -e '(.topologies|length)==4 and (.workloads|length)==9 and (.transports|length)==2 and (.scenarios|length)==72' testdata/perf/manifest.json
 go test ./cmd/vev-perf-harness
 ```
 
