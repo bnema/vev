@@ -939,8 +939,8 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 					requireNamedClientDialer(t, ctx, deps.Dialer, "remote")
 					gotDialer = "remote"
 					gotRemote = deps.Remote
-					if !request.Remote || request.EnvironmentPolicy != protocol.EnvironmentPolicyClientOwned {
-						t.Fatal("direct CLI remote attach must preserve client-owned environment policy")
+					if !request.Remote || request.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
+						t.Fatal("direct CLI remote attach must use the remote daemon environment")
 					}
 					gotClipboard = deps.Clipboard
 					if request.Intent != protocol.IntentAttach || request.SessionName != "work" {
@@ -978,7 +978,7 @@ func TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority(t *testing.T) {
 		remoteDialerFactory: factory.DialerForRemote,
 		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
 			require.True(t, request.Remote)
-			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy)
+			require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
 			require.NotNil(t, deps.HostRegistry, "a launched client must own a host registry")
 			binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), "remote.example")
 			require.NoError(t, resolveErr)
@@ -1002,7 +1002,11 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 			calls++
 			require.NotNil(t, deps.Dialer)
 			require.True(t, request.Remote)
-			require.Equal(t, protocol.EnvironmentPolicyClientOwned, request.EnvironmentPolicy, "direct CLI remote ownership must survive a handoff")
+			wantPolicy := protocol.EnvironmentPolicyDaemonOwned
+			if calls > 1 {
+				wantPolicy = protocol.EnvironmentPolicyClientOwned
+			}
+			require.Equal(t, wantPolicy, request.EnvironmentPolicy, "the selected handoff must control environment ownership")
 			if calls == 1 {
 				return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach}}
 			}

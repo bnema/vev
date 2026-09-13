@@ -1004,7 +1004,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		deps.remoteDialerFactory = defaultRemoteDialerFactory()
 	}
 	var remoteSelection *domain.RemoteSessionTarget
-	var remoteEnvironmentPolicy protocol.EnvironmentPolicy
+	remoteEnvironmentPolicy := protocol.EnvironmentPolicyDaemonOwned
 	remoteDisplayOrigin := domain.RemoteDisplayOrigin(remoteTarget)
 	routeOrigin := protocol.RouteOriginLocal
 	routeOriginKey := "local"
