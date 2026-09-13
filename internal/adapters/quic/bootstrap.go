@@ -63,7 +63,6 @@ var (
 	errBootstrapConsumed  = errors.New("quic: bootstrap token already consumed")
 	errBootstrapMalformed = errors.New("quic: malformed bootstrap readiness")
 	errBootstrapAuth      = errors.New("quic: bootstrap authentication failed")
-	errBootstrapNoStream  = errors.New("quic: bootstrap peer opened no stream")
 )
 
 // Server is the ephemeral bootstrap endpoint: one QUIC listener with a
@@ -363,7 +362,7 @@ func (s *Server) Addr() string { return s.listener.Addr() }
 // readiness port: the readiness record never carries a dialable
 // address. The token travels only inside the encrypted stream after
 // the pinned handshake.
-func Dial(ctx context.Context, addr string, readiness Readiness, config Config, timeout time.Duration) (wire.Transport, error) {
+func Dial(ctx context.Context, addr string, readiness Readiness, config Config, timeout time.Duration, opts ...Option) (wire.Transport, error) {
 	if addr == "" {
 		return nil, errBootstrapMalformed
 	}
@@ -381,7 +380,7 @@ func Dial(ctx context.Context, addr string, readiness Readiness, config Config, 
 	if err != nil || len(fingerprint) != sha256.Size {
 		return nil, errBootstrapMalformed
 	}
-	dialer := DialConfig(addr, "vev-bootstrap", fingerprint, config, timeout)
+	dialer := DialConfig(addr, "vev-bootstrap", fingerprint, config, timeout, opts...)
 	transport, err := dialer.Dial(ctx)
 	if err != nil {
 		return nil, err

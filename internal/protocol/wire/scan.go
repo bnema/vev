@@ -11,6 +11,7 @@ package wire
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -31,17 +32,18 @@ const (
 )
 
 var (
-	ErrScanDepth      = errors.New("wire: envelope exceeds maximum nesting depth")
-	ErrScanFields     = errors.New("wire: envelope exceeds maximum field count")
-	ErrScanRepeated   = errors.New("wire: envelope exceeds maximum repeated elements")
-	ErrScanLength     = errors.New("wire: envelope field exceeds maximum length")
-	ErrScanUnknown    = errors.New("wire: envelope has unknown field")
-	ErrScanWireType   = errors.New("wire: envelope has invalid wire type")
-	ErrScanDuplicate  = errors.New("wire: envelope repeats singular field")
-	ErrScanEmpty      = errors.New("wire: envelope has no payload variant")
-	ErrScanTrailing   = errors.New("wire: envelope has trailing bytes")
-	ErrScanTruncated  = errors.New("wire: envelope is truncated")
-	ErrScanNotMessage = errors.New("wire: envelope field is not a message")
+	ErrScanDepth       = errors.New("wire: envelope exceeds maximum nesting depth")
+	ErrScanFields      = errors.New("wire: envelope exceeds maximum field count")
+	ErrScanRepeated    = errors.New("wire: envelope exceeds maximum repeated elements")
+	ErrScanLength      = errors.New("wire: envelope field exceeds maximum length")
+	ErrScanUnknown     = errors.New("wire: envelope has unknown field")
+	ErrScanWireType    = errors.New("wire: envelope has invalid wire type")
+	ErrScanDuplicate   = errors.New("wire: envelope repeats singular field")
+	ErrScanEmpty       = errors.New("wire: envelope has no payload variant")
+	ErrScanTrailing    = errors.New("wire: envelope has trailing bytes")
+	ErrScanTruncated   = errors.New("wire: envelope is truncated")
+	ErrScanNotMessage  = errors.New("wire: envelope field is not a message")
+	ErrScanVarintRange = errors.New("wire: envelope varint exceeds declared field range")
 )
 
 // scanSpec describes the expected shape of one message level: known fields
@@ -199,6 +201,22 @@ func isEnvelopeDescriptor(descriptor protoreflect.MessageDescriptor) bool {
 	return name == "vev.wire.v1.ClientEnvelope" || name == "vev.wire.v1.ServerEnvelope"
 }
 
+// checkVarintRange rejects a raw varint that cannot be represented by the
+// declared 32-bit scalar kind. Generated unmarshal truncates the high bits of
+// uint32 and enum fields, so a hostile 64-bit varint could otherwise alias a
+// legitimate small value (for example an in-range enum code). Signed 32-bit
+// fields are intentionally not bounded here: a canonical negative int32 is
+// sign-extended to ten bytes and would be indistinguishable from an overflow.
+func checkVarintRange(kind protoreflect.Kind, value uint64) error {
+	switch kind {
+	case protoreflect.Uint32Kind, protoreflect.EnumKind:
+		if value > math.MaxUint32 {
+			return fmt.Errorf("%w: kind %v", ErrScanVarintRange, kind)
+		}
+	}
+	return nil
+}
+
 func checkWireType(field scanField, wireType protowire.Type) error {
 	switch field.kind {
 	case protoreflect.BoolKind, protoreflect.EnumKind,
@@ -228,9 +246,12 @@ func checkWireType(field scanField, wireType protowire.Type) error {
 func (s *envelopeScanner) scanField(descriptor protoreflect.FieldDescriptor, field scanField, wireType protowire.Type, payload []byte, depth int) (int, error) {
 	switch wireType {
 	case protowire.VarintType:
-		_, length := protowire.ConsumeVarint(payload)
+		value, length := protowire.ConsumeVarint(payload)
 		if length < 0 {
 			return 0, ErrScanTruncated
+		}
+		if err := checkVarintRange(field.kind, value); err != nil {
+			return 0, err
 		}
 		return length, nil
 	case protowire.Fixed32Type:

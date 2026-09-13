@@ -46,7 +46,8 @@ protocol-check:
 	tmp="$$(mktemp -d)"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	go tool buf generate --output "$$tmp"; \
-	genroot="$$(find "$$tmp" -name 'envelope.pb.go' -printf '%h' -quit)"; \
+	genfile="$$(find "$$tmp" -name 'envelope.pb.go' -print -quit)"; \
+	genroot="$$(dirname "$$genfile")"; \
 	test -n "$$genroot"; \
 	for f in internal/protocol/wire/*.pb.go; do b="$$(basename "$$f")"; cmp -s "$$genroot/$$b" "$$f" || { echo "stale generated file: $$f"; exit 1; }; done; \
 	genfiles="$$(cd "$$genroot" && ls *.pb.go | sort)"; \

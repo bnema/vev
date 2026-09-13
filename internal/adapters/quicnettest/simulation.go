@@ -120,12 +120,6 @@ type LinkConfig struct {
 	Blackouts []Blackout
 }
 
-// impairs reports whether the link changes anything at all.
-func (l LinkConfig) impairs() bool {
-	return l.BaseLatency != 0 || l.Jitter != 0 || l.LossPercent != 0 ||
-		l.DuplicatePercent != 0 || l.ReorderPercent != 0 || len(l.Blackouts) != 0
-}
-
 func (l LinkConfig) validate(direction Direction) error {
 	if l.BaseLatency < 0 || l.Jitter < 0 || l.DuplicateDelay < 0 || l.ReorderDelay < 0 {
 		return fmt.Errorf("quicnettest: %s link durations must not be negative", direction)

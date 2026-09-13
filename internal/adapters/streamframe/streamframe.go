@@ -73,8 +73,6 @@ type Framer struct {
 	queueMessages int
 	queueBytes    uint64
 
-	writeMu sync.Mutex
-
 	// readMu serializes Recv so concurrent receivers each get one
 	// complete envelope instead of racing on the reused read buffer.
 	readMu sync.Mutex

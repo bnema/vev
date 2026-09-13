@@ -147,6 +147,18 @@ func forceStopDaemon(ctx context.Context, runtimeDir string, hooks forceStopHook
 		return errForceStopDeclined
 	}
 
+	// The prompt is interactive and may stay open arbitrarily long, so the
+	// confirmed incarnation is re-verified before SIGTERM exactly as it is
+	// before SIGKILL: a PID reused while the operator was answering is never
+	// signalled.
+	current, found, findErr := hooks.finder.Find(ctx, runtimeDir)
+	if findErr != nil {
+		return fmt.Errorf("vev: re-identifying daemon process: %w", findErr)
+	}
+	if !found || current.PID != candidate.PID || current.Start != candidate.Start {
+		return fmt.Errorf("vev: %w (process identity changed before SIGTERM)", errForceStopTimeout)
+	}
+
 	if err := hooks.signal(candidate.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("vev: sending SIGTERM to process %d: %w", candidate.PID, err)
 	}

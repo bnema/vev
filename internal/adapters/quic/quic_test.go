@@ -3,6 +3,9 @@ package quic
 import (
 	"context"
 	"io"
+	"net"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,6 +93,140 @@ func TestQUICConfigValidation(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = listener.Close() }()
 	require.Contains(t, listener.Addr(), "127.0.0.1")
+}
+
+// TestQUICOrderlyCloseDeliversFinalEnvelope is the regression guard for an
+// orderly close discarding the envelope written immediately before it: the
+// send side must be FINed, not RESET_STREAMed, so the peer still receives the
+// final envelope before observing EOF.
+func TestQUICOrderlyCloseDeliversFinalEnvelope(t *testing.T) {
+	server, client := dialTestPairWithConfig(t, Config{})
+	payload := []byte("final envelope survives an orderly close")
+	require.NoError(t, server.Send(wire.Envelope{Payload: payload}))
+	require.NoError(t, server.Close())
+
+	got, err := client.Recv()
+	require.NoError(t, err, "an orderly close must not discard the final envelope")
+	require.Equal(t, payload, got.Payload)
+	_, err = client.Recv()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestQUICResolveAddrsExpandsLiteralsAndHonorsContext(t *testing.T) {
+	addrs, err := resolveQUICAddrs(context.Background(), "127.0.0.1:4433")
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, 4433, addrs[0].Port)
+	require.True(t, addrs[0].IP.Equal(net.ParseIP("127.0.0.1")))
+
+	addrs, err = resolveQUICAddrs(context.Background(), "[::1]:4433")
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.True(t, addrs[0].IP.Equal(net.ParseIP("::1")))
+
+	_, err = resolveQUICAddrs(context.Background(), "127.0.0.1:notaport")
+	require.Error(t, err)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = resolveQUICAddrs(canceled, "definitely-not-a-real-host.invalid:4433")
+	require.Error(t, err, "resolution must be bounded by the dial context")
+}
+
+// TestQUICDialFallsBackAcrossResolvedAddresses proves every resolved address
+// is attempted under the one shared dial deadline: a black-holed first
+// candidate must not prevent the reachable second from being dialed.
+func TestQUICDialFallsBackAcrossResolvedAddresses(t *testing.T) {
+	cert, fingerprint, err := GenerateEphemeralCert()
+	require.NoError(t, err)
+	listener, err := ListenConfig("127.0.0.1:0", cert, Config{}, 4)
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	accepted := make(chan wire.Transport, 1)
+	go func() {
+		if transport, err := listener.Accept(); err == nil {
+			accepted <- transport
+		}
+	}()
+	_, portText, err := net.SplitHostPort(listener.Addr())
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+
+	dialer := DialConfig("placeholder:1", "vev-bootstrap", fingerprint, Config{}, 4*time.Second)
+	dialer.resolve = func(context.Context, string) ([]*net.UDPAddr, error) {
+		return []*net.UDPAddr{
+			{IP: net.ParseIP("127.0.0.1"), Port: 1}, // nothing listens here
+			{IP: net.ParseIP("127.0.0.1"), Port: port},
+		}, nil
+	}
+	client, err := dialer.Dial(context.Background())
+	require.NoError(t, err, "the dialer must fail over to a later resolved address")
+	defer func() { _ = client.Close() }()
+
+	select {
+	case server := <-accepted:
+		defer func() { _ = server.Close() }()
+		payload := []byte("second address")
+		require.NoError(t, client.Send(wire.Envelope{Payload: payload}))
+		got, err := server.Recv()
+		require.NoError(t, err)
+		require.Equal(t, payload, got.Payload)
+	case <-time.After(10 * time.Second):
+		t.Fatal("fallback address was not dialed")
+	}
+}
+
+type markRecorder struct {
+	mu    sync.Mutex
+	marks []ports.RuntimeMark
+}
+
+func (r *markRecorder) ObserveRuntime(mark ports.RuntimeMark) {
+	r.mu.Lock()
+	r.marks = append(r.marks, mark)
+	r.mu.Unlock()
+}
+
+func (r *markRecorder) Flush() {}
+func (r *markRecorder) Close() {}
+
+// TestQUICDialObserverEmitsAdapterMarks proves the observer threaded through
+// DialConfig reaches the dialed transport and observes its raw carriage.
+func TestQUICDialObserverEmitsAdapterMarks(t *testing.T) {
+	cert, fingerprint, err := GenerateEphemeralCert()
+	require.NoError(t, err)
+	listener, err := ListenConfig("127.0.0.1:0", cert, Config{}, 4)
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	accepted := make(chan wire.Transport, 1)
+	go func() {
+		if transport, err := listener.Accept(); err == nil {
+			accepted <- transport
+		}
+	}()
+
+	recorder := &markRecorder{}
+	client, err := DialConfig(listener.Addr(), "vev-bootstrap", fingerprint, Config{}, 10*time.Second, WithRuntimeObserver(recorder)).Dial(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	select {
+	case server := <-accepted:
+		defer func() { _ = server.Close() }()
+		require.NoError(t, client.Send(wire.Envelope{Payload: []byte("observed")}))
+		_, err = server.Recv()
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("listener did not accept")
+	}
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	require.NotEmpty(t, recorder.marks, "observer must receive marks from the QUIC transport")
+	for _, mark := range recorder.marks {
+		require.Equal(t, "quic", mark.Component)
+	}
 }
 
 func TestQUICTransportCloseReportsEOF(t *testing.T) {

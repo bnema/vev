@@ -193,6 +193,14 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			wantErr: errProtoConvertRange,
 		},
 		{
+			name: "underline style narrowing",
+			run: func(t *testing.T) error {
+				_, err := cellStyleFromWire(&wire.CellStyle{UnderlineStyle: 256})
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
 			name:    "picker line kind",
 			run:     func(t *testing.T) error { _, err := pickerLineFromWire(&wire.PickerLine{Kind: 256}); return err },
 			wantErr: protocol.ErrInvalidNavigation,
@@ -235,4 +243,174 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			require.ErrorIs(t, tt.run(t), tt.wantErr)
 		})
 	}
+}
+
+func testWireRouteEntry(key, generation uint64) *wire.RecentRouteEntry {
+	return &wire.RecentRouteEntry{
+		Key:          key,
+		Generation:   generation,
+		Target:       testExactWireTarget(),
+		Name:         "work",
+		Kind:         uint32(protocol.RouteKindLocal),
+		Reachability: uint32(protocol.RouteReachabilityReachable),
+	}
+}
+
+func testSemanticRouteEntry(key, generation uint64) protocol.RecentRouteEntry {
+	lifecycle := domain.SessionLifecycleID{1}
+	return protocol.RecentRouteEntry{
+		Key:          key,
+		Generation:   generation,
+		Target:       protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"},
+		Name:         "work",
+		Kind:         protocol.RouteKindLocal,
+		Reachability: protocol.RouteReachabilityReachable,
+	}
+}
+
+// TestRouteSemanticBoundsRestored proves the old strict route codec bounds
+// and invariants are restored on both conversion directions: encode refuses
+// to emit a malformed value, decode refuses to accept one, and valid bounded
+// values still round-trip unchanged.
+func TestRouteSemanticBoundsRestored(t *testing.T) {
+	entry := testSemanticRouteEntry(1, 1)
+	ref := protocol.RouteRef{Key: 1, Generation: 1}
+	validSnapshot := protocol.RecentRouteSnapshot{Generation: 1, Entries: []protocol.RecentRouteEntry{entry}}
+	validSubscription := protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{{Ref: ref, Target: entry.Target}}}
+	validAction := protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 1, Generation: 1}
+
+	oversized := validSnapshot
+	for len(oversized.Entries) <= protocol.RouteSnapshotMaxEntries {
+		next := uint64(len(oversized.Entries) + 1)
+		oversized.Entries = append(oversized.Entries, testSemanticRouteEntry(next, next))
+	}
+	mismatched := protocol.RecentRouteSnapshot{
+		Generation:  1,
+		Active:      protocol.RouteRef{Key: 2, Generation: 2},
+		ActiveEntry: entry,
+	}
+	duplicateSubscription := protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{
+		{Ref: ref, Target: entry.Target},
+		{Ref: ref, Target: entry.Target},
+	}}
+
+	decodedEntries := make([]*wire.RecentRouteEntry, 0, protocol.RouteSnapshotMaxEntries+1)
+	for i := 1; i <= protocol.RouteSnapshotMaxEntries+1; i++ {
+		decodedEntries = append(decodedEntries, testWireRouteEntry(uint64(i), uint64(i)))
+	}
+
+	tests := []struct {
+		name    string
+		run     func(t *testing.T) error
+		wantErr error
+	}{
+		{
+			name: "encode oversized snapshot",
+			run: func(t *testing.T) error {
+				_, err := recentRouteSnapshotToWire(oversized)
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "encode mismatched active presentation",
+			run: func(t *testing.T) error {
+				_, err := recentRouteSnapshotToWire(mismatched)
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "encode snapshot missing home reference",
+			run: func(t *testing.T) error {
+				broken := validSnapshot
+				broken.Home = protocol.RouteRef{Key: 9, Generation: 9}
+				_, err := recentRouteSnapshotToWire(broken)
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "encode duplicate attention reference",
+			run: func(t *testing.T) error {
+				_, err := attentionSubscriptionToWire(duplicateSubscription)
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "encode zero navigation action",
+			run: func(t *testing.T) error {
+				_, err := routeNavigationActionToWire(protocol.RouteNavigationAction{})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "decode oversized snapshot",
+			run: func(t *testing.T) error {
+				_, err := recentRouteSnapshotFromWire(&wire.RecentRouteSnapshot{Generation: 1, Entries: decodedEntries})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "decode mismatched active presentation",
+			run: func(t *testing.T) error {
+				_, err := recentRouteSnapshotFromWire(&wire.RecentRouteSnapshot{
+					Generation:  1,
+					Active:      &wire.RouteRef{Key: 2, Generation: 2},
+					ActiveEntry: testWireRouteEntry(1, 1),
+				})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "decode duplicate attention reference",
+			run: func(t *testing.T) error {
+				_, err := attentionSubscriptionFromWire(&wire.RouteAttentionSubscription{Targets: []*wire.RouteAttentionTarget{
+					{Ref: &wire.RouteRef{Key: 1, Generation: 1}, Target: testExactWireTarget()},
+					{Ref: &wire.RouteRef{Key: 1, Generation: 1}, Target: testExactWireTarget()},
+				}})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+		{
+			name: "decode zero navigation action",
+			run: func(t *testing.T) error {
+				_, err := routeNavigationActionFromWire(&wire.RouteNavigationAction{})
+				return err
+			},
+			wantErr: protocol.ErrInvalidRouteWire,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.ErrorIs(t, tt.run(t), tt.wantErr)
+		})
+	}
+
+	t.Run("valid snapshot round trip", func(t *testing.T) {
+		converted, err := recentRouteSnapshotToWire(validSnapshot)
+		require.NoError(t, err)
+		decoded, err := recentRouteSnapshotFromWire(converted)
+		require.NoError(t, err)
+		require.Equal(t, validSnapshot, decoded)
+	})
+	t.Run("valid attention subscription round trip", func(t *testing.T) {
+		converted, err := attentionSubscriptionToWire(validSubscription)
+		require.NoError(t, err)
+		decoded, err := attentionSubscriptionFromWire(converted)
+		require.NoError(t, err)
+		require.Equal(t, validSubscription, decoded)
+	})
+	t.Run("valid navigation action round trip", func(t *testing.T) {
+		converted, err := routeNavigationActionToWire(validAction)
+		require.NoError(t, err)
+		decoded, err := routeNavigationActionFromWire(converted)
+		require.NoError(t, err)
+		require.Equal(t, validAction, decoded)
+	})
 }

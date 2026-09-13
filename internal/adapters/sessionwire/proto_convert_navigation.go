@@ -46,8 +46,8 @@ func attentionTargetFromWire(message *wire.RouteAttentionTarget) (protocol.Route
 }
 
 func attentionSubscriptionToWire(message protocol.RouteAttentionSubscription) (*wire.RouteAttentionSubscription, error) {
-	if len(message.Targets) > protocol.RouteSnapshotMaxEntries {
-		return nil, protocol.ErrInvalidRouteWire
+	if err := message.Validate(); err != nil {
+		return nil, err
 	}
 	out := &wire.RouteAttentionSubscription{}
 	for _, target := range message.Targets {

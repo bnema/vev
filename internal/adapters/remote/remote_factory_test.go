@@ -3,8 +3,31 @@ package remote
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+
+	"github.com/bnema/vev/internal/ports"
 )
+
+type recordingObserver struct {
+	mu    sync.Mutex
+	marks []ports.RuntimeMark
+}
+
+func (r *recordingObserver) ObserveRuntime(mark ports.RuntimeMark) {
+	r.mu.Lock()
+	r.marks = append(r.marks, mark)
+	r.mu.Unlock()
+}
+
+func (r *recordingObserver) Flush() {}
+func (r *recordingObserver) Close() {}
+
+func (r *recordingObserver) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.marks)
+}
 
 func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 	factory := NewDialerFactory()
@@ -42,6 +65,22 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDialerFactoryPropagatesObserverToQUICTransport(t *testing.T) {
+	observer := &recordingObserver{}
+	factory := NewDialerFactoryWithRuntimeObserver(observer)
+	dialer, err := factory.DialerForRemote("remote.example", "work", TransportQUIC, nil)
+	if err != nil {
+		t.Fatalf("DialerForRemote() error = %v", err)
+	}
+	got, ok := dialer.(quicDialer)
+	if !ok {
+		t.Fatalf("dialer type = %T, want %T", dialer, quicDialer{})
+	}
+	if got.observer != observer {
+		t.Fatalf("quic dialer observer = %v, want the factory observer", got.observer)
 	}
 }
 

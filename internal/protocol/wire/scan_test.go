@@ -2,6 +2,7 @@ package wire
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -84,6 +85,30 @@ func TestScanEnvelopeUnknownField(t *testing.T) {
 	unknown = protowire.AppendVarint(unknown, 1)
 	if err := ScanEnvelope(&ClientEnvelope{}, unknown); !errors.Is(err, ErrScanUnknown) {
 		t.Fatalf("ScanEnvelope() = %v, want ErrScanUnknown", err)
+	}
+}
+
+// TestScanEnvelopeRejectsUint32Overflow proves a raw varint wider than the
+// declared uint32 field is rejected before generated unmarshal can truncate
+// its high bits into a legitimate value.
+func TestScanEnvelopeRejectsUint32Overflow(t *testing.T) {
+	hello := protowire.AppendTag(nil, 1, protowire.VarintType) // Hello.version
+	hello = protowire.AppendVarint(hello, math.MaxUint32+1)
+	raw := protowire.AppendTag(nil, 1, protowire.BytesType) // ClientEnvelope.hello
+	raw = protowire.AppendBytes(raw, hello)
+	if err := ScanEnvelope(&ClientEnvelope{}, raw); !errors.Is(err, ErrScanVarintRange) {
+		t.Fatalf("ScanEnvelope() = %v, want ErrScanVarintRange", err)
+	}
+}
+
+// TestScanEnvelopeAllowsSignExtendedInt32 proves a canonical negative int32
+// (ten-byte sign-extended varint) still passes: it is a real value, not a
+// truncating overflow.
+func TestScanEnvelopeAllowsSignExtendedInt32(t *testing.T) {
+	style := protowire.AppendTag(nil, 5, protowire.VarintType) // CellStyle.foreground
+	style = protowire.AppendVarint(style, math.MaxUint64)      // -1
+	if err := ScanEnvelope(&CellStyle{}, style); err != nil {
+		t.Fatalf("ScanEnvelope() = %v, want nil", err)
 	}
 }
 

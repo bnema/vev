@@ -213,6 +213,10 @@ func cellStyleFromWire(message *wire.CellStyle) (renderer.Style, error) {
 	if underline < math.MinInt16 || underline > math.MaxInt16 {
 		return renderer.Style{}, errProtoConvertRange
 	}
+	underlineStyle, err := mustUint8(message.GetUnderlineStyle())
+	if err != nil {
+		return renderer.Style{}, err
+	}
 	attrs := message.GetAttrs()
 	if attrs > math.MaxUint16 {
 		return renderer.Style{}, errProtoConvertRange
@@ -240,7 +244,7 @@ func cellStyleFromWire(message *wire.CellStyle) (renderer.Style, error) {
 		HasBackgroundRGB:     message.GetHasBackgroundRgb(),
 		HasUnderlineColor:    message.GetHasUnderlineColor(),
 		HasUnderlineColorRGB: message.GetHasUnderlineColorRgb(),
-		UnderlineStyle:       renderer.UnderlineStyle(message.GetUnderlineStyle()),
+		UnderlineStyle:       renderer.UnderlineStyle(underlineStyle),
 		UnderlineColor:       int(underline),
 		ForegroundRGB:        foregroundRGB,
 		BackgroundRGB:        backgroundRGB,

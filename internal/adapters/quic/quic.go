@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -179,6 +180,11 @@ type Transport struct {
 	conn   *quicgo.Conn
 	stream *quicgo.Stream
 	framer *streamframe.Framer
+	// packetConn is the dialer-owned local socket behind conn; the listener
+	// owns its own socket and passes nil.
+	packetConn net.PacketConn
+
+	observer ports.SerializedRuntimeObserver
 
 	linkMu    sync.Mutex
 	linkState ports.LinkState
@@ -196,13 +202,16 @@ var (
 )
 
 // newTransport owns one connected stream. The caller must have enforced
-// the single-stream contract already.
-func newTransport(conn *quicgo.Conn, stream *quicgo.Stream) *Transport {
+// the single-stream contract already. observer may be nil; when set it
+// receives process-local adapter marks for send and receive.
+func newTransport(conn *quicgo.Conn, stream *quicgo.Stream, packetConn net.PacketConn, observer ports.SerializedRuntimeObserver) *Transport {
 	t := &Transport{
-		conn:      conn,
-		stream:    stream,
-		linkState: ports.LinkStateConnected,
-		events:    make(chan ports.LinkEvent, 4),
+		conn:       conn,
+		stream:     stream,
+		packetConn: packetConn,
+		observer:   observer,
+		linkState:  ports.LinkStateConnected,
+		events:     make(chan ports.LinkEvent, 4),
 	}
 	t.framer = streamframe.NewFramer(stream, stream, t.closeStream)
 	// The single-stream contract is enforced for the whole connection
@@ -217,6 +226,9 @@ func newTransport(conn *quicgo.Conn, stream *quicgo.Stream) *Transport {
 	// connection dies on its own.
 	go func() {
 		<-conn.Context().Done()
+		if t.packetConn != nil {
+			_ = t.packetConn.Close()
+		}
 		t.signalTerminal(linkEventError(context.Cause(conn.Context())))
 	}()
 	return t
@@ -258,7 +270,10 @@ func guardStreamContract(conn *quicgo.Conn) {
 
 // Send queues the envelope for the sole writer and waits for its wire attempt.
 func (t *Transport) Send(envelope wire.Envelope) error {
-	if err := t.framer.Send(envelope.Payload); err != nil {
+	end := t.observe(ports.RuntimeAdapterSendStart, uint64(len(envelope.Payload)))
+	err := t.framer.Send(envelope.Payload)
+	end(err == nil)
+	if err != nil {
 		return mapFramerError(err)
 	}
 	return nil
@@ -266,10 +281,30 @@ func (t *Transport) Send(envelope wire.Envelope) error {
 
 // SendAsync accepts the envelope for ordered background transmission.
 func (t *Transport) SendAsync(envelope wire.Envelope) error {
-	if err := t.framer.SendAsync(envelope.Payload); err != nil {
+	end := t.observe(ports.RuntimeAdapterSendStart, uint64(len(envelope.Payload)))
+	err := t.framer.SendAsync(envelope.Payload)
+	end(err == nil)
+	if err != nil {
 		return mapFramerError(err)
 	}
 	return nil
+}
+
+// observe opens one process-local adapter mark pair, or returns a no-op end
+// when observation is disabled.
+func (t *Transport) observe(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
+	if t.observer == nil {
+		return func(bool) {}
+	}
+	correlation := ports.NewRuntimeCorrelation()
+	t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("quic", correlation, start, bytes, true))
+	end := ports.RuntimeAdapterSendEnd
+	if start == ports.RuntimeAdapterReceiveStart {
+		end = ports.RuntimeAdapterReceiveEnd
+	}
+	return func(valid bool) {
+		t.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("quic", correlation, end, bytes, valid))
+	}
 }
 
 // Recv reads one complete envelope, blocking until arrival or close.
@@ -278,17 +313,21 @@ func (t *Transport) SendAsync(envelope wire.Envelope) error {
 // application decoders, but an unbounded skip would let a peer stall
 // Recv forever without progress.
 func (t *Transport) Recv() (wire.Envelope, error) {
+	end := t.observe(ports.RuntimeAdapterReceiveStart, 0)
 	for skipped := 0; ; skipped++ {
 		payload, err := t.framer.Recv()
 		if errors.Is(err, streamframe.ErrZeroLength) {
 			if skipped >= maxSkippedProbes {
+				end(false)
 				return wire.Envelope{}, errZeroLength
 			}
 			continue
 		}
 		if err != nil {
+			end(false)
 			return wire.Envelope{}, mapFramerError(err)
 		}
+		end(true)
 		return wire.Envelope{Payload: payload}, nil
 	}
 }
@@ -345,21 +384,46 @@ func (t *Transport) LinkState() ports.LinkState {
 // the channel; no degraded/probing transitions are invented.
 func (t *Transport) LinkEvents() <-chan ports.LinkEvent { return t.events }
 
-// Close cancels the stream with an explicit code, closes the connection,
-// and unblocks in-flight Send/Recv. It publishes the terminal Offline link
-// event and closes the event stream.
+// gracefulCloseWindow bounds how long an orderly close keeps the connection
+// alive after its FIN so an already-written final envelope can be transmitted
+// before CONNECTION_CLOSE. Close itself never waits on it.
+const gracefulCloseWindow = time.Second
+
+// Close performs an orderly teardown: it stops the writer, FINs the send side
+// instead of RESET_STREAMing it, and defers the hard connection close so an
+// envelope already handed to the stream (the final envelope of an orderly
+// close) is transmitted rather than discarded. It publishes the terminal
+// Offline link event and closes the event stream.
 func (t *Transport) Close() error {
 	t.closeOnce.Do(func() {
-		t.stream.CancelRead(streamCodeClosed)
-		t.stream.CancelWrite(streamCodeClosed)
 		// Publish the graceful terminal event before closing the
 		// connection so a local Close reports a nil cause instead of
 		// racing the peer-failure watcher.
 		t.signalTerminal(nil)
-		_ = t.conn.CloseWithError(codeClosed, "closed")
+		// Start the bounded hard close first: if the writer is blocked on a
+		// peer that stopped reading, it is what unblocks the FIN below.
+		go t.deferCloseConnection()
+		// framer.Close stops new sends, unblocks a blocked Recv through the
+		// injected closer, and waits for the writer to finish. It must run
+		// before the FIN so an in-flight write is not cut short.
 		t.closeErr = t.framer.Close()
+		_ = t.stream.Close()
 	})
 	return t.closeErr
+}
+
+// deferCloseConnection keeps the connection alive long enough to transmit a
+// FIN and any stream data queued behind it, then hard-closes unless the peer
+// already did. Closing the connection first would send CONNECTION_CLOSE ahead
+// of the buffered stream data and discard it.
+func (t *Transport) deferCloseConnection() {
+	timer := time.NewTimer(gracefulCloseWindow)
+	defer timer.Stop()
+	select {
+	case <-t.conn.Context().Done():
+	case <-timer.C:
+		_ = t.conn.CloseWithError(codeClosed, "closed")
+	}
 }
 
 // signalTerminal publishes the terminal Offline event and closes the event
@@ -397,10 +461,12 @@ func linkEventError(err error) error {
 	return err
 }
 
+// closeStream is the framer's injected closer: it unblocks a blocked Recv
+// without touching the send side, which Close() FINs only after the writer
+// has drained.
 func (t *Transport) closeStream() error {
 	t.stream.CancelRead(streamCodeClosed)
-	t.stream.CancelWrite(streamCodeClosed)
-	return t.conn.CloseWithError(codeClosed, "closed")
+	return nil
 }
 
 func mapFramerError(err error) error {

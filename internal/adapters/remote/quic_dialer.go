@@ -98,7 +98,7 @@ func (d quicDialer) Dial(ctx context.Context) (wire.Transport, error) {
 	if err != nil {
 		return nil, quicUnavailable("resolve QUIC peer", err)
 	}
-	transport, err := quic.Dial(bootstrapCtx, addr, readiness, quic.Config{}, 15*time.Second)
+	transport, err := quic.Dial(bootstrapCtx, addr, readiness, quic.Config{}, 15*time.Second, quic.WithRuntimeObserver(d.observer))
 	if err != nil {
 		return nil, quicUnavailable("dial bootstrap QUIC", err)
 	}

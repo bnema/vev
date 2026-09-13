@@ -15,7 +15,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -138,25 +137,6 @@ func checkPreambleResponse(message *wire.PreambleResponse) (protoCeilings, error
 		return protoCeilings{}, ErrPreambleRejected
 	}
 	return remote, nil
-}
-
-// writePreambleFrame writes one length-delimited preamble envelope. The
-// preamble is bounded to wire.PreambleLimit before allocation.
-func writePreambleFrame(writer io.Writer, message proto.Message) error {
-	raw, err := proto.Marshal(message)
-	if err != nil {
-		return err
-	}
-	if len(raw) > wire.PreambleLimit {
-		return wire.ErrScanLength
-	}
-	var header [4]byte
-	binary.BigEndian.PutUint32(header[:], uint32(len(raw)))
-	if _, err := writer.Write(header[:]); err != nil {
-		return err
-	}
-	_, err = writer.Write(raw)
-	return err
 }
 
 // readPreambleFrame reads one length-delimited preamble envelope, enforcing
@@ -299,10 +279,4 @@ func rejectionCodeFor(err error) uint32 {
 		return 3 // version mismatch is the common typed refusal
 	}
 	return 7
-}
-
-// handshakeDeadline returns the single absolute deadline for the complete
-// handshake: callers pass it down and never restart it.
-func handshakeDeadline(timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), timeout)
 }

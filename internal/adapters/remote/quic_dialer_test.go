@@ -80,6 +80,8 @@ func TestQUICDialerComposesHostPortAndAuthenticates(t *testing.T) {
 	// bare host and attach the published port, never a remote loopback.
 	stub := newStubBootstrapProcess(raw, nil)
 	dialer := stubQuicDialerForTest("user@127.0.0.1", stub)
+	observer := &recordingObserver{}
+	dialer.observer = observer
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	transport, err := dialer.Dial(ctx)
@@ -109,6 +111,9 @@ func TestQUICDialerComposesHostPortAndAuthenticates(t *testing.T) {
 	// session outlives the SSH channel by design.
 	if stub.killed {
 		t.Fatal("bootstrap child was killed; the detached proxy must outlive it")
+	}
+	if observer.count() == 0 {
+		t.Fatal("runtime observer was not propagated to the QUIC transport")
 	}
 	select {
 	case <-stub.waited:

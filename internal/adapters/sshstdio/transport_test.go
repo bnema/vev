@@ -58,8 +58,8 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 }
 
 func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
-	got := BuildCommandForMode("user@example.com", "_udp-bootstrap", "work")
-	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap'"}
+	got := BuildCommandForMode("user@example.com", "_quic-bootstrap", "work")
+	want := []string{"--", "user@example.com", "'vev' '_quic-bootstrap'"}
 	if got.Path != "ssh" {
 		t.Fatalf("Path = %q, want ssh", got.Path)
 	}

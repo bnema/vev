@@ -4,11 +4,16 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
 	quicgo "github.com/quic-go/quic-go"
 
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
@@ -24,20 +29,44 @@ type Dialer struct {
 	addr        string
 	serverName  string
 	fingerprint []byte
-	tls         *tls.Config
 	config      *quicgo.Config
 	timeout     time.Duration
+	observer    ports.SerializedRuntimeObserver
+	// resolve is the address-resolution seam; nil selects the context-aware
+	// default resolver. Multi-address fallback is asserted through it without
+	// depending on real DNS answers or black-holed routes.
+	resolve func(ctx context.Context, addr string) ([]*net.UDPAddr, error)
 }
 
 var _ wire.Dialer = (*Dialer)(nil)
 
+// Option tunes a dial.
+type Option func(*dialOptions)
+
+type dialOptions struct {
+	observer ports.SerializedRuntimeObserver
+}
+
+// WithRuntimeObserver enables process-local adapter marks on the dialed
+// transport. A nil observer leaves observation disabled.
+func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
+	return func(opts *dialOptions) { opts.observer = observer }
+}
+
 // DialConfig carries the dial parameters. Fingerprint is the exact
-// SHA-256 of the server certificate (32 bytes). Timeout bounds the
-// whole dial including stream open; zero selects 15s, negative is
+// SHA-256 of the server certificate (32 bytes). Timeout bounds the whole
+// dial: address resolution, every candidate connection, stream open, and
+// the liveness probe share one deadline; zero selects 15s, negative is
 // rejected at Dial time.
-func DialConfig(addr, serverName string, fingerprint []byte, config Config, timeout time.Duration) Dialer {
+func DialConfig(addr, serverName string, fingerprint []byte, config Config, timeout time.Duration, opts ...Option) Dialer {
 	if timeout == 0 {
 		timeout = 15 * time.Second
+	}
+	var options dialOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
 	}
 	return Dialer{
 		addr:        addr,
@@ -45,6 +74,7 @@ func DialConfig(addr, serverName string, fingerprint []byte, config Config, time
 		fingerprint: append([]byte(nil), fingerprint...),
 		config:      clientQUICConfig(config),
 		timeout:     timeout,
+		observer:    options.observer,
 	}
 }
 
@@ -64,22 +94,88 @@ func (d Dialer) Dial(ctx context.Context) (wire.Transport, error) {
 	if d.timeout < 0 {
 		return nil, errors.New("quic: negative dial timeout")
 	}
-	tlsConf := clientTLSConfig(d.serverName, d.fingerprint)
+	// One shared deadline bounds resolution, every candidate address, stream
+	// open, and the probe, so the documented timeout is truly
+	// whole-operation rather than per-step.
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	conn, err := quicgo.DialAddr(ctx, d.addr, tlsConf, d.config)
+	tlsConf := clientTLSConfig(d.serverName, d.fingerprint)
+
+	addrs, err := d.resolveAddrs(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	var lastErr error
+	for i, addr := range addrs {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, err
+		}
+		// Split the shared deadline across the remaining candidates so a
+		// black-holed address cannot starve the rest of the resolved set.
+		budget := time.Duration(0)
+		if remaining := len(addrs) - i; remaining > 1 {
+			if deadline, ok := ctx.Deadline(); ok {
+				if slice := time.Until(deadline) / time.Duration(remaining); slice > 0 {
+					budget = slice
+				}
+			}
+		}
+		conn, packetConn, err := d.dialCandidate(ctx, addr, tlsConf, budget)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		transport, err := d.finishDial(ctx, conn, packetConn)
+		if err != nil {
+			lastErr = err
+			_ = conn.CloseWithError(codeReset, "dial failed")
+			_ = packetConn.Close()
+			continue
+		}
+		return transport, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, ctx.Err()
+}
+
+// dialCandidate opens one QUIC connection to a single resolved address. A
+// positive budget carves a slice from the shared deadline so a black-holed
+// candidate cannot consume the whole window. The returned socket is owned by
+// the caller on success and closed here on failure.
+func (d Dialer) dialCandidate(ctx context.Context, addr *net.UDPAddr, tlsConf *tls.Config, budget time.Duration) (*quicgo.Conn, net.PacketConn, error) {
+	if budget > 0 {
+		attemptCtx, cancel := context.WithTimeout(ctx, budget)
+		defer cancel()
+		ctx = attemptCtx
+	}
+	packetConn, err := listenUDPFor(addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := quicgo.Dial(ctx, packetConn, addr, tlsConf, d.config)
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, nil, err
+	}
+	return conn, packetConn, nil
+}
+
+// finishDial rejects 0-RTT resumption, opens the single stream under the
+// shared deadline, and sends the liveness probe. packetConn is the
+// caller-created local socket backing conn; the returned transport owns it.
+// On error the caller owns closing conn and packetConn.
+func (d Dialer) finishDial(ctx context.Context, conn *quicgo.Conn, packetConn net.PacketConn) (wire.Transport, error) {
 	if conn.ConnectionState().Used0RTT {
-		_ = conn.CloseWithError(codeReset, "0rtt refused")
 		return nil, errors.New("quic: 0-RTT resumption refused")
 	}
-	openCtx, openCancel := context.WithTimeout(ctx, d.timeout)
-	defer openCancel()
-	stream, err := conn.OpenStreamSync(openCtx)
+	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		_ = conn.CloseWithError(codeReset, "no stream")
 		return nil, err
 	}
 	// The server observes the connection once this stream carries data:
@@ -89,10 +185,66 @@ func (d Dialer) Dial(ctx context.Context) (wire.Transport, error) {
 	// (ErrZeroLength); the server's first Recv surfaces that error and
 	// the stream stays usable for application envelopes afterwards.
 	if _, err := stream.Write([]byte{0, 0, 0, 0}); err != nil {
-		_ = conn.CloseWithError(codeReset, "probe failed")
 		return nil, err
 	}
-	return newTransport(conn, stream), nil
+	return newTransport(conn, stream, packetConn, d.observer), nil
+}
+
+// listenUDPFor binds a local socket matching the candidate's address family.
+// quic-go's Dial takes ownership semantics from the caller (unlike DialAddr),
+// so the returned socket must be closed with the connection.
+func listenUDPFor(remote *net.UDPAddr) (*net.UDPConn, error) {
+	local := &net.UDPAddr{IP: net.IPv6unspecified, Port: 0}
+	if remote.IP.To4() != nil {
+		local = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+	}
+	return net.ListenUDP("udp", local)
+}
+
+// resolveAddrs turns the configured dial address into one or more concrete
+// UDP addresses within ctx.
+func (d Dialer) resolveAddrs(ctx context.Context) ([]*net.UDPAddr, error) {
+	if d.resolve != nil {
+		return d.resolve(ctx, d.addr)
+	}
+	return resolveQUICAddrs(ctx, d.addr)
+}
+
+// resolveQUICAddrs resolves addr with the context-aware default resolver.
+// A literal IP yields exactly one address; a hostname yields every resolved
+// address (deduplicated) so the dialer can fail over between them. The
+// lookup is bounded by ctx, unlike quic-go's own unbounded DialAddr
+// resolution.
+func resolveQUICAddrs(ctx context.Context, addr string) ([]*net.UDPAddr, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("quic: invalid dial address %q: %w", addr, err)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum <= 0 || portNum > 65535 {
+		return nil, fmt.Errorf("quic: invalid dial port %q", port)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []*net.UDPAddr{{IP: ip, Port: portNum}}, nil
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	addrs := make([]*net.UDPAddr, 0, len(ips))
+	seen := make(map[netip.Addr]struct{}, len(ips))
+	for _, ip := range ips {
+		ip = ip.Unmap()
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		addrs = append(addrs, &net.UDPAddr{IP: net.IP(ip.AsSlice()), Port: portNum})
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("quic: no addresses for host %q", host)
+	}
+	return addrs, nil
 }
 
 // Listener accepts QUIC connections with bounded admission: at most
@@ -250,7 +402,7 @@ func acceptSingleStream(ctx context.Context, conn *quicgo.Conn) (*Transport, err
 	if stream == nil {
 		return nil, errNoStream
 	}
-	return newTransport(conn, stream), nil
+	return newTransport(conn, stream, nil, nil), nil
 }
 
 // Close stops the listener; established transports are unaffected.

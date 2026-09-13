@@ -6,6 +6,9 @@ import (
 )
 
 func routeNavigationActionToWire(message protocol.RouteNavigationAction) (*wire.RouteNavigationAction, error) {
+	if err := message.Validate(); err != nil {
+		return nil, err
+	}
 	return &wire.RouteNavigationAction{
 		CauseActionId:      message.CauseActionID,
 		SnapshotGeneration: message.SnapshotGeneration,
@@ -18,12 +21,16 @@ func routeNavigationActionFromWire(message *wire.RouteNavigationAction) (protoco
 	if message == nil {
 		return protocol.RouteNavigationAction{}, protocol.ErrInvalidRouteWire
 	}
-	return protocol.RouteNavigationAction{
+	action := protocol.RouteNavigationAction{
 		CauseActionID:      message.GetCauseActionId(),
 		SnapshotGeneration: message.GetSnapshotGeneration(),
 		Key:                message.GetKey(),
 		Generation:         message.GetGeneration(),
-	}, nil
+	}
+	if err := action.Validate(); err != nil {
+		return protocol.RouteNavigationAction{}, err
+	}
+	return action, nil
 }
 
 func routeCreateSessionActionToWire(message protocol.RouteCreateSessionAction) (*wire.RouteCreateSessionAction, error) {
@@ -147,6 +154,9 @@ func samePeerSwitchFailureFromWire(message *wire.SamePeerSwitchFailure) (protoco
 }
 
 func recentRouteSnapshotToWire(message protocol.RecentRouteSnapshot) (*wire.RecentRouteSnapshot, error) {
+	if err := message.Validate(); err != nil {
+		return nil, err
+	}
 	activeEntry, err := recentRouteEntryToWire(message.ActiveEntry)
 	if err != nil {
 		return nil, err
@@ -189,6 +199,9 @@ func recentRouteSnapshotFromWire(message *wire.RecentRouteSnapshot) (protocol.Re
 		}
 		snapshot.Entries = append(snapshot.Entries, converted)
 	}
+	if err := snapshot.Validate(); err != nil {
+		return protocol.RecentRouteSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
@@ -225,6 +238,9 @@ func attentionSubscriptionFromWire(message *wire.RouteAttentionSubscription) (pr
 			return protocol.RouteAttentionSubscription{}, err
 		}
 		subscription.Targets = append(subscription.Targets, converted)
+	}
+	if err := subscription.Validate(); err != nil {
+		return protocol.RouteAttentionSubscription{}, err
 	}
 	return subscription, nil
 }

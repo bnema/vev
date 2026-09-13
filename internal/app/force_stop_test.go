@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,7 +236,9 @@ func TestForceStopRefusesSIGKILLWhenProcessIdentityChanged(t *testing.T) {
 	calls := 0
 	f.hooks.finder = fakeDaemonFinder{find: func(context.Context, string) (daemonProcess, bool, error) {
 		calls++
-		if calls == 1 {
+		// The confirmed incarnation stays valid through the SIGTERM re-check and
+		// disappears only before the SIGKILL escalation.
+		if calls <= 2 {
 			return daemonProcess{PID: f.pid, Command: "vev --daemon", Start: "start-1"}, true, nil
 		}
 		// The verified incarnation is gone: the PID now belongs to another process.
@@ -248,6 +251,67 @@ func TestForceStopRefusesSIGKILLWhenProcessIdentityChanged(t *testing.T) {
 	require.Equal(t, []syscall.Signal{syscall.SIGTERM}, f.signals, "a reused PID must never receive SIGKILL")
 	require.FileExists(t, ipc.SocketPath(runtimeDir), "artifacts stay until ownership is released")
 	assertDurableStateIntact(t, stateDir)
+}
+
+// promptChangeReader flips the verified incarnation as soon as the operator's
+// answer is consumed, so the identity check that follows confirmation sees a
+// PID that was reused while the prompt was open.
+type promptChangeReader struct {
+	reader io.Reader
+	onRead func()
+}
+
+func (r promptChangeReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.onRead()
+	}
+	return n, err
+}
+
+func TestForceStopReverifiesIdentityAfterConfirmation(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(f *forceStopFixture) (daemonProcess, bool, error)
+	}{
+		{
+			name: "pid reused by an unrelated process",
+			change: func(f *forceStopFixture) (daemonProcess, bool, error) {
+				return daemonProcess{PID: f.pid, Command: "unrelated", Start: "start-2"}, true, nil
+			},
+		},
+		{
+			name: "verified process vanished",
+			change: func(*forceStopFixture) (daemonProcess, bool, error) {
+				return daemonProcess{}, false, nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newForceStopFixture(t, "y\n")
+			runtimeDir, stateDir := forceStopRuntime(t)
+			reverified := false
+			f.hooks.finder = fakeDaemonFinder{find: func(context.Context, string) (daemonProcess, bool, error) {
+				if reverified {
+					return tt.change(f)
+				}
+				return daemonProcess{PID: f.pid, Command: "/proc/self/exe --daemon", Start: "start-1"}, true, nil
+			}}
+			f.hooks.stdin = promptChangeReader{
+				reader: strings.NewReader("y\n"),
+				onRead: func() { reverified = true },
+			}
+
+			err := forceStopDaemon(context.Background(), runtimeDir, f.hooks)
+
+			require.ErrorIs(t, err, errForceStopTimeout)
+			require.Empty(t, f.signals, "the confirmed PID must never receive a signal once its identity changed")
+			require.FileExists(t, ipc.SocketPath(runtimeDir), "artifacts stay until ownership is released")
+			require.DirExists(t, filepath.Join(runtimeDir, spawnLockName))
+			assertDurableStateIntact(t, stateDir)
+		})
+	}
 }
 
 func TestForceStopIsBoundedWhenOwnershipNeverTransfers(t *testing.T) {
