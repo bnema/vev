@@ -213,12 +213,12 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	reporter := observability.NewSerialized(observer, 64)
 	defer reporter.Close()
 
-	frame := wire.Frame{Type: wire.MsgOutput, Payload: []byte("stdio bytes stay exact")}
+	envelope := wire.Envelope{Payload: []byte("stdio bytes stay exact")}
 	var observed, baseline bytes.Buffer
-	if err := NewTransport(bytes.NewReader(nil), &observed, nil, WithRuntimeObserver(reporter)).Send(frame); err != nil {
+	if err := NewTransport(bytes.NewReader(nil), &observed, nil, WithRuntimeObserver(reporter)).Send(envelope); err != nil {
 		t.Fatalf("observed Send() error = %v", err)
 	}
-	if err := NewTransport(bytes.NewReader(nil), &baseline, nil).Send(frame); err != nil {
+	if err := NewTransport(bytes.NewReader(nil), &baseline, nil).Send(envelope); err != nil {
 		t.Fatalf("baseline Send() error = %v", err)
 	}
 	if !bytes.Equal(observed.Bytes(), baseline.Bytes()) {
@@ -228,8 +228,8 @@ func TestTransportObservabilitySSHStdioPreservesCarriage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observed Recv() error = %v", err)
 	}
-	if received.Type != frame.Type || !bytes.Equal(received.Payload, frame.Payload) {
-		t.Fatalf("observed Recv() = %#v, want %#v", received, frame)
+	if !bytes.Equal(received.Payload, envelope.Payload) {
+		t.Fatalf("observed Recv() = %#v, want %#v", received, envelope)
 	}
 	reporter.Close()
 	if err := closer.Close(); err != nil {

@@ -14,11 +14,11 @@ func BenchmarkTransportSend(b *testing.B) {
 	conn := discardConn{}
 	tr := NewTransport(conn)
 	payload := []byte("payload payload payload")
-	frame := wire.Frame{Type: wire.MsgOutput, Payload: payload}
+	envelope := wire.Envelope{Payload: payload}
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if err := tr.Send(frame); err != nil {
+		if err := tr.Send(envelope); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -26,8 +26,9 @@ func BenchmarkTransportSend(b *testing.B) {
 
 func BenchmarkTransportRecvReuse(b *testing.B) {
 	payload := []byte("payload payload payload")
-	encoded := encodeBenchmarkFrame(wire.Frame{Type: wire.MsgOutput, Payload: payload})
-	recv := &unixTransport{conn: &loopingReaderConn{data: encoded}}
+	encoded := encodeBenchmarkFrame(wire.Envelope{Payload: payload})
+	recv := NewTransport(&loopingReaderConn{data: encoded})
+	b.Cleanup(func() { _ = recv.Close() })
 
 	b.ReportAllocs()
 	for b.Loop() {
@@ -37,12 +38,14 @@ func BenchmarkTransportRecvReuse(b *testing.B) {
 	}
 }
 
-func encodeBenchmarkFrame(f wire.Frame) []byte {
-	n := 1 + len(f.Payload)
-	buf := make([]byte, frameHeaderLen+n)
-	binary.BigEndian.PutUint32(buf[:frameHeaderLen], uint32(n))
-	buf[frameHeaderLen] = byte(f.Type)
-	copy(buf[frameHeaderLen+1:], f.Payload)
+// frameHeaderLen is the 4-byte big-endian length prefix; envelopes carry no
+// legacy type byte.
+const frameHeaderLen = 4
+
+func encodeBenchmarkFrame(e wire.Envelope) []byte {
+	buf := make([]byte, frameHeaderLen+len(e.Payload))
+	binary.BigEndian.PutUint32(buf[:frameHeaderLen], uint32(len(e.Payload)))
+	copy(buf[frameHeaderLen:], e.Payload)
 	return buf
 }
 

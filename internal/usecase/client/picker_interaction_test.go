@@ -1,6 +1,8 @@
 package client
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
@@ -9,6 +11,53 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPickerRendererClearsPreviousBoundsAcrossResizes(t *testing.T) {
+	loop := pickerLoopFixture(t)
+	r := &pickerRenderer{}
+	screen := renderer.NewScreen(100, 30)
+	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
+
+	screen.Write(r.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
+	require.NotNil(t, r.prevBounds)
+	oldBounds := *r.prevBounds
+
+	screen.Resize(80, 30)
+	screen.Write(r.render(loop, domain.Size{Cols: 80, Rows: 30}, emptyPickerPreview()))
+	require.NotNil(t, r.prevBounds)
+	newBounds := *r.prevBounds
+
+	require.Greater(t, oldBounds.X+oldBounds.Width, newBounds.X+newBounds.Width)
+	snapshot := screen.Snapshot()
+	for y := oldBounds.Y; y < min(oldBounds.Y+oldBounds.Height, snapshot.Rows()); y++ {
+		for x := newBounds.X + newBounds.Width; x < min(oldBounds.X+oldBounds.Width, snapshot.Columns()); x++ {
+			require.Equal(t, ' ', snapshot.Row(y)[x].Rune, "stale modal cell at (%d,%d)", x, y)
+		}
+	}
+	require.Equal(t, 'S', snapshot.Row(0)[0].Rune, "render must preserve session content outside picker damage")
+	require.Equal(t, '┌', snapshot.Row(newBounds.Y)[newBounds.X].Rune, "new picker border must be rendered")
+}
+
+func TestPickerRendererResetProtectsRepaintedSessionFromPreviousLease(t *testing.T) {
+	loop := pickerLoopFixture(t)
+	r := &pickerRenderer{}
+	screen := renderer.NewScreen(100, 30)
+	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
+	screen.Write(r.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
+
+	r.reset()
+	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
+	screen.Write(r.render(loop, domain.Size{Cols: 80, Rows: 30}, emptyPickerPreview()))
+
+	snapshot := screen.Snapshot()
+	require.Equal(t, 'S', snapshot.Row(3)[72].Rune, "new lease must not clear the previous lease's bounds")
+}
+
+func paintScreen(screen *renderer.Screen, size domain.Size, fill rune) {
+	for y := 0; y < size.Rows; y++ {
+		screen.Write([]byte(fmt.Sprintf("\x1b[%d;1H%s", y+1, strings.Repeat(string(fill), size.Cols))))
+	}
+}
 
 func pickerSnapshotFixture() protocol.PickerSnapshot {
 	return protocol.PickerSnapshot{

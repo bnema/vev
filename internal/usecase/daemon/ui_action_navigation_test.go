@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,10 +23,10 @@ func TestUIActionNavigationUsesAdmittedCause(t *testing.T) {
 				effect.uiActionID = actionID
 				require.NoError(t, effect.sendControl(message))
 				frame := awaitTestValue(t, sends, "navigation was not sent")
-				require.Equal(t, actionID, testNavigationCause(t, frame))
-				original, err := testServerFrame(message)
+				require.Equal(t, actionID, testNavigationCause(t, frame.Payload))
+				original, err := testServerEnvelope(message)
 				require.NoError(t, err)
-				require.Equal(t, uint64(999), testNavigationCause(t, original), "sending must not mutate reusable navigation templates")
+				require.Equal(t, uint64(999), testNavigationCause(t, original.Payload), "sending must not mutate reusable navigation templates")
 			})
 		}
 	}
@@ -47,23 +47,19 @@ func testNavigationName(message protocol.ServerMessage, actionID uint64) string 
 	}
 }
 
-func testNavigationCause(t *testing.T, frame wire.Frame) uint64 {
+func testNavigationCause(t *testing.T, payload []byte) uint64 {
 	t.Helper()
-	switch frame.Type {
-	case wire.MsgAttachTarget:
-		message, err := wire.UnmarshalAttachTarget(frame.Payload)
-		require.NoError(t, err)
+	message, err := sessionwire.DecodeServerEnvelope(payload)
+	require.NoError(t, err)
+	switch message := message.(type) {
+	case protocol.AttachTarget:
 		return message.CauseActionID
-	case wire.MsgNavigateRecentRoute:
-		message, err := wire.UnmarshalRouteNavigationAction(frame.Payload)
-		require.NoError(t, err)
+	case protocol.RouteNavigationAction:
 		return message.CauseActionID
-	case wire.MsgRouteCreateSession:
-		message, err := wire.UnmarshalRouteCreateSessionAction(frame.Payload)
-		require.NoError(t, err)
+	case protocol.RouteCreateSessionAction:
 		return message.CauseActionID
 	default:
-		t.Fatalf("unexpected navigation frame type %d", frame.Type)
+		t.Fatalf("unexpected navigation message %T", message)
 		return 0
 	}
 }
@@ -83,6 +79,6 @@ func TestUIActionInputPaletteSubmissionCarriesItsOwnCause(t *testing.T) {
 	} {
 		require.False(t, d.handleAttachmentClientMessage(captureAttachmentCapability(sess, ac, ac.transport()), input))
 	}
-	frame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
-	require.Equal(t, uint64(41), testNavigationCause(t, frame), "submission owns navigation, not the earlier palette-opening action")
+	frame := awaitFrame(t, sends, "RouteNavigationAction")
+	require.Equal(t, uint64(41), testNavigationCause(t, frame.Payload), "submission owns navigation, not the earlier palette-opening action")
 }

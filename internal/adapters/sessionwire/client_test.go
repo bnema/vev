@@ -18,37 +18,35 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 	tests := []struct {
 		name    string
 		message protocol.ClientMessage
-		typeID  wire.MsgType
 	}{
-		{name: "hello", message: protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}, typeID: wire.MsgHello},
-		{name: "input", message: protocol.Input{InputSeq: 1, Data: []byte("x")}, typeID: wire.MsgInput},
-		{name: "resize", message: protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}}, typeID: wire.MsgResize},
-		{name: "detach", message: protocol.Detach{}, typeID: wire.MsgDetach},
-		{name: "ping", message: protocol.Ping{}, typeID: wire.MsgPing},
-		{name: "list", message: protocol.List{}, typeID: wire.MsgList},
-		{name: "kill", message: protocol.Kill{Name: "work"}, typeID: wire.MsgKill},
-		{name: "theme", message: protocol.Theme{TrueColor: true}, typeID: wire.MsgTheme},
-		{name: "ack", message: protocol.Ack{Epoch: 1, State: 1}, typeID: wire.MsgAck},
-		{name: "image", message: protocol.ImagePush{InputSeq: 1, Mime: "image/png", Data: []byte{1}}, typeID: wire.MsgImagePush},
-		{name: "notice", message: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}, typeID: wire.MsgClientNotice},
-		{name: "command", message: protocol.CommandRequest{Version: protocol.Version, RequestID: 1, Slug: "list-sessions"}, typeID: wire.MsgCommand},
-		{name: "reset", message: protocol.OutputResetRequest{}, typeID: wire.MsgOutputResetRequest},
-		{name: "UI fence", message: protocol.UIFence{ActionID: 7}, typeID: wire.MsgUIFence},
-		{name: "UI fence pointer", message: &protocol.UIFence{ActionID: 7}, typeID: wire.MsgUIFence},
-		{name: "preview", message: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}, typeID: wire.MsgRemotePreviewRequest},
-		{name: "attention", message: protocol.RouteAttentionSubscription{Targets: []protocol.RouteAttentionTarget{}}, typeID: wire.MsgRouteAttentionSubscription},
-		{name: "same peer", message: protocol.SamePeerSwitchRequest{RequestID: 1, Target: exact}, typeID: wire.MsgSamePeerSwitchRequest},
-		{name: "snapshot", message: protocol.RecentRouteSnapshot{}, typeID: wire.MsgRecentRouteSnapshot},
-		{name: "route failure", message: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgRouteNavigationFailure},
-		{name: "creation failure", message: protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgSessionCreationFailure},
-		{name: "creation failure pointer", message: &protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}, typeID: wire.MsgSessionCreationFailure},
+		{name: "hello", message: protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}}},
+		{name: "input", message: protocol.Input{InputSeq: 1, Data: []byte("x")}},
+		{name: "resize", message: protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}}},
+		{name: "detach", message: protocol.Detach{}},
+		{name: "ping", message: protocol.Ping{}},
+		{name: "list", message: protocol.List{}},
+		{name: "kill", message: protocol.Kill{Name: "work"}},
+		{name: "theme", message: protocol.Theme{TrueColor: true}},
+		{name: "ack", message: protocol.Ack{Epoch: 1, State: 1}},
+		{name: "image", message: protocol.ImagePush{InputSeq: 1, Mime: "image/png", Data: []byte{1}}},
+		{name: "notice", message: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}},
+		{name: "command", message: protocol.CommandRequest{Version: protocol.Version, RequestID: 1, Slug: "list-sessions"}},
+		{name: "reset", message: protocol.OutputResetRequest{}},
+		{name: "UI fence", message: protocol.UIFence{ActionID: 7}},
+		{name: "UI fence pointer", message: &protocol.UIFence{ActionID: 7}},
+		{name: "preview", message: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}},
+		{name: "attention", message: protocol.RouteAttentionSubscription{}},
+		{name: "same peer", message: protocol.SamePeerSwitchRequest{RequestID: 1, Target: exact}},
+		{name: "snapshot", message: protocol.RecentRouteSnapshot{}},
+		{name: "route failure", message: protocol.RouteNavigationFailure{Key: 1, Generation: 1, Code: protocol.RouteFailureUnavailable}},
+		{name: "creation failure", message: protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}},
+		{name: "creation failure pointer", message: &protocol.SessionCreationFailure{RequestID: 1, Code: protocol.RouteFailureUnavailable}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{}
+			raw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
 			require.NoError(t, NewClientConnection(raw).SendClient(tt.message))
-			require.Equal(t, tt.typeID, raw.sent.Type)
-			got, err := decodeClient(raw.sent)
+			got, err := DecodeClientEnvelope(mustSingleAppPayload(t, raw))
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
 			case *protocol.SessionCreationFailure:
@@ -73,7 +71,7 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 		{name: "output", message: protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: testUIOutputContext()}},
 		{name: "detached", message: protocol.Detached{Reason: protocol.ReasonDetach}},
 		{name: "pong", message: protocol.Pong{}},
-		{name: "sessions", message: protocol.Sessions{Sessions: []protocol.SessionInfo{}}},
+		{name: "sessions", message: protocol.Sessions{}},
 		{name: "command result", message: protocol.CommandResult{RequestID: 1, OK: true}},
 		{name: "attach target", message: protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}},
 		{name: "preview", message: protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}},
@@ -86,9 +84,8 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			frame, err := encodeServer(tt.message)
-			require.NoError(t, err)
-			got, err := NewClientConnection(&scriptedTransport{recv: frame}).ReceiveServer()
+			raw := &scriptedTransport{recv: mustClientPreambleQueue(t, mustEncodeServer(t, tt.message))}
+			got, err := NewClientConnection(raw).ReceiveServer()
 			require.NoError(t, err)
 			require.Equal(t, tt.message, got)
 		})
@@ -96,31 +93,48 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 }
 
 func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T) {
-	validError := wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"})
-	for _, tt := range []struct {
-		name     string
-		frame    wire.Frame
-		category protocol.DecodeCategory
-	}{
-		{name: "wrong direction", frame: wire.Frame{Type: wire.MsgInput}, category: protocol.DecodeWrongDirection},
-		{name: "truncated payload", frame: wire.Frame{Type: wire.MsgError, Payload: validError[:1]}, category: protocol.DecodeMalformed},
-		{name: "trailing garbage", frame: wire.Frame{Type: wire.MsgError, Payload: append(append([]byte(nil), validError...), 0xff)}, category: protocol.DecodeMalformed},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewClientConnection(&scriptedTransport{recv: tt.frame}).ReceiveServer()
-			var failure *protocol.DecodeFailure
-			require.ErrorAs(t, err, &failure)
-			require.Equal(t, tt.category, failure.Category)
-		})
-	}
+	t.Run("wrong direction", func(t *testing.T) {
+		// A client envelope on the server-to-client path is rejected
+		// before any mutation: its fields are unknown to the server
+		// envelope, so decoding reports the wrong-direction category.
+		raw := &scriptedTransport{recv: mustClientPreambleQueue(t, mustEncodeClient(t, protocol.Input{InputSeq: 1, Data: []byte("x")}))}
+		_, err := NewClientConnection(raw).ReceiveServer()
+		var failure *protocol.DecodeFailure
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, protocol.DecodeUnknownType, failure.Category)
+	})
 
-	events := make(chan ports.LinkEvent, 1)
-	raw := &capableTransport{events: events}
-	connection := NewClientConnection(raw)
-	require.Equal(t, uint8(1), connection.Capabilities().PreferredOutputWindow)
-	require.True(t, connection.Capabilities().LinkState)
-	require.Equal(t, ports.LinkStateDegraded, connection.LinkState())
-	require.Equal(t, (<-chan ports.LinkEvent)(events), connection.LinkEvents())
+	t.Run("truncated payload", func(t *testing.T) {
+		valid := mustEncodeServer(t, protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"})
+		raw := &scriptedTransport{recv: mustClientPreambleQueue(t, valid[:1])}
+		_, err := NewClientConnection(raw).ReceiveServer()
+		var failure *protocol.DecodeFailure
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, protocol.DecodeMalformed, failure.Category)
+	})
+
+	t.Run("trailing garbage", func(t *testing.T) {
+		valid := mustEncodeServer(t, protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "error"})
+		// A second top-level variant occurrence is trailing data, not
+		// a longer message: the scanner rejects duplicate variants.
+		duplicate := mustEncodeServer(t, protocol.Pong{})
+		raw := &scriptedTransport{recv: mustClientPreambleQueue(t, append(append([]byte(nil), valid...), duplicate...))}
+		_, err := NewClientConnection(raw).ReceiveServer()
+		var failure *protocol.DecodeFailure
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, protocol.DecodeMalformed, failure.Category)
+		require.ErrorIs(t, failure.Err, wire.ErrScanDuplicate)
+	})
+
+	t.Run("capabilities", func(t *testing.T) {
+		events := make(chan ports.LinkEvent, 1)
+		raw := &capableTransport{events: events}
+		connection := NewClientConnection(raw)
+		require.Equal(t, uint8(1), connection.Capabilities().PreferredOutputWindow)
+		require.True(t, connection.Capabilities().LinkState)
+		require.Equal(t, ports.LinkStateDegraded, connection.LinkState())
+		require.Equal(t, (<-chan ports.LinkEvent)(events), connection.LinkEvents())
+	})
 }
 
 func TestClientDialerWrapsEachConnectionAndPreservesErrors(t *testing.T) {
@@ -129,12 +143,14 @@ func TestClientDialerWrapsEachConnectionAndPreservesErrors(t *testing.T) {
 	_, err := dialer.Dial(context.Background())
 	require.ErrorIs(t, err, dialErr)
 
-	raw := &scriptedTransport{}
+	raw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
 	dialer = NewClientDialer(&scriptedDialer{transport: raw})
 	connection, err := dialer.Dial(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, connection.SendClient(protocol.Ping{}))
-	require.Equal(t, wire.MsgPing, raw.sent.Type)
+	got, err := DecodeClientEnvelope(mustSingleAppPayload(t, raw))
+	require.NoError(t, err)
+	require.Equal(t, protocol.Ping{}, got)
 }
 
 type scriptedDialer struct {

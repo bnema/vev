@@ -12,7 +12,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/palette"
 )
 
@@ -24,9 +23,8 @@ func TestPaletteRemoteCreateUsesDaemonEnvironment(t *testing.T) {
 	result := palette.NewCreateSessionDestination(palette.CreateSessionOnRemoteHost, "remote.example", "remote.example", protocol.RouteRef{}, 0)
 	err := (paletteExec{d: local, sess: sess, ac: ac, effect: effect}).createSessionOnDestination(effect, result, "work")
 	require.NoError(t, err)
-	frame := awaitFrame(t, sends, wire.MsgAttachTarget)
-	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "AttachTarget")
+	handoff := decodeServerMessage(t, frame).(protocol.AttachTarget)
 	require.Equal(t, protocol.IntentNew, handoff.Intent)
 	require.NotZero(t, handoff.RequestID)
 	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, handoff.EnvironmentPolicy)

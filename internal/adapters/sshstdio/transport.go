@@ -7,7 +7,6 @@ package sshstdio
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -18,19 +17,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/streamframe"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-const (
-	maxFrameLen     = wire.MaxFrameLen
-	frameHeaderLen  = 4
-	sshCloseTimeout = 3 * time.Second
-)
+const sshCloseTimeout = 3 * time.Second
 
 var (
-	ErrZeroLengthFrame = errors.New("sshstdio: zero-length frame")
-	ErrFrameTooLarge   = errors.New("sshstdio: frame exceeds maximum length")
+	ErrZeroLengthFrame = streamframe.ErrZeroLength
+	ErrFrameTooLarge   = streamframe.ErrTooLarge
 )
 
 type closeFunc func() error
@@ -77,6 +73,7 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 		close:  closeFn,
 		eofErr: eofErr,
 		done:   make(chan struct{}),
+		framer: nil,
 	}
 	if file, ok := r.(*os.File); ok && file == os.Stdin {
 		t.r = newProcessStdinReader(file, t.done)
@@ -90,12 +87,31 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 			t.writerCloser = closer
 		}
 	}
+	// Framing, queueing, and the writer live in streamframe; this adapter
+	// keeps reader cancellation, process waiting, and EOF mapping. The
+	// framer's closer releases owned streams so Close unblocks Recv.
+	t.framer = streamframe.NewFramer(t.r, &serializedWriter{w: t.w}, t.closeOwnedStreams)
 	return t
+}
+
+// serializedWriter serializes concurrent streamframe writes over one child
+// stdin pipe; streamframe already serializes queue admission, this guards
+// the raw Write against interleaving.
+type serializedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (w *serializedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(p)
 }
 
 type transport struct {
 	r              io.Reader
 	w              io.Writer
+	framer         *streamframe.Framer
 	close          closeFunc
 	eofErr         eofErrFunc
 	readerCloser   io.Closer
@@ -108,9 +124,6 @@ type transport struct {
 	operationsDone [operationKindCount]chan struct{}
 	closeOnce      sync.Once
 	closeErr       error
-
-	mu      sync.Mutex
-	readBuf []byte
 }
 
 type readResult struct {
@@ -261,59 +274,23 @@ func (r processStdinReader) Read(dst []byte) (int, error) {
 	return r.pump.read(r.done, dst)
 }
 
-func (t *transport) Send(f wire.Frame) error {
-	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(f.Payload)))
-	n := 1 + len(f.Payload)
-	if n > maxFrameLen {
-		end(false)
-		return ErrFrameTooLarge
-	}
-
-	buf := make([]byte, frameHeaderLen+n)
-	binary.BigEndian.PutUint32(buf[:frameHeaderLen], uint32(n))
-	buf[frameHeaderLen] = byte(f.Type)
-	copy(buf[frameHeaderLen+1:], f.Payload)
-
-	t.mu.Lock()
-	_, err := t.w.Write(buf)
-	t.mu.Unlock()
+func (t *transport) Send(envelope wire.Envelope) error {
+	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(envelope.Payload)))
+	err := t.framer.Send(envelope.Payload)
 	end(err == nil)
 	return err
 }
 
-func (t *transport) Recv() (wire.Frame, error) {
+func (t *transport) Recv() (wire.Envelope, error) {
 	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
-	var hdr [frameHeaderLen]byte
-	if _, err := io.ReadFull(t.r, hdr[:]); err != nil {
+	payload, err := t.framer.Recv()
+	if err != nil {
 		err = t.mapEOFError(err)
 		end(false)
-		return wire.Frame{}, err
+		return wire.Envelope{}, err
 	}
-
-	n := binary.BigEndian.Uint32(hdr[:])
-	if n == 0 {
-		end(false)
-		return wire.Frame{}, ErrZeroLengthFrame
-	}
-	if n > maxFrameLen {
-		end(false)
-		return wire.Frame{}, ErrFrameTooLarge
-	}
-
-	if cap(t.readBuf) < int(n) {
-		t.readBuf = make([]byte, n)
-	} else {
-		t.readBuf = t.readBuf[:n]
-	}
-	if _, err := io.ReadFull(t.r, t.readBuf); err != nil {
-		err = t.mapEOFError(err)
-		end(false)
-		return wire.Frame{}, err
-	}
-
-	payload := append([]byte(nil), t.readBuf[1:]...)
 	end(true)
-	return wire.Frame{Type: wire.MsgType(t.readBuf[0]), Payload: payload}, nil
+	return wire.Envelope{Payload: payload}, nil
 }
 
 func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
@@ -352,35 +329,41 @@ func (t *transport) mapEOFError(err error) error {
 func (t *transport) Close() error {
 	t.closeOnce.Do(func() {
 		wait := t.beginShutdown()
-		// Close owned streams before waiting for in-flight operations. The
-		// writer is what releases a Send blocked on a child stdin pipe; the
-		// reader releases a Recv blocked in io.ReadFull. Unowned streams cannot
-		// be interrupted safely, so the cancellation boundary releases Recv
-		// without closing the source.
-		var writeErr, readErr error
-		if t.writerCloser != nil {
-			writeErr = t.writerCloser.Close()
-		}
-		if t.readerCloser != nil {
-			readErr = t.readerCloser.Close()
-		}
-		closeErr := t.close()
+		// The framer's closer (closeOwnedStreams below) releases owned
+		// streams before waiting for in-flight operations. Unowned
+		// streams cannot be interrupted safely, so the cancellation
+		// boundary releases Recv without closing the source.
+		t.closeErr = t.framer.Close()
 		if t.writerCloser != nil && wait.send != nil {
 			<-wait.send
 		}
 		if t.readerCloser != nil && wait.receive != nil {
 			<-wait.receive
 		}
-		switch {
-		case closeErr != nil:
-			t.closeErr = closeErr
-		case readErr != nil:
-			t.closeErr = readErr
-		default:
-			t.closeErr = writeErr
-		}
 	})
 	return t.closeErr
+}
+
+// closeOwnedStreams closes owned streams before the framer waits for its
+// writer, then waits for the child process. It runs exactly once via the
+// framer's Close.
+func (t *transport) closeOwnedStreams() error {
+	var writeErr, readErr error
+	if t.writerCloser != nil {
+		writeErr = t.writerCloser.Close()
+	}
+	if t.readerCloser != nil {
+		readErr = t.readerCloser.Close()
+	}
+	closeErr := t.close()
+	switch {
+	case closeErr != nil:
+		return closeErr
+	case readErr != nil:
+		return readErr
+	default:
+		return writeErr
+	}
 }
 
 func (t *transport) beginObservedOperation(kind operationKind) bool {
@@ -509,7 +492,7 @@ func BuildCommand(target, _ string) CommandSpec {
 }
 
 // BuildCommandForMode constructs the local ssh subprocess argv for a hidden vev
-// remote mode such as _stdio or _udp-bootstrap.
+// remote mode such as _stdio or _quic-bootstrap.
 func BuildCommandForMode(target, mode, _ string) CommandSpec {
 	return BuildCommandForRemoteCommand(target, "vev", mode)
 }
@@ -526,17 +509,13 @@ func BuildCommandForRemoteCommand(target string, command ...string) CommandSpec 
 	return CommandSpec{Path: "ssh", Args: args}
 }
 
-// BuildCommandForObservation constructs non-interactive ssh argv for remote
-// observation (catalogue checks). It reuses the quoting/argv pattern above
-// and additionally pins batch mode (never prompt), strict host-key checking
-// (never accept new keys automatically), a bounded connect timeout and a
-// single connection attempt. TTY allocation is disabled (-T) and advertised
-// host-key updates are refused (UpdateHostKeys=no) so background observation
-// can neither grab a terminal nor mutate the user's known-hosts trust state,
-// even when local ssh configuration requests a TTY or key updates: explicit
-// command-line options override configuration file values. No stdin is
-// allocated by this argv; the caller must leave Stdin detached. Interactive
-// attach authentication is untouched: only observation uses this builder.
+// BuildCommandForObservation constructs unattended ssh argv for remote
+// observation (catalogue checks). Authentication, proxying, and host-key trust
+// remain owned by the target's effective OpenSSH configuration so managed
+// transports such as NetBird keep their coherent policy. Vev only disables
+// TTY allocation and advertised host-key updates, and bounds connection time
+// and attempts. The caller leaves stdin detached and owns a whole-command
+// deadline, so background observation cannot wait indefinitely for input.
 func BuildCommandForObservation(target string, connectTimeout time.Duration, command ...string) CommandSpec {
 	secs := int(connectTimeout / time.Second)
 	if secs < 1 {
@@ -545,8 +524,6 @@ func BuildCommandForObservation(target string, connectTimeout time.Duration, com
 	spec := BuildCommandForRemoteCommand(target, command...)
 	opts := []string{
 		"-T",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=yes",
 		"-o", "UpdateHostKeys=no",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", secs),
 		"-o", "ConnectionAttempts=1",

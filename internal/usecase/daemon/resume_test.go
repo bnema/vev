@@ -23,17 +23,17 @@ import (
 type closeTrackingTransport struct {
 	mu     sync.Mutex
 	closed bool
-	sends  []wire.Frame
+	sends  []wire.Envelope
 }
 
-func (t *closeTrackingTransport) Send(f wire.Frame) error {
+func (t *closeTrackingTransport) Send(f wire.Envelope) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sends = append(t.sends, f)
 	return nil
 }
-func (t *closeTrackingTransport) Recv() (wire.Frame, error) {
-	return wire.Frame{}, errors.New("closed")
+func (t *closeTrackingTransport) Recv() (wire.Envelope, error) {
+	return wire.Envelope{}, errors.New("closed")
 }
 func (t *closeTrackingTransport) Close() error {
 	t.mu.Lock()
@@ -47,10 +47,10 @@ func (t *closeTrackingTransport) Closed() bool {
 	return t.closed
 }
 
-func (t *closeTrackingTransport) Sends() []wire.Frame {
+func (t *closeTrackingTransport) Sends() []wire.Envelope {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]wire.Frame(nil), t.sends...)
+	return append([]wire.Envelope(nil), t.sends...)
 }
 
 type closeCountingBlockedTransport struct {
@@ -64,13 +64,13 @@ func newCloseCountingBlockedTransport() *closeCountingBlockedTransport {
 	return &closeCountingBlockedTransport{closed: make(chan struct{})}
 }
 
-func (t *closeCountingBlockedTransport) Send(wire.Frame) error {
+func (t *closeCountingBlockedTransport) Send(wire.Envelope) error {
 	<-t.closed
 	return errors.New("closed")
 }
 
-func (t *closeCountingBlockedTransport) Recv() (wire.Frame, error) {
-	return wire.Frame{}, errors.New("closed")
+func (t *closeCountingBlockedTransport) Recv() (wire.Envelope, error) {
+	return wire.Envelope{}, errors.New("closed")
 }
 
 func (t *closeCountingBlockedTransport) Close() error {
@@ -327,14 +327,14 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	done := make(chan struct{})
 	resumeHello := helloResumeCapable(protocol.IntentResume, sess.name, token)
 	go func() {
-		d.handleHelloFrame(tr.tr, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(resumeHello)})
+		d.handleHelloFrame(tr.tr, mustClientEnvelope(resumeHello))
 		close(done)
 	}()
 
 	<-tr.welcomeEntered
 	handshakeTimer := awaitHandshakeTimer(t, clock)
 	welcome := <-tr.sends
-	require.Equal(t, wire.MsgWelcome, welcome.Type)
+	require.Equal(t, "Welcome", envelopeMessageName(t, welcome.Payload))
 	sess.mu.Lock()
 	resumed := sess.snapshotAttachmentsLocked()[0]
 	sess.mu.Unlock()
@@ -352,9 +352,8 @@ func TestHandleHelloResumeDefersFreshOutputUntilWelcome(t *testing.T) {
 	requireNoCoordinatorOutputFrame(t, tr.sends)
 
 	tr.release()
-	output := awaitFrame(t, tr.sends, wire.MsgOutput)
-	first, err := wire.UnmarshalOutput(output.Payload)
-	require.NoError(t, err)
+	output := awaitFrame(t, tr.sends, "Output")
+	first := unmarshalTestOutput(t, output.Payload)
 	require.Zero(t, first.Base)
 	tr.finish()
 	<-done
@@ -1095,8 +1094,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 
 	f := outputStateFrame(ac.output, []byte("incremental while reliable backlog drains"), reset, 0)
 	ac.sendMu.Unlock()
-	out, err := wire.UnmarshalOutput(f.Payload)
-	require.NoError(t, err)
+	out := unmarshalTestOutput(t, f.Payload)
 	require.Equal(t, uint64(5), out.Base, "output should remain incremental unless an explicit reset is requested")
 	require.Equal(t, uint64(6), out.New)
 
@@ -1105,8 +1103,7 @@ func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
 	require.True(t, reset, "explicit reset should still force full repaint")
 	full := outputStateFrame(ac.output, []byte("explicit full repaint"), reset, 0)
 	ac.sendMu.Unlock()
-	fullOut, err := wire.UnmarshalOutput(full.Payload)
-	require.NoError(t, err)
+	fullOut := unmarshalTestOutput(t, full.Payload)
 	require.Equal(t, uint64(0), fullOut.Base)
 	require.Equal(t, uint64(7), fullOut.New)
 }
@@ -1186,20 +1183,18 @@ func TestResumeRebasesFullOutputWindowBeforeFirstPaint(t *testing.T) {
 	require.Same(t, ac, resumedAC)
 	d.paint(resumedSess, resumedAC, true, nil)
 
-	sends := testFramesOfType(newTr.Sends(), wire.MsgOutput)
+	sends := testFramesOfType(newTr.Sends(), "Output")
 	require.Len(t, sends, 1)
-	first, err := wire.UnmarshalOutput(sends[0].Payload)
-	require.NoError(t, err)
+	first := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, first.Base)
 	require.Equal(t, uint64(1), first.New)
 	resumedAC.ackOutputState(first.Epoch, first.New)
 
 	resumedSess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(resumedSess, resumedAC, false, nil)
-	sends = testFramesOfType(newTr.Sends(), wire.MsgOutput)
+	sends = testFramesOfType(newTr.Sends(), "Output")
 	require.Len(t, sends, 2)
-	second, err := wire.UnmarshalOutput(sends[1].Payload)
-	require.NoError(t, err)
+	second := unmarshalTestOutput(t, sends[1].Payload)
 	require.Equal(t, first.New, second.Base)
 }
 
@@ -1246,10 +1241,9 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.True(t, resumedSess.renderCoordinator().markAttachmentReady(resumedSess.renderCoordinator().attachmentLease(resumedAC)))
 	d.firstPaint(resumedSess, resumedAC)
 
-	sends := testFramesOfType(newTransport.Sends(), wire.MsgOutput)
+	sends := testFramesOfType(newTransport.Sends(), "Output")
 	require.Len(t, sends, 1)
-	output, err := wire.UnmarshalOutput(sends[0].Payload)
-	require.NoError(t, err)
+	output := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, output.Base, "resume must start with a complete frame")
 	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
 	terminal.Write(output.Data)
@@ -1544,10 +1538,8 @@ func TestRawTerminalSideEffectsAreOutputStateNeutral(t *testing.T) {
 
 	sends := tr.Sends()
 	require.Len(t, sends, 2)
-	first, err := wire.UnmarshalOutput(sends[0].Payload)
-	require.NoError(t, err)
-	second, err := wire.UnmarshalOutput(sends[1].Payload)
-	require.NoError(t, err)
+	first := unmarshalTestOutput(t, sends[0].Payload)
+	second := unmarshalTestOutput(t, sends[1].Payload)
 	require.Zero(t, first.Base)
 	require.Zero(t, first.New)
 	require.Zero(t, second.Base)

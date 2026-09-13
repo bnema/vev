@@ -63,6 +63,22 @@ func TestImportBoundaries(t *testing.T) {
 	}
 }
 
+// externalDependencyOwners confines technology imports to their owning
+// layers. Use cases never touch protobuf runtime APIs, generated wire
+// envelopes, QUIC, stream framing, or concrete adapters; the wire package
+// never touches QUIC either (carriage lives in adapters).
+var externalDependencyOwners = map[string][]packageLayer{
+	"google.golang.org/protobuf/": {layerAdapter, layerApp, layerWire, layerTestSupport, layerScript},
+	"github.com/quic-go/quic-go":  {layerAdapter, layerApp},
+}
+
+func TestExternalDependencyBoundaries(t *testing.T) {
+	violations := inspectExternalDependencies(t)
+	if len(violations) != 0 {
+		t.Fatalf("invalid external dependencies:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
 func TestImportBoundaryNegativeFixtures(t *testing.T) {
 	tests := []struct {
 		name, source, target string
@@ -230,4 +246,67 @@ func importPathForFile(path string) string {
 		return modulePath
 	}
 	return modulePath + "/" + strings.TrimPrefix(dir, "./")
+}
+
+func inspectExternalDependencies(t *testing.T) []string {
+	t.Helper()
+	var violations []string
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".git" || name == ".worktrees" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		source := importPathForFile(path)
+		sourceLayer, err := classifyPackage(source)
+		if err != nil {
+			violations = append(violations, path+": "+err.Error())
+			return nil
+		}
+		// Test files may use any external dependency except inside pkg,
+		// mirroring the internal test-import policy.
+		if strings.HasSuffix(path, "_test.go") && sourceLayer != layerPkg {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		for _, spec := range file.Imports {
+			target, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				continue
+			}
+			for prefix, owners := range externalDependencyOwners {
+				if !strings.HasPrefix(target, prefix) {
+					continue
+				}
+				allowed := false
+				for _, owner := range owners {
+					if sourceLayer == owner {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					violations = append(violations, fmt.Sprintf("%s: %s may not import %s", path, source, target))
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking repository: %v", err)
+	}
+	sort.Strings(violations)
+	return violations
 }

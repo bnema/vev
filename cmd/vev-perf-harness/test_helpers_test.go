@@ -21,15 +21,6 @@ func (c *fakeClock) Sleep(d time.Duration) {
 	c.tick += d.Nanoseconds()
 }
 
-type fakeUDPNetem struct {
-	port   int
-	closed bool
-}
-
-func (n *fakeUDPNetem) Port() int { return n.port }
-
-func (n *fakeUDPNetem) Close() error { n.closed = true; return nil }
-
 type fakeProcess struct {
 	fail       bool
 	measureErr error

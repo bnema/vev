@@ -16,63 +16,35 @@ import (
 )
 
 func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
-	fixtures := []struct {
-		name string
-		tr   transport
-		rtt  time.Duration
-		loss int
-	}{
-		{"baseline", transport{ID: "udp_baseline", Kind: "udp"}, 0, 0},
-		{"25ms", transport{ID: "udp_25ms", Kind: "udp", RTTMS: 25}, 25 * time.Millisecond, 0},
-		{"100ms", transport{ID: "udp_100ms", Kind: "udp", RTTMS: 100}, 100 * time.Millisecond, 0},
-		{"loss0", transport{ID: "udp_loss_0pct", Kind: "udp"}, 0, 0},
-		{"loss1", transport{ID: "udp_loss_1pct", Kind: "udp", LossPercent: 1}, 0, 1},
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range fixtures {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.Chmod(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			var configs []udpNetemConfig
-			netem := &fakeUDPNetem{port: 45678}
-			l := &cliLauncher{bin: "/bin/true", netemFactory: func(c udpNetemConfig) (udpNetem, error) {
-				configs = append(configs, c)
-				return netem, nil
-			}}
-			m := processMapping{ProcessID: "udp-peer", TracePath: filepath.Join(dir, "udp.jsonl"), Role: "udp_peer"}
-			if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			p, err := l.preparePeer(m, roleCommand{Args: []string{"_udp-proxy"}, Transport: tc.tr})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(configs) != 1 || configs[0].RTT != tc.rtt || configs[0].LossPercent != tc.loss || configs[0].TargetPath != filepath.Join(dir, "udp-peer.target") {
-				t.Fatalf("fixture did not reach netem seam: %+v", configs)
-			}
-			shim, err := os.ReadFile(filepath.Join(dir, "ssh"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			text := string(shim)
-			for _, want := range []string{"_udp-proxy", m.TracePath, m.ProcessID, "udp-peer.target", "VEV-UDP %s %s\\n' 45678", "udp-peer.pid"} {
-				if !strings.Contains(text, want) {
-					t.Errorf("seam does not retain %q:\n%s", want, text)
-				}
-			}
-			if strings.Contains(text, "VEV_PERF_UDP_") {
-				t.Fatalf("ignored vev UDP environment was used instead of netem: %s", text)
-			}
-			// A nonexistent pid is already-cleaned-up; Close must still close the
-			// harness-owned emulator.
-			if err := p.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if !netem.closed {
-				t.Fatal("harness netem was not cleaned up")
-			}
-		})
+	l := &cliLauncher{bin: "/bin/true"}
+	m := processMapping{ProcessID: "ssh-stdio-peer", TracePath: filepath.Join(dir, "peer.jsonl"), Role: "ssh_stdio_peer"}
+	if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := l.preparePeer(m, roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim, err := os.ReadFile(filepath.Join(dir, "ssh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(shim)
+	for _, want := range []string{"_stdio", m.TracePath, m.ProcessID} {
+		if !strings.Contains(text, want) {
+			t.Errorf("seam does not retain %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "VEV_PERF_UDP_") {
+		t.Fatalf("ignored vev UDP environment was used instead of the _stdio seam: %s", text)
+	}
+	// Close must be a no-op for a peer with no owned background process.
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/palette"
 )
 
@@ -132,7 +132,7 @@ func TestPaletteRemoteCNSDestinationSurvivesStaleOrCheckingCatalog(t *testing.T)
 		// endpoint with the name bound.
 		token := beginRecentRoutePaletteEffect(t, d, sess, ac)
 		d.handleInputForAttachment(token, []byte("\x1b "))
-		awaitFrame(t, sends, wire.MsgOutput)
+		awaitFrame(t, sends, "Output")
 		d.handleInputForAttachment(token, []byte("CNS workremote"))
 		// Destination mode lists candidates without a selection until the
 		// user moves; Down selects the first-ranked row (the target).
@@ -160,9 +160,7 @@ func TestPaletteRemoteCNSDestinationSurvivesStaleOrCheckingCatalog(t *testing.T)
 		for {
 			select {
 			case frame := <-sends:
-				if frame.Type == wire.MsgAttachTarget {
-					target, err := wire.UnmarshalAttachTarget(frame.Payload)
-					require.NoError(t, err)
+				if target, ok := decodeServerMessage(t, frame).(protocol.AttachTarget); ok {
 					require.Equal(t, endpoint, target.Endpoint)
 					require.Equal(t, "workremote", target.Session)
 					return

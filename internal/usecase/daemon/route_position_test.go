@@ -8,7 +8,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestRouteAppliesPreferredTabPerAttachment(t *testing.T) {
@@ -96,11 +95,10 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 
 	var positions []protocol.RoutePosition
 	for _, frame := range tr.Sends() {
-		if frame.Type != wire.MsgRoutePosition {
+		position, ok := decodeServerMessage(t, frame).(protocol.RoutePosition)
+		if !ok {
 			continue
 		}
-		position, err := wire.UnmarshalRoutePosition(frame.Payload)
-		require.NoError(t, err)
 		positions = append(positions, position)
 	}
 	require.Equal(t, []protocol.RoutePosition{

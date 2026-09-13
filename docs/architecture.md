@@ -7,14 +7,29 @@ vev uses a hexagonal core with typed session messages at the client and daemon b
 - `internal/domain`: pure shared values and invariants. `domain/terminalcap` owns terminal capability values and environment detection policy.
 - `internal/protocol`: typed, transport-neutral client/daemon messages, protocol version, semantic validation, and handshake policy.
 - `internal/protocol/catalogue`: independently versioned remote discovery JSON schema and bounded validation.
-- `internal/protocol/wire`: message IDs, raw frames, strict codecs, compression, encoded limits, and raw `Transport`, `Dialer`, and `Listener` contracts.
+- `internal/protocol/wire`: Protobuf wire contract. Sources of truth are
+  `schema/*.proto` (generated `*.pb.go` is never edited); `scan.go` owns
+  strict protowire inspection, `preamble.go` owns limits/magic/epoch, and
+  `transport.go` owns raw `Transport`, `Dialer`, and `Listener` contracts
+  carrying `Envelope{Payload}` (one complete serialized directional
+  envelope, no type byte).
 - `internal/ports`: application-facing interfaces and the values required by those interfaces. It contains no codecs, raw frames, environment policy, or worker implementations.
 - `internal/usecase`: client, daemon, and supporting application behavior. Production use cases may consume semantic protocol packages but never `protocol/wire` or concrete adapters.
-- `internal/adapters/sessionwire`: translates between typed session connections and raw wire transports, including direction checks and decode-failure classification.
+- `internal/adapters/sessionwire`: translates between typed session
+  connections and raw wire transports: directional `oneof` envelope
+  wrapping/unwrapping, the staged preamble state machine
+  (PreambleRequest first, PreambleResponse acceptance, exact version,
+  negotiated ceilings, one absolute deadline), direction checks, and
+  decode-failure classification.
+- `internal/adapters/quic`: one-stream QUIC carriage (TLS 1.3, epoch ALPN,
+  exact SHA-256 pin, single bidirectional stream, bounded admission) plus
+  the short-lived SSH bootstrap (ephemeral certificate, 32-byte token,
+  nonce, ≤4 KiB readiness, ≤15 s expiry, atomic one-time consumption).
+  QUIC library types never leave the package.
 - `internal/adapters/uidriver`: owns strict JSONL decoding, response serialization, bounded controller queues, private Unix sockets, peer credentials, and the stdio bridge. It consumes `ports.UIService` and never creates an attachment.
 - `internal/adapters/webterm`: owns the authenticated loopback HTTP/WebSocket frontend, browser event encoding, VT-backed terminal and transactional HTML output. It implements `ports.Terminal`; application composition supplies the ordinary client runner.
 - `internal/adapters/uiterm`: owns the immutable VT mirror/snapshot and deterministic headless terminal. The concrete terminal writer (`adapters/term`) taps successful writes and flushes into this sink only when observation is enabled.
-- `internal/adapters`: IPC, UDP, SSH stdio, PTY, terminal, VT-backed UI terminal/observation, JSONL UI-driver sockets, persistence-facing, and observability implementations.
+- `internal/adapters`: IPC, QUIC, SSH stdio, PTY, terminal, VT-backed UI terminal/observation, JSONL UI-driver sockets, persistence-facing, and observability implementations. `streamframe` owns the shared 4-byte big-endian length framing of one complete Protobuf envelope used by every stream carriage.
 - `internal/app`: CLI parsing and composition. It selects local or remote carriage, wraps raw dialers with `sessionwire`, injects typed ports into use cases, and owns explicit UI-driver endpoint launch configuration.
 - `pkg`: reusable packages that never import `internal`.
 
@@ -70,17 +85,20 @@ Remote discovery has two owners with separated writers. The daemon composes its 
 client or daemon use case
   ↕ ports.ClientConnection / ports.ServerConnection
 adapters/sessionwire
-  ↕ protocol/wire.Transport carrying wire.Frame
-IPC, UDP, or SSH stdio adapter
+  ↕ protocol/wire.Transport carrying wire.Envelope (Protobuf)
+IPC, QUIC, or SSH stdio adapter
 ```
 
-Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values. `sessionwire` alone maps those values to message IDs and payload codecs. Blind proxies may forward raw frames, and the UDP adapter may inspect bounded frame classification for QoS, but neither path exposes bytes to a use case.
+Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values. `sessionwire` alone maps those values to directional `oneof` envelopes. Blind proxies may forward raw envelopes, but no proxy path exposes bytes to a use case.
 
 ## Adding code
 
 - Add application behavior to a use case and define any cross-layer interface in `internal/ports`.
 - Add transport-neutral session meaning to `internal/protocol`.
 - Add remote catalogue schema fields and validation to `internal/protocol/catalogue`.
-- Add message IDs, binary layouts, strict decoding, compression, or raw carriage contracts to `internal/protocol/wire`.
+- Add Protobuf message variants, envelope fields, or preamble members to
+  `internal/protocol/wire/schema/*.proto`, regenerate with
+  `go tool buf generate`, and handle the new variant in `sessionwire`.
+  Never edit generated `*.pb.go`; never add manual IDs or dispatch tables.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `48`, including the client-picker interaction and its preview pair).
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `51`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.

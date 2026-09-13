@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -50,28 +51,29 @@ func (d acceptanceRemoteDialer) Dial(context.Context) (wire.Transport, error) {
 	return clientTransport, nil
 }
 
-func serveAcceptanceRemote(tr wire.Transport, target string, handoff protocol.AttachTarget, outputs chan<- string) {
+func serveAcceptanceRemote(raw wire.Transport, target string, handoff protocol.AttachTarget, outputs chan<- string) {
+	tr := sessionwire.NewServerConnection(raw)
 	defer func() { _ = tr.Close() }()
 	welcomed := false
 	for {
-		frame, err := tr.Recv()
+		message, err := tr.ReceiveClient()
 		if err != nil {
 			return
 		}
 		if !welcomed {
-			if frame.Type != wire.MsgHello {
+			if _, ok := message.(protocol.Hello); !ok {
 				continue
 			}
-			if err := tr.Send(wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: target})}); err != nil {
+			if err := tr.SendServer(protocol.Welcome{SessionID: target}); err != nil {
 				return
 			}
 			welcomed = true
 			continue
 		}
 		if handoff.Endpoint != "" {
-			_ = tr.Send(wire.Frame{Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(handoff)})
+			_ = tr.SendServer(handoff)
 			for {
-				if _, err := tr.Recv(); err != nil {
+				if _, err := tr.ReceiveClient(); err != nil {
 					return
 				}
 			}
@@ -80,23 +82,19 @@ func serveAcceptanceRemote(tr wire.Transport, target string, handoff protocol.At
 		if outputs != nil {
 			outputs <- string(data)
 		}
-		payload, err := wire.MarshalOutput(protocol.Output{
+		if err := tr.SendServer(protocol.Output{
 			Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Data: data,
 			Context: &protocol.ViewContext{
 				Publication: 1,
 				Route:       protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "remote-fixture"}},
 				TabID:       "tab-1", FocusedPaneID: "pane-1",
 			},
-		})
-		if err != nil {
+		}); err != nil {
 			return
 		}
-		if err := tr.Send(wire.Frame{Type: wire.MsgOutput, Payload: payload}); err != nil {
-			return
-		}
-		_ = tr.Send(wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})})
+		_ = tr.SendServer(protocol.Detached{Reason: protocol.ReasonDetach})
 		for {
-			if _, err := tr.Recv(); err != nil {
+			if _, err := tr.ReceiveClient(); err != nil {
 				return
 			}
 		}
@@ -148,23 +146,23 @@ func TestAcceptanceRemoteDirectAndPickerUseOnlyRemoteTransports(t *testing.T) {
 		},
 	}
 
-	wireTransport, err := (acceptanceRemoteDialer{
+	probeRaw, err := (acceptanceRemoteDialer{
 		target:  "picker-wire.example",
 		handoff: protocol.AttachTarget{Endpoint: "picked.example", Session: "picked", Intent: protocol.IntentAttach},
 	}).Dial(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, wireTransport.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(protocol.Hello{
+	wireTransport := sessionwire.NewClientConnection(probeRaw)
+	require.NoError(t, wireTransport.SendClient(protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24},
-	})}))
-	welcome, err := wireTransport.Recv()
+	}))
+	welcome, err := wireTransport.ReceiveServer()
 	require.NoError(t, err)
-	require.Equal(t, wire.MsgWelcome, welcome.Type)
-	require.NoError(t, wireTransport.Send(wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(protocol.Theme{})}))
-	attachTarget, err := wireTransport.Recv()
+	require.IsType(t, protocol.Welcome{}, welcome)
+	require.NoError(t, wireTransport.SendClient(protocol.Theme{}))
+	attachTargetMessage, err := wireTransport.ReceiveServer()
 	require.NoError(t, err)
-	target, err := wire.UnmarshalAttachTarget(attachTarget.Payload)
-	require.NoError(t, err)
-	require.Equal(t, wire.MsgAttachTarget, attachTarget.Type)
+	target, ok := attachTargetMessage.(protocol.AttachTarget)
+	require.True(t, ok, "expected attach target, got %T", attachTargetMessage)
 	require.Equal(t, "picked.example", target.Endpoint)
 	require.NoError(t, wireTransport.Close())
 

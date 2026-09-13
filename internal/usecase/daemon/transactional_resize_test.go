@@ -12,7 +12,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
@@ -190,9 +189,8 @@ func TestProcessPTYDataRetainsCallbacksDuringResizeReplay(t *testing.T) {
 	// normal asynchronous client path, proving replay uses processPTYData.
 	var clipboardOutput string
 	for {
-		frame := awaitFrame(t, sends, wire.MsgOutput)
-		out, err := wire.UnmarshalOutput(frame.Payload)
-		require.NoError(t, err)
+		frame := awaitFrame(t, sends, "Output")
+		out := unmarshalTestOutput(t, frame.Payload)
 		clipboardOutput = string(out.Data)
 		if strings.Contains(clipboardOutput, "\x1b]52;c;YQ==\a") {
 			break
@@ -840,9 +838,8 @@ func TestTransactionalResizeObsoleteTimerCallbacksCommitOnlyLatestEpoch(t *testi
 	// The resize deadline is the only debounce: commit fires its sticky reset
 	// through S2 immediately (subject to ACK/sync gates).
 	frame := <-frames
-	require.Equal(t, wire.MsgOutput, frame.Type, "the committed epoch emits a full frame")
-	output, err := wire.UnmarshalOutput(frame.Payload)
-	require.NoError(t, err)
+	require.Equal(t, "Output", envelopeMessageName(t, frame.Payload), "the committed epoch emits a full frame")
+	output := unmarshalTestOutput(t, frame.Payload)
 	require.Zero(t, output.Base, "the accepted resize frame must reset the renderer state")
 	select {
 	case extra := <-frames:

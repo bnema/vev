@@ -1,0 +1,17 @@
+version: v2
+modules:
+  - path: internal/protocol/wire/schema
+lint:
+  use:
+    - STANDARD
+  except:
+    # Schema sources live flat in schema/ by plan; the Go package is
+    # fixed by go_package and buf.gen.yaml instead of directory layout.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE
+  except:
+    # One approved clean break at the migration baseline: the Protobuf
+    # schema epoch starts here and replaces the custom MsgType codecs.
+    - EXTENSION_NO_DELETE

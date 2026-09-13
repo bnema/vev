@@ -59,18 +59,15 @@ func closeLaunchedRoles(processes []launchedRole) error {
 // cliLauncher is deliberately limited to executing the supplied public vev
 // binary. Scenario orchestration never reaches into an in-process daemon.
 type cliLauncher struct {
-	bin          string
-	netemFactory udpNetemFactory
-	mu           sync.Mutex
-	peers        map[string]peerRoute
-	runtimes     map[string]string
+	bin      string
+	mu       sync.Mutex
+	peers    map[string]peerRoute
+	runtimes map[string]string
 }
 
 type peerRoute struct {
 	mapping processMapping
 	command roleCommand
-	pidPath string
-	netem   udpNetem
 }
 
 type preparedPeer struct {
@@ -83,36 +80,14 @@ func (p preparedPeer) Warmup([]byte) error { return nil }
 func (p preparedPeer) Measure([]byte, func() error, func() error) error { return nil }
 
 func (p preparedPeer) Close() error {
-	var errs []error
-	if p.route.pidPath != "" {
-		b, err := os.ReadFile(p.route.pidPath)
-		if err == nil {
-			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
-			if parseErr != nil || pid <= 0 {
-				errs = append(errs, fmt.Errorf("invalid owned peer pid: %q", b))
-			} else if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-				errs = append(errs, killErr)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, err)
-		}
-	}
-	if p.route.netem != nil {
-		if err := p.route.netem.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
 	if p.cleanupRuntime != nil {
-		if err := p.cleanupRuntime(); err != nil {
-			errs = append(errs, err)
-		}
+		return p.cleanupRuntime()
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 type terminalOutput interface {
 	io.Writer
-	Sync() error
 	Close() error
 }
 
@@ -158,7 +133,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	} else if info.IsDir() {
 		return nil, fmt.Errorf("public CLI binary %q is a directory", bin)
 	}
-	if m.Role == "ssh_stdio_peer" || m.Role == "udp_peer" {
+	if m.Role == "ssh_stdio_peer" {
 		return l.preparePeer(m, role)
 	}
 	cmd := exec.Command(bin, role.Args...)
@@ -301,7 +276,7 @@ func (l *cliLauncher) releaseRuntime(runDir string) error {
 
 // preparePeer installs a per-run ssh command seam. The ordinary public client
 // still executes its documented remote attach command; its ssh child invokes
-// only the parsed public _stdio or _udp-proxy entrypoint. This makes the peer
+// only the parsed public _stdio entrypoint. This makes the peer
 // carrying client traffic the declared, exclusively traced role rather than a
 // separately launched but unused process.
 func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -332,70 +307,25 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, fail(err)
 	}
-	if len(role.Args) != 1 || (role.Args[0] != "_stdio" && role.Args[0] != "_udp-proxy") {
+	if len(role.Args) != 1 || role.Args[0] != "_stdio" {
 		return nil, fail(fmt.Errorf("unsupported public peer command %q", role.Args))
 	}
 	route := peerRoute{mapping: m, command: role}
-	closeNetem := func(err error) error {
-		if route.netem != nil {
-			err = errors.Join(err, route.netem.Close())
-		}
-		return fail(err)
-	}
-	if m.Role == "udp_peer" {
-		route.pidPath = filepath.Join(runDir, "udp-peer.pid")
-		factory := l.netemFactory
-		if factory == nil {
-			factory = newUDPNetem
-		}
-		netem, err := factory(udpNetemConfig{
-			RTT:         time.Duration(role.Transport.RTTMS) * time.Millisecond,
-			LossPercent: role.Transport.LossPercent,
-			TargetPath:  filepath.Join(runDir, "udp-peer.target"),
-		})
-		if err != nil {
-			return nil, fail(fmt.Errorf("start harness UDP netem: %w", err))
-		}
-		route.netem = netem
-	}
 	shim := filepath.Join(runDir, "ssh")
-	ready := filepath.Join(runDir, "udp-peer.ready")
-	target := filepath.Join(runDir, "udp-peer.target")
-	netemPort := 0
-	if route.netem != nil {
-		netemPort = route.netem.Port()
-	}
-	stderr := filepath.Join(runDir, "udp-peer.stderr")
-	// The bootstrap protocol requires the SSH command to exit after forwarding
-	// the readiness line. The long-lived proxy is owned by pidPath and receives
-	// the role's unique trace identity, never the bootstrap/client identity.
+	// The SSH command seam forwards the public _stdio entrypoint with the
+	// peer's unique trace identity, so the peer carrying client traffic is the
+	// declared, exclusively traced role.
 	body := fmt.Sprintf(`#!/bin/sh
 set -eu
 case "$*" in
   *"_stdio"*)
-    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[11]q VEV_PERF_RUN=%[12]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio
-    ;;
-  *"_udp-bootstrap"*)
-    rm -f %[6]q %[7]q %[8]q
-    env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[11]q VEV_PERF_RUN=%[12]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _udp-proxy >%[6]q 2>%[7]q &
-    peer=$!
-    printf '%%s\n' "$peer" > %[10]q
-    i=0
-    while [ ! -s %[6]q ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
-    test -s %[6]q
-    line=$(head -n 1 %[6]q)
-    printf '%%s\n' "$line" > %[8]q
-    set -- $line
-    test "$1" = VEV-UDP
-    test -n "$3"
-    printf 'VEV-UDP %%s %%s\n' %[9]d "$3"
-    exit 0
+    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[6]q VEV_PERF_RUN=%[7]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio
     ;;
   *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
 esac
-`, m.TracePath, m.ProcessID, runtimeDir, filepath.Join(runDir, "state"), l.bin, ready, stderr, target, netemPort, route.pidPath, m.Scenario, m.Run)
+`, m.TracePath, m.ProcessID, runtimeDir, filepath.Join(runDir, "state"), l.bin, m.Scenario, m.Run)
 	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
-		return nil, closeNetem(err)
+		return nil, fail(err)
 	}
 	l.mu.Lock()
 	if l.peers == nil {
@@ -403,7 +333,7 @@ esac
 	}
 	if _, exists := l.peers[runDir]; exists {
 		l.mu.Unlock()
-		return nil, closeNetem(fmt.Errorf("duplicate transport peer for %s", runDir))
+		return nil, fail(fmt.Errorf("duplicate transport peer for %s", runDir))
 	}
 	l.peers[runDir] = route
 	l.mu.Unlock()
@@ -418,8 +348,6 @@ func remoteMode(t transport) (string, error) {
 	switch t.Kind {
 	case "ssh_stdio":
 		return "stdio", nil
-	case "udp":
-		return "udp", nil
 	default:
 		return "", fmt.Errorf("transport %q cannot route through a remote peer", t.ID)
 	}
@@ -527,10 +455,11 @@ func (p *cliProcess) Warmup(input []byte) error {
 	return p.waitForTerminalMarker(inputMarker(input), input)
 }
 
-// Measure records a boundary only after the harness-owned terminal output file
-// has accepted application output and Sync has reported a successful flush.
-// The marker is injected through the real client PTY, never fabricated by the
-// harness. PTY local echo is discarded and cannot satisfy this boundary.
+// Measure records a boundary after copyTerminal has read the marker from the
+// real client PTY and the harness-owned output writer has accepted that chunk.
+// This models successful terminal-byte delivery without adding filesystem
+// durability latency. The marker is never fabricated by the harness, and PTY
+// local echo is discarded so it cannot satisfy the boundary.
 func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error {
 	if p.pty == nil {
 		return errors.New("measured process has no terminal PTY")
@@ -544,9 +473,6 @@ func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error
 	}
 	if err := p.waitForTerminalMarker(inputMarker(input), input); err != nil {
 		return err
-	}
-	if err := p.output.Sync(); err != nil {
-		return fmt.Errorf("flush terminal output: %w", err)
 	}
 	return flushed()
 }
@@ -565,9 +491,6 @@ func (p *cliProcess) waitForTerminalReady() error {
 			}
 			if len(chunk) == 0 {
 				continue
-			}
-			if err := p.output.Sync(); err != nil {
-				return fmt.Errorf("flush terminal readiness output: %w", err)
 			}
 			return nil
 		case err := <-p.waitErr:

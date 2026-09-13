@@ -1,9 +1,10 @@
 # Remote resilience
 
-Remote attachments connect directly to the selected vev daemon. UDP is the
-normal carriage: SSH bootstraps an authenticated endpoint, then the attachment
-carries the vev protocol over UDP. Set `VEV_REMOTE_TRANSPORT=stdio` to use an
-SSH-only carriage explicitly when UDP is unavailable. vev must be installed on
+Remote attachments connect directly to the selected vev daemon. QUIC is the
+normal carriage: SSH bootstraps an authenticated endpoint (ephemeral
+certificate, token, SHA-256 pin), then the attachment carries the vev
+protocol over one QUIC stream. Set `VEV_REMOTE_TRANSPORT=stdio` to use an
+SSH-only carriage explicitly when QUIC is unavailable. vev must be installed on
 the remote host.
 
 The session remains shared across all attachments. It owns PTYs, VT state, tabs,
@@ -57,10 +58,10 @@ cursor while holding raw input. The daemon either commits the fenced attachment
 transition and publishes the committed identity before the rebased full paint,
 or sends a typed pre-commit rejection and leaves the source attachment usable.
 No hostname, label, DNS result, or SSH alias authorizes reuse. Stopped and
-cross-origin targets outside the hybrid UDP flow retain direct close-and-dial
+cross-origin targets outside the hybrid QUIC flow retain direct close-and-dial
 handoff.
 
-A UDP attachment opening the hybrid home picker keeps its authenticated remote
+A QUIC attachment opening the hybrid home picker keeps its authenticated remote
 transport parked while a transient local connection renders the picker. The
 remote daemon suspends that attachment's rendered output only after a
 lease-bound prepare handshake, so the picker has sole terminal ownership and
@@ -78,7 +79,7 @@ threshold, the client overlays an animated switching or starting toast until
 the destination's authoritative output is flushed.
 
 Opening the home picker does not change the client's active route or recent
-session order, on either UDP or SSH stdio. Its status bar keeps the source
+session order, on either QUIC or SSH stdio. Its status bar keeps the source
 session label (for example, `misc@igor`), not the local session hosting the
 picker. Local backing-session tabs and bar-script output are hidden while
 this temporary attachment renders the picker. Selecting a destination commits
@@ -128,13 +129,16 @@ picker selection changes.
   shared geometry; if the winning attachment detaches, the most recently
   claimed remaining valid attachment becomes authoritative.
 
-## UDP operation
+## QUIC operation
 
-- The remote host selects a UDP port in `61000-61023` by default. Set
-  `VEV_UDP_PORT_RANGE` to a range, one port, or `0` for an ephemeral port.
-- The UDP carriage authenticates and retransmits protocol frames, preserves
-  frame order, and reports bounded link-health state without logging payloads,
-  addresses, keys, or identities.
+- The remote host runs one ephemeral QUIC server per bootstrap: fresh
+  certificate, 32-byte token, nonce, ≤4 KiB readiness line, ≤15 s expiry,
+  and atomic one-time token consumption. The client pins the exact SHA-256
+  certificate fingerprint and answers with one bounded auth record.
+- The QUIC carriage runs over UDP with TLS 1.3, the epoch ALPN, and
+  QUIC-native reliability, ordering, and congestion control; no custom
+  retransmission layer exists. Link health reports transport connectivity
+  without logging payloads, addresses, keys, or identities.
 - Large full output snapshots use bounded zlib compression when it reduces the
   wire payload. Incremental output and non-beneficial snapshots retain their
   canonical encoding. The protocol validates the compression kind, declared
@@ -145,10 +149,8 @@ picker selection changes.
   exists, the client opens a fresh exact attachment instead. The remote session
   and its PTYs remain in place while the attachment is offline.
 
-The raw UDP AEAD key is held only in memory during bootstrap and transport
-setup. It is not written to durable state. Key buffers are cleared on the
-reachable handoff paths on a best-effort basis; cipher implementations and
-other I/O owners may retain internal copies for their lifetime.
+The bootstrap token and ephemeral key live only in memory. They are not
+written to durable state.
 
 ## Connection states
 
@@ -167,12 +169,12 @@ written into the PTY's output stream.
 ## Diagnostics and checks
 
 At debug level, transport-health logs contain only state, elapsed progress ages,
-and bounded counters. `scripts/debug-remote-attach.sh --udp-health user@host`
-collects redacted health lines and Linux `ss -u -m` socket-memory counters.
+and bounded counters. `scripts/debug-remote-attach.sh user@host`
+collects redacted health lines.
 
 Useful checks are:
 
-- block and unblock the configured UDP port range;
+- block and unblock UDP traffic;
 - move between networks or change VPN state;
 - suspend and resume the attachment machine;
 - reconnect to the same named session;

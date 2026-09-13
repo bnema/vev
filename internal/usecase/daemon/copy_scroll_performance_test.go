@@ -4,8 +4,9 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +25,17 @@ func TestCopyCompositionDoesNotAllocateIntermediateFrame(t *testing.T) {
 	assertRenderByteBudget(t, func() {
 		composeCopyClientFrame(mode, target, frame, styles)
 	}, 32<<10)
+}
+
+// unmarshalBenchmarkOutput decodes one captured output envelope under a
+// benchmark harness, mirroring unmarshalTestOutput.
+func unmarshalBenchmarkOutput(tb testing.TB, payload []byte) protocol.Output {
+	tb.Helper()
+	message, err := sessionwire.DecodeServerEnvelope(payload)
+	require.NoError(tb, err)
+	output, ok := message.(protocol.Output)
+	require.True(tb, ok, "expected Output, got %T", message)
+	return output
 }
 
 // Each operation renders two wheel movements, up three rows then down three.
@@ -53,8 +65,7 @@ func BenchmarkDaemonHistoryCopyScroll(b *testing.B) {
 			}
 			metrics := f.output.metrics()
 			b.ReportMetric(float64(metrics.payloadBytes)/float64(2*b.N), "wire-B/wheel")
-			output, err := wire.UnmarshalOutput(f.output.lastPayload())
-			require.NoError(b, err)
+			output := unmarshalBenchmarkOutput(b, f.output.lastPayload())
 			b.ReportMetric(float64(len(output.Data)), "last-ANSI-B/wheel")
 		})
 	}

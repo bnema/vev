@@ -8,17 +8,18 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const (
-	remotePreviewCommandTimeout = 5 * time.Second
-	remotePreviewWaitDelay      = 500 * time.Millisecond
-	remotePreviewMaxDiagnostic  = 4 << 10
+	remotePreviewCommandTimeout    = 5 * time.Second
+	remotePreviewSSHConnectTimeout = 5 * time.Second
+	remotePreviewWaitDelay         = 500 * time.Millisecond
+	remotePreviewMaxDiagnostic     = 4 << 10
 )
 
 var (
@@ -43,8 +44,8 @@ func NewPreviewClient() ports.RemotePreviewClient {
 
 func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
 	request := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: width, Height: height}
-	payload := wire.MarshalRemotePreviewRequest(request)
-	if payload == nil {
+	payload, err := sessionwire.EncodeClientMessage(request)
+	if err != nil {
 		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreviewRequest
 	}
 	runCtx, cancel := context.WithTimeout(ctx, c.previewTimeout())
@@ -54,7 +55,11 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 		command = exec.CommandContext
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	spec := sshstdio.BuildCommandForRemoteCommand(target.Endpoint, "vev", "_remote-preview", encoded)
+	// Preview is background observation, not attach: it must never grab a TTY
+	// or mutate the user's known-hosts trust state, so it uses the same
+	// non-interactive argv builder as catalogue checks (batch mode, strict
+	// host-key checking, bounded connect, no TTY, refused host-key updates).
+	spec := sshstdio.BuildCommandForObservation(target.Endpoint, remotePreviewSSHConnectTimeout, "vev", "_remote-preview", encoded)
 	cmd := command(runCtx, spec.Path, spec.Args...)
 	stdout := boundedBuffer{limit: protocol.RemotePreviewMaxBytes}
 	stderr := boundedBuffer{limit: remotePreviewMaxDiagnostic}
@@ -79,9 +84,13 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 	if stdout.overflow || stderr.overflow {
 		return protocol.RemotePreview{}, errRemotePreviewTooLarge
 	}
-	preview, err := wire.UnmarshalRemotePreview(stdout.Bytes())
+	previewMessage, err := sessionwire.DecodeServerEnvelope(stdout.Bytes())
 	if err != nil {
 		return protocol.RemotePreview{}, err
+	}
+	preview, ok := previewMessage.(protocol.RemotePreview)
+	if !ok {
+		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
 	}
 	if preview.Status != protocol.RemotePreviewOK {
 		return protocol.RemotePreview{}, fmt.Errorf("remote preview unavailable: status %d", preview.Status)

@@ -1443,13 +1443,13 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		frameInput([]byte("\x1b ")),
 		frameInput([]byte("CNT\r")),
 		frameInput([]byte("\x1b1")),
-		wire.Frame{Type: wire.MsgResize, Payload: mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 22, Rows: 6}})},
+		mustMarshalResize(protocol.Resize{Size: domain.Size{Cols: 22, Rows: 6}}),
 	)
 
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr) })
-	awaitFrame(t, sends, wire.MsgWelcome)
-	first := awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Welcome")
+	first := awaitFrame(t, sends, "Output")
 	require.Eventually(t, func() bool {
 		sessions := listSessions(t, d)
 		return len(sessions.Sessions) == 1 && sessions.Sessions[0].Tabs == 2
@@ -1464,9 +1464,8 @@ func TestStatusCoalescesCreateSwitchAndResize(t *testing.T) {
 		"timed out awaiting resized output frame",
 	)
 
-	for _, f := range []wire.Frame{first, resized} {
-		out, err := wire.UnmarshalOutput(f.Payload)
-		require.NoError(t, err)
+	for _, f := range []wire.Envelope{first, resized} {
+		out := unmarshalTestOutput(t, f.Payload)
 		require.Contains(t, string(out.Data), "work")
 		require.Contains(t, string(out.Data), ";7m", "active status tab should be inverse-highlighted")
 	}

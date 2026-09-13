@@ -14,14 +14,14 @@ import (
 const ctrlV = 0x16
 
 // maxClipboardImagePush caps the image the client will send in one
-// MsgImagePush, mirroring the daemon's independent cap. The 1 MiB cap fits
+// ImagePush, mirroring the daemon's independent cap. The 1 MiB cap fits
 // both sshstdio and the datagram transport's fragmented payload ceiling.
 const maxClipboardImagePush = 1 << 20 // 1 MiB
 
 // clipboardIntercept sits between the terminal's theme scanner and the paste
 // coalescer on a remote attach. It splits pass-through stdin bytes on Ctrl+V
 // (0x16): each occurrence triggers a clipboard image read, sent as one
-// MsgImagePush frame instead of the keystroke. Everything else — ordinary
+// ImagePush envelope instead of the keystroke. Everything else — ordinary
 // bytes, and any 0x16 that arrives while the coalescer is mid-paste (pasted
 // text may legitimately contain it) — is forwarded to next unchanged, so it
 // still gets the coalescer's marker-splitting treatment.

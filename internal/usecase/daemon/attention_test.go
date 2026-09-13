@@ -13,6 +13,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -166,7 +167,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 	trW := newMockServerConnection(t)
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
-	trW.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Frame) error {
+	trW.EXPECT().Send(mock.Anything).RunAndReturn(func(wire.Envelope) error {
 		<-block
 		return nil
 	}).Maybe()
@@ -250,7 +251,7 @@ func TestAckAttentionClearsOnlyPaintedVisibleTab(t *testing.T) {
 	// the full paint above just sent: no second frame should follow.
 	select {
 	case f := <-sends:
-		t.Fatalf("unexpected extra frame after ack: %v", f.Type)
+		t.Fatalf("unexpected extra frame after ack: %s", envelopeMessageName(t, f.Payload))
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -295,14 +296,14 @@ func TestSwitchTabClearsAttentionEndToEnd(t *testing.T) {
 	require.True(t, selectTestAttachmentTab(sess, 1))
 	d.paint(sess, ac, true, nil)
 	data := mustOutputData(t, sends)
-	position, err := wire.UnmarshalRoutePosition(awaitFrame(t, sends, wire.MsgRoutePosition).Payload)
-	require.NoError(t, err)
+	position, ok := decodeServerMessage(t, awaitFrame(t, sends, "RoutePosition")).(protocol.RoutePosition)
+	require.True(t, ok)
 	require.Equal(t, domain.TabStableID(sess.tabs[1].stableID), position.ActiveTabID)
 	// The tab transition publishes its position, but the deferred repaint has
 	// no additional terminal bytes.
 	select {
 	case f := <-sends:
-		t.Fatalf("unexpected extra frame after ack: %v", f.Type)
+		t.Fatalf("unexpected extra frame after ack: %s", envelopeMessageName(t, f.Payload))
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -358,7 +359,7 @@ func TestAnimationRepaintConfinedToBarRows(t *testing.T) {
 	d.repaintAttachedClients(sess)
 	select {
 	case f := <-sends:
-		t.Fatalf("unexpected frame on unchanged repaint: %v", f.Type)
+		t.Fatalf("unexpected frame on unchanged repaint: %s", envelopeMessageName(t, f.Payload))
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -490,7 +491,7 @@ func TestJumpAttentionNoopsWithNoBells(t *testing.T) {
 	require.Equal(t, 0, testAttachmentTabIndex(sess))
 	select {
 	case f := <-sends:
-		t.Fatalf("unexpected frame on no-op jump: %v", f.Type)
+		t.Fatalf("unexpected frame on no-op jump: %s", envelopeMessageName(t, f.Payload))
 	case <-time.After(20 * time.Millisecond):
 	}
 }

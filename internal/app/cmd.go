@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -171,10 +172,8 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return usagef("--self requires running inside a vev pane")
 	}
 
-	if _, err := wire.MarshalCommandRequest(request); errors.Is(err, wire.ErrTooManyCommandArgs) {
+	if len(request.Args) > 65535 {
 		return usagef("too many command arguments")
-	} else if err != nil {
-		return fmt.Errorf("encoding command: %w", err)
 	}
 
 	dial := deps.dial
@@ -191,28 +190,20 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 	const generation = uint64(1)
 	requestID, outcome := tracker.Publish(generation)
 	request.RequestID = requestID
-	payload, err := wire.MarshalCommandRequest(request)
-	if err != nil {
-		tracker.Remove(requestID, generation)
-		return fmt.Errorf("encoding command: %w", err)
-	}
-	if err := transport.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}); err != nil {
+	connection := sessionwire.NewClientConnection(transport)
+	if err := connection.SendClient(request); err != nil {
 		tracker.Remove(requestID, generation)
 		return &exitCoded{code: 3, err: fmt.Errorf("sending command: %w", err)}
 	}
 	go func() {
-		reply, recvErr := transport.Recv()
+		reply, recvErr := connection.ReceiveServer()
 		if recvErr != nil {
 			tracker.Fail(requestID, generation, fmt.Errorf("reading command reply: %w", recvErr))
 			return
 		}
-		if reply.Type != wire.MsgCommandResult {
-			tracker.Fail(requestID, generation, fmt.Errorf("unexpected command reply type %d", reply.Type))
-			return
-		}
-		result, decodeErr := wire.UnmarshalCommandResult(reply.Payload)
-		if decodeErr != nil {
-			tracker.Fail(requestID, generation, fmt.Errorf("decoding command reply: %w", decodeErr))
+		result, ok := reply.(protocol.CommandResult)
+		if !ok {
+			tracker.Fail(requestID, generation, fmt.Errorf("unexpected command reply %T", reply))
 			return
 		}
 		result.RequestID = requestID

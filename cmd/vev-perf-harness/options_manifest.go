@@ -157,7 +157,7 @@ func validateManifest(m manifest) error {
 		}
 		trans[t.ID] = true
 	}
-	for _, v := range []string{"local", "ssh_stdio", "udp_baseline", "udp_25ms", "udp_100ms", "udp_loss_0pct", "udp_loss_1pct"} {
+	for _, v := range []string{"local", "ssh_stdio"} {
 		if !trans[v] {
 			return fmt.Errorf("missing canonical transport %s", v)
 		}
@@ -212,14 +212,10 @@ func selectScenario(m manifest, id string) ([]scenario, error) {
 }
 
 func requiredRoles(transportID string) []string {
-	switch transportID {
-	case "local":
+	if transportID == "local" {
 		return []string{"daemon", "client"}
-	case "ssh_stdio":
-		return []string{"daemon", "client", "ssh_stdio_peer"}
-	default:
-		return []string{"daemon", "client", "udp_peer"}
 	}
+	return []string{"daemon", "client", "ssh_stdio_peer"}
 }
 
 func equalRoleSet(got, want []string) bool {
@@ -240,13 +236,8 @@ func equalRoleSet(got, want []string) bool {
 
 func validateTransportFixture(t transport) error {
 	want := map[string]transport{
-		"local":         {ID: "local", Kind: "local"},
-		"ssh_stdio":     {ID: "ssh_stdio", Kind: "ssh_stdio"},
-		"udp_baseline":  {ID: "udp_baseline", Kind: "udp"},
-		"udp_25ms":      {ID: "udp_25ms", Kind: "udp", RTTMS: 25},
-		"udp_100ms":     {ID: "udp_100ms", Kind: "udp", RTTMS: 100},
-		"udp_loss_0pct": {ID: "udp_loss_0pct", Kind: "udp", LossPercent: 0},
-		"udp_loss_1pct": {ID: "udp_loss_1pct", Kind: "udp", LossPercent: 1},
+		"local":     {ID: "local", Kind: "local"},
+		"ssh_stdio": {ID: "ssh_stdio", Kind: "ssh_stdio"},
 	}
 	w, ok := want[t.ID]
 	if !ok || t.Kind != w.Kind || t.RTTMS != w.RTTMS || t.LossPercent != w.LossPercent {

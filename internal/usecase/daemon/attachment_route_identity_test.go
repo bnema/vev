@@ -14,8 +14,8 @@ type committedIdentityErrorTransport struct {
 	closeTrackingTransport
 }
 
-func (t *committedIdentityErrorTransport) Send(frame wire.Frame) error {
-	if frame.Type == wire.MsgCommittedRouteIdentity {
+func (t *committedIdentityErrorTransport) Send(frame wire.Envelope) error {
+	if envelopeMessageName(nil, frame.Payload) == "CommittedRouteIdentity" {
 		return errors.New("committed identity send failed")
 	}
 	return t.closeTrackingTransport.Send(frame)
@@ -58,13 +58,11 @@ func TestAttachmentTransitionPublishesCommittedRouteIdentity(t *testing.T) {
 	var identity protocol.CommittedRouteIdentity
 	found := false
 	for _, frame := range transport.Sends() {
-		if frame.Type != wire.MsgCommittedRouteIdentity {
+		decoded, ok := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
+		if !ok {
 			continue
 		}
-		var decodeErr error
-		identity, decodeErr = wire.UnmarshalCommittedRouteIdentity(frame.Payload)
-		require.NoError(t, decodeErr)
-		found = true
+		identity, found = decoded, true
 	}
 	require.True(t, found, "attachment transitions must publish their committed route identity")
 	require.Equal(t, "target", identity.Target.SessionName)

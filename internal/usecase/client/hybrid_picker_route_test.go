@@ -27,12 +27,12 @@ import (
 // confirmation or endpoint dial.
 
 // hybridPickerTransport is a live wire.Transport the test drives frame by
-// frame. Recv yields queued frames in order and parks when the queue is
+// frame. Recv yields queued envelopes in order and parks when the queue is
 // empty, so the journey can react to what the client actually sent.
 type hybridPickerTransport struct {
 	mu        sync.Mutex
-	queue     []wire.Frame
-	sends     []wire.Frame
+	queue     []wire.Envelope
+	sends     []wire.Envelope
 	signal    chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
@@ -43,14 +43,14 @@ func newHybridPickerTransport() *hybridPickerTransport {
 	return &hybridPickerTransport{signal: make(chan struct{}, 1), done: make(chan struct{})}
 }
 
-func (t *hybridPickerTransport) Send(frame wire.Frame) error {
+func (t *hybridPickerTransport) Send(frame wire.Envelope) error {
 	t.mu.Lock()
 	t.sends = append(t.sends, frame)
 	t.mu.Unlock()
 	return nil
 }
 
-func (t *hybridPickerTransport) Recv() (wire.Frame, error) {
+func (t *hybridPickerTransport) Recv() (wire.Envelope, error) {
 	for {
 		t.mu.Lock()
 		if len(t.queue) > 0 {
@@ -63,7 +63,7 @@ func (t *hybridPickerTransport) Recv() (wire.Frame, error) {
 		select {
 		case <-t.signal:
 		case <-t.done:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 	}
 }
@@ -74,7 +74,7 @@ func (t *hybridPickerTransport) Close() error {
 	return nil
 }
 
-func (t *hybridPickerTransport) push(frame wire.Frame) {
+func (t *hybridPickerTransport) push(frame wire.Envelope) {
 	t.mu.Lock()
 	t.queue = append(t.queue, frame)
 	t.mu.Unlock()
@@ -84,20 +84,20 @@ func (t *hybridPickerTransport) push(frame wire.Frame) {
 	}
 }
 
-func (t *hybridPickerTransport) sent() []wire.Frame {
+func (t *hybridPickerTransport) sent() []wire.Envelope {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]wire.Frame(nil), t.sends...)
+	return append([]wire.Envelope(nil), t.sends...)
 }
 
-// awaitSend waits for one client frame of the requested type and returns its
-// payload.
-func (t *hybridPickerTransport) awaitSend(typ wire.MsgType) ([]byte, bool) {
+// awaitSend waits for one client message of the requested kind.
+func (t *hybridPickerTransport) awaitSend(tb *testing.T, name string) (protocol.ClientMessage, bool) {
+	tb.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, frame := range t.sent() {
-			if frame.Type == typ {
-				return frame.Payload, true
+			if clientMessageName(tb, frame) == name {
+				return decodeClientMessageForTest(tb, frame), true
 			}
 		}
 		time.Sleep(time.Millisecond)
@@ -105,9 +105,10 @@ func (t *hybridPickerTransport) awaitSend(typ wire.MsgType) ([]byte, bool) {
 	return nil, false
 }
 
-func (t *hybridPickerTransport) sentType(typ wire.MsgType) bool {
+func (t *hybridPickerTransport) sentType(tb *testing.T, name string) bool {
+	tb.Helper()
 	for _, frame := range t.sent() {
-		if frame.Type == typ {
+		if clientMessageName(tb, frame) == name {
 			return true
 		}
 	}
@@ -201,14 +202,14 @@ func (term *hybridPickerTerminal) awaitDisplay(t *testing.T, label string) {
 	t.Fatalf("the picker frame never showed %q; terminal output was %q", label, term.screen())
 }
 
-func hybridPickerWelcome(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
-	return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+func hybridPickerWelcome(name string, lifecycle domain.SessionLifecycleID) wire.Envelope {
+	return frameOfMessage(protocol.Welcome{
 		SessionID: name + "-id", SessionName: name, ResumeToken: 1,
 		Capabilities: protocol.CapabilityResume,
 		CommittedIdentity: &protocol.CommittedRouteIdentity{
 			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
 		},
-	}))
+	})
 }
 
 // hybridPickerPaint pushes one authoritative full paint, which is both the
@@ -216,12 +217,10 @@ func hybridPickerWelcome(name string, lifecycle domain.SessionLifecycleID) wire.
 func hybridPickerPaint(t *testing.T, transport *hybridPickerTransport, epoch uint64, target protocol.ExactSessionTarget, text string) {
 	t.Helper()
 	view := protocol.ViewContext{Publication: epoch, Route: protocol.CommittedRouteIdentity{Target: target}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
-	payload, err := wire.MarshalOutput(protocol.Output{
+	transport.push(mustServerEnvelope(protocol.Output{
 		Epoch: epoch, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view,
 		Data: []byte("\x1b[2J\x1b[H" + text),
-	})
-	require.NoError(t, err)
-	transport.push(frameOf(wire.MsgOutput, payload))
+	}))
 }
 
 const hybridPickerInteraction = uint64(7)
@@ -249,8 +248,8 @@ func hybridPickerSnapshot() protocol.PickerSnapshot {
 func openHybridPicker(t *testing.T, transport *hybridPickerTransport, serving protocol.ExactSessionTarget) {
 	t.Helper()
 	hybridPickerPaint(t, transport, 1, serving, "ready")
-	transport.push(frameOf(wire.MsgPickerOffer, wire.MarshalPickerOffer(hybridPickerOffer())))
-	transport.push(frameOf(wire.MsgPickerSnapshot, wire.MarshalPickerSnapshot(hybridPickerSnapshot())))
+	transport.push(frameOfMessage(hybridPickerOffer()))
+	transport.push(frameOfMessage(hybridPickerSnapshot()))
 }
 
 func hybridPickerTargets() (domain.RemoteSessionTarget, protocol.ExactSessionTarget) {
@@ -279,10 +278,10 @@ func TestHybridPickerSameHostSwitchKeepsTheServingTransport(t *testing.T) {
 	// The bootstrap attaches locally, then hands the client to the remote
 	// endpoint the serving daemon names.
 	local.push(hybridPickerWelcome("local", domain.SessionLifecycleID{1}))
-	local.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	local.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: "remote", Session: "source", Intent: protocol.IntentAttach, RemoteTarget: &source,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-	})))
+	}))
 
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote}}
 	localDialer := &sequenceDialer{trs: []wire.Transport{local}}
@@ -307,27 +306,21 @@ func TestHybridPickerSameHostSwitchKeepsTheServingTransport(t *testing.T) {
 	// The commit crosses as a typed selection; the daemon then retires the
 	// interaction and offers the same-host target on the same connection.
 	term.reader.pressEnter()
-	selectionPayload, ok := remote.awaitSend(wire.MsgPickerSelection)
-	require.True(t, ok, "the picker commit never crossed the wire")
-	selection, err := wire.UnmarshalPickerSelection(selectionPayload)
-	require.NoError(t, err)
+	selection := mustAwaitSend(t, remote, "PickerSelection").(protocol.PickerSelection)
 	require.Equal(t, hybridPickerInteraction, selection.InteractionID)
 
-	remote.push(frameOf(wire.MsgPickerClosedServer, wire.MarshalPickerClosed(protocol.PickerClosed{
+	remote.push(frameOfMessage(protocol.PickerClosed{
 		InteractionID: hybridPickerInteraction, BarrierEpoch: 1, BarrierState: 1,
-	})))
-	remote.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	}))
+	remote.push(frameOfMessage(protocol.AttachTarget{
 		Session: target.SessionName, Intent: protocol.IntentAttach, ExactTarget: &target,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true, CauseActionID: selection.CauseActionID,
-	})))
+	}))
 
-	switchPayload, ok := remote.awaitSend(wire.MsgSamePeerSwitchRequest)
-	require.True(t, ok, "the same-host target must be confirmed on the serving connection")
-	switchRequest, err := wire.UnmarshalSamePeerSwitchRequest(switchPayload)
-	require.NoError(t, err)
+	switchRequest := mustAwaitSend(t, remote, "SamePeerSwitchRequest").(protocol.SamePeerSwitchRequest)
 	require.Equal(t, target, switchRequest.Target)
 
-	remote.push(frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: target})))
+	remote.push(frameOfMessage(protocol.CommittedRouteIdentity{Target: target}))
 	hybridPickerPaint(t, remote, 2, target, "target frame")
 
 	// The released destination paint is displayed while the client is still on
@@ -337,7 +330,7 @@ func TestHybridPickerSameHostSwitchKeepsTheServingTransport(t *testing.T) {
 	require.Equal(t, int32(1), remoteDialer.calls.Load(), "a same-host switch must keep the authenticated serving transport")
 	require.Zero(t, remote.closed.Load(), "a same-host switch must not close the serving transport")
 
-	remote.push(frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})))
+	remote.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
 
 	select {
 	case err := <-done:
@@ -346,7 +339,7 @@ func TestHybridPickerSameHostSwitchKeepsTheServingTransport(t *testing.T) {
 		t.Fatal("client did not finish the same-host picker switch")
 	}
 	require.Equal(t, []string{"remote"}, drainStrings(handoffEndpoints))
-	require.False(t, local.sentType(wire.MsgSamePeerSwitchRequest), "the switch belongs to the serving connection")
+	require.False(t, local.sentType(t, "SamePeerSwitchRequest"), "the switch belongs to the serving connection")
 }
 
 // TestHybridPickerDifferentHostDialsTheTargetEndpoint pins the cross-host
@@ -368,10 +361,10 @@ func TestHybridPickerDifferentHostDialsTheTargetEndpoint(t *testing.T) {
 	handoffEndpoints := make(chan string, 4)
 
 	local.push(hybridPickerWelcome("local", domain.SessionLifecycleID{1}))
-	local.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	local.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: "remote", Session: "source", Intent: protocol.IntentAttach, RemoteTarget: &source,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-	})))
+	}))
 
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote}}
 	targetDialer := &sequenceDialer{trs: []wire.Transport{targetTransport}}
@@ -397,22 +390,19 @@ func TestHybridPickerDifferentHostDialsTheTargetEndpoint(t *testing.T) {
 	term.awaitDisplay(t, "second")
 
 	term.reader.pressEnter()
-	selectionPayload, ok := remote.awaitSend(wire.MsgPickerSelection)
-	require.True(t, ok, "the picker commit never crossed the wire")
-	selection, err := wire.UnmarshalPickerSelection(selectionPayload)
-	require.NoError(t, err)
+	selection := mustAwaitSend(t, remote, "PickerSelection").(protocol.PickerSelection)
 
-	remote.push(frameOf(wire.MsgPickerClosedServer, wire.MarshalPickerClosed(protocol.PickerClosed{
+	remote.push(frameOfMessage(protocol.PickerClosed{
 		InteractionID: hybridPickerInteraction, BarrierEpoch: 1, BarrierState: 1,
-	})))
-	remote.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	}))
+	remote.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: targetHost.Endpoint, Session: targetHost.SessionName, Intent: protocol.IntentAttach,
 		RemoteTarget: &targetHost, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		CauseActionID: selection.CauseActionID,
-	})))
+	}))
 
 	targetTransport.push(hybridPickerWelcome("target", targetHost.LifecycleID))
-	targetTransport.push(frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})))
+	targetTransport.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
 
 	select {
 	case err := <-done:
@@ -423,11 +413,8 @@ func TestHybridPickerDifferentHostDialsTheTargetEndpoint(t *testing.T) {
 	require.Equal(t, []string{"remote", "target-host"}, drainStrings(handoffEndpoints))
 	require.Equal(t, int32(1), targetDialer.calls.Load(), "the cross-host target must be dialed once")
 	require.Positive(t, remote.closed.Load(), "the source attachment must close after the cross-host handoff")
-	require.False(t, remote.sentType(wire.MsgSamePeerSwitchRequest), "a cross-host target is never confirmed on the source connection")
-	helloPayload, ok := targetTransport.awaitSend(wire.MsgHello)
-	require.True(t, ok, "the target attachment never sent a Hello")
-	hello, err := wire.UnmarshalHello(helloPayload)
-	require.NoError(t, err)
+	require.False(t, remote.sentType(t, "SamePeerSwitchRequest"), "a cross-host target is never confirmed on the source connection")
+	hello := mustAwaitSend(t, targetTransport, "Hello").(protocol.Hello)
 	require.Equal(t, "target", hello.Name)
 	require.NotNil(t, hello.RemoteTarget)
 	require.Equal(t, targetHost, *hello.RemoteTarget)
@@ -465,10 +452,10 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 	resolutions := make(chan string, 8)
 
 	local.push(hybridPickerWelcome("local", domain.SessionLifecycleID{1}))
-	local.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	local.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: "remote", Session: "source", Intent: protocol.IntentAttach, RemoteTarget: &source,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-	})))
+	}))
 
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote, remoteReturn}}
 	otherDialer := &sequenceDialer{trs: []wire.Transport{other}}
@@ -497,24 +484,23 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 
 	// The serving peer hands the client to another host.
 	term.reader.pressEnter()
-	selection, err := wire.UnmarshalPickerSelection(mustAwaitSend(t, remote, wire.MsgPickerSelection))
-	require.NoError(t, err)
-	remote.push(frameOf(wire.MsgPickerClosedServer, wire.MarshalPickerClosed(protocol.PickerClosed{
+	selection := mustAwaitSend(t, remote, "PickerSelection").(protocol.PickerSelection)
+	remote.push(frameOfMessage(protocol.PickerClosed{
 		InteractionID: hybridPickerInteraction, BarrierEpoch: 1, BarrierState: 1,
-	})))
-	remote.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	}))
+	remote.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: otherHost.Endpoint, Session: otherHost.SessionName, Intent: protocol.IntentAttach,
 		RemoteTarget: &otherHost, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		CauseActionID: selection.CauseActionID,
-	})))
+	}))
 	other.push(hybridPickerWelcome("other", otherHost.LifecycleID))
 	// The new peer offers the return route to the first host.
-	other.push(frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+	other.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: "remote", Session: source.SessionName, Intent: protocol.IntentAttach,
 		RemoteTarget: &source, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-	})))
+	}))
 	remoteReturn.push(hybridPickerWelcome("source", source.LifecycleID))
-	remoteReturn.push(frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})))
+	remoteReturn.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
 
 	select {
 	case err := <-done:
@@ -530,10 +516,10 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 	require.Equal(t, []string{"remote", "target-host", "remote"}, drainStrings(resolutions))
 }
 
-// mustAwaitSend waits for one client frame of the requested type.
-func mustAwaitSend(t *testing.T, transport *hybridPickerTransport, typ wire.MsgType) []byte {
+// mustAwaitSend waits for one client message of the requested kind.
+func mustAwaitSend(t *testing.T, transport *hybridPickerTransport, name string) protocol.ClientMessage {
 	t.Helper()
-	payload, ok := transport.awaitSend(typ)
-	require.True(t, ok, "frame %d never crossed the wire", typ)
-	return payload
+	message, ok := transport.awaitSend(t, name)
+	require.True(t, ok, "client message %s never crossed the wire", name)
+	return message
 }

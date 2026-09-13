@@ -7,65 +7,61 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/stretchr/testify/require"
 )
 
-func sendAcceptanceInput(t *testing.T, tr wire.Transport, data string) {
+func sendAcceptanceInput(t *testing.T, tr ports.ClientConnection, data string) {
 	t.Helper()
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(data)})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte(data)}))
 }
 
-func awaitAcceptanceFrame(t *testing.T, p *pump, typ wire.MsgType, predicate func(wire.Frame) bool) wire.Frame {
+func awaitAcceptanceFrame(t *testing.T, p *typedPump, predicate func(protocol.ServerMessage) bool) protocol.ServerMessage {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {
-		case frame, ok := <-p.ch:
-			require.True(t, ok, "connection closed before frame")
-			if frame.Type == typ && predicate(frame) {
-				return frame
+		case message, ok := <-p.ch:
+			require.True(t, ok, "connection closed before message")
+			if predicate(message) {
+				return message
 			}
 		case <-deadline.C:
-			t.Fatal("timed out waiting for acceptance frame")
+			t.Fatal("timed out waiting for acceptance message")
 		}
 	}
 }
 
-func awaitAcceptanceCommand(t *testing.T, p *pump, requestID uint64) protocol.CommandResult {
+func awaitAcceptanceCommand(t *testing.T, p *typedPump, requestID uint64) protocol.CommandResult {
 	t.Helper()
-	frame := awaitAcceptanceFrame(t, p, wire.MsgCommandResult, func(frame wire.Frame) bool {
-		result, err := wire.UnmarshalCommandResult(frame.Payload)
-		require.NoError(t, err)
-		return result.RequestID == requestID
+	message := awaitAcceptanceFrame(t, p, func(message protocol.ServerMessage) bool {
+		result, ok := message.(protocol.CommandResult)
+		return ok && result.RequestID == requestID
 	})
-	result, err := wire.UnmarshalCommandResult(frame.Payload)
-	require.NoError(t, err)
+	result, ok := message.(protocol.CommandResult)
+	require.True(t, ok, "expected command result, got %T", message)
 	return result
 }
 
-func awaitAcceptanceOutput(t *testing.T, p *pump, predicate func(protocol.Output) bool) protocol.Output {
+func awaitAcceptanceOutput(t *testing.T, p *typedPump, predicate func(protocol.Output) bool) protocol.Output {
 	t.Helper()
-	frame := awaitAcceptanceFrame(t, p, wire.MsgOutput, func(frame wire.Frame) bool {
-		output, err := wire.UnmarshalOutput(frame.Payload)
-		require.NoError(t, err)
-		return predicate(output)
+	message := awaitAcceptanceFrame(t, p, func(message protocol.ServerMessage) bool {
+		output, ok := message.(protocol.Output)
+		return ok && predicate(output)
 	})
-	output, err := wire.UnmarshalOutput(frame.Payload)
-	require.NoError(t, err)
+	output, ok := message.(protocol.Output)
+	require.True(t, ok, "expected output, got %T", message)
 	return output
 }
 
-func awaitAcceptanceCommandResult(t *testing.T, tr wire.Transport, p *pump, requestID uint64, slug string) protocol.CommandResult {
+func awaitAcceptanceCommandResult(t *testing.T, tr ports.ClientConnection, p *typedPump, requestID uint64, slug string) protocol.CommandResult {
 	t.Helper()
-	payload, err := wire.MarshalCommandRequest(protocol.CommandRequest{
+	require.NoError(t, tr.SendClient(protocol.CommandRequest{
 		Version: protocol.Version, RequestID: requestID, Attached: true, Slug: slug,
-	})
-	require.NoError(t, err)
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: payload}))
+	}))
 	return awaitAcceptanceCommand(t, p, requestID)
 }
 
@@ -114,33 +110,22 @@ func TestAcceptanceTwoLocalAttachmentsKeepViewsOverTransports(t *testing.T) {
 	// The resize keeps its attachment-local output stream while recalculating
 	// shared PTY/content geometry from the latest valid attachment claim; the
 	// peer stream remains independent.
-	resizePayload, err := wire.MarshalResize(protocol.Resize{Size: domain.Size{Cols: 100, Rows: 30}})
-	require.NoError(t, err)
-	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgResize, Payload: resizePayload}))
+	require.NoError(t, first.SendClient(protocol.Resize{Size: domain.Size{Cols: 100, Rows: 30}}))
 	resized := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Size == (domain.Size{Cols: 100, Rows: 30}) })
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, resized.Size)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
-	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
+	require.NoError(t, first.SendClient(protocol.OutputResetRequest{}))
 	reset := awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Base == 0 && output.Full })
 	require.True(t, reset.Full)
 	assertNoTextAfterInput(t, secondPump, size, "FIRST_PANE_INPUT")
 
-	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})}))
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for {
-		select {
-		case frame := <-firstPump.ch:
-			if frame.Type == wire.MsgDetached {
-				goto detached
-			}
-		case <-deadline.C:
-			t.Fatal("timed out waiting for first attachment detach")
-		}
-	}
+	require.NoError(t, first.SendClient(protocol.Detach{}))
+	awaitAcceptanceFrame(t, firstPump, func(message protocol.ServerMessage) bool {
+		_, ok := message.(protocol.Detached)
+		return ok
+	})
 
-detached:
 	sendAcceptanceInput(t, second, "q")
 	sendAcceptanceInput(t, second, "PEER_SURVIVES\n")
 	awaitText(t, secondPump, size, "PEER_SURVIVES")
@@ -173,7 +158,7 @@ func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 	}
 
 drained:
-	require.NoError(t, first.Send(wire.Frame{Type: wire.MsgOutputResetRequest, Payload: wire.MarshalOutputResetRequest(protocol.OutputResetRequest{})}))
+	require.NoError(t, first.SendClient(protocol.OutputResetRequest{}))
 	awaitAcceptanceOutput(t, firstPump, func(output protocol.Output) bool { return output.Full && output.Base == 0 })
 	assertNoTextAfterInput(t, secondPump, size, "Commands")
 }

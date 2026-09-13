@@ -14,10 +14,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
+
+// frameHeaderLen is the 4-byte big-endian length prefix; envelopes carry no
+// legacy type byte.
+const frameHeaderLen = 4
 
 func TestBuildCommandUsesExecArgs(t *testing.T) {
 	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio'`.
@@ -53,8 +58,8 @@ func TestBuildCommandUsesExecArgs(t *testing.T) {
 }
 
 func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
-	got := BuildCommandForMode("user@example.com", "_udp-bootstrap", "work")
-	want := []string{"--", "user@example.com", "'vev' '_udp-bootstrap'"}
+	got := BuildCommandForMode("user@example.com", "_quic-bootstrap", "work")
+	want := []string{"--", "user@example.com", "'vev' '_quic-bootstrap'"}
 	if got.Path != "ssh" {
 		t.Fatalf("Path = %q, want ssh", got.Path)
 	}
@@ -110,27 +115,31 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 	}
 }
 
-func TestBuildCommandForObservationDisablesTTYAndTrustMutation(t *testing.T) {
+func TestBuildCommandForObservationPreservesHostTrustAndAuthenticationPolicy(t *testing.T) {
 	spec := BuildCommandForObservation("user@example.com", 5*time.Second, "vev", "cmd", "remote-catalog", "--json")
 	if spec.Path != "ssh" {
 		t.Fatalf("Path = %q, want ssh", spec.Path)
 	}
 	flat := strings.Join(spec.Args, " ")
-	for _, want := range []string{"-T", "BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectTimeout=5", "ConnectionAttempts=1"} {
+	for _, want := range []string{"-T", "UpdateHostKeys=no", "ConnectTimeout=5", "ConnectionAttempts=1"} {
 		if !strings.Contains(flat, want) {
 			t.Fatalf("observation argv %q missing %q", spec.Args, want)
 		}
 	}
+	for _, forbidden := range []string{"BatchMode=", "StrictHostKeyChecking=", "UserKnownHostsFile=", "ProxyCommand="} {
+		if strings.Contains(flat, forbidden) {
+			t.Fatalf("observation argv %q overrides host policy %q", spec.Args, forbidden)
+		}
+	}
 
-	// Effective behavior: explicit CLI options must win over a user
-	// configuration that requests a TTY, key updates, prompts and lax
-	// host-key checking. ssh -G reports the effective configuration
-	// without connecting.
+	// Effective behavior: host-specific authentication and trust policy stays
+	// intact while vev still disables TTY allocation, host-key updates, and
+	// unbounded connection attempts.
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
 		t.Skip("ssh binary not available for effective-config probe")
 	}
-	conflict := "Host *\n  RequestTTY yes\n  UpdateHostKeys yes\n  BatchMode no\n  StrictHostKeyChecking no\n"
+	conflict := "Host *\n  RequestTTY yes\n  UpdateHostKeys yes\n  BatchMode no\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ProxyCommand fake-proxy %h %p\n"
 	confPath := t.TempDir() + "/ssh_config"
 	if err := os.WriteFile(confPath, []byte(conflict), 0o600); err != nil {
 		t.Fatalf("write conflicting ssh config: %v", err)
@@ -177,12 +186,18 @@ func TestBuildCommandForObservationDisablesTTYAndTrustMutation(t *testing.T) {
 		}
 	}
 	for key, want := range map[string]string{
-		"batchmode": "yes", "stricthostkeychecking": "yes",
+		"batchmode": "no", "stricthostkeychecking": "no",
 		"requesttty": "no", "updatehostkeys": "no",
 	} {
 		if got := normalize(effective[key]); got != want {
-			t.Fatalf("effective ssh %s = %q, want %q (config must not override observation argv)", key, effective[key], want)
+			t.Fatalf("effective ssh %s = %q, want %q", key, effective[key], want)
 		}
+	}
+	if effective["userknownhostsfile"] != "/dev/null" {
+		t.Fatalf("effective ssh userknownhostsfile = %q, want /dev/null", effective["userknownhostsfile"])
+	}
+	if !strings.Contains(effective["proxycommand"], "fake-proxy") {
+		t.Fatalf("effective ssh proxycommand = %q, want configured proxy", effective["proxycommand"])
 	}
 }
 
@@ -191,7 +206,7 @@ func TestCloseInterruptsBlockedSend(t *testing.T) {
 	transport := NewTransport(nil, writer, nil)
 
 	sendDone := make(chan error, 1)
-	go func() { sendDone <- transport.Send(wire.Frame{Type: wire.MsgOutput, Payload: []byte("blocked")}) }()
+	go func() { sendDone <- transport.Send(wire.Envelope{Payload: []byte("blocked")}) }()
 	<-writer.started
 	if err := transport.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -243,30 +258,45 @@ func TestTransportRoundTripAndVersionMismatchFrame(t *testing.T) {
 			t.Errorf("server Recv: %v", err)
 			return
 		}
-		got, err := wire.UnmarshalHello(f.Payload)
+		decoded, err := sessionwire.DecodeClientEnvelope(f.Payload)
 		if err != nil {
-			t.Errorf("UnmarshalHello: %v", err)
+			t.Errorf("DecodeClientEnvelope: %v", err)
+			return
+		}
+		got, ok := decoded.(protocol.Hello)
+		if !ok {
+			t.Errorf("decoded client message = %T, want protocol.Hello", decoded)
 			return
 		}
 		if got.Version == protocol.Version {
 			t.Errorf("test did not send a mismatched version")
 		}
-		_ = server.Send(wire.Frame{Type: wire.MsgError, Payload: wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})})
+		errPayload, err := sessionwire.EncodeServerMessage(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
+		if err != nil {
+			t.Errorf("EncodeServerMessage: %v", err)
+			return
+		}
+		_ = server.Send(wire.Envelope{Payload: errPayload})
 	}()
 
-	if err := client.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}); err != nil {
+	helloPayload, err := sessionwire.EncodeClientMessage(hello)
+	if err != nil {
+		t.Fatalf("EncodeClientMessage: %v", err)
+	}
+	if err := client.Send(wire.Envelope{Payload: helloPayload}); err != nil {
 		t.Fatalf("client Send: %v", err)
 	}
 	reply, err := client.Recv()
 	if err != nil {
 		t.Fatalf("client Recv: %v", err)
 	}
-	if reply.Type != wire.MsgError {
-		t.Fatalf("reply type = %d, want MsgError", reply.Type)
-	}
-	em, err := wire.UnmarshalErrorMsg(reply.Payload)
+	decodedReply, err := sessionwire.DecodeServerEnvelope(reply.Payload)
 	if err != nil {
-		t.Fatalf("UnmarshalErrorMsg: %v", err)
+		t.Fatalf("DecodeServerEnvelope: %v", err)
+	}
+	em, ok := decodedReply.(protocol.ErrorMsg)
+	if !ok {
+		t.Fatalf("decoded server message = %T, want protocol.ErrorMsg", decodedReply)
 	}
 	if em.Code != protocol.ErrVersionMismatch {
 		t.Fatalf("error code = %d, want ErrVersionMismatch", em.Code)
@@ -282,35 +312,35 @@ func TestTransportRejectsZeroLengthFrame(t *testing.T) {
 }
 
 func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
-	boundaryPayload := make([]byte, wire.MaxFrameLen-1)
+	boundaryPayload := make([]byte, wire.AbsoluteEnvelopeLimit-1)
 	boundaryWire := &bytes.Buffer{}
 	boundarySend := NewTransport(nil, boundaryWire, nil)
-	if err := boundarySend.Send(wire.Frame{Type: wire.MsgOutput, Payload: boundaryPayload}); err != nil {
+	if err := boundarySend.Send(wire.Envelope{Payload: boundaryPayload}); err != nil {
 		t.Fatalf("boundary Send error = %v", err)
 	}
-	if got := binary.BigEndian.Uint32(boundaryWire.Bytes()[:frameHeaderLen]); got != wire.MaxFrameLen {
-		t.Fatalf("boundary frame length = %d, want %d", got, wire.MaxFrameLen)
+	if got := binary.BigEndian.Uint32(boundaryWire.Bytes()[:frameHeaderLen]); got != uint32(len(boundaryPayload)) {
+		t.Fatalf("boundary envelope length = %d, want %d", got, len(boundaryPayload))
 	}
 	boundaryRecv := NewTransport(bytes.NewReader(boundaryWire.Bytes()), io.Discard, nil)
 	boundaryFrame, err := boundaryRecv.Recv()
 	if err != nil {
 		t.Fatalf("boundary Recv error = %v", err)
 	}
-	if boundaryFrame.Type != wire.MsgOutput || len(boundaryFrame.Payload) != len(boundaryPayload) {
-		t.Fatalf("boundary frame = type %d, payload %d bytes; want type %d, payload %d bytes", boundaryFrame.Type, len(boundaryFrame.Payload), wire.MsgOutput, len(boundaryPayload))
+	if len(boundaryFrame.Payload) != len(boundaryPayload) {
+		t.Fatalf("boundary envelope = payload %d bytes; want %d bytes", len(boundaryFrame.Payload), len(boundaryPayload))
 	}
 	if !bytes.Equal(boundaryFrame.Payload, boundaryPayload) {
 		t.Fatal("boundary payload was corrupted")
 	}
 
 	send := NewTransport(nil, io.Discard, nil)
-	err = send.Send(wire.Frame{Type: wire.MsgOutput, Payload: make([]byte, wire.MaxFrameLen)})
+	err = send.Send(wire.Envelope{Payload: make([]byte, wire.AbsoluteEnvelopeLimit+1)})
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("Send error = %v, want ErrFrameTooLarge", err)
 	}
 
 	var header [frameHeaderLen]byte
-	binary.BigEndian.PutUint32(header[:], wire.MaxFrameLen+1)
+	binary.BigEndian.PutUint32(header[:], wire.AbsoluteEnvelopeLimit+1)
 	recv := NewTransport(bytes.NewReader(header[:]), io.Discard, nil)
 	_, err = recv.Recv()
 	if !errors.Is(err, ErrFrameTooLarge) {

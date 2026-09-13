@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -119,7 +120,7 @@ func (t *reconnectTestTimer) Stop() bool {
 
 // recvItem is one scripted Recv result.
 type recvItem struct {
-	f    wire.Frame
+	f    wire.Envelope
 	err  error
 	wait <-chan struct{}
 }
@@ -137,26 +138,26 @@ func scriptRecv(tr *mockClientConnection, items ...recvItem) func() {
 		ch <- it
 	}
 	done := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
 		select {
 		case it := <-ch:
 			if it.wait != nil {
 				select {
 				case <-it.wait:
 				case <-done:
-					return wire.Frame{}, io.EOF
+					return wire.Envelope{}, io.EOF
 				}
 			}
 			return it.f, it.err
 		case <-done:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 	}).Maybe()
 	return func() { close(done) }
 }
 
-func frameOf(t wire.MsgType, payload []byte) wire.Frame {
-	return wire.Frame{Type: t, Payload: payload}
+func frameOfMessage(message protocol.ServerMessage) wire.Envelope {
+	return mustServerEnvelope(message)
 }
 
 // blockingReader blocks on Read until closed, then returns EOF. Stands in
@@ -236,8 +237,13 @@ func newHappyTerminal(t *testing.T, out *bytes.Buffer, restoreCount *atomic.Int3
 	return tm, in
 }
 
-func isType(typ wire.MsgType) any {
-	return mock.MatchedBy(func(f wire.Frame) bool { return f.Type == typ })
+func isType(name string) any {
+	return mock.MatchedBy(func(f wire.Envelope) bool {
+		if serverMessageNameForTest(f.Payload) == name {
+			return true
+		}
+		return clientMessageName(nil, f) == name
+	})
 }
 
 // stubHostRegistry is the test host registry: it resolves endpoints from a
@@ -399,13 +405,13 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 				return io.ErrClosedPipe
 			}
 			if tt.phase == "send" {
-				tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(wire.Frame) error {
+				tr.EXPECT().Send(isType("Hello")).RunAndReturn(func(wire.Envelope) error {
 					return block()
 				}).Once()
 			} else {
-				tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
-				tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
-					return wire.Frame{}, block()
+				tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
+				tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
+					return wire.Envelope{}, block()
 				}).Once()
 			}
 			dialer := newMockClientDialer(t)
@@ -444,7 +450,7 @@ func TestRunBoundsPreWelcomeOperations(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("handshake operation leaked after Run returned")
 			}
-			tr.AssertNotCalled(t, "Send", isType(wire.MsgTheme))
+			tr.AssertNotCalled(t, "Send", isType("Theme"))
 		})
 	}
 }
@@ -461,17 +467,17 @@ func TestAttachHelloIncludesTrueColor(t *testing.T) {
 
 	gotHello := make(chan protocol.Hello, 1)
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
-		hello, err := wire.UnmarshalHello(f.Payload)
-		require.NoError(t, err)
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).RunAndReturn(func(f wire.Envelope) error {
+		hello, ok := decodeClientMessageForTest(t, f).(protocol.Hello)
+		require.True(t, ok)
 		gotHello <- hello
 		return nil
 	}).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1"})},
+		recvItem{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -494,14 +500,14 @@ func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
 	defer term.in.unblock()
 	lifecycle := domain.SessionLifecycleID{9, 8, 7}
 	tr := &recordingTransport{recvs: []recvItem{
-		{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+		{f: mustServerEnvelope(protocol.Welcome{
 			SessionID:   "s1",
 			SessionName: "main",
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "main"},
 			},
-		}))},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		})},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 
 	err := runTestClient(context.Background(), attachTestDependencies(tr, term, realClock{}), client.AttachRequest{
@@ -517,17 +523,13 @@ func TestAttachPublishesCommittedRouteSnapshot(t *testing.T) {
 	foundSnapshot := false
 	foundSubscription := false
 	for _, frame := range tr.Sends() {
-		switch frame.Type {
-		case wire.MsgRecentRouteSnapshot:
-			var err error
-			snapshot, err = wire.UnmarshalRecentRouteSnapshot(frame.Payload)
-			require.NoError(t, err)
-			foundSnapshot = true
-		case wire.MsgRouteAttentionSubscription:
-			var err error
-			subscription, err = wire.UnmarshalRouteAttentionSubscription(frame.Payload)
-			require.NoError(t, err)
-			foundSubscription = true
+		message, err := sessionwire.DecodeClientEnvelope(frame.Payload)
+		require.NoError(t, err)
+		switch message := message.(type) {
+		case protocol.RecentRouteSnapshot:
+			snapshot, foundSnapshot = message, true
+		case protocol.RouteAttentionSubscription:
+			subscription, foundSubscription = message, true
 		}
 	}
 	require.True(t, foundSnapshot, "successful Welcome must publish a route snapshot")
@@ -544,23 +546,23 @@ func TestLocalOnlyHandoffBetweenLocalSessionsKeepsClientRunning(t *testing.T) {
 
 	firstLifecycle := domain.SessionLifecycleID{1}
 	secondLifecycle := domain.SessionLifecycleID{2}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
 			},
-		}))
+		})
 	}
 	secondTarget := protocol.ExactSessionTarget{LifecycleID: secondLifecycle, SessionName: "second"}
 	first := &recordingTransport{recvs: []recvItem{
 		{f: welcome("first", firstLifecycle)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Session: "second", Intent: protocol.IntentAttach, ExactTarget: &secondTarget,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
-		}))},
-		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: secondTarget}))},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		})},
+		{f: mustServerEnvelope(protocol.CommittedRouteIdentity{Target: secondTarget})},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	dialer := &sequenceDialer{trs: []wire.Transport{first}}
 
@@ -580,25 +582,25 @@ func TestKilledSessionReturnsToPreviousLocalRoute(t *testing.T) {
 
 	firstTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "first"}
 	secondTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "second"}
-	welcome := func(target protocol.ExactSessionTarget) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(target protocol.ExactSessionTarget) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 1,
 			Capabilities:      protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
-		}))
+		})
 	}
 	active := &recordingTransport{recvs: []recvItem{
 		{f: welcome(firstTarget)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Session: "second", Intent: protocol.IntentAttach, ExactTarget: &secondTarget,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
-		}))},
-		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: secondTarget}))},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))},
+		})},
+		{f: mustServerEnvelope(protocol.CommittedRouteIdentity{Target: secondTarget})},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonSessionKilled})},
 	}}
 	previous := &recordingTransport{recvs: []recvItem{
 		{f: welcome(firstTarget)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	dialer := &sequenceDialer{trs: []wire.Transport{active, previous}}
 
@@ -626,28 +628,28 @@ func TestSamePeerSwitchFailurePreservesSourceRouteHistory(t *testing.T) {
 
 	sourceTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "source"}
 	destTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "destination"}
-	welcome := func(target protocol.ExactSessionTarget) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(target protocol.ExactSessionTarget) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 1,
 			Capabilities:      protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
-		}))
+		})
 	}
 	switchSent := make(chan struct{})
 	var switchOnce sync.Once
 	active := &recordingTransport{recvs: []recvItem{
 		{f: welcome(sourceTarget)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Session: "destination", Intent: protocol.IntentAttach, ExactTarget: &destTarget,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
-		}))},
-		{f: frameOf(wire.MsgSamePeerSwitchFailure, mustMarshalSamePeerSwitchFailure(protocol.SamePeerSwitchFailure{
+		})},
+		{f: mustServerEnvelope(protocol.SamePeerSwitchFailure{
 			RequestID: 1, Code: protocol.SamePeerSwitchUnavailable,
-		})), wait: switchSent},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		}), wait: switchSent},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
-	active.onSend = func(frame wire.Frame) {
-		if frame.Type == wire.MsgSamePeerSwitchRequest {
+	active.onSend = func(frame wire.Envelope) {
+		if _, ok := decodeClientMessageForTest(t, frame).(protocol.SamePeerSwitchRequest); ok {
 			switchOnce.Do(func() { close(switchSent) })
 		}
 	}
@@ -662,10 +664,11 @@ func TestSamePeerSwitchFailurePreservesSourceRouteHistory(t *testing.T) {
 	require.Equal(t, int32(1), dialer.calls.Load(), "a rejected same-peer switch must not dial a replacement transport")
 	var snapshots []protocol.RecentRouteSnapshot
 	for _, sent := range active.Sends() {
-		if sent.Type != wire.MsgRecentRouteSnapshot {
+		snapshot, ok := decodeClientMessageForTest(t, sent).(protocol.RecentRouteSnapshot)
+		if !ok {
 			continue
 		}
-		snapshot, err := wire.UnmarshalRecentRouteSnapshot(sent.Payload)
+		_ = snapshot
 		require.NoError(t, err)
 		snapshots = append(snapshots, snapshot)
 	}
@@ -691,7 +694,7 @@ func TestAttachHelloPreservesCompleteAttachRequest(t *testing.T) {
 	}
 	tr := &recordingTransport{recvs: []recvItem{
 		{f: welcomeFrame(0)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 
 	require.NoError(t, runTestClient(context.Background(), attachTestDependencies(tr, term, realClock{}), request))
@@ -710,24 +713,24 @@ func TestStoppedLocalHandoffDialsReplacementTransport(t *testing.T) {
 	sourceLifecycle := domain.SessionLifecycleID{1}
 	targetLifecycle := domain.SessionLifecycleID{2}
 	target := protocol.ExactSessionTarget{LifecycleID: targetLifecycle, SessionName: "stopped"}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
 			},
-		}))
+		})
 	}
 	first := &recordingTransport{recvs: []recvItem{
 		{f: welcome("source", sourceLifecycle)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Session: "stopped", Intent: protocol.IntentAttach, ExactTarget: &target,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-		}))},
+		})},
 	}}
 	second := &recordingTransport{recvs: []recvItem{
 		{f: welcome("stopped", targetLifecycle)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	dialer := &sequenceDialer{trs: []wire.Transport{first, second}}
 
@@ -742,20 +745,20 @@ func TestStoppedLocalHandoffDialsReplacementTransport(t *testing.T) {
 	require.Equal(t, &target, helloFromSend(t, second).ExactTarget)
 }
 
-func hybridWelcomeFrame(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
-	return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+func hybridWelcomeFrame(name string, lifecycle domain.SessionLifecycleID) wire.Envelope {
+	return mustServerEnvelope(protocol.Welcome{
 		SessionID: name, SessionName: name, ResumeToken: 1, Capabilities: protocol.CapabilityResume,
 		CommittedIdentity: &protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name}},
-	}))
+	})
 }
 
 func hybridLocalBootstrap(lifecycle domain.SessionLifecycleID, target domain.RemoteSessionTarget) *recordingTransport {
 	return &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("local", lifecycle)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Endpoint: target.Endpoint, Session: target.SessionName, Intent: protocol.IntentAttach,
 			RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-		}))},
+		})},
 	}}
 }
 
@@ -783,24 +786,23 @@ func TestHybridBackSessionSamePeerOfferReusesRemoteTransport(t *testing.T) {
 	backSwitchSent := make(chan struct{})
 	remote := &recordingTransport{recvs: []recvItem{
 		{f: hybridWelcomeFrame("source", sourceLifecycle)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Session: "target", Intent: protocol.IntentAttach, ExactTarget: &targetExact,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
-		}))},
-		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: targetExact})), wait: firstSwitchSent},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{
+		})},
+		{f: mustServerEnvelope(protocol.CommittedRouteIdentity{Target: targetExact}), wait: firstSwitchSent},
+		{f: mustServerEnvelope(protocol.AttachTarget{
 			Session: "source", Intent: protocol.IntentAttach, ExactTarget: &sourceExact,
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,
-		}))},
-		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: sourceExact})), wait: backSwitchSent},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		})},
+		{f: mustServerEnvelope(protocol.CommittedRouteIdentity{Target: sourceExact}), wait: backSwitchSent},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
-	remote.onSend = func(frame wire.Frame) {
-		if frame.Type != wire.MsgSamePeerSwitchRequest {
+	remote.onSend = func(frame wire.Envelope) {
+		request, ok := decodeClientMessageForTest(t, frame).(protocol.SamePeerSwitchRequest)
+		if !ok {
 			return
 		}
-		request, err := wire.UnmarshalSamePeerSwitchRequest(frame.Payload)
-		require.NoError(t, err)
 		switch request.Target {
 		case targetExact:
 			close(firstSwitchSent)
@@ -847,11 +849,11 @@ func TestRemoteCreationFailuresRestoreSourceAndReportCorrelation(t *testing.T) {
 			}
 			initial := &recordingTransport{recvs: []recvItem{
 				{f: hybridWelcomeFrame("work", lifecycle)},
-				{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(target))},
+				{f: mustServerEnvelope(target)},
 			}}
 			restored := &recordingTransport{recvs: []recvItem{
 				{f: hybridWelcomeFrame("work", lifecycle)},
-				{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+				{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 			}}
 			sourceDialer := &sequenceDialer{trs: []wire.Transport{initial, restored}}
 			targetDialer := &sequenceDialer{errs: []error{tt.dialErr}}
@@ -873,12 +875,11 @@ func TestRemoteCreationFailuresRestoreSourceAndReportCorrelation(t *testing.T) {
 			require.Equal(t, tt.wantTargetCalls, targetDialer.calls.Load())
 			var failure protocol.SessionCreationFailure
 			for _, frame := range restored.Sends() {
-				if frame.Type != wire.MsgSessionCreationFailure {
+				decoded, ok := decodeClientMessageForTest(t, frame).(protocol.SessionCreationFailure)
+				if !ok {
 					continue
 				}
-				var err error
-				failure, err = wire.UnmarshalSessionCreationFailure(frame.Payload)
-				require.NoError(t, err)
+				failure = decoded
 			}
 			require.Equal(t, uint64(7), failure.RequestID)
 			require.Equal(t, protocol.RouteFailureUnavailable, failure.Code)
@@ -892,14 +893,14 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 
 	localLifecycle := domain.SessionLifecycleID{1}
 	remoteLifecycle := domain.SessionLifecycleID{2}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: name + "-id", SessionName: name, ResumeToken: 1,
 			Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
 			},
-		}))
+		})
 	}
 	createRemote := protocol.AttachTarget{
 		RequestID: 1, Endpoint: "remote", Session: "created", Intent: protocol.IntentNew,
@@ -907,23 +908,23 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	}
 	local1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("misc", localLifecycle)},
-		{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(createRemote))},
+		{f: mustServerEnvelope(createRemote)},
 	}}
 	remote1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("created", remoteLifecycle)},
-		{f: frameOf(wire.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{
+		{f: mustServerEnvelope(protocol.RouteNavigationAction{
 			SnapshotGeneration: 2, Key: 1, Generation: 1,
-		}))},
+		})},
 	}}
 	local2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("misc", localLifecycle)},
-		{f: frameOf(wire.MsgNavigateRecentRoute, mustMarshalRouteAction(protocol.RouteNavigationAction{
+		{f: mustServerEnvelope(protocol.RouteNavigationAction{
 			SnapshotGeneration: 3, Key: 2, Generation: 2,
-		}))},
+		})},
 	}}
 	remote2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("created", remoteLifecycle)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote1, remote2}}
@@ -954,36 +955,20 @@ func TestRouteNavigationReturnsToCreatedRemoteSession(t *testing.T) {
 	require.Equal(t, protocol.NavigationCapabilityInventory, returnHello.NavigationCapabilities)
 }
 
-func mustMarshalCommittedIdentity(identity protocol.CommittedRouteIdentity) []byte {
-	payload, err := wire.MarshalCommittedRouteIdentity(identity)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalCommittedIdentity(identity protocol.CommittedRouteIdentity) protocol.CommittedRouteIdentity {
+	return identity
 }
 
-func mustMarshalRouteAction(action protocol.RouteNavigationAction) []byte {
-	payload, err := wire.MarshalRouteNavigationAction(action)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalRouteAction(action protocol.RouteNavigationAction) protocol.RouteNavigationAction {
+	return action
 }
 
-func mustMarshalRoutePosition(position protocol.RoutePosition) []byte {
-	payload, err := wire.MarshalRoutePosition(position)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalRoutePosition(position protocol.RoutePosition) protocol.RoutePosition {
+	return position
 }
 
-func mustMarshalSamePeerSwitchFailure(failure protocol.SamePeerSwitchFailure) []byte {
-	payload, err := wire.MarshalSamePeerSwitchFailure(failure)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalSamePeerSwitchFailure(failure protocol.SamePeerSwitchFailure) protocol.SamePeerSwitchFailure {
+	return failure
 }
 
 func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.T) {
@@ -995,11 +980,11 @@ func TestAttachTargetHandoffReturnsValidatedTargetAndClosesTransport(t *testing.
 
 	target := protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach}
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "local"}))},
-		recvItem{f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(target))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "local"})},
+		recvItem{f: mustServerEnvelope(target)},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1022,19 +1007,17 @@ func TestAttachHelloIncludesCompleteLocalEnvironment(t *testing.T) {
 
 	gotHello := make(chan protocol.Hello, 1)
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
-		hello, err := wire.UnmarshalHello(f.Payload)
-		if err != nil {
-			return err
-		}
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).RunAndReturn(func(f wire.Envelope) error {
+		hello, ok := decodeClientMessageForTest(t, f).(protocol.Hello)
+		require.True(t, ok)
 		gotHello <- hello
 		return nil
 	}).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1"})},
+		recvItem{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1051,17 +1034,17 @@ func TestAttachHelloRequestsSingleOutputForDatagramTransport(t *testing.T) {
 	defer in.unblock()
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).RunAndReturn(func(f wire.Frame) error {
-		hello, err := wire.UnmarshalHello(f.Payload)
-		require.NoError(t, err)
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).RunAndReturn(func(f wire.Envelope) error {
+		hello, ok := decodeClientMessageForTest(t, f).(protocol.Hello)
+		require.True(t, ok)
 		require.Equal(t, uint8(1), hello.MaxOutputInFlight)
 		return nil
 	}).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
-		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1"})},
+		recvItem{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1077,13 +1060,13 @@ func TestAttachHappyPath(t *testing.T) {
 	defer in.unblock()
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main"}))},
-		recvItem{f: frameOf(wire.MsgOutput, mustMarshalOutput(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("hello world")}))},
-		recvItem{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1", SessionName: "main"})},
+		recvItem{f: mustServerEnvelope(protocol.Output{Epoch: 1, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("hello world")})},
+		recvItem{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	)
 	defer unblock()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1100,9 +1083,9 @@ func TestAttachVersionMismatch(t *testing.T) {
 	// EnterRaw must NOT be called on the error-before-welcome path.
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
-		frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
+		mustServerEnvelope(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"}),
 		nil,
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1112,7 +1095,7 @@ func TestAttachVersionMismatch(t *testing.T) {
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
 	require.Equal(t, protocol.ErrVersionMismatch, pe.Code)
-	tr.AssertNotCalled(t, "Send", isType(wire.MsgTheme))
+	tr.AssertNotCalled(t, "Send", isType("Theme"))
 }
 
 func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
@@ -1123,12 +1106,12 @@ func TestAttachRestoredOnRecvErrorMidStream(t *testing.T) {
 	defer in.unblock()
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	boom := errors.New("connection reset")
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1"})},
 		recvItem{err: boom},
 	)
 	defer unblock()
@@ -1147,11 +1130,11 @@ func TestAttachDaemonVanishedOnEOF(t *testing.T) {
 	defer in.unblock()
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1"})},
 		recvItem{err: io.EOF},
 	)
 	defer unblock()
@@ -1181,35 +1164,35 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	gotInput := make(chan []byte, 2)
 	allowDetach := make(chan struct{})
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(wire.MsgInput)).RunAndReturn(func(f wire.Frame) error {
-		in, err := wire.UnmarshalInput(f.Payload)
-		require.NoError(t, err)
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
+	tr.EXPECT().Send(isType("Input")).RunAndReturn(func(f wire.Envelope) error {
+		in, ok := decodeClientMessageForTest(t, f).(protocol.Input)
+		require.True(t, ok)
 		gotInput <- in.Data
 		close(allowDetach)
 		return nil
 	}).Once()
-	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := mustServerEnvelope(protocol.Welcome{SessionID: "s1"})
+	detached := mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})
 	recvCh := make(chan recvItem, 1)
 	recvCh <- recvItem{f: welcome}
 	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
 		case <-allowDetach:
 			select {
 			case <-closed:
-				return wire.Frame{}, io.EOF
+				return wire.Envelope{}, io.EOF
 			default:
 				close(closed)
 				return detached, nil
 			}
 		case <-closed:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1218,7 +1201,7 @@ func TestAttachStdinForwardsSGRMouseReportAsSingleFrame(t *testing.T) {
 	require.NoError(t, err)
 	select {
 	case got := <-gotInput:
-		require.Equal(t, []byte("\x1b[<0;1;1M"), got, "SGR mouse report must arrive as one intact MsgInput frame")
+		require.Equal(t, []byte("\x1b[<0;1;1M"), got, "SGR mouse report must arrive as one intact Input envelope")
 	case <-time.After(2 * time.Second):
 		t.Fatal("mouse report input was not sent")
 	}
@@ -1243,35 +1226,35 @@ func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 	gotInput := make(chan []byte, 1)
 	allowDetach := make(chan struct{})
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
-	tr.EXPECT().Send(isType(wire.MsgInput)).RunAndReturn(func(f wire.Frame) error {
-		in, err := wire.UnmarshalInput(f.Payload)
-		require.NoError(t, err)
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
+	tr.EXPECT().Send(isType("Input")).RunAndReturn(func(f wire.Envelope) error {
+		in, ok := decodeClientMessageForTest(t, f).(protocol.Input)
+		require.True(t, ok)
 		gotInput <- in.Data
 		close(allowDetach)
 		return nil
 	}).Once()
-	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := mustServerEnvelope(protocol.Welcome{SessionID: "s1"})
+	detached := mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})
 	recvCh := make(chan recvItem, 1)
 	recvCh <- recvItem{f: welcome}
 	closed := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
 		select {
 		case it := <-recvCh:
 			return it.f, it.err
 		case <-allowDetach:
 			select {
 			case <-closed:
-				return wire.Frame{}, io.EOF
+				return wire.Envelope{}, io.EOF
 			default:
 				close(closed)
 				return detached, nil
 			}
 		case <-closed:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1280,7 +1263,7 @@ func TestAttachStdinCoalescesSplitBracketedPaste(t *testing.T) {
 	require.NoError(t, err)
 	select {
 	case got := <-gotInput:
-		require.Equal(t, paste, got, "split bracketed paste must arrive as one intact MsgInput frame")
+		require.Equal(t, paste, got, "split bracketed paste must arrive as one intact Input envelope")
 	case <-time.After(2 * time.Second):
 		t.Fatal("split bracketed paste input was not sent")
 	}
@@ -1298,24 +1281,24 @@ func TestAttachForwardsResize(t *testing.T) {
 	var firstRecvOnce sync.Once
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	// The resize frame is forwarded via the sender goroutine.
 	gotResize := make(chan protocol.Resize, 1)
-	tr.EXPECT().Send(isType(wire.MsgResize)).RunAndReturn(func(f wire.Frame) error {
-		r, _ := wire.UnmarshalResize(f.Payload)
+	tr.EXPECT().Send(isType("Resize")).RunAndReturn(func(f wire.Envelope) error {
+		r, _ := decodeClientMessageForTest(t, f).(protocol.Resize)
 		gotResize <- r
 		close(detachAfterResize)
 		return nil
 	}).Once()
 
-	welcome := frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))
-	detached := frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))
+	welcome := mustServerEnvelope(protocol.Welcome{SessionID: "s1"})
+	detached := mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})
 	recvCh := make(chan recvItem, 2)
 	recvCh <- recvItem{f: welcome}
 	done := make(chan struct{})
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
 		firstRecvOnce.Do(func() { close(firstRecv) })
 		select {
 		case it := <-recvCh:
@@ -1324,13 +1307,13 @@ func TestAttachForwardsResize(t *testing.T) {
 			// Deliver the detach once the resize has been observed.
 			select {
 			case <-done:
-				return wire.Frame{}, io.EOF
+				return wire.Envelope{}, io.EOF
 			default:
 				close(done)
 				return detached, nil
 			}
 		case <-done:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 	}).Maybe()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1359,12 +1342,12 @@ func TestRunRestoresRawModeAfterAttachError(t *testing.T) {
 	defer in.unblock()
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgTheme)).Return(nil).Maybe()
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Theme")).Return(nil).Maybe()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	boom := errors.New("connection reset")
 	unblock := scriptRecv(tr,
-		recvItem{f: frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1"}))},
+		recvItem{f: mustServerEnvelope(protocol.Welcome{SessionID: "s1"})},
 		recvItem{err: boom},
 	)
 	defer unblock()
@@ -1383,9 +1366,9 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	// EnterRaw must NOT be called when the daemon rejects Hello before Welcome.
 
 	tr := newMockClientConnection(t)
-	tr.EXPECT().Send(isType(wire.MsgHello)).Return(nil).Once()
+	tr.EXPECT().Send(isType("Hello")).Return(nil).Once()
 	tr.EXPECT().Recv().Return(
-		frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"})),
+		mustServerEnvelope(protocol.ErrorMsg{Code: protocol.ErrVersionMismatch, Text: "version mismatch"}),
 		nil,
 	).Once()
 	tr.EXPECT().Close().Return(nil).Once()
@@ -1396,7 +1379,7 @@ func TestRunDoesNotEnterRawBeforePreWelcomeError(t *testing.T) {
 	require.Error(t, err)
 	var pe *client.ProtocolError
 	require.True(t, errors.As(err, &pe), "want *client.ProtocolError, got %T", err)
-	tr.AssertNotCalled(t, "Send", isType(wire.MsgTheme))
+	tr.AssertNotCalled(t, "Send", isType("Theme"))
 }
 
 func TestRunPhaseASingleAttempt(t *testing.T) {
@@ -1429,14 +1412,14 @@ func (d *sequenceDialer) Dial(context.Context) (ports.ClientConnection, error) {
 type recordingTransport struct {
 	mu      sync.Mutex
 	recvs   []recvItem
-	sends   []wire.Frame
+	sends   []wire.Envelope
 	closed  atomic.Int32
 	stall   <-chan struct{}
-	onSend  func(wire.Frame)
+	onSend  func(wire.Envelope)
 	onClose func()
 }
 
-func (t *recordingTransport) Send(f wire.Frame) error {
+func (t *recordingTransport) Send(f wire.Envelope) error {
 	t.mu.Lock()
 	t.sends = append(t.sends, f)
 	onSend := t.onSend
@@ -1447,18 +1430,18 @@ func (t *recordingTransport) Send(f wire.Frame) error {
 	return nil
 }
 
-func (t *recordingTransport) Sends() []wire.Frame {
+func (t *recordingTransport) Sends() []wire.Envelope {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]wire.Frame(nil), t.sends...)
+	return append([]wire.Envelope(nil), t.sends...)
 }
 
-func (t *recordingTransport) Recv() (wire.Frame, error) {
+func (t *recordingTransport) Recv() (wire.Envelope, error) {
 	if len(t.recvs) == 0 {
 		if t.stall != nil {
 			<-t.stall
 		}
-		return wire.Frame{}, io.EOF
+		return wire.Envelope{}, io.EOF
 	}
 	it := t.recvs[0]
 	t.recvs = t.recvs[1:]
@@ -1517,14 +1500,14 @@ func helloFromSend(t *testing.T, tr *recordingTransport) protocol.Hello {
 	t.Helper()
 	sends := tr.Sends()
 	require.NotEmpty(t, sends)
-	require.Equal(t, wire.MsgHello, sends[0].Type)
-	h, err := wire.UnmarshalHello(sends[0].Payload)
-	require.NoError(t, err)
+	require.Equal(t, "Hello", clientMessageName(t, sends[0]))
+	h, ok := decodeClientMessageForTest(t, sends[0]).(protocol.Hello)
+	require.True(t, ok)
 	return h
 }
 
-func welcomeFrame(token uint64) wire.Frame {
-	return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: protocol.CapabilityResume}))
+func welcomeFrame(token uint64) wire.Envelope {
+	return mustServerEnvelope(protocol.Welcome{SessionID: "s1", SessionName: "main", ResumeToken: token, Capabilities: protocol.CapabilityResume})
 }
 
 func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
@@ -1532,7 +1515,7 @@ func TestRunReconnectsWithRotatedTokenAndSameClientID(t *testing.T) {
 	defer term.in.unblock()
 	tr1 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {err: io.EOF}}}
 	tr2 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(22)}, {err: io.EOF}}}
-	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
+	tr3 := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(33)}, {f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})}}}
 	d := &sequenceDialer{trs: []wire.Transport{tr1, tr2, tr3}}
 	clock := &reconnectTestClock{}
 	result := make(chan error, 1)
@@ -1572,19 +1555,19 @@ func TestExpiredResumeFallsBackToFreshExactAttach(t *testing.T) {
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: target.LifecycleID,
 		SessionName: target.SessionName, LiveTabID: "stale-tab",
 	}
-	welcome := func(token uint64) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(token uint64) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: "work", SessionName: "work", ResumeToken: token, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
-		}))
+		})
 	}
 	tr1 := &recordingTransport{recvs: []recvItem{{f: welcome(11)}, {err: io.EOF}}}
-	tr2 := &recordingTransport{recvs: []recvItem{{f: frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{
+	tr2 := &recordingTransport{recvs: []recvItem{{f: mustServerEnvelope(protocol.ErrorMsg{
 		Code: protocol.ErrNoSuchSession, Text: "resume token is no longer valid",
-	}))}}}
+	})}}}
 	tr3 := &recordingTransport{recvs: []recvItem{
 		{f: welcome(22)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	dialer := &sequenceDialer{trs: []wire.Transport{tr1, tr2, tr3}}
 	clock := &reconnectTestClock{}
@@ -1618,20 +1601,20 @@ func TestReconnectRestoresLastPublishedRouteTab(t *testing.T) {
 	defer term.in.unblock()
 	lifecycle := domain.SessionLifecycleID{7, 8, 9}
 	target := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}
-	welcome := func(token uint64) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(token uint64) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: "work", SessionName: "work", ResumeToken: token, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target},
-		}))
+		})
 	}
 	tr1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome(11)},
-		{f: frameOf(wire.MsgRoutePosition, mustMarshalRoutePosition(protocol.RoutePosition{Target: target, ActiveTabID: "tab-2"}))},
+		{f: mustServerEnvelope(protocol.RoutePosition{Target: target, ActiveTabID: "tab-2"})},
 		{err: io.EOF},
 	}}
 	tr2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome(22)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	dialer := &sequenceDialer{trs: []wire.Transport{tr1, tr2}}
 	clock := &reconnectTestClock{}
@@ -1657,24 +1640,24 @@ func TestRemoteReconnectDropsStalePickerTargetAfterDaemonSessionSwitch(t *testin
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: oldLifecycle,
 		SessionName: "old", LiveTabID: "tab-1",
 	}
-	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{
+	welcome := func(name string, lifecycle domain.SessionLifecycleID, token uint64) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{
 			SessionID: name, SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume,
 			CommittedIdentity: &protocol.CommittedRouteIdentity{
 				Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: name},
 			},
-		}))
+		})
 	}
 	tr1 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("old", oldLifecycle, 11)},
-		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{
+		{f: mustServerEnvelope(protocol.CommittedRouteIdentity{
 			Target: protocol.ExactSessionTarget{LifecycleID: newLifecycle, SessionName: "new"},
-		}))},
+		})},
 		{err: io.EOF},
 	}}
 	tr2 := &recordingTransport{recvs: []recvItem{
 		{f: welcome("new", newLifecycle, 22)},
-		{f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))},
+		{f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})},
 	}}
 	dialer := &sequenceDialer{trs: []wire.Transport{tr1, tr2}}
 	clock := &reconnectTestClock{}
@@ -1699,7 +1682,7 @@ func TestRemoteReconnectDropsStalePickerTargetAfterDaemonSessionSwitch(t *testin
 func TestRunExitsCleanlyWhenKilledSessionHasNoPriorRoute(t *testing.T) {
 	term := newRunTerminal()
 	defer term.in.unblock()
-	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonSessionKilled}))}}}
+	tr := &recordingTransport{recvs: []recvItem{{f: welcomeFrame(11)}, {f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonSessionKilled})}}}
 	d := &sequenceDialer{trs: []wire.Transport{tr}}
 
 	err := runTestClient(context.Background(), testDependencies(d, term, realClock{}, nil, nil), client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "main", Remote: false})

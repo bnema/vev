@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt/ansi"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +42,7 @@ func TestPreparedOutputSemanticPublication(t *testing.T) {
 				require.Equal(t, before+1, output.Context.Publication)
 				require.Equal(t, context.Route, output.Context.Route)
 				require.Equal(t, uint64(9), output.Echo)
-				_, marshalErr := wire.MarshalOutput(output)
+				_, marshalErr := sessionwire.EncodeServerMessage(output)
 				require.NoError(t, marshalErr)
 				if scenario == "send failure" {
 					return sendErr
@@ -112,7 +112,7 @@ func TestPreparedOutputNoBytePublication(t *testing.T) {
 				require.Equal(t, state, update.State)
 				require.Equal(t, uint64(2), update.Context.Publication)
 				require.Equal(t, context.FocusedPaneID, update.Context.FocusedPaneID)
-				_, marshalErr := wire.MarshalUIViewUpdate(update)
+				_, marshalErr := sessionwire.EncodeServerMessage(update)
 				require.NoError(t, marshalErr)
 				if scenario == "failure" {
 					return sendErr

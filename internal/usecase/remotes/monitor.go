@@ -546,6 +546,9 @@ func (m *Monitor) applyObserveFailure(now time.Time, state *serviceState, host *
 		kind = domain.RemoteFailureTransport
 	}
 	host.availability = availabilityFor(kind)
+	if host.consecutiveFailures == 0 {
+		host.failureEpisode++
+	}
 	host.consecutiveFailures++
 	host.lastFailure = domain.RemoteFailure{Kind: kind, Err: result.Err}
 	if host.followUp {

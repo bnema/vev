@@ -191,6 +191,18 @@ type RouteRetired struct {
 	Target ExactSessionTarget
 }
 
+// Validate rejects a retirement without the nonzero reference that fences it
+// and without a valid lifecycle target. Both encode and decode call it.
+func (r RouteRetired) Validate() error {
+	if r.Ref.IsZero() || r.Ref.Validate() != nil {
+		return fmt.Errorf("%w: retired route reference is zero", ErrInvalidRouteWire)
+	}
+	if err := r.Target.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid retired route target: %v", ErrInvalidRouteWire, err)
+	}
+	return nil
+}
+
 // RemoteInventorySourceKey identifies a configured endpoint without disclosing it.
 func RemoteInventorySourceKey(endpoint string) string {
 	sum := sha256.Sum256([]byte("vev-inventory-remote\x00" + endpoint))
@@ -201,6 +213,31 @@ func RemoteInventorySourceKey(endpoint string) string {
 // uses to resolve live attention and retire authoritatively absent lifecycles.
 type RouteAttentionSubscription struct {
 	Targets []RouteAttentionTarget
+}
+
+// Validate enforces the bounded, duplicate-free attention mapping invariants
+// on both the encode and decode sides of the wire conversion.
+func (r RouteAttentionSubscription) Validate() error {
+	if len(r.Targets) > RouteSnapshotMaxEntries {
+		return fmt.Errorf("%w: too many attention targets", ErrInvalidRouteWire)
+	}
+	refs := make(map[RouteRef]struct{}, len(r.Targets))
+	for _, target := range r.Targets {
+		if err := ValidateRouteLabel(target.SourceKey, true); err != nil {
+			return fmt.Errorf("%w: invalid route source", ErrInvalidRouteWire)
+		}
+		if err := target.Ref.Validate(); err != nil || target.Ref.IsZero() {
+			return fmt.Errorf("%w: invalid attention route reference", ErrInvalidRouteWire)
+		}
+		if err := target.Target.Validate(); err != nil {
+			return fmt.Errorf("%w: invalid attention target: %v", ErrInvalidRouteWire, err)
+		}
+		if _, exists := refs[target.Ref]; exists {
+			return fmt.Errorf("%w: duplicate attention route reference", ErrInvalidRouteWire)
+		}
+		refs[target.Ref] = struct{}{}
+	}
+	return nil
 }
 
 func (r RouteRef) IsZero() bool { return r.Key == 0 && r.Generation == 0 }
@@ -244,6 +281,97 @@ type RecentRouteSnapshot struct {
 	Entries     []RecentRouteEntry
 }
 
+// validateRecentRouteEntry enforces one entry's identity and display bounds.
+func validateRecentRouteEntry(entry RecentRouteEntry) error {
+	if entry.Key == 0 || entry.Generation == 0 {
+		return fmt.Errorf("%w: route entry identity is zero", ErrInvalidRouteWire)
+	}
+	if err := entry.Target.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid route lifecycle target: %v", ErrInvalidRouteWire, err)
+	}
+	if entry.Name != entry.Target.SessionName {
+		return fmt.Errorf("%w: route name does not match lifecycle target", ErrInvalidRouteWire)
+	}
+	if err := ValidateRouteLabel(entry.Name, false); err != nil {
+		return fmt.Errorf("%w: route name: %v", ErrInvalidRouteWire, err)
+	}
+	if err := ValidateRouteLabel(entry.HostLabel, true); err != nil {
+		return fmt.Errorf("%w: route host label: %v", ErrInvalidRouteWire, err)
+	}
+	if entry.Kind.Validate() != nil {
+		return fmt.Errorf("%w: invalid route kind", ErrInvalidRouteWire)
+	}
+	if entry.Reachability.Validate() != nil {
+		return fmt.Errorf("%w: invalid route reachability", ErrInvalidRouteWire)
+	}
+	return nil
+}
+
+// Validate enforces the bounded, self-consistent invariants of one complete
+// route publication: entry budget, nonzero generation for non-empty
+// snapshots, matching active presentation, unique entry references, and
+// previous/home references that resolve inside the snapshot. Both encode and
+// decode call it so a malformed snapshot cannot be produced or accepted.
+func (s RecentRouteSnapshot) Validate() error {
+	if len(s.Entries) > RouteSnapshotMaxEntries {
+		return fmt.Errorf("%w: too many route entries", ErrInvalidRouteWire)
+	}
+	if s.Generation == 0 && (len(s.Entries) != 0 || s.ActiveEntry != (RecentRouteEntry{})) {
+		return fmt.Errorf("%w: non-empty snapshot has zero generation", ErrInvalidRouteWire)
+	}
+	for _, ref := range []RouteRef{s.Active, s.Previous, s.Home} {
+		if err := ref.Validate(); err != nil {
+			return fmt.Errorf("%w: route reference: %v", ErrInvalidRouteWire, err)
+		}
+	}
+	if s.Active.IsZero() {
+		if s.ActiveEntry != (RecentRouteEntry{}) {
+			return fmt.Errorf("%w: active presentation has no active route", ErrInvalidRouteWire)
+		}
+	} else {
+		if err := validateRecentRouteEntry(s.ActiveEntry); err != nil {
+			return err
+		}
+		if s.Active != (RouteRef{Key: s.ActiveEntry.Key, Generation: s.ActiveEntry.Generation}) {
+			return fmt.Errorf("%w: active presentation does not match active route", ErrInvalidRouteWire)
+		}
+	}
+	if !s.Active.IsZero() && s.Active == s.Previous {
+		return fmt.Errorf("%w: active and previous routes are identical", ErrInvalidRouteWire)
+	}
+	refs := make(map[RouteRef]struct{}, len(s.Entries))
+	for _, entry := range s.Entries {
+		if s.Active == (RouteRef{Key: entry.Key, Generation: entry.Generation}) {
+			return fmt.Errorf("%w: active route must be metadata-only", ErrInvalidRouteWire)
+		}
+		if err := validateRecentRouteEntry(entry); err != nil {
+			return err
+		}
+		ref := RouteRef{Key: entry.Key, Generation: entry.Generation}
+		if _, exists := refs[ref]; exists {
+			return fmt.Errorf("%w: duplicate route entry", ErrInvalidRouteWire)
+		}
+		refs[ref] = struct{}{}
+	}
+	for _, item := range []struct {
+		name string
+		ref  RouteRef
+	}{
+		{name: "previous", ref: s.Previous},
+		{name: "home", ref: s.Home},
+	} {
+		if item.ref.IsZero() || item.ref == s.Active {
+			// Active is metadata-only and intentionally excluded from the
+			// recent display entries. Home may point at active as well.
+			continue
+		}
+		if _, exists := refs[item.ref]; !exists {
+			return fmt.Errorf("%w: %s route reference is absent from snapshot", ErrInvalidRouteWire, item.name)
+		}
+	}
+	return nil
+}
+
 // RouteNavigationAction asks the client to resolve one entry from a specific
 // complete snapshot. It carries no session name, endpoint, or credential.
 type RouteNavigationAction struct {
@@ -251,6 +379,15 @@ type RouteNavigationAction struct {
 	SnapshotGeneration uint64
 	Key                uint64
 	Generation         uint64
+}
+
+// Validate rejects a navigation action whose snapshot/entry identity is zero;
+// both encode and decode call it so a stale or malformed action never ships.
+func (a RouteNavigationAction) Validate() error {
+	if a.SnapshotGeneration == 0 || a.Key == 0 || a.Generation == 0 {
+		return fmt.Errorf("%w: navigation action identity is zero", ErrInvalidRouteWire)
+	}
+	return nil
 }
 
 // RouteCreateSessionAction asks the client to create a named session through
@@ -360,6 +497,16 @@ func (c RouteFailureCode) Validate() error {
 		return ErrInvalidRouteWire
 	}
 	return nil
+}
+
+// Validate requires the nonzero entry identity that correlates the failure
+// with its navigation action, plus a bounded failure code. Both encode and
+// decode call it so a zero identity never ships.
+func (f RouteNavigationFailure) Validate() error {
+	if f.Key == 0 || f.Generation == 0 {
+		return fmt.Errorf("%w: failure identity is zero", ErrInvalidRouteWire)
+	}
+	return f.Code.Validate()
 }
 
 // SessionCreationFailure reports a correlated pre-commit create transition

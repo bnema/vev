@@ -16,7 +16,7 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	transport := newReconnectToastLinkTransport()
-	transport.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	transport.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -39,9 +39,7 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 		Session: "stopped", Intent: protocol.IntentAttach, ExactTarget: &exact,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
-	transport.recvCh <- reconnectToastRecv{frame: wire.Frame{
-		Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(target),
-	}}
+	transport.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(target)}
 
 	select {
 	case result := <-resultCh:
@@ -50,8 +48,9 @@ func TestCloseAndDialAttachTargetSkipsSamePeerSwitch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close-and-dial target did not return a handoff")
 	}
-	_, sentSamePeer := transport.sends.find(func(frame wire.Frame) bool {
-		return frame.Type == wire.MsgSamePeerSwitchRequest
+	_, sentSamePeer := transport.sends.find(func(frame wire.Envelope) bool {
+		_, ok := decodeClientMessage(t, frame).(protocol.SamePeerSwitchRequest)
+		return ok
 	})
 	require.False(t, sentSamePeer)
 }

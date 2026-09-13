@@ -3,10 +3,31 @@ package remote
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
-	"github.com/bnema/vev/internal/adapters/dgram"
+	"github.com/bnema/vev/internal/ports"
 )
+
+type recordingObserver struct {
+	mu    sync.Mutex
+	marks []ports.RuntimeMark
+}
+
+func (r *recordingObserver) ObserveRuntime(mark ports.RuntimeMark) {
+	r.mu.Lock()
+	r.marks = append(r.marks, mark)
+	r.mu.Unlock()
+}
+
+func (r *recordingObserver) Flush() {}
+func (r *recordingObserver) Close() {}
+
+func (r *recordingObserver) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.marks)
+}
 
 func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 	factory := NewDialerFactory()
@@ -16,7 +37,7 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 		mode     TransportMode
 		wantType any
 	}{
-		{name: "udp", mode: TransportUDP, wantType: dgram.RemoteDialer{}},
+		{name: "quic", mode: TransportQUIC, wantType: quicDialer{}},
 		{name: "stdio", mode: TransportStdio, wantType: stdioDialer{}},
 	}
 	for _, tt := range tests {
@@ -26,13 +47,13 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 				t.Fatalf("DialerForRemote() error = %v", err)
 			}
 			switch tt.wantType.(type) {
-			case dgram.RemoteDialer:
-				got, ok := dialer.(dgram.RemoteDialer)
+			case quicDialer:
+				got, ok := dialer.(quicDialer)
 				if !ok {
-					t.Fatalf("dialer type = %T, want %T", dialer, dgram.RemoteDialer{})
+					t.Fatalf("dialer type = %T, want %T", dialer, quicDialer{})
 				}
-				if got.Target != "remote.example" {
-					t.Fatalf("dialer target = %q, want %q", got.Target, "remote.example")
+				if got.target != "remote.example" {
+					t.Fatalf("dialer target = %q, want %q", got.target, "remote.example")
 				}
 			case stdioDialer:
 				got, ok := dialer.(stdioDialer)
@@ -44,6 +65,22 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDialerFactoryPropagatesObserverToQUICTransport(t *testing.T) {
+	observer := &recordingObserver{}
+	factory := NewDialerFactoryWithRuntimeObserver(observer)
+	dialer, err := factory.DialerForRemote("remote.example", "work", TransportQUIC, nil)
+	if err != nil {
+		t.Fatalf("DialerForRemote() error = %v", err)
+	}
+	got, ok := dialer.(quicDialer)
+	if !ok {
+		t.Fatalf("dialer type = %T, want %T", dialer, quicDialer{})
+	}
+	if got.observer != observer {
+		t.Fatalf("quic dialer observer = %v, want the factory observer", got.observer)
 	}
 }
 

@@ -13,10 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func previewClientTargetForTest() domain.RemoteSessionTarget {
@@ -37,29 +37,36 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 		LifecycleID: lifecycle, TabID: target.LiveTabID, Revision: 7, Width: 1, Height: 1,
 		Cells: []renderer.Cell{{Rune: 'x', Style: renderer.DefaultStyle()}},
 	}
-	payload := wire.MarshalRemotePreview(want)
+	payload, err := sessionwire.EncodeServerMessage(want)
+	require.NoError(t, err)
 	require.NotNil(t, payload)
 
 	var gotPath string
 	var gotArgs []string
+	wantCommand := sshstdio.BuildCommandForObservation(target.Endpoint, remotePreviewSSHConnectTimeout, "vev", "_remote-preview", "request")
 	client := &PreviewClient{command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		gotPath = name
 		gotArgs = append([]string(nil), args...)
-		if len(args) != 3 {
-			t.Fatalf("ssh args = %#v, want target and one remote command", args)
+		if len(args) != len(wantCommand.Args) {
+			t.Fatalf("ssh args = %#v, want observation argv %#v", args, wantCommand.Args)
 		}
-		words := strings.Split(args[2], " ")
+		remote := args[len(args)-1]
+		words := strings.Split(remote, " ")
 		if len(words) != 3 {
-			t.Fatalf("remote command = %q, want three shell words", args[2])
+			t.Fatalf("remote command = %q, want three shell words", remote)
 		}
 		encoded := strings.Trim(words[2], "'")
 		requestPayload, err := base64.RawURLEncoding.DecodeString(encoded)
 		if err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		request, err := wire.UnmarshalRemotePreviewRequest(requestPayload)
+		requestMessage, err := sessionwire.DecodeClientEnvelope(requestPayload)
 		if err != nil {
 			t.Fatalf("decode request payload: %v", err)
+		}
+		request, ok := requestMessage.(protocol.RemotePreviewRequest)
+		if !ok {
+			t.Fatalf("request payload = %T, want protocol.RemotePreviewRequest", requestMessage)
 		}
 		if request.Target != target || request.Width != 1 || request.Height != 1 {
 			t.Fatalf("request = %#v, want target and 1x1 dimensions", request)
@@ -70,10 +77,12 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 	got, err := client.Preview(context.Background(), target, 1, 1)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-	wantCommand := sshstdio.BuildCommandForRemoteCommand(target.Endpoint, "vev", "_remote-preview", "request")
 	require.Equal(t, wantCommand.Path, gotPath)
-	require.Equal(t, target.Endpoint, gotArgs[1])
-	require.Contains(t, gotArgs[2], "'_remote-preview'")
+	require.Equal(t, wantCommand.Args[:len(wantCommand.Args)-1], gotArgs[:len(gotArgs)-1],
+		"preview must use the observation-safe ssh argv")
+	require.Contains(t, gotArgs[len(gotArgs)-1], "'_remote-preview'")
+	require.Contains(t, gotArgs, "-T")
+	require.Contains(t, gotArgs, "UpdateHostKeys=no")
 }
 
 func TestRemotePreviewClientRejectsMismatchedResponseIdentity(t *testing.T) {
@@ -96,13 +105,14 @@ func TestRemotePreviewClientRejectsMismatchedResponseIdentity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			preview := valid
 			tt.mutate(&preview)
-			payload := wire.MarshalRemotePreview(preview)
+			payload, err := sessionwire.EncodeServerMessage(preview)
+			require.NoError(t, err)
 			require.NotNil(t, payload)
 
 			client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 				return stdoutCmd(ctx, string(payload))
 			}}
-			_, err := client.Preview(context.Background(), target, 1, 1)
+			_, err = client.Preview(context.Background(), target, 1, 1)
 			require.ErrorIs(t, err, errRemotePreviewIdentity)
 		})
 	}

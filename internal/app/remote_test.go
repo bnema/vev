@@ -9,12 +9,12 @@ import (
 	"testing"
 
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -59,16 +59,13 @@ func TestRemoteHostDepsDefaultsStore(t *testing.T) {
 
 func TestDecodeSessionListErrorReply(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
-		_, err := decodeSessionListReply(wire.Frame{
-			Type:    wire.MsgError,
-			Payload: wire.MarshalErrorMsg(protocol.ErrorMsg{Text: "denied"}),
-		})
+		_, err := decodeSessionListReply(decodeServerEnvelope(t, mustServerEnvelope(protocol.ErrorMsg{Text: "denied"})))
 		require.EqualError(t, err, "vev: denied")
 	})
 
 	t.Run("malformed", func(t *testing.T) {
-		_, err := decodeSessionListReply(wire.Frame{Type: wire.MsgError, Payload: []byte{0}})
-		require.ErrorContains(t, err, "vev: decoding error reply")
+		_, err := sessionwire.DecodeServerEnvelope([]byte{0})
+		require.Error(t, err)
 	})
 }
 
@@ -307,7 +304,7 @@ func TestCatalogSessionsAsInfoInvariants(t *testing.T) {
 func TestRunAttachWithDepsDoesNotLearnDirectRemoteHost(t *testing.T) {
 	store := portsmocks.NewMockRemoteHostStore(t)
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("build@mule", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("build@mule", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "build@mule", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,

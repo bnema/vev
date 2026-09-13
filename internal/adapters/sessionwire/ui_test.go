@@ -14,22 +14,23 @@ func TestUISynchronizationClientDispatch(t *testing.T) {
 		protocol.Input{InputSeq: 3, ActionID: 7, Data: []byte("x")},
 		protocol.UIFence{ActionID: 7},
 	} {
-		raw := &scriptedTransport{}
-		require.NoError(t, NewClientConnection(raw).SendClient(message))
-		raw.recv = raw.sent
-		got, err := NewServerConnection(raw).ReceiveClient()
+		clientRaw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
+		require.NoError(t, NewClientConnection(clientRaw).SendClient(message))
+		sent := mustSingleAppPayload(t, clientRaw)
+		serverRaw := &scriptedTransport{recv: mustServerPreambleQueue(t, sent)}
+		got, err := NewServerConnection(serverRaw).ReceiveClient()
 		require.NoError(t, err)
 		require.Equal(t, message, got)
-		headerLen := len(raw.sent.Payload)
+		headerLen := len(sent)
 		if input, ok := message.(protocol.Input); ok {
-			// Input consumes the remaining frame as bytes; only its fixed header
-			// has strict prefix truncation semantics.
+			// Input carries opaque bytes after the envelope header; only
+			// the envelope framing has strict prefix truncation semantics.
 			headerLen -= len(input.Data)
 		}
 		for size := range headerLen {
-			raw.recv.Payload = raw.sent.Payload[:size]
+			raw := &scriptedTransport{recv: mustServerPreambleQueue(t, sent[:size])}
 			_, err := NewServerConnection(raw).ReceiveClient()
-			require.Error(t, err, "type %d prefix %d", raw.sent.Type, size)
+			require.Error(t, err, "prefix %d", size)
 		}
 	}
 }
@@ -55,26 +56,28 @@ func TestUISynchronizationServerDispatch(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, async := range []bool{false, true} {
-				raw := &capableTransport{}
-				server := NewServerConnection(raw)
-				var frame wire.Frame
+				serverRaw := &capableTransport{}
+				server := NewServerConnection(serverRaw)
+				var sent []byte
 				if async {
 					require.NoError(t, server.SendServerAsync(test.message))
-					frame = raw.async
+					require.Equal(t, 1, len(serverRaw.async))
+					sent = serverRaw.async[0].Payload
 				} else {
 					require.NoError(t, server.SendServer(test.message))
-					frame = raw.sent
+					require.Equal(t, 1, serverRaw.sentLen())
+					sent = serverRaw.sentPayload(0)
 				}
-				raw.recv = frame
-				got, err := NewClientConnection(raw).ReceiveServer()
+				clientRaw := &scriptedTransport{recv: mustClientPreambleQueue(t, sent)}
+				got, err := NewClientConnection(clientRaw).ReceiveServer()
 				require.NoError(t, err)
 				require.Equal(t, test.message, got)
-				for size := range len(frame.Payload) {
-					raw.recv.Payload = frame.Payload[:size]
+				for size := range len(sent) {
+					raw := &scriptedTransport{recv: mustClientPreambleQueue(t, sent[:size])}
 					_, err := NewClientConnection(raw).ReceiveServer()
 					require.Error(t, err, "prefix %d", size)
 				}
-				raw.recv.Payload = append(append([]byte(nil), frame.Payload...), 0)
+				raw := &scriptedTransport{recv: mustClientPreambleQueue(t, append(append([]byte(nil), sent...), 0))}
 				_, err = NewClientConnection(raw).ReceiveServer()
 				require.Error(t, err)
 			}

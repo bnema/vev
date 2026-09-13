@@ -83,22 +83,22 @@ func (_c *MockTransport_Close_Call) RunAndReturn(run func() error) *MockTranspor
 }
 
 // Recv provides a mock function for the type MockTransport
-func (_mock *MockTransport) Recv() (wire.Frame, error) {
+func (_mock *MockTransport) Recv() (wire.Envelope, error) {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for Recv")
 	}
 
-	var r0 wire.Frame
+	var r0 wire.Envelope
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() (wire.Frame, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func() (wire.Envelope, error)); ok {
 		return returnFunc()
 	}
-	if returnFunc, ok := ret.Get(0).(func() wire.Frame); ok {
+	if returnFunc, ok := ret.Get(0).(func() wire.Envelope); ok {
 		r0 = returnFunc()
 	} else {
-		r0 = ret.Get(0).(wire.Frame)
+		r0 = ret.Get(0).(wire.Envelope)
 	}
 	if returnFunc, ok := ret.Get(1).(func() error); ok {
 		r1 = returnFunc()
@@ -125,27 +125,27 @@ func (_c *MockTransport_Recv_Call) Run(run func()) *MockTransport_Recv_Call {
 	return _c
 }
 
-func (_c *MockTransport_Recv_Call) Return(frame wire.Frame, err error) *MockTransport_Recv_Call {
-	_c.Call.Return(frame, err)
+func (_c *MockTransport_Recv_Call) Return(envelope wire.Envelope, err error) *MockTransport_Recv_Call {
+	_c.Call.Return(envelope, err)
 	return _c
 }
 
-func (_c *MockTransport_Recv_Call) RunAndReturn(run func() (wire.Frame, error)) *MockTransport_Recv_Call {
+func (_c *MockTransport_Recv_Call) RunAndReturn(run func() (wire.Envelope, error)) *MockTransport_Recv_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Send provides a mock function for the type MockTransport
-func (_mock *MockTransport) Send(frame wire.Frame) error {
-	ret := _mock.Called(frame)
+func (_mock *MockTransport) Send(envelope wire.Envelope) error {
+	ret := _mock.Called(envelope)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Send")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(wire.Frame) error); ok {
-		r0 = returnFunc(frame)
+	if returnFunc, ok := ret.Get(0).(func(wire.Envelope) error); ok {
+		r0 = returnFunc(envelope)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -158,16 +158,16 @@ type MockTransport_Send_Call struct {
 }
 
 // Send is a helper method to define mock.On call
-//   - frame wire.Frame
-func (_e *MockTransport_Expecter) Send(frame any) *MockTransport_Send_Call {
-	return &MockTransport_Send_Call{Call: _e.mock.On("Send", frame)}
+//   - envelope wire.Envelope
+func (_e *MockTransport_Expecter) Send(envelope any) *MockTransport_Send_Call {
+	return &MockTransport_Send_Call{Call: _e.mock.On("Send", envelope)}
 }
 
-func (_c *MockTransport_Send_Call) Run(run func(frame wire.Frame)) *MockTransport_Send_Call {
+func (_c *MockTransport_Send_Call) Run(run func(envelope wire.Envelope)) *MockTransport_Send_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 wire.Frame
+		var arg0 wire.Envelope
 		if args[0] != nil {
-			arg0 = args[0].(wire.Frame)
+			arg0 = args[0].(wire.Envelope)
 		}
 		run(
 			arg0,
@@ -181,7 +181,7 @@ func (_c *MockTransport_Send_Call) Return(err error) *MockTransport_Send_Call {
 	return _c
 }
 
-func (_c *MockTransport_Send_Call) RunAndReturn(run func(frame wire.Frame) error) *MockTransport_Send_Call {
+func (_c *MockTransport_Send_Call) RunAndReturn(run func(envelope wire.Envelope) error) *MockTransport_Send_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -291,22 +291,22 @@ func (_c *MockDatagramTransport_DatagramTransport_Call) RunAndReturn(run func())
 }
 
 // Recv provides a mock function for the type MockDatagramTransport
-func (_mock *MockDatagramTransport) Recv() (wire.Frame, error) {
+func (_mock *MockDatagramTransport) Recv() (wire.Envelope, error) {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for Recv")
 	}
 
-	var r0 wire.Frame
+	var r0 wire.Envelope
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() (wire.Frame, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func() (wire.Envelope, error)); ok {
 		return returnFunc()
 	}
-	if returnFunc, ok := ret.Get(0).(func() wire.Frame); ok {
+	if returnFunc, ok := ret.Get(0).(func() wire.Envelope); ok {
 		r0 = returnFunc()
 	} else {
-		r0 = ret.Get(0).(wire.Frame)
+		r0 = ret.Get(0).(wire.Envelope)
 	}
 	if returnFunc, ok := ret.Get(1).(func() error); ok {
 		r1 = returnFunc()
@@ -333,27 +333,27 @@ func (_c *MockDatagramTransport_Recv_Call) Run(run func()) *MockDatagramTranspor
 	return _c
 }
 
-func (_c *MockDatagramTransport_Recv_Call) Return(frame wire.Frame, err error) *MockDatagramTransport_Recv_Call {
-	_c.Call.Return(frame, err)
+func (_c *MockDatagramTransport_Recv_Call) Return(envelope wire.Envelope, err error) *MockDatagramTransport_Recv_Call {
+	_c.Call.Return(envelope, err)
 	return _c
 }
 
-func (_c *MockDatagramTransport_Recv_Call) RunAndReturn(run func() (wire.Frame, error)) *MockDatagramTransport_Recv_Call {
+func (_c *MockDatagramTransport_Recv_Call) RunAndReturn(run func() (wire.Envelope, error)) *MockDatagramTransport_Recv_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // Send provides a mock function for the type MockDatagramTransport
-func (_mock *MockDatagramTransport) Send(frame wire.Frame) error {
-	ret := _mock.Called(frame)
+func (_mock *MockDatagramTransport) Send(envelope wire.Envelope) error {
+	ret := _mock.Called(envelope)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Send")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(wire.Frame) error); ok {
-		r0 = returnFunc(frame)
+	if returnFunc, ok := ret.Get(0).(func(wire.Envelope) error); ok {
+		r0 = returnFunc(envelope)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -366,16 +366,16 @@ type MockDatagramTransport_Send_Call struct {
 }
 
 // Send is a helper method to define mock.On call
-//   - frame wire.Frame
-func (_e *MockDatagramTransport_Expecter) Send(frame any) *MockDatagramTransport_Send_Call {
-	return &MockDatagramTransport_Send_Call{Call: _e.mock.On("Send", frame)}
+//   - envelope wire.Envelope
+func (_e *MockDatagramTransport_Expecter) Send(envelope any) *MockDatagramTransport_Send_Call {
+	return &MockDatagramTransport_Send_Call{Call: _e.mock.On("Send", envelope)}
 }
 
-func (_c *MockDatagramTransport_Send_Call) Run(run func(frame wire.Frame)) *MockDatagramTransport_Send_Call {
+func (_c *MockDatagramTransport_Send_Call) Run(run func(envelope wire.Envelope)) *MockDatagramTransport_Send_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 wire.Frame
+		var arg0 wire.Envelope
 		if args[0] != nil {
-			arg0 = args[0].(wire.Frame)
+			arg0 = args[0].(wire.Envelope)
 		}
 		run(
 			arg0,
@@ -389,7 +389,7 @@ func (_c *MockDatagramTransport_Send_Call) Return(err error) *MockDatagramTransp
 	return _c
 }
 
-func (_c *MockDatagramTransport_Send_Call) RunAndReturn(run func(frame wire.Frame) error) *MockDatagramTransport_Send_Call {
+func (_c *MockDatagramTransport_Send_Call) RunAndReturn(run func(envelope wire.Envelope) error) *MockDatagramTransport_Send_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -422,16 +422,16 @@ func (_m *MockAsyncTransport) EXPECT() *MockAsyncTransport_Expecter {
 }
 
 // SendAsync provides a mock function for the type MockAsyncTransport
-func (_mock *MockAsyncTransport) SendAsync(frame wire.Frame) error {
-	ret := _mock.Called(frame)
+func (_mock *MockAsyncTransport) SendAsync(envelope wire.Envelope) error {
+	ret := _mock.Called(envelope)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SendAsync")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(wire.Frame) error); ok {
-		r0 = returnFunc(frame)
+	if returnFunc, ok := ret.Get(0).(func(wire.Envelope) error); ok {
+		r0 = returnFunc(envelope)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -444,16 +444,16 @@ type MockAsyncTransport_SendAsync_Call struct {
 }
 
 // SendAsync is a helper method to define mock.On call
-//   - frame wire.Frame
-func (_e *MockAsyncTransport_Expecter) SendAsync(frame any) *MockAsyncTransport_SendAsync_Call {
-	return &MockAsyncTransport_SendAsync_Call{Call: _e.mock.On("SendAsync", frame)}
+//   - envelope wire.Envelope
+func (_e *MockAsyncTransport_Expecter) SendAsync(envelope any) *MockAsyncTransport_SendAsync_Call {
+	return &MockAsyncTransport_SendAsync_Call{Call: _e.mock.On("SendAsync", envelope)}
 }
 
-func (_c *MockAsyncTransport_SendAsync_Call) Run(run func(frame wire.Frame)) *MockAsyncTransport_SendAsync_Call {
+func (_c *MockAsyncTransport_SendAsync_Call) Run(run func(envelope wire.Envelope)) *MockAsyncTransport_SendAsync_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 wire.Frame
+		var arg0 wire.Envelope
 		if args[0] != nil {
-			arg0 = args[0].(wire.Frame)
+			arg0 = args[0].(wire.Envelope)
 		}
 		run(
 			arg0,
@@ -467,7 +467,7 @@ func (_c *MockAsyncTransport_SendAsync_Call) Return(err error) *MockAsyncTranspo
 	return _c
 }
 
-func (_c *MockAsyncTransport_SendAsync_Call) RunAndReturn(run func(frame wire.Frame) error) *MockAsyncTransport_SendAsync_Call {
+func (_c *MockAsyncTransport_SendAsync_Call) RunAndReturn(run func(envelope wire.Envelope) error) *MockAsyncTransport_SendAsync_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -500,16 +500,16 @@ func (_m *MockOwnedSynchronousTransport) EXPECT() *MockOwnedSynchronousTransport
 }
 
 // SendSynchronous provides a mock function for the type MockOwnedSynchronousTransport
-func (_mock *MockOwnedSynchronousTransport) SendSynchronous(frame wire.Frame) error {
-	ret := _mock.Called(frame)
+func (_mock *MockOwnedSynchronousTransport) SendSynchronous(envelope wire.Envelope) error {
+	ret := _mock.Called(envelope)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SendSynchronous")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(wire.Frame) error); ok {
-		r0 = returnFunc(frame)
+	if returnFunc, ok := ret.Get(0).(func(wire.Envelope) error); ok {
+		r0 = returnFunc(envelope)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -522,16 +522,16 @@ type MockOwnedSynchronousTransport_SendSynchronous_Call struct {
 }
 
 // SendSynchronous is a helper method to define mock.On call
-//   - frame wire.Frame
-func (_e *MockOwnedSynchronousTransport_Expecter) SendSynchronous(frame any) *MockOwnedSynchronousTransport_SendSynchronous_Call {
-	return &MockOwnedSynchronousTransport_SendSynchronous_Call{Call: _e.mock.On("SendSynchronous", frame)}
+//   - envelope wire.Envelope
+func (_e *MockOwnedSynchronousTransport_Expecter) SendSynchronous(envelope any) *MockOwnedSynchronousTransport_SendSynchronous_Call {
+	return &MockOwnedSynchronousTransport_SendSynchronous_Call{Call: _e.mock.On("SendSynchronous", envelope)}
 }
 
-func (_c *MockOwnedSynchronousTransport_SendSynchronous_Call) Run(run func(frame wire.Frame)) *MockOwnedSynchronousTransport_SendSynchronous_Call {
+func (_c *MockOwnedSynchronousTransport_SendSynchronous_Call) Run(run func(envelope wire.Envelope)) *MockOwnedSynchronousTransport_SendSynchronous_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 wire.Frame
+		var arg0 wire.Envelope
 		if args[0] != nil {
-			arg0 = args[0].(wire.Frame)
+			arg0 = args[0].(wire.Envelope)
 		}
 		run(
 			arg0,
@@ -545,7 +545,7 @@ func (_c *MockOwnedSynchronousTransport_SendSynchronous_Call) Return(err error) 
 	return _c
 }
 
-func (_c *MockOwnedSynchronousTransport_SendSynchronous_Call) RunAndReturn(run func(frame wire.Frame) error) *MockOwnedSynchronousTransport_SendSynchronous_Call {
+func (_c *MockOwnedSynchronousTransport_SendSynchronous_Call) RunAndReturn(run func(envelope wire.Envelope) error) *MockOwnedSynchronousTransport_SendSynchronous_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -1,0 +1,117 @@
+// Client-picker interaction: offers, snapshots, commits, closes.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// PickerLine is one structured row. Key is opaque and source-assigned.
+message PickerLine {
+  string key = 1;
+  // Closed kind taxonomy: 1 = section, 2 = session, 3 = tab, 4 = host.
+  uint32 kind = 2;
+  string label = 3;
+  string detail = 4;
+  // Closed status taxonomy: 0 = none, 1 = up, 2 = stopped, 3 = down,
+  // 4 = stale, 5 = version, 6 = error.
+  uint32 status = 5;
+  string status_detail = 6;
+  bool attention = 7;
+  bool stopped = 8;
+  bool dim = 9;
+  bool focusable = 10;
+  uint32 actions = 11; // bitmask: 1 = navigate, 2 = move, 4 = kill
+  bool ephemeral = 12;
+}
+
+// PickerCursor restores the selected row by opaque key.
+message PickerCursor {
+  string key = 1;
+  int64 index = 2;
+}
+
+// PickerProjection is one complete daemon-authorised presentation.
+message PickerProjection {
+  repeated PickerLine lines = 1;
+  PickerCursor cursor = 2;
+}
+
+// PickerSnapshot atomically publishes both presentation projections.
+message PickerSnapshot {
+  uint64 interaction_id = 1;
+  string source_id = 2;
+  uint64 source_revision = 3;
+  // Closed source-status taxonomy: 1 = ok, 2 = unavailable, 3 = too large.
+  uint32 status = 4;
+  string status_detail = 5;
+  PickerProjection recent = 6;
+  PickerProjection grouped = 7;
+}
+
+// PickerOffer opens one interaction.
+message PickerOffer {
+  uint64 interaction_id = 1;
+  uint64 request_id = 2;
+  // Closed intent taxonomy: 1 = navigation, 2 = move pane, 3 = move tab.
+  uint32 intent = 3;
+  string move_source_key = 4;
+  uint64 barrier_epoch = 5;
+  uint64 barrier_state = 6;
+  uint64 size_epoch = 7;
+  string title = 8;
+}
+
+// PickerBegin asks the daemon to open one interaction.
+message PickerBegin {
+  uint64 request_id = 1;
+  uint32 intent = 2; // same taxonomy as PickerOffer.intent
+}
+
+// PickerSelection commits the opaque row key at a revision.
+message PickerSelection {
+  uint64 cause_action_id = 1;
+  uint64 request_id = 2;
+  uint64 interaction_id = 3;
+  string source_id = 4;
+  uint64 source_revision = 5;
+  string key = 6;
+  // Closed action taxonomy: 1 = navigate, 2 = move, 3 = kill.
+  uint32 action = 7;
+}
+
+// PickerResult reports a completed mutation.
+message PickerResult {
+  uint64 cause_action_id = 1;
+  uint64 request_id = 2;
+  uint64 interaction_id = 3;
+  string source_id = 4;
+  string key = 5;
+  uint32 action = 6; // same taxonomy as PickerSelection.action
+}
+
+// PickerFailure reports a rejected selection with a bounded code.
+message PickerFailure {
+  uint64 cause_action_id = 1;
+  uint64 request_id = 2;
+  uint64 interaction_id = 3;
+  string source_id = 4;
+  string key = 5;
+  uint32 action = 6; // same taxonomy as PickerSelection.action
+  // Closed code taxonomy: 1 = stale revision, 2 = unknown key,
+  // 3 = retired target, 4 = navigation failed, 5 = unknown source,
+  // 6 = action failed.
+  uint32 code = 7;
+}
+
+// PickerClose asks the daemon to retire one interaction. Idempotent.
+message PickerClose {
+  uint64 interaction_id = 1;
+  uint64 request_id = 2;
+}
+
+// PickerClosed confirms the daemon retired one interaction.
+message PickerClosed {
+  uint64 interaction_id = 1;
+  uint64 barrier_epoch = 2;
+  uint64 barrier_state = 3;
+}

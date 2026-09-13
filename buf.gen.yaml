@@ -1,0 +1,10 @@
+version: v2
+plugins:
+  # Invoke the pinned protoc-gen-go through the Go tool chain so generation
+  # never depends on an ambient PATH plugin. Requires go >= 1.24.
+  - local: [go, tool, protoc-gen-go]
+    out: internal/protocol/wire
+    opt:
+      - paths=source_relative
+inputs:
+  - directory: internal/protocol/wire/schema

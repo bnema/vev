@@ -90,6 +90,7 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 	}
 	ac.overlays.pickerMu.Lock()
 	previousSession, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
+	previousCancel := ac.overlays.pickerPreviewCancel
 	interaction := ac.overlays.pickerInteraction + 1
 	if interaction == 0 {
 		interaction = 1
@@ -107,10 +108,14 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 	ac.overlays.pickerPreviewGeneration = 0
 	ac.overlays.pickerPreviewKey = ""
 	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerPreviewCancel = nil
 	ac.overlays.pickerMu.Unlock()
-	// A previous interaction's row must stop observing before this one owns the
-	// namespace, exactly as retiring the interaction would.
+	// A previous interaction's row must stop observing and refreshing before
+	// this one owns the namespace, exactly as retiring the interaction would.
 	d.teardownPickerPreviewSubscription(ac, previousSession, previousGeneration)
+	if previousCancel != nil {
+		previousCancel()
+	}
 
 	barrierEpoch, barrierState, sizeEpoch := pickerClientBarrier(ac)
 	offer := protocol.PickerOffer{
@@ -303,6 +308,7 @@ func (d *Daemon) closePickerForAttachment(ac *attachedClient, effect *attachment
 	}
 	previewSession := ac.overlays.pickerPreviewSession
 	previewGeneration := ac.overlays.pickerPreviewGeneration
+	previewCancel := ac.overlays.pickerPreviewCancel
 	ac.overlays.pickerOpen = false
 	ac.overlays.pickerKeys = nil
 	ac.overlays.pickerRevisions = nil
@@ -312,11 +318,16 @@ func (d *Daemon) closePickerForAttachment(ac *attachedClient, effect *attachment
 	ac.overlays.pickerPreviewGeneration = 0
 	ac.overlays.pickerPreviewKey = ""
 	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerPreviewCancel = nil
 	ac.overlays.pickerMu.Unlock()
-	// A retired interaction stops observing: its row is no longer displayed,
-	// and a later preview must not resurrect it. The recorded session pins the
-	// teardown to the exact coordinator that owns the subscription.
+	// A retired interaction stops observing and refreshing: its row is no
+	// longer displayed, and a later preview must not resurrect it. The recorded
+	// session pins the teardown to the exact coordinator that owns the
+	// subscription.
 	d.teardownPickerPreviewSubscription(ac, previewSession, previewGeneration)
+	if previewCancel != nil {
+		previewCancel()
+	}
 	if effect == nil {
 		return true
 	}

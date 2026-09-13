@@ -9,6 +9,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -39,8 +40,10 @@ func TestTransportReplayIntegration(t *testing.T) {
 		got, err := receiver.Recv()
 		require.NoError(t, err)
 		require.Equal(t, want, got)
-		output, err := wire.UnmarshalOutput(got.Payload)
+		decoded, err := sessionwire.DecodeServerEnvelope(got.Payload)
 		require.NoError(t, err)
+		output, ok := decoded.(protocol.Output)
+		require.True(t, ok, "decoded server message = %T, want protocol.Output", decoded)
 		bytes = append(bytes, output.Data...)
 		terminal.Write(output.Data)
 	}
@@ -102,7 +105,12 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				for _, snapshot := range sequence {
-					if err := sender.Send(wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(snapshot)}); err != nil {
+					payload, err := sessionwire.EncodeClientMessage(snapshot)
+					if err != nil {
+						done <- err
+						return
+					}
+					if err := sender.Send(wire.Envelope{Payload: payload}); err != nil {
 						done <- err
 						return
 					}
@@ -111,12 +119,15 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 			}()
 
 			for _, want := range sequence {
-				frame, err := receiver.Recv()
+				envelope, err := receiver.Recv()
 				require.NoError(t, err)
-				require.Equal(t, wire.MsgTheme, frame.Type)
-				require.Equal(t, wire.MarshalTheme(want), frame.Payload, "theme payload must be preserved byte-for-byte before decode")
-				got, err := wire.UnmarshalTheme(frame.Payload)
+				wantPayload, err := sessionwire.EncodeClientMessage(want)
 				require.NoError(t, err)
+				require.Equal(t, wantPayload, envelope.Payload, "theme envelope must be preserved byte-for-byte before decode")
+				decoded, err := sessionwire.DecodeClientEnvelope(envelope.Payload)
+				require.NoError(t, err)
+				got, ok := decoded.(protocol.Theme)
+				require.True(t, ok, "decoded client message = %T, want protocol.Theme", decoded)
 				require.Equal(t, want, got)
 			}
 			require.NoError(t, <-done)

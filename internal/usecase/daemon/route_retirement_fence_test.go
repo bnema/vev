@@ -62,7 +62,7 @@ func TestRouteRetirementDoesNotSendThroughFrozenAttachment(t *testing.T) {
 	d.reconcileRouteHistory(ac)
 	select {
 	case message := <-sends:
-		t.Fatalf("unexpected retirement during transition: %v", message.Type)
+		t.Fatalf("unexpected retirement during transition: %s", envelopeMessageName(t, message.Payload))
 	default:
 	}
 }

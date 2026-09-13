@@ -310,6 +310,10 @@ type Daemon struct {
 	// monitor. Presentation reads it without I/O; nil disables remote
 	// directory projections without affecting local behavior.
 	remoteDirectory ports.RemoteDirectory
+	// remoteFailureNoticed tracks active observation failure episodes so
+	// bounded retries do not produce repeated global toasts.
+	remoteFailureNoticeMu sync.Mutex
+	remoteFailureNoticed  map[string]uint64
 	// remoteMonitorRun starts the monitor policy loop. Serve owns its
 	// lifetime; nil disables background monitoring.
 	remoteMonitorRun func(context.Context) error
@@ -1175,6 +1179,7 @@ func (d *Daemon) handleConn(tr ports.ServerConnection) {
 func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.ServerConnection, failure *protocol.DecodeFailure) {
 	send := func(message protocol.ServerMessage) {
 		_ = boundedHandshakeOperation(ctx, tr, func() error { return tr.SendServer(message) })
+		_ = tr.Close()
 	}
 	switch failure.Kind {
 	case protocol.DecodeMessageHello:

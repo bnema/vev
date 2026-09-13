@@ -5,7 +5,6 @@ package app
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -66,12 +65,12 @@ func startDaemonInDir(t *testing.T, dir string, opts ...daemon.Option) (string, 
 	return dir, ch
 }
 
-// pump wires a background Recv pump to a transport so tests can await frames
-// with a timeout (wire.Transport has no read deadline).
-type pump struct{ ch chan wire.Frame }
+// pump wires a background Recv pump to a raw transport so tests can await
+// envelopes with a timeout (wire.Transport has no read deadline).
+type pump struct{ ch chan wire.Envelope }
 
 func recvPump(tr wire.Transport) *pump {
-	p := &pump{ch: make(chan wire.Frame, 128)}
+	p := &pump{ch: make(chan wire.Envelope, 128)}
 	go func() {
 		for {
 			f, err := tr.Recv()
@@ -85,40 +84,61 @@ func recvPump(tr wire.Transport) *pump {
 	return p
 }
 
-// attach dials, handshakes, and returns the transport plus its frame pump.
-func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size) (wire.Transport, *pump) {
+// typedPump wires a background ReceiveServer pump to a typed client connection
+// so tests can await semantic messages with a timeout.
+type typedPump struct{ ch chan protocol.ServerMessage }
+
+func recvTypedPump(conn ports.ClientConnection) *typedPump {
+	p := &typedPump{ch: make(chan protocol.ServerMessage, 128)}
+	go func() {
+		for {
+			message, err := conn.ReceiveServer()
+			if err != nil {
+				close(p.ch)
+				return
+			}
+			p.ch <- message
+		}
+	}()
+	return p
+}
+
+// attach dials, handshakes, and returns the typed client connection plus its
+// semantic message pump.
+func attach(t *testing.T, dir string, intent uint8, name string, sz domain.Size) (ports.ClientConnection, *typedPump) {
 	t.Helper()
 	return attachWithEnvironment(t, dir, intent, name, sz, nil)
 }
 
-func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, sz domain.Size, env []string) (wire.Transport, *pump) {
+func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, sz domain.Size, env []string) (ports.ClientConnection, *typedPump) {
 	t.Helper()
-	tr, err := ipc.DialContext(context.Background(), dir)
+	raw, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
+	conn := sessionwire.NewClientConnection(raw)
 	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}))
-	p := recvPump(tr)
+	require.NoError(t, conn.SendClient(hello))
+	p := recvTypedPump(conn)
 	select {
-	case f, ok := <-p.ch:
+	case message, ok := <-p.ch:
 		require.True(t, ok, "connection closed before welcome")
-		require.Equal(t, wire.MsgWelcome, f.Type)
+		require.IsType(t, protocol.Welcome{}, message)
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for welcome")
 	}
-	return tr, p
+	return conn, p
 }
 
 func listRemoteSessions(t *testing.T, dir string) protocol.Sessions {
 	t.Helper()
-	tr, err := ipc.DialContext(context.Background(), dir)
+	raw, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
-	defer func() { _ = tr.Close() }()
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}))
-	f, err := tr.Recv()
+	conn := sessionwire.NewClientConnection(raw)
+	defer func() { _ = conn.Close() }()
+	require.NoError(t, conn.SendClient(protocol.List{}))
+	message, err := conn.ReceiveServer()
 	require.NoError(t, err)
-	require.Equal(t, wire.MsgSessions, f.Type)
-	sessions, err := wire.UnmarshalSessions(f.Payload)
-	require.NoError(t, err)
+	sessions, ok := message.(protocol.Sessions)
+	require.True(t, ok, "expected session listing, got %T", message)
 	return sessions
 }
 
@@ -131,15 +151,16 @@ func killDaemon(dir string) error {
 }
 
 func requestKill(dir string, scope protocol.KillScope) error {
-	tr, err := ipc.DialContext(context.Background(), dir)
+	raw, err := ipc.DialContext(context.Background(), dir)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tr.Close() }()
-	if err := tr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: scope})}); err != nil {
+	conn := sessionwire.NewClientConnection(raw)
+	defer func() { _ = conn.Close() }()
+	if err := conn.SendClient(protocol.Kill{Scope: scope}); err != nil {
 		return err
 	}
-	reply, err := receiveKillReply(tr, daemonStopTimeout)
+	reply, err := receiveKillReply(conn, daemonStopTimeout)
 	if errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -149,68 +170,84 @@ func requestKill(dir string, scope protocol.KillScope) error {
 	if err != nil {
 		return err
 	}
-	if reply.Type != wire.MsgError {
+	em, ok := reply.(protocol.ErrorMsg)
+	if !ok {
 		return nil
-	}
-	em, err := wire.UnmarshalErrorMsg(reply.Payload)
-	if err != nil {
-		return fmt.Errorf("decoding kill error: %w", err)
 	}
 	return fmt.Errorf("kill failed: %s", em.Text)
 }
 
-func receiveKillReply(tr wire.Transport, timeout time.Duration) (wire.Frame, error) {
+func receiveKillReply(conn ports.ClientConnection, timeout time.Duration) (protocol.ServerMessage, error) {
 	type result struct {
-		frame wire.Frame
-		err   error
+		message protocol.ServerMessage
+		err     error
 	}
 	received := make(chan result, 1)
 	go func() {
-		frame, err := tr.Recv()
-		received <- result{frame: frame, err: err}
+		message, err := conn.ReceiveServer()
+		received <- result{message: message, err: err}
 	}()
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case reply := <-received:
-		return reply.frame, reply.err
+		return reply.message, reply.err
 	case <-timer.C:
-		_ = tr.Close()
+		_ = conn.Close()
 		reply := <-received
-		return reply.frame, errors.Join(context.DeadlineExceeded, reply.err)
+		return reply.message, errors.Join(context.DeadlineExceeded, reply.err)
 	}
 }
 
-type blockingRecvTransport struct {
+type blockingClientConnection struct {
 	closed chan struct{}
 	once   sync.Once
 }
 
-func (*blockingRecvTransport) Send(wire.Frame) error { return nil }
+func (*blockingClientConnection) SendClient(protocol.ClientMessage) error { return nil }
 
-func (t *blockingRecvTransport) Recv() (wire.Frame, error) {
-	<-t.closed
-	return wire.Frame{}, io.ErrClosedPipe
+func (c *blockingClientConnection) ReceiveServer() (protocol.ServerMessage, error) {
+	<-c.closed
+	return nil, io.ErrClosedPipe
 }
 
-func (t *blockingRecvTransport) Close() error {
-	t.once.Do(func() { close(t.closed) })
+func (*blockingClientConnection) Capabilities() protocol.ConnectionCapabilities {
+	return protocol.ConnectionCapabilities{}
+}
+
+func (*blockingClientConnection) LinkState() ports.LinkState         { return ports.LinkState(0) }
+func (*blockingClientConnection) LinkEvents() <-chan ports.LinkEvent { return nil }
+
+func (c *blockingClientConnection) Close() error {
+	c.once.Do(func() { close(c.closed) })
 	return nil
 }
 
 func TestReceiveKillReplyTimesOut(t *testing.T) {
-	tr := &blockingRecvTransport{closed: make(chan struct{})}
-	_, err := receiveKillReply(tr, 10*time.Millisecond)
+	conn := &blockingClientConnection{closed: make(chan struct{})}
+	_, err := receiveKillReply(conn, 10*time.Millisecond)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
 
+// mustHelloBytes encodes a minimal valid Hello for first-frame shape probes.
+func mustHelloBytes() []byte {
+	raw, err := sessionwire.EncodeClientMessage(protocol.Hello{
+		Version: protocol.Version, Size: domain.Size{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
 func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) {
-	incompatibleVersion := make([]byte, 10)
-	binary.BigEndian.PutUint16(incompatibleVersion[:2], protocol.Version+1)
-	binary.BigEndian.PutUint64(incompatibleVersion[2:], 42)
-	valid, err := wire.MarshalCommandRequest(protocol.CommandRequest{
+	versionMismatch, err := sessionwire.EncodeClientMessage(protocol.CommandRequest{
+		Version: protocol.Version + 1, RequestID: 42, Slug: "list-sessions",
+	})
+	require.NoError(t, err)
+	valid, err := sessionwire.EncodeClientMessage(protocol.CommandRequest{
 		Version: protocol.Version, RequestID: 43, Slug: "list-sessions",
 	})
 	require.NoError(t, err)
@@ -218,69 +255,98 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 	tests := []struct {
 		name    string
 		payload []byte
-		want    *protocol.CommandResult
+		want    protocol.ServerMessage
 	}{
 		{
 			name:    "incompatible version",
-			payload: incompatibleVersion,
+			payload: versionMismatch,
 			want:    &protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
 		},
 		{
+			// A single zero byte carries no recoverable envelope tag:
+			// the daemon answers the generic hello error.
 			name:    "truncated version prefix",
 			payload: []byte{0},
+			want:    &protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "expected hello"},
 		},
 		{
-			name:    "trailing garbage",
+			// Scan-level trailing garbage on a one-shot command
+			// connection carries no recoverable request: the daemon
+			// logs the rejection and closes without a typed refusal,
+			// so the client observes EOF.
+			name:    "trailing garbage closes without refusal",
 			payload: append(append([]byte(nil), valid...), 0xff),
-			want:    &protocol.CommandResult{RequestID: 43, Code: protocol.ErrInternal, Text: "malformed command request"},
+		},
+		{
+			// A decodable Hello with trailing garbage fails semantic
+			// validation after scanning: it is neither a command nor a
+			// well-formed attach, so the daemon answers the hello
+			// refusal before closing.
+			name:    "hello-shaped trailing garbage replies hello error",
+			payload: append(append([]byte(nil), mustHelloBytes()...), 0xff),
+			want:    &protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "malformed hello"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir, _ := startDaemon(t)
-			tr, err := ipc.DialContext(context.Background(), dir)
+			raw, err := ipc.DialContext(context.Background(), dir)
 			require.NoError(t, err)
-			defer func() { _ = tr.Close() }()
+			defer func() { _ = raw.Close() }()
 
-			require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgCommand, Payload: tt.payload}))
-			frame, err := tr.Recv()
+			preambleRequest, err := sessionwire.EncodePreambleRequestForTest()
+			require.NoError(t, err)
+			require.NoError(t, raw.Send(wire.Envelope{Payload: preambleRequest}))
+			response, err := raw.Recv()
+			require.NoError(t, err)
+			require.True(t, sessionwire.DecodePreambleAcceptanceForTest(response.Payload))
+
+			require.NoError(t, raw.Send(wire.Envelope{Payload: tt.payload}))
+			frame, err := raw.Recv()
 			if tt.want == nil {
 				require.ErrorIs(t, err, io.EOF)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, wire.MsgCommandResult, frame.Type)
-			require.Equal(t, wire.MarshalCommandResult(*tt.want), frame.Payload)
-			result, err := wire.UnmarshalCommandResult(frame.Payload)
+			message, err := sessionwire.DecodeServerEnvelope(frame.Payload)
 			require.NoError(t, err)
-			require.Equal(t, *tt.want, result)
+			switch want := tt.want.(type) {
+			case *protocol.CommandResult:
+				result, ok := message.(protocol.CommandResult)
+				require.True(t, ok, "expected command result, got %T", message)
+				require.Equal(t, *want, result)
+			case *protocol.ErrorMsg:
+				reply, ok := message.(protocol.ErrorMsg)
+				require.True(t, ok, "expected error reply, got %T", message)
+				require.Equal(t, *want, reply)
+			default:
+				t.Fatalf("unsupported want type %T", tt.want)
+			}
 		})
 	}
 }
 
 // awaitText decodes MsgOutput frames into a fresh VT screen and returns once
 // the reconstructed grid contains want.
-func awaitText(t *testing.T, p *pump, sz domain.Size, want string) {
+func awaitText(t *testing.T, p *typedPump, sz domain.Size, want string) {
 	t.Helper()
 	_ = awaitScreenText(t, p, sz, want)
 }
 
 // awaitScreenText is like awaitText, but returns the reconstructed screen text
 // at the point the wanted text appears so callers can make additional checks.
-func awaitScreenText(t *testing.T, p *pump, sz domain.Size, want string) string {
+func awaitScreenText(t *testing.T, p *typedPump, sz domain.Size, want string) string {
 	t.Helper()
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
 	timeout := time.After(5 * time.Second)
 	for {
 		select {
-		case f, ok := <-p.ch:
+		case message, ok := <-p.ch:
 			if !ok {
 				t.Fatalf("connection closed before %q appeared; screen=%q", want, screenText(screen))
 			}
-			if f.Type == wire.MsgOutput {
-				o, err := wire.UnmarshalOutput(f.Payload)
-				require.NoError(t, err)
-				screen.Write(o.Data)
+			if output, ok := message.(protocol.Output); ok {
+				screen.Write(output.Data)
 				text := screenText(screen)
 				if strings.Contains(text, want) {
 					return text
@@ -292,20 +358,18 @@ func awaitScreenText(t *testing.T, p *pump, sz domain.Size, want string) string 
 	}
 }
 
-func assertNoTextAfterInput(t *testing.T, p *pump, sz domain.Size, absent string) {
+func assertNoTextAfterInput(t *testing.T, p *typedPump, sz domain.Size, absent string) {
 	t.Helper()
 	screen := vt.NewScreen(sz.Cols, sz.Rows)
 	timeout := time.After(300 * time.Millisecond)
 	for {
 		select {
-		case f, ok := <-p.ch:
+		case message, ok := <-p.ch:
 			if !ok {
 				return
 			}
-			if f.Type == wire.MsgOutput {
-				o, err := wire.UnmarshalOutput(f.Payload)
-				require.NoError(t, err)
-				screen.Write(o.Data)
+			if output, ok := message.(protocol.Output); ok {
+				screen.Write(output.Data)
 				require.NotContains(t, screenText(screen), absent)
 			}
 		case <-timeout:
@@ -335,10 +399,10 @@ func shellFixture(t *testing.T, label string) string {
 	return path
 }
 
-func assertChildEnvironment(t *testing.T, tr wire.Transport, p *pump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
+func assertChildEnvironment(t *testing.T, tr ports.ClientConnection, p *typedPump, sz domain.Size, wantTestEnv, wantShell, wantRuntimeDir, wantWayland string) {
 	t.Helper()
 	command := "printf '\\033[2J\\033[H'; printf 'VEV_TEST_ENV=%s SHELL=%s XDG_RUNTIME_DIR=%s WAYLAND_DISPLAY=%s TERM=%s COLORTERM=%s TERM_PROGRAM=%s VEV_PREFIX=%.24s\\n' \"$VEV_TEST_ENV\" \"${SHELL##*/}\" \"$XDG_RUNTIME_DIR\" \"$WAYLAND_DISPLAY\" \"$TERM\" \"$COLORTERM\" \"$TERM_PROGRAM\" \"$VEV\"\n"
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte(command)})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte(command)}))
 	text := awaitScreenText(t, p, sz, "TERM_PROGRAM=vev")
 	// The concrete PTY adapter selects the profile from host terminfo. Exact
 	// direct/fallback behavior is covered by the adapter's hermetic tests.
@@ -381,9 +445,9 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	// The first shell was already running, so it retains its original environment.
 	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/first", "wayland-first")
 
-	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr2.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, p2, sz, "Commands")
-	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr2.SendClient(protocol.Input{Data: []byte("CNT\r")}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
 	assertChildEnvironment(t, tr2, p2, sz, "second", secondShell, "/run/second", "wayland-second")
 }
@@ -414,17 +478,17 @@ func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) 
 
 	// The second attachment mutates shared tab state. Its newly opened PTY must
 	// also be rendered to that attachment, not only to the coordinator primary.
-	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr2.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, p2, sz, "Commands")
-	require.NoError(t, tr2.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr2.SendClient(protocol.Input{Data: []byte("CNT\r")}))
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
 
 	// Each attachment owns its selected tab. Move the first attachment to the
 	// new PTY before releasing its gate, so the fresh PTY output must reach both
 	// views rather than only being recovered by a later first paint.
-	require.NoError(t, tr1.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b2")})}))
+	require.NoError(t, tr1.SendClient(protocol.Input{Data: []byte("\x1b2")}))
 	awaitText(t, p1, sz, "SHELL_COMMAND=second")
-	require.NoError(t, tr1.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("go\n")})}))
+	require.NoError(t, tr1.SendClient(protocol.Input{Data: []byte("go\n")}))
 	awaitText(t, p2, sz, sharedOutput)
 	awaitText(t, p1, sz, sharedOutput)
 }
@@ -446,7 +510,7 @@ func TestIntegration_InputRoundtrip(t *testing.T) {
 	tr, p := attach(t, dir, protocol.IntentEphemeral, "", sz)
 	defer func() { _ = tr.Close() }()
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("PINGPONG\n")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("PINGPONG\n")}))
 	awaitText(t, p, sz, "PINGPONG")
 }
 
@@ -458,10 +522,10 @@ func TestIntegration_CommandPaletteCreatesTab(t *testing.T) {
 	defer func() { _ = tr.Close() }()
 	awaitText(t, p, sz, "READY")
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, p, sz, "Commands")
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("CNT\r")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("CNT\r")}))
 	// Tab labels are enriched with the focused pane's title; with no process
 	// inspector wired in this test, that title falls back to the shell's
 	// basename ("sh").
@@ -478,25 +542,25 @@ func TestIntegration_CommandPaletteRenamesEphemeralSession(t *testing.T) {
 	text := awaitScreenText(t, p, sz, "READY")
 	require.Contains(t, text, " 0* ")
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1b ")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, p, sz, "Commands")
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("RNS\r")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("RNS\r")}))
 	awaitText(t, p, sz, "Rename session")
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x7fwork\r")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("\x7fwork\r")}))
 	text = awaitScreenText(t, p, sz, " work ")
 	require.NotContains(t, text, "work*")
 
-	listTr, err := ipc.DialContext(context.Background(), dir)
+	listRaw, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
+	listTr := sessionwire.NewClientConnection(listRaw)
 	defer func() { _ = listTr.Close() }()
-	require.NoError(t, listTr.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}))
-	f, err := listTr.Recv()
+	require.NoError(t, listTr.SendClient(protocol.List{}))
+	message, err := listTr.ReceiveServer()
 	require.NoError(t, err)
-	require.Equal(t, wire.MsgSessions, f.Type)
-	sessions, err := wire.UnmarshalSessions(f.Payload)
-	require.NoError(t, err)
+	sessions, ok := message.(protocol.Sessions)
+	require.True(t, ok, "expected session listing, got %T", message)
 	require.NotEmpty(t, sessions.Sessions)
 	require.Equal(t, "work", sessions.Sessions[0].Name)
 	require.False(t, sessions.Sessions[0].Ephemeral)
@@ -511,7 +575,7 @@ func TestIntegration_AltCWithoutPaletteDoesNotCreateTab(t *testing.T) {
 	text := awaitScreenText(t, p, sz, "READY")
 	require.NotContains(t, text, " 1  2 ")
 
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("\x1bc")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("\x1bc")}))
 	assertNoTextAfterInput(t, p, sz, " 1  2 ")
 }
 
@@ -987,7 +1051,7 @@ func publishRestorableCheckpoint(t *testing.T, stateDir string, repository *snap
 	go func() { served <- d.Serve(ctx, sessionwire.NewServerListener(listener)) }()
 
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, name, domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("checkpoint me\n")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("checkpoint me\n")}))
 	require.Eventually(t, func() bool {
 		record, ok, _ := opened.Catalogue.Record(name)
 		return ok && record.Committed != nil && record.DegradedReason == ""
@@ -1073,7 +1137,7 @@ func runBlockedSnapshotWriterShutdown(t *testing.T) blockedSnapshotWriterShutdow
 
 	awaitLifecycleStage(t, listenerReady, "daemon listener")
 	tr, _ := attach(t, runtimeDir, protocol.IntentNew, "work", domain.Size{Cols: 80, Rows: 24})
-	require.NoError(t, tr.Send(wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(protocol.Input{Data: []byte("dirty state\n")})}))
+	require.NoError(t, tr.SendClient(protocol.Input{Data: []byte("dirty state\n")}))
 	awaitLifecycleStage(t, repository.entered, "snapshot publication")
 	require.NoError(t, tr.Close())
 	require.Eventually(t, func() bool {
@@ -1425,11 +1489,11 @@ func (c *lifecycleControlledCatalogue) Close() error {
 
 type integrationTransport struct{}
 
-func (*integrationTransport) Send(wire.Frame) error     { return nil }
-func (*integrationTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (*integrationTransport) Close() error              { return nil }
-func (*integrationTransport) LocalAddr() net.Addr       { return nil }
-func (*integrationTransport) RemoteAddr() net.Addr      { return nil }
+func (*integrationTransport) Send(wire.Envelope) error     { return nil }
+func (*integrationTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (*integrationTransport) Close() error                 { return nil }
+func (*integrationTransport) LocalAddr() net.Addr          { return nil }
+func (*integrationTransport) RemoteAddr() net.Addr         { return nil }
 
 func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
@@ -1440,12 +1504,13 @@ func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
 	tr2, _ := attach(t, dir, protocol.IntentNew, "two", sz)
 	require.NoError(t, tr2.Close())
 
-	killTr, err := ipc.DialContext(context.Background(), dir)
+	killRaw, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
+	killTr := sessionwire.NewClientConnection(killRaw)
 	defer func() { _ = killTr.Close() }()
-	require.NoError(t, killTr.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillAll})}))
+	require.NoError(t, killTr.SendClient(protocol.Kill{Scope: protocol.KillAll}))
 
-	_, err = killTr.Recv()
+	_, err = killTr.ReceiveServer()
 	require.ErrorIs(t, err, io.EOF)
 	var serveErr error
 	require.Eventually(t, func() bool {

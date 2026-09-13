@@ -3,24 +3,22 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE' >&2
-Usage: scripts/debug-remote-attach.sh [--mode stdio|udp|default] [--session NAME] [--duration 8s] [--vev-bin PATH] [--udp-health] user@host
+Usage: scripts/debug-remote-attach.sh [--mode stdio|quic|default] [--session NAME] [--duration 8s] [--vev-bin PATH] user@host
 
 Runs a real remote attach smoke/debug attempt under a PTY, captures local and
 remote vev versions, and stores local/remote log tails around the attempt.
 
 Examples:
-  scripts/debug-remote-attach.sh brice@arch
-  scripts/debug-remote-attach.sh --session work brice@arch
-  scripts/debug-remote-attach.sh --mode udp brice@arch
-  go build -o /tmp/vev-debug . && scripts/debug-remote-attach.sh --vev-bin /tmp/vev-debug brice@arch
+  scripts/debug-remote-attach.sh user@example-host
+  scripts/debug-remote-attach.sh --session work user@example-host
+  scripts/debug-remote-attach.sh --mode quic user@example-host
+  go build -o /tmp/vev-debug . && scripts/debug-remote-attach.sh --vev-bin /tmp/vev-debug user@example-host
 
 Notes:
   - The command times out intentionally if attach succeeds and stays interactive.
   - Exit 124 from timeout is treated as a likely successful attach if no early
     vev/ssh error is captured; inspect the bundle for confirmation.
   - The remote host must be reachable by SSH for log collection.
-  - --udp-health collects redacted UDP transport-health log lines and Linux
-    ss -u -m socket-memory counters when available.
   - The attach attempt unsets VEV so the smoke test can run from inside vev.
 USAGE
 }
@@ -29,7 +27,6 @@ mode="default"
 session=""
 duration="8s"
 vev_bin="${VEV_BIN:-vev}"
-collect_udp_health=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
@@ -40,8 +37,6 @@ while [[ $# -gt 0 ]]; do
       duration="${2:-}"; shift 2 ;;
     --vev-bin)
       vev_bin="${2:-}"; shift 2 ;;
-    --udp-health)
-      collect_udp_health=true; shift ;;
     -h|--help)
       usage; exit 0 ;;
     --)
@@ -58,8 +53,8 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 case "$mode" in
-  default|stdio|udp) ;;
-  *) echo "invalid --mode $mode (want default, stdio, or udp)" >&2; exit 2 ;;
+  default|stdio|quic) ;;
+  *) echo "invalid --mode $mode (want default, stdio, or quic)" >&2; exit 2 ;;
 esac
 
 target="$1"
@@ -73,7 +68,6 @@ out_dir="${TMPDIR:-/tmp}/vev-remote-attach-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out_dir"
 
 local_state="${XDG_STATE_HOME:-$HOME/.local/state}/vev"
-diagnostic_files=()
 
 # All persisted and displayed command output passes through this filter. Keep
 # diagnostic counters while removing the target, local home, network addresses,
@@ -132,21 +126,6 @@ copy_remote_logs() {
   redact_file "$raw_err" "$out_dir/remote-$label/logs.err"
 }
 
-collect_udp_diagnostics() {
-  local label="$1" local_dir="$out_dir/local-$1" remote_dir="$out_dir/remote-$1"
-  if ! "$collect_udp_health"; then return; fi
-
-  grep -hE 'udp( transport)? health' "$local_dir"/*.log 2>/dev/null | redact >"$local_dir/udp-transport-health.out" || true
-  (ss -u -m 2>/dev/null || true) | awk '/skmem:/' | redact >"$local_dir/udp-socket-memory.out"
-  diagnostic_files+=("$local_dir/udp-transport-health.out" "$local_dir/udp-socket-memory.out")
-
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$target" 'state="${XDG_STATE_HOME:-$HOME/.local/state}/vev"; [ -d "$state" ] && grep -hE "udp( transport)? health" "$state"/vev*.log 2>/dev/null || true' \
-    2>&1 | redact >"$remote_dir/udp-transport-health.out" || true
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$target" 'ss -u -m 2>/dev/null | awk "/skmem:/" || true' \
-    2>&1 | redact >"$remote_dir/udp-socket-memory.out" || true
-  diagnostic_files+=("$remote_dir/udp-transport-health.out" "$remote_dir/udp-socket-memory.out")
-}
-
 printf 'debug bundle: %s\n' "$out_dir"
 printf 'mode: %s\nduration: %s\n' "$mode" "$duration" >"$out_dir/summary.txt"
 
@@ -196,7 +175,6 @@ printf '%s\n' "$attach_status" >"$out_dir/attach.exit"
 
 copy_local_logs after
 copy_remote_logs after
-collect_udp_diagnostics after
 
 {
   echo "debug bundle: $out_dir"
@@ -208,10 +186,6 @@ collect_udp_diagnostics after
   if [[ -s "$out_dir/attach.err" ]]; then
     echo "attach stderr:"
     sed 's/^/  /' "$out_dir/attach.err" | tail -40
-  fi
-  if ((${#diagnostic_files[@]})); then
-    echo "collected diagnostic files:"
-    printf '  %s\n' "${diagnostic_files[@]}"
   fi
   echo "recent local after logs:"
   find "$out_dir/local-after" -maxdepth 1 -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do

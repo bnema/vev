@@ -5,7 +5,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,13 +36,11 @@ func TestBackSessionUsesClientPreviousRouteAfterSnapshotPublication(t *testing.T
 	var action protocol.RouteNavigationAction
 	found := false
 	for _, frame := range frames {
-		if frame.Type != wire.MsgNavigateRecentRoute {
+		decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction)
+		if !ok {
 			continue
 		}
-		var err error
-		action, err = wire.UnmarshalRouteNavigationAction(frame.Payload)
-		require.NoError(t, err)
-		found = true
+		action, found = decoded, true
 	}
 	require.True(t, found)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 5, Key: 7, Generation: 3}, action)
@@ -88,9 +85,9 @@ func TestBackSessionOffersPreviousRouteOnCurrentDaemon(t *testing.T) {
 	require.NoError(t, d.backSessionForAttachment(effect))
 	frames := transport.Sends()
 	require.Len(t, frames, 1)
-	require.Equal(t, wire.MsgAttachTarget, frames[0].Type)
-	handoff, err := wire.UnmarshalAttachTarget(frames[0].Payload)
-	require.NoError(t, err)
+	require.Equal(t, "AttachTarget", envelopeMessageName(t, frames[0].Payload))
+	handoff, ok := decodeServerMessage(t, frames[0]).(protocol.AttachTarget)
+	require.True(t, ok)
 	require.Equal(t, protocol.AttachTarget{
 		Session: target.name, Intent: protocol.IntentAttach, ExactTarget: &exact,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true,

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -83,7 +84,7 @@ func requireSignal(t *testing.T, ch <-chan struct{}, message string) {
 	}
 }
 
-func requireFrame(t *testing.T, ch <-chan protocol.ClientMessage, message string) wire.Frame {
+func requireFrame(t *testing.T, ch <-chan protocol.ClientMessage, message string) wire.Envelope {
 	t.Helper()
 	select {
 	case message := <-ch:
@@ -92,8 +93,18 @@ func requireFrame(t *testing.T, ch <-chan protocol.ClientMessage, message string
 		return frame
 	case <-time.After(time.Second):
 		t.Fatal(message)
-		return wire.Frame{}
+		return wire.Envelope{}
 	}
+}
+
+func requireInput(t *testing.T, ch <-chan protocol.ClientMessage, message string) protocol.Input {
+	t.Helper()
+	frame := requireFrame(t, ch, message)
+	decoded, err := sessionwire.DecodeClientEnvelope(frame.Payload)
+	require.NoError(t, err)
+	input, ok := decoded.(protocol.Input)
+	require.True(t, ok, "decoded message is %T, want Input", decoded)
+	return input
 }
 
 func requireTimer(t *testing.T, ch <-chan *attachPaletteTimer, message string) *attachPaletteTimer {
@@ -323,9 +334,7 @@ func TestTerminalInputPumpCancellationAfterInputBeforeOSCPreservesOnlyUndelivere
 		}).run()
 		close(done)
 	}()
-	frame := requireFrame(t, out, "timed out waiting for delivered input prefix")
-	got, err := wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	got := requireInput(t, out, "timed out waiting for delivered input prefix")
 	require.Equal(t, []byte("x"), got.Data)
 	requireSignal(t, delivered, "timed out waiting for cancellation after input delivery")
 	requireSignal(t, done, "timed out waiting for cancelled stdin pump")
@@ -342,9 +351,7 @@ func TestTerminalInputPumpCancellationAfterInputBeforeOSCPreservesOnlyUndelivere
 		}).run()
 		close(replacementDone)
 	}()
-	frame = requireFrame(t, replacementOut, "timed out waiting for undelivered input suffix")
-	got, err = wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	got = requireInput(t, replacementOut, "timed out waiting for undelivered input suffix")
 	require.Equal(t, []byte("y"), got.Data, "replacement must receive only the undelivered ordinary suffix")
 
 	cancelReplacement()
@@ -369,9 +376,7 @@ func TestTerminalInputPumpCancellationPreservesCoalescerHeldSuffix(t *testing.T)
 		}).run()
 		close(done)
 	}()
-	frame := requireFrame(t, out, "timed out waiting for delivered input prefix")
-	got, err := wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	got := requireInput(t, out, "timed out waiting for delivered input prefix")
 	require.Equal(t, []byte("x"), got.Data)
 	requireSignal(t, done, "timed out waiting for cancelled stdin pump")
 
@@ -389,9 +394,7 @@ func TestTerminalInputPumpCancellationPreservesCoalescerHeldSuffix(t *testing.T)
 		close(replacementDone)
 	}()
 	requireTimer(t, replacementClock.timers, "timed out waiting for paste-prefix ambiguity timer").fire()
-	frame = requireFrame(t, replacementOut, "timed out waiting for coalescer-held suffix")
-	got, err = wire.UnmarshalInput(frame.Payload)
-	require.NoError(t, err)
+	got = requireInput(t, replacementOut, "timed out waiting for coalescer-held suffix")
 	require.Equal(t, held, got.Data, "replacement must receive the coalescer-held suffix exactly once")
 
 	cancelReplacement()

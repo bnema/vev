@@ -268,12 +268,12 @@ func awaitLatestCoordinatorTimer(t *testing.T, clk *coordinatorMockClock) *coord
 	}
 }
 
-func requireNoCoordinatorOutputFrame(t *testing.T, sends chan wire.Frame) {
+func requireNoCoordinatorOutputFrame(t *testing.T, sends chan wire.Envelope) {
 	t.Helper()
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type == wire.MsgRoutePosition {
+			if envelopeMessageName(t, frame.Payload) == "RoutePosition" {
 				continue
 			}
 			t.Fatalf("unexpected output frame: %+v", frame)
@@ -1522,7 +1522,7 @@ func TestRenderCoordinatorSyncBatchSurvivesAttachmentLifecycle(t *testing.T) {
 }
 
 func TestRenderCoordinatorResizeEpochDispatch(t *testing.T) {
-	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Frame, *coordinatorMockClock, chan renderInvalidation) {
+	newResizeFixture := func(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Envelope, *coordinatorMockClock, chan renderInvalidation) {
 		t.Helper()
 		p, releasePTY := newBlockingPTY(t)
 		t.Cleanup(releasePTY)

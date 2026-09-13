@@ -18,32 +18,32 @@ import (
 )
 
 type datagramTestTransport struct {
-	sends chan wire.Frame
-	recv  chan wire.Frame
+	sends chan wire.Envelope
+	recv  chan wire.Envelope
 	once  sync.Once
 }
 
 type failingOutputTransport struct{}
 
-func (failingOutputTransport) Send(wire.Frame) error     { return errors.New("send failed") }
-func (failingOutputTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (failingOutputTransport) Close() error              { return nil }
+func (failingOutputTransport) Send(wire.Envelope) error     { return errors.New("send failed") }
+func (failingOutputTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (failingOutputTransport) Close() error                 { return nil }
 
 type asyncPaintTransport struct {
-	syncSends  chan wire.Frame
-	asyncSends chan wire.Frame
+	syncSends  chan wire.Envelope
+	asyncSends chan wire.Envelope
 }
 
-func (t *asyncPaintTransport) Send(f wire.Frame) error      { t.syncSends <- f; return nil }
-func (t *asyncPaintTransport) SendAsync(f wire.Frame) error { t.asyncSends <- f; return nil }
-func (t *asyncPaintTransport) Recv() (wire.Frame, error)    { return wire.Frame{}, io.EOF }
-func (t *asyncPaintTransport) Close() error                 { return nil }
+func (t *asyncPaintTransport) Send(f wire.Envelope) error      { t.syncSends <- f; return nil }
+func (t *asyncPaintTransport) SendAsync(f wire.Envelope) error { t.asyncSends <- f; return nil }
+func (t *asyncPaintTransport) Recv() (wire.Envelope, error)    { return wire.Envelope{}, io.EOF }
+func (t *asyncPaintTransport) Close() error                    { return nil }
 
 type timedSideEffectTransport struct {
 	closeTrackingTransport
 }
 
-func (t *timedSideEffectTransport) SendSynchronous(f wire.Frame) error {
+func (t *timedSideEffectTransport) SendSynchronous(f wire.Envelope) error {
 	return t.Send(f)
 }
 
@@ -55,14 +55,14 @@ func (noWatchdogClock) NewTimer(time.Duration) ports.Timer {
 }
 
 func newDatagramTestTransport() *datagramTestTransport {
-	return &datagramTestTransport{sends: make(chan wire.Frame, 64), recv: make(chan wire.Frame, 64)}
+	return &datagramTestTransport{sends: make(chan wire.Envelope, 64), recv: make(chan wire.Envelope, 64)}
 }
 
-func (t *datagramTestTransport) Send(f wire.Frame) error { t.sends <- f; return nil }
-func (t *datagramTestTransport) Recv() (wire.Frame, error) {
+func (t *datagramTestTransport) Send(f wire.Envelope) error { t.sends <- f; return nil }
+func (t *datagramTestTransport) Recv() (wire.Envelope, error) {
 	f, ok := <-t.recv
 	if !ok {
-		return wire.Frame{}, io.EOF
+		return wire.Envelope{}, io.EOF
 	}
 	return f, nil
 }
@@ -91,24 +91,22 @@ func TestDatagramAttachPipelinesRendererBeforeAck(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(sess, ac, false, nil)
-	first := awaitFrame(t, tr.sends, wire.MsgOutput)
-	out, err := wire.UnmarshalOutput(first.Payload)
-	require.NoError(t, err)
+	first := awaitFrame(t, tr.sends, "Output")
+	out := unmarshalTestOutput(t, first.Payload)
 	require.Equal(t, uint64(1), out.New)
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("\rB"))
 	d.paint(sess, ac, false, nil)
-	updated := awaitFrame(t, tr.sends, wire.MsgOutput)
-	out, err = wire.UnmarshalOutput(updated.Payload)
-	require.NoError(t, err)
+	updated := awaitFrame(t, tr.sends, "Output")
+	out = unmarshalTestOutput(t, updated.Payload)
 	require.Equal(t, uint64(2), out.New)
-	// Both states were emitted before the MsgAck; the ordered dependency chain
+	// Both states were emitted before the Ack; the ordered dependency chain
 	// must therefore remain valid without waiting for renderer acknowledgement.
-	tr.recv <- wire.Frame{Type: wire.MsgAck, Payload: mustMarshalAck(protocol.Ack{Epoch: out.Epoch, State: out.New})}
+	tr.recv <- mustClientEnvelope(protocol.Ack{Epoch: out.Epoch, State: out.New})
 	require.NoError(t, tr.Close())
 	d.runConnLoop(ac)
 
-	// The production MsgAck path retires retained states without moving the
+	// The production Ack path retires retained states without moving the
 	// renderer baseline backward.
 	d.paint(sess, ac, false, nil)
 	require.Empty(t, tr.sends)
@@ -118,16 +116,16 @@ func TestPaintExplicitlyUsesAsyncTransportCapability(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
-	tr := &asyncPaintTransport{syncSends: make(chan wire.Frame, 1), asyncSends: make(chan wire.Frame, 1)}
+	tr := &asyncPaintTransport{syncSends: make(chan wire.Envelope, 1), asyncSends: make(chan wire.Envelope, 1)}
 	ac.replaceTransport(tr)
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 
 	d.paint(sess, ac, false, nil)
 
-	awaitFrame(t, tr.asyncSends, wire.MsgOutput)
+	awaitFrame(t, tr.asyncSends, "Output")
 	select {
 	case frame := <-tr.syncSends:
-		t.Fatalf("paint used synchronous Send: %+v", frame)
+		t.Fatalf("paint used synchronous Send: %+v", envelopeMessageName(t, frame.Payload))
 	default:
 	}
 }
@@ -156,7 +154,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 	pane.screen.ClearDamage()
 	client := vt.NewScreen(80, 25)
 	d.paint(sess, ac, true, nil)
-	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, wire.MsgOutput))
+	first := mustApplyOutput(t, client, awaitFrame(t, tr.sends, "Output"))
 	ac.ackOutputState(first.Epoch, first.New)
 
 	// Preserve the frame after one scroll while inducing a real VT scroll
@@ -176,7 +174,7 @@ func TestDatagramMultipleUnackedScrollPaintsMatchLatestFrame(t *testing.T) {
 		pane.screen.Write([]byte("\nq"))
 		writeTestFrame(t, pane.screen, desired)
 		d.paint(sess, ac, false, nil)
-		mustApplyOutput(t, client, awaitFrame(t, tr.sends, wire.MsgOutput))
+		mustApplyOutput(t, client, awaitFrame(t, tr.sends, "Output"))
 	}
 
 	require.Equal(t, 'B', client.Cell(0, 1).Rune,
@@ -199,10 +197,9 @@ func outputStateRow(row []renderer.Cell) string {
 	return string(runes)
 }
 
-func mustApplyOutput(t *testing.T, screen *vt.Screen, frame wire.Frame) protocol.Output {
+func mustApplyOutput(t *testing.T, screen *vt.Screen, frame wire.Envelope) protocol.Output {
 	t.Helper()
-	out, err := wire.UnmarshalOutput(frame.Payload)
-	require.NoError(t, err)
+	out := unmarshalTestOutput(t, frame.Payload)
 	screen.Write(out.Data)
 	return out
 }
@@ -214,9 +211,9 @@ func TestLocalAttachStillAdvancesRendererOnSend(t *testing.T) {
 
 	sess.tabs[0].focusedPane().screen.Write([]byte("A"))
 	d.paint(sess, ac, false, nil)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
-	// The first paint updates the renderer shadow without waiting for MsgAck.
+	// The first paint updates the renderer shadow without waiting for Ack.
 	d.paint(sess, ac, false, nil)
 	requireNoOutputFrame(t, sends)
 }
@@ -229,13 +226,12 @@ func TestLocalOutputAckDoesNotMoveRendererShadowBackward(t *testing.T) {
 
 	pane.screen.Write([]byte("A"))
 	d.paint(sess, ac, false, nil)
-	first := awaitFrame(t, sends, wire.MsgOutput)
-	out, err := wire.UnmarshalOutput(first.Payload)
-	require.NoError(t, err)
+	first := awaitFrame(t, sends, "Output")
+	out := unmarshalTestOutput(t, first.Payload)
 
 	pane.screen.Write([]byte("\rB"))
 	d.paint(sess, ac, false, nil)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	ac.ackOutputState(out.Epoch, out.New)
 	d.paint(sess, ac, false, nil)
@@ -253,8 +249,7 @@ func TestRawTerminalSideEffectDoesNotEnterFullOutputWindow(t *testing.T) {
 	require.Equal(t, uint64(maxUnackedOutputStates), ac.output.outstanding())
 	sends := tr.Sends()
 	require.Len(t, sends, 1)
-	out, err := wire.UnmarshalOutput(sends[0].Payload)
-	require.NoError(t, err)
+	out := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, out.Base)
 	require.Zero(t, out.New)
 }
@@ -305,7 +300,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			pane.screen.Write([]byte(strings.Repeat("A", 79)))
 			d.paint(sess, ac, true, nil)
 			client := vt.NewScreen(80, 24)
-			initial := mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+			initial := mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 			ac.ackOutputState(initial.Epoch, initial.New)
 
 			d.sessWg.Add(1)
@@ -326,7 +321,7 @@ func TestResizeGrowthFirstFrameIncludesConcurrentPTYRedraw(t *testing.T) {
 			require.Equal(t, 'B', pane.screen.Cell(100, 0).Rune, "replay must parse the redraw before commit")
 
 			client.Resize(120, 24)
-			mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+			mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 			require.Equal(t, 'B', client.Cell(100, 1).Rune,
 				"first grown frame exposed stale pre-SIGWINCH pane content")
 			select {
@@ -357,7 +352,7 @@ func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
 	done := captureResizeCallbackDone(t, sess.renderCoordinator())
 	timer.ch <- time.Now()
 	awaitTestCompletion(t, done, "resize callback did not complete")
-	frame := awaitFrame(t, sends, wire.MsgOutput)
+	frame := awaitFrame(t, sends, "Output")
 	client := vt.NewScreen(120, 24)
 	out := mustApplyOutput(t, client, frame)
 	require.Zero(t, out.Base)
@@ -396,7 +391,7 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	requireNoOutputFrame(t, sends)
 	latest.ch <- time.Now()
 	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
 	require.Equal(t, 120, testAttachmentTab(sess).focusedPane().screen.Columns())
 	requireNoOutputFrame(t, sends)

@@ -1,0 +1,155 @@
+// Terminal I/O, UI fences, and bounded preview viewports.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+import "common.proto";
+import "session.proto";
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// ViewContext is the committed boundary of one output state.
+message ViewContext {
+  uint64 publication = 1;
+  CommittedRouteIdentity route = 2;
+  string tab_id = 3;
+  string focused_pane_id = 4;
+}
+
+// Output is one terminal state. Terminal data uses the explicit encoding
+// enum below; converters compress only full snapshots at the frozen
+// threshold and only when smaller.
+message Output {
+  uint64 epoch = 1;
+  uint64 base = 2;
+  uint64 new_state = 3;
+  uint64 echo = 4;
+  uint64 view_revision = 5;
+  uint32 cols = 6;
+  uint32 rows = 7;
+  bool full = 8;
+  ViewContext context = 9; // optional pointer
+  // Closed encoding taxonomy: 0 = raw, 1 = zlib (full snapshots only).
+  uint32 encoding = 10;
+  uint64 uncompressed_length = 11;
+  bytes data = 12;
+}
+
+// Ack cumulatively acknowledges one epoch.
+message Ack {
+  uint64 epoch = 1;
+  uint64 state = 2;
+}
+
+// Input carries client keystrokes and pastes.
+message Input {
+  uint64 input_seq = 1;
+  uint64 action_id = 2;
+  bytes data = 3;
+}
+
+// Resize carries a geometry claim.
+message Resize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+  uint32 pixel_width = 3;
+  uint32 pixel_height = 4;
+}
+
+// Theme carries the 57-byte fixed terminal theme block field by field.
+message Theme {
+  bool has_foreground = 1;
+  RGB foreground = 2;
+  bool has_background = 3;
+  RGB background = 4;
+  bool true_color = 5;
+  bool scheme_known = 6;
+  bool light = 7;
+  uint32 palette_known = 8;
+  repeated RGB palette = 9; // exactly 16 entries
+}
+
+// ImagePush carries one Kitty graphics payload.
+message ImagePush {
+  uint64 input_seq = 1;
+  string mime = 2;
+  bytes data = 3;
+}
+
+// ClientNotice is a fixed one-byte client signal.
+message ClientNotice {
+  // Closed action taxonomy: 1 = clipboard fallback, 2 = clipboard too
+  // large, 3 = link degraded, 4 = link connected.
+  uint32 action = 1;
+}
+
+// OutputResetRequest restarts the output chain. Empty marker.
+message OutputResetRequest {}
+
+// UIFence orders UI operations by action.
+message UIFence {
+  uint64 action_id = 1;
+}
+
+// UIReceipt reports the processed output boundary.
+message UIReceipt {
+  uint64 action_id = 1;
+  uint64 epoch = 2;
+  uint64 state = 3;
+  uint64 view_publication = 4;
+  // Closed outcome taxonomy: 1 = processed, 2 = unavailable.
+  uint32 outcome = 5;
+}
+
+// UIViewUpdate publishes a view boundary without terminal data.
+message UIViewUpdate {
+  uint64 epoch = 1;
+  uint64 state = 2;
+  ViewContext context = 3;
+}
+
+// RemotePreviewRequest asks for a bounded remote viewport.
+message RemotePreviewRequest {
+  uint32 version = 1;
+  RemoteTarget target = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+// RemotePreview is a bounded row-major styled-cell viewport.
+message RemotePreview {
+  uint32 version = 1;
+  // Closed status taxonomy: 0 = ok, 1 = unavailable, 2 = no such target,
+  // 3 = stale, 4 = malformed, 5 = too large.
+  uint32 status = 2;
+  LifecycleID lifecycle_id = 3;
+  string tab_id = 4;
+  uint64 revision = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  repeated PreviewCell cells = 8;
+}
+
+// PickerPreviewRequest asks for one picker's row viewport.
+message PickerPreviewRequest {
+  uint32 version = 1;
+  uint64 interaction_id = 2;
+  string source_id = 3;
+  string key = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+// PickerPreview is the row viewport of one picker row.
+message PickerPreview {
+  uint32 version = 1;
+  uint64 interaction_id = 2;
+  string source_id = 3;
+  string key = 4;
+  // Closed status taxonomy: 0 = ok, 1 = no such target, 2 = unavailable,
+  // 3 = too large.
+  uint32 status = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  repeated PreviewCell cells = 8;
+}

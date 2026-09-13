@@ -9,10 +9,10 @@ import (
 
 const testWaitTimeout = 2 * time.Second
 
-func testFramesOfType(frames []wire.Frame, typ wire.MsgType) []wire.Frame {
-	matched := make([]wire.Frame, 0, len(frames))
+func testFramesOfType(frames []wire.Envelope, name string) []wire.Envelope {
+	matched := make([]wire.Envelope, 0, len(frames))
 	for _, frame := range frames {
-		if frame.Type == typ {
+		if envelopeMessageName(nil, frame.Payload) == name {
 			matched = append(matched, frame)
 		}
 	}
@@ -40,29 +40,30 @@ func awaitTestCompletion(t *testing.T, done <-chan struct{}, failure string) {
 
 func awaitCoordinatorOutput(
 	t *testing.T,
-	sends <-chan wire.Frame,
+	sends <-chan wire.Envelope,
 	timers <-chan *coordinatorMockTimer,
 	frameContext string,
 	timeoutFailure string,
-) wire.Frame {
+) wire.Envelope {
 	t.Helper()
 	deadline := time.NewTimer(testWaitTimeout)
 	defer deadline.Stop()
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type == wire.MsgRoutePosition {
+			name := envelopeMessageName(t, frame.Payload)
+			if name == "RoutePosition" {
 				continue
 			}
-			if frame.Type != wire.MsgOutput {
-				t.Fatalf("unexpected frame type %d %s", frame.Type, frameContext)
+			if name != "Output" {
+				t.Fatalf("unexpected frame type %s %s", name, frameContext)
 			}
 			return frame
 		case timer := <-timers:
 			timer.ch <- time.Time{}
 		case <-deadline.C:
 			t.Fatal(timeoutFailure)
-			return wire.Frame{}
+			return wire.Envelope{}
 		}
 	}
 }

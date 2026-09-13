@@ -43,7 +43,7 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 		}
 		defer func() { _ = conn.Close() }()
 		client := NewTransport(conn)
-		errCh <- client.Send(wire.Frame{Type: wire.MsgPing})
+		errCh <- client.Send(wire.Envelope{Payload: []byte("ping envelope stays exact")})
 	}()
 
 	transport, err := ln.Accept()
@@ -56,8 +56,8 @@ func TestListenAcceptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recv() error = %v", err)
 	}
-	if got.Type != wire.MsgPing {
-		t.Fatalf("Recv() type = %v, want MsgPing", got.Type)
+	if string(got.Payload) != "ping envelope stays exact" {
+		t.Fatalf("Recv() payload = %q, want ping envelope", got.Payload)
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("client dial/send error = %v", err)

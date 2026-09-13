@@ -67,7 +67,7 @@ func (m *scriptRemoteMonitor) run(ctx context.Context) error {
 	return nil
 }
 
-func newMonitorServeHarness(t *testing.T, monitor *scriptRemoteMonitor) (*Daemon, *mockServerListener, chan wire.Transport, chan wire.Frame, func()) {
+func newMonitorServeHarness(t *testing.T, monitor *scriptRemoteMonitor) (*Daemon, *mockServerListener, chan wire.Transport, chan wire.Envelope, func()) {
 	t.Helper()
 	p, releasePTY := newBlockingPTY(t)
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
@@ -135,8 +135,8 @@ func TestServeStartsMonitorWithoutWaitingForRemote(t *testing.T) {
 	}
 
 	// Local attach and first paint flow while remote I/O stays blocked.
-	awaitFrame(t, sends, wire.MsgWelcome)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Welcome")
+	awaitFrame(t, sends, "Output")
 
 	// The runner is not an attachment: it holds no session and performs no
 	// admission of its own.
@@ -166,8 +166,8 @@ func TestServeIdleExitWithMonitorRunning(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(context.Background(), l) }()
 
-	awaitFrame(t, sends, wire.MsgWelcome)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Welcome")
+	awaitFrame(t, sends, "Output")
 
 	// Child exits -> session removed -> registry empties -> Serve returns,
 	// even though the monitor runner is still parked in its context.
@@ -224,8 +224,8 @@ func TestServeShutdownJoinBoundedForStuckMonitor(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("monitor runner did not start with Serve")
 	}
-	awaitFrame(t, sends, wire.MsgWelcome)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Welcome")
+	awaitFrame(t, sends, "Output")
 
 	start := time.Now()
 	cancel()

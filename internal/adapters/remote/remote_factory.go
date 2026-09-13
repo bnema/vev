@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -16,7 +15,10 @@ import (
 type TransportMode string
 
 const (
-	TransportUDP   TransportMode = "udp"
+	// TransportQUIC is the default remote carriage: one authenticated
+	// QUIC stream per connection (P6.3). TransportStdio selects the
+	// explicit SSH-only carriage.
+	TransportQUIC  TransportMode = "quic"
 	TransportStdio TransportMode = "stdio"
 )
 
@@ -55,19 +57,11 @@ func (f DialerFactory) DialerForRemoteWithLaunch(target, session string, mode Tr
 
 func (f DialerFactory) dialerForRemote(target, session string, mode TransportMode, log *slog.Logger, launch *EndpointLaunch) (wire.Dialer, error) {
 	switch mode {
-	case TransportUDP:
+	case TransportQUIC:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)
 		}
-		dialer := dgram.NewRemoteDialerWithLogger(target, "", log)
-		dialer.RuntimeObserver = f.observer
-		if launch != nil {
-			dialer.BootstrapBinary = launch.Binary
-			dialer.BootstrapRoot = launch.Root
-			dialer.BootstrapOwnerToken = launch.OwnerToken
-			dialer.BootstrapEnvironment = append([]string(nil), launch.Environment...)
-		}
-		return dialer, nil
+		return quicDialer{target: target, log: log, observer: f.observer, launch: launch}, nil
 	case TransportStdio:
 		if log != nil {
 			log.Info("remote transport selected", "mode", mode, "target", target, "session", session)

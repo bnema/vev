@@ -23,15 +23,15 @@ import (
 	"github.com/bnema/vev/pkg/rawterm"
 )
 
-// sessionListDialer serves a canned session listing over generated mocks.
+// sessionListDialer serves a canned session listing over generated mocks. The
+// typed client connection runs the preamble lazily, so the transport answers
+// the preamble request before the listing exchange.
 func sessionListDialer(t *testing.T, sessions []protocol.SessionInfo) func() wire.Dialer {
 	t.Helper()
 	transport := wiremocks.NewMockTransport(t)
-	transport.EXPECT().Send(mock.Anything).RunAndReturn(func(frame wire.Frame) error {
-		require.Equal(t, wire.MsgList, frame.Type)
-		return nil
-	}).Once()
-	transport.EXPECT().Recv().Return(wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(protocol.Sessions{Sessions: sessions})}, nil).Once()
+	transport.EXPECT().Send(mock.Anything).Return(nil).Twice()
+	transport.EXPECT().Recv().Return(mustPreambleResponse(), nil).Once()
+	transport.EXPECT().Recv().Return(mustServerEnvelope(protocol.Sessions{Sessions: sessions}), nil).Once()
 	transport.EXPECT().Close().Return(nil)
 	dialer := wiremocks.NewMockDialer(t)
 	dialer.EXPECT().Dial(mock.Anything).Return(transport, nil).Once()
@@ -365,10 +365,10 @@ func stalledListTransport(t *testing.T, blockOnSend bool) (*wiremocks.MockTransp
 		<-closed
 	}
 	if blockOnSend {
-		transport.EXPECT().Send(mock.Anything).Run(func(wire.Frame) { block() }).Return(errors.New("transport closed")).Once()
+		transport.EXPECT().Send(mock.Anything).Run(func(wire.Envelope) { block() }).Return(errors.New("transport closed")).Once()
 	} else {
 		transport.EXPECT().Send(mock.Anything).Return(nil).Once()
-		transport.EXPECT().Recv().Run(func() { block() }).Return(wire.Frame{}, errors.New("transport closed")).Once()
+		transport.EXPECT().Recv().Run(func() { block() }).Return(wire.Envelope{}, errors.New("transport closed")).Once()
 	}
 	transport.EXPECT().Close().Run(func() {
 		select {

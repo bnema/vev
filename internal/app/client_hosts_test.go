@@ -27,15 +27,15 @@ var _ wire.Dialer = clientHostsTestDialer{}
 
 func clientHostsEndpointFactory(factory remoteDialerForTarget, allowed map[string]struct{}, restricted bool, environment func(string) []string) clientEndpointFactory {
 	return clientEndpointFactory{
-		factory: factory, mode: remoteadapter.TransportUDP, environment: environment,
+		factory: factory, mode: remoteadapter.TransportQUIC, environment: environment,
 		allowed: allowed, restricted: restricted, log: slog.New(slog.DiscardHandler),
 	}
 }
 
 func TestClientEndpointFactoryResolvesOneCarriagePerEndpoint(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportUDP, nil).Return(clientHostsTestDialer{name: "arch"}, nil).Once()
-	factory.EXPECT().DialerForRemote("cache", "", remoteadapter.TransportUDP, nil).Return(clientHostsTestDialer{name: "cache"}, nil).Once()
+	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportQUIC, nil).Return(clientHostsTestDialer{name: "arch"}, nil).Once()
+	factory.EXPECT().DialerForRemote("cache", "", remoteadapter.TransportQUIC, nil).Return(clientHostsTestDialer{name: "cache"}, nil).Once()
 
 	resolver := clientHostsEndpointFactory(factory.DialerForRemote, nil, false, func(endpoint string) []string {
 		return []string{"ENDPOINT=" + endpoint}
@@ -64,7 +64,7 @@ func TestClientEndpointFactoryRefusesEndpointsOutsideTheAllowlist(t *testing.T) 
 	require.ErrorContains(t, err, "not allowed")
 
 	// Without a configured allowlist every valid endpoint resolves.
-	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportUDP, nil).Return(clientHostsTestDialer{}, nil).Once()
+	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportQUIC, nil).Return(clientHostsTestDialer{}, nil).Once()
 	resolver = clientHostsEndpointFactory(factory.DialerForRemote, nil, false, nil)
 	_, err = resolver.ResolveEndpoint(context.Background(), "arch")
 	require.NoError(t, err)
@@ -82,7 +82,7 @@ func TestClientEndpointFactoryRejectsInvalidEndpoints(t *testing.T) {
 func TestClientEndpointFactoryKeepsFactoryErrorsAuthoritative(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
 	want := errors.New("transport mode refused this endpoint")
-	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportUDP, nil).Return(nil, want).Once()
+	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportQUIC, nil).Return(nil, want).Once()
 	resolver := clientHostsEndpointFactory(factory.DialerForRemote, nil, false, nil)
 
 	_, err := resolver.ResolveEndpoint(context.Background(), "arch")
@@ -107,7 +107,7 @@ func TestClientHostRegistryDefersMalformedLaunchAllowlist(t *testing.T) {
 	t.Setenv(launchAllowedRemoteEndpointsEnv, "user@bad host")
 	factory := newRemoteDialerFactoryMock(t)
 
-	registry := newClientHostRegistry(runAttachDeps{remoteDialerFactory: factory.DialerForRemote}, remoteadapter.TransportUDP, nil, slog.New(slog.DiscardHandler))
+	registry := newClientHostRegistry(runAttachDeps{remoteDialerFactory: factory.DialerForRemote}, remoteadapter.TransportQUIC, nil, slog.New(slog.DiscardHandler))
 	require.NotNil(t, registry, "a malformed allowlist must not fail registry construction")
 
 	_, err := registry.ResolveEndpoint(context.Background(), "arch")
@@ -136,8 +136,8 @@ func TestRunAttachWithDepsLocalAttachSurvivesMalformedLaunchAllowlist(t *testing
 
 func TestClientEndpointFactoryKeepsNilEnvironmentDistinct(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportUDP, nil).Return(clientHostsTestDialer{}, nil).Once()
-	factory.EXPECT().DialerForRemote("cache", "", remoteadapter.TransportUDP, nil).Return(clientHostsTestDialer{}, nil).Once()
+	factory.EXPECT().DialerForRemote("arch", "", remoteadapter.TransportQUIC, nil).Return(clientHostsTestDialer{}, nil).Once()
+	factory.EXPECT().DialerForRemote("cache", "", remoteadapter.TransportQUIC, nil).Return(clientHostsTestDialer{}, nil).Once()
 	resolver := clientHostsEndpointFactory(factory.DialerForRemote, nil, false, func(endpoint string) []string {
 		if endpoint == "cache" {
 			return []string{}

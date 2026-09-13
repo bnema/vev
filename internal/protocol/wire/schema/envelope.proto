@@ -1,0 +1,135 @@
+// Directional envelopes and the connection preamble.
+//
+// The preamble is the fixed, bounded envelope understood before any other
+// payload. The first client frame is always PreambleRequest; the first
+// server frame is always PreambleResponse. Exact version equality is
+// mandatory; the preamble negotiates immutable per-connection ceilings once.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+import "command.proto";
+import "navigation.proto";
+import "picker.proto";
+import "session.proto";
+import "terminal.proto";
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// ProtocolEpoch identifies the current wire epoch. Bumped only for an
+// intentional clean break; ALPN and version checks bind to it. The numeric
+// value lives as wire.ProtocolEpoch in Go; it is documented here as the
+// schema authority (current value 1).
+
+// PreambleMagic is the fixed 4-byte magic opening every preamble. The
+// numeric value lives as wire.PreambleMagic in Go; it is documented here
+// as the schema authority (0x56455631, "VEV1").
+
+// PreambleRole names which side sends the preamble.
+message PreambleRole {
+  // Closed taxonomy: 1 = client, 2 = server.
+  uint32 role = 1;
+}
+
+// PreambleRequest is the client's first frame on every connection.
+message PreambleRequest {
+  uint32 magic = 1; // must equal PREAMBLE_MAGIC
+  uint32 epoch = 2; // must equal PROTOCOL_EPOCH
+  uint32 version = 3; // exact session protocol version
+  PreambleRole role = 4; // must be client
+  uint64 max_receive_envelope_bytes = 5; // advertised receive ceiling
+  uint64 output_data_limit = 6; // advertised Output data ceiling
+  uint32 capability_bits = 7; // optional capability flags
+}
+
+// PreambleRejectionCode is the closed preamble refusal taxonomy.
+message PreambleRejectionCode {
+  // Closed taxonomy: 1 = bad magic, 2 = epoch mismatch, 3 = version
+  // mismatch, 4 = wrong role, 5 = duplicate preamble, 6 = out of order,
+  // 7 = limit refused.
+  uint32 code = 1;
+}
+
+// PreambleResponse is the server's first frame: acceptance or typed refusal.
+message PreambleResponse {
+  uint32 magic = 1; // must equal PREAMBLE_MAGIC
+  uint32 epoch = 2;
+  uint32 version = 3;
+  PreambleRole role = 4; // must be server
+  uint64 max_receive_envelope_bytes = 5; // effective negotiated ceiling
+  uint64 output_data_limit = 6; // effective Output data ceiling
+  uint32 capability_bits = 7;
+  bool accepted = 8;
+  PreambleRejectionCode rejection = 9; // set only when accepted is false
+}
+
+// ClientEnvelope is the closed client-to-server union. Exactly one variant
+// must be set per envelope; sessionwire rejects empty, duplicate, and
+// wrong-direction payloads before generated unmarshal.
+message ClientEnvelope {
+  oneof payload {
+    Hello hello = 1;
+    Input input = 2;
+    Resize resize = 3;
+    Detach detach = 4;
+    Ping ping = 5;
+    List list = 6;
+    Kill kill = 7;
+    Theme theme = 8;
+    Ack ack = 9;
+    ImagePush image_push = 10;
+    ClientNotice client_notice = 11;
+    CommandRequest command_request = 12;
+    OutputResetRequest output_reset_request = 13;
+    RemotePreviewRequest remote_preview_request = 14;
+    RouteAttentionSubscription route_attention_subscription = 15;
+    SamePeerSwitchRequest same_peer_switch_request = 16;
+    RecentRouteSnapshot recent_route_snapshot = 17;
+    RouteNavigationFailure route_navigation_failure = 18;
+    SessionCreationFailure session_creation_failure = 19;
+    UIFence ui_fence = 20;
+    NavigationInventoryRequest navigation_inventory_request = 21;
+    NavigationInventoryPublication navigation_inventory_publication = 22;
+    NavigationInventoryFailure navigation_inventory_failure = 23;
+    PickerBegin picker_begin = 24;
+    PickerClose picker_close = 25;
+    PickerSelection picker_selection = 26;
+    PickerPreviewRequest picker_preview_request = 27;
+    PickerControlRequest picker_control_request = 28;
+  }
+}
+
+// ServerEnvelope is the closed server-to-client union. Exactly one variant
+// must be set per envelope.
+message ServerEnvelope {
+  oneof payload {
+    Welcome welcome = 1;
+    ErrorMsg error = 2;
+    Output output = 3;
+    Detached detached = 4;
+    Pong pong = 5;
+    Sessions sessions = 6;
+    CommandResult command_result = 7;
+    AttachTarget attach_target = 8;
+    RemotePreview remote_preview = 9;
+    CommittedRouteIdentity committed_route_identity = 10;
+    RouteNavigationAction route_navigation_action = 11;
+    RouteCreateSessionAction route_create_session_action = 12;
+    RouteNavigationFailure route_navigation_failure = 13;
+    RoutePosition route_position = 14;
+    RouteRetired route_retired = 15;
+    SamePeerSwitchFailure same_peer_switch_failure = 16;
+    UIReceipt ui_receipt = 17;
+    UIViewUpdate ui_view_update = 18;
+    NavigationInventoryResponse navigation_inventory_response = 19;
+    NavigationInventoryDemand navigation_inventory_demand = 20;
+    NavigationInventorySelection navigation_inventory_selection = 21;
+    PickerOffer picker_offer = 22;
+    PickerSnapshot picker_snapshot = 23;
+    PickerClosed picker_closed = 24;
+    PickerResult picker_result = 25;
+    PickerFailure picker_failure = 26;
+    PickerPreview picker_preview = 27;
+    PickerControlResponse picker_control_response = 28;
+  }
+}

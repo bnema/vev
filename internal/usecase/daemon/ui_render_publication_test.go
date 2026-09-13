@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,8 +39,7 @@ func TestRenderPublicationUsesCapturedIdentityAndRevision(t *testing.T) {
 				require.Zero(t, ac.output.next)
 				return
 			}
-			output, err := wire.UnmarshalOutput(awaitFrame(t, sends, wire.MsgOutput).Payload)
-			require.NoError(t, err)
+			output := unmarshalTestOutput(t, awaitFrame(t, sends, "Output").Payload)
 			require.Equal(t, &want, output.Context)
 			require.Equal(t, state.view.revision, output.ViewRevision)
 			require.Equal(t, want, ac.output.lastViewContext)
@@ -63,8 +62,7 @@ func TestRenderPublishesContextWithoutTerminalBytes(t *testing.T) {
 		require.True(t, d.emitFrame(sess, ac, state, composed))
 	}
 	paint(true)
-	initial, err := wire.UnmarshalOutput(awaitFrame(t, sends, wire.MsgOutput).Payload)
-	require.NoError(t, err)
+	initial := unmarshalTestOutput(t, awaitFrame(t, sends, "Output").Payload)
 	require.NotNil(t, initial.Context)
 	beforeOutstanding := ac.output.outstanding()
 	sess.mu.Lock()
@@ -72,15 +70,13 @@ func TestRenderPublishesContextWithoutTerminalBytes(t *testing.T) {
 	sess.mu.Unlock()
 	// The test's bars contain no session name, so only semantic context changes.
 	paint(false)
-	update, err := wire.UnmarshalUIViewUpdate(awaitFrame(t, sends, wire.MsgUIViewUpdate).Payload)
-	require.NoError(t, err)
+	update := decodeServerMessage(t, awaitFrame(t, sends, "UIViewUpdate")).(protocol.UIViewUpdate)
 	require.Equal(t, initial.Epoch, update.Epoch)
 	require.Equal(t, initial.New, update.State)
 	require.Equal(t, initial.Context.Publication+1, update.Context.Publication)
 	require.Equal(t, "renamed", update.Context.Route.Target.SessionName)
 	require.Equal(t, initial.Context.Route.Target.LifecycleID, update.Context.Route.Target.LifecycleID)
-	position, err := wire.UnmarshalRoutePosition(awaitFrame(t, sends, wire.MsgRoutePosition).Payload)
-	require.NoError(t, err)
+	position := decodeServerMessage(t, awaitFrame(t, sends, "RoutePosition")).(protocol.RoutePosition)
 	require.Equal(t, update.Context.Route.Target, position.Target)
 	require.Equal(t, beforeOutstanding, ac.output.outstanding(), "metadata does not create an ACK obligation")
 	require.Empty(t, drainAllFrames(sends))

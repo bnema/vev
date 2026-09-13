@@ -226,7 +226,7 @@ func (h *harness) runOne(o options, mat manifest, s scenario, run int, raw io.Wr
 			return nil
 		}
 		closed = true
-		// Clients own SSH-stdio descendants; close them before the deferred UDP
+		// Clients own SSH-stdio descendants; close them before the deferred
 		// peer and daemon so no role survives a failed or completed run.
 		return closeLaunchedRoles(processes)
 	}
@@ -392,13 +392,11 @@ func routeRoleArgs(s scenario, m processMapping, selected transport) roleCommand
 		switch s.Transport {
 		case "local":
 			return roleCommand{Args: []string{"new", session}}
-		case "ssh_stdio", "udp_baseline", "udp_25ms", "udp_100ms", "udp_loss_0pct", "udp_loss_1pct":
+		case "ssh_stdio":
 			return roleCommand{Args: remote}
 		}
 	case "ssh_stdio_peer":
 		return roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: s.Transport, Kind: "ssh_stdio"}}
-	case "udp_peer":
-		return roleCommand{Args: []string{"_udp-proxy"}, Transport: selected}
 	}
 	return roleCommand{}
 }
@@ -418,20 +416,7 @@ func manifestTransport(m manifest, id string) (transport, error) {
 }
 
 func scenarioTransport(s scenario) transport {
-	switch s.Transport {
-	case "udp_baseline":
-		return transport{ID: s.Transport, Kind: "udp"}
-	case "udp_25ms":
-		return transport{ID: s.Transport, Kind: "udp", RTTMS: 25}
-	case "udp_100ms":
-		return transport{ID: s.Transport, Kind: "udp", RTTMS: 100}
-	case "udp_loss_0pct":
-		return transport{ID: s.Transport, Kind: "udp", LossPercent: 0}
-	case "udp_loss_1pct":
-		return transport{ID: s.Transport, Kind: "udp", LossPercent: 1}
-	default:
-		return transport{ID: s.Transport}
-	}
+	return transport{ID: s.Transport}
 }
 
 func launchOrder(mappings []processMapping) []processMapping {
@@ -440,7 +425,7 @@ func launchOrder(mappings []processMapping) []processMapping {
 		switch role {
 		case "daemon":
 			return 0
-		case "ssh_stdio_peer", "udp_peer":
+		case "ssh_stdio_peer":
 			return 1
 		case "client":
 			return 2

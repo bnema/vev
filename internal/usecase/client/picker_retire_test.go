@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,15 +22,12 @@ func pickerReleasePaint(transport *attachPaletteTransport, text string) []byte {
 		}},
 		TabID: "t_abc123", FocusedPaneID: "p_def456",
 	}
-	payload, err := wire.MarshalOutput(protocol.Output{
+	envelope := mustServerEnvelope(protocol.Output{
 		Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24},
 		Context: &view, Data: []byte("\x1b[2J\x1b[H" + text),
 	})
-	if err != nil {
-		return nil
-	}
-	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: payload}
-	return payload
+	transport.detached <- envelope
+	return envelope.Payload
 }
 
 // TestPickerRetireRejectsLateSnapshot pins that a closed interaction is
@@ -48,7 +44,7 @@ func TestPickerRetireRejectsLateSnapshot(t *testing.T) {
 	require.NoError(t, err)
 
 	// The daemon retires the interaction and repaints authoritatively.
-	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
+	transport.detached <- mustServerEnvelope(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})
 	require.NotNil(t, pickerReleasePaint(transport, "released"))
 	released := "released"
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &released}})
@@ -57,7 +53,7 @@ func TestPickerRetireRejectsLateSnapshot(t *testing.T) {
 	// A late snapshot for the retired interaction must not restore the modal.
 	late := snapshot
 	late.SourceRevision = snapshot.SourceRevision + 1
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(late)}
+	transport.detached <- mustServerEnvelope(late)
 	time.Sleep(100 * time.Millisecond)
 	captured, err := ui.Capture(ui.Handle())
 	require.NoError(t, err)
@@ -88,7 +84,7 @@ func TestPickerReplaceAbortsSupersededLease(t *testing.T) {
 		},
 		Cursor: protocol.PickerCursor{Key: "cc/third", Index: 0},
 	}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(superseding)}
+	transport.detached <- mustServerEnvelope(superseding)
 	third := "third"
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &third}})
 	require.NoError(t, err)
@@ -124,23 +120,20 @@ func TestPickerStaleRevisionClosesInteraction(t *testing.T) {
 
 	// The daemon refuses the committed revision: the client must close the
 	// interaction so it stops owning input on the daemon side.
-	failure := wire.MarshalPickerFailure(protocol.PickerFailure{
+	transport.detached <- mustServerEnvelope(protocol.PickerFailure{
 		CauseActionID: 3, InteractionID: snapshot.InteractionID, SourceID: "serving",
 		Key: "aa/first", Action: protocol.PickerActionNavigate, Code: protocol.PickerStaleRevision,
 	})
-	require.NotNil(t, failure)
-	transport.detached <- wire.Frame{Type: wire.MsgPickerFailure, Payload: failure}
 
-	closePayload := awaitWireFrame(t, transport, wire.MsgPickerCloseClient)
-	closed, err := wire.UnmarshalPickerClose(closePayload)
-	require.NoError(t, err)
+	closed, ok := awaitWireFrame(t, transport, "PickerClose").(protocol.PickerClose)
+	require.True(t, ok)
 	require.Equal(t, snapshot.InteractionID, closed.InteractionID)
 
 	// Input during the release window is dropped, then routing resumes once
 	// the daemon confirms the close and its authoritative repaint is shown.
 	writeTerminal(t, writer, "leaked")
 	requireNoPickerInput(t, transport)
-	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
+	transport.detached <- mustServerEnvelope(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})
 	require.NotNil(t, pickerReleasePaint(transport, "released"))
 	released := "released"
 	_, err = ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &released}})

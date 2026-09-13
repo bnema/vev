@@ -83,6 +83,19 @@ func remotePreviewKeyFor(target domain.RemoteSessionTarget, width, height uint16
 }
 
 func (d *Daemon) fetchRemotePreview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
+	return d.fetchRemotePreviewMode(ctx, target, width, height, false)
+}
+
+// refreshRemotePreview bypasses the ordinary cache TTL so the displayed remote
+// row observes new output at the refresher cadence instead of once every five
+// seconds. It still honours the one-second failure cooldown and shares the
+// per-key single flight, so an active row never overlaps a render-triggered
+// revalidation and a failed host is never hammered.
+func (d *Daemon) refreshRemotePreview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
+	return d.fetchRemotePreviewMode(ctx, target, width, height, true)
+}
+
+func (d *Daemon) fetchRemotePreviewMode(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16, force bool) (protocol.RemotePreview, error) {
 	if d == nil || d.remotePreviewClient == nil {
 		return protocol.RemotePreview{}, errors.New("remote preview client unavailable")
 	}
@@ -107,46 +120,45 @@ func (d *Daemon) fetchRemotePreview(ctx context.Context, target domain.RemoteSes
 	d.remotePreview.mu.Lock()
 	d.remotePreview.initializeLocked()
 
-	if cached, ok := d.remotePreview.cache[key]; ok {
+	cached, hasCached := d.remotePreview.cache[key]
+	if hasCached {
 		cached.Used = now
 		d.remotePreview.cache[key] = cached
-		if now.Sub(cached.Fetched) <= remotePreviewCacheTTL {
+		if !force && now.Sub(cached.Fetched) <= remotePreviewCacheTTL {
 			preview := cloneRemotePreview(cached.Preview)
 			d.remotePreview.mu.Unlock()
 			return preview, nil
 		}
-
-		// Expired data remains useful to the picker. Revalidation is detached
-		// from the navigation request so cursor movement never waits on remote
-		// I/O, and cooldowns prevent a failed host from being hammered.
-		if until, cooling := d.remotePreview.cooldowns[key]; cooling && now.Before(until) {
-			preview := cloneRemotePreview(cached.Preview)
-			d.remotePreview.mu.Unlock()
-			return preview, nil
-		}
-		if flight := d.remotePreview.flights[key]; flight != nil {
-			preview := cloneRemotePreview(cached.Preview)
-			d.remotePreview.mu.Unlock()
-			return preview, nil
-		}
-		flight := &remotePreviewFlight{done: make(chan struct{})}
-		d.remotePreview.flights[key] = flight
-		preview := cloneRemotePreview(cached.Preview)
-		d.remotePreview.mu.Unlock()
-		go d.runRemotePreviewFlight(d.remotePreviewContext(), key, target, width, height, flight)
-		return preview, nil
 	}
-
 	if until, cooling := d.remotePreview.cooldowns[key]; cooling && now.Before(until) {
+		if !force && hasCached {
+			preview := cloneRemotePreview(cached.Preview)
+			d.remotePreview.mu.Unlock()
+			return preview, nil
+		}
 		d.remotePreview.mu.Unlock()
 		return protocol.RemotePreview{}, errRemotePreviewCooldown
 	}
 	if flight := d.remotePreview.flights[key]; flight != nil {
+		if !force && hasCached {
+			preview := cloneRemotePreview(cached.Preview)
+			d.remotePreview.mu.Unlock()
+			return preview, nil
+		}
 		d.remotePreview.mu.Unlock()
 		return waitRemotePreviewFlight(ctx, flight)
 	}
 	flight := &remotePreviewFlight{done: make(chan struct{})}
 	d.remotePreview.flights[key] = flight
+	if !force && hasCached {
+		// Expired data remains useful to the picker. Revalidation is detached
+		// from the navigation request so cursor movement never waits on remote
+		// I/O, and cooldowns prevent a failed host from being hammered.
+		preview := cloneRemotePreview(cached.Preview)
+		d.remotePreview.mu.Unlock()
+		go d.runRemotePreviewFlight(d.remotePreviewContext(), key, target, width, height, flight)
+		return preview, nil
+	}
 	d.remotePreview.mu.Unlock()
 
 	d.runRemotePreviewFlight(ctx, key, target, width, height, flight)
@@ -169,19 +181,24 @@ func waitRemotePreviewFlight(ctx context.Context, flight *remotePreviewFlight) (
 	}
 }
 
-// awaitRemotePreviewRefresh lets a picker display expired content immediately
-// while still publishing the refreshed result once the same-key flight finishes.
-// A completed flight is read from the cache without starting a second remote
-// request.
-func (d *Daemon) awaitRemotePreviewRefresh(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error) {
-	key := remotePreviewKeyFor(target, width, height)
-	d.remotePreview.mu.Lock()
-	flight := d.remotePreview.flights[key]
-	d.remotePreview.mu.Unlock()
-	if flight != nil {
-		return waitRemotePreviewFlight(ctx, flight)
+// peekRemotePreview returns known cache content without blocking on remote I/O
+// or starting a refresh. The picker can therefore paint immediately while the
+// selected row's refresher owns active freshness.
+func (d *Daemon) peekRemotePreview(target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, bool) {
+	if d == nil {
+		return protocol.RemotePreview{}, false
 	}
-	return d.fetchRemotePreview(ctx, target, width, height)
+	key := remotePreviewKeyFor(target, width, height)
+	now := d.clock.Now()
+	d.remotePreview.mu.Lock()
+	defer d.remotePreview.mu.Unlock()
+	entry, ok := d.remotePreview.cache[key]
+	if !ok {
+		return protocol.RemotePreview{}, false
+	}
+	entry.Used = now
+	d.remotePreview.cache[key] = entry
+	return cloneRemotePreview(entry.Preview), true
 }
 
 func (d *Daemon) runRemotePreviewFlight(ctx context.Context, key remotePreviewCacheKey, target domain.RemoteSessionTarget, width, height uint16, flight *remotePreviewFlight) {

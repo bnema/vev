@@ -2,10 +2,10 @@ package client_test
 
 import (
 	"context"
-	"errors"
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -101,100 +101,16 @@ func externalCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
 		LinkState:             link,
 	}
 }
-func externalClientFrame(m protocol.ClientMessage) (wire.Frame, error) {
-	switch x := m.(type) {
-	case protocol.Hello:
-		return wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(x)}, nil
-	case protocol.Input:
-		return wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(x)}, nil
-	case protocol.Resize:
-		p, e := wire.MarshalResize(x)
-		return wire.Frame{Type: wire.MsgResize, Payload: p}, e
-	case protocol.Detach:
-		return wire.Frame{Type: wire.MsgDetach}, nil
-	case protocol.Theme:
-		return wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(x)}, nil
-	case protocol.Ack:
-		p, e := wire.MarshalAck(x)
-		return wire.Frame{Type: wire.MsgAck, Payload: p}, e
-	case protocol.ImagePush:
-		return wire.Frame{Type: wire.MsgImagePush, Payload: wire.MarshalImagePush(x)}, nil
-	case protocol.ClientNotice:
-		return wire.Frame{Type: wire.MsgClientNotice, Payload: wire.MarshalClientNotice(x)}, nil
-	case protocol.OutputResetRequest:
-		return wire.Frame{Type: wire.MsgOutputResetRequest}, nil
-	case protocol.RecentRouteSnapshot:
-		p, e := wire.MarshalRecentRouteSnapshot(x)
-		return wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: p}, e
-	case protocol.RouteAttentionSubscription:
-		p, e := wire.MarshalRouteAttentionSubscription(x)
-		return wire.Frame{Type: wire.MsgRouteAttentionSubscription, Payload: p}, e
-	case protocol.SamePeerSwitchRequest:
-		p, e := wire.MarshalSamePeerSwitchRequest(x)
-		return wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: p}, e
-	case protocol.RouteNavigationFailure:
-		p, e := wire.MarshalRouteNavigationFailure(x)
-		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: p}, e
-	case protocol.SessionCreationFailure:
-		p, e := wire.MarshalSessionCreationFailure(x)
-		return wire.Frame{Type: wire.MsgSessionCreationFailure, Payload: p}, e
-	case protocol.NavigationInventoryPublication:
-		return wire.Frame{Type: wire.MsgNavigationInventoryPublication, Payload: wire.MarshalNavigationInventoryPublication(x)}, nil
-	case protocol.NavigationInventoryFailure:
-		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: wire.MarshalNavigationInventoryFailure(x)}, nil
-	case protocol.PickerSelection:
-		return wire.Frame{Type: wire.MsgPickerSelection, Payload: wire.MarshalPickerSelection(x)}, nil
-	case protocol.PickerClose:
-		return wire.Frame{Type: wire.MsgPickerCloseClient, Payload: wire.MarshalPickerClose(x)}, nil
-	default:
-		return wire.Frame{}, errors.New("test client: unsupported message")
+func externalClientFrame(m protocol.ClientMessage) (wire.Envelope, error) {
+	raw, err := sessionwire.EncodeClientMessage(m)
+	if err != nil {
+		return wire.Envelope{}, err
 	}
+	return wire.Envelope{Payload: raw}, nil
 }
-func externalServerMessage(f wire.Frame) (protocol.ServerMessage, error) {
-	switch f.Type {
-	case wire.MsgWelcome:
-		return wire.UnmarshalWelcome(f.Payload)
-	case wire.MsgNavigationInventoryDemand:
-		return wire.UnmarshalNavigationInventoryDemand(f.Payload)
-	case wire.MsgNavigationInventorySelection:
-		return wire.UnmarshalNavigationInventorySelection(f.Payload)
-	case wire.MsgError:
-		return wire.UnmarshalErrorMsg(f.Payload)
-	case wire.MsgOutput:
-		return wire.UnmarshalOutput(f.Payload)
-	case wire.MsgDetached:
-		return wire.UnmarshalDetached(f.Payload)
-	case wire.MsgPong:
-		return wire.UnmarshalPong(f.Payload)
-	case wire.MsgAttachTarget:
-		return wire.UnmarshalAttachTarget(f.Payload)
-	case wire.MsgNavigateRecentRoute:
-		return wire.UnmarshalRouteNavigationAction(f.Payload)
-	case wire.MsgRouteCreateSession:
-		return wire.UnmarshalRouteCreateSessionAction(f.Payload)
-	case wire.MsgCommittedRouteIdentity:
-		return wire.UnmarshalCommittedRouteIdentity(f.Payload)
-	case wire.MsgSamePeerSwitchFailure:
-		return wire.UnmarshalSamePeerSwitchFailure(f.Payload)
-	case wire.MsgRouteRetired:
-		return wire.UnmarshalRouteRetired(f.Payload)
-	case wire.MsgRoutePosition:
-		return wire.UnmarshalRoutePosition(f.Payload)
-	case wire.MsgRouteNavigationFailure:
-		return wire.UnmarshalRouteNavigationFailure(f.Payload)
-	case wire.MsgPickerOffer:
-		return wire.UnmarshalPickerOffer(f.Payload)
-	case wire.MsgPickerSnapshot:
-		return wire.UnmarshalPickerSnapshot(f.Payload)
-	case wire.MsgPickerClosedServer:
-		return wire.UnmarshalPickerClosed(f.Payload)
-	case wire.MsgPickerResult:
-		return wire.UnmarshalPickerResult(f.Payload)
-	case wire.MsgPickerFailure:
-		return wire.UnmarshalPickerFailure(f.Payload)
-	default:
-		return nil, errors.New("test client: unsupported server frame")
-	}
+
+func externalServerMessage(f wire.Envelope) (protocol.ServerMessage, error) {
+	return sessionwire.DecodeServerEnvelope(f.Payload)
 }
 
 func (t *markedDatagramTransport) SendClient(m protocol.ClientMessage) error {

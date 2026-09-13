@@ -43,6 +43,7 @@ const (
 	NoticeConnection
 	NoticeUser
 	NoticeNavigationInventory
+	NoticeRemoteObservation
 
 	// noticeCodeLimit is an append-only declaration sentinel, not a persisted
 	// valid notice code. Keep it last when adding a NoticeCode.
@@ -72,6 +73,7 @@ var noticeSlugs = map[NoticeCode]string{
 	NoticeConnection:          "connection",
 	NoticeUser:                "user",
 	NoticeNavigationInventory: "navigation-inventory",
+	NoticeRemoteObservation:   "remote-observation",
 }
 
 func (c NoticeCode) String() string {

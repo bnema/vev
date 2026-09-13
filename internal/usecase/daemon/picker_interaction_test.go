@@ -20,7 +20,7 @@ import (
 // pickerClientTestUnit builds a fixture attachment and one extra session so
 // snapshots are non-empty. It returns an admitted effect for the guarded
 // sends.
-func pickerClientTestUnit(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Frame, *attachmentEffect) {
+func pickerClientTestUnit(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Envelope, *attachmentEffect) {
 	t.Helper()
 	p, releasePTY := newBlockingPTY(t)
 	return pickerClientTestUnitWithPTY(t, p, releasePTY)
@@ -28,7 +28,7 @@ func pickerClientTestUnit(t *testing.T) (*Daemon, *session, *attachedClient, cha
 
 // pickerClientTestUnitWithPTY builds the same fixture over a caller-owned
 // PTY, so tests can observe whether session input reached the child.
-func pickerClientTestUnitWithPTY(t *testing.T, p ports.PTY, releasePTY func()) (*Daemon, *session, *attachedClient, chan wire.Frame, *attachmentEffect) {
+func pickerClientTestUnitWithPTY(t *testing.T, p ports.PTY, releasePTY func()) (*Daemon, *session, *attachedClient, chan wire.Envelope, *attachmentEffect) {
 	t.Helper()
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)
 	t.Cleanup(releasePTY)
@@ -41,7 +41,7 @@ func pickerClientTestUnitWithPTY(t *testing.T, p ports.PTY, releasePTY func()) (
 	return d, sess, ac, sends, effect
 }
 
-func openTestPicker(t *testing.T, d *Daemon, ac *attachedClient, effect *attachmentEffect, sends chan wire.Frame, intent protocol.PickerIntent) protocol.PickerOffer {
+func openTestPicker(t *testing.T, d *Daemon, ac *attachedClient, effect *attachmentEffect, sends chan wire.Envelope, intent protocol.PickerIntent) protocol.PickerOffer {
 	t.Helper()
 	require.NoError(t, d.openPickerForAttachment(ac, effect, intent, moveSourceLocator{}, 0))
 	offer := awaitPickerOffer(t, sends)
@@ -52,42 +52,33 @@ func openTestPicker(t *testing.T, d *Daemon, ac *attachedClient, effect *attachm
 	return offer
 }
 
-func awaitPickerOffer(t *testing.T, sends chan wire.Frame) protocol.PickerOffer {
+func awaitPickerOffer(t *testing.T, sends chan wire.Envelope) protocol.PickerOffer {
 	t.Helper()
 	for {
 		frame := awaitTestValue(t, sends, "picker offer was not published")
-		if frame.Type != wire.MsgPickerOffer {
-			continue
+		if offer, ok := decodeServerMessage(t, frame).(protocol.PickerOffer); ok {
+			return offer
 		}
-		offer, err := wire.UnmarshalPickerOffer(frame.Payload)
-		require.NoError(t, err)
-		return offer
 	}
 }
 
-func awaitPickerSnapshot(t *testing.T, sends chan wire.Frame) protocol.PickerSnapshot {
+func awaitPickerSnapshot(t *testing.T, sends chan wire.Envelope) protocol.PickerSnapshot {
 	t.Helper()
 	for {
 		frame := awaitTestValue(t, sends, "picker snapshot was not published")
-		if frame.Type != wire.MsgPickerSnapshot {
-			continue
+		if snapshot, ok := decodeServerMessage(t, frame).(protocol.PickerSnapshot); ok {
+			return snapshot
 		}
-		snapshot, err := wire.UnmarshalPickerSnapshot(frame.Payload)
-		require.NoError(t, err)
-		return snapshot
 	}
 }
 
-func awaitPickerFailure(t *testing.T, sends chan wire.Frame) protocol.PickerFailure {
+func awaitPickerFailure(t *testing.T, sends chan wire.Envelope) protocol.PickerFailure {
 	t.Helper()
 	for {
 		frame := awaitTestValue(t, sends, "picker failure was not published")
-		if frame.Type != wire.MsgPickerFailure {
-			continue
+		if failure, ok := decodeServerMessage(t, frame).(protocol.PickerFailure); ok {
+			return failure
 		}
-		failure, err := wire.UnmarshalPickerFailure(frame.Payload)
-		require.NoError(t, err)
-		return failure
 	}
 }
 
@@ -291,7 +282,7 @@ func TestPickerOpenRepaintsWithoutSessionChange(t *testing.T) {
 	_ = awaitPickerSnapshot(t, sends)
 	select {
 	case frame := <-sends:
-		require.Equal(t, wire.MsgOutput, frame.Type, "open must trigger an authoritative repaint")
+		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload), "open must trigger an authoritative repaint")
 	default:
 		t.Fatal("open produced no repaint after the snapshot")
 	}
@@ -344,16 +335,12 @@ func TestPickerCancelPublishesClosedAndAuthoritativeFullPaint(t *testing.T) {
 	for settled := false; !settled; {
 		select {
 		case frame := <-sends:
-			if frame.Type == wire.MsgPickerClosedServer {
-				closed, err := wire.UnmarshalPickerClosed(frame.Payload)
-				require.NoError(t, err)
+			if closed, ok := decodeServerMessage(t, frame).(protocol.PickerClosed); ok {
 				require.Equal(t, snapshot.InteractionID, closed.InteractionID)
 				sawClosed = true
 				continue
 			}
-			if frame.Type == wire.MsgOutput {
-				output, err := wire.UnmarshalOutput(frame.Payload)
-				require.NoError(t, err)
+			if output, ok := decodeServerMessage(t, frame).(protocol.Output); ok {
 				require.True(t, sawClosed, "the restore paint must follow the close")
 				require.True(t, output.Full, "cancel release paint must be authoritative")
 				settled = true
@@ -509,7 +496,7 @@ func TestAttentionPulseRepublishesTheOpenPickerSource(t *testing.T) {
 	d.pokeAttentionTicker()
 	timer.fire()
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "a closed interaction republished a snapshot")
+		require.NotEqual(t, "PickerSnapshot", envelopeMessageName(t, frame.Payload), "a closed interaction republished a snapshot")
 	}
 
 	cancel()
@@ -616,19 +603,19 @@ func TestPickerSelectionClosesBeforeTheDestinationPaint(t *testing.T) {
 
 	// Collect the handoff frames for a short settle window, then require the
 	// close to precede any paint.
-	var order []wire.MsgType
+	var order []string
 	for settled := false; !settled; {
 		select {
 		case frame := <-sends:
-			order = append(order, frame.Type)
+			order = append(order, envelopeMessageName(t, frame.Payload))
 		case <-time.After(200 * time.Millisecond):
 			settled = true
 		}
 	}
 	require.NotEmpty(t, order, "the handoff published nothing")
-	require.Equal(t, wire.MsgPickerClosedServer, order[0], "the close must precede the handoff")
+	require.Equal(t, "PickerClosed", order[0], "the close must precede the handoff")
 	for i, frameType := range order {
-		if frameType == wire.MsgOutput {
+		if frameType == "Output" {
 			require.NotZero(t, i, "a paint must not precede the close")
 		}
 	}
@@ -747,7 +734,7 @@ func TestPickerRefreshPublishesOnlyChangedSource(t *testing.T) {
 	d.refreshPickerSnapshot(ac)
 	d.refreshPickerSnapshot(ac)
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "unchanged source republished a snapshot")
+		require.NotEqual(t, "PickerSnapshot", envelopeMessageName(t, frame.Payload), "unchanged source republished a snapshot")
 	}
 	ac.overlays.pickerMu.Lock()
 	require.Equal(t, first.SourceRevision, ac.overlays.pickerRevisions[servingPickerSourceID], "unchanged source bumped the revision")
@@ -768,7 +755,7 @@ func TestPickerRefreshPublishesOnlyChangedSource(t *testing.T) {
 	effect = admitPickerEffectForTest(t, testAttachmentSession(t, ac), ac)
 	require.True(t, d.closePickerForAttachment(ac, effect, first.InteractionID))
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "closed interaction republished a snapshot")
+		require.NotEqual(t, "PickerSnapshot", envelopeMessageName(t, frame.Payload), "closed interaction republished a snapshot")
 	}
 }
 
@@ -855,6 +842,6 @@ func TestPickerSnapshotRetryAfterFailedSend(t *testing.T) {
 	quietEffect := admitPickerEffectForTest(t, sess, ac)
 	require.NoError(t, d.publishPickerSourceForAttachment(ac, quietEffect, offer.InteractionID))
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerSnapshot, frame.Type, "committed retry republished an unchanged source")
+		require.NotEqual(t, "PickerSnapshot", envelopeMessageName(t, frame.Payload), "committed retry republished an unchanged source")
 	}
 }

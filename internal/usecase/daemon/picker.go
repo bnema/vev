@@ -372,7 +372,7 @@ func (d *Daemon) switchToTargetForAttachment(effect *attachmentEffect, target pi
 
 // sendLocalAttachTargetForAttachment offers an endpoint-empty, exact local
 // target on the current authenticated connection. A current client confirms it
-// with MsgSamePeerSwitchRequest; an interrupted or older client retains the
+// with SamePeerSwitchRequest; an interrupted or older client retains the
 // existing close-and-redial fallback without any daemon-origin inference.
 func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, target picker.Target, guard sessionHandoffGuard, action string) error {
 	d.mu.Lock()

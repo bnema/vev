@@ -449,7 +449,9 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	if r.renderer == nil || r.size != size {
 		r.renderer = ansirenderer.New(ansirenderer.Capabilities{})
 		r.size = size
-		r.prevBounds = nil
+		// Keep prevBounds across a resize. The new renderer is primed with an
+		// empty shadow below, so damaging the old rectangle explicitly clears
+		// the part of the previous modal that remains visible at the new size.
 		r.primed = false
 	}
 	// The picker is a floating box over a screen the client does not own: a
@@ -477,14 +479,22 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 		damage = append(damage, damageRect(*r.prevBounds))
 	}
 	damage = append(damage, damageRect(presentation.Bounds))
-	bounds := presentation.Bounds
-	r.prevBounds = &bounds
-
 	data, err := r.renderer.Draw(base, damage)
 	if err != nil {
 		return nil
 	}
+	bounds := presentation.Bounds
+	r.prevBounds = &bounds
 	return data
+}
+
+// reset forgets modal damage after the daemon has restored the authoritative
+// session frame. A later picker must not clear cells from an earlier lease.
+func (r *pickerRenderer) reset() {
+	if r == nil {
+		return
+	}
+	r.prevBounds = nil
 }
 
 // damageRect is the damage one rectangle of a composed frame produces.

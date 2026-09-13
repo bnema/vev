@@ -1,0 +1,30 @@
+// Control commands. Request-level version fields stay at this staged
+// revision; P4.1 removes them once the preamble owns compatibility.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// CommandRequest asks the daemon to run one control command.
+message CommandRequest {
+  uint32 version = 1;
+  uint64 request_id = 2;
+  bool attached = 3;
+  bool self = 4;
+  string slug = 5;
+  repeated string args = 6;
+  string target_session = 7;
+  string target_tab = 8;
+  string target_pane = 9;
+  bool json = 10;
+}
+
+// CommandResult reports a control command's outcome.
+message CommandResult {
+  uint64 request_id = 1;
+  bool ok = 2;
+  uint32 code = 3;
+  string text = 4;
+  string output = 5;
+}

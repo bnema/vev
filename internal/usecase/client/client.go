@@ -2148,6 +2148,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		pickerCurrent = nil
 		pickerPreview.resetFor()
 		pickerPreviewFrame = emptyPickerPreview()
+		pickerRenderer.reset()
 		clearPreviewTimer()
 		pickerInput.clear()
 		restoreTerminalModes()
@@ -2163,6 +2164,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		pickerCurrent = nil
 		pickerPreview.resetFor()
 		pickerPreviewFrame = emptyPickerPreview()
+		pickerRenderer.reset()
 		clearPreviewTimer()
 		pickerInput.clear()
 		restoreTerminalModes()

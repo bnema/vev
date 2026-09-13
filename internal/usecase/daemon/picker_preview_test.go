@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,22 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
-func awaitPickerPreview(t *testing.T, sends chan wire.Frame) protocol.PickerPreview {
+func awaitPickerPreview(t *testing.T, sends chan wire.Envelope) protocol.PickerPreview {
 	t.Helper()
 	for {
 		frame := awaitTestValue(t, sends, "picker preview was not published")
-		if frame.Type != wire.MsgPickerPreview {
-			continue
+		if preview, ok := decodeServerMessage(t, frame).(protocol.PickerPreview); ok {
+			return preview
 		}
-		preview, err := wire.UnmarshalPickerPreview(frame.Payload)
-		require.NoError(t, err)
-		return preview
 	}
 }
 
@@ -85,7 +84,7 @@ func TestPickerPreviewStaleRequestPublishesNothing(t *testing.T) {
 		d.handleAttachmentClientMessage(capability, request)
 	}
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type, "a request for another interaction must publish nothing")
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload), "a request for another interaction must publish nothing")
 	}
 
 	// A superseded generation is dropped even though its request was valid.
@@ -99,7 +98,7 @@ func TestPickerPreviewStaleRequestPublishesNothing(t *testing.T) {
 	require.True(t, known)
 	d.publishPickerPreviewForAttachment(ac, live, generation-1, target, protocol.PickerIntentNavigation, known)
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type, "a superseded generation must not publish")
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload), "a superseded generation must not publish")
 	}
 	require.Equal(t, key, first.Key)
 }
@@ -121,7 +120,7 @@ func TestPickerPreviewRetiredInteractionStopsPublishing(t *testing.T) {
 	require.Zero(t, generation, "retiring the interaction must clear the preview generation")
 
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type)
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload))
 	}
 }
 
@@ -312,7 +311,7 @@ func TestPickerPreviewCrossSessionFollowsTheTargetsRenderCoordinator(t *testing.
 	d.invalidateRender(viewerSess, ac, true, "picker_preview_test.go:viewer")
 	fireCoordinatorTimer(t, viewerCoordinator, drainCoordinatorTimers(clock), urgentRenderDeadline)
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type,
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload),
 			"a viewer-session render must not publish the target's preview")
 	}
 
@@ -324,4 +323,114 @@ func TestPickerPreviewCrossSessionFollowsTheTargetsRenderCoordinator(t *testing.
 		"teardown must remove the exact target subscription")
 	require.False(t, d.paneRenderable(targetSess, targetTab, targetTab.focusedPane()),
 		"a retired preview must stop keeping the target renderable")
+}
+
+// manualPreviewClock is a deterministic ports.Clock for the remote preview
+// refresher. Timers never fire on their own, so a test can prove the worker
+// armed one and then advance it explicitly without any wall-clock sleep.
+type manualPreviewClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	waiting chan time.Time
+	armed   chan struct{}
+}
+
+func newManualPreviewClock(now time.Time) *manualPreviewClock {
+	return &manualPreviewClock{now: now, armed: make(chan struct{}, 64)}
+}
+
+func (c *manualPreviewClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *manualPreviewClock) NewTimer(time.Duration) ports.Timer {
+	ch := make(chan time.Time, 1)
+	c.mu.Lock()
+	c.waiting = ch
+	c.mu.Unlock()
+	select {
+	case c.armed <- struct{}{}:
+	default:
+	}
+	return manualPreviewTimer{ch: ch}
+}
+
+func (c *manualPreviewClock) awaitTimer(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.armed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("quiet viewer never armed a remote preview refresh")
+	}
+}
+
+func (c *manualPreviewClock) fire(now time.Time) {
+	c.mu.Lock()
+	ch := c.waiting
+	c.waiting = nil
+	c.now = now
+	c.mu.Unlock()
+	if ch != nil {
+		ch <- now
+	}
+}
+
+type manualPreviewTimer struct{ ch chan time.Time }
+
+func (t manualPreviewTimer) C() <-chan time.Time      { return t.ch }
+func (t manualPreviewTimer) Reset(time.Duration) bool { return false }
+func (t manualPreviewTimer) Stop() bool               { return true }
+
+// TestRemotePickerPreviewRefreshesWithoutViewerRenderWake is the regression for
+// the quiet-viewer stale delay: a selected remote row must keep refreshing on
+// its own cadence even when the viewer renders nothing at all. Relying on a
+// viewer render wake left a quiet viewer stale indefinitely.
+func TestRemotePickerPreviewRefreshesWithoutViewerRenderWake(t *testing.T) {
+	target := remotePreviewCacheTarget()
+	clock := newManualPreviewClock(time.Unix(100, 0))
+	client := &remotePreviewTestClient{result: remotePreviewCacheResultRune(target, 1, 'a')}
+	d, sess, ac, sends, effect := pickerClientTestUnit(t)
+	d.clock = clock
+	d.remotePreviewClient = client
+	t.Cleanup(func() {
+		ac.overlays.pickerMu.Lock()
+		cancel := ac.overlays.pickerPreviewCancel
+		ac.overlays.pickerPreviewCancel = nil
+		ac.overlays.pickerMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	})
+	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
+	snapshot := awaitPickerSnapshot(t, sends)
+
+	const key = "remote-row"
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.pickerKeys[key] = picker.Target{RemoteTarget: &target}
+	ac.overlays.pickerMu.Unlock()
+
+	d.handleAttachmentClientMessage(pickerClientCapability(t, ac, sess), pickerPreviewRequestFor(snapshot, key, 1, 1))
+	first := awaitPickerPreview(t, sends)
+	require.Equal(t, protocol.PickerPreviewOK, first.Status)
+	require.Equal(t, 'a', first.Cells[0].Rune)
+	require.Equal(t, 1, client.Calls(), "the initial selection needs exactly one fetch")
+
+	// No viewer render happens at all. Only the selected row's worker may
+	// schedule and drive the next attempt.
+	client.mu.Lock()
+	client.result = remotePreviewCacheResultRune(target, 2, 'b')
+	client.mu.Unlock()
+	clock.awaitTimer(t)
+	clock.fire(time.Unix(101, 0))
+	second := awaitPickerPreview(t, sends)
+	require.Equal(t, 'b', second.Cells[0].Rune, "a quiet viewer must still receive the refreshed row")
+	require.Equal(t, 2, client.Calls())
+
+	// Retiring the interaction cancels the worker, so no further fetch may
+	// happen even though the refresher cadence continues in the background.
+	require.True(t, d.closePickerForAttachment(ac, nil, snapshot.InteractionID))
+	_ = drainAllFrames(sends)
+	require.Equal(t, 2, client.Calls())
 }

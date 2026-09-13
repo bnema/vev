@@ -15,7 +15,7 @@ import (
 // fanoutBlockingTransport blocks only the first output send. The paired
 // healthy attachment must still receive its frame while this peer is stuck.
 type fanoutBlockingTransport struct {
-	sent       chan wire.Frame
+	sent       chan wire.Envelope
 	entered    chan struct{}
 	release    chan struct{}
 	done       chan struct{}
@@ -26,16 +26,16 @@ type fanoutBlockingTransport struct {
 
 func newFanoutBlockingTransport() *fanoutBlockingTransport {
 	return &fanoutBlockingTransport{
-		sent:    make(chan wire.Frame, 8),
+		sent:    make(chan wire.Envelope, 8),
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 		done:    make(chan struct{}),
 	}
 }
 
-func (t *fanoutBlockingTransport) Send(frame wire.Frame) error {
+func (t *fanoutBlockingTransport) Send(frame wire.Envelope) error {
 	t.sent <- frame
-	if frame.Type == wire.MsgOutput {
+	if envelopeMessageName(nil, frame.Payload) == "Output" {
 		t.enteredOne.Do(func() { close(t.entered) })
 		<-t.release
 	}
@@ -43,7 +43,7 @@ func (t *fanoutBlockingTransport) Send(frame wire.Frame) error {
 	return nil
 }
 
-func (t *fanoutBlockingTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (t *fanoutBlockingTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
 
 func (t *fanoutBlockingTransport) Close() error {
 	t.releaseOne.Do(func() { close(t.release) })
@@ -102,7 +102,7 @@ func TestRenderCoordinatorFanoutDoesNotWaitForSlowTransport(t *testing.T) {
 
 	select {
 	case frame := <-healthySends:
-		require.Equal(t, wire.MsgOutput, frame.Type, "healthy attachment did not receive output")
+		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload), "healthy attachment did not receive output")
 	case <-time.After(2 * time.Second):
 		t.Fatal("healthy attachment remained blocked behind the slow transport")
 	}

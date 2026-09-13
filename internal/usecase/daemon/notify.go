@@ -407,10 +407,10 @@ func sameToastNotice(a, b domain.Notification) bool {
 	if a.Code != b.Code || a.SessionID != b.SessionID {
 		return false
 	}
-	// NoticeUser is intentionally generic: its message and selected severity
-	// are the notice identity. Typed daemon notices retain their established
-	// code-and-scope coalescing behavior.
-	if a.Code != domain.NoticeUser {
+	// Generic user notices and endpoint-scoped remote observations use their
+	// visible message and details as identity. Other typed daemon notices retain
+	// their established code-and-scope coalescing behavior.
+	if a.Code != domain.NoticeUser && a.Code != domain.NoticeRemoteObservation {
 		return true
 	}
 	return a.Severity == b.Severity &&

@@ -5,7 +5,6 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/stretchr/testify/require"
 )
@@ -52,8 +51,7 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 			require.True(t, d.emitFrame(sess, ac, &state, pending))
 			require.Equal(t, pending.cache, ac.pipelineCache)
 			require.NotContains(t, frameText(ac.pipelineCache.frame), "COPY")
-			output, err := wire.UnmarshalOutput((<-sends).Payload)
-			require.NoError(t, err)
+			output := unmarshalTestOutput(t, (<-sends).Payload)
 			terminal := renderer.NewScreen(pending.frame.Width, pending.frame.Height)
 			terminal.Write(output.Data)
 			require.Contains(t, frameText(captureTestFrame(terminal)), "COPY", "retry must render copy cells despite interleaved ANSI styling")
