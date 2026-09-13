@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -116,11 +117,11 @@ func (*attachPaletteTerminalHarness) Flush() error                           { r
 
 type attachPaletteTransport struct {
 	mu           sync.Mutex
-	frames       []wire.Frame
+	frames       []wire.Envelope
 	themes       []protocol.Theme
 	themeCh      chan protocol.Theme
 	inputCh      chan protocol.Input
-	detached     chan wire.Frame
+	detached     chan wire.Envelope
 	themeSendErr error
 	welcomed     bool
 }
@@ -129,42 +130,38 @@ func newAttachPaletteTransport() *attachPaletteTransport {
 	return &attachPaletteTransport{
 		themeCh:  make(chan protocol.Theme, 16),
 		inputCh:  make(chan protocol.Input, 16),
-		detached: make(chan wire.Frame, 16),
+		detached: make(chan wire.Envelope, 16),
 	}
 }
-func (t *attachPaletteTransport) Send(frame wire.Frame) error {
+func (t *attachPaletteTransport) Send(frame wire.Envelope) error {
 	t.mu.Lock()
 	t.frames = append(t.frames, frame)
 	themeSendErr := t.themeSendErr
 	t.mu.Unlock()
-	switch frame.Type {
-	case wire.MsgTheme:
+	message, err := sessionwire.DecodeClientEnvelope(frame.Payload)
+	if err != nil {
+		return err
+	}
+	switch got := message.(type) {
+	case protocol.Theme:
 		if themeSendErr != nil {
 			return themeSendErr
-		}
-		got, err := wire.UnmarshalTheme(frame.Payload)
-		if err != nil {
-			return err
 		}
 		t.mu.Lock()
 		t.themes = append(t.themes, got)
 		t.mu.Unlock()
 		t.themeCh <- got
-	case wire.MsgInput:
-		got, err := wire.UnmarshalInput(frame.Payload)
-		if err != nil {
-			return err
-		}
+	case protocol.Input:
 		t.inputCh <- got
 	}
 	return nil
 }
-func (t *attachPaletteTransport) Recv() (wire.Frame, error) {
+func (t *attachPaletteTransport) Recv() (wire.Envelope, error) {
 	t.mu.Lock()
 	if !t.welcomed {
 		t.welcomed = true
 		t.mu.Unlock()
-		return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
+		return mustServerEnvelope(protocol.Welcome{SessionID: "s"}), nil
 	}
 	t.mu.Unlock()
 	return <-t.detached, nil
@@ -240,7 +237,7 @@ func (h *attachPaletteHarness) nextTimer(t *testing.T) *attachPaletteTimer {
 }
 func (h *attachPaletteHarness) detach(t *testing.T) {
 	t.Helper()
-	h.transport.detached <- wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
+	h.transport.detached <- mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})
 	result := <-h.done
 	require.NoError(t, result.err)
 	select {
@@ -326,7 +323,7 @@ func TestAttachReconnectPreservesStandaloneEscapeBeforeClaimRevocation(t *testin
 
 	// Detach starts reconnect teardown. The residual must already be owned by
 	// the lifecycle reader at the precise point the old claim is revoked.
-	first.transport.detached <- wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
+	first.transport.detached <- mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})
 	require.Equal(t, []byte("\x1b"), <-revoked)
 	release()
 	require.NoError(t, (<-first.done).err)

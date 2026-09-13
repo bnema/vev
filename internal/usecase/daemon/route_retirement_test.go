@@ -8,7 +8,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
@@ -29,9 +28,8 @@ func TestPickerDeleteRetiresSubscribedHistory(t *testing.T) {
 				require.NoError(t, d.killSession(victim, protocol.ReasonSessionKilled, false))
 			}
 			require.NoError(t, d.killPickerTarget(picker.Target{Session: victim.id, Name: victim.name, Incarnation: victim.incarnation, Stopped: stopped}))
-			frame := awaitFrame(t, sends, wire.MsgRouteRetired)
-			message, err := wire.UnmarshalRouteRetired(frame.Payload)
-			require.NoError(t, err)
+			frame := awaitFrame(t, sends, "RouteRetired")
+			message := decodeServerMessage(t, frame).(protocol.RouteRetired)
 			require.Equal(t, protocol.RouteRetired{Ref: ref, Target: target}, message)
 			require.Equal(t, source, ac.currentAttachmentSession())
 		})
@@ -47,9 +45,8 @@ func TestRemoteDirectoryDeletionRetiresHistoryWithPickerClosed(t *testing.T) {
 	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{Endpoint: "remote", InventoryKnown: true, Availability: domain.RemoteAvailabilityReachable, LastAttempt: d.clock.Now().Add(time.Second), LastSuccess: d.clock.Now().Add(2 * time.Second)})
 	require.False(t, ac.overlays.pickerClientActive())
 	d.refreshRemoteDirectoryViews()
-	frame := awaitFrame(t, sends, wire.MsgRouteRetired)
-	message, err := wire.UnmarshalRouteRetired(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "RouteRetired")
+	message := decodeServerMessage(t, frame).(protocol.RouteRetired)
 	require.Equal(t, protocol.RouteRetired{Ref: ref, Target: target}, message)
 }
 

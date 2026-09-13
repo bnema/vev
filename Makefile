@@ -1,4 +1,4 @@
-.PHONY: install test test-installer lint mocks demo remote-acceptance
+.PHONY: install test test-installer lint mocks demo remote-acceptance protocol protocol-check
 
 install:
 	go install .
@@ -13,8 +13,11 @@ test:
 test-installer:
 	sh scripts/install_platform_test.sh
 
+# Generated *.pb.go files are byte-reproducible via protocol-check and
+# are never edited; protoc-gen-go import grouping is not
+# goimports-clean, so lint covers hand-written sources only.
 lint:
-	@test -z "$$(goimports -l .)"
+	@test -z "$$(for f in $$(git ls-files --cached --others --exclude-standard '*.go' | grep -v '\.pb\.go$$'); do test -f "$$f" && printf '%s\n' "$$f"; done | xargs -r goimports -l)"
 	go vet ./...
 
 mocks:
@@ -27,6 +30,29 @@ mocks:
 
 remote-acceptance:
 	scripts/remote-picker-harness/run.sh
+
+# protocol regenerates the Protobuf wire contract from
+# internal/protocol/wire/schema using the pinned Go tools (buf + protoc-gen-go).
+protocol:
+	go tool buf lint
+	go tool buf format --diff --exit-code
+	go tool buf generate
+
+# protocol-check verifies the checked-in generated code is current: it
+# regenerates into a temporary directory and diffs the full file set.
+protocol-check:
+	go tool buf lint
+	go tool buf format --diff --exit-code
+	tmp="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	go tool buf generate --output "$$tmp"; \
+	genroot="$$(find "$$tmp" -name 'envelope.pb.go' -printf '%h' -quit)"; \
+	test -n "$$genroot"; \
+	for f in internal/protocol/wire/*.pb.go; do b="$$(basename "$$f")"; cmp -s "$$genroot/$$b" "$$f" || { echo "stale generated file: $$f"; exit 1; }; done; \
+	genfiles="$$(cd "$$genroot" && ls *.pb.go | sort)"; \
+	repofiles="$$(cd internal/protocol/wire && ls *.pb.go | sort)"; \
+	test "$$genfiles" = "$$repofiles" || { echo "generated file set differs"; echo "generated: $$genfiles"; echo "checked in: $$repofiles"; exit 1; }; \
+	test -z "$$(git status --porcelain -- internal/protocol/wire/*.pb.go)"
 
 demo:
 	docker build -f scripts/demo/Dockerfile -t vev-demo .

@@ -18,9 +18,9 @@ import (
 
 type cacheFailTransport struct{}
 
-func (cacheFailTransport) Send(wire.Frame) error     { return errors.New("send failed") }
-func (cacheFailTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (cacheFailTransport) Close() error              { return nil }
+func (cacheFailTransport) Send(wire.Envelope) error     { return errors.New("send failed") }
+func (cacheFailTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (cacheFailTransport) Close() error                 { return nil }
 
 func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 	for _, failure := range []struct {
@@ -74,8 +74,7 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			require.True(t, d.emitFrame(sess, ac, &state, pending))
 			require.Equal(t, pending.cache, ac.pipelineCache)
 			frame := <-sends
-			output, err := wire.UnmarshalOutput(frame.Payload)
-			require.NoError(t, err)
+			output := unmarshalTestOutput(t, frame.Payload)
 			require.Contains(t, string(output.Data), "next", "the retry must emit state retained after the failed emission")
 		})
 	}

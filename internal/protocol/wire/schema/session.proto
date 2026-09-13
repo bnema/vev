@@ -1,0 +1,213 @@
+// Session lifecycle and control messages (protocol.Hello and friends).
+syntax = "proto3";
+
+package vev.wire.v1;
+
+import "common.proto";
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// Hello opens a session attachment. version must stay field 1.
+message Hello {
+  uint32 version = 1;
+  // Closed intent taxonomy: 0 = ephemeral, 1 = new, 2 = attach, 3 = resume.
+  uint32 intent = 2;
+  bytes client_id = 3; // exactly 16 bytes
+  uint64 resume_token = 4;
+  string name = 5;
+  uint32 cols = 6;
+  uint32 rows = 7;
+  uint32 pixel_width = 8;
+  uint32 pixel_height = 9;
+  string term_env = 10;
+  string cwd = 11;
+  bool true_color = 12;
+  uint32 max_output_in_flight = 13;
+  repeated string env = 14;
+  RemoteTarget remote_target = 15; // optional pointer
+  uint32 environment_policy = 16; // 0 = client-owned, 1 = daemon-owned
+  ExactTarget exact_target = 17; // optional pointer
+  string preferred_tab_id = 18;
+  uint32 navigation_capabilities = 19;
+  bool remote = 20;
+  bool kitty_direct_graphics = 21;
+}
+
+// Welcome answers an accepted attach.
+message Welcome {
+  string session_id = 1;
+  string session_name = 2;
+  bool ephemeral = 3;
+  uint64 resume_token = 4;
+  uint32 capabilities = 5;
+  CommittedRouteIdentity committed_identity = 6; // optional pointer
+}
+
+// ErrorMsg is a bounded daemon error.
+message ErrorMsg {
+  uint32 code = 1;
+  string text = 2;
+}
+
+// CommittedRouteIdentity is the identity committed after an accepted attach.
+message CommittedRouteIdentity {
+  ExactTarget target = 1;
+  bool ephemeral = 2;
+}
+
+// AttachTarget hands a client to another session, possibly remote.
+message AttachTarget {
+  uint64 request_id = 1;
+  string endpoint = 2;
+  string session = 3;
+  uint32 intent = 4;
+  RemoteTarget remote_target = 5; // optional pointer
+  uint32 environment_policy = 6;
+  ExactTarget exact_target = 7; // optional pointer
+  bool same_peer = 8;
+  string preferred_tab_id = 9;
+  uint64 cause_action_id = 10;
+}
+
+// SessionInfo is one row of a session listing.
+message SessionInfo {
+  string session_id = 1;
+  string name = 2;
+  // Closed state taxonomy: 0 = up, 1 = down, 2 = broken.
+  uint32 state = 3;
+  bool ephemeral = 4;
+  uint32 tabs = 5;
+  bool attached = 6;
+}
+
+// Sessions is the one-shot listing answer.
+message Sessions {
+  repeated SessionInfo sessions = 1;
+}
+
+// Kill asks the daemon to destroy a session or shut down.
+message Kill {
+  string name = 1;
+  // Closed scope taxonomy: 0 = session, 1 = daemon, 2 = all.
+  uint32 scope = 2;
+}
+
+// Detached reports why an attachment ended.
+message Detached {
+  // Closed reason taxonomy: 0 = detach, 1 = killed, 2 = shutdown, 3 = replaced.
+  uint32 reason = 1;
+}
+
+// Detach asks the daemon to release the attachment. Empty marker.
+message Detach {}
+
+// Ping / Pong are empty keepalive markers.
+message Ping {}
+
+message Pong {}
+
+// List asks for the one-shot session listing. Empty marker.
+message List {}
+
+// RouteRef is an opaque client-ledger reference.
+message RouteRef {
+  uint64 key = 1;
+  uint64 generation = 2;
+}
+
+// RouteAttentionTarget binds one displayed reference to an exact lifecycle.
+message RouteAttentionTarget {
+  RouteRef ref = 1;
+  ExactTarget target = 2;
+  string source_key = 3;
+}
+
+// RouteAttentionSubscription is the bounded client-owned attention mapping.
+message RouteAttentionSubscription {
+  repeated RouteAttentionTarget targets = 1;
+}
+
+// RecentRouteEntry is one route's identity plus display view.
+message RecentRouteEntry {
+  uint64 key = 1;
+  uint64 generation = 2;
+  ExactTarget target = 3;
+  string name = 4;
+  string host_label = 5;
+  // Closed kind taxonomy: 1 = local, 2 = remote.
+  uint32 kind = 6;
+  bool ephemeral = 7;
+  bool attention = 8;
+  // Closed reachability taxonomy: 0 = unknown, 1 = reachable, 2 = unavailable.
+  uint32 reachability = 9;
+}
+
+// RecentRouteSnapshot is an immutable bounded route publication.
+message RecentRouteSnapshot {
+  uint64 generation = 1;
+  RouteRef active = 2;
+  RecentRouteEntry active_entry = 3;
+  RouteRef previous = 4;
+  RouteRef home = 5;
+  repeated RecentRouteEntry entries = 6;
+}
+
+// RouteNavigationAction asks the client to resolve one ledger entry.
+message RouteNavigationAction {
+  uint64 cause_action_id = 1;
+  uint64 snapshot_generation = 2;
+  uint64 key = 3;
+  uint64 generation = 4;
+}
+
+// RouteCreateSessionAction asks the client to create a named session.
+message RouteCreateSessionAction {
+  uint64 cause_action_id = 1;
+  uint64 request_id = 2;
+  uint64 snapshot_generation = 3;
+  uint64 key = 4;
+  uint64 generation = 5;
+  string session_name = 6;
+}
+
+// RouteNavigationFailure is the bounded rejection taxonomy shared by both
+// directions: the same semantic payload appears in both envelopes.
+message RouteNavigationFailure {
+  uint64 key = 1;
+  uint64 generation = 2;
+  // Closed code taxonomy: 1 = stale, 2 = no such route, 3 = unavailable,
+  // 4 = target changed, 5 = origin unavailable.
+  uint32 code = 3;
+}
+
+// SessionCreationFailure reports a correlated pre-commit create failure.
+message SessionCreationFailure {
+  uint64 request_id = 1;
+  uint32 code = 2; // same taxonomy as RouteNavigationFailure.code
+}
+
+// RoutePosition is mutable per-client route state.
+message RoutePosition {
+  ExactTarget target = 1;
+  string active_tab_id = 2;
+}
+
+// RouteRetired invalidates one subscribed exact lifecycle.
+message RouteRetired {
+  RouteRef ref = 1;
+  ExactTarget target = 2;
+}
+
+// SamePeerSwitchRequest confirms a daemon-offered endpoint-empty target.
+message SamePeerSwitchRequest {
+  uint64 request_id = 1;
+  ExactTarget target = 2;
+  string preferred_tab_id = 3;
+}
+
+// SamePeerSwitchFailure leaves the source attachment unchanged.
+message SamePeerSwitchFailure {
+  uint64 request_id = 1;
+  // Closed code taxonomy: 1 = stale target, 2 = unavailable.
+  uint32 code = 2;
+}

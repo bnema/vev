@@ -5,26 +5,14 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-func mustMarshalOutput(m protocol.Output) []byte {
-	payload, err := wire.MarshalOutput(m)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalOutput(m protocol.Output) wire.Envelope {
+	return mustServerEnvelope(m)
 }
 
-func mustMarshalAck(m protocol.Ack) []byte {
-	payload, err := wire.MarshalAck(m)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalAck(m protocol.Ack) wire.Envelope {
+	return mustClientEnvelope(m)
 }
 
-func mustMarshalResize(m protocol.Resize) []byte {
-	payload, err := wire.MarshalResize(m)
-	if err != nil {
-		panic(err)
-	}
-	return payload
+func mustMarshalResize(m protocol.Resize) wire.Envelope {
+	return mustClientEnvelope(m)
 }

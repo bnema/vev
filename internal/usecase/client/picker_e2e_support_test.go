@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/uiterm"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,7 +132,7 @@ func startPickerE2EHarness(t *testing.T, reader io.Reader, withUI bool) *pickerE
 	done := make(chan attachResult, 1)
 	go func() { done <- attempt.run(context.Background()) }()
 	t.Cleanup(func() {
-		transport.detached <- wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}
+		transport.detached <- mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})
 		select {
 		case result := <-done:
 			require.NoError(t, result.err)
@@ -152,9 +152,7 @@ func startPickerE2EHarness(t *testing.T, reader io.Reader, withUI bool) *pickerE
 	// through the wire: it starts the foreground, publishes the UI boundary,
 	// and lets automation batches admit.
 	view0 := protocol.ViewContext{Publication: 1, Route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "fixture"}}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
-	output0, err := wire.MarshalOutput(protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view0, Data: []byte("\x1b[Hready")})
-	require.NoError(t, err)
-	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: output0}
+	transport.detached <- mustServerEnvelope(protocol.Output{Epoch: 1, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view0, Data: []byte("\x1b[Hready")})
 
 	return &pickerE2EHarness{attempt: attempt, transport: transport, ui: ui, terminal: uiTerminal, input: input, clock: clock}
 }
@@ -193,14 +191,14 @@ func (t *attachPaletteTransport) frameCount() int {
 // starts. More than a few deadlines for one escape means the window is
 // being re-armed instead of expiring, so the helper fails instead of
 // firing forever.
-func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport *attachPaletteTransport, frameType wire.MsgType) {
+func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport *attachPaletteTransport, frameName string) {
 	t.Helper()
 	const maxDeadlines = 4
 	hasFrame := func() bool {
 		transport.mu.Lock()
 		defer transport.mu.Unlock()
 		for _, frame := range transport.frames {
-			if frame.Type == frameType {
+			if clientMessageName(t, frame) == frameName {
 				return true
 			}
 		}
@@ -225,7 +223,7 @@ func (h *pickerE2EHarness) awaitAfterAmbiguityDeadlines(t *testing.T, transport 
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("frame %d never crossed the wire", frameType)
+			t.Fatalf("frame %s never crossed the wire", frameName)
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -257,9 +255,9 @@ func pickerSnapshot() protocol.PickerSnapshot {
 func openPickerOnHarness(t *testing.T, transport *attachPaletteTransport) protocol.PickerSnapshot {
 	t.Helper()
 	offer := pickerOffer()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerOffer, Payload: wire.MarshalPickerOffer(offer)}
+	transport.detached <- mustServerEnvelope(offer)
 	snapshot := pickerSnapshot()
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	transport.detached <- mustServerEnvelope(snapshot)
 	return snapshot
 }
 
@@ -289,27 +287,28 @@ func (h *pickerE2EHarness) awaitPreviewTimer(t *testing.T) *attachPaletteTimer {
 	}
 }
 
-// awaitWireFrame waits for one client frame of the requested type.
-func awaitWireFrame(t *testing.T, transport *attachPaletteTransport, frameType wire.MsgType) []byte {
+// awaitWireFrame waits for one client message of the requested semantic
+// name and returns its decoded value.
+func awaitWireFrame(t *testing.T, transport *attachPaletteTransport, frameName string) protocol.ClientMessage {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			t.Fatalf("frame %d never crossed the wire", frameType)
+			t.Fatalf("frame %s never crossed the wire", frameName)
 			return nil
 		default:
 			transport.mu.Lock()
-			var payload []byte
+			var message protocol.ClientMessage
 			for _, frame := range transport.frames {
-				if frame.Type == frameType {
-					payload = frame.Payload
+				if clientMessageName(t, frame) == frameName {
+					message, _ = sessionwire.DecodeClientEnvelope(frame.Payload)
 					break
 				}
 			}
 			transport.mu.Unlock()
-			if payload != nil {
-				return payload
+			if message != nil {
+				return message
 			}
 			time.Sleep(time.Millisecond)
 		}
@@ -319,12 +318,12 @@ func awaitWireFrame(t *testing.T, transport *attachPaletteTransport, frameType w
 // awaitPickerSelection waits for the typed commit on the wire transport.
 func awaitPickerSelection(t *testing.T, transport *attachPaletteTransport) protocol.PickerSelection {
 	t.Helper()
-	selection, err := wire.UnmarshalPickerSelection(awaitWireFrame(t, transport, wire.MsgPickerSelection))
-	require.NoError(t, err)
+	selection, ok := awaitWireFrame(t, transport, "PickerSelection").(protocol.PickerSelection)
+	require.True(t, ok)
 	return selection
 }
 
-// requireNoPickerInput fails when any MsgInput frame reached the PTY.
+// requireNoPickerInput fails when any Input envelope reached the PTY.
 func requireNoPickerInput(t *testing.T, transport *attachPaletteTransport) {
 	t.Helper()
 	select {

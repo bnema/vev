@@ -32,7 +32,7 @@ func setupMovePickerSessionsWithClock(t *testing.T, clock ports.Clock, extraDest
 
 // setupMovePickerSessionsCore builds the move fixture without draining the
 // attachment transport, so a regression can read exactly what the daemon sent.
-func setupMovePickerSessionsCore(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func(), chan wire.Frame) {
+func setupMovePickerSessionsCore(t *testing.T, clock ports.Clock, extraDestinationTabs int) (*Daemon, *session, *attachedClient, *session, *tab, []func(), chan wire.Envelope) {
 	t.Helper()
 	sourcePTY, releaseSource := newBlockingPTY(t)
 	d, source, ac, sends := newManualSessionWithPTYsClock(t, clock, sourcePTY)
@@ -462,7 +462,7 @@ func TestMovePickerCompositeFollowReportsCorrelatedResult(t *testing.T) {
 	require.Equal(t, selection.InteractionID, result.InteractionID)
 	require.Equal(t, selection.Key, result.Key)
 	require.Equal(t, protocol.PickerActionMove, result.Action)
-	assertNoFurtherFrame(t, sends, wire.MsgPickerResult, "composite follow reported its result more than once")
+	assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
 }
 
 // TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability pins the
@@ -510,7 +510,7 @@ func TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability(t *test
 	require.Equal(t, selection.CauseActionID, result.CauseActionID)
 	require.Equal(t, selection.InteractionID, result.InteractionID)
 	require.Equal(t, protocol.PickerActionMove, result.Action)
-	assertNoFurtherFrame(t, sends, wire.MsgPickerResult, "composite follow reported its result more than once")
+	assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
 }
 
 // supersedeAttachmentCapabilityForTest retires an attachment's exact published
@@ -590,23 +590,22 @@ func TestMovePickerCompositeFollowReadmitsSupersededCapabilityBeforeIdentity(t *
 	require.Equal(t, selection.CauseActionID, result.CauseActionID)
 	require.Equal(t, selection.InteractionID, result.InteractionID)
 	require.Equal(t, protocol.PickerActionMove, result.Action)
-	assertNoFurtherFrame(t, sends, wire.MsgCommittedRouteIdentity, "composite follow published its committed identity more than once")
-	assertNoFurtherFrame(t, sends, wire.MsgPickerResult, "composite follow reported its result more than once")
+	assertNoFurtherFrame(t, sends, "CommittedRouteIdentity", "composite follow published its committed identity more than once")
+	assertNoFurtherFrame(t, sends, "PickerResult", "composite follow reported its result more than once")
 }
 
 // awaitSentCommittedIdentity reads the next committed route identity the daemon
 // published, skipping unrelated frames.
-func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Frame) protocol.CommittedRouteIdentity {
+func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Envelope) protocol.CommittedRouteIdentity {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type != wire.MsgCommittedRouteIdentity {
+			identity, ok := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
+			if !ok {
 				continue
 			}
-			identity, err := wire.UnmarshalCommittedRouteIdentity(frame.Payload)
-			require.NoError(t, err)
 			return identity
 		case <-deadline:
 			t.Fatal("composite follow sent no committed route identity")
@@ -617,13 +616,13 @@ func awaitSentCommittedIdentity(t *testing.T, sends <-chan wire.Frame) protocol.
 
 // assertNoFurtherFrame proves a frame was produced exactly once: no later frame
 // of that type may follow the one the caller already observed.
-func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Frame, frameType wire.MsgType, failure string) {
+func assertNoFurtherFrame(t *testing.T, sends <-chan wire.Envelope, frameName string, failure string) {
 	t.Helper()
 	deadline := time.After(200 * time.Millisecond)
 	for {
 		select {
 		case frame := <-sends:
-			require.NotEqual(t, frameType, frame.Type, failure)
+			require.NotEqual(t, frameName, envelopeMessageName(t, frame.Payload), failure)
 		case <-deadline:
 			return
 		}
@@ -664,17 +663,16 @@ func TestMovePickerClosedRejectionUsesFreshEffect(t *testing.T) {
 }
 
 // awaitSentPickerResult blocks until the daemon reports a completed mutation.
-func awaitSentPickerResult(t *testing.T, sends <-chan wire.Frame) protocol.PickerResult {
+func awaitSentPickerResult(t *testing.T, sends <-chan wire.Envelope) protocol.PickerResult {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type != wire.MsgPickerResult {
+			result, ok := decodeServerMessage(t, frame).(protocol.PickerResult)
+			if !ok {
 				continue
 			}
-			result, err := wire.UnmarshalPickerResult(frame.Payload)
-			require.NoError(t, err)
 			return result
 		case <-deadline:
 			t.Fatal("composite follow sent no correlated PickerResult")
@@ -686,22 +684,18 @@ func awaitSentPickerResult(t *testing.T, sends <-chan wire.Frame) protocol.Picke
 // collectSentPickerOutcome drains the bounded set of frames one rejection can
 // produce and returns the PickerFailure, plus any PickerResult that must not
 // exist on the rejection path.
-func collectSentPickerOutcome(t *testing.T, sends <-chan wire.Frame) (failure protocol.PickerFailure, result *protocol.PickerResult) {
+func collectSentPickerOutcome(t *testing.T, sends <-chan wire.Envelope) (failure protocol.PickerFailure, result *protocol.PickerResult) {
 	t.Helper()
 	found := false
 	deadline := time.After(500 * time.Millisecond)
 	for {
 		select {
 		case frame := <-sends:
-			switch frame.Type {
-			case wire.MsgPickerFailure:
-				decoded, err := wire.UnmarshalPickerFailure(frame.Payload)
-				require.NoError(t, err)
-				failure, found = decoded, true
-			case wire.MsgPickerResult:
-				decoded, err := wire.UnmarshalPickerResult(frame.Payload)
-				require.NoError(t, err)
-				result = &decoded
+			switch message := decodeServerMessage(t, frame).(type) {
+			case protocol.PickerFailure:
+				failure, found = message, true
+			case protocol.PickerResult:
+				result = &message
 			}
 		case <-deadline:
 			require.True(t, found, "closed rejection sent no bounded failure")

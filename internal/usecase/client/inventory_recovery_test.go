@@ -21,22 +21,22 @@ func TestInventoryFailureRestoresLatestRemoteIdentityAfterResumeRejection(t *tes
 	local := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "local"}
 	first := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "remote-first"}
 	current := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{3}, SessionName: "remote-current"}
-	welcome := func(target protocol.ExactSessionTarget) wire.Frame {
-		return frameOf(wire.MsgWelcome, wire.MarshalWelcome(protocol.Welcome{SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 17, Capabilities: protocol.CapabilityResume, CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target}}))
+	welcome := func(target protocol.ExactSessionTarget) wire.Envelope {
+		return mustServerEnvelope(protocol.Welcome{SessionID: target.SessionName, SessionName: target.SessionName, ResumeToken: 17, Capabilities: protocol.CapabilityResume, CommittedIdentity: &protocol.CommittedRouteIdentity{Target: target}})
 	}
-	rejected := func() wire.Frame {
-		return frameOf(wire.MsgError, wire.MarshalErrorMsg(protocol.ErrorMsg{Code: protocol.ErrNoSuchTarget, Text: "unavailable"}))
+	rejected := func() wire.Envelope {
+		return mustServerEnvelope(protocol.ErrorMsg{Code: protocol.ErrNoSuchTarget, Text: "unavailable"})
 	}
-	initial := &recordingTransport{recvs: []recvItem{{f: welcome(local)}, {f: frameOf(wire.MsgAttachTarget, wire.MarshalAttachTarget(protocol.AttachTarget{Endpoint: "remote", Session: first.SessionName, Intent: protocol.IntentAttach, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}))}}}
+	initial := &recordingTransport{recvs: []recvItem{{f: welcome(local)}, {f: mustServerEnvelope(protocol.AttachTarget{Endpoint: "remote", Session: first.SessionName, Intent: protocol.IntentAttach, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned})}}}
 	published := make(chan struct{})
 	var once sync.Once
 	selection := protocol.NavigationInventorySelection{InteractionGeneration: 1, PublicationGeneration: 1, SourceKey: "local", EntryKey: "entry"}
 	remote := &recordingTransport{recvs: []recvItem{
 		{f: welcome(first)},
-		{f: frameOf(wire.MsgCommittedRouteIdentity, mustMarshalCommittedIdentity(protocol.CommittedRouteIdentity{Target: current}))},
-		{f: frameOf(wire.MsgRoutePosition, mustMarshalRoutePosition(protocol.RoutePosition{Target: current, ActiveTabID: "remembered-tab"}))},
-		{f: frameOf(wire.MsgNavigationInventoryDemand, wire.MarshalNavigationInventoryDemand(protocol.NavigationInventoryDemand{InteractionGeneration: 1, Open: true}))},
-		{f: frameOf(wire.MsgNavigationInventorySelection, wire.MarshalNavigationInventorySelection(selection)), wait: published},
+		{f: mustServerEnvelope(protocol.CommittedRouteIdentity{Target: current})},
+		{f: mustServerEnvelope(protocol.RoutePosition{Target: current, ActiveTabID: "remembered-tab"})},
+		{f: mustServerEnvelope(protocol.NavigationInventoryDemand{InteractionGeneration: 1, Open: true})},
+		{f: mustServerEnvelope(selection), wait: published},
 	}, stall: make(chan struct{})}
 	release := make(chan struct{})
 	remote.stall = release
@@ -47,14 +47,14 @@ func TestInventoryFailureRestoresLatestRemoteIdentityAfterResumeRejection(t *tes
 			close(release)
 		}
 	}
-	remote.onSend = func(f wire.Frame) {
-		if f.Type == wire.MsgNavigationInventoryPublication {
+	remote.onSend = func(f wire.Envelope) {
+		if clientMessageName(t, f) == "NavigationInventoryPublication" {
 			once.Do(func() { close(published) })
 		}
 	}
 	failed := &recordingTransport{recvs: []recvItem{{f: rejected()}}}
 	resume := &recordingTransport{recvs: []recvItem{{f: rejected()}}}
-	restored := &recordingTransport{recvs: []recvItem{{f: welcome(current)}, {f: frameOf(wire.MsgDetached, wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach}))}}}
+	restored := &recordingTransport{recvs: []recvItem{{f: welcome(current)}, {f: mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach})}}}
 	localDialer := &sequenceDialer{trs: []wire.Transport{initial, failed}}
 	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote, resume, restored}}
 	control := portsmocks.NewMockClientDialer(t)

@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -30,12 +29,12 @@ import (
 	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/config"
-	"github.com/bnema/vev/internal/adapters/dgram"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/quic"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
@@ -52,7 +51,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/internal/usecase/remotes"
-	pdgram "github.com/bnema/vev/pkg/dgram"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -68,8 +66,8 @@ const (
 	kindDaemon
 	kindDaemonLauncher
 	kindStdio
-	kindUDPBootstrap
-	kindUDPProxy
+	kindQUICBootstrap
+	kindQUICProxy
 	kindRemotePreview
 	kindUIDriver
 	kindUIRemoteCleanup
@@ -237,16 +235,16 @@ parsedUIFlags:
 			return command{}, usagef("`_stdio` does not accept a session name")
 		}
 		return command{kind: kindStdio}, nil
-	case "_udp-bootstrap":
+	case "_quic-bootstrap":
 		if len(args) != 1 {
-			return command{}, usagef("`_udp-bootstrap` does not accept a session name")
+			return command{}, usagef("`_quic-bootstrap` does not accept a session name")
 		}
-		return command{kind: kindUDPBootstrap}, nil
-	case "_udp-proxy":
+		return command{kind: kindQUICBootstrap}, nil
+	case "_quic-proxy":
 		if len(args) != 1 {
-			return command{}, usagef("`_udp-proxy` does not accept a session name")
+			return command{}, usagef("`_quic-proxy` does not accept a session name")
 		}
-		return command{kind: kindUDPProxy}, nil
+		return command{kind: kindQUICProxy}, nil
 	case "_remote-preview":
 		if len(args) != 2 || args[1] == "" {
 			return command{}, usagef("`_remote-preview` requires one encoded request")
@@ -358,10 +356,10 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runDaemonLauncher()
 	case kindStdio:
 		return runStdio(ctx)
-	case kindUDPBootstrap:
-		return runUDPBootstrap(ctx)
-	case kindUDPProxy:
-		return runUDPProxy(ctx, os.Stdout)
+	case kindQUICBootstrap:
+		return runQUICBootstrap(ctx)
+	case kindQUICProxy:
+		return runQUICProxy(ctx)
 	case kindRemotePreview:
 		return runRemotePreview(ctx, cmd.remotePreviewPayload)
 	case kindUIRemoteCleanup:
@@ -918,12 +916,12 @@ type runAttachDeps struct {
 
 func remoteTransportModeFromEnv(value string) (remoteadapter.TransportMode, error) {
 	switch value {
-	case "", string(remoteadapter.TransportUDP):
-		return remoteadapter.TransportUDP, nil
+	case "", string(remoteadapter.TransportQUIC):
+		return remoteadapter.TransportQUIC, nil
 	case string(remoteadapter.TransportStdio):
 		return remoteadapter.TransportStdio, nil
 	default:
-		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, remoteadapter.TransportUDP, remoteadapter.TransportStdio)
+		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, remoteadapter.TransportQUIC, remoteadapter.TransportStdio)
 	}
 }
 
@@ -1189,18 +1187,19 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 		cwd = ""
 	}
 	hello := detachedLocalHello(name, cwd)
-	if err := transport.Send(wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)}); err != nil {
+	connection := sessionwire.NewClientConnection(transport)
+	if err := connection.SendClient(hello); err != nil {
 		return fmt.Errorf("vev: creating detached session: %w", err)
 	}
 
 	type detachedReply struct {
-		frame wire.Frame
-		err   error
+		message protocol.ServerMessage
+		err     error
 	}
 	replyCh := make(chan detachedReply, 1)
 	go func() {
-		f, err := transport.Recv()
-		replyCh <- detachedReply{frame: f, err: err}
+		message, err := connection.ReceiveServer()
+		replyCh <- detachedReply{message: message, err: err}
 	}()
 
 	select {
@@ -1211,17 +1210,13 @@ func createDetachedLocalSession(ctx context.Context, name string) error {
 		if reply.err != nil {
 			return fmt.Errorf("vev: awaiting detached session creation: %w", reply.err)
 		}
-		switch reply.frame.Type {
-		case wire.MsgWelcome:
+		switch message := reply.message.(type) {
+		case protocol.Welcome:
 			return nil
-		case wire.MsgError:
-			em, derr := wire.UnmarshalErrorMsg(reply.frame.Payload)
-			if derr != nil {
-				return fmt.Errorf("vev: decoding error reply: %w", derr)
-			}
-			return &client.ProtocolError{Code: em.Code, Text: em.Text}
+		case protocol.ErrorMsg:
+			return &client.ProtocolError{Code: message.Code, Text: message.Text}
 		default:
-			return fmt.Errorf("vev: unexpected reply type %d to detached session creation", reply.frame.Type)
+			return fmt.Errorf("vev: unexpected reply %T to detached session creation", reply.message)
 		}
 	}
 }
@@ -1252,10 +1247,11 @@ func requestDaemonStop(ctx context.Context) error {
 		return errors.Join(errDaemonNotRunning, owner.Release())
 	}
 	defer func() { _ = transport.Close() }()
-	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Scope: protocol.KillDaemon})}); err != nil {
+	connection := sessionwire.NewClientConnection(transport)
+	if err := connection.SendClient(protocol.Kill{Scope: protocol.KillDaemon}); err != nil {
 		return fmt.Errorf("vev: requesting daemon stop: %w", err)
 	}
-	if _, err := transport.Recv(); err != nil && !errors.Is(err, io.EOF) {
+	if _, err := connection.ReceiveServer(); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("vev: reading daemon stop reply: %w", err)
 	}
 
@@ -1313,24 +1309,14 @@ func runStdio(ctx context.Context) (retErr error) {
 		_ = stdoutReader.Close()
 	}()
 	stdio := sshstdio.NewTransport(stdin, stdoutWriter, nil, sshstdio.WithRuntimeObserver(observer))
-	return runStdioProxy(ctx, stdio, transport, log)
+	return proxyTransports(ctx, stdio, transport, log)
 }
 
-var (
-	udpBootstrapTimeout = 5 * time.Second
-	udpProxyCommand     = func(ctx context.Context, exe string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, exe, args...)
-	}
-)
-
-// runUDPBootstrap starts a detached _udp-proxy, forwards its single readiness
-// line, and exits so SSH stdio can close without owning the UDP proxy lifetime.
-func runUDPBootstrap(ctx context.Context) error {
-	// Always start a fresh proxy for a bootstrap request. A client attach begins
-	// with MsgHello, which must reach the daemon handshake path; reusing an
-	// already-running proxy would forward that Hello into the daemon connection's
-	// post-handshake runConnLoop, where it is intentionally ignored. Every
-	// bootstrap starts a fresh byte-only carriage.
+// runQUICBootstrap starts a detached QUIC proxy, forwards its single
+// readiness line, and exits so the SSH channel closes without owning
+// the session lifetime. The detached proxy serves exactly one
+// authenticated stream, then exits deterministically.
+func runQUICBootstrap(ctx context.Context) error {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -1342,7 +1328,6 @@ func runUDPBootstrap(ctx context.Context) error {
 		_ = w.Close()
 		return err
 	}
-	args := []string{"_udp-proxy"}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		_ = w.Close()
@@ -1350,9 +1335,11 @@ func runUDPBootstrap(ctx context.Context) error {
 	}
 	defer func() { _ = devNull.Close() }()
 
-	cmd := udpProxyCommand(ctx, exe, args...)
-	// _udp-proxy writes diagnostics through configureLogging(logging.Stdio, false);
-	// stdio is detached here so the bootstrap SSH channel can close.
+	cmd := exec.CommandContext(ctx, exe, "_quic-proxy")
+	// The proxy writes diagnostics through configureLogging; stdio is
+	// detached here so the bootstrap SSH channel can close. The proxy
+	// owns the session lifetime in its own session (Setsid) and is
+	// released: the bootstrap child exits after forwarding readiness.
 	cmd.Stdin = devNull
 	cmd.Stdout = w
 	cmd.Stderr = devNull
@@ -1363,7 +1350,7 @@ func runUDPBootstrap(ctx context.Context) error {
 	}
 	_ = w.Close()
 
-	readyCtx, cancel := context.WithTimeout(ctx, udpBootstrapTimeout)
+	readyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	lineCh := make(chan string, 1)
 	errCh := make(chan error, 1)
@@ -1388,181 +1375,98 @@ func runUDPBootstrap(ctx context.Context) error {
 	case <-readyCtx.Done():
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return fmt.Errorf("vev: udp bootstrap readiness: %w", readyCtx.Err())
+		return fmt.Errorf("vev: quic bootstrap readiness: %w", readyCtx.Err())
 	}
 }
 
-// runUDPProxy is the detached long-lived remote-side datagram proxy.
-func runUDPProxy(ctx context.Context, ready io.Writer) (retErr error) {
+// runQUICProxy is the detached long-lived remote-side QUIC proxy: one
+// ephemeral listener/certificate, one atomic token, private IPC only
+// after the first authenticated stream. It exits after session
+// termination, token expiry, or setup failure.
+func runQUICProxy(ctx context.Context) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Stdio, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
-	log.Debug("udp carriage starting")
+	log.Debug("quic proxy starting")
+	server, readiness, err := quic.NewServer()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = server.Close() }()
+	raw, err := quic.EncodeReadiness(readiness)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "%s\n", raw); err != nil {
+		return err
+	}
+	// Serve exactly one authenticated session, then exit
+	// deterministically. Accept fails closed on token expiry, so the
+	// proxy cannot outlive its advertised credential.
+	transport, err := server.Accept(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = transport.Close() }()
+	return proxyQUICBootstrap(ctx, transport)
+}
 
-	observer, observerCloser, err := newPerformanceTrace(clock.New())
-	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
-	}
-	if observerCloser != nil {
-		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
-	}
-	portRange, err := parseUDPPortRange(os.Getenv(envUDPPortRange))
-	if err != nil {
-		return err
-	}
-	conn, err := listenUDPInRange(ctx, portRange)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
+// proxyQUICBootstrap bridges the single authenticated QUIC stream to the
+// local daemon over private IPC. The daemon side is wrapped as a typed
+// server connection by the daemon's own accept path; here the bridge
+// copies raw envelopes both ways until either side closes. No session
+// bytes flow before auth: Accept returned only the authenticated stream.
+func proxyQUICBootstrap(ctx context.Context, transport wire.Transport) error {
 	daemonTr, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (wire.Transport, error) {
-		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
+		return ipc.DialContext(ctx, dir)
 	}, realSpawn, defaultBackoff)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = daemonTr.Close() }()
-	udpOptions := udpProxyClientTransportOptions
-	udpOptions.Observe = dgram.DiagnosticLogObserver(log)
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return errors.New("vev: udp proxy did not get a UDP address")
-	}
-	var (
-		dg       *dgram.Transport
-		setupErr error
-	)
-	pdgram.SecretDo(func() {
-		key := make([]byte, pdgram.KeySize)
-		defer pdgram.Erase(key)
-		if _, setupErr = rand.Read(key); setupErr != nil {
-			return
-		}
-		dg, setupErr = dgram.NewTransportWithOptions(conn, nil, key, 2, 1, udpOptions, dgram.WithRuntimeObserver(observer))
-		if setupErr != nil {
-			return
-		}
-		readiness := append([]byte("VEV-UDP "), strconv.Itoa(addr.Port)...)
-		readiness = append(readiness, ' ')
-		readiness = base64.StdEncoding.AppendEncode(readiness, key)
-		readiness = append(readiness, '\n')
-		defer pdgram.Erase(readiness)
-		_, setupErr = ready.Write(readiness)
-		pdgram.Erase(readiness)
-		pdgram.Erase(key)
-	})
-	if setupErr != nil {
-		if dg != nil {
-			_ = dg.Close()
-		}
-		return setupErr
-	}
-	defer func() { _ = dg.Close() }()
-	return runUDPProxyRuntime(ctx, dg, daemonTr, log)
+	return proxyTransports(ctx, transport, daemonTr, slog.Default())
 }
 
-const udpProxyIdleTTL = 15 * time.Minute
-
-var udpProxyClientTransportOptions = dgram.Options{
-	MaxPending: 32,
-	DeadAfter:  2 * udpProxyIdleTTL,
+// proxyTransports copies raw envelopes both ways until either side
+// closes. It is carriage-neutral (IPC, SSH, QUIC): the only datagram
+// special case (hello output-window clamping) lived in the removed
+// datagram proxy, not here.
+func proxyTransports(ctx context.Context, a, b wire.Transport, _ *slog.Logger) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Own both carriages: closing them releases the copy goroutines'
+	// blocked Recv calls (with serialized end marks) instead of
+	// abandoning them mid-Recv when the first direction fails.
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	errCh := make(chan error, 2)
+	go func() { errCh <- copyTransport(ctx, a, b) }()
+	go func() { errCh <- copyTransport(ctx, b, a) }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-const (
-	// envUDPPortRange configures the remote UDP proxy's listen port range so a
-	// host firewall can allow a known range instead of a random ephemeral port.
-	// Format: "START-END" (inclusive), a single "PORT", or "0" for a random
-	// ephemeral port. Unset uses the default range below.
-	envUDPPortRange     = "VEV_UDP_PORT_RANGE"
-	defaultUDPPortStart = 61000
-	defaultUDPPortEnd   = 61023
-)
-
-// udpPortRange is an inclusive [start, end] UDP port range. start == 0 means a
-// random ephemeral port (the old ":0" behavior).
-type udpPortRange struct {
-	start int
-	end   int
-}
-
-// parseUDPPortRange parses VEV_UDP_PORT_RANGE. Empty -> default range. "0" ->
-// ephemeral. "N" -> single port N. "A-B" -> inclusive range. Ports must be in
-// 1..65535 (or 0 for ephemeral) and end must be >= start.
-func parseUDPPortRange(value string) (udpPortRange, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return udpPortRange{start: defaultUDPPortStart, end: defaultUDPPortEnd}, nil
-	}
-	startStr, endStr, hasRange := strings.Cut(value, "-")
-	start, err := parseUDPPort(startStr)
-	if err != nil {
-		return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
-	}
-	if start == 0 {
-		if hasRange {
-			return udpPortRange{}, fmt.Errorf("invalid %s %q: port 0 (ephemeral) cannot be combined with a range", envUDPPortRange, value)
-		}
-		return udpPortRange{start: 0, end: 0}, nil
-	}
-	end := start
-	if hasRange {
-		end, err = parseUDPPort(endStr)
+func copyTransport(ctx context.Context, src, dst wire.Transport) error {
+	for {
+		envelope, err := src.Recv()
 		if err != nil {
-			return udpPortRange{}, fmt.Errorf("invalid %s %q: %w", envUDPPortRange, value, err)
+			return err
+		}
+		if err := dst.Send(envelope); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 	}
-	if end < start {
-		return udpPortRange{}, fmt.Errorf("invalid %s %q: end %d before start %d", envUDPPortRange, value, end, start)
-	}
-	return udpPortRange{start: start, end: end}, nil
-}
-
-func parseUDPPort(s string) (int, error) {
-	p, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return 0, fmt.Errorf("port %q is not a number", strings.TrimSpace(s))
-	}
-	if p < 0 || p > 65535 {
-		return 0, fmt.Errorf("port %d out of range 0-65535", p)
-	}
-	return p, nil
-}
-
-// listenUDPInRange binds a UDP packet conn on the first free port in the range,
-// skipping busy ports. A zero-start range binds a random ephemeral port.
-func listenUDPInRange(ctx context.Context, r udpPortRange) (net.PacketConn, error) {
-	var lc net.ListenConfig
-	if r.start == 0 {
-		return lc.ListenPacket(ctx, "udp", ":0")
-	}
-	if r.start < 0 || r.end < r.start {
-		return nil, fmt.Errorf("invalid UDP port range %d-%d", r.start, r.end)
-	}
-	var lastErr error
-	for port := r.start; port <= r.end; port++ {
-		conn, err := lc.ListenPacket(ctx, "udp", fmt.Sprintf(":%d", port))
-		if err == nil {
-			return conn, nil
-		}
-		lastErr = err
-	}
-	return nil, fmt.Errorf("no free UDP port in range %d-%d: %w", r.start, r.end, lastErr)
-}
-
-// runStdioProxy forwards the framed transport without interpreting protocol
-// messages. Session selection remains in the Hello sent by the thin client.
-func runStdioProxy(ctx context.Context, client, daemon wire.Transport, log *slog.Logger) error {
-	return proxyTransports(ctx, client, daemon, log)
-}
-
-func runUDPProxyRuntime(ctx context.Context, client, daemon wire.Transport, log *slog.Logger) error {
-	return dgram.ProxyRuntime{Client: client, Daemon: daemon, Log: log, IdleTTL: udpProxyIdleTTL}.Run(ctx)
-}
-
-func proxyTransports(ctx context.Context, a, b wire.Transport, log *slog.Logger) error {
-	return dgram.ProxyRuntime{Client: a, Daemon: b, Log: log}.Run(ctx)
 }
 
 // runList prints the daemon's session listing. With no daemon running, it
@@ -1634,43 +1538,37 @@ var preflightListTimeout = 5 * time.Second
 // a socket that accepts but never replies neither delays the attach
 // fallback nor blocks Ctrl-C exit. Transport.Close interrupts blocked Send
 // and Recv.
-func boundedListExchange(ctx context.Context, transport wire.Transport) (wire.Frame, error) {
+func boundedListExchange(ctx context.Context, transport wire.Transport) (protocol.ServerMessage, error) {
 	listCtx, cancel := context.WithTimeout(ctx, preflightListTimeout)
 	defer cancel()
 	stopClose := context.AfterFunc(listCtx, func() { _ = transport.Close() })
 	defer stopClose()
 	defer func() { _ = transport.Close() }()
 
-	if err := transport.Send(wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(protocol.List{})}); err != nil {
+	connection := sessionwire.NewClientConnection(transport)
+	if err := connection.SendClient(protocol.List{}); err != nil {
 		if listCtx.Err() != nil {
-			return wire.Frame{}, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
+			return nil, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
 		}
-		return wire.Frame{}, fmt.Errorf("vev: requesting session list: %w", err)
+		return nil, fmt.Errorf("vev: requesting session list: %w", err)
 	}
-	reply, err := transport.Recv()
+	reply, err := connection.ReceiveServer()
 	if err != nil {
 		if listCtx.Err() != nil {
-			return wire.Frame{}, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
+			return nil, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
 		}
-		return wire.Frame{}, fmt.Errorf("vev: reading session list: %w", err)
+		return nil, fmt.Errorf("vev: reading session list: %w", err)
 	}
 	return reply, nil
 }
 
-func decodeSessionListReply(reply wire.Frame) ([]protocol.SessionInfo, error) {
-	if reply.Type == wire.MsgError {
-		em, err := wire.UnmarshalErrorMsg(reply.Payload)
-		if err != nil {
-			return nil, fmt.Errorf("vev: decoding error reply: %w", err)
-		}
+func decodeSessionListReply(reply protocol.ServerMessage) ([]protocol.SessionInfo, error) {
+	if em, ok := reply.(protocol.ErrorMsg); ok {
 		return nil, fmt.Errorf("vev: %s", em.Text)
 	}
-	if reply.Type != wire.MsgSessions {
-		return nil, fmt.Errorf("vev: unexpected reply type %d to list", reply.Type)
-	}
-	sessions, err := wire.UnmarshalSessions(reply.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("vev: decoding session list: %w", err)
+	sessions, ok := reply.(protocol.Sessions)
+	if !ok {
+		return nil, fmt.Errorf("vev: unexpected reply %T to list", reply)
 	}
 	return sessions.Sessions, nil
 }
@@ -1760,6 +1658,7 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 		return errDaemonNotRunning
 	}
 	defer func() { _ = transport.Close() }()
+	connection := sessionwire.NewClientConnection(transport)
 
 	scope := protocol.KillSession
 	if all {
@@ -1767,19 +1666,17 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 	} else if daemon {
 		scope = protocol.KillDaemon
 	}
-	if err := transport.Send(wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(protocol.Kill{Name: name, Scope: scope})}); err != nil {
+	if err := connection.SendClient(protocol.Kill{Name: name, Scope: scope}); err != nil {
 		return fmt.Errorf("vev: requesting kill: %w", err)
 	}
-	reply, err := transport.Recv()
+	reply, err := connection.ReceiveServer()
 	if err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("vev: reading kill reply: %w", err)
 	}
-	if err == nil && reply.Type == wire.MsgError {
-		em, decodeErr := wire.UnmarshalErrorMsg(reply.Payload)
-		if decodeErr != nil {
-			return fmt.Errorf("vev: decoding error reply: %w", decodeErr)
+	if err == nil {
+		if em, ok := reply.(protocol.ErrorMsg); ok {
+			return fmt.Errorf("vev: %s", em.Text)
 		}
-		return fmt.Errorf("vev: %s", em.Text)
 	}
 	if all || daemon {
 		waitCtx, cancel := context.WithTimeout(ctx, daemonStopTimeout)

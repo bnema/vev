@@ -1175,6 +1175,7 @@ func (d *Daemon) handleConn(tr ports.ServerConnection) {
 func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.ServerConnection, failure *protocol.DecodeFailure) {
 	send := func(message protocol.ServerMessage) {
 		_ = boundedHandshakeOperation(ctx, tr, func() error { return tr.SendServer(message) })
+		_ = tr.Close()
 	}
 	switch failure.Kind {
 	case protocol.DecodeMessageHello:

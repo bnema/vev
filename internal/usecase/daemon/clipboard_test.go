@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -244,9 +245,9 @@ func TestPTYReaderForwardsOSC52ClipboardToAttachedClient(t *testing.T) {
 
 	var clipboardOutput string
 	for range 3 {
-		f := awaitFrame(t, sends, wire.MsgOutput)
-		out, err := wire.UnmarshalOutput(f.Payload)
-		require.NoError(t, err)
+		f := awaitFrame(t, sends, "Output")
+		out, ok := decodeServerMessage(t, f).(protocol.Output)
+		require.True(t, ok)
 		clipboardOutput = string(out.Data)
 		if strings.Contains(clipboardOutput, "\x1b]52;c;aGVsbG8=\x07") {
 			break
@@ -277,7 +278,7 @@ func TestPTYReaderDropsOversizedClipboardPayload(t *testing.T) {
 
 	select {
 	case f := <-sends:
-		require.NotEqual(t, wire.MsgOutput, f.Type)
+		require.NotEqual(t, "Output", envelopeMessageName(t, f.Payload))
 	default:
 	}
 }
@@ -302,7 +303,7 @@ func TestPTYReaderDropsInvalidBase64Clipboard(t *testing.T) {
 
 	select {
 	case f := <-sends:
-		require.NotEqual(t, wire.MsgOutput, f.Type)
+		require.NotEqual(t, "Output", envelopeMessageName(t, f.Payload))
 	default:
 	}
 }
@@ -329,15 +330,15 @@ type staleClipboardErrorTransport struct {
 	sends int
 }
 
-func (t *staleClipboardErrorTransport) Send(wire.Frame) error {
+func (t *staleClipboardErrorTransport) Send(wire.Envelope) error {
 	t.mu.Lock()
 	t.sends++
 	t.mu.Unlock()
 	return errors.New("stale clipboard send")
 }
 
-func (*staleClipboardErrorTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (*staleClipboardErrorTransport) Close() error              { return nil }
+func (*staleClipboardErrorTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (*staleClipboardErrorTransport) Close() error                 { return nil }
 
 func (t *staleClipboardErrorTransport) sendCount() int {
 	t.mu.Lock()
@@ -384,13 +385,13 @@ func newMovingClipboardErrorTransport() *movingClipboardErrorTransport {
 	}
 }
 
-func (t *movingClipboardErrorTransport) Send(wire.Frame) error {
+func (t *movingClipboardErrorTransport) Send(wire.Envelope) error {
 	t.startedOnce.Do(func() { close(t.started) })
 	<-t.release
 	return errors.New("clipboard send failed after pane move")
 }
 
-func (*movingClipboardErrorTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*movingClipboardErrorTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
 
 func (t *movingClipboardErrorTransport) Close() error {
 	t.closeOnce.Do(func() { close(t.closed) })
@@ -510,10 +511,14 @@ func newBlockingClipboardTransport() *blockingClipboardTransport {
 	}
 }
 
-func (tr *blockingClipboardTransport) Send(f wire.Frame) error {
-	out, err := wire.UnmarshalOutput(f.Payload)
+func (tr *blockingClipboardTransport) Send(f wire.Envelope) error {
+	message, err := sessionwire.DecodeServerEnvelope(f.Payload)
 	if err != nil {
 		return err
+	}
+	out, ok := message.(protocol.Output)
+	if !ok {
+		return nil
 	}
 	data := string(out.Data)
 	var label string
@@ -533,5 +538,5 @@ func (tr *blockingClipboardTransport) Send(f wire.Frame) error {
 	return nil
 }
 
-func (tr *blockingClipboardTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (tr *blockingClipboardTransport) Close() error              { return nil }
+func (tr *blockingClipboardTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (tr *blockingClipboardTransport) Close() error                 { return nil }

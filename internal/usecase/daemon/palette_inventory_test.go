@@ -8,7 +8,6 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // TestPaletteInventoryNamespaceLifecycle pins the overlay interaction
@@ -91,9 +90,8 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 
 	interaction := d.enterPalette(current, ac)
 	d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-	demandFrame := awaitFrame(t, sends, wire.MsgNavigationInventoryDemand)
-	demand, err := wire.UnmarshalNavigationInventoryDemand(demandFrame.Payload)
-	require.NoError(t, err)
+	demandFrame := awaitFrame(t, sends, "NavigationInventoryDemand")
+	demand := decodeServerMessage(t, demandFrame).(protocol.NavigationInventoryDemand)
 	require.True(t, demand.Open)
 	require.Equal(t, interaction, demand.InteractionGeneration)
 
@@ -113,24 +111,23 @@ func TestPaletteInventoryDemandAndSelectionFlow(t *testing.T) {
 
 	d.handlePaletteInput(ac, []byte("zzqimported\r"), effect)
 
-	selectionFrame := awaitFrame(t, sends, wire.MsgNavigationInventorySelection)
-	selection, err := wire.UnmarshalNavigationInventorySelection(selectionFrame.Payload)
-	require.NoError(t, err)
+	selectionFrame := awaitFrame(t, sends, "NavigationInventorySelection")
+	selection := decodeServerMessage(t, selectionFrame).(protocol.NavigationInventorySelection)
 	require.Equal(t, uint64(0), selection.CauseActionID, "keyboard input carries no automation cause")
 	require.Equal(t, interaction, selection.InteractionGeneration)
 	require.Equal(t, uint64(1), selection.PublicationGeneration)
 	require.Equal(t, "local", selection.SourceKey)
 	require.Equal(t, "aaa/zzqimported", selection.EntryKey)
 
-	closeFrame := awaitFrame(t, sends, wire.MsgNavigationInventoryDemand)
-	closeDemand, err := wire.UnmarshalNavigationInventoryDemand(closeFrame.Payload)
-	require.NoError(t, err)
+	closeFrame := awaitFrame(t, sends, "NavigationInventoryDemand")
+	closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
+	require.True(t, ok)
 	require.False(t, closeDemand.Open)
 	require.Equal(t, interaction, closeDemand.InteractionGeneration)
 	// Input handling sends controls synchronously; no second close may be queued.
 	for len(sends) > 0 {
 		frame := <-sends
-		require.NotEqual(t, wire.MsgNavigationInventoryDemand, frame.Type, "selection emits exactly one close")
+		require.NotEqual(t, "NavigationInventoryDemand", envelopeMessageName(t, frame.Payload), "selection emits exactly one close")
 	}
 
 	require.False(t, ac.overlays.paletteActive(), "select closes the overlay")
@@ -185,7 +182,7 @@ func TestPaletteInventoryRemoteEnterNeverAttaches(t *testing.T) {
 	require.True(t, ac.overlays.paletteActive(), "refused remote selection keeps the palette open")
 	select {
 	case frame := <-sends:
-		require.NotEqual(t, wire.MsgNavigationInventorySelection, frame.Type, "remote Enter must not emit a selection")
+		require.NotEqual(t, "NavigationInventorySelection", envelopeMessageName(t, frame.Payload), "remote Enter must not emit a selection")
 	case <-time.After(200 * time.Millisecond):
 	}
 }
@@ -254,12 +251,12 @@ func TestPaletteInventoryEscapeSendsCloseDemand(t *testing.T) {
 
 	interaction := d.enterPalette(current, ac)
 	d.sendPaletteInventoryDemand(ac, effect, true, interaction)
-	awaitFrame(t, sends, wire.MsgNavigationInventoryDemand)
+	awaitFrame(t, sends, "NavigationInventoryDemand")
 
 	d.handlePaletteInput(ac, []byte{0x1b}, effect)
-	closeFrame := awaitFrame(t, sends, wire.MsgNavigationInventoryDemand)
-	closeDemand, err := wire.UnmarshalNavigationInventoryDemand(closeFrame.Payload)
-	require.NoError(t, err)
+	closeFrame := awaitFrame(t, sends, "NavigationInventoryDemand")
+	closeDemand, ok := decodeServerMessage(t, closeFrame).(protocol.NavigationInventoryDemand)
+	require.True(t, ok)
 	require.False(t, closeDemand.Open)
 	require.Equal(t, interaction, closeDemand.InteractionGeneration)
 	require.False(t, ac.overlays.paletteActive())
@@ -280,7 +277,7 @@ func TestPaletteInventoryDemandRequiresCapability(t *testing.T) {
 	for {
 		select {
 		case frame := <-sends:
-			if frame.Type == wire.MsgNavigationInventoryDemand {
+			if envelopeMessageName(t, frame.Payload) == "NavigationInventoryDemand" {
 				t.Fatalf("demand without capability must not send")
 			}
 		case <-deadline:

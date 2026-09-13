@@ -1,0 +1,90 @@
+// Shared wire-only values for the vev session protocol.
+//
+// Package vev.wire.v1 is the canonical Protobuf contract replacing the
+// custom MsgType codecs. Field numbers are new Protobuf numbers, never
+// preserved legacy MsgType IDs. Semantic validation stays in
+// internal/protocol; sessionwire owns conversion.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// LifecycleID is the opaque 16-byte identity of one session lifecycle
+// (domain.SessionLifecycleID / domain.IncarnationID).
+message LifecycleID {
+  bytes value = 1; // exactly 16 bytes
+}
+
+// TabSelector is an exact tab identity handoff (domain.TabSelector).
+message TabSelector {
+  // Closed taxonomy: 0 = absent, 1 = stable ID, 2 = ordinal.
+  uint32 kind = 1;
+  string stable_id = 2;
+  uint32 ordinal = 3;
+  string raw_name = 4;
+  uint32 expected_count = 5;
+}
+
+// RemoteTarget is the structured picker-based remote identity
+// (domain.RemoteSessionTarget). Endpoint and display origin stay separate:
+// the latter is presentation-only.
+message RemoteTarget {
+  string endpoint = 1;
+  string display_origin = 2;
+  LifecycleID lifecycle_id = 3;
+  string session_name = 4;
+  string live_tab_id = 5;
+  TabSelector stopped_tab = 6;
+  bool stopped = 7;
+}
+
+// ExactTarget is the daemon-neutral attach identity
+// (protocol.ExactSessionTarget).
+message ExactTarget {
+  LifecycleID lifecycle_id = 1;
+  string session_name = 2;
+}
+
+// RGB is one terminal color triple (renderer.RGB).
+message RGB {
+  uint32 r = 1;
+  uint32 g = 2;
+  uint32 b = 3;
+}
+
+// CellStyle is the bounded style block of one preview cell
+// (renderer.Style). Indexed colors use int32 so -1 (unset) survives.
+message CellStyle {
+  bool bold = 1;
+  bool italic = 2;
+  bool inverse = 3;
+  uint32 attrs = 4;
+  int32 foreground = 5;
+  int32 background = 6;
+  bool has_foreground_rgb = 7;
+  bool has_background_rgb = 8;
+  bool has_underline_color = 9;
+  bool has_underline_color_rgb = 10;
+  uint32 underline_style = 11;
+  int32 underline_color = 12;
+  RGB foreground_rgb = 13;
+  RGB background_rgb = 14;
+  RGB underline_color_rgb = 15;
+}
+
+// PreviewCell is one styled viewport cell: rune, continuation flag, style.
+// Cell payloads beyond rune/style never travel on this wire.
+message PreviewCell {
+  uint32 rune_value = 1;
+  bool continuation = 2;
+  CellStyle style = 3;
+}
+
+// RemoteRegistration is the exact configured identity of one monitored
+// endpoint (domain.RemoteRegistration).
+message RemoteRegistration {
+  string endpoint = 1;
+  bytes incarnation = 2; // exactly 16 bytes
+  uint64 generation = 3;
+}

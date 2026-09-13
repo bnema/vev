@@ -69,6 +69,10 @@ func (d *Daemon) sendCommandResult(tr ports.ServerConnection, result protocol.Co
 		d.log.Warn("command response send failed", "err", err)
 		return err
 	}
+	// One-shot control connections terminate after their refusal or
+	// result: closing here lets malformed first frames observe EOF
+	// instead of hanging on a half-open connection.
+	_ = tr.Close()
 	return nil
 }
 

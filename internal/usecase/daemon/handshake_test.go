@@ -29,8 +29,8 @@ func newHandshakeBlockingTransport(blockWelcome bool) *handshakeBlockingTranspor
 	}
 }
 
-func (t *handshakeBlockingTransport) Send(frame wire.Frame) error {
-	if t.blockWelcome && frame.Type == wire.MsgWelcome {
+func (t *handshakeBlockingTransport) Send(frame wire.Envelope) error {
+	if t.blockWelcome && envelopeMessageName(nil, frame.Payload) == "Welcome" {
 		close(t.welcome)
 		<-t.closed
 		return io.ErrClosedPipe
@@ -38,9 +38,9 @@ func (t *handshakeBlockingTransport) Send(frame wire.Frame) error {
 	return nil
 }
 
-func (t *handshakeBlockingTransport) Recv() (wire.Frame, error) {
+func (t *handshakeBlockingTransport) Recv() (wire.Envelope, error) {
 	<-t.closed
-	return wire.Frame{}, io.ErrClosedPipe
+	return wire.Envelope{}, io.ErrClosedPipe
 }
 
 func (t *handshakeBlockingTransport) Close() error {
@@ -183,7 +183,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	resumeTransport := newHandshakeBlockingTransport(true)
 	done := make(chan struct{})
 	go func() {
-		d.handleHelloFrame(resumeTransport, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(helloResumeCapable(protocol.IntentResume, sess.name, token))})
+		d.handleHelloFrame(resumeTransport, mustClientEnvelope(helloResumeCapable(protocol.IntentResume, sess.name, token)))
 		close(done)
 	}()
 

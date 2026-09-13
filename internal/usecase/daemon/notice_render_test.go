@@ -9,24 +9,24 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// replayOutputFrames decodes and writes each MsgOutput frame's terminal bytes
+// replayOutputFrames decodes and writes each Output envelope’s terminal bytes
 // into screen, growing its shadow the same way a real client would.
-func replayOutputFrames(t *testing.T, screen *vt.Screen, frames []wire.Frame) {
+func replayOutputFrames(t *testing.T, screen *vt.Screen, frames []wire.Envelope) {
 	t.Helper()
 	for _, f := range frames {
-		require.Equal(t, wire.MsgOutput, f.Type)
-		out, err := wire.UnmarshalOutput(f.Payload)
-		require.NoError(t, err)
+		out, ok := decodeServerMessage(t, f).(protocol.Output)
+		require.True(t, ok)
 		screen.Write(out.Data)
 	}
 }
 
 // drainAllFrames collects every frame already queued on sends without blocking.
-func drainAllFrames(sends chan wire.Frame) []wire.Frame {
-	var out []wire.Frame
+func drainAllFrames(sends chan wire.Envelope) []wire.Envelope {
+	var out []wire.Envelope
 	for {
 		select {
 		case f := <-sends:
@@ -96,7 +96,7 @@ func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
 	awaitToastCount(t, ac, 0)
 	select {
 	case f := <-sends:
-		replayOutputFrames(t, screen, append([]wire.Frame{f}, drainAllFrames(sends)...))
+		replayOutputFrames(t, screen, append([]wire.Envelope{f}, drainAllFrames(sends)...))
 	case <-time.After(2 * time.Second):
 		t.Fatal("expiry did not invalidate the render")
 	}

@@ -32,11 +32,11 @@ import (
 // assertions must not depend on any adapter's framing implementation.
 type scriptedReplayTransport struct {
 	t      *testing.T
-	frames []wire.Frame
+	frames []wire.Envelope
 	next   int
 }
 
-func (s *scriptedReplayTransport) Send(got wire.Frame) error {
+func (s *scriptedReplayTransport) Send(got wire.Envelope) error {
 	s.t.Helper()
 	if s.next >= len(s.frames) {
 		s.t.Errorf("unexpected frame %#v", got)
@@ -44,12 +44,11 @@ func (s *scriptedReplayTransport) Send(got wire.Frame) error {
 	}
 	want := s.frames[s.next]
 	s.next++
-	require.Equal(s.t, want.Type, got.Type)
 	require.Equal(s.t, want.Payload, got.Payload)
 	return nil
 }
-func (*scriptedReplayTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (*scriptedReplayTransport) Close() error              { return nil }
+func (*scriptedReplayTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (*scriptedReplayTransport) Close() error                 { return nil }
 
 func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	frames := replaytest.Transcript()
@@ -57,9 +56,8 @@ func TestTransportReplayFinalShadowAndTerminalBytes(t *testing.T) {
 	terminal := vt.NewScreen(8, 3)
 	for _, frame := range frames {
 		require.NoError(t, transport.Send(frame))
-		output, err := wire.UnmarshalOutput(frame.Payload)
-		require.NoError(t, err)
-		require.Equal(t, frame.Payload, mustMarshalOutput(output), "output payload must remain byte exact")
+		output := unmarshalTestOutput(t, frame.Payload)
+		require.Equal(t, frame.Payload, mustServerEnvelope(output).Payload, "output payload must remain byte exact")
 		terminal.Write(output.Data)
 	}
 	require.Equal(t, len(frames), transport.next)
@@ -253,8 +251,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	require.True(t, d.emitFrame(sess, ac, &state, composed))
 	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.output.lastCursor)
 	require.Equal(t, uint64(1), ac.output.next)
-	out, err := wire.UnmarshalOutput((<-sends).Payload)
-	require.NoError(t, err)
+	out := unmarshalTestOutput(t, (<-sends).Payload)
 	require.Zero(t, out.Base)
 	require.Equal(t, uint64(1), out.New)
 }
@@ -306,15 +303,15 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	state.panes[0].stableID = "pane-2"
 	ac.sendMu.Lock()
 	require.True(t, d.emitFrame(sess, ac, &state, noByte))
-	var frame wire.Frame
+	var frame wire.Envelope
 	select {
 	case frame = <-sends:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for UI view update")
 	}
-	require.Equal(t, wire.MsgUIViewUpdate, frame.Type)
-	update, err := wire.UnmarshalUIViewUpdate(frame.Payload)
-	require.NoError(t, err)
+	require.Equal(t, "UIViewUpdate", envelopeMessageName(t, frame.Payload))
+	update, ok := decodeServerMessage(t, frame).(protocol.UIViewUpdate)
+	require.True(t, ok)
 	require.Equal(t, state.focusedPaneID, update.Context.FocusedPaneID)
 }
 
@@ -352,12 +349,12 @@ func TestComposeEmitExactReplayTiledFloatingBarsOverlayAndCursor(t *testing.T) {
 	stream := newOutputStateStream()
 	prepared, err := stream.prepareFrame(nil, &state, composed.frame, composed.damage, composed.reset, composed.cursor)
 	require.NoError(t, err)
-	var outputFrame wire.Frame
-	require.NoError(t, prepared.send(0, outputFrameSender(func(frame wire.Frame) error {
+	var outputFrame wire.Envelope
+	require.NoError(t, prepared.send(0, outputFrameSender(func(frame wire.Envelope) error {
 		outputFrame = frame
 		return nil
 	})))
-	output, err := wire.UnmarshalOutput(outputFrame.Payload)
+	output := unmarshalTestOutput(t, outputFrame.Payload)
 	require.NoError(t, err)
 	terminalBytes := output.Data
 	require.Equal(t, "\x1b[1;1H\x1b[0;7m tab \x1b[0m      R\x1b[2;1HAAAAAAAAAAAA\x1b[3;1HBBB┌─fl─┐BBB\x1b[4;1H───Prompt───\x1b[5;1HPROMPT\x1b[K\x1b[B\x1b[2K\x1b[7;1H\x1b[0;7m sess \x1b[0m     B\x1b[0m\x1b[?25l", string(terminalBytes))
@@ -721,7 +718,7 @@ func TestEmitFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.
 	require.Zero(t, ac.output.next, "rejected transport effect must not commit output state")
 	select {
 	case frame := <-sends:
-		t.Fatalf("rejected transport effect was sent: %v", frame.Type)
+		t.Fatalf("rejected transport effect was sent: %s", envelopeMessageName(t, frame.Payload))
 	default:
 	}
 }

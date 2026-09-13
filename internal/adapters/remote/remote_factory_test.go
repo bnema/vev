@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-
-	"github.com/bnema/vev/internal/adapters/dgram"
 )
 
 func TestDialerFactorySelectsExplicitModes(t *testing.T) {
@@ -16,7 +14,7 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 		mode     TransportMode
 		wantType any
 	}{
-		{name: "udp", mode: TransportUDP, wantType: dgram.RemoteDialer{}},
+		{name: "quic", mode: TransportQUIC, wantType: quicDialer{}},
 		{name: "stdio", mode: TransportStdio, wantType: stdioDialer{}},
 	}
 	for _, tt := range tests {
@@ -26,13 +24,13 @@ func TestDialerFactorySelectsExplicitModes(t *testing.T) {
 				t.Fatalf("DialerForRemote() error = %v", err)
 			}
 			switch tt.wantType.(type) {
-			case dgram.RemoteDialer:
-				got, ok := dialer.(dgram.RemoteDialer)
+			case quicDialer:
+				got, ok := dialer.(quicDialer)
 				if !ok {
-					t.Fatalf("dialer type = %T, want %T", dialer, dgram.RemoteDialer{})
+					t.Fatalf("dialer type = %T, want %T", dialer, quicDialer{})
 				}
-				if got.Target != "remote.example" {
-					t.Fatalf("dialer target = %q, want %q", got.Target, "remote.example")
+				if got.target != "remote.example" {
+					t.Fatalf("dialer target = %q, want %q", got.target, "remote.example")
 				}
 			case stdioDialer:
 				got, ok := dialer.(stdioDialer)

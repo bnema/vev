@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -79,21 +80,21 @@ func (t *paletteAttachTerminal) Flush() error                         { return n
 
 type paletteAttachTransport struct {
 	mu       sync.Mutex
-	sent     []wire.Frame
+	sent     []wire.Envelope
 	themes   []protocol.Theme
 	finals   int
 	finalSet chan struct{}
 }
 
-func (t *paletteAttachTransport) Send(frame wire.Frame) error {
+func (t *paletteAttachTransport) Send(frame wire.Envelope) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sent = append(t.sent, frame)
-	if frame.Type == wire.MsgTheme {
-		theme, err := wire.UnmarshalTheme(frame.Payload)
-		if err != nil {
-			return err
-		}
+	message, err := sessionwire.DecodeClientEnvelope(frame.Payload)
+	if err != nil {
+		return err
+	}
+	if theme, ok := message.(protocol.Theme); ok {
 		t.themes = append(t.themes, theme)
 		if theme.HasForeground && theme.HasBackground {
 			t.finals++
@@ -105,15 +106,15 @@ func (t *paletteAttachTransport) Send(frame wire.Frame) error {
 	return nil
 }
 
-func (t *paletteAttachTransport) Recv() (wire.Frame, error) {
+func (t *paletteAttachTransport) Recv() (wire.Envelope, error) {
 	t.mu.Lock()
 	first := len(t.sent) == 1
 	t.mu.Unlock()
 	if first {
-		return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
+		return mustServerEnvelope(protocol.Welcome{SessionID: "s"}), nil
 	}
 	<-t.finalSet
-	return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
+	return mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach}), nil
 }
 func (*paletteAttachTransport) Close() error { return nil }
 
@@ -156,8 +157,8 @@ func TestAttachPublishesOnlyClearedAndDefinitiveInitialPalette(t *testing.T) {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
 	require.Len(t, transport.sent, 3)
-	require.Equal(t, []wire.MsgType{wire.MsgHello, wire.MsgTheme, wire.MsgTheme}, []wire.MsgType{
-		transport.sent[0].Type, transport.sent[1].Type, transport.sent[2].Type,
+	require.Equal(t, []string{"Hello", "Theme", "Theme"}, []string{
+		clientMessageName(t, transport.sent[0]), clientMessageName(t, transport.sent[1]), clientMessageName(t, transport.sent[2]),
 	}, "the protocol requires Hello before the two palette publications")
 	require.Len(t, transport.themes, 2)
 	cleared, definitive := transport.themes[0], transport.themes[1]

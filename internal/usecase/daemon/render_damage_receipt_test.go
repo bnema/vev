@@ -6,7 +6,6 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
@@ -155,8 +154,7 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 			state, composed = captureComposeForReceiptTest(t, sess, ac)
 			require.True(t, d.emitFrame(sess, ac, state, composed))
 			frame := <-sends
-			out, err := wire.UnmarshalOutput(frame.Payload)
-			require.NoError(t, err)
+			out := unmarshalTestOutput(t, frame.Payload)
 			require.Contains(t, string(out.Data), "changed", "retry must emit the retained terminal bytes")
 			p.mu.Lock()
 			require.Empty(t, p.screen.Damage(), "only the successful retry commits its receipt")
@@ -222,7 +220,7 @@ func TestPrepareFailureFallbackOnlySuppressesRecursiveNoticePaint(t *testing.T) 
 		require.True(t, d.emitFrame(sess, ac, state, composed))
 		require.Len(t, d.notices.history(), want)
 		frame := <-sends
-		require.Equal(t, wire.MsgOutput, frame.Type, "outer failure %d must repaint its notice", want)
+		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload), "outer failure %d must repaint its notice", want)
 		require.False(t, ac.prepareFailureFallback.Load())
 	}
 }

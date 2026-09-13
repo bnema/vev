@@ -8,7 +8,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
@@ -24,9 +23,8 @@ func TestRenamePublishesCommittedRouteIdentityToAttachedClients(t *testing.T) {
 
 	require.NoError(t, d.renameSession(sess, "vps-infra"))
 
-	frame := awaitFrame(t, sends, wire.MsgCommittedRouteIdentity)
-	identity, err := wire.UnmarshalCommittedRouteIdentity(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "CommittedRouteIdentity")
+	identity := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
 	require.Equal(t, protocol.ExactSessionTarget{
 		LifecycleID: domain.IncarnationID{1},
 		SessionName: "vps-infra",
@@ -54,13 +52,11 @@ func TestRenameDefersCommittedRouteIdentityUntilFirstRouteSnapshot(t *testing.T)
 		ActiveEntry: protocol.RecentRouteEntry{Key: 1, Generation: 1, Target: testRouteTarget("0", 1), Name: "0", Kind: protocol.RouteKindLocal},
 		Home:        activeRef,
 	}
-	payload, err := wire.MarshalRecentRouteSnapshot(snapshot)
-	require.NoError(t, err)
-	require.False(t, d.handleAttachmentClientFrame(token, wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: payload}))
+	require.False(t, d.handleAttachmentClientFrame(token, mustClientEnvelope(snapshot)))
 
-	frame := awaitFrame(t, sends, wire.MsgCommittedRouteIdentity)
-	identity, err := wire.UnmarshalCommittedRouteIdentity(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "CommittedRouteIdentity")
+	identity, ok := decodeServerMessage(t, frame).(protocol.CommittedRouteIdentity)
+	require.True(t, ok)
 	require.Equal(t, protocol.ExactSessionTarget{
 		LifecycleID: domain.IncarnationID{1},
 		SessionName: "vps-infra",

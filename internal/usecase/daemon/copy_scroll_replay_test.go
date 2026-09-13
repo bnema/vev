@@ -7,7 +7,6 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,8 +18,7 @@ func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {
 			base := f.ac.pipelineCache.frame
 			terminal := vt.NewScreen(base.Width, base.Height)
 			replay := func() []byte {
-				output, err := wire.UnmarshalOutput(f.output.lastPayload())
-				require.NoError(t, err)
+				output := unmarshalTestOutput(t, f.output.lastPayload())
 				terminal.Write(output.Data)
 				f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 				return output.Data

@@ -196,9 +196,8 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	source.screen.Write([]byte("source"))
 	source.mu.Unlock()
 	d.paint(sess, ac, true, nil)
-	first := awaitFrame(t, sends, wire.MsgOutput)
-	firstOutput, err := wire.UnmarshalOutput(first.Payload)
-	require.NoError(t, err)
+	first := awaitFrame(t, sends, "Output")
+	firstOutput := unmarshalTestOutput(t, first.Payload)
 	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
 	terminal.Write(firstOutput.Data)
 
@@ -212,9 +211,8 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	daemonKeyHandler{d: d, ac: ac}.Action(keys.ActionSwitchTab2, nil)
 	require.Equal(t, 1, testAttachmentTabIndex(sess))
 
-	second := awaitFrame(t, sends, wire.MsgOutput)
-	secondOutput, err := wire.UnmarshalOutput(second.Payload)
-	require.NoError(t, err)
+	second := awaitFrame(t, sends, "Output")
+	secondOutput := unmarshalTestOutput(t, second.Payload)
 	require.Zero(t, secondOutput.Base, "tab switch must emit the complete target frame first")
 	terminal.Write(secondOutput.Data)
 	require.NotContains(t, strings.Join(frameRows(terminal), "\n"), "source", "the first target-tab frame must not retain source pane cells")
@@ -309,11 +307,11 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 
 	// Establish the client shadow while the retained popup is hidden.
 	d.paint(sess, ac, true, nil)
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 
 	// Route the real Alt+F binding. Showing a retained pane must paint once.
 	d.handleInput(sess, ac, []byte("\x1bf"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	require.Contains(t, strings.Join(frameRows(client), "\n"), "popup-content")
 	require.Contains(t, strings.Join(frameRows(client), "\n"), "┌")
 	select {
@@ -325,7 +323,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	// The second real key must repaint immediately, rather than waiting for
 	// unrelated output, while retaining the existing PTY and context.
 	d.handleInput(sess, ac, []byte("\x1bf"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	require.NotContains(t, strings.Join(frameRows(client), "\n"), "popup-content")
 	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
@@ -343,7 +341,7 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	// A third show uses the installed pane; it must not launch or emit a second
 	// resize/start frame.
 	d.handleInput(sess, ac, []byte("\x1bf"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	require.Contains(t, strings.Join(frameRows(client), "\n"), "popup-content")
 	tb.mu.Lock()
 	require.Equal(t, floatingVisible, tb.floating.state)
@@ -630,13 +628,13 @@ func TestBracketedMultilinePasteForwardsDelimitersAndNewlines(t *testing.T) {
 func TestOverlayInputPrecedence(t *testing.T) {
 	cases := []struct {
 		name  string
-		setup func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame)
+		setup func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Envelope)
 		input []byte
 		check func(t *testing.T, ac *attachedClient, writes chan []byte)
 	}{
 		{
 			name: "prompt before palette copy and normal",
-			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame) {
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Envelope) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
 				d.enterPalette(sess, ac)
@@ -653,7 +651,7 @@ func TestOverlayInputPrecedence(t *testing.T) {
 		},
 		{
 			name: "palette before copy and normal",
-			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame) {
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Envelope) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
 				d.enterPalette(sess, ac)
@@ -668,7 +666,7 @@ func TestOverlayInputPrecedence(t *testing.T) {
 		},
 		{
 			name: "copy before normal",
-			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Frame) {
+			setup: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient, sends chan wire.Envelope) {
 				t.Helper()
 				d.enterCopyMode(sess, ac)
 			},
@@ -777,9 +775,8 @@ func TestPaletteBackSessionSendsClientPreviousRouteAction(t *testing.T) {
 	})
 
 	require.NoError(t, d.backSessionForAttachment(effect))
-	frame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
-	action, err := wire.UnmarshalRouteNavigationAction(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "RouteNavigationAction")
+	action := decodeServerMessage(t, frame).(protocol.RouteNavigationAction)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}, action)
 }
 
@@ -804,7 +801,7 @@ func TestSwitchSourceDoesNotOwnPreviousRoute(t *testing.T) {
 	require.Equal(t, uint64(0), ac.routeSnapshotCopy().Generation, "route ownership starts in the client")
 }
 
-func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Frame, []func()) {
+func newRecentNavigationTestSessions(t *testing.T) (*Daemon, *session, *attachedClient, chan wire.Envelope, []func()) {
 	t.Helper()
 	p1, release1 := newBlockingPTY(t)
 	p2, release2 := newBlockingPTY(t)
@@ -860,9 +857,8 @@ func TestAltDDetachesCurrentClient(t *testing.T) {
 	d.handleInput(sess, ac, []byte("DET\r"))
 
 	require.Empty(t, sess.snapshotAttachments())
-	f := awaitFrame(t, sends, wire.MsgDetached)
-	det, err := wire.UnmarshalDetached(f.Payload)
-	require.NoError(t, err)
+	f := awaitFrame(t, sends, "Detached")
+	det := decodeServerMessage(t, f).(protocol.Detached)
 	require.Equal(t, protocol.ReasonDetach, det.Reason)
 }
 
@@ -873,13 +869,13 @@ func TestRNSOpensPromptAndEnterPromotesEphemeralSession(t *testing.T) {
 	sess.name = "0"
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("RNS\r"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	require.True(t, ac.overlays.promptActive())
 
 	d.handleInput(sess, ac, []byte("\r"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	require.False(t, ac.overlays.promptActive())
 	require.False(t, sess.ephemeral)
@@ -896,16 +892,15 @@ func TestRNTOpensPromptAndRenamesActiveTab(t *testing.T) {
 	selectTestAttachmentTab(sess, 1)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("RNT\r"))
-	out := awaitFrame(t, sends, wire.MsgOutput)
+	out := awaitFrame(t, sends, "Output")
 	require.True(t, ac.overlays.promptActive())
-	msg, err := wire.UnmarshalOutput(out.Payload)
-	require.NoError(t, err)
+	msg := unmarshalTestOutput(t, out.Payload)
 	require.Contains(t, string(msg.Data), "> 2")
 
 	d.handleInput(sess, ac, []byte("\x7flogs\r"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, "logs", sess.tabs[1].name)
@@ -1070,10 +1065,9 @@ func TestCopyModeMouseHorizontalReverseDragUsesExactOSC52(t *testing.T) {
 	d.handleInput(sess, ac, []byte("y"))
 	var msg protocol.Output
 	require.Eventually(t, func() bool {
-		frame := awaitFrame(t, sends, wire.MsgOutput)
-		var err error
-		msg, err = wire.UnmarshalOutput(frame.Payload)
-		return err == nil && string(msg.Data) == string(scopy.OSC52("lph")[0])
+		frame := awaitFrame(t, sends, "Output")
+		msg = unmarshalTestOutput(t, frame.Payload)
+		return string(msg.Data) == string(scopy.OSC52("lph")[0])
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, scopy.OSC52("lph")[0], msg.Data)
 	require.Nil(t, ac.overlays.copyPointer.pane)
@@ -1552,7 +1546,7 @@ func TestMouseGatedWhileNoticesOverlayActive(t *testing.T) {
 
 	d.notices.record(domain.Notification{Code: domain.NoticePaneSpawn, Message: "m", Time: time.Unix(1, 0)})
 	d.enterNotices(sess, ac)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	require.True(t, ac.overlays.noticesActive())
 
 	// Same coordinates that TestMouseHitTestFocusesPaneAndTranslatesSGRColumns

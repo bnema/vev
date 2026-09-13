@@ -1,8 +1,14 @@
-// Package sessionwire adapts typed session messages to strict binary frames.
+// Package sessionwire adapts typed session messages to Protobuf envelopes.
 package sessionwire
 
 import (
+	"context"
 	"errors"
+	"sync"
+	"time"
+
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -10,67 +16,79 @@ import (
 )
 
 var (
-	ErrUnknownMessageType = errors.New("sessionwire: unknown message type")
-	ErrWrongDirection     = errors.New("sessionwire: wrong message direction")
-	ErrInvalidMessage     = errors.New("sessionwire: invalid message")
-	ErrUnsupportedSend    = errors.New("sessionwire: send mode is unsupported")
+	ErrWrongDirection  = errors.New("sessionwire: wrong message direction")
+	ErrInvalidMessage  = errors.New("sessionwire: invalid message")
+	ErrUnsupportedSend = errors.New("sessionwire: send mode is unsupported")
 )
 
-type serverConnection struct{ raw wire.Transport }
+type serverConnection struct {
+	raw      wire.Transport
+	ceilings protoCeilings
+
+	preambleOnce sync.Once
+	preambleErr  error
+	deadline     time.Time
+}
 
 var _ ports.ServerConnection = (*serverConnection)(nil)
 
-// NewServerConnection wraps one raw connection incarnation exactly once.
+// NewServerConnection wraps one raw connection incarnation exactly once. The
+// server preamble runs on the first ReceiveClient, bounded by the handshake
+// deadline started here; the daemon's transport watcher closes the link on
+// timeout, which unblocks the preamble read.
 func NewServerConnection(raw wire.Transport) ports.ServerConnection {
 	if raw == nil {
 		return nil
 	}
-	return &serverConnection{raw: raw}
+	return &serverConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout)}
+}
+
+func (c *serverConnection) ensurePreamble() error {
+	c.preambleOnce.Do(func() {
+		ctx, cancel := context.WithDeadline(context.Background(), c.deadline)
+		defer cancel()
+		c.ceilings, c.preambleErr = runProtoServerPreamble(ctx, c.raw, c.ceilings)
+		if c.preambleErr != nil {
+			_ = c.raw.Close()
+		}
+	})
+	return c.preambleErr
 }
 
 func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
-	frame, err := c.raw.Recv()
+	if err := c.ensurePreamble(); err != nil {
+		return nil, c.preambleDecodeFailure(err)
+	}
+	envelope, err := c.raw.Recv()
 	if err != nil {
 		return nil, err
 	}
-	message, err := decodeClient(frame)
-	if err == nil {
+	message, decodeErr := decodeClientEnvelopeWithin(envelope.Payload, c.ceilings.maxReceiveEnvelopeBytes)
+	if decodeErr == nil {
 		return message, nil
 	}
-	failure := &protocol.DecodeFailure{Category: protocol.DecodeMalformed, Type: uint8(frame.Type), Err: err}
-	if errors.Is(err, ErrUnknownMessageType) {
-		failure.Category = protocol.DecodeUnknownType
-	} else if errors.Is(err, ErrWrongDirection) {
-		failure.Category = protocol.DecodeWrongDirection
+	return nil, decodeErr
+}
+
+// preambleDecodeFailure maps a preamble refusal to the typed compatibility
+// responses the daemon sends before any mutation. Only Hello carries a
+// version the daemon can answer; other first-frame kinds are handled after
+// a successful preamble by the normal decode path.
+func (c *serverConnection) preambleDecodeFailure(err error) *protocol.DecodeFailure {
+	return &protocol.DecodeFailure{
+		Category: protocol.DecodeMalformed,
+		Kind:     protocol.DecodeMessageHello,
+		Version:  uint16(protocol.Version),
+		Err:      err,
 	}
-	switch frame.Type {
-	case wire.MsgHello:
-		failure.Kind = protocol.DecodeMessageHello
-		failure.Version, _ = wire.PeekHelloVersion(frame.Payload)
-	case wire.MsgCommand:
-		failure.Kind = protocol.DecodeMessageCommand
-		failure.Version, _ = wire.PeekCommandVersion(frame.Payload)
-		failure.RequestID, failure.HasRequestID = wire.PeekCommandRequestID(frame.Payload)
-	case wire.MsgKill:
-		failure.Kind = protocol.DecodeMessageKill
-	case wire.MsgRemotePreviewRequest:
-		failure.Kind = protocol.DecodeMessageRemotePreview
-	case wire.MsgNavigationInventoryRequest:
-		failure.Kind = protocol.DecodeMessageNavigationInventory
-		failure.Version, _ = wire.PeekNavigationInventoryVersion(frame.Payload)
-		failure.RequestID, failure.HasRequestID = wire.PeekNavigationInventoryRequestID(frame.Payload)
-	case wire.MsgPickerControlRequest:
-		failure.Version, _ = wire.PeekPickerControlVersion(frame.Payload)
-	}
-	return nil, failure
 }
 
 func (c *serverConnection) SendServer(message protocol.ServerMessage) error {
-	frame, err := encodeServer(message)
+	envelope, err := encodeProtoServer(message)
 	if err != nil {
 		return err
 	}
-	return c.raw.Send(frame)
+	return c.sendEnvelope(envelope)
 }
 
 func (c *serverConnection) SendServerAsync(message protocol.ServerMessage) error {
@@ -78,11 +96,15 @@ func (c *serverConnection) SendServerAsync(message protocol.ServerMessage) error
 	if !ok {
 		return ErrUnsupportedSend
 	}
-	frame, err := encodeServer(message)
+	envelope, err := encodeProtoServer(message)
 	if err != nil {
 		return err
 	}
-	return transport.SendAsync(frame)
+	raw, err := sendEnvelopeWithin(envelope, c.ceilings)
+	if err != nil {
+		return err
+	}
+	return transport.SendAsync(raw)
 }
 
 func (c *serverConnection) SendServerSynchronous(message protocol.ServerMessage) error {
@@ -90,19 +112,23 @@ func (c *serverConnection) SendServerSynchronous(message protocol.ServerMessage)
 	if !ok {
 		return ErrUnsupportedSend
 	}
-	frame, err := encodeServer(message)
+	envelope, err := encodeProtoServer(message)
 	if err != nil {
 		return err
 	}
-	return transport.SendSynchronous(frame)
+	raw, err := sendEnvelopeWithin(envelope, c.ceilings)
+	if err != nil {
+		return err
+	}
+	return transport.SendSynchronous(raw)
 }
 
 func (c *serverConnection) SendOutput(output protocol.Output) error {
-	frame, err := encodeOutput(output)
+	envelope, err := encodeProtoServer(output)
 	if err != nil {
 		return err
 	}
-	return c.raw.Send(frame)
+	return c.sendEnvelope(envelope)
 }
 
 func (c *serverConnection) SendOutputAsync(output protocol.Output) error {
@@ -110,11 +136,15 @@ func (c *serverConnection) SendOutputAsync(output protocol.Output) error {
 	if !ok {
 		return ErrUnsupportedSend
 	}
-	frame, err := encodeOutput(output)
+	envelope, err := encodeProtoServer(output)
 	if err != nil {
 		return err
 	}
-	return transport.SendAsync(frame)
+	raw, err := sendEnvelopeWithin(envelope, c.ceilings)
+	if err != nil {
+		return err
+	}
+	return transport.SendAsync(raw)
 }
 
 func (c *serverConnection) SendOutputSynchronous(output protocol.Output) error {
@@ -122,26 +152,208 @@ func (c *serverConnection) SendOutputSynchronous(output protocol.Output) error {
 	if !ok {
 		return ErrUnsupportedSend
 	}
-	frame, err := encodeOutput(output)
+	envelope, err := encodeProtoServer(output)
 	if err != nil {
 		return err
 	}
-	return transport.SendSynchronous(frame)
+	raw, err := sendEnvelopeWithin(envelope, c.ceilings)
+	if err != nil {
+		return err
+	}
+	return transport.SendSynchronous(raw)
 }
 
-func encodeOutput(output protocol.Output) (wire.Frame, error) {
-	payload, err := wire.MarshalOutput(output)
-	return wire.Frame{Type: wire.MsgOutput, Payload: payload}, err
+func (c *serverConnection) sendEnvelope(envelope *wire.ServerEnvelope) error {
+	raw, err := sendEnvelopeWithin(envelope, c.ceilings)
+	if err != nil {
+		return err
+	}
+	return c.raw.Send(raw)
+}
+
+func marshalServerEnvelope(envelope *wire.ServerEnvelope) (wire.Envelope, error) {
+	raw, err := (proto.Marshal(envelope))
+	if err != nil {
+		return wire.Envelope{}, err
+	}
+	return wire.Envelope{Payload: raw}, nil
+}
+
+// DecodeClientEnvelope unwraps one scanned client envelope payload into its
+// semantic message. App composition uses it for hidden one-shot carriages
+// (remote preview) that validate a request before dialing the daemon.
+func DecodeClientEnvelope(payload []byte) (protocol.ClientMessage, error) {
+	return decodeClientEnvelope(payload)
+}
+
+// EncodePreambleResponseForTest marshals the canned server preamble
+// acceptance exchanged before application traffic. Tests own their
+// preamble fixtures; production always negotiates through the handshake.
+func EncodePreambleResponseForTest() ([]byte, error) {
+	return proto.Marshal(preambleResponseToWire(true, defaultProtoCeilings(), 0))
+}
+
+// EncodePreambleRequestForTest marshals the canned client preamble request
+// exchanged before application traffic.
+func EncodePreambleRequestForTest() ([]byte, error) {
+	return proto.Marshal(preambleRequestToWire(defaultProtoCeilings()))
+}
+
+// DecodePreambleAcceptanceForTest reports whether a raw preamble response
+// payload is a server acceptance.
+func DecodePreambleAcceptanceForTest(payload []byte) bool {
+	var response wire.PreambleResponse
+	if serr := wire.ScanEnvelope(&response, payload); serr != nil {
+		return false
+	}
+	if uerr := (proto.UnmarshalOptions{DiscardUnknown: false}.Unmarshal(payload, &response)); uerr != nil {
+		return false
+	}
+	_, err := checkPreambleResponse(&response)
+	return err == nil
+}
+
+// EncodeClientMessage wraps one semantic client message in its serialized
+// directional envelope for hidden one-shot carriages.
+func EncodeClientMessage(message protocol.ClientMessage) ([]byte, error) {
+	envelope, err := encodeProtoClient(message)
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(envelope)
+}
+
+// EncodeServerMessage wraps one semantic server message in its serialized
+// directional envelope for hidden one-shot carriages.
+func EncodeServerMessage(message protocol.ServerMessage) ([]byte, error) {
+	envelope, err := encodeProtoServer(message)
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(envelope)
+}
+
+func decodeClientEnvelope(payload []byte) (protocol.ClientMessage, error) {
+	return decodeClientEnvelopeWithin(payload, wire.AbsoluteEnvelopeLimit)
+}
+
+// decodeClientEnvelopeWithin unwraps one client envelope under the
+// negotiated receive envelope ceiling. The one-shot exported decoder uses
+// the absolute ceiling because no preamble was negotiated there.
+func decodeClientEnvelopeWithin(payload []byte, envelopeLimit uint64) (protocol.ClientMessage, error) {
+	envelope := &wire.ClientEnvelope{}
+	if err := checkCategoryCeiling(payload, clientEnvelopeCategory(payload), envelopeLimit); err != nil {
+		return nil, &protocol.DecodeFailure{Category: protocol.DecodeMalformed, Err: err, Kind: clientVariantKind(payload)}
+	}
+	if err := wire.ScanEnvelope(envelope, payload); err != nil {
+		failure := &protocol.DecodeFailure{Category: protocol.DecodeMalformed, Err: err}
+		if errors.Is(err, wire.ErrScanUnknown) {
+			failure.Category = protocol.DecodeUnknownType
+		}
+		// Scan-level malformation (truncation, trailing data) still
+		// carries the envelope variant in its leading tag. Recovering
+		// the kind preserves first-frame compatibility routing: the
+		// daemon answers malformed Command/Kill/Hello frames with typed
+		// refusals instead of a generic hello error.
+		failure.Kind = clientVariantKind(payload)
+		return nil, failure
+	}
+	if err := (proto.UnmarshalOptions{DiscardUnknown: false}.Unmarshal(payload, envelope)); err != nil {
+		return nil, &protocol.DecodeFailure{Category: protocol.DecodeMalformed, Err: err}
+	}
+	message, err := decodeProtoClient(envelope)
+	if err != nil {
+		return nil, clientFailureFor(envelope, err)
+	}
+	return message, nil
+}
+
+// clientVariantKind recovers the envelope variant from the leading tag of
+// a payload that failed strict scanning. Only the kinds with typed
+// first-frame refusals (Hello/Command/Kill/RemotePreview/Navigation
+// Inventory) are reported; anything else stays Unknown so the daemon
+// answers with its generic hello error.
+// ClientVariantKindForTest exposes scan-failure kind recovery to
+// integration probes. Production uses it through decodeClientEnvelope.
+func ClientVariantKindForTest(payload []byte) protocol.DecodeMessageKind {
+	return clientVariantKind(payload)
+}
+
+func clientVariantKind(payload []byte) protocol.DecodeMessageKind {
+	number, wireType, length := protowire.ConsumeTag(payload)
+	if wireType != protowire.BytesType {
+		return protocol.DecodeMessageUnknown
+	}
+	// ConsumeTag reports errCodeFieldNumber (-1..-4) for bad tags;
+	// only accept a positively consumed tag.
+	if length <= 0 {
+		return protocol.DecodeMessageUnknown
+	}
+	switch number {
+	case 1:
+		return protocol.DecodeMessageHello
+	case 7:
+		return protocol.DecodeMessageKill
+	case 12:
+		return protocol.DecodeMessageCommand
+	case 14:
+		return protocol.DecodeMessageRemotePreview
+	case 21:
+		return protocol.DecodeMessageNavigationInventory
+	default:
+		return protocol.DecodeMessageUnknown
+	}
+}
+
+// clientFailureFor preserves the daemon's first-frame compatibility routing:
+// Hello/Command/Kill/RemotePreview/NavigationInventory/PickerControl kinds
+// select the typed refusal a malformed first frame receives.
+func clientFailureFor(envelope *wire.ClientEnvelope, err error) *protocol.DecodeFailure {
+	failure := &protocol.DecodeFailure{Category: protocol.DecodeMalformed, Err: err}
+	if errors.Is(err, ErrWrongDirection) {
+		failure.Category = protocol.DecodeWrongDirection
+		return failure
+	}
+	switch envelope.Payload.(type) {
+	case *wire.ClientEnvelope_Hello:
+		failure.Kind = protocol.DecodeMessageHello
+		if payload, ok := envelope.Payload.(*wire.ClientEnvelope_Hello); ok && payload.Hello != nil {
+			failure.Version = uint16(payload.Hello.GetVersion())
+		}
+	case *wire.ClientEnvelope_CommandRequest:
+		failure.Kind = protocol.DecodeMessageCommand
+		if payload, ok := envelope.Payload.(*wire.ClientEnvelope_CommandRequest); ok && payload.CommandRequest != nil {
+			failure.Version = uint16(payload.CommandRequest.GetVersion())
+			failure.RequestID = payload.CommandRequest.GetRequestId()
+			failure.HasRequestID = true
+		}
+	case *wire.ClientEnvelope_Kill:
+		failure.Kind = protocol.DecodeMessageKill
+	case *wire.ClientEnvelope_RemotePreviewRequest:
+		failure.Kind = protocol.DecodeMessageRemotePreview
+	case *wire.ClientEnvelope_NavigationInventoryRequest:
+		failure.Kind = protocol.DecodeMessageNavigationInventory
+		if payload, ok := envelope.Payload.(*wire.ClientEnvelope_NavigationInventoryRequest); ok && payload.NavigationInventoryRequest != nil {
+			failure.Version = uint16(payload.NavigationInventoryRequest.GetVersion())
+			failure.RequestID = payload.NavigationInventoryRequest.GetRequestId()
+			failure.HasRequestID = true
+		}
+	case *wire.ClientEnvelope_PickerControlRequest:
+		if payload, ok := envelope.Payload.(*wire.ClientEnvelope_PickerControlRequest); ok && payload.PickerControlRequest != nil {
+			failure.Version = uint16(payload.PickerControlRequest.GetVersion())
+		}
+	}
+	return failure
 }
 
 func (c *serverConnection) Capabilities() protocol.ConnectionCapabilities {
-	return rawCapabilities(c.raw)
+	return rawCapabilities(c.raw, c.ceilings.outputDataLimit)
 }
 
 func (c *serverConnection) LinkState() ports.LinkState         { return rawLinkState(c.raw) }
 func (c *serverConnection) LinkEvents() <-chan ports.LinkEvent { return rawLinkEvents(c.raw) }
 
-func rawCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
+func rawCapabilities(raw wire.Transport, outputDataLimit uint64) protocol.ConnectionCapabilities {
 	_, datagram := raw.(wire.DatagramTransport)
 	_, async := raw.(wire.AsyncTransport)
 	_, synchronous := raw.(wire.OwnedSynchronousTransport)
@@ -151,7 +363,7 @@ func rawCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
 		window = 1
 	}
 	return protocol.ConnectionCapabilities{
-		OutputDataLimit:       protocol.MaxOutputDataLen,
+		OutputDataLimit:       int(outputDataLimit),
 		PreferredOutputWindow: window,
 		AsyncSend:             async,
 		OwnedSynchronousSend:  synchronous,
@@ -197,316 +409,3 @@ func (l *serverListener) Accept() (ports.ServerConnection, error) {
 
 func (l *serverListener) Close() error { return l.raw.Close() }
 func (l *serverListener) Addr() string { return l.raw.Addr() }
-
-func decodeClient(frame wire.Frame) (protocol.ClientMessage, error) {
-	switch frame.Type {
-	case wire.MsgHello:
-		return wire.UnmarshalHello(frame.Payload)
-	case wire.MsgInput:
-		return wire.UnmarshalInput(frame.Payload)
-	case wire.MsgResize:
-		return wire.UnmarshalResize(frame.Payload)
-	case wire.MsgDetach:
-		return protocol.Detach{}, nil
-	case wire.MsgPing:
-		return protocol.Ping{}, nil
-	case wire.MsgList:
-		return protocol.List{}, nil
-	case wire.MsgKill:
-		return wire.UnmarshalKill(frame.Payload)
-	case wire.MsgTheme:
-		return wire.UnmarshalTheme(frame.Payload)
-	case wire.MsgAck:
-		return wire.UnmarshalAck(frame.Payload)
-	case wire.MsgImagePush:
-		return wire.UnmarshalImagePush(frame.Payload)
-	case wire.MsgClientNotice:
-		return wire.UnmarshalClientNotice(frame.Payload)
-	case wire.MsgCommand:
-		return wire.UnmarshalCommandRequest(frame.Payload)
-	case wire.MsgOutputResetRequest:
-		return wire.UnmarshalOutputResetRequest(frame.Payload)
-	case wire.MsgRemotePreviewRequest:
-		return wire.UnmarshalRemotePreviewRequest(frame.Payload)
-	case wire.MsgRouteAttentionSubscription:
-		return wire.UnmarshalRouteAttentionSubscription(frame.Payload)
-	case wire.MsgSamePeerSwitchRequest:
-		return wire.UnmarshalSamePeerSwitchRequest(frame.Payload)
-	case wire.MsgNavigationInventoryRequest:
-		return wire.UnmarshalNavigationInventoryRequest(frame.Payload)
-	case wire.MsgNavigationInventoryPublication:
-		return wire.UnmarshalNavigationInventoryPublication(frame.Payload)
-	case wire.MsgNavigationInventoryFailure:
-		return wire.UnmarshalNavigationInventoryFailure(frame.Payload)
-	case wire.MsgPickerBegin:
-		return wire.UnmarshalPickerBegin(frame.Payload)
-	case wire.MsgPickerCloseClient:
-		return wire.UnmarshalPickerClose(frame.Payload)
-	case wire.MsgPickerSelection:
-		return wire.UnmarshalPickerSelection(frame.Payload)
-	case wire.MsgPickerPreviewRequest:
-		return wire.UnmarshalPickerPreviewRequest(frame.Payload)
-	case wire.MsgPickerControlRequest:
-		return wire.UnmarshalPickerControlRequest(frame.Payload)
-	case wire.MsgRecentRouteSnapshot:
-		return wire.UnmarshalRecentRouteSnapshot(frame.Payload)
-	case wire.MsgRouteNavigationFailure:
-		return wire.UnmarshalRouteNavigationFailure(frame.Payload)
-	case wire.MsgSessionCreationFailure:
-		return wire.UnmarshalSessionCreationFailure(frame.Payload)
-	case wire.MsgUIFence:
-		return wire.UnmarshalUIFence(frame.Payload)
-	case wire.MsgWelcome, wire.MsgError, wire.MsgOutput, wire.MsgDetached, wire.MsgPong,
-		wire.MsgSessions, wire.MsgCommandResult, wire.MsgAttachTarget, wire.MsgRemotePreviewResponse,
-		wire.MsgCommittedRouteIdentity, wire.MsgNavigateRecentRoute, wire.MsgRouteCreateSession,
-		wire.MsgRoutePosition, wire.MsgSamePeerSwitchFailure,
-		wire.MsgUIReceipt, wire.MsgUIViewUpdate, wire.MsgNavigationInventoryResponse,
-		wire.MsgNavigationInventoryDemand, wire.MsgNavigationInventorySelection, wire.MsgRouteRetired,
-		wire.MsgPickerOffer, wire.MsgPickerSnapshot, wire.MsgPickerClosedServer, wire.MsgPickerResult, wire.MsgPickerFailure,
-		wire.MsgPickerPreview, wire.MsgPickerControlResponse:
-		return nil, ErrWrongDirection
-	default:
-		return nil, ErrUnknownMessageType
-	}
-}
-
-func encodeServer(message protocol.ServerMessage) (wire.Frame, error) {
-	switch m := message.(type) {
-	case protocol.Welcome:
-		payload := wire.MarshalWelcome(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgWelcome, Payload: payload}, nil
-	case protocol.ErrorMsg:
-		return wire.Frame{Type: wire.MsgError, Payload: wire.MarshalErrorMsg(m)}, nil
-	case protocol.Output:
-		payload, err := wire.MarshalOutput(m)
-		return wire.Frame{Type: wire.MsgOutput, Payload: payload}, err
-	case protocol.UIReceipt:
-		payload, err := wire.MarshalUIReceipt(m)
-		return wire.Frame{Type: wire.MsgUIReceipt, Payload: payload}, err
-	case protocol.UIViewUpdate:
-		payload, err := wire.MarshalUIViewUpdate(m)
-		return wire.Frame{Type: wire.MsgUIViewUpdate, Payload: payload}, err
-	case protocol.Detached:
-		if err := protocol.ValidateDetached(m); err != nil {
-			return wire.Frame{}, err
-		}
-		return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(m)}, nil
-	case protocol.Pong:
-		return wire.Frame{Type: wire.MsgPong, Payload: wire.MarshalPong(m)}, nil
-	case protocol.Sessions:
-		return wire.Frame{Type: wire.MsgSessions, Payload: wire.MarshalSessions(m)}, nil
-	case protocol.CommandResult:
-		return wire.Frame{Type: wire.MsgCommandResult, Payload: wire.MarshalCommandResult(m)}, nil
-	case protocol.AttachTarget:
-		payload := wire.MarshalAttachTarget(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgAttachTarget, Payload: payload}, nil
-	case protocol.RemotePreview:
-		payload := wire.MarshalRemotePreview(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgRemotePreviewResponse, Payload: payload}, nil
-	case protocol.CommittedRouteIdentity:
-		payload, err := wire.MarshalCommittedRouteIdentity(m)
-		return wire.Frame{Type: wire.MsgCommittedRouteIdentity, Payload: payload}, err
-	case protocol.RouteNavigationAction:
-		payload, err := wire.MarshalRouteNavigationAction(m)
-		return wire.Frame{Type: wire.MsgNavigateRecentRoute, Payload: payload}, err
-	case protocol.RouteCreateSessionAction:
-		payload, err := wire.MarshalRouteCreateSessionAction(m)
-		return wire.Frame{Type: wire.MsgRouteCreateSession, Payload: payload}, err
-	case protocol.RouteNavigationFailure:
-		payload, err := wire.MarshalRouteNavigationFailure(m)
-		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: payload}, err
-	case protocol.RouteRetired:
-		payload, err := wire.MarshalRouteRetired(m)
-		return wire.Frame{Type: wire.MsgRouteRetired, Payload: payload}, err
-	case protocol.RoutePosition:
-		payload, err := wire.MarshalRoutePosition(m)
-		return wire.Frame{Type: wire.MsgRoutePosition, Payload: payload}, err
-	case protocol.SamePeerSwitchFailure:
-		payload, err := wire.MarshalSamePeerSwitchFailure(m)
-		return wire.Frame{Type: wire.MsgSamePeerSwitchFailure, Payload: payload}, err
-	case protocol.NavigationInventoryResponse:
-		payload := wire.MarshalNavigationInventoryResponse(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryResponse, Payload: payload}, nil
-	case protocol.NavigationInventoryDemand:
-		payload := wire.MarshalNavigationInventoryDemand(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: payload}, nil
-	case protocol.NavigationInventorySelection:
-		payload := wire.MarshalNavigationInventorySelection(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: payload}, nil
-	case protocol.PickerOffer:
-		payload := wire.MarshalPickerOffer(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerOffer, Payload: payload}, nil
-	case protocol.PickerSnapshot:
-		payload := wire.MarshalPickerSnapshot(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerSnapshot, Payload: payload}, nil
-	case protocol.PickerClosed:
-		payload := wire.MarshalPickerClosed(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerClosedServer, Payload: payload}, nil
-	case protocol.PickerResult:
-		payload := wire.MarshalPickerResult(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerResult, Payload: payload}, nil
-	case protocol.PickerFailure:
-		payload := wire.MarshalPickerFailure(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerFailure, Payload: payload}, nil
-	case protocol.PickerControlResponse:
-		payload := wire.MarshalPickerControlResponse(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerControlResponse, Payload: payload}, nil
-	case protocol.PickerPreview:
-		payload := wire.MarshalPickerPreview(m)
-		if payload == nil {
-			return wire.Frame{}, ErrInvalidMessage
-		}
-		return wire.Frame{Type: wire.MsgPickerPreview, Payload: payload}, nil
-	case *protocol.Welcome:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.ErrorMsg:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.Output:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.UIReceipt:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.UIViewUpdate:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.Detached:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.Pong:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.Sessions:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.CommandResult:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.AttachTarget:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.RemotePreview:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.CommittedRouteIdentity:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.RouteNavigationAction:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.RouteCreateSessionAction:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.RouteNavigationFailure:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.RouteRetired:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.RoutePosition:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.SamePeerSwitchFailure:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.NavigationInventoryResponse:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.NavigationInventoryDemand:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.NavigationInventorySelection:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerOffer:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerSnapshot:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerClosed:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerResult:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerFailure:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerPreview:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	case *protocol.PickerControlResponse:
-		if m != nil {
-			return encodeServer(*m)
-		}
-	default:
-		return wire.Frame{}, ErrWrongDirection
-	}
-	return wire.Frame{}, ErrInvalidMessage
-}

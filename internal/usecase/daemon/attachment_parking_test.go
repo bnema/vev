@@ -14,7 +14,7 @@ type resumeWelcomeFailureTransport struct {
 	closeTrackingTransport
 }
 
-func (*resumeWelcomeFailureTransport) Send(wire.Frame) error { return errWelcomeSendFailed }
+func (*resumeWelcomeFailureTransport) Send(wire.Envelope) error { return errWelcomeSendFailed }
 
 var errWelcomeSendFailed = errors.New("welcome send failed")
 
@@ -152,7 +152,7 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	require.False(t, oldRetained)
 	require.NotNil(t, newParked)
 	require.NotEmpty(t, resumedTransport.Sends())
-	require.Equal(t, wire.MsgWelcome, resumedTransport.Sends()[0].Type, "Welcome must remain the first server frame after Hello")
+	require.Equal(t, "Welcome", envelopeMessageName(t, resumedTransport.Sends()[0].Payload), "Welcome must remain the first server frame after Hello")
 }
 
 func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {

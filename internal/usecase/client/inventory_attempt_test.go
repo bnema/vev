@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -88,7 +89,7 @@ const (
 type inventoryAttemptTransport struct {
 	mu            sync.Mutex
 	calls         int
-	sent          []wire.Frame
+	sent          []wire.Envelope
 	publications  []protocol.NavigationInventoryPublication
 	published     chan struct{}
 	publishedOnce sync.Once
@@ -98,55 +99,52 @@ type inventoryAttemptTransport struct {
 	script        inventoryScript
 }
 
-func (t *inventoryAttemptTransport) Send(frame wire.Frame) error {
-	var publication protocol.NavigationInventoryPublication
-	if frame.Type == wire.MsgNavigationInventoryPublication {
-		var err error
-		publication, err = wire.UnmarshalNavigationInventoryPublication(frame.Payload)
-		if err != nil {
-			return err
-		}
+func (t *inventoryAttemptTransport) Send(envelope wire.Envelope) error {
+	message, err := sessionwire.DecodeClientEnvelope(envelope.Payload)
+	if err != nil {
+		return err
 	}
+	publication, isPublication := message.(protocol.NavigationInventoryPublication)
 	t.mu.Lock()
-	t.sent = append(t.sent, frame)
-	if frame.Type == wire.MsgNavigationInventoryPublication {
+	t.sent = append(t.sent, envelope)
+	if isPublication {
 		t.publications = append(t.publications, publication)
 	}
 	t.mu.Unlock()
-	if frame.Type == wire.MsgNavigationInventoryPublication {
+	if isPublication {
 		t.publishedOnce.Do(func() { close(t.published) })
 	}
 	return nil
 }
 
-func (t *inventoryAttemptTransport) Recv() (wire.Frame, error) {
+func (t *inventoryAttemptTransport) Recv() (wire.Envelope, error) {
 	t.mu.Lock()
 	t.calls++
 	call := t.calls
 	t.mu.Unlock()
 	switch call {
 	case 1:
-		return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s"})}, nil
+		return mustServerEnvelope(protocol.Welcome{SessionID: "s"}), nil
 	case 2:
 		if t.script == inventoryScriptSilent {
 			select {
 			case <-t.detach:
-				return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
+				return mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach}), nil
 			case <-t.release:
-				return wire.Frame{}, io.EOF
+				return wire.Envelope{}, io.EOF
 			}
 		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: wire.MarshalNavigationInventoryDemand(protocol.NavigationInventoryDemand{InteractionGeneration: 7, Open: true})}, nil
+		return mustServerEnvelope(protocol.NavigationInventoryDemand{InteractionGeneration: 7, Open: true}), nil
 	case 3:
 		if t.script == inventoryScriptLocalIgnore {
-			return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: wire.MarshalNavigationInventoryDemand(protocol.NavigationInventoryDemand{InteractionGeneration: 7})}, nil
+			return mustServerEnvelope(protocol.NavigationInventoryDemand{InteractionGeneration: 7}), nil
 		}
 		select {
 		case <-t.published:
 		case <-t.detach:
-			return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
+			return mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach}), nil
 		case <-t.release:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 		// The close script holds the close demand until the test releases
 		// it, so polling assertions run against an open interaction.
@@ -154,22 +152,22 @@ func (t *inventoryAttemptTransport) Recv() (wire.Frame, error) {
 			select {
 			case <-t.releaseClose:
 			case <-t.release:
-				return wire.Frame{}, io.EOF
+				return wire.Envelope{}, io.EOF
 			}
 		}
 		if t.script == inventoryScriptSelect {
-			return wire.Frame{Type: wire.MsgNavigationInventorySelection, Payload: wire.MarshalNavigationInventorySelection(protocol.NavigationInventorySelection{
+			return mustServerEnvelope(protocol.NavigationInventorySelection{
 				CauseActionID: 9, InteractionGeneration: 7, PublicationGeneration: 1,
 				SourceKey: "local", EntryKey: "aaa/alpha",
-			})}, nil
+			}), nil
 		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryDemand, Payload: wire.MarshalNavigationInventoryDemand(protocol.NavigationInventoryDemand{InteractionGeneration: 7})}, nil
+		return mustServerEnvelope(protocol.NavigationInventoryDemand{InteractionGeneration: 7}), nil
 	default:
 		select {
 		case <-t.detach:
-			return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: protocol.ReasonDetach})}, nil
+			return mustServerEnvelope(protocol.Detached{Reason: protocol.ReasonDetach}), nil
 		case <-t.release:
-			return wire.Frame{}, io.EOF
+			return wire.Envelope{}, io.EOF
 		}
 	}
 }
@@ -201,14 +199,13 @@ func (t *inventoryAttemptTransport) latestRouteSnapshot() (protocol.RecentRouteS
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := len(t.sent) - 1; i >= 0; i-- {
-		if t.sent[i].Type != wire.MsgRecentRouteSnapshot {
-			continue
-		}
-		snapshot, err := wire.UnmarshalRecentRouteSnapshot(t.sent[i].Payload)
+		message, err := sessionwire.DecodeClientEnvelope(t.sent[i].Payload)
 		if err != nil {
 			panic(err)
 		}
-		return snapshot, true
+		if snapshot, ok := message.(protocol.RecentRouteSnapshot); ok {
+			return snapshot, true
+		}
 	}
 	return protocol.RecentRouteSnapshot{}, false
 }
@@ -223,11 +220,11 @@ func (t *inventoryAttemptTransport) hello() protocol.Hello {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, frame := range t.sent {
-		if frame.Type == wire.MsgHello {
-			hello, err := wire.UnmarshalHello(frame.Payload)
-			if err != nil {
-				panic(err)
-			}
+		message, err := sessionwire.DecodeClientEnvelope(frame.Payload)
+		if err != nil {
+			panic(err)
+		}
+		if hello, ok := message.(protocol.Hello); ok {
 			return hello
 		}
 	}

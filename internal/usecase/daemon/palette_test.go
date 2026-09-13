@@ -15,7 +15,6 @@ import (
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -241,22 +240,21 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 
 	d.handleInput(sess, ac, []byte("\x1b "))
 	require.True(t, ac.overlays.paletteActive())
-	out := awaitFrame(t, sends, wire.MsgOutput)
-	msg, err := wire.UnmarshalOutput(out.Payload)
-	require.NoError(t, err)
+	out := awaitFrame(t, sends, "Output")
+	msg := unmarshalTestOutput(t, out.Payload)
 	require.Contains(t, string(msg.Data), "Commands")
 
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
 	require.Equal(t, 1, testAttachmentTabIndex(sess))
 	requireFloatingInitialized(t, testAttachmentTab(sess))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("\x1b"))
 	require.False(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 // TestPaletteCommandFailureSurfacesAsNotice drives a palette command whose Run
@@ -273,9 +271,9 @@ func TestPaletteCommandFailureSurfacesAsNotice(t *testing.T) {
 	d.ptys = ptys
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("CNT\r"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	history := d.notices.history()
 	require.NotEmpty(t, history, "failed palette command must record a notice")
@@ -402,13 +400,13 @@ func TestPaletteEnterFreezesActiveSessionSelectionAgainstTrailingInput(t *testin
 	target.createdAt = 42
 
 	d.handleInput(current, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(current, ac, []byte("recent\rx"))
 
 	require.Same(t, target, ac.currentSession(), "Enter must retain the selected session despite trailing frame bytes")
 	require.False(t, ac.overlays.paletteActive(), "trailing input must not prevent the captured selection from closing the palette")
-	awaitFrame(t, sends, wire.MsgOutput)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *testing.T) {
@@ -418,15 +416,15 @@ func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *t
 	target.createdAt = 42
 
 	d.handleInput(current, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(current, ac, []byte("recent\r"))
 
 	require.Same(t, target, ac.currentSession())
 	require.Contains(t, target.snapshotAttachments(), ac, "canonical handoff reuses the attached client")
 	require.False(t, ac.overlays.paletteActive())
 	require.Empty(t, d.paletteRecent, "session selections are not command recency")
-	awaitFrame(t, sends, wire.MsgOutput)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *testing.T) {
@@ -440,7 +438,7 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 	d.ptys = ptys
 
 	d.handleInput(current, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(current, ac, []byte("stopped\r"))
 
 	require.Same(t, current, ac.currentSession(), "failed resume must retain the source attachment")
@@ -452,7 +450,7 @@ func TestPaletteStoppedSessionResumeFailureKeepsPaletteAndSourceAttachment(t *te
 	require.Equal(t, "requested session is unavailable", ac.overlays.paletteFeedback)
 	ac.overlays.paletteMu.Unlock()
 	require.Equal(t, stopped, d.inactive[stopped.name], "failed resume must retain stopped lifecycle metadata")
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
@@ -465,7 +463,7 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 	d.inactive["stopped"] = inactiveSession{name: "stopped", cwd: "/tmp", createdAt: 42, state: protocol.SessionDown}
 
 	d.handleInput(current, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	generation := ac.lifecycle.generationValue()
 	d.handleInput(current, ac, []byte("stopped\r"))
 
@@ -475,11 +473,10 @@ func TestPaletteSelectedStoppedSessionResumesAndSwitches(t *testing.T) {
 	require.Equal(t, true, resumed.attachmentRegistered(ac))
 	require.Greater(t, ac.lifecycle.generationValue(), generation, "stopped-session handoff must publish through the attachment transition")
 	require.False(t, ac.overlays.paletteActive())
-	firstPaint := awaitFrame(t, sends, wire.MsgOutput)
-	firstOutput, err := wire.UnmarshalOutput(firstPaint.Payload)
-	require.NoError(t, err)
+	firstPaint := awaitFrame(t, sends, "Output")
+	firstOutput := unmarshalTestOutput(t, firstPaint.Payload)
 	require.Zero(t, firstOutput.Base, "stopped-session first paint must reset moving output state")
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
@@ -489,9 +486,9 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1, Active: protocol.RouteRef{Key: 1, Generation: 1}})
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("JRS"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
@@ -499,7 +496,7 @@ func TestPaletteJRSActivatesOnlyExactContextualHint(t *testing.T) {
 	ac.overlays.paletteMu.Unlock()
 
 	d.handleInput(sess, ac, []byte("\b\b\bRNS"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
@@ -513,25 +510,24 @@ func TestPaletteJRSUsesEffectiveOverrideOnly(t *testing.T) {
 	d.ApplyConfig(domain.Config{Codes: map[string]string{"jump-recent-session": "RJS"}})
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInputForAttachment(token, []byte("RJS"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, command.ContextHintRecentSessions, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
 	d.handleInputForAttachment(token, []byte(" 1\r"))
 
-	actionFrame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
-	action, err := wire.UnmarshalRouteNavigationAction(actionFrame.Payload)
-	require.NoError(t, err)
+	actionFrame := awaitFrame(t, sends, "RouteNavigationAction")
+	action := decodeServerMessage(t, actionFrame).(protocol.RouteNavigationAction)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 2, Generation: 1}, action)
 	require.Same(t, current, ac.currentSession())
 	require.False(t, ac.overlays.paletteActive())
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInputForAttachment(token, []byte("JRS"))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	ac.overlays.paletteMu.Lock()
 	require.Equal(t, command.ContextHintNone, ac.overlays.paletteHints.Kind)
 	ac.overlays.paletteMu.Unlock()
@@ -683,12 +679,11 @@ func TestPaletteRemoteCatalogSelectionSendsExactAttachTarget(t *testing.T) {
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInputForAttachment(token, []byte("work@arch\r"))
 
-	frame := awaitFrame(t, sends, wire.MsgAttachTarget)
-	target, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "AttachTarget")
+	target := decodeServerMessage(t, frame).(protocol.AttachTarget)
 	remoteTarget := domain.RemoteSessionTarget{
 		Endpoint: "user@arch", DisplayOrigin: "arch", LifecycleID: remoteLifecycle,
 		SessionName: "work", LiveTabID: "tab-work",
@@ -715,7 +710,7 @@ func TestPaletteUnknownRemoteSelectionFailsClosed(t *testing.T) {
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInputForAttachment(token, []byte("cached@arch\r"))
 
 	require.Same(t, current, ac.currentAttachmentSession())
@@ -723,7 +718,7 @@ func TestPaletteUnknownRemoteSelectionFailsClosed(t *testing.T) {
 	for {
 		select {
 		case frame := <-sends:
-			require.NotEqual(t, wire.MsgAttachTarget, frame.Type)
+			require.NotEqual(t, "AttachTarget", envelopeMessageName(t, frame.Payload))
 		default:
 			return
 		}
@@ -852,7 +847,7 @@ func TestPaletteLifecycleTargetRejectsSameNameReplacement(t *testing.T) {
 	for {
 		select {
 		case frame := <-sends:
-			require.NotEqual(t, wire.MsgAttachTarget, frame.Type)
+			require.NotEqual(t, "AttachTarget", envelopeMessageName(t, frame.Payload))
 		default:
 			return
 		}
@@ -873,12 +868,11 @@ func TestPaletteFuzzyRemoteRecentRouteSendsExactNavigationAction(t *testing.T) {
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInputForAttachment(token, []byte("logs@edge\r"))
 
-	actionFrame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
-	action, err := wire.UnmarshalRouteNavigationAction(actionFrame.Payload)
-	require.NoError(t, err)
+	actionFrame := awaitFrame(t, sends, "RouteNavigationAction")
+	action := decodeServerMessage(t, actionFrame).(protocol.RouteNavigationAction)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 9, Key: 8, Generation: 4}, action)
 	require.False(t, ac.overlays.paletteActive())
 }
@@ -889,12 +883,12 @@ func TestPaletteFuzzySelectedStaticCommandExecutes(t *testing.T) {
 	defer releases[1]()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("next\r"))
 
 	require.False(t, ac.overlays.paletteActive())
 	require.Equal(t, 1, testAttachmentTabIndex(sess))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
@@ -903,14 +897,13 @@ func TestPaletteJRSUsesCapturedRankAfterMRUChanges(t *testing.T) {
 	ac.setRouteSnapshot(testRecentRouteSnapshot())
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	// Reordering live MRU after opening must not shift rank 1 from its capture.
 	d.sessions[domain.SessionID("older")].core().mruAt.Store(100)
 	d.handleInputForAttachment(token, []byte("JRS 1\r"))
 
-	actionFrame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
-	action, err := wire.UnmarshalRouteNavigationAction(actionFrame.Payload)
-	require.NoError(t, err)
+	actionFrame := awaitFrame(t, sends, "RouteNavigationAction")
+	action := decodeServerMessage(t, actionFrame).(protocol.RouteNavigationAction)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 1, Key: 2, Generation: 1}, action)
 	require.Same(t, current, ac.currentSession())
 	require.False(t, ac.overlays.paletteActive())
@@ -957,7 +950,7 @@ func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 	}
 	token := beginRecentRoutePaletteEffect(t, d, sess, ac)
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	inputHandled := make(chan struct{})
 	go func() {
 		d.handleInputForAttachment(token, []byte("JRS 1\r"))
@@ -969,9 +962,8 @@ func TestPaletteJRSDoesNotRevalidateTargetInDaemon(t *testing.T) {
 	close(releaseHandoff)
 	awaitTestCompletion(t, inputHandled, "JRS route-action input did not complete")
 
-	actionFrame := awaitFrame(t, sends, wire.MsgNavigateRecentRoute)
-	action, err := wire.UnmarshalRouteNavigationAction(actionFrame.Payload)
-	require.NoError(t, err)
+	actionFrame := awaitFrame(t, sends, "RouteNavigationAction")
+	action := decodeServerMessage(t, actionFrame).(protocol.RouteNavigationAction)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 7, Key: 9, Generation: 4}, action)
 	require.False(t, ac.overlays.paletteActive())
 }
@@ -983,7 +975,7 @@ func TestPaletteJRSOutOfRangeKeepsPaletteOpenWithoutClamping(t *testing.T) {
 	token := beginRecentRoutePaletteEffect(t, d, current, ac)
 
 	d.handleInputForAttachment(token, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInputForAttachment(token, []byte("JRS 3\r"))
 
 	require.Same(t, current, ac.currentSession())
@@ -992,7 +984,7 @@ func TestPaletteJRSOutOfRangeKeepsPaletteOpenWithoutClamping(t *testing.T) {
 	require.Equal(t, "JRS 3", ac.overlays.palette.Query())
 	require.Equal(t, "requested recent session is unavailable", ac.overlays.paletteFeedback)
 	ac.overlays.paletteMu.Unlock()
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteJRSMalformedRankFeedback(t *testing.T) {
@@ -1000,7 +992,7 @@ func TestPaletteJRSMalformedRankFeedback(t *testing.T) {
 	defer releaseAll(releases)
 
 	d.handleInput(current, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(current, ac, []byte("JRS 0\r"))
 
 	require.Same(t, current, ac.currentSession())
@@ -1009,7 +1001,7 @@ func TestPaletteJRSMalformedRankFeedback(t *testing.T) {
 	require.Equal(t, "JRS 0", ac.overlays.palette.Query())
 	require.Equal(t, "rank must be one positive decimal", ac.overlays.paletteFeedback)
 	ac.overlays.paletteMu.Unlock()
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteFailureDoesNotOverwriteChangedQueryInSameGeneration(t *testing.T) {
@@ -1044,8 +1036,8 @@ func TestPaletteFailureDoesNotOverwriteNewerInteraction(t *testing.T) {
 	ac.overlays.paletteMu.Lock()
 	require.Empty(t, ac.overlays.paletteFeedback)
 	ac.overlays.paletteMu.Unlock()
-	awaitFrame(t, sends, wire.MsgOutput)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteTFPExecutesFloatingToggle(t *testing.T) {
@@ -1056,14 +1048,14 @@ func TestPaletteTFPExecutesFloatingToggle(t *testing.T) {
 	installTestFloating(tb, newPane("floating", nil, domain.Size{Cols: 20, Rows: 5}), false)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("TFP\r"))
 
 	require.False(t, ac.overlays.paletteActive())
 	tb.mu.Lock()
 	require.Equal(t, floatingVisible, tb.floating.state)
 	tb.mu.Unlock()
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
@@ -1075,11 +1067,10 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	d.ptys = newFactorySeq(t, p2)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("CNS\r"))
-	promptFrame := awaitFrame(t, sends, wire.MsgOutput)
-	promptOutput, err := wire.UnmarshalOutput(promptFrame.Payload)
-	require.NoError(t, err)
+	promptFrame := awaitFrame(t, sends, "Output")
+	promptOutput := unmarshalTestOutput(t, promptFrame.Payload)
 	require.False(t, ac.overlays.paletteActive())
 	require.True(t, ac.overlays.promptActive())
 	require.Contains(t, string(promptOutput.Data), "Create session")
@@ -1089,13 +1080,11 @@ func TestPaletteCNSPromptsForSessionNameThenCreatesAndSwitches(t *testing.T) {
 	// The submit first paints the newly attached session while the prompt is
 	// still open, then handlePromptInput closes the prompt and repaints the
 	// client's current session. The final frame must be for the new session.
-	firstPaint := awaitFrame(t, sends, wire.MsgOutput)
-	firstOutput, err := wire.UnmarshalOutput(firstPaint.Payload)
-	require.NoError(t, err)
+	firstPaint := awaitFrame(t, sends, "Output")
+	firstOutput := unmarshalTestOutput(t, firstPaint.Payload)
 	require.Zero(t, firstOutput.Base, "new-session first paint must reset moving output state")
-	finalRepaint := awaitFrame(t, sends, wire.MsgOutput)
-	finalOutput, err := wire.UnmarshalOutput(finalRepaint.Payload)
-	require.NoError(t, err)
+	finalRepaint := awaitFrame(t, sends, "Output")
+	finalOutput := unmarshalTestOutput(t, finalRepaint.Payload)
 	require.False(t, ac.overlays.promptActive())
 	require.Equal(t, 2, sessionCount(d))
 	require.Empty(t, sess.snapshotAttachments())
@@ -1129,9 +1118,9 @@ func TestPaletteDirectSessionCreation(t *testing.T) {
 			d.ptys = newFactorySeq(t, p2)
 
 			d.handleInput(sess, ac, []byte("\x1b "))
-			awaitFrame(t, sends, wire.MsgOutput)
+			awaitFrame(t, sends, "Output")
 			d.handleInput(sess, ac, []byte(tc.input))
-			awaitFrame(t, sends, wire.MsgOutput)
+			awaitFrame(t, sends, "Output")
 
 			require.False(t, ac.overlays.paletteActive())
 			require.False(t, ac.overlays.promptActive())
@@ -1152,13 +1141,13 @@ func TestPaletteReopensWithSuccessfulCommandFirst(t *testing.T) {
 	defer releases[1]()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	result, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
 	cmd, ok := result.Command()
@@ -1243,16 +1232,14 @@ func TestPaletteCommandNoopRepaintsAfterClose(t *testing.T) {
 	defer releases[0]()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	paletteFrame := awaitFrame(t, sends, wire.MsgOutput)
-	paletteOutput, err := wire.UnmarshalOutput(paletteFrame.Payload)
-	require.NoError(t, err)
+	paletteFrame := awaitFrame(t, sends, "Output")
+	paletteOutput := unmarshalTestOutput(t, paletteFrame.Payload)
 	require.Contains(t, string(paletteOutput.Data), "Commands")
 
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
-	repaint := awaitFrame(t, sends, wire.MsgOutput)
-	repaintOutput, err := wire.UnmarshalOutput(repaint.Payload)
-	require.NoError(t, err)
+	repaint := awaitFrame(t, sends, "Output")
+	repaintOutput := unmarshalTestOutput(t, repaint.Payload)
 	require.NotContains(t, string(repaintOutput.Data), "Commands")
 }
 
@@ -1264,12 +1251,11 @@ func TestPaletteCreateTabErrorRepaintsAfterClose(t *testing.T) {
 	d.ptys = ptys
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("CNT\r"))
 	require.False(t, ac.overlays.paletteActive())
-	repaint := awaitFrame(t, sends, wire.MsgOutput)
-	repaintOutput, err := wire.UnmarshalOutput(repaint.Payload)
-	require.NoError(t, err)
+	repaint := awaitFrame(t, sends, "Output")
+	repaintOutput := unmarshalTestOutput(t, repaint.Payload)
 	require.NotContains(t, string(repaintOutput.Data), "Commands")
 	require.Len(t, sess.tabs, 1)
 }
@@ -1279,10 +1265,10 @@ func TestPaletteEnterNoMatchKeepsOpenAndEscapeSplit(t *testing.T) {
 	defer releases[0]()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handleInput(sess, ac, []byte("zzzz\r"))
 	require.True(t, ac.overlays.paletteActive())
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	d.handlePaletteInput(ac, []byte{0x1b, '['})
 	require.True(t, ac.overlays.paletteActive())
@@ -1290,7 +1276,7 @@ func TestPaletteEnterNoMatchKeepsOpenAndEscapeSplit(t *testing.T) {
 	d.handlePaletteInput(ac, []byte{'A'})
 	require.True(t, ac.overlays.paletteActive())
 	require.Empty(t, ac.overlays.palettePending)
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
@@ -1298,10 +1284,10 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 	defer releases[0]()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 
 	d.handlePaletteInput(ac, []byte{0x0e})
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	result, ok := ac.overlays.palette.Selected()
 	require.True(t, ok)
 	cmd, ok := result.Command()
@@ -1309,7 +1295,7 @@ func TestPaletteCtrlNAndCtrlPNavigate(t *testing.T) {
 	require.Equal(t, "CNS", cmd.Code)
 
 	d.handlePaletteInput(ac, []byte{0x10})
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	result, ok = ac.overlays.palette.Selected()
 	require.True(t, ok)
 	cmd, ok = result.Command()
@@ -1417,7 +1403,7 @@ func TestPaletteUTF8PendingCompletesFilter(t *testing.T) {
 	defer releases[0]()
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 	d.handlePaletteInput(ac, []byte{0xc3})
 	require.Equal(t, []byte{0xc3}, ac.overlays.palettePending)
 	d.handlePaletteInput(ac, []byte{0xa9})

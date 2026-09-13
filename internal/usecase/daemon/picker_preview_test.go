@@ -15,16 +15,13 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
-func awaitPickerPreview(t *testing.T, sends chan wire.Frame) protocol.PickerPreview {
+func awaitPickerPreview(t *testing.T, sends chan wire.Envelope) protocol.PickerPreview {
 	t.Helper()
 	for {
 		frame := awaitTestValue(t, sends, "picker preview was not published")
-		if frame.Type != wire.MsgPickerPreview {
-			continue
+		if preview, ok := decodeServerMessage(t, frame).(protocol.PickerPreview); ok {
+			return preview
 		}
-		preview, err := wire.UnmarshalPickerPreview(frame.Payload)
-		require.NoError(t, err)
-		return preview
 	}
 }
 
@@ -85,7 +82,7 @@ func TestPickerPreviewStaleRequestPublishesNothing(t *testing.T) {
 		d.handleAttachmentClientMessage(capability, request)
 	}
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type, "a request for another interaction must publish nothing")
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload), "a request for another interaction must publish nothing")
 	}
 
 	// A superseded generation is dropped even though its request was valid.
@@ -99,7 +96,7 @@ func TestPickerPreviewStaleRequestPublishesNothing(t *testing.T) {
 	require.True(t, known)
 	d.publishPickerPreviewForAttachment(ac, live, generation-1, target, protocol.PickerIntentNavigation, known)
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type, "a superseded generation must not publish")
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload), "a superseded generation must not publish")
 	}
 	require.Equal(t, key, first.Key)
 }
@@ -121,7 +118,7 @@ func TestPickerPreviewRetiredInteractionStopsPublishing(t *testing.T) {
 	require.Zero(t, generation, "retiring the interaction must clear the preview generation")
 
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type)
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload))
 	}
 }
 
@@ -312,7 +309,7 @@ func TestPickerPreviewCrossSessionFollowsTheTargetsRenderCoordinator(t *testing.
 	d.invalidateRender(viewerSess, ac, true, "picker_preview_test.go:viewer")
 	fireCoordinatorTimer(t, viewerCoordinator, drainCoordinatorTimers(clock), urgentRenderDeadline)
 	for _, frame := range drainAllFrames(sends) {
-		require.NotEqual(t, wire.MsgPickerPreview, frame.Type,
+		require.NotEqual(t, "PickerPreview", envelopeMessageName(t, frame.Payload),
 			"a viewer-session render must not publish the target's preview")
 	}
 

@@ -17,21 +17,21 @@ import (
 type blockedAttachmentTransport struct {
 	entered chan struct{}
 	release chan struct{}
-	sends   chan wire.Frame
+	sends   chan wire.Envelope
 	blocked atomic.Bool
 	once    sync.Once
 }
 
-func (t *blockedAttachmentTransport) Send(frame wire.Frame) error {
-	if frame.Type == wire.MsgOutput && t.blocked.Load() {
+func (t *blockedAttachmentTransport) Send(frame wire.Envelope) error {
+	if envelopeMessageName(nil, frame.Payload) == "Output" && t.blocked.Load() {
 		t.once.Do(func() { close(t.entered) })
 		<-t.release
 	}
 	t.sends <- frame
 	return nil
 }
-func (*blockedAttachmentTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (*blockedAttachmentTransport) Close() error              { return nil }
+func (*blockedAttachmentTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (*blockedAttachmentTransport) Close() error                 { return nil }
 
 func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
@@ -86,9 +86,9 @@ func TestStaleCapacityReadinessRequeuesWithoutAnotherInvalidation(t *testing.T) 
 	ac.output.syncCapacityLocked()
 	ac.sendMu.Unlock()
 	close(releaseRetry)
-	frame := awaitFrame(t, sends, wire.MsgOutput)
-	output, err := wire.UnmarshalOutput(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "Output")
+	output, ok := decodeServerMessage(t, frame).(protocol.Output)
+	require.True(t, ok)
 	require.Contains(t, string(output.Data), "capacity race")
 	awaitTestCompletion(t, fireDone, "initial fire did not finish")
 
@@ -147,10 +147,10 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	defer releasePTY()
 	clock := &signalClock{timers: make(chan *signalTimer, 16)}
 	d := newTestDaemon(t, newFactory(t, pty), clock)
-	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Frame, 8)}
+	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
-	newTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Frame, 8)}
+	newTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	_, fresh, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, newTransport)
 	require.NoError(t, err)
 
@@ -173,7 +173,7 @@ func TestAttachmentFirstPaintDoesNotWaitForBlockedPeer(t *testing.T) {
 	painted := make(chan bool, 1)
 	go func() { painted <- d.firstPaintForTransition(token) }()
 	frame := awaitTestValue(t, newTransport.sends, "healthy attachment first paint was gated by slow peer")
-	require.Equal(t, wire.MsgOutput, frame.Type)
+	require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
 	require.True(t, <-painted)
 	close(oldTransport.release)
 }
@@ -183,7 +183,7 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	defer releasePTY()
 	clock := &signalClock{timers: make(chan *signalTimer, 16)}
 	d := newTestDaemon(t, newFactory(t, pty), clock)
-	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Frame, 8)}
+	oldTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	sess, old, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, oldTransport)
 	require.NoError(t, err)
 	rc := sess.renderCoordinator()
@@ -203,16 +203,16 @@ func TestMultiAttachmentHandshakeFirstPaintNotGatedByBlockedPeer(t *testing.T) {
 	awaitTestCompletion(t, oldTransport.entered, "slow attachment did not begin its blocked output")
 
 	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}
-	tr, sends, releaseConn := newConn(t, wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(hello)})
+	tr, sends, releaseConn := newConn(t, mustClientEnvelope(hello))
 	defer releaseConn()
 	handshakeDone := make(chan struct{})
 	go func() {
 		d.handleConn(tr)
 		close(handshakeDone)
 	}()
-	awaitFrame(t, sends, wire.MsgWelcome)
-	firstPaint := awaitFrame(t, sends, wire.MsgOutput)
-	require.Equal(t, wire.MsgOutput, firstPaint.Type)
+	awaitFrame(t, sends, "Welcome")
+	firstPaint := awaitFrame(t, sends, "Output")
+	require.Equal(t, "Output", envelopeMessageName(t, firstPaint.Payload))
 	releaseConn()
 	awaitTestCompletion(t, handshakeDone, "multi-attachment handshake did not complete after first paint")
 	close(oldTransport.release)
@@ -223,10 +223,10 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	pty, releasePTY := newBlockingPTY(t)
 	defer releasePTY()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	firstTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Frame, 8)}
+	firstTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{1}}, firstTransport)
 	require.NoError(t, err)
-	secondTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Frame, 8)}
+	secondTransport := &blockedAttachmentTransport{entered: make(chan struct{}), release: make(chan struct{}), sends: make(chan wire.Envelope, 8)}
 	_, _, err = d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}, ClientID: [16]byte{2}}, secondTransport)
 	require.NoError(t, err)
 	rc := sess.renderCoordinator()
@@ -245,9 +245,9 @@ func TestAttachmentPaintFanoutDoesNotWaitForBlockedPeer(t *testing.T) {
 	}
 	select {
 	case frame := <-secondTransport.sends:
-		require.Equal(t, wire.MsgOutput, frame.Type)
-		out, err := wire.UnmarshalOutput(frame.Payload)
-		require.NoError(t, err)
+		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
+		out, ok := decodeServerMessage(t, frame).(protocol.Output)
+		require.True(t, ok)
 		require.True(t, out.Full, "fan-out peers must send a fresh first frame even after another attachment acknowledges shared damage")
 	case <-time.After(time.Second):
 		t.Fatal("second attachment waited for first attachment transport")
@@ -285,10 +285,7 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	require.True(t, rc.markAttachmentReady(secondLease))
 	resize := func(ac *attachedClient, tr ports.ServerConnection, size domain.Size) {
 		token := sess.captureAttachmentCapability(ac, tr)
-		d.handleAttachmentClientFrame(token, wire.Frame{
-			Type:    wire.MsgResize,
-			Payload: mustMarshalResize(protocol.Resize{Size: size}),
-		})
+		d.handleAttachmentClientFrame(token, mustMarshalResize(protocol.Resize{Size: size}))
 	}
 	resize(second, secondTransport, domain.Size{Cols: 120, Rows: 50})
 

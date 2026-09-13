@@ -10,7 +10,6 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -193,7 +192,7 @@ func TestPickerPhysicalInputWithoutUIDriver(t *testing.T) {
 	require.Nil(t, harness.ui, "this harness has no ui-driver")
 	transport := harness.transport
 
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(pickerSnapshot())}
+	transport.detached <- mustServerEnvelope(pickerSnapshot())
 	// The drawn picker is the barrier: write only once it owns the screen.
 	awaitTerminalText(t, harness.terminal, "second")
 
@@ -215,7 +214,7 @@ func TestPickerPhysicalInputOwnsSession(t *testing.T) {
 	harness := startPickerE2EWithInput(t, reader)
 	ui, transport := harness.ui, harness.transport
 
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(pickerSnapshot())}
+	transport.detached <- mustServerEnvelope(pickerSnapshot())
 	attached := ports.UIStatusAttached
 	first := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
@@ -233,7 +232,7 @@ func TestPickerPhysicalInputOwnsSession(t *testing.T) {
 	// A physical Escape closes the picker once the disambiguation window
 	// expires: the client sends the typed close and never leaks the byte.
 	writeTerminal(t, writer, "\x1b")
-	harness.awaitAfterAmbiguityDeadlines(t, transport, wire.MsgPickerCloseClient)
+	harness.awaitAfterAmbiguityDeadlines(t, transport, "PickerClose")
 	requireNoPickerInput(t, transport)
 }
 
@@ -247,7 +246,7 @@ func TestPickerPhysicalPasteNeverActs(t *testing.T) {
 	harness := startPickerE2EWithInput(t, reader)
 	ui, transport := harness.ui, harness.transport
 
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(pickerSnapshot())}
+	transport.detached <- mustServerEnvelope(pickerSnapshot())
 	attached := ports.UIStatusAttached
 	first := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
@@ -263,7 +262,7 @@ func TestPickerPhysicalPasteNeverActs(t *testing.T) {
 
 	// The picker is still open: a real Escape closes it.
 	writeTerminal(t, writer, "\x1b")
-	harness.awaitAfterAmbiguityDeadlines(t, transport, wire.MsgPickerCloseClient)
+	harness.awaitAfterAmbiguityDeadlines(t, transport, "PickerClose")
 }
 
 // TestPickerReleaseDropsInputWithoutReplay pins the release window: bytes
@@ -276,7 +275,7 @@ func TestPickerReleaseDropsInputWithoutReplay(t *testing.T) {
 	harness := startPickerE2EWithInput(t, reader)
 	ui, transport := harness.ui, harness.transport
 
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(pickerSnapshot())}
+	transport.detached <- mustServerEnvelope(pickerSnapshot())
 	attached := ports.UIStatusAttached
 	first := "first"
 	_, err := ui.Wait(ctx, utilWait(ui, &attached, &first))
@@ -284,7 +283,7 @@ func TestPickerReleaseDropsInputWithoutReplay(t *testing.T) {
 
 	// Close the interaction from the daemon side, then keep typing: the
 	// release paint has not landed, so those bytes belong to the picker.
-	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: 7, BarrierEpoch: 2, BarrierState: 1})}
+	transport.detached <- mustServerEnvelope(protocol.PickerClosed{InteractionID: 7, BarrierEpoch: 2, BarrierState: 1})
 	writeTerminal(t, writer, "leaked")
 	requireNoPickerInput(t, transport)
 

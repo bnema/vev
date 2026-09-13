@@ -10,7 +10,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +20,7 @@ import (
 // repaints locally and completes without daemon evidence, Enter queues a
 // typed PickerSelection on the wire, and the daemon-side PickerClose +
 // same-peer handoff resolve the session. Zero picker bytes reach the PTY:
-// no MsgInput frame carries picker data.
+// no Input envelope carries picker data.
 func TestClientPickerLoopEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	harness := startPickerE2E(t)
@@ -73,15 +72,11 @@ func TestClientPickerLoopEndToEnd(t *testing.T) {
 	// exactly like a resolved selection, then the same-peer handoff and full
 	// paint commit the session.
 	second := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "second"}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
-	transport.detached <- wire.Frame{Type: wire.MsgAttachTarget, Payload: wire.MarshalAttachTarget(protocol.AttachTarget{Session: second.SessionName, Intent: protocol.IntentAttach, ExactTarget: &second, SamePeer: true, CauseActionID: selection.CauseActionID})}
-	identityPayload, err := wire.MarshalCommittedRouteIdentity(protocol.CommittedRouteIdentity{Target: second})
-	require.NoError(t, err)
-	transport.detached <- wire.Frame{Type: wire.MsgCommittedRouteIdentity, Payload: identityPayload}
+	transport.detached <- mustServerEnvelope(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})
+	transport.detached <- mustServerEnvelope(protocol.AttachTarget{Session: second.SessionName, Intent: protocol.IntentAttach, ExactTarget: &second, SamePeer: true, CauseActionID: selection.CauseActionID})
+	transport.detached <- mustServerEnvelope(protocol.CommittedRouteIdentity{Target: second})
 	view := protocol.ViewContext{Publication: 2, Route: protocol.CommittedRouteIdentity{Target: second}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
-	outputPayload, err := wire.MarshalOutput(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hsecond")})
-	require.NoError(t, err)
-	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: outputPayload}
+	transport.detached <- mustServerEnvelope(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hsecond")})
 	select {
 	case action := <-committed:
 		require.Equal(t, ports.UIActionProcessed, action.Status)
@@ -108,12 +103,12 @@ func TestClientPickerCompositeMoveCompletesFromResult(t *testing.T) {
 	offer := pickerOffer()
 	offer.Intent = protocol.PickerIntentMoveTab
 	offer.Title = " Move "
-	transport.detached <- wire.Frame{Type: wire.MsgPickerOffer, Payload: wire.MarshalPickerOffer(offer)}
+	transport.detached <- mustServerEnvelope(offer)
 	snapshot := pickerSnapshot()
 	for i := range snapshot.Lines {
 		snapshot.Lines[i].Actions = protocol.PickerCanMove
 	}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerSnapshot, Payload: wire.MarshalPickerSnapshot(snapshot)}
+	transport.detached <- mustServerEnvelope(snapshot)
 	attached := ports.UIStatusAttached
 	first := "first"
 	_, err := ui.Wait(ctx, ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &attached, TextContains: &first}})
@@ -137,21 +132,16 @@ func TestClientPickerCompositeMoveCompletesFromResult(t *testing.T) {
 	// The daemon retires the interaction, then publishes the destination route
 	// and full paint without a same-peer attach offer.
 	second := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "second"}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
-	identityPayload, err := wire.MarshalCommittedRouteIdentity(protocol.CommittedRouteIdentity{Target: second})
-	require.NoError(t, err)
-	transport.detached <- wire.Frame{Type: wire.MsgCommittedRouteIdentity, Payload: identityPayload}
+	transport.detached <- mustServerEnvelope(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})
+	transport.detached <- mustServerEnvelope(protocol.CommittedRouteIdentity{Target: second})
 	view := protocol.ViewContext{Publication: 2, Route: protocol.CommittedRouteIdentity{Target: second}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
-	outputPayload, err := wire.MarshalOutput(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hsecond")})
-	require.NoError(t, err)
-	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: outputPayload}
+	transport.detached <- mustServerEnvelope(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hsecond")})
 	// Completion rides the fresh effect the move postcommit admitted on the
 	// published destination capability.
-	resultPayload := wire.MarshalPickerResult(protocol.PickerResult{
+	transport.detached <- mustServerEnvelope(protocol.PickerResult{
 		CauseActionID: selection.CauseActionID, InteractionID: snapshot.InteractionID,
 		SourceID: "serving", Key: selection.Key, Action: protocol.PickerActionMove,
 	})
-	transport.detached <- wire.Frame{Type: wire.MsgPickerResult, Payload: resultPayload}
 
 	select {
 	case action := <-committed:
@@ -181,8 +171,8 @@ func TestClientPickerRequestsAndRendersTheDisplayedRowPreview(t *testing.T) {
 	require.NoError(t, err)
 
 	harness.awaitPreviewTimer(t).fire()
-	request, err := wire.UnmarshalPickerPreviewRequest(awaitWireFrame(t, transport, wire.MsgPickerPreviewRequest))
-	require.NoError(t, err)
+	request, ok := awaitWireFrame(t, transport, "PickerPreviewRequest").(protocol.PickerPreviewRequest)
+	require.True(t, ok)
 	require.Equal(t, snapshot.InteractionID, request.InteractionID)
 	require.Equal(t, "serving", request.SourceID)
 	require.Equal(t, "aa/first", request.Key)
@@ -197,14 +187,14 @@ func TestClientPickerRequestsAndRendersTheDisplayedRowPreview(t *testing.T) {
 		Key: "aa/first", Status: protocol.PickerPreviewOK, Width: 4, Height: 1,
 		Cells: []renderer.Cell{{Rune: 'v'}, {Rune: 'i'}, {Rune: 'e'}, {Rune: 'w'}},
 	}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerPreview, Payload: wire.MarshalPickerPreview(viewport)}
+	transport.detached <- mustServerEnvelope(viewport)
 	awaitTerminalText(t, harness.terminal, "view")
 
 	// A late viewport for a row the user left must not replace the displayed one.
 	late := viewport
 	late.Key = "bb/second"
 	late.Cells = []renderer.Cell{{Rune: 's'}, {Rune: 't'}, {Rune: 'a'}, {Rune: 'l'}}
-	transport.detached <- wire.Frame{Type: wire.MsgPickerPreview, Payload: wire.MarshalPickerPreview(late)}
+	transport.detached <- mustServerEnvelope(late)
 	awaitTerminalText(t, harness.terminal, "view")
 	require.NotContains(t, uiSnapshotText(mustCapture(t, ui)), "stal")
 }
@@ -243,9 +233,8 @@ func TestClientPickerCancelReleasesOnAuthoritativeFullPaint(t *testing.T) {
 		}
 		cancelled <- action
 	}()
-	closePayload := awaitWireFrame(t, transport, wire.MsgPickerCloseClient)
-	closeMessage, err := wire.UnmarshalPickerClose(closePayload)
-	require.NoError(t, err)
+	closeMessage, ok := awaitWireFrame(t, transport, "PickerClose").(protocol.PickerClose)
+	require.True(t, ok)
 	require.Equal(t, snapshot.InteractionID, closeMessage.InteractionID)
 	requireNoPickerInput(t, transport)
 
@@ -262,11 +251,9 @@ func TestClientPickerCancelReleasesOnAuthoritativeFullPaint(t *testing.T) {
 
 	// The daemon confirms and repaints authoritatively: the frame is
 	// displayed and the pending cancel completes against that boundary.
-	transport.detached <- wire.Frame{Type: wire.MsgPickerClosedServer, Payload: wire.MarshalPickerClosed(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})}
+	transport.detached <- mustServerEnvelope(protocol.PickerClosed{InteractionID: snapshot.InteractionID, BarrierEpoch: 2, BarrierState: 1})
 	view := protocol.ViewContext{Publication: 2, Route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "fixture"}}, TabID: "t_abc123", FocusedPaneID: "p_def456"}
-	outputPayload, err := wire.MarshalOutput(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hreleased")})
-	require.NoError(t, err)
-	transport.detached <- wire.Frame{Type: wire.MsgOutput, Payload: outputPayload}
+	transport.detached <- mustServerEnvelope(protocol.Output{Epoch: 2, New: 1, Full: true, Size: domain.Size{Cols: 80, Rows: 24}, Context: &view, Data: []byte("\x1b[2J\x1b[Hreleased")})
 	select {
 	case action := <-cancelled:
 		require.Equal(t, ports.UIActionProcessed, action.Status)

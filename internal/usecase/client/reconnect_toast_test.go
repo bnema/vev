@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -130,21 +131,21 @@ func (r *reconnectToastOutputRecorder) String() string {
 	return r.all.String()
 }
 
-func reconnectToastWelcome(token uint64) wire.Frame {
+func reconnectToastWelcome(token uint64) wire.Envelope {
 	return reconnectToastWelcomeNamed("", token)
 }
 
-func reconnectToastWelcomeNamed(name string, token uint64) wire.Frame {
-	return wire.Frame{Type: wire.MsgWelcome, Payload: wire.MarshalWelcome(protocol.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume})}
+func reconnectToastWelcomeNamed(name string, token uint64) wire.Envelope {
+	return mustServerEnvelope(protocol.Welcome{SessionID: "s1", SessionName: name, ResumeToken: token, Capabilities: protocol.CapabilityResume})
 }
 
-func reconnectToastDetach(reason uint8) wire.Frame {
-	return wire.Frame{Type: wire.MsgDetached, Payload: wire.MarshalDetached(protocol.Detached{Reason: reason})}
+func reconnectToastDetach(reason uint8) wire.Envelope {
+	return mustServerEnvelope(protocol.Detached{Reason: reason})
 }
 
 type reconnectToastRecv struct {
-	frame wire.Frame
-	err   error
+	envelope wire.Envelope
+	err      error
 }
 
 type reconnectToastSequenceDialer struct {
@@ -164,7 +165,7 @@ func (d *reconnectToastSequenceDialer) Dial(context.Context) (ports.ClientConnec
 type reconnectToastRecordingTransport struct {
 	mu     sync.Mutex
 	recvs  []reconnectToastRecv
-	sends  []wire.Frame
+	sends  []wire.Envelope
 	closed bool
 }
 
@@ -174,7 +175,7 @@ func newReconnectToastRecordingTransport(recvs ...reconnectToastRecv) *reconnect
 
 type reconnectToastSentFrames struct {
 	mu      sync.Mutex
-	frames  []wire.Frame
+	frames  []wire.Envelope
 	changed chan struct{}
 }
 
@@ -182,7 +183,7 @@ func newReconnectToastSentFrames() *reconnectToastSentFrames {
 	return &reconnectToastSentFrames{changed: make(chan struct{}, 1)}
 }
 
-func (s *reconnectToastSentFrames) record(frame wire.Frame) {
+func (s *reconnectToastSentFrames) record(frame wire.Envelope) {
 	s.mu.Lock()
 	s.frames = append(s.frames, frame)
 	s.mu.Unlock()
@@ -192,7 +193,7 @@ func (s *reconnectToastSentFrames) record(frame wire.Frame) {
 	}
 }
 
-func (s *reconnectToastSentFrames) find(match func(wire.Frame) bool) (wire.Frame, bool) {
+func (s *reconnectToastSentFrames) find(match func(wire.Envelope) bool) (wire.Envelope, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, frame := range s.frames {
@@ -200,7 +201,7 @@ func (s *reconnectToastSentFrames) find(match func(wire.Frame) bool) (wire.Frame
 			return frame, true
 		}
 	}
-	return wire.Frame{}, false
+	return wire.Envelope{}, false
 }
 
 type reconnectToastLinkTransport struct {
@@ -221,22 +222,23 @@ func newReconnectToastLinkTransport() *reconnectToastLinkTransport {
 	}
 }
 
-func (t *reconnectToastLinkTransport) Send(f wire.Frame) error {
+func (t *reconnectToastLinkTransport) Send(f wire.Envelope) error {
 	t.sends.record(f)
-	if f.Type != wire.MsgClientNotice {
+	message, err := sessionwire.DecodeClientEnvelope(f.Payload)
+	if err != nil {
 		return nil
 	}
-	notice, err := wire.UnmarshalClientNotice(f.Payload)
-	if err != nil {
-		return err
+	notice, ok := message.(protocol.ClientNotice)
+	if !ok {
+		return nil
 	}
 	t.clientNotices <- notice
 	return nil
 }
 
-func (t *reconnectToastLinkTransport) Recv() (wire.Frame, error) {
+func (t *reconnectToastLinkTransport) Recv() (wire.Envelope, error) {
 	recv := <-t.recvCh
-	return recv.frame, recv.err
+	return recv.envelope, recv.err
 }
 
 func (t *reconnectToastLinkTransport) Close() error { return nil }
@@ -245,22 +247,22 @@ func (t *reconnectToastLinkTransport) LinkEvents() <-chan ports.LinkEvent { retu
 
 func (t *reconnectToastLinkTransport) LinkState() ports.LinkState { return t.state }
 
-func (t *reconnectToastRecordingTransport) Send(f wire.Frame) error {
+func (t *reconnectToastRecordingTransport) Send(f wire.Envelope) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sends = append(t.sends, f)
 	return nil
 }
 
-func (t *reconnectToastRecordingTransport) Recv() (wire.Frame, error) {
+func (t *reconnectToastRecordingTransport) Recv() (wire.Envelope, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.recvs) == 0 {
-		return wire.Frame{}, io.EOF
+		return wire.Envelope{}, io.EOF
 	}
 	recv := t.recvs[0]
 	t.recvs = t.recvs[1:]
-	return recv.frame, recv.err
+	return recv.envelope, recv.err
 }
 
 func (t *reconnectToastRecordingTransport) Close() error {
@@ -270,10 +272,10 @@ func (t *reconnectToastRecordingTransport) Close() error {
 	return nil
 }
 
-func (t *reconnectToastRecordingTransport) sentFrames() []wire.Frame {
+func (t *reconnectToastRecordingTransport) sentFrames() []wire.Envelope {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]wire.Frame(nil), t.sends...)
+	return append([]wire.Envelope(nil), t.sends...)
 }
 
 func (t *reconnectToastRecordingTransport) wasClosed() bool {
@@ -289,10 +291,10 @@ func assertReconnectToastAttemptPublishesOnlyClearedTheme(t *testing.T, tr *reco
 	t.Helper()
 	frames := tr.sentFrames()
 	require.GreaterOrEqual(t, len(frames), 2)
-	require.Equal(t, wire.MsgHello, frames[0].Type)
-	require.Equal(t, wire.MsgTheme, frames[1].Type)
-	theme, err := wire.UnmarshalTheme(frames[1].Payload)
-	require.NoError(t, err)
+	require.Equal(t, "Hello", clientMessageName(t, frames[0]))
+	require.Equal(t, "Theme", clientMessageName(t, frames[1]))
+	theme, ok := decodeClientMessage(t, frames[1]).(protocol.Theme)
+	require.True(t, ok)
 	require.False(t, theme.HasForeground)
 	require.False(t, theme.HasBackground)
 	require.Zero(t, theme.PaletteKnown)
@@ -303,9 +305,9 @@ func reconnectToastHelloFromSend(t *testing.T, tr *reconnectToastRecordingTransp
 	t.Helper()
 	frames := tr.sentFrames()
 	require.NotEmpty(t, frames)
-	require.Equal(t, wire.MsgHello, frames[0].Type)
-	hello, err := wire.UnmarshalHello(frames[0].Payload)
-	require.NoError(t, err)
+	require.Equal(t, "Hello", clientMessageName(t, frames[0]))
+	hello, ok := decodeClientMessage(t, frames[0]).(protocol.Hello)
+	require.True(t, ok)
 	return hello
 }
 
@@ -383,7 +385,7 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	})
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
@@ -395,14 +397,14 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 	require.Contains(t, firstToast, "┌")
 	require.Contains(t, firstToast, "probing UDP path")
 
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   2,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Full:  true,
 		Data:  []byte("daemon incremental"),
-	})}}
+	})}
 	redrawn := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, redrawn, "daemon incremental")
 	require.Contains(t, redrawn, "┌")
@@ -414,55 +416,55 @@ func TestProbingToastReconcilesDaemonOutputAndDismissal(t *testing.T) {
 
 	beforeAwaitingReset := out.String()
 	beforeStatelessFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   0,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("stateless side effect"),
-	})}}
+	})}
 	require.Eventually(t, func() bool {
 		return strings.Contains(out.String(), "stateless side effect") && flushes.Load() > beforeStatelessFlushes
 	}, time.Second, time.Millisecond)
 
 	afterStateless := out.String()
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 1,
 		Base:  2,
 		New:   3,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("intervening incremental"),
-	})}}
+	})}
 	requireAckedState(t, tr.sends, 1, 3)
 	require.Contains(t, out.String(), "intervening incremental")
 	require.Contains(t, afterStateless[len(beforeAwaitingReset):], "stateless side effect")
 
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 2,
 		Base:  0,
 		New:   4,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Full:  true,
 		Data:  []byte("authoritative reset"),
-	})}}
+	})}
 	requireAckedState(t, tr.sends, 2, 4)
 	require.Eventually(t, func() bool { return strings.Contains(out.String(), "authoritative reset") }, time.Second, time.Millisecond)
 	require.NotContains(t, out.String()[len(beforeAwaitingReset):], strings.Repeat(" ", reconnectToastBoundsFor(term.size, "probing UDP path").Width))
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 2,
 		Base:  4,
 		New:   5,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("increment after reset"),
-	})}}
+	})}
 	require.Eventually(t, func() bool {
 		return strings.Contains(out.String(), "increment after reset") && flushes.Load() > beforeIncrementFlushes
 	}, time.Second, time.Millisecond)
 	requireAckedState(t, tr.sends, 2, 5)
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
 	require.NoError(t, result.err)
 }
@@ -476,7 +478,7 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	})
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
@@ -497,37 +499,38 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 		{Epoch: 1, Base: 1, New: 2, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("first skipped increment")},
 		{Epoch: 1, Base: 2, New: 3, Size: domain.Size{Cols: 1, Rows: 1}, Data: []byte("second skipped increment")},
 	} {
-		tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(output)}}
+		tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(output)}
 		require.Equal(t, beforeReset, out.String())
 	}
-	requireSentFrame(t, tr.sends, "output reset request", func(frame wire.Frame) bool {
-		return frame.Type == wire.MsgOutputResetRequest
+	requireSentFrame(t, tr.sends, "output reset request", func(frame wire.Envelope) bool {
+		_, ok := decodeClientMessage(t, frame).(protocol.OutputResetRequest)
+		return ok
 	})
-	_, sentAck := tr.sends.find(func(frame wire.Frame) bool { return frame.Type == wire.MsgAck })
+	_, sentAck := tr.sends.find(func(frame wire.Envelope) bool { _, ok := decodeClientMessage(t, frame).(protocol.Ack); return ok })
 	require.False(t, sentAck, "discarded output must not be ACKed")
 
 	// Handoff cleanup is an ordered terminal side effect, not a replay state.
 	// It must cross the outstanding reset gate, flush before the control handoff,
 	// and must not manufacture an independent ACK.
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 2,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("handoff graphics cleanup"),
-	})}}
+	})}
 	cleanup := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, cleanup, "handoff graphics cleanup")
-	_, sentAck = tr.sends.find(func(frame wire.Frame) bool { return frame.Type == wire.MsgAck })
+	_, sentAck = tr.sends.find(func(frame wire.Envelope) bool { _, ok := decodeClientMessage(t, frame).(protocol.Ack); return ok })
 	require.False(t, sentAck, "state-independent cleanup must not be ACKed")
 
 	beforeResetFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 2,
 		Base:  0,
 		New:   4,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Full:  true,
 		Data:  []byte("stage transition reset"),
-	})}}
+	})}
 	redrawn := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, redrawn, "stage transition reset")
 	require.Contains(t, redrawn, offlineMessage)
@@ -535,20 +538,20 @@ func TestActiveReconnectToastStageTransitionReconcilesBeforeRedraw(t *testing.T)
 	requireAckedState(t, tr.sends, 2, 4)
 
 	beforeIncrementFlushes := flushes.Load()
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 2,
 		Base:  4,
 		New:   5,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Data:  []byte("stage increment after reset"),
-	})}}
+	})}
 	incremental := requireReconnectToastOutput(t, out.completed)
 	require.Contains(t, incremental, "stage increment after reset")
 	require.Contains(t, incremental, offlineMessage)
 	require.Eventually(t, func() bool { return flushes.Load() > beforeIncrementFlushes }, time.Second, time.Millisecond)
 	requireAckedState(t, tr.sends, 2, 5)
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
 	require.NoError(t, result.err)
 }
@@ -564,7 +567,7 @@ func requireReconnectToastOutput(t *testing.T, completed <-chan string) string {
 	}
 }
 
-func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description string, match func(wire.Frame) bool) wire.Frame {
+func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description string, match func(wire.Envelope) bool) wire.Envelope {
 	t.Helper()
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
@@ -576,32 +579,37 @@ func requireSentFrame(t *testing.T, sends *reconnectToastSentFrames, description
 		case <-sends.changed:
 		case <-timer.C:
 			t.Fatalf("timed out waiting for %s", description)
-			return wire.Frame{}
+			return wire.Envelope{}
 		}
 	}
 }
 
+func decodeClientMessage(t *testing.T, envelope wire.Envelope) protocol.ClientMessage {
+	t.Helper()
+	message, err := sessionwire.DecodeClientEnvelope(envelope.Payload)
+	require.NoError(t, err)
+	return message
+}
+
 func requireResize(t *testing.T, sends *reconnectToastSentFrames) protocol.Resize {
 	t.Helper()
-	frame := requireSentFrame(t, sends, "Resize frame", func(frame wire.Frame) bool {
-		return frame.Type == wire.MsgResize
+	frame := requireSentFrame(t, sends, "Resize frame", func(frame wire.Envelope) bool {
+		_, ok := decodeClientMessage(t, frame).(protocol.Resize)
+		return ok
 	})
-	resize, err := wire.UnmarshalResize(frame.Payload)
-	require.NoError(t, err)
+	resize, ok := decodeClientMessage(t, frame).(protocol.Resize)
+	require.True(t, ok)
 	return resize
 }
 
 func requireAckedState(t *testing.T, sends *reconnectToastSentFrames, epoch, state uint64) {
 	t.Helper()
-	frame := requireSentFrame(t, sends, fmt.Sprintf("ACK for epoch %d state %d", epoch, state), func(frame wire.Frame) bool {
-		if frame.Type != wire.MsgAck {
-			return false
-		}
-		ack, err := wire.UnmarshalAck(frame.Payload)
-		return err == nil && ack.Epoch == epoch && ack.State >= state
+	frame := requireSentFrame(t, sends, fmt.Sprintf("ACK for epoch %d state %d", epoch, state), func(frame wire.Envelope) bool {
+		ack, ok := decodeClientMessage(t, frame).(protocol.Ack)
+		return ok && ack.Epoch == epoch && ack.State >= state
 	})
-	ack, err := wire.UnmarshalAck(frame.Payload)
-	require.NoError(t, err)
+	ack, ok := decodeClientMessage(t, frame).(protocol.Ack)
+	require.True(t, ok)
 	require.Equal(t, epoch, ack.Epoch)
 	require.GreaterOrEqual(t, ack.State, state)
 }
@@ -689,7 +697,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	})
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 	observer := &reconnectFlushObserver{flushes: &flushes, seen: make(chan int32, 1)}
 
 	resultCh := make(chan attachResult, 1)
@@ -708,14 +716,14 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	require.Eventually(t, func() bool { return flushes.Load() > beforeStatus }, time.Second, time.Millisecond)
 	beforeOutput := flushes.Load()
 
-	tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+	tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 		Epoch: 1,
 		Base:  0,
 		New:   2,
 		Size:  domain.Size{Cols: 1, Rows: 1},
 		Full:  true,
 		Data:  []byte("daemon output behind local reconnect status"),
-	})}}
+	})}
 
 	select {
 	case observedAtFlush := <-observer.seen:
@@ -726,7 +734,7 @@ func TestLocalReconnectStatusFlushesDaemonOutputBeforeObservationAndAck(t *testi
 	requireAckedState(t, tr.sends, 1, 2)
 	require.Greater(t, flushes.Load(), beforeOutput, "daemon output must be flushed before ACK")
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonDetach)}
 	require.NoError(t, requireAttachResult(t, resultCh).err)
 }
 
@@ -745,7 +753,7 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			term := newReconnectToastTerminalHarnessWithOutput(t, out)
 			defer term.closeInput()
 			tr := newReconnectToastLinkTransport()
-			tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+			tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 			resultCh := make(chan attachResult, 1)
 			ms := milestones{}
@@ -760,20 +768,20 @@ func TestLocalReconnectStatusTransitionsDoNotRequestAuthoritativeReset(t *testin
 			}
 
 			const output = "local status output remains visible"
-			tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+			tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 				Epoch: 1,
 				Base:  0,
 				New:   2,
 				Size:  domain.Size{Cols: 1, Rows: 1},
 				Full:  true,
 				Data:  []byte(output),
-			})}}
+			})}
 			require.Eventually(t, func() bool { return strings.Contains(out.String(), output) }, time.Second, time.Millisecond)
 			requireAckedState(t, tr.sends, 1, 2)
-			_, sentResize := tr.sends.find(func(frame wire.Frame) bool { return frame.Type == wire.MsgResize })
+			_, sentResize := tr.sends.find(func(frame wire.Envelope) bool { return clientMessageName(nil, frame) == "Resize" })
 			require.False(t, sentResize, "local reconnect status must not request a daemon reset")
 
-			tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
+			tr.recvCh <- reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonDetach)}
 			require.NoError(t, requireAttachResult(t, resultCh).err)
 		})
 	}
@@ -816,7 +824,7 @@ func TestReconnectOverlayRedrawFailureDoesNotObserveOrAckOutput(t *testing.T) {
 			term, arm := tt.configure(t, out)
 			defer term.closeInput()
 			tr := newReconnectToastLinkTransport()
-			tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+			tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 			observer := &reconnectRuntimeObserver{}
 
 			resultCh := make(chan attachResult, 1)
@@ -828,14 +836,14 @@ func TestReconnectOverlayRedrawFailureDoesNotObserveOrAckOutput(t *testing.T) {
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			requireReconnectToastOutput(t, out.completed)
 			arm()
-			tr.recvCh <- reconnectToastRecv{frame: wire.Frame{Type: wire.MsgOutput, Payload: mustMarshalOutput(protocol.Output{
+			tr.recvCh <- reconnectToastRecv{envelope: mustServerEnvelope(protocol.Output{
 				Epoch: 1,
 				Base:  0,
 				New:   2,
 				Size:  domain.Size{Cols: 1, Rows: 1},
 				Full:  true,
 				Data:  []byte("daemon output before failed redraw"),
-			})}}
+			})}
 
 			result := requireAttachResult(t, resultCh)
 			require.ErrorContains(t, result.err, tt.wantError)
@@ -849,7 +857,7 @@ func TestReconnectLinkEventsNotifyDaemonWithoutLocalTerminalWrites(t *testing.T)
 	term := newReconnectToastTerminalHarnessWithOutput(t, out)
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
@@ -866,7 +874,7 @@ func TestReconnectLinkEventsNotifyDaemonWithoutLocalTerminalWrites(t *testing.T)
 	default:
 	}
 
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonDetach)}
 	result := requireAttachResult(t, resultCh)
 	require.NoError(t, result.err)
 	require.True(t, result.welcomed)
@@ -876,7 +884,7 @@ func TestAttachAttemptOfflineLinkEventReturnsReconnectableError(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	tr := newReconnectToastLinkTransport()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
@@ -927,14 +935,14 @@ type reconnectResetBlockingTransport struct {
 
 func newReconnectResetBlockingTransport() *reconnectResetBlockingTransport {
 	return &reconnectResetBlockingTransport{
-		recvs:   []reconnectToastRecv{{frame: reconnectToastWelcomeNamed("assigned", 44)}},
+		recvs:   []reconnectToastRecv{{envelope: reconnectToastWelcomeNamed("assigned", 44)}},
 		entered: make(chan struct{}),
 		closed:  make(chan struct{}),
 	}
 }
 
-func (t *reconnectResetBlockingTransport) Send(frame wire.Frame) error {
-	if frame.Type != wire.MsgResize {
+func (t *reconnectResetBlockingTransport) Send(frame wire.Envelope) error {
+	if clientMessageName(nil, frame) != "Resize" {
 		return nil
 	}
 	t.enterOnce.Do(func() { close(t.entered) })
@@ -942,15 +950,15 @@ func (t *reconnectResetBlockingTransport) Send(frame wire.Frame) error {
 	return io.ErrClosedPipe
 }
 
-func (t *reconnectResetBlockingTransport) Recv() (wire.Frame, error) {
+func (t *reconnectResetBlockingTransport) Recv() (wire.Envelope, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.recvs) == 0 {
-		return wire.Frame{}, io.EOF
+		return wire.Envelope{}, io.EOF
 	}
 	recv := t.recvs[0]
 	t.recvs = t.recvs[1:]
-	return recv.frame, recv.err
+	return recv.envelope, recv.err
 }
 
 func (t *reconnectResetBlockingTransport) Close() error {
@@ -1015,7 +1023,7 @@ func TestPreSenderReconnectResetIsBounded(t *testing.T) {
 type reconnectToastBlockingSendTransport struct {
 	*reconnectToastLinkTransport
 	armed       atomic.Bool
-	blockType   wire.MsgType
+	blockType   string
 	sendErr     error
 	entered     chan struct{}
 	release     chan struct{}
@@ -1026,17 +1034,17 @@ type reconnectToastBlockingSendTransport struct {
 func newReconnectToastBlockingSendTransport() *reconnectToastBlockingSendTransport {
 	return &reconnectToastBlockingSendTransport{
 		reconnectToastLinkTransport: newReconnectToastLinkTransport(),
-		blockType:                   wire.MsgClientNotice,
+		blockType:                   "ClientNotice",
 		entered:                     make(chan struct{}),
 		release:                     make(chan struct{}),
 	}
 }
 
-func (t *reconnectToastBlockingSendTransport) Send(frame wire.Frame) error {
+func (t *reconnectToastBlockingSendTransport) Send(frame wire.Envelope) error {
 	if err := t.reconnectToastLinkTransport.Send(frame); err != nil {
 		return err
 	}
-	if t.armed.Load() && frame.Type == t.blockType {
+	if t.armed.Load() && clientMessageName(nil, frame) == t.blockType {
 		t.enteredOnce.Do(func() { close(t.entered) })
 		<-t.release
 		return t.sendErr
@@ -1073,7 +1081,7 @@ func TestReconnectResetEnqueueCancellationExitsCleanly(t *testing.T) {
 			tr := newReconnectToastBlockingSendTransport()
 			releaseSender := func() { tr.releaseOnce.Do(func() { close(tr.release) }) }
 			defer releaseSender()
-			tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+			tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -1084,7 +1092,7 @@ func TestReconnectResetEnqueueCancellationExitsCleanly(t *testing.T) {
 
 			tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 			requireTerminalSizeCalls(t, term, 2)
-			tr.blockType = wire.MsgResize
+			tr.blockType = "Resize"
 			tr.armed.Store(true)
 			term.resizeCh <- domain.Geometry{Size: term.size}
 			select {
@@ -1115,7 +1123,7 @@ func TestReconnectResetCancellationPreservesQueuedSenderError(t *testing.T) {
 	tr := newReconnectToastBlockingSendTransport()
 	releaseSender := func() { tr.releaseOnce.Do(func() { close(tr.release) }) }
 	defer releaseSender()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
@@ -1124,7 +1132,7 @@ func TestReconnectResetCancellationPreservesQueuedSenderError(t *testing.T) {
 
 	tr.events <- ports.LinkEvent{State: ports.LinkStateProbing}
 	requireTerminalSizeCalls(t, term, 2)
-	tr.blockType = wire.MsgResize
+	tr.blockType = "Resize"
 	tr.armed.Store(true)
 	term.resizeCh <- domain.Geometry{Size: term.size}
 	select {
@@ -1154,7 +1162,7 @@ func TestAttachAttemptReturnsWhileSenderSendIsBlockedAfterCancellation(t *testin
 	tr := newReconnectToastBlockingSendTransport()
 	releaseSender := func() { tr.releaseOnce.Do(func() { close(tr.release) }) }
 	defer releaseSender()
-	tr.recvCh <- reconnectToastRecv{frame: reconnectToastWelcome(44)}
+	tr.recvCh <- reconnectToastRecv{envelope: reconnectToastWelcome(44)}
 
 	resultCh := make(chan attachResult, 1)
 	ms := milestones{}
@@ -1372,7 +1380,7 @@ func TestReconnectRetryFailuresPreserveAttachError(t *testing.T) {
 			term := newReconnectToastTerminalHarnessWithOutput(t, tt.output())
 			defer term.closeInput()
 			tr := newReconnectToastRecordingTransport(
-				reconnectToastRecv{frame: reconnectToastWelcome(44)},
+				reconnectToastRecv{envelope: reconnectToastWelcome(44)},
 				reconnectToastRecv{err: attachErr},
 			)
 			dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr}}
@@ -1427,7 +1435,7 @@ func TestReconnectRetrySleepFailuresPreserveDialError(t *testing.T) {
 			})
 			defer term.closeInput()
 			tr := newReconnectToastRecordingTransport(
-				reconnectToastRecv{frame: reconnectToastWelcome(44)},
+				reconnectToastRecv{envelope: reconnectToastWelcome(44)},
 				reconnectToastRecv{err: io.EOF},
 			)
 			dialer := newMockClientDialer(t)
@@ -1459,7 +1467,7 @@ func TestRemoteReconnectToastFailedDrawDoesNotBlankBounds(t *testing.T) {
 	term := newReconnectToastTerminalHarnessWithOutput(t, out)
 	defer term.closeInput()
 	tr := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
-		{frame: reconnectToastWelcome(44)},
+		{envelope: reconnectToastWelcome(44)},
 		{err: io.EOF},
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr}}
@@ -1535,7 +1543,7 @@ func TestReconnectCancellationPreservesContextWhenStatusClearFails(t *testing.T)
 			term := newReconnectToastTerminalHarnessWithOutput(t, &reconnectStatusClearFailWriter{clearErr: clearErr})
 			defer term.closeInput()
 			tr := newReconnectToastRecordingTransport(
-				reconnectToastRecv{frame: reconnectToastWelcome(11)},
+				reconnectToastRecv{envelope: reconnectToastWelcome(11)},
 				reconnectToastRecv{err: io.EOF},
 			)
 			dialer := newMockClientDialer(t)
@@ -1568,12 +1576,12 @@ func TestRemoteReconnectToastLifecycleWithWrappedTransportError(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	tr1 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
-		{frame: reconnectToastWelcome(44)},
+		{envelope: reconnectToastWelcome(44)},
 		{err: wrappedLinkDead},
 	}}
 	tr2 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
-		{frame: reconnectToastWelcome(55)},
-		{frame: reconnectToastDetach(protocol.ReasonDetach)},
+		{envelope: reconnectToastWelcome(55)},
+		{envelope: reconnectToastDetach(protocol.ReasonDetach)},
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr1, tr2}}
 
@@ -1612,12 +1620,12 @@ func TestRemoteEphemeralReconnectUsesAssignedSessionName(t *testing.T) {
 	term := newReconnectToastTerminalHarness(t)
 	defer term.closeInput()
 	tr1 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
-		{frame: reconnectToastWelcomeNamed("0", 44)},
+		{envelope: reconnectToastWelcomeNamed("0", 44)},
 		{err: linkDead},
 	}}
 	tr2 := &reconnectToastRecordingTransport{recvs: []reconnectToastRecv{
-		{frame: reconnectToastWelcomeNamed("0", 55)},
-		{frame: reconnectToastDetach(protocol.ReasonDetach)},
+		{envelope: reconnectToastWelcomeNamed("0", 55)},
+		{envelope: reconnectToastDetach(protocol.ReasonDetach)},
 	}}
 	dialer := &reconnectToastSequenceDialer{transports: []wire.Transport{tr1, tr2}}
 
@@ -1647,8 +1655,8 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 		{
 			name: "clears on successful reconnect",
 			configure: func(t *testing.T, dialer *mockClientDialer) []*reconnectToastRecordingTransport {
-				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
-				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonDetach)})
+				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{envelope: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
+				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{envelope: reconnectToastWelcome(22)}, reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonDetach)})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr1, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
 				return []*reconnectToastRecordingTransport{tr1, tr2}
@@ -1659,7 +1667,7 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 		{
 			name: "clears on cancellation",
 			configure: func(t *testing.T, dialer *mockClientDialer) []*reconnectToastRecordingTransport {
-				tr := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
+				tr := newReconnectToastRecordingTransport(reconnectToastRecv{envelope: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr, nil).Once()
 				return []*reconnectToastRecordingTransport{tr}
 			},
@@ -1672,8 +1680,8 @@ func TestRemoteReconnectToastLifecycle(t *testing.T) {
 		{
 			name: "clears on final exit",
 			configure: func(t *testing.T, dialer *mockClientDialer) []*reconnectToastRecordingTransport {
-				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
-				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{frame: reconnectToastWelcome(22)}, reconnectToastRecv{frame: reconnectToastDetach(protocol.ReasonSessionKilled)})
+				tr1 := newReconnectToastRecordingTransport(reconnectToastRecv{envelope: reconnectToastWelcome(11)}, reconnectToastRecv{err: io.EOF})
+				tr2 := newReconnectToastRecordingTransport(reconnectToastRecv{envelope: reconnectToastWelcome(22)}, reconnectToastRecv{envelope: reconnectToastDetach(protocol.ReasonSessionKilled)})
 				dialer.EXPECT().Dial(mock.Anything).Return(tr1, nil).Once()
 				dialer.EXPECT().Dial(mock.Anything).Return(tr2, nil).Once()
 				return []*reconnectToastRecordingTransport{tr1, tr2}

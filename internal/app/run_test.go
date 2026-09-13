@@ -11,13 +11,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
+	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
@@ -417,13 +417,21 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 // scriptRecv makes a transport yield frames in order, then wait for done
 // before returning EOF. The shared done channel coordinates proxy readers
 // without relying on scheduling or sleeps.
-func TestRunUDPProxyUsesBoundedClientMaxPending(t *testing.T) {
-	require.Equal(t, 32, udpProxyClientTransportOptions.MaxPending)
-}
-
-func TestRunUDPProxyClientDeadAfterExceedsIdleTTL(t *testing.T) {
-	require.Positive(t, udpProxyIdleTTL)
-	require.Greater(t, udpProxyClientTransportOptions.DeadAfter, udpProxyIdleTTL)
+func TestProxyTransportsCopiesBothDirections(t *testing.T) {
+	left, right := net.Pipe()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
+	client := ipc.NewTransport(left)
+	daemon := ipc.NewTransport(right)
+	done := make(chan error, 1)
+	go func() { done <- proxyTransports(context.Background(), client, daemon, nil) }()
+	payload := []byte("proxy stays carriage-neutral")
+	require.NoError(t, client.Send(wire.Envelope{Payload: payload}))
+	got, err := daemon.Recv()
+	require.NoError(t, err)
+	require.Equal(t, payload, got.Payload)
+	_ = client.Close()
+	_ = daemon.Close()
 }
 
 func TestDevelopmentTempDirOption(t *testing.T) {
@@ -570,11 +578,14 @@ func TestParseArgs(t *testing.T) {
 		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
 		{name: "stdio rejects session", args: []string{"_stdio", "work"}, wantErr: true},
 		{name: "stdio rejects extra args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
-		{name: "udp bootstrap", args: []string{"_udp-bootstrap"}, wantKind: kindUDPBootstrap},
-		{name: "udp bootstrap rejects session", args: []string{"_udp-bootstrap", "work"}, wantErr: true},
-		{name: "udp proxy", args: []string{"_udp-proxy"}, wantKind: kindUDPProxy},
-		{name: "udp proxy rejects session", args: []string{"_udp-proxy", "work"}, wantErr: true},
-		{name: "udp proxy rejects extra args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
+		{name: "quic bootstrap", args: []string{"_quic-bootstrap"}, wantKind: kindQUICBootstrap},
+		{name: "quic bootstrap rejects session", args: []string{"_quic-bootstrap", "work"}, wantErr: true},
+		{name: "quic proxy", args: []string{"_quic-proxy"}, wantKind: kindQUICProxy},
+		{name: "quic proxy rejects session", args: []string{"_quic-proxy", "work"}, wantErr: true},
+		{name: "removed udp bootstrap", args: []string{"_udp-bootstrap"}, wantErr: true},
+		{name: "removed udp proxy", args: []string{"_udp-proxy"}, wantErr: true},
+		{name: "removed udp proxy rejects session", args: []string{"_udp-proxy", "work"}, wantErr: true},
+		{name: "removed udp proxy rejects extra args", args: []string{"_udp-proxy", "work", "extra"}, wantErr: true},
 		{name: "help", args: []string{"--help"}, wantKind: kindHelp},
 		{name: "help subcommand", args: []string{"help"}, wantKind: kindHelp},
 		{name: "version", args: []string{"--version"}, wantKind: kindVersion},
@@ -907,7 +918,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 		selectedTransport string
 		wantMode          remoteadapter.TransportMode
 	}{
-		{name: "default remote mode is udp", selectedTransport: "", wantMode: remoteadapter.TransportUDP},
+		{name: "default remote mode is quic", selectedTransport: "", wantMode: remoteadapter.TransportQUIC},
 		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: remoteadapter.TransportStdio},
 	}
 
@@ -960,7 +971,7 @@ func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
 // exactly once for the route it starts on.
 func TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
 
 	var registryDials int
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
@@ -982,8 +993,8 @@ func TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority(t *testing.T) {
 
 func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
+	factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
 	var calls int
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 		remoteDialerFactory: factory.DialerForRemote,
@@ -1008,7 +1019,7 @@ func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.
 // carriage.
 func TestRunAttachWithDepsReusesOneEndpointBinding(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	var first, second ports.ClientDialer
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
@@ -1032,7 +1043,7 @@ func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
 	factory := newRemoteDialerFactoryMock(t)
 	// The registry resolves the endpoint once: every repeated handoff reuses
 	// that binding, and the attempt bound is what the loop still enforces.
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 
 	calls := 0
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
@@ -1058,7 +1069,7 @@ func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T)
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+			factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 			target := protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: tt.intent, RequestID: tt.requestID, EnvironmentPolicy: tt.policy}
 			want := client.AttachRequest{Intent: tt.intent, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
 			localCalls, remoteCalls := 0, 0
@@ -1109,7 +1120,7 @@ func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
+			factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
 			calls := 0
 			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
 				remoteDialerFactory: factory.DialerForRemote,
@@ -1136,7 +1147,7 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 			return nil
 		},
 	})
-	if err == nil || err.Error() != `vev: invalid remote transport "serial" (want "udp" or "stdio")` {
+	if err == nil || err.Error() != `vev: invalid remote transport "serial" (want "quic" or "stdio")` {
 		t.Fatalf("runAttachWithDeps error = %v, want invalid transport", err)
 	}
 	if runClientCalled {
@@ -1147,7 +1158,7 @@ func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.
 func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
 	factoryErr := errors.New("factory failed")
 	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportUDP, mock.Anything).Return(nil, factoryErr)
+	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(nil, factoryErr)
 	runClientCalled := false
 
 	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
@@ -1201,169 +1212,6 @@ func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
 	if gotClipboard != ports.ClipboardReader(clip) {
 		t.Fatalf("local attach must retain the ClipboardReader for later remote handoffs, got %#v", gotClipboard)
 	}
-}
-
-func TestRunUDPBootstrapForwardsReadinessAndExits(t *testing.T) {
-	oldTimeout := udpBootstrapTimeout
-	udpBootstrapTimeout = time.Second
-	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
-	oldCommand := udpProxyCommand
-	var gotCmd *exec.Cmd
-	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
-		cmd := exec.Command("/bin/sh", "-c", "printf 'VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n'")
-		gotCmd = cmd
-		return cmd
-	}
-	t.Cleanup(func() { udpProxyCommand = oldCommand })
-
-	got := captureStdout(t, func() {
-		if err := runUDPBootstrap(context.Background()); err != nil {
-			t.Fatalf("runUDPBootstrap() error = %v", err)
-		}
-	})
-	if got != "VEV-UDP 4242 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n" {
-		t.Fatalf("readiness = %q", got)
-	}
-	if gotCmd.Stdin == nil || gotCmd.Stderr == nil {
-		t.Fatalf("proxy stdio = stdin %T stderr %T, want detached from SSH channels", gotCmd.Stdin, gotCmd.Stderr)
-	}
-	if gotCmd.Stdout == os.Stdout || gotCmd.Stderr == os.Stderr || gotCmd.Stdin == os.Stdin {
-		t.Fatalf("proxy inherited SSH stdio handles")
-	}
-}
-
-func TestRunUDPBootstrapReturnsReadinessEOF(t *testing.T) {
-	oldTimeout := udpBootstrapTimeout
-	udpBootstrapTimeout = time.Second
-	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
-	oldCommand := udpProxyCommand
-	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
-		return exec.Command("/bin/sh", "-c", "exit 7")
-	}
-	t.Cleanup(func() { udpProxyCommand = oldCommand })
-
-	err := runUDPBootstrap(context.Background())
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("runUDPBootstrap() error = %v, want EOF", err)
-	}
-}
-
-func TestRunUDPBootstrapTimesOutWaitingForReadiness(t *testing.T) {
-	oldTimeout := udpBootstrapTimeout
-	udpBootstrapTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { udpBootstrapTimeout = oldTimeout })
-	oldCommand := udpProxyCommand
-	udpProxyCommand = func(context.Context, string, ...string) *exec.Cmd {
-		return exec.Command("/bin/sh", "-c", "sleep 5")
-	}
-	t.Cleanup(func() { udpProxyCommand = oldCommand })
-
-	err := runUDPBootstrap(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("runUDPBootstrap() error = %v, want deadline exceeded", err)
-	}
-}
-
-func TestParseUDPPortRange(t *testing.T) {
-	tests := []struct {
-		name      string
-		value     string
-		want      udpPortRange
-		wantError bool
-	}{
-		{name: "empty uses default", value: "", want: udpPortRange{start: defaultUDPPortStart, end: defaultUDPPortEnd}},
-		{name: "zero is ephemeral", value: "0", want: udpPortRange{start: 0, end: 0}},
-		{name: "zero range rejected", value: "0-100", wantError: true},
-		{name: "single port", value: "61000", want: udpPortRange{start: 61000, end: 61000}},
-		{name: "range", value: "61000-61023", want: udpPortRange{start: 61000, end: 61023}},
-		{name: "range with spaces", value: " 61000 - 61023 ", want: udpPortRange{start: 61000, end: 61023}},
-		{name: "reversed range", value: "61023-61000", wantError: true},
-		{name: "non-numeric", value: "abc", wantError: true},
-		{name: "missing end", value: "61000-", wantError: true},
-		{name: "port too high", value: "70000", wantError: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseUDPPortRange(tt.value)
-			if tt.wantError {
-				if err == nil {
-					t.Fatalf("parseUDPPortRange(%q) error = nil, want error", tt.value)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseUDPPortRange(%q) error = %v", tt.value, err)
-			}
-			if got != tt.want {
-				t.Fatalf("parseUDPPortRange(%q) = %+v, want %+v", tt.value, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestListenUDPInRange(t *testing.T) {
-	// Occupy a wildcard UDP port, then assert listenUDPInRange skips it.
-	var lc net.ListenConfig
-	occupied, err := lc.ListenPacket(context.Background(), "udp", ":0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = occupied.Close() }()
-	udpPort := func(t *testing.T, conn net.PacketConn) int {
-		t.Helper()
-		addr, ok := conn.LocalAddr().(*net.UDPAddr)
-		if !ok {
-			t.Fatalf("LocalAddr() = %T, want *net.UDPAddr", conn.LocalAddr())
-		}
-		return addr.Port
-	}
-	busyPort := udpPort(t, occupied)
-
-	t.Run("skips busy port", func(t *testing.T) {
-		conn, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort, end: busyPort + 8})
-		if err != nil {
-			t.Fatalf("listenUDPInRange error = %v", err)
-		}
-		defer func() { _ = conn.Close() }()
-		got := udpPort(t, conn)
-		if got == busyPort {
-			t.Fatalf("bound busy port %d, want a different port in range", busyPort)
-		}
-		if got < busyPort || got > busyPort+8 {
-			t.Fatalf("bound port %d outside range %d-%d", got, busyPort, busyPort+8)
-		}
-	})
-
-	t.Run("exhausted range errors", func(t *testing.T) {
-		_, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort, end: busyPort})
-		if err == nil {
-			t.Fatal("listenUDPInRange error = nil, want exhausted-range error")
-		}
-		if !strings.Contains(err.Error(), "no free UDP port in range") {
-			t.Fatalf("error = %v, want 'no free UDP port in range'", err)
-		}
-	})
-
-	t.Run("invalid direct range errors", func(t *testing.T) {
-		_, err := listenUDPInRange(context.Background(), udpPortRange{start: busyPort + 8, end: busyPort})
-		if err == nil {
-			t.Fatal("listenUDPInRange error = nil, want invalid-range error")
-		}
-		if !strings.Contains(err.Error(), "invalid UDP port range") {
-			t.Fatalf("error = %v, want 'invalid UDP port range'", err)
-		}
-	})
-
-	t.Run("ephemeral binds", func(t *testing.T) {
-		conn, err := listenUDPInRange(context.Background(), udpPortRange{start: 0, end: 0})
-		if err != nil {
-			t.Fatalf("listenUDPInRange ephemeral error = %v", err)
-		}
-		defer func() { _ = conn.Close() }()
-		if udpPort(t, conn) == 0 {
-			t.Fatal("ephemeral bind returned port 0")
-		}
-	})
 }
 
 func TestPprofAddrIsLoopback(t *testing.T) {
@@ -1436,7 +1284,7 @@ func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
 
 func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
 	_, err := remoteDiscoveryDaemonOption(t.TempDir(), "serial", clock.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "udp" or "stdio")`)
+	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "quic" or "stdio")`)
 }
 
 func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {

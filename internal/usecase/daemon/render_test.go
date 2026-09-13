@@ -38,14 +38,14 @@ func TestPaletteBackdropDimsSimultaneousCopyMode(t *testing.T) {
 	pane.screen.Write([]byte("\x1b[38;2;180;90;30mX"))
 
 	d.enterCopyMode(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	undimmed := client.Cell(0, 1)
 	require.Equal(t, 'X', undimmed.Rune, "fixture must address copy-mode pane content")
 	copyBar := client.RowCells(client.Rows() - 1)
 	require.Contains(t, rowText(copyBar), "[SCROLL]", "fixture must capture the copy status bar")
 
 	d.enterPalette(sess, ac)
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	dimmed := client.Cell(0, 1)
 	require.Equal(t, undimmed.Rune, dimmed.Rune, "palette backdrop must preserve copy content")
 	require.Equal(t, themeui.NewDimmer(theme).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "palette backdrop must dim the composed copy frame")
@@ -84,9 +84,8 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 
 			d.firstPaint(sess, ac)
 
-			frame := awaitFrame(t, sends, wire.MsgOutput)
-			output, err := wire.UnmarshalOutput(frame.Payload)
-			require.NoError(t, err)
+			frame := awaitFrame(t, sends, "Output")
+			output := unmarshalTestOutput(t, frame.Payload)
 			require.Zero(t, output.Base, "first paint must be a mandatory reset")
 			select {
 			case extra := <-sends:
@@ -106,13 +105,13 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	pane := sess.tabs[0].focusedPane()
 	pane.screen.Write([]byte("X"))
 	d.paint(sess, ac, true, nil)
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	undimmed := client.Cell(0, 1)
 	topBar := client.Cell(0, 0)
 	bottomBar := client.Cell(0, 24)
 
 	d.handleInput(sess, ac, []byte("\x1b "))
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	dimmed := client.Cell(0, 1)
 	require.Equal(t, 'X', dimmed.Rune)
 	require.Equal(t, themeui.NewDimmer(backdropTheme()).Dim(undimmed.Style).Canonical(), dimmed.Style.Canonical(), "open palette must use the theme dim style")
@@ -124,7 +123,7 @@ func TestPaletteBackdropProductionRenderAndDismissal(t *testing.T) {
 	require.Equal(t, dimmedBottomBar, client.Cell(0, 24), "bottom chrome is part of the complete backdrop")
 
 	d.handleInput(sess, ac, []byte("\x1b"))
-	mustApplyOutput(t, client, awaitFrame(t, sends, wire.MsgOutput))
+	mustApplyOutput(t, client, awaitFrame(t, sends, "Output"))
 	require.Equal(t, undimmed, client.Cell(0, 1), "full redraw restores pane rune and style")
 	require.Equal(t, topBar, client.Cell(0, 0))
 	require.Equal(t, bottomBar, client.Cell(0, 24))
@@ -166,10 +165,10 @@ func awaitPTYReadProcessed(t *testing.T, processed <-chan struct{}) {
 	<-processed
 }
 
-func awaitOutputFrameWithoutSleep(t *testing.T, sends <-chan wire.Frame) wire.Frame {
+func awaitOutputFrameWithoutSleep(t *testing.T, sends <-chan wire.Envelope) wire.Envelope {
 	t.Helper()
 	frame := <-sends
-	require.Equal(t, wire.MsgOutput, frame.Type)
+	require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
 	return frame
 }
 
@@ -309,8 +308,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, inactiveProcessed)
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), urgentRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
-		output, err := wire.UnmarshalOutput(frame.Payload)
-		require.NoError(t, err)
+		output := unmarshalTestOutput(t, frame.Payload)
 		require.Contains(t, string(output.Data), "partial complete")
 		requireNoCoordinatorOutputFrame(t, sends)
 
@@ -342,8 +340,7 @@ func TestPTYReaderSyncVisibilityTransitions(t *testing.T) {
 		awaitPTYReadProcessed(t, newProcessed)
 		fireCoordinatorTimer(t, rc, drainCoordinatorTimers(clock), minOutputRenderDeadline)
 		frame := awaitOutputFrameWithoutSleep(t, sends)
-		output, err := wire.UnmarshalOutput(frame.Payload)
-		require.NoError(t, err)
+		output := unmarshalTestOutput(t, frame.Payload)
 		require.Contains(t, string(output.Data), "newly active")
 		require.NotContains(t, string(output.Data), "old partial")
 
@@ -470,7 +467,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 }
 
 func TestNonRenderablePaneDamageRemainsPendingForCapture(t *testing.T) {
-	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan wire.Frame) {
+	newFixture := func(t *testing.T) (*Daemon, *session, *tab, *pane, chan wire.Envelope) {
 		t.Helper()
 		p, release := newBlockingPTY(t)
 		t.Cleanup(release)
@@ -532,9 +529,8 @@ func TestAltXClosesFinalTabAndDetaches(t *testing.T) {
 	d.handleInput(sess, ac, []byte("CLT\r"))
 
 	require.Equal(t, 0, sessionCount(d))
-	f := awaitFrame(t, sends, wire.MsgDetached)
-	det, err := wire.UnmarshalDetached(f.Payload)
-	require.NoError(t, err)
+	f := awaitFrame(t, sends, "Detached")
+	det := decodeServerMessage(t, f).(protocol.Detached)
 	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 }
 
@@ -553,9 +549,8 @@ func TestPTYEOFClosesActiveNonFinalTabAndRepaintsRemaining(t *testing.T) {
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
 	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	f := awaitFrame(t, sends, wire.MsgOutput)
-	out, err := wire.UnmarshalOutput(f.Payload)
-	require.NoError(t, err)
+	f := awaitFrame(t, sends, "Output")
+	out := unmarshalTestOutput(t, f.Payload)
 	data := string(out.Data)
 	require.Contains(t, data, "remaining")
 	require.Contains(t, data, "work")
@@ -579,9 +574,8 @@ func TestPTYEOFClosesInactiveNonFinalTabAndRepaintsStatus(t *testing.T) {
 	require.Eventually(t, func() bool { return tabCount(sess) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, 1, sessionCount(d))
 	require.Equal(t, 0, testAttachmentTabIndex(sess))
-	f := awaitFrame(t, sends, wire.MsgOutput)
-	out, err := wire.UnmarshalOutput(f.Payload)
-	require.NoError(t, err)
+	f := awaitFrame(t, sends, "Output")
+	out := unmarshalTestOutput(t, f.Payload)
 	data := string(out.Data)
 	require.Contains(t, data, "active")
 	require.Contains(t, data, "work")
@@ -598,9 +592,8 @@ func TestPTYEOFFinalTabKillsSessionAndDetaches(t *testing.T) {
 	releases[0]()
 
 	require.Eventually(t, func() bool { return sessionCount(d) == 0 }, 2*time.Second, 5*time.Millisecond)
-	f := awaitFrame(t, sends, wire.MsgDetached)
-	det, err := wire.UnmarshalDetached(f.Payload)
-	require.NoError(t, err)
+	f := awaitFrame(t, sends, "Detached")
+	det := decodeServerMessage(t, f).(protocol.Detached)
 	require.Equal(t, protocol.ReasonSessionKilled, det.Reason)
 
 	d.sessWg.Wait()
@@ -869,8 +862,8 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	var gotOutput atomic.Bool
 	tr := newMockServerConnection(t)
 	tr.EXPECT().Close().Return(nil).Maybe()
-	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Frame) error {
-		if f.Type == wire.MsgOutput {
+	tr.EXPECT().Send(mock.Anything).RunAndReturn(func(f wire.Envelope) error {
+		if envelopeMessageName(nil, f.Payload) == "Output" {
 			gotOutput.Store(true)
 		}
 		return nil
@@ -989,7 +982,7 @@ func TestPTYKittyIcatDetectionGetsResponsesWrittenBackToPTY(t *testing.T) {
 	}
 	select {
 	case f := <-sends:
-		require.NotEqual(t, wire.MsgOutput, f.Type)
+		require.NotEqual(t, "Output", envelopeMessageName(t, f.Payload))
 	default:
 	}
 }

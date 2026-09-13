@@ -28,8 +28,7 @@ func TestUIFenceDispatchReceivesACKAtFullOutputWindow(t *testing.T) {
 	t.Cleanup(func() { rc.beginSessionTeardown().finish(); rc.waitForTimerWorkers() })
 	ac.output.setWindow(1)
 	require.Equal(t, paintEmitted, d.paint(sess, ac, true, lease))
-	initial, err := wire.UnmarshalOutput(awaitFrame(t, sends, wire.MsgOutput).Payload)
-	require.NoError(t, err)
+	initial := unmarshalTestOutput(t, awaitFrame(t, sends, "Output").Payload)
 	require.True(t, ac.output.atCapacity())
 	require.Empty(t, drainAllFrames(sends))
 
@@ -56,10 +55,8 @@ func TestUIFenceDispatchReceivesACKAtFullOutputWindow(t *testing.T) {
 	require.Empty(t, drainAllFrames(sends), "full output window cannot publish or confirm the fence")
 	messages <- protocol.Ack{Epoch: initial.Epoch, State: initial.New}
 	require.False(t, awaitTestValue(t, dispatched, "releasing ACK did not complete"))
-	update, err := wire.UnmarshalUIViewUpdate(awaitFrame(t, sends, wire.MsgUIViewUpdate).Payload)
-	require.NoError(t, err)
-	receipt, err := wire.UnmarshalUIReceipt(awaitFrame(t, sends, wire.MsgUIReceipt).Payload)
-	require.NoError(t, err)
+	update := decodeServerMessage(t, awaitFrame(t, sends, "UIViewUpdate")).(protocol.UIViewUpdate)
+	receipt := decodeServerMessage(t, awaitFrame(t, sends, "UIReceipt")).(protocol.UIReceipt)
 	require.Equal(t, protocol.UIReceipt{ActionID: 9, Epoch: update.Epoch, State: update.State, ViewPublication: update.Context.Publication, Outcome: protocol.UIReceiptProcessed}, receipt)
 	require.Equal(t, initial.New, update.State, "no-op confirmation must not advance the ACK chain")
 	require.Equal(t, initial.Context.Publication+1, update.Context.Publication)
@@ -97,15 +94,12 @@ func TestUIFencePreRegistrationCaptureCannotConfirmAction(t *testing.T) {
 	}()
 	require.False(t, awaitTestValue(t, dispatched, "fence dispatch acquired render sendMu"))
 	emit(state)
-	initial, err := wire.UnmarshalOutput(awaitFrame(t, sends, wire.MsgOutput).Payload)
-	require.NoError(t, err)
+	initial := unmarshalTestOutput(t, awaitFrame(t, sends, "Output").Payload)
 	require.Empty(t, drainAllFrames(sends), "an earlier capture cannot retire a later fence")
 	require.True(t, rc.needsUIFence(lease, rc.captureUIFence(lease)))
 	emit(capture(false))
-	update, err := wire.UnmarshalUIViewUpdate(awaitFrame(t, sends, wire.MsgUIViewUpdate).Payload)
-	require.NoError(t, err)
-	receipt, err := wire.UnmarshalUIReceipt(awaitFrame(t, sends, wire.MsgUIReceipt).Payload)
-	require.NoError(t, err)
+	update := decodeServerMessage(t, awaitFrame(t, sends, "UIViewUpdate")).(protocol.UIViewUpdate)
+	receipt := decodeServerMessage(t, awaitFrame(t, sends, "UIReceipt")).(protocol.UIReceipt)
 	require.Equal(t, uint64(5), receipt.ActionID)
 	require.Equal(t, initial.New, receipt.State)
 	require.Equal(t, update.Context.Publication, receipt.ViewPublication)
@@ -113,14 +107,14 @@ func TestUIFencePreRegistrationCaptureCannotConfirmAction(t *testing.T) {
 }
 
 func TestUIFenceFailedPublicationOrReceiptDoesNotConfirm(t *testing.T) {
-	for _, failedType := range []wire.MsgType{wire.MsgUIViewUpdate, wire.MsgUIReceipt} {
-		t.Run(map[wire.MsgType]string{wire.MsgUIViewUpdate: "metadata", wire.MsgUIReceipt: "receipt"}[failedType], func(t *testing.T) {
+	for _, failedType := range []string{"UIViewUpdate", "UIReceipt"} {
+		t.Run(map[string]string{"UIViewUpdate": "metadata", "UIReceipt": "receipt"}[failedType], func(t *testing.T) {
 			d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
 			tr := newMockServerConnection(t)
-			sends := make(chan wire.Frame, 16)
+			sends := make(chan wire.Envelope, 16)
 			var fail atomic.Bool
-			tr.EXPECT().Send(mock.Anything).RunAndReturn(func(frame wire.Frame) error {
-				if fail.Load() && frame.Type == failedType {
+			tr.EXPECT().Send(mock.Anything).RunAndReturn(func(frame wire.Envelope) error {
+				if fail.Load() && envelopeMessageName(nil, frame.Payload) == failedType {
 					return errors.New("injected send failure")
 				}
 				sends <- frame
@@ -143,19 +137,18 @@ func TestUIFenceFailedPublicationOrReceiptDoesNotConfirm(t *testing.T) {
 				rc.waitForTimerWorkers()
 			})
 			require.Equal(t, paintEmitted, d.paint(sess, ac, true, lease))
-			initial, err := wire.UnmarshalOutput(awaitFrame(t, sends, wire.MsgOutput).Payload)
-			require.NoError(t, err)
+			initial := unmarshalTestOutput(t, awaitFrame(t, sends, "Output").Payload)
 			require.Empty(t, drainAllFrames(sends))
 			require.False(t, d.handleAttachmentClientMessage(captureAttachmentCapability(sess, ac, tr), protocol.UIFence{ActionID: 13}))
 			fail.Store(true)
 			require.Equal(t, paintEmitted, d.paint(sess, ac, false, lease))
 			awaitTestValue(t, cleanupEntered, "failed send did not reserve exact-attachment cleanup")
-			if failedType == wire.MsgUIViewUpdate {
+			if failedType == "UIViewUpdate" {
 				require.Equal(t, initial.Context.Publication, ac.output.viewPublication)
 				require.True(t, rc.needsUIFence(lease, rc.captureUIFence(lease)), "failed metadata cannot select a receipt")
 			} else {
-				update, err := wire.UnmarshalUIViewUpdate(awaitFrame(t, sends, wire.MsgUIViewUpdate).Payload)
-				require.NoError(t, err)
+				update, ok := decodeServerMessage(t, awaitFrame(t, sends, "UIViewUpdate")).(protocol.UIViewUpdate)
+				require.True(t, ok)
 				require.Equal(t, initial.Context.Publication+1, update.Context.Publication)
 				rc.mu.Lock()
 				pending := lease.pendingUIFence

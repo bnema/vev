@@ -13,10 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func previewClientTargetForTest() domain.RemoteSessionTarget {
@@ -37,7 +37,8 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 		LifecycleID: lifecycle, TabID: target.LiveTabID, Revision: 7, Width: 1, Height: 1,
 		Cells: []renderer.Cell{{Rune: 'x', Style: renderer.DefaultStyle()}},
 	}
-	payload := wire.MarshalRemotePreview(want)
+	payload, err := sessionwire.EncodeServerMessage(want)
+	require.NoError(t, err)
 	require.NotNil(t, payload)
 
 	var gotPath string
@@ -57,9 +58,13 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 		if err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		request, err := wire.UnmarshalRemotePreviewRequest(requestPayload)
+		requestMessage, err := sessionwire.DecodeClientEnvelope(requestPayload)
 		if err != nil {
 			t.Fatalf("decode request payload: %v", err)
+		}
+		request, ok := requestMessage.(protocol.RemotePreviewRequest)
+		if !ok {
+			t.Fatalf("request payload = %T, want protocol.RemotePreviewRequest", requestMessage)
 		}
 		if request.Target != target || request.Width != 1 || request.Height != 1 {
 			t.Fatalf("request = %#v, want target and 1x1 dimensions", request)
@@ -96,13 +101,14 @@ func TestRemotePreviewClientRejectsMismatchedResponseIdentity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			preview := valid
 			tt.mutate(&preview)
-			payload := wire.MarshalRemotePreview(preview)
+			payload, err := sessionwire.EncodeServerMessage(preview)
+			require.NoError(t, err)
 			require.NotNil(t, payload)
 
 			client := &PreviewClient{command: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 				return stdoutCmd(ctx, string(payload))
 			}}
-			_, err := client.Preview(context.Background(), target, 1, 1)
+			_, err = client.Preview(context.Background(), target, 1, 1)
 			require.ErrorIs(t, err, errRemotePreviewIdentity)
 		})
 	}

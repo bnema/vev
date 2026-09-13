@@ -12,7 +12,7 @@ import (
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 )
 
-// maxImagePushSize independently caps an accepted MsgImagePush payload,
+// maxImagePushSize independently caps an accepted ImagePush payload,
 // defending against an old or foreign client even though the client is
 // expected to enforce the same cap before sending. Kept at 1 MiB so one
 // ImagePush fits the datagram transport's fragmented payload ceiling.

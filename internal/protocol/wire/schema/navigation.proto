@@ -1,0 +1,119 @@
+// Navigation inventory and picker control plane.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+import "common.proto";
+import "picker.proto";
+import "session.proto";
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// InventoryEntry is one sanitized public row: display facts only.
+message InventoryEntry {
+  string source_key = 1;
+  string entry_key = 2;
+  string name = 3;
+  string display_origin = 4;
+  string state = 5;
+  string reason = 6;
+}
+
+// InventorySourceGroup is one packed source with its own status.
+message InventorySourceGroup {
+  string source_key = 1;
+  // Closed status taxonomy: 1 = ok, 2 = unavailable, 3 = too large.
+  uint32 status = 2;
+  repeated InventoryEntry entries = 3;
+}
+
+// NavigationInventoryRequest queries a source control connection.
+message NavigationInventoryRequest {
+  uint32 version = 1;
+  uint64 request_id = 2;
+  // Closed operation taxonomy: 1 = snapshot, 2 = resolve.
+  uint32 operation = 3;
+  string source_key = 4;
+  string entry_key = 5;
+  RemoteRegistration registration = 6; // optional pointer
+}
+
+// NavigationInventoryResponse answers a control query: groups for
+// snapshot, one non-mutating AttachTarget for resolve, never both.
+message NavigationInventoryResponse {
+  uint64 request_id = 1;
+  uint32 operation = 2;
+  // Closed status taxonomy: 1 = ok, 2 = unavailable, 3 = invalid,
+  // 4 = version mismatch.
+  uint32 status = 3;
+  repeated InventorySourceGroup groups = 4;
+  AttachTarget resolved = 5; // optional pointer
+}
+
+// NavigationInventoryDemand is serving daemon to client.
+message NavigationInventoryDemand {
+  uint64 interaction_generation = 1;
+  bool open = 2;
+}
+
+// NavigationInventoryPublication is client to serving daemon.
+message NavigationInventoryPublication {
+  uint64 interaction_generation = 1;
+  uint64 publication_generation = 2;
+  repeated InventorySourceGroup groups = 3;
+}
+
+// NavigationInventorySelection is serving daemon to client.
+message NavigationInventorySelection {
+  uint64 cause_action_id = 1;
+  uint64 interaction_generation = 2;
+  uint64 publication_generation = 3;
+  string source_key = 4;
+  string entry_key = 5;
+}
+
+// NavigationInventoryFailure is client to serving daemon.
+message NavigationInventoryFailure {
+  uint64 cause_action_id = 1;
+  uint64 interaction_generation = 2;
+  string source_key = 3;
+  string entry_key = 4;
+  // Closed code taxonomy: 1 = stale identity, 2 = source gone,
+  // 3 = incompatible, 4 = invalid target, 5 = navigation failed,
+  // 6 = restore failed.
+  uint32 code = 5;
+}
+
+// PickerRouteObservation is one exact-target probe answer.
+message PickerRouteObservation {
+  ExactTarget target = 1;
+  // Closed presence taxonomy: 1 = present, 2 = absent, 3 = unknown.
+  uint32 presence = 2;
+  bool attention = 3;
+}
+
+// PickerControlRequest queries the client's local picker authority.
+// Operation payloads are exclusive: snapshot/resolve carry source/key
+// identity, observe carries one bounded target list.
+message PickerControlRequest {
+  uint32 version = 1;
+  uint64 request_id = 2;
+  // Closed operation taxonomy: 1 = snapshot, 2 = resolve, 3 = observe.
+  uint32 operation = 3;
+  uint64 source_revision = 4;
+  string source_id = 5;
+  string key = 6;
+  repeated ExactTarget targets = 7;
+}
+
+// PickerControlResponse returns one snapshot, one revalidated target, or
+// the observation list. Failed statuses carry no payload.
+message PickerControlResponse {
+  uint64 request_id = 1;
+  uint32 operation = 2;
+  // Closed source-status taxonomy: 1 = ok, 2 = unavailable, 3 = too large.
+  uint32 status = 3;
+  PickerSnapshot snapshot = 4; // optional pointer
+  AttachTarget resolved = 5; // optional pointer
+  repeated PickerRouteObservation observations = 6;
+}

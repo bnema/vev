@@ -9,7 +9,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -31,8 +30,7 @@ func TestLocalPickerOfferCarriesExactLifecycle(t *testing.T) {
 
 	require.NoError(t, d.switchToTargetForAttachment(effect, picker.Target{Session: target.id}, sessionHandoffGuard{allowSamePeer: true}, "picker-select"))
 	frame := receiveRemotePicker(t, sends, "local attach target")
-	got, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	got := decodeServerMessage(t, frame).(protocol.AttachTarget)
 	require.Empty(t, got.Endpoint)
 	require.Equal(t, protocol.IntentAttach, got.Intent)
 	require.True(t, got.SamePeer)
@@ -62,11 +60,11 @@ func TestStoppedLocalPickerHandoffWaitsForClientClose(t *testing.T) {
 	}, sessionHandoffGuard{allowSamePeer: true}, "picker-select"))
 
 	cleanup := receiveRemotePicker(t, sends, "graphics cleanup")
-	require.Equal(t, wire.MsgOutput, cleanup.Type)
+	require.Equal(t, "Output", envelopeMessageName(t, cleanup.Payload))
 	handoff := receiveRemotePicker(t, sends, "stopped local attach target")
-	require.Equal(t, wire.MsgAttachTarget, handoff.Type)
-	target, err := wire.UnmarshalAttachTarget(handoff.Payload)
-	require.NoError(t, err)
+	require.Equal(t, "AttachTarget", envelopeMessageName(t, handoff.Payload))
+	target, ok := decodeServerMessage(t, handoff).(protocol.AttachTarget)
+	require.True(t, ok)
 	require.False(t, target.SamePeer)
 	require.Equal(t, &protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "stopped"}, target.ExactTarget)
 	require.Same(t, source, ac.currentAttachmentSession(), "the source remains attached until the client receives the handoff and closes")
@@ -89,8 +87,7 @@ func TestRemotePickerRichHandoffCarriesLifecycleTabAndPolicy(t *testing.T) {
 	target := picker.Target{Session: key.ID(), RemoteKey: &key, RemoteTarget: &remoteTarget, TabID: "tab-1"}
 	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{}, "picker-select"))
 	frame := receiveRemotePicker(t, sends, "rich attach target")
-	got, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	got := decodeServerMessage(t, frame).(protocol.AttachTarget)
 	require.NotNil(t, got.RemoteTarget)
 	require.Equal(t, remoteTarget, *got.RemoteTarget)
 	require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, got.EnvironmentPolicy)
@@ -131,7 +128,7 @@ func TestRemotePickerRichHandoffRejectsMismatchedRouteKey(t *testing.T) {
 			for {
 				select {
 				case frame := <-sends:
-					require.NotEqual(t, wire.MsgAttachTarget, frame.Type)
+					require.NotEqual(t, "AttachTarget", envelopeMessageName(t, frame.Payload))
 				default:
 					return
 				}
@@ -160,7 +157,7 @@ func TestRemotePickerRichHandoffRejectsReplacedLifecycle(t *testing.T) {
 	for {
 		select {
 		case frame := <-sends:
-			require.NotEqual(t, wire.MsgAttachTarget, frame.Type, "rejected handoff must not send an attach target")
+			require.NotEqual(t, "AttachTarget", envelopeMessageName(t, frame.Payload), "rejected handoff must not send an attach target")
 		default:
 			return
 		}

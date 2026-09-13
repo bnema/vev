@@ -59,11 +59,11 @@ func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	d.attachCoordinator(sess, nil, ac, true)
 	tr, ok := ac.tr.(*mockServerConnection)
 	require.True(t, ok, "attached client connection must use the test wrapper")
-	frames := []wire.Frame{
-		{Type: wire.MsgClientNotice, Payload: []byte{0xff}},
-		{Type: wire.MsgDetach, Payload: wire.MarshalDetach(protocol.Detach{})},
+	frames := []wire.Envelope{
+		{Payload: []byte{0xff}},
+		mustClientEnvelope(protocol.Detach{}),
 	}
-	tr.EXPECT().Recv().RunAndReturn(func() (wire.Frame, error) {
+	tr.EXPECT().Recv().RunAndReturn(func() (wire.Envelope, error) {
 		frame := frames[0]
 		frames = frames[1:]
 		return frame, nil
@@ -74,7 +74,6 @@ func TestMalformedClientNoticeIsIgnored(t *testing.T) {
 	require.Empty(t, d.notices.history())
 	require.Contains(t, logs.String(), "rejected client message")
 	require.Contains(t, logs.String(), "category=1")
-	require.Contains(t, logs.String(), "type=11")
 }
 
 func stripNoticeTimes(notices []domain.Notification) []domain.Notification {
@@ -274,7 +273,7 @@ func (c *noticeClock) durations() []time.Duration {
 // caller-supplied clock so toast TTLs are deterministic. The session has no
 // render coordinator, so invalidateRender paints directly and every repaint is
 // observable as a frame on the returned channel.
-func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attachedClient, chan wire.Frame) {
+func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attachedClient, chan wire.Envelope) {
 	t.Helper()
 	p, _ := newBlockingPTY(t)
 	d := newTestDaemon(t, nil, clk)
@@ -871,9 +870,8 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 
 	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "could not open pane", nil)
 	awaitToastCount(t, ac, 1)
-	shown := awaitFrame(t, sends, wire.MsgOutput)
-	shownOutput, err := wire.UnmarshalOutput(shown.Payload)
-	require.NoError(t, err)
+	shown := awaitFrame(t, sends, "Output")
+	shownOutput := unmarshalTestOutput(t, shown.Payload)
 	terminal := vt.NewScreen(80, 25)
 	terminal.Write(shownOutput.Data)
 
@@ -887,9 +885,8 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 	_, overflow := visibleToasts(ac)
 	require.Zero(t, overflow, "overflow resets once no toast is visible")
 
-	expired := awaitFrame(t, sends, wire.MsgOutput)
-	expiredOutput, err := wire.UnmarshalOutput(expired.Payload)
-	require.NoError(t, err)
+	expired := awaitFrame(t, sends, "Output")
+	expiredOutput := unmarshalTestOutput(t, expired.Payload)
 	terminal.Write(expiredOutput.Data)
 	ac.sendMu.Lock()
 	base := ac.pipelineCache.frame.Clone()

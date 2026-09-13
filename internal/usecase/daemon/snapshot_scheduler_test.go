@@ -313,7 +313,7 @@ func TestServeShutdownDeadlineStillJoinsRetainedSessionWriter(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, listener) }()
 
-	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, "Welcome")
 	sess := firstSession(d)
 	require.NotNil(t, sess)
 
@@ -478,7 +478,7 @@ func TestServeShutdownCheckpointsBeforeStoppingSnapshotWorker(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, "Welcome")
 	markSnapshotDirty(firstSession(d))
 	d.snapshotWake <- struct{}{}
 	first := <-published
@@ -535,7 +535,7 @@ func TestServeShutdownDeadlineStillJoinsUncooperativeSnapshotRepository(t *testi
 	served := make(chan error, 1)
 	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, wire.MsgWelcome)
+	awaitFrame(t, sends, "Welcome")
 	markSnapshotDirty(firstSession(d))
 	d.snapshotWake <- struct{}{}
 	select {

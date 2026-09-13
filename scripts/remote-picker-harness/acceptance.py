@@ -8,7 +8,7 @@ or accepting a request is never success: every scenario ends on a
 postcondition ``wait`` or a verified capture.
 
 Transport selection passes through the fixture process environment:
-``VEV_REMOTE_TRANSPORT`` unset means UDP, ``stdio`` means SSH stdio.
+``VEV_REMOTE_TRANSPORT`` unset means QUIC, ``stdio`` means SSH stdio.
 Direct-remote scenarios use ``--remote`` in a fresh client container with no
 local daemon; they never create a local home session as setup.
 """
@@ -159,7 +159,7 @@ def scenario_local_palette_cycle(client_container):
 
 def scenario_direct_remote_ephemeral(client_container, remote_container, env):
     """M2/M3: direct remote attach with no local daemon, committed output."""
-    mode = env.get("VEV_REMOTE_TRANSPORT", "udp")
+    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
     driver = Driver(client_container, ["--remote", "remote"], env=env)
     try:
         capture = driver.call("capture")
@@ -238,7 +238,7 @@ def commit_target(driver, target, before):
 def scenario_client_picker_navigate(client_container, remote_container, env):
     """P6.2: client-owned navigation picker end to end, plus its cancel path."""
     topology = picker_topology(env)
-    mode = env.get("VEV_REMOTE_TRANSPORT", "udp")
+    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
     first, second, entry = (name + suffix for name in ("picka", "pickb", "pickc"))
     # Direct mode is served by the remote daemon: the picker interaction
@@ -283,7 +283,7 @@ def scenario_client_picker_navigate(client_container, remote_container, env):
 
 def scenario_hybrid_exact_return(client_container, remote_container, env):
     """M4/M5: local A -> local B -> remote -> exact local A with committed action."""
-    mode = env.get("VEV_REMOTE_TRANSPORT", "udp")
+    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
     first, second, remote = (name + suffix for name in ("sample", "second", "other"))
     fixture = Driver(remote_container, ["--session", remote])
@@ -323,7 +323,7 @@ SCENARIOS = {
 
 def main(argv):
     if len(argv) != 4:
-        raise SystemExit("usage: acceptance.py CLIENT_CONTAINER REMOTE_CONTAINER SCENARIO[@stdio|@udp]")
+        raise SystemExit("usage: acceptance.py CLIENT_CONTAINER REMOTE_CONTAINER SCENARIO[@stdio|@quic]")
     client_container, remote_container, spec = argv[1], argv[2], argv[3]
     name, _, transport = spec.partition("@")
     if name not in SCENARIOS:
@@ -331,8 +331,8 @@ def main(argv):
     env = {}
     if transport == "stdio":
         env["VEV_REMOTE_TRANSPORT"] = "stdio"
-    elif transport and transport != "udp":
-        raise SystemExit(f"unknown transport {transport}; want stdio or udp")
+    elif transport and transport != "quic":
+        raise SystemExit(f"unknown transport {transport}; want stdio or quic")
     topology = os.environ.get("VEV_ACCEPTANCE_TOPOLOGY")
     if topology:
         env["VEV_ACCEPTANCE_TOPOLOGY"] = topology

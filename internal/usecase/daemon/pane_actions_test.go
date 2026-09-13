@@ -696,7 +696,7 @@ func TestClosePaneRepaintFanoutRespectsAttachmentScope(t *testing.T) {
 			closingPTY.EXPECT().Close().Return(nil).Once()
 
 			clients := make([]*attachedClient, 2)
-			sends := make([]chan wire.Frame, 2)
+			sends := make([]chan wire.Envelope, 2)
 			for i := range clients {
 				tr, sent := newCapturingTransport(t)
 				clients[i] = &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
@@ -716,7 +716,7 @@ func TestClosePaneRepaintFanoutRespectsAttachmentScope(t *testing.T) {
 				select {
 				case frame := <-sends[i]:
 					require.True(t, want, "attachment %d unexpectedly repainted: %#v", i, frame)
-					require.Equal(t, wire.MsgOutput, frame.Type)
+					require.Equal(t, "Output", envelopeMessageName(t, frame.Payload))
 				default:
 					require.False(t, want, "attachment %d was not repainted", i)
 				}

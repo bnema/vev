@@ -514,9 +514,8 @@ func TestRemotePickerNavigationCommitsARemoteRowThroughTheHandoff(t *testing.T) 
 
 	d.resolvePickerSelection(effect, navigateSelection(snapshot, key))
 
-	frame := awaitFrame(t, sends, wire.MsgAttachTarget)
-	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	frame := awaitFrame(t, sends, "AttachTarget")
+	handoff := decodeServerMessage(t, frame).(protocol.AttachTarget)
 	require.Equal(t, "arch", handoff.Endpoint)
 	require.Equal(t, "work", handoff.Session)
 }
@@ -579,9 +578,9 @@ func TestRemotePickerHandoffSendsTargetAndLeavesNoShadowSession(t *testing.T) {
 	require.NoError(t, d.sendRemoteAttachTargetForAttachment(effect, target, sessionHandoffGuard{}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "attach target")
-	require.Equal(t, wire.MsgAttachTarget, frame.Type)
-	got, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	require.Equal(t, "AttachTarget", envelopeMessageName(t, frame.Payload))
+	got, ok := decodeServerMessage(t, frame).(protocol.AttachTarget)
+	require.True(t, ok)
 	require.Equal(t, protocol.AttachTarget{Endpoint: "arch", Session: "work", Intent: protocol.IntentAttach, RemoteTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, got)
 	require.Nil(t, ac.currentAttachmentSession())
 	d.mu.Lock()
@@ -686,8 +685,7 @@ func TestRemotePickerResurrectsStoppedRemoteSessionWithoutTabMetadata(t *testing
 	require.NoError(t, local.sendRemoteAttachTargetForAttachment(effect, selected, sessionHandoffGuard{}, "picker-select"))
 
 	frame := receiveRemotePicker(t, sends, "stopped remote target without tab metadata")
-	handoff, err := wire.UnmarshalAttachTarget(frame.Payload)
-	require.NoError(t, err)
+	handoff := decodeServerMessage(t, frame).(protocol.AttachTarget)
 	require.Equal(t, selected.RemoteTarget, handoff.RemoteTarget)
 
 	remote := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
@@ -819,10 +817,10 @@ func firstSelectableTarget(t *testing.T, set pickerLineSet) (picker.Target, bool
 	return picker.Target{}, false
 }
 
-func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...appports.ServerConnection) (*session, *attachedClient, chan wire.Frame) {
+func addRemoteRefreshPickerOwner(t *testing.T, d *Daemon, id domain.SessionID, transports ...appports.ServerConnection) (*session, *attachedClient, chan wire.Envelope) {
 	t.Helper()
 	var tr appports.ServerConnection
-	var sends chan wire.Frame
+	var sends chan wire.Envelope
 	if len(transports) != 0 {
 		tr = transports[0]
 	} else {

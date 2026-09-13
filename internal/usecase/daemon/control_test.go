@@ -198,10 +198,7 @@ func TestHandleCommandAttachedRejectionReturnsSendFailure(t *testing.T) {
 func TestHandleConnRoutesCommand(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	request := protocol.CommandRequest{Version: protocol.Version, Slug: "list-sessions"}
-	payload, err := wire.MarshalCommandRequest(request)
-	require.NoError(t, err)
-	frame := wire.Frame{Type: wire.MsgCommand, Payload: payload}
-	tr, sends, _ := newConn(t, frame)
+	tr, sends, _ := newConn(t, mustClientEnvelope(request))
 
 	d.handleConn(tr)
 
@@ -1312,7 +1309,7 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 		done <- struct{}{}
 	}()
 	close(start)
-	for _, sends := range []chan wire.Frame{leftSends, rightSends} {
+	for _, sends := range []chan wire.Envelope{leftSends, rightSends} {
 		select {
 		case <-done:
 			result := awaitCommandResult(t, sends)
@@ -1337,14 +1334,12 @@ func addNamedMoveDestination(d *Daemon, name, tabID, paneID string) *session {
 	return sess
 }
 
-func commandFrame(t *testing.T, request protocol.CommandRequest) wire.Frame {
+func commandFrame(t *testing.T, request protocol.CommandRequest) wire.Envelope {
 	t.Helper()
 	if request.Version == 0 {
 		request.Version = protocol.Version
 	}
-	payload, err := wire.MarshalCommandRequest(request)
-	require.NoError(t, err)
-	return wire.Frame{Type: wire.MsgCommand, Payload: payload}
+	return mustClientEnvelope(request)
 }
 
 func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) protocol.CommandResult {
@@ -1355,12 +1350,10 @@ func sendCommand(t *testing.T, d *Daemon, request protocol.CommandRequest) proto
 	return awaitCommandResult(t, sends)
 }
 
-func awaitCommandResult(t *testing.T, sends chan wire.Frame) protocol.CommandResult {
+func awaitCommandResult(t *testing.T, sends chan wire.Envelope) protocol.CommandResult {
 	t.Helper()
-	reply := awaitFrame(t, sends, wire.MsgCommandResult)
-	result, err := wire.UnmarshalCommandResult(reply.Payload)
-	require.NoError(t, err)
-	return result
+	reply := awaitFrame(t, sends, "CommandResult")
+	return decodeServerMessage(t, reply).(protocol.CommandResult)
 }
 
 type controlPTYFactory struct {
@@ -1410,13 +1403,13 @@ func newBlockingControlSendTransport() *blockingControlSendTransport {
 	return &blockingControlSendTransport{started: make(chan struct{}), closed: make(chan struct{})}
 }
 
-func (tr *blockingControlSendTransport) Send(wire.Frame) error {
+func (tr *blockingControlSendTransport) Send(wire.Envelope) error {
 	tr.once.Do(func() { close(tr.started) })
 	<-tr.closed
 	return io.ErrClosedPipe
 }
 
-func (*blockingControlSendTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
+func (*blockingControlSendTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
 func (tr *blockingControlSendTransport) Close() error {
 	tr.once.Do(func() { close(tr.started) })
 	select {
@@ -1432,9 +1425,9 @@ type commandSendErrorTransport struct {
 	closed bool
 }
 
-func (tr *commandSendErrorTransport) Send(wire.Frame) error  { return tr.err }
-func (*commandSendErrorTransport) Recv() (wire.Frame, error) { return wire.Frame{}, io.EOF }
-func (tr *commandSendErrorTransport) Close() error           { tr.closed = true; return nil }
+func (tr *commandSendErrorTransport) Send(wire.Envelope) error  { return tr.err }
+func (*commandSendErrorTransport) Recv() (wire.Envelope, error) { return wire.Envelope{}, io.EOF }
+func (tr *commandSendErrorTransport) Close() error              { tr.closed = true; return nil }
 
 func addControlSession(d *Daemon, name, tabID, paneID string) *session {
 	tb := newTabWithStableID(tabID, paneID, newQuietPTY(), domain.Size{Cols: 80, Rows: 22})

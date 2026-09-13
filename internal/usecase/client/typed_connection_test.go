@@ -3,7 +3,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -11,6 +10,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -89,145 +90,40 @@ func (d *mockClientDialer) Dial(ctx context.Context) (ports.ClientConnection, er
 	return &rawClientConnection{raw: raw}, nil
 }
 
-func testClientFrame(message protocol.ClientMessage) (wire.Frame, error) {
-	switch m := message.(type) {
-	case protocol.Hello:
-		return wire.Frame{Type: wire.MsgHello, Payload: wire.MarshalHello(m)}, nil
-	case protocol.Input:
-		return wire.Frame{Type: wire.MsgInput, Payload: wire.MarshalInput(m)}, nil
-	case protocol.Resize:
-		p, e := wire.MarshalResize(m)
-		return wire.Frame{Type: wire.MsgResize, Payload: p}, e
-	case protocol.Detach:
-		return wire.Frame{Type: wire.MsgDetach, Payload: wire.MarshalDetach(m)}, nil
-	case protocol.Ping:
-		return wire.Frame{Type: wire.MsgPing, Payload: wire.MarshalPing(m)}, nil
-	case protocol.List:
-		return wire.Frame{Type: wire.MsgList, Payload: wire.MarshalList(m)}, nil
-	case protocol.Kill:
-		return wire.Frame{Type: wire.MsgKill, Payload: wire.MarshalKill(m)}, nil
-	case protocol.Theme:
-		return wire.Frame{Type: wire.MsgTheme, Payload: wire.MarshalTheme(m)}, nil
-	case protocol.Ack:
-		p, e := wire.MarshalAck(m)
-		return wire.Frame{Type: wire.MsgAck, Payload: p}, e
-	case protocol.ImagePush:
-		return wire.Frame{Type: wire.MsgImagePush, Payload: wire.MarshalImagePush(m)}, nil
-	case protocol.ClientNotice:
-		return wire.Frame{Type: wire.MsgClientNotice, Payload: wire.MarshalClientNotice(m)}, nil
-	case protocol.CommandRequest:
-		p, e := wire.MarshalCommandRequest(m)
-		return wire.Frame{Type: wire.MsgCommand, Payload: p}, e
-	case protocol.OutputResetRequest:
-		return wire.Frame{Type: wire.MsgOutputResetRequest}, nil
-	case protocol.RemotePreviewRequest:
-		return wire.Frame{Type: wire.MsgRemotePreviewRequest, Payload: wire.MarshalRemotePreviewRequest(m)}, nil
-	case protocol.RouteAttentionSubscription:
-		p, e := wire.MarshalRouteAttentionSubscription(m)
-		return wire.Frame{Type: wire.MsgRouteAttentionSubscription, Payload: p}, e
-	case protocol.SamePeerSwitchRequest:
-		p, e := wire.MarshalSamePeerSwitchRequest(m)
-		return wire.Frame{Type: wire.MsgSamePeerSwitchRequest, Payload: p}, e
-	case protocol.RecentRouteSnapshot:
-		p, e := wire.MarshalRecentRouteSnapshot(m)
-		return wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: p}, e
-	case protocol.RouteNavigationFailure:
-		p, e := wire.MarshalRouteNavigationFailure(m)
-		return wire.Frame{Type: wire.MsgRouteNavigationFailure, Payload: p}, e
-	case protocol.NavigationInventoryRequest:
-		p := wire.MarshalNavigationInventoryRequest(m)
-		if p == nil {
-			return wire.Frame{}, errors.New("test client connection: invalid inventory request")
-		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryRequest, Payload: p}, nil
-	case protocol.NavigationInventoryPublication:
-		p := wire.MarshalNavigationInventoryPublication(m)
-		if p == nil {
-			return wire.Frame{}, errors.New("test client connection: invalid inventory publication")
-		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryPublication, Payload: p}, nil
-	case protocol.NavigationInventoryFailure:
-		p := wire.MarshalNavigationInventoryFailure(m)
-		if p == nil {
-			return wire.Frame{}, errors.New("test client connection: invalid inventory failure")
-		}
-		return wire.Frame{Type: wire.MsgNavigationInventoryFailure, Payload: p}, nil
-	case protocol.PickerSelection:
-		p := wire.MarshalPickerSelection(m)
-		if p == nil {
-			return wire.Frame{}, errors.New("test client connection: invalid picker selection")
-		}
-		return wire.Frame{Type: wire.MsgPickerSelection, Payload: p}, nil
-	case protocol.PickerClose:
-		p := wire.MarshalPickerClose(m)
-		if p == nil {
-			return wire.Frame{}, errors.New("test client connection: invalid picker close")
-		}
-		return wire.Frame{Type: wire.MsgPickerCloseClient, Payload: p}, nil
-	case protocol.PickerPreviewRequest:
-		p := wire.MarshalPickerPreviewRequest(m)
-		if p == nil {
-			return wire.Frame{}, errors.New("test client connection: invalid picker preview request")
-		}
-		return wire.Frame{Type: wire.MsgPickerPreviewRequest, Payload: p}, nil
-	default:
-		return wire.Frame{}, errors.New("test client connection: unsupported client message")
+func testClientFrame(message protocol.ClientMessage) (wire.Envelope, error) {
+	raw, err := sessionwire.EncodeClientMessage(message)
+	if err != nil {
+		return wire.Envelope{}, err
 	}
+	return wire.Envelope{Payload: raw}, nil
 }
 
-func testServerMessage(frame wire.Frame) (protocol.ServerMessage, error) {
-	switch frame.Type {
-	case wire.MsgWelcome:
-		return wire.UnmarshalWelcome(frame.Payload)
-	case wire.MsgError:
-		return wire.UnmarshalErrorMsg(frame.Payload)
-	case wire.MsgOutput:
-		return wire.UnmarshalOutput(frame.Payload)
-	case wire.MsgDetached:
-		return wire.UnmarshalDetached(frame.Payload)
-	case wire.MsgPong:
-		return wire.UnmarshalPong(frame.Payload)
-	case wire.MsgSessions:
-		return wire.UnmarshalSessions(frame.Payload)
-	case wire.MsgCommandResult:
-		return wire.UnmarshalCommandResult(frame.Payload)
-	case wire.MsgAttachTarget:
-		return wire.UnmarshalAttachTarget(frame.Payload)
-	case wire.MsgRemotePreviewResponse:
-		return wire.UnmarshalRemotePreview(frame.Payload)
-	case wire.MsgCommittedRouteIdentity:
-		return wire.UnmarshalCommittedRouteIdentity(frame.Payload)
-	case wire.MsgNavigateRecentRoute:
-		return wire.UnmarshalRouteNavigationAction(frame.Payload)
-	case wire.MsgRouteNavigationFailure:
-		return wire.UnmarshalRouteNavigationFailure(frame.Payload)
-	case wire.MsgRouteRetired:
-		return wire.UnmarshalRouteRetired(frame.Payload)
-	case wire.MsgRoutePosition:
-		return wire.UnmarshalRoutePosition(frame.Payload)
-	case wire.MsgSamePeerSwitchFailure:
-		return wire.UnmarshalSamePeerSwitchFailure(frame.Payload)
-	case wire.MsgNavigationInventoryResponse:
-		return wire.UnmarshalNavigationInventoryResponse(frame.Payload)
-	case wire.MsgNavigationInventoryDemand:
-		return wire.UnmarshalNavigationInventoryDemand(frame.Payload)
-	case wire.MsgNavigationInventorySelection:
-		return wire.UnmarshalNavigationInventorySelection(frame.Payload)
-	case wire.MsgPickerOffer:
-		return wire.UnmarshalPickerOffer(frame.Payload)
-	case wire.MsgPickerSnapshot:
-		return wire.UnmarshalPickerSnapshot(frame.Payload)
-	case wire.MsgPickerClosedServer:
-		return wire.UnmarshalPickerClosed(frame.Payload)
-	case wire.MsgPickerResult:
-		return wire.UnmarshalPickerResult(frame.Payload)
-	case wire.MsgPickerFailure:
-		return wire.UnmarshalPickerFailure(frame.Payload)
-	case wire.MsgPickerPreview:
-		return wire.UnmarshalPickerPreview(frame.Payload)
-	default:
-		return nil, errors.New("test client connection: unsupported server frame")
+func mustClientEnvelope(message protocol.ClientMessage) wire.Envelope {
+	envelope, err := testClientFrame(message)
+	if err != nil {
+		panic(err)
 	}
+	return envelope
+}
+
+func mustServerEnvelope(message protocol.ServerMessage) wire.Envelope {
+	if output, ok := message.(protocol.Output); ok && output.New != 0 && output.Context == nil {
+		output.Context = &protocol.ViewContext{
+			Publication: output.Epoch<<32 | output.New,
+			Route:       protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}},
+			TabID:       "tab-1", FocusedPaneID: "pane-1",
+		}
+		message = output
+	}
+	raw, err := sessionwire.EncodeServerMessage(message)
+	if err != nil {
+		panic(err)
+	}
+	return wire.Envelope{Payload: raw}
+}
+
+func testServerMessage(envelope wire.Envelope) (protocol.ServerMessage, error) {
+	return sessionwire.DecodeServerEnvelope(envelope.Payload)
 }
 
 func testClientCapabilities(raw wire.Transport) protocol.ConnectionCapabilities {
@@ -255,7 +151,7 @@ func testClientLinkEvents(raw wire.Transport) <-chan ports.LinkEvent {
 func TestRunRecvLogsIgnoredTypedBoundaryFailures(t *testing.T) {
 	connection := portsmocks.NewMockClientConnection(t)
 	connection.EXPECT().ReceiveServer().Return(nil, &protocol.DecodeFailure{Category: protocol.DecodeUnknownType, Type: 255}).Once()
-	connection.EXPECT().ReceiveServer().Return(nil, &protocol.DecodeFailure{Category: protocol.DecodeWrongDirection, Type: uint8(wire.MsgInput)}).Once()
+	connection.EXPECT().ReceiveServer().Return(nil, &protocol.DecodeFailure{Category: protocol.DecodeWrongDirection}).Once()
 	connection.EXPECT().ReceiveServer().Return(protocol.Pong{}, nil).Once()
 	connection.EXPECT().ReceiveServer().Return(nil, io.EOF).Once()
 	results := make(chan recvResult, 2)
@@ -423,3 +319,79 @@ func (t *attachPaletteTransport) Capabilities() protocol.ConnectionCapabilities 
 }
 func (t *attachPaletteTransport) LinkState() ports.LinkState         { return ports.LinkStateConnected }
 func (t *attachPaletteTransport) LinkEvents() <-chan ports.LinkEvent { return nil }
+
+func decodeClientMessageForTest(t *testing.T, envelope wire.Envelope) protocol.ClientMessage {
+	t.Helper()
+	message, err := sessionwire.DecodeClientEnvelope(envelope.Payload)
+	if err != nil {
+		t.Fatalf("decoding client envelope: %v", err)
+	}
+	return message
+}
+
+func serverMessageNameForTest(payload []byte) string {
+	message, err := sessionwire.DecodeServerEnvelope(payload)
+	if err != nil {
+		return ""
+	}
+	switch message.(type) {
+	case protocol.Welcome:
+		return "Welcome"
+	case protocol.ErrorMsg:
+		return "Error"
+	case protocol.Output:
+		return "Output"
+	case protocol.Detached:
+		return "Detached"
+	case protocol.Pong:
+		return "Pong"
+	case protocol.Sessions:
+		return "Sessions"
+	case protocol.CommandResult:
+		return "CommandResult"
+	case protocol.AttachTarget:
+		return "AttachTarget"
+	case protocol.RemotePreview:
+		return "RemotePreview"
+	case protocol.CommittedRouteIdentity:
+		return "CommittedRouteIdentity"
+	case protocol.RouteNavigationAction:
+		return "RouteNavigationAction"
+	case protocol.RouteCreateSessionAction:
+		return "RouteCreateSessionAction"
+	case protocol.RouteNavigationFailure:
+		return "RouteNavigationFailure"
+	case protocol.RoutePosition:
+		return "RoutePosition"
+	case protocol.RouteRetired:
+		return "RouteRetired"
+	case protocol.SamePeerSwitchFailure:
+		return "SamePeerSwitchFailure"
+	case protocol.UIReceipt:
+		return "UIReceipt"
+	case protocol.UIViewUpdate:
+		return "UIViewUpdate"
+	case protocol.NavigationInventoryResponse:
+		return "NavigationInventoryResponse"
+	case protocol.NavigationInventoryDemand:
+		return "NavigationInventoryDemand"
+	case protocol.NavigationInventorySelection:
+		return "NavigationInventorySelection"
+	case protocol.PickerOffer:
+		return "PickerOffer"
+	case protocol.PickerSnapshot:
+		return "PickerSnapshot"
+	case protocol.PickerClosed:
+		return "PickerClosed"
+	case protocol.PickerResult:
+		return "PickerResult"
+	case protocol.PickerFailure:
+		return "PickerFailure"
+	case protocol.PickerPreview:
+		return "PickerPreview"
+	case protocol.PickerControlResponse:
+		return "PickerControlResponse"
+	default:
+		return ""
+	}
+}

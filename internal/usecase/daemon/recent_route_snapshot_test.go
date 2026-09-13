@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,11 +46,9 @@ func TestRecentRouteSnapshotRepaintsWithoutDeferredIdentity(t *testing.T) {
 	ac.installTestAttachmentCapability(token)
 	ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
 
-	payload, err := wire.MarshalRecentRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 2})
-	require.NoError(t, err)
-	require.False(t, d.handleAttachmentClientFrame(token, wire.Frame{Type: wire.MsgRecentRouteSnapshot, Payload: payload}))
+	require.False(t, d.handleAttachmentClientFrame(token, mustClientEnvelope(protocol.RecentRouteSnapshot{Generation: 2})))
 
-	awaitFrame(t, sends, wire.MsgOutput)
+	awaitFrame(t, sends, "Output")
 }
 
 func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
@@ -93,13 +90,11 @@ func TestPaletteRecentRouteSelectionSendsTypedClientAction(t *testing.T) {
 	var action protocol.RouteNavigationAction
 	found := false
 	for _, frame := range frames {
-		if frame.Type != wire.MsgNavigateRecentRoute {
+		decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction)
+		if !ok {
 			continue
 		}
-		var err error
-		action, err = wire.UnmarshalRouteNavigationAction(frame.Payload)
-		require.NoError(t, err)
-		found = true
+		action, found = decoded, true
 	}
 	require.True(t, found)
 	require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 2, Generation: 3}, action)
