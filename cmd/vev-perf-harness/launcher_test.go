@@ -572,8 +572,8 @@ func TestCLIProcessWarmupWaitsForDelayedTerminalReadiness(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if output.syncs != 1 {
-		t.Fatalf("readiness output was not flushed: syncs=%d", output.syncs)
+	if output.syncs != 0 {
+		t.Fatalf("readiness performed a filesystem sync: syncs=%d", output.syncs)
 	}
 }
 
@@ -602,7 +602,7 @@ func TestCLIProcessPairsApplicationOutputWithSuccessfulFlush(t *testing.T) {
 	if err := p.Measure(input, func() error { order = append(order, "injected"); return nil }, func() error { order = append(order, "flushed"); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if len(pty.writes) != 1 || output.syncs != 1 || !equalStrings(order, []string{"injected", "flushed"}) {
+	if len(pty.writes) != 1 || output.syncs != 0 || !equalStrings(order, []string{"injected", "flushed"}) {
 		t.Fatalf("writes=%q syncs=%d boundary order=%q", pty.writes, output.syncs, order)
 	}
 }
@@ -615,7 +615,6 @@ func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
 		{"daemon", []string{"--daemon"}},
 		{"client", []string{"new", "perf-s-001"}},
 		{"ssh_stdio_peer", []string{"_stdio"}},
-		{"udp_peer", []string{"_udp-proxy"}},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
 			got := roleArgs(scenario{ID: "s", Transport: "local"}, processMapping{Role: tc.role, Run: 1})

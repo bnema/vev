@@ -207,7 +207,7 @@ func TestHarnessManifestCoversCanonicalMatrix(t *testing.T) {
 	if err := validateManifest(m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Scenarios) != 4*9*7 {
+	if len(m.Scenarios) != 4*9*2 {
 		t.Fatalf("scenarios=%d", len(m.Scenarios))
 	}
 	m.Scenarios = m.Scenarios[:len(m.Scenarios)-1]

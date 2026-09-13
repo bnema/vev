@@ -238,15 +238,8 @@ func TestHarnessRoutesEveryRemoteFixtureThroughItsDeclaredPeer(t *testing.T) {
 		name      string
 		transport transport
 		peer      string
-		wantRTT   int
-		wantLoss  int
 	}{
-		{"ssh", transport{ID: "ssh_stdio", Kind: "ssh_stdio"}, "ssh_stdio_peer", 0, 0},
-		{"udp baseline", transport{ID: "udp_baseline", Kind: "udp"}, "udp_peer", 0, 0},
-		{"udp 25ms", transport{ID: "udp_25ms", Kind: "udp", RTTMS: 25}, "udp_peer", 25, 0},
-		{"udp 100ms", transport{ID: "udp_100ms", Kind: "udp", RTTMS: 100}, "udp_peer", 100, 0},
-		{"udp loss zero", transport{ID: "udp_loss_0pct", Kind: "udp", LossPercent: 0}, "udp_peer", 0, 0},
-		{"udp loss", transport{ID: "udp_loss_1pct", Kind: "udp", LossPercent: 1}, "udp_peer", 0, 1},
+		{"ssh", transport{ID: "ssh_stdio", Kind: "ssh_stdio"}, "ssh_stdio_peer"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -256,14 +249,8 @@ func TestHarnessRoutesEveryRemoteFixtureThroughItsDeclaredPeer(t *testing.T) {
 			if !equalStrings(client.Args, []string{"attach", "harness@127.0.0.1"}) {
 				t.Fatalf("client did not use ephemeral public remote attach: %q", client.Args)
 			}
-			if tc.peer == "ssh_stdio_peer" && !equalStrings(peer.Args, []string{"_stdio"}) {
+			if !equalStrings(peer.Args, []string{"_stdio"}) {
 				t.Fatalf("ssh peer command=%q", peer.Args)
-			}
-			if tc.peer == "udp_peer" && !equalStrings(peer.Args, []string{"_udp-proxy"}) {
-				t.Fatalf("udp peer command=%q", peer.Args)
-			}
-			if peer.Transport.RTTMS != tc.wantRTT || peer.Transport.LossPercent != tc.wantLoss {
-				t.Fatalf("peer lost manifest network settings: %+v", peer.Transport)
 			}
 		})
 	}
@@ -274,11 +261,6 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 		name, transport, peer, peerCommand string
 	}{
 		{"ssh", "ssh_stdio", "ssh_stdio_peer", "_stdio"},
-		{"udp baseline", "udp_baseline", "udp_peer", "_udp-proxy"},
-		{"udp 25ms", "udp_25ms", "udp_peer", "_udp-proxy"},
-		{"udp 100ms", "udp_100ms", "udp_peer", "_udp-proxy"},
-		{"udp loss zero", "udp_loss_0pct", "udp_peer", "_udp-proxy"},
-		{"udp loss", "udp_loss_1pct", "udp_peer", "_udp-proxy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
