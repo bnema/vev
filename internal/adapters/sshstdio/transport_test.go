@@ -115,27 +115,31 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 	}
 }
 
-func TestBuildCommandForObservationDisablesTTYAndTrustMutation(t *testing.T) {
+func TestBuildCommandForObservationPreservesHostTrustAndAuthenticationPolicy(t *testing.T) {
 	spec := BuildCommandForObservation("user@example.com", 5*time.Second, "vev", "cmd", "remote-catalog", "--json")
 	if spec.Path != "ssh" {
 		t.Fatalf("Path = %q, want ssh", spec.Path)
 	}
 	flat := strings.Join(spec.Args, " ")
-	for _, want := range []string{"-T", "BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectTimeout=5", "ConnectionAttempts=1"} {
+	for _, want := range []string{"-T", "UpdateHostKeys=no", "ConnectTimeout=5", "ConnectionAttempts=1"} {
 		if !strings.Contains(flat, want) {
 			t.Fatalf("observation argv %q missing %q", spec.Args, want)
 		}
 	}
+	for _, forbidden := range []string{"BatchMode=", "StrictHostKeyChecking=", "UserKnownHostsFile=", "ProxyCommand="} {
+		if strings.Contains(flat, forbidden) {
+			t.Fatalf("observation argv %q overrides host policy %q", spec.Args, forbidden)
+		}
+	}
 
-	// Effective behavior: explicit CLI options must win over a user
-	// configuration that requests a TTY, key updates, prompts and lax
-	// host-key checking. ssh -G reports the effective configuration
-	// without connecting.
+	// Effective behavior: host-specific authentication and trust policy stays
+	// intact while vev still disables TTY allocation, host-key updates, and
+	// unbounded connection attempts.
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
 		t.Skip("ssh binary not available for effective-config probe")
 	}
-	conflict := "Host *\n  RequestTTY yes\n  UpdateHostKeys yes\n  BatchMode no\n  StrictHostKeyChecking no\n"
+	conflict := "Host *\n  RequestTTY yes\n  UpdateHostKeys yes\n  BatchMode no\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ProxyCommand fake-proxy %h %p\n"
 	confPath := t.TempDir() + "/ssh_config"
 	if err := os.WriteFile(confPath, []byte(conflict), 0o600); err != nil {
 		t.Fatalf("write conflicting ssh config: %v", err)
@@ -182,12 +186,18 @@ func TestBuildCommandForObservationDisablesTTYAndTrustMutation(t *testing.T) {
 		}
 	}
 	for key, want := range map[string]string{
-		"batchmode": "yes", "stricthostkeychecking": "yes",
+		"batchmode": "no", "stricthostkeychecking": "no",
 		"requesttty": "no", "updatehostkeys": "no",
 	} {
 		if got := normalize(effective[key]); got != want {
-			t.Fatalf("effective ssh %s = %q, want %q (config must not override observation argv)", key, effective[key], want)
+			t.Fatalf("effective ssh %s = %q, want %q", key, effective[key], want)
 		}
+	}
+	if effective["userknownhostsfile"] != "/dev/null" {
+		t.Fatalf("effective ssh userknownhostsfile = %q, want /dev/null", effective["userknownhostsfile"])
+	}
+	if !strings.Contains(effective["proxycommand"], "fake-proxy") {
+		t.Fatalf("effective ssh proxycommand = %q, want configured proxy", effective["proxycommand"])
 	}
 }
 

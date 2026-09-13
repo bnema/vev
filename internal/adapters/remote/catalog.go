@@ -186,8 +186,9 @@ func (c *CatalogClient) listTimeout() time.Duration {
 
 // List runs a non-interactive `ssh` observation of `vev cmd remote-catalog
 // --json` and decodes exactly one versioned catalog envelope from stdout.
-// The observation never prompts, allocates a TTY, mutates trust, or executes
-// host strings as shell fragments. List always applies a bounded command
+// The observation allocates no TTY, invokes no askpass helper, and executes
+// no host strings as shell fragments. Host authentication and trust remain
+// owned by effective OpenSSH policy. List always applies a bounded command
 // timeout derived from ctx so a caller with no deadline cannot hang
 // indefinitely, while still honoring caller cancellation; owned SSH
 // processes are killed and reaped on cancellation with a bounded wait.
@@ -209,8 +210,9 @@ func (c *CatalogClient) List(ctx context.Context, target string) (catalogue.Remo
 	}
 	spec := sshstdio.BuildCommandForObservation(target, catalogSSHConnectTimeout, "vev", "cmd", "remote-catalog", "--json")
 	cmd := command(runCtx, spec.Path, spec.Args...)
-	// Stdin stays detached: exec leaves a nil Stdin on the null device, and
-	// batch mode forbids prompts even if output were ever attached to a TTY.
+	// Stdin stays detached and askpass is explicitly disabled. This preserves
+	// host-specific authentication policy without allowing GUI prompt helpers.
+	cmd.Env = append(cmd.Environ(), "SSH_ASKPASS_REQUIRE=never")
 	stdout := boundedBuffer{limit: maxCatalogBytes}
 	stderr := boundedBuffer{limit: maxCatalogDiagnosticBytes}
 	cmd.Stdout = &stdout

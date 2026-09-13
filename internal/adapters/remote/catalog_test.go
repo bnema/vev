@@ -73,9 +73,14 @@ func TestRemoteCatalogClientCommandConstruction(t *testing.T) {
 				t.Fatalf("observation must keep the target one unquoted local argv word right after --; got %q", gotArgs)
 			}
 			joined := strings.Join(gotArgs[:sep], " ")
-			for _, flag := range []string{"-T", "BatchMode=yes", "StrictHostKeyChecking=yes", "UpdateHostKeys=no", "ConnectTimeout=", "ConnectionAttempts=1"} {
+			for _, flag := range []string{"-T", "UpdateHostKeys=no", "ConnectTimeout=", "ConnectionAttempts=1"} {
 				if !strings.Contains(joined, flag) {
 					t.Fatalf("observation argv missing %q; got %q", flag, gotArgs)
+				}
+			}
+			for _, hostPolicy := range []string{"BatchMode=", "StrictHostKeyChecking="} {
+				if strings.Contains(joined, hostPolicy) {
+					t.Fatalf("observation argv overrides host policy %q; got %q", hostPolicy, gotArgs)
 				}
 			}
 			if sep+2 >= len(gotArgs) || !strings.Contains(gotArgs[sep+2], "'vev'") || !strings.Contains(gotArgs[sep+2], "'remote-catalog'") {

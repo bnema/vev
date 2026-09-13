@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sort"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -58,6 +60,7 @@ func (d *Daemon) refreshRemoteDirectoryViews() {
 	if d == nil {
 		return
 	}
+	d.notifyNewRemoteFailures(d.remoteDirectorySnapshot())
 	d.mu.Lock()
 	sessions := d.sessionsSnapshotLocked()
 	d.mu.Unlock()
@@ -69,6 +72,58 @@ func (d *Daemon) refreshRemoteDirectoryViews() {
 			d.reconcileRouteHistory(ac)
 			d.refreshRemoteDirectoryViewsFor(ac)
 		}
+	}
+}
+
+func (d *Daemon) notifyNewRemoteFailures(snapshot ports.RemoteDirectorySnapshot) {
+	var notices []domain.Notification
+	d.remoteFailureNoticeMu.Lock()
+	if d.remoteFailureNoticed == nil {
+		d.remoteFailureNoticed = make(map[string]uint64)
+	}
+	present := make(map[string]struct{}, len(snapshot.Hosts))
+	for _, host := range snapshot.Hosts {
+		present[host.Endpoint] = struct{}{}
+		if host.LastFailure.Err == nil || host.ConsecutiveFailures == 0 {
+			continue
+		}
+		if d.remoteFailureNoticed[host.Endpoint] == host.FailureEpisode {
+			continue
+		}
+		d.remoteFailureNoticed[host.Endpoint] = host.FailureEpisode
+		notices = append(notices, domain.Notification{
+			Severity: domain.NoticeWarn,
+			Code:     domain.NoticeRemoteObservation,
+			Message:  remoteFailureNoticeMessage(host),
+			Details:  host.LastFailure.Err.Error(),
+		})
+	}
+	for endpoint := range d.remoteFailureNoticed {
+		if _, ok := present[endpoint]; !ok {
+			delete(d.remoteFailureNoticed, endpoint)
+		}
+	}
+	d.remoteFailureNoticeMu.Unlock()
+	for _, notice := range notices {
+		d.notify(nil, notice.Severity, notice.Code, notice.Message, errors.New(notice.Details))
+	}
+}
+
+func remoteFailureNoticeMessage(host ports.RemoteHostSnapshot) string {
+	prefix := "Remote check failed: " + host.Endpoint + " — "
+	switch host.LastFailure.Kind {
+	case domain.RemoteFailureAuthentication:
+		return prefix + "SSH authentication failed; verify non-interactive SSH access"
+	case domain.RemoteFailureTrust:
+		return prefix + "SSH host verification failed; verify the host key policy"
+	case domain.RemoteFailureIncompatible:
+		return prefix + "remote vev version is incompatible"
+	case domain.RemoteFailureInvalidResponse:
+		return prefix + "remote catalog response is invalid"
+	case domain.RemoteFailureTimeout:
+		return prefix + "SSH timed out"
+	default:
+		return prefix + "SSH connection failed; verify SSH access"
 	}
 }
 

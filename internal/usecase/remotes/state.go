@@ -42,6 +42,7 @@ type hostPolicy struct {
 	followUp            bool
 	attempts            uint64
 	consecutiveFailures uint
+	failureEpisode      uint64
 	lastFailure         domain.RemoteFailure
 	lastAttempt         time.Time
 	lastSuccess         time.Time
@@ -294,6 +295,7 @@ func (s *serviceState) buildSnapshot(revision uint64, initialized bool) ports.Re
 			LastSuccess:         host.lastSuccess,
 			NextDue:             host.nextDue,
 			ConsecutiveFailures: host.consecutiveFailures,
+			FailureEpisode:      host.failureEpisode,
 			LastFailure:         host.lastFailure,
 			InventoryKnown:      host.inventoryKnown,
 			Registration:        host.registration,

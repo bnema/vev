@@ -22,6 +22,7 @@ type RemoteHostSnapshot struct {
 	LastSuccess         time.Time
 	NextDue             time.Time
 	ConsecutiveFailures uint
+	FailureEpisode      uint64
 	LastFailure         domain.RemoteFailure
 	InventoryKnown      bool
 	Sessions            []catalogue.RemoteCatalogSession

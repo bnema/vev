@@ -136,6 +136,49 @@ func TestRemotePickerUsesCompactUpDetailRegardlessOfAttachment(t *testing.T) {
 	}
 }
 
+func TestStoppedPickerHeaderUsesBadgeWithoutDuplicateDetail(t *testing.T) {
+	view := pickerSessionView{ID: "stopped:work", Name: "work", TargetName: "work", Stopped: true}
+	lines := pickerSessionLines(view, protocol.PickerIntentNavigation, pickerSourceFilter{}, pickerSourceFilter{})
+	require.Len(t, lines, 1)
+	require.Equal(t, protocol.PickerLineStatusStopped, lines[0].line.Status)
+	require.Empty(t, lines[0].line.Detail)
+}
+
+func TestRemoteFailureNoticeEmittedOncePerFailureEpisode(t *testing.T) {
+	d := newRemotePickerDaemon()
+	errSSH := errors.New("host key verification failed")
+	failed := ports.RemoteDirectorySnapshot{Hosts: []ports.RemoteHostSnapshot{{
+		Endpoint: "brice@arch", ConsecutiveFailures: 1, FailureEpisode: 1,
+		LastFailure: domain.RemoteFailure{Kind: domain.RemoteFailureTrust, Err: errSSH},
+	}}}
+
+	d.notifyNewRemoteFailures(failed)
+	d.notifyNewRemoteFailures(failed)
+	notices := d.notices.history()
+	require.Len(t, notices, 1)
+	require.Contains(t, notices[0].Message, "SSH host verification failed")
+	require.Contains(t, notices[0].Details, "host key verification failed")
+
+	// A coalesced recovery need not be observed: the monitor-owned episode ID
+	// still distinguishes a later outage publication.
+	failed.Hosts[0].FailureEpisode = 2
+	d.notifyNewRemoteFailures(failed)
+	require.Len(t, d.notices.history(), 2)
+}
+
+func TestRemoteFailureNoticesKeepEndpointsDistinct(t *testing.T) {
+	d := newRemotePickerDaemon()
+	d.notifyNewRemoteFailures(ports.RemoteDirectorySnapshot{Hosts: []ports.RemoteHostSnapshot{
+		{Endpoint: "arch", ConsecutiveFailures: 1, FailureEpisode: 1, LastFailure: domain.RemoteFailure{Kind: domain.RemoteFailureAuthentication, Err: errors.New("denied")}},
+		{Endpoint: "mule", ConsecutiveFailures: 1, FailureEpisode: 1, LastFailure: domain.RemoteFailure{Kind: domain.RemoteFailureTimeout, Err: errors.New("timeout")}},
+	}})
+	notices := d.notices.history()
+	require.Len(t, notices, 2)
+	messages := []string{notices[0].Message, notices[1].Message}
+	require.Condition(t, func() bool { return strings.Contains(messages[0], "arch") || strings.Contains(messages[1], "arch") })
+	require.Condition(t, func() bool { return strings.Contains(messages[0], "mule") || strings.Contains(messages[1], "mule") })
+}
+
 func TestRemotePickerScopesSameLifecycleBytesToEachEndpoint(t *testing.T) {
 	d := newRemotePickerDaemon()
 	lifecycle := remoteLifecycleForTest()

@@ -509,17 +509,13 @@ func BuildCommandForRemoteCommand(target string, command ...string) CommandSpec 
 	return CommandSpec{Path: "ssh", Args: args}
 }
 
-// BuildCommandForObservation constructs non-interactive ssh argv for remote
-// observation (catalogue checks). It reuses the quoting/argv pattern above
-// and additionally pins batch mode (never prompt), strict host-key checking
-// (never accept new keys automatically), a bounded connect timeout and a
-// single connection attempt. TTY allocation is disabled (-T) and advertised
-// host-key updates are refused (UpdateHostKeys=no) so background observation
-// can neither grab a terminal nor mutate the user's known-hosts trust state,
-// even when local ssh configuration requests a TTY or key updates: explicit
-// command-line options override configuration file values. No stdin is
-// allocated by this argv; the caller must leave Stdin detached. Interactive
-// attach authentication is untouched: only observation uses this builder.
+// BuildCommandForObservation constructs unattended ssh argv for remote
+// observation (catalogue checks). Authentication, proxying, and host-key trust
+// remain owned by the target's effective OpenSSH configuration so managed
+// transports such as NetBird keep their coherent policy. Vev only disables
+// TTY allocation and advertised host-key updates, and bounds connection time
+// and attempts. The caller leaves stdin detached and owns a whole-command
+// deadline, so background observation cannot wait indefinitely for input.
 func BuildCommandForObservation(target string, connectTimeout time.Duration, command ...string) CommandSpec {
 	secs := int(connectTimeout / time.Second)
 	if secs < 1 {
@@ -528,8 +524,6 @@ func BuildCommandForObservation(target string, connectTimeout time.Duration, com
 	spec := BuildCommandForRemoteCommand(target, command...)
 	opts := []string{
 		"-T",
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=yes",
 		"-o", "UpdateHostKeys=no",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", secs),
 		"-o", "ConnectionAttempts=1",

@@ -426,14 +426,11 @@ func pickerStatusFor(view pickerSessionView, stopped bool) protocol.PickerLineSt
 	return protocol.PickerLineStatusError
 }
 
-// pickerStatusDetailFor fills the muted detail of a header line: a stopped
-// session reads "stopped" and a remote reason replaces it.
-func pickerStatusDetailFor(view pickerSessionView, stopped bool) string {
+// pickerStatusDetailFor fills the muted detail of a header line. Statuses
+// already represented by a badge are not repeated as adjacent text.
+func pickerStatusDetailFor(view pickerSessionView, _ bool) string {
 	if view.RemoteReason != "" {
 		return view.RemoteReason
-	}
-	if stopped {
-		return "stopped"
 	}
 	return ""
 }
