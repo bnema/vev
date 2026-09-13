@@ -185,8 +185,8 @@ func TestBootstrapMalformedReadiness(t *testing.T) {
 		mutate(func(r *Readiness) { r.Token = "00" }),
 		mutate(func(r *Readiness) { r.Nonce = "not-base64!!" }),
 		// Expiry in the past and implausibly far in the future.
-		mutate(func(r *Readiness) { r.ExpiresAt = time.Now().Add(-time.Second).Unix() }),
-		mutate(func(r *Readiness) { r.ExpiresAt = time.Now().Add(time.Hour).Unix() }),
+		mutate(func(r *Readiness) { r.ExpiresAt = time.Now().Add(-10 * time.Minute).Unix() }),
+		mutate(func(r *Readiness) { r.ExpiresAt = time.Now().Add(10 * time.Minute).Unix() }),
 	} {
 		_, err := ParseReadiness(line)
 		require.Error(t, err)

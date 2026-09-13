@@ -65,13 +65,13 @@ Before touching daemon teardown paths, read the lock-ordering notes at the top o
 
 ## Wire protocol
 
-Typed messages and negotiated version live in `internal/protocol`. Remote discovery JSON lives in `internal/protocol/catalogue`. Message IDs, frames, strict codecs, compression, encoded bounds, and raw carriage interfaces live in `internal/protocol/wire`. Connection framing lives in concrete carriage adapters such as `internal/adapters/ipc`.
+Typed messages and negotiated version live in `internal/protocol`. Remote discovery JSON lives in `internal/protocol/catalogue`. Protobuf schemas, generated wire envelopes, strict scanning, encoded bounds, and raw carriage interfaces live in `internal/protocol/wire`; `internal/adapters/sessionwire` owns semantic conversion and Output compression. Shared stream framing lives in `internal/adapters/streamframe`.
 
-- IPC frames on a connection are 4-byte big-endian length, 1 type byte, then payload.
-- Client message types occupy `1–13`, `15`, `32–33`, `35` (`MsgParkedRouteRequest`), and `49`/`51`/`53` (`MsgPickerOpen`/`MsgPickerCloseClient`/`MsgPickerSelection`); server types occupy `16–23`, `25–31`, `34`, `36` (`MsgParkedRouteResponse`), and `50`/`52`/`54` (`MsgPickerSnapshot`/`MsgPickerCloseServer`/`MsgPickerFailure`). Types `14` and `24` remain reserved.
-- Version negotiation requires strict equality.
-- `Hello.Version` and `CommandRequest.Version` must stay first so their version peekers work.
-- Bump `ProtocolVersion` for any message layout change.
+- Stream frames are a 4-byte big-endian length followed by one complete serialized directional Protobuf envelope.
+- Client and server directions are separate closed `oneof` unions in `internal/protocol/wire/schema/envelope.proto`.
+- Every connection starts with the bounded preamble; magic, epoch, role, protocol version, and negotiated limits are validated before application messages.
+- Version negotiation requires strict equality. Bump `internal/protocol.Version` for semantic or message layout changes; bump `wire.ProtocolEpoch` only for an intentional clean break.
+- Generated `*.pb.go` files are never edited. Run `go tool buf generate` and `make protocol-check` after schema changes.
 
 ## Session flow
 
@@ -79,7 +79,7 @@ Typed messages and negotiated version live in `internal/protocol`. Remote discov
 - Named sessions survive headless and persist across daemon restarts.
 - The daemon starts on first use and exits when the last session ends.
 - Each connection has a 15-second handshake budget from connect through the initial committed publication.
-- Local and remote attach use the same typed `Hello`/`Welcome` session protocol. `sessionwire` translates typed traffic to raw frames carried by IPC, UDP, or SSH stdio.
-- Remote attach opens a direct connection to the selected daemon over UDP by default; `VEV_REMOTE_TRANSPORT=stdio` explicitly selects an SSH-only carriage.
+- Local and remote attach use the same typed `Hello`/`Welcome` session protocol. `sessionwire` translates typed traffic to Protobuf envelopes carried by IPC, QUIC, or SSH stdio.
+- Remote attach bootstraps an authenticated direct QUIC connection by default; `VEV_REMOTE_TRANSPORT=stdio` explicitly selects an SSH-only carriage.
 - A session owns shared PTYs, VT state, tabs, panes, PTY content geometry selected by the latest valid attachment claim, and ordered mutations. Each attachment owns its window/view, copy and overlay state, rendering/output state, and reconnect lifecycle; when the latest claimant detaches, the most recently claimed remaining attachment becomes authoritative.
 - Command requests have a 10-second result deadline and are tracked per connection.

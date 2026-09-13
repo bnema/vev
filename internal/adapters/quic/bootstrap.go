@@ -167,9 +167,9 @@ func EncodeReadiness(readiness Readiness) ([]byte, error) {
 
 // ParseReadiness parses and validates one readiness line: schema
 // version, size, JSON shape, token/nonce/port/fingerprint presence,
-// and expiry. Expiry must be present and no later than the bootstrap
-// bound from now: a compromised peer cannot advertise a long-lived
-// credential. Secret values never appear in the returned error.
+// and expiry. The remote server is authoritative for expiry during auth;
+// client-side parsing rejects only implausibly long-lived credentials and
+// allows bounded host-clock skew. Secret values never appear in the error.
 func ParseReadiness(line []byte) (Readiness, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || len(line) > bootstrapMaxReadiness {
@@ -201,7 +201,8 @@ func ParseReadiness(line []byte) (Readiness, error) {
 	}
 	now := time.Now()
 	expires := time.Unix(readiness.ExpiresAt, 0)
-	if !expires.After(now) || expires.After(now.Add(bootstrapExpiry+time.Minute)) {
+	const bootstrapClockSkew = 5 * time.Minute
+	if !expires.After(now.Add(-bootstrapClockSkew)) || expires.After(now.Add(bootstrapExpiry+bootstrapClockSkew)) {
 		return Readiness{}, errBootstrapExpired
 	}
 	return readiness, nil

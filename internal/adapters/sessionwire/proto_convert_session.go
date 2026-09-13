@@ -18,9 +18,6 @@ import (
 const protoOutputCompressionThreshold = 1024
 
 func helloToWire(message protocol.Hello) (*wire.Hello, error) {
-	if message.Version > math.MaxUint16 {
-		return nil, errProtoConvertRange
-	}
 	cols, rows, pixelWidth, pixelHeight, err := geometryToWire(message.Size, message.PixelWidth, message.PixelHeight)
 	if err != nil {
 		return nil, err

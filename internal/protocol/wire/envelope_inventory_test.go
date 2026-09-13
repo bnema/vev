@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bnema/vev/internal/protocol"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -14,6 +15,9 @@ import (
 // shares a payload type except route navigation failure, and the preamble
 // constants agree with the schema authority.
 func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
+	if protocol.Version != 51 {
+		t.Fatalf("protocol.Version = %d, want 51", protocol.Version)
+	}
 	if ProtocolEpoch != 1 {
 		t.Fatalf("ProtocolEpoch = %d, want 1", ProtocolEpoch)
 	}

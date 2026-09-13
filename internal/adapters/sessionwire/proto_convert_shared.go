@@ -74,7 +74,11 @@ func tabSelectorFromWire(message *wire.TabSelector) (domain.TabSelector, error) 
 	if message == nil {
 		return selector, nil
 	}
-	selector.Kind = domain.TabSelectorKind(message.GetKind())
+	kind, err := enum8[domain.TabSelectorKind](message.GetKind())
+	if err != nil {
+		return domain.TabSelector{}, err
+	}
+	selector.Kind = kind
 	selector.StableID = domain.TabStableID(message.GetStableId())
 	ordinal, err := mustUint16(message.GetOrdinal())
 	if err != nil {
