@@ -43,15 +43,17 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 
 	var gotPath string
 	var gotArgs []string
+	wantCommand := sshstdio.BuildCommandForObservation(target.Endpoint, remotePreviewSSHConnectTimeout, "vev", "_remote-preview", "request")
 	client := &PreviewClient{command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		gotPath = name
 		gotArgs = append([]string(nil), args...)
-		if len(args) != 3 {
-			t.Fatalf("ssh args = %#v, want target and one remote command", args)
+		if len(args) != len(wantCommand.Args) {
+			t.Fatalf("ssh args = %#v, want observation argv %#v", args, wantCommand.Args)
 		}
-		words := strings.Split(args[2], " ")
+		remote := args[len(args)-1]
+		words := strings.Split(remote, " ")
 		if len(words) != 3 {
-			t.Fatalf("remote command = %q, want three shell words", args[2])
+			t.Fatalf("remote command = %q, want three shell words", remote)
 		}
 		encoded := strings.Trim(words[2], "'")
 		requestPayload, err := base64.RawURLEncoding.DecodeString(encoded)
@@ -75,10 +77,12 @@ func TestRemotePreviewClientBuildsExactSSHCommandAndDecodesResponse(t *testing.T
 	got, err := client.Preview(context.Background(), target, 1, 1)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-	wantCommand := sshstdio.BuildCommandForRemoteCommand(target.Endpoint, "vev", "_remote-preview", "request")
 	require.Equal(t, wantCommand.Path, gotPath)
-	require.Equal(t, target.Endpoint, gotArgs[1])
-	require.Contains(t, gotArgs[2], "'_remote-preview'")
+	require.Equal(t, wantCommand.Args[:len(wantCommand.Args)-1], gotArgs[:len(gotArgs)-1],
+		"preview must use the observation-safe ssh argv")
+	require.Contains(t, gotArgs[len(gotArgs)-1], "'_remote-preview'")
+	require.Contains(t, gotArgs, "-T")
+	require.Contains(t, gotArgs, "UpdateHostKeys=no")
 }
 
 func TestRemotePreviewClientRejectsMismatchedResponseIdentity(t *testing.T) {

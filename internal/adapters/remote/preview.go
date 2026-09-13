@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	remotePreviewCommandTimeout = 5 * time.Second
-	remotePreviewWaitDelay      = 500 * time.Millisecond
-	remotePreviewMaxDiagnostic  = 4 << 10
+	remotePreviewCommandTimeout    = 5 * time.Second
+	remotePreviewSSHConnectTimeout = 5 * time.Second
+	remotePreviewWaitDelay         = 500 * time.Millisecond
+	remotePreviewMaxDiagnostic     = 4 << 10
 )
 
 var (
@@ -54,7 +55,11 @@ func (c *PreviewClient) Preview(ctx context.Context, target domain.RemoteSession
 		command = exec.CommandContext
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	spec := sshstdio.BuildCommandForRemoteCommand(target.Endpoint, "vev", "_remote-preview", encoded)
+	// Preview is background observation, not attach: it must never grab a TTY
+	// or mutate the user's known-hosts trust state, so it uses the same
+	// non-interactive argv builder as catalogue checks (batch mode, strict
+	// host-key checking, bounded connect, no TTY, refused host-key updates).
+	spec := sshstdio.BuildCommandForObservation(target.Endpoint, remotePreviewSSHConnectTimeout, "vev", "_remote-preview", encoded)
 	cmd := command(runCtx, spec.Path, spec.Args...)
 	stdout := boundedBuffer{limit: protocol.RemotePreviewMaxBytes}
 	stderr := boundedBuffer{limit: remotePreviewMaxDiagnostic}

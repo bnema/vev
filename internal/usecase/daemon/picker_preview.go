@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -31,33 +33,48 @@ func (d *Daemon) handlePickerPreviewForAttachment(effect *attachmentEffect, requ
 	ac.overlays.pickerMu.Lock()
 	target, known := ac.overlays.pickerKeys[request.Key]
 	previousSession, previousGeneration := ac.overlays.pickerPreviewSession, ac.overlays.pickerPreviewGeneration
+	previousCancel := ac.overlays.pickerPreviewCancel
 	ac.overlays.pickerPreviewGeneration++
 	generation := ac.overlays.pickerPreviewGeneration
 	ac.overlays.pickerPreviewKey = request.Key
 	ac.overlays.pickerPreviewSession = nil
+	ac.overlays.pickerPreviewCancel = nil
 	ac.overlays.pickerMu.Unlock()
-	// The superseded row stops observing before the new subscription is
-	// installed, so moving between rows cannot leave a live observer on the
-	// previous target's coordinator.
+	// The superseded row stops observing and refreshing before the new
+	// subscription is installed, so moving between rows cannot leave a live
+	// observer or worker on the previous target.
 	d.teardownPickerPreviewSubscription(ac, previousSession, previousGeneration)
+	if previousCancel != nil {
+		previousCancel()
+	}
 
-	coordinator, targetSession := d.pickerPreviewWakeCoordinator(effect, target, intent)
-	if coordinator != nil && coordinator.subscribePreviewFor(ac, generation, func(renderWake) {
-		d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, known)
-	}) {
-		// subscribePreviewFor is deliberately outside pickerMu. Revalidate after
-		// it returns so a concurrent close or newer request tears the
-		// subscription it just installed back down before it can outlive its row.
-		ac.overlays.pickerMu.Lock()
-		current := ac.overlays.pickerOpen && ac.overlays.pickerInteraction == request.InteractionID &&
-			ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewKey == request.Key
-		if current {
-			ac.overlays.pickerPreviewSession = targetSession
+	if target.RemoteTarget != nil {
+		// A remote row has no local renderer to wake it and the viewer may be
+		// completely quiet, so active freshness is a cancellable worker that
+		// publishes each completed refresh directly instead of waiting for a
+		// viewer render. Only the selected row owns a worker.
+		if known {
+			d.adoptRemotePreviewRefresher(ac, d.startRemotePreviewRefresher(ac, request, generation, target, intent), request, generation)
 		}
-		ac.overlays.pickerMu.Unlock()
-		if !current {
-			coordinator.teardownPreviewFor(ac, generation)
-			return
+	} else {
+		coordinator, targetSession := d.pickerPreviewWakeCoordinator(effect, target, intent)
+		if coordinator != nil && coordinator.subscribePreviewFor(ac, generation, func(renderWake) {
+			d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, known)
+		}) {
+			// subscribePreviewFor is deliberately outside pickerMu. Revalidate after
+			// it returns so a concurrent close or newer request tears the
+			// subscription it just installed back down before it can outlive its row.
+			ac.overlays.pickerMu.Lock()
+			current := ac.overlays.pickerOpen && ac.overlays.pickerInteraction == request.InteractionID &&
+				ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewKey == request.Key
+			if current {
+				ac.overlays.pickerPreviewSession = targetSession
+			}
+			ac.overlays.pickerMu.Unlock()
+			if !current {
+				coordinator.teardownPreviewFor(ac, generation)
+				return
+			}
 		}
 	}
 	d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, known)
@@ -92,6 +109,83 @@ func (d *Daemon) teardownPickerPreviewSubscription(ac *attachedClient, targetSes
 	}
 	if coordinator := attachmentRenderCoordinator(targetSession); coordinator != nil {
 		coordinator.teardownPreviewFor(ac, generation)
+	}
+}
+
+// adoptRemotePreviewRefresher records the selected row's worker cancel func so
+// selection replacement, close, or retirement can stop it. Revalidation after
+// recording closes the race where a concurrent close or newer request already
+// superseded this generation.
+func (d *Daemon) adoptRemotePreviewRefresher(ac *attachedClient, cancel context.CancelFunc, request protocol.PickerPreviewRequest, generation uint64) {
+	if ac == nil || ac.overlays == nil || cancel == nil {
+		return
+	}
+	ac.overlays.pickerMu.Lock()
+	current := ac.overlays.pickerOpen && ac.overlays.pickerInteraction == request.InteractionID &&
+		ac.overlays.pickerPreviewGeneration == generation && ac.overlays.pickerPreviewKey == request.Key
+	if current {
+		ac.overlays.pickerPreviewCancel = cancel
+	}
+	ac.overlays.pickerMu.Unlock()
+	if !current {
+		cancel()
+	}
+}
+
+// cancelPickerPreviewWorker stops the selected remote row's refresher without
+// touching the interaction namespace. Detach uses it so a disconnected
+// attachment cannot keep observing a host after its transport is gone; open,
+// replacement, and retirement cancel through the same recorded func.
+func cancelPickerPreviewWorker(ac *attachedClient) {
+	if ac == nil || ac.overlays == nil {
+		return
+	}
+	ac.overlays.pickerMu.Lock()
+	cancel := ac.overlays.pickerPreviewCancel
+	ac.overlays.pickerPreviewCancel = nil
+	ac.overlays.pickerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// startRemotePreviewRefresher starts the selected remote row's active-freshness
+// worker. The worker is cancellable by the returned func, and its context is
+// derived from the daemon serve context so shutdown also stops it.
+func (d *Daemon) startRemotePreviewRefresher(ac *attachedClient, request protocol.PickerPreviewRequest, generation uint64, target picker.Target, intent protocol.PickerIntent) context.CancelFunc {
+	if ac == nil || ac.overlays == nil || target.RemoteTarget == nil {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(d.remotePreviewContext())
+	go d.remotePreviewRefresher(ctx, ac, request, generation, target, intent)
+	return cancel
+}
+
+// remotePreviewRefresher keeps the displayed remote row fresh. It waits one
+// cooldown after every completed attempt, so a slow host can never accumulate
+// overlapping or catch-up requests; it rechecks the preview generation after
+// remote I/O, so a completed refresh can never replace the row the user is
+// displaying; and it publishes the completed refresh itself, so a quiet viewer
+// needs no render wake to see it.
+func (d *Daemon) remotePreviewRefresher(ctx context.Context, ac *attachedClient, request protocol.PickerPreviewRequest, generation uint64, target picker.Target, intent protocol.PickerIntent) {
+	for {
+		timer := d.clock.NewTimer(remotePreviewCooldown)
+		select {
+		case <-timer.C():
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+		if ctx.Err() != nil || !pickerPreviewRequestCurrent(ac, request, generation) {
+			return
+		}
+		if _, err := d.refreshRemotePreview(ctx, *target.RemoteTarget, request.Width, request.Height); err != nil {
+			continue
+		}
+		if ctx.Err() != nil || !pickerPreviewRequestCurrent(ac, request, generation) {
+			return
+		}
+		d.publishPickerPreviewForAttachment(ac, request, generation, target, intent, true)
 	}
 }
 
@@ -151,8 +245,17 @@ func (d *Daemon) capturePickerPreview(target picker.Target, intent protocol.Pick
 		Version: protocol.PickerPreviewSchemaVersion, Status: protocol.PickerPreviewUnavailable,
 	}
 	if target.RemoteTarget != nil {
-		remote, err := d.awaitRemotePreviewRefresh(d.remotePreviewContext(), *target.RemoteTarget, width, height)
-		if err != nil || remote.Status != protocol.RemotePreviewOK {
+		// Known cache content displays immediately; the selected row's refresher
+		// owns active freshness, so a render wake never waits on remote I/O.
+		remote, ok := d.peekRemotePreview(*target.RemoteTarget, width, height)
+		if !ok {
+			fetched, err := d.fetchRemotePreview(d.remotePreviewContext(), *target.RemoteTarget, width, height)
+			if err != nil {
+				return unavailable
+			}
+			remote = fetched
+		}
+		if remote.Status != protocol.RemotePreviewOK {
 			return unavailable
 		}
 		if remote.Width == 0 || remote.Height == 0 || len(remote.Cells) == 0 {

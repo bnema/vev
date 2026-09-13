@@ -889,6 +889,7 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 		sess.unregisterAttachmentLocked(ac)
 		ac.setSession(nil)
 		ac.invalidateFrozenAttachmentCapability()
+		cancelPickerPreviewWorker(ac)
 	}
 	sess.mu.Unlock()
 	d.notices.routingMu.Unlock()
@@ -937,6 +938,7 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentCapability, done
 		unregisterAttachmentSessionLocked(token.sess, token.ac)
 		token.ac.setSession(nil)
 		token.ac.invalidateFrozenAttachmentCapability()
+		cancelPickerPreviewWorker(token.ac)
 	}
 	if coordinator != nil {
 		coordinator.mu.Unlock()
