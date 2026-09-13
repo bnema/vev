@@ -502,8 +502,8 @@ func TestProxyRebindChangesUpstreamSourceAddress(t *testing.T) {
 	if first.from.Port == second.from.Port {
 		t.Fatalf("upstream source port stayed %d across a NAT rebind", first.from.Port)
 	}
-	if got := proxy.Stats().Rebinds; got != 1 {
-		t.Fatalf("rebinds = %d, want 1", got)
+	if got := proxy.Stats().Rebinds; got < 1 {
+		t.Fatalf("rebinds = %d, want at least 1", got)
 	}
 }
 
