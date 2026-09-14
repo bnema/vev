@@ -436,10 +436,9 @@ func TestProxyTransportsCopiesBothDirections(t *testing.T) {
 }
 
 // TestQUICProxyLifecycleDeliversFinalEnvelope exercises the production proxy
-// bridge instead of a bare same-process Transport.Close: the daemon direction
-// emits one final synchronous envelope, the proxy forwards it, tears both
-// carriages down, and then performs the bounded graceful teardown wait the
-// detached _quic-proxy uses before process exit. The envelope must survive.
+// bridge instead of a bare same-process Transport.Close. It verifies that a
+// client already reading, as production clients are, receives the daemon's
+// final synchronous envelope while the proxy tears both carriages down.
 func TestQUICProxyLifecycleDeliversFinalEnvelope(t *testing.T) {
 	cert, fingerprint, err := quic.GenerateEphemeralCert()
 	require.NoError(t, err)
@@ -479,19 +478,37 @@ func TestQUICProxyLifecycleDeliversFinalEnvelope(t *testing.T) {
 	require.NoError(t, peer.Send(wire.Envelope{Payload: final}))
 	_ = peer.Close()
 
+	// Receive while the proxy performs its bounded graceful teardown. Waiting
+	// for teardown first lets QUIC's eventual CONNECTION_CLOSE discard unread
+	// stream data, a property the adapter does not promise to prevent.
+	type recvResult struct {
+		envelope wire.Envelope
+		err      error
+	}
+	received := make(chan recvResult, 1)
+	go func() {
+		envelope, err := client.Recv()
+		received <- recvResult{envelope: envelope, err: err}
+	}()
+	var got wire.Envelope
+	select {
+	case result := <-received:
+		require.NoError(t, result.err, "a reading client must receive the final envelope during proxy teardown")
+		got = result.envelope
+	case <-ctx.Done():
+		t.Fatal("timed out receiving the final envelope during proxy teardown")
+	}
+	require.Equal(t, final, got.Payload)
+
 	select {
 	case <-proxyDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("proxy did not stop after the daemon side closed")
 	}
 
-	// The proxy waits for deferred graceful teardown before returning; this is
-	// what keeps the final envelope from being discarded at process exit.
+	// Verify the bounded teardown phase completed after the proxy closed its
+	// QUIC carriage; runQUICProxy performs the same wait before process exit.
 	require.NoError(t, waitGracefulTeardown(proxySide))
-
-	got, err := client.Recv()
-	require.NoError(t, err, "the final envelope must survive proxy teardown")
-	require.Equal(t, final, got.Payload)
 	_, err = client.Recv()
 	require.ErrorIs(t, err, io.EOF)
 }
