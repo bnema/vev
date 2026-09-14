@@ -107,3 +107,49 @@ func TestPaintPublishesChangedAttachmentRoutePosition(t *testing.T) {
 	}, positions)
 	d.clientGone(sess, ac, tr, false)
 }
+
+func TestWarmAndColdAttachmentPreferredTab(t *testing.T) {
+	for _, disappeared := range []bool{false, true} {
+		name := "matching retained tab"
+		if disappeared {
+			name = "retained tab disappeared"
+		}
+		t.Run(name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "tab-1", "pane-1")
+			sess.incarnation = domain.SessionLifecycleID{1}
+			second := newTabWithStableID("tab-2", "pane-2", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
+			sess.mu.Lock()
+			sess.tabs = append(sess.tabs, second)
+			sess.mu.Unlock()
+			target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+			hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: sess.name, Size: defaultSize, ExactTarget: &target, PreferredTabID: "tab-2", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
+			warmTransport := &closeTrackingTransport{}
+			_, warm, err := d.routeWithContext(context.Background(), hello, warmTransport)
+			require.NoError(t, err)
+			sess.repairAttachmentView(warm)
+			require.Equal(t, domain.TabStableID("tab-2"), warm.viewSnapshot().tabID)
+			rc := sess.renderCoordinator()
+			require.True(t, rc.markAttachmentReady(rc.attachmentLease(warm)))
+			require.NoError(t, d.suspendAttachment(sess.captureAttachmentCapability(warm, warmTransport), protocol.SuspendAttachment{RequestID: 1}))
+			if disappeared {
+				sess.mu.Lock()
+				sess.tabs = sess.tabs[:1]
+				sess.mu.Unlock()
+			}
+			require.NoError(t, d.activateAttachment(warm, warm.transportSnapshot(), protocol.ActivateAttachment{RequestID: 2, Target: target, Size: defaultSize}))
+			coldTransport := &closeTrackingTransport{}
+			_, cold, err := d.routeWithContext(context.Background(), hello, coldTransport)
+			require.NoError(t, err)
+			sess.repairAttachmentView(cold)
+			want := domain.TabStableID("tab-2")
+			if disappeared {
+				want = "tab-1"
+			}
+			require.Equal(t, want, cold.viewSnapshot().tabID)
+			require.Equal(t, cold.viewSnapshot().tabID, warm.viewSnapshot().tabID)
+			d.clientGone(sess, warm, warmTransport, false)
+			d.clientGone(sess, cold, coldTransport, false)
+		})
+	}
+}

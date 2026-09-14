@@ -37,6 +37,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenTabsKeys := make(map[string]bool)
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
+	seenRemoteKeys := make(map[string]bool)
 
 	scanner := bufio.NewScanner(r)
 	lineNo := 0
@@ -64,6 +65,21 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 		}
 
 		switch {
+		case key == "remote.attachment-cache-ttl":
+			warnings = warnDuplicateKey(warnings, seenRemoteKeys, key, lineNo)
+			if strings.EqualFold(value, "off") {
+				cfg.RemoteAttachmentCacheTTL = -1
+				continue
+			}
+			ttl, err := time.ParseDuration(value)
+			if err != nil {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid %s %q", key, value)})
+				continue
+			}
+			if ttl == 0 {
+				ttl = domain.Defaults().RemoteAttachmentCacheTTL
+			}
+			cfg.RemoteAttachmentCacheTTL = ttl
 		case key == "web.listen" || key == "web.origin":
 			warnings = warnDuplicateKey(warnings, seenWebKeys, key, lineNo)
 			// Keep raw values for fail-closed validation at gateway startup.

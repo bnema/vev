@@ -890,6 +890,7 @@ func defaultRemoteDialerFactory() remoteDialerForTarget {
 type runClientFunc func(context.Context, client.Dependencies, client.AttachRequest) error
 
 type runAttachDeps struct {
+	configPath              func() string
 	localDialer             func() wire.Dialer
 	remoteDialerFactory     remoteDialerForTarget
 	selectedRemoteTransport string
@@ -1022,6 +1023,20 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		return policy
 	}
+	configPath := deps.configPath
+	if configPath == nil {
+		configPath = platform.ConfigPath
+	}
+	cfg, warnings, configErr := config.Load(configPath())
+	if configErr != nil {
+		if log != nil {
+			log.Warn("loading client config failed; using defaults", "err", configErr)
+		}
+		cfg = domain.Defaults()
+	}
+	if log != nil {
+		logConfigWarnings(log, warnings)
+	}
 	// The launching client owns one host registry for the whole run: endpoint
 	// bindings are resolved once and reused by every later handoff, and the
 	// discovery loop it drives lives exactly as long as the runner.
@@ -1041,6 +1056,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return resolveErr
 			}
 			err = runClient(ctx, client.Dependencies{
+				AttachmentCacheTTL:     cfg.RemoteAttachmentCacheTTL,
 				Dialer:                 binding.Dialer,
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
@@ -1070,6 +1086,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
 			err = runClient(ctx, client.Dependencies{
+				AttachmentCacheTTL:     cfg.RemoteAttachmentCacheTTL,
 				Dialer:                 sessionwire.NewClientDialer(localDialer()),
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),

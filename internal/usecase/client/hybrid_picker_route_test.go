@@ -32,6 +32,7 @@ import (
 type hybridPickerTransport struct {
 	mu        sync.Mutex
 	queue     []wire.Envelope
+	receiving bool
 	sends     []wire.Envelope
 	signal    chan struct{}
 	done      chan struct{}
@@ -54,11 +55,13 @@ func (t *hybridPickerTransport) Recv() (wire.Envelope, error) {
 	for {
 		t.mu.Lock()
 		if len(t.queue) > 0 {
+			t.receiving = false
 			frame := t.queue[0]
 			t.queue = t.queue[1:]
 			t.mu.Unlock()
 			return frame, nil
 		}
+		t.receiving = true
 		t.mu.Unlock()
 		select {
 		case <-t.signal:
@@ -77,11 +80,24 @@ func (t *hybridPickerTransport) Close() error {
 func (t *hybridPickerTransport) push(frame wire.Envelope) {
 	t.mu.Lock()
 	t.queue = append(t.queue, frame)
+	t.receiving = false
 	t.mu.Unlock()
 	select {
 	case t.signal <- struct{}{}:
 	default:
 	}
+}
+
+// awaitReceived waits until the reader has delivered every queued frame to its
+// inbox and entered the next Recv. Merely pushing invalid dormant output does
+// not establish that it arrived before the activation boundary.
+func (t *hybridPickerTransport) awaitReceived(tb *testing.T) {
+	tb.Helper()
+	require.Eventually(tb, func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return len(t.queue) == 0 && t.receiving
+	}, time.Second, time.Millisecond)
 }
 
 func (t *hybridPickerTransport) sent() []wire.Envelope {
@@ -401,6 +417,9 @@ func TestHybridPickerDifferentHostDialsTheTargetEndpoint(t *testing.T) {
 		CauseActionID: selection.CauseActionID,
 	}))
 
+	suspend := mustAwaitSend(t, remote, "SuspendAttachment").(protocol.SuspendAttachment)
+	remote.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: suspend.RequestID, Target: protocol.ExactSessionTarget{LifecycleID: source.LifecycleID, SessionName: source.SessionName}}))
+
 	targetTransport.push(hybridPickerWelcome("target", targetHost.LifecycleID))
 	targetTransport.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
 
@@ -447,7 +466,6 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 	}
 	local := newHybridPickerTransport()
 	remote := newHybridPickerTransport()
-	remoteReturn := newHybridPickerTransport()
 	other := newHybridPickerTransport()
 	resolutions := make(chan string, 8)
 
@@ -457,7 +475,7 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}))
 
-	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote, remoteReturn}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote}}
 	otherDialer := &sequenceDialer{trs: []wire.Transport{other}}
 	localDialer := &sequenceDialer{trs: []wire.Transport{local}}
 	dialers := map[string]ports.ClientDialer{"remote": remoteDialer, "target-host": otherDialer}
@@ -493,14 +511,23 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 		RemoteTarget: &otherHost, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		CauseActionID: selection.CauseActionID,
 	}))
+	suspend := mustAwaitSend(t, remote, "SuspendAttachment").(protocol.SuspendAttachment)
+	remote.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: suspend.RequestID, Target: protocol.ExactSessionTarget{LifecycleID: source.LifecycleID, SessionName: source.SessionName}}))
 	other.push(hybridPickerWelcome("other", otherHost.LifecycleID))
 	// The new peer offers the return route to the first host.
 	other.push(frameOfMessage(protocol.AttachTarget{
 		Endpoint: "remote", Session: source.SessionName, Intent: protocol.IntentAttach,
 		RemoteTarget: &source, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}))
-	remoteReturn.push(hybridPickerWelcome("source", source.LifecycleID))
-	remoteReturn.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
+	otherSuspend := mustAwaitSend(t, other, "SuspendAttachment").(protocol.SuspendAttachment)
+	other.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: otherSuspend.RequestID, Target: protocol.ExactSessionTarget{LifecycleID: otherHost.LifecycleID, SessionName: otherHost.SessionName}}))
+	activation := mustAwaitSend(t, remote, "ActivateAttachment").(protocol.ActivateAttachment)
+	require.Equal(t, source.LifecycleID, activation.Target.LifecycleID)
+	hybridPickerPaint(t, remote, 2, activation.Target, "warm return")
+	remote.push(frameOfMessage(protocol.RoutePosition{Target: activation.Target, ActiveTabID: "tab-2"}))
+	remote.push(frameOfMessage(protocol.AttachmentActivated{RequestID: activation.RequestID, Identity: protocol.CommittedRouteIdentity{Target: activation.Target}, Epoch: 2, State: 1, ViewPublication: 2}))
+	term.awaitDisplay(t, "warm return")
+	remote.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
 
 	select {
 	case err := <-done:
@@ -508,10 +535,9 @@ func TestHybridPickerKeepsOneEndpointBindingAcrossServingPeers(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("client did not finish the cross-peer picker route")
 	}
-	// Returning to the first peer resolves that endpoint again and dials a fresh
-	// connection through it: the registry owns binding reuse, and a route
-	// crossing serving peers never invalidates the client's own resolution.
-	require.Equal(t, int32(2), remoteDialer.calls.Load())
+	// Resolution remains registry-owned, but activation reuses the authenticated
+	// attachment and emits no second Hello or dial.
+	require.Equal(t, int32(1), remoteDialer.calls.Load())
 	require.Equal(t, int32(1), otherDialer.calls.Load())
 	require.Equal(t, []string{"remote", "target-host", "remote"}, drainStrings(resolutions))
 }
@@ -522,4 +548,142 @@ func mustAwaitSend(t *testing.T, transport *hybridPickerTransport, name string) 
 	message, ok := transport.awaitSend(t, name)
 	require.True(t, ok, "client message %s never crossed the wire", name)
 	return message
+}
+
+// The route ledger chooses local/home; the cache only transfers transport
+// ownership. The activation frame must be displayed before queued input resumes.
+func TestWarmAttachmentRemoteLocalRemoteReusesDial(t *testing.T) {
+	term := newHybridPickerTerminal()
+	defer term.reader.unblock()
+	local1, local2, remote := newHybridPickerTransport(), newHybridPickerTransport(), newHybridPickerTransport()
+	localTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "local"}
+	remoteTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "work"}
+	local1.push(hybridPickerWelcome("local", localTarget.LifecycleID))
+	local1.push(frameOfMessage(protocol.AttachTarget{Endpoint: "remote", Session: "work", Intent: protocol.IntentAttach, ExactTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}))
+	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{remote}}
+	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	deps.HostRegistry = stubHostRegistry{resolve: func(string) (ports.RemoteEndpointBinding, error) {
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runTestClient(ctx, deps, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local"})
+	}()
+	remote.push(hybridPickerWelcome("work", remoteTarget.LifecycleID))
+	hybridPickerPaint(t, remote, 1, remoteTarget, "remote first")
+	term.awaitDisplay(t, "remote first")
+	// The committed cursor differs from the original (empty) attach hint.
+	// Both the route ledger and retained cache request must remember it.
+	remote.push(frameOfMessage(protocol.RoutePosition{Target: remoteTarget, ActiveTabID: "tab-2"}))
+	remote.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}))
+	suspension := mustAwaitSend(t, remote, "SuspendAttachment").(protocol.SuspendAttachment)
+	remote.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: suspension.RequestID, Target: remoteTarget}))
+	local2.push(hybridPickerWelcome("local", localTarget.LifecycleID))
+	hybridPickerPaint(t, local2, 1, localTarget, "local return")
+	term.awaitDisplay(t, "local return")
+	// Ordinary dormant output cannot overwrite the local foreground.
+	hybridPickerPaint(t, remote, 1, remoteTarget, "forbidden dormant output")
+	remote.awaitReceived(t)
+	local2.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}))
+	activation := mustAwaitSend(t, remote, "ActivateAttachment").(protocol.ActivateAttachment)
+	hybridPickerPaint(t, remote, 2, remoteTarget, "reactivated full")
+	remote.push(frameOfMessage(protocol.RoutePosition{Target: activation.Target, ActiveTabID: "tab-2"}))
+	remote.push(frameOfMessage(protocol.AttachmentActivated{RequestID: activation.RequestID, Identity: protocol.CommittedRouteIdentity{Target: remoteTarget}, Epoch: 2, State: 1, ViewPublication: 2}))
+	term.awaitDisplay(t, "reactivated full")
+	require.NotContains(t, term.screen(), "forbidden dormant output")
+	require.Equal(t, int32(1), remoteDialer.calls.Load())
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner failed to close cached transports")
+	}
+	require.Positive(t, remote.closed.Load())
+}
+
+func TestWarmAttachmentRepairsDisappearedTab(t *testing.T) {
+	for _, scenario := range []string{"reconnect", "route return"} {
+		t.Run(scenario, func(t *testing.T) {
+			term := newHybridPickerTerminal()
+			defer term.reader.unblock()
+			local1, local2, remote := newHybridPickerTransport(), newHybridPickerTransport(), newHybridPickerTransport()
+			local3, remote2 := newHybridPickerTransport(), newHybridPickerTransport()
+			localTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "local"}
+			remoteTarget := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "work"}
+			local1.push(hybridPickerWelcome("local", localTarget.LifecycleID))
+			local1.push(frameOfMessage(protocol.AttachTarget{Endpoint: "remote", Session: "work", Intent: protocol.IntentAttach, ExactTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}))
+			localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2, local3}}
+			remoteDialer := &sequenceDialer{trs: []wire.Transport{remote, remote2}}
+			deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+			deps.HostRegistry = stubHostRegistry{resolve: func(string) (ports.RemoteEndpointBinding, error) {
+				return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- runTestClient(ctx, deps, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local"})
+			}()
+			remote.push(hybridPickerWelcome("work", remoteTarget.LifecycleID))
+			hybridPickerPaint(t, remote, 1, remoteTarget, "remote first")
+			term.awaitDisplay(t, "remote first")
+			// The committed cursor differs from the original (empty) attach hint.
+			// Both the route ledger and retained cache request must remember it.
+			remote.push(frameOfMessage(protocol.RoutePosition{Target: remoteTarget, ActiveTabID: "tab-2"}))
+			remote.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}))
+			suspension := mustAwaitSend(t, remote, "SuspendAttachment").(protocol.SuspendAttachment)
+			remote.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: suspension.RequestID, Target: remoteTarget}))
+			local2.push(hybridPickerWelcome("local", localTarget.LifecycleID))
+			hybridPickerPaint(t, local2, 1, localTarget, "local return")
+			term.awaitDisplay(t, "local return")
+			// Ordinary dormant output cannot overwrite the local foreground.
+			hybridPickerPaint(t, remote, 1, remoteTarget, "forbidden dormant output")
+			remote.awaitReceived(t)
+			if scenario == "reconnect" {
+				local2.push(frameOfMessage(protocol.AttachTarget{Endpoint: "remote", Session: "work", Intent: protocol.IntentAttach, ExactTarget: &remoteTarget, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}))
+			} else {
+				local2.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 3, Key: 2, Generation: 2}))
+			}
+			activation := mustAwaitSend(t, remote, "ActivateAttachment").(protocol.ActivateAttachment)
+			hybridPickerPaint(t, remote, 2, remoteTarget, "reactivated full")
+			remote.push(frameOfMessage(protocol.RoutePosition{Target: activation.Target, ActiveTabID: "tab-1"}))
+			remote.push(frameOfMessage(protocol.AttachmentActivated{RequestID: activation.RequestID, Identity: protocol.CommittedRouteIdentity{Target: remoteTarget}, Epoch: 2, State: 1, ViewPublication: 2}))
+			term.awaitDisplay(t, "reactivated full")
+			require.NotContains(t, term.screen(), "forbidden dormant output")
+			require.Equal(t, int32(1), remoteDialer.calls.Load())
+			// While suspended tab-2 disappeared; the daemon repaired its retained
+			// cursor to tab-1 in the activation publication above, with no later update.
+			if scenario == "route return" {
+				remote.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: 1, Generation: 3}))
+				suspend := mustAwaitSend(t, remote, "SuspendAttachment").(protocol.SuspendAttachment)
+				remote.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: suspend.RequestID, Target: remoteTarget}))
+				local3.push(hybridPickerWelcome("local", localTarget.LifecycleID))
+				hybridPickerPaint(t, local3, 1, localTarget, "local third")
+				term.awaitDisplay(t, "local third")
+				// Evict the parked connection so the next Hello exposes the ledger cursor.
+				remote.push(frameOfMessage(protocol.Detached{Reason: protocol.ReasonDetach}))
+				require.Eventually(t, func() bool { return remote.closed.Load() > 0 }, time.Second, time.Millisecond)
+				local3.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 5, Key: 2, Generation: 4}))
+			} else {
+				// A foreground transport failure exposes the attempt request cursor.
+				remote.closeOnce.Do(func() { close(remote.done) })
+			}
+			hello := mustAwaitSend(t, remote2, "Hello").(protocol.Hello)
+			require.Equal(t, &remoteTarget, hello.ExactTarget)
+			require.Equal(t, domain.TabStableID("tab-1"), hello.PreferredTabID)
+			remote2.push(hybridPickerWelcome("work", remoteTarget.LifecycleID))
+			hybridPickerPaint(t, remote2, 1, remoteTarget, "repaired return")
+			term.awaitDisplay(t, "repaired return")
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("runner failed to close cached transports")
+			}
+			require.Positive(t, remote.closed.Load())
+		})
+	}
 }

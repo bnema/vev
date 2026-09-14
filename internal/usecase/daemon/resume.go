@@ -194,7 +194,7 @@ func (d *Daemon) waitParkingInFlight(h protocol.Hello) bool {
 }
 
 func (d *Daemon) prepareParkAttachment(sess *session, ac *attachedClient) bool {
-	if sess == nil || ac == nil || !ac.resumeCapable {
+	if sess == nil || ac == nil || !ac.resumeCapable || ac.attachmentActivity() != attachmentActive {
 		return false
 	}
 	d.mu.Lock()

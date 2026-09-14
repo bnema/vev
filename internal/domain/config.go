@@ -108,21 +108,24 @@ func (c ScrollbackConfig) Valid() bool {
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
 type Config struct {
-	WebListen      string
-	WebOrigin      string
-	Theme          ThemeMode
-	ThemePalette   bool
-	ThemeAccent    ThemeAccent
-	Bar            BarConfig
-	BindingEntries []ConfigEntry
-	Codes          map[string]string
-	Snapshot       SnapshotConfig
-	Copy           CopyConfig
-	Palette        PaletteConfig
-	Floating       FloatingConfig
-	Nav            NavConfig
-	Tabs           TabsConfig
-	Scrollback     ScrollbackConfig
+	// RemoteAttachmentCacheTTL is read by each launching client. Zero uses the
+	// default retention; negative durations disable remote attachment reuse.
+	RemoteAttachmentCacheTTL time.Duration
+	WebListen                string
+	WebOrigin                string
+	Theme                    ThemeMode
+	ThemePalette             bool
+	ThemeAccent              ThemeAccent
+	Bar                      BarConfig
+	BindingEntries           []ConfigEntry
+	Codes                    map[string]string
+	Snapshot                 SnapshotConfig
+	Copy                     CopyConfig
+	Palette                  PaletteConfig
+	Floating                 FloatingConfig
+	Nav                      NavConfig
+	Tabs                     TabsConfig
+	Scrollback               ScrollbackConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -135,9 +138,10 @@ type Warning struct {
 // Defaults returns vev's default configuration.
 func Defaults() Config {
 	return Config{
-		Theme:        ThemeAuto,
-		ThemePalette: true,
-		ThemeAccent:  ThemeAccent{Mode: ThemeAccentAuto},
+		RemoteAttachmentCacheTTL: 15 * time.Minute,
+		Theme:                    ThemeAuto,
+		ThemePalette:             true,
+		ThemeAccent:              ThemeAccent{Mode: ThemeAccentAuto},
 		Bar: BarConfig{
 			Interval: 5 * time.Second,
 		},

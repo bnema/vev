@@ -96,6 +96,8 @@ message ClientEnvelope {
     PickerSelection picker_selection = 26;
     PickerPreviewRequest picker_preview_request = 27;
     PickerControlRequest picker_control_request = 28;
+    SuspendAttachment suspend_attachment = 29;
+    ActivateAttachment activate_attachment = 30;
   }
 }
 
@@ -131,5 +133,7 @@ message ServerEnvelope {
     PickerFailure picker_failure = 26;
     PickerPreview picker_preview = 27;
     PickerControlResponse picker_control_response = 28;
+    AttachmentSuspended attachment_suspended = 31;
+    AttachmentActivated attachment_activated = 32;
   }
 }

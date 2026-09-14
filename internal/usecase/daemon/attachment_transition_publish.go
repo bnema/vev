@@ -120,7 +120,7 @@ func (d *Daemon) validateAttachmentTransitionPrelocked(req attachmentTransitionR
 	sourceCore := source.core()
 	targetCore := req.target.core()
 	if sourceCore == nil || targetCore == nil || !req.preflighted || !req.attachmentEffectsFrozen ||
-		req.next == nil || d.closing || d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
+		req.next == nil || req.next.attachmentActivity() != attachmentActive || d.closing || d.sessions[sourceCore.id] != source || d.sessions[targetCore.id] != req.target ||
 		req.expectedTransport.transport == nil || !req.next.transportSnapshotCurrent(req.expectedTransport) ||
 		req.preserveAttachment && req.sourceCapability == nil {
 		return nil, errAttachmentTransition

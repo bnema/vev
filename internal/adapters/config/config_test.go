@@ -359,6 +359,7 @@ func TestParse(t *testing.T) {
 				tt.want.Palette = domain.Defaults().Palette
 			}
 			tt.want.Scrollback = domain.DefaultScrollbackConfig()
+			tt.want.RemoteAttachmentCacheTTL = 15 * time.Minute
 			got, warnings, err := Parse(strings.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)

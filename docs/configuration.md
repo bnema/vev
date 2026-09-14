@@ -7,6 +7,10 @@ vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means d
 web.listen = 127.0.0.1:8778
 web.origin = http://127.0.0.1:8778
 
+# Client startup setting: retain suspended remote attachments for this duration.
+# Zero selects the default; off or a negative duration disables reuse.
+remote.attachment-cache-ttl = 15m
+
 # Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
 # In auto mode with palette inheritance enabled, infer a terminal accent.
@@ -87,6 +91,31 @@ code.detach = DET
 ```
 
 Invalid values log a warning and resolve that setting to its default on both initial load and reload.
+
+## Remote attachment cache
+
+`remote.attachment-cache-ttl` is read when a terminal client starts, not hot
+reloaded. It defaults to `15m`; positive Go durations such as `30s` or `5m`
+select another retention period. `0` selects the default. `off` (case-insensitive)
+or a negative duration disables reuse. Invalid values warn and retain the
+previous valid value, or the default when none was provided.
+
+Navigating away suspends the remote attachment. Returning before expiry can
+reuse its authenticated connection without another bootstrap or dial. Dormant
+attachments have no terminal input, output, or geometry authority. Expiry,
+remote closure, or rejected activation evicts the connection; selecting that
+endpoint then uses normal reconnect/attach behavior. Endpoint aliases remain
+distinct, even if they resolve to the same server. Exiting the client closes
+its retained connections.
+
+Retention is bounded by TTL and one dormant attachment per exact endpoint,
+**not by a global connection count**. Each dormant entry retains a transport,
+a reader, a drain worker, a timer, and daemon attachment state; SSH stdio can
+also retain an SSH process. The client inbox is bounded and dormant output is
+discarded. TTL is an age bound, not a hard memory/socket/process bound: visiting
+many distinct endpoints within that period can retain many connections. A
+measured global capacity policy remains under review; no arbitrary capacity
+number is imposed. Use a shorter TTL or `off` when resource limits are tight.
 
 ## Scrollback
 

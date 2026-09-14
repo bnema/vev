@@ -310,13 +310,24 @@ const (
 )
 
 func (d *Daemon) paint(entry *session, ac *attachedClient, reset bool, lease *attachmentLease) paintResult {
+	return d.paintWithActivationEffect(entry, ac, reset, lease, nil)
+}
+
+// activation owns the drained transition gate; only its explicit ticket may
+// publish while ordinary input and render admission remain disabled.
+func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, reset bool, lease *attachmentLease, activation *attachmentEffect) paintResult {
 	// Session-owned PTY preparation remains local; attachment rendering is
 	// captured through session.captureRenderState.
 	sess := entry
 	local := sess != nil
 	marks := d.newRuntimeMarkBatch()
 	var paintEffect *attachmentEffect
-	if lease != nil {
+	if activation != nil {
+		paintEffect = activation
+		marks.attachmentEffect = activation
+	} else if ac.attachmentActivity() != attachmentActive {
+		return paintRejected
+	} else if lease != nil {
 		token := captureAttachmentCapability(entry, ac, ac.transport())
 		token.lease = lease
 		ticket, admitted := ac.beginAttachmentEffect(token)

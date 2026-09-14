@@ -151,6 +151,8 @@ type Dependencies struct {
 	Dialer   ports.ClientDialer
 	Terminal ports.Terminal
 	Clock    ports.Clock
+	// AttachmentCacheTTL defaults to 15 minutes. Negative values disable reuse.
+	AttachmentCacheTTL time.Duration
 	// DisableCapabilityProbe skips active outer-terminal discovery for headless
 	// embedders and deterministic tests. Interactive clients leave it false.
 	DisableCapabilityProbe bool
@@ -291,14 +293,15 @@ func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attach
 }
 
 type Runner struct {
-	ui              *UI
-	dialer          ports.ClientDialer
-	term            ports.Terminal
-	clock           ports.Clock
-	clipboard       ports.ClipboardReader
-	logger          *slog.Logger
-	runtimeObserver ports.SerializedRuntimeObserver
-	hostRegistry    ports.ClientHostRegistry
+	ui                 *UI
+	dialer             ports.ClientDialer
+	term               ports.Terminal
+	clock              ports.Clock
+	clipboard          ports.ClipboardReader
+	logger             *slog.Logger
+	runtimeObserver    ports.SerializedRuntimeObserver
+	hostRegistry       ports.ClientHostRegistry
+	attachmentCacheTTL time.Duration
 	// launchedRemote records whether this runner was launched as a direct
 	// remote attach. It decides the handoff environment policy exactly like the
 	// composition root used to: a picker route from a locally launched client
@@ -340,6 +343,7 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:             log,
 		runtimeObserver:    deps.RuntimeObserver,
 		hostRegistry:       deps.HostRegistry,
+		attachmentCacheTTL: deps.AttachmentCacheTTL,
 		launchedRemote:     deps.Remote,
 		remote:             deps.Remote,
 		localControlDialer: deps.LocalControlDialer,
@@ -569,6 +573,8 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		return nil
 	}
 
+	cache := newAttachmentCoordinator(r.clock, r.attachmentCacheTTL)
+	defer cache.close()
 	resumeToken := uint64(0)
 	attemptRequest := request
 	dialer := r.dialer
@@ -666,8 +672,23 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if err := validateAttachRequest(attemptRequest); err != nil {
 			return err
 		}
+		var entry *cachedAttachment
+		var activated *protocol.AttachmentActivated
+		var activationOutput *protocol.Output
+		var activationPosition *protocol.RoutePosition
+		if cache.has(attemptRequest.OriginKey) {
+			if geometry, geometryErr := r.term.Geometry(); geometryErr == nil {
+				entry, activated, activationOutput, activationPosition = cache.activate(ctx, attemptRequest, geometry.NormalizePixels())
+			}
+		}
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
-		transport, err := boundedDialWithTransition(handshakeCtx, dialer, transition)
+		var transport ports.ClientConnection
+		var err error
+		if entry != nil {
+			transport = entry.transport
+		} else {
+			transport, err = boundedDialWithTransition(handshakeCtx, dialer, transition)
+		}
 		if err != nil {
 			if r.ui != nil {
 				r.ui.failHandoff()
@@ -773,6 +794,9 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return err
 		}
 
+		if entry == nil && attemptRequest.Remote && attemptRequest.OriginKey != "" && cache.ttl > 0 {
+			entry = newCachedAttachment(transport)
+		}
 		var linkEvents <-chan ports.LinkEvent
 		if connection.Connection().Capabilities().LinkState {
 			linkEvents = connection.Connection().LinkEvents()
@@ -781,6 +805,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			runner:                   r,
 			dialer:                   dialer,
 			connection:               connection,
+			entry:                    entry,
+			activated:                activated,
+			activationOutput:         activationOutput,
+			activationPosition:       activationPosition,
 			remote:                   remote,
 			handshakeCtx:             handshakeCtx,
 			handshakeTimedOut:        timedOut,
@@ -817,8 +845,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if result.welcomed {
 			backoff = defaultReconnectBackoff.initial
 		}
-		if !result.transportClosed {
-			_ = connection.Close()
+		navigating := result.err == nil && (result.target != nil || result.handoff != nil || result.routeAction != nil || result.routeCreateAction != nil)
+		if entry == nil {
+			if !result.transportClosed {
+				_ = connection.Close()
+			}
 		}
 		// Apply metadata from every processed frame before dispatching its
 		// navigation action. A committed identity can arrive immediately before
@@ -844,6 +875,10 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			*attemptRequest.ExactTarget == result.routePosition.Target {
 			attemptRequest.PreferredTabID = result.routePosition.ActiveTabID
 			attemptRequest.RemoteTarget = nil
+		}
+		// Cache the last committed route cursor, not the original attach hint.
+		if entry != nil && (!navigating || !cache.suspend(ctx, entry, attemptRequest, result)) {
+			entry.release()
 		}
 		if result.err == nil && result.welcomed && navTransition.pendingCreation() {
 			navTransition.settleSuccess()
@@ -1266,6 +1301,10 @@ type attachAttempt struct {
 	runner                   *Runner
 	dialer                   ports.ClientDialer
 	connection               *SessionConnection
+	entry                    *cachedAttachment
+	activated                *protocol.AttachmentActivated
+	activationOutput         *protocol.Output
+	activationPosition       *protocol.RoutePosition
 	remote                   bool
 	transport                ports.ClientConnection
 	handshakeCtx             context.Context
@@ -1422,6 +1461,34 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		}
 		return nil
 	}
+	if a.activated != nil && a.activationOutput != nil {
+		// Activation is already protocol-committed; publish its full frame before
+		// route history or a new input generation may observe the destination.
+		if err := enterRaw(); err != nil {
+			return attachResult{err: err}
+		}
+		output := a.activationOutput
+		uiOutput, _ := term.(ports.UIOutputTransaction)
+		if uiOutput != nil {
+			state, _ := (outputApplyState{}).next(*output)
+			uiOutput.BeginOutput(state.uiContext(ports.UIContext{}, ports.UIStatusTransitioning))
+		}
+		_, err := term.Out().Write(output.Data)
+		if err == nil {
+			err = term.Flush()
+		}
+		if uiOutput != nil {
+			uiOutput.EndOutput(err == nil)
+		}
+		if err != nil {
+			return attachResult{err: fmt.Errorf("vev: publishing activation: %w", err)}
+		}
+		// The ordinary output path still commits ACK/UI bookkeeping, without
+		// writing the already-published cells a second time.
+		copyOutput := *output
+		copyOutput.Data = nil
+		a.activationOutput = &copyOutput
+	}
 	// Actively probe the direct outer terminal before Hello. The probe uses the
 	// lifecycle input pump; unsupported and silent terminals fail closed within
 	// its bounded deadline.
@@ -1475,18 +1542,27 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		NavigationCapabilities: request.NavigationCapabilities,
 		Remote:                 remote,
 	}
-	if err := sendHandshake(func() error {
-		return transport.SendClient(hello)
-	}); err != nil {
-		return handshakeFailure("sending hello", err)
+	if a.activated == nil {
+		if err := sendHandshake(func() error { return transport.SendClient(hello) }); err != nil {
+			return handshakeFailure("sending hello", err)
+		}
+		if a.entry != nil {
+			a.entry.startReader()
+		}
 	}
 	ms.helloSent = true
 
 	// 2. Await Welcome or a typed rejection.
 	var reply protocol.ServerMessage
-	if err := boundedHandshakeOperationWithTransition(handshakeCtx, transport, func() error {
+	if a.activated != nil {
+		reply = protocol.Welcome{ResumeToken: a.entry.resumeToken, SessionName: a.activated.Identity.Target.SessionName, CommittedIdentity: &a.activated.Identity}
+	} else if err := boundedHandshakeOperationWithTransition(handshakeCtx, transport, func() error {
 		var receiveErr error
-		reply, receiveErr = transport.ReceiveServer()
+		if a.entry != nil {
+			reply, receiveErr = a.entry.receive(handshakeCtx)
+		} else {
+			reply, receiveErr = transport.ReceiveServer()
+		}
 		return receiveErr
 	}, transition); err != nil {
 		return handshakeFailure("awaiting welcome", err)
@@ -1520,6 +1596,16 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		return handshakeFailure("validating welcome", err)
 	}
 	welcomedResult := func(err error) attachResult { return result(true, err) }
+	rememberRoutePosition := func(position protocol.RoutePosition) error {
+		if a.runner.ledger == nil {
+			return errors.New("vev: route ledger unavailable")
+		}
+		if err := a.runner.ledger.updateRoutePosition(position); err != nil {
+			return fmt.Errorf("vev: remembering route position: %w", err)
+		}
+		routePosition = cloneRoutePosition(&position)
+		return nil
+	}
 	if committedIdentity != nil && a.runner.ledger != nil {
 		if request.ExactTarget != nil && *request.ExactTarget != committedIdentity.Target {
 			return welcomedResult(errRouteTargetChanged)
@@ -1977,7 +2063,26 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 		a.onInventoryCommitted()
 	}
 	senderStarted = true
-	go runSender(loopCtx, cancel, transport, controlCh, barrierCh, sendCh, inputGate, ackQueue, sendErrCh, log)
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		runSender(loopCtx, cancel, transport, controlCh, barrierCh, sendCh, inputGate, ackQueue, sendErrCh, log)
+	}()
+	defer func() {
+		cancel()
+		// Bound sender retirement before suspension takes over its write ownership.
+		if a.entry != nil {
+			_ = newAttachmentCoordinator(clk, -1).transition(ctx, a.entry, func(wait context.Context) error {
+				select {
+				case <-senderDone:
+					return nil
+				case <-wait.Done():
+					return wait.Err()
+				}
+			})
+			<-senderDone
+		}
+	}()
 
 	type foregroundRuntime struct {
 		cancel                context.CancelFunc
@@ -2215,11 +2320,27 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 			abortPickerLease(true)
 		}
 	}
-	startForeground()
+	if a.activationOutput == nil {
+		startForeground()
+	}
 	defer stopForeground()
 
-	recvCh := make(chan recvResult, 1)
-	go runRecv(loopCtx, transport, recvCh, transportFailed, log)
+	var recvCh <-chan recvResult
+	if a.entry != nil {
+		recvCh = a.entry.inbox
+	} else {
+		ch := make(chan recvResult, 1)
+		recvCh = ch
+		go runRecv(loopCtx, transport, ch, transportFailed, log)
+	}
+	// A validated activation frame is processed by the ordinary terminal transaction
+	// before input ownership is granted. No dormant frame enters this path.
+	var activationCh chan recvResult
+	if a.activationOutput != nil {
+		activationCh = make(chan recvResult, 1)
+		activationCh <- recvResult{message: *a.activationOutput}
+		recvCh = activationCh
+	}
 	armRouteObservation()
 
 	requestReconnectReset := func() error {
@@ -2707,7 +2828,7 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 					continue
 				}
-				if ui != nil && o.Full && foreground == nil && samePeerSwitch == nil {
+				if a.activationOutput == nil && ui != nil && o.Full && foreground == nil && samePeerSwitch == nil {
 					startForeground()
 				}
 				if uiOutput != nil {
@@ -2753,6 +2874,22 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					uiOutput.EndOutput(true)
 				}
 				outputState = nextState
+				if a.entry != nil && o.Epoch > a.entry.epoch {
+					a.entry.epoch = o.Epoch
+				}
+				if activationCh != nil {
+					// Publish the repaired cursor only after the warm full frame commits,
+					// through the same ledger/result path as foreground RoutePosition.
+					if a.activationPosition != nil {
+						if err := rememberRoutePosition(*a.activationPosition); err != nil {
+							return welcomedResult(err)
+						}
+					}
+					activationCh = nil
+					recvCh = a.entry.inbox
+					a.activationOutput = nil
+					startForeground()
+				}
 				if ui != nil && o.New != 0 {
 					ui.published(uiGeneration)
 					if o.Full {
@@ -3168,14 +3305,9 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 					}
 				}
 			case protocol.RoutePosition:
-				position := message
-				if a.runner.ledger == nil {
-					return welcomedResult(errors.New("vev: route ledger unavailable"))
+				if err := rememberRoutePosition(message); err != nil {
+					return welcomedResult(err)
 				}
-				if derr := a.runner.ledger.updateRoutePosition(position); derr != nil {
-					return welcomedResult(fmt.Errorf("vev: remembering route position: %w", derr))
-				}
-				routePosition = cloneRoutePosition(&position)
 			case protocol.RouteRetired:
 				if a.runner.ledger != nil && a.runner.ledger.retireRoute(message, a.runner.ledger.attentionSubscriptionFor(request)) {
 					if err := publishRouteSnapshot(); err != nil {

@@ -16,11 +16,21 @@ const (
 	attachmentEffectsFrozen
 )
 
+type attachmentActivity uint8
+
+const (
+	attachmentActive attachmentActivity = iota
+	attachmentSuspended
+	attachmentActivating
+)
+
 // attachmentLifecycle owns the immutable committed capability and the
 // linearization gate for every attachment-bound observable effect. Transitions
-// freeze and drain it before changing membership, generation, Transport, or
-// render lease identity.
+// freeze and drain it before changing membership, generation, transport,
+// activity, or render lease identity.
 type attachmentLifecycle struct {
+	activity         attachmentActivity // protected by mu; independent of transition freeze ownership
+	retained         protocol.ExactSessionTarget
 	generation       atomic.Uint64
 	mu               sync.Mutex
 	cond             *sync.Cond
@@ -236,7 +246,7 @@ func (ac *attachedClient) beginAttachmentEffect(token attachmentCapability) (*at
 	g := &ac.lifecycle
 	g.mu.Lock()
 	g.initLocked()
-	if g.phase != attachmentEffectsStable || !g.capability.sameIdentity(token) {
+	if g.phase != attachmentEffectsStable || g.activity != attachmentActive || !g.capability.sameIdentity(token) {
 		g.mu.Unlock()
 		return nil, false
 	}
