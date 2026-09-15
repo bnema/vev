@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ const attachmentRetirementJoinTimeout = 5 * time.Second
 type attachmentCoordinator struct {
 	mu       sync.Mutex
 	clock    ports.Clock
+	log      *slog.Logger
 	cfg      domain.AttachmentCacheConfig
 	entries  map[string]*cachedAttachment
 	lru      *list.List // front = most recently suspended; values are *cachedAttachment
@@ -64,12 +66,17 @@ type cachedAttachment struct {
 	dormantDone   chan struct{}
 }
 
-func newAttachmentCoordinator(clock ports.Clock, cfg domain.AttachmentCacheConfig) *attachmentCoordinator {
+func newAttachmentCoordinator(clock ports.Clock, cfg domain.AttachmentCacheConfig, loggers ...*slog.Logger) *attachmentCoordinator {
 	if clock == nil {
 		clock = systemClock{}
 	}
+	log := slog.Default()
+	if len(loggers) != 0 && loggers[0] != nil {
+		log = loggers[0]
+	}
 	return &attachmentCoordinator{
 		clock:    clock,
+		log:      log,
 		cfg:      cfg,
 		entries:  make(map[string]*cachedAttachment),
 		lru:      list.New(),
@@ -232,6 +239,7 @@ func (c *attachmentCoordinator) suspend(ctx context.Context, e *cachedAttachment
 	for _, victim := range victims {
 		c.retire(victim)
 	}
+	c.log.Debug("remote attachment suspended", "origin", e.key, "session", e.identity.Target.SessionName, "lifecycle", e.identity.Target.LifecycleID)
 	return true
 }
 
@@ -353,28 +361,33 @@ func (c *attachmentCoordinator) activate(ctx context.Context, request AttachRequ
 	transition.start(warmActivationTarget(request))
 	close(e.stopDormant)
 	e.waitDormant()
-	fail := func() (*cachedAttachment, *protocol.AttachmentActivated, *protocol.Output, *protocol.RoutePosition) {
+	fail := func(reason string, err error) (*cachedAttachment, *protocol.AttachmentActivated, *protocol.Output, *protocol.RoutePosition) {
+		args := []any{"origin", e.key, "session", e.identity.Target.SessionName, "reason", reason}
+		if err != nil {
+			args = append(args, "err", err)
+		}
+		c.log.Debug("warm remote activation failed", args...)
 		c.retire(e)
 		return nil, nil, nil, nil
 	}
 	select {
 	case <-e.done:
-		return fail()
+		return fail("transport closed", nil)
 	default:
 	}
 	if (c.cfg.IdleTimeout > 0 && !c.clock.Now().Before(e.expires)) || !request.Remote || request.Intent == protocol.IntentNew || request.SessionName != e.identity.Target.SessionName || request.EnvironmentPolicy != e.request.EnvironmentPolicy || !slices.Equal(request.Environment, e.request.Environment) {
-		return fail()
+		return fail("request ineligible", nil)
 	}
 	// Activation retains the attachment cursor; unlike cold Hello it cannot
 	// apply a different preferred tab (including a disappeared tab's fallback).
 	if request.PreferredTabID != "" && request.PreferredTabID != e.request.PreferredTabID {
-		return fail()
+		return fail("preferred tab changed", nil)
 	}
 	if request.ExactTarget != nil && *request.ExactTarget != e.identity.Target {
-		return fail()
+		return fail("exact target changed", nil)
 	}
 	if request.RemoteTarget != nil && (request.RemoteTarget.LifecycleID != e.identity.Target.LifecycleID || request.RemoteTarget.SessionName != e.identity.Target.SessionName) {
-		return fail()
+		return fail("remote target changed", nil)
 	}
 	e.sequence++
 	var full *protocol.Output
@@ -419,9 +432,10 @@ func (c *attachmentCoordinator) activate(ctx context.Context, request AttachRequ
 		}
 	})
 	if err != nil {
-		return fail()
+		return fail("transition failed", err)
 	}
 	e.epoch = full.Epoch
+	c.log.Debug("warm remote attachment activated", "origin", e.key, "session", e.identity.Target.SessionName, "lifecycle", e.identity.Target.LifecycleID, "epoch", e.epoch)
 	return e, activated, full, position
 }
 

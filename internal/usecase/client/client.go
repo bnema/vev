@@ -587,7 +587,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		return nil
 	}
 
-	cache := newAttachmentCoordinator(r.clock, r.attachmentCache)
+	cache := newAttachmentCoordinator(r.clock, r.attachmentCache, r.logger)
 	defer cache.close()
 	resumeToken := uint64(0)
 	attemptRequest := request

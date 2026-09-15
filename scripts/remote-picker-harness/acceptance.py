@@ -7,10 +7,17 @@ lifecycle/session/focus context, observed published output). Sending a key
 or accepting a request is never success: every scenario ends on a
 postcondition ``wait`` or a verified capture.
 
-Transport selection passes through the fixture process environment:
-``VEV_REMOTE_TRANSPORT`` unset means QUIC, ``stdio`` means SSH stdio.
-Direct-remote scenarios use ``--remote`` in a fresh client container with no
-local daemon; they never create a local home session as setup.
+Transport selection passes through the client process environment:
+``VEV_REMOTE_TRANSPORT`` unset means QUIC, ``stdio`` means SSH stdio. The
+value is forwarded into the container with ``docker exec -e`` so it actually
+reaches the driver process.
+
+Direct-remote scenarios use ``--remote ENDPOINT --session NAME`` against a
+named fixture session: a named exact remote target, never an ephemeral
+attach. The warm-reuse scenario keeps one client Runner across a
+local -> named remote -> local -> same named remote journey and pins the
+retained attachment with client debug logs, the remote daemon's attach
+count, and the committed remote lifecycle.
 """
 
 import json
@@ -25,6 +32,17 @@ ROWS = "30"
 REQUEST_TIMEOUT_S = 15
 WAIT_TIMEOUT_MS = 15000
 
+STATE_LOG_DIR = "$HOME/.local/state/vev"
+CLIENT_LOG = "vev-client.log"
+DAEMON_LOG = "vev-daemon.log"
+STDIO_LOG = "vev-stdio.log"
+REMOTE_CACHE_FILE = "remote-catalog-cache.json"
+INVENTORY_TIMEOUT_S = 45
+ARTIFACTS_DIR = os.environ.get("VEV_ACCEPTANCE_ARTIFACTS_DIR", "").strip()
+# The warm-reuse scenario requires client debug events. Every driver gets
+# debug logging unless a scenario explicitly overrides it.
+DRIVER_BASE_ENV = {"VEV_LOG": "debug"}
+
 
 class DriverError(Exception):
     pass
@@ -34,15 +52,18 @@ class Driver:
     """One headless client with bounded reads and reliable termination."""
 
     def __init__(self, container, args, env=None):
-        cmd = ["docker", "exec", "-i", container, "vev", "--ui-driver",
-               "--cols", COLS, "--rows", ROWS] + args
-        process_env = None
+        effective = dict(DRIVER_BASE_ENV)
         if env:
-            process_env = dict(os.environ)
-            process_env.update(env)
+            effective.update(env)
+        cmd = ["docker", "exec", "-i"]
+        for key in sorted(effective):
+            cmd += ["-e", f"{key}={effective[key]}"]
+        cmd += [container, "vev", "--ui-driver",
+                "--cols", COLS, "--rows", ROWS] + args
+        # The environment must be forwarded into the container (-e); passing
+        # it to the docker CLI process alone never reaches the driver.
         self.process = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, env=process_env,
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
         self.request_id = 0
         ready = self._read("discovery")
@@ -133,6 +154,135 @@ def check(condition, message, diagnostics):
         raise DriverError(f"{message}\n diagnostics: {json.dumps(diagnostics)[:2000]}")
 
 
+def docker_capture(args, timeout=30):
+    return subprocess.run(["docker", *args], capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def log_size(container, filename):
+    """Byte length of one state log, so a run can read only its own events."""
+    script = (f'f="{STATE_LOG_DIR}/{filename}"; '
+              'if [ -f "$f" ]; then wc -c < "$f"; else echo 0; fi')
+    try:
+        result = docker_capture(["exec", container, "sh", "-c", script])
+    except subprocess.TimeoutExpired:
+        return 0
+    if result.returncode != 0:
+        return 0
+    try:
+        return int(result.stdout.strip() or "0")
+    except ValueError:
+        return 0
+
+
+def log_since(container, filename, offset):
+    """Raw log bytes appended after offset; empty when the file is absent."""
+    script = (f'f="{STATE_LOG_DIR}/{filename}"; '
+              f'if [ -f "$f" ]; then tail -c +{offset + 1} "$f"; fi')
+    try:
+        result = docker_capture(["exec", container, "sh", "-c", script])
+    except subprocess.TimeoutExpired:
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def json_events(text):
+    """Parse structured vev log lines, tolerating a truncated boundary line."""
+    events = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and "msg" in event:
+            events.append(event)
+    return events
+
+
+def count_events(events, message, **fields):
+    return sum(1 for event in events
+               if event.get("msg") == message
+               and all(event.get(key) == value for key, value in fields.items()))
+
+
+def write_artifact(name, payload):
+    """Persist scenario evidence under the configured artifacts directory.
+
+    The payload carries only committed contexts and structured log counts:
+    no credentials, key material, or raw environment are recorded.
+    """
+    if not ARTIFACTS_DIR:
+        return
+    os.makedirs(ARTIFACTS_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(ARTIFACTS_DIR, name)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def await_remote_inventory(container, session, timeout_s=INVENTORY_TIMEOUT_S, interval_s=0.5):
+    """Wait until the local daemon publishes ``session`` for its remote host.
+
+    The remote monitor observes each host on a ~15s healthy cadence, so a
+    freshly created remote session is invisible to the palette until the next
+    observation. Wait on the daemon's persisted catalog cache (rewritten right
+    after a successful observation) rather than guessing a timeout, so the
+    following navigation is deterministic and near-immediate in isolation.
+    """
+    script = (f'f="{STATE_LOG_DIR}/{REMOTE_CACHE_FILE}"; '
+              f'grep -qF "{session}" "$f" 2>/dev/null')
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            if docker_capture(["exec", container, "sh", "-c", script]).returncode == 0:
+                return
+        except subprocess.TimeoutExpired:
+            pass
+        if time.monotonic() >= deadline:
+            raise DriverError(
+                f"remote session {session} never reached the local inventory "
+                f"within {timeout_s}s")
+        time.sleep(interval_s)
+
+
+def switch_route(driver, name, origin, lifecycle_id=None, timeout_ms=WAIT_TIMEOUT_MS):
+    """Switch by exact qualified palette label and prove the commit.
+
+    A named target with a known lifecycle is additionally pinned with a
+    ``wait`` on that exact lifecycle, so a stale or freshly-created session
+    can never satisfy the check.
+    """
+    driver.palette(name, f"Switch to session {name}@{origin}")
+    committed = driver.call("keys", keys=["Enter"])
+    check(committed.get("status") == "processed",
+          f"route switch to {name}@{origin} not processed", committed)
+    session = committed.get("context", {}).get("session", {})
+    check(session.get("session_name") == name,
+          f"route switch did not commit {name}@{origin}", committed)
+    if lifecycle_id is not None:
+        driver.call("wait", expect={"session": {
+            "session_name": name, "lifecycle_id": lifecycle_id,
+        }}, timeout_ms=timeout_ms)
+    return committed["context"]
+
+
+def commit_output(driver, command, sentinel):
+    """Type a command, run it, and wait for output the command text lacks.
+
+    The sentinel must not appear contiguously in the typed command; callers
+    build it with shell interpolation so an echoed command line can never
+    satisfy the wait.
+    """
+    entered = driver.call("text", text=command)
+    check(entered.get("status") == "processed", "command text not processed", entered)
+    driver.call("keys", keys=["Enter"])
+    driver.wait_text(sentinel)
+
+
 def scenario_local_palette_cycle(client_container):
     """M1: local IPC palette open/action/close with committed observation."""
     suffix = uuid.uuid4().hex[:8]
@@ -157,22 +307,151 @@ def scenario_local_palette_cycle(client_container):
         driver.close()
 
 
-def scenario_direct_remote_ephemeral(client_container, remote_container, env):
-    """M2/M3: direct remote attach with no local daemon, committed output."""
+def scenario_direct_remote_named(client_container, remote_container, env):
+    """M2/M3: direct attach to a named exact remote target, committed output.
+
+    The remote daemon owns a pre-created named session. ``--remote remote
+    --session NAME`` attaches to that exact lifecycle instead of creating an
+    ephemeral one, so the daemon-owned target is pinned, not inferred.
+    """
     mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
-    driver = Driver(client_container, ["--remote", "remote"], env=env)
+    suffix = uuid.uuid4().hex[:8]
+    name = "direct" + suffix
+    fixture = Driver(remote_container, ["--session", name])
+    fixture_capture = fixture.call("capture")
+    fixture_session = fixture_capture["context"]["session"]
+    fixture.close()
+    check(fixture_session["session_name"] == name,
+          "remote fixture did not commit the named target", fixture_capture)
+    driver = Driver(client_container, ["--remote", "remote", "--session", name], env=env)
+    evidence = {"scenario": "direct-remote-named", "mode": mode,
+                "remote_session": name, "fixture_session": fixture_session}
     try:
         capture = driver.call("capture")
         session = capture["context"]["session"]
-        entered = driver.call("text", text="printf 'DIRECT_OK'")
-        check(entered.get("status") == "processed", "remote text action not processed", entered)
-        driver.call("keys", keys=["Enter"])
-        driver.wait_text("DIRECT_OK")
+        check(session["session_name"] == name,
+              "named remote target not committed", capture)
+        check(session == fixture_session,
+              "direct attach did not reuse the exact named remote lifecycle", capture)
+        # The sentinel is built by the shell so the echoed command line cannot
+        # satisfy the wait before the command actually runs.
+        commit_output(driver, "printf 'DIRECT_%s' OK", "DIRECT_OK")
         final = driver.call("capture")
         check(final["context"]["session"] == session, "remote lifecycle changed", final)
-        print(f"PASS direct-remote-ephemeral mode={mode} lifecycle={session['lifecycle_id'][:8]}")
+        evidence["remote_session_context"] = session
+        evidence["final_context"] = final["context"]
+        print(f"PASS direct-remote-named mode={mode} session={name} "
+              f"lifecycle={session['lifecycle_id'][:8]}")
     finally:
         driver.close()
+        write_artifact(f"direct-remote-named-{mode}.json", evidence)
+
+
+def scenario_warm_reuse(client_container, remote_container, env):
+    """Warm remote reuse across one client Runner.
+
+    Journey: local -> named remote -> local -> same named remote. The remote
+    attachment is expected to suspend on the way back to local and reactivate
+    warm on the return: same committed remote lifecycle, retained pane output,
+    and new committed output. No-redial evidence is deterministic: the client
+    debug log records exactly one suspend and one warm activation (zero
+    fallbacks), and the remote daemon records exactly one attach for the
+    session, so a second bootstrap or dial would be visible. When the remote
+    proxy debug log is available it must also show exactly one proxy start.
+    """
+    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
+    suffix = uuid.uuid4().hex[:8]
+    local_name = "locl" + suffix
+    remote_name = "remt" + suffix
+    fixture = Driver(remote_container, ["--session", remote_name])
+    fixture_capture = fixture.call("capture")
+    fixture_session = fixture_capture["context"]["session"]
+    fixture.close()
+    check(fixture_session["session_name"] == remote_name,
+          "remote fixture did not commit the named target", fixture_capture)
+    remote_lifecycle = fixture_session["lifecycle_id"]
+    # Snapshot log positions after the fixture so only events from this client
+    # journey are counted.
+    client_offset = log_size(client_container, CLIENT_LOG)
+    remote_offset = log_size(remote_container, DAEMON_LOG)
+    stdio_offset = log_size(remote_container, STDIO_LOG)
+    driver = Driver(client_container, ["--session", local_name], env=env)
+    evidence = {"scenario": "warm-reuse", "mode": mode,
+                "local_session": local_name, "remote_session": remote_name,
+                "remote_lifecycle": remote_lifecycle,
+                "fixture_session": fixture_session}
+    try:
+        initial = driver.call("capture")["context"]
+        check(initial["session"]["session_name"] == local_name,
+              "local session not committed", initial)
+        local_lifecycle = initial["session"]["lifecycle_id"]
+        # 1. local -> named exact remote.
+        await_remote_inventory(client_container, remote_name)
+        switch_route(driver, remote_name, "remote", remote_lifecycle)
+        first_remote = driver.call("capture")["context"]
+        check(first_remote["session"] == fixture_session,
+              "first remote attach did not commit the exact named lifecycle", first_remote)
+        evidence["first_remote"] = first_remote
+        # Committed output while the remote pane is authoritative.
+        commit_output(driver, "printf 'WARM_%s' PERSIST", "WARM_PERSIST")
+        # 2. remote -> local: the remote attachment suspends and stays warm.
+        switch_route(driver, local_name, "local", local_lifecycle)
+        local_return = driver.call("capture")["context"]
+        check(local_return["session"]["session_name"] == local_name,
+              "return to local did not commit", local_return)
+        evidence["local_return"] = local_return
+        # 3. local -> same named remote: the retained transport reactivates.
+        switch_route(driver, remote_name, "remote", remote_lifecycle)
+        second_remote = driver.call("capture")["context"]
+        check(second_remote["session"]["lifecycle_id"] == remote_lifecycle,
+              "warm return changed the remote lifecycle", second_remote)
+        check(second_remote["session"] == fixture_session,
+              "warm return did not reuse the exact named target", second_remote)
+        evidence["second_remote"] = second_remote
+        # State and new committed output both survive the warm round trip.
+        driver.wait_text("WARM_PERSIST")
+        commit_output(driver, "printf 'WARM_%s' AFTER", "WARM_AFTER")
+        after_output = driver.call("capture")["context"]
+        check(after_output["session"]["lifecycle_id"] == remote_lifecycle,
+              "lifecycle changed after warm committed output", after_output)
+        evidence["after_warm_output"] = after_output
+    finally:
+        driver.close()
+        client_events = json_events(log_since(client_container, CLIENT_LOG, client_offset))
+        remote_events = json_events(log_since(remote_container, DAEMON_LOG, remote_offset))
+        stdio_events = json_events(log_since(remote_container, STDIO_LOG, stdio_offset))
+        evidence["log_counts"] = {
+            "client_suspended": count_events(
+                client_events, "remote attachment suspended",
+                origin="remote", session=remote_name),
+            "client_warm_activated": count_events(
+                client_events, "warm remote attachment activated",
+                origin="remote", session=remote_name, lifecycle=remote_lifecycle),
+            "client_warm_failed": count_events(
+                client_events, "warm remote activation failed",
+                origin="remote", session=remote_name),
+            "remote_client_attached": count_events(
+                remote_events, "client attached", session=remote_name),
+            "remote_proxy_started": (
+                count_events(stdio_events, "stdio proxy starting") +
+                count_events(stdio_events, "quic proxy starting")),
+        }
+        write_artifact(f"warm-reuse-{mode}.json", evidence)
+    counts = evidence["log_counts"]
+    check(counts["client_suspended"] == 1,
+          "expected exactly one remote attachment suspension", counts)
+    check(counts["client_warm_activated"] == 1,
+          "expected exactly one warm remote activation", counts)
+    check(counts["client_warm_failed"] == 0,
+          "warm activation failed or fell back to a cold dial", counts)
+    check(counts["remote_client_attached"] == 1,
+          "remote daemon saw a second bootstrap/attach (redial)", counts)
+    if counts["remote_proxy_started"]:
+        check(counts["remote_proxy_started"] == 1,
+              "remote proxy started more than once (redial)", counts)
+    print(f"PASS warm-reuse mode={mode} local={local_name} remote={remote_name} "
+          f"lifecycle={remote_lifecycle[:8]} "
+          f"attaches={counts['remote_client_attached']}")
 
 
 def picker_topology(env):
@@ -298,6 +577,9 @@ def scenario_hybrid_exact_return(client_container, remote_container, env):
         switched = driver.call("keys", keys=["Enter"])
         check(switched["context"]["session"]["session_name"] == second,
               "local switch did not commit", switched)
+        # The local daemon refreshes remote inventory on its own cadence; wait
+        # for the fixture session to be published before searching the palette.
+        await_remote_inventory(client_container, remote)
         driver.palette(remote, "Switch to session " + remote + "@remote")
         entered = driver.call("keys", keys=["Enter"])
         check(entered["context"]["session"]["session_name"] == remote,
@@ -315,7 +597,8 @@ def scenario_hybrid_exact_return(client_container, remote_container, env):
 
 SCENARIOS = {
     "local-palette-cycle": lambda client, remote, env: scenario_local_palette_cycle(client),
-    "direct-remote-ephemeral": scenario_direct_remote_ephemeral,
+    "direct-remote-named": scenario_direct_remote_named,
+    "warm-reuse": scenario_warm_reuse,
     "hybrid-exact-return": scenario_hybrid_exact_return,
     "client-picker-navigate": scenario_client_picker_navigate,
 }
