@@ -65,21 +65,34 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 		}
 
 		switch {
-		case key == "remote.attachment-cache-ttl":
+		case key == "remote.attachment-cache":
 			warnings = warnDuplicateKey(warnings, seenRemoteKeys, key, lineNo)
-			if strings.EqualFold(value, "off") {
-				cfg.RemoteAttachmentCacheTTL = -1
-				continue
-			}
-			ttl, err := time.ParseDuration(value)
-			if err != nil {
+			on, ok := parseOnOff(value)
+			if !ok {
 				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid %s %q", key, value)})
 				continue
 			}
-			if ttl == 0 {
-				ttl = domain.Defaults().RemoteAttachmentCacheTTL
+			cfg.AttachmentCache.Enabled = on
+		case key == "remote.attachment-cache-capacity":
+			warnings = warnDuplicateKey(warnings, seenRemoteKeys, key, lineNo)
+			capacity, err := strconv.Atoi(value)
+			if err != nil || capacity <= 0 {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid %s %q", key, value)})
+				continue
 			}
-			cfg.RemoteAttachmentCacheTTL = ttl
+			cfg.AttachmentCache.Capacity = capacity
+		case key == "remote.attachment-cache-idle-timeout":
+			warnings = warnDuplicateKey(warnings, seenRemoteKeys, key, lineNo)
+			if strings.EqualFold(value, "off") {
+				cfg.AttachmentCache.IdleTimeout = 0
+				continue
+			}
+			timeout, err := time.ParseDuration(value)
+			if err != nil || timeout <= 0 {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid %s %q", key, value)})
+				continue
+			}
+			cfg.AttachmentCache.IdleTimeout = timeout
 		case key == "web.listen" || key == "web.origin":
 			warnings = warnDuplicateKey(warnings, seenWebKeys, key, lineNo)
 			// Keep raw values for fail-closed validation at gateway startup.

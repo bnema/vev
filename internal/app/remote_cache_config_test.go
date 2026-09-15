@@ -8,21 +8,22 @@ import (
 	"time"
 
 	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRunAttachThreadsRemoteCacheConfig(t *testing.T) {
+func TestRunAttachThreadsAttachmentCacheConfig(t *testing.T) {
 	for _, remote := range []string{"", "remote.example"} {
 		for _, tt := range []struct {
 			name, text string
-			want       time.Duration
+			want       domain.AttachmentCacheConfig
 		}{
-			{"default", "", client.DefaultAttachmentCacheTTL},
-			{"configured", "remote.attachment-cache-ttl = 42s", 42 * time.Second},
-			{"disabled", "remote.attachment-cache-ttl = off", -1},
+			{"default", "", domain.DefaultAttachmentCacheConfig()},
+			{"configured", "remote.attachment-cache-capacity = 3\nremote.attachment-cache-idle-timeout = 42s", domain.AttachmentCacheConfig{Enabled: true, Capacity: 3, IdleTimeout: 42 * time.Second}},
+			{"disabled", "remote.attachment-cache = off", domain.AttachmentCacheConfig{Enabled: false, Capacity: 8}},
 		} {
 			t.Run(remote+"/"+tt.name, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "config")
@@ -37,7 +38,7 @@ func TestRunAttachThreadsRemoteCacheConfig(t *testing.T) {
 					remoteDialerFactory: factory.DialerForRemote,
 					runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
 						calls++
-						require.Equal(t, tt.want, deps.AttachmentCacheTTL)
+						require.Equal(t, tt.want, deps.AttachmentCache)
 						return nil
 					},
 				})

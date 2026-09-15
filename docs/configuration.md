@@ -7,9 +7,12 @@ vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means d
 web.listen = 127.0.0.1:8778
 web.origin = http://127.0.0.1:8778
 
-# Client startup setting: retain suspended remote attachments for this duration.
-# Zero selects the default; off or a negative duration disables reuse.
-remote.attachment-cache-ttl = 15m
+# Client startup setting: retain suspended remote attachments. Reuse is on by
+# default; off disables it. Capacity bounds dormant destinations (LRU). An
+# optional positive idle timeout expires dormant entries; off has no age bound.
+remote.attachment-cache = on
+remote.attachment-cache-capacity = 8
+remote.attachment-cache-idle-timeout = off
 
 # Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
@@ -94,28 +97,35 @@ Invalid values log a warning and resolve that setting to its default on both ini
 
 ## Remote attachment cache
 
-`remote.attachment-cache-ttl` is read when a terminal client starts, not hot
-reloaded. It defaults to `15m`; positive Go durations such as `30s` or `5m`
-select another retention period. `0` selects the default. `off` (case-insensitive)
-or a negative duration disables reuse. Invalid values warn and retain the
-previous valid value, or the default when none was provided.
+These keys are read when a terminal client starts, not hot reloaded.
+`remote.attachment-cache` is `on` (default) or `off`. With reuse enabled the
+runner retains at most `remote.attachment-cache-capacity` dormant destinations
+(default `8`), evicting the least-recently used one when a new suspension would
+exceed capacity. `remote.attachment-cache-idle-timeout` is `off` (default, no
+age bound) or a positive Go duration such as `30s` or `5m`; a positive value
+expires a dormant entry that long after it was suspended.
 
-Navigating away suspends the remote attachment. Returning before expiry can
-reuse its authenticated connection without another bootstrap or dial. Dormant
-attachments have no terminal input, output, or geometry authority. Expiry,
-remote closure, or rejected activation evicts the connection; selecting that
-endpoint then uses normal reconnect/attach behavior. Endpoint aliases remain
-distinct, even if they resolve to the same server. Exiting the client closes
-its retained connections.
+Navigating away suspends the remote attachment. Returning before eviction or
+expiry reuses its authenticated connection without another bootstrap or dial.
+Dormant attachments have no terminal input, output, or geometry authority.
+Expiry, remote closure, or rejected activation evicts the connection; selecting
+that endpoint then uses normal reconnect/attach behavior. Independently of the
+client policy, the daemon force-retires an attachment suspended for 24 hours as
+a safety bound. Endpoint aliases remain distinct, even if they resolve to the
+same server. Exiting the client
+closes its retained connections. Heartbeat or liveness traffic never refreshes
+activity: a successful use followed by suspension marks the entry most
+recently used, and only user navigation changes recency.
 
-Retention is bounded by TTL and one dormant attachment per exact endpoint,
-**not by a global connection count**. Each dormant entry retains a transport,
-a reader, a drain worker, a timer, and daemon attachment state; SSH stdio can
-also retain an SSH process. The client inbox is bounded and dormant output is
-discarded. TTL is an age bound, not a hard memory/socket/process bound: visiting
-many distinct endpoints within that period can retain many connections. A
-measured global capacity policy remains under review; no arbitrary capacity
-number is imposed. Use a shorter TTL or `off` when resource limits are tight.
+Retention is bounded by the LRU capacity and, when configured, the idle
+timeout, so visiting many distinct endpoints cannot retain more than the
+capacity. Each dormant entry retains a transport, a reader, and daemon
+attachment state; SSH stdio can also retain an SSH process. The client inbox is
+bounded and dormant output is discarded. Warm reactivation has a short
+client-local budget: a stalled retained transport is logically relinquished at
+that deadline and the client cold-attaches immediately while the old transport
+retires in the background. Use `remote.attachment-cache = off` when no
+retention is wanted.
 
 ## Scrollback
 

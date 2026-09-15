@@ -1056,7 +1056,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return resolveErr
 			}
 			err = runClient(ctx, client.Dependencies{
-				AttachmentCacheTTL:     cfg.RemoteAttachmentCacheTTL,
+				AttachmentCache:        cfg.AttachmentCache,
 				Dialer:                 binding.Dialer,
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
@@ -1086,7 +1086,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
 			err = runClient(ctx, client.Dependencies{
-				AttachmentCacheTTL:     cfg.RemoteAttachmentCacheTTL,
+				AttachmentCache:        cfg.AttachmentCache,
 				Dialer:                 sessionwire.NewClientDialer(localDialer()),
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),

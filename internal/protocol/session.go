@@ -16,7 +16,9 @@ import (
 const Version uint16 = 52
 
 // HandshakeTimeout bounds every transport handshake from connect through the
-// first committed publication.
+// first committed publication. It excludes the preceding client-local
+// warm-reuse probe, which has its own short budget: a cold dial that follows
+// a warm miss still receives the full handshake budget.
 const HandshakeTimeout = 15 * time.Second
 
 // MaxOutputDataLen reserves the type byte, fixed Output fields, and the largest

@@ -40,6 +40,25 @@ type sessionView struct {
 	tabs         []tabView
 }
 
+// sessionInteractivelyAttachedLocked reports whether sess has registered
+// interactive presence: at least one attachment that is active or has an
+// activation in progress. Suspended attachments keep transport ownership and
+// session membership but hold no interactive authority, so they do not count.
+// Caller holds s.mu; each activity read briefly takes only that attachment's
+// lifecycle.mu and never freezes, drains, or waits on a gate.
+func sessionInteractivelyAttachedLocked(s *session) bool {
+	if s == nil {
+		return false
+	}
+	for ac := range s.attachments {
+		switch ac.attachmentActivity() {
+		case attachmentActive, attachmentActivating:
+			return true
+		}
+	}
+	return false
+}
+
 // snapshotView reads session fields under s.mu and samples the independently
 // atomic mruAt while that lock is held. tabCount and hasAttention are always
 // filled; tabs is allocated only when opts.tabDetails is true (non-nil empty
@@ -60,8 +79,11 @@ func (s *session) snapshotView(opts viewOptions) sessionView {
 		createdAt:   s.createdAt,
 		defaultTab:  0,
 		mruAt:       s.mruAt.Load(),
-		attached:    len(s.attachments) != 0,
-		tabCount:    len(s.tabs),
+		// attached reports interactive presence only; a suspended-only session
+		// remains registered for teardown and possible activation but is not
+		// observably attached.
+		attached: sessionInteractivelyAttachedLocked(s),
+		tabCount: len(s.tabs),
 	}
 	if opts.tabDetails {
 		view.tabs = make([]tabView, 0, len(s.tabs))

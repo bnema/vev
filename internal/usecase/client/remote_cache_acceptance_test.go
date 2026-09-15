@@ -14,35 +14,54 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Only the cache TTL is manually fired; ordinary protocol budgets retain their
-// normal clocks. This avoids sleeping through expiration or firing unrelated
-// handshake timers while testing ownership transfer.
-type acceptanceCacheClock struct {
+// acceptanceTimerClock hands out registered manual timers for every request.
+// Ordinary protocol and toast budgets simply never fire, keeping the ownership
+// transfer deterministic; the journey fires exactly the cache idle timer it
+// configured, so the fake never keys on a hardcoded duration.
+type acceptanceTimerClock struct {
 	realClock
 	mu     sync.Mutex
-	expiry chan time.Time
+	timers []*acceptanceManualTimer
 }
-type acceptanceCacheTimer struct{ ch chan time.Time }
 
-func (t acceptanceCacheTimer) C() <-chan time.Time    { return t.ch }
-func (acceptanceCacheTimer) Stop() bool               { return true }
-func (acceptanceCacheTimer) Reset(time.Duration) bool { return false }
-func (c *acceptanceCacheClock) NewTimer(d time.Duration) ports.Timer {
-	if d != 7*time.Minute {
-		return c.realClock.NewTimer(d)
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.expiry = make(chan time.Time, 1)
-	return acceptanceCacheTimer{c.expiry}
+type acceptanceManualTimer struct {
+	ch chan time.Time
+	d  time.Duration
 }
-func (c *acceptanceCacheClock) expire(t *testing.T) {
-	t.Helper()
+
+func (t *acceptanceManualTimer) C() <-chan time.Time    { return t.ch }
+func (*acceptanceManualTimer) Stop() bool               { return true }
+func (*acceptanceManualTimer) Reset(time.Duration) bool { return false }
+
+func (c *acceptanceTimerClock) NewTimer(d time.Duration) ports.Timer {
+	timer := &acceptanceManualTimer{ch: make(chan time.Time, 1), d: d}
 	c.mu.Lock()
-	ch := c.expiry
+	c.timers = append(c.timers, timer)
 	c.mu.Unlock()
-	require.NotNil(t, ch)
-	ch <- time.Now()
+	return timer
+}
+
+// fire delivers the timer most recently armed for d, waiting for it to be
+// registered first.
+func (c *acceptanceTimerClock) fire(t *testing.T, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		var match *acceptanceManualTimer
+		for _, timer := range c.timers {
+			if timer.d == d {
+				match = timer
+			}
+		}
+		c.mu.Unlock()
+		if match != nil {
+			match.ch <- time.Now()
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("no timer armed for %s", d)
 }
 
 func TestRunnerRemoteCacheFallbackAndOwnership(t *testing.T) {
@@ -54,9 +73,9 @@ func TestRunnerRemoteCacheFallbackAndOwnership(t *testing.T) {
 			remote1, remote2 := newHybridPickerTransport(), newHybridPickerTransport()
 			localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
 			remoteDialer := &sequenceDialer{trs: []wire.Transport{remote1, remote2}}
-			clk := &acceptanceCacheClock{}
+			clk := &acceptanceTimerClock{}
 			deps := testDependencies(localDialer, term, clk, nil, nil)
-			deps.AttachmentCacheTTL = 7 * time.Minute
+			deps.AttachmentCache = domain.AttachmentCacheConfig{Enabled: true, Capacity: domain.DefaultAttachmentCacheCapacity, IdleTimeout: 7 * time.Minute}
 			deps.HostRegistry = stubHostRegistry{resolve: func(string) (ports.RemoteEndpointBinding, error) {
 				return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
 			}}
@@ -98,7 +117,7 @@ func TestRunnerRemoteCacheFallbackAndOwnership(t *testing.T) {
 			require.False(t, remote1.sentType(t, "Resize"))
 			switch scenario {
 			case "expiry":
-				clk.expire(t)
+				clk.fire(t, deps.AttachmentCache.IdleTimeout)
 				require.Eventually(t, func() bool { return remote1.closed.Load() == 1 }, time.Second, time.Millisecond)
 			case "dormant death":
 				// A remote Detached is terminal server traffic, not a client Close call.
@@ -138,5 +157,81 @@ func TestRunnerRemoteCacheFallbackAndOwnership(t *testing.T) {
 				require.Equal(t, int32(1), transport.closed.Load(), "each owned connection closes once")
 			}
 		})
+	}
+}
+
+// slowCloseTransport unblocks its reader immediately on Close and then stalls,
+// modelling an SSH process whose reaping outlives the logical revocation.
+type slowCloseTransport struct {
+	*hybridPickerTransport
+	release <-chan struct{}
+}
+
+func (t *slowCloseTransport) Close() error {
+	_ = t.hybridPickerTransport.Close()
+	<-t.release
+	return nil
+}
+
+// TestWarmActivationDeadlineColdDialsWhileCloseStalls proves the client starts
+// the cold dial at the warm deadline even when the retained transport's
+// physical close has not returned.
+func TestWarmActivationDeadlineColdDialsWhileCloseStalls(t *testing.T) {
+	term := newHybridPickerTerminal()
+	defer term.reader.unblock()
+	local1, local2 := newHybridPickerTransport(), newHybridPickerTransport()
+	owner := newHybridPickerTransport()
+	release := make(chan struct{})
+	remote2 := newHybridPickerTransport()
+	localDialer := &sequenceDialer{trs: []wire.Transport{local1, local2}}
+	remoteDialer := &sequenceDialer{trs: []wire.Transport{&slowCloseTransport{hybridPickerTransport: owner, release: release}, remote2}}
+	clk := &acceptanceTimerClock{}
+	deps := testDependencies(localDialer, term, clk, nil, nil)
+	// No idle timeout: the warm deadline is the only client-local budget here.
+	deps.AttachmentCache = domain.DefaultAttachmentCacheConfig()
+	deps.HostRegistry = stubHostRegistry{resolve: func(string) (ports.RemoteEndpointBinding, error) {
+		return ports.RemoteEndpointBinding{Dialer: remoteDialer}, nil
+	}}
+	target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "source"}
+	toRemote := protocol.AttachTarget{Endpoint: "remote", Session: "source", Intent: protocol.IntentAttach, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
+	local1.push(hybridPickerWelcome("local", domain.SessionLifecycleID{1}))
+	local1.push(frameOfMessage(toRemote))
+	owner.push(hybridPickerWelcome("source", target.LifecycleID))
+	hybridPickerPaint(t, owner, 1, target, "owner foreground")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runTestClient(ctx, deps, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "local", Origin: protocol.RouteOriginLocal, OriginKey: "local"})
+	}()
+	term.awaitDisplay(t, "owner foreground")
+	owner.push(frameOfMessage(protocol.RouteNavigationAction{SnapshotGeneration: 2, Key: 1, Generation: 1}))
+	suspend := mustAwaitSend(t, owner, "SuspendAttachment").(protocol.SuspendAttachment)
+	owner.push(frameOfMessage(protocol.AttachmentSuspended{RequestID: suspend.RequestID, Target: target}))
+	local2.push(hybridPickerWelcome("local", domain.SessionLifecycleID{1}))
+	hybridPickerPaint(t, local2, 1, protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "local"}, "local foreground")
+	term.awaitDisplay(t, "local foreground")
+	// Returning reuses the retained transport, which stalls without answering.
+	local2.push(frameOfMessage(toRemote))
+	mustAwaitSend(t, owner, "ActivateAttachment")
+	clk.fire(t, 2*time.Second)
+	hello := mustAwaitSend(t, remote2, "Hello").(protocol.Hello)
+	require.Equal(t, toRemote.ExactTarget, hello.ExactTarget)
+	require.Equal(t, int32(2), remoteDialer.calls.Load(), "a stalled retained transport must not delay the cold dial")
+	require.Equal(t, int32(1), owner.closed.Load(), "the stalled transport is closed before its reaping finishes")
+	select {
+	case <-release:
+		t.Fatal("the physical close returned before the journey asserted the cold dial")
+	default:
+	}
+	remote2.push(hybridPickerWelcome("source", toRemote.ExactTarget.LifecycleID))
+	hybridPickerPaint(t, remote2, 1, *toRemote.ExactTarget, "cold foreground")
+	term.awaitDisplay(t, "cold foreground")
+	close(release)
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not exit")
 	}
 }

@@ -26,6 +26,12 @@ func (t systemTimer) Stop() bool                 { return t.Timer.Stop() }
 // newHandshakeContext owns one deadline for the complete outbound handshake.
 // The caller must stop it before entering the long-lived connection loop.
 func newHandshakeContext(parent context.Context, clock ports.Clock) (context.Context, <-chan struct{}, func()) {
+	return newBoundedContext(parent, clock, protocol.HandshakeTimeout)
+}
+
+// newBoundedContext owns one deadline of the requested length. The caller must
+// invoke finish when the bounded operation ends.
+func newBoundedContext(parent context.Context, clock ports.Clock, timeout time.Duration) (context.Context, <-chan struct{}, func()) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -34,9 +40,9 @@ func newHandshakeContext(parent context.Context, clock ports.Clock) (context.Con
 	if clock == nil {
 		clock = systemClock{}
 	}
-	timer := clock.NewTimer(protocol.HandshakeTimeout)
+	timer := clock.NewTimer(timeout)
 	if timer == nil {
-		timer = systemClock{}.NewTimer(protocol.HandshakeTimeout)
+		timer = systemClock{}.NewTimer(timeout)
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -114,6 +120,28 @@ func boundedHandshakeOperationWithTransition(ctx context.Context, transport port
 
 func boundedDial(ctx context.Context, dialer ports.ClientDialer) (ports.ClientConnection, error) {
 	return boundedDialWithTransition(ctx, dialer, nil)
+}
+
+// retireSender bounds the wait for an attach loop's sender goroutine after its
+// context is canceled. A retained transport must not keep a wedged sender when
+// the cache takes over write ownership, so exceeding the shared handshake
+// budget closes the transport, which the ClientConnection contract requires to
+// unblock the send. The helper never waits past that budget.
+func retireSender(ctx context.Context, clock ports.Clock, transport ports.ClientConnection, done <-chan struct{}) {
+	select {
+	case <-done:
+		return
+	default:
+	}
+	bounded, _, finish := newHandshakeContext(ctx, clock)
+	defer finish()
+	select {
+	case <-done:
+	case <-bounded.Done():
+		if transport != nil {
+			_ = transport.Close()
+		}
+	}
 }
 
 func boundedDialWithTransition(ctx context.Context, dialer ports.ClientDialer, transition *transitionUI) (ports.ClientConnection, error) {

@@ -151,8 +151,9 @@ type Dependencies struct {
 	Dialer   ports.ClientDialer
 	Terminal ports.Terminal
 	Clock    ports.Clock
-	// AttachmentCacheTTL defaults to 15 minutes. Negative values disable reuse.
-	AttachmentCacheTTL time.Duration
+	// AttachmentCache is the retention policy for suspended remote
+	// attachments. Its zero value disables reuse.
+	AttachmentCache domain.AttachmentCacheConfig
 	// DisableCapabilityProbe skips active outer-terminal discovery for headless
 	// embedders and deterministic tests. Interactive clients leave it false.
 	DisableCapabilityProbe bool
@@ -234,6 +235,19 @@ func (r *Runner) resolveHandoff(ctx context.Context, target protocol.AttachTarge
 	}, nil
 }
 
+// warmActivationTarget renders the transition toast for a retained transport's
+// reactivation. It carries no authority: the cache validates the real request
+// and exact target before sending ActivateAttachment.
+func warmActivationTarget(request AttachRequest) protocol.AttachTarget {
+	return protocol.AttachTarget{
+		Endpoint:     request.OriginKey,
+		Session:      request.SessionName,
+		Intent:       request.Intent,
+		ExactTarget:  request.ExactTarget,
+		RemoteTarget: request.RemoteTarget,
+	}
+}
+
 // handoffEnvironmentPolicy mirrors the composition root's picker rule: a route
 // chosen from a locally launched client has no explicit remote selection, so
 // its environment belongs to the daemon; every other target keeps the policy
@@ -293,15 +307,15 @@ func bindAttachHandoff(target protocol.AttachTarget, source attachRoute) *attach
 }
 
 type Runner struct {
-	ui                 *UI
-	dialer             ports.ClientDialer
-	term               ports.Terminal
-	clock              ports.Clock
-	clipboard          ports.ClipboardReader
-	logger             *slog.Logger
-	runtimeObserver    ports.SerializedRuntimeObserver
-	hostRegistry       ports.ClientHostRegistry
-	attachmentCacheTTL time.Duration
+	ui              *UI
+	dialer          ports.ClientDialer
+	term            ports.Terminal
+	clock           ports.Clock
+	clipboard       ports.ClipboardReader
+	logger          *slog.Logger
+	runtimeObserver ports.SerializedRuntimeObserver
+	hostRegistry    ports.ClientHostRegistry
+	attachmentCache domain.AttachmentCacheConfig
 	// launchedRemote records whether this runner was launched as a direct
 	// remote attach. It decides the handoff environment policy exactly like the
 	// composition root used to: a picker route from a locally launched client
@@ -343,7 +357,7 @@ func NewRunner(deps Dependencies) *Runner {
 		logger:             log,
 		runtimeObserver:    deps.RuntimeObserver,
 		hostRegistry:       deps.HostRegistry,
-		attachmentCacheTTL: deps.AttachmentCacheTTL,
+		attachmentCache:    deps.AttachmentCache,
 		launchedRemote:     deps.Remote,
 		remote:             deps.Remote,
 		localControlDialer: deps.LocalControlDialer,
@@ -573,7 +587,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		return nil
 	}
 
-	cache := newAttachmentCoordinator(r.clock, r.attachmentCacheTTL)
+	cache := newAttachmentCoordinator(r.clock, r.attachmentCache)
 	defer cache.close()
 	resumeToken := uint64(0)
 	attemptRequest := request
@@ -676,9 +690,12 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		var activated *protocol.AttachmentActivated
 		var activationOutput *protocol.Output
 		var activationPosition *protocol.RoutePosition
-		if cache.has(attemptRequest.OriginKey) {
+		if attemptRequest.Remote && attemptRequest.OriginKey != "" {
 			if geometry, geometryErr := r.term.Geometry(); geometryErr == nil {
-				entry, activated, activationOutput, activationPosition = cache.activate(ctx, attemptRequest, geometry.NormalizePixels())
+				// One activation attempt replaces the old lookup-then-activate
+				// pair: a miss returns nil and falls through to a cold dial
+				// without starting warm-probe transition feedback.
+				entry, activated, activationOutput, activationPosition = cache.activate(ctx, attemptRequest, geometry.NormalizePixels(), transition)
 			}
 		}
 		handshakeCtx, timedOut, finishHandshake := newHandshakeContext(ctx, r.clock)
@@ -773,7 +790,11 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		if err != nil {
 			stopHandshakeTransport()
 			finishHandshake()
-			_ = transport.Close()
+			if entry != nil {
+				cache.retire(entry)
+			} else {
+				_ = transport.Close()
+			}
 			if navTransition.pendingCreation() {
 				r.creationFailure = &protocol.SessionCreationFailure{RequestID: navTransition.requestID, Code: protocol.RouteFailureUnavailable}
 				route, ok := navTransition.restore()
@@ -794,7 +815,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 			return err
 		}
 
-		if entry == nil && attemptRequest.Remote && attemptRequest.OriginKey != "" && cache.ttl > 0 {
+		if entry == nil && attemptRequest.Remote && attemptRequest.OriginKey != "" && cache.enabled() {
 			entry = newCachedAttachment(transport)
 		}
 		var linkEvents <-chan ports.LinkEvent
@@ -878,7 +899,7 @@ func (r *Runner) Run(ctx context.Context, request AttachRequest) (retErr error) 
 		}
 		// Cache the last committed route cursor, not the original attach hint.
 		if entry != nil && (!navigating || !cache.suspend(ctx, entry, attemptRequest, result)) {
-			entry.release()
+			cache.retire(entry)
 		}
 		if result.err == nil && result.welcomed && navTransition.pendingCreation() {
 			navTransition.settleSuccess()
@@ -2070,17 +2091,12 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	}()
 	defer func() {
 		cancel()
-		// Bound sender retirement before suspension takes over its write ownership.
 		if a.entry != nil {
-			_ = newAttachmentCoordinator(clk, -1).transition(ctx, a.entry, func(wait context.Context) error {
-				select {
-				case <-senderDone:
-					return nil
-				case <-wait.Done():
-					return wait.Err()
-				}
-			})
-			<-senderDone
+			// Bound sender retirement before suspension takes over its write
+			// ownership. A wedged send cannot pin teardown: exceeding the
+			// shared budget closes the transport, which the port contract
+			// requires to unblock the send.
+			retireSender(ctx, clk, a.entry.transport, senderDone)
 		}
 	}()
 

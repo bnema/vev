@@ -104,28 +104,54 @@ func (c ScrollbackConfig) Valid() bool {
 	return c.Megabytes <= MaxScrollbackMegabytes && c.Lines >= 0 && c.Lines <= MaxScrollbackLines
 }
 
+// AttachmentCacheConfig is the client-side retention policy for suspended
+// remote attachments. Capacity bounds how many dormant destinations one
+// runner retains; IdleTimeout, when positive, expires a dormant entry that
+// long after suspension. A zero IdleTimeout retains dormant entries for the
+// whole runner lifetime.
+type AttachmentCacheConfig struct {
+	Enabled     bool
+	Capacity    int
+	IdleTimeout time.Duration
+}
+
+// DefaultAttachmentCacheCapacity bounds one runner's dormant destinations.
+const DefaultAttachmentCacheCapacity = 8
+
+// DefaultAttachmentCacheConfig returns the approved retention policy: reuse
+// enabled, eight dormant destinations, and no client age expiry.
+func DefaultAttachmentCacheConfig() AttachmentCacheConfig {
+	return AttachmentCacheConfig{Enabled: true, Capacity: DefaultAttachmentCacheCapacity}
+}
+
+// Valid reports whether the policy is usable: a positive dormant capacity and
+// a non-negative idle timeout.
+func (c AttachmentCacheConfig) Valid() bool {
+	return c.Capacity > 0 && c.IdleTimeout >= 0
+}
+
 // Config is the user-editable vev configuration after parsing. Unknown binding
 // keys are preserved here (in BindingEntries, in file order) so the usecase
 // layer can decide which actions it understands.
 type Config struct {
-	// RemoteAttachmentCacheTTL is read by each launching client. Zero uses the
-	// default retention; negative durations disable remote attachment reuse.
-	RemoteAttachmentCacheTTL time.Duration
-	WebListen                string
-	WebOrigin                string
-	Theme                    ThemeMode
-	ThemePalette             bool
-	ThemeAccent              ThemeAccent
-	Bar                      BarConfig
-	BindingEntries           []ConfigEntry
-	Codes                    map[string]string
-	Snapshot                 SnapshotConfig
-	Copy                     CopyConfig
-	Palette                  PaletteConfig
-	Floating                 FloatingConfig
-	Nav                      NavConfig
-	Tabs                     TabsConfig
-	Scrollback               ScrollbackConfig
+	// AttachmentCache is read by each launching terminal client, not hot
+	// reloaded.
+	AttachmentCache AttachmentCacheConfig
+	WebListen       string
+	WebOrigin       string
+	Theme           ThemeMode
+	ThemePalette    bool
+	ThemeAccent     ThemeAccent
+	Bar             BarConfig
+	BindingEntries  []ConfigEntry
+	Codes           map[string]string
+	Snapshot        SnapshotConfig
+	Copy            CopyConfig
+	Palette         PaletteConfig
+	Floating        FloatingConfig
+	Nav             NavConfig
+	Tabs            TabsConfig
+	Scrollback      ScrollbackConfig
 }
 
 // Warning describes a non-fatal config problem. Parsers and reloaders should
@@ -138,10 +164,10 @@ type Warning struct {
 // Defaults returns vev's default configuration.
 func Defaults() Config {
 	return Config{
-		RemoteAttachmentCacheTTL: 15 * time.Minute,
-		Theme:                    ThemeAuto,
-		ThemePalette:             true,
-		ThemeAccent:              ThemeAccent{Mode: ThemeAccentAuto},
+		AttachmentCache: DefaultAttachmentCacheConfig(),
+		Theme:           ThemeAuto,
+		ThemePalette:    true,
+		ThemeAccent:     ThemeAccent{Mode: ThemeAccentAuto},
 		Bar: BarConfig{
 			Interval: 5 * time.Second,
 		},

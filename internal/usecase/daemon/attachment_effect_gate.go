@@ -360,3 +360,21 @@ func (ac *attachedClient) invalidateFrozenAttachmentCapability() {
 	g.failedTransport = transportSnapshot{}
 	g.mu.Unlock()
 }
+
+// detachFrozenAttachmentLocked atomically unregisters ac from sess and
+// invalidates its frozen capability. Callers must already hold ac's transition
+// freeze and sess.mu (plus routing locks where routing discipline applies); it
+// never freezes, drains, waits, or parks, so terminal teardown and the
+// daemon-owned suspension expiry can share one exact detach commit. A false
+// result means another path already detached ac. Only the winner performs
+// geometry reconciliation and transport/resource cleanup, outside locks.
+func detachFrozenAttachmentLocked(sess *session, ac *attachedClient) bool {
+	if sess == nil || ac == nil || ac.currentAttachmentSession() != sess || !attachmentRegisteredLocked(sess, ac) {
+		return false
+	}
+	sess.unregisterAttachmentLocked(ac)
+	ac.setSession(nil)
+	ac.invalidateFrozenAttachmentCapability()
+	cancelPickerPreviewWorker(ac)
+	return true
+}

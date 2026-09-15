@@ -3,6 +3,12 @@
 // Lock ordering: never acquire sendMu or session/daemon locks while holding a
 // pane lock. Coordinator callbacks and timer methods run without coordinator.mu;
 // see the lock-specific comments on attachedClient and renderCoordinator.
+// Attachment lifecycle gates order after daemon, session, routing, coordinator,
+// and pane locks: a daemon or session owner may briefly take one
+// lifecycle.mu to observe committed activity (see
+// sessionInteractivelyAttachedLocked), but must never freeze, drain, or wait on
+// a gate while holding any architecture lock. Freeze/drain always runs with
+// every architecture lock released.
 package daemon
 
 import (
