@@ -96,7 +96,7 @@ func (d *Daemon) activateAttachment(ac *attachedClient, expected transportSnapsh
 	ac.lifecycle.mu.Lock()
 	valid := ac.lifecycle.activity == attachmentSuspended && ac.lifecycle.retained == request.Target
 	ac.lifecycle.mu.Unlock()
-	if !valid || d.closing || d.sessions[sess.id] != sess || sess.incarnation != request.Target.LifecycleID || !attachmentRegisteredLocked(sess, ac) || !ac.transportSnapshotCurrent(expected) {
+	if !valid || d.closing || d.sessions[sess.id] != sess || sess.incarnation != request.Target.LifecycleID || sess.name != request.Target.SessionName || !attachmentRegisteredLocked(sess, ac) || !ac.transportSnapshotCurrent(expected) {
 		sess.mu.Unlock()
 		d.mu.Unlock()
 		return errAttachmentTransition
@@ -139,6 +139,11 @@ func (d *Daemon) activateAttachment(ac *attachedClient, expected transportSnapsh
 	go func() {
 		select {
 		case <-paintTimer.C():
+			select {
+			case <-paintDone:
+				return
+			default:
+			}
 			d.log.Warn("activation publication timed out; force closing client transport")
 			_ = ac.closeCapturedTransport(expected.transport)
 		case <-paintDone:
