@@ -119,17 +119,6 @@ func (e *cachedAttachment) close() {
 	e.once.Do(func() { close(e.done); _ = e.transport.Close() })
 }
 
-// release closes and joins the entry's reader and dormant workers. Test code
-// uses it for deterministic cleanup; runtime paths use the coordinator's
-// tracked asynchronous retirement.
-func (e *cachedAttachment) release() {
-	e.close()
-	e.waitDormant()
-	if e.readerStarted {
-		<-e.readerDone
-	}
-}
-
 func (e *cachedAttachment) receive(ctx context.Context) (protocol.ServerMessage, error) {
 	select {
 	case <-ctx.Done():
@@ -225,7 +214,6 @@ func (c *attachmentCoordinator) suspend(ctx context.Context, e *cachedAttachment
 		}
 	})
 	if err != nil {
-		e.close()
 		return false
 	}
 	e.key = request.OriginKey
@@ -454,13 +442,6 @@ func (e *cachedAttachment) drainDormant() error {
 			return nil
 		}
 	}
-}
-
-// has reports whether the exact key is currently dormant for test assertions.
-func (c *attachmentCoordinator) has(endpoint string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.entries[endpoint] != nil
 }
 
 // retire detaches a transport from coordinator bookkeeping and physically

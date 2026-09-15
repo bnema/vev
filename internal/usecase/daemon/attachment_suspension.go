@@ -7,12 +7,6 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-func (ac *attachedClient) attachmentActivity() attachmentActivity {
-	ac.lifecycle.mu.Lock()
-	defer ac.lifecycle.mu.Unlock()
-	return ac.lifecycle.activity
-}
-
 // Suspension retains membership for transport ownership and session teardown,
 // but removes the render lease and geometry claim. The lifecycle gate, rather
 // than membership alone, admits all ordinary attachment effects.
@@ -102,7 +96,7 @@ func (d *Daemon) activateAttachment(ac *attachedClient, expected transportSnapsh
 	ac.lifecycle.mu.Lock()
 	valid := ac.lifecycle.activity == attachmentSuspended && ac.lifecycle.retained == request.Target
 	ac.lifecycle.mu.Unlock()
-	if !valid || d.closing || d.sessions[sess.id] != sess || sess.incarnation != request.Target.LifecycleID || sess.name != request.Target.SessionName || !attachmentRegisteredLocked(sess, ac) || !ac.transportSnapshotCurrent(expected) {
+	if !valid || d.closing || d.sessions[sess.id] != sess || sess.incarnation != request.Target.LifecycleID || !attachmentRegisteredLocked(sess, ac) || !ac.transportSnapshotCurrent(expected) {
 		sess.mu.Unlock()
 		d.mu.Unlock()
 		return errAttachmentTransition
@@ -140,7 +134,20 @@ func (d *Daemon) activateAttachment(ac *attachedClient, expected transportSnapsh
 	ac.pipelineScratch = composeCacheInput{}
 	ac.captureFrames = nil
 	ac.sendMu.Unlock()
-	if d.paintWithActivationEffect(sess, ac, true, lease, effect) != paintEmitted || !effect.current() {
+	paintDone := make(chan struct{})
+	paintTimer := d.clock.NewTimer(detachNotifyTimeout)
+	go func() {
+		select {
+		case <-paintTimer.C():
+			d.log.Warn("activation publication timed out; force closing client transport")
+			_ = ac.closeCapturedTransport(expected.transport)
+		case <-paintDone:
+			paintTimer.Stop()
+		}
+	}()
+	paintResult := d.paintWithActivationEffect(sess, ac, true, lease, effect)
+	close(paintDone)
+	if paintResult != paintEmitted || !effect.current() {
 		return errAttachmentTransition
 	}
 	ac.sendMu.Lock()

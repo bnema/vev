@@ -14,6 +14,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func releaseCachedAttachment(e *cachedAttachment) {
+	e.close()
+	e.waitDormant()
+	if e.readerStarted {
+		<-e.readerDone
+	}
+}
+
+func attachmentCacheHas(c *attachmentCoordinator, endpoint string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.entries[endpoint] != nil
+}
+
 // The peer uses typed messages so the tests exercise publication correlation,
 // reader ownership and terminal isolation independently of carriage encoding.
 type cacheTestPeer struct {
@@ -232,7 +246,7 @@ func TestAttachmentCacheRejectsUncommittedPublication(t *testing.T) {
 			got, _, _, _ := c.activate(context.Background(), cacheTestRequest("a"), domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 			require.Nil(t, got)
 			<-e.readerDone
-			require.False(t, c.has("a"))
+			require.False(t, attachmentCacheHas(c, "a"))
 		})
 	}
 }
@@ -258,7 +272,7 @@ func TestAttachmentCachePreferredTabEligibility(t *testing.T) {
 			got, _, _, _ := c.activate(context.Background(), request, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, nil)
 			if tt.warm {
 				require.Same(t, e, got)
-				got.release()
+				releaseCachedAttachment(got)
 			} else {
 				require.Nil(t, got)
 				require.Len(t, p.sent, 1, "mismatched preference must fall back before activation")
@@ -293,7 +307,7 @@ func TestAttachmentCacheActivationDrainsQueuedDormantMessages(t *testing.T) {
 			if tt.warm {
 				require.Same(t, e, got)
 				require.Equal(t, []byte("full"), full.Data)
-				got.release()
+				releaseCachedAttachment(got)
 			} else {
 				require.Nil(t, got)
 				require.Len(t, p.sent, 1)
@@ -384,8 +398,8 @@ func TestAttachmentCacheLRUCapacityAndRecency(t *testing.T) {
 		defer c.close()
 		_, pa := parkTestPeer(t, c, "a")
 		_, pb := parkTestPeer(t, c, "b")
-		require.False(t, c.has("a"))
-		require.True(t, c.has("b"))
+		require.False(t, attachmentCacheHas(c, "a"))
+		require.True(t, attachmentCacheHas(c, "b"))
 		<-pa.closed
 		require.False(t, peerClosed(pb), "the retained destination stays open")
 	})
@@ -398,10 +412,10 @@ func TestAttachmentCacheLRUCapacityAndRecency(t *testing.T) {
 			_, p := parkTestPeer(t, c, key)
 			peers[key] = p
 		}
-		require.False(t, c.has("e0"), "oldest dormant destination is evicted")
+		require.False(t, attachmentCacheHas(c, "e0"), "oldest dormant destination is evicted")
 		<-peers["e0"].closed
 		for i := 1; i < 9; i++ {
-			require.True(t, c.has(fmt.Sprintf("e%d", i)))
+			require.True(t, attachmentCacheHas(c, fmt.Sprintf("e%d", i)))
 		}
 	})
 	t.Run("least recently used dormant entry is evicted first", func(t *testing.T) {
@@ -410,9 +424,9 @@ func TestAttachmentCacheLRUCapacityAndRecency(t *testing.T) {
 		_, pa := parkTestPeer(t, c, "a")
 		_, pb := parkTestPeer(t, c, "b")
 		_, pc := parkTestPeer(t, c, "c")
-		require.False(t, c.has("a"))
-		require.True(t, c.has("b"))
-		require.True(t, c.has("c"))
+		require.False(t, attachmentCacheHas(c, "a"))
+		require.True(t, attachmentCacheHas(c, "b"))
+		require.True(t, attachmentCacheHas(c, "c"))
 		<-pa.closed
 		require.False(t, peerClosed(pb))
 		require.False(t, peerClosed(pc))
@@ -426,9 +440,9 @@ func TestAttachmentCacheLRUCapacityAndRecency(t *testing.T) {
 		require.Same(t, e, got)
 		require.True(t, c.suspend(context.Background(), e, cacheTestRequest("a"), attachResult{committedIdentity: &pa.identity, resumeToken: 7}))
 		_, pc := parkTestPeer(t, c, "c")
-		require.True(t, c.has("a"), "recently used entry survives")
-		require.False(t, c.has("b"), "older entry is evicted")
-		require.True(t, c.has("c"))
+		require.True(t, attachmentCacheHas(c, "a"), "recently used entry survives")
+		require.False(t, attachmentCacheHas(c, "b"), "older entry is evicted")
+		require.True(t, attachmentCacheHas(c, "c"))
 		<-pb.closed
 		require.False(t, peerClosed(pa), "the re-suspended entry stays retained")
 		require.False(t, peerClosed(pc))
@@ -438,8 +452,8 @@ func TestAttachmentCacheLRUCapacityAndRecency(t *testing.T) {
 		defer c.close()
 		_, _ = parkTestPeer(t, c, "alias-one")
 		_, _ = parkTestPeer(t, c, "alias-two")
-		require.True(t, c.has("alias-two"))
-		require.False(t, c.has("alias-one"))
+		require.True(t, attachmentCacheHas(c, "alias-two"))
+		require.False(t, attachmentCacheHas(c, "alias-one"))
 	})
 }
 
@@ -453,7 +467,7 @@ func TestAttachmentCacheDisabledPolicyRetainsNothing(t *testing.T) {
 	require.Empty(t, c.entries)
 	require.Zero(t, clock.timerCount())
 	require.False(t, c.enabled())
-	e.release()
+	releaseCachedAttachment(e)
 }
 
 func TestAttachmentCacheWithoutIdleTimeoutArmsNoTimer(t *testing.T) {
@@ -463,7 +477,7 @@ func TestAttachmentCacheWithoutIdleTimeoutArmsNoTimer(t *testing.T) {
 	e, _ := parkTestPeer(t, c, "a")
 	require.Nil(t, e.timer, "no client age expiry allocates no idle timer")
 	require.False(t, clock.armedFor(time.Minute), "only the shared handshake timer may exist")
-	require.True(t, c.has("a"), "an entry without a timeout is retained")
+	require.True(t, attachmentCacheHas(c, "a"), "an entry without a timeout is retained")
 }
 
 func TestAttachmentCacheShutdownInitiatesEveryCloseBeforeJoining(t *testing.T) {
@@ -540,8 +554,8 @@ func TestAttachmentCacheShutdownRacesLifecycle(t *testing.T) {
 		}()
 		close(start)
 		wg.Wait()
-		e.release()
-		require.False(t, c.has("a"))
+		releaseCachedAttachment(e)
+		require.False(t, attachmentCacheHas(c, "a"))
 	}
 }
 
@@ -588,7 +602,7 @@ func TestAttachmentCacheWarmActivationDeadlineFallsBack(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("warm activation did not relinquish ownership at its deadline")
 			}
-			require.False(t, c.has("a"))
+			require.False(t, attachmentCacheHas(c, "a"))
 			// Release the deliberate stall so physical retirement can finish
 			// before the deferred shutdown joins it.
 			close(release)

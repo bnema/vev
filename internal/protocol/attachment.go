@@ -38,9 +38,10 @@ func (m ActivateAttachment) Geometry() domain.Geometry {
 	return domain.Geometry{Size: m.Size, PixelWidth: m.PixelWidth, PixelHeight: m.PixelHeight}.NormalizePixels()
 }
 
-// AttachmentActivated commits a successful activation after a full Output on a
-// fresh epoch. Identity and the epoch/state/view-publication fence must match
-// that Output's context. The receiver checks freshness against its previous
+// AttachmentActivated commits a successful activation after a full Output and
+// changed RoutePosition on a fresh epoch. Identity and the
+// epoch/state/view-publication fence must match that Output's context. The
+// receiver checks freshness against its previous
 // chain and correlation against the pending request; Validate checks only the
 // self-contained message. Failure must not emit this success ACK (the existing
 // error/close path permits eviction and reconnect).

@@ -45,6 +45,12 @@ type attachmentLifecycle struct {
 
 var nextAttachmentEffectGateOrder atomic.Uint64
 
+func (ac *attachedClient) attachmentActivity() attachmentActivity {
+	ac.lifecycle.mu.Lock()
+	defer ac.lifecycle.mu.Unlock()
+	return ac.lifecycle.activity
+}
+
 func (g *attachmentLifecycle) generationValue() uint64 {
 	if g == nil {
 		return 0

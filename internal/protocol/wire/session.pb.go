@@ -1945,8 +1945,9 @@ func (x *ActivateAttachment) GetPixelHeight() uint32 {
 	return 0
 }
 
-// AttachmentActivated follows a full Output on a fresh epoch. The identity and
-// epoch/state/publication fence must match that Output before input resumes.
+// AttachmentActivated follows a full Output and changed RoutePosition on a
+// fresh epoch. The identity and epoch/state/publication fence must match that
+// Output before input resumes.
 type AttachmentActivated struct {
 	state           protoimpl.MessageState  `protogen:"open.v1"`
 	RequestId       uint64                  `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`

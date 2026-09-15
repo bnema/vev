@@ -97,15 +97,22 @@ func TestAttachmentActivationPublicationPrecedesSuccess(t *testing.T) {
 	suspended := decodeServerMessage(t, <-sends).(protocol.AttachmentSuspended)
 	require.NoError(t, d.activateAttachment(ac, ac.transportSnapshot(), protocol.ActivateAttachment{RequestID: 2, Target: suspended.Target, Size: ac.sizeSnapshot()}))
 	var full *protocol.Output
+	var position *protocol.RoutePosition
 	for len(sends) != 0 {
 		switch m := decodeServerMessage(t, <-sends).(type) {
 		case protocol.Output:
+			require.Nil(t, full)
 			require.True(t, m.Full)
 			require.Zero(t, m.Base)
 			require.NotNil(t, m.Context)
 			full = &m
+		case protocol.RoutePosition:
+			require.NotNil(t, full, "route position must follow full publication")
+			require.Nil(t, position)
+			position = &m
 		case protocol.AttachmentActivated:
 			require.NotNil(t, full, "activation success must follow full publication")
+			require.NotNil(t, position, "activation success must follow route position")
 			require.Equal(t, full.Epoch, m.Epoch)
 			require.Equal(t, full.New, m.State)
 			require.Equal(t, full.Context.Publication, m.ViewPublication)

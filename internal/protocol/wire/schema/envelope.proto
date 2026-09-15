@@ -104,6 +104,9 @@ message ClientEnvelope {
 // ServerEnvelope is the closed server-to-client union. Exactly one variant
 // must be set per envelope.
 message ServerEnvelope {
+  // 29 and 30 mirror the client-direction attachment request tags.
+  reserved 29, 30;
+
   oneof payload {
     Welcome welcome = 1;
     ErrorMsg error = 2;
