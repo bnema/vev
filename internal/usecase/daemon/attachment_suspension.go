@@ -101,12 +101,13 @@ func (d *Daemon) activateAttachment(ac *attachedClient, expected transportSnapsh
 		d.mu.Unlock()
 		return errAttachmentTransition
 	}
-	ac.setGeometry(request.Geometry())
+	geometry := request.Geometry()
+	ac.setGeometry(geometry)
 	rc := d.ensureRenderCoordinatorPrelocked(sess)
 	rc.mu.Lock()
 	lease := rc.attachWithReadinessLocked(ac, true)
 	rc.mu.Unlock()
-	sess.geometry.claimLocked(sess.core(), ac, request.Geometry())
+	sess.geometry.claimLocked(sess.core(), ac, geometry)
 	// A committed activation ends the suspended lifetime: cancel the daemon-owned
 	// safety expiry before the new capability generation is published.
 	d.clearSuspendedExpiryLocked(ac)

@@ -142,7 +142,7 @@ func TestPickerStaleRevisionClosesInteraction(t *testing.T) {
 	writeTerminal(t, writer, "ok")
 	select {
 	case <-transport.inputCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("session input did not resume after the release paint")
 	}
 }

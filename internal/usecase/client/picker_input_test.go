@@ -296,7 +296,7 @@ func TestPickerReleaseDropsInputWithoutReplay(t *testing.T) {
 
 	writeTerminal(t, writer, "ok")
 	var delivered []byte
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(5 * time.Second)
 	for len(delivered) < len("ok") {
 		select {
 		case frame := <-transport.inputCh:

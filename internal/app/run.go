@@ -560,6 +560,20 @@ func logConfigWarnings(log *slog.Logger, warnings []domain.Warning) {
 	}
 }
 
+func loadConfigOrDefaults(log *slog.Logger, path string) domain.Config {
+	cfg, warnings, err := config.Load(path)
+	if err != nil {
+		if log != nil {
+			log.Warn("loading config failed; using defaults", "path", path, "err", err)
+		}
+		cfg = domain.Defaults()
+	}
+	if log != nil {
+		logConfigWarnings(log, warnings)
+	}
+	return cfg
+}
+
 func snapshotDir() string {
 	return filepath.Join(platform.StateDir(), "snapshots")
 }
@@ -756,12 +770,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
 	}
 	configPath := platform.ConfigPath()
-	cfg, warnings, err := config.Load(configPath)
-	if err != nil {
-		log.Warn("loading config failed; using defaults", "path", configPath, "err", err)
-		cfg = domain.Defaults()
-	}
-	logConfigWarnings(log, warnings)
+	cfg := loadConfigOrDefaults(log, configPath)
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
@@ -1027,16 +1036,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 	if configPath == nil {
 		configPath = platform.ConfigPath
 	}
-	cfg, warnings, configErr := config.Load(configPath())
-	if configErr != nil {
-		if log != nil {
-			log.Warn("loading client config failed; using defaults", "err", configErr)
-		}
-		cfg = domain.Defaults()
-	}
-	if log != nil {
-		logConfigWarnings(log, warnings)
-	}
+	cfg := loadConfigOrDefaults(log, configPath())
 	// The launching client owns one host registry for the whole run: endpoint
 	// bindings are resolved once and reused by every later handoff, and the
 	// discovery loop it drives lives exactly as long as the runner.

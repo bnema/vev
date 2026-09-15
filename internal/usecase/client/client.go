@@ -242,8 +242,6 @@ func warmActivationTarget(request AttachRequest) protocol.AttachTarget {
 	return protocol.AttachTarget{
 		Endpoint:     request.OriginKey,
 		Session:      request.SessionName,
-		Intent:       request.Intent,
-		ExactTarget:  request.ExactTarget,
 		RemoteTarget: request.RemoteTarget,
 	}
 }

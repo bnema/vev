@@ -24,6 +24,7 @@ func TestRunAttachThreadsAttachmentCacheConfig(t *testing.T) {
 			{"default", "", domain.DefaultAttachmentCacheConfig()},
 			{"configured", "remote.attachment-cache-capacity = 3\nremote.attachment-cache-idle-timeout = 42s", domain.AttachmentCacheConfig{Enabled: true, Capacity: 3, IdleTimeout: 42 * time.Second}},
 			{"disabled", "remote.attachment-cache = off", domain.AttachmentCacheConfig{Enabled: false, Capacity: 8}},
+			{"warning with nil logger", "remote.attachment-cache-capacity = 0", domain.DefaultAttachmentCacheConfig()},
 		} {
 			t.Run(remote+"/"+tt.name, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "config")
