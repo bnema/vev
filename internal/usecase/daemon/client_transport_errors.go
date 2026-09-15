@@ -26,6 +26,12 @@ func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed 
 			return // stale connection loop; a newer transport owns this client
 		}
 	}
+	// A warm attachment already retains its live session state. Closure evicts
+	// it rather than creating a second, parked lifetime.
+	if ac.attachmentActivity() != attachmentActive {
+		explicit = true
+		notice = false
+	}
 	// Advertise parking before detach so IntentResume never observes both the
 	// live seat and parking/parked registries empty for a still-valid token.
 	var parkingToken uint64
@@ -184,7 +190,7 @@ func (d *Daemon) finishSendErrorDetach(sess *session, ac *attachedClient, failed
 		rc.noteDetach(ac)
 	}
 	sess.geometry.reconcileAndInvalidate(d, sess, nil, "client_transport_errors.go")
-	if d.parkAttachment(sess, ac) {
+	if ac.attachmentActivity() == attachmentActive && d.parkAttachment(sess, ac) {
 		_ = ac.closeCapturedTransport(failed)
 		d.log.Warn("parked client after send error", "session", name)
 		return

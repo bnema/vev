@@ -75,6 +75,9 @@ func TestInventoryFailureRestoresLatestRemoteIdentityAfterResumeRejection(t *tes
 		return conn, nil
 	}).Twice()
 	deps := testDependencies(localDialer, term, realClock{}, nil, nil)
+	// This journey exercises cold resume rejection, not warm suspension. Its
+	// scripted peer deliberately has no suspension/activation responses.
+	deps.AttachmentCache = domain.AttachmentCacheConfig{Enabled: false}
 	deps.LocalControlDialer = control
 	deps.HostRegistry = dialerForEndpoints(map[string]ports.ClientDialer{"remote": remoteDialer})
 	require.NoError(t, runTestClient(context.Background(), deps, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: local.SessionName, Origin: protocol.RouteOriginLocal, OriginKey: "local"}))

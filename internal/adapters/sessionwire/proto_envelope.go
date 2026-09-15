@@ -15,6 +15,28 @@ import (
 
 func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, error) {
 	switch m := message.(type) {
+	case protocol.SuspendAttachment:
+		converted, err := suspendAttachmentToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_SuspendAttachment{SuspendAttachment: converted}}, nil
+	case *protocol.SuspendAttachment:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoClient(*m)
+	case protocol.ActivateAttachment:
+		converted, err := activateAttachmentToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_ActivateAttachment{ActivateAttachment: converted}}, nil
+	case *protocol.ActivateAttachment:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoClient(*m)
 	case protocol.Hello:
 		converted, err := helloToWire(m)
 		if err != nil {
@@ -294,6 +316,28 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 
 func encodeProtoServer(message protocol.ServerMessage) (*wire.ServerEnvelope, error) {
 	switch m := message.(type) {
+	case protocol.AttachmentSuspended:
+		converted, err := attachmentSuspendedToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_AttachmentSuspended{AttachmentSuspended: converted}}, nil
+	case *protocol.AttachmentSuspended:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoServer(*m)
+	case protocol.AttachmentActivated:
+		converted, err := attachmentActivatedToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_AttachmentActivated{AttachmentActivated: converted}}, nil
+	case *protocol.AttachmentActivated:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoServer(*m)
 	case protocol.Welcome:
 		converted, err := welcomeToWire(m)
 		if err != nil {
@@ -598,6 +642,10 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 		return nil, ErrInvalidMessage
 	}
 	switch payload := envelope.Payload.(type) {
+	case *wire.ClientEnvelope_SuspendAttachment:
+		return suspendAttachmentFromWire(payload.SuspendAttachment)
+	case *wire.ClientEnvelope_ActivateAttachment:
+		return activateAttachmentFromWire(payload.ActivateAttachment)
 	case *wire.ClientEnvelope_Hello:
 		return helloFromWire(payload.Hello)
 	case *wire.ClientEnvelope_Input:
@@ -666,6 +714,10 @@ func decodeProtoServer(envelope *wire.ServerEnvelope) (protocol.ServerMessage, e
 		return nil, ErrInvalidMessage
 	}
 	switch payload := envelope.Payload.(type) {
+	case *wire.ServerEnvelope_AttachmentSuspended:
+		return attachmentSuspendedFromWire(payload.AttachmentSuspended)
+	case *wire.ServerEnvelope_AttachmentActivated:
+		return attachmentActivatedFromWire(payload.AttachmentActivated)
 	case *wire.ServerEnvelope_Welcome:
 		return welcomeFromWire(payload.Welcome)
 	case *wire.ServerEnvelope_Error:

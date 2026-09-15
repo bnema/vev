@@ -60,6 +60,10 @@ func clientMessageName(t *testing.T, envelope wire.Envelope) string {
 		return ""
 	}
 	switch message.(type) {
+	case protocol.SuspendAttachment:
+		return "SuspendAttachment"
+	case protocol.ActivateAttachment:
+		return "ActivateAttachment"
 	case protocol.Hello:
 		return "Hello"
 	case protocol.Input:

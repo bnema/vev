@@ -1762,6 +1762,268 @@ func (x *SamePeerSwitchFailure) GetCode() uint32 {
 	return 0
 }
 
+// SuspendAttachment requests an acknowledged passive publication barrier.
+type SuspendAttachment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SuspendAttachment) Reset() {
+	*x = SuspendAttachment{}
+	mi := &file_session_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SuspendAttachment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendAttachment) ProtoMessage() {}
+
+func (x *SuspendAttachment) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendAttachment.ProtoReflect.Descriptor instead.
+func (*SuspendAttachment) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *SuspendAttachment) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+// AttachmentSuspended is sent only after authority revocation and output drain.
+type AttachmentSuspended struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Target        *ExactTarget           `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttachmentSuspended) Reset() {
+	*x = AttachmentSuspended{}
+	mi := &file_session_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttachmentSuspended) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttachmentSuspended) ProtoMessage() {}
+
+func (x *AttachmentSuspended) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttachmentSuspended.ProtoReflect.Descriptor instead.
+func (*AttachmentSuspended) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *AttachmentSuspended) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *AttachmentSuspended) GetTarget() *ExactTarget {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+// ActivateAttachment targets only the suspended attachment's retained lifecycle.
+type ActivateAttachment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Target        *ExactTarget           `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	Cols          uint32                 `protobuf:"varint,3,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows          uint32                 `protobuf:"varint,4,opt,name=rows,proto3" json:"rows,omitempty"`
+	PixelWidth    uint32                 `protobuf:"varint,5,opt,name=pixel_width,json=pixelWidth,proto3" json:"pixel_width,omitempty"`
+	PixelHeight   uint32                 `protobuf:"varint,6,opt,name=pixel_height,json=pixelHeight,proto3" json:"pixel_height,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActivateAttachment) Reset() {
+	*x = ActivateAttachment{}
+	mi := &file_session_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateAttachment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateAttachment) ProtoMessage() {}
+
+func (x *ActivateAttachment) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateAttachment.ProtoReflect.Descriptor instead.
+func (*ActivateAttachment) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ActivateAttachment) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *ActivateAttachment) GetTarget() *ExactTarget {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *ActivateAttachment) GetCols() uint32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *ActivateAttachment) GetRows() uint32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+func (x *ActivateAttachment) GetPixelWidth() uint32 {
+	if x != nil {
+		return x.PixelWidth
+	}
+	return 0
+}
+
+func (x *ActivateAttachment) GetPixelHeight() uint32 {
+	if x != nil {
+		return x.PixelHeight
+	}
+	return 0
+}
+
+// AttachmentActivated follows a full Output and changed RoutePosition on a
+// fresh epoch. The identity and epoch/state/publication fence must match that
+// Output before input resumes.
+type AttachmentActivated struct {
+	state           protoimpl.MessageState  `protogen:"open.v1"`
+	RequestId       uint64                  `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Identity        *CommittedRouteIdentity `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
+	Epoch           uint64                  `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	State           uint64                  `protobuf:"varint,4,opt,name=state,proto3" json:"state,omitempty"`
+	ViewPublication uint64                  `protobuf:"varint,5,opt,name=view_publication,json=viewPublication,proto3" json:"view_publication,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AttachmentActivated) Reset() {
+	*x = AttachmentActivated{}
+	mi := &file_session_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttachmentActivated) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttachmentActivated) ProtoMessage() {}
+
+func (x *AttachmentActivated) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttachmentActivated.ProtoReflect.Descriptor instead.
+func (*AttachmentActivated) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *AttachmentActivated) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *AttachmentActivated) GetIdentity() *CommittedRouteIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *AttachmentActivated) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *AttachmentActivated) GetState() uint64 {
+	if x != nil {
+		return x.State
+	}
+	return 0
+}
+
+func (x *AttachmentActivated) GetViewPublication() uint64 {
+	if x != nil {
+		return x.ViewPublication
+	}
+	return 0
+}
+
 var File_session_proto protoreflect.FileDescriptor
 
 const file_session_proto_rawDesc = "" +
@@ -1913,7 +2175,30 @@ const file_session_proto_rawDesc = "" +
 	"\x15SamePeerSwitchFailure\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x12\n" +
-	"\x04code\x18\x02 \x01(\rR\x04codeB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
+	"\x04code\x18\x02 \x01(\rR\x04code\"2\n" +
+	"\x11SuspendAttachment\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\x04R\trequestId\"f\n" +
+	"\x13AttachmentSuspended\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\x04R\trequestId\x120\n" +
+	"\x06target\x18\x02 \x01(\v2\x18.vev.wire.v1.ExactTargetR\x06target\"\xd1\x01\n" +
+	"\x12ActivateAttachment\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\x04R\trequestId\x120\n" +
+	"\x06target\x18\x02 \x01(\v2\x18.vev.wire.v1.ExactTargetR\x06target\x12\x12\n" +
+	"\x04cols\x18\x03 \x01(\rR\x04cols\x12\x12\n" +
+	"\x04rows\x18\x04 \x01(\rR\x04rows\x12\x1f\n" +
+	"\vpixel_width\x18\x05 \x01(\rR\n" +
+	"pixelWidth\x12!\n" +
+	"\fpixel_height\x18\x06 \x01(\rR\vpixelHeight\"\xcc\x01\n" +
+	"\x13AttachmentActivated\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\x04R\trequestId\x12?\n" +
+	"\bidentity\x18\x02 \x01(\v2#.vev.wire.v1.CommittedRouteIdentityR\bidentity\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12\x14\n" +
+	"\x05state\x18\x04 \x01(\x04R\x05state\x12)\n" +
+	"\x10view_publication\x18\x05 \x01(\x04R\x0fviewPublicationB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
 	file_session_proto_rawDescOnce sync.Once
@@ -1927,7 +2212,7 @@ func file_session_proto_rawDescGZIP() []byte {
 	return file_session_proto_rawDescData
 }
 
-var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_session_proto_goTypes = []any{
 	(*Hello)(nil),                      // 0: vev.wire.v1.Hello
 	(*Welcome)(nil),                    // 1: vev.wire.v1.Welcome
@@ -1955,35 +2240,42 @@ var file_session_proto_goTypes = []any{
 	(*RouteRetired)(nil),               // 23: vev.wire.v1.RouteRetired
 	(*SamePeerSwitchRequest)(nil),      // 24: vev.wire.v1.SamePeerSwitchRequest
 	(*SamePeerSwitchFailure)(nil),      // 25: vev.wire.v1.SamePeerSwitchFailure
-	(*RemoteTarget)(nil),               // 26: vev.wire.v1.RemoteTarget
-	(*ExactTarget)(nil),                // 27: vev.wire.v1.ExactTarget
+	(*SuspendAttachment)(nil),          // 26: vev.wire.v1.SuspendAttachment
+	(*AttachmentSuspended)(nil),        // 27: vev.wire.v1.AttachmentSuspended
+	(*ActivateAttachment)(nil),         // 28: vev.wire.v1.ActivateAttachment
+	(*AttachmentActivated)(nil),        // 29: vev.wire.v1.AttachmentActivated
+	(*RemoteTarget)(nil),               // 30: vev.wire.v1.RemoteTarget
+	(*ExactTarget)(nil),                // 31: vev.wire.v1.ExactTarget
 }
 var file_session_proto_depIdxs = []int32{
-	26, // 0: vev.wire.v1.Hello.remote_target:type_name -> vev.wire.v1.RemoteTarget
-	27, // 1: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
+	30, // 0: vev.wire.v1.Hello.remote_target:type_name -> vev.wire.v1.RemoteTarget
+	31, // 1: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
 	3,  // 2: vev.wire.v1.Welcome.committed_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	27, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
-	26, // 4: vev.wire.v1.AttachTarget.remote_target:type_name -> vev.wire.v1.RemoteTarget
-	27, // 5: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
+	31, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
+	30, // 4: vev.wire.v1.AttachTarget.remote_target:type_name -> vev.wire.v1.RemoteTarget
+	31, // 5: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
 	5,  // 6: vev.wire.v1.Sessions.sessions:type_name -> vev.wire.v1.SessionInfo
 	13, // 7: vev.wire.v1.RouteAttentionTarget.ref:type_name -> vev.wire.v1.RouteRef
-	27, // 8: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
+	31, // 8: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
 	14, // 9: vev.wire.v1.RouteAttentionSubscription.targets:type_name -> vev.wire.v1.RouteAttentionTarget
-	27, // 10: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
+	31, // 10: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
 	13, // 11: vev.wire.v1.RecentRouteSnapshot.active:type_name -> vev.wire.v1.RouteRef
 	16, // 12: vev.wire.v1.RecentRouteSnapshot.active_entry:type_name -> vev.wire.v1.RecentRouteEntry
 	13, // 13: vev.wire.v1.RecentRouteSnapshot.previous:type_name -> vev.wire.v1.RouteRef
 	13, // 14: vev.wire.v1.RecentRouteSnapshot.home:type_name -> vev.wire.v1.RouteRef
 	16, // 15: vev.wire.v1.RecentRouteSnapshot.entries:type_name -> vev.wire.v1.RecentRouteEntry
-	27, // 16: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
+	31, // 16: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
 	13, // 17: vev.wire.v1.RouteRetired.ref:type_name -> vev.wire.v1.RouteRef
-	27, // 18: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
-	27, // 19: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
-	20, // [20:20] is the sub-list for method output_type
-	20, // [20:20] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	31, // 18: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
+	31, // 19: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
+	31, // 20: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
+	31, // 21: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
+	3,  // 22: vev.wire.v1.AttachmentActivated.identity:type_name -> vev.wire.v1.CommittedRouteIdentity
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_session_proto_init() }
@@ -1998,7 +2290,7 @@ func file_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_session_proto_rawDesc), len(file_session_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   26,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

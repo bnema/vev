@@ -886,13 +886,15 @@ func (d *Daemon) detachIfCurrentTransport(sess *session, ac *attachedClient, exp
 		current = false
 	}
 	if current {
-		sess.unregisterAttachmentLocked(ac)
-		ac.setSession(nil)
-		ac.invalidateFrozenAttachmentCapability()
-		cancelPickerPreviewWorker(ac)
+		current = detachFrozenAttachmentLocked(sess, ac)
 	}
 	sess.mu.Unlock()
 	d.notices.routingMu.Unlock()
+	if current {
+		// Terminal detach ends any daemon-owned suspension expiry. The clear runs
+		// outside routingMu so it never inverts the daemon -> routing lock order.
+		d.clearSuspendedExpiry(ac)
+	}
 	return current
 }
 
@@ -935,10 +937,7 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentCapability, done
 	}
 	current := coordinator != nil && token.currentInSessionAndLeaseLocked(token.sess, token.ac, coordinator)
 	if current {
-		unregisterAttachmentSessionLocked(token.sess, token.ac)
-		token.ac.setSession(nil)
-		token.ac.invalidateFrozenAttachmentCapability()
-		cancelPickerPreviewWorker(token.ac)
+		current = detachFrozenAttachmentLocked(token.sess, token.ac)
 	}
 	if coordinator != nil {
 		coordinator.mu.Unlock()
@@ -946,6 +945,11 @@ func (d *Daemon) detachIfAttachmentCurrentUntil(token attachmentCapability, done
 	core.mu.Unlock()
 	d.notices.routingMu.Unlock()
 	d.mu.Unlock()
+	if current {
+		// The suspension expiry is daemon-scoped; clear it only after every other
+		// architecture lock is released.
+		d.clearSuspendedExpiry(token.ac)
+	}
 	return current
 }
 
@@ -1782,6 +1786,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		capture(attached)
 	}
 	clear(sess.attachments)
+	d.purgeSuspendedForSessionLocked(sess)
 	stoppedName := sess.name
 	stoppedRecord := sess.persistRecordLocked(max(d.nowUnixNano(), sess.createdAt, int64(1)))
 	ephemeral := sess.ephemeral

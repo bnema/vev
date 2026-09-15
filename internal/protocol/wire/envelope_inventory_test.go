@@ -15,8 +15,8 @@ import (
 // shares a payload type except route navigation failure, and the preamble
 // constants agree with the schema authority.
 func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
-	if protocol.Version != 51 {
-		t.Fatalf("protocol.Version = %d, want 51", protocol.Version)
+	if protocol.Version != 52 {
+		t.Fatalf("protocol.Version = %d, want 52", protocol.Version)
 	}
 	if ProtocolEpoch != 1 {
 		t.Fatalf("ProtocolEpoch = %d, want 1", ProtocolEpoch)
@@ -30,6 +30,7 @@ func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
 
 	// Closed semantic unions, in wire-variant spelling.
 	clientSemantic := map[string]bool{
+		"suspend_attachment": true, "activate_attachment": true,
 		"hello": true, "input": true, "resize": true, "detach": true, "ping": true,
 		"list": true, "kill": true, "theme": true, "ack": true, "image_push": true,
 		"client_notice": true, "command_request": true, "output_reset_request": true,
@@ -42,6 +43,7 @@ func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
 		"picker_preview_request": true, "picker_control_request": true,
 	}
 	serverSemantic := map[string]bool{
+		"attachment_suspended": true, "attachment_activated": true,
 		"welcome": true, "error": true, "output": true, "detached": true, "pong": true,
 		"sessions": true, "command_result": true, "attach_target": true,
 		"remote_preview": true, "committed_route_identity": true,

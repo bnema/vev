@@ -317,6 +317,7 @@ func runTestClient(ctx context.Context, deps client.Dependencies, request client
 
 func testDependencies(dialer ports.ClientDialer, terminal ports.Terminal, clock ports.Clock, clipboard ports.ClipboardReader, observer ports.SerializedRuntimeObserver) client.Dependencies {
 	return client.Dependencies{
+		AttachmentCache:        domain.DefaultAttachmentCacheConfig(),
 		Dialer:                 dialer,
 		Terminal:               terminal,
 		Clock:                  clock,

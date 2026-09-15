@@ -94,6 +94,36 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 	if d.afterAttachmentFrameDispatch != nil {
 		d.afterAttachmentFrameDispatch(capability)
 	}
+	var transitionErr error
+	switch request := message.(type) {
+	case protocol.SuspendAttachment:
+		transitionErr = d.suspendAttachment(capability, request)
+	case protocol.ActivateAttachment:
+		transitionErr = d.activateAttachment(capability.ac, capability.transport, request)
+	default:
+		if capability.ac.attachmentActivity() != attachmentActive {
+			if _, ping := message.(protocol.Ping); ping {
+				if d.boundedSendErr(capability.ac, protocol.Pong{}) != nil {
+					d.clientGoneWithoutNotice(capability.sess, capability.ac, capability.transport.transport, true)
+					return true
+				}
+			}
+			if _, detach := message.(protocol.Detach); detach {
+				d.clientGoneWithoutNotice(capability.sess, capability.ac, capability.transport.transport, true)
+				return true
+			}
+			return false
+		}
+		return d.handleActiveAttachmentClientMessage(capability, message)
+	}
+	if transitionErr != nil {
+		d.clientGoneWithoutNotice(capability.sess, capability.ac, capability.transport.transport, true)
+		return true
+	}
+	return false
+}
+
+func (d *Daemon) handleActiveAttachmentClientMessage(capability attachmentCapability, message protocol.ClientMessage) bool {
 	effect, admitted := capability.ac.beginAttachmentEffect(capability)
 	if !admitted {
 		return false

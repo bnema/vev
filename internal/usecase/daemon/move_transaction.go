@@ -316,6 +316,7 @@ func (t *moveTransaction) publishLocked() error {
 		t.retiredAttachments = detachMoveAttachmentsLocked(t.source, t.sourceTransports)
 		t.source.tabs = nil
 		d.purgeParkingForSessionLocked(t.source)
+		d.purgeSuspendedForSessionLocked(t.source)
 		t.retiredParked = d.purgeParkedForSessionLocked(t.source)
 	}
 	t.sourceName = t.source.name

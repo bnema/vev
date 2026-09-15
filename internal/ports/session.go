@@ -6,7 +6,10 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// ClientConnection is one typed client-side session channel.
+// ClientConnection is one typed client-side session channel. Close must be
+// concurrent-safe, required to unblock ReceiveServer (and every send mode),
+// and must not need a prior graceful exchange: a retained dormant attachment
+// is closed by the client when it is evicted, replaced, or the runner exits.
 type ClientConnection interface {
 	SendClient(protocol.ClientMessage) error
 	ReceiveServer() (protocol.ServerMessage, error)

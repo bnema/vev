@@ -211,3 +211,35 @@ message SamePeerSwitchFailure {
   // Closed code taxonomy: 1 = stale target, 2 = unavailable.
   uint32 code = 2;
 }
+
+// SuspendAttachment requests an acknowledged passive publication barrier.
+message SuspendAttachment {
+  uint64 request_id = 1;
+}
+
+// AttachmentSuspended is sent only after authority revocation and output drain.
+message AttachmentSuspended {
+  uint64 request_id = 1;
+  ExactTarget target = 2;
+}
+
+// ActivateAttachment targets only the suspended attachment's retained lifecycle.
+message ActivateAttachment {
+  uint64 request_id = 1;
+  ExactTarget target = 2;
+  uint32 cols = 3;
+  uint32 rows = 4;
+  uint32 pixel_width = 5;
+  uint32 pixel_height = 6;
+}
+
+// AttachmentActivated follows a full Output and changed RoutePosition on a
+// fresh epoch. The identity and epoch/state/publication fence must match that
+// Output before input resumes.
+message AttachmentActivated {
+  uint64 request_id = 1;
+  CommittedRouteIdentity identity = 2;
+  uint64 epoch = 3;
+  uint64 state = 4;
+  uint64 view_publication = 5;
+}

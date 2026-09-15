@@ -67,6 +67,13 @@ func normalizeOutputWindow(window uint8) uint8 {
 
 const defaultResumeParkGrace = 15 * time.Minute
 
+// defaultSuspendedSafetyExpiry bounds how long the daemon retains a suspended
+// attachment. Suspension keeps transport ownership and session membership but
+// removes interactive authority, so a client that never returns must not keep
+// the underlying process alive indefinitely. Expiry is a terminal, no-notice
+// eviction that never mints a resume credential.
+const defaultSuspendedSafetyExpiry = 24 * time.Hour
+
 // defaultSize is retained for headless layout helpers that have no client
 // window; Hello routing rejects invalid dimensions instead of using it.
 var defaultSize = domain.Size{Cols: 80, Rows: 24}
@@ -110,6 +117,12 @@ type Daemon struct {
 	// with Wait.
 	notifies []chan struct{}
 	parked   map[uint64]*parkedAttachment
+	// suspended retains one daemon-owned safety expiry per suspended
+	// attachment. Expiry is exact: the record carries the suspension's
+	// lifecycle generation and transport incarnation, so a later activation,
+	// re-suspension, detach, or session teardown can never be retired by a
+	// stale timer. Guarded by mu.
+	suspended map[*attachedClient]*suspendedAttachmentRetention
 	// graphicsNamespaces reserves deterministic, attachment/session-scoped Kitty
 	// ID blocks. Once a block may have reached an outer terminal it remains in
 	// this bounded table for the daemon lifetime: side-effect Output frames have
@@ -232,18 +245,22 @@ type Daemon struct {
 	// after the render ticket ends and before exact lifecycle validation.
 	beforeAttachmentSendErrorCleanup func(attachmentCapability)
 	afterAttachmentSendErrorCleanup  func()
-	ptys                             ports.PTYFactory
-	clock                            ports.Clock
-	log                              *slog.Logger
-	runtimeObserver                  ports.RuntimeObserver
-	baseEnv                          []string
-	shell                            string
-	shellArgs                        []string
-	shellOverride                    bool
-	persistEnabled                   bool
-	catalogue                        ports.Catalogue
-	catalogueRecords                 []domain.CatalogueRecord
-	catalogueRecordsProvided         bool
+	// beforeSuspendedExpiryFreeze pauses the safety expiry after its timer fired
+	// and before it freezes the attachment effect gate, so tests can win
+	// activation, disconnect, or replacement first. It is a test-only seam.
+	beforeSuspendedExpiryFreeze func(*attachedClient)
+	ptys                        ports.PTYFactory
+	clock                       ports.Clock
+	log                         *slog.Logger
+	runtimeObserver             ports.RuntimeObserver
+	baseEnv                     []string
+	shell                       string
+	shellArgs                   []string
+	shellOverride               bool
+	persistEnabled              bool
+	catalogue                   ports.Catalogue
+	catalogueRecords            []domain.CatalogueRecord
+	catalogueRecordsProvided    bool
 	// snapshotRepository is the sole checkpoint storage contract.
 	snapshotRepository      ports.SnapshotRepository
 	recovery                *recoveryusecase.Coordinator
@@ -304,6 +321,7 @@ type Daemon struct {
 	barScripts                     *barScriptState
 	notices                        *noticeCenter
 	resumeParkGrace                time.Duration
+	suspendedSafetyExpiry          time.Duration
 	remotePreview                  remotePreviewState
 	remotePreviewClient            ports.RemotePreviewClient
 	// remoteDirectory is the snapshot-only projection served by the remote
@@ -595,6 +613,17 @@ func WithResumeParkGrace(grace time.Duration) Option {
 	}
 }
 
+// WithSuspendedSafetyExpiry overrides how long the daemon retains a suspended
+// attachment before terminal eviction. Non-positive durations keep the default.
+// Fake-clock tests set a short duration so the real timer path stays under test.
+func WithSuspendedSafetyExpiry(expiry time.Duration) Option {
+	return func(d *Daemon) {
+		if expiry > 0 {
+			d.suspendedSafetyExpiry = expiry
+		}
+	}
+}
+
 // WithConfig applies the initial user configuration.
 func WithConfig(cfg domain.Config) Option {
 	return func(d *Daemon) {
@@ -673,6 +702,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		inactive:                     make(map[string]inactiveSession),
 		creating:                     make(map[string]struct{}),
 		parked:                       make(map[uint64]*parkedAttachment),
+		suspended:                    make(map[*attachedClient]*suspendedAttachmentRetention),
 		graphicsNamespaces:           make(map[uint64]struct{}),
 		graphicsNamespaceFences:      make(map[uint64]uint64),
 		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
@@ -694,6 +724,7 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		snapshotWake:                 make(chan struct{}, 1),
 		notices:                      newNoticeCenter(),
 		resumeParkGrace:              defaultResumeParkGrace,
+		suspendedSafetyExpiry:        defaultSuspendedSafetyExpiry,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),
@@ -929,6 +960,7 @@ func (d *Daemon) terminateAllWithSnapshotDeadline(reason uint8, purge bool, dead
 	d.closing = true
 	d.purgeAllParkingLocked()
 	parkedRetirements := d.purgeAllParkedLocked()
+	d.purgeAllSuspendedLocked()
 	snapshot := d.sessionsSnapshotLocked()
 	stoppedNames := make([]string, 0, len(d.inactive))
 	if purge {
@@ -1234,7 +1266,9 @@ func (d *Daemon) handleList(tr ports.ServerConnection) {
 			State:     protocol.SessionUp,
 			Ephemeral: s.ephemeral,
 			Tabs:      uint16(len(s.tabs)),
-			Attached:  len(s.attachments) != 0,
+			// Attached means registered interactive presence, not mere transport
+			// membership: a suspended-only session is headless to observers.
+			Attached: sessionInteractivelyAttachedLocked(s),
 		}
 		liveNames[s.name] = struct{}{}
 		s.mu.Unlock()

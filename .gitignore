@@ -1,6 +1,8 @@
 /vev
 .dev/
 *.test
+__pycache__/
+*.pyc
 .superpowers/
 docs/superpowers/
 .agent-reviews/

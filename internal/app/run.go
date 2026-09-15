@@ -560,6 +560,20 @@ func logConfigWarnings(log *slog.Logger, warnings []domain.Warning) {
 	}
 }
 
+func loadConfigOrDefaults(log *slog.Logger, path string) domain.Config {
+	cfg, warnings, err := config.Load(path)
+	if err != nil {
+		if log != nil {
+			log.Warn("loading config failed; using defaults", "path", path, "err", err)
+		}
+		cfg = domain.Defaults()
+	}
+	if log != nil {
+		logConfigWarnings(log, warnings)
+	}
+	return cfg
+}
+
 func snapshotDir() string {
 	return filepath.Join(platform.StateDir(), "snapshots")
 }
@@ -756,12 +770,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		daemonOpts = append(daemonOpts, daemon.WithRuntimeObserver(observer))
 	}
 	configPath := platform.ConfigPath()
-	cfg, warnings, err := config.Load(configPath)
-	if err != nil {
-		log.Warn("loading config failed; using defaults", "path", configPath, "err", err)
-		cfg = domain.Defaults()
-	}
-	logConfigWarnings(log, warnings)
+	cfg := loadConfigOrDefaults(log, configPath)
 	daemonOpts = append(daemonOpts, daemon.WithConfig(cfg))
 	daemonOpts = append(daemonOpts, daemon.WithBarScriptCommandRunner(shellcmd.New()))
 	daemonOpts = append(daemonOpts, daemon.WithProcessInspector(platform.NewProcessInspector()), daemon.WithDirOrHome(platform.DirOrHome))
@@ -890,6 +899,7 @@ func defaultRemoteDialerFactory() remoteDialerForTarget {
 type runClientFunc func(context.Context, client.Dependencies, client.AttachRequest) error
 
 type runAttachDeps struct {
+	configPath              func() string
 	localDialer             func() wire.Dialer
 	remoteDialerFactory     remoteDialerForTarget
 	selectedRemoteTransport string
@@ -1022,6 +1032,11 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 		}
 		return policy
 	}
+	configPath := deps.configPath
+	if configPath == nil {
+		configPath = platform.ConfigPath
+	}
+	cfg := loadConfigOrDefaults(log, configPath())
 	// The launching client owns one host registry for the whole run: endpoint
 	// bindings are resolved once and reused by every later handoff, and the
 	// discovery loop it drives lives exactly as long as the runner.
@@ -1041,6 +1056,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				return resolveErr
 			}
 			err = runClient(ctx, client.Dependencies{
+				AttachmentCache:        cfg.AttachmentCache,
 				Dialer:                 binding.Dialer,
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),
@@ -1070,6 +1086,7 @@ func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, ac
 				log.Info("attaching to local session", "intent", intent, "name", name)
 			}
 			err = runClient(ctx, client.Dependencies{
+				AttachmentCache:        cfg.AttachmentCache,
 				Dialer:                 sessionwire.NewClientDialer(localDialer()),
 				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
 				Terminal:               clientTerminal(deps),

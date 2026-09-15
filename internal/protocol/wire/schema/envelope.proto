@@ -96,12 +96,17 @@ message ClientEnvelope {
     PickerSelection picker_selection = 26;
     PickerPreviewRequest picker_preview_request = 27;
     PickerControlRequest picker_control_request = 28;
+    SuspendAttachment suspend_attachment = 29;
+    ActivateAttachment activate_attachment = 30;
   }
 }
 
 // ServerEnvelope is the closed server-to-client union. Exactly one variant
 // must be set per envelope.
 message ServerEnvelope {
+  // 29 and 30 mirror the client-direction attachment request tags.
+  reserved 29, 30;
+
   oneof payload {
     Welcome welcome = 1;
     ErrorMsg error = 2;
@@ -131,5 +136,7 @@ message ServerEnvelope {
     PickerFailure picker_failure = 26;
     PickerPreview picker_preview = 27;
     PickerControlResponse picker_control_response = 28;
+    AttachmentSuspended attachment_suspended = 31;
+    AttachmentActivated attachment_activated = 32;
   }
 }
