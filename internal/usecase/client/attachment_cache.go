@@ -237,6 +237,7 @@ func (c *attachmentCoordinator) suspend(ctx context.Context, e *cachedAttachment
 	e.dormantDone = make(chan struct{})
 	victims, installed := c.install(e)
 	if !installed {
+		close(e.dormantDone)
 		return false
 	}
 	go c.dormantLoop(e)

@@ -112,8 +112,8 @@ Expiry, remote closure, or rejected activation evicts the connection; selecting
 that endpoint then uses normal reconnect/attach behavior. Independently of the
 client policy, the daemon force-retires an attachment suspended for 24 hours as
 a safety bound. Endpoint aliases remain distinct, even if they resolve to the
-same server. Exiting the client
-closes its retained connections. Heartbeat or liveness traffic never refreshes
+same server. Exiting the client closes its retained connections. Heartbeat or
+liveness traffic never refreshes
 activity: a successful use followed by suspension marks the entry most
 recently used, and only user navigation changes recency.
 
