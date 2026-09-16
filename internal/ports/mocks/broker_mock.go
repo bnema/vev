@@ -350,23 +350,23 @@ func (_c *MockBrokerService_ConnectionID_Call) RunAndReturn(run func() ports.Bro
 }
 
 // OpenStream provides a mock function for the type MockBrokerService
-func (_mock *MockBrokerService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.ClientConnection, error) {
+func (_mock *MockBrokerService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	ret := _mock.Called(ctx, request)
 
 	if len(ret) == 0 {
 		panic("no return value specified for OpenStream")
 	}
 
-	var r0 ports.ClientConnection
+	var r0 ports.BrokerLogicalConnection
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) (ports.ClientConnection, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)); ok {
 		return returnFunc(ctx, request)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) ports.ClientConnection); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) ports.BrokerLogicalConnection); ok {
 		r0 = returnFunc(ctx, request)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(ports.ClientConnection)
+			r0 = ret.Get(0).(ports.BrokerLogicalConnection)
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.BrokerOpenStreamRequest) error); ok {
@@ -407,12 +407,12 @@ func (_c *MockBrokerService_OpenStream_Call) Run(run func(ctx context.Context, r
 	return _c
 }
 
-func (_c *MockBrokerService_OpenStream_Call) Return(clientConnection ports.ClientConnection, err error) *MockBrokerService_OpenStream_Call {
-	_c.Call.Return(clientConnection, err)
+func (_c *MockBrokerService_OpenStream_Call) Return(brokerLogicalConnection ports.BrokerLogicalConnection, err error) *MockBrokerService_OpenStream_Call {
+	_c.Call.Return(brokerLogicalConnection, err)
 	return _c
 }
 
-func (_c *MockBrokerService_OpenStream_Call) RunAndReturn(run func(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.ClientConnection, error)) *MockBrokerService_OpenStream_Call {
+func (_c *MockBrokerService_OpenStream_Call) RunAndReturn(run func(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)) *MockBrokerService_OpenStream_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -917,6 +917,140 @@ func (_c *MockBrokerPhysicalConnection_Close_Call) RunAndReturn(run func() error
 	return _c
 }
 
+// Done provides a mock function for the type MockBrokerPhysicalConnection
+func (_mock *MockBrokerPhysicalConnection) Done() <-chan struct{} {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for Done")
+	}
+
+	var r0 <-chan struct{}
+	if returnFunc, ok := ret.Get(0).(func() <-chan struct{}); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(<-chan struct{})
+		}
+	}
+	return r0
+}
+
+// MockBrokerPhysicalConnection_Done_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Done'
+type MockBrokerPhysicalConnection_Done_Call struct {
+	*mock.Call
+}
+
+// Done is a helper method to define mock.On call
+func (_e *MockBrokerPhysicalConnection_Expecter) Done() *MockBrokerPhysicalConnection_Done_Call {
+	return &MockBrokerPhysicalConnection_Done_Call{Call: _e.mock.On("Done")}
+}
+
+func (_c *MockBrokerPhysicalConnection_Done_Call) Run(run func()) *MockBrokerPhysicalConnection_Done_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockBrokerPhysicalConnection_Done_Call) Return(valCh <-chan struct{}) *MockBrokerPhysicalConnection_Done_Call {
+	_c.Call.Return(valCh)
+	return _c
+}
+
+func (_c *MockBrokerPhysicalConnection_Done_Call) RunAndReturn(run func() <-chan struct{}) *MockBrokerPhysicalConnection_Done_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Err provides a mock function for the type MockBrokerPhysicalConnection
+func (_mock *MockBrokerPhysicalConnection) Err() error {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for Err")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func() error); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockBrokerPhysicalConnection_Err_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Err'
+type MockBrokerPhysicalConnection_Err_Call struct {
+	*mock.Call
+}
+
+// Err is a helper method to define mock.On call
+func (_e *MockBrokerPhysicalConnection_Expecter) Err() *MockBrokerPhysicalConnection_Err_Call {
+	return &MockBrokerPhysicalConnection_Err_Call{Call: _e.mock.On("Err")}
+}
+
+func (_c *MockBrokerPhysicalConnection_Err_Call) Run(run func()) *MockBrokerPhysicalConnection_Err_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockBrokerPhysicalConnection_Err_Call) Return(err error) *MockBrokerPhysicalConnection_Err_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockBrokerPhysicalConnection_Err_Call) RunAndReturn(run func() error) *MockBrokerPhysicalConnection_Err_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// FailureKind provides a mock function for the type MockBrokerPhysicalConnection
+func (_mock *MockBrokerPhysicalConnection) FailureKind() domain.RemoteFailureKind {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for FailureKind")
+	}
+
+	var r0 domain.RemoteFailureKind
+	if returnFunc, ok := ret.Get(0).(func() domain.RemoteFailureKind); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.RemoteFailureKind)
+	}
+	return r0
+}
+
+// MockBrokerPhysicalConnection_FailureKind_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FailureKind'
+type MockBrokerPhysicalConnection_FailureKind_Call struct {
+	*mock.Call
+}
+
+// FailureKind is a helper method to define mock.On call
+func (_e *MockBrokerPhysicalConnection_Expecter) FailureKind() *MockBrokerPhysicalConnection_FailureKind_Call {
+	return &MockBrokerPhysicalConnection_FailureKind_Call{Call: _e.mock.On("FailureKind")}
+}
+
+func (_c *MockBrokerPhysicalConnection_FailureKind_Call) Run(run func()) *MockBrokerPhysicalConnection_FailureKind_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockBrokerPhysicalConnection_FailureKind_Call) Return(remoteFailureKind domain.RemoteFailureKind) *MockBrokerPhysicalConnection_FailureKind_Call {
+	_c.Call.Return(remoteFailureKind)
+	return _c
+}
+
+func (_c *MockBrokerPhysicalConnection_FailureKind_Call) RunAndReturn(run func() domain.RemoteFailureKind) *MockBrokerPhysicalConnection_FailureKind_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Identity provides a mock function for the type MockBrokerPhysicalConnection
 func (_mock *MockBrokerPhysicalConnection) Identity() ports.BrokerDaemonIdentity {
 	ret := _mock.Called()
@@ -1008,23 +1142,23 @@ func (_c *MockBrokerPhysicalConnection_Incarnation_Call) RunAndReturn(run func()
 }
 
 // OpenStream provides a mock function for the type MockBrokerPhysicalConnection
-func (_mock *MockBrokerPhysicalConnection) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.ClientConnection, error) {
+func (_mock *MockBrokerPhysicalConnection) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	ret := _mock.Called(ctx, request)
 
 	if len(ret) == 0 {
 		panic("no return value specified for OpenStream")
 	}
 
-	var r0 ports.ClientConnection
+	var r0 ports.BrokerLogicalConnection
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) (ports.ClientConnection, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)); ok {
 		return returnFunc(ctx, request)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) ports.ClientConnection); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerOpenStreamRequest) ports.BrokerLogicalConnection); ok {
 		r0 = returnFunc(ctx, request)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(ports.ClientConnection)
+			r0 = ret.Get(0).(ports.BrokerLogicalConnection)
 		}
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.BrokerOpenStreamRequest) error); ok {
@@ -1065,12 +1199,12 @@ func (_c *MockBrokerPhysicalConnection_OpenStream_Call) Run(run func(ctx context
 	return _c
 }
 
-func (_c *MockBrokerPhysicalConnection_OpenStream_Call) Return(clientConnection ports.ClientConnection, err error) *MockBrokerPhysicalConnection_OpenStream_Call {
-	_c.Call.Return(clientConnection, err)
+func (_c *MockBrokerPhysicalConnection_OpenStream_Call) Return(brokerLogicalConnection ports.BrokerLogicalConnection, err error) *MockBrokerPhysicalConnection_OpenStream_Call {
+	_c.Call.Return(brokerLogicalConnection, err)
 	return _c
 }
 
-func (_c *MockBrokerPhysicalConnection_OpenStream_Call) RunAndReturn(run func(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.ClientConnection, error)) *MockBrokerPhysicalConnection_OpenStream_Call {
+func (_c *MockBrokerPhysicalConnection_OpenStream_Call) RunAndReturn(run func(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)) *MockBrokerPhysicalConnection_OpenStream_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1147,8 +1281,8 @@ func (_m *MockBrokerEndpointConnector) EXPECT() *MockBrokerEndpointConnector_Exp
 }
 
 // Connect provides a mock function for the type MockBrokerEndpointConnector
-func (_mock *MockBrokerEndpointConnector) Connect(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (ports.BrokerPhysicalConnection, error) {
-	ret := _mock.Called(ctx, endpoint, policy)
+func (_mock *MockBrokerEndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	ret := _mock.Called(ctx, endpoint)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Connect")
@@ -1156,18 +1290,18 @@ func (_mock *MockBrokerEndpointConnector) Connect(ctx context.Context, endpoint 
 
 	var r0 ports.BrokerPhysicalConnection
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, ports.BrokerPolicy) (ports.BrokerPhysicalConnection, error)); ok {
-		return returnFunc(ctx, endpoint, policy)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error)); ok {
+		return returnFunc(ctx, endpoint)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, ports.BrokerPolicy) ports.BrokerPhysicalConnection); ok {
-		r0 = returnFunc(ctx, endpoint, policy)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerResolvedEndpoint) ports.BrokerPhysicalConnection); ok {
+		r0 = returnFunc(ctx, endpoint)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(ports.BrokerPhysicalConnection)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, string, ports.BrokerPolicy) error); ok {
-		r1 = returnFunc(ctx, endpoint, policy)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.BrokerResolvedEndpoint) error); ok {
+		r1 = returnFunc(ctx, endpoint)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -1181,30 +1315,24 @@ type MockBrokerEndpointConnector_Connect_Call struct {
 
 // Connect is a helper method to define mock.On call
 //   - ctx context.Context
-//   - endpoint string
-//   - policy ports.BrokerPolicy
-func (_e *MockBrokerEndpointConnector_Expecter) Connect(ctx any, endpoint any, policy any) *MockBrokerEndpointConnector_Connect_Call {
-	return &MockBrokerEndpointConnector_Connect_Call{Call: _e.mock.On("Connect", ctx, endpoint, policy)}
+//   - endpoint ports.BrokerResolvedEndpoint
+func (_e *MockBrokerEndpointConnector_Expecter) Connect(ctx any, endpoint any) *MockBrokerEndpointConnector_Connect_Call {
+	return &MockBrokerEndpointConnector_Connect_Call{Call: _e.mock.On("Connect", ctx, endpoint)}
 }
 
-func (_c *MockBrokerEndpointConnector_Connect_Call) Run(run func(ctx context.Context, endpoint string, policy ports.BrokerPolicy)) *MockBrokerEndpointConnector_Connect_Call {
+func (_c *MockBrokerEndpointConnector_Connect_Call) Run(run func(ctx context.Context, endpoint ports.BrokerResolvedEndpoint)) *MockBrokerEndpointConnector_Connect_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 string
+		var arg1 ports.BrokerResolvedEndpoint
 		if args[1] != nil {
-			arg1 = args[1].(string)
-		}
-		var arg2 ports.BrokerPolicy
-		if args[2] != nil {
-			arg2 = args[2].(ports.BrokerPolicy)
+			arg1 = args[1].(ports.BrokerResolvedEndpoint)
 		}
 		run(
 			arg0,
 			arg1,
-			arg2,
 		)
 	})
 	return _c
@@ -1215,7 +1343,7 @@ func (_c *MockBrokerEndpointConnector_Connect_Call) Return(brokerPhysicalConnect
 	return _c
 }
 
-func (_c *MockBrokerEndpointConnector_Connect_Call) RunAndReturn(run func(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (ports.BrokerPhysicalConnection, error)) *MockBrokerEndpointConnector_Connect_Call {
+func (_c *MockBrokerEndpointConnector_Connect_Call) RunAndReturn(run func(ctx context.Context, endpoint ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error)) *MockBrokerEndpointConnector_Connect_Call {
 	_c.Call.Return(run)
 	return _c
 }

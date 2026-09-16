@@ -65,6 +65,8 @@ const (
 	BrokerMaxTransportBytes = 64
 	// BrokerMaxIdentityBytes bounds the authenticated daemon identity token.
 	BrokerMaxIdentityBytes = 256
+	// BrokerMaxPolicyTokenBytes bounds each authoritative policy identity.
+	BrokerMaxPolicyTokenBytes = 256
 )
 
 // BrokerEpoch identifies one broker process incarnation. Every broker
@@ -147,9 +149,18 @@ type BrokerPolicy struct {
 	CatalogSchemaVersion uint16
 	EnvironmentPolicy    protocol.EnvironmentPolicy
 	Transport            string
+	// Opaque, authoritative policy identities, not display labels or secrets.
+	Trust     string
+	Launch    string
+	Isolation string
 }
 
 func (p BrokerPolicy) Validate() error {
+	for _, token := range []struct{ value, label string }{{p.Trust, "policy trust"}, {p.Launch, "policy launch"}, {p.Isolation, "policy isolation"}} {
+		if err := validateBrokerToken(token.value, BrokerMaxPolicyTokenBytes, token.label); err != nil {
+			return err
+		}
+	}
 	if p.ProtocolVersion == 0 {
 		return errors.New("ports: broker policy has no protocol version")
 	}
@@ -168,10 +179,7 @@ func (p BrokerPolicy) Validate() error {
 // Compatible reports whether two validated policies may share a pooled
 // physical transport. It requires exact equality across every field.
 func (p BrokerPolicy) Compatible(other BrokerPolicy) bool {
-	return p.ProtocolVersion == other.ProtocolVersion &&
-		p.CatalogSchemaVersion == other.CatalogSchemaVersion &&
-		p.EnvironmentPolicy == other.EnvironmentPolicy &&
-		p.Transport == other.Transport
+	return p == other
 }
 
 // BrokerHostTombstone fences a removed host registration so a stale probe,
@@ -322,6 +330,9 @@ func BrokerCompletionIsStale(currentRegistration domain.RemoteRegistration, curr
 // session environment; it is never inherited from the broker process
 // environment.
 type BrokerOpenStreamRequest struct {
+	Epoch        BrokerEpoch
+	Purpose      BrokerStreamPurpose
+	Local        bool
 	Connection   BrokerConnectionID
 	Stream       BrokerStreamID
 	Endpoint     string
@@ -332,23 +343,38 @@ type BrokerOpenStreamRequest struct {
 }
 
 func (r BrokerOpenStreamRequest) Validate() error {
+	if r.Epoch == 0 {
+		return errors.New("ports: missing broker epoch")
+	}
 	if err := r.Connection.Validate(); err != nil {
 		return err
 	}
 	if err := r.Stream.Validate(); err != nil {
 		return err
 	}
-	if err := domain.ValidateRemoteHostTarget(r.Endpoint); err != nil {
-		return fmt.Errorf("ports: broker open stream: %w", err)
+	if r.Local {
+		if r.Endpoint != "" || r.Registration != (domain.RemoteRegistration{}) {
+			return errors.New("ports: local endpoint carries remote registration")
+		}
+	} else {
+		if err := r.Registration.Validate(); err != nil {
+			return err
+		}
+		if r.Endpoint != r.Registration.Endpoint {
+			return errors.New("ports: endpoint registration mismatch")
+		}
 	}
-	if err := r.Registration.Validate(); err != nil {
-		return fmt.Errorf("ports: broker open stream: %w", err)
-	}
-	if r.Endpoint != r.Registration.Endpoint {
-		return errors.New("ports: broker open stream endpoint does not match registration")
-	}
-	if err := r.Target.Validate(); err != nil {
-		return fmt.Errorf("ports: broker open stream: %w", err)
+	switch r.Purpose {
+	case BrokerStreamAttachment:
+		if err := r.Target.Validate(); err != nil {
+			return err
+		}
+	case BrokerStreamControl, BrokerStreamObservation:
+		if r.Target != (protocol.ExactSessionTarget{}) || len(r.Env) != 0 {
+			return errors.New("ports: control/observation carries attachment state")
+		}
+	default:
+		return errors.New("ports: invalid stream purpose")
 	}
 	if uint64(len(r.Env)) > BrokerMaxEnvEntries {
 		return errors.New("ports: broker open stream has too many environment entries")
@@ -492,6 +518,8 @@ func (c BrokerErrorCode) Validate() error {
 type BrokerError struct {
 	Code BrokerErrorCode
 	Text string
+	// Cause is local-only diagnostic authority, never serialized as display text.
+	Cause error
 }
 
 func (e BrokerError) Error() string {
@@ -500,6 +528,8 @@ func (e BrokerError) Error() string {
 	}
 	return "vev: broker " + e.Code.String() + ": " + e.Text
 }
+
+func (e BrokerError) Unwrap() error { return e.Cause }
 
 func (e BrokerError) Validate() error {
 	if err := e.Code.Validate(); err != nil {
@@ -522,9 +552,19 @@ type BrokerStreamLost struct {
 	Stream     BrokerStreamID
 	Epoch      BrokerEpoch
 	Cause      domain.RemoteFailureKind
+	Err        error
+}
+
+// Error and Unwrap retain exact stream scope while allowing generic lifecycle handling.
+func (e BrokerStreamLost) Error() string { return "vev: broker attachment_lost" }
+func (e BrokerStreamLost) Unwrap() error {
+	return BrokerError{Code: BrokerErrorAttachmentLost, Cause: e.Err}
 }
 
 func (e BrokerStreamLost) Validate() error {
+	if e.Cause < domain.RemoteFailureTransport || e.Cause > domain.RemoteFailureInvalidResponse {
+		return errors.New("ports: broker stream loss has invalid cause")
+	}
 	if err := e.Connection.Validate(); err != nil {
 		return err
 	}
@@ -555,7 +595,7 @@ type BrokerService interface {
 	ConnectionID() BrokerConnectionID
 	Snapshot() BrokerSnapshot
 	Subscribe() (BrokerSubscription, error)
-	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (ClientConnection, error)
+	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
 	CloseStream(connection BrokerConnectionID, stream BrokerStreamID) error
 	AddHost(ctx context.Context, target string) error
 	RemoveHost(ctx context.Context, target string) (bool, error)
@@ -602,10 +642,17 @@ type BrokerHostProbe interface {
 // state, identity, geometry, input, output, cancellation, or application
 // errors between streams.
 type BrokerPhysicalConnection interface {
+	// Done is the physical terminal authority, independent of reads. On
+	// physical failure, publish Err and FailureKind and close Done BEFORE
+	// terminating affected logical streams. Both results are stable after Done.
+	// FailureKind is nonzero for failure; None is allowed only for local Close.
+	Done() <-chan struct{}
+	Err() error
+	FailureKind() domain.RemoteFailureKind
 	Identity() BrokerDaemonIdentity
 	Incarnation() BrokerDaemonIncarnation
 	Policy() BrokerPolicy
-	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (ClientConnection, error)
+	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
 	Close() error
 }
 
@@ -613,7 +660,7 @@ type BrokerPhysicalConnection interface {
 // one endpoint under an exact compatible policy. Conflicting policy is
 // rejected; the first launching client never becomes policy authority.
 type BrokerEndpointConnector interface {
-	Connect(ctx context.Context, endpoint string, policy BrokerPolicy) (BrokerPhysicalConnection, error)
+	Connect(ctx context.Context, endpoint BrokerResolvedEndpoint) (BrokerPhysicalConnection, error)
 }
 
 // BrokerListener accepts client connections to the per-user broker

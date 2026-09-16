@@ -102,3 +102,51 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
   Never edit generated `*.pb.go`; never add manual IDs or dispatch tables.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
 - Bump `internal/protocol.Version` for negotiated wire layout changes (currently `51`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
+
+## Broker pool core (Plan 001 P2.2, not activated)
+
+`internal/usecase/broker.Pool` owns bounded physical keys and logical stream
+reservations, but no session data or traffic queues. Local and registered remote
+requests use the same operation. A broker-owned `BrokerEndpointResolver` checks
+current registration authority and exact requested policy on every request and
+returns an authenticated service binding. Display aliases and adapter addresses
+are not keys. Identity plus complete trust, launch, isolation, transport,
+protocol, catalogue, and environment policy select one physical connection;
+authenticated identity and policy are checked again after connection.
+
+Clients receive pool-issued epoch-scoped connection IDs and supply strictly
+increasing stream IDs. Failed admitted opens consume their IDs. Active clients,
+physical keys, and pending/live streams have explicit caps; retired IDs need no
+unbounded tombstone collection. Coalesced connection attempts are independent
+of any single waiter and are canceled when their final reservation leaves.
+Physical retirement keeps its key occupied until Close finishes. Fake-clock idle
+eviction and shutdown close transports outside the bookkeeping lock.
+
+Logical and physical ports expose terminal signals independent of message reads.
+A stream terminal failure releases only its reservation; physical failure fans
+out separately scoped typed loss errors. The pool owns neither framing nor
+fairness: future transport adapters must implement independently bounded queues
+and prompt cancellation/Close. Shutdown joins owned operations and relies on
+that explicit port contract. No production composition or real multiplexing is
+introduced here, and existing production connectivity ownership is unchanged.
+
+Physical `Done` is authoritative: adapters publish stable `Err` and
+`FailureKind`, then close physical `Done` before terminating affected logical
+streams. Loss carries the exact epoch/connection/stream and a nonzero failure
+kind (invalid/absent adapter kinds defensively become transport failure), with
+its diagnostic cause retained locally through `errors.Is/As`. Resolver,
+connector, and open errors map deterministically: deadline before cancellation,
+then a validated broker code, otherwise unavailable. Invalid resolved bindings
+and nil successful opens are incompatible adapter results. Adapter diagnostics
+are never copied to display text. Resolved addresses are bounded opaque tokens,
+not display labels or pooling identities.
+
+At terminal observation the precedence is pool shutdown, request/client
+cancellation, physical loss, entry retirement, then logical completion. Thus
+shutdown reports cancelled rather than a synthetic transport loss caused by
+local Close; a physical loss already published to a stream is not rewritten by
+later shutdown. Explicit logical Close remains idempotent and preserves the
+underlying Close error. Timer ownership is single-goroutine; Stop followed by a
+nonblocking drain on false precedes Reset, supporting buffered timer adapters.
+Policy identities have independent field-labelled validation and a named bound.
+These are P2.2 port contracts, not a wire migration or production activation.

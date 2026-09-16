@@ -32,6 +32,7 @@ func testBrokerPolicy() BrokerPolicy {
 		CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion,
 		EnvironmentPolicy:    protocol.EnvironmentPolicyDaemonOwned,
 		Transport:            "quic",
+		Trust:                "trust", Launch: "launch", Isolation: "user",
 	}
 }
 
@@ -266,6 +267,9 @@ func TestBrokerPolicyCompatibility(t *testing.T) {
 		"catalog schema":   withBrokerPolicy(base, func(p *BrokerPolicy) { p.CatalogSchemaVersion++ }),
 		"environment":      withBrokerPolicy(base, func(p *BrokerPolicy) { p.EnvironmentPolicy = protocol.EnvironmentPolicyClientOwned }),
 		"transport":        withBrokerPolicy(base, func(p *BrokerPolicy) { p.Transport = "stdio" }),
+		"trust":            withBrokerPolicy(base, func(p *BrokerPolicy) { p.Trust = "other" }),
+		"launch":           withBrokerPolicy(base, func(p *BrokerPolicy) { p.Launch = "other" }),
+		"isolation":        withBrokerPolicy(base, func(p *BrokerPolicy) { p.Isolation = "other" }),
 	}
 	for name, conflict := range conflicts {
 		if base.Compatible(conflict) {
@@ -273,11 +277,10 @@ func TestBrokerPolicyCompatibility(t *testing.T) {
 		}
 	}
 	invalid := []BrokerPolicy{
-		{},
-		{ProtocolVersion: protocol.Version},
-		{ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion},
-		{ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion, EnvironmentPolicy: protocol.EnvironmentPolicy(9), Transport: "quic"},
-		{ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned},
+		withBrokerPolicy(base, func(p *BrokerPolicy) { p.ProtocolVersion = 0 }),
+		withBrokerPolicy(base, func(p *BrokerPolicy) { p.CatalogSchemaVersion = 0 }),
+		withBrokerPolicy(base, func(p *BrokerPolicy) { p.EnvironmentPolicy = protocol.EnvironmentPolicy(9) }),
+		withBrokerPolicy(base, func(p *BrokerPolicy) { p.Transport = "" }),
 	}
 	for i, policy := range invalid {
 		if err := policy.Validate(); err == nil {
@@ -289,6 +292,7 @@ func TestBrokerPolicyCompatibility(t *testing.T) {
 func TestBrokerOpenStreamRequestValidate(t *testing.T) {
 	valid := func() BrokerOpenStreamRequest {
 		return BrokerOpenStreamRequest{
+			Epoch: 1, Purpose: BrokerStreamAttachment,
 			Connection:   BrokerConnectionID{1},
 			Stream:       2,
 			Endpoint:     "user@arch",
@@ -466,6 +470,8 @@ func TestBrokerInterfacesArePorts(t *testing.T) {
 	// adapters can implement them without importing use cases.
 	for name, iface := range map[string]reflect.Type{
 		"BrokerService":            reflect.TypeOf((*BrokerService)(nil)).Elem(),
+		"BrokerEndpointResolver":   reflect.TypeOf((*BrokerEndpointResolver)(nil)).Elem(),
+		"BrokerLogicalConnection":  reflect.TypeOf((*BrokerLogicalConnection)(nil)).Elem(),
 		"BrokerSnapshotStore":      reflect.TypeOf((*BrokerSnapshotStore)(nil)).Elem(),
 		"BrokerHostProbe":          reflect.TypeOf((*BrokerHostProbe)(nil)).Elem(),
 		"BrokerPhysicalConnection": reflect.TypeOf((*BrokerPhysicalConnection)(nil)).Elem(),
@@ -476,5 +482,36 @@ func TestBrokerInterfacesArePorts(t *testing.T) {
 		if iface.Kind() != reflect.Interface {
 			t.Fatalf("%s must stay an interface, got %v", name, iface.Kind())
 		}
+	}
+}
+
+func TestBrokerStreamPurposeShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		purpose BrokerStreamPurpose
+		target  bool
+		env     bool
+		valid   bool
+	}{
+		{"attachment", BrokerStreamAttachment, true, true, true},
+		{"attachment missing target", BrokerStreamAttachment, false, false, false},
+		{"control", BrokerStreamControl, false, false, true},
+		{"observation", BrokerStreamObservation, false, false, true},
+		{"control target", BrokerStreamControl, true, false, false},
+		{"observation env", BrokerStreamObservation, false, true, false},
+		{"unknown", 0, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: tc.purpose, Policy: testBrokerPolicy()}
+			if tc.target {
+				r.Target = testBrokerTarget()
+			}
+			if tc.env {
+				r.Env = []string{"TERM=xterm"}
+			}
+			if (r.Validate() == nil) != tc.valid {
+				t.Fatalf("Validate()=%v", r.Validate())
+			}
+		})
 	}
 }
