@@ -100,6 +100,36 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 		{"other adapter rejects usecase", modulePath + "/internal/adapters/ipc", modulePath + "/internal/usecase/client", false, false},
 		{"usecase test may use wire fixture", modulePath + "/internal/usecase/client", modulePath + "/internal/protocol/wire", true, true},
 		{"pkg test still rejects internal", modulePath + "/pkg/rawterm", modulePath + "/internal/domain", true, false},
+		// P1.1 broker ownership: broker consumes ports/protocol/domain
+		// (catalogue counts as protocol family) and no sibling use case.
+		{"broker accepts ports", modulePath + "/internal/usecase/broker", modulePath + "/internal/ports", false, true},
+		{"broker accepts protocol", modulePath + "/internal/usecase/broker", modulePath + "/internal/protocol", false, true},
+		{"broker accepts domain", modulePath + "/internal/usecase/broker", modulePath + "/internal/domain", false, true},
+		{"broker accepts catalogue", modulePath + "/internal/usecase/broker", modulePath + "/internal/protocol/catalogue", false, true},
+		{"broker accepts own subpackage", modulePath + "/internal/usecase/broker", modulePath + "/internal/usecase/broker/streams", false, true},
+		{"broker subpackage accepts broker root", modulePath + "/internal/usecase/broker/streams", modulePath + "/internal/usecase/broker", false, true},
+		{"broker rejects client", modulePath + "/internal/usecase/broker", modulePath + "/internal/usecase/client", false, false},
+		{"broker rejects daemon", modulePath + "/internal/usecase/broker", modulePath + "/internal/usecase/daemon", false, false},
+		{"broker rejects remotes", modulePath + "/internal/usecase/broker", modulePath + "/internal/usecase/remotes", false, false},
+		{"broker rejects sibling usecase", modulePath + "/internal/usecase/broker", modulePath + "/internal/usecase/picker", false, false},
+		{"broker rejects adapter", modulePath + "/internal/usecase/broker", modulePath + "/internal/adapters/ipc", false, false},
+		{"broker rejects broker adapter", modulePath + "/internal/usecase/broker", modulePath + "/internal/adapters/remote", false, false},
+		{"broker rejects wire", modulePath + "/internal/usecase/broker", modulePath + "/internal/protocol/wire", false, false},
+		{"broker rejects app", modulePath + "/internal/usecase/broker", modulePath + "/internal/app", false, false},
+		{"broker rejects persist", modulePath + "/internal/usecase/broker", modulePath + "/internal/persist", false, false},
+		// P1.1 client/daemon must not own broker, each other, or remote discovery.
+		{"client rejects daemon", modulePath + "/internal/usecase/client", modulePath + "/internal/usecase/daemon", false, false},
+		{"client rejects broker", modulePath + "/internal/usecase/client", modulePath + "/internal/usecase/broker", false, false},
+		{"client rejects remotes", modulePath + "/internal/usecase/client", modulePath + "/internal/usecase/remotes", false, false},
+		{"client rejects broker adapter", modulePath + "/internal/usecase/client", modulePath + "/internal/adapters/remote", false, false},
+		{"daemon rejects client", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/client", false, false},
+		{"daemon rejects broker", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/broker", false, false},
+		{"daemon rejects remotes registry", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/remotes", false, false},
+		{"daemon rejects remote adapter", modulePath + "/internal/usecase/daemon", modulePath + "/internal/adapters/remote", false, false},
+		{"daemon rejects app", modulePath + "/internal/usecase/daemon", modulePath + "/internal/app", false, false},
+		{"remotes rejects client", modulePath + "/internal/usecase/remotes", modulePath + "/internal/usecase/client", false, false},
+		{"remotes rejects daemon", modulePath + "/internal/usecase/remotes", modulePath + "/internal/usecase/daemon", false, false},
+		{"remotes rejects broker", modulePath + "/internal/usecase/remotes", modulePath + "/internal/usecase/broker", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -185,7 +215,38 @@ func dependencyAllowed(source, target string, testFile bool) (bool, error) {
 	if source == modulePath+"/internal/adapters/snapshot" && target == modulePath+"/internal/usecase/snapshot" {
 		return true, nil
 	}
+	if packageImportDenied(source, target) {
+		return false, nil
+	}
 	return productionDependencies[sourceLayer][targetLayer], nil
+}
+
+// packageImportDenied encodes ADR 001 ownership at package granularity for
+// production files. Layer rules alone permit any usecase-to-usecase import;
+// these denies keep broker, client, daemon, and remotes from owning each
+// other, and keep the broker free of every sibling use case. Test files stay
+// exempt so composition tests can wire adapters and orchestrators together.
+func packageImportDenied(source, target string) bool {
+	brokerPkg := modulePath + "/internal/usecase/broker"
+	clientPkg := modulePath + "/internal/usecase/client"
+	daemonPkg := modulePath + "/internal/usecase/daemon"
+	remotesPkg := modulePath + "/internal/usecase/remotes"
+	usecasePrefix := modulePath + "/internal/usecase/"
+	under := func(path, root string) bool {
+		return path == root || strings.HasPrefix(path, root+"/")
+	}
+	switch {
+	case under(source, brokerPkg):
+		return !under(target, brokerPkg) && strings.HasPrefix(target, usecasePrefix)
+	case under(source, clientPkg):
+		return under(target, daemonPkg) || under(target, brokerPkg) || under(target, remotesPkg)
+	case under(source, daemonPkg):
+		return under(target, clientPkg) || under(target, brokerPkg) || under(target, remotesPkg)
+	case under(source, remotesPkg):
+		return under(target, clientPkg) || under(target, daemonPkg) || under(target, brokerPkg)
+	default:
+		return false
+	}
 }
 
 func testSupportDependencyAllowed(source string, target packageLayer) bool {
