@@ -21,6 +21,15 @@ vev uses a hexagonal core with typed session messages at the client and daemon b
   (PreambleRequest first, PreambleResponse acceptance, exact version,
   negotiated ceilings, one absolute deadline), direction checks, and
   decode-failure classification.
+- `internal/adapters/brokerwire`: translates between typed broker messages
+  and the separate broker Protobuf conversation (`schema/broker.proto`;
+  client tags 101-110, server tags 201-209, disjoint from every session
+  tag, each direction its own closed `oneof`). It owns the stateless
+  broker codec over `wire.ScanEnvelope`, the broker preamble (roles 3/4,
+  exact `protocol.Version`, 1 MiB..16 MiB / 1..64 KiB ceilings, 4 KiB
+  byte-length bound), multipart snapshot assembly, per-connection operation
+  and stream trackers, and the bounded admission lock. It is not activated
+  by production composition until P3.2.
 - `internal/adapters/quic`: one-stream QUIC carriage (TLS 1.3, epoch ALPN,
   exact SHA-256 pin, single bidirectional stream, bounded admission) plus
   the short-lived SSH bootstrap (ephemeral certificate, 32-byte token,
@@ -29,7 +38,7 @@ vev uses a hexagonal core with typed session messages at the client and daemon b
 - `internal/adapters/uidriver`: owns strict JSONL decoding, response serialization, bounded controller queues, private Unix sockets, peer credentials, and the stdio bridge. It consumes `ports.UIService` and never creates an attachment.
 - `internal/adapters/webterm`: owns the authenticated loopback HTTP/WebSocket frontend, browser event encoding, VT-backed terminal and transactional HTML output. It implements `ports.Terminal`; application composition supplies the ordinary client runner.
 - `internal/adapters/uiterm`: owns the immutable VT mirror/snapshot and deterministic headless terminal. The concrete terminal writer (`adapters/term`) taps successful writes and flushes into this sink only when observation is enabled.
-- `internal/adapters`: IPC, QUIC, SSH stdio, PTY, terminal, VT-backed UI terminal/observation, JSONL UI-driver sockets, persistence-facing, and observability implementations. `streamframe` owns the shared 4-byte big-endian length framing of one complete Protobuf envelope used by every stream carriage.
+- `internal/adapters`: IPC, QUIC, SSH stdio, PTY, terminal, VT-backed UI terminal/observation, JSONL UI-driver sockets, persistence-facing, broker-wire, and observability implementations. `streamframe` owns the shared 4-byte big-endian length framing of one complete Protobuf envelope used by every stream carriage.
 - `internal/app`: CLI parsing and composition. It selects local or remote carriage, wraps raw dialers with `sessionwire`, injects typed ports into use cases, and owns explicit UI-driver endpoint launch configuration.
 - `pkg`: reusable packages that never import `internal`.
 
@@ -101,7 +110,29 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
   `go tool buf generate`, and handle the new variant in `sessionwire`.
   Never edit generated `*.pb.go`; never add manual IDs or dispatch tables.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `51`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `53`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
+
+## Broker wire core (Plan 001 P3.1, not activated)
+
+`internal/adapters/brokerwire` owns the broker's separate Protobuf
+conversation end to end: client tags 101-110 and server tags 201-209 are
+disjoint from every session tag, and each direction is its own closed
+directional `oneof` union. A broker connection opens with exactly one
+broker preamble (roles 3/4) that carries the same magic, epoch, exact
+`protocol.Version`, and 1 MiB..16 MiB / 1..64 KiB ceilings as the session
+handshake; a serialized preamble is bounded to 4 KiB (`wire.PreambleLimit`,
+re-exported through `brokerwire.CheckPreambleSize`) before scan or
+allocation. The broker negotiates no optional capabilities, so nonzero
+capability bits are refused with code 7.
+
+The package is stateful only where P3.1 requires it: per-connection state
+(ready/close, one subscription generation series, one assembler), multipart
+snapshot assembly with an 80 MiB staged ceiling that charges at least 64
+bytes per tab, and bounded operation/stream trackers. Every worker method
+holds the connection lock across both the ready check and the tracker
+mutation, so a racing close can never admit work after shutdown. The codec
+itself stays stateless over `wire.ScanEnvelope`. No socket, framing pump,
+or P3.2 transport is introduced here.
 
 ## Broker pool core (Plan 001 P2.2, not activated)
 

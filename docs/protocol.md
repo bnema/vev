@@ -86,6 +86,27 @@ Command requests additionally carry a 10-second result deadline
 (`daemon/command_tracker.go:CommandRequestTimeout`), tracked per
 connection and correlated by `RequestID`.
 
+## Broker negotiation
+
+Broker connections are a separate conversation from the session protocol.
+`internal/adapters/brokerwire` owns it: client tags 101-110 and server tags
+201-209 are disjoint from every session tag, and each direction is its own
+closed directional `oneof` union. A broker connection opens with exactly one
+broker preamble (`PreambleRequest` client → server, `PreambleResponse` server
+→ client) using broker roles 3/4. The preamble carries the same magic
+(`wire.PreambleMagic`), epoch (`wire.ProtocolEpoch`), exact `protocol.Version`
+equality, and negotiated ceilings as the session handshake (envelope
+1 MiB..16 MiB, stream chunk 1..64 KiB), and the serialized preamble is
+bounded to 4 KiB (`wire.PreambleLimit`, exposed as
+`brokerwire.CheckPreambleSize`) before scan or allocation.
+
+Refusals use the shared `PreambleRejectionCode` taxonomy. There is no
+capability negotiation in P3.1: nonzero capability bits are refused as
+code 7 (`limit refused`), and code 6 (`out of order`) is reserved for the
+connection dispatcher, which owns framing-order detection and never surfaces
+it from the stateless codec. Brokerwire is not activated by production
+composition until P3.2.
+
 ## Output, ACK, and flow control
 
 An `Output` state is `(Epoch, Base, New, Echo, ViewRevision, Size, Full,

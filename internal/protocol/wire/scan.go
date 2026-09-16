@@ -185,10 +185,17 @@ func (s *envelopeScanner) scanMessage(descriptor protoreflect.MessageDescriptor,
 }
 
 // isEnvelopeDescriptor reports whether the descriptor is a top-level
-// directional envelope requiring exactly one variant.
+// directional envelope requiring exactly one variant. Session and broker
+// envelopes are separate conversations with disjoint tag spaces; both
+// directions of each require exactly one variant.
 func isEnvelopeDescriptor(descriptor protoreflect.MessageDescriptor) bool {
-	name := string(descriptor.FullName())
-	return name == "vev.wire.v1.ClientEnvelope" || name == "vev.wire.v1.ServerEnvelope"
+	switch string(descriptor.FullName()) {
+	case "vev.wire.v1.ClientEnvelope", "vev.wire.v1.ServerEnvelope",
+		"vev.wire.v1.BrokerClientEnvelope", "vev.wire.v1.BrokerServerEnvelope":
+		return true
+	default:
+		return false
+	}
 }
 
 // checkVarintRange rejects a raw varint that cannot be represented by the

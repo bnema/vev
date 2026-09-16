@@ -1,0 +1,320 @@
+// Broker wire schema: the client/server broker conversations.
+//
+// The broker is an independently versioned conversation from the session
+// protocol: client tags 101-110 and server tags 201-209 are disjoint from
+// every session tag, and each direction is its own closed oneof union.
+// Scope (broker epoch plus client connection) is carried explicitly on
+// every payload so stream IDs and events never cross a scope. Semantic
+// validation stays outside this package; conversion mirrors the port
+// types losslessly.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+import "common.proto";
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// BrokerScope identifies one broker process incarnation and one client
+// connection within it (ports.BrokerEpoch / ports.BrokerConnectionID).
+// Streams and events are scoped to one scope; an epoch change forces a
+// full resynchronization.
+message BrokerScope {
+  uint64 broker_epoch = 1;
+  bytes connection_id = 2; // exactly 16 bytes
+}
+
+// BrokerStreamRef identifies one logical stream within one scope
+// (ports.BrokerStreamID). It never crosses connections or epochs.
+message BrokerStreamRef {
+  BrokerScope scope = 1;
+  uint64 stream_id = 2;
+}
+
+// BrokerWirePolicy is the exact connection policy two endpoints must share
+// before pooling one physical transport (ports.BrokerPolicy). Tokens are
+// opaque, authoritative identities: never display labels, never secrets.
+message BrokerWirePolicy {
+  uint32 protocol_version = 1;
+  uint32 catalogue_version = 2;
+  // Closed taxonomy: 0 = client-owned, 1 = daemon-owned.
+  uint32 environment_policy = 3;
+  string transport = 4;
+  string trust = 5;
+  string launch = 6;
+  string isolation = 7;
+}
+
+// BrokerErrorDetail is the typed broker failure carried to clients
+// (ports.BrokerError plus bounded display text). The underlying cause is
+// local-only diagnostic authority and never travels on this wire.
+message BrokerErrorDetail {
+  // Closed taxonomy: 1 = unavailable, 2 = incompatible, 3 = timeout,
+  // 4 = cancelled, 5 = outcome_unknown, 6 = attachment_lost,
+  // 7 = stale_epoch, 8 = conflicting_policy, 9 = explicit_exit,
+  // 10 = fatal_terminal.
+  uint32 code = 1;
+  string text = 2;
+  // Closed admission-refusal taxonomy; 0 = none. Codes are assigned by the
+  // broker admission slice.
+  uint32 admission_code = 3;
+  // Closed cause taxonomy (domain.RemoteFailureKind): 0 = none, 1 =
+  // transport, through the last declared failure kind.
+  uint32 failure_kind = 4;
+}
+
+// BrokerTimestamp is one instant split into seconds and nanoseconds so
+// time.Time survives the wire exactly.
+message BrokerTimestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+// BrokerClientEnvelope is the closed client-to-server broker union. Exactly
+// one variant must be set per envelope; empty, duplicate, and
+// wrong-direction payloads are rejected before generated unmarshal.
+message BrokerClientEnvelope {
+  oneof payload {
+    Register register = 101;
+    Subscribe subscribe = 102;
+    Resync resync = 103;
+    Unsubscribe unsubscribe = 104;
+    AddHost add_host = 105;
+    RemoveHost remove_host = 106;
+    Reconcile reconcile = 107;
+    OpenStream open_stream = 108;
+    ClientStreamData client_stream_data = 109;
+    CloseStream close_stream = 110;
+  }
+}
+
+// BrokerServerEnvelope is the closed server-to-client broker union. Exactly
+// one variant must be set per envelope.
+message BrokerServerEnvelope {
+  oneof payload {
+    Registered registered = 201;
+    SnapshotPart snapshot_part = 202;
+    OperationResult operation_result = 203;
+    StreamOpened stream_opened = 204;
+    ServerStreamData server_stream_data = 205;
+    StreamClosed stream_closed = 206;
+    Progress progress = 207;
+    BrokerErrorMessage broker_error_message = 208;
+    Shutdown shutdown = 209;
+  }
+}
+
+// Register opens one client connection to the broker.
+message Register {}
+
+// Subscribe asks for snapshot and lifecycle publications for one scope.
+message Subscribe {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+}
+
+// Resync asks for a full snapshot publication after an epoch change or a
+// gap in the client's generation series.
+message Resync {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+}
+
+// Unsubscribe stops publications for one scope.
+message Unsubscribe {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+}
+
+// AddHost adds one configured host registration. operation_id is the
+// idempotency identity of this mutating operation.
+message AddHost {
+  BrokerScope scope = 1;
+  bytes operation_id = 2; // exactly 16 bytes
+  string endpoint = 3;
+}
+
+// RemoveHost removes one configured host registration.
+message RemoveHost {
+  BrokerScope scope = 1;
+  bytes operation_id = 2; // exactly 16 bytes
+  string endpoint = 3;
+}
+
+// Reconcile hands the broker one exact registration to probe.
+message Reconcile {
+  BrokerScope scope = 1;
+  RemoteRegistration registration = 2;
+}
+
+// OpenStream asks the broker to open one independently cancellable logical
+// stream to the owning daemon. env is the per-request session environment
+// and is never inherited from the broker process environment.
+message OpenStream {
+  BrokerStreamRef ref = 1;
+  // Closed taxonomy: 1 = attachment, 2 = control, 3 = observation.
+  uint32 purpose = 2;
+  bool local = 3;
+  string endpoint = 4;
+  RemoteRegistration registration = 5;
+  ExactTarget target = 6;
+  repeated string env = 7;
+  BrokerWirePolicy policy = 8;
+}
+
+// ClientStreamData carries one opaque client-to-daemon stream frame.
+message ClientStreamData {
+  BrokerStreamRef ref = 1;
+  bytes data = 2;
+}
+
+// CloseStream closes one logical stream.
+message CloseStream {
+  BrokerStreamRef ref = 1;
+}
+
+// Registered confirms one accepted client connection and its assigned scope.
+message Registered {
+  BrokerScope scope = 1;
+}
+
+// SnapshotPart is one fragment of a snapshot publication. Parts of one
+// generation and revision arrive in index order and carry exactly one
+// nested payload.
+message SnapshotPart {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+  uint64 revision = 3;
+  uint32 index = 4;
+  oneof part {
+    SnapshotBegin begin = 10;
+    SnapshotHost host = 11;
+    SnapshotSession session = 12;
+    SnapshotTombstone tombstone = 13;
+    SnapshotEnd end = 14;
+  }
+}
+
+// SnapshotBegin opens a snapshot publication with its element counts.
+message SnapshotBegin {
+  uint32 host_count = 1;
+  uint32 session_count = 2;
+  uint32 tombstone_count = 3;
+}
+
+// SnapshotHost is one host projection (ports.RemoteHostSnapshot). The
+// endpoint and display origin stay separate: the latter is
+// presentation-only. Sessions travel as separate SnapshotSession parts.
+message SnapshotHost {
+  uint32 host_index = 1;
+  string endpoint = 2;
+  string display_origin = 3;
+  uint32 rank = 4;
+  RemoteRegistration registration = 5;
+  // Closed availability taxonomy; 0 is the zero value.
+  uint32 availability = 6;
+  bool checking = 7;
+  BrokerTimestamp last_attempt = 8;
+  BrokerTimestamp last_success = 9;
+  BrokerTimestamp next_due = 10;
+  uint64 consecutive_failures = 11;
+  uint64 failure_episode = 12;
+  // Closed cause taxonomy (domain.RemoteFailureKind); 0 = none.
+  uint32 failure_kind = 13;
+  bool inventory_known = 14;
+  uint32 session_count = 15;
+}
+
+// SnapshotSession is one catalogue session bound to its host by index.
+message SnapshotSession {
+  uint32 host_index = 1;
+  uint32 session_index = 2;
+  BrokerCatalogSession session = 3;
+}
+
+// SnapshotTombstone fences one retired host registration so a stale probe
+// cannot revive authority for that exact incarnation.
+message SnapshotTombstone {
+  uint32 tombstone_index = 1;
+  RemoteRegistration registration = 2;
+  uint64 retired_revision = 3;
+}
+
+// SnapshotEnd closes a snapshot publication.
+message SnapshotEnd {}
+
+// OperationResult is exactly one completion for one admitted mutating
+// operation.
+message OperationResult {
+  BrokerScope scope = 1;
+  bytes operation_id = 2; // exactly 16 bytes
+  // Closed taxonomy: 1 = ok, 2 = failed, 3 = outcome_unknown.
+  uint32 outcome = 3;
+  bool removed = 4;
+  BrokerErrorDetail error = 5;
+}
+
+// StreamOpened confirms one logical stream is established.
+message StreamOpened {
+  BrokerStreamRef ref = 1;
+}
+
+// ServerStreamData carries one opaque daemon-to-client stream frame.
+message ServerStreamData {
+  BrokerStreamRef ref = 1;
+  bytes data = 2;
+}
+
+// StreamClosed ends one logical stream. An unset error is an orderly close;
+// a set error reports the typed failure that ended it.
+message StreamClosed {
+  BrokerStreamRef ref = 1;
+  BrokerErrorDetail error = 2;
+}
+
+// Progress reports one phase of a long-running broker operation.
+message Progress {
+  BrokerStreamRef ref = 1;
+  uint32 phase = 2;
+  string text = 3;
+}
+
+// BrokerErrorMessage reports a broker-wide typed failure for one scope.
+message BrokerErrorMessage {
+  BrokerScope scope = 1;
+  BrokerErrorDetail error = 2;
+}
+
+// Shutdown reports the broker process is stopping.
+message Shutdown {
+  BrokerScope scope = 1;
+  // Closed reason taxonomy; 0 is the zero value.
+  uint32 reason = 2;
+  string text = 3;
+}
+
+// BrokerCatalogSession mirrors catalogue.RemoteCatalogSession exactly: the
+// lifecycle identity is a fixed 16-byte value, the state is a closed
+// taxonomy, and the tab list keeps its presence separately from its
+// length.
+message BrokerCatalogSession {
+  bytes lifecycle_id = 1; // exactly 16 bytes
+  string name = 2;
+  // Closed taxonomy: 1 = up, 2 = down, 3 = broken.
+  uint32 state = 3;
+  bool ephemeral = 4;
+  repeated BrokerCatalogTab tabs = 5;
+  bool attached = 6;
+  uint64 last_used_seq = 7;
+  string active_tab_id = 8;
+  string reason = 9;
+}
+
+// BrokerCatalogTab mirrors catalogue.RemoteCatalogTab exactly.
+message BrokerCatalogTab {
+  string id = 1;
+  uint32 index = 2;
+  string name = 3;
+  string detail = 4;
+  bool attention = 5;
+}
