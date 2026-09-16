@@ -529,3 +529,43 @@ func TestListenMuxConcurrentCloseAndDial(t *testing.T) {
 		}
 	}
 }
+
+// TestMuxExportedPeerVerifierSeam proves the exported injection seams the broker
+// IPC adapter consumes behave like the internal ones: the platform default
+// admits a same-user peer, a nil verifier falls back to it, and an injected
+// refusal fails closed without handing out a transport.
+func TestMuxExportedPeerVerifierSeam(t *testing.T) {
+	path := muxTestPath(t)
+	listener, err := ListenMuxWithPeerVerifier(path, SameUserPeerVerifier())
+	if err != nil {
+		t.Fatalf("ListenMuxWithPeerVerifier: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if SameUserPeerVerifier() == nil {
+		t.Fatal("SameUserPeerVerifier must return the platform verifier")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	transport, err := DialMuxContextWithPeerVerifier(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("DialMuxContextWithPeerVerifier with a nil verifier: %v", err)
+	}
+	t.Cleanup(func() { _ = transport.Close() })
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	t.Cleanup(func() { _ = accepted.Close() })
+
+	refused, err := DialMuxContextWithPeerVerifier(ctx, path, func(*net.UnixConn) error { return ErrMuxPeerRejected })
+	if err == nil {
+		t.Fatal("an injected refusal must fail the dial")
+	}
+	if !errors.Is(err, ErrMuxPeerRejected) {
+		t.Fatalf("dial refusal = %v, want ErrMuxPeerRejected", err)
+	}
+	if refused != nil {
+		t.Fatal("a refused peer must never receive a transport")
+	}
+}

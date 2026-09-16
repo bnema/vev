@@ -30,6 +30,17 @@ vev uses a hexagonal core with typed session messages at the client and daemon b
   byte-length bound), multipart snapshot assembly, per-connection operation
   and stream trackers, and the bounded admission lock. It is not activated
   by production composition until P3.2.
+- `internal/adapters/brokeripc`: the Plan 001 P3.3 private local broker
+  endpoint. It implements `ports.BrokerListener` (accepting same-user clients
+  and running one brokerwire session per accepted connection) and
+  `ports.BrokerService` (the client adapter over the same conversation) on one
+  per-user AF_UNIX endpoint, reusing the P3.2 private IPC carriage
+  (`ipc.ListenMux`/`ipc.DialMuxContext`: owner-only directory, 0600 socket,
+  same-user `SO_PEERCRED` admission, race-safe stale-socket recovery,
+  foreign-path refusal) and the shared `streamframe` framing. It owns the
+  bounded per-connection queues, the snapshot publisher, the per-stream typed
+  bridge over `sessionwire`, and deterministic disconnect cleanup. Like P3.1 and
+  P3.2 it is not activated by production composition.
 - `internal/adapters/quic`: one-stream QUIC carriage (TLS 1.3, epoch ALPN,
   exact SHA-256 pin, single bidirectional stream, bounded admission) plus
   the short-lived SSH bootstrap (ephemeral certificate, 32-byte token,
@@ -181,3 +192,49 @@ underlying Close error. Timer ownership is single-goroutine; Stop followed by a
 nonblocking drain on false precedes Reset, supporting buffered timer adapters.
 Policy identities have independent field-labelled validation and a named bound.
 These are P2.2 port contracts, not a wire migration or production activation.
+
+## Broker local IPC (Plan 001 P3.3, not activated)
+
+`internal/adapters/brokeripc` carries the P3.1 broker conversation over one
+per-user Unix endpoint. The carriage is the P3.2 private AF_UNIX carriage in
+`internal/adapters/ipc`: an owner-only (0700, `pkg/safedir.EnsurePrivate`)
+parent directory, a bound socket tightened to 0600, race-safe recovery of a
+stale socket whose owner died, refusal (never removal) of a path that is not a
+socket, and same-user kernel peer credentials (`SO_PEERCRED` on Linux) on both
+accept and dial, failing closed on a platform or build without that check. The
+endpoint name (`broker.sock`) is deliberately distinct from the daemon's
+`daemon.sock`.
+
+The listener owns its accept loop: one client slot is acquired before each
+accept, each accepted carriage completes the broker preamble and broker
+admission in its own goroutine, and admitted sessions are published through a
+bounded FIFO to `Accept`. A client that stalls during the preamble therefore
+occupies one slot and one goroutine, never the loop. Each session runs the
+brokerwire connection state machine (one Register, one subscription generation
+series, bounded operation and stream trackers), one snapshot publisher that
+writes the P3.1 multipart layout and coalesces through the core's capacity-one
+subscription, and one bridge per logical stream. Streams carry the typed
+session protocol: `sessionwire` runs over a bounded private byte pipe on each
+side, and two relay goroutines move typed messages between the client's session
+connection and the admitted broker core connection, so no session byte is
+reinterpreted.
+
+Every frame must carry the epoch and connection identity the listener assigned
+at accept; a mismatched frame is fenced, and a stale stream open is answered
+with a `StreamClosed` carrying the stale admission code. A malformed,
+oversize, or wrong-direction envelope settles exactly the connection that sent
+it. Operational bounds are explicit: concurrent clients per listener, per-stream
+inbound chunks and bytes, pending mutating operations, and the brokerwire
+per-connection stream and dedup bounds. Disconnect cleanup is deterministic:
+the session cancels its context, stops publishing, closes the outer carriage
+(so a stream writer parked on a non-reading peer is interrupted), settles every
+bridged stream (releasing its core connection and carriage), closes the
+brokerwire state, joins every worker, closes the admitted core service, and
+releases its client slot. Mutating operations report `outcome unknown` when a
+reply is lost after the request was sent, and the client never replays them
+blindly.
+
+P3.3 introduces no production activation: nothing in `internal/app` or `main`
+constructs this adapter yet. P3.4 composes the broker use case, its stores, and
+this listener behind a hidden entry point, and P7 performs the coordinated
+cutover.

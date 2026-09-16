@@ -3,7 +3,7 @@ package brokerwire
 // Stateless bound refusals (P3.1).
 //
 // The broker preamble negotiates one immutable pair of ceilings per
-// connection: maxReceiveEnvelopeBytes bounds every envelope this side
+// connection: MaxReceiveEnvelopeBytes bounds every envelope this side
 // accepts, and StreamChunkLimit bounds one opaque ClientStreamData or
 // ServerStreamData frame. Envelope ceilings are fixed: ordinary envelopes
 // never exceed the advertised floor, and the preamble advertisement itself
@@ -41,45 +41,70 @@ const (
 	MaxStreamChunkBytes uint64 = 64 << 10
 )
 
-// brokerCeilings are the immutable per-connection ceilings negotiated once
-// by the broker preamble. StreamChunkLimit bounds one opaque stream data
-// frame in either direction.
-type brokerCeilings struct {
-	maxReceiveEnvelopeBytes uint64
-	streamChunkLimit        uint64
+// Ceilings are the immutable per-connection ceilings negotiated once by the
+// broker preamble. MaxReceiveEnvelopeBytes bounds every envelope this side
+// accepts; StreamChunkLimit bounds one opaque stream data frame in either
+// direction.
+//
+// The preamble helpers and the connection dispatcher share this value: a
+// caller that completed the preamble reads the negotiated limits from
+// BrokerPreambleRequest or BrokerPreambleResponse and passes them to
+// EncodeClient/DecodeClient and EncodeServer/DecodeServer.
+type Ceilings struct {
+	MaxReceiveEnvelopeBytes uint64
+	StreamChunkLimit        uint64
 }
+
+// brokerCeilings is the in-package alias for Ceilings. It exists only so
+// P3.1's tests keep their short spelling; production code uses Ceilings.
+type brokerCeilings = Ceilings
 
 // defaultBrokerCeilings advertises the local broker receive policy: the
 // full absolute envelope ceiling and the maximum stream chunk.
-func defaultBrokerCeilings() brokerCeilings {
-	return brokerCeilings{
-		maxReceiveEnvelopeBytes: wire.AbsoluteEnvelopeLimit,
-		streamChunkLimit:        MaxStreamChunkBytes,
+func defaultBrokerCeilings() Ceilings {
+	return Ceilings{
+		MaxReceiveEnvelopeBytes: wire.AbsoluteEnvelopeLimit,
+		StreamChunkLimit:        MaxStreamChunkBytes,
 	}
 }
 
+// DefaultCeilings returns the local broker receive policy: the full absolute
+// envelope ceiling and the maximum stream chunk. It is the offer a broker IPC
+// client or server advertises before negotiation.
+func DefaultCeilings() Ceilings { return defaultBrokerCeilings() }
+
 // effectiveBrokerCeilings takes the minima of both sides' advertisements.
-func effectiveBrokerCeilings(local, remote brokerCeilings) brokerCeilings {
-	return brokerCeilings{
-		maxReceiveEnvelopeBytes: min(local.maxReceiveEnvelopeBytes, remote.maxReceiveEnvelopeBytes),
-		streamChunkLimit:        min(local.streamChunkLimit, remote.streamChunkLimit),
+func effectiveBrokerCeilings(local, remote Ceilings) Ceilings {
+	return Ceilings{
+		MaxReceiveEnvelopeBytes: min(local.MaxReceiveEnvelopeBytes, remote.MaxReceiveEnvelopeBytes),
+		StreamChunkLimit:        min(local.StreamChunkLimit, remote.StreamChunkLimit),
 	}
+}
+
+// EffectiveCeilings returns the element-wise minima of the two advertised
+// ceilings: one byte stream carries exactly the limits both peers accepted.
+func EffectiveCeilings(local, remote Ceilings) Ceilings {
+	return effectiveBrokerCeilings(local, remote)
 }
 
 // checkBrokerCeilings refuses a zero, below-floor, or above-ceiling
 // advertisement. Envelope bounds are the 1 MiB..16 MiB advertised window;
 // chunk bounds are 1..64 KiB.
-func checkBrokerCeilings(remote brokerCeilings) error {
-	if remote.maxReceiveEnvelopeBytes < MinBrokerEnvelopeBytes ||
-		remote.maxReceiveEnvelopeBytes > MaxBrokerEnvelopeBytes {
+func checkBrokerCeilings(remote Ceilings) error {
+	if remote.MaxReceiveEnvelopeBytes < MinBrokerEnvelopeBytes ||
+		remote.MaxReceiveEnvelopeBytes > MaxBrokerEnvelopeBytes {
 		return ErrPreambleRejected
 	}
-	if remote.streamChunkLimit < MinStreamChunkBytes ||
-		remote.streamChunkLimit > MaxStreamChunkBytes {
+	if remote.StreamChunkLimit < MinStreamChunkBytes ||
+		remote.StreamChunkLimit > MaxStreamChunkBytes {
 		return ErrPreambleRejected
 	}
 	return nil
 }
+
+// Validate reports whether one advertised ceiling is negotiable: an envelope
+// window inside 1 MiB..16 MiB and a stream chunk inside 1..64 KiB.
+func (c Ceilings) Validate() error { return checkBrokerCeilings(c) }
 
 // checkBrokerEnvelopeCeiling rejects one serialized broker envelope above
 // the negotiated ceiling. All broker envelopes are control-class: the

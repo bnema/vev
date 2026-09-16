@@ -146,6 +146,39 @@ func TestBrokerPreambleByteLengthHelper(t *testing.T) {
 // TestBrokerPreambleRoles proves the broker preamble uses roles 3/4, the
 // existing magic/epoch/exact version, zero capability bits, the 4 KiB
 // preamble bound, and precise refusal mapping.
+// TestBrokerCeilingsExportedSurface proves the exported ceiling value the
+// connection dispatcher consumes stays equivalent to the preamble helpers'
+// internal view: defaults are negotiable, minima are element-wise, and a
+// non-negotiable advertisement is refused.
+func TestBrokerCeilingsExportedSurface(t *testing.T) {
+	defaults := DefaultCeilings()
+	require.NoError(t, defaults.Validate())
+	require.Equal(t, defaultBrokerCeilings(), defaults)
+
+	smaller := Ceilings{MaxReceiveEnvelopeBytes: MinBrokerEnvelopeBytes, StreamChunkLimit: 1024}
+	require.NoError(t, smaller.Validate())
+	require.Equal(t, smaller, EffectiveCeilings(defaults, smaller))
+	require.Equal(t, smaller, EffectiveCeilings(smaller, defaults))
+	require.Equal(t, defaults, EffectiveCeilings(defaults, defaults))
+
+	for _, invalid := range []Ceilings{
+		{},
+		{MaxReceiveEnvelopeBytes: MinBrokerEnvelopeBytes - 1, StreamChunkLimit: MaxStreamChunkBytes},
+		{MaxReceiveEnvelopeBytes: MaxBrokerEnvelopeBytes + 1, StreamChunkLimit: MaxStreamChunkBytes},
+		{MaxReceiveEnvelopeBytes: MaxBrokerEnvelopeBytes, StreamChunkLimit: 0},
+		{MaxReceiveEnvelopeBytes: MaxBrokerEnvelopeBytes, StreamChunkLimit: MaxStreamChunkBytes + 1},
+	} {
+		require.ErrorIs(t, invalid.Validate(), ErrPreambleRejected)
+	}
+
+	// The decoded preamble's exported ceilings drive the codec ceilings.
+	request := EncodePreambleRequest(smaller)
+	decoded, err := DecodePreambleRequest(request)
+	require.NoError(t, err)
+	require.Equal(t, smaller, decoded.Ceilings)
+	require.NoError(t, decoded.Ceilings.Validate())
+}
+
 func TestBrokerPreambleRoles(t *testing.T) {
 	t.Run("client role is 3 and server role is 4", func(t *testing.T) {
 		request := EncodePreambleRequest(defaultBrokerCeilings())
@@ -192,7 +225,7 @@ func TestBrokerPreambleRoles(t *testing.T) {
 	})
 	t.Run("round trip negotiates minima", func(t *testing.T) {
 		local := defaultBrokerCeilings()
-		remote := brokerCeilings{maxReceiveEnvelopeBytes: testEnvelopeCeiling / 2, streamChunkLimit: 1024}
+		remote := brokerCeilings{MaxReceiveEnvelopeBytes: testEnvelopeCeiling / 2, StreamChunkLimit: 1024}
 		decoded, err := DecodePreambleRequest(EncodePreambleRequest(remote))
 		require.NoError(t, err)
 		require.Equal(t, remote, decoded.Ceilings)

@@ -61,12 +61,12 @@ const (
 // BrokerPreambleRequest is the validated broker client preamble: the
 // negotiated ceilings plus the raw wire message for stateless re-encode.
 type BrokerPreambleRequest struct {
-	Ceilings brokerCeilings
+	Ceilings Ceilings
 }
 
 // BrokerPreambleResponse is the validated broker server preamble.
 type BrokerPreambleResponse struct {
-	Ceilings brokerCeilings
+	Ceilings Ceilings
 	Accepted bool
 	Code     uint32
 }
@@ -78,8 +78,8 @@ func EncodePreambleRequest(ceilings brokerCeilings) *wire.PreambleRequest {
 		Epoch:                   wire.ProtocolEpoch,
 		Version:                 uint32(protocol.Version),
 		Role:                    &wire.PreambleRole{Role: BrokerRoleClient},
-		MaxReceiveEnvelopeBytes: ceilings.maxReceiveEnvelopeBytes,
-		OutputDataLimit:         ceilings.streamChunkLimit,
+		MaxReceiveEnvelopeBytes: ceilings.MaxReceiveEnvelopeBytes,
+		OutputDataLimit:         ceilings.StreamChunkLimit,
 	}
 }
 
@@ -92,8 +92,8 @@ func EncodePreambleResponse(accepted bool, ceilings brokerCeilings, code uint32)
 		Epoch:                   wire.ProtocolEpoch,
 		Version:                 uint32(protocol.Version),
 		Role:                    &wire.PreambleRole{Role: BrokerRoleServer},
-		MaxReceiveEnvelopeBytes: ceilings.maxReceiveEnvelopeBytes,
-		OutputDataLimit:         ceilings.streamChunkLimit,
+		MaxReceiveEnvelopeBytes: ceilings.MaxReceiveEnvelopeBytes,
+		OutputDataLimit:         ceilings.StreamChunkLimit,
 		Accepted:                accepted,
 	}
 	if !accepted {
@@ -125,8 +125,8 @@ func DecodePreambleRequest(message *wire.PreambleRequest) (BrokerPreambleRequest
 		return BrokerPreambleRequest{}, ErrPreambleRejected
 	}
 	remote := brokerCeilings{
-		maxReceiveEnvelopeBytes: message.GetMaxReceiveEnvelopeBytes(),
-		streamChunkLimit:        message.GetOutputDataLimit(),
+		MaxReceiveEnvelopeBytes: message.GetMaxReceiveEnvelopeBytes(),
+		StreamChunkLimit:        message.GetOutputDataLimit(),
 	}
 	if err := checkBrokerCeilings(remote); err != nil {
 		return BrokerPreambleRequest{}, err
@@ -160,8 +160,8 @@ func DecodePreambleResponse(message *wire.PreambleResponse) (BrokerPreambleRespo
 		return BrokerPreambleResponse{Code: message.GetRejection().GetCode()}, ErrPreambleRejected
 	}
 	remote := brokerCeilings{
-		maxReceiveEnvelopeBytes: message.GetMaxReceiveEnvelopeBytes(),
-		streamChunkLimit:        message.GetOutputDataLimit(),
+		MaxReceiveEnvelopeBytes: message.GetMaxReceiveEnvelopeBytes(),
+		StreamChunkLimit:        message.GetOutputDataLimit(),
 	}
 	if err := checkBrokerCeilings(remote); err != nil {
 		return BrokerPreambleResponse{}, err
@@ -198,8 +198,8 @@ func RejectionCodeFor(request *wire.PreambleRequest, err error) uint32 {
 			return RejectionLimitRefused
 		}
 		remote := brokerCeilings{
-			maxReceiveEnvelopeBytes: request.GetMaxReceiveEnvelopeBytes(),
-			streamChunkLimit:        request.GetOutputDataLimit(),
+			MaxReceiveEnvelopeBytes: request.GetMaxReceiveEnvelopeBytes(),
+			StreamChunkLimit:        request.GetOutputDataLimit(),
 		}
 		if checkBrokerCeilings(remote) != nil {
 			return RejectionLimitRefused

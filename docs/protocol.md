@@ -113,7 +113,11 @@ capability negotiation in P3.1: nonzero capability bits are refused as
 code 7 (`limit refused`), and code 6 (`out of order`) is reserved for the
 connection dispatcher, which owns framing-order detection and never surfaces
 it from the stateless codec. Brokerwire is not activated by production
-composition until P3.2.
+composition until P3.2. The P3.3 private local endpoint
+(`internal/adapters/brokeripc`) carries this conversation over one per-user
+AF_UNIX socket: `broker.sock` in the per-user runtime directory, with
+same-user peer-credential admission, bounded per-connection queues, and
+production composition deferred to P3.4 and the P7 cutover.
 
 ## Output, ACK, and flow control
 

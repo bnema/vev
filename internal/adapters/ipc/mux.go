@@ -68,10 +68,19 @@ var (
 	ErrMuxPeerRejected = errors.New("ipc: mux peer failed same-user credential verification")
 )
 
-// muxPeerVerifier checks one connected AF_UNIX peer's kernel credentials. It
+// PeerVerifier checks one connected AF_UNIX peer's kernel credentials. It
 // returns nil only for a peer proven to be the current effective user. It is a
-// function type so a test can inject an observable refusal without root.
-type muxPeerVerifier func(conn *net.UnixConn) error
+// function type so a caller (or test) can inject an observable refusal without
+// root; SameUserPeerVerifier returns the platform default.
+type PeerVerifier func(conn *net.UnixConn) error
+
+// muxPeerVerifier is the in-package spelling of PeerVerifier.
+type muxPeerVerifier = PeerVerifier
+
+// SameUserPeerVerifier returns this build's default same-user peer verifier:
+// Linux SO_PEERCRED admission, or a fail-closed refusal on a platform or
+// build without it.
+func SameUserPeerVerifier() PeerVerifier { return verifySameUserUnixPeer }
 
 // MuxListener is the listener half of a private daemonmux Unix carriage. Accept
 // returns a raw bounded transport (Send/RecvBounded/Close) ready for the
@@ -111,6 +120,17 @@ var _ MuxListener = (*muxListener)(nil)
 // owner already bound at path is reported as ErrDaemonRunning.
 func ListenMux(path string, opts ...Option) (MuxListener, error) {
 	return listenMux(path, verifySameUserUnixPeer, opts...)
+}
+
+// ListenMuxWithPeerVerifier binds the private carriage exactly like ListenMux
+// but admits peers with an injected verifier instead of the platform default.
+// It exists so a caller or test can supply an explicit admission policy (or
+// observe a deterministic refusal without root); a nil verifier falls back to
+// the platform default. Every other security property - owner-only parent,
+// 0600 socket, race-safe stale recovery, foreign-path refusal, inode-scoped
+// unlink on Close - is unchanged.
+func ListenMuxWithPeerVerifier(path string, verify PeerVerifier, opts ...Option) (MuxListener, error) {
+	return listenMux(path, verify, opts...)
 }
 
 // listenMux is ListenMux with an injected peer verifier, so a test can observe
@@ -166,6 +186,14 @@ func listenMux(path string, verify muxPeerVerifier, opts ...Option) (MuxListener
 // classification.
 func DialMuxContext(ctx context.Context, path string, opts ...Option) (wire.BoundedTransport, error) {
 	return dialMux(ctx, path, verifySameUserUnixPeer, opts...)
+}
+
+// DialMuxContextWithPeerVerifier connects to the private carriage exactly like
+// DialMuxContext but verifies the accepted peer with an injected verifier
+// instead of the platform default. A nil verifier falls back to the platform
+// default; a peer the verifier refuses is closed without being handed out.
+func DialMuxContextWithPeerVerifier(ctx context.Context, path string, verify PeerVerifier, opts ...Option) (wire.BoundedTransport, error) {
+	return dialMux(ctx, path, verify, opts...)
 }
 
 // dialMux is DialMuxContext with an injected peer verifier, so a test can
