@@ -45,6 +45,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -98,6 +99,34 @@ func BuildCommandForMux(target string, command ...string) CommandSpec {
 func DialMuxContext(ctx context.Context, spec CommandSpec, logger *slog.Logger, opts ...Option) (wire.BoundedTransport, error) {
 	return dialMuxContext(ctx, spec, logger, opts...)
 }
+
+// NewDiagnosticSink returns a bounded stderr sink that captures at most limit
+// bytes and reports a sanitized, truncated diagnostic: terminal escapes and
+// control bytes are stripped, so a hostile peer can neither grow the capture
+// without bound nor inject control bytes into a log. It is the same bounded,
+// sanitized capture the mux carriage uses for its own child diagnostics, shared
+// with callers (such as the broker's authenticated QUIC bootstrap) that start
+// an ssh child of their own and must never surface raw remote stderr.
+func NewDiagnosticSink(limit int) *DiagnosticSink {
+	if limit <= 0 {
+		limit = muxStderrLimit
+	}
+	return &DiagnosticSink{capped: newCappedDiagnostic(limit)}
+}
+
+// DiagnosticSink is a bounded, sanitizing, concurrent-safe io.Writer for one
+// child's stderr. It is safe for the os/exec stderr copy goroutine to write
+// while another goroutine reads String: the read is internally synchronized and
+// observes a bounded, sanitized snapshot rather than a partial capture.
+type DiagnosticSink struct{ capped *cappedDiagnostic }
+
+// Write captures at most the sink's ceiling and records that the rest was
+// dropped, so the child is never blocked writing diagnostics.
+func (s *DiagnosticSink) Write(p []byte) (int, error) { return s.capped.Write(p) }
+
+// String returns the captured text sanitized and truncated to the sink's
+// ceiling, so every reader observes a bounded, control-byte-free value.
+func (s *DiagnosticSink) String() string { return s.capped.String() }
 
 // NewStdioTransport returns the helper half of one SSH stdio carriage: the
 // current process' own stdin and stdout framed as the raw bounded transport the
@@ -157,6 +186,10 @@ func dialMuxContext(ctx context.Context, spec CommandSpec, logger *slog.Logger, 
 // non-printable bytes are stripped, so a hostile peer can neither grow the
 // capture without bound nor inject control bytes into a log.
 type cappedDiagnostic struct {
+	// mu makes Write and String safe to call concurrently: an os/exec stderr
+	// copy goroutine may still be writing while a reader renders the diagnostic,
+	// and the capture must never be observed partially written.
+	mu       sync.Mutex
 	buf      bytes.Buffer
 	limit    int
 	overflow bool
@@ -169,6 +202,8 @@ func newCappedDiagnostic(limit int) *cappedDiagnostic {
 // Write captures at most the configured ceiling and records that the rest was
 // dropped, so the child is never blocked writing diagnostics.
 func (d *cappedDiagnostic) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	remaining := d.limit - d.buf.Len()
 	if remaining <= 0 {
 		d.overflow = true
@@ -185,6 +220,8 @@ func (d *cappedDiagnostic) Write(p []byte) (int, error) {
 // String returns the captured text sanitized and truncated to the diagnostic
 // ceiling, so every reader observes a bounded, control-byte-free value.
 func (d *cappedDiagnostic) String() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	return sanitizeDiagnostic(d.buf.String())
 }
 

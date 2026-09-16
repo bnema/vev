@@ -1,0 +1,301 @@
+package broker
+
+import (
+	"context"
+	"errors"
+	"sync"
+
+	"github.com/bnema/vev/internal/ports"
+)
+
+// Offline broker composition (Plan 001 P3.4 slice B).
+//
+// Authority admits one accepted client connection to the broker core and
+// returns the connection-scoped ports.BrokerService for exactly that
+// connection. It is the structural implementation of ports.BrokerAuthority,
+// the admission seam the broker IPC listener (internal/adapters/brokeripc)
+// consumes and which this use case must not import: admission obtains one
+// supervisor client lease and one pool connection
+// identity, and rolls both back on any failure so a refused admission never
+// pins the broker open or leaks a client slot. The admission context bounds
+// admission only and is never retained; the admitted service owns a
+// connection-lived context derived from the supervisor root.
+//
+// This composition is deliberately offline and immutable: its registry runs
+// observation-disabled, so the returned service publishes and subscribes to
+// durable snapshots but never probes or reconciles, and host membership is
+// refused rather than mutated. Live membership mutation is composed in a later
+// slice.
+
+// ErrOfflineMembership is the typed refusal returned by AddHost and RemoveHost
+// on an offline broker connection: membership is immutable for the
+// connection's lifetime and the refusal never touches durable authority.
+// Callers classify it with errors.Is instead of matching message text.
+var ErrOfflineMembership = errors.New("broker: offline membership is immutable")
+
+// offlineMembershipRefusal is the typed, presentation-safe refusal. It is a
+// ports.BrokerError so the wire layer classifies it without message matching,
+// and it carries ErrOfflineMembership for errors.Is.
+func offlineMembershipRefusal() error {
+	return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: ErrOfflineMembership.Error(), Cause: ErrOfflineMembership}
+}
+
+// Authority admits one accepted client connection to the broker core. It owns
+// no lifetime of its own: the supervisor owns the broker lifetime, the registry
+// owns snapshots, and the pool owns transports. An admitted Service is bound to
+// exactly one pool client identity and one broker epoch.
+//
+// It is the structural implementation of ports.BrokerAuthority, the admission
+// seam the broker IPC listener consumes; this use case never imports that
+// adapter.
+type Authority struct {
+	epoch      ports.BrokerEpoch
+	registry   *Registry
+	pool       *Pool
+	supervisor *Supervisor
+}
+
+var _ ports.BrokerAuthority = (*Authority)(nil)
+
+// NewAuthority composes one connection-scoped broker authority over an existing
+// registry, pool, and supervisor. All three must be live and share epoch. The
+// registry must be observation-disabled: this authority's sessions expose
+// immutable offline membership, so an observing registry would probe hosts the
+// service refuses to manage.
+//
+// The caller owns the dependencies' lifecycles. In particular it must start the
+// registry's single Registry.Run to own and drain the durable writer, and must
+// cancel that run context and join Run before the store is closed. NewAuthority
+// neither starts nor settles Run: serving connections without a live Run leaks
+// the writer and never flushes the newest staged publication, and a registry
+// that was never run leaves its durable writer undrained.
+func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, supervisor *Supervisor) (*Authority, error) {
+	if epoch == 0 || nilDependency(registry) || nilDependency(pool) || nilDependency(supervisor) {
+		return nil, errors.New("broker: invalid authority dependencies")
+	}
+	if registry.epoch != epoch || pool.epoch != epoch {
+		return nil, errors.New("broker: authority epoch mismatch")
+	}
+	if !registry.observationDisabled {
+		return nil, errors.New("broker: authority requires an observation-disabled registry")
+	}
+	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor}, nil
+}
+
+// AdmitClient admits exactly one accepted client connection. The supervisor
+// client lease and the pool connection identity are acquired together; if
+// either fails, the other is released before returning, so admission either
+// commits both or neither. ctx bounds admission only and is never retained: the
+// returned service derives its own connection-lived context from the supervisor
+// root, so a caller's setup deadline cannot disturb an admitted connection.
+func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lease, err := a.supervisor.AdmitClient()
+	if err != nil {
+		return nil, err
+	}
+	id, err := a.pool.RegisterClient()
+	if err != nil {
+		lease.Release()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		a.pool.CloseClient(id)
+		lease.Release()
+		return nil, err
+	}
+	return newService(a.epoch, id, a.registry, a.pool, a.supervisor, lease), nil
+}
+
+// Service is one admitted client connection: the core's service for exactly one
+// pool connection identity and broker epoch. It implements ports.BrokerService.
+type Service struct {
+	epoch      ports.BrokerEpoch
+	id         ports.BrokerConnectionID
+	registry   *Registry
+	pool       *Pool
+	supervisor *Supervisor
+	lease      *Lease
+
+	// ctx owns everything this connection started: in-flight setup opens and
+	// live streams. It is derived from the supervisor root, never from the
+	// admission context, so broker shutdown and Close both abort owned work.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu     sync.Mutex
+	closed bool
+	subs   map[*serviceSubscription]struct{}
+	// wg counts in-flight OpenStream calls so Close drains them, and their
+	// operation leases, before it releases the connection resources.
+	wg sync.WaitGroup
+
+	closeOnce sync.Once
+}
+
+var _ ports.BrokerService = (*Service)(nil)
+
+func newService(epoch ports.BrokerEpoch, id ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease) *Service {
+	ctx, cancel := context.WithCancel(supervisor.RootContext())
+	return &Service{
+		epoch: epoch, id: id, registry: registry, pool: pool, supervisor: supervisor, lease: lease,
+		ctx: ctx, cancel: cancel, subs: make(map[*serviceSubscription]struct{}),
+	}
+}
+
+// ConnectionID returns the pool identity assigned at admission. Clients carry
+// it on stream operations so a stale request can be fenced.
+func (s *Service) ConnectionID() ports.BrokerConnectionID { return s.id }
+
+// Snapshot delegates to the registry's current immutable publication.
+func (s *Service) Snapshot() ports.BrokerSnapshot { return s.registry.Snapshot() }
+
+// Subscribe delegates to the registry and tracks the returned subscription so
+// Close releases every subscription this connection still owns. A closed
+// connection refuses new subscriptions.
+func (s *Service) Subscribe() (ports.BrokerSubscription, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ports.BrokerAdmissionClosed
+	}
+	sub := &serviceSubscription{service: s, inner: s.registry.Subscribe()}
+	s.subs[sub] = struct{}{}
+	s.mu.Unlock()
+	return sub, nil
+}
+
+// OpenStream opens one logical stream through the pool on behalf of the user.
+// The request is fenced to this connection's exact epoch and identity before
+// the pool sees it, and one operation lease pins the broker only while setup is
+// in flight: a stream that opens successfully outlives its setup lease, and
+// Close or broker shutdown still aborts anything that has not finished.
+func (s *Service) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+	if err := s.scope(&request); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ports.BrokerAdmissionClosed
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	defer s.wg.Done()
+
+	operation, err := s.supervisor.AdmitOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer operation.Release()
+
+	openCtx, release := s.openContext(ctx)
+	stream, err := s.pool.OpenStream(openCtx, request)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	// Detach the connection-scoped context link once the pool reports the
+	// stream terminal, so a long-lived connection never accumulates one link
+	// per opened stream. Nothing here ends the stream: setup completion and the
+	// operation lease's release both happen while it keeps running.
+	go func() {
+		<-stream.Done()
+		release()
+	}()
+	return stream, nil
+}
+
+// CloseStream retires one stream of this connection. A foreign connection
+// identity is refused as stale and never retires another connection's stream.
+func (s *Service) CloseStream(connection ports.BrokerConnectionID, stream ports.BrokerStreamID) error {
+	if !connection.IsZero() && connection != s.id {
+		return ports.BrokerAdmissionStale
+	}
+	return s.pool.CloseStream(s.id, stream)
+}
+
+// AddHost refuses host admission: this connection has immutable offline
+// membership, so no mutation is attempted.
+func (s *Service) AddHost(context.Context, string) error { return offlineMembershipRefusal() }
+
+// RemoveHost refuses host removal without mutating authority. The result is the
+// explicit false/refusal pair.
+func (s *Service) RemoveHost(context.Context, string) (bool, error) {
+	return false, offlineMembershipRefusal()
+}
+
+// RequestReconcile is deliberately a no-op: an offline connection has no
+// observation to reconcile, so the hint starts no probe, timer, or reconcile.
+func (s *Service) RequestReconcile(string) {}
+
+// Close cancels and drains every owned resource exactly once: in-flight setup
+// opens and live streams stop, subscriptions close, the pool client is retired,
+// and the supervisor client lease is released. It is idempotent and
+// concurrent-safe; every caller observes the same terminal state.
+func (s *Service) Close() error {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		subs := make([]*serviceSubscription, 0, len(s.subs))
+		for sub := range s.subs {
+			subs = append(subs, sub)
+		}
+		s.mu.Unlock()
+
+		s.cancel()
+		s.wg.Wait()
+		for _, sub := range subs {
+			sub.Close()
+		}
+		s.pool.CloseClient(s.id)
+		s.lease.Release()
+	})
+	return nil
+}
+
+// scope fences one request to this connection's exact epoch and identity,
+// filling an absent identity with this connection's own. A foreign epoch or
+// connection is refused before it can steer another connection's work.
+func (s *Service) scope(request *ports.BrokerOpenStreamRequest) error {
+	if request.Epoch != 0 && request.Epoch != s.epoch {
+		return ports.BrokerError{Code: ports.BrokerErrorStaleEpoch}
+	}
+	if !request.Connection.IsZero() && request.Connection != s.id {
+		return ports.BrokerAdmissionStale
+	}
+	request.Epoch = s.epoch
+	request.Connection = s.id
+	return nil
+}
+
+// openContext derives the context that owns one stream: the caller's context
+// bounds the request, and the connection context bounds the service, so the
+// stream and its setup end when either does. The returned release detaches the
+// connection link once the stream has settled.
+func (s *Service) openContext(ctx context.Context) (context.Context, func()) {
+	openCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	return openCtx, func() { stop(); cancel() }
+}
+
+// serviceSubscription is one connection-owned subscription. Closing it releases
+// the registry subscription and forgets it on the owning service.
+type serviceSubscription struct {
+	service *Service
+	inner   ports.BrokerSubscription
+	once    sync.Once
+}
+
+func (s *serviceSubscription) Changed() <-chan struct{} { return s.inner.Changed() }
+
+func (s *serviceSubscription) Close() {
+	s.once.Do(func() {
+		s.inner.Close()
+		s.service.mu.Lock()
+		delete(s.service.subs, s)
+		s.service.mu.Unlock()
+	})
+}

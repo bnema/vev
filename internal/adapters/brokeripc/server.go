@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
 	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -30,24 +35,6 @@ import (
 // one goroutine per admitted mutating operation. Every one of those is
 // per-connection, so a slow or stalled client blocks only its own work.
 
-// Authority admits one accepted broker client to the broker core. The returned
-// ports.BrokerService is the core's service for exactly that connection: its
-// ConnectionID is the identity the session stamps on every frame, and Close
-// releases the connection's core resources. P3.4 supplies the broker use case
-// here; this adapter never constructs a broker itself.
-//
-// ctx bounds AdmitClient only. It carries the listener's handshake deadline and
-// is canceled either as soon as admission returns or when the listener closes,
-// so an implementation must not retain it or start work that outlives admission
-// from it. Honoring ctx cancellation is what lets Listener.Close drop a client
-// already parked in admission immediately instead of waiting out the handshake
-// budget. The admitted service gets its own connection-lived context from the
-// session. An authority that needs a longer-lived context must supply its own
-// rather than keep this one.
-type Authority interface {
-	AdmitClient(ctx context.Context) (ports.BrokerService, error)
-}
-
 // Listen binds the private per-user broker endpoint at path and returns a
 // ports.BrokerListener that admits same-user clients only.
 //
@@ -57,14 +44,22 @@ type Authority interface {
 // without being removed, a stale socket left by a dead owner is recovered
 // race-safely, and a live owner is reported as ipc.ErrDaemonRunning instead of
 // being evicted.
-func Listen(path string, epoch ports.BrokerEpoch, authority Authority, cfg Config, opts ...ipc.Option) (ports.BrokerListener, error) {
+//
+// authority is the ports.BrokerAuthority admission seam: the listener calls
+// AdmitClient once per accepted connection under the handshake budget and binds
+// the returned service to exactly that connection. That service's ConnectionID
+// is the identity the session stamps on every frame; the P3.4 broker use case
+// supplies the implementation, and this adapter consumes it without
+// constructing a broker itself. See ports.BrokerAuthority for the
+// admission-context contract.
+func Listen(path string, epoch ports.BrokerEpoch, authority ports.BrokerAuthority, cfg Config, opts ...ipc.Option) (ports.BrokerListener, error) {
 	return listen(path, epoch, authority, cfg, ipc.SameUserPeerVerifier(), opts...)
 }
 
 // listen is Listen with an injected peer verifier, so a test can observe a
 // deterministic same-user refusal without root. A nil verifier falls back to
 // the platform default.
-func listen(path string, epoch ports.BrokerEpoch, authority Authority, cfg Config, verify ipc.PeerVerifier, opts ...ipc.Option) (ports.BrokerListener, error) {
+func listen(path string, epoch ports.BrokerEpoch, authority ports.BrokerAuthority, cfg Config, verify ipc.PeerVerifier, opts ...ipc.Option) (ports.BrokerListener, error) {
 	cfg = cfg.withDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -110,7 +105,7 @@ func listen(path string, epoch ports.BrokerEpoch, authority Authority, cfg Confi
 // already-accepted client immediately instead of waiting out HandshakeTimeout.
 type listener struct {
 	epoch     ports.BrokerEpoch
-	authority Authority
+	authority ports.BrokerAuthority
 	cfg       Config
 	mux       ipc.MuxListener
 	slots     chan struct{}
@@ -338,9 +333,9 @@ func (l *listener) Accept() (ports.BrokerService, error) {
 // startSession completes the preamble and admission for one accepted carriage
 // and starts the session. The admission context is bounded to the handshake
 // budget and is canceled as soon as admission returns or when the listener
-// closes, so the admitted service must not retain it (see Authority) and
-// Close can drop a client still in preamble or admission. Slot ownership
-// transfers to the session on success.
+// closes, so the admitted service must not retain it (see
+// ports.BrokerAuthority) and Close can drop a client still in preamble or
+// admission. Slot ownership transfers to the session on success.
 func (l *listener) startSession(transport wire.BoundedTransport, release func()) (*serverSession, error) {
 	// The handshake budget is bounded by the listener-scoped context, so
 	// Listener.Close cancels a preamble or admission that is still waiting
@@ -361,7 +356,7 @@ func (l *listener) startSession(transport wire.BoundedTransport, release func())
 		_ = transport.Close()
 		return nil, fmt.Errorf("%w: authority admitted a nil service", ErrConfig)
 	}
-	session, err := newServerSession(l.epoch, transport, ceilings, core, l.cfg, release)
+	session, err := newServerSession(l.epoch, transport, ceilings, core, l.cfg, release, registrationDeadline(ctx))
 	if err != nil {
 		_ = core.Close()
 		_ = transport.Close()
@@ -496,6 +491,23 @@ type serverSession struct {
 	// session from its live set. It is set before run starts.
 	onShutdown func()
 
+	// registerDeadline is the absolute instant by which the client's Register
+	// must arrive: the accept-time handshake deadline that bounded the preamble
+	// and admission. Until Register is accepted the session is guarded by it, so
+	// a peer that stays silent after admission is settled instead of pinning the
+	// admitted core lease and the listener slot. Once Register is accepted the
+	// guard is stopped and the session runs on its own connection-lived context.
+	registerDeadline time.Time
+	// registered is set atomically the instant Register handling begins, before
+	// any connection state is touched. The pre-Register guard reads it when the
+	// registration deadline elapses, so a Register that arrives at the deadline
+	// boundary is never settled as a peer timeout even if the guard wins the
+	// race to the deadline.
+	registered atomic.Bool
+	// stopRegistration stops and joins the pre-Register guard. It is set by run
+	// and called once from the Register dispatch; a no-op for a zero deadline.
+	stopRegistration func()
+
 	errMu    sync.Mutex
 	closeErr error
 	done     chan struct{}
@@ -503,8 +515,27 @@ type serverSession struct {
 
 var _ ports.BrokerService = (*serverSession)(nil)
 
+// registrationDeadline returns the absolute instant by which an accepted client
+// must send its Register: the accept-time handshake deadline that already
+// bounded the preamble and admission. The session extends that same budget over
+// the pre-Register wait, so a peer that completes the preamble and admission and
+// then stays silent cannot hold a core client lease or a listener slot past the
+// configured handshake budget. A missing deadline yields the zero time, which
+// disables the bound.
+func registrationDeadline(ctx context.Context) time.Time {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return time.Time{}
+	}
+	return deadline
+}
+
 // newServerSession binds one admitted connection to its exact scope.
-func newServerSession(epoch ports.BrokerEpoch, transport wire.BoundedTransport, ceilings brokerwire.Ceilings, core ports.BrokerService, cfg Config, release func()) (*serverSession, error) {
+//
+// registerDeadline is the absolute instant by which the client's Register must
+// arrive (the accept-time handshake deadline); the zero time disables the bound
+// and exists only for direct construction outside the listener.
+func newServerSession(epoch ports.BrokerEpoch, transport wire.BoundedTransport, ceilings brokerwire.Ceilings, core ports.BrokerService, cfg Config, release func(), registerDeadline time.Time) (*serverSession, error) {
 	if epoch == 0 || transport == nil || core == nil {
 		return nil, ErrConfig
 	}
@@ -530,18 +561,19 @@ func newServerSession(epoch ports.BrokerEpoch, transport wire.BoundedTransport, 
 		release = func() {}
 	}
 	return &serverSession{
-		epoch:     epoch,
-		scope:     conn.Scope(),
-		conn:      conn,
-		core:      core,
-		transport: transport,
-		ceilings:  ceilings,
-		cfg:       cfg,
-		release:   release,
-		ctx:       ctx,
-		cancel:    cancel,
-		streams:   make(map[ports.BrokerStreamID]*serverStream),
-		done:      make(chan struct{}),
+		epoch:            epoch,
+		scope:            conn.Scope(),
+		conn:             conn,
+		core:             core,
+		transport:        transport,
+		ceilings:         ceilings,
+		cfg:              cfg,
+		release:          release,
+		ctx:              ctx,
+		cancel:           cancel,
+		streams:          make(map[ports.BrokerStreamID]*serverStream),
+		registerDeadline: registerDeadline,
+		done:             make(chan struct{}),
 	}, nil
 }
 
@@ -551,6 +583,13 @@ func newServerSession(epoch ports.BrokerEpoch, transport wire.BoundedTransport, 
 // carriage error settles exactly this connection.
 func (s *serverSession) run() {
 	defer s.shutdown()
+	// The pre-Register phase shares the accept-time handshake deadline that
+	// bounded the preamble and admission. Arm it before the read loop and stop
+	// (and join) it as soon as Register is accepted, so a silent peer cannot pin
+	// the admitted core lease or the listener slot, and a healthy session is
+	// never disturbed by it.
+	s.stopRegistration = s.armRegistrationDeadline()
+	defer s.stopRegistration()
 	for {
 		envelope, err := s.transport.RecvBounded(s.ceilings.MaxReceiveEnvelopeBytes)
 		if err != nil {
@@ -569,15 +608,72 @@ func (s *serverSession) run() {
 	}
 }
 
+// armRegistrationDeadline enforces the accept-time registration budget on the
+// pre-Register phase. The peer must send its Register before the absolute
+// deadline that already bounded the preamble and admission; if it does not, the
+// guard settles the session, which closes the admitted core service and releases
+// the listener slot. The bound is derived from the session's own connection-lived
+// context, so shutdown cancels it too, and it is stopped as soon as Register is
+// accepted.
+//
+// The guard consults the registered marker before settling: a Register whose
+// handling already began is admitted even when the deadline elapses concurrently
+// with it, so the boundary between an on-time Register and a silent peer is the
+// marker, never a timer race.
+//
+// The returned stop function is idempotent and joins the guard goroutine, so an
+// accepted (or settled) session never leaves a timer goroutine behind. A zero
+// deadline disables the bound; only direct session construction uses that.
+func (s *serverSession) armRegistrationDeadline() func() {
+	if s.registerDeadline.IsZero() {
+		return func() {}
+	}
+	ctx, cancel := context.WithDeadline(s.ctx, s.registerDeadline)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			// Only the registration budget itself settles the session; a session
+			// cancel (shutdown) leaves the terminal cause to the reader. A
+			// Register already being handled makes the budget moot: the marker is
+			// set before any connection state is touched, so this check is the
+			// deadline boundary.
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && !s.registered.Load() {
+				s.abort(errors.Join(ErrRegistrationTimeout, context.DeadlineExceeded))
+			}
+		case <-stop:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			close(stop)
+			<-done
+		})
+	}
+}
+
 // dispatch applies one client frame. A returned error is a protocol or carriage
 // violation that settles the connection; a refusal the peer can observe is sent
 // on the wire and returns nil.
 func (s *serverSession) dispatch(message brokerwire.ClientMessage) error {
 	switch m := message.(type) {
 	case brokerwire.Register:
+		// Mark registration as begun before touching connection state, so the
+		// pre-Register guard sharing the accept-time deadline can distinguish a
+		// Register arriving at the boundary from a silent peer and never settles
+		// this healthy connection.
+		s.registered.Store(true)
 		if err := s.conn.Register(); err != nil {
 			return errors.Join(ErrProtocol, err)
 		}
+		// The client met the accept-time registration budget: stop (and join)
+		// the pre-Register guard before answering, so this healthy connection is
+		// no longer bounded by the setup deadline.
+		s.stopRegistration()
 		return s.send(brokerwire.Registered{Epoch: s.epoch, Connection: s.scope.Connection})
 	case brokerwire.Subscribe:
 		if !s.scopeMatches(m.Epoch, m.Connection) {
@@ -771,9 +867,23 @@ func (s *serverSession) Close() error {
 }
 
 // orderlyDisconnect reports whether one terminal cause is a peer disconnect or a
-// local close rather than a failure.
+// local close rather than a failure. A registration timeout is a peer that
+// completed admission and then stayed silent: the session settles, but the
+// outcome is the peer's departure, so a listener draining its sessions never
+// reports it as its own failure.
+//
+// A peer that closes abruptly can surface a reset (or a local-close sentinel
+// from a concurrently interrupted read) instead of a clean EOF; both are still
+// the peer's or this side's ordinary departure, never a sandbox failure.
 func orderlyDisconnect(err error) bool {
-	return err == nil || errors.Is(err, io.EOF) || errors.Is(err, ErrConnectionClosed) || errors.Is(err, ErrSessionClosed)
+	return err == nil ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, fs.ErrClosed) ||
+		errors.Is(err, ErrConnectionClosed) ||
+		errors.Is(err, ErrSessionClosed) ||
+		errors.Is(err, ErrRegistrationTimeout)
 }
 
 // ConnectionID returns the identity assigned to this connection at accept.

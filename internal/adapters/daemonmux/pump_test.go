@@ -197,6 +197,43 @@ func requireEngineEventually(t *testing.T, pump *Pump, cond func(*StreamEngine) 
 	require.Eventually(t, func() bool { return cond(pump.Engine()) }, 5*time.Second, time.Millisecond, msgAndArgs...)
 }
 
+// requireStreamTerminalEventually waits until one stream has reached its
+// terminal state with Done closed, then returns that settled read.
+func requireStreamTerminalEventually(t *testing.T, pump *Pump, id PhysicalStreamID) StreamStatus {
+	t.Helper()
+	var status StreamStatus
+	require.Eventually(t, func() bool {
+		current, ok := pump.Engine().Status(id)
+		if !ok {
+			return false
+		}
+		status = current
+		return current.State == StreamTerminal && channelClosed(current.Done)
+	}, 5*time.Second, time.Millisecond, "stream %d did not reach terminal", id)
+	return status
+}
+
+// requireStreamClosingEventually waits until one undrained stream has settled
+// into closing with its preserved chunk still queued and charged and Done still
+// open, then returns that settled read. The transition is stable until the
+// chunk is drained, so the returned read cannot be a stale intermediate state.
+func requireStreamClosingEventually(t *testing.T, pump *Pump, id PhysicalStreamID) StreamStatus {
+	t.Helper()
+	var status StreamStatus
+	require.Eventually(t, func() bool {
+		current, ok := pump.Engine().Status(id)
+		if !ok {
+			return false
+		}
+		status = current
+		return current.State == StreamClosing &&
+			current.QueuedChunks == 1 &&
+			current.QueuedBytes == 1 &&
+			!channelClosed(current.Done)
+	}, 5*time.Second, time.Millisecond, "stream %d did not settle into closing with a preserved chunk", id)
+	return status
+}
+
 // takeEventually waits until one stream's inbound queue yields a chunk.
 func takeEventually(t *testing.T, pump *Pump, id PhysicalStreamID) ([]byte, bool) {
 	t.Helper()
@@ -310,19 +347,21 @@ func TestPumpTwoAndHundredStreams(t *testing.T) {
 			}
 			// The drained stream settles at once; every other stream is closing
 			// and still holds its one unread, charged chunk until it is drained.
-			requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == count-1 })
+			// The reader applies the closes asynchronously and in order, so each
+			// stream is observed on its own eventual transition: a global Live
+			// precondition would pass as soon as the drained stream settles,
+			// before a later stream has applied its own close.
+			terminal := requireStreamTerminalEventually(t, pump, ids[0])
+			require.Equal(t, StreamTerminal, terminal.State)
+			for _, id := range ids[1:] {
+				status := requireStreamClosingEventually(t, pump, id)
+				require.Equal(t, 1, status.QueuedChunks)
+				require.Equal(t, 1, status.QueuedBytes)
+			}
+			require.Equal(t, count-1, pump.Engine().Live())
 			require.Equal(t, count-1, pump.Engine().AggregateBytes())
 			require.False(t, pump.Engine().Closed())
 			require.False(t, channelClosed(pump.Done()))
-			terminal := mustStatus(t, pump.Engine(), ids[0])
-			require.Equal(t, StreamTerminal, terminal.State)
-			require.True(t, channelClosed(terminal.Done))
-			for _, id := range ids[1:] {
-				status := mustStatus(t, pump.Engine(), id)
-				require.Equal(t, StreamClosing, status.State)
-				require.False(t, channelClosed(status.Done))
-				require.Equal(t, 1, status.QueuedChunks)
-			}
 
 			// Draining every preserved chunk releases its bytes and terminalizes
 			// the stream; the physical connection stays open.

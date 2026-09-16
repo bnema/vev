@@ -33,10 +33,15 @@ type Config struct {
 	StreamInboundChunks int
 	// StreamInboundBytes bounds one logical stream's inbound chunk bytes.
 	StreamInboundBytes uint64
-	// HandshakeTimeout bounds one accepted connection's broker preamble plus
-	// admission. The client dialer also bounds its own preamble exchange with
-	// it. It is deliberately separate from the session handshake budget that
-	// runs inside a logical stream.
+	// HandshakeTimeout bounds one accepted connection's broker preamble, broker
+	// admission, and the wait for its Register. The client dialer also bounds
+	// its whole setup (Unix dial, preamble, Register send, and wait for
+	// Registered) with it. On the server the registration phase shares the same
+	// accept-time budget as the preamble and admission: a peer that completes
+	// the preamble and admission but never sends Register is settled when that
+	// deadline elapses, so it cannot hold a core client lease or a listener slot
+	// indefinitely. It is deliberately separate from the session handshake
+	// budget that runs inside a logical stream.
 	HandshakeTimeout time.Duration
 	// MaxPendingOperations bounds mutating operations this side is waiting for
 	// on one connection. It never exceeds the brokerwire per-connection bound.

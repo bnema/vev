@@ -535,6 +535,7 @@ func TestBrokerInterfacesArePorts(t *testing.T) {
 		"BrokerHostProbe":          reflect.TypeOf((*BrokerHostProbe)(nil)).Elem(),
 		"BrokerPhysicalConnection": reflect.TypeOf((*BrokerPhysicalConnection)(nil)).Elem(),
 		"BrokerEndpointConnector":  reflect.TypeOf((*BrokerEndpointConnector)(nil)).Elem(),
+		"BrokerAuthority":          reflect.TypeOf((*BrokerAuthority)(nil)).Elem(),
 		"BrokerListener":           reflect.TypeOf((*BrokerListener)(nil)).Elem(),
 		"BrokerSubscription":       reflect.TypeOf((*BrokerSubscription)(nil)).Elem(),
 	} {

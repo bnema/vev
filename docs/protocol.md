@@ -117,7 +117,16 @@ composition until P3.2. The P3.3 private local endpoint
 (`internal/adapters/brokeripc`) carries this conversation over one per-user
 AF_UNIX socket: `broker.sock` in the per-user runtime directory, with
 same-user peer-credential admission, bounded per-connection queues, and
-production composition deferred to P3.4 and the P7 cutover.
+production composition deferred to P3.4 and the P7 cutover. P3.4 adds
+the hidden, isolated offline sandbox entries -- `_broker-serve`,
+`_broker-launcher`, and `_broker-status` -- over an operator-supplied private
+root, plus the hidden remote mux helpers `_broker-mux-stdio`,
+`_broker-mux-quic-bootstrap`, and `_broker-mux-quic-proxy` that bridge a
+provisioned private daemonmux Unix carriage to stdio or to one freshly
+authenticated QUIC stream; ordinary production composition still waits for P7.
+Setup is fully bounded: the dialer's one context/deadline covers the Unix
+dial, preamble, Register send, and wait for Registered, and the server requires Register within
+the same accept-time handshake budget that bounded the preamble and admission.
 
 ## Output, ACK, and flow control
 

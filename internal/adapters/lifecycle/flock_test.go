@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,6 +37,92 @@ func TestLifecycleLock(t *testing.T) {
 	t.Run("process contention and reacquire", testLifecycleLockProcessContentionAndReacquire)
 	t.Run("acquire cancellation", testLifecycleLockAcquireCancellation)
 	t.Run("unavailable runtime directory", testLifecycleLockUnavailableRuntimeDirectory)
+	t.Run("lock file is owner-only regular", testLifecycleLockIsOwnerOnlyRegular)
+	t.Run("owner-only variant is accepted", testLifecycleLockOwnerOnlyVariantAccepted)
+	t.Run("restrictive umask normalizes to owner-only", testLifecycleLockRestrictiveUmaskNormalizes)
+	t.Run("symlinked lock path fails closed", testLifecycleLockSymlinkFailsClosed)
+	t.Run("nonregular lock path fails closed", testLifecycleLockNonRegularFailsClosed)
+	t.Run("loose permissions fail closed", testLifecycleLockLoosePermissionsFailClosed)
+}
+
+func testLifecycleLockIsOwnerOnlyRegular(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	owner, err := TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, owner.Release()) }()
+
+	info, err := os.Lstat(Path(runtimeDir))
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular(), "the lock must be a regular file")
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "the lock must be owner-only")
+}
+
+// testLifecycleLockOwnerOnlyVariantAccepted proves a pre-existing owner-only
+// lock with a different owner bit pattern is trusted, so an installation whose
+// lock was created under a variant umask can still start the daemon.
+func testLifecycleLockOwnerOnlyVariantAccepted(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	require.NoError(t, os.WriteFile(Path(runtimeDir), nil, 0o600))
+	require.NoError(t, os.Chmod(Path(runtimeDir), 0o700))
+
+	owner, err := TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	require.NoError(t, owner.Release())
+}
+
+// testLifecycleLockRestrictiveUmaskNormalizes proves a newly created lock is
+// chmodded to 0600 even when the process umask would have stripped owner bits,
+// so the lock is always exactly owner-only after creation.
+func testLifecycleLockRestrictiveUmaskNormalizes(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	previous := syscall.Umask(0o400)
+	defer syscall.Umask(previous)
+
+	owner, err := TryAcquire(runtimeDir)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, owner.Release()) }()
+
+	info, err := os.Lstat(Path(runtimeDir))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "a newly created lock must be normalized to owner-only")
+}
+
+func testLifecycleLockSymlinkFailsClosed(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	target := filepath.Join(t.TempDir(), "target.lock")
+	require.NoError(t, os.WriteFile(target, nil, 0o600))
+	require.NoError(t, os.Symlink(target, Path(runtimeDir)))
+
+	_, err := TryAcquire(runtimeDir)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrBusy), "a symlinked lock path is an error, not contention")
+	require.Contains(t, err.Error(), "symlink")
+}
+
+func testLifecycleLockNonRegularFailsClosed(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	require.NoError(t, syscall.Mkfifo(Path(runtimeDir), 0o600))
+
+	_, err := TryAcquire(runtimeDir)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrBusy), "a non-regular lock path is an error, not contention")
+	require.Contains(t, err.Error(), "not a regular file")
+}
+
+func testLifecycleLockLoosePermissionsFailClosed(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	require.NoError(t, os.MkdirAll(runtimeDir, 0o700))
+	require.NoError(t, os.WriteFile(Path(runtimeDir), nil, 0o600))
+	require.NoError(t, os.Chmod(Path(runtimeDir), 0o644))
+
+	_, err := TryAcquire(runtimeDir)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrBusy), "a loose lock file is an error, not contention")
+	require.Contains(t, err.Error(), "permissions")
 }
 
 func testLifecycleLockProcessContentionAndReacquire(t *testing.T) {

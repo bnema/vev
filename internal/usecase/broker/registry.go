@@ -37,6 +37,17 @@ const (
 	runStopped
 )
 
+// RegistryConfig selects how a Registry runs. The zero value observes hosts.
+type RegistryConfig struct {
+	// ObservationDisabled runs the registry as a read-only snapshot owner: it
+	// restores and publishes durable state, owns and drains its writer, and
+	// honors the Run lifecycle, but issues no probes, arms no timers, and never
+	// reconciles. The probe dependency is unused and may be nil. Membership is
+	// expected to be immutable for the run; a caller that needs observation
+	// keeps the zero-value config.
+	ObservationDisabled bool
+}
+
 // Registry owns configured hosts and their immutable observation projection.
 type Registry struct {
 	epoch ports.BrokerEpoch
@@ -44,6 +55,9 @@ type Registry struct {
 	clock ports.Clock
 	log   *slog.Logger
 	store *snapshotWriter
+	// observationDisabled is fixed at construction: a disabled registry never
+	// observes, so it has no probe, timer, or reconcile work to do.
+	observationDisabled bool
 
 	// hostStore and authority are the synchronous membership owner. Only this
 	// registry may mutate the store while it is live; the caller owns Close.
@@ -94,7 +108,18 @@ type Registry struct {
 // outside Registry.ReplaceHosts. The caller closes the store after the registry
 // has stopped and flushed its advisory writer.
 func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock ports.Clock, log *slog.Logger) (*Registry, error) {
-	if epoch == 0 || nilDependency(store) || nilDependency(probe) || nilDependency(clock) {
+	return NewRegistryWithConfig(epoch, store, probe, clock, log, RegistryConfig{})
+}
+
+// NewRegistryWithConfig restores a validated durable snapshot under a fresh
+// broker epoch and selects the run mode from cfg. Observation-disabled mode
+// tolerates a nil probe because such a registry never probes; every other
+// dependency is required exactly as NewRegistry requires it.
+func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock ports.Clock, log *slog.Logger, cfg RegistryConfig) (*Registry, error) {
+	if epoch == 0 || nilDependency(store) || nilDependency(clock) {
+		return nil, errors.New("broker: invalid registry dependencies")
+	}
+	if !cfg.ObservationDisabled && nilDependency(probe) {
 		return nil, errors.New("broker: invalid registry dependencies")
 	}
 	if log == nil {
@@ -102,7 +127,8 @@ func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe por
 	}
 	r := &Registry{
 		epoch: epoch, probe: probe, clock: clock, log: log,
-		hosts: make(map[string]ports.RemoteHostSnapshot), inflight: make(map[string]*probeAttempt),
+		observationDisabled: cfg.ObservationDisabled,
+		hosts:               make(map[string]ports.RemoteHostSnapshot), inflight: make(map[string]*probeAttempt),
 		pending: make(map[string]bool), tombstones: make(map[string]ports.BrokerHostTombstone),
 		subs: make(map[*subscription]struct{}), wake: make(chan struct{}, 1),
 		freshFor: defaultFreshFor, retryBase: defaultRetryBase, retryMax: defaultRetryLimit,
@@ -350,7 +376,12 @@ func (r *Registry) cancelAllInflightLocked() {
 }
 
 // RequestProbe is non-blocking and coalesces concurrent demand per endpoint.
+// A disabled registry never observes, so the demand is dropped without
+// scheduling anything.
 func (r *Registry) RequestProbe(endpoint string) {
+	if r.observationDisabled {
+		return
+	}
 	r.mu.Lock()
 	if _, ok := r.hosts[endpoint]; ok {
 		r.pending[endpoint] = true
@@ -371,12 +402,21 @@ func (r *Registry) hint() {
 // concurrent or restarted caller can never duplicate scheduling. On return it
 // clears in-flight observation state, publishes the settled projection, and
 // flushes durable persistence before any further write is refused.
+//
+// An observation-disabled registry runs the same lifecycle and drain but never
+// schedules observation: it arms no timer, starts no probe, and drops every
+// reconcile. It still owns and drains its durable writer, so a shutdown never
+// returns before the newest staged publication has reached the store.
 func (r *Registry) Run(ctx context.Context) {
 	if !r.running.CompareAndSwap(runIdle, runActive) {
 		r.log.Warn("broker: registry Run refused; single-run already started or finished")
 		return
 	}
 	defer r.settle()
+	if r.observationDisabled {
+		<-ctx.Done()
+		return
+	}
 	timer := r.clock.NewTimer(0)
 	defer timer.Stop()
 	results := make(chan probeResult, ports.BrokerMaxHosts)

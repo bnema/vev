@@ -216,6 +216,48 @@ var connectivityMatrix = []connectivityEntry{
 		Owner:   connectivityLocalOnly,
 		Notes:   "No connectivity.",
 	},
+	{
+		Kind:    "kindBrokerServe",
+		Summary: "hidden _broker-serve isolated offline broker sandbox",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Foreground sandbox process over its own private root: no production runtime/state, no daemon dial, no RemoteHostStore, and no session persistence. It composes the broker under a temporary offline config and does not become a client façade or an ordinary command.",
+	},
+	{
+		Kind:    "kindBrokerLauncher",
+		Summary: "hidden _broker-launcher detached offline broker launcher",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Process mechanics only, scoped to one operator-supplied offline root: it starts _broker-serve in a new session and exits, like the daemon launcher, and never dials a daemon, owns the host store, or mutates persistence.",
+	},
+	{
+		Kind:    "kindBrokerStatus",
+		Summary: "hidden _broker-status offline broker probe and connect-or-spawn",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Reports the offline broker's local IPC endpoint and, with --ensure, elects one spawner under a descriptor-backed lock. It dials only the operator-supplied broker sandbox socket (never a daemon or RemoteHostStore) and never becomes a client façade or ordinary command.",
+	},
+	{
+		Kind:    "kindBrokerMuxStdio",
+		Summary: "hidden _broker-mux-stdio remote SSH stdio daemonmux bridge",
+		Owner:   connectivityTransportInfra,
+		DirectDialDebt: []string{
+			"ipc.DialMuxContext local daemonmux carriage (broker_offline_mux.go)",
+		},
+		Notes: "Remote-side helper over one operator-supplied offline root: it bridges its own stdio to the single provisioned private Unix daemonmux carriage. It never starts a broker, observer, or ordinary daemon, never dials the production daemon socket, and never fabricates a daemon incarnation. Direct-dial debt is recorded here rather than as broker debt because the helper itself stays transport infra.",
+	},
+	{
+		Kind:    "kindBrokerMuxQUICBootstrap",
+		Summary: "hidden _broker-mux-quic-bootstrap remote SSH-side QUIC bootstrap",
+		Owner:   connectivityTransportInfra,
+		Notes:   "Starts one detached _broker-mux-quic-proxy in a new session, forwards its single readiness line, and exits. Its only child is that proxy: it never starts a broker, observer, or ordinary daemon, and one-time QUIC credentials never reach an address, log, or error.",
+	},
+	{
+		Kind:    "kindBrokerMuxQUICProxy",
+		Summary: "hidden _broker-mux-quic-proxy detached remote QUIC daemonmux bridge",
+		Owner:   connectivityTransportInfra,
+		DirectDialDebt: []string{
+			"ipc.DialMuxContext local daemonmux carriage (broker_offline_mux.go)",
+		},
+		Notes: "Mints one ephemeral authenticated QUIC server, admits exactly one carriage, and bridges it to the single provisioned private Unix daemonmux carriage. It never dials the production daemon socket, never starts a daemon, and never fabricates a daemon incarnation.",
+	},
 }
 
 // connectivityOwnerFor returns the matrix owner for a cmdKind identifier.

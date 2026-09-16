@@ -46,6 +46,13 @@ vev uses a hexagonal core with typed session messages at the client and daemon b
   the short-lived SSH bootstrap (ephemeral certificate, 32-byte token,
   nonce, ≤4 KiB readiness, ≤15 s expiry, atomic one-time consumption).
   QUIC library types never leave the package.
+- `internal/adapters/brokerconfig`: owns the strict isolated offline broker
+  sandbox configuration (`config.json` marker), the textual offline-root
+  validation that keeps the sandbox out of production runtime/state, and the
+  immutable `ports.BrokerEndpointResolver` over the provisioned endpoint
+  registrations, identities, policies, and absolute Unix mux routes. It is
+  composed only by the hidden offline broker entry points (`_broker-serve`,
+  `_broker-launcher`, and `_broker-status`).
 - `internal/adapters/uidriver`: owns strict JSONL decoding, response serialization, bounded controller queues, private Unix sockets, peer credentials, and the stdio bridge. It consumes `ports.UIService` and never creates an attachment.
 - `internal/adapters/webterm`: owns the authenticated loopback HTTP/WebSocket frontend, browser event encoding, VT-backed terminal and transactional HTML output. It implements `ports.Terminal`; application composition supplies the ordinary client runner.
 - `internal/adapters/uiterm`: owns the immutable VT mirror/snapshot and deterministic headless terminal. The concrete terminal writer (`adapters/term`) taps successful writes and flushes into this sink only when observation is enabled.
@@ -223,9 +230,23 @@ Every frame must carry the epoch and connection identity the listener assigned
 at accept; a mismatched frame is fenced, and a stale stream open is answered
 with a `StreamClosed` carrying the stale admission code. A malformed,
 oversize, or wrong-direction envelope settles exactly the connection that sent
-it. Operational bounds are explicit: concurrent clients per listener, per-stream
-inbound chunks and bytes, pending mutating operations, and the brokerwire
-per-connection stream and dedup bounds. Disconnect cleanup is deterministic:
+it. Setup is fully bounded on both halves: the client dialer bounds the Unix
+dial, the preamble, the Register send, and the wait for Registered with one
+context/deadline, closing the carriage to interrupt a peer that stalls after a
+successful preamble and joining every setup worker, while a registered
+connection detaches from that setup context; the server requires the client's
+Register within the same accept-time handshake budget that bounded the preamble
+and admission, so a silent same-user peer can neither pin an admitted core lease
+nor hold a listener slot. Admission is the `ports.BrokerAuthority` seam,
+implemented by `internal/usecase/broker.Authority`; the pre-Register guard
+consults a registered marker set when Register handling begins, so a Register
+arriving exactly at the deadline is admitted rather than settled as a timeout,
+and a genuine registration timeout is classified as an orderly peer disconnect
+so a listener draining its sessions never reports one as its own failure.
+Operational bounds are explicit: concurrent clients
+per listener, per-stream inbound chunks and bytes, pending mutating operations,
+and the brokerwire per-connection stream and dedup bounds. Disconnect cleanup is
+deterministic:
 the session cancels its context, stops publishing, closes the outer carriage
 (so a stream writer parked on a non-reading peer is interrupted), settles every
 bridged stream (releasing its core connection and carriage), closes the
@@ -235,6 +256,167 @@ reply is lost after the request was sent, and the client never replays them
 blindly.
 
 P3.3 introduces no production activation: nothing in `internal/app` or `main`
-constructs this adapter yet. P3.4 composes the broker use case, its stores, and
-this listener behind a hidden entry point, and P7 performs the coordinated
+constructs this adapter for ordinary operation. P3.4 composes the broker use
+case, its stores, and this listener behind the hidden `_broker-serve` sandbox
+entry point, with the listener consuming
+`ports.BrokerAuthority` instead of defining its own seam. The composing caller
+owns the `Registry.Run` lifecycle: it starts the single run to own and drain the
+durable writer and cancels and joins that run before closing the store, because
+`NewAuthority` neither starts nor settles the run. P7 performs the coordinated
 cutover.
+
+## Broker offline sandbox (Plan 001 P3.4 slice C, not activated)
+
+The hidden `_broker-serve --offline-root ABS [--idle-grace DURATION]` entry
+point is a foreground, isolated sandbox over one operator-supplied offline root.
+It is excluded from public help and changes no ordinary command, path, or
+factory. The root must be absolute, cleaned, symlink-free, and outside the
+production runtime and state directories; the runtime, state, and log paths are
+derived only beneath it and secured with `pkg/safedir.EnsurePrivate`, and the
+durable store is opened with `brokerstore.OpenOffline` over the sandbox state
+directory with no legacy inputs.
+
+`internal/adapters/brokerconfig` owns the strict sandbox configuration: a
+bounded, owner-only `config.json` carrying the exact `vev.broker.offline/v1`
+marker, with unknown fields, duplicate keys, trailing data, invalid UTF-8,
+excessive nesting, and duplicate endpoints refused. Each immutable registration
+provisions the exact daemon registration, the stable authenticated daemon
+identity, the exact connection policy, and one absolute Unix mux route. The
+resulting `ports.BrokerEndpointResolver` performs no I/O and invents no address:
+a request must name a configured endpoint, carry its exact registration, and
+request a compatible policy, so a request can never supply an address, identity,
+secret, command, or policy of its own. Because the pool keys one physical
+transport by the exact authenticated identity plus policy pair and deliberately
+ignores the opaque route address, two registrations that share that pair must
+agree on the one route the pool dials: an alias of an identical route is
+accepted under distinct endpoints, while a second route for the same pair is
+refused instead of being dialed for neither endpoint.
+
+The composition samples a cryptographically random non-zero broker epoch and
+builds a store-backed, observation-disabled `broker.Registry` (whose single
+`Run` the supervisor owns and joins), the immutable resolver, a
+`daemonmux.EndpointConnector` over `ipc.DialMuxContext`, a bounded `Pool`, the
+idle `Supervisor` (5m default grace), `broker.Authority`, and the
+`brokeripc` listener. A temporary startup lease pins the supervisor open until
+the listener and its accept drain are ready; the drain continuously takes
+admitted sessions without closing them, because each returned service is the
+listener's own connection-scoped session. A signal or parent-context
+cancellation, or the idle grace, shuts down in the fixed order listener ->
+pool -> registry -> store -> log -> owner lock. The foreground process holds a
+reusable lifetime owner lock (`internal/adapters/lifecycle.TryAcquire`) on the
+sandbox runtime directory for its whole run, so a second owner fails closed.
+The optional `idleGrace` field in `config.json` provisions the sandbox's
+effective idle grace as a Go duration string. It is the single deterministic
+source for that grace: `_broker-serve` and `_broker-launcher` refuse an explicit
+`--idle-grace` that conflicts with the provisioned value, because a status probe
+cannot read a running broker's effective grace through the broker IPC protocol.
+When no grace is provisioned, an explicit flag (or the supervisor default)
+applies.
+
+## Broker offline connect-or-spawn and status (Plan 001 P3.4 slice D, not activated)
+
+The hidden `_broker-launcher --offline-root ABS [--idle-grace DURATION]` entry
+point is the intermediate half of a double fork: it validates the sandbox
+configuration (including the idle-grace conflict rule), starts one detached
+`_broker-serve` in a new session, and exits, exactly like the daemon launcher.
+The hidden `_broker-status --offline-root ABS [--ensure] [--timeout DURATION]`
+entry point reports the offline broker's state. Both are excluded from public
+help and change no ordinary command, path, or factory.
+
+Status without `--ensure` is dial-only: it performs one bounded probe of the
+sandbox socket and prints exactly one bounded JSON document,
+`{status, endpoint, epoch, revision, host_count}`, where `endpoint` is the
+broker IPC socket path and the epoch, revision, and host count are zero when the
+broker is offline. A missing socket and a stale socket left by a dead owner are
+both recoverable absence; a foreign path, a live endpoint that fails the broker
+handshake, and a stalled handshake are incompatible and never respawned over.
+`--timeout` is the probe's single absolute bound in dial-only mode, so a caller
+can tighten the probe or rely on the default (10s) and observe the same bound.
+Dial-only status always exits zero, so the JSON is the sole result. `--ensure`
+runs one absolute overall deadline (default 10s): it validates and secures the
+sandbox root exactly as the launcher does before creating the spawn directory or
+taking any lock. On success it prints the ready report and exits zero; on any
+layout, configuration, or startup failure it still prints the offline report but
+exits 3, so the caller always observes one offline JSON document and a distinct
+exit code. The launcher is spawned under the ensure context
+(`exec.CommandContext`), so the overall deadline or a signal bounds a launcher
+that never exits; a launcher that already started the detached `_broker-serve`
+is still safe to kill, because that serve is in its own session and survives.
+
+A foreground `_broker-serve` that hits an unexpected terminal accept failure
+commits the same ordered shutdown as a cancellation, so a socket that can no
+longer admit work is never left bound.
+
+Race safety rests on two descriptor-backed exclusive locks that are never
+stolen by age and whose inodes are never unlinked. Both refuse any lock with
+group or other access and trust an owner-only file whatever its exact owner bit
+pattern, so a lock created under a restrictive umask (normalized to 0600 on
+creation) or by a different tool never wedges startup; a group/other-readable
+path stays refused. The broker lifetime lock
+(`layout.Runtime/lifecycle.lock`) is held by the foreground `_broker-serve` for
+its whole run; only the elected spawner probes it, and only as a liveness hint.
+The spawn-election lock (`layout.Spawn/lifecycle.lock`, a separate private
+directory beneath runtime) elects exactly one status caller to spawn. The
+elected spawner re-dials after winning the lock, then holds the election until
+the endpoint answers a valid broker registration and publishes its initial
+snapshot, or until the deadline expires. A waiter never touches the lifetime
+lock, so it can never briefly steal ownership from the broker it is waiting for,
+and every wait is a bounded retry rather than a sleep loop. If the elected
+spawner dies before readiness, the kernel releases its lock and a waiter takes
+over; a duplicate `_broker-serve` fails its own lifetime acquisition
+nonblocking. Every spawn uses the existing double-fork process pattern, and the
+status probe and launcher inherit only the ambient environment minus the
+performance-trace inputs.
+
+## Broker remote mux helpers (Plan 001 P3.4 slice E, not activated)
+
+The offline broker reaches a remote daemon's private daemonmux carriage over one
+of three explicitly provisioned, bounded routes, and P3.4 slice E adds the
+transport-selecting connector plus three hidden remote helpers. The routing
+schema is strict and immutable: `internal/adapters/brokerconfig` parses a
+registration's `route` as either the original Unix mux path string or an object
+with an explicit kind, and refuses unknown kinds, unknown fields, trailing data,
+and any kind/field mismatch. The bounded `ssh-stdio` and `ssh-quic` variants
+carry an ssh target, an explicit remote argv, and optional trust inputs (a
+known-hosts file and a connect timeout). A route can never carry an identity, a
+policy, a command chosen at request time, or a secret. Identity and policy stay
+authoritative on the registration, and the resolver publishes only an opaque
+bounded route address: a digest of the route's own contents, so the pooling
+layer never carries a target, a path, or an argv word.
+
+`_broker-serve` composes a transport-selecting `daemonmux.EndpointConnector`. Its
+dial function receives only the opaque address, looks the route up in the
+immutable configuration it was built with, and refuses an address the
+configuration did not produce. A `unix` route dials the provisioned private Unix
+mux carriage directly; an `ssh-stdio` route starts one explicit ssh child (built
+with `sshstdio.BuildCommandForMux` and carrying only trust inputs that narrow
+verification, never disabling host-key checking, forcing an auth bypass, or
+requesting a PTY) through `sshstdio.DialMuxContext`; an `ssh-quic` route runs one
+SSH-authenticated QUIC bootstrap, reads exactly one readiness line, and pins the
+freshly minted ephemeral certificate through `quic.DialMuxContext`. One
+caller-supplied setup context bounds bootstrap, pinned dial, and the daemonmux
+physical handshake together; `brokerMuxSetupTimeout` is an independent backstop
+for the broker-side bootstrap readiness wait and the child's kill/reap cleanup,
+so an earlier caller deadline stays authoritative while a helper that never
+prints readiness is still interrupted and reaped within the bound. The captured
+bootstrap stderr sink is read only after that kill and reap, and the sink is
+itself synchronized, so the os/exec copy goroutine never races the diagnostic. A
+successful physical connection detaches from that context and stays pool-owned.
+QUIC credentials are minted fresh per physical
+connection and consumed exactly once, and captured bootstrap stderr is bounded
+and sanitized, so a token, a nonce, or raw remote text never reaches an address,
+a log, or an error.
+
+The three hidden helpers are excluded from public help. `_broker-mux-stdio
+--offline-root ABS` validates the sandbox and bridges its own stdio to the single
+provisioned private Unix daemonmux carriage. `_broker-mux-quic-bootstrap
+--offline-root ABS` validates the sandbox, starts one detached
+`_broker-mux-quic-proxy` in a new session, forwards its single readiness line,
+and exits. `_broker-mux-quic-proxy --offline-root ABS` mints one ephemeral QUIC
+server, admits exactly one authenticated carriage, and bridges it to the same
+private Unix daemonmux carriage. A helper only ever bridges to the configured
+private endpoint: it never starts a broker, an observer, or an ordinary daemon,
+never dials the production daemon socket, and never fabricates a daemon
+incarnation, which the daemon on the far side of the carriage alone owns.
+Ordinary production composition still waits for P7; the helpers change no
+ordinary command, path, or factory.

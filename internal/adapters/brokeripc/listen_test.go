@@ -21,7 +21,7 @@ import (
 // gatedAuthority blocks admission until a test releases it, so a listener Close
 // can race an admission that has already reached the authority.
 type gatedAuthority struct {
-	inner   Authority
+	inner   ports.BrokerAuthority
 	entered chan struct{}
 	gate    chan struct{}
 	once    sync.Once

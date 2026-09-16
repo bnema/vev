@@ -44,6 +44,13 @@ var (
 	// that is not the one assigned at accept. It is refused as stale and never
 	// applied.
 	ErrScopeMismatch = errors.New("brokeripc: frame scope does not match the accepted connection")
+	// ErrRegistrationTimeout reports a client that completed the broker preamble
+	// and admission but did not send its Register within the accept-time
+	// handshake budget. The session is settled, its admitted core service is
+	// closed, and its listener slot is released; context.DeadlineExceeded also
+	// matches it. It is an orderly peer disconnect, so a listener draining its
+	// sessions does not report a clean shutdown as this timeout.
+	ErrRegistrationTimeout = errors.New("brokeripc: broker registration timed out")
 )
 
 // transportFailure classifies one carriage error that ended a connection. A

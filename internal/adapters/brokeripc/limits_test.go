@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
+	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -273,21 +276,26 @@ func (unboundedTransport) Close() error { return nil }
 // never serve.
 func TestServerSessionRejectsInvalidConstruction(t *testing.T) {
 	core := &fakeCore{id: ports.BrokerConnectionID{1}, hub: newSnapshotHub(ports.BrokerSnapshot{}), streams: map[ports.BrokerStreamID]*fakeLogicalConn{}, done: make(chan struct{})}
-	_, err := newServerSession(0, nil, brokerwire.DefaultCeilings(), core, Config{}, nil)
+	_, err := newServerSession(0, nil, brokerwire.DefaultCeilings(), core, Config{}, nil, time.Time{})
 	require.ErrorIs(t, err, ErrConfig)
-	_, err = newServerSession(1, nil, brokerwire.DefaultCeilings(), nil, Config{}, nil)
+	_, err = newServerSession(1, nil, brokerwire.DefaultCeilings(), nil, Config{}, nil, time.Time{})
 	require.ErrorIs(t, err, ErrConfig)
 	require.NoError(t, brokerwire.DefaultCeilings().Validate())
 	require.Error(t, brokerwire.Ceilings{}.Validate())
 }
 
-// TestOrderlyDisconnectClassification proves a peer disconnect and a local close
-// are orderly ends while a protocol violation is not.
+// TestOrderlyDisconnectClassification proves a peer disconnect, a local close,
+// and a peer registration timeout are orderly ends while a protocol violation
+// is not.
 func TestOrderlyDisconnectClassification(t *testing.T) {
 	require.True(t, orderlyDisconnect(nil))
 	require.True(t, orderlyDisconnect(io.EOF))
 	require.True(t, orderlyDisconnect(ErrSessionClosed))
 	require.True(t, orderlyDisconnect(ErrConnectionClosed))
+	require.True(t, orderlyDisconnect(errors.Join(ErrRegistrationTimeout, context.DeadlineExceeded)))
+	require.True(t, orderlyDisconnect(&net.OpError{Op: "read", Net: "unix", Err: syscall.ECONNRESET}))
+	require.True(t, orderlyDisconnect(net.ErrClosed))
+	require.True(t, orderlyDisconnect(fs.ErrClosed))
 	require.False(t, orderlyDisconnect(ErrMalformedFrame))
 	require.False(t, orderlyDisconnect(ErrProtocol))
 }

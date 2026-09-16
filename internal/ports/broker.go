@@ -680,6 +680,24 @@ type BrokerEndpointConnector interface {
 	Connect(ctx context.Context, endpoint BrokerResolvedEndpoint) (BrokerPhysicalConnection, error)
 }
 
+// BrokerAuthority admits one accepted client connection to the broker core
+// and returns the BrokerService scoped to exactly that connection. It is the
+// admission seam between the broker listener adapter and the broker use case:
+// the listener owns the carriage and calls AdmitClient once per accepted
+// connection, the implementation assigns the connection identity, and the
+// returned service owns that connection until Close. The adapter never
+// constructs a broker itself.
+//
+// ctx bounds admission only. It carries the listener's handshake deadline and
+// is canceled as soon as admission returns or when the listener closes, so an
+// implementation must not retain it or start work that outlives admission
+// from it; honoring that cancellation is what lets a listener drop a client
+// parked in admission immediately. The admitted service gets its own
+// connection-lived context and must not derive from this one.
+type BrokerAuthority interface {
+	AdmitClient(ctx context.Context) (BrokerService, error)
+}
+
 // BrokerListener accepts client connections to the per-user broker
 // endpoint. Each Accept returns a BrokerService bound to exactly one
 // accepted client connection: the implementation assigns that

@@ -45,22 +45,31 @@ func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier)
 	if path == "" {
 		return nil, ErrConfig
 	}
-	transport, err := ipc.DialMuxContextWithPeerVerifier(ctx, path, verify)
+	// One deadline bounds the whole setup: the Unix dial, the preamble
+	// exchange, the Register send, and the wait for Registered. Each setup step
+	// closes the carriage when that deadline expires, because a context alone
+	// cannot interrupt blocking framing I/O; that is what stops a peer that
+	// stalls after a successful preamble from parking Dial forever.
+	setup, cancelSetup := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+	defer cancelSetup()
+	transport, err := ipc.DialMuxContextWithPeerVerifier(setup, path, verify)
 	if err != nil {
 		return nil, err
 	}
-	handshake, cancel := context.WithTimeout(ctx, cfg.HandshakeTimeout)
-	defer cancel()
-	ceilings, err := runClientPreamble(handshake, transport, brokerwire.DefaultCeilings())
+	ceilings, err := runClientPreamble(setup, transport, brokerwire.DefaultCeilings())
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
-	scope, err := register(handshake, transport, ceilings)
+	scope, err := register(setup, transport, ceilings)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
 	}
+	// Setup is complete and the carriage is healthy, so the established
+	// connection detaches from the setup deadline: it gets its own
+	// connection-lived context below, and cancelSetup (deferred) only ends an
+	// already-finished setup.
 	conn, err := brokerwire.NewConnection(scope)
 	if err != nil {
 		_ = transport.Close()
@@ -94,7 +103,39 @@ func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier)
 // register completes the broker registration exchange: one Register follows the
 // preamble, and the first server frame must be the Registered answer carrying
 // the scope assigned at accept. Any other first frame is a protocol violation.
+//
+// The wait is bounded by ctx: a peer that stalls after a successful preamble is
+// interrupted by closing the carriage, and the exchange worker is joined before
+// returning, so no setup goroutine is abandoned on the carriage. A Registered
+// observed after ctx expired is not a success.
 func register(ctx context.Context, transport wire.BoundedTransport, ceilings brokerwire.Ceilings) (brokerwire.Scope, error) {
+	type result struct {
+		scope brokerwire.Scope
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		scope, err := exchangeRegister(transport, ceilings)
+		done <- result{scope: scope, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = transport.Close()
+		<-done
+		return brokerwire.Scope{}, ctx.Err()
+	case outcome := <-done:
+		if outcome.err == nil {
+			if err := ctx.Err(); err != nil {
+				return brokerwire.Scope{}, err
+			}
+		}
+		return outcome.scope, outcome.err
+	}
+}
+
+// exchangeRegister runs one Register/Registered round trip on the carriage. It
+// is synchronous: the caller bounds it by closing the carriage on ctx expiry.
+func exchangeRegister(transport wire.BoundedTransport, ceilings brokerwire.Ceilings) (brokerwire.Scope, error) {
 	payload, err := brokerwire.EncodeClient(brokerwire.Register{}, ceilings.MaxReceiveEnvelopeBytes, ceilings.StreamChunkLimit)
 	if err != nil {
 		return brokerwire.Scope{}, err
@@ -117,9 +158,6 @@ func register(ctx context.Context, transport wire.BoundedTransport, ceilings bro
 	scope := brokerwire.Scope{Epoch: registered.Epoch, Connection: registered.Connection}
 	if err := scope.Validate(); err != nil {
 		return brokerwire.Scope{}, errors.Join(ErrProtocol, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return brokerwire.Scope{}, err
 	}
 	return scope, nil
 }

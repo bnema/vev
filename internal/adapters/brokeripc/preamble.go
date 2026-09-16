@@ -21,11 +21,16 @@ import (
 //
 // The preamble envelope is bounded to brokerwire.BrokerPreambleLimit (4 KiB)
 // before allocation, strict-scanned with wire.ScanEnvelope before generated
-// unmarshal, and is never restarted: the caller's context (the configured
-// handshake timeout) bounds the whole exchange.
+// unmarshal, and is never restarted. The caller's context (the configured
+// setup/handshake budget) bounds the whole exchange: a context alone cannot
+// interrupt the blocking carriage I/O, so the client half closes the carriage
+// on expiry to release the worker and joins it before returning.
 
 // runClientPreamble sends the local broker PreambleRequest offer and accepts
 // exactly one PreambleResponse. It returns the effective negotiated ceilings.
+// On ctx expiry it closes the carriage, which interrupts the blocking send or
+// receive, and joins its worker before returning, so a peer that stalls
+// mid-preamble never leaves a setup goroutine parked on the carriage.
 func runClientPreamble(ctx context.Context, transport wire.Transport, offer brokerwire.Ceilings) (brokerwire.Ceilings, error) {
 	if err := offer.Validate(); err != nil {
 		return brokerwire.Ceilings{}, errors.Join(ErrConfig, err)
@@ -69,6 +74,11 @@ func runClientPreamble(ctx context.Context, transport wire.Transport, offer brok
 	}()
 	select {
 	case <-ctx.Done():
+		// A context alone cannot reach a Send or RecvBounded parked on a silent
+		// peer; closing the carriage releases the worker, and draining done
+		// joins it before returning. No setup goroutine outlives the exchange.
+		_ = transport.Close()
+		<-done
 		return brokerwire.Ceilings{}, ctx.Err()
 	case outcome := <-done:
 		return outcome.ceilings, outcome.err

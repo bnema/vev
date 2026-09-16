@@ -40,9 +40,9 @@ func TryAcquire(runtimeDir string) (*Owner, error) {
 	}
 
 	path := Path(runtimeDir)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := openLockFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("lifecycle: opening %s: %w", path, err)
+		return nil, err
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		closeErr := file.Close()
@@ -52,6 +52,56 @@ func TryAcquire(runtimeDir string) (*Owner, error) {
 		return nil, errors.Join(fmt.Errorf("lifecycle: locking %s: %w", path, err), closeErr)
 	}
 	return &Owner{file: file, path: path}, nil
+}
+
+// openLockFile opens the lock inode without following a symlink and refuses to
+// trust anything that is not a regular, owner-only file.
+//
+// O_NOFOLLOW makes a symlinked lock path fail closed with ELOOP instead of
+// flocking the link target, and the fstat check fails closed on a directory,
+// FIFO, device, or a file with group/other access, so a path another user could
+// plant can never become the lifecycle lock. Only group and other access is
+// refused: an owner-only file is trusted regardless of the exact owner bit
+// pattern, so a lock created under a restrictive umask (or normalized by a
+// different tool) is never a permanent, unrecoverable startup failure. A newly
+// created lock is additionally chmodded to 0600 so a permissive umask can never
+// leave group/other bits behind. The failure is reported as an ordinary error,
+// never ErrBusy.
+func openLockFile(path string) (*os.File, error) {
+	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_EXCL|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	created := err == nil
+	if err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			if errors.Is(err, syscall.ELOOP) {
+				return nil, fmt.Errorf("lifecycle: %s is a symlink", path)
+			}
+			return nil, fmt.Errorf("lifecycle: opening %s: %w", path, err)
+		}
+		fd, err = syscall.Open(path, syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			if errors.Is(err, syscall.ELOOP) {
+				return nil, fmt.Errorf("lifecycle: %s is a symlink", path)
+			}
+			return nil, fmt.Errorf("lifecycle: opening %s: %w", path, err)
+		}
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if created {
+		if err := syscall.Fchmod(fd, 0o600); err != nil {
+			return nil, errors.Join(fmt.Errorf("lifecycle: chmod %s: %w", path, err), file.Close())
+		}
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("lifecycle: stat %s: %w", path, err), file.Close())
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.Join(fmt.Errorf("lifecycle: %s is not a regular file", path), file.Close())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.Join(fmt.Errorf("lifecycle: %s has permissions %04o, want owner-only", path, info.Mode().Perm()), file.Close())
+	}
+	return file, nil
 }
 
 // Acquire waits until lifecycle ownership is available or ctx is cancelled.

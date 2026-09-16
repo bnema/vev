@@ -244,6 +244,30 @@ func TestCatalogueFailureDoesNotListen(t *testing.T) {
 	}
 }
 
+// TestLifecycleOwnershipAcceptsOwnerOnlyVariantLock is the production-daemon
+// regression for the relaxed lock-permission rule: a pre-existing lock written
+// with an owner-only mode other than 0600 must still let the daemon start, while
+// group/other access stays refused (covered by the lifecycle unit tests).
+func TestLifecycleOwnershipAcceptsOwnerOnlyVariantLock(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, safedir.EnsurePrivate(runtimeDir))
+	require.NoError(t, os.WriteFile(lifecycle.Path(runtimeDir), nil, 0o600))
+	require.NoError(t, os.Chmod(lifecycle.Path(runtimeDir), 0o700))
+
+	started := false
+	err := runWithLifecycleOwner(context.Background(), runtimeDir, stateDir, func(context.Context) error {
+		started = true
+		return nil
+	})
+	require.NoError(t, err, "an owner-only variant lock must not block production daemon startup")
+	require.True(t, started)
+
+	owner, err := lifecycle.TryAcquire(runtimeDir)
+	require.NoError(t, err, "lifecycle ownership must be released after startup")
+	require.NoError(t, owner.Release())
+}
+
 func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
 	var events []string
 	_, _, err := constructDaemonBeforeSocketPublication(

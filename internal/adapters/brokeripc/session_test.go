@@ -30,7 +30,7 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 	for burst := 0; burst < bursts; burst++ {
 		transport := newRecordingTransport()
 		core := newTestCore(epoch)
-		session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {})
+		session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
 		require.NoError(t, err)
 		require.NoError(t, session.conn.Register())
 
@@ -71,7 +71,7 @@ func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x52)
 	transport := newRecordingTransport()
 	core := newTestCore(epoch)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {})
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	require.NoError(t, session.conn.Register())
 	t.Cleanup(func() { session.shutdown() })
@@ -103,7 +103,7 @@ func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 	const epoch = ports.BrokerEpoch(0x53)
 	transport := newRecordingTransport()
 	core := newTestCore(epoch)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {})
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() {}, time.Time{})
 	require.NoError(t, err)
 	t.Cleanup(func() { session.shutdown() })
 

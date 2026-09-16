@@ -84,7 +84,7 @@ func TestProtocolViolationWithParkedStreamWriterReleasesSession(t *testing.T) {
 	require.True(t, ok, "the IPC carriage must be a bounded transport")
 	core := newTestCore(epoch)
 	released := make(chan struct{}, 1)
-	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() { released <- struct{}{} })
+	session, err := newServerSession(epoch, transport, brokerwire.DefaultCeilings(), core, Config{}, func() { released <- struct{}{} }, time.Time{})
 	require.NoError(t, err)
 
 	// The peer's Register already happened; the duplicate Register below is the

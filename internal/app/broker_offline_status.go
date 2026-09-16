@@ -1,0 +1,674 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"os"
+	"os/exec"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/bnema/vev/internal/adapters/brokerconfig"
+	"github.com/bnema/vev/internal/adapters/brokeripc"
+	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"github.com/bnema/vev/internal/platform"
+	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
+)
+
+// Detached connect-or-spawn and status (Plan 001 P3.4 slice D).
+//
+// `_broker-launcher` is the intermediate half of a double fork: it starts one
+// hidden `_broker-serve` in a new session and exits immediately, exactly like
+// the daemon launcher, so the broker is reparented before the status caller
+// continues. `_broker-status` is the client-facing probe: without --ensure it
+// is dial-only and renders the observable state, and with --ensure it
+// coordinates a race-safe connect-or-spawn.
+//
+// Both commands are hidden from public help and change no ordinary command,
+// path, or factory. They operate only inside the operator-supplied offline
+// root; a root that overlaps the production runtime or state directories is
+// refused before anything is created.
+//
+// Race safety rests on two exclusive descriptor-backed locks that are never
+// stolen by age and whose inodes are never unlinked:
+//
+//   - the broker lifetime lock (`layout.Runtime/lifecycle.lock`) is held by the
+//     foreground `_broker-serve` for its whole run; a status probe uses it only
+//     to detect that a broker already owns the sandbox and therefore must not
+//     be duplicated.
+//   - the spawn-election lock (`layout.Spawn/lifecycle.lock`) elects exactly
+//     one status caller to spawn. Holding it across the readiness wait keeps
+//     late callers waiting on the winner instead of racing a second spawn; if
+//     the winner dies, the kernel releases the lock, so a waiter can take over
+//     without ever unlinking or age-stealing the lock file.
+//
+// The elected spawner holds the election until the endpoint answers a valid
+// broker registration and publishes its initial snapshot, or until the one
+// absolute overall deadline expires. A live-but-incompatible endpoint and a
+// stalled handshake are diagnosed without spawning.
+
+const (
+	// brokerLauncherCommand is the hidden intermediate that starts one detached
+	// `_broker-serve` and exits.
+	brokerLauncherCommand = "_broker-launcher"
+	// brokerStatusCommand is the hidden broker status probe.
+	brokerStatusCommand = "_broker-status"
+)
+
+// Bounds for the detached connect-or-spawn path. Every wait is bounded by the
+// one absolute overall deadline, and the first dial is bounded on its own so a
+// stalled endpoint cannot consume the whole budget before classification.
+const (
+	brokerStatusDefaultTimeout = 10 * time.Second
+	brokerStatusProbeBudget    = 2 * time.Second
+	brokerStatusInitialBackoff = 5 * time.Millisecond
+	brokerStatusMaxBackoff     = 50 * time.Millisecond
+	brokerStatusMaxReportBytes = 4 << 10
+)
+
+var (
+	// errBrokerAbsent reports that no broker is bound at the endpoint, so a
+	// spawn may recover it. A missing socket and a stale socket left by a dead
+	// owner are both absence.
+	errBrokerAbsent = errors.New("vev: broker endpoint is absent")
+	// errBrokerIncompatible reports that the endpoint exists but is not a
+	// compatible broker (a foreign path, a live endpoint that fails the broker
+	// handshake, or a handshake that stalls past its bound). It is never an
+	// invitation to spawn.
+	errBrokerIncompatible = errors.New("vev: broker endpoint is not a compatible broker")
+	// errBrokerNotReady reports that --ensure did not observe a ready broker
+	// before the overall deadline.
+	errBrokerNotReady = errors.New("vev: broker did not become ready")
+)
+
+// brokerLauncherOptions is the parsed `_broker-launcher` invocation.
+type brokerLauncherOptions struct {
+	offlineRoot string
+	idleGrace   time.Duration
+}
+
+// brokerStatusOptions is the parsed `_broker-status` invocation.
+type brokerStatusOptions struct {
+	offlineRoot string
+	ensure      bool
+	timeout     time.Duration
+}
+
+// brokerStatusReport is the bounded JSON status document. It carries exactly
+// the ready/offline state, the broker endpoint, and the broker's epoch,
+// revision, and host count. Epoch, revision, and host count are zero when the
+// broker is offline.
+type brokerStatusReport struct {
+	Status    string               `json:"status"`
+	Endpoint  string               `json:"endpoint"`
+	Epoch     ports.BrokerEpoch    `json:"epoch"`
+	Revision  ports.BrokerRevision `json:"revision"`
+	HostCount int                  `json:"host_count"`
+}
+
+// brokerStatusLock is one held exclusive election lock.
+type brokerStatusLock interface {
+	Release() error
+}
+
+// brokerStatusDeps are the injectable seams of `_broker-status`. Every seam has
+// a production default; tests substitute them to drive the election, deadline,
+// and classification deterministically.
+type brokerStatusDeps struct {
+	now             func() time.Time
+	wait            func(context.Context, time.Duration) error
+	probe           func(context.Context, string) (brokerStatusReport, error)
+	acquireElection func(string) (brokerStatusLock, error)
+	lifetimeOwner   func(string) (bool, error)
+	spawn           func(ctx context.Context, root string, grace time.Duration, graceSet bool) error
+	stdout          io.Writer
+}
+
+// defaultBrokerStatusDeps returns the production seams.
+func defaultBrokerStatusDeps() brokerStatusDeps {
+	return brokerStatusDeps{
+		now:   time.Now,
+		wait:  waitBackoff,
+		probe: probeBrokerStatus,
+		acquireElection: func(dir string) (brokerStatusLock, error) {
+			return lifecycle.TryAcquire(dir)
+		},
+		lifetimeOwner: func(runtimeDir string) (bool, error) {
+			owner, err := lifecycle.TryAcquire(runtimeDir)
+			if err != nil {
+				if errors.Is(err, lifecycle.ErrBusy) {
+					return true, nil
+				}
+				return false, err
+			}
+			return false, owner.Release()
+		},
+		spawn:  spawnBrokerLauncher,
+		stdout: os.Stdout,
+	}
+}
+
+// parseBrokerLauncherArgs strictly parses
+// `_broker-launcher --offline-root ABS [--idle-grace DURATION]`. Unknown flags,
+// duplicate flags, positionals, and non-positive durations are refused.
+func parseBrokerLauncherArgs(args []string) (command, error) {
+	var options brokerLauncherOptions
+	var seenRoot, seenGrace bool
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--offline-root":
+			if seenRoot {
+				return command{}, usagef("`%s` received duplicate --offline-root", brokerLauncherCommand)
+			}
+			if index+1 >= len(args) || args[index+1] == "" {
+				return command{}, usagef("`--offline-root` requires a path")
+			}
+			options.offlineRoot = args[index+1]
+			seenRoot = true
+			index++
+		case "--idle-grace":
+			if seenGrace {
+				return command{}, usagef("`%s` received duplicate --idle-grace", brokerLauncherCommand)
+			}
+			if index+1 >= len(args) || args[index+1] == "" {
+				return command{}, usagef("`--idle-grace` requires a duration")
+			}
+			grace, err := time.ParseDuration(args[index+1])
+			if err != nil {
+				return command{}, usagef("`--idle-grace` %q is not a duration", args[index+1])
+			}
+			if grace <= 0 {
+				return command{}, usagef("`--idle-grace` must be positive")
+			}
+			options.idleGrace = grace
+			seenGrace = true
+			index++
+		default:
+			if strings.HasPrefix(args[index], "-") {
+				return command{}, usagef("unknown flag %q for `%s`", args[index], brokerLauncherCommand)
+			}
+			return command{}, usagef("`%s` does not accept positional arguments", brokerLauncherCommand)
+		}
+	}
+	if options.offlineRoot == "" {
+		return command{}, usagef("`%s` requires --offline-root", brokerLauncherCommand)
+	}
+	return command{kind: kindBrokerLauncher, brokerLauncher: options}, nil
+}
+
+// parseBrokerStatusArgs strictly parses
+// `_broker-status --offline-root ABS [--ensure] [--timeout DURATION]`. Unknown
+// flags, duplicate flags, positionals, and non-positive timeouts are refused.
+func parseBrokerStatusArgs(args []string) (command, error) {
+	options := brokerStatusOptions{timeout: brokerStatusDefaultTimeout}
+	var seenRoot, seenEnsure, seenTimeout bool
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--offline-root":
+			if seenRoot {
+				return command{}, usagef("`%s` received duplicate --offline-root", brokerStatusCommand)
+			}
+			if index+1 >= len(args) || args[index+1] == "" {
+				return command{}, usagef("`--offline-root` requires a path")
+			}
+			options.offlineRoot = args[index+1]
+			seenRoot = true
+			index++
+		case "--ensure":
+			if seenEnsure {
+				return command{}, usagef("`%s` received duplicate --ensure", brokerStatusCommand)
+			}
+			options.ensure = true
+			seenEnsure = true
+		case "--timeout":
+			if seenTimeout {
+				return command{}, usagef("`%s` received duplicate --timeout", brokerStatusCommand)
+			}
+			if index+1 >= len(args) || args[index+1] == "" {
+				return command{}, usagef("`--timeout` requires a duration")
+			}
+			timeout, err := time.ParseDuration(args[index+1])
+			if err != nil {
+				return command{}, usagef("`--timeout` %q is not a duration", args[index+1])
+			}
+			if timeout <= 0 {
+				return command{}, usagef("`--timeout` must be positive")
+			}
+			options.timeout = timeout
+			seenTimeout = true
+			index++
+		default:
+			if strings.HasPrefix(args[index], "-") {
+				return command{}, usagef("unknown flag %q for `%s`", args[index], brokerStatusCommand)
+			}
+			return command{}, usagef("`%s` does not accept positional arguments", brokerStatusCommand)
+		}
+	}
+	if options.offlineRoot == "" {
+		return command{}, usagef("`%s` requires --offline-root", brokerStatusCommand)
+	}
+	return command{kind: kindBrokerStatus, brokerStatus: options}, nil
+}
+
+// runBrokerLauncherCommand runs the hidden launcher. It changes no ordinary
+// command and never runs in production flows.
+func runBrokerLauncherCommand(_ context.Context, options brokerLauncherOptions) error {
+	return runBrokerLauncher(options)
+}
+
+// runBrokerLauncher validates the sandbox configuration, diagnoses an explicit
+// idle grace that conflicts with the provisioned one, then starts one detached
+// `_broker-serve` in a new session and returns.
+func runBrokerLauncher(options brokerLauncherOptions) error {
+	layout, err := offlineLayout(options.offlineRoot)
+	if err != nil {
+		return err
+	}
+	if err := safedir.EnsurePrivate(layout.Root); err != nil {
+		return fmt.Errorf("vev: secure broker sandbox root: %w", err)
+	}
+	config, err := brokerconfig.Load(layout)
+	if err != nil {
+		return err
+	}
+	grace, err := effectiveIdleGrace(config, options.idleGrace)
+	if err != nil {
+		return err
+	}
+	args := []string{brokerServeCommand, "--offline-root", options.offlineRoot}
+	if grace > 0 {
+		args = append(args, "--idle-grace", grace.String())
+	}
+	return startDetachedBrokerServe(args)
+}
+
+// startDetachedBrokerServe starts one `_broker-serve` in a new session and
+// releases it, so the broker outlives the short-lived launcher. It mirrors the
+// daemon launcher's double-fork boundary: no ambient variable is dropped beyond
+// the performance-trace inputs, stdio is /dev/null, and the process is
+// reparented immediately.
+func startDetachedBrokerServe(args []string) error {
+	exePath, err := selfExePath()
+	if err != nil {
+		return fmt.Errorf("vev: resolving executable path: %w", err)
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("vev: opening %s: %w", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	cmd := exec.Command(exePath, args...)
+	cmd.Env = withoutPerformanceTraceEnv(os.Environ())
+	cmd.Dir = platform.DirOrHome("")
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("vev: starting detached broker: %w", err)
+	}
+	return cmd.Process.Release()
+}
+
+// spawnBrokerLauncher runs the hidden launcher, bounded by ctx, and waits for
+// it to exit, so the broker has been reparented before the caller retries the
+// endpoint. exec.CommandContext is deliberate: the overall status deadline or a
+// signal kills a launcher that is still waiting, while killing the launcher
+// after it has started the detached `_broker-serve` does not touch that serve --
+// it is in its own session and was released, so it survives.
+func spawnBrokerLauncher(ctx context.Context, root string, grace time.Duration, graceSet bool) error {
+	exePath, err := selfExePath()
+	if err != nil {
+		return fmt.Errorf("vev: resolving executable path: %w", err)
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("vev: opening %s: %w", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	args := []string{brokerLauncherCommand, "--offline-root", root}
+	if graceSet {
+		args = append(args, "--idle-grace", grace.String())
+	}
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, exePath, args...)
+	cmd.Env = withoutPerformanceTraceEnv(os.Environ())
+	cmd.Dir = platform.DirOrHome("")
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := bytes.TrimSpace(stderr.Bytes()); len(detail) > 0 {
+			return fmt.Errorf("vev: launching broker: %w: %s", err, detail)
+		}
+		return fmt.Errorf("vev: launching broker: %w", err)
+	}
+	return nil
+}
+
+// runBrokerStatusCommand runs the hidden status probe, bounded by a signal-aware
+// parent context.
+func runBrokerStatusCommand(ctx context.Context, options brokerStatusOptions) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runBrokerStatus(ctx, options, defaultBrokerStatusDeps())
+}
+
+// runBrokerStatus renders the broker status as one bounded JSON document.
+//
+// Without --ensure it is dial-only: it performs one probe bounded by
+// --timeout and always succeeds, reporting ready or offline, so the JSON is the
+// sole result and a caller never has to interpret an exit code to read a state.
+// The timeout is the single absolute probe bound; it is never silently replaced
+// by the ensure probe budget, so a caller can tighten it (or rely on the
+// default) and observe the same bound. With --ensure it uses one absolute
+// overall deadline; on success it prints the ready report and
+// returns nil, and on any layout, configuration, or startup failure it still
+// prints the offline report but returns a code-3 error so the caller always
+// observes one offline JSON document and a distinct exit code.
+func runBrokerStatus(ctx context.Context, options brokerStatusOptions, deps brokerStatusDeps) error {
+	layout, err := offlineLayout(options.offlineRoot)
+	if err != nil {
+		if options.ensure {
+			return ensureOfflineFailure(deps.stdout, brokerStatusReport{Status: "offline"}, err)
+		}
+		return err
+	}
+	socketPath := brokeripc.SocketPath(layout.Runtime)
+	offline := brokerStatusReport{Status: "offline", Endpoint: socketPath}
+
+	if !options.ensure {
+		probeCtx, cancel := context.WithTimeout(ctx, options.timeout)
+		defer cancel()
+		report, err := deps.probe(probeCtx, socketPath)
+		if err != nil {
+			// Dial-only renders the observable state: absence and an
+			// incompatible live endpoint both read as offline.
+			return writeBrokerStatusReport(deps.stdout, offline)
+		}
+		return writeBrokerStatusReport(deps.stdout, report)
+	}
+
+	// Validate and secure the sandbox root exactly as the launcher does before
+	// the spawn directory is created or any lock is taken, so status --ensure can
+	// never operate on paths the launcher would refuse.
+	if err := safedir.EnsurePrivate(layout.Root); err != nil {
+		return ensureOfflineFailure(deps.stdout, offline, fmt.Errorf("vev: secure broker sandbox root: %w", err))
+	}
+	config, err := brokerconfig.Load(layout)
+	if err != nil {
+		return ensureOfflineFailure(deps.stdout, offline, err)
+	}
+	grace, graceSet := config.IdleGrace()
+
+	deadline := deps.now().Add(options.timeout)
+	report, err := ensureBrokerReady(ctx, brokerStatusRequest{
+		layout:     layout,
+		socketPath: socketPath,
+		deadline:   deadline,
+		timeout:    options.timeout,
+		root:       options.offlineRoot,
+		grace:      grace,
+		graceSet:   graceSet,
+	}, deps)
+	if err != nil {
+		return ensureOfflineFailure(deps.stdout, offline, err)
+	}
+	return writeBrokerStatusReport(deps.stdout, report)
+}
+
+// ensureOfflineFailure renders one offline report and returns the ensure failure
+// wrapped in exit code 3, so a layout, configuration, or startup failure always
+// leaves the caller with the offline JSON document and a distinct exit code.
+func ensureOfflineFailure(stdout io.Writer, offline brokerStatusReport, err error) error {
+	if writeErr := writeBrokerStatusReport(stdout, offline); writeErr != nil {
+		return errors.Join(err, writeErr)
+	}
+	return &exitCoded{code: 3, err: err}
+}
+
+// brokerStatusRequest carries one ensure run's fixed inputs.
+type brokerStatusRequest struct {
+	layout     brokerconfig.Layout
+	socketPath string
+	deadline   time.Time
+	timeout    time.Duration
+	root       string
+	grace      time.Duration
+	graceSet   bool
+}
+
+// ensureBrokerReady connects to an already-ready broker or elects one spawner
+// and holds the election until the endpoint answers a valid broker registration
+// and publishes its initial snapshot, or until the absolute deadline expires.
+func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps brokerStatusDeps) (brokerStatusReport, error) {
+	ctx, cancel := context.WithDeadline(ctx, req.deadline)
+	defer cancel()
+
+	// Secure the sandbox paths before any lock is taken: the spawn-election
+	// directory lives beneath the runtime directory, and both must be private
+	// and symlink-free before they can hold an exclusive lock.
+	if err := safedir.EnsurePrivate(req.layout.Spawn); err != nil {
+		return brokerStatusReport{}, fmt.Errorf("vev: secure broker sandbox spawn directory: %w", err)
+	}
+	if err := req.layout.VerifyCreated(); err != nil {
+		return brokerStatusReport{}, fmt.Errorf("vev: verify broker sandbox paths: %w", err)
+	}
+
+	var held brokerStatusLock
+	defer func() {
+		if held != nil {
+			_ = held.Release()
+		}
+	}()
+	spawned := false
+	backoff := brokerStatusInitialBackoff
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return brokerStatusReport{}, err
+		}
+		if !deps.now().Before(req.deadline) {
+			return brokerStatusReport{}, fmt.Errorf("%w: endpoint %s did not answer Register within %s", errBrokerNotReady, req.socketPath, req.timeout)
+		}
+		report, err := probeWithin(ctx, deps, req.socketPath, req.deadline)
+		if err == nil {
+			return report, nil
+		}
+		if ctx.Err() != nil {
+			return brokerStatusReport{}, ctx.Err()
+		}
+		// A probe that finished after the deadline is a bounded failure, never
+		// an absence that would justify one more spawn.
+		if !deps.now().Before(req.deadline) {
+			return brokerStatusReport{}, fmt.Errorf("%w: endpoint %s did not answer Register within %s", errBrokerNotReady, req.socketPath, req.timeout)
+		}
+		if !errors.Is(err, errBrokerAbsent) {
+			return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w", req.socketPath, err)
+		}
+
+		if held == nil {
+			lock, err := deps.acquireElection(req.layout.Spawn)
+			switch {
+			case err == nil:
+				held = lock
+				// Re-dial after winning the election: the previous holder may
+				// already have published readiness.
+				report, err := probeWithin(ctx, deps, req.socketPath, req.deadline)
+				if err == nil {
+					return report, nil
+				}
+				if ctx.Err() != nil {
+					return brokerStatusReport{}, ctx.Err()
+				}
+				if !errors.Is(err, errBrokerAbsent) {
+					return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w", req.socketPath, err)
+				}
+			case errors.Is(err, lifecycle.ErrBusy):
+				// Another caller is elected and spawning. Only the elected
+				// spawner ever probes the broker lifetime lock, so a waiter can
+				// never briefly steal ownership from the broker it is waiting for.
+				if err := deps.wait(ctx, backoff); err != nil {
+					return brokerStatusReport{}, err
+				}
+				backoff *= 2
+				if backoff > brokerStatusMaxBackoff {
+					backoff = brokerStatusMaxBackoff
+				}
+				continue
+			default:
+				return brokerStatusReport{}, fmt.Errorf("vev: elect broker spawner: %w", err)
+			}
+		}
+		if held != nil && !spawned {
+			busy, err := deps.lifetimeOwner(req.layout.Runtime)
+			if err != nil {
+				return brokerStatusReport{}, fmt.Errorf("vev: inspect broker lifetime owner: %w", err)
+			}
+			if !busy {
+				if err := deps.spawn(ctx, req.root, req.grace, req.graceSet); err != nil {
+					return brokerStatusReport{}, err
+				}
+				spawned = true
+			}
+		}
+
+		if err := deps.wait(ctx, backoff); err != nil {
+			return brokerStatusReport{}, err
+		}
+		backoff *= 2
+		if backoff > brokerStatusMaxBackoff {
+			backoff = brokerStatusMaxBackoff
+		}
+	}
+}
+
+// probeWithin bounds one probe by the smaller of the probe budget and the
+// remaining overall time.
+func probeWithin(ctx context.Context, deps brokerStatusDeps, socketPath string, deadline time.Time) (brokerStatusReport, error) {
+	budget := brokerStatusProbeBudget
+	if remaining := deadline.Sub(deps.now()); remaining < budget {
+		budget = remaining
+	}
+	if budget <= 0 {
+		return brokerStatusReport{}, context.DeadlineExceeded
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	return deps.probe(probeCtx, socketPath)
+}
+
+// probeBrokerStatus is the production probe: it classifies endpoint absence
+// first, dials with the bounded broker setup, then waits for the broker to
+// register the connection and publish its initial snapshot.
+func probeBrokerStatus(ctx context.Context, socketPath string) (brokerStatusReport, error) {
+	info, err := os.Lstat(socketPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return brokerStatusReport{}, absentError(socketPath)
+	case err != nil:
+		return brokerStatusReport{}, fmt.Errorf("vev: inspect broker endpoint %s: %w", socketPath, err)
+	case info.Mode()&os.ModeSocket == 0:
+		return brokerStatusReport{}, incompatibleError(socketPath, errors.New("path is not a Unix socket"))
+	}
+
+	service, err := brokeripc.Dial(ctx, socketPath, brokeripc.Config{})
+	if err != nil {
+		if backendAbsent(err) {
+			return brokerStatusReport{}, absentError(socketPath)
+		}
+		if ctx.Err() != nil {
+			return brokerStatusReport{}, ctx.Err()
+		}
+		// The endpoint may have retired between the stat and the dial; re-check
+		// so a broker that just shut down is classified as absent, not as an
+		// incompatible endpoint that must never be respawned.
+		if _, statErr := os.Lstat(socketPath); errors.Is(statErr, fs.ErrNotExist) {
+			return brokerStatusReport{}, absentError(socketPath)
+		}
+		return brokerStatusReport{}, incompatibleError(socketPath, err)
+	}
+	defer func() { _ = service.Close() }()
+
+	sub, err := service.Subscribe()
+	if err != nil {
+		return brokerStatusReport{}, incompatibleError(socketPath, err)
+	}
+	defer sub.Close()
+	changed := sub.Changed()
+	for {
+		if snapshot := service.Snapshot(); snapshot.Revision != 0 {
+			return readyBrokerStatus(socketPath, snapshot), nil
+		}
+		select {
+		case <-ctx.Done():
+			return brokerStatusReport{}, ctx.Err()
+		case _, ok := <-changed:
+			if ok {
+				continue
+			}
+			if snapshot := service.Snapshot(); snapshot.Revision != 0 {
+				return readyBrokerStatus(socketPath, snapshot), nil
+			}
+			return brokerStatusReport{}, incompatibleError(socketPath, errors.New("connection ended before the initial snapshot"))
+		}
+	}
+}
+
+// readyBrokerStatus projects one committed snapshot into the ready report.
+func readyBrokerStatus(socketPath string, snapshot ports.BrokerSnapshot) brokerStatusReport {
+	return brokerStatusReport{
+		Status:    "ready",
+		Endpoint:  socketPath,
+		Epoch:     snapshot.Epoch,
+		Revision:  snapshot.Revision,
+		HostCount: len(snapshot.Hosts),
+	}
+}
+
+// backendAbsent reports whether one dial failure means no broker is bound:
+// a missing socket or a stale socket whose dead owner left the pathname behind.
+// Any other dial failure is a live endpoint that must not be respawned.
+func backendAbsent(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// absentError wraps one recoverable-absence diagnosis.
+func absentError(socketPath string) error {
+	return fmt.Errorf("%w: %s", errBrokerAbsent, socketPath)
+}
+
+// incompatibleError wraps one live-but-incompatible diagnosis.
+func incompatibleError(socketPath string, cause error) error {
+	return fmt.Errorf("%w: %s: %w", errBrokerIncompatible, socketPath, cause)
+}
+
+// writeBrokerStatusReport writes exactly one bounded JSON document.
+func writeBrokerStatusReport(w io.Writer, report brokerStatusReport) error {
+	data, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("vev: encode broker status: %w", err)
+	}
+	if len(data) > brokerStatusMaxReportBytes {
+		return errors.New("vev: broker status report exceeds the bound")
+	}
+	if _, err := w.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("vev: write broker status: %w", err)
+	}
+	return nil
+}

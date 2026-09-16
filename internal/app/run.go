@@ -74,6 +74,12 @@ const (
 	kindWebDaemon
 	kindWebRenew
 	kindWebServe
+	kindBrokerServe
+	kindBrokerLauncher
+	kindBrokerStatus
+	kindBrokerMuxStdio
+	kindBrokerMuxQUICBootstrap
+	kindBrokerMuxQUICProxy
 	kindHelp
 	kindVersion
 )
@@ -92,6 +98,10 @@ type command struct {
 	killAll              bool
 	killDaemon           bool
 	cmd                  cmdInvocation
+	brokerServe          brokerServeOptions
+	brokerLauncher       brokerLauncherOptions
+	brokerStatus         brokerStatusOptions
+	brokerMux            brokerMuxOptions
 	remotePreviewPayload string
 	uiDriver             uiDriverOptions
 	uiObserve            bool
@@ -230,6 +240,18 @@ parsedUIFlags:
 		return command{kind: kindDaemon}, nil
 	case "--daemon-launcher":
 		return command{kind: kindDaemonLauncher}, nil
+	case brokerServeCommand:
+		return parseBrokerServeArgs(args[1:])
+	case brokerLauncherCommand:
+		return parseBrokerLauncherArgs(args[1:])
+	case brokerStatusCommand:
+		return parseBrokerStatusArgs(args[1:])
+	case brokerMuxStdioCommand:
+		return parseBrokerMuxArgs(brokerMuxStdioCommand, kindBrokerMuxStdio, args[1:])
+	case brokerMuxQUICBootstrapCommand:
+		return parseBrokerMuxArgs(brokerMuxQUICBootstrapCommand, kindBrokerMuxQUICBootstrap, args[1:])
+	case brokerMuxQUICProxyCommand:
+		return parseBrokerMuxArgs(brokerMuxQUICProxyCommand, kindBrokerMuxQUICProxy, args[1:])
 	case "_stdio":
 		if len(args) != 1 {
 			return command{}, usagef("`_stdio` does not accept a session name")
@@ -354,6 +376,18 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runDaemon()
 	case kindDaemonLauncher:
 		return runDaemonLauncher()
+	case kindBrokerServe:
+		return runBrokerServeCommand(ctx, cmd.brokerServe)
+	case kindBrokerLauncher:
+		return runBrokerLauncherCommand(ctx, cmd.brokerLauncher)
+	case kindBrokerStatus:
+		return runBrokerStatusCommand(ctx, cmd.brokerStatus)
+	case kindBrokerMuxStdio:
+		return runBrokerMuxStdioCommand(ctx, cmd.brokerMux)
+	case kindBrokerMuxQUICBootstrap:
+		return runBrokerMuxQUICBootstrapCommand(ctx, cmd.brokerMux)
+	case kindBrokerMuxQUICProxy:
+		return runBrokerMuxQUICProxyCommand(ctx, cmd.brokerMux)
 	case kindStdio:
 		return runStdio(ctx)
 	case kindQUICBootstrap:

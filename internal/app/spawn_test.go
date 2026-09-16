@@ -31,6 +31,27 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// The hidden offline broker commands are re-executed through this test
+	// binary, so a broker test can exercise the real dispatch path in a real
+	// subprocess. The helper env var keeps that interception out of ordinary
+	// runs.
+	if len(os.Args) >= 2 && os.Getenv(brokerHelperEnv) == "1" {
+		switch os.Args[1] {
+		case brokerServeCommand, brokerLauncherCommand, brokerStatusCommand,
+			brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand:
+			recordBrokerHelperProcess(os.Args[1])
+			if os.Args[1] == brokerLauncherCommand {
+				if record := os.Getenv(brokerLauncherBlockRecordEnv); record != "" {
+					blockBrokerLauncherHelper(record, os.Getenv(brokerLauncherBlockReleaseEnv))
+				}
+			}
+			if err := Run(os.Args[1:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(ExitCode(err))
+			}
+			os.Exit(0)
+		}
+	}
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--daemon-launcher":
@@ -191,6 +212,27 @@ func writeProcessRecord(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// blockBrokerLauncherHelper is a controlled, blocking launcher: it records its
+// PID and waits for the release marker (or a bounded fallback) so a test can
+// hold a launcher open and prove the spawn wait is bounded by its context.
+func blockBrokerLauncherHelper(record, release string) {
+	if err := writeProcessRecord(record); err != nil {
+		os.Exit(2)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		_, statErr := os.Stat(release)
+		if statErr == nil {
+			break
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			os.Exit(2)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	os.Exit(0)
 }
 
 func terminateProcessFromFile(path string) error {
