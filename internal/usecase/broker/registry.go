@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -44,9 +45,20 @@ type Registry struct {
 	log   *slog.Logger
 	store *snapshotWriter
 
+	// hostStore and authority are the synchronous membership owner. Only this
+	// registry may mutate the store while it is live; the caller owns Close.
+	hostStore ports.BrokerHostStore
+	authority ports.BrokerHosts // guarded by mu; independent of publication revision
+
 	current  atomic.Pointer[ports.BrokerSnapshot]
 	mu       sync.Mutex
 	revision ports.BrokerRevision
+	// revisionExhausted records that this epoch consumed its entire revision
+	// series. The registry then fails closed: the last valid snapshot stays
+	// published, nothing is written to the store, and every mutation path
+	// reports ports.ErrBrokerRevisionExhausted instead of wrapping the series to
+	// zero or below the newest revision.
+	revisionExhausted bool
 	// attempts is the registry-wide monotonic attempt token source. Every
 	// started observation claims one token, and only the token currently
 	// recorded as in flight may complete. Tokens are never reused, so a stale
@@ -73,8 +85,16 @@ type Registry struct {
 }
 
 // NewRegistry restores a validated durable snapshot under a fresh broker epoch.
-func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerSnapshotStore, probe ports.BrokerHostProbe, clock ports.Clock, log *slog.Logger) (*Registry, error) {
-	if epoch == 0 || probe == nil || clock == nil {
+// The store owns durable membership as well as the advisory snapshot, so
+// BrokerHostStore is required explicitly: a store that cannot answer
+// LoadHosts is not a broker host store, and an optional assertion would let a
+// caller silently run the registry without authoritative membership. A nil
+// store is refused by the dependency guard, including a typed nil hidden
+// behind the interface. Until Run returns, callers must not mutate the store
+// outside Registry.ReplaceHosts. The caller closes the store after the registry
+// has stopped and flushed its advisory writer.
+func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock ports.Clock, log *slog.Logger) (*Registry, error) {
+	if epoch == 0 || nilDependency(store) || nilDependency(probe) || nilDependency(clock) {
 		return nil, errors.New("broker: invalid registry dependencies")
 	}
 	if log == nil {
@@ -88,18 +108,66 @@ func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerSnapshotStore, probe
 		freshFor: defaultFreshFor, retryBase: defaultRetryBase, retryMax: defaultRetryLimit,
 		jitter: jittered,
 	}
-	if store != nil {
-		r.store = newSnapshotWriter(store, log)
-		snapshot, err := store.Load()
-		if err != nil {
-			return nil, err
-		}
-		if err := r.restore(snapshot); err != nil {
-			return nil, err
-		}
+	r.store = newSnapshotWriter(store, log)
+	snapshot, err := store.Load()
+	if err != nil {
+		return nil, err
 	}
+	if err := r.restore(snapshot); err != nil {
+		return nil, err
+	}
+	hosts, err := store.LoadHosts()
+	if err != nil {
+		return nil, err
+	}
+	if err := r.projectMembership(hosts); err != nil {
+		return nil, err
+	}
+	r.hostStore = store
+	r.authority = ports.BrokerHosts{Revision: hosts.Revision, Hosts: append([]ports.BrokerHostRecord(nil), hosts.Hosts...)}
 	r.publishLocked(false)
 	return r, nil
+}
+
+// nilDependency reports whether a required dependency is absent, including a
+// typed nil pointer stored behind a non-nil interface. Comparing the interface
+// to nil alone would admit a typed nil and defer the failure to the first
+// method call, which panics; the reflection check keeps the dependency guard
+// total for every nil shape.
+func nilDependency(dependency any) bool {
+	if dependency == nil {
+		return true
+	}
+	value := reflect.ValueOf(dependency)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// projectMembership intersects durable membership with the observations a
+// previous process left behind. Durable membership is authoritative:
+// snapshots cannot resurrect removed hosts or omit never-observed
+// registrations. A restored observation is reused only when it belongs to the
+// exact same registration identity; any other registration starts unknown and
+// carries no inventory.
+func (r *Registry) projectMembership(hosts ports.BrokerHosts) error {
+	if err := hosts.Validate(); err != nil {
+		return err
+	}
+	next := make(map[string]ports.RemoteHostSnapshot, len(hosts.Hosts))
+	for _, record := range hosts.Hosts {
+		registration := record.Registration
+		restored, present := r.hosts[registration.Endpoint]
+		if !present || !restored.Registration.Equal(registration) {
+			restored = ports.RemoteHostSnapshot{Endpoint: registration.Endpoint, Registration: registration, Availability: domain.RemoteAvailabilityUnknown}
+		}
+		next[registration.Endpoint] = restored
+	}
+	r.hosts = next
+	return nil
 }
 
 // restore adopts a validated durable snapshot. A zero-epoch snapshot is only
@@ -151,12 +219,53 @@ func (r *Registry) Subscribe() ports.BrokerSubscription {
 	return s
 }
 
-// SetHosts atomically replaces configured membership. An unchanged membership
-// is a no-op: it neither republishes nor restarts an in-flight observation.
+// ReplaceHosts durably replaces membership and explicit policy using the loaded
+// authority revision. Success means membership is committed, not that advisory
+// observations have flushed. Store errors (including stale authority) are
+// returned without changing the projection, probe attempts, or local token.
+// A settled run reports ports.ErrBrokerRegistryClosed and an exhausted revision
+// series reports ports.ErrBrokerRevisionExhausted; both refuse the mutation
+// before the store CAS, so a refusal never changes durable authority either.
+// Conflicts are not retried or refreshed implicitly: reconcile by reopening the
+// owner. Callers must supply fresh incarnations when removing and re-adding.
+// Even identical records perform CAS so stale authority cannot report success.
+// The synchronous write holds mu; Snapshot remains lock-free, but scheduling
+// waits for membership durability. Observation writes remain asynchronous.
+func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
+	records = append([]ports.BrokerHostRecord(nil), records...)
+	if err := ports.ValidateBrokerHostRecords(records); err != nil {
+		return err
+	}
+	next := make(map[string]ports.RemoteHostSnapshot, len(records))
+	for _, record := range records {
+		reg := record.Registration
+		next[reg.Endpoint] = ports.RemoteHostSnapshot{Endpoint: reg.Endpoint, Registration: reg, Availability: domain.RemoteAvailabilityUnknown}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.running.Load() == runStopped {
+		return fmt.Errorf("broker: membership replacement: %w", ports.ErrBrokerRegistryClosed)
+	}
+	if r.revisionExhaustedLocked() {
+		return fmt.Errorf("broker: membership replacement: %w", ports.ErrBrokerRevisionExhausted)
+	}
+	if err := r.hostStore.ReplaceHosts(r.authority.Revision, records); err != nil {
+		return fmt.Errorf("broker: replace hosts: %w", err)
+	}
+	r.authority = ports.BrokerHosts{Revision: r.authority.Revision + 1, Hosts: records}
+	r.setHostsLocked(next)
+	return nil
+}
+
+// setHosts is projection-only; it is private so callers cannot bypass durable
+// membership and policy. Observation tests use it without claiming durability.
+// An unchanged membership is a no-op: it neither republishes nor restarts an
+// in-flight observation. An exhausted revision series is refused with
+// ports.ErrBrokerRevisionExhausted before the projection changes.
 // Removed registrations retire bounded tombstones so a stale completion can
 // never revive them; replaced or re-added endpoints are fenced by the
 // registry attempt token instead.
-func (r *Registry) SetHosts(registrations []domain.RemoteRegistration) error {
+func (r *Registry) setHosts(registrations []domain.RemoteRegistration) error {
 	if len(registrations) > ports.BrokerMaxHosts {
 		return fmt.Errorf("broker: %d host registrations exceed the limit of %d", len(registrations), ports.BrokerMaxHosts)
 	}
@@ -172,9 +281,19 @@ func (r *Registry) SetHosts(registrations []domain.RemoteRegistration) error {
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.revisionExhaustedLocked() {
+		return fmt.Errorf("broker: set hosts: %w", ports.ErrBrokerRevisionExhausted)
+	}
+	r.setHostsLocked(next)
+	return nil
+}
+
+// setHostsLocked applies only a projection; the public path commits authority
+// first. The caller holds mu through both steps, fencing probe completions.
+func (r *Registry) setHostsLocked(next map[string]ports.RemoteHostSnapshot) {
 	if registrationsUnchanged(r.hosts, next) {
-		r.mu.Unlock()
-		return nil
+		return
 	}
 	for endpoint, current := range r.hosts {
 		candidate, present := next[endpoint]
@@ -207,9 +326,7 @@ func (r *Registry) SetHosts(registrations []domain.RemoteRegistration) error {
 	}
 	r.hosts = next
 	r.publishLocked(true)
-	r.mu.Unlock()
 	r.hint()
-	return nil
 }
 
 // cancelInflightLocked cancels the in-flight attempt for one endpoint and
@@ -301,11 +418,9 @@ func (r *Registry) settle() {
 	if cleared {
 		r.publishLocked(true)
 	}
-	r.mu.Unlock()
-	if r.store != nil {
-		r.store.close()
-	}
 	r.running.Store(runStopped)
+	r.mu.Unlock()
+	r.store.close()
 }
 
 // probeAttempt is one admitted observation: the registry-wide token that
@@ -392,9 +507,6 @@ func (r *Registry) apply(result probeResult) {
 
 	kind, availability, failed := observationOutcome(result)
 	if !failed {
-		// Reachable: adopt the observed inventory, but registry-owned
-		// accounting (success time, attempt counters, failure episode) stays
-		// local.
 		observed := result.snapshot.Clone()
 		observed.Endpoint = result.endpoint
 		observed.Registration = result.registration
@@ -405,9 +517,17 @@ func (r *Registry) apply(result probeResult) {
 		observed.ConsecutiveFailures = 0
 		observed.LastFailure = domain.RemoteFailure{}
 		observed.FailureEpisode = current.FailureEpisode
-		r.hosts[result.endpoint] = observed
-		r.publishLocked(true)
-		return
+		// A projection the durable store would reject is an invalid response,
+		// not an observation: publishing it would leave the registry valid but
+		// permanently unpersisted. The store applies the same rule.
+		if err := ports.ValidateDurableHostProjection(observed); err != nil {
+			r.log.Debug("broker: observation is not persistable", "endpoint", result.endpoint, "err", err)
+			kind, availability, failed = domain.RemoteFailureInvalidResponse, domain.RemoteAvailabilityInvalidResponse, true
+		} else {
+			r.hosts[result.endpoint] = observed
+			r.publishLocked(true)
+			return
+		}
 	}
 	// Every non-reachable outcome is a typed failure on the capped retry
 	// cadence: the last success, last-known inventory, and failure episode
@@ -425,7 +545,10 @@ func (r *Registry) apply(result probeResult) {
 
 // observationOutcome classifies a completed observation. It reports
 // failed=false only for a confirmed reachable result; every other outcome
-// carries the typed failure kind and the availability to publish.
+// carries the typed failure kind and the availability to publish. The caller
+// additionally checks the adopted projection against the durable rules
+// (ports.ValidateDurableHostProjection), which cover the session bound and
+// catalogue validity for the exact incarnation and success time.
 func observationOutcome(result probeResult) (domain.RemoteFailureKind, domain.RemoteAvailability, bool) {
 	if result.err != nil {
 		kind := domain.RemoteFailureTransport
@@ -433,13 +556,6 @@ func observationOutcome(result probeResult) (domain.RemoteFailureKind, domain.Re
 			kind = domain.RemoteFailureTimeout
 		}
 		return kind, availabilityFor(kind), true
-	}
-	// A projection carrying more sessions than the publication bound is a
-	// malformed response: publishing it would produce a snapshot that fails
-	// BrokerSnapshot.Validate. Classify the whole projection as an invalid
-	// response so the last-known inventory stays authoritative.
-	if len(result.snapshot.Sessions) > ports.BrokerMaxSessionsPerHost {
-		return domain.RemoteFailureInvalidResponse, domain.RemoteAvailabilityInvalidResponse, true
 	}
 	switch result.snapshot.Availability {
 	case domain.RemoteAvailabilityReachable:
@@ -548,18 +664,32 @@ func registrationsUnchanged(current, next map[string]ports.RemoteHostSnapshot) b
 }
 
 // retireLocked records the tombstone for one removed registration at the
-// revision of the publication that carries it.
+// revision of the publication that carries it. Mutation paths refuse an
+// exhausted series before retiring, so the retirement revision can never wrap
+// to zero or fall below the last published one.
 func (r *Registry) retireLocked(registration domain.RemoteRegistration) {
 	retired := r.revision + 1
-	if retired == 0 {
-		retired = 1
-	}
 	r.tombstones[registration.Endpoint] = ports.BrokerHostTombstone{
 		Endpoint:        registration.Endpoint,
 		Registration:    registration,
 		RetiredRevision: retired,
 	}
 	r.pruneTombstonesLocked()
+}
+
+// revisionExhaustedLocked reports whether this epoch has no revision left to
+// publish, latching the exhausted state on first detection. Callers must hold
+// r.mu.
+func (r *Registry) revisionExhaustedLocked() bool {
+	if r.revisionExhausted {
+		return true
+	}
+	if r.revision != ^ports.BrokerRevision(0) {
+		return false
+	}
+	r.revisionExhausted = true
+	r.log.Error("broker: revision series exhausted; refusing further publication", "epoch", r.epoch)
+	return true
 }
 
 // pruneTombstonesLocked keeps only the newest BrokerMaxTombstones retirements
@@ -604,6 +734,14 @@ func (r *Registry) tombstonesLocked() []ports.BrokerHostTombstone {
 }
 
 func (r *Registry) publishLocked(persist bool) {
+	// Fail closed on an exhausted series: a wrapped revision would be zero, and
+	// a wrapped series would publish revisions below the newest one, either of
+	// which silently freezes durable persistence. The last valid snapshot stays
+	// published, nothing is stored, and no subscriber is woken for a publication
+	// that did not happen.
+	if r.revisionExhaustedLocked() {
+		return
+	}
 	r.revision++
 	hosts := make([]ports.RemoteHostSnapshot, 0, len(r.hosts))
 	for _, host := range r.hosts {
@@ -612,7 +750,7 @@ func (r *Registry) publishLocked(persist bool) {
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Endpoint < hosts[j].Endpoint })
 	snapshot := ports.BrokerSnapshot{Epoch: r.epoch, Revision: r.revision, Hosts: hosts, Removed: r.tombstonesLocked()}
 	r.current.Store(&snapshot)
-	if persist && r.store != nil {
+	if persist {
 		// enqueue only stages an immutable publication: rendering the durable
 		// copy and every store call happen on the writer goroutine, never
 		// under the registry lock and never on the probe schedule.
@@ -625,9 +763,13 @@ func (r *Registry) publishLocked(persist bool) {
 
 // durable returns the persistable copy of a publication, rendered by the
 // writer goroutine. Checking is transient in-flight state and never reaches
-// the durable snapshot.
+// the durable snapshot. Retirement tombstones are process-local fencing state:
+// they retire registrations only for this process lifetime and a restart never
+// adopts them, so persisting them would leak stale authority into durable
+// state. Removed is therefore cleared before persistence.
 func durable(snapshot ports.BrokerSnapshot) ports.BrokerSnapshot {
 	out := snapshot.Clone()
+	out.Removed = nil
 	for i := range out.Hosts {
 		out.Hosts[i].Checking = false
 	}

@@ -28,12 +28,17 @@ type RemoteHostSnapshot struct {
 	Sessions            []catalogue.RemoteCatalogSession
 }
 
-// Clone returns a defensive copy with an independent session slice.
+// Clone returns a defensive copy with an independent session slice. Each
+// session keeps the exact nil-ness of its tab list: an empty but present list
+// is catalogue-valid and must not become absent through a copy.
 func (s RemoteHostSnapshot) Clone() RemoteHostSnapshot {
 	out := s
 	out.Sessions = append([]catalogue.RemoteCatalogSession(nil), s.Sessions...)
 	for i := range out.Sessions {
-		out.Sessions[i].Tabs = append([]catalogue.RemoteCatalogTab(nil), out.Sessions[i].Tabs...)
+		if s.Sessions[i].Tabs == nil {
+			continue
+		}
+		out.Sessions[i].Tabs = append(make([]catalogue.RemoteCatalogTab, 0, len(s.Sessions[i].Tabs)), s.Sessions[i].Tabs...)
 	}
 	return out
 }

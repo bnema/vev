@@ -1,0 +1,1 @@
+{"version": 3, "hosts": [{"target": "user@arch", "fetched_at_unix_nano": 1780000000000000000, "sessions": [{"lifecycle_id": "02000000000000000000000000000000", "name": "work", "state": "up", "ephemeral": false, "last_used_seq": 42, "tabs": [{"id": "t_work", "index": 0, "name": "shell"}], "active_tab_id": "t_work", "attached": false}]}]}

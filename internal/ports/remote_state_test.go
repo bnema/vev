@@ -72,7 +72,7 @@ func TestRemoteDirectorySnapshotCloneIsDefensive(t *testing.T) {
 func TestRemoteHostSnapshotCloneIsDefensive(t *testing.T) {
 	original := RemoteHostSnapshot{
 		Endpoint: "user@arch",
-		Sessions: []catalogue.RemoteCatalogSession{{Name: "work"}},
+		Sessions: []catalogue.RemoteCatalogSession{{Name: "work"}, {Name: "empty", Tabs: []catalogue.RemoteCatalogTab{}}},
 	}
 	cloned := original.Clone()
 	cloned.Sessions[0].Name = "mutated"
@@ -81,5 +81,12 @@ func TestRemoteHostSnapshotCloneIsDefensive(t *testing.T) {
 	}
 	if (RemoteHostSnapshot{}).Clone().Sessions != nil {
 		t.Fatal("Clone() of a session-less host must stay nil")
+	}
+	if cloned.Sessions[1].Tabs == nil {
+		t.Fatal("Clone() must keep an empty but present tab list")
+	}
+	cloned.Sessions[1].Tabs = append(cloned.Sessions[1].Tabs, catalogue.RemoteCatalogTab{ID: "tab-1"})
+	if original.Sessions[1].Tabs == nil || len(original.Sessions[1].Tabs) != 0 {
+		t.Fatalf("Clone() shares tab memory with the original: %+v", original.Sessions[1].Tabs)
 	}
 }

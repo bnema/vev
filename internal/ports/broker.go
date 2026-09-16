@@ -69,6 +69,22 @@ const (
 	BrokerMaxPolicyTokenBytes = 256
 )
 
+// Broker registry lifecycle sentinels. They are typed so a caller can classify
+// why the registry refused a membership mutation without importing the use
+// case or matching on message text.
+var (
+	// ErrBrokerRegistryClosed reports that the registry run has settled: its
+	// durable writer is flushed, in-flight attempts are retired, and no further
+	// membership mutation is acknowledged.
+	ErrBrokerRegistryClosed = errors.New("ports: broker registry is closed")
+	// ErrBrokerRevisionExhausted reports that the broker epoch has consumed its
+	// entire revision series. The registry fails closed: it keeps the last valid
+	// snapshot published and refuses further mutations instead of wrapping to
+	// zero or publishing a revision below the newest one, either of which would
+	// silently freeze durable persistence.
+	ErrBrokerRevisionExhausted = errors.New("ports: broker revision series exhausted")
+)
+
 // BrokerEpoch identifies one broker process incarnation. Every broker
 // process samples a fresh non-zero epoch at startup; every publication
 // carries a revision within that epoch. Clients discard all broker state
@@ -220,7 +236,9 @@ func (t BrokerHostTombstone) Fences(candidate domain.RemoteRegistration) bool {
 // BrokerSnapshot is an immutable, fully defensive broker publication. Hosts
 // reuse the ordered RemoteHostSnapshot projection; Removed carries the
 // bounded tombstone set that fences stale authority. Nested slices are
-// never mutated after publication.
+// never mutated after publication. Removed is process-local fencing state and
+// is never durable: a BrokerSnapshotStore persists and reloads hosts without
+// tombstones.
 type BrokerSnapshot struct {
 	Epoch    BrokerEpoch
 	Revision BrokerRevision
@@ -618,17 +636,16 @@ type BrokerSnapshotStore interface {
 }
 
 // BrokerHostProbe observes one exact host registration without creating an
-// attachment. The returned projection must describe the same registration,
-// must not exceed BrokerMaxSessionsPerHost sessions (an over-bound projection
-// is classified as an invalid response and never published), and every
-// returned session and its catalogue values must already be fully validated
-// and within the catalogue bounds: the registry re-checks only the session
-// count, so malformed or over-bound session names, tab identities, states,
-// and detail text would be published verbatim. Implementations should
+// attachment. The returned projection must describe the same registration and
+// must satisfy the durable projection rules (see
+// ValidateDurableHostProjection): the registry re-checks exactly those rules,
+// so an over-bound or catalogue-invalid session inventory is classified as an
+// invalid response and never published. Implementations should therefore
 // validate the projection with catalogue.ValidateRemoteCatalog against the
-// RemoteCatalogMax* bounds before returning it. Probe must return promptly
-// once ctx is cancelled: the registry cancels the attempt context when a
-// registration is replaced or removed, and when the run settles. A probe that
+// RemoteCatalogMax* bounds before returning it rather than relying on that
+// rejection. Probe must return promptly once ctx is cancelled: the registry
+// cancels the attempt context when a registration is replaced or removed, and
+// when the run settles. A probe that
 // ignores cancellation delays that retirement and can overlap a replacement
 // attempt for the same endpoint. Stale completions that arrive anyway are
 // fenced by epoch and registration identity before publication.

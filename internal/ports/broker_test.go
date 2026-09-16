@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -50,6 +51,64 @@ func validBrokerSnapshot() BrokerSnapshot {
 		Epoch:    3,
 		Revision: 9,
 		Hosts:    []RemoteHostSnapshot{testBrokerHost("user@arch")},
+	}
+}
+
+// TestBrokerHostStoreIsASnapshotStore pins the interface guard: the exclusive
+// owner of durable membership also owns the advisory snapshot, so a
+// BrokerHostStore must stay usable wherever a BrokerSnapshotStore is required.
+func TestBrokerHostStoreIsASnapshotStore(t *testing.T) {
+	host := reflect.TypeOf((*BrokerHostStore)(nil)).Elem()
+	snapshot := reflect.TypeOf((*BrokerSnapshotStore)(nil)).Elem()
+	if !host.Implements(snapshot) {
+		t.Fatal("BrokerHostStore must implement BrokerSnapshotStore")
+	}
+}
+
+// TestValidateDurableHostProjection matches the durable rules the offline store
+// enforces and the registry re-checks before adopting an observation.
+func TestValidateDurableHostProjection(t *testing.T) {
+	session := catalogue.RemoteCatalogSession{
+		LifecycleID: testBrokerLifecycle(),
+		Name:        "work",
+		State:       catalogue.RemoteCatalogSessionUp,
+		Tabs:        []catalogue.RemoteCatalogTab{},
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*RemoteHostSnapshot)
+		wantErr bool
+	}{
+		{name: "empty inventory", mutate: func(*RemoteHostSnapshot) {}},
+		{name: "valid inventory", mutate: func(h *RemoteHostSnapshot) { h.Sessions = []catalogue.RemoteCatalogSession{session} }},
+		{name: "zero availability", mutate: func(h *RemoteHostSnapshot) { h.Availability = 0 }, wantErr: true},
+		{name: "unknown availability", mutate: func(h *RemoteHostSnapshot) { h.Availability = domain.RemoteAvailabilityUnknown }},
+		{name: "availability past the closed range", mutate: func(h *RemoteHostSnapshot) { h.Availability = domain.RemoteAvailabilityInvalidResponse + 1 }, wantErr: true},
+		{name: "failure kind past the closed range", mutate: func(h *RemoteHostSnapshot) { h.LastFailure.Kind = domain.RemoteFailureInvalidResponse + 1 }, wantErr: true},
+		{name: "missing lifecycle identity", mutate: func(h *RemoteHostSnapshot) {
+			h.Sessions = []catalogue.RemoteCatalogSession{{Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: []catalogue.RemoteCatalogTab{}}}
+		}, wantErr: true},
+		{name: "absent tab list", mutate: func(h *RemoteHostSnapshot) {
+			broken := session
+			broken.Tabs = nil
+			h.Sessions = []catalogue.RemoteCatalogSession{broken}
+		}, wantErr: true},
+		{name: "sessions past the catalogue bound", mutate: func(h *RemoteHostSnapshot) {
+			h.Sessions = make([]catalogue.RemoteCatalogSession, catalogue.RemoteCatalogMaxSessions+1)
+			for i := range h.Sessions {
+				h.Sessions[i] = session
+			}
+		}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			host := testBrokerHost("user@arch")
+			host.LastSuccess = time.Unix(50, 0)
+			tc.mutate(&host)
+			if gotErr := ValidateDurableHostProjection(host); (gotErr != nil) != tc.wantErr {
+				t.Fatalf("ValidateDurableHostProjection() = %v, wantErr %t", gotErr, tc.wantErr)
+			}
+		})
 	}
 }
 
