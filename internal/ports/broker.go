@@ -565,10 +565,35 @@ type BrokerService interface {
 
 // BrokerSnapshotStore persists the durable broker snapshot independently
 // from session state. The broker is its sole writer; session persistence
-// stays daemon-owned and is never moved here.
+// stays daemon-owned and is never moved here. Load is called once while the
+// broker is constructed; Store runs on the broker's serialized writer
+// goroutine. Store must return promptly and must never block indefinitely:
+// this seam deliberately carries no cancellation context in P2.1, and broker
+// shutdown waits for the in-flight write to finish, so a Store that blocks
+// without bound blocks shutdown. Implementations must bound their own write
+// time and return an error rather than wait forever.
 type BrokerSnapshotStore interface {
 	Load() (BrokerSnapshot, error)
 	Store(BrokerSnapshot) error
+}
+
+// BrokerHostProbe observes one exact host registration without creating an
+// attachment. The returned projection must describe the same registration,
+// must not exceed BrokerMaxSessionsPerHost sessions (an over-bound projection
+// is classified as an invalid response and never published), and every
+// returned session and its catalogue values must already be fully validated
+// and within the catalogue bounds: the registry re-checks only the session
+// count, so malformed or over-bound session names, tab identities, states,
+// and detail text would be published verbatim. Implementations should
+// validate the projection with catalogue.ValidateRemoteCatalog against the
+// RemoteCatalogMax* bounds before returning it. Probe must return promptly
+// once ctx is cancelled: the registry cancels the attempt context when a
+// registration is replaced or removed, and when the run settles. A probe that
+// ignores cancellation delays that retirement and can overlap a replacement
+// attempt for the same endpoint. Stale completions that arrive anyway are
+// fenced by epoch and registration identity before publication.
+type BrokerHostProbe interface {
+	Probe(ctx context.Context, registration domain.RemoteRegistration) (RemoteHostSnapshot, error)
 }
 
 // BrokerPhysicalConnection is one pooled physical transport to an

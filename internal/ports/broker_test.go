@@ -467,6 +467,7 @@ func TestBrokerInterfacesArePorts(t *testing.T) {
 	for name, iface := range map[string]reflect.Type{
 		"BrokerService":            reflect.TypeOf((*BrokerService)(nil)).Elem(),
 		"BrokerSnapshotStore":      reflect.TypeOf((*BrokerSnapshotStore)(nil)).Elem(),
+		"BrokerHostProbe":          reflect.TypeOf((*BrokerHostProbe)(nil)).Elem(),
 		"BrokerPhysicalConnection": reflect.TypeOf((*BrokerPhysicalConnection)(nil)).Elem(),
 		"BrokerEndpointConnector":  reflect.TypeOf((*BrokerEndpointConnector)(nil)).Elem(),
 		"BrokerListener":           reflect.TypeOf((*BrokerListener)(nil)).Elem(),
