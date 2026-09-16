@@ -12,8 +12,11 @@ import (
 	"github.com/bnema/vev/internal/domain"
 )
 
-// Version is the negotiated vev session protocol version.
-const Version uint16 = 53
+// Version is the negotiated vev session protocol version. It carries the
+// daemonmux physical preamble conversation (multiplex.proto), whose
+// negotiated ceilings and accepted daemon binding ride the same wire
+// version as the session and broker conversations.
+const Version uint16 = 54
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local

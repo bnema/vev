@@ -289,10 +289,10 @@ func (s *Server) authenticate(ctx context.Context, admittedConn admitted) error 
 	}
 	results := make(chan authResult, 1)
 	go func() {
-		// recvBounded rejects an over-limit length prefix before
+		// RecvBounded rejects an over-limit length prefix before
 		// allocating, so an unauthenticated peer cannot force a large
 		// pre-auth allocation by advertising a huge frame.
-		envelope, err := admittedConn.transport.recvBounded(bootstrapMaxAuthRecord)
+		envelope, err := admittedConn.transport.RecvBounded(bootstrapMaxAuthRecord)
 		results <- authResult{payload: envelope.Payload, err: err}
 	}()
 	select {

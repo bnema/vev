@@ -468,3 +468,61 @@ func TestTransportAsyncEgressIsBoundedAndCloseInterruptsWorkers(t *testing.T) {
 		t.Fatalf("SendAsync after Close = %v, want errClosed", err)
 	}
 }
+
+// TestTransportRecvBoundedEnforcesCallerLimit proves the IPC transport exposes
+// the shared bounded receive: an over-limit length prefix is refused before the
+// body is read, a zero limit refuses a non-empty frame, and an in-limit frame
+// round-trips byte for byte.
+func TestTransportRecvBoundedEnforcesCallerLimit(t *testing.T) {
+	writePrefix := func(conn net.Conn, length uint32) {
+		go func() {
+			var header [4]byte
+			binary.BigEndian.PutUint32(header[:], length)
+			_, _ = conn.Write(header[:])
+		}()
+	}
+
+	t.Run("over-limit prefix refused before body", func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
+		server := NewTransport(c2).(wire.BoundedTransport)
+		writePrefix(c1, 8)
+		_, err := server.RecvBounded(4)
+		if !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("RecvBounded() error = %v, want ErrFrameTooLarge", err)
+		}
+	})
+
+	t.Run("zero limit refuses non-empty frame", func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
+		server := NewTransport(c2).(wire.BoundedTransport)
+		writePrefix(c1, 1)
+		_, err := server.RecvBounded(0)
+		if !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("RecvBounded() error = %v, want ErrFrameTooLarge", err)
+		}
+	})
+
+	t.Run("in-limit frame round trips", func(t *testing.T) {
+		c1, c2 := net.Pipe()
+		defer func() { _ = c1.Close() }()
+		defer func() { _ = c2.Close() }()
+		server := NewTransport(c2).(wire.BoundedTransport)
+		payload := []byte("bounded ipc envelope")
+		go func() {
+			var header [4]byte
+			binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+			_, _ = c1.Write(append(header[:], payload...))
+		}()
+		envelope, err := server.RecvBounded(uint64(len(payload)))
+		if err != nil {
+			t.Fatalf("RecvBounded() error = %v", err)
+		}
+		if !reflect.DeepEqual(envelope.Payload, payload) {
+			t.Fatalf("RecvBounded() payload = %q, want %q", envelope.Payload, payload)
+		}
+	})
+}

@@ -28,6 +28,16 @@ type serverConnection struct {
 	preambleOnce sync.Once
 	preambleErr  error
 	deadline     time.Time
+
+	// preambleDone closes exactly once when the handshake has run, whether it
+	// succeeded or failed. It backs the handshake completion seam a mux listener
+	// exposes to the daemon; the absolute deadline is never restarted.
+	preambleDone chan struct{}
+
+	hooksMu       sync.Mutex
+	handshakeDone bool
+	hooksRun      bool
+	hooks         []func()
 }
 
 var _ ports.ServerConnection = (*serverConnection)(nil)
@@ -35,12 +45,92 @@ var _ ports.ServerConnection = (*serverConnection)(nil)
 // NewServerConnection wraps one raw connection incarnation exactly once. The
 // server preamble runs on the first ReceiveClient, bounded by the handshake
 // deadline started here; the daemon's transport watcher closes the link on
-// timeout, which unblocks the preamble read.
+// timeout, which unblocks the preamble read. Prefer
+// NewServerConnectionWithDeadline when the caller already owns the absolute
+// deadline, as the daemon-side mux listener does at Open admission.
 func NewServerConnection(raw wire.Transport) ports.ServerConnection {
+	return NewServerConnectionWithDeadline(raw, time.Now().Add(protocol.HandshakeTimeout))
+}
+
+// NewServerConnectionWithDeadline wraps one raw connection incarnation exactly
+// once with an absolute local handshake deadline its caller already fixed. A
+// daemon-side mux listener passes the deadline it accepted at Open admission,
+// so a stream delayed in an accept queue spends that one budget instead of
+// starting a second one. The preamble still runs lazily on the first
+// ReceiveClient; a deadline already in the past fails it immediately. A zero
+// deadline falls back to a fresh protocol.HandshakeTimeout from now.
+func NewServerConnectionWithDeadline(raw wire.Transport, deadline time.Time) ports.ServerConnection {
 	if raw == nil {
 		return nil
 	}
-	return &serverConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout)}
+	if deadline.IsZero() {
+		deadline = time.Now().Add(protocol.HandshakeTimeout)
+	}
+	return &serverConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: deadline, preambleDone: make(chan struct{})}
+}
+
+// HandshakeDeadline returns the absolute local deadline of the session
+// handshake this connection accepted. It is fixed for the connection's
+// lifetime and is never restarted: the preamble, Hello/Welcome, and the first
+// committed publication all share it.
+func (c *serverConnection) HandshakeDeadline() time.Time { return c.deadline }
+
+// HandshakeDone returns a channel that is closed exactly once when the
+// handshake has run, whether it succeeded or failed.
+func (c *serverConnection) HandshakeDone() <-chan struct{} { return c.preambleDone }
+
+// OnHandshakeComplete registers fn to run exactly once when the handshake has
+// run. Registering after completion runs fn immediately; a nil fn is ignored.
+func (c *serverConnection) OnHandshakeComplete(fn func()) {
+	if fn == nil {
+		return
+	}
+	c.hooksMu.Lock()
+	if c.handshakeDone {
+		c.hooksMu.Unlock()
+		fn()
+		return
+	}
+	c.hooks = append(c.hooks, fn)
+	c.hooksMu.Unlock()
+}
+
+// finishPreamble publishes handshake completion from inside the preamble's
+// sync.Once: it closes the done channel and marks the handshake complete so a
+// later registration runs immediately. It deliberately runs no registered hook,
+// because a hook that calls back into the connection would re-enter sync.Once
+// and deadlock; runHandshakeHooks runs the hooks after the Once body returns.
+// It tolerates a zero-value connection that never allocated the done channel
+// (test literals and seam-only construction), so closing is nil-safe.
+func (c *serverConnection) finishPreamble() {
+	if c.preambleDone != nil {
+		close(c.preambleDone)
+	}
+	c.hooksMu.Lock()
+	c.handshakeDone = true
+	c.hooksMu.Unlock()
+}
+
+// runHandshakeHooks runs the completion hooks registered before the handshake
+// finished exactly once, after the preamble's sync.Once body has returned.
+// Running them outside the Once is what lets a hook call back into the
+// connection - for example to receive a message - without re-entering
+// sync.Once and deadlocking. Every ensurePreamble caller invokes it; only the
+// first drains the hooks, and a registrant that arrives after completion
+// observes the completed flag and runs itself.
+func (c *serverConnection) runHandshakeHooks() {
+	c.hooksMu.Lock()
+	if c.hooksRun {
+		c.hooksMu.Unlock()
+		return
+	}
+	c.hooksRun = true
+	hooks := c.hooks
+	c.hooks = nil
+	c.hooksMu.Unlock()
+	for _, fn := range hooks {
+		fn()
+	}
 }
 
 func (c *serverConnection) ensurePreamble() error {
@@ -51,7 +141,9 @@ func (c *serverConnection) ensurePreamble() error {
 		if c.preambleErr != nil {
 			_ = c.raw.Close()
 		}
+		c.finishPreamble()
 	})
+	c.runHandshakeHooks()
 	return c.preambleErr
 }
 

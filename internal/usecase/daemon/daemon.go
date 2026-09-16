@@ -1144,7 +1144,7 @@ func (d *Daemon) sessionsSnapshotLocked() []*session {
 // handleConn reads the first typed message off a fresh connection and routes it.
 // A context watcher closes the connection on cancellation or handshake timeout.
 func (d *Daemon) handleConn(tr ports.ServerConnection) {
-	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(d.hardCtx)
+	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(d.hardCtx, acceptedHandshakeDeadline(tr))
 	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
 	defer finishHandshake()
 	defer stopTransport()
@@ -1337,10 +1337,12 @@ func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 }
 
 // handleHello runs the attach handshake for direct package callers. Accepted
-// connections use handleHelloWithContext so the deadline also covers the first
-// frame read in handleConn.
+// connections use handleConn, which resolves the optional accepted deadline so
+// one budget also covers the first frame read; handleHello adopts the same seam
+// when the connection exposes it. A connection without the seam keeps the
+// ordinary fresh protocol.HandshakeTimeout budget.
 func (d *Daemon) handleHello(tr ports.ServerConnection, hello protocol.Hello) {
-	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(context.Background())
+	handshakeCtx, timedOut, finishHandshake := d.newHandshakeContext(context.Background(), acceptedHandshakeDeadline(tr))
 	stopTransport := watchHandshakeTransport(handshakeCtx, tr)
 	defer finishHandshake()
 	defer stopTransport()

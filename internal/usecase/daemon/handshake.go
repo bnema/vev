@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -11,9 +12,28 @@ import (
 
 var errHandshakeTimeout = errors.New("handshake timed out")
 
+// acceptedHandshakeDeadline returns the absolute handshake deadline an accepted
+// connection already owns, or the zero time when the connection exposes no
+// deadline seam and the daemon must start a fresh budget. The seam is asserted
+// structurally so the daemon neither imports the mux/sessionwire adapters nor
+// widens the ServerConnection contract.
+func acceptedHandshakeDeadline(tr ports.ServerConnection) time.Time {
+	provider, ok := tr.(ports.HandshakeDeadlineProvider)
+	if !ok {
+		return time.Time{}
+	}
+	return provider.HandshakeDeadline()
+}
+
 // newHandshakeContext owns one deadline for the complete inbound handshake.
+// acceptedDeadline is the absolute deadline an accepted connection already
+// owns; the zero time starts a fresh protocol.HandshakeTimeout budget, which
+// preserves the behavior of ordinary connections lacking the optional seam.
+// A non-zero acceptedDeadline is adopted verbatim: the timer covers only the
+// time the connection has left, so queue delay is consumed instead of
+// restarting the budget, and an already-elapsed deadline expires immediately.
 // The caller must stop it before entering the long-lived connection loop.
-func (d *Daemon) newHandshakeContext(parent context.Context) (context.Context, <-chan struct{}, func()) {
+func (d *Daemon) newHandshakeContext(parent context.Context, acceptedDeadline time.Time) (context.Context, <-chan struct{}, func()) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -23,9 +43,22 @@ func (d *Daemon) newHandshakeContext(parent context.Context) (context.Context, <
 	if d != nil && d.clock != nil {
 		clock = d.clock
 	}
-	timer := clock.NewTimer(protocol.HandshakeTimeout)
+	budget := protocol.HandshakeTimeout
+	if !acceptedDeadline.IsZero() {
+		budget = acceptedDeadline.Sub(clock.Now())
+	}
+	if budget <= 0 {
+		// The accepted connection already spent its whole budget before the
+		// daemon reached it. Expire now rather than start a second budget; the
+		// closed timedOut channel keeps handshakeContextError reporting a
+		// deadline rather than a bare cancellation.
+		close(timedOut)
+		cancel()
+		return ctx, timedOut, cancel
+	}
+	timer := clock.NewTimer(budget)
 	if timer == nil {
-		timer = systemClock{}.NewTimer(protocol.HandshakeTimeout)
+		timer = systemClock{}.NewTimer(budget)
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})

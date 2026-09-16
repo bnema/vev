@@ -482,3 +482,43 @@ func TestProcessCloser(t *testing.T) {
 		})
 	}
 }
+
+// TestTransportRecvBoundedEnforcesCallerLimit proves the SSH stdio transport
+// exposes the shared bounded receive: an over-limit length prefix is refused
+// before the body is read, a zero limit refuses a non-empty frame, and an
+// in-limit frame round-trips byte for byte.
+func TestTransportRecvBoundedEnforcesCallerLimit(t *testing.T) {
+	var header [frameHeaderLen]byte
+
+	t.Run("over-limit prefix refused before body", func(t *testing.T) {
+		binary.BigEndian.PutUint32(header[:], 8)
+		recv := NewTransport(bytes.NewReader(header[:]), io.Discard, nil).(wire.BoundedTransport)
+		if _, err := recv.RecvBounded(4); !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("RecvBounded error = %v, want ErrFrameTooLarge", err)
+		}
+	})
+
+	t.Run("zero limit refuses non-empty frame", func(t *testing.T) {
+		binary.BigEndian.PutUint32(header[:], 1)
+		recv := NewTransport(bytes.NewReader(header[:]), io.Discard, nil).(wire.BoundedTransport)
+		if _, err := recv.RecvBounded(0); !errors.Is(err, ErrFrameTooLarge) {
+			t.Fatalf("RecvBounded error = %v, want ErrFrameTooLarge", err)
+		}
+	})
+
+	t.Run("in-limit frame round trips", func(t *testing.T) {
+		payload := []byte("bounded ssh envelope")
+		var wireBuf bytes.Buffer
+		binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+		wireBuf.Write(header[:])
+		wireBuf.Write(payload)
+		recv := NewTransport(bytes.NewReader(wireBuf.Bytes()), io.Discard, nil).(wire.BoundedTransport)
+		envelope, err := recv.RecvBounded(uint64(len(payload)))
+		if err != nil {
+			t.Fatalf("RecvBounded error = %v", err)
+		}
+		if !bytes.Equal(envelope.Payload, payload) {
+			t.Fatalf("RecvBounded payload = %q, want %q", envelope.Payload, payload)
+		}
+	})
+}

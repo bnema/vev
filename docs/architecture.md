@@ -110,7 +110,7 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
   `go tool buf generate`, and handle the new variant in `sessionwire`.
   Never edit generated `*.pb.go`; never add manual IDs or dispatch tables.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `53`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `54`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
 
 ## Broker wire core (Plan 001 P3.1, not activated)
 

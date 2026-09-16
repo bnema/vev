@@ -377,3 +377,180 @@ func (w *gateWriter) nextFrame() ([]byte, error) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TestFramerRecvBoundedAppliesCallerLimitBeforeBody proves a per-call limit
+// narrower than the framer ceiling is enforced on the four-byte prefix: the
+// over-limit body is left unread, and a matching frame still round-trips.
+func TestFramerRecvBoundedAppliesCallerLimitBeforeBody(t *testing.T) {
+	body := []byte("01234567")
+	encode := func() []byte {
+		var encoded bytes.Buffer
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(body)))
+		encoded.Write(header[:])
+		encoded.Write(body)
+		return encoded.Bytes()
+	}
+
+	src := bytes.NewReader(encode())
+	receiver := NewFramer(src, nil, nil)
+	defer func() { _ = receiver.Close() }()
+	_, err := receiver.RecvBounded(uint64(len(body) - 1))
+	require.ErrorIs(t, err, ErrTooLarge)
+	require.Equal(t, len(body), src.Len(), "over-limit body must not be read")
+
+	// A fresh stream at the matching limit round-trips the same frame. (A
+	// rejected prefix desynchronizes the stream, exactly as an oversize
+	// frame always has, so it is never re-read.)
+	src = bytes.NewReader(encode())
+	receiver = NewFramer(src, nil, nil)
+	defer func() { _ = receiver.Close() }()
+	got, err := receiver.RecvBounded(uint64(len(body)))
+	require.NoError(t, err)
+	require.Equal(t, body, got)
+}
+
+// TestFramerRecvBoundedPartialPrefixAndBody feeds the prefix and body one byte
+// at a time: the bounded path reassembles exactly like Recv.
+func TestFramerRecvBoundedPartialPrefixAndBody(t *testing.T) {
+	payload := []byte("bounded partial payload")
+	var encoded bytes.Buffer
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+	encoded.Write(header[:])
+	encoded.Write(payload)
+
+	pr, pw := io.Pipe()
+	defer func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	}()
+	receiver := NewFramer(pr, nil, nil)
+	defer func() { _ = receiver.Close() }()
+	go func() {
+		for _, b := range encoded.Bytes() {
+			if _, err := pw.Write([]byte{b}); err != nil {
+				return
+			}
+		}
+	}()
+	got, err := receiver.RecvBounded(uint64(len(payload)))
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+// TestFramerRecvBoundedZeroLengthAndZeroLimit proves the bounded path keeps
+// Recv's zero-length refusal and treats a zero caller limit as refusing every
+// non-empty frame before its body is read.
+func TestFramerRecvBoundedZeroLengthAndZeroLimit(t *testing.T) {
+	t.Run("zero length", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		defer func() {
+			_ = pr.Close()
+			_ = pw.Close()
+		}()
+		receiver := NewFramer(pr, nil, nil)
+		defer func() { _ = receiver.Close() }()
+		go func() { _, _ = pw.Write([]byte{0, 0, 0, 0}) }()
+		_, err := receiver.RecvBounded(64)
+		require.ErrorIs(t, err, ErrZeroLength)
+	})
+	t.Run("zero limit refuses body", func(t *testing.T) {
+		src := bytes.NewReader([]byte{0, 0, 0, 4, 'a', 'b', 'c', 'd'})
+		receiver := NewFramer(src, nil, nil)
+		defer func() { _ = receiver.Close() }()
+		_, err := receiver.RecvBounded(0)
+		require.ErrorIs(t, err, ErrTooLarge)
+		require.Equal(t, 4, src.Len(), "body must not be read at a zero limit")
+	})
+}
+
+// TestFramerRecvBoundedNeverWidensTheFramerCeiling proves a caller limit above
+// the framer's negotiated ceiling cannot raise it.
+func TestFramerRecvBoundedNeverWidensTheFramerCeiling(t *testing.T) {
+	var encoded bytes.Buffer
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], 17)
+	encoded.Write(header[:])
+	encoded.Write(bytes.Repeat([]byte("z"), 17))
+
+	src := bytes.NewReader(encoded.Bytes())
+	receiver := NewFramer(src, nil, nil, WithMaxEnvelope(16))
+	defer func() { _ = receiver.Close() }()
+	_, err := receiver.RecvBounded(1 << 20)
+	require.ErrorIs(t, err, ErrTooLarge)
+	require.Equal(t, 17, src.Len(), "body must not be read above the framer ceiling")
+}
+
+// TestFramerRecvBoundedMatchesRecvByteForByte proves the bounded path returns
+// exactly what Recv returns for the same wire bytes.
+func TestFramerRecvBoundedMatchesRecvByteForByte(t *testing.T) {
+	payloads := [][]byte{[]byte("one"), bytes.Repeat([]byte("x"), 70000), []byte("three")}
+	var encoded bytes.Buffer
+	for _, payload := range payloads {
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+		encoded.Write(header[:])
+		encoded.Write(payload)
+	}
+	plain := NewFramer(bytes.NewReader(encoded.Bytes()), nil, nil)
+	bounded := NewFramer(bytes.NewReader(encoded.Bytes()), nil, nil)
+	defer func() {
+		_ = plain.Close()
+		_ = bounded.Close()
+	}()
+	for _, want := range payloads {
+		got, err := plain.Recv()
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+		got, err = bounded.RecvBounded(AbsoluteLimit)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
+}
+
+// TestFramerRecvBoundedCloseUnblocks proves Close releases a blocked bounded
+// receive through the injected closer.
+func TestFramerRecvBoundedCloseUnblocks(t *testing.T) {
+	pr, pw := io.Pipe()
+	framer := NewFramer(pr, pw, func() error {
+		_ = pr.Close()
+		_ = pw.Close()
+		return nil
+	})
+	recvErr := make(chan error, 1)
+	go func() {
+		_, err := framer.RecvBounded(64)
+		recvErr <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, framer.Close())
+	select {
+	case err := <-recvErr:
+		require.True(t, errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, ErrClosed))
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecvBounded was not unblocked by Close")
+	}
+}
+
+// TestFramerConcurrentRecvBoundedAndClose hammers bounded receives against a
+// concurrent Close under -race: every call returns and no receive is stranded.
+func TestFramerConcurrentRecvBoundedAndClose(t *testing.T) {
+	pr, pw := io.Pipe()
+	framer := NewFramer(pr, pw, func() error {
+		_ = pr.Close()
+		_ = pw.Close()
+		return nil
+	})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = framer.RecvBounded(64)
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, framer.Close())
+	wg.Wait()
+}

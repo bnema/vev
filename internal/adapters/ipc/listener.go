@@ -25,6 +25,12 @@ func SocketPath(runtimeDir string) string {
 // bound by a live daemon (a dial-probe against it succeeded).
 var ErrDaemonRunning = errors.New("ipc: a daemon is already listening on this socket")
 
+// staleRecoveryAttempts bounds the bind/probe/remove/rebind loop that recovers
+// from a socket file whose owner died without unlinking it. A racing owner can
+// rebind between our liveness probe and our removal, in which case we leave its
+// socket alone and retry; the bound keeps a pathological race from spinning.
+const staleRecoveryAttempts = 3
+
 // unixListener implements wire.Listener over an AF_UNIX SOCK_STREAM
 // listener.
 type unixListener struct {
@@ -39,8 +45,9 @@ type unixListener struct {
 // If the socket path is already bound (EADDRINUSE), Listen dial-probes it:
 // a failed dial (connection refused, or the file having vanished) means
 // the previous owner died without cleaning up, so the stale socket file is
-// unlinked and bind is retried once. A successful dial means a live daemon
-// owns the socket, and Listen returns ErrDaemonRunning.
+// unlinked and bind is retried (race-safely, never unlinking a socket a
+// racing owner rebound in the probe window). A successful dial means a live
+// daemon owns the socket, and Listen returns ErrDaemonRunning.
 func Listen(dir string, opts ...Option) (wire.Listener, error) {
 	if err := safedir.EnsurePrivate(dir); err != nil {
 		return nil, fmt.Errorf("ipc: securing socket directory: %w", err)
@@ -48,26 +55,9 @@ func Listen(dir string, opts ...Option) (wire.Listener, error) {
 
 	sockPath := filepath.Join(dir, socketFileName)
 
-	ln, err := bindUnix(sockPath)
+	ln, err := listenUnixStaleSafe(sockPath)
 	if err != nil {
-		if !errors.Is(err, syscall.EADDRINUSE) {
-			return nil, fmt.Errorf("ipc: listen on %s: %w", sockPath, err)
-		}
-
-		if probeErr := probeLiveDaemon(sockPath); probeErr != nil {
-			return nil, probeErr
-		}
-
-		// Dial failed: the socket file is stale (its listener died
-		// without unlinking). Remove it and retry the bind once.
-		if rmErr := os.Remove(sockPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			return nil, fmt.Errorf("ipc: removing stale socket %s: %w", sockPath, rmErr)
-		}
-
-		ln, err = bindUnix(sockPath)
-		if err != nil {
-			return nil, fmt.Errorf("ipc: listen on %s after removing stale socket: %w", sockPath, err)
-		}
+		return nil, fmt.Errorf("ipc: listen on %s: %w", sockPath, err)
 	}
 
 	if err := os.Chmod(sockPath, 0o600); err != nil {
@@ -76,6 +66,68 @@ func Listen(dir string, opts ...Option) (wire.Listener, error) {
 	}
 
 	return &unixListener{ln: ln, addr: sockPath, opts: opts}, nil
+}
+
+// listenUnixStaleSafe binds sockPath, recovering race-safely from a stale
+// socket file left behind by an owner that died without unlinking it. A socket
+// still served by a live peer is reported as ErrDaemonRunning. A path that
+// exists and is not a socket is refused without being removed, so a caller's
+// foreign file is never unlinked.
+//
+// The recovery is race-safe: the socket file's inode is observed before the
+// liveness probe and compared with the inode at removal time, so a socket a
+// racing owner rebound in that window is never unlinked. When the inode
+// changed, the bind is retried (and typically reports the racing owner live)
+// instead of removing it.
+func listenUnixStaleSafe(sockPath string) (*net.UnixListener, error) {
+	for attempt := 0; attempt < staleRecoveryAttempts; attempt++ {
+		ln, err := bindUnix(sockPath)
+		if err == nil {
+			return ln, nil
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return nil, err
+		}
+
+		before, statErr := os.Lstat(sockPath)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue // a racing owner removed it; retry the bind
+			}
+			return nil, fmt.Errorf("ipc: inspecting socket %s: %w", sockPath, statErr)
+		}
+		if before.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("ipc: %s exists and is not a socket", sockPath)
+		}
+
+		if probeErr := probeLiveDaemon(sockPath); probeErr != nil {
+			return nil, probeErr
+		}
+
+		current, statErr := os.Lstat(sockPath)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue // a racing owner removed it; retry the bind
+			}
+			return nil, fmt.Errorf("ipc: inspecting socket %s: %w", sockPath, statErr)
+		}
+		if !os.SameFile(before, current) {
+			// A racing owner rebound the path after the probe said the old
+			// socket was dead. Never unlink its live socket; retry the bind,
+			// which will observe the new owner.
+			continue
+		}
+
+		// The inode is still the stale one the probe found dead. Remove it and
+		// retry the bind. A racing owner that binds between this removal and the
+		// next bind simply wins; the next bind reports it live.
+		if rmErr := os.Remove(sockPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			return nil, fmt.Errorf("ipc: removing stale socket %s: %w", sockPath, rmErr)
+		}
+	}
+
+	// Every attempt observed a live owner (or a racing owner kept winning).
+	return nil, ErrDaemonRunning
 }
 
 // bindUnix binds and listens on sockPath.

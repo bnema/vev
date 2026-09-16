@@ -94,6 +94,8 @@ func newTransport(r io.Reader, w io.Writer, closeFn closeFunc, eofErr eofErrFunc
 	return t
 }
 
+var _ wire.BoundedTransport = (*transport)(nil)
+
 // serializedWriter serializes concurrent streamframe writes over one child
 // stdin pipe; streamframe already serializes queue admission, this guards
 // the raw Write against interleaving.
@@ -293,6 +295,22 @@ func (t *transport) Recv() (wire.Envelope, error) {
 	return wire.Envelope{Payload: payload}, nil
 }
 
+// RecvBounded reads one complete envelope bounded to limit before allocation,
+// sharing the framer's validation with Recv: an over-limit length prefix is
+// refused without reading its body. It is the bounded raw-carriage capability
+// a preamble-negotiated multiplexer consumes.
+func (t *transport) RecvBounded(limit uint64) (wire.Envelope, error) {
+	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
+	payload, err := t.framer.RecvBounded(limit)
+	if err != nil {
+		err = t.mapEOFError(err)
+		end(false)
+		return wire.Envelope{}, err
+	}
+	end(true)
+	return wire.Envelope{Payload: payload}, nil
+}
+
 func (t *transport) beginOperation(start ports.RuntimeMarkKind, bytes uint64) func(bool) {
 	if t.observer == nil {
 		return func(bool) {}
@@ -403,20 +421,30 @@ func (t *transport) beginShutdown() operationWait {
 	return wait
 }
 
+// stderrSink is the bounded diagnostic capture a process waiter reads for a
+// non-clean exit. A plain *bytes.Buffer keeps the session dial's existing raw
+// behavior; the mux dial supplies a bounded, sanitizing capture and sets
+// sanitize so the public error never carries remote stderr.
+type stderrSink interface {
+	io.Writer
+	String() string
+}
+
 type processWaiter struct {
-	cmd     *exec.Cmd
-	stdin   io.Closer
-	stderr  *bytes.Buffer
-	timeout time.Duration
-	log     *slog.Logger
-	target  string
-	session string
+	cmd      *exec.Cmd
+	stdin    io.Closer
+	stderr   stderrSink
+	timeout  time.Duration
+	log      *slog.Logger
+	target   string
+	session  string
+	sanitize bool
 
 	waitOnce sync.Once
 	waitErr  error
 }
 
-func newProcessWaiter(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration, log *slog.Logger, target, session string) *processWaiter {
+func newProcessWaiter(cmd *exec.Cmd, stdin io.Closer, stderr stderrSink, timeout time.Duration, log *slog.Logger, target, session string) *processWaiter {
 	w := &processWaiter{
 		cmd:     cmd,
 		stdin:   stdin,
@@ -426,6 +454,15 @@ func newProcessWaiter(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, time
 		target:  target,
 		session: session,
 	}
+	return w
+}
+
+// newMuxProcessWaiter builds the waiter for one mux child. It reuses the
+// session wait/kill contract unchanged but sanitizes the public error: the
+// bounded, sanitized stderr is logged, never returned.
+func newMuxProcessWaiter(cmd *exec.Cmd, stdin io.Closer, stderr stderrSink, timeout time.Duration, log *slog.Logger) *processWaiter {
+	w := newProcessWaiter(cmd, stdin, stderr, timeout, log, "", "")
+	w.sanitize = true
 	return w
 }
 
@@ -451,16 +488,19 @@ func (w *processWaiter) wait(timeout time.Duration) error {
 			_ = w.cmd.Process.Kill()
 			w.waitErr = <-waitCh
 		}
-		w.waitErr = formatProcessWaitError(w.waitErr, w.stderr, w.log, w.target, w.session)
+		w.waitErr = formatProcessWaitError(w.waitErr, w.stderr, w.log, w.target, w.session, w.sanitize)
 	})
 	return w.waitErr
 }
 
-func formatProcessWaitError(err error, stderr *bytes.Buffer, log *slog.Logger, target, session string) error {
+func formatProcessWaitError(err error, stderr stderrSink, log *slog.Logger, target, session string, sanitize bool) error {
 	if err == nil {
 		return nil
 	}
-	stderrText := strings.TrimSpace(stderr.String())
+	var stderrText string
+	if stderr != nil {
+		stderrText = strings.TrimSpace(stderr.String())
+	}
 	if log != nil {
 		attrs := []any{"target", target, "session", session, "err", err}
 		if stderrText != "" {
@@ -468,13 +508,18 @@ func formatProcessWaitError(err error, stderr *bytes.Buffer, log *slog.Logger, t
 		}
 		log.Warn("ssh exited non-cleanly", attrs...)
 	}
+	if sanitize {
+		// The mux carriage's public error carries only the typed outcome; the
+		// bounded, sanitized diagnostic above is local-only.
+		return fmt.Errorf("%w: %w", ErrMuxSSHExit, err)
+	}
 	if stderrText != "" {
 		return fmt.Errorf("sshstdio: ssh exited: %w: %s", err, stderrText)
 	}
 	return fmt.Errorf("sshstdio: ssh exited: %w", err)
 }
 
-func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr *bytes.Buffer, timeout time.Duration, log *slog.Logger, target, session string) closeFunc {
+func newProcessCloser(cmd *exec.Cmd, stdin io.Closer, stderr stderrSink, timeout time.Duration, log *slog.Logger, target, session string) closeFunc {
 	return newProcessWaiter(cmd, stdin, stderr, timeout, log, target, session).close
 }
 

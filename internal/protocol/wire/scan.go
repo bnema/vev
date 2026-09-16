@@ -185,13 +185,16 @@ func (s *envelopeScanner) scanMessage(descriptor protoreflect.MessageDescriptor,
 }
 
 // isEnvelopeDescriptor reports whether the descriptor is a top-level
-// directional envelope requiring exactly one variant. Session and broker
-// envelopes are separate conversations with disjoint tag spaces; both
-// directions of each require exactly one variant.
+// directional envelope requiring exactly one variant. Session, broker, and
+// daemonmux envelopes are separate conversations with disjoint tag spaces;
+// both directions of each require exactly one variant. The daemonmux
+// preamble messages are adapter messages, not envelopes, so they are not
+// listed here.
 func isEnvelopeDescriptor(descriptor protoreflect.MessageDescriptor) bool {
 	switch string(descriptor.FullName()) {
 	case "vev.wire.v1.ClientEnvelope", "vev.wire.v1.ServerEnvelope",
-		"vev.wire.v1.BrokerClientEnvelope", "vev.wire.v1.BrokerServerEnvelope":
+		"vev.wire.v1.BrokerClientEnvelope", "vev.wire.v1.BrokerServerEnvelope",
+		"vev.wire.v1.MuxClientEnvelope", "vev.wire.v1.MuxServerEnvelope":
 		return true
 	default:
 		return false

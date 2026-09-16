@@ -56,7 +56,15 @@ negotiated ceiling.
 - Daemon (`internal/usecase/daemon/handshake.go`, `daemon.go:handleConn`):
   `newHandshakeContext` + `watchHandshakeTransport` close the exact
   admitted connection on timeout; `failHandshakeAttachment` retires only
-  that connection and purges a route-created session only when empty.
+  that connection and purges a route-created session only when empty. An
+  accepted connection that implements the optional
+  `ports.HandshakeDeadlineProvider` seam supplies the absolute deadline it
+  was admitted with, which the daemon adopts verbatim: queue delay is
+  consumed instead of restarting the budget, and an already-elapsed
+  deadline fails promptly. Connections without the seam keep a fresh
+  budget from accept. Completion stays where the daemon commits its
+  initial publication; the sessionwire preamble's own completion is not
+  the handshake deadline.
 
 First frame routing (`daemon.go:handleConn`): `Hello` → full attach;
 `List`, `CommandRequest`, `RemotePreviewRequest`,

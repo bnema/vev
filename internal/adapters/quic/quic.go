@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -209,6 +208,7 @@ type Transport struct {
 var (
 	_ wire.Transport          = (*Transport)(nil)
 	_ wire.AsyncTransport     = (*Transport)(nil)
+	_ wire.BoundedTransport   = (*Transport)(nil)
 	_ ports.LinkStateReporter = (*Transport)(nil)
 )
 
@@ -364,9 +364,29 @@ func (t *Transport) beginShutdown() <-chan struct{} {
 // application decoders, but an unbounded skip would let a peer stall
 // Recv forever without progress.
 func (t *Transport) Recv() (wire.Envelope, error) {
+	return t.recvSkippingProbes(t.framer.Recv)
+}
+
+// RecvBounded reads exactly one framed envelope without allocating a
+// payload larger than limit: the four-byte length prefix is validated
+// before any payload buffer exists. It backs the bootstrap auth record so
+// an unauthenticated peer cannot force a large pre-auth allocation by
+// advertising a huge frame and stalling. Zero-length dial probes are
+// skipped exactly like Recv, and the shared streamframe framer enforces the
+// same framing as every other carriage. It reads through the transport's one
+// framer, so it must only be used before regular Send/Recv traffic begins.
+func (t *Transport) RecvBounded(limit uint64) (wire.Envelope, error) {
+	return t.recvSkippingProbes(func() ([]byte, error) { return t.framer.RecvBounded(limit) })
+}
+
+// recvSkippingProbes observes one receive operation and runs read for exactly
+// one envelope, skipping the framed zero-length dial probe at most
+// maxSkippedProbes times. Both Recv and RecvBounded share it, so the bounded
+// path adds only the per-call ceiling and never a second framing copy.
+func (t *Transport) recvSkippingProbes(read func() ([]byte, error)) (wire.Envelope, error) {
 	end := t.observe(ports.RuntimeAdapterReceiveStart, 0)
 	for skipped := 0; ; skipped++ {
-		payload, err := t.framer.Recv()
+		payload, err := read()
 		if errors.Is(err, streamframe.ErrZeroLength) {
 			if skipped >= maxSkippedProbes {
 				end(false)
@@ -379,38 +399,6 @@ func (t *Transport) Recv() (wire.Envelope, error) {
 			return wire.Envelope{}, mapFramerError(err)
 		}
 		end(true)
-		return wire.Envelope{Payload: payload}, nil
-	}
-}
-
-// recvBounded reads exactly one framed envelope without allocating a
-// payload larger than limit: the four-byte length prefix is validated
-// before any payload buffer exists. It backs the bootstrap auth record so
-// an unauthenticated peer cannot force a large pre-auth allocation by
-// advertising a huge frame and stalling. Zero-length dial probes are
-// skipped exactly like Recv. It reads the stream directly (bypassing the
-// framer) and must only be used before regular Recv/Send traffic begins.
-func (t *Transport) recvBounded(limit uint32) (wire.Envelope, error) {
-	for skipped := 0; ; skipped++ {
-		var header [4]byte
-		if _, err := io.ReadFull(t.stream, header[:]); err != nil {
-			return wire.Envelope{}, mapFramerError(err)
-		}
-		length := binary.BigEndian.Uint32(header[:])
-		if length == 0 {
-			if skipped >= maxSkippedProbes {
-				return wire.Envelope{}, errZeroLength
-			}
-			continue
-		}
-		if length > limit {
-			return wire.Envelope{}, errTooLarge
-		}
-		payload := make([]byte, length)
-		if _, err := io.ReadFull(t.stream, payload); err != nil {
-			zeroBytes(payload)
-			return wire.Envelope{}, mapFramerError(err)
-		}
 		return wire.Envelope{Payload: payload}, nil
 	}
 }

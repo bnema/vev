@@ -68,6 +68,8 @@ func NewTransport(conn net.Conn, opts ...Option) wire.Transport {
 	return t
 }
 
+var _ wire.BoundedTransport = (*unixTransport)(nil)
+
 // Send queues the envelope for the sole writer and waits for its wire attempt.
 func (t *unixTransport) Send(envelope wire.Envelope) error {
 	end := t.beginOperation(ports.RuntimeAdapterSendStart, uint64(len(envelope.Payload)))
@@ -91,6 +93,21 @@ func (t *unixTransport) SendAsync(envelope wire.Envelope) error {
 func (t *unixTransport) Recv() (wire.Envelope, error) {
 	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
 	payload, err := t.framer.Recv()
+	if err != nil {
+		end(false)
+		return wire.Envelope{}, mapFramerError(err)
+	}
+	end(true)
+	return wire.Envelope{Payload: payload}, nil
+}
+
+// RecvBounded reads one complete envelope bounded to limit before allocation,
+// sharing the framer's validation with Recv: an over-limit length prefix is
+// refused without reading its body. It is the bounded raw-carriage capability
+// a preamble-negotiated multiplexer consumes.
+func (t *unixTransport) RecvBounded(limit uint64) (wire.Envelope, error) {
+	end := t.beginOperation(ports.RuntimeAdapterReceiveStart, 0)
+	payload, err := t.framer.RecvBounded(limit)
 	if err != nil {
 		end(false)
 		return wire.Envelope{}, mapFramerError(err)

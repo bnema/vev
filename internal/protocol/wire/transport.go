@@ -41,6 +41,19 @@ type OwnedSynchronousTransport interface {
 	SendSynchronous(Envelope) error
 }
 
+// BoundedTransport is a Transport whose receive path accepts a caller-supplied
+// ceiling: RecvBounded validates the framed length prefix against limit before
+// allocating or reading the body, so a peer cannot force a large allocation by
+// advertising a huge frame. The effective bound is the smaller of limit and the
+// transport's own framed ceiling, so it can only narrow a carriage that already
+// enforces one. Every vev stream carriage (IPC, QUIC, SSH stdio) implements it;
+// callers that need a bounded read assert this optional capability, leaving the
+// base Transport contract unchanged.
+type BoundedTransport interface {
+	Transport
+	RecvBounded(limit uint64) (Envelope, error)
+}
+
 // Dialer establishes outbound raw carriage connections.
 type Dialer interface {
 	Dial(context.Context) (Transport, error)

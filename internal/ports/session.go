@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -38,6 +39,27 @@ type ServerConnection interface {
 	LinkState() LinkState
 	LinkEvents() <-chan LinkEvent
 	Close() error
+}
+
+// HandshakeDeadlineProvider is an optional boundary-safe port implemented by
+// accepted server connections that already own an absolute handshake deadline
+// fixed before the daemon saw them - for example a connection admitted by a mux
+// listener whose stream spent part of its budget waiting in an accept queue.
+//
+// HandshakeDeadline returns that absolute deadline, stable for the connection's
+// lifetime and never restarted. A daemon-consuming use case adopts it verbatim
+// for the one handshake context that covers the first ReceiveClient through
+// Welcome and the committed initial publication, so queue delay and the
+// handshake share a single budget; an already-elapsed deadline fails the
+// handshake promptly instead of starting a second protocol.HandshakeTimeout. A
+// connection that does not implement this port keeps the ordinary behavior of a
+// fresh budget started when the daemon takes it.
+//
+// Completion is deliberately not part of this port: an accepted connection may
+// finish its transport preamble earlier, but the daemon's budget must end only
+// where it commits its initial publication.
+type HandshakeDeadlineProvider interface {
+	HandshakeDeadline() time.Time
 }
 
 // ServerListener accepts typed server-side session connections.

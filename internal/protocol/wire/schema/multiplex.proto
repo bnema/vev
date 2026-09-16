@@ -1,0 +1,153 @@
+// Daemon multiplexer wire schema: the broker-to-daemon conversation that
+// multiplexes independently cancellable logical streams over one pooled
+// physical connection.
+//
+// daemonmux is a third conversation, separate from the session protocol
+// (tags 1-32) and the broker protocol (client 101-110, server 201-209):
+// client tags 301-304 and server tags 401-405 are disjoint from every other
+// tag, and each direction is its own closed oneof union. The physical
+// preamble is a separate adapter message pair, not an envelope variant:
+// roles 5/6 negotiate the per-connection ceilings, the authenticated daemon
+// identity, and the accepted policy once, before any application message.
+//
+// MuxData, MuxClose, and MuxReset are shared payloads carried in both
+// directions; MuxOpen carries the full stream identity, and every later
+// frame is routed by physical_stream_id alone.
+syntax = "proto3";
+
+package vev.wire.v1;
+
+import "broker.proto";
+import "common.proto";
+import "envelope.proto";
+
+option go_package = "github.com/bnema/vev/internal/protocol/wire";
+
+// MuxStreamRef identifies one logical stream multiplexed over one physical
+// daemon connection: the mux-local physical_stream_id asserted by the
+// opening side, the broker epoch and client connection that own the stream,
+// and the broker client_stream_id it carries. physical_stream_id never
+// crosses a physical connection; client_stream_id never crosses a broker
+// connection or epoch. Every numeric value is nonzero and connection_id is
+// exactly 16 bytes.
+message MuxStreamRef {
+  uint64 physical_stream_id = 1;
+  uint64 broker_epoch = 2;
+  bytes connection_id = 3; // exactly 16 bytes
+  uint64 client_stream_id = 4;
+}
+
+// MuxOpen asks the daemon to open one independently cancellable logical
+// stream over the physical connection. env is the per-request session
+// environment and is never inherited from the broker process environment.
+// The daemon revalidates the exact session identity before attachment.
+message MuxOpen {
+  MuxStreamRef ref = 1;
+  // Closed taxonomy: 1 = attachment, 2 = control, 3 = observation.
+  uint32 purpose = 2;
+  bool local = 3;
+  string endpoint = 4;
+  RemoteRegistration registration = 5;
+  ExactTarget target = 6;
+  repeated string env = 7;
+  BrokerWirePolicy policy = 8;
+}
+
+// MuxOpened confirms one logical stream is established.
+message MuxOpened {
+  MuxStreamRef ref = 1;
+}
+
+// MuxRefused refuses one logical stream open. The typed error is
+// mandatory: a refusal without a reason could not be classified.
+message MuxRefused {
+  MuxStreamRef ref = 1;
+  BrokerErrorDetail error = 2;
+}
+
+// MuxData carries one opaque stream frame in either direction. Once a
+// stream is opened it is routed by physical_stream_id alone and never
+// repeats its scope.
+message MuxData {
+  uint64 physical_stream_id = 1;
+  bytes data = 2;
+}
+
+// MuxClose ends one logical stream in either direction.
+message MuxClose {
+  uint64 physical_stream_id = 1;
+}
+
+// MuxReset aborts one logical stream in either direction. An unset error is
+// an abort without a typed reason; a set error carries the failure.
+message MuxReset {
+  uint64 physical_stream_id = 1;
+  BrokerErrorDetail error = 2;
+}
+
+// MuxClientEnvelope is the closed broker-to-daemon mux union. Exactly one
+// variant must be set per envelope; empty, duplicate, and wrong-direction
+// payloads are rejected before generated unmarshal.
+message MuxClientEnvelope {
+  oneof payload {
+    MuxOpen open = 301;
+    MuxData data = 302;
+    MuxClose close = 303;
+    MuxReset reset = 304;
+  }
+}
+
+// MuxServerEnvelope is the closed daemon-to-broker mux union. Exactly one
+// variant must be set per envelope.
+message MuxServerEnvelope {
+  oneof payload {
+    MuxOpened opened = 401;
+    MuxRefused refused = 402;
+    MuxData data = 403;
+    MuxClose close = 404;
+    MuxReset reset = 405;
+  }
+}
+
+// MuxPreambleRequest is the daemonmux client's first frame on one physical
+// connection: the requested per-connection ceilings and the broker policy
+// the client asks the daemon to accept. The shared field numbers mirror
+// MuxPreambleResponse, exactly as the session preamble pair does. Each
+// ceiling is advertised independently per direction: max_aggregate_bytes is
+// the buffered-bytes budget the client will enforce in the direction it
+// accepts, and never shared with the opposite direction.
+message MuxPreambleRequest {
+  uint32 magic = 1; // must equal the shared preamble magic
+  uint32 epoch = 2; // must equal the shared protocol epoch
+  uint32 version = 3; // exact session protocol version
+  PreambleRole role = 4; // must be 5 (daemonmux client)
+  uint64 max_receive_envelope_bytes = 5; // requested 1 MiB..16 MiB
+  uint64 stream_chunk_limit = 6; // requested 1..64 KiB
+  uint64 max_streams = 7; // requested 1..128
+  uint64 max_aggregate_bytes = 8; // requested 1 max chunk + overhead..64 MiB, per direction
+  uint32 capability_bits = 9; // must be zero
+  BrokerWirePolicy policy = 10; // requested connection policy
+}
+
+// MuxPreambleResponse is the daemon's first frame: acceptance carrying the
+// effective (minimum) ceilings, the authenticated daemon identity and
+// incarnation, and the accepted policy, or a typed refusal. The effective
+// ceilings never exceed the client's offer, and max_aggregate_bytes stays a
+// per-direction budget: the daemon enforces the effective value
+// independently in each direction it buffers.
+message MuxPreambleResponse {
+  uint32 magic = 1;
+  uint32 epoch = 2;
+  uint32 version = 3;
+  PreambleRole role = 4; // must be 6 (daemonmux server)
+  uint64 max_receive_envelope_bytes = 5; // effective ceiling
+  uint64 stream_chunk_limit = 6; // effective ceiling
+  uint64 max_streams = 7; // effective ceiling
+  uint64 max_aggregate_bytes = 8; // effective ceiling, per direction, never above the offer
+  uint32 capability_bits = 9; // must be zero
+  BrokerWirePolicy accepted_policy = 10; // daemon-authoritative policy
+  bool accepted = 11;
+  PreambleRejectionCode rejection = 12; // set only when accepted is false
+  string daemon_identity = 13; // authenticated identity token
+  bytes incarnation = 14; // exactly 16 bytes
+}

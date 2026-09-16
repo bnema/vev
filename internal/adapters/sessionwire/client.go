@@ -20,6 +20,16 @@ type clientConnection struct {
 	preambleOnce sync.Once
 	preambleErr  error
 	deadline     time.Time
+
+	// preambleDone closes exactly once when the handshake has run, whether it
+	// succeeded or failed. It backs the handshake completion hook that a logical
+	// mux connection exposes; the absolute deadline is never restarted.
+	preambleDone chan struct{}
+
+	hooksMu       sync.Mutex
+	handshakeDone bool
+	hooksRun      bool
+	hooks         []func()
 }
 
 var _ ports.ClientConnection = (*clientConnection)(nil)
@@ -31,7 +41,71 @@ func NewClientConnection(raw wire.Transport) ports.ClientConnection {
 	if raw == nil {
 		return nil
 	}
-	return &clientConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout)}
+	return &clientConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout), preambleDone: make(chan struct{})}
+}
+
+// HandshakeDeadline returns the absolute local deadline of the session
+// handshake this connection started with. It is the one accepted deadline the
+// preamble, Hello/Welcome, and first committed publication share; the value is
+// fixed for the connection's lifetime and is never restarted.
+func (c *clientConnection) HandshakeDeadline() time.Time { return c.deadline }
+
+// HandshakeDone returns a channel that is closed exactly once when the
+// handshake has run, whether it succeeded or failed.
+func (c *clientConnection) HandshakeDone() <-chan struct{} { return c.preambleDone }
+
+// OnHandshakeComplete registers fn to run exactly once when the handshake has
+// run. Registering after completion runs fn immediately; a nil fn is ignored.
+func (c *clientConnection) OnHandshakeComplete(fn func()) {
+	if fn == nil {
+		return
+	}
+	c.hooksMu.Lock()
+	if c.handshakeDone {
+		c.hooksMu.Unlock()
+		fn()
+		return
+	}
+	c.hooks = append(c.hooks, fn)
+	c.hooksMu.Unlock()
+}
+
+// finishPreamble publishes handshake completion from inside the preamble's
+// sync.Once: it closes the done channel and marks the handshake complete so a
+// later registration runs immediately. It deliberately runs no registered hook,
+// because a hook that calls back into the connection would re-enter sync.Once
+// and deadlock; runHandshakeHooks runs the hooks after the Once body returns.
+// It tolerates a zero-value connection that never allocated the done channel
+// (test literals and seam-only construction), so closing is nil-safe.
+func (c *clientConnection) finishPreamble() {
+	if c.preambleDone != nil {
+		close(c.preambleDone)
+	}
+	c.hooksMu.Lock()
+	c.handshakeDone = true
+	c.hooksMu.Unlock()
+}
+
+// runHandshakeHooks runs the completion hooks registered before the handshake
+// finished exactly once, after the preamble's sync.Once body has returned.
+// Running them outside the Once is what lets a hook call back into the
+// connection - for example to send a message - without re-entering sync.Once
+// and deadlocking. Every ensurePreamble caller invokes it; only the first
+// drains the hooks, and a registrant that arrives after completion observes the
+// completed flag and runs itself.
+func (c *clientConnection) runHandshakeHooks() {
+	c.hooksMu.Lock()
+	if c.hooksRun {
+		c.hooksMu.Unlock()
+		return
+	}
+	c.hooksRun = true
+	hooks := c.hooks
+	c.hooks = nil
+	c.hooksMu.Unlock()
+	for _, fn := range hooks {
+		fn()
+	}
 }
 
 func (c *clientConnection) ensurePreamble() error {
@@ -42,7 +116,9 @@ func (c *clientConnection) ensurePreamble() error {
 		if c.preambleErr != nil {
 			_ = c.raw.Close()
 		}
+		c.finishPreamble()
 	})
+	c.runHandshakeHooks()
 	return c.preambleErr
 }
 
@@ -104,7 +180,7 @@ func (d *clientDialer) Dial(ctx context.Context) (ports.ClientConnection, error)
 	if err != nil {
 		return nil, err
 	}
-	connection := &clientConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout)}
+	connection := &clientConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout), preambleDone: make(chan struct{})}
 	if err := connection.ensurePreambleWith(ctx); err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -117,7 +193,9 @@ func (c *clientConnection) ensurePreambleWith(ctx context.Context) error {
 		ctx, cancel := context.WithDeadline(ctx, c.deadline)
 		defer cancel()
 		c.ceilings, c.preambleErr = runProtoClientPreamble(ctx, c.raw, c.ceilings)
+		c.finishPreamble()
 	})
+	c.runHandshakeHooks()
 	return c.preambleErr
 }
 

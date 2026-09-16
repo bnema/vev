@@ -169,6 +169,35 @@ func (f *Framer) SendAsync(payload []byte) error {
 func (f *Framer) Recv() ([]byte, error) {
 	f.readMu.Lock()
 	defer f.readMu.Unlock()
+	return f.recvLocked(f.negotiatedBound())
+}
+
+// RecvBounded reads one complete envelope like Recv, but validates the four-
+// byte length prefix against limit before allocating or reading the body, so a
+// peer cannot force an allocation larger than the caller's bound by
+// advertising a huge frame. The effective bound is the smaller of limit and
+// the framer's negotiated ceiling, so a per-call limit can only narrow the
+// framer; a zero limit refuses every non-empty frame. Concurrent calls are
+// serialized with Recv. The caller owns the returned copy.
+func (f *Framer) RecvBounded(limit uint64) ([]byte, error) {
+	f.readMu.Lock()
+	defer f.readMu.Unlock()
+	return f.recvLocked(min(f.negotiatedBound(), limit))
+}
+
+// negotiatedBound is the framer's configured per-connection ceiling, or 0
+// when the framer is disabled (which refuses every non-empty frame).
+func (f *Framer) negotiatedBound() uint64 {
+	if f.maxEnvelope <= 0 {
+		return 0
+	}
+	return uint64(f.maxEnvelope)
+}
+
+// recvLocked reads and validates one frame under readMu. The length prefix is
+// validated against bound before any body buffer exists, and the returned slice
+// is a fresh copy the caller owns.
+func (f *Framer) recvLocked(bound uint64) ([]byte, error) {
 	var header [4]byte
 	if _, err := io.ReadFull(f.r, header[:]); err != nil {
 		if f.isClosed() {
@@ -180,7 +209,7 @@ func (f *Framer) Recv() ([]byte, error) {
 	if length == 0 {
 		return nil, ErrZeroLength
 	}
-	if f.maxEnvelope <= 0 || length > uint32(f.maxEnvelope) {
+	if uint64(length) > bound {
 		return nil, ErrTooLarge
 	}
 	if cap(f.readBuf) < int(length) {
@@ -188,13 +217,17 @@ func (f *Framer) Recv() ([]byte, error) {
 	} else {
 		f.readBuf = f.readBuf[:length]
 	}
-	if _, err := io.ReadFull(f.r, f.readBuf); err != nil {
+	payload := f.readBuf
+	if _, err := io.ReadFull(f.r, payload); err != nil {
+		// Best-effort erase: a truncated frame may hold a partial secret
+		// (for example a bounded bootstrap auth record).
+		clear(payload)
 		if f.isClosed() {
 			return nil, io.EOF
 		}
 		return nil, err
 	}
-	return append([]byte(nil), f.readBuf...), nil
+	return append([]byte(nil), payload...), nil
 }
 
 // Close unblocks in-flight Send and Recv, fails queued payloads, waits for
