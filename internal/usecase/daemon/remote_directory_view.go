@@ -20,6 +20,19 @@ func (d *Daemon) remoteDirectorySnapshot() ports.RemoteDirectorySnapshot {
 	return d.remoteDirectory.Snapshot()
 }
 
+// currentRemoteDirectory returns a sorted defensive copy of the newest
+// publication plus the monitoring state. It performs no I/O and never waits
+// for the service loop. Centralizing it keeps the hybrid capture and the
+// foreign picker projection reading exactly the same rows (coordinated P7
+// removal set).
+func (d *Daemon) currentRemoteDirectory() (hosts []ports.RemoteHostSnapshot, monitored, initialized bool) {
+	directory := d.remoteDirectorySnapshot()
+	hosts = append([]ports.RemoteHostSnapshot(nil), directory.Hosts...)
+	sortDirectoryHosts(hosts)
+	monitored = d != nil && d.remoteDirectory != nil
+	return hosts, monitored, directory.Initialized
+}
+
 // sortDirectoryHosts orders hosts by registry rank, breaking ties by
 // endpoint. Snapshot slice order is alphabetical; Rank carries registry
 // (pinned-then-learned) order for presentation.

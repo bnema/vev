@@ -49,7 +49,7 @@ func (d *Daemon) answerNavigationInventory(request protocol.NavigationInventoryR
 func (d *Daemon) snapshotNavigationInventory(requestID uint64) protocol.NavigationInventoryResponse {
 	inv := d.captureSessionInventory(viewOptions{}, false)
 	groups := make([]protocol.NavigationInventorySourceGroup, 0, len(inv.hosts)+1)
-	groups = append(groups, d.localInventoryGroup(inv))
+	groups = append(groups, d.localInventoryGroup(inv.localSessionInventory))
 	for _, host := range inv.hosts {
 		groups = append(groups, remoteInventoryGroup(host))
 	}
@@ -60,10 +60,26 @@ func (d *Daemon) snapshotNavigationInventory(requestID uint64) protocol.Navigati
 	return fitNavigationInventoryResponse(response)
 }
 
+// localNavigationInventorySnapshot is the prepared local-only navigation
+// projection (Plan 001 P4.3): exactly one local source group, built from the
+// remote-free capture. It never reads the remote directory, so the source
+// control daemon's own export cannot observe or depend on remote monitoring.
+// The hybrid snapshotNavigationInventory composes this group with foreign
+// source groups through the same localInventoryGroup projection.
+func (d *Daemon) localNavigationInventorySnapshot(requestID uint64) protocol.NavigationInventoryResponse {
+	inv := d.captureLocalSessionInventory(viewOptions{}, false)
+	response := protocol.NavigationInventoryResponse{
+		RequestID: requestID, Operation: protocol.NavigationInventorySnapshot, Status: protocol.NavigationInventoryOK,
+		Groups: []protocol.NavigationInventorySourceGroup{d.localInventoryGroup(inv)},
+	}
+	return fitNavigationInventoryResponse(response)
+}
+
 // localInventoryGroup projects live named sessions and resumable stopped
-// sessions. Observation failures do not exist for local state; broken
-// records are excluded here because they are never resumable.
-func (d *Daemon) localInventoryGroup(inv sessionInventory) protocol.NavigationInventorySourceGroup {
+// sessions. Observation failures do not exist for local state; broken and
+// purging records are excluded here because they are never resumable. It reads
+// only the remote-free local capture.
+func (d *Daemon) localInventoryGroup(inv localSessionInventory) protocol.NavigationInventorySourceGroup {
 	group := protocol.NavigationInventorySourceGroup{SourceKey: protocol.NavigationInventoryLocalSourceKey, Status: protocol.NavigationInventorySourceOK}
 	for _, item := range inv.live {
 		view := item.view
@@ -210,7 +226,7 @@ func fitNavigationInventoryResponse(response protocol.NavigationInventoryRespons
 func (d *Daemon) resolveNavigationInventory(request protocol.NavigationInventoryRequest) protocol.NavigationInventoryResponse {
 	response := protocol.NavigationInventoryResponse{RequestID: request.RequestID, Operation: protocol.NavigationInventoryResolve}
 	if request.SourceKey == protocol.NavigationInventoryLocalSourceKey {
-		target, ok := d.resolveLocalInventoryEntry(request.EntryKey)
+		target, ok := d.localNavigationResolve(request)
 		if !ok {
 			response.Status = protocol.NavigationInventoryUnavailable
 			return response
@@ -239,11 +255,24 @@ func (d *Daemon) resolveNavigationInventory(request protocol.NavigationInventory
 	return response
 }
 
-// resolveLocalInventoryEntry matches the opaque key against fresh live and
+// localNavigationResolve is the prepared local-only navigation resolver
+// (Plan 001 P4.3). It rejects a structured foreign source key or registration
+// before any lookup, so a local resolve can never be satisfied by a remote
+// endpoint or a foreign registration even when a local session shares the
+// row's name. Matching is by the opaque lifecycle-qualified key only: a stale
+// or replaced lifecycle never falls back to a same-name session.
+func (d *Daemon) localNavigationResolve(request protocol.NavigationInventoryRequest) (protocol.ExactSessionTarget, bool) {
+	if request.SourceKey != protocol.NavigationInventoryLocalSourceKey || !request.Registration.IsZero() {
+		return protocol.ExactSessionTarget{}, false
+	}
+	return localNavigationResolveEntry(d.captureLocalSessionInventory(viewOptions{}, false), request.EntryKey)
+}
+
+// localNavigationResolveEntry matches the opaque key against fresh live and
 // resumable stopped state. A stopped target that is now live with the same
-// lifecycle and selector stays attachable; a changed lifecycle rejects.
-func (d *Daemon) resolveLocalInventoryEntry(entryKey string) (protocol.ExactSessionTarget, bool) {
-	inv := d.captureSessionInventory(viewOptions{}, false)
+// lifecycle and selector stays attachable; a broken or purging record is not
+// resumable and rejects; a changed lifecycle rejects.
+func localNavigationResolveEntry(inv localSessionInventory, entryKey string) (protocol.ExactSessionTarget, bool) {
 	for _, item := range inv.live {
 		view := item.view
 		if view.name == "" || view.ephemeral {

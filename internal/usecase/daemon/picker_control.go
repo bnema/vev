@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -76,12 +77,51 @@ func (d *Daemon) observePickerRoutes(targets []protocol.ExactSessionTarget) []pr
 }
 
 func (d *Daemon) pickerControlAttachTarget(target picker.Target) (protocol.AttachTarget, bool) {
+	// A remote target names an endpoint-qualified remote session, not a local
+	// one. The structured route and lifecycle are revalidated against the
+	// remote catalogue by remoteCatalogTargetReady; the local resolver never
+	// sees a foreign target.
 	if target.RemoteTarget != nil && target.RemoteKey != nil {
 		remote := *target.RemoteTarget
 		if !d.remoteCatalogTargetReady(remote) {
 			return protocol.AttachTarget{}, false
 		}
 		return protocol.AttachTarget{Endpoint: remote.Endpoint, Session: remote.SessionName, Intent: protocol.IntentAttach, RemoteTarget: &remote, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, true
+	}
+	return d.pickerControlAttachTargetLocal(target)
+}
+
+// pickerControlAttachTargetLocal preserves the hybrid live behavior for a
+// local target while keeping the prepared resolver strict. The picker
+// snapshot's tab is a best-effort cursor, so a tab that vanished between the
+// snapshot and the resolve must not fail the whole attach: the client's own
+// missing-tab fallback would have attached the session's first tab anyway.
+// The wrapper therefore retries once without a preferred tab, which can only
+// succeed when the exact local lifecycle is still current, so a replaced or
+// renamed session and a foreign target still reject.
+func (d *Daemon) pickerControlAttachTargetLocal(target picker.Target) (protocol.AttachTarget, bool) {
+	resolved, ok := d.localPickerControlAttachTarget(target)
+	if ok || target.TabID == "" {
+		return resolved, ok
+	}
+	target.TabID = ""
+	return d.localPickerControlAttachTarget(target)
+}
+
+// localPickerControlAttachTarget is the prepared local-only control resolver
+// (Plan 001 P4.3). It rejects a structured foreign target (remote route or
+// remote session key) before any lookup, so a local resolve can never be
+// satisfied by a foreign row. It then matches the exact session identity and
+// lifecycle; a replaced lifecycle or a renamed session never falls back to a
+// same-name session. A non-empty preferred tab must still exist in the current
+// session, so a stale tab rejects instead of forwarding a dangling tab ID; the
+// hybrid pickerControlAttachTarget retains its vanished-tab fallback on top of
+// this strict check.
+// Broken and purging stopped records are unreachable here: only live registry
+// sessions are eligible.
+func (d *Daemon) localPickerControlAttachTarget(target picker.Target) (protocol.AttachTarget, bool) {
+	if target.RemoteTarget != nil || target.RemoteKey != nil {
+		return protocol.AttachTarget{}, false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -90,7 +130,24 @@ func (d *Daemon) pickerControlAttachTarget(target picker.Target) (protocol.Attac
 		return protocol.AttachTarget{}, false
 	}
 	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if !targetMatchesLifecycle(target, sess.name, sess.createdAt, sess.incarnation) {
+		return protocol.AttachTarget{}, false
+	}
+	if target.TabID != "" && !sessionHasStableTabLocked(sess, target.TabID) {
+		return protocol.AttachTarget{}, false
+	}
 	exact := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
-	sess.mu.Unlock()
 	return protocol.AttachTarget{Session: exact.SessionName, Intent: protocol.IntentAttach, ExactTarget: &exact, PreferredTabID: target.TabID, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, true
+}
+
+// sessionHasStableTabLocked reports whether an exact stable tab identity is
+// still present on a session. Caller holds the session lock.
+func sessionHasStableTabLocked(sess *session, tabID domain.TabStableID) bool {
+	for _, tab := range sess.tabs {
+		if tab != nil && tab.stableID == string(tabID) {
+			return true
+		}
+	}
+	return false
 }

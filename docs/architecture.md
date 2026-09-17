@@ -114,6 +114,63 @@ feeds it) belongs to the coordinated P7 removal set; it is not removed,
 gated, or polled differently before that cutover, and no polling gate is
 introduced here (GO-001, deferred to P7).
 
+## Prepared local inventory boundary (Plan 001 P4.3, preparation only)
+
+The daemon separates local registry state from foreign remote-directory rows.
+`captureLocalSessionInventory` (returning `localSessionInventory`) copies live
+sessions and inactive records and never reads the remote directory;
+`captureSessionInventory` composes that local capture with the foreign rows
+from `currentRemoteDirectory`. The local catalogue export
+(`controlExec.RemoteCatalog`), the prepared navigation projection
+(`localNavigationInventorySnapshot` / `localInventoryGroup`), the prepared
+navigation resolver (`localNavigationResolve`), and the prepared picker
+projection (`localPickerViews` / `localPickerViewProjections`) read only the
+local capture, so they cannot observe or depend on remote monitoring. The
+prepared control resolver (`localPickerControlAttachTarget`) is not an
+inventory projection: it reads the live session registry directly under
+`d.mu` and never the remote directory, the `sessionInventory` composite, or a
+stopped record — only live registry sessions are eligible there.
+
+The current hybrid projections keep their foreign behavior by composing the
+prepared local output with the foreign rows: `snapshotNavigationInventory`
+appends `remoteInventoryGroup` per host, `pickerViewProjections` interleaves
+`foreignPickerViews` between the local live and stopped groups, and
+`pickerControlAttachTarget` delegates to `localPickerControlAttachTarget` (via
+`pickerControlAttachTargetLocal`) after its remote branch. Prepared local
+resolution is exact: a structured foreign source key, registration, remote
+target, or remote key is rejected before any lookup; broken and purging records
+are never resumable; a stopped target that becomes live with the same lifecycle
+resolves; and a stale lifecycle or a same-name replacement never resolves by
+name. The prepared local resolver also rejects a stale preferred tab, but the
+hybrid wrapper preserves the live behavior on top of it: when the exact local
+lifecycle is still current and only the tab vanished between snapshot and
+resolve, it retries with an empty `PreferredTabID`, matching the client's own
+missing-tab fallback instead of failing the attach.
+
+Current ownership: `internal/usecase/daemon` owns the local capture, the
+prepared projections and resolvers, and the hybrid wrappers; `internal/app`
+composes the daemon-side monitor; `internal/adapters/remote` plus the
+runner-scoped `remotes.HostRegistry` own discovery. This is a preparation pass:
+no production composition is cut over, no monitor is gated or removed, no
+public protocol, schema, or version changes, and the signed purge machinery is
+untouched.
+
+P7 removal set: `WithRemoteMonitor` and the `remoteDirectory` /
+`remoteMonitorRun` state; `remoteDirectorySnapshot` and `currentRemoteDirectory`;
+`watchRemoteDirectory`, `refreshRemoteDirectoryViews`, and
+`notifyNewRemoteFailures`; the foreign picker composition (`foreignPickerViews`,
+`remoteInventoryGroup` and the remote groups in `snapshotNavigationInventory`,
+the remote branch of `pickerControlAttachTarget`, `resolveRemoteInventoryEntry`);
+the hybrid wrappers themselves (`captureSessionInventory`, the
+`sessionInventory` composite, `pickerViewProjections`, `pickerControlAttachTarget`
+and its `pickerControlAttachTargetLocal` vanished-tab fallback) once the local
+projections read `localSessionInventory` directly; the remote picker, palette,
+preview, attach, and route projections that read the directory; and the
+daemon-side `ports.RemoteDirectory` / `ports.RemotePreviewClient` composition.
+Once those foreign inputs are deleted, the prepared local functions are the
+whole projection. The daemon-side monitor and host registry stay active until
+then (GO-001, deferred to P7).
+
 ## Session composition
 
 ```text

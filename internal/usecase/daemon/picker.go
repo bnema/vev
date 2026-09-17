@@ -32,22 +32,44 @@ func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionV
 	return grouped, current
 }
 
-func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pickerSessionView, []pickerSessionView, pickerSourceFilter) {
+// pickerLocalViews is the remote-free picker projection. The hybrid
+// projection interleaves foreign rows between the live and stopped rows, so
+// the two groups are returned separately and the stopped rows are returned
+// without a LOCAL section label. The assembler applies that label once it
+// knows whether any row precedes them.
+type pickerLocalViews struct {
+	current        pickerSourceFilter
+	now            time.Time
+	recentLive     []pickerSessionView
+	groupedLive    []pickerSessionView
+	recentStopped  []pickerSessionView
+	groupedStopped []pickerSessionView
+}
+
+// pickerForeignViews is the projected foreign (remote-directory) portion of
+// the hybrid picker projection plus whether it suppresses the LOCAL label on a
+// preceding stopped row.
+type pickerForeignViews struct {
+	recent            []pickerSessionView
+	grouped           []pickerSessionView
+	blockLocalStopped bool
+}
+
+// localPickerViews is the prepared local-only picker projection (Plan 001
+// P4.3). It captures live and stopped local rows, orders them exactly like the
+// hybrid projection does when no foreign source is present, and never reads
+// the remote directory.
+func (d *Daemon) localPickerViews(cur *session, ac *attachedClient) pickerLocalViews {
 	if cur != nil && ac != nil {
 		cur.repairAttachmentView(ac)
 	}
 	opts := viewOptions{tabDetails: true, focusedTitles: true, terminalTitle: d.currentTabsConfig().TerminalTitle}
-	inv := d.captureSessionInventory(opts, true)
+	inv := d.captureLocalSessionInventory(opts, true)
 	stopped := inv.visibleStopped()
-	hosts := inv.hosts
-	now := inv.now
-	monitored := inv.monitored
-	initialized := inv.initialized
 
 	// One snapshot per live session: sorting and view building read the same
 	// capture, so comparators cannot observe a concurrent touchMRU or
-	// renameSession mid-sort. Remote-catalog locks are released before sorting
-	// and picker-row construction.
+	// renameSession mid-sort.
 	live := inv.live
 	var current pickerSourceFilter
 	for _, item := range live {
@@ -79,6 +101,42 @@ func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pick
 		return stopped[i].name < stopped[j].name
 	})
 
+	recentLive := make([]pickerSessionView, 0, len(live))
+	groupedLive := make([]pickerSessionView, 0, len(live))
+	for i, item := range live {
+		recentLive = append(recentLive, item.view.pickerView())
+		view := item.view.pickerView()
+		if i == 0 {
+			view.Section = "LOCAL"
+		}
+		groupedLive = append(groupedLive, view)
+	}
+	stoppedRows := stoppedPickerRows(stopped)
+	// The grouped projection labels its first stopped row in place, so the
+	// recent projection keeps its own copy.
+	recentStopped := append([]pickerSessionView(nil), stoppedRows...)
+	groupedStopped := stoppedRows
+	return pickerLocalViews{current: current, now: inv.now, recentLive: recentLive, groupedLive: groupedLive, recentStopped: recentStopped, groupedStopped: groupedStopped}
+}
+
+// stoppedPickerRows projects visible inactive records into picker rows. The
+// local and hybrid projections share this single row shape, and the callers
+// own whether a LOCAL section label is applied.
+func stoppedPickerRows(stopped []inactiveSession) []pickerSessionView {
+	rows := make([]pickerSessionView, 0, len(stopped))
+	for _, s := range stopped {
+		createdAt := s.createdAt
+		rows = append(rows, pickerSessionView{ID: domain.SessionID("stopped:" + s.name), Incarnation: s.incarnation, Name: s.name, TargetName: s.name, Stopped: true, ExpectedCreatedAt: &createdAt})
+	}
+	return rows
+}
+
+// foreignPickerViews projects the current remote directory for the picker. It
+// reads the remote directory; a nil directory yields no rows and cannot
+// suppress the local stopped section label. The daemon-side monitor stays
+// intentionally active in this state (coordinated P7 removal set).
+func (d *Daemon) foreignPickerViews(now time.Time) pickerForeignViews {
+	hosts, monitored, initialized := d.currentRemoteDirectory()
 	catalogRows := 0
 	for _, host := range hosts {
 		catalogRows += len(host.Sessions)
@@ -87,10 +145,7 @@ func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pick
 		}
 	}
 	checking := monitored && !initialized
-	recent := make([]pickerSessionView, 0, len(live)+len(stopped)+catalogRows)
-	for _, item := range live {
-		recent = append(recent, item.view.pickerView())
-	}
+	recent := make([]pickerSessionView, 0, catalogRows)
 	for _, host := range hosts {
 		for _, session := range host.Sessions {
 			key := domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}
@@ -105,19 +160,8 @@ func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pick
 	if checking {
 		recent = append(recent, remotePickerCheckingView())
 	}
-	for _, s := range stopped {
-		createdAt := s.createdAt
-		recent = append(recent, pickerSessionView{ID: domain.SessionID("stopped:" + s.name), Incarnation: s.incarnation, Name: s.name, TargetName: s.name, Stopped: true, ExpectedCreatedAt: &createdAt})
-	}
 
-	views := make([]pickerSessionView, 0, len(live)+len(stopped)+catalogRows)
-	for i, item := range live {
-		view := item.view.pickerView()
-		if i == 0 {
-			view.Section = "LOCAL"
-		}
-		views = append(views, view)
-	}
+	grouped := make([]pickerSessionView, 0, catalogRows)
 	for _, host := range hosts {
 		publishedForHost := 0
 		for _, session := range host.Sessions {
@@ -130,13 +174,13 @@ func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pick
 			if publishedForHost == 0 {
 				view.Section = "REMOTE  " + host.Endpoint
 			}
-			views = append(views, view)
+			grouped = append(grouped, view)
 			publishedForHost++
 		}
 		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
 			view := remotePickerHostView(host, now)
 			view.Section = "REMOTE  " + host.Endpoint
-			views = append(views, view)
+			grouped = append(grouped, view)
 		}
 	}
 	// A nil directory means remote monitoring is not installed at all:
@@ -144,24 +188,49 @@ func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pick
 	if checking {
 		view := remotePickerCheckingView()
 		view.Section = "REMOTE"
-		views = append(views, view)
+		grouped = append(grouped, view)
 	}
-	for i, s := range stopped {
-		createdAt := s.createdAt
-		view := pickerSessionView{
-			ID:                domain.SessionID("stopped:" + s.name),
-			Incarnation:       s.incarnation,
-			Name:              s.name,
-			TargetName:        s.name,
-			Stopped:           true,
-			ExpectedCreatedAt: &createdAt,
-		}
-		if i == 0 && len(live) == 0 && catalogRows == 0 && !checking {
-			view.Section = "LOCAL"
-		}
-		views = append(views, view)
+	return pickerForeignViews{recent: recent, grouped: grouped, blockLocalStopped: catalogRows > 0 || checking}
+}
+
+// localPickerViewProjections is the complete remote-free picker projection.
+// It appends the local stopped rows directly and applies the LOCAL section
+// label when no live row opened the group.
+func (d *Daemon) localPickerViewProjections(cur *session, ac *attachedClient) ([]pickerSessionView, []pickerSessionView, pickerSourceFilter) {
+	local := d.localPickerViews(cur, ac)
+	recent := make([]pickerSessionView, 0, len(local.recentLive)+len(local.recentStopped))
+	recent = append(recent, local.recentLive...)
+	recent = append(recent, local.recentStopped...)
+	grouped := make([]pickerSessionView, 0, len(local.groupedLive)+len(local.groupedStopped))
+	grouped = append(grouped, local.groupedLive...)
+	grouped = append(grouped, withLocalStoppedSection(local.groupedStopped, len(local.groupedLive) == 0)...)
+	return recent, grouped, local.current
+}
+
+func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pickerSessionView, []pickerSessionView, pickerSourceFilter) {
+	// The hybrid projection reuses the prepared local projection for its
+	// local rows and interleaves the current foreign remote rows between the
+	// live and stopped groups.
+	local := d.localPickerViews(cur, ac)
+	foreign := d.foreignPickerViews(local.now)
+	recent := make([]pickerSessionView, 0, len(local.recentLive)+len(foreign.recent)+len(local.recentStopped))
+	recent = append(recent, local.recentLive...)
+	recent = append(recent, foreign.recent...)
+	recent = append(recent, local.recentStopped...)
+	grouped := make([]pickerSessionView, 0, len(local.groupedLive)+len(foreign.grouped)+len(local.groupedStopped))
+	grouped = append(grouped, local.groupedLive...)
+	grouped = append(grouped, foreign.grouped...)
+	grouped = append(grouped, withLocalStoppedSection(local.groupedStopped, len(local.groupedLive) == 0 && !foreign.blockLocalStopped)...)
+	return recent, grouped, local.current
+}
+
+// withLocalStoppedSection marks the first stopped row as the LOCAL section
+// when no preceding row already opened a local group.
+func withLocalStoppedSection(stopped []pickerSessionView, local bool) []pickerSessionView {
+	if local && len(stopped) > 0 {
+		stopped[0].Section = "LOCAL"
 	}
-	return recent, views, current
+	return stopped
 }
 
 func attentionSuffix(label string) string {

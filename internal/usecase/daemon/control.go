@@ -728,7 +728,10 @@ func (e controlExec) RemoteCatalog(asJSON bool) (string, error) {
 	if !asJSON {
 		return "", command.ErrInvalidArguments
 	}
-	inv := e.d.captureSessionInventory(viewOptions{tabDetails: true, focusedTitles: true}, true)
+	// The catalogue export is a local-only projection (Plan 001 P4.3): it
+	// reads the remote-free capture and never the remote directory, so a
+	// serving daemon's own catalogue is independent of remote monitoring.
+	inv := e.d.captureLocalSessionInventory(viewOptions{tabDetails: true, focusedTitles: true}, true)
 	stopped := inv.visibleStopped()
 
 	rows := make([]catalogue.RemoteCatalogSession, 0, len(inv.live)+len(stopped))
