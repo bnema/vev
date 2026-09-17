@@ -380,6 +380,36 @@ func TestServiceCloseIsIdempotentAndConcurrent(t *testing.T) {
 	requireBrokerClosed(t, err)
 }
 
+func TestServiceDoneErrContract(t *testing.T) {
+	t.Run("local close is orderly", func(t *testing.T) {
+		authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		service, err := authority.AdmitClient(context.Background())
+		require.NoError(t, err)
+
+		select {
+		case <-service.Done():
+			t.Fatal("Done closed before any terminal event")
+		default:
+		}
+		require.NoError(t, service.Close())
+		await(t, service.Done())
+		require.NoError(t, service.Err(), "an orderly local Close reports no terminal cause")
+		require.NoError(t, service.Err(), "Err is stable after Done")
+	})
+
+	t.Run("broker shutdown is a typed loss", func(t *testing.T) {
+		authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+		service, err := authority.AdmitClient(context.Background())
+		require.NoError(t, err)
+
+		require.NoError(t, supervisor.Close())
+		await(t, service.Done())
+		var typed ports.BrokerError
+		require.ErrorAs(t, service.Err(), &typed)
+		require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
+	})
+}
+
 func TestServiceShutdownTerminatesOwnedWork(t *testing.T) {
 	authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
 	service, err := authority.AdmitClient(context.Background())

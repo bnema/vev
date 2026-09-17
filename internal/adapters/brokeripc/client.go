@@ -35,6 +35,34 @@ func Dial(ctx context.Context, path string, cfg Config) (ports.BrokerService, er
 	return dial(ctx, path, cfg, ipc.SameUserPeerVerifier())
 }
 
+// Connector implements ports.BrokerConnector over the private broker IPC
+// carriage. It holds only the endpoint and its bounds, so every Connect is an
+// independent attempt and the caller owns Close on the returned service. The
+// client process reaches the broker use case exclusively through this seam.
+type Connector struct {
+	path string
+	cfg  Config
+}
+
+var _ ports.BrokerConnector = (*Connector)(nil)
+
+// NewConnector returns a connector for one broker endpoint. An empty path is
+// refused by Connect, exactly as Dial refuses it, so a misconfigured connector
+// fails closed instead of dialing an unspecified socket.
+func NewConnector(path string, cfg Config) *Connector {
+	return &Connector{path: path, cfg: cfg}
+}
+
+// Connect dials the configured endpoint and returns the connection-scoped
+// service. Cancellation is honored by the underlying Dial, which bounds the
+// whole setup and closes the carriage when its context expires.
+func (c *Connector) Connect(ctx context.Context) (ports.BrokerService, error) {
+	if c == nil {
+		return nil, ErrConfig
+	}
+	return Dial(ctx, c.path, c.cfg)
+}
+
 // dial is Dial with an injected peer verifier, so a test can observe a
 // deterministic same-user refusal without root.
 func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier) (ports.BrokerService, error) {
@@ -350,6 +378,20 @@ func (c *client) completeOperation(operation ports.BrokerOperationID, result ope
 
 // ConnectionID returns the identity assigned to this connection at accept.
 func (c *client) ConnectionID() ports.BrokerConnectionID { return c.scope.Connection }
+
+// Done closes exactly once when this connection is terminal: the carriage
+// failed, the broker retired it, or this side closed it. Err is stable
+// afterwards.
+func (c *client) Done() <-chan struct{} { return c.done }
+
+// Err returns this connection's terminal cause: nil for an orderly local Close,
+// otherwise the failure that settled it. The cause is recorded exactly once and
+// never overwritten, so it is stable once Done is closed.
+func (c *client) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
 
 // Snapshot returns the newest fully committed publication.
 func (c *client) Snapshot() ports.BrokerSnapshot {

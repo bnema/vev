@@ -133,21 +133,65 @@ type Service struct {
 	wg sync.WaitGroup
 
 	closeOnce sync.Once
+
+	// done closes exactly once when this connection is terminal, either because
+	// the broker root shut down or because Close settled it locally. Err is
+	// stable afterwards (nil for an orderly local Close). stopRoot detaches the
+	// root watcher once Close has committed so a closed connection never leaves
+	// a root callback behind.
+	done     chan struct{}
+	stopRoot func() bool
+	termOnce sync.Once
+	termErr  error
 }
 
 var _ ports.BrokerService = (*Service)(nil)
 
 func newService(epoch ports.BrokerEpoch, id ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease) *Service {
 	ctx, cancel := context.WithCancel(supervisor.RootContext())
-	return &Service{
+	s := &Service{
 		epoch: epoch, id: id, registry: registry, pool: pool, supervisor: supervisor, lease: lease,
 		ctx: ctx, cancel: cancel, subs: make(map[*serviceSubscription]struct{}),
+		done: make(chan struct{}),
 	}
+	// Broker shutdown ends every admitted connection. The watcher records the
+	// loss as the terminal cause unless a local Close has already settled the
+	// connection, so a connection closed by its owner reports nil and one lost
+	// to a broker shutdown reports the typed loss.
+	s.stopRoot = context.AfterFunc(supervisor.RootContext(), func() {
+		s.terminalize(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker shutdown", Cause: context.Canceled})
+	})
+	return s
 }
 
 // ConnectionID returns the pool identity assigned at admission. Clients carry
 // it on stream operations so a stale request can be fenced.
 func (s *Service) ConnectionID() ports.BrokerConnectionID { return s.id }
+
+// Done closes exactly once when this connection is terminal: the broker root
+// shut down or Close settled it locally. Err is stable afterwards.
+func (s *Service) Done() <-chan struct{} { return s.done }
+
+// Err returns this connection's terminal cause: nil for an orderly local Close,
+// otherwise the broker-side loss that settled it. The cause is recorded exactly
+// once and never overwritten, so it is stable once Done is closed.
+func (s *Service) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.termErr
+}
+
+// terminalize records the terminal cause and closes Done exactly once. The
+// first cause wins, so a race between a broker-root loss and a local Close
+// yields one stable, observable outcome.
+func (s *Service) terminalize(err error) {
+	s.termOnce.Do(func() {
+		s.mu.Lock()
+		s.termErr = err
+		s.mu.Unlock()
+		close(s.done)
+	})
+}
 
 // Snapshot delegates to the registry's current immutable publication.
 func (s *Service) Snapshot() ports.BrokerSnapshot { return s.registry.Snapshot() }
@@ -252,6 +296,13 @@ func (s *Service) Close() error {
 		}
 		s.pool.CloseClient(s.id)
 		s.lease.Release()
+		// The connection is locally and orderly closed: detach the broker-root
+		// watcher so it can neither fire later nor overwrite the clean outcome,
+		// then publish the terminal state.
+		if s.stopRoot != nil {
+			s.stopRoot()
+		}
+		s.terminalize(nil)
 	})
 	return nil
 }

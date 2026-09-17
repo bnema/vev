@@ -241,6 +241,10 @@ type fakeCore struct {
 
 func (c *fakeCore) ConnectionID() ports.BrokerConnectionID { return c.id }
 
+func (c *fakeCore) Done() <-chan struct{} { return c.done }
+
+func (c *fakeCore) Err() error { return nil }
+
 func (c *fakeCore) Snapshot() ports.BrokerSnapshot { return c.hub.current() }
 
 func (c *fakeCore) Subscribe() (ports.BrokerSubscription, error) { return c.hub.subscribe(), nil }

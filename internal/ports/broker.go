@@ -611,6 +611,14 @@ type BrokerService interface {
 	// ConnectionID returns the ID assigned when this client connection was
 	// accepted. Clients carry it on stream operations to fence stale requests.
 	ConnectionID() BrokerConnectionID
+	// Done closes exactly once when this connection is terminal: the broker
+	// retired it, the carriage failed, or the client closed it locally. Err is
+	// stable afterwards. A client observes Done/Err to attribute a broker loss
+	// to the connection even while it holds no logical stream.
+	Done() <-chan struct{}
+	// Err returns the terminal cause, stable once Done is closed. It is nil for
+	// an orderly local Close and non-nil for a broker-side loss or failure.
+	Err() error
 	Snapshot() BrokerSnapshot
 	Subscribe() (BrokerSubscription, error)
 	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
@@ -678,6 +686,31 @@ type BrokerPhysicalConnection interface {
 // rejected; the first launching client never becomes policy authority.
 type BrokerEndpointConnector interface {
 	Connect(ctx context.Context, endpoint BrokerResolvedEndpoint) (BrokerPhysicalConnection, error)
+}
+
+// BrokerConnector establishes the client-facing broker connection: it connects
+// to the per-user broker endpoint and returns the connection-scoped
+// BrokerService for exactly that accepted connection. It is the client
+// process's admission seam, distinct from BrokerEndpointConnector (which opens
+// a pooled physical transport for one endpoint inside the broker) and from
+// BrokerAuthority (which admits a listener-side accepted connection).
+//
+// Connect must honor cancellation: a cancelled connect returns promptly and
+// leaves no service behind, so a client that abandons an attempt never leaks a
+// connection. Each successful Connect is independent and the caller owns Close
+// on the returned service; a connector retains no connection state of its own.
+// Semantic rejection is reported as a typed BrokerError and cancellation as a
+// context error.
+//
+// A successful service is independent of the setup context: Connect must be
+// given a context that bounds only the setup, and once Connect returns a
+// service the caller may cancel or let that context expire without closing,
+// interrupting, or otherwise disturbing the established connection. The
+// returned service's lifetime is bounded solely by its own Close and by the
+// broker, so a caller that abandons the setup context (a bounded attempt) still
+// owns a live connection it must Close.
+type BrokerConnector interface {
+	Connect(ctx context.Context) (BrokerService, error)
 }
 
 // BrokerAuthority admits one accepted client connection to the broker core

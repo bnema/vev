@@ -889,6 +889,24 @@ func orderlyDisconnect(err error) bool {
 // ConnectionID returns the identity assigned to this connection at accept.
 func (s *serverSession) ConnectionID() ports.BrokerConnectionID { return s.scope.Connection }
 
+// Done closes exactly once when this session is terminal: the carriage failed,
+// the peer disconnected, or the owner closed it. Err is stable afterwards.
+func (s *serverSession) Done() <-chan struct{} { return s.done }
+
+// Err returns the cause that settled this session, or nil for an orderly end
+// (a peer disconnect, a registration timeout, or a local close). The underlying
+// terminal cause is never overwritten, so the result is stable once Done is
+// closed. A cause Close already reports as orderly is reported as nil here too,
+// so a client that observes Done/Err never mistakes a peer's ordinary departure
+// for a sandbox failure.
+func (s *serverSession) Err() error {
+	err := s.terminalErr()
+	if orderlyDisconnect(err) {
+		return nil
+	}
+	return err
+}
+
 // Snapshot returns the admitted core service's current publication.
 func (s *serverSession) Snapshot() ports.BrokerSnapshot { return s.core.Snapshot() }
 
