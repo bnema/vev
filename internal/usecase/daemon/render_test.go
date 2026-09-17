@@ -886,7 +886,7 @@ func TestResizeOrdersPTYBeforeScreen(t *testing.T) {
 	require.True(t, gotOutput.Load(), "resize forces a full redraw output")
 }
 
-// --- reader EOF -> registry-empty shutdown ----------------------------------
+// --- failed client send teardown --------------------------------------------
 
 func TestSendErrorKeepsEphemeralHeadless(t *testing.T) {
 	p := portsmocks.NewMockPTY(t)

@@ -109,7 +109,7 @@ func validateRestoreSessionSnapshot(snap snapcodec.Session) error {
 
 // restoreSession owns the restored tabs until registration succeeds. Every
 // unsuccessful path closes their PTYs and cancels their shared session context.
-func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64, checkpoint domain.CheckpointRef) error {
+func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, repositoryGeneration uint64, checkpoint domain.CheckpointRef, epoch uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -147,7 +147,7 @@ func (d *Daemon) restoreSession(ctx context.Context, snap snapcodec.Session, rep
 	// checkpoints must continue from it rather than reuse generation one.
 	sess.snapshotPublishedGeneration = repositoryGeneration
 	sess.snapshotPublishedCheckpoint = &checkpoint
-	registered, err := d.persistAndRegisterRestoredSession(ctx, sess)
+	registered, err := d.persistAndRegisterRestoredSession(ctx, sess, epoch)
 	if err != nil || !registered {
 		return err
 	}
@@ -313,7 +313,10 @@ func (d *Daemon) newRestoredSession(snap snapcodec.Session, sctx context.Context
 
 // persistAndRegisterRestoredSession atomically transfers a successfully
 // persisted session to the daemon. The caller retains cleanup on false/error.
-func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *session) (bool, error) {
+// The epoch revalidation makes publication a true admitted transition: if a
+// KillAll purge began and is waiting on this admitted restore, the session is
+// not published, so it cannot resurrect a record the purge is about to remove.
+func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *session, epoch uint64) (bool, error) {
 	if sess.incarnation == (domain.IncarnationID{}) {
 		d.mu.Lock()
 		stopped := d.inactive[sess.name]
@@ -343,7 +346,7 @@ func (d *Daemon) persistAndRegisterRestoredSession(ctx context.Context, sess *se
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closing || d.findByNameLocked(sess.name) != nil || ctx.Err() != nil {
+	if d.purgeSupersededLocked(epoch) || d.findByNameLocked(sess.name) != nil || ctx.Err() != nil {
 		return false, nil
 	}
 	sess.id = domain.SessionID(fmt.Sprintf("sess-%d", d.nextID))

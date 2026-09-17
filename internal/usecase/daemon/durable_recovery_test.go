@@ -275,10 +275,10 @@ func TestFinalCheckpointFailurePreservesCatalogue(t *testing.T) {
 
 func TestCatalogueRestoreIndependent(t *testing.T) {
 	t.Run("empty catalogue restoration", func(t *testing.T) {
-		emptyDaemon, emptyCatalogue := newDurableRecoveryDaemon(t, nil, &durableRecoveryRepository{})
+		emptyDaemon, _ := newDurableRecoveryDaemon(t, nil, &durableRecoveryRepository{})
 		emptyDone := make(chan struct{})
 		go func() {
-			emptyDaemon.restoreCatalogue(context.Background(), mustDurableRecords(t, emptyCatalogue))
+			emptyDaemon.restoreIncrementalSnapshots(context.Background())
 			close(emptyDone)
 		}()
 		select {
@@ -299,7 +299,7 @@ func TestCatalogueRestoreIndependent(t *testing.T) {
 		}
 		d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{healthy, broken}, repository)
 
-		d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+		d.restoreIncrementalSnapshots(context.Background())
 
 		d.mu.Lock()
 		healthyEntry := d.inactive[healthy.Name]
@@ -335,7 +335,7 @@ func TestCatalogueRestoreResetsOnlyIncompatibleCheckpoint(t *testing.T) {
 	}
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{incompatible, healthy}, repository)
 
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	fresh, ok, err := catalogue.Record(incompatible.Name)
 	require.NoError(t, err)
@@ -370,7 +370,7 @@ func TestIncompatibleCheckpointDeleteFailurePublishesFreshStoppedAuthority(t *te
 	restoreDone := d.inactive[record.Name].restoreDone
 	d.mu.Unlock()
 
-	restoreErr := d.restoreRecord(context.Background(), record)
+	restoreErr := d.restoreRecord(context.Background(), record, d.purgeEpochSnapshot())
 	require.NoError(t, restoreErr, "post-commit cleanup failure must not fail the authority transition")
 
 	fresh, ok, err := catalogue.Record(record.Name)
@@ -416,7 +416,7 @@ func TestIncompatibleCheckpointPreCommitFailureReturnsError(t *testing.T) {
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 	catalogue.replaceErr = cause
 
-	err := d.restoreRecord(context.Background(), record)
+	err := d.restoreRecord(context.Background(), record, d.purgeEpochSnapshot())
 
 	require.ErrorIs(t, err, cause)
 	persisted, ok, recordErr := catalogue.Record(record.Name)
@@ -445,7 +445,7 @@ func TestRestoreLoadFailuresRetainCheckpointWithoutDeletion(t *testing.T) {
 			}
 			d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-			d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+			d.restoreIncrementalSnapshots(context.Background())
 
 			persisted, ok, err := catalogue.Record(record.Name)
 			require.NoError(t, err)
@@ -467,9 +467,9 @@ func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
 		records[i] = durableRecoveryRecord(i)
 		repository.generations[records[i].Name] = validGeneration(t, records[i])
 	}
-	d, catalogue := newDurableRecoveryDaemon(t, records, repository)
+	d, _ := newDurableRecoveryDaemon(t, records, repository)
 
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	require.Len(t, d.inactive, count)
 	for _, record := range records {
@@ -481,11 +481,11 @@ func TestCatalogueRestoreAggregateOver4096(t *testing.T) {
 func TestCatalogueRestoreSingleSessionOver4096(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	repository := &durableRecoveryRepository{generations: map[string]ports.SnapshotGeneration{record.Name: validGeneration(t, record)}, errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
 	// The repository may contain any number of stale entries; restoration has no
 	// discovery API and therefore performs exactly one direct catalogue lookup.
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	require.Equal(t, protocol.SessionDown, d.inactive[record.Name].state)
 	require.Equal(t, 1, repository.loads[record.Name])
@@ -498,7 +498,7 @@ func TestCatalogueRestoreIncarnationMismatch(t *testing.T) {
 	repository := &durableRecoveryRepository{generations: map[string]ports.SnapshotGeneration{record.Name: generation}, errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
 	got, _, _ := catalogue.Record(record.Name)
@@ -674,7 +674,7 @@ func TestPersistAndRegisterRestoredSessionRegistrationFailurePreservesStoppedEnt
 	sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
 	sess.incarnation = record.IncarnationID
 
-	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
+	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
 
 	require.ErrorContains(t, err, "registry rejected")
 	require.False(t, registered)
@@ -744,7 +744,7 @@ func TestPersistAndRegisterRestoredSessionRejectsReplacementIncarnation(t *testi
 	sess := newSnapshotTestSession(t, record.Name, false, record.Cwd)
 	sess.incarnation = record.IncarnationID
 
-	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
+	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
 	require.ErrorContains(t, err, "incarnation")
 	require.False(t, registered)
 	require.Empty(t, d.sessions)
@@ -842,7 +842,7 @@ func TestAttachBarrierSurvivesLiveRegistryPublication(t *testing.T) {
 	d.mu.Unlock()
 	sess := &session{sessionCore: sessionCore{name: record.Name, incarnation: record.IncarnationID}}
 
-	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess)
+	registered, err := d.persistAndRegisterRestoredSession(t.Context(), sess, d.purgeEpochSnapshot())
 	require.NoError(t, err)
 	require.True(t, registered)
 
@@ -879,7 +879,7 @@ func TestRestoreCancellationTransitionsBeforeAttachCompletion(t *testing.T) {
 	restoreCtx, cancelRestore := context.WithCancel(context.Background())
 	restored := make(chan struct{})
 	go func() {
-		d.restoreCatalogue(restoreCtx, mustDurableRecords(t, catalogue))
+		d.restoreIncrementalSnapshots(restoreCtx)
 		close(restored)
 	}()
 	<-repository.started
@@ -990,9 +990,9 @@ func TestCatalogueRestoreDegradedVisible(t *testing.T) {
 	record := durableRecoveryRecord(0)
 	record.DegradedReason = "checkpoint validation failed"
 	repository := &durableRecoveryRepository{generations: make(map[string]ports.SnapshotGeneration), errors: make(map[string]error), loads: make(map[string]int), repairs: make(map[string]domain.CheckpointRef)}
-	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
+	d, _ := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	require.Equal(t, protocol.SessionBroken, d.inactive[record.Name].state)
 	require.Zero(t, repository.loads[record.Name])

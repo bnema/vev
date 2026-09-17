@@ -156,32 +156,52 @@ func TestServeStartsMonitorWithoutWaitingForRemote(t *testing.T) {
 	}
 }
 
-// TestServeIdleExitWithMonitorRunning proves monitoring never counts as an
-// attachment: the last session exit still drives Serve to return, and the
-// monitor stops with the daemon.
-func TestServeIdleExitWithMonitorRunning(t *testing.T) {
+// TestServeSurvivesIdleExitWithMonitorRunning proves monitoring never counts as
+// an attachment and the last session exit no longer drives Serve to return: the
+// daemon keeps serving and the monitor keeps running across the empty
+// registry, and only explicit cancellation stops both.
+func TestServeSurvivesIdleExitWithMonitorRunning(t *testing.T) {
 	monitor := &scriptRemoteMonitor{started: make(chan struct{}), stopped: make(chan struct{})}
 	d, l, _, sends, releasePTY := newMonitorServeHarness(t, monitor)
+	defer releasePTY()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	served := make(chan error, 1)
-	go func() { served <- d.Serve(context.Background(), l) }()
+	go func() { served <- d.Serve(ctx, l) }()
 
 	awaitFrame(t, sends, "Welcome")
 	awaitFrame(t, sends, "Output")
 
-	// Child exits -> session removed -> registry empties -> Serve returns,
-	// even though the monitor runner is still parked in its context.
+	// Child exits -> session removed -> registry empties. Serve must keep
+	// running and the monitor must stay parked in its context.
 	releasePTY()
+	det := awaitFrame(t, sends, "Detached")
+	require.Equal(t, protocol.ReasonSessionKilled, decodeServerMessage(t, det).(protocol.Detached).Reason)
+	require.Equal(t, 0, sessionCount(d))
+	select {
+	case <-served:
+		t.Fatal("Serve returned after the last session exited")
+	default:
+	}
+	select {
+	case <-monitor.stopped:
+		t.Fatal("monitor stopped while the daemon was still serving")
+	default:
+	}
+
+	// Only explicit cancellation ends the daemon.
+	cancel()
 	select {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
-		t.Fatal("Serve did not return after last session exited")
+		t.Fatal("Serve did not return after context cancel")
 	}
 	select {
 	case <-monitor.stopped:
 	case <-time.After(5 * time.Second):
-		t.Fatal("monitor runner did not stop after idle exit")
+		t.Fatal("monitor runner did not stop after explicit shutdown")
 	}
 }
 

@@ -106,6 +106,14 @@ Attention is a daemon fact, not an overlay: a bell raised by a PTY, by a status-
 
 Remote discovery has two owners with separated writers. The daemon composes its own store, catalogue client, cache, and monitor for the structured rows and exact-target validation its picker serves. The launching client composes a runner-scoped `remotes.HostRegistry` over its own store, catalogue client, and a runner-local catalogue cache that seeds from the durable snapshot and never writes it, so one monitor can never truncate the other's file. The registry projects that discovery through `ports.RemoteDirectory` and resolves each endpoint once into a `ports.RemoteEndpointBinding` — the typed dialer every session on that endpoint attaches through, plus the environment to advertise — which the runner reuses for its initial remote attach and for every later handoff. Transport mode, launch allowlist, and endpoint environment stay in `internal/app` behind `ports.RemoteEndpointFactory`; the client never inspects them, and a resolution failure is never cached, so a refused endpoint fails the handoff instead of falling back to another resolver.
 
+Current state: the daemon-side monitor is deliberately still active. `Serve`
+starts the runner through `daemon.WithRemoteMonitor` and joins it inside the
+bounded remote-shutdown budget, and the daemon keeps its own remote directory
+and host registry. That daemon-owned monitoring (and the host registry that
+feeds it) belongs to the coordinated P7 removal set; it is not removed,
+gated, or polled differently before that cutover, and no polling gate is
+introduced here (GO-001, deferred to P7).
+
 ## Session composition
 
 ```text

@@ -150,6 +150,34 @@ func killDaemon(dir string) error {
 	return requestKill(dir, protocol.KillDaemon)
 }
 
+// killNamedSession deletes one named live or stopped session over the control
+// connection, using the same wire scope the client sends for `kill -s NAME`.
+func killNamedSession(dir, name string) error {
+	raw, err := ipc.DialContext(context.Background(), dir)
+	if err != nil {
+		return err
+	}
+	conn := sessionwire.NewClientConnection(raw)
+	defer func() { _ = conn.Close() }()
+	if err := conn.SendClient(protocol.Kill{Scope: protocol.KillSession, Name: name}); err != nil {
+		return err
+	}
+	reply, err := receiveKillReply(conn, daemonStopTimeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if em, ok := reply.(protocol.ErrorMsg); ok {
+		return fmt.Errorf("kill failed: %s", em.Text)
+	}
+	return nil
+}
+
 func requestKill(dir string, scope protocol.KillScope) error {
 	raw, err := ipc.DialContext(context.Background(), dir)
 	if err != nil {
@@ -331,6 +359,27 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 func awaitText(t *testing.T, p *typedPump, sz domain.Size, want string) {
 	t.Helper()
 	_ = awaitScreenText(t, p, sz, want)
+}
+
+// awaitDetached consumes typed messages until the daemon signals the session's
+// end with the expected Detached reason, ignoring interleaved Output frames.
+func awaitDetached(t *testing.T, p *typedPump, reason uint8) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case message, ok := <-p.ch:
+			if !ok {
+				t.Fatal("connection closed before Detached")
+			}
+			if detached, ok := message.(protocol.Detached); ok {
+				require.Equal(t, reason, detached.Reason)
+				return
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for Detached")
+		}
+	}
 }
 
 // awaitScreenText is like awaitText, but returns the reconstructed screen text
@@ -597,12 +646,13 @@ func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
 
-	require.NoError(t, killAll(dir))
+	// An ephemeral session's daemon is ended only by the explicit daemon stop.
+	require.NoError(t, killDaemon(dir))
 	select {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not shut down after kill all")
+		t.Fatal("daemon did not stop after kill --daemon")
 	}
 }
 
@@ -679,12 +729,20 @@ func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 		{Name: "beta", State: protocol.SessionDown},
 	}, sessions.Sessions)
 
+	// Kill-all purges every durable record but leaves this daemon serving.
 	require.NoError(t, killAll(dir))
+	require.Empty(t, listRemoteSessions(t, dir).Sessions)
+	select {
+	case err := <-served:
+		t.Fatalf("kill-all stopped the restarted daemon: %v", err)
+	default:
+	}
+	require.NoError(t, killDaemon(dir))
 	select {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("restarted daemon did not stop after kill all")
+		t.Fatal("restarted daemon did not stop after kill --daemon")
 	}
 
 	served = start()
@@ -719,6 +777,142 @@ func TestIntegration_NamedSurvivesReattach(t *testing.T) {
 	tr2, p2 := attach(t, dir, protocol.IntentAttach, "work", sz)
 	defer func() { _ = tr2.Close() }()
 	awaitText(t, p2, sz, "MARKER")
+}
+
+// TestIntegration_NamedSessionLastRemovalKeepsDaemonServing is the P4.1
+// app-level contract (P4.1 review GO-003): a named session killed as the last
+// registry entry is removed without stopping Serve, and the same daemon process
+// accepts the same name again. It runs over the real socket, PTY, and
+// catalogue/recovery/snapshot persistence the production composition installs.
+// A named session's final live removal is a durable purge, so the re-attached
+// name carries a fresh persisted incarnation rather than resuming the deleted
+// one.
+func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	dir := filepath.Join(t.TempDir(), "runtime")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	opened, err := persist.OpenOrCreate(stateDir)
+	require.NoError(t, err)
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+
+	_, served := startDaemonInDir(t, dir,
+		daemon.WithShell("/bin/cat", nil),
+		daemon.WithCatalogue(opened.Catalogue, opened.Records),
+		daemon.WithSnapshotRepository(repository),
+		daemon.WithRecoveryCoordinator(coordinator),
+	)
+
+	first, p1 := attach(t, dir, protocol.IntentNew, "work", sz)
+	require.NoError(t, first.SendClient(protocol.Input{Data: []byte("ping\n")}))
+	awaitText(t, p1, sz, "ping")
+	firstRecord, ok, err := opened.Catalogue.Record("work")
+	require.NoError(t, err)
+	require.True(t, ok, "a live named session must own a durable record")
+
+	// End it as the last session: the registry empties, but that is not daemon
+	// shutdown in the P4.1 model.
+	require.NoError(t, killNamedSession(dir, "work"))
+	awaitDetached(t, p1, protocol.ReasonSessionKilled)
+	require.Eventually(t, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 },
+		5*time.Second, 10*time.Millisecond, "session was not removed")
+	select {
+	case err := <-served:
+		t.Fatalf("Serve stopped after the last session was removed: %v", err)
+	default:
+	}
+	_, ok, err = opened.Catalogue.Record("work")
+	require.NoError(t, err)
+	require.False(t, ok, "final live removal purges the durable record")
+
+	// The same daemon process accepts the same name again and can still serve a
+	// fresh terminal operation.
+	second, p2 := attach(t, dir, protocol.IntentNew, "work", sz)
+	require.NoError(t, second.SendClient(protocol.Input{Data: []byte("pong\n")}))
+	awaitText(t, p2, sz, "pong")
+	sessions := listRemoteSessions(t, dir).Sessions
+	require.Len(t, sessions, 1)
+	require.Equal(t, "work", sessions[0].Name)
+	require.Equal(t, protocol.SessionUp, sessions[0].State)
+	secondRecord, ok, err := opened.Catalogue.Record("work")
+	require.NoError(t, err)
+	require.True(t, ok, "re-attached named session must persist its identity")
+	require.NotEqual(t, firstRecord.IncarnationID, secondRecord.IncarnationID,
+		"a re-created name must not reuse the purged incarnation")
+
+	require.NoError(t, second.Close())
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after kill --daemon")
+	}
+}
+
+// TestIntegration_NamedSessionRestoresPersistedIdentity proves a stopped named
+// session is restored inside the daemon process that is already serving it,
+// keeping its exact persisted identity. The seed daemon stops while holding the
+// session as its only registry entry, which preserves it as stopped authority;
+// the daemon under test then resumes it over a real socket with the production
+// catalogue/recovery/snapshot options and serves a fresh operation.
+func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
+	sz := domain.Size{Cols: 80, Rows: 24}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+	name := publishRestorableCheckpoint(t, stateDir, repository)
+
+	opened, err := persist.OpenOrCreate(stateDir)
+	require.NoError(t, err)
+	stopped, ok, err := opened.Catalogue.Record(name)
+	require.NoError(t, err)
+	require.True(t, ok, "stopped named session must keep its durable record")
+	require.NotNil(t, stopped.Committed, "stopped named session must keep its committed checkpoint")
+
+	dir := filepath.Join(t.TempDir(), "runtime")
+	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+	_, served := startDaemonInDir(t, dir,
+		daemon.WithShell("/bin/cat", nil),
+		daemon.WithCatalogue(opened.Catalogue, opened.Records),
+		daemon.WithSnapshotRepository(repository),
+		daemon.WithRecoveryCoordinator(coordinator),
+	)
+	require.Equal(t, []protocol.SessionInfo{{Name: name, State: protocol.SessionDown}}, listRemoteSessions(t, dir).Sessions)
+	select {
+	case err := <-served:
+		t.Fatalf("Serve stopped before the restore: %v", err)
+	default:
+	}
+
+	conn, p := attach(t, dir, protocol.IntentAttach, name, sz)
+	require.NoError(t, conn.SendClient(protocol.Input{Data: []byte("revived\n")}))
+	awaitText(t, p, sz, "revived")
+	require.Eventually(t, func() bool {
+		sessions := listRemoteSessions(t, dir).Sessions
+		return len(sessions) == 1 && sessions[0].State == protocol.SessionUp
+	}, 5*time.Second, 10*time.Millisecond, "named session was not restored")
+
+	restored, ok, err := opened.Catalogue.Record(name)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, stopped.IncarnationID, restored.IncarnationID,
+		"restore must retain the persisted incarnation")
+	require.Equal(t, stopped.CreatedAt, restored.CreatedAt,
+		"restore must retain the persisted lifecycle timestamp")
+
+	require.NoError(t, conn.Close())
+	select {
+	case err := <-served:
+		t.Fatalf("Serve stopped while the restored session was live: %v", err)
+	default:
+	}
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after kill --daemon")
+	}
 }
 
 func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
@@ -1495,31 +1689,67 @@ func (*integrationTransport) Close() error                 { return nil }
 func (*integrationTransport) LocalAddr() net.Addr          { return nil }
 func (*integrationTransport) RemoteAddr() net.Addr         { return nil }
 
-func TestIntegration_KillAllShutsDownDaemon(t *testing.T) {
+// TestIntegration_KillAllPurgesSessionsAndKeepsDaemon is the P4.2 app-level
+// contract: `kill --all` removes every live and stopped session but leaves the
+// daemon serving, and the same process accepts fresh named and ephemeral
+// sessions that start PTYs, forward input, and open a tab through the ordinary
+// command palette. Only the distinct explicit daemon stop ends it.
+func TestIntegration_KillAllPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
-	dir, served := startDaemon(t, daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}))
+	dir, served := startDaemon(t, daemon.WithShell("/bin/cat", nil))
 
-	tr1, _ := attach(t, dir, protocol.IntentNew, "one", sz)
-	require.NoError(t, tr1.Close())
-	tr2, _ := attach(t, dir, protocol.IntentNew, "two", sz)
-	require.NoError(t, tr2.Close())
+	first, firstPump := attach(t, dir, protocol.IntentNew, "one", sz)
+	require.NoError(t, first.SendClient(protocol.Input{Data: []byte("alpha\n")}))
+	awaitText(t, firstPump, sz, "alpha")
+	// A detached named session becomes stopped authority, so kill-all must purge
+	// both the live and the stopped record in one operation.
+	second, _ := attach(t, dir, protocol.IntentNew, "two", sz)
+	require.NoError(t, second.Close())
+	require.Len(t, listRemoteSessions(t, dir).Sessions, 2)
 
-	killRaw, err := ipc.DialContext(context.Background(), dir)
-	require.NoError(t, err)
-	killTr := sessionwire.NewClientConnection(killRaw)
-	defer func() { _ = killTr.Close() }()
-	require.NoError(t, killTr.SendClient(protocol.Kill{Scope: protocol.KillAll}))
+	require.NoError(t, killAll(dir))
+	// The daemon survives the purge: Serve has not returned and the registry is
+	// empty.
+	select {
+	case err := <-served:
+		t.Fatalf("KillAll stopped Serve: %v", err)
+	default:
+	}
+	require.Eventually(t, func() bool { return len(listRemoteSessions(t, dir).Sessions) == 0 },
+		5*time.Second, 10*time.Millisecond, "kill-all did not purge every session")
 
-	_, err = killTr.ReceiveServer()
-	require.ErrorIs(t, err, io.EOF)
-	var serveErr error
+	// Reuse: a fresh named session starts its PTY and forwards input.
+	third, thirdPump := attach(t, dir, protocol.IntentNew, "again", sz)
+	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("beta\n")}))
+	awaitText(t, thirdPump, sz, "beta")
+	// A fresh ephemeral session is admitted too.
+	fourth, fourthPump := attach(t, dir, protocol.IntentEphemeral, "", sz)
+	require.NoError(t, fourth.SendClient(protocol.Input{Data: []byte("gamma\n")}))
+	awaitText(t, fourthPump, sz, "gamma")
+
+	// A tab opened after the purge is real, live topology.
+	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("\x1b ")}))
+	awaitText(t, thirdPump, sz, "Commands")
+	require.NoError(t, third.SendClient(protocol.Input{Data: []byte("CNT\r")}))
 	require.Eventually(t, func() bool {
-		select {
-		case serveErr = <-served:
-			return true
-		default:
-			return false
+		for _, info := range listRemoteSessions(t, dir).Sessions {
+			if info.Name == "again" {
+				return info.Tabs == 2
+			}
 		}
-	}, 15*time.Second, 10*time.Millisecond, "daemon did not shut down after kill all")
-	require.NoError(t, serveErr)
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "a tab created after the purge was not published")
+
+	_ = first.Close()
+	require.NoError(t, third.Close())
+	require.NoError(t, fourth.Close())
+
+	// Only the distinct explicit daemon stop ends the daemon.
+	require.NoError(t, killDaemon(dir))
+	select {
+	case err := <-served:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after kill --daemon")
+	}
 }

@@ -315,17 +315,28 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 				ac.overlays.clearCopyModeForPane(p)
 			}
 		}
+		// A concurrent detach or token resume that invalidated the teardown's
+		// participant snapshot is itself observable progress: the next owner
+		// resolution consumes the fresh participant set, so retry instead of
+		// treating the abort as a completed close.
+		participantsChanged := false
 		if err := d.closeTabLocked(sess, tb, true); err != nil {
-			return true
+			if !errors.Is(err, errSessionKillParticipantsChanged) {
+				return true
+			}
+			participantsChanged = true
 		}
 		if p.owner.Load() == nil {
 			return true
 		}
 		// A successful no-op teardown means participant, gate, or lifecycle
 		// validation rejected the mutation without changing either the tab list
-		// or the pane owner. Retrying that exact state would spin forever; only
-		// retry when the teardown made observable progress that can be consumed
-		// by the next owner resolution.
+		// or the pane owner. That includes an explicit participants-changed
+		// sentinel: the kill aborted because a concurrent detach or transport
+		// replacement invalidated its snapshot, which the owner resolution below
+		// consumes. Retrying that exact state would spin forever; only retry when
+		// the teardown made observable progress that can be consumed by the next
+		// owner resolution.
 		d.mu.Lock()
 		sessionCurrent := d.sessions[sess.id] == sess
 		sess.mu.Lock()
@@ -341,7 +352,7 @@ func (d *Daemon) reapTiledPaneLease(lease paneEffectLease) bool {
 		}
 		sess.mu.Unlock()
 		d.mu.Unlock()
-		if sessionCurrent && tabCurrent && !attachmentsChanged {
+		if sessionCurrent && tabCurrent && !attachmentsChanged && !participantsChanged {
 			return true
 		}
 		return false

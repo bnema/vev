@@ -6,6 +6,10 @@ vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle
 
 `stopped` is safe fresh metadata, `restoring` is validation in progress, and `degraded` preserves uncertain state without starting a replacement shell. A degraded session remains visible in `vev ls`, but attach is refused until an explicit recovery action succeeds. A session reserved for durable purge is hidden from listings and pickers until deletion either completes or leaves a retained broken record.
 
+## Bulk purge
+
+`kill --all` purges every live, stopped, and broken session while leaving the daemon running. Its admission gate is transient and each phase spends its own bounded deadline (admission drain, stopped/broken sweep, shared live teardown), so an uncooperative repository can never hold purge admission or control indefinitely. A durable delete that ignores cancellation is completed by a detached worker under the exact session name, incarnation, and creation time it captured, so it can never remove a same-name replacement; until it returns, the stopped authority still reserves the name and the purge reports a typed failure. A live unit whose teardown aborts before it owns destructive work stays registered, and its snapshot-coordinator quarantine is rolled back so it keeps checkpointing.
+
 ## Recovery commands
 
 - `vev cmd -s NAME session-recovery discard`

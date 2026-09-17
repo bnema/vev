@@ -91,11 +91,13 @@ type Daemon struct {
 	lastAllocatedCreatedAt int64
 	mruSeq                 atomic.Uint64
 	creationRequestSeq     atomic.Uint64
-	// closing marks that shutdown has irreversibly begun. It is set under mu,
-	// atomically with the event that makes shutdown inevitable (the registry
-	// emptying in killSession, or shutdownAll starting), and checked by route
-	// under the same mutex — so a Hello racing shutdown can never insert a new
-	// session that nobody would tear down.
+	// closing marks that explicit daemon shutdown (KillDaemon/process
+	// cancellation) has irreversibly begun. It is set under mu when
+	// shutdownAll starts, and checked by route under the same mutex — so a Hello
+	// racing shutdown can never insert a new session that nobody would tear
+	// down. Neither an empty registry (final session removal) nor a KillAll
+	// purge sets it: the daemon survives empty→occupied→empty and survives a
+	// purge, and only an explicit stop/process cancellation ends it.
 	closing bool
 
 	// moveLifecycleMu is the daemon-level admission gate for transferable
@@ -109,6 +111,28 @@ type Daemon struct {
 	// Shutdown cancels it only after the global move gate drains.
 	paneProcessCtx    context.Context
 	paneProcessCancel context.CancelFunc
+
+	// purgeAllMu grants one daemon-wide purge (KillAll) owner at a time so two
+	// concurrent kill-all requests never interleave their exact lifecycle sets.
+	// It is not an admission gate; see purgeAdmissionClosing below.
+	purgeAllMu sync.Mutex
+	// purgeAdmissionClosing is the transient KillAll admission gate. Unlike
+	// closing and moveLifecycleClosing it is re-openable: purgeAllSessions sets
+	// it under mu, removes exactly the live and stopped/broken/durable records
+	// captured at that instant, then clears it so the daemon keeps serving.
+	// Creation and restoration wait on the changed channel (a blocked writer
+	// keeps new admissions out), while moves and internal creations reject, so
+	// no transition can be inserted into the purge's exact lifecycle set.
+	// purgeAdmissionActive counts admitted transitions the purge must drain.
+	// purgeEpoch increments once at each purge that acquires the gate (after the
+	// drain) so a restoration worker blocked on admission can detect a purge
+	// that completed while it waited and must not resurrect the records captured
+	// before that purge.
+	// All three fields are guarded by mu.
+	purgeAdmissionClosing bool
+	purgeAdmissionActive  uint
+	purgeAdmissionChanged chan struct{}
+	purgeEpoch            uint64
 
 	// notifies holds one completion channel per in-flight async Detached
 	// notification (guarded by mu, pruned on insert). Channels rather than a
@@ -180,6 +204,21 @@ type Daemon struct {
 	// afterAttachmentEffectsFrozen observes the lock-free boundary after all affected
 	// attachment gates are frozen and drained, before architecture publication.
 	afterAttachmentEffectsFrozen func()
+	// afterPurgeAdmission is a deterministic test seam that runs after a KillAll
+	// purge has closed purge admission and taken the closing fence, while it
+	// still owns purgeAllMu. It lets tests observe purge serialization.
+	afterPurgeAdmission func()
+	// beforePurgeLiveSessionKill is a deterministic test seam that runs after a
+	// KillAll purge's per-unit shutdown precheck and before that live unit
+	// attempts teardown ownership. Tests use it to let an explicit stop win that
+	// exact window, proving a stop-owned unit is never reported as a success.
+	beforePurgeLiveSessionKill func(*session)
+	// afterSessionKillQuarantine is a deterministic test seam that runs while a
+	// teardown owns the session and its snapshot coordinator is quarantined, but
+	// before the pre-publication revalidation. Tests use it to change the
+	// participant set in that window and prove a post-quarantine abort rolls the
+	// quarantine back so a surviving session keeps checkpointing.
+	afterSessionKillQuarantine func(*session)
 	// beforeAttachmentTransitionIdentityAdmission is a deterministic test seam
 	// after a ready transition published its capability and before the committed
 	// route identity is admitted, so tests can supersede that exact capability in
@@ -348,6 +387,10 @@ type Daemon struct {
 	hardCtx    context.Context
 	hardCancel context.CancelFunc
 
+	// done is closed exactly once by an explicit daemon stop (shutdownAll) to
+	// break Serve's accept loop. It is deliberately not closed by final session
+	// removal or by a KillAll purge: an empty registry and a purged registry
+	// both keep the daemon serving.
 	done     chan struct{}
 	doneOnce sync.Once
 
@@ -447,6 +490,10 @@ func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 // WithRemoteMonitor installs the snapshot-only remote directory and the
 // monitor runner. Serve starts the runner without waiting for registry,
 // cache or runtime readiness and stops it with its own context.
+//
+// The daemon-side monitor stays intentionally active in this state: it is part
+// of the coordinated P7 removal set, so no polling gate, feature switch, or
+// early shutdown path is added here (GO-001, deferred to P7).
 func WithRemoteMonitor(directory ports.RemoteDirectory, run func(context.Context) error) Option {
 	return func(d *Daemon) {
 		d.remoteDirectory = directory
@@ -792,8 +839,12 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 const remoteMonitorShutdownJoin = 3 * time.Second
 
 // Serve runs the accept loop over l, owning it for the loop's lifetime. It
-// returns when the last session is removed or ctx is cancelled; on the latter
-// path attached clients are detached with ReasonServerShutdown.
+// returns only on ctx cancellation or an explicit daemon shutdown request
+// (KillDaemon), never when the session registry drains to empty: final
+// session removal is independent of daemon shutdown so the daemon survives
+// empty→occupied→empty and can accept fresh sessions again. A KillAll purge
+// leaves Serve running too. On the ctx path
+// attached clients are detached with ReasonServerShutdown.
 func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	d.serveCtx, d.serveCancel = context.WithCancel(ctx)
 	defer d.serveCancel()
@@ -866,8 +917,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	} else {
 		d.closeRestoreDone()
 	}
-	// Break the accept loop when either the parent context is cancelled or the
-	// registry drains to empty: both close the listener, which fails Accept.
+	// Break the accept loop only on an explicit shutdown: the parent context
+	// being cancelled or an explicit daemon stop request (d.done). An empty
+	// registry never closes the listener, so the daemon keeps accepting.
 	go func() {
 		select {
 		case <-d.serveCtx.Done():
@@ -908,7 +960,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 		snapshotDeadline = newSnapshotShutdownDeadline(d.clock)
 		defer snapshotDeadline.stop()
 	}
-	d.terminateAllWithSnapshotDeadline(protocol.ReasonServerShutdown, false, snapshotDeadline)
+	d.terminateAllForShutdown(protocol.ReasonServerShutdown, snapshotDeadline)
 	d.waitNotifies()
 	d.hardCancel()
 	d.serveCancel()
@@ -928,7 +980,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 		d.persistShutdownSnapshotFailure(name, context.DeadlineExceeded)
 	}
 	d.WaitDurableWriters()
-	d.terminateAllWithSnapshotDeadline(protocol.ReasonServerShutdown, false, snapshotDeadline)
+	d.terminateAllForShutdown(protocol.ReasonServerShutdown, snapshotDeadline)
 	d.waitSessionWorkersWithSnapshotDeadline(snapshotDeadline)
 	d.waitNotifies()
 	if err := d.flushCatalogue(); err != nil {
@@ -942,58 +994,41 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	return nil
 }
 
-// shutdownAll marks the daemon closing and kills every live session. Setting
-// closing under the same lock as the snapshot guarantees no session can be
-// inserted after the snapshot: route rejects once closing is set, and both run
-// under d.mu. killSession (which relocks) runs after the lock is released.
+// shutdownAll is the explicit daemon-stop operation (wire KillDaemon). It is
+// the only caller that irreversibly ends the daemon: it closes move admission,
+// marks closing, cancels the daemon-wide pane process context, preserves every
+// live session as stopped durable authority, and closes done so Serve returns.
+// KillAll never reaches this path. Setting closing under the same lock as the
+// snapshot guarantees no session can be inserted after the snapshot: route
+// rejects once closing is set, and both run under d.mu. killSession (which
+// relocks) runs after the lock is released.
 func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
-	return d.terminateAllWithSnapshotDeadline(reason, false, nil)
+	return d.terminateAllForShutdown(reason, nil)
 }
 
-func (d *Daemon) purgeAll(reason uint8) (checkpointIncomplete bool) {
-	return d.terminateAllWithSnapshotDeadline(reason, true, nil)
-}
-
-func (d *Daemon) terminateAllWithSnapshotDeadline(reason uint8, purge bool, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+// terminateAllForShutdown performs the irreversible daemon teardown shared by
+// shutdownAll and Serve's exit path. It is separate from purgeAllSessions,
+// which leaves every daemon-wide shutdown fact untouched.
+func (d *Daemon) terminateAllForShutdown(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true
+	// Wake any KillAll waiting on purge admission so it defers to this stop
+	// instead of holding the gate until its bounded drain deadline expires.
+	d.signalPurgeAdmissionChangedLocked()
 	d.purgeAllParkingLocked()
 	parkedRetirements := d.purgeAllParkedLocked()
 	d.purgeAllSuspendedLocked()
 	snapshot := d.sessionsSnapshotLocked()
-	stoppedNames := make([]string, 0, len(d.inactive))
-	if purge {
-		for name := range d.inactive {
-			stoppedNames = append(stoppedNames, name)
-		}
-		sort.Strings(stoppedNames)
-	}
-	empty := len(snapshot) == 0
 	d.mu.Unlock()
 	d.finishParkedAttachmentRetirements(parkedRetirements)
-	if !purge {
-		// Publish preservation policy for the complete registry snapshot before
-		// cancelling any PTY. Cancellation-driven EOF is allowed to own teardown,
-		// but its disposition must remain daemon shutdown rather than session purge.
-		for _, s := range snapshot {
-			s.reserveShutdownTeardown()
-		}
+	// Publish preservation policy for the complete registry snapshot before
+	// cancelling any PTY. Cancellation-driven EOF is allowed to own teardown,
+	// but its disposition must remain daemon shutdown rather than session purge.
+	for _, s := range snapshot {
+		s.reserveShutdownTeardown()
 	}
-	d.log.Info("session termination begin", "reason", reason, "purge", purge, "live_sessions", len(snapshot), "stopped_sessions", len(stoppedNames))
-	// Purge stopped authority before signaling Serve to exit. Once the final
-	// live registry entry closes, Serve cancels its context; deleting stopped
-	// records afterward would be interrupted and retain broken catalogue entries.
-	for _, name := range stoppedNames {
-		if err := d.retryStoppedPurge(name); err != nil {
-			checkpointIncomplete = true
-			d.log.Error("deleting stopped session during kill all failed", "err", err, "session", name)
-		}
-	}
-	if empty {
-		d.doneOnce.Do(func() { close(d.done) })
-		return checkpointIncomplete
-	}
+	d.log.Info("session termination begin", "reason", reason, "live_sessions", len(snapshot))
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that
 		// is blocked in snapshot publication or purge work.
@@ -1002,11 +1037,11 @@ func (d *Daemon) terminateAllWithSnapshotDeadline(reason uint8, purge bool, dead
 		ephemeral := s.ephemeral
 		s.mu.Unlock()
 		s.stopInMemoryLifecycle()
-		if err := d.killSessionWithSnapshotDeadline(s, reason, purge, deadline, nil); err != nil {
+		if err := d.killSessionWithSnapshotDeadline(s, reason, false, deadline, nil); err != nil {
 			checkpointIncomplete = true
 			d.log.Error("closing session with unpersisted terminal state", "err", err)
 		}
-		if !purge && !ephemeral && deadline != nil {
+		if !ephemeral && deadline != nil {
 			select {
 			case <-deadline.Done():
 				checkpointIncomplete = true
@@ -1291,15 +1326,21 @@ func (d *Daemon) handleList(tr ports.ServerConnection) {
 }
 
 // handleKill terminates the requested live session or stopped named session,
-// or all sessions, and closes the control connection; the resulting EOF is the
-// client's success signal.
+// purges every session (KillAll), or stops the daemon (KillDaemon), and closes
+// the control connection; the resulting EOF is the client's success signal.
+// KillAll leaves the daemon active; KillDaemon is the explicit stop.
 func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 	defer func() { _ = tr.Close() }()
 
 	switch request.Scope {
 	case protocol.KillAll:
-		if d.purgeAll(protocol.ReasonSessionKilled) {
-			_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "one or more sessions could not be deleted"))
+		result := d.purgeAllSessions(protocol.ReasonSessionKilled)
+		if result.Superseded() {
+			d.logControlSendFailure("kill all superseded response", d.boundedControlSend(tr, serverError(protocol.ErrServerShutdown, "daemon is shutting down")))
+			return
+		}
+		if result.Failed() {
+			d.logControlSendFailure("kill all failure response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, result.summary())))
 		}
 		return
 	case protocol.KillDaemon:
@@ -1307,7 +1348,7 @@ func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 		return
 	case protocol.KillSession:
 	default:
-		_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "invalid kill scope"))
+		d.logControlSendFailure("invalid kill scope response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, "invalid kill scope")))
 		return
 	}
 
@@ -1320,7 +1361,7 @@ func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 			// deletion order as live and offline purges.
 			if err := d.retryStoppedPurge(request.Name); err != nil {
 				d.log.Warn("deleting stopped session failed", "err", err, "session", request.Name)
-				_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting stopped session failed"))
+				d.logControlSendFailure("stopped delete failure response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting stopped session failed")))
 			}
 			return
 		}
@@ -1328,11 +1369,18 @@ func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 	d.mu.Unlock()
 
 	if target == nil {
-		_ = d.boundedControlSend(tr, serverError(protocol.ErrNoSuchSession, "no such session: "+request.Name))
+		d.logControlSendFailure("no such session response", d.boundedControlSend(tr, serverError(protocol.ErrNoSuchSession, "no such session: "+request.Name)))
 		return
 	}
 	if err := d.killSession(target, protocol.ReasonSessionKilled, true); err != nil {
-		_ = d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting persisted session failed"))
+		if errors.Is(err, errSessionKillParticipantsChanged) {
+			// The exact session was not removed; a concurrent detach or token
+			// resume invalidated the teardown snapshot. Report the retryable
+			// outcome instead of a permanent delete failure.
+			d.logControlSendFailure("session delete retry response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, sessionKillRetryMessage)))
+			return
+		}
+		d.logControlSendFailure("session delete failure response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting persisted session failed")))
 	}
 }
 
@@ -1676,7 +1724,15 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 	if h.ExactTarget != nil && h.ResumeToken == 0 && h.Name != h.ExactTarget.SessionName {
 		return nil, nil, &protoErr{protocol.ErrNoSuchSession, "exact session target name mismatch"}
 	}
+	// A remote exact-target handoff is an admitted transition like a local
+	// create/restore: it reserves purge admission before dispatch, so a Hello
+	// arriving during a KillAll waits on the gate exactly as a local route does
+	// instead of being rejected outright.
 	if h.RemoteTarget != nil && h.ResumeToken == 0 {
+		if err := d.acquirePurgeAdmission(ctx); err != nil {
+			return nil, nil, err
+		}
+		defer d.releasePurgeAdmission()
 		return d.routeRemoteTargetWithContext(ctx, h, tr)
 	}
 	if h.ExactTarget != nil && h.ResumeToken == 0 {
@@ -1731,11 +1787,20 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 		h.Intent == protocol.IntentEphemeral {
 		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "daemon-owned environment requires an exact remote target"}
 	}
+	// KillAll admission gate: a purge owns the exact lifecycle set it captured,
+	// so a Hello arriving during it waits here and is then admitted as a create
+	// or restore after the purge, never inserted into the set being removed.
+	// This is transient and re-opened by the purge; it is not daemon closing.
+	if err := d.acquirePurgeAdmission(ctx); err != nil {
+		return nil, nil, err
+	}
+	defer d.releasePurgeAdmission()
 	d.mu.Lock()
-	// Shutdown/create interlock: once shutdown has begun (last session removed,
-	// or shutdownAll started) no new session may be created and no attach may
+	// Shutdown/create interlock: once an explicit shutdown has begun
+	// (shutdownAll started) no new session may be created and no attach may
 	// proceed — the teardown snapshot has already been (or is being) taken, so
-	// anything inserted now would leak its PTY and hang Serve.
+	// anything inserted now would leak its PTY and hang Serve. An empty registry
+	// alone is not shutdown, and a KillAll purge is gated by admission above.
 	if d.closing {
 		d.mu.Unlock()
 		return nil, nil, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}

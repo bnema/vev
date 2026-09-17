@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 
 	"github.com/bnema/vev/internal/domain"
 )
@@ -110,6 +111,12 @@ func (d *Daemon) executeMove(topology moveTopology) (result error) {
 
 	reservation, err := d.reserveMoveLifecycles(t.source, t.destination)
 	if err != nil {
+		// Preserve a typed transient admission rejection (a KillAll purge owning
+		// the exact set) so the command path maps it retryably instead of
+		// misreporting the destination as gone.
+		if errors.Is(err, errPurgeAdmissionClosed) {
+			return err
+		}
 		return errMoveStaleTarget
 	}
 	reservationHeld := true

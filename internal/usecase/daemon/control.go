@@ -87,6 +87,15 @@ func (d *Daemon) boundedControlSend(tr ports.ServerConnection, message protocol.
 	return err
 }
 
+// logControlSendFailure records that an error response could not be delivered.
+// A one-shot control client treats EOF as success, so a failed error send would
+// otherwise let it infer success from a silent close.
+func (d *Daemon) logControlSendFailure(operation string, err error) {
+	if err != nil {
+		d.log.Warn("control error response send failed", "operation", operation, "err", err)
+	}
+}
+
 func serverCommandResult(result protocol.CommandResult) protocol.CommandResult { return result }
 
 func (d *Daemon) dispatchCommand(ctx context.Context, request protocol.CommandRequest) protocol.CommandResult {
@@ -148,6 +157,16 @@ func (d *Daemon) runControl(cmd command.Command, exec controlExec, request proto
 		return commandFailure(protocol.ErrInvalidCommandArgs, "usage: "+cmd.Usage)
 	case errors.Is(err, errSessionNameInUse):
 		return commandFailure(protocol.ErrNameTaken, err.Error())
+	case errors.Is(err, errPurgeAdmissionClosed):
+		// A KillAll purge owns the exact lifecycle set. The operation is
+		// transient (the daemon is not shutting down), so surface a retryable
+		// internal failure rather than a name or shutdown verdict.
+		return commandFailure(protocol.ErrInternal, err.Error())
+	case errors.Is(err, errSessionKillParticipantsChanged):
+		// A concurrent detach or token resume invalidated the teardown snapshot
+		// before it removed anything. The operation is safe to retry, so report
+		// that clear outcome instead of the internal sentinel text.
+		return commandFailure(protocol.ErrInternal, sessionKillRetryMessage)
 	case isMoveCommandError(err):
 		return moveCommandFailure(err)
 	case errors.Is(err, layout.ErrNotInSplit):
@@ -489,6 +508,9 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	defer e.d.mu.Unlock()
 	if e.d.closing {
 		return errors.New("daemon is shutting down")
+	}
+	if e.d.purgeAdmissionClosedLocked() {
+		return errPurgeAdmissionClosed
 	}
 	if e.d.nameLiveOrStoppedLocked(name) {
 		return errSessionNameInUse

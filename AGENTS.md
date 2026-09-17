@@ -77,7 +77,9 @@ Typed messages and negotiated version live in `internal/protocol`. Remote discov
 
 - Ephemeral numbered sessions survive detach while the daemon retains them, but are not persisted.
 - Named sessions survive headless and persist across daemon restarts.
-- The daemon starts on first use and exits when the last session ends.
+- The daemon starts on first use and survives an empty session registry: final session removal is not shutdown, so it can be reused; it ends only on an explicit shutdown request or process cancellation.
+- A bulk purge (`kill --all`) takes a transient admission gate and bounds each phase with its own deadline: admission drain, stopped/broken sweep, and a shared live-teardown budget. A repository delete that ignores cancellation is detached behind an exact name/incarnation/created-time fence and reported as a typed failure instead of holding purge admission or control.
+- A live unit whose teardown aborts before destructive ownership stays registered, and its snapshot-coordinator quarantine is rolled back so the surviving session resumes checkpoint scheduling and its attached clients are unfrozen.
 - Each connection has a 15-second handshake budget from connect through the initial committed publication.
 - Local and remote attach use the same typed `Hello`/`Welcome` session protocol. `sessionwire` translates typed traffic to Protobuf envelopes carried by IPC, QUIC, or SSH stdio.
 - Remote attach bootstraps an authenticated direct QUIC connection by default; `VEV_REMOTE_TRANSPORT=stdio` explicitly selects an SSH-only carriage.

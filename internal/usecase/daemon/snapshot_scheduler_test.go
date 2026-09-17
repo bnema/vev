@@ -83,6 +83,98 @@ func TestSnapshotCoordinatorQuarantineJoinsInFlightPublication(t *testing.T) {
 	}
 }
 
+// TestQuarantineDiscardDoesNotDoubleDecrementPendingCaptures proves the pending
+// capture accounting is exact across a quarantine discard and a rollback
+// replacement: a queued capture the quarantine discarded already dropped its own
+// pending count, so the worker-side finish that rejects its stale identity must
+// not decrement a replacement scheduled after the rollback.
+func TestQuarantineDiscardDoesNotDoubleDecrementPendingCaptures(t *testing.T) {
+	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+	repository := portsmocks.NewMockSnapshotRepository(t)
+	WithSnapshotRepository(repository)(d)
+	startSnapshotEncodeWorker(t, d)
+
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBlocker) }) }
+	t.Cleanup(release)
+	repository.EXPECT().Publish(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, publication ports.SnapshotPublication) error {
+		if publication.Name == "blocker" {
+			close(blockerStarted)
+			<-releaseBlocker
+		}
+		return nil
+	}).Maybe()
+
+	// Occupy the single worker so the test session's capture stays queued.
+	blocker := newSnapshotTestSession(t, "blocker", false, "/work")
+	markSnapshotDirty(blocker)
+	require.True(t, d.scheduleSnapshot(blocker))
+	awaitTestValue(t, blockerStarted, "the blocking publication did not start")
+
+	sess := newSnapshotTestSession(t, "work", false, "/work")
+	markSnapshotDirty(sess)
+	require.True(t, d.scheduleSnapshot(sess), "the test capture should queue behind the blocked worker")
+	sess.snapshotMu.Lock()
+	first := sess.snapshotQueuedCapture
+	firstCount := sess.snapshotPendingCaptures
+	sess.snapshotMu.Unlock()
+	require.NotNil(t, first)
+	require.Equal(t, uint(1), firstCount)
+
+	// Quarantine discards the queued capture and drops its pending count exactly
+	// once.
+	<-quarantineSnapshotCoordinator(sess)
+	sess.snapshotMu.Lock()
+	discardedCount := sess.snapshotPendingCaptures
+	sess.snapshotMu.Unlock()
+	require.Equal(t, uint(0), discardedCount, "quarantine must consume the discarded capture's count")
+	require.True(t, first.coordinatorDiscarded)
+
+	// Model the worker having already dequeued the stale capture: the global
+	// bounded queue still holds it, so free the slot before the replacement.
+	select {
+	case dequeued := <-d.snapshotJobs:
+		require.Same(t, first, dequeued)
+	default:
+		t.Fatal("the discarded capture must still be queued in the global worker queue")
+	}
+
+	// The rollback restores scheduling, and the replacement capture owns its own
+	// pending count.
+	rollbackSnapshotQuarantine(sess, true)
+	require.True(t, d.scheduleSnapshot(sess), "the rolled-back session must schedule a replacement capture")
+	sess.snapshotMu.Lock()
+	replacement := sess.snapshotQueuedCapture
+	replacementCount := sess.snapshotPendingCaptures
+	sess.snapshotMu.Unlock()
+	require.NotNil(t, replacement)
+	require.NotSame(t, first, replacement)
+	require.Equal(t, uint(1), replacementCount)
+
+	// The worker finishing the stale discarded capture must not decrement the
+	// live replacement's pending count.
+	d.finishSnapshotCapture(first, false)
+	sess.snapshotMu.Lock()
+	afterFinishCount := sess.snapshotPendingCaptures
+	afterFinishPending := sess.snapshotPending
+	sess.snapshotMu.Unlock()
+	require.Equal(t, uint(1), afterFinishCount, "the discarded capture must not decrement the replacement")
+	require.True(t, afterFinishPending)
+
+	// Once the worker drains both captures only the replacement publishes, and
+	// the accounting returns to zero.
+	release()
+	awaitSnapshotClean(t, sess)
+	sess.snapshotMu.Lock()
+	finalCount := sess.snapshotPendingCaptures
+	finalPending := sess.snapshotPending
+	sess.snapshotMu.Unlock()
+	require.Equal(t, uint(0), finalCount)
+	require.False(t, finalPending)
+}
+
 func TestForcedSnapshotSchedulesSuccessorAfterRoutineInFlight(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := portsmocks.NewMockSnapshotRepository(t)

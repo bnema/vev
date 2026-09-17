@@ -182,12 +182,20 @@ func noticeDetails(err error) string {
 	return strings.Join(parts, " ← ")
 }
 
-// benignNoticeError reports errors that are expected control flow rather than
-// something the user needs to be told about.
+// benignNoticeError reports unclassified errors that are expected control flow
+// rather than something the user needs to be told about. A caller that wraps one
+// of these in an explicit *domain.UserError still reports its own message; this
+// filter only keeps an unclassified occurrence from surfacing as an
+// internal-error notice.
 func benignNoticeError(err error) bool {
 	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, errNoNeighbor) ||
-		errors.Is(err, ports.ErrNoClipboardImage)
+		errors.Is(err, ports.ErrNoClipboardImage) ||
+		// A concurrent detach or token resume that invalidated a teardown's
+		// participant snapshot is expected control flow: the caller observes an
+		// explicit error and retries or reports it, so it must not also surface
+		// as an internal-error notice.
+		errors.Is(err, errSessionKillParticipantsChanged)
 }
 
 // persistShutdownSnapshotFailure records a terminal snapshot failure that
@@ -222,15 +230,21 @@ func (d *Daemon) persistShutdownSnapshotFailure(name string, cause error) {
 	}
 }
 
-// reportError turns any error into a user-facing notice. Unclassified errors
-// become NoticeInternal: an error reaching here is never silently dropped
-// unless benignNoticeError says it is routine.
+// reportError turns any error into a user-facing notice. An explicitly
+// classified *domain.UserError always wins: the caller already decided what the
+// user should see, so it is reported even when the cause chain also matches a
+// routine sentinel (for example a retryable teardown abort). Any other error is
+// dropped only when benignNoticeError says it is routine; unclassified errors
+// become NoticeInternal.
 func (d *Daemon) reportError(sess *session, err error) {
-	if err == nil || benignNoticeError(err) {
+	if err == nil {
 		return
 	}
 	if ue, ok := errors.AsType[*domain.UserError](err); ok {
 		d.notify(sess, ue.Severity, ue.Code, ue.Msg, ue.Err)
+		return
+	}
+	if benignNoticeError(err) {
 		return
 	}
 	d.notify(sess, domain.NoticeError, domain.NoticeInternal, "internal error", err)

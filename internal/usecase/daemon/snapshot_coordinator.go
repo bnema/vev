@@ -50,6 +50,32 @@ func quarantineSnapshotCoordinatorWithOptions(sess *session, retainQueuedCapture
 	return done
 }
 
+// rollbackSnapshotQuarantine reverses quarantineSnapshotCoordinator when a
+// teardown aborts before it owns any destructive repository operation and the
+// session therefore stays live and registered. The quarantine cancelled the
+// publication context and flipped eligibility, so a surviving session would
+// otherwise never checkpoint again: this discards the cancelled context so the
+// next schedule allocates a fresh one, restores the captured pre-quarantine
+// eligibility, and marks the session dirty so the mutations its ineligible fast
+// path suppressed during the quarantine window are captured by a later
+// publication. A queued capture the quarantine discarded stays discarded:
+// startSnapshotPublication rejects it by identity and the forced dirty
+// generation guarantees a replacement capture.
+func rollbackSnapshotQuarantine(sess *session, wasEligible bool) {
+	if sess == nil {
+		return
+	}
+	sess.snapshotMu.Lock()
+	sess.snapshotQuarantined = false
+	sess.snapshotPublicationContext = nil
+	sess.snapshotPublicationCancel = nil
+	sess.snapshotMu.Unlock()
+	sess.snapEligible.Store(wasEligible)
+	if wasEligible {
+		markSnapshotDirty(sess)
+	}
+}
+
 func markSnapshotDirty(sess *session) {
 	if sess == nil || !sess.snapEligible.Load() {
 		return
@@ -160,7 +186,12 @@ func (d *Daemon) finishSnapshotCapture(capture *snapshotCapture, succeeded bool)
 	capture.finishOnce.Do(func() {
 		var shouldScheduleForcedSuccessor bool
 		capture.session.snapshotMu.Lock()
-		if capture.session.snapshotPendingCaptures > 0 {
+		// A capture the quarantine discarded already dropped its pending count when
+		// it was detached from the producer queue; the worker still calls finish on
+		// it after rejecting the stale identity. Decrementing again here would
+		// under-count a replacement capture scheduled after a rollback, so a
+		// discarded capture must not decrement twice.
+		if !capture.coordinatorDiscarded && capture.session.snapshotPendingCaptures > 0 {
 			capture.session.snapshotPendingCaptures--
 		}
 		if capture.session.snapshotQueuedCapture == capture {

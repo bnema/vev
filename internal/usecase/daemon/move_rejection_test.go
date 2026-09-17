@@ -50,6 +50,26 @@ func TestNormalizeMoveRejectionDoesNotLeakInternalErrors(t *testing.T) {
 	require.ErrorIs(t, got, errMovePaneInvalid)
 }
 
+// TestMoveRejectionPreservesTransientPurgeAdmission proves a transient KillAll
+// admission rejection is not wrapped as a move rejection or leaked as an
+// internal detail: the command adapter keeps the typed sentinel it maps
+// retryably, and the palette adapter renders a retryable warning.
+func TestMoveRejectionPreservesTransientPurgeAdmission(t *testing.T) {
+	normalized := normalizeMoveRejection(errPurgeAdmissionClosed)
+	require.ErrorIs(t, normalized, errPurgeAdmissionClosed)
+	require.NotErrorIs(t, normalized, errMovePaneInvalid)
+	var rejection *moveRejection
+	require.False(t, errors.As(normalized, &rejection))
+
+	paletteErr := movePickerUserError(errPurgeAdmissionClosed)
+	var userErr *domain.UserError
+	require.ErrorAs(t, paletteErr, &userErr)
+	require.Equal(t, domain.NoticeSessionUnavailable, userErr.Code)
+	require.Equal(t, domain.NoticeWarn, userErr.Severity)
+	require.Equal(t, sessionKillRetryMessage, userErr.Msg)
+	require.ErrorIs(t, userErr.Err, errPurgeAdmissionClosed)
+}
+
 func TestMoveRejectionPresentationParity(t *testing.T) {
 	tests := []struct {
 		name            string

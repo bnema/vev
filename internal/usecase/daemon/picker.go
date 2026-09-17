@@ -726,6 +726,9 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 			expectedTransport: sourceCapability.transport, sourceCapability: &sourceCapability, sourceEffect: sourceEffect, action: action,
 			expectedSourceTab: guard.expectedSource, copySourceEnvironment: true, ready: true,
 			createTargetLocked: func() (*session, error) {
+				if d.purgeAdmissionClosedLocked() {
+					return nil, errPurgeAdmissionClosed
+				}
 				current, ok := d.inactive[target.Name]
 				if !ok || !current.canResume() || !current.sameLifecycle(stopped) || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
 					return nil, errAttachmentTransition
@@ -759,6 +762,9 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	}
 	env := copyEnvironment(from.env)
 	from.mu.Unlock()
+	if d.purgeAdmissionClosedLocked() {
+		return nil, attachmentTransitionResult{}, false, errPurgeAdmissionClosed
+	}
 	current, ok := d.inactive[target.Name]
 	if !ok || !current.canResume() || !current.sameLifecycle(stopped) || !targetMatchesLifecycle(target, current.name, current.createdAt, current.incarnation) {
 		return nil, attachmentTransitionResult{}, false, errAttachmentTransition

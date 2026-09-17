@@ -29,7 +29,7 @@ func TestRestoreAmbiguousBadVersionLoadFailurePreservesCheckpoint(t *testing.T) 
 	}
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	persisted, ok, err := catalogue.Record(record.Name)
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ func TestRestoreTransientLoadFailureBecomesDiscardable(t *testing.T) {
 	}
 	d, catalogue := newDurableRecoveryDaemon(t, []domain.CatalogueRecord{record}, repository)
 
-	d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+	d.restoreIncrementalSnapshots(context.Background())
 
 	persisted, ok, err := catalogue.Record(record.Name)
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestStaleIncompatibleRestoreCannotOverwriteNewerAuthority(t *testing.T) {
 				d.setStoppedRecovery(replacement, tt.state)
 			}
 
-			d.restoreCatalogue(context.Background(), mustDurableRecords(t, catalogue))
+			d.restoreIncrementalSnapshots(context.Background())
 
 			persisted, ok, err := catalogue.Record(record.Name)
 			require.NoError(t, err)

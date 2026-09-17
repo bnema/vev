@@ -42,7 +42,7 @@ vev --ui-observe ...              expose passive observation for an attach
 vev --ui-control ...              expose observation and input control
 ```
 
-The daemon starts on first use and exits after the last session. Numbered sessions survive detach; named sessions also survive daemon restarts. Exiting the final shell removes that session and returns to the most recently used session; with no previous session, vev exits. See [durable-session recovery](docs/durable-session-recovery.md).
+The daemon starts on first use and survives an empty session registry: removing the last session is not shutdown, so it can be reused. `kill --all` purges every session and leaves the daemon running; it ends only on an explicit `kill --daemon` or process cancellation. Numbered sessions survive detach; named sessions also survive daemon restarts. Exiting the final shell removes that session and returns to the most recently used session; with no previous session, vev exits. See [durable-session recovery](docs/durable-session-recovery.md).
 
 > [!NOTE]
 > A release that bumps vev's protocol version resets named sessions saved by an older protocol. Session names are retained, but layouts, tabs, terminal history, recovery transcripts, and process-recovery state are discarded. Each local or remote daemon applies this reset to its own sessions when it first starts with the new protocol.

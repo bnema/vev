@@ -9,6 +9,15 @@
 // sessionInteractivelyAttachedLocked), but must never freeze, drain, or wait on
 // a gate while holding any architecture lock. Freeze/drain always runs with
 // every architecture lock released.
+//
+// Daemon-level gate order is moveLifecycleMu before d.mu: reserveMoveLifecycles
+// holds moveLifecycleMu while taking d.mu to reserve the KillAll purge-gate
+// counter, and releaseMoveAdmissionLocked does the same while releasing it.
+// closeMoveLifecycles deliberately drops moveLifecycleMu before taking d.mu, so
+// no path holds d.mu and then waits on moveLifecycleMu. Consequently
+// moveLifecycleReservation.Release must never be called with d.mu held: it takes
+// moveLifecycleMu first, releases both the move-gate and purge-gate reservations
+// in that order, and only then drops moveLifecycleMu.
 package daemon
 
 import (
@@ -1120,11 +1129,3 @@ func (d *Daemon) recordClientNotice(sess *session, ac *attachedClient, sev domai
 func (d *Daemon) resizeForFirstPaint(sess *session, ac *attachedClient, sz domain.Size) bool {
 	return sess.geometry.requestResize(d, sess, ac, sz, true)
 }
-
-// killSession removes a session and tears down its resources. It is
-// idempotent: only the caller that wins the registry delete acts. When the
-// registry empties it marks the daemon closing (atomically with the
-// empty-check, under d.mu) and signals shutdown.
-//
-// Teardown ordering matters: context cancel, pty.Close, and the done signal
-// run first and unconditionally — never gated behind a client send. The

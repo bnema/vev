@@ -938,3 +938,21 @@ func TestToastExpiryRemovesOnlyTheEntryItArmed(t *testing.T) {
 		return len(ns) == 0
 	}, 200*time.Millisecond, 5*time.Millisecond, "expiry must remove only the entry it armed")
 }
+
+// TestReportErrorClassifiedUserErrorWinsOverBenignCause proves an explicitly
+// classified user error is reported even when its cause chain also matches a
+// routine sentinel. A retryable teardown abort must reach the user as its own
+// message instead of being filtered as internal control flow.
+func TestReportErrorClassifiedUserErrorWinsOverBenignCause(t *testing.T) {
+	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
+
+	d.reportError(sess, closeTabFailureNotice(fmt.Errorf("close tab: %w", errSessionKillParticipantsChanged)))
+
+	hist := d.notices.history()
+	require.Len(t, hist, 1)
+	require.Contains(t, hist[0].Message, "couldn't close tab")
+	require.Contains(t, hist[0].Message, "try again")
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Contains(t, toasts[0].Message, "try again")
+}

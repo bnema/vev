@@ -114,6 +114,11 @@ func movePickerUserError(err error) error {
 	if errors.As(err, &userErr) {
 		return err
 	}
+	if errors.Is(err, errPurgeAdmissionClosed) {
+		// A transient KillAll admission rejection is retry state: surface a
+		// retryable warning instead of a permanent "Move failed" verdict.
+		return domain.UserWarn(domain.NoticeSessionUnavailable, sessionKillRetryMessage, err)
+	}
 	descriptor, ok := moveRejectionDescriptorFor(err)
 	if !ok {
 		descriptor = moveRejectionDescriptorByReason(moveRejectionInvalid)
@@ -143,6 +148,12 @@ func normalizeMoveRejection(err error) error {
 	}
 	var rejection *moveRejection
 	if errors.As(err, &rejection) {
+		return err
+	}
+	if errors.Is(err, errPurgeAdmissionClosed) {
+		// A transient KillAll admission rejection is retry state, not a move
+		// rejection: preserve the typed sentinel so the command and palette
+		// adapters map it consistently with the other command paths.
 		return err
 	}
 	if errors.Is(err, layout.ErrTooSmall) {

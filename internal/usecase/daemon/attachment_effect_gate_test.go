@@ -381,7 +381,10 @@ func TestKillSessionInterruptsCapturedSendWithoutClosingNewerIncarnation(t *test
 		ac.replaceTransport(fresh)
 	}
 
-	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, false))
+	// The transport incarnation changed after the snapshot, so the kill aborts
+	// before publishing terminal ownership. That abort must be observable: a
+	// silent nil would report a teardown that never happened as success.
+	require.ErrorIs(t, d.killSession(sess, protocol.ReasonSessionKilled, false), errSessionKillParticipantsChanged)
 	awaitTestCompletion(t, sendDone, "captured incarnation attachment effect ticket did not retire")
 	require.True(t, stale.Closed(), "exact captured in-flight transport was not interrupted")
 	require.False(t, fresh.Closed(), "newer transport incarnation was interrupted")

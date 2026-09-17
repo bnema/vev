@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -221,4 +223,121 @@ func TestRouteRemoteTargetRejectsSameNameReplacement(t *testing.T) {
 	var protocolErr *protoErr
 	require.ErrorAs(t, err, &protocolErr)
 	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
+}
+
+// TestRouteAttachStopVerdictKeysOnAttachError proves the supersession rewrite is
+// keyed on the attach failure: a cleanup error that happens to chain
+// errAttachmentTransition must not turn an unrelated attach failure into the
+// shutdown verdict, while a genuine attach-level transition under a stop still
+// is.
+func TestRouteAttachStopVerdictKeysOnAttachError(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	d.mu.Lock()
+	d.closing = true
+	d.mu.Unlock()
+	t.Cleanup(func() {
+		d.mu.Lock()
+		d.closing = false
+		d.mu.Unlock()
+	})
+
+	attachErr := errors.New("route attach failed")
+	cleanupErr := fmt.Errorf("route cleanup: %w", errAttachmentTransition)
+	joined := errors.Join(attachErr, cleanupErr)
+	// The joined rollback error really does carry the transition sentinel, which
+	// is exactly what the old rewrite keyed on.
+	require.ErrorIs(t, joined, errAttachmentTransition, "the synthetic join still carries the sentinel")
+	verdict, ok := d.routeAttachStopVerdict(attachErr)
+	require.False(t, ok, "a cleanup-only transition must not decide the verdict")
+	require.Nil(t, verdict)
+
+	verdict, ok = d.routeAttachStopVerdict(errAttachmentTransition)
+	require.True(t, ok)
+	var protocolErr *protoErr
+	require.ErrorAs(t, verdict, &protocolErr)
+	require.Equal(t, protocol.ErrServerShutdown, protocolErr.code)
+
+	d.mu.Lock()
+	d.closing = false
+	d.mu.Unlock()
+	_, ok = d.routeAttachStopVerdict(errAttachmentTransition)
+	require.False(t, ok, "a transition without an explicit stop is not a shutdown verdict")
+}
+
+// TestFinishRouteAttachSupersessionReportsShutdownVerdict proves the reachable
+// supersession path: an explicit stop that removes the route's target during the
+// handshake leaves the attach a leaked transition, and the caller receives the
+// authoritative shutdown verdict rather than the internal sentinel.
+func TestFinishRouteAttachSupersessionReportsShutdownVerdict(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	sess, err := createSessionForTest(d, "work", false, "/tmp/work", defaultSize, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+
+	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
+		if action != "" {
+			return
+		}
+		d.afterAttachmentEffectParticipantsSnapshotted = nil
+		// The explicit stop wins the target in the freeze-to-publish window, so
+		// the attach transition can no longer be published.
+		d.mu.Lock()
+		d.closing = true
+		d.unregisterSessionLocked(sess)
+		d.mu.Unlock()
+	}
+	t.Cleanup(func() { d.afterAttachmentEffectParticipantsSnapshotted = nil })
+
+	// The caller must hold d.mu on entry; finishRouteAttach releases it on both
+	// success and error paths before returning.
+	d.mu.Lock()
+	_, err = d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
+	}, true, false)
+
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, protocol.ErrServerShutdown, protocolErr.code)
+	d.mu.Lock()
+	_, retained := d.sessions[sess.id]
+	d.mu.Unlock()
+	require.False(t, retained, "the stop owns the target from this point")
+}
+
+// TestFinishRouteAttachKeepsUnrelatedAttachFailure proves the call site keeps an
+// attach failure that is not a leaked transition, even while the daemon stops and
+// the rollback cleanup aborts with its own sentinel: only the attach error may
+// decide the shutdown verdict.
+func TestFinishRouteAttachKeepsUnrelatedAttachFailure(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+
+	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
+		if action != "" {
+			return
+		}
+		d.afterAttachmentEffectParticipantsSnapshotted = nil
+		// The stop begins and a token resume invalidates the rollback's snapshot,
+		// so the cleanup aborts with a sentinel instead of a clean no-op.
+		d.mu.Lock()
+		d.closing = true
+		d.mu.Unlock()
+		fresh := &closeTrackingTransport{}
+		ac.replaceTransport(fresh)
+		ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
+	}
+	t.Cleanup(func() { d.afterAttachmentEffectParticipantsSnapshotted = nil })
+
+	missing := domain.RemoteSessionTarget{LifecycleID: sess.incarnation, SessionName: "work", LiveTabID: "missing-tab"}
+	d.mu.Lock()
+	_, err := d.finishRouteAttach(sess, &closeTrackingTransport{}, defaultSize, protocol.Hello{
+		Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: defaultSize,
+		RemoteTarget: &missing, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+	}, true, false)
+	var protocolErr *protoErr
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code, "an unrelated attach failure must not become a shutdown verdict")
+	d.mu.Lock()
+	d.closing = false
+	d.mu.Unlock()
 }

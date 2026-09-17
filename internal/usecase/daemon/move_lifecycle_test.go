@@ -147,6 +147,26 @@ func TestMoveLifecycleReservationRejectsTeardownWithoutLeakingCounts(t *testing.
 	}
 }
 
+// TestMoveLifecycleReservationRejectedByPurgeAdmissionIsRetryable proves a
+// move that arrives while a KillAll purge owns the exact lifecycle set is
+// rejected with the transient purge-admission sentinel rather than the
+// permanent shutdown verdict, and that the rejection leaks no move or purge
+// admission counts.
+func TestMoveLifecycleReservationRejectedByPurgeAdmissionIsRetryable(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	source := &session{sessionCore: sessionCore{id: "source"}}
+	destination := &session{sessionCore: sessionCore{id: "destination"}}
+
+	beginTestPurgeAdmission(t, d)
+	reservation, err := d.reserveMoveLifecycles(source, destination)
+	require.ErrorIs(t, err, errPurgeAdmissionClosed)
+	require.NotErrorIs(t, err, errMoveLifecycleUnavailable)
+	require.Nil(t, reservation)
+	awaitDaemonMoveActive(t, d, 0)
+	d.endPurgeAdmission()
+	requirePurgeAdmissionBalanced(t, d)
+}
+
 func TestMoveLifecycleReservationDeduplicatesAndReleasesExactlyOnce(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := &session{sessionCore: sessionCore{id: "same"}}

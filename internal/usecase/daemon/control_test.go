@@ -995,6 +995,25 @@ func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.
 	destTab.mu.Unlock()
 }
 
+// TestHandleCommandMovePanePurgeAdmissionMapsToRetryableError proves a move
+// command rejected because a transient KillAll purge owns the exact lifecycle
+// set surfaces the same retryable internal outcome as the create path, instead
+// of misreporting the destination as gone.
+func TestHandleCommandMovePanePurgeAdmissionMapsToRetryableError(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	addControlSession(d, "work", "t_work", "p_work")
+	addNamedMoveDestination(d, "dest", "t_dest", "p_dest")
+
+	beginTestPurgeAdmission(t, d)
+	result := sendCommand(t, d, protocol.CommandRequest{
+		Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "work",
+	})
+	require.False(t, result.OK)
+	require.Equal(t, protocol.ErrInternal, result.Code)
+	require.Equal(t, errPurgeAdmissionClosed.Error(), result.Text)
+	d.endPurgeAdmission()
+}
+
 func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	source := addControlSession(d, "work", "t_active", "p_active")
@@ -1440,4 +1459,70 @@ func addControlSession(d *Daemon, name, tabID, paneID string) *session {
 	d.sessions[sess.id] = sess
 	d.mu.Unlock()
 	return sess
+}
+
+// TestHandleKillSessionParticipantsChangedReportsRetryable proves a direct
+// session kill whose teardown snapshot a concurrent token resume invalidated
+// reports a clear retryable outcome instead of a permanent delete failure, and
+// leaves the session live.
+func TestHandleKillSessionParticipantsChangedReportsRetryable(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+
+	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
+		if action != "" {
+			return
+		}
+		d.afterAttachmentEffectParticipantsSnapshotted = nil
+		// A token resume replaces the exact transport after the participant
+		// snapshot was taken, so the kill aborts before removing anything.
+		fresh := &closeTrackingTransport{}
+		ac.replaceTransport(fresh)
+		ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
+	}
+	t.Cleanup(func() { d.afterAttachmentEffectParticipantsSnapshotted = nil })
+
+	tr, sends := newCapturingTransport(t)
+	d.handleKill(tr, protocol.Kill{Scope: protocol.KillSession, Name: "work"})
+
+	frame := awaitFrame(t, sends, "Error")
+	msg, ok := decodeServerMessage(t, frame).(protocol.ErrorMsg)
+	require.True(t, ok)
+	require.Equal(t, protocol.ErrInternal, msg.Code)
+	require.Equal(t, sessionKillRetryMessage, msg.Text)
+	require.Equal(t, 1, sessionCount(d), "an aborted direct kill must leave the session live")
+	require.Same(t, sess, firstSession(d))
+}
+
+// TestCloseTabParticipantsChangedReportsRetryable proves a last-tab close whose
+// teardown snapshot a concurrent token resume invalidated reports a clear
+// retryable outcome to both the command result and the attached client, and
+// leaves the session and its tab live.
+func TestCloseTabParticipantsChangedReportsRetryable(t *testing.T) {
+	d, sess, ac, _ := newManualSessionWithPTYs(t, newQuietPTY())
+
+	d.afterAttachmentEffectParticipantsSnapshotted = func(action string, _ []*attachedClient) {
+		if action != "" {
+			return
+		}
+		d.afterAttachmentEffectParticipantsSnapshotted = nil
+		fresh := &closeTrackingTransport{}
+		ac.replaceTransport(fresh)
+		ac.installTestAttachmentCapability(sess.captureAttachmentCapability(ac, fresh))
+	}
+	t.Cleanup(func() { d.afterAttachmentEffectParticipantsSnapshotted = nil })
+
+	result := sendCommand(t, d, protocol.CommandRequest{Slug: "close-tab", TargetSession: "work"})
+	require.False(t, result.OK)
+	require.Equal(t, protocol.ErrInternal, result.Code)
+	require.Equal(t, sessionKillRetryMessage, result.Text)
+
+	toasts := awaitToastCount(t, ac, 1)
+	require.Contains(t, toasts[0].Message, "couldn't close tab")
+	require.Contains(t, toasts[0].Message, "try again")
+
+	sess.mu.Lock()
+	tabs := len(sess.tabs)
+	sess.mu.Unlock()
+	require.Equal(t, 1, tabs, "an aborted last-tab close must retain the tab")
+	require.Equal(t, 1, sessionCount(d), "an aborted last-tab close must retain the session")
 }

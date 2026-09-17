@@ -470,6 +470,10 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		d.mu.Unlock()
 		return errors.New("daemon is shutting down")
 	}
+	if d.purgeAdmissionClosedLocked() {
+		d.mu.Unlock()
+		return errPurgeAdmissionClosed
+	}
 	if d.nameLiveOrStoppedLocked(name) {
 		d.mu.Unlock()
 		return errSessionNameInUse
@@ -542,6 +546,9 @@ func (d *Daemon) createSessionAndSwitchForAttachment(effect *attachmentEffect, n
 			if d.closing {
 				return nil, errors.New("daemon is shutting down")
 			}
+			if d.purgeAdmissionClosedLocked() {
+				return nil, errPurgeAdmissionClosed
+			}
 			if d.nameLiveOrStoppedLocked(name) {
 				return nil, errSessionNameInUse
 			}
@@ -573,6 +580,10 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 	if d.closing {
 		d.mu.Unlock()
 		return errors.New("daemon is shutting down")
+	}
+	if d.purgeAdmissionClosedLocked() {
+		d.mu.Unlock()
+		return errPurgeAdmissionClosed
 	}
 	from.mu.Lock()
 	cwd, env := from.cwd, copyEnvironment(from.env)
@@ -619,6 +630,9 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(effect *attachment
 		createTargetLocked: func() (*session, error) {
 			if capability.sess == nil || d.closing {
 				return nil, errAttachmentTransition
+			}
+			if d.purgeAdmissionClosedLocked() {
+				return nil, errPurgeAdmissionClosed
 			}
 			source := capability.sess
 			source.mu.Lock()
@@ -1180,8 +1194,7 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 		}
 		if err != nil {
 			d.log.Warn("closing last tab failed", "session", name, "err", err)
-			d.reportError(sess, domain.UserErr(domain.NoticeSnapshotSaturated,
-				"couldn't close tab: session state not yet saved; try again", err))
+			d.reportError(sess, closeTabFailureNotice(err))
 			return err
 		}
 		d.log.Info("tab closed", "session", name, "last", true)
@@ -1228,6 +1241,19 @@ func (d *Daemon) closeTabLockedWithEffect(sess *session, tb *tab, repaint bool, 
 		d.repaintAllAttachedClients()
 	}
 	return nil
+}
+
+// closeTabFailureNotice classifies a failed last-tab close for the attached
+// client. A participants-changed abort removed nothing and is safe to retry, so
+// it reports that retryable outcome instead of the snapshot-write failure the
+// other teardown errors carry.
+func closeTabFailureNotice(err error) error {
+	if errors.Is(err, errSessionKillParticipantsChanged) {
+		return domain.UserErr(domain.NoticeSessionUnavailable,
+			"couldn't close tab: session changed during the close; try again", err)
+	}
+	return domain.UserErr(domain.NoticeSnapshotSaturated,
+		"couldn't close tab: session state not yet saved; try again", err)
 }
 
 // ptyReader drains child output into the VT screen and pokes the dirty channel
@@ -1310,6 +1336,15 @@ func (d *Daemon) retryStoppedPurgeContextExact(ctx context.Context, name string,
 	return nil
 }
 
+// killSession removes a session and tears down its resources. It is
+// idempotent: only the caller that wins the registry delete acts. Final
+// session removal is independent of daemon shutdown: an empty registry leaves
+// the daemon serving (closing is untouched) so a later create/restore can
+// occupy it again, and only an explicit shutdownAll ends the daemon.
+//
+// Teardown ordering matters: context cancel and pty.Close run first and
+// unconditionally — never gated behind a client send. The Detached notice is
+// delivered asynchronously under the drain deadline.
 func (d *Daemon) killSession(sess *session, reason uint8, purge bool) error {
 	return d.killSessionWithSnapshotDeadline(sess, reason, purge, nil, nil)
 }
@@ -1406,6 +1441,18 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		}
 	}
 	return snapshot, true
+}
+
+// sessionKillTargetRemoved reports whether the exact target session has already
+// left the live registry, so a post-freeze mismatch is an already-removed no-op
+// rather than a participant change that left work undone.
+func (d *Daemon) sessionKillTargetRemoved(target *session) bool {
+	if target == nil {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sessions[target.id] != target
 }
 
 // sessionKillParticipantsCurrent repeats lifecycle, source-token, and exact
@@ -1580,10 +1627,61 @@ func (s *session) finishTeardown() {
 	s.teardownMu.Unlock()
 }
 
+// errSessionKillDeadline reports that a caller-supplied teardown deadline
+// expired before killSessionWithSnapshotDeadlineAndCondition froze every
+// attachment gate, acquired teardown ownership, or finished joining the
+// session's snapshot publication. The session is left live and registered
+// exactly as it was: a purge's snapshot quarantine is rolled back, restoring
+// eligibility and dirty scheduling for the surviving session, so the abort is
+// retry state rather than a lifecycle mutation. It is deliberately distinct
+// from a completed teardown: a bounded purge or shutdown must report the skip as
+// a typed failure or an incomplete verdict instead of misreporting success.
+// Callers that pass no deadline never observe it.
+var errSessionKillDeadline = errors.New("session teardown deadline exceeded before ownership")
+
+// errSessionKillParticipantsChanged reports that a concurrent detach or token
+// resume changed the participant set between the pre-freeze snapshot and a
+// post-freeze revalidation, so the kill aborted before freezing every gate or
+// before publishing terminal ownership. The session was left untouched. It is
+// deliberately distinct from a completed teardown so a bounded purge can retry
+// against a fresh snapshot instead of counting the abort as a purged unit, and
+// so a caller that does not retry still sees that nothing was removed.
+var errSessionKillParticipantsChanged = errors.New("session kill participants changed after snapshot")
+
+// sessionKillRetryMessage is the user-facing, retryable outcome for a teardown
+// a concurrent detach or token resume invalidated before it removed anything.
+// The sentinel above is internal bookkeeping, so every user-facing path (a
+// direct kill or a close-tab command) maps it to this message instead of
+// leaking the sentinel text or a permanent-failure verdict.
+const sessionKillRetryMessage = "session changed during the operation; try again"
+
+// teardownDeadlineElapsed reports whether the supplied deadline has already
+// expired. A nil deadline never counts as elapsed.
+func teardownDeadlineElapsed(deadline *snapshotShutdownDeadline) bool {
+	if deadline == nil {
+		return false
+	}
+	select {
+	case <-deadline.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 // killSessionWithSnapshotDeadline shares Serve's shutdown budget with its
 // terminal checkpoint and coordinator join. A timed-out repository call keeps
 // only immutable capture state; it never observes closed worker channels or
 // session-owned cache that teardown has released.
+//
+// A deadline that wins before this call freezes every attachment gate or
+// acquires teardown ownership returns errSessionKillDeadline, so a bounded
+// caller can distinguish a skip from a completed teardown. An already-removed
+// target is a no-op; a target that is still registered while its participant
+// set, transport incarnation, or source capability changed after the snapshot
+// returns errSessionKillParticipantsChanged, so an aborted teardown is never
+// mistaken for a completed one. Ordinary callers that pass nil preserve their
+// previous behavior exactly.
 func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline, admission *sessionKillAdmission) error {
 	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, deadline, admission, false)
 }
@@ -1635,10 +1733,19 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		// The acquisition helper has already rolled back exactly the gates it
 		// owned. Do not enter architecture locks or publish terminal ownership
 		// changes unless the complete canonical participant set is frozen.
+		if teardownDeadlineElapsed(deadline) {
+			return errSessionKillDeadline
+		}
 		return nil
 	}
 	if !d.sessionKillParticipantsCurrent(participants) {
-		return nil
+		if d.sessionKillTargetRemoved(sess) {
+			// The exact target already left the registry, so there is nothing left
+			// to tear down: an already-removed session is a no-op, not a
+			// participant change.
+			return nil
+		}
+		return errSessionKillParticipantsChanged
 	}
 
 	// Pane EOF, explicit close, and daemon shutdown can all converge on the same
@@ -1649,9 +1756,28 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	var acquired bool
 	reason, purge, acquired = sess.beginTeardownRequest(deadline, reason, purge)
 	if !acquired {
+		// beginTeardownRequest only fails to acquire when the deadline expired
+		// (without one it waits until ownership is available), so the session is
+		// still untouched and the skip must stay observable.
+		if deadline != nil {
+			return errSessionKillDeadline
+		}
 		return nil
 	}
 	defer sess.finishTeardown()
+	// Capture eligibility before any coordinator quarantine flips it. Every
+	// post-quarantine abort that leaves this session registered restores exactly
+	// this value, so a surviving session resumes checkpoint scheduling instead of
+	// staying permanently frozen. The rollback is gated on the same teardown
+	// ownership as finishTeardown and on the exact registry entry, so a completed
+	// removal never resurrects scheduling.
+	wasEligible := sess.snapEligible.Load()
+	quarantined := false
+	defer func() {
+		if quarantined && d.sessionRegistered(sess) {
+			rollbackSnapshotQuarantine(sess, wasEligible)
+		}
+	}()
 
 	d.mu.Lock()
 	current := d.sessions[sess.id]
@@ -1673,13 +1799,26 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	incarnation := sess.incarnation
 	sess.mu.Unlock()
 	// Join snapshot publication before changing live identity or deleting the
-	// incarnation directory, so an older publication cannot recreate it.
+	// incarnation directory, so an older publication cannot recreate it. A shared
+	// caller deadline bounds the join: a repository call that ignores cancellation
+	// must never hold purge admission open, so an expired budget leaves the unit
+	// live and reports the typed skip instead.
 	if purge && !isEphemeral {
 		if err := d.beginSnapshotPurge(name, incarnation); err != nil {
 			return err
 		}
 		if d.snapshotRepository != nil {
-			<-quarantineSnapshotCoordinator(sess)
+			quarantineDone := quarantineSnapshotCoordinator(sess)
+			quarantined = true
+			if deadline != nil {
+				select {
+				case <-quarantineDone:
+				case <-deadline.Done():
+					return errSessionKillDeadline
+				}
+			} else {
+				<-quarantineDone
+			}
 		}
 	}
 	if !purge && !isEphemeral && d.persistEnabled {
@@ -1719,6 +1858,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		} else {
 			quarantineDone = quarantineSnapshotCoordinator(sess)
 		}
+		quarantined = true
 		joined := true
 		if deadline != nil {
 			select {
@@ -1733,6 +1873,9 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 			sess.snapshotMu.Lock()
 			sess.snapshotChunkCache = nil
 			sess.snapshotMu.Unlock()
+		}
+		if d.afterSessionKillQuarantine != nil {
+			d.afterSessionKillQuarantine(sess)
 		}
 	}
 	// Revalidate the exact source capability, target lifecycle, and attachment
@@ -1757,7 +1900,7 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		unlockSessions()
 		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
-		return nil
+		return errSessionKillParticipantsChanged
 	}
 
 	// d.mu -> routingMu -> ordered sessions -> ordered coordinators are held
@@ -1798,13 +1941,6 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 		stopped.purging = purge
 		d.inactive[stoppedName] = stopped
 	}
-	empty := len(d.sessions) == 0
-	if empty {
-		// Shutdown is now inevitable and irreversible (doneOnce below): stop
-		// route from inserting new sessions from this instant, while we still
-		// hold the same lock route checks under.
-		d.closing = true
-	}
 	d.mu.Unlock()
 	d.finishParkedAttachmentRetirements(parkedRetirements)
 	frozen.unfreeze()
@@ -1844,27 +1980,23 @@ func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reas
 	}
 	// The coordinator and all panes are now stopped, so no producer can publish
 	// another generation after this destructive source deletion. Keep the hidden
-	// stopped record when deletion fails so a repeated live kill can retry.
+	// stopped record when deletion fails or is still pending so a repeated live
+	// kill can retry. The purge-owned exact delete is bounded: a repository
+	// delete that ignores cancellation is detached behind a name/incarnation/
+	// createdAt fence rather than holding purgeAllMu, admission, or control
+	// responses.
 	if !ephemeral && purge {
-		err := d.finishSnapshotPurge(d.serveCtx, stoppedName, incarnation, stoppedRecord.CreatedAt)
-		if err != nil {
+		if err := d.finishLiveDurablePurge(deadline, stoppedRecord); err != nil {
 			purgeErr = errors.Join(purgeErr, err)
 			d.log.Warn("finishing session snapshot purge failed", "err", err, "session", stoppedName)
-		} else {
-			expected := inactiveSessionFromRecord(stoppedRecord, protocol.SessionDown, nil)
-			d.mu.Lock()
-			if stopped, ok := d.inactive[stoppedName]; ok && stopped.purging && stopped.sameLifecycle(expected) {
-				delete(d.inactive, stoppedName)
-			}
-			d.mu.Unlock()
 		}
 	}
-	if purge && purgeErr == nil {
+	if purge && purgeErr == nil && isEphemeral {
+		// An ephemeral purge owns no durable record, but the remaining sessions'
+		// route histories may still reference it.
 		d.reconcileAllRouteHistories()
 	}
-	if empty {
-		d.doneOnce.Do(func() { close(d.done) })
-	} else if ringing {
+	if ringing {
 		d.repaintAllAttachedClients()
 	}
 

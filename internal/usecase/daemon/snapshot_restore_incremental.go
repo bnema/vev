@@ -39,26 +39,64 @@ func (d *Daemon) restoreIncrementalSnapshots(ctx context.Context) {
 	if d.catalogue == nil {
 		return
 	}
+	records, epoch, ok := d.captureCatalogueSnapshot(ctx)
+	if !ok {
+		return
+	}
+	d.restoreCatalogueEpoch(ctx, records, epoch)
+}
+
+// captureCatalogueSnapshot reads the purge boundary and the authoritative
+// catalogue records together under purge admission. Holding the gate for both
+// reads keeps them atomic with any KillAll: a purge can never increment the
+// epoch between the two reads and pair a record set it already removed with a
+// boundary that looks current. The caller's context and the move/purge gates
+// bound the wait.
+func (d *Daemon) captureCatalogueSnapshot(ctx context.Context) ([]domain.CatalogueRecord, uint64, bool) {
+	if err := d.acquirePurgeAdmission(ctx); err != nil {
+		return nil, 0, false
+	}
+	defer d.releasePurgeAdmission()
+	epoch := d.purgeEpochSnapshot()
 	records, err := d.catalogue.Records()
 	if err != nil {
 		d.log.Error("loading catalogue for snapshot restoration failed", "err", err)
-		return
+		return nil, 0, false
 	}
-	d.restoreCatalogue(ctx, records)
+	return records, epoch, true
 }
 
-// restoreCatalogue gives every expected record an independent bounded job.
-// A failed record is degraded without cancelling any sibling restoration.
-func (d *Daemon) restoreCatalogue(ctx context.Context, records []domain.CatalogueRecord) {
+// restoreCatalogueEpoch restores records captured at the given purge boundary.
+// Each worker holds purge admission for exactly one record's transition — its
+// registry publication, checkpoint load, and publication or demotion — so a
+// KillAll drains the in-flight record before it snapshots, and a worker that
+// waited on admission abandons records superseded by a completed purge. Holding
+// admission per record rather than per worker keeps the purge's drain latency
+// proportional to the slowest single record, not the whole catalogue.
+func (d *Daemon) restoreCatalogueEpoch(ctx context.Context, records []domain.CatalogueRecord, epoch uint64) {
 	jobs := make(chan domain.CatalogueRecord)
 	workers := min(catalogueRestoreConcurrency, len(records))
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
 			for record := range jobs {
-				done := d.ensureCatalogueRegistryEntry(record)
-				err := d.restoreRecord(ctx, record)
+				if err := d.acquirePurgeAdmission(ctx); err != nil {
+					// Admission is closed for good (shutdown or cancellation): drain
+					// the queue so the producer can finish, and touch no registry state.
+					continue
+				}
+				if ctx.Err() != nil {
+					d.releasePurgeAdmission()
+					continue
+				}
+				done, ok := d.ensureCatalogueRegistryEntry(record, epoch)
+				if !ok {
+					d.releasePurgeAdmission()
+					continue
+				}
+				err := d.restoreRecord(ctx, record, epoch)
 				d.finishRecordRestore(record, err, done)
+				d.releasePurgeAdmission()
 			}
 		})
 	}
@@ -100,15 +138,22 @@ func inactiveSessionFromRecord(record domain.CatalogueRecord, state protocol.Ses
 	}
 }
 
-func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord) chan struct{} {
+// ensureCatalogueRegistryEntry publishes a stopped registry entry for a record
+// captured at epoch, unless a purge or explicit shutdown has superseded it. The
+// false result means the record must be skipped: it no longer belongs to the
+// authoritative set, so creating an entry here would resurrect it.
+func (d *Daemon) ensureCatalogueRegistryEntry(record domain.CatalogueRecord, epoch uint64) (chan struct{}, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.purgeSupersededLocked(epoch) {
+		return nil, false
+	}
 	if entry, ok := d.inactive[record.Name]; ok {
-		return entry.restoreDone
+		return entry.restoreDone, true
 	}
 	state, done := initialSessionState(record)
 	d.inactive[record.Name] = inactiveSessionFromRecord(record, state, done)
-	return done
+	return done, true
 }
 
 // closeRuntimeRestoreDoneLocked closes a per-record restoration barrier.
@@ -173,7 +218,12 @@ func (d *Daemon) finishRecordRestore(record domain.CatalogueRecord, restoreErr e
 	}
 }
 
-func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord) error {
+func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecord, epoch uint64) error {
+	if d.purgeSuperseded(epoch) {
+		// A purge or shutdown owns this record now; skip the load entirely so no
+		// PTY is opened for a lifecycle that will not survive.
+		return nil
+	}
 	if record.DegradedReason != "" {
 		d.setStoppedRecovery(record, protocol.SessionBroken)
 		d.logSessionDegraded(record, "persisted-broken")
@@ -229,7 +279,7 @@ func (d *Daemon) restoreRecord(ctx context.Context, record domain.CatalogueRecor
 		d.log.Info("snapshot_checkpoint_reconciliation_complete", "session", record.Name, "incarnation", record.IncarnationID.String(), "generation", selected.Generation)
 	}
 
-	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected); err != nil {
+	if err := d.restoreSession(ctx, selectedSnapshot, selectedGeneration.Generation, selected, epoch); err != nil {
 		return err
 	}
 	d.setStoppedRecovery(record, protocol.SessionDown)

@@ -33,10 +33,26 @@ func (d *Daemon) reserveMoveLifecycles(source, destination *session) (*moveLifec
 	}
 	d.mu.Lock()
 	closing := d.closing
+	purgeClosing := d.purgeAdmissionClosing
+	if !closing && !purgeClosing {
+		// A move transfers live state across the exact lifecycle set a KillAll
+		// purge captured, so it reserves the purge admission gate too: the purge
+		// drains this reservation before it snapshots, and a move arriving during
+		// the purge is rejected instead of racing the set.
+		d.purgeAdmissionActive++
+	}
 	d.mu.Unlock()
 	if closing {
 		d.moveLifecycleMu.Unlock()
 		return nil, errMoveLifecycleUnavailable
+	}
+	if purgeClosing {
+		// A transient KillAll purge owns the exact lifecycle set, so no move can
+		// reserve it. Unlike a shutdown this is retry state, so report the same
+		// typed admission outcome as the other command paths instead of a
+		// permanent "target gone" verdict.
+		d.moveLifecycleMu.Unlock()
+		return nil, errPurgeAdmissionClosed
 	}
 	d.moveLifecycleActive++
 	d.signalMoveLifecycleChangedLocked()
@@ -53,8 +69,7 @@ func (d *Daemon) reserveMoveLifecycles(source, destination *session) (*moveLifec
 		if sess.teardownActive {
 			unlockMoveSessions(sessions)
 			d.moveLifecycleMu.Lock()
-			d.moveLifecycleActive--
-			d.signalMoveLifecycleChangedLocked()
+			d.releaseMoveAdmissionLocked()
 			d.moveLifecycleMu.Unlock()
 			return nil, errMoveLifecycleUnavailable
 		}
@@ -99,8 +114,7 @@ func (r *moveLifecycleReservation) Release() {
 			sess.signalTeardownChangedLocked()
 		}
 		unlockMoveSessions(r.sessions)
-		r.daemon.moveLifecycleActive--
-		r.daemon.signalMoveLifecycleChangedLocked()
+		r.daemon.releaseMoveAdmissionLocked()
 		r.daemon.moveLifecycleMu.Unlock()
 	})
 }
@@ -137,6 +151,17 @@ func (d *Daemon) closeMoveLifecycles() {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// releaseMoveAdmissionLocked drops one move's move-gate and KillAll purge-gate
+// reservations. Caller holds moveLifecycleMu; the purge gate is guarded by mu.
+func (d *Daemon) releaseMoveAdmissionLocked() {
+	d.moveLifecycleActive--
+	d.signalMoveLifecycleChangedLocked()
+	d.mu.Lock()
+	d.purgeAdmissionActive--
+	d.signalPurgeAdmissionChangedLocked()
+	d.mu.Unlock()
 }
 
 func (d *Daemon) moveLifecycleChangeLocked() chan struct{} {

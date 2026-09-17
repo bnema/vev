@@ -188,6 +188,15 @@ while `pickerOpen`; only typed picker messages act.
   and carry no async byte-budget charge; async sends are charged on
   admission and released exactly once on dequeue.
 
+Current state: a one-shot control client uses the daemon closing the
+connection (EOF) as its success signal, so a control failure whose error
+response cannot be delivered would otherwise be indistinguishable from
+success; the daemon only logs such a failed send
+(`daemon.logControlSendFailure`) before closing. The wire-level decision for that
+residual belongs to the P7 explicit result protocol, which replaces close-as-
+success with an explicit per-request result; until that cutover the close-based
+convention is kept unchanged (GO-005, deferred to P7).
+
 ## Limits
 
 | Item | Ceiling | Owner |

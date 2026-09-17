@@ -136,16 +136,51 @@ func TestHandshakeNoSuchSession(t *testing.T) {
 	require.Equal(t, protocol.ErrNoSuchSession, em.Code)
 }
 
-func TestKillAllEmptyDaemonSignalsShutdown(t *testing.T) {
-	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
+// TestKillAllEmptyDaemonKeepsServing proves KillAll no longer ends the daemon:
+// purging an empty registry leaves closing, move admission, the daemon-wide
+// pane process context, and d.done untouched, and the same daemon then admits a
+// fresh session.
+func TestKillAllEmptyDaemonKeepsServing(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	tr, _, _ := newConn(t, mustClientEnvelope(protocol.Kill{Scope: protocol.KillAll}))
 	d.handleConn(tr)
 
 	select {
 	case <-d.done:
-	case <-time.After(time.Second):
-		t.Fatal("kill all on empty daemon did not signal shutdown")
+		t.Fatal("kill all on empty daemon must not signal shutdown")
+	default:
 	}
+	d.mu.Lock()
+	closing := d.closing
+	d.mu.Unlock()
+	require.False(t, closing, "kill all must not mark the daemon closing")
+	d.moveLifecycleMu.Lock()
+	moveClosing := d.moveLifecycleClosing
+	d.moveLifecycleMu.Unlock()
+	require.False(t, moveClosing, "kill all must not close move admission")
+	select {
+	case <-d.paneProcessCtx.Done():
+		t.Fatal("kill all must not cancel the daemon-wide pane process context")
+	default:
+	}
+
+	// The purge reopened admission: the same daemon creates a fresh session.
+	tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+	var hg sync.WaitGroup
+	hg.Go(func() { d.handleConn(tr2) })
+	welcome := decodeServerMessage(t, awaitFrame(t, sends2, "Welcome")).(protocol.Welcome)
+	require.Equal(t, "0", welcome.SessionName)
+	awaitFrame(t, sends2, "Output")
+	require.Equal(t, 1, sessionCount(d))
+
+	releaseConn2()
+	_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
+	release()
+	hg.Wait()
+	d.sessWg.Wait()
+	d.waitNotifies()
 }
 
 func TestBeginTeardownRequestResolvesShutdownPreservation(t *testing.T) {
@@ -382,14 +417,21 @@ func TestDetachKeepsNamed(t *testing.T) {
 
 // --- render scheduler debounce ----------------------------------------------
 
-func TestReaderEOFRemovesSessionAndSignalsShutdown(t *testing.T) {
-	p := portsmocks.NewMockPTY(t)
+// TestReaderEOFRemovesSessionAndDaemonSurvives proves final session removal is
+// independent of daemon shutdown: the last session's EOF empties the registry
+// without signalling shutdown or marking the daemon closing, and the same
+// daemon can be occupied again by a fresh session.
+func TestReaderEOFRemovesSessionAndDaemonSurvives(t *testing.T) {
+	eofPTY := portsmocks.NewMockPTY(t)
 	// Read returns EOF immediately (child already gone).
-	p.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
-	p.EXPECT().Close().Return(nil).Maybe()
-	p.EXPECT().Pid().Return(1).Maybe()
+	eofPTY.EXPECT().Read(mock.Anything).Return(0, io.EOF).Maybe()
+	eofPTY.EXPECT().Close().Return(nil).Maybe()
+	eofPTY.EXPECT().Pid().Return(1).Maybe()
 
-	d := newTestDaemon(t, newFactory(t, p), stubClock{})
+	secondPTY, releaseSecond := newBlockingPTY(t)
+	defer releaseSecond()
+	d := newTestDaemon(t, newFactorySeq(t, eofPTY, secondPTY), stubClock{})
+
 	tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
 	var hg sync.WaitGroup
@@ -400,27 +442,140 @@ func TestReaderEOFRemovesSessionAndSignalsShutdown(t *testing.T) {
 	dm := decodeServerMessage(t, det).(protocol.Detached)
 	require.Equal(t, protocol.ReasonSessionKilled, dm.Reason)
 
+	// The registry is empty, yet the daemon has not begun shutdown and has not
+	// signalled Serve. The Detached notice is scheduled only after registry
+	// removal has published, so these assertions are deterministic.
 	select {
 	case <-d.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("registry-empty shutdown was not signalled")
+		t.Fatal("final session removal must not signal daemon shutdown")
+	default:
 	}
+	d.mu.Lock()
+	closing := d.closing
+	d.mu.Unlock()
+	require.False(t, closing, "empty registry must not mark the daemon closing")
 	require.Equal(t, 0, sessionCount(d))
 
+	// The empty registry can be occupied again by a brand-new session.
+	tr2, sends2, releaseConn2 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+	var hg2 sync.WaitGroup
+	hg2.Go(func() { d.handleConn(tr2) })
+	welcome := decodeServerMessage(t, awaitFrame(t, sends2, "Welcome")).(protocol.Welcome)
+	require.Equal(t, "0", welcome.SessionName)
+	awaitFrame(t, sends2, "Output")
+	require.Equal(t, 1, sessionCount(d))
+
+	_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
+	releaseConn2()
 	hg.Wait()
+	hg2.Wait()
+	d.sessWg.Wait()
+	d.waitNotifies()
+}
+
+// TestConcurrentFinalRemovalAndCreationLinearize proves final-session removal
+// no longer opens a shutdown window: a create racing the removal is always
+// admitted (never rejected with ErrServerShutdown) and the two registry
+// transitions linearize under d.mu, leaving exactly the newly created session.
+func TestConcurrentFinalRemovalAndCreationLinearize(t *testing.T) {
+	for attempt := 0; attempt < 32; attempt++ {
+		firstPTY, releaseFirst := newBlockingPTY(t)
+		secondPTY, releaseSecond := newBlockingPTY(t)
+		d := newTestDaemon(t, newFactorySeq(t, firstPTY, secondPTY), stubClock{})
+
+		sess, err := createSessionForTest(d, "0", true, "/tmp", domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, nil)
+		require.NoError(t, err)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		var createErr error
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, createErr = d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), &closeTrackingTransport{})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = d.killSession(sess, protocol.ReasonSessionKilled, true)
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, createErr, "attempt %d: creation racing final removal must be admitted", attempt)
+		require.Equal(t, 1, sessionCount(d), "attempt %d: exactly the new session must remain", attempt)
+		d.mu.Lock()
+		closing := d.closing
+		d.mu.Unlock()
+		require.False(t, closing, "attempt %d: empty→occupied must not mark the daemon closing", attempt)
+
+		_ = d.killSession(firstSession(d), protocol.ReasonSessionKilled, true)
+		releaseFirst()
+		releaseSecond()
+		d.sessWg.Wait()
+		d.waitNotifies()
+	}
+}
+
+// TestRestoreAfterEmptyRegistryWorks proves a stopped named session can be
+// restored by a fresh attach once the registry has returned to empty: the
+// daemon kept serving and the inactive authority survived the final removal.
+func TestRestoreAfterEmptyRegistryWorks(t *testing.T) {
+	firstPTY, releaseFirst := newBlockingPTY(t)
+	defer releaseFirst()
+	secondPTY, releaseSecond := newBlockingPTY(t)
+	defer releaseSecond()
+	d := newTestDaemon(t, newFactorySeq(t, firstPTY, secondPTY), stubClock{})
+
+	sess, err := createSessionForTest(d, "work", false, t.TempDir(), domain.Size{Cols: 80, Rows: 24}, terminalEnv{}, d.baseEnv)
+	require.NoError(t, err)
+
+	// Stop the only session; the registry returns to empty without shutdown.
+	require.NoError(t, d.killSession(sess, protocol.ReasonServerShutdown, false))
+	require.Equal(t, 0, sessionCount(d))
+	select {
+	case <-d.done:
+		t.Fatal("stopped final session must not signal daemon shutdown")
+	default:
+	}
+
+	// Restore it inside the same daemon.
+	tr := newMockServerConnection(t)
+	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
+	tr.EXPECT().Close().Return(nil).Maybe()
+	restored, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: domain.Size{Cols: 80, Rows: 24}}, tr)
+	require.NoError(t, err)
+	require.NotNil(t, ac)
+	require.Equal(t, "work", restored.name)
+	require.Equal(t, 1, sessionCount(d))
+
+	_ = d.killSession(restored, protocol.ReasonServerShutdown, false)
 	d.sessWg.Wait()
 	d.waitNotifies()
 }
 
 // --- full Serve lifecycle ---------------------------------------------------
 
-func TestServeReturnsWhenLastSessionExits(t *testing.T) {
-	p, releasePTY := newBlockingPTY(t)
-	tr, sends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+// TestServeSurvivesEmptyRegistryAndAcceptsNewSession proves the accept loop and
+// listener are not torn down by an empty registry: after the last session
+// exits, the same Serve loop still admits a brand-new session, and only ctx
+// cancellation ends it.
+func TestServeSurvivesEmptyRegistryAndAcceptsNewSession(t *testing.T) {
+	firstPTY, releaseFirst := newBlockingPTY(t)
+	defer releaseFirst()
+	secondPTY, releaseSecond := newBlockingPTY(t)
+	defer releaseSecond()
+
+	firstTr, firstSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
+	secondTr, secondSends, _ := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 
 	l := newMockServerListener(t)
+	// Feed connections one at a time: the second is offered only after the
+	// first session has exited, so the mock factory's PTY order is deterministic
+	// and the reuse handshake proves the accept loop survived.
 	connCh := make(chan wire.Transport, 1)
-	connCh <- tr
+	connCh <- firstTr
 	closed := make(chan struct{})
 	var once sync.Once
 	l.EXPECT().Accept().RunAndReturn(func() (wire.Transport, error) {
@@ -434,22 +589,35 @@ func TestServeReturnsWhenLastSessionExits(t *testing.T) {
 	l.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil }).Maybe()
 	l.EXPECT().Addr().Return("mock").Maybe()
 
-	d := New(newFactory(t, p), stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := New(newFactorySeq(t, firstPTY, secondPTY), stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	served := make(chan error, 1)
-	go func() { served <- d.Serve(context.Background(), l) }()
+	go func() { served <- d.Serve(ctx, l) }()
 
-	awaitFrame(t, sends, "Welcome")
-	awaitFrame(t, sends, "Output")
+	awaitFrame(t, firstSends, "Welcome")
+	awaitFrame(t, firstSends, "Output")
 
-	// Child exits -> session removed -> registry empties -> Serve returns.
-	releasePTY()
+	// Child exits -> session removed -> registry empties -> Serve must survive.
+	releaseFirst()
+	det := awaitFrame(t, firstSends, "Detached")
+	require.Equal(t, protocol.ReasonSessionKilled, decodeServerMessage(t, det).(protocol.Detached).Reason)
+	require.Equal(t, 0, sessionCount(d))
 
+	// The same accept loop admits a fresh connection into the empty registry.
+	connCh <- secondTr
+	awaitFrame(t, secondSends, "Welcome")
+	awaitFrame(t, secondSends, "Output")
+	require.Equal(t, 1, sessionCount(d))
+
+	// Only explicit cancellation stops Serve.
+	cancel()
 	select {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(3 * time.Second):
-		t.Fatal("Serve did not return after last session exited")
+		t.Fatal("Serve did not return after context cancel")
 	}
 }
 
@@ -499,22 +667,18 @@ func TestServeGracefulShutdownOnContextCancel(t *testing.T) {
 
 // --- shutdown/create interlock ------------------------------------------------
 
-// TestHelloRacingShutdownIsRejected covers the interlock between the
-// registry-empty shutdown decision and session creation. In particular, the
-// old `.Once()` factory expectation was wrong: firstPaint legitimately queues
-// a floating prewarm, so an Open that starts before killSession is valid work,
-// not a leaked post-shutdown child. The factory markers classify timing at the
-// Open boundary: this test first observes that valid prewarm, then verifies
-// that d.done (closed synchronously by killSession) is never followed by an
-// Open start.
-func TestHelloRacingShutdownIsRejected(t *testing.T) {
+// TestHelloAfterExplicitShutdownIsRejected covers the shutdown/create
+// interlock that survives P4.1: an explicit shutdownAll still marks the daemon
+// closing synchronously and signals Serve, so Hellos arriving afterward are
+// rejected with a clean typed error instead of creating a session the teardown
+// snapshot missed. Final session removal alone no longer triggers this.
+func TestHelloAfterExplicitShutdownIsRejected(t *testing.T) {
 	p, releasePTY := newBlockingPTY(t)
 	floating := newQuietPTY()
 	f := portsmocks.NewMockPTYFactory(t)
 	normalSize := domain.Size{Cols: 80, Rows: 22}
-	preShutdownFloatingOpen := make(chan struct{}, 1)
+	var d *Daemon
 	var opensAfterShutdown atomic.Int32
-	d := newTestDaemon(t, f, stubClock{})
 	f.EXPECT().Open(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
 		func(_ context.Context, _ string, _ []string, _ []string, _ string, geometry domain.Geometry) (ports.PTY, error) {
 			select {
@@ -525,40 +689,29 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 			if geometry.Size == normalSize {
 				return p, nil
 			}
-			select {
-			case preShutdownFloatingOpen <- struct{}{}:
-			default:
-			}
 			return floating, nil
 		},
 	).Maybe()
+	d = newTestDaemon(t, f, stubClock{})
 
 	tr1, sends1, release1 := newConn(t, mustHello(protocol.IntentEphemeral, "", domain.Size{Cols: 80, Rows: 24}))
 	var hg sync.WaitGroup
 	hg.Go(func() { d.handleConn(tr1) })
 	awaitFrame(t, sends1, "Welcome")
-	// firstPaint starts the background prewarm asynchronously. It is valid for
-	// this Open to occur before shutdown, so do not mistake it for the racing
-	// Hello's forbidden launch.
 	awaitFrame(t, sends1, "Output")
-	select {
-	case <-preShutdownFloatingOpen:
-	case <-time.After(time.Second):
-		t.Fatal("legitimate pre-shutdown floating prewarm did not start")
-	}
-	sess := firstSession(d)
-	require.NotNil(t, sess)
+	require.Equal(t, 1, sessionCount(d))
 
-	// The last session dies: shutdown begins irreversibly.
-	_ = d.killSession(sess, protocol.ReasonSessionKilled, false)
+	// Explicit shutdown begins irreversibly and signals Serve synchronously.
+	require.False(t, d.shutdownAll(protocol.ReasonServerShutdown))
 	select {
 	case <-d.done:
 	default:
-		t.Fatal("registry-empty shutdown must be signalled synchronously by killSession")
+		t.Fatal("explicit shutdown must signal Serve synchronously")
 	}
+	require.Equal(t, 0, sessionCount(d))
 
-	// Racing Hellos — both creation intents must be rejected with a clean
-	// typed error, and nothing may be inserted into the registry.
+	// Hellos after shutdown — both creation intents — must be rejected with a
+	// clean typed error, and nothing may be inserted into the registry.
 	for _, intent := range []struct {
 		name   string
 		intent uint8
@@ -572,17 +725,16 @@ func TestHelloRacingShutdownIsRejected(t *testing.T) {
 		e := awaitFrame(t, sends2, "Error")
 		em, ok := decodeServerMessage(t, e).(protocol.ErrorMsg)
 		require.True(t, ok)
-		require.Equal(t, protocol.ErrServerShutdown, em.Code, "%s hello racing shutdown must be rejected", intent.name)
+		require.Equal(t, protocol.ErrServerShutdown, em.Code, "%s hello after shutdown must be rejected", intent.name)
 	}
 	require.Equal(t, 0, sessionCount(d), "no session may be inserted after shutdown began")
-	require.Zero(t, opensAfterShutdown.Load(), "no PTYFactory.Open may start after d.done/shutdown completion")
 
 	release1()
 	releasePTY()
 	hg.Wait()
 	d.sessWg.Wait()
 	d.waitNotifies()
-	require.Zero(t, opensAfterShutdown.Load(), "racing Hellos must not start a PTY after shutdown")
+	require.Zero(t, opensAfterShutdown.Load(), "shutdown must not be followed by a PTY launch")
 }
 
 // --- wedged-client teardown ---------------------------------------------------

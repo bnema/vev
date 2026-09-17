@@ -179,7 +179,9 @@ Remote host commands, listing, and successful direct-attach learning are always 
 
 Set `VEV_LOG=debug`, `VEV_LOG=warn`, or `VEV_LOG=error` to change verbosity; the default is `info`. JSON-line logs such as `vev-daemon.log` live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset. The same state directory contains the strict session catalogue, any private pre-migration catalogue backup, notices, `hosts.json`, and `snapshots/`. The lifecycle lock and socket live in `$XDG_RUNTIME_DIR/vev` (with platform runtime fallbacks).
 
-Recovery events include `lifecycle_owner_wait`, `lifecycle_owner_acquired`, `lifecycle_owner_released`, `catalogue_validated`, `catalogue_compaction_recovery_complete`, `session_restore_complete`, `fallback_checkpoint_promoted`, `snapshot_head_repair_complete`, `session_degraded`, `snapshot_maintenance_progress`, `interrupted_transaction_recovery_complete`, and `daemon_startup_complete`.
+Recovery events include `lifecycle_owner_wait`, `lifecycle_owner_acquired`, `lifecycle_owner_released`, `catalogue_validated`, `catalogue_compaction_recovery_complete`, `session_restore_complete`, `fallback_checkpoint_promoted`, `snapshot_head_repair_complete`, `session_degraded`, `snapshot_garbage_collection_complete`, `interrupted_transaction_recovery_complete`, and `daemon_startup_complete`.
+
+Snapshot garbage collection is startup-only: the daemon runs one coordinator-owned pass before it publishes its socket, and no periodic snapshot collection runs afterward. The five-second idle maintenance loop compresses sealed scrollback pages and never collects snapshots or incarnations (GO-002, deferred).
 
 Catalogue failure is fail-closed: vev does not publish an empty replacement daemon. Preserve the state directory, inspect `catalogue_validation_failed`, correct storage or ownership problems, and retry without editing catalogue files. See [Durable session recovery](durable-session-recovery.md) for explicit recovery commands, migration, diagnostics, and the committed checkpoint plus up to two direct fallbacks retention policy.
 

@@ -40,6 +40,10 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.He
 		d.mu.Unlock()
 		return nil, nil, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
+	// Purge admission is already reserved by routeWithContext before this
+	// dispatch, so an admitted remote target must not re-check the transient
+	// gate: a purge that begins while this route is admitted waits for it and
+	// must not reject it.
 	if live := d.findByNameLocked(target.SessionName); live != nil {
 		if live.incarnation != target.LifecycleID {
 			d.mu.Unlock()
@@ -127,18 +131,33 @@ func (d *Daemon) sendCommittedRouteIdentityForAttachment(effect *attachmentEffec
 }
 
 func (d *Daemon) finishRouteAttach(sess *session, tr ports.ServerConnection, sz domain.Size, h protocol.Hello, routeCreated, purge bool) (*attachedClient, error) {
-	ac, err := d.finishAttach(sess, tr, sz, h)
-	if err != nil && routeCreated {
+	ac, attachErr := d.finishAttach(sess, tr, sz, h)
+	err := attachErr
+	if attachErr != nil && routeCreated {
 		if cleanupErr := d.killSessionIfEmpty(sess, protocol.ReasonSessionKilled, purge); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
-		return nil, err
+	}
+	if verdict, ok := d.routeAttachStopVerdict(attachErr); ok {
+		return nil, verdict
 	}
 	if err == nil && routeCreated && ac != nil {
 		ac.routeCreatedSession = true
 		ac.routeSessionPurge = purge
 	}
 	return ac, err
+}
+
+// routeAttachStopVerdict reports the authoritative explicit-stop outcome when an
+// attach failure is the leaked transition of a handshake the stop tore down. It
+// deliberately inspects only attachErr: the rollback cleanup error the caller
+// may join onto it is internal bookkeeping and must never decide the verdict, so
+// an unrelated attach failure is reported as-is even while the daemon stops.
+func (d *Daemon) routeAttachStopVerdict(attachErr error) (error, bool) {
+	if attachErr == nil || !errors.Is(attachErr, errAttachmentTransition) || !d.purgeSupersededForShutdown() {
+		return nil, false
+	}
+	return &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}, true
 }
 
 // remoteTargetMatchesSessionLocked validates the exact lifecycle and tab

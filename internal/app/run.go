@@ -135,7 +135,7 @@ usage:
   vev host rm <host>  remove a pinned remote host
   vev host list       list known remote hosts
   vev kill <name>     kill a session
-  vev kill --all      kill all sessions and stop the daemon
+  vev kill --all      kill all sessions (the daemon keeps running)
   vev kill --daemon   stop the active vev daemon
   vev cmd <command>   run a control command (vev cmd --help)
   vev --ui-observe    expose passive observation for this interactive client
@@ -1771,16 +1771,14 @@ func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) 
 			return cause
 		}
 	}
-	if all || daemon {
+	// Only an explicit daemon stop ends the daemon; kill-all purges sessions and
+	// leaves it running, so it must not wait for an ownership transfer.
+	if daemon {
 		waitCtx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 		defer cancel()
 		owner, waitErr := waitForLifecycleAvailability(waitCtx, ipc.SocketDir(), defaultBackoff)
 		if waitErr != nil {
-			cause := fmt.Errorf("vev: waiting for daemon ownership transfer: %w", waitErr)
-			if daemon {
-				return forceStopDaemonFallback(ctx, cause)
-			}
-			return cause
+			return forceStopDaemonFallback(ctx, fmt.Errorf("vev: waiting for daemon ownership transfer: %w", waitErr))
 		}
 		if releaseErr := owner.Release(); releaseErr != nil {
 			return fmt.Errorf("vev: releasing daemon ownership probe: %w", releaseErr)
@@ -1796,7 +1794,7 @@ func printKillSuccess(name string, all, daemon bool) {
 		return
 	}
 	if all {
-		fmt.Println("killed all sessions and stopped daemon")
+		fmt.Println("killed all sessions")
 		return
 	}
 	fmt.Printf("killed %s\n", name)
