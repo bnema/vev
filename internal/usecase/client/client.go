@@ -3655,14 +3655,23 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 // claim grants one attach scanner exclusive permission to dequeue terminal
 // input. The reader itself remains lifecycle-owned across reconnects.
 func (p *terminalInputPump) claim() uint64 {
+	consumer, ok := p.tryClaim()
+	if !ok {
+		panic("terminal input consumer already claimed")
+	}
+	return consumer
+}
+
+// tryClaim lets competing foreground owners decline admission without panicking.
+func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.consumer != 0 {
-		panic("terminal input consumer already claimed")
+		return 0, false
 	}
 	p.nextID++
 	p.consumer = p.nextID
-	return p.consumer
+	return p.consumer, true
 }
 
 // revoke invalidates an attempt before its replacement is allowed to claim
