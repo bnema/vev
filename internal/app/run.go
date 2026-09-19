@@ -75,6 +75,7 @@ const (
 	kindWebRenew
 	kindWebServe
 	kindBrokerServe
+	kindBrokerClient
 	kindBrokerLauncher
 	kindBrokerStatus
 	kindBrokerMuxStdio
@@ -99,6 +100,7 @@ type command struct {
 	killDaemon           bool
 	cmd                  cmdInvocation
 	brokerServe          brokerServeOptions
+	brokerClient         brokerClientOptions
 	brokerLauncher       brokerLauncherOptions
 	brokerStatus         brokerStatusOptions
 	brokerMux            brokerMuxOptions
@@ -242,6 +244,8 @@ parsedUIFlags:
 		return command{kind: kindDaemonLauncher}, nil
 	case brokerServeCommand:
 		return parseBrokerServeArgs(args[1:])
+	case brokerClientCommand:
+		return parseBrokerClientArgs(args[1:])
 	case brokerLauncherCommand:
 		return parseBrokerLauncherArgs(args[1:])
 	case brokerStatusCommand:
@@ -378,6 +382,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runDaemonLauncher()
 	case kindBrokerServe:
 		return runBrokerServeCommand(ctx, cmd.brokerServe)
+	case kindBrokerClient:
+		return runBrokerClientCommand(ctx, cmd.brokerClient)
 	case kindBrokerLauncher:
 		return runBrokerLauncherCommand(ctx, cmd.brokerLauncher)
 	case kindBrokerStatus:

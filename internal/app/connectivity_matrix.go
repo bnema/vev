@@ -223,6 +223,12 @@ var connectivityMatrix = []connectivityEntry{
 		Notes:   "Foreground sandbox process over its own private root: no production runtime/state, no daemon dial, no RemoteHostStore, and no session persistence. It composes the broker under a temporary offline config and does not become a client façade or an ordinary command.",
 	},
 	{
+		Kind:    "kindBrokerClient",
+		Summary: "hidden _broker-client autonomous offline client harness",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Explicit offline-root composition only: real broker IPC and logical streams exercise terminal and UI harnesses without changing any ordinary command or production path.",
+	},
+	{
 		Kind:    "kindBrokerLauncher",
 		Summary: "hidden _broker-launcher detached offline broker launcher",
 		Owner:   connectivityLocalOnly,

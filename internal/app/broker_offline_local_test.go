@@ -200,6 +200,28 @@ func TestBrokerLocalObservationComposition(t *testing.T) {
 	})
 }
 
+func TestOfflineRegistryConfigSelectsLocalObservationOnlyWhenProvisioned(t *testing.T) {
+	localConfig, binding := testLocalSandboxConfig(t)
+	selected, err := offlineRegistryConfig(localConfig, nil)
+	require.NoError(t, err)
+	require.False(t, selected.ObservationDisabled)
+	require.NotNil(t, selected.Local)
+	require.Equal(t, binding.DisplayOrigin, selected.Local.DisplayOrigin)
+	require.Equal(t, binding.Policy, selected.Local.Policy)
+
+	root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	writeSandboxConfig(t, root, sandboxRegistrationDocument("/tmp/vev-local-test/mux.sock"))
+	layout, err := brokerconfig.ResolveLayout(root, nil)
+	require.NoError(t, err)
+	remoteOnly, err := brokerconfig.Load(layout)
+	require.NoError(t, err)
+	disabled, err := offlineRegistryConfig(remoteOnly, nil)
+	require.NoError(t, err)
+	require.True(t, disabled.ObservationDisabled)
+	require.Nil(t, disabled.Local)
+}
+
 // TestBrokerLocalObservationRegistryPublishesLocalFirst proves the composition
 // end to end: the registry observes the local daemon through the broker-owned
 // probe and publishes it at index zero, and the durable store persists no local

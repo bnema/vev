@@ -34,9 +34,11 @@ import (
 // config marker. It never reads or writes production runtime, state, or config
 // and never changes an ordinary command, path, or factory.
 //
-// Nothing here spawns a detached process, connects or spawns a daemon, reports
-// status, or reaches SSH or QUIC: those remain later slices. The composed
-// process is foreground: it owns one lifetime lock for its whole run, serves
+// Nothing here spawns a detached process or daemon, reports status, or changes
+// a production path. When the sandbox configuration provisions a local binding,
+// the registry observes that existing Unix daemonmux route without opening a
+// logical stream; it owns no remote membership and never reaches SSH or QUIC.
+// The composed process is foreground: it owns one lifetime lock for its whole run, serves
 // until a signal or its parent context ends it, or until the broker idles out,
 // and then shuts down in a fixed order.
 
@@ -281,7 +283,11 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	}
 	defer startupLease.Release()
 
-	registry, err := broker.NewRegistryWithConfig(epoch, store, nil, clk, log, broker.RegistryConfig{ObservationDisabled: true})
+	registryConfig, err := offlineRegistryConfig(config, log)
+	if err != nil {
+		return err
+	}
+	registry, err := broker.NewRegistryWithConfig(epoch, store, nil, clk, log, registryConfig)
 	if err != nil {
 		return err
 	}
@@ -355,6 +361,20 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 // is never logged; any other terminal accept failure is unexpected: it is logged
 // as an error and reported on failed so the caller commits shutdown instead of
 // leaving a bound broker that can no longer admit work.
+func offlineRegistryConfig(config *brokerconfig.Config, log *slog.Logger) (broker.RegistryConfig, error) {
+	if config == nil {
+		return broker.RegistryConfig{}, errors.New("vev: offline registry requires configuration")
+	}
+	if _, ok := config.LocalBinding(); !ok {
+		return broker.RegistryConfig{ObservationDisabled: true}, nil
+	}
+	local, err := brokerLocalObservation(config, log)
+	if err != nil {
+		return broker.RegistryConfig{}, err
+	}
+	return broker.RegistryConfig{Local: local}, nil
+}
+
 func drainBrokerAccept(listener ports.BrokerListener, log *slog.Logger, started chan<- struct{}, drained chan<- struct{}, failed chan<- struct{}) {
 	defer close(drained)
 	close(started)

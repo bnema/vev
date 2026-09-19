@@ -25,9 +25,10 @@ import (
 // it derives the probe from the sandbox configuration and never touches the
 // production runtime or state directories.
 //
-// This is a preparation slice: nothing here is activated by production
-// composition, and the observation-disabled offline authority composition is
-// unchanged.
+// The hidden offline sandbox selects this producer whenever its strict config
+// provisions a local binding. Ordinary production composition does not select
+// it. The sandbox owns no remote membership, and probing remains no-spawn and
+// attachment-free even though it runs on the registry's observation cadence.
 
 // localCarrierDialer establishes one raw framed daemonmux carriage for the
 // opaque route address the broker-owned local binding published. It is the same
