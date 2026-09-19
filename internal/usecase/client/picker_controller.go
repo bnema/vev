@@ -55,6 +55,9 @@ type pickerHost interface {
 	// ResolveKey revalidates exactly one committed catalogue key into the
 	// exact broker stream request the user committed.
 	ResolveKey(string, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
+	// ResolveInitial resolves the one-shot initial navigation without relying
+	// on mutable presentation selection.
+	ResolveInitial(InitialNavigation, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
 	// SetOwnsInput releases or re-acquires picker input ownership at an attach
 	// boundary, so exactly one owner consumes the shared terminal reader.
 	SetOwnsInput(bool)

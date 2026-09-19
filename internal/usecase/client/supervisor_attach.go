@@ -239,13 +239,7 @@ type attachmentSettlement struct {
 // allocated strictly increasing per connection and is consumed even when
 // resolution refuses, matching the pool's never-reused ID contract.
 func (s *Supervisor) resolveInitialStreamRequest(service ports.BrokerService, navigation InitialNavigation) (ports.BrokerOpenStreamRequest, error) {
-	resolver, ok := s.cfg.Picker.(interface {
-		ResolveInitial(InitialNavigation, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
-	})
-	if !ok {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation is unavailable"}
-	}
-	return resolver.ResolveInitial(navigation, pickerResolveBase{Connection: service.ConnectionID(), Stream: ports.BrokerStreamID(s.nextStream.Add(1))})
+	return s.cfg.Picker.ResolveInitial(navigation, pickerResolveBase{Connection: service.ConnectionID(), Stream: ports.BrokerStreamID(s.nextStream.Add(1))})
 }
 
 func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, key string) (ports.BrokerOpenStreamRequest, error) {

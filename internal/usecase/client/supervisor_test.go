@@ -647,6 +647,54 @@ func TestSupervisorPickerWithoutBroker(t *testing.T) {
 	}
 }
 
+func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newSupervisorTestClock()
+	reader := newSupervisorTestReader()
+	t.Cleanup(reader.unblock)
+	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	service.publish(1, 1)
+	renders := make(chan State, 16)
+
+	sup := mustSupervisor(t, SupervisorConfig{
+		Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) {
+			return service, nil
+		}),
+		Terminal: newSupervisorTestTerminal(reader),
+		Clock:    clock,
+		Picker:   newPickerController(clock, pickerTestFreshness),
+		Render: func(state State) {
+			renders <- state
+		},
+	})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- sup.Run(ctx) }()
+	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
+	for {
+		select {
+		case <-renders:
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	service.publish(1, 2)
+	select {
+	case state := <-renders:
+		require.Equal(t, PresentPicker, state.Presentation)
+		require.Equal(t, ConnectivityReady, state.Connectivity)
+	case <-time.After(5 * time.Second):
+		t.Fatal("picker publication did not request a repaint")
+	}
+
+	cancel()
+	require.ErrorIs(t, <-runErr, context.Canceled)
+}
+
 func TestSupervisorBrokerLossReconnectsWithFreshGeneration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

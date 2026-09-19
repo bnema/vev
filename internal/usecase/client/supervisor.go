@@ -260,8 +260,10 @@ type SupervisorConfig struct {
 	// Clock supplies the retry timers. Required; use ports.Clock, not the wall
 	// clock.
 	Clock ports.Clock
-	// Render paints the current state. It is called once per visible
-	// transition. Optional; the default renders nothing.
+	// Render asks the composition to paint the current state. It is called for
+	// visible transitions and after picker catalogue publications; while the
+	// state reports PresentPicker, the composition paints from Picker.Render
+	// and Picker.RenderNotice. Optional; the default renders nothing.
 	Render func(State)
 	// Notify surfaces a connectivity failure without leaving the picker.
 	// Optional; the default notifies nothing.
@@ -502,6 +504,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 			// for the next one; the picker never shows a stale empty catalogue
 			// while an established connection already has state.
 			s.cfg.Picker.ApplySnapshot(service.Snapshot())
+			s.renderCurrent()
 		}
 		wasReadyLost := s.State().ReadyLost
 		s.transition(supervisorEvent{kind: supervisorReady})
@@ -727,6 +730,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 			return readyOutcome{lossErr: service.Err()}
 		case <-changed:
 			s.cfg.Picker.ApplySnapshot(service.Snapshot())
+			s.renderCurrent()
 		case <-ops:
 			if key, ok := s.takeCommittedKey(); ok {
 				return readyOutcome{commitKey: key}
@@ -904,7 +908,18 @@ func (s *Supervisor) transition(event supervisorEvent) {
 	s.state = reduceSupervisor(s.state, event)
 	state := s.state
 	s.mu.Unlock()
-	s.cfg.Render(state)
+	if s.cfg.Render != nil {
+		s.cfg.Render(state)
+	}
+}
+
+// renderCurrent repaints presentation data that changed without a supervisor
+// state transition, notably a picker catalogue publication.
+func (s *Supervisor) renderCurrent() {
+	if s == nil || s.cfg.Render == nil {
+		return
+	}
+	s.cfg.Render(s.State())
 }
 
 // terminalInputLifetime owns the single read of the controlling terminal. It is
