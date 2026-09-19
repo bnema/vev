@@ -94,28 +94,40 @@ type BrokerHostStore interface {
 // one seam. This guard keeps that composition compile-checked.
 var _ BrokerSnapshotStore = (BrokerHostStore)(nil)
 
-// ValidateDurableHostProjection reports whether one host projection satisfies
-// the semantic rules of durable broker state: a published availability and
-// failure kind inside their closed ranges, and a session inventory the
-// catalogue accepts for the host's exact incarnation and success time. The
-// offline store and the registry both apply this rule, so a projection the
-// registry publishes is never rejected (and therefore silently never
-// persisted) by the store. Transient state (Checking and the live failure
-// cause) is deliberately not part of the durable rule.
-func ValidateDurableHostProjection(host RemoteHostSnapshot) error {
-	if host.Availability < domain.RemoteAvailabilityUnknown || host.Availability > domain.RemoteAvailabilityInvalidResponse {
+// ValidateDurableHostProjection reports whether one daemon observation
+// satisfies the rules the offline store and wire accept: a local observation
+// is never durable, availability and failure kinds stay in their closed
+// ranges, and a present session inventory is a valid catalogue cache entry
+// against the exact registration incarnation. The offline store and the
+// registry both apply this rule, so a projection the registry publishes is
+// never rejected (and therefore silently never persisted) by the store.
+// Transient state (Checking and the live failure cause) is deliberately not
+// part of the durable rule.
+func ValidateDurableHostProjection(obs BrokerDaemonObservation) error {
+	if obs.Local {
+		return errors.New("ports: local daemon observation is never durable")
+	}
+	if obs.Availability < domain.RemoteAvailabilityUnknown || obs.Availability > domain.RemoteAvailabilityInvalidResponse {
 		return errors.New("ports: broker host availability is out of range")
 	}
-	if host.LastFailure.Kind > domain.RemoteFailureInvalidResponse {
+	if obs.LastFailure.Kind > domain.RemoteFailureInvalidResponse {
 		return errors.New("ports: broker host failure kind is out of range")
 	}
-	if len(host.Sessions) == 0 {
+	// Observed identity is part of the durable rule, not only of the live one: a
+	// restored record with partial identity or without the protocol version its
+	// identity was authenticated with would otherwise reach a publication the
+	// wire refuses, taking down every client connection instead of failing
+	// closed here.
+	if err := validateObservedDaemonState(obs); err != nil {
+		return err
+	}
+	if len(obs.Sessions) == 0 {
 		return nil
 	}
 	return catalogue.ValidateRemoteCatalogCacheEntries([]catalogue.RemoteCatalogCacheEntry{{
-		Host:        host.Endpoint,
-		Incarnation: host.Registration.Incarnation,
-		FetchedAt:   host.LastSuccess,
-		Sessions:    host.Sessions,
+		Host:        obs.Endpoint,
+		Incarnation: obs.Registration.Incarnation,
+		FetchedAt:   obs.LastSuccess,
+		Sessions:    obs.Sessions,
 	}})
 }

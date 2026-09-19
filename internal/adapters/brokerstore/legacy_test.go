@@ -60,10 +60,10 @@ func TestDefensiveCopiesAndConcurrentAccess(t *testing.T) {
 	h.Hosts[0].Policy.Trust = "changed"
 	snap, err := s.Load()
 	require.NoError(t, err)
-	snap.Hosts[0].Sessions[0].Tabs[0].Name = "changed"
+	snap.Daemons[0].Sessions[0].Tabs[0].Name = "changed"
 	again, err := s.Load()
 	require.NoError(t, err)
-	require.Equal(t, "shell", again.Hosts[0].Sessions[0].Tabs[0].Name)
+	require.Equal(t, "shell", again.Daemons[0].Sessions[0].Tabs[0].Name)
 	hosts, err := s.LoadHosts()
 	require.NoError(t, err)
 	require.Equal(t, "known-hosts", hosts.Hosts[0].Policy.Trust)

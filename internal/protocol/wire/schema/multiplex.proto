@@ -51,6 +51,11 @@ message MuxOpen {
   ExactTarget target = 6;
   repeated string env = 7;
   BrokerWirePolicy policy = 8;
+  // Closed attachment-admission taxonomy (ports.BrokerStreamAdmission):
+  // 0 = none (control/observation), 1 = exact attach/resume carrying
+  // target, 2 = create named carrying name, 3 = create ephemeral.
+  uint32 admission = 9;
+  string name = 10;
 }
 
 // MuxOpened confirms one logical stream is established.

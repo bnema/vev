@@ -12,9 +12,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/stretchr/testify/require"
 )
@@ -202,7 +204,7 @@ func (s *testStore) LoadHosts() (ports.BrokerHosts, error) {
 		return s.hosts, nil
 	}
 	authority := ports.BrokerHosts{Revision: 1}
-	for _, host := range s.loaded.Hosts {
+	for _, host := range s.loaded.Daemons {
 		authority.Hosts = append(authority.Hosts, ports.BrokerHostRecord{Registration: host.Registration, Pinned: true, Policy: poolPolicy()})
 	}
 	return authority, nil
@@ -368,24 +370,24 @@ type probeCall struct {
 }
 
 type probeAnswer struct {
-	snapshot ports.RemoteHostSnapshot
+	snapshot ports.BrokerDaemonObservation
 	err      error
 }
 
-func (p *testProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.RemoteHostSnapshot, error) {
+func (p *testProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
 	call := probeCall{registration: registration, result: make(chan probeAnswer, 1)}
 	select {
 	case p.calls <- call:
 	case <-ctx.Done():
 		p.noteCanceled()
-		return ports.RemoteHostSnapshot{}, ctx.Err()
+		return ports.BrokerDaemonObservation{}, ctx.Err()
 	}
 	select {
 	case answer := <-call.result:
 		return answer.snapshot, answer.err
 	case <-ctx.Done():
 		p.noteCanceled()
-		return ports.RemoteHostSnapshot{}, ctx.Err()
+		return ports.BrokerDaemonObservation{}, ctx.Err()
 	}
 }
 
@@ -420,7 +422,7 @@ func newChurnProbe() *churnProbe {
 	}
 }
 
-func (p *churnProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.RemoteHostSnapshot, error) {
+func (p *churnProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
 	p.mu.Lock()
 	live := 0
 	for other, endpoint := range p.contexts {
@@ -454,7 +456,7 @@ func (p *churnProbe) Probe(ctx context.Context, registration domain.RemoteRegist
 	case <-ctx.Done():
 	case <-p.release:
 	}
-	return ports.RemoteHostSnapshot{}, ctx.Err()
+	return ports.BrokerDaemonObservation{}, ctx.Err()
 }
 
 // openRelease lets every still-blocked probe return, so a failing test never
@@ -497,6 +499,21 @@ func registration(t *testing.T, endpoint string, marker byte) domain.RemoteRegis
 	result, err := domain.NewRemoteRegistration(endpoint, incarnation)
 	require.NoError(t, err)
 	return result
+}
+
+// hostRecord builds one pinned authority record with the shared test policy.
+// The projection-only setHosts seam takes records now, so membership carries
+// the same configured authority (registration plus policy) as production.
+func hostRecord(reg domain.RemoteRegistration) ports.BrokerHostRecord {
+	return ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: poolPolicy()}
+}
+
+func hostRecords(registrations ...domain.RemoteRegistration) []ports.BrokerHostRecord {
+	records := make([]ports.BrokerHostRecord, 0, len(registrations))
+	for _, reg := range registrations {
+		records = append(records, hostRecord(reg))
+	}
+	return records
 }
 
 // hostSession builds one catalogue-valid session. The registry applies the
@@ -590,7 +607,7 @@ func waitSnapshot(t *testing.T, r *Registry, predicate func(ports.BrokerSnapshot
 	}
 }
 
-func waitHost(t *testing.T, r *Registry, endpoint string, predicate func(ports.RemoteHostSnapshot) bool) ports.RemoteHostSnapshot {
+func waitHost(t *testing.T, r *Registry, endpoint string, predicate func(ports.BrokerDaemonObservation) bool) ports.BrokerDaemonObservation {
 	t.Helper()
 	snapshot := waitSnapshot(t, r, func(snapshot ports.BrokerSnapshot) bool {
 		host, ok := snapshot.Find(endpoint)
@@ -603,7 +620,7 @@ func waitHost(t *testing.T, r *Registry, endpoint string, predicate func(ports.R
 // requireHostStableWithin asserts a stale completion has no delayed effect:
 // the published host stays exactly as observed for a bounded window, and any
 // intervening publication fails immediately.
-func requireHostStableWithin(t *testing.T, r *Registry, endpoint string, want ports.RemoteHostSnapshot, window time.Duration) {
+func requireHostStableWithin(t *testing.T, r *Registry, endpoint string, want ports.BrokerDaemonObservation, window time.Duration) {
 	t.Helper()
 	sub := r.Subscribe()
 	defer sub.Close()
@@ -682,14 +699,15 @@ func attemptFor(r *Registry, endpoint string) uint64 {
 func TestRegistryRestoresPersistedSnapshotUnderFreshEpoch(t *testing.T) {
 	reg := registration(t, "example.test", 1)
 	sessions := []catalogue.RemoteCatalogSession{{
-		Name:  "work",
-		State: catalogue.RemoteCatalogSessionUp,
-		Tabs:  []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "shell"}},
+		LifecycleID: domain.SessionLifecycleID{1},
+		Name:        "work",
+		State:       catalogue.RemoteCatalogSessionUp,
+		Tabs:        []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "shell"}},
 	}}
 	stored := ports.BrokerSnapshot{
 		Epoch:    7,
 		Revision: 9,
-		Hosts: []ports.RemoteHostSnapshot{{
+		Daemons: []ports.BrokerDaemonObservation{{
 			Endpoint:       reg.Endpoint,
 			Registration:   reg,
 			Availability:   domain.RemoteAvailabilityReachable,
@@ -709,10 +727,10 @@ func TestRegistryRestoresPersistedSnapshotUnderFreshEpoch(t *testing.T) {
 	// A restored broker process starts a fresh revision series: revisions
 	// never compare across epochs.
 	require.Equal(t, ports.BrokerRevision(1), snapshot.Revision)
-	require.Len(t, snapshot.Hosts, 1)
+	require.Len(t, snapshot.Daemons, 1)
 	require.Empty(t, snapshot.Removed)
 
-	host := snapshot.Hosts[0]
+	host := snapshot.Daemons[0]
 	require.True(t, host.Registration.Equal(reg))
 	require.Equal(t, domain.RemoteAvailabilityReachable, host.Availability)
 	require.Equal(t, time.Unix(80, 0), host.NextDue)
@@ -753,7 +771,7 @@ func TestRegistryRestoreRejectsInvalidInputs(t *testing.T) {
 	require.Error(t, err)
 
 	// A durable record without an epoch is inconsistent, never silently empty.
-	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Hosts: []ports.RemoteHostSnapshot{{Endpoint: reg.Endpoint, Registration: reg}}}}, newTestProbe(1), clock, nil)
+	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Daemons: []ports.BrokerDaemonObservation{{Endpoint: reg.Endpoint, Registration: reg}}}}, newTestProbe(1), clock, nil)
 	require.Error(t, err)
 	_, err = NewRegistry(1, &testStore{loaded: ports.BrokerSnapshot{Epoch: 0, Removed: []ports.BrokerHostTombstone{{Endpoint: reg.Endpoint, Registration: reg, RetiredRevision: 3}}}}, newTestProbe(1), clock, nil)
 	require.Error(t, err)
@@ -763,7 +781,7 @@ func TestRegistryRestoreRejectsInvalidInputs(t *testing.T) {
 	empty, err := NewRegistry(1, &testStore{}, newTestProbe(1), clock, nil)
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerRevision(1), empty.Snapshot().Revision)
-	require.Empty(t, empty.Snapshot().Hosts)
+	require.Empty(t, empty.Snapshot().Daemons)
 }
 
 func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
@@ -777,7 +795,7 @@ func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
 	currentEpoch := ports.BrokerSnapshot{
 		Epoch:    7,
 		Revision: 9,
-		Hosts: []ports.RemoteHostSnapshot{{
+		Daemons: []ports.BrokerDaemonObservation{{
 			Endpoint:     reg.Endpoint,
 			Registration: reg,
 			Availability: domain.RemoteAvailabilityReachable,
@@ -799,26 +817,26 @@ func TestRegistryRestoreRejectsPersistedSnapshotFromItsOwnEpoch(t *testing.T) {
 	// A different epoch is still adopted normally.
 	registry, err := NewRegistry(8, &testStore{loaded: currentEpoch}, newTestProbe(1), clock, nil)
 	require.NoError(t, err)
-	require.Len(t, registry.Snapshot().Hosts, 1)
+	require.Len(t, registry.Snapshot().Daemons, 1)
 }
 
 func TestRegistrySetHostsRejectsInvalidRegistrations(t *testing.T) {
 	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
 
 	reg := registration(t, "example.test", 1)
-	require.Error(t, registry.setHosts([]domain.RemoteRegistration{reg, reg}))
-	require.Error(t, registry.setHosts([]domain.RemoteRegistration{{Endpoint: reg.Endpoint}}))
-	require.Empty(t, registry.Snapshot().Hosts)
+	require.Error(t, registry.setHosts(hostRecords(reg, reg)))
+	require.Error(t, registry.setHosts(hostRecords(domain.RemoteRegistration{Endpoint: reg.Endpoint})))
+	require.Empty(t, registry.Snapshot().Daemons)
 }
 
 func TestRegistrySetHostsRejectsHostLimitWithoutMutation(t *testing.T) {
 	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 
-	oversized := make([]domain.RemoteRegistration, 0, ports.BrokerMaxHosts+1)
+	oversized := make([]ports.BrokerHostRecord, 0, ports.BrokerMaxHosts+1)
 	for index := 0; index <= ports.BrokerMaxHosts; index++ {
-		oversized = append(oversized, registration(t, fmt.Sprintf("host-%d.test", index), byte(index+1)))
+		oversized = append(oversized, hostRecord(registration(t, fmt.Sprintf("host-%d.test", index), byte(index+1))))
 	}
 	before := registry.Snapshot()
 	require.Error(t, registry.setHosts(oversized))
@@ -827,16 +845,16 @@ func TestRegistrySetHostsRejectsHostLimitWithoutMutation(t *testing.T) {
 
 	// The boundary itself is accepted.
 	require.NoError(t, registry.setHosts(oversized[:ports.BrokerMaxHosts]))
-	require.Len(t, registry.Snapshot().Hosts, ports.BrokerMaxHosts)
+	require.Len(t, registry.Snapshot().Daemons, ports.BrokerMaxHosts)
 }
 
-func TestRegistryUnchangedSetHostsIsNoOp(t *testing.T) {
+func TestRegistryUnchangedSetHostsIsNoOpAndReorderRepublishes(t *testing.T) {
 	clock := newManualClock(time.Unix(100, 0))
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	first := registration(t, "example.test", 1)
 	second := registration(t, "other.test", 2)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{first, second}))
+	require.NoError(t, registry.setHosts(hostRecords(first, second)))
 	startRegistry(t, registry)
 
 	// Every configured host is observed exactly once.
@@ -847,24 +865,114 @@ func TestRegistryUnchangedSetHostsIsNoOp(t *testing.T) {
 	}
 	require.Len(t, calls, 2)
 	before := registry.Snapshot()
-	for _, host := range before.Hosts {
+	for _, host := range before.Daemons {
 		require.True(t, host.Checking)
 	}
 
-	// Identical membership, including in a different order, never republishes
-	// and never restarts an in-flight observation.
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{second, first}))
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{first, second}))
+	// Identical membership in the same order never republishes and never
+	// restarts an in-flight observation.
+	require.NoError(t, registry.setHosts(hostRecords(first, second)))
 	require.Equal(t, before, registry.Snapshot())
+	requireNoProbeWithin(t, probe, probeGrace)
+
+	// A reordering of identical records is a membership change: publication
+	// order and the presentation rank stamped from it follow durable membership
+	// authority, so the registry republishes both without cancelling the
+	// in-flight observation.
+	require.NoError(t, registry.setHosts(hostRecords(second, first)))
+	reordered := registry.Snapshot()
+	require.Greater(t, reordered.Revision, before.Revision)
+	require.Equal(t, []string{"other.test", "example.test"}, []string{reordered.Daemons[0].Endpoint, reordered.Daemons[1].Endpoint})
+	require.Equal(t, 0, reordered.Daemons[0].Rank)
+	require.Equal(t, 1, reordered.Daemons[1].Rank)
+	for _, host := range reordered.Daemons {
+		require.True(t, host.Checking)
+	}
+	requireNoProbeWithin(t, probe, probeGrace)
+
+	// Restoring the configured order restores the published order and ranks.
+	require.NoError(t, registry.setHosts(hostRecords(first, second)))
+	require.Equal(t, before.Daemons, registry.Snapshot().Daemons)
 	requireNoProbeWithin(t, probe, probeGrace)
 
 	// The in-flight observations still complete normally.
 	for endpoint, call := range calls {
-		call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-		waitHost(t, registry, endpoint, func(host ports.RemoteHostSnapshot) bool {
+		call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+		waitHost(t, registry, endpoint, func(host ports.BrokerDaemonObservation) bool {
 			return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 		})
 	}
+}
+
+// TestRegistrySanitizesDerivedDisplayOrigin pins the boundary between routing
+// authority and presentation: a target the routing validator accepts may carry
+// bidi controls or line separators, and a hint the registry derives from it must
+// never render them. The sanitized hint is published, satisfies the contract
+// gate, and leaves the host observable.
+func TestRegistrySanitizesDerivedDisplayOrigin(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     string
+	}{
+		{name: "login prefix strips the bidi rune from the origin", endpoint: "user@ho\u202est.test", want: "host.test"},
+		{name: "bare target drops the bidi rune", endpoint: "ho\u202est.test", want: "host.test"},
+		{name: "right-to-left mark dropped", endpoint: "user@ho\u200fst.test", want: "host.test"},
+		{name: "ordinary target unchanged", endpoint: "user@host.test", want: "host.test"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newManualClock(time.Unix(100, 0))
+			probe := newTestProbe(1)
+			registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
+			require.NoError(t, registry.setHosts(hostRecords(registration(t, tc.endpoint, 1))))
+
+			host := registry.Snapshot().Daemons[0]
+			require.Equal(t, tc.endpoint, host.Endpoint, "the routing target stays authoritative")
+			require.Equal(t, tc.want, host.DisplayOrigin)
+			require.NoError(t, host.Validate())
+			require.NoError(t, registry.Snapshot().Validate())
+
+			// Sanitizing the hint never makes the host unobservable.
+			startRegistry(t, registry)
+			call := receiveCall(t, probe)
+			call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+			waitHost(t, registry, tc.endpoint, func(host ports.BrokerDaemonObservation) bool {
+				return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
+			})
+		})
+	}
+}
+
+// TestRegistryRefusesUnpublishableMembership pins the fail-closed membership
+// boundary: a target whose derived hint holds only refused runes has no
+// displayable origin, and membership that cannot be published is refused where
+// authority is owned instead of freezing every later publication.
+func TestRegistryRefusesUnpublishableMembership(t *testing.T) {
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	err := registry.setHosts(hostRecords(registration(t, "user@\u202e", 1)))
+	require.ErrorContains(t, err, "not publishable")
+	require.Empty(t, registry.Snapshot().Daemons)
+}
+
+// TestRegistryRefusesInvalidPublication pins the last-resort publication guard:
+// a projection that reached the live set unpublished is never published, because
+// a snapshot the wire refuses aborts every client connection on subscribe, and a
+// refused publication never advances the revision series.
+func TestRegistryRefusesInvalidPublication(t *testing.T) {
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	require.NoError(t, registry.setHosts(hostRecords(registration(t, "example.test", 1))))
+	before := registry.Snapshot()
+
+	// Inject behind the membership boundary, which now refuses such a record.
+	registry.mu.Lock()
+	broken := before.Daemons[0].Clone()
+	broken.DisplayOrigin = ""
+	registry.hosts[broken.Endpoint] = broken
+	registry.publishLocked(false)
+	registry.mu.Unlock()
+
+	require.Equal(t, before, registry.Snapshot())
 }
 
 func TestRegistrySnapshotIsImmutable(t *testing.T) {
@@ -872,12 +980,13 @@ func TestRegistrySnapshotIsImmutable(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
 		Sessions: []catalogue.RemoteCatalogSession{{
 			LifecycleID: domain.SessionLifecycleID{1},
 			Name:        "work",
@@ -885,7 +994,7 @@ func TestRegistrySnapshotIsImmutable(t *testing.T) {
 			Tabs:        []catalogue.RemoteCatalogTab{{ID: "tab-1", Name: "shell"}},
 		}},
 	}}
-	observed := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	observed := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && len(host.Sessions) == 1
 	})
 	require.Equal(t, "work", observed.Sessions[0].Name)
@@ -895,22 +1004,23 @@ func TestRegistrySnapshotIsImmutable(t *testing.T) {
 	observed.Sessions[0].Name = "mutated"
 	observed.Sessions[0].Tabs[0].Name = "mutated"
 	current := registry.Snapshot()
-	require.Equal(t, reg.Endpoint, current.Hosts[0].Endpoint)
-	require.Equal(t, "work", current.Hosts[0].Sessions[0].Name)
-	require.Equal(t, "shell", current.Hosts[0].Sessions[0].Tabs[0].Name)
+	require.Equal(t, reg.Endpoint, current.Daemons[0].Endpoint)
+	require.Equal(t, "work", current.Daemons[0].Sessions[0].Name)
+	require.Equal(t, "shell", current.Daemons[0].Sessions[0].Tabs[0].Name)
 
 	// A later publication never mutates a snapshot already handed out.
 	earlier := registry.Snapshot()
 	registry.RequestProbe(reg.Endpoint)
 	next := receiveCall(t, probe)
-	next.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     []catalogue.RemoteCatalogSession{hostSession("other")},
+	next.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{hostSession("other")},
 	}}
-	waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && len(host.Sessions) == 1 && host.Sessions[0].Name == "other"
 	})
-	require.Equal(t, "work", earlier.Hosts[0].Sessions[0].Name)
+	require.Equal(t, "work", earlier.Daemons[0].Sessions[0].Name)
 }
 
 func TestRegistrySchedulesFreshObservationAfterSuccess(t *testing.T) {
@@ -919,13 +1029,13 @@ func TestRegistrySchedulesFreshObservationAfterSuccess(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
 
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 	require.Equal(t, start, host.LastAttempt)
@@ -948,12 +1058,12 @@ func TestRegistryDemandOverridesFreshSchedule(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-	waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+	waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 
@@ -970,7 +1080,7 @@ func TestRegistryCoalescesConcurrentDemand(t *testing.T) {
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
@@ -982,8 +1092,8 @@ func TestRegistryCoalescesConcurrentDemand(t *testing.T) {
 		t.Fatalf("concurrent demand started a duplicate probe for %q", duplicate.registration.Endpoint)
 	default:
 	}
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return host.Availability == domain.RemoteAvailabilityReachable && host.LastSuccess.Equal(start)
 	})
 	require.Equal(t, start.Add(defaultFreshFor), host.NextDue)
@@ -991,8 +1101,8 @@ func TestRegistryCoalescesConcurrentDemand(t *testing.T) {
 	// The single coalesced follow-up is admitted once the first completes.
 	followUp := receiveCall(t, probe)
 	require.True(t, followUp.registration.Equal(reg))
-	followUp.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-	waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	followUp.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+	waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 }
@@ -1002,7 +1112,7 @@ func TestRegistryIgnoresDemandForUnknownEndpoint(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	registry.RequestProbe("unknown.test")
 	startRegistry(t, registry)
 
@@ -1019,11 +1129,11 @@ func TestRegistryPublishesReachabilityAndPersists(t *testing.T) {
 	store := &testStore{}
 	registry := newTestRegistry(t, 3, store, probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
 		Availability:   domain.RemoteAvailabilityReachable,
 		InventoryKnown: true,
 		Sessions:       []catalogue.RemoteCatalogSession{hostSession("work")},
@@ -1034,13 +1144,13 @@ func TestRegistryPublishesReachabilityAndPersists(t *testing.T) {
 	})
 
 	stored := waitStored(t, store, func(stored ports.BrokerSnapshot) bool {
-		return stored.Revision >= snapshot.Revision && len(stored.Hosts) == 1
+		return stored.Revision >= snapshot.Revision && len(stored.Daemons) == 1
 	})
 	require.Equal(t, ports.BrokerEpoch(3), stored.Epoch)
-	require.Len(t, stored.Hosts, 1)
-	require.Equal(t, "work", stored.Hosts[0].Sessions[0].Name)
-	require.Equal(t, reg.Endpoint, stored.Hosts[0].Endpoint)
-	require.False(t, stored.Hosts[0].Checking)
+	require.Len(t, stored.Daemons, 1)
+	require.Equal(t, "work", stored.Daemons[0].Sessions[0].Name)
+	require.Equal(t, reg.Endpoint, stored.Daemons[0].Endpoint)
+	require.False(t, stored.Daemons[0].Checking)
 }
 
 func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
@@ -1054,31 +1164,31 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 	}{
 		{
 			name:             "unreachable without error",
-			answer:           probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityUnreachable}},
+			answer:           probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}},
 			wantAvailability: domain.RemoteAvailabilityUnreachable,
 			wantKind:         domain.RemoteFailureTransport,
 		},
 		{
 			name:             "unknown outcome is not reachability",
-			answer:           probeAnswer{snapshot: ports.RemoteHostSnapshot{}},
+			answer:           probeAnswer{snapshot: ports.BrokerDaemonObservation{}},
 			wantAvailability: domain.RemoteAvailabilityUnreachable,
 			wantKind:         domain.RemoteFailureTransport,
 		},
 		{
 			name:             "incompatible",
-			answer:           probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityIncompatible}},
+			answer:           probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityIncompatible}},
 			wantAvailability: domain.RemoteAvailabilityIncompatible,
 			wantKind:         domain.RemoteFailureIncompatible,
 		},
 		{
 			name:             "authentication",
-			answer:           probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityAuthFailed}},
+			answer:           probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityAuthFailed}},
 			wantAvailability: domain.RemoteAvailabilityAuthFailed,
 			wantKind:         domain.RemoteFailureAuthentication,
 		},
 		{
 			name:             "invalid response",
-			answer:           probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityInvalidResponse}},
+			answer:           probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityInvalidResponse}},
 			wantAvailability: domain.RemoteAvailabilityInvalidResponse,
 			wantKind:         domain.RemoteFailureInvalidResponse,
 		},
@@ -1104,12 +1214,12 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 			probe := newTestProbe(1)
 			registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 			reg := registration(t, "example.test", 1)
-			require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+			require.NoError(t, registry.setHosts(hostRecords(reg)))
 			startRegistry(t, registry)
 
 			call := receiveCall(t, probe)
 			call.result <- tt.answer
-			host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+			host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 				return !host.Checking && host.ConsecutiveFailures == 1
 			})
 			require.Equal(t, tt.wantAvailability, host.Availability)
@@ -1135,18 +1245,19 @@ func TestRegistryClassifiesOversizedProbeProjectionAsInvalidResponse(t *testing.
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 	sub := registry.Subscribe()
 	defer sub.Close()
 
 	// A reachable observation establishes the last-known inventory.
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     []catalogue.RemoteCatalogSession{hostSession("work")},
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{hostSession("work")},
 	}}
-	waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 
@@ -1157,12 +1268,13 @@ func TestRegistryClassifiesOversizedProbeProjectionAsInvalidResponse(t *testing.
 	// never pass unnoticed.
 	clock.Advance(defaultFreshFor)
 	call = receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     hostSessions(ports.BrokerMaxSessionsPerHost + 1),
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       hostSessions(ports.BrokerMaxSessionsPerHost + 1),
 	}}
 	deadline := time.After(time.Second)
-	var host ports.RemoteHostSnapshot
+	var host ports.BrokerDaemonObservation
 	for {
 		snapshot := registry.Snapshot()
 		require.NoError(t, snapshot.Validate())
@@ -1192,24 +1304,25 @@ func TestRegistryAcceptsProbeProjectionAtSessionBound(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	// The bound itself is valid: exactly BrokerMaxSessionsPerHost sessions are
 	// accepted and published, and the resulting snapshot validates.
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     hostSessions(ports.BrokerMaxSessionsPerHost),
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       hostSessions(ports.BrokerMaxSessionsPerHost),
 	}}
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 	require.Len(t, host.Sessions, ports.BrokerMaxSessionsPerHost)
 	require.Zero(t, host.ConsecutiveFailures)
 	snapshot := registry.Snapshot()
 	require.NoError(t, snapshot.Validate())
-	require.Len(t, snapshot.Hosts[0].Sessions, ports.BrokerMaxSessionsPerHost)
+	require.Len(t, snapshot.Daemons[0].Sessions, ports.BrokerMaxSessionsPerHost)
 }
 
 // TestRegistryRejectsNonDurableObservation proves the registry and the durable
@@ -1222,15 +1335,16 @@ func TestRegistryRejectsNonDurableObservation(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     []catalogue.RemoteCatalogSession{hostSession("work")},
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{hostSession("work")},
 	}}
-	waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 
@@ -1238,11 +1352,12 @@ func TestRegistryRejectsNonDurableObservation(t *testing.T) {
 	// a zero lifecycle identity and an absent tab list) is a malformed response.
 	clock.Advance(defaultFreshFor)
 	call = receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     []catalogue.RemoteCatalogSession{{Name: "work", State: catalogue.RemoteCatalogSessionUp}},
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{{Name: "work", State: catalogue.RemoteCatalogSessionUp}},
 	}}
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.ConsecutiveFailures == 1
 	})
 	require.Equal(t, domain.RemoteAvailabilityInvalidResponse, host.Availability)
@@ -1252,7 +1367,7 @@ func TestRegistryRejectsNonDurableObservation(t *testing.T) {
 	require.Equal(t, start, host.LastSuccess)
 	snapshot := registry.Snapshot()
 	require.NoError(t, snapshot.Validate())
-	require.NoError(t, ports.ValidateDurableHostProjection(snapshot.Hosts[0]))
+	require.NoError(t, ports.ValidateDurableHostProjection(snapshot.Daemons[0]))
 }
 
 // TestRegistryRevisionOverflowFailsClosed pins the revision series: zero is not
@@ -1266,7 +1381,7 @@ func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 	registry, err := NewRegistry(1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)), logger)
 	require.NoError(t, err)
 	first := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{first}))
+	require.NoError(t, registry.setHosts(hostRecords(first)))
 	before := registry.Snapshot()
 	require.NoError(t, before.Validate())
 	require.Equal(t, ports.BrokerRevision(2), before.Revision)
@@ -1277,7 +1392,7 @@ func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 
 	// Both mutation paths refuse the change before touching the store or the
 	// projection, so neither durable authority nor the publication series moves.
-	require.ErrorIs(t, registry.setHosts([]domain.RemoteRegistration{registration(t, "other.test", 2)}), ports.ErrBrokerRevisionExhausted)
+	require.ErrorIs(t, registry.setHosts(hostRecords(registration(t, "other.test", 2))), ports.ErrBrokerRevisionExhausted)
 	require.ErrorIs(t, registry.ReplaceHosts([]ports.BrokerHostRecord{{Registration: first, Pinned: true, Policy: poolPolicy()}}), ports.ErrBrokerRevisionExhausted)
 	require.Equal(t, authority, registry.authority)
 
@@ -1292,7 +1407,7 @@ func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 	require.NoError(t, after.Validate())
 	require.Greater(t, after.Revision, ports.BrokerRevision(0))
 	require.Equal(t, ^ports.BrokerRevision(0), registry.revision)
-	require.Equal(t, first, after.Hosts[0].Registration)
+	require.Equal(t, first, after.Daemons[0].Registration)
 	// The refusal is observable: an exhausted series logs instead of failing
 	// silently behind a frozen snapshot.
 	require.Contains(t, logs.String(), "revision series exhausted")
@@ -1304,16 +1419,17 @@ func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	// A successful observation owns the success time and opens no episode.
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityReachable,
-		Sessions:     []catalogue.RemoteCatalogSession{hostSession("work")},
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{hostSession("work")},
 	}}
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 	require.Equal(t, start, host.LastSuccess)
@@ -1322,11 +1438,12 @@ func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 	// A failure preserves the last success and opens exactly one episode.
 	clock.Advance(defaultFreshFor)
 	call = receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{
-		Availability: domain.RemoteAvailabilityIncompatible,
-		Sessions:     []catalogue.RemoteCatalogSession{{Name: "stale", State: catalogue.RemoteCatalogSessionUp}},
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Availability:   domain.RemoteAvailabilityIncompatible,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{{Name: "stale", State: catalogue.RemoteCatalogSessionUp}},
 	}}
-	host = waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host = waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.ConsecutiveFailures == 1
 	})
 	require.Equal(t, start, host.LastSuccess)
@@ -1340,7 +1457,7 @@ func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 	clock.Advance(defaultRetryBase)
 	call = receiveCall(t, probe)
 	call.result <- probeAnswer{err: errors.New("offline")}
-	host = waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host = waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.ConsecutiveFailures == 2
 	})
 	require.Equal(t, start, host.LastSuccess)
@@ -1350,8 +1467,8 @@ func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 	clock.Advance(2 * defaultRetryBase)
 	recovered := clock.Now()
 	call = receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-	host = waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+	host = waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.ConsecutiveFailures == 0
 	})
 	require.Equal(t, recovered, host.LastSuccess)
@@ -1366,7 +1483,7 @@ func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {
 	probe := newTestProbe(1)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	probeErr := errors.New("offline")
@@ -1385,7 +1502,7 @@ func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {
 		call := receiveCall(t, probe)
 		at := clock.Now()
 		call.result <- probeAnswer{err: probeErr}
-		host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+		host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 			return !host.Checking && host.ConsecutiveFailures == uint(index+1)
 		})
 		require.Equal(t, domain.RemoteAvailabilityUnreachable, host.Availability)
@@ -1410,12 +1527,12 @@ func TestRegistryJitterAppliesToRetryAndHealthyRefresh(t *testing.T) {
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	registry.jitter = func(base time.Duration, _ string, _ uint64) time.Duration { return base / 2 }
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	call := receiveCall(t, probe)
 	call.result <- probeAnswer{err: errors.New("offline")}
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityUnreachable
 	})
 	require.Equal(t, start.Add(defaultRetryBase/2), host.NextDue)
@@ -1423,8 +1540,8 @@ func TestRegistryJitterAppliesToRetryAndHealthyRefresh(t *testing.T) {
 	clock.Advance(defaultRetryBase / 2)
 	next := receiveCall(t, probe)
 	successAt := clock.Now()
-	next.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-	host = waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	next.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+	host = waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 	// The healthy refresh is jittered too: a fleet of hosts never converges
@@ -1457,9 +1574,10 @@ func TestRegistryJitterIsDeterministicAndBounded(t *testing.T) {
 
 func TestRegistryFencesStaleCompletionAcrossRegistrationChanges(t *testing.T) {
 	replacementAnswer := func(name string) probeAnswer {
-		return probeAnswer{snapshot: ports.RemoteHostSnapshot{
-			Availability: domain.RemoteAvailabilityReachable,
-			Sessions:     []catalogue.RemoteCatalogSession{hostSession(name)},
+		return probeAnswer{snapshot: ports.BrokerDaemonObservation{
+			Availability:   domain.RemoteAvailabilityReachable,
+			InventoryKnown: true,
+			Sessions:       []catalogue.RemoteCatalogSession{hostSession(name)},
 		}}
 	}
 	assertFenced := func(t *testing.T, current, replacement domain.RemoteRegistration) {
@@ -1467,18 +1585,18 @@ func TestRegistryFencesStaleCompletionAcrossRegistrationChanges(t *testing.T) {
 		clock := newManualClock(time.Unix(100, 0))
 		probe := newTestProbe(2)
 		registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
-		require.NoError(t, registry.setHosts([]domain.RemoteRegistration{current}))
+		require.NoError(t, registry.setHosts(hostRecords(current)))
 		startRegistry(t, registry)
 		currentCall := receiveCall(t, probe)
 		require.True(t, currentCall.registration.Equal(current))
 
-		require.NoError(t, registry.setHosts([]domain.RemoteRegistration{replacement}))
+		require.NoError(t, registry.setHosts(hostRecords(replacement)))
 		replacementCall := receiveCall(t, probe)
 		require.True(t, replacementCall.registration.Equal(replacement))
 
 		// The replacement completes and becomes authoritative...
 		replacementCall.result <- replacementAnswer("replacement")
-		applied := waitHost(t, registry, replacement.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+		applied := waitHost(t, registry, replacement.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 			return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable && len(host.Sessions) == 1
 		})
 		require.True(t, applied.Registration.Equal(replacement))
@@ -1495,7 +1613,7 @@ func TestRegistryFencesStaleCompletionAcrossRegistrationChanges(t *testing.T) {
 		next := receiveCall(t, probe)
 		require.True(t, next.registration.Equal(replacement))
 		next.result <- replacementAnswer("next")
-		waitHost(t, registry, replacement.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+		waitHost(t, registry, replacement.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 			return !host.Checking && len(host.Sessions) == 1 && host.Sessions[0].Name == "next"
 		})
 	}
@@ -1516,7 +1634,7 @@ func TestRegistryFencesRetiredAttemptsAcrossRemovalAndIdenticalReAdd(t *testing.
 	probe := newTestProbe(2)
 	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1532,20 +1650,20 @@ func TestRegistryFencesRetiredAttemptsAcrossRemovalAndIdenticalReAdd(t *testing.
 	// Removal retires a bounded tombstone and drops the in-flight token.
 	require.NoError(t, registry.setHosts(nil))
 	removed := registry.Snapshot()
-	require.Empty(t, removed.Hosts)
+	require.Empty(t, removed.Daemons)
 	require.Len(t, removed.Removed, 1)
 	require.Equal(t, removed.Revision, removed.Removed[0].RetiredRevision)
 	require.True(t, removed.Removed[0].Fences(reg))
 	require.NoError(t, removed.Validate())
 
 	// The retired attempt can never revive a removed endpoint.
-	registry.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: retired, snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}, at: clock.Now()})
-	require.Empty(t, registry.Snapshot().Hosts)
+	registry.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: retired, snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}, at: clock.Now()})
+	require.Empty(t, registry.Snapshot().Daemons)
 	require.Len(t, registry.Snapshot().Removed, 1)
 
 	// Re-adding the identical registration supersedes the tombstone, so only
 	// the attempt token can fence the retired completion.
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	require.Empty(t, registry.Snapshot().Removed)
 	dispatch()
 	freshCall := receiveCall(t, probe)
@@ -1553,13 +1671,13 @@ func TestRegistryFencesRetiredAttemptsAcrossRemovalAndIdenticalReAdd(t *testing.
 	fresh := attemptFor(registry, reg.Endpoint)
 	require.Greater(t, fresh, retired)
 
-	registry.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: retired, snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}, at: clock.Now()})
+	registry.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: retired, snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}, at: clock.Now()})
 	stale, ok := registry.Snapshot().Find(reg.Endpoint)
 	require.True(t, ok)
 	require.True(t, stale.Checking)
 	require.Equal(t, domain.RemoteAvailabilityUnknown, stale.Availability)
 
-	registry.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: fresh, snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}, at: clock.Now()})
+	registry.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: fresh, snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}, at: clock.Now()})
 	applied, ok := registry.Snapshot().Find(reg.Endpoint)
 	require.True(t, ok)
 	require.False(t, applied.Checking)
@@ -1571,9 +1689,9 @@ func TestRegistryRetiresInflightAttemptsOnReplacementAndRemoval(t *testing.T) {
 	replacement := registration(t, "example.test", 2)
 	tests := []struct {
 		name string
-		next []domain.RemoteRegistration
+		next []ports.BrokerHostRecord
 	}{
-		{name: "replacement", next: []domain.RemoteRegistration{replacement}},
+		{name: "replacement", next: []ports.BrokerHostRecord{hostRecord(replacement)}},
 		{name: "removal", next: nil},
 	}
 	for _, tt := range tests {
@@ -1581,7 +1699,7 @@ func TestRegistryRetiresInflightAttemptsOnReplacementAndRemoval(t *testing.T) {
 			clock := newManualClock(time.Unix(100, 0))
 			probe := newTestProbe(2)
 			registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
-			require.NoError(t, registry.setHosts([]domain.RemoteRegistration{current}))
+			require.NoError(t, registry.setHosts(hostRecords(current)))
 			startRegistry(t, registry)
 
 			call := receiveCall(t, probe)
@@ -1609,7 +1727,7 @@ func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
 
 	first := registration(t, "example.test", 1)
 	second := registration(t, "example.test", 2)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{first}))
+	require.NoError(t, registry.setHosts(hostRecords(first)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1635,7 +1753,7 @@ func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
 		if round%2 == 0 {
 			next = second
 		}
-		require.NoError(t, registry.setHosts([]domain.RemoteRegistration{next}))
+		require.NoError(t, registry.setHosts(hostRecords(next)))
 		select {
 		case <-probe.startedSig:
 		case <-time.After(time.Second):
@@ -1657,7 +1775,7 @@ func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
 				if (worker+round)%2 == 0 {
 					next = second
 				}
-				if err := registry.setHosts([]domain.RemoteRegistration{next}); err != nil {
+				if err := registry.setHosts(hostRecords(next)); err != nil {
 					failures[worker] = err
 					return
 				}
@@ -1700,9 +1818,9 @@ func TestRegistryPublishesBoundedTombstones(t *testing.T) {
 	// Two full membership rounds with distinct endpoints: without pruning the
 	// retired set would double.
 	for round := 0; round < 2; round++ {
-		registrations := make([]domain.RemoteRegistration, 0, ports.BrokerMaxHosts)
+		registrations := make([]ports.BrokerHostRecord, 0, ports.BrokerMaxHosts)
 		for index := 0; index < ports.BrokerMaxHosts; index++ {
-			registrations = append(registrations, registration(t, fmt.Sprintf("round-%d-host-%d.test", round, index), byte(round*ports.BrokerMaxHosts+index+1)))
+			registrations = append(registrations, hostRecord(registration(t, fmt.Sprintf("round-%d-host-%d.test", round, index), byte(round*ports.BrokerMaxHosts+index+1))))
 		}
 		require.NoError(t, registry.setHosts(registrations))
 		require.NoError(t, registry.setHosts(nil))
@@ -1730,7 +1848,7 @@ func TestRegistryPersistenceRunsOffLockAndCoalescesWrites(t *testing.T) {
 	defer registry.store.close()
 
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	// The writer is now blocked inside the first durable write.
 	first := <-store.entered
 	require.Equal(t, ports.BrokerRevision(2), first)
@@ -1743,7 +1861,7 @@ func TestRegistryPersistenceRunsOffLockAndCoalescesWrites(t *testing.T) {
 		defer close(published)
 		for generation := domain.RemoteGeneration(2); generation <= 6; generation++ {
 			reg.Generation = generation
-			if err := registry.setHosts([]domain.RemoteRegistration{reg}); err != nil {
+			if err := registry.setHosts(hostRecords(reg)); err != nil {
 				setErr = err
 				return
 			}
@@ -1778,10 +1896,10 @@ func TestRegistryReplaceHostsBlockedCASKeepsSnapshotLockFree(t *testing.T) {
 	require.NoError(t, err)
 
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 	call := receiveCall(t, probe)
-	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return host.Checking
 	}).Checking)
 
@@ -1801,8 +1919,8 @@ func TestRegistryReplaceHostsBlockedCASKeepsSnapshotLockFree(t *testing.T) {
 	select {
 	case snapshot := <-observed:
 		require.NoError(t, snapshot.Validate())
-		require.Len(t, snapshot.Hosts, 1)
-		require.Equal(t, reg, snapshot.Hosts[0].Registration)
+		require.Len(t, snapshot.Daemons, 1)
+		require.Equal(t, reg, snapshot.Daemons[0].Registration)
 	case <-time.After(time.Second):
 		t.Fatal("Snapshot blocked behind the durable membership CAS")
 	}
@@ -1811,7 +1929,7 @@ func TestRegistryReplaceHostsBlockedCASKeepsSnapshotLockFree(t *testing.T) {
 	// parked: applying the result needs the registry lock, so the in-flight
 	// projection must stay exactly as published until membership commits.
 	registry.hint()
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
 	pending, ok := registry.Snapshot().Find(reg.Endpoint)
 	require.True(t, ok)
 	require.True(t, pending.Checking)
@@ -1834,7 +1952,7 @@ window:
 	// applies the observation and resumes scheduling the next one.
 	store.releaseCAS()
 	require.NoError(t, <-replaced)
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 	})
 	require.Equal(t, clock.Now(), host.LastSuccess)
@@ -1853,19 +1971,19 @@ func TestRegistryStoreErrorsAreObservableAndDoNotStallPublication(t *testing.T) 
 	defer registry.store.close()
 
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	waitForLog(t, logs, "durable snapshot write failed")
 	require.Contains(t, logs.String(), storeErr.Error())
 
 	// A failed write is not fatal and never blocks the next publication.
 	store.setStoreErr(nil)
 	reg.Generation++
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
 		return snapshot.Revision == registry.Snapshot().Revision
 	})
-	require.Len(t, stored.Hosts, 1)
-	require.True(t, stored.Hosts[0].Registration.Equal(reg))
+	require.Len(t, stored.Daemons, 1)
+	require.True(t, stored.Daemons[0].Registration.Equal(reg))
 }
 
 func TestRegistryPersistedCopyClearsChecking(t *testing.T) {
@@ -1874,26 +1992,26 @@ func TestRegistryPersistedCopyClearsChecking(t *testing.T) {
 	store := &testStore{}
 	registry := newTestRegistry(t, 3, store, probe, clock)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	startRegistry(t, registry)
 
 	// The observation is in flight: the published projection carries Checking,
 	// the durable copy never does.
-	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return host.Checking
 	}).Checking)
 	stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
-		return len(snapshot.Hosts) == 1
+		return len(snapshot.Daemons) == 1
 	})
-	require.False(t, stored.Hosts[0].Checking)
+	require.False(t, stored.Daemons[0].Checking)
 
 	// Completing the observation persists the settled projection.
 	call := receiveCall(t, probe)
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
 	settled := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
-		return len(snapshot.Hosts) == 1 && snapshot.Hosts[0].Availability == domain.RemoteAvailabilityReachable
+		return len(snapshot.Daemons) == 1 && snapshot.Daemons[0].Availability == domain.RemoteAvailabilityReachable
 	})
-	require.False(t, settled.Hosts[0].Checking)
+	require.False(t, settled.Daemons[0].Checking)
 }
 
 // TestRegistryNeverPersistsRetirementTombstones proves retirement tombstones
@@ -1907,16 +2025,16 @@ func TestRegistryNeverPersistsRetirementTombstones(t *testing.T) {
 	defer registry.store.close()
 
 	reg := registration(t, "retired.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	require.NoError(t, registry.setHosts(nil))
 
 	// Removal publishes a bounded tombstone and drops the live host in memory.
-	require.Empty(t, registry.Snapshot().Hosts)
+	require.Empty(t, registry.Snapshot().Daemons)
 	require.Len(t, registry.Snapshot().Removed, 1)
 
 	// The durable copy drops the tombstone before the store ever sees it.
 	stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
-		return len(snapshot.Hosts) == 0 && snapshot.Revision == registry.Snapshot().Revision
+		return len(snapshot.Daemons) == 0 && snapshot.Revision == registry.Snapshot().Revision
 	})
 	require.Empty(t, stored.Removed)
 
@@ -1924,7 +2042,7 @@ func TestRegistryNeverPersistsRetirementTombstones(t *testing.T) {
 	// stale tombstone.
 	reopened, err := NewRegistry(2, &testStore{loaded: stored}, newTestProbe(1), clock, nil)
 	require.NoError(t, err)
-	require.Empty(t, reopened.Snapshot().Hosts)
+	require.Empty(t, reopened.Snapshot().Daemons)
 	require.Empty(t, reopened.Snapshot().Removed)
 }
 
@@ -1937,7 +2055,7 @@ func TestRegistryBoundsSlowSubscribersAndStopsOnCancellation(t *testing.T) {
 	reg := registration(t, "example.test", 1)
 	for generation := domain.RemoteGeneration(1); generation <= 10; generation++ {
 		reg.Generation = generation
-		require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+		require.NoError(t, registry.setHosts(hostRecords(reg)))
 	}
 	// A subscriber that never drains is bounded to one pending wake and
 	// never blocks publication.
@@ -1949,7 +2067,7 @@ func TestRegistryBoundsSlowSubscribersAndStopsOnCancellation(t *testing.T) {
 	sub.Close()
 	sub.Close()
 	reg.Generation++
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	select {
 	case <-sub.Changed():
 		t.Fatal("closed subscription received a notification")
@@ -1972,7 +2090,7 @@ func TestRegistryBoundsSlowSubscribersAndStopsOnCancellation(t *testing.T) {
 		t.Fatal("in-flight probe did not observe cancellation")
 	}
 	// Cleanup settles the projection: no host stays in flight.
-	host := waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking
 	})
 	require.Equal(t, domain.RemoteAvailabilityUnknown, host.Availability)
@@ -1986,14 +2104,14 @@ func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
 	registry, err := NewRegistry(1, store, probe, clock, logger)
 	require.NoError(t, err)
 	reg := registration(t, "example.test", 1)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{reg}))
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); registry.Run(ctx) }()
 
 	call := receiveCall(t, probe)
-	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return host.Checking
 	}).Checking)
 
@@ -2014,22 +2132,22 @@ func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
 		t.Fatal("registry did not stop after cancellation")
 	}
 	// Cleanup publishes the settled projection: nothing stays in flight.
-	require.False(t, waitHost(t, registry, reg.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+	require.False(t, waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking
 	}).Checking)
 
 	// The retired completion can never be applied once the run is over.
-	call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
 	settled := registry.Snapshot()
-	require.Equal(t, domain.RemoteAvailabilityUnknown, settled.Hosts[0].Availability)
-	require.Zero(t, settled.Hosts[0].ConsecutiveFailures)
+	require.Equal(t, domain.RemoteAvailabilityUnknown, settled.Daemons[0].Availability)
+	require.Zero(t, settled.Daemons[0].ConsecutiveFailures)
 
 	// Persistence is flushed before shutdown and no write outlives it.
 	stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
 		return snapshot.Revision >= settled.Revision
 	})
 	require.Equal(t, settled.Revision, stored.Revision)
-	require.False(t, stored.Hosts[0].Checking)
+	require.False(t, stored.Daemons[0].Checking)
 	writes := store.writeCount()
 	require.NoError(t, registry.setHosts(nil))
 	require.Equal(t, writes, store.writeCount())
@@ -2064,18 +2182,186 @@ func TestRegistryRevisionsIncreaseMonotonicallyWithinEpoch(t *testing.T) {
 
 	first := registration(t, "a.test", 1)
 	second := registration(t, "b.test", 2)
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{first}))
+	require.NoError(t, registry.setHosts(hostRecords(first)))
 	observe()
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{first, second}))
+	require.NoError(t, registry.setHosts(hostRecords(first, second)))
 	observe()
 
 	startRegistry(t, registry)
 	for range 2 {
 		call := receiveCall(t, probe)
-		call.result <- probeAnswer{snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable}}
-		waitHost(t, registry, call.registration.Endpoint, func(host ports.RemoteHostSnapshot) bool {
+		call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+		waitHost(t, registry, call.registration.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 			return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
 		})
 		observe()
 	}
+}
+
+// TestRegistryProbeCannotOverrideConfiguredAuthority proves the ownership rule:
+// a probe supplies observed state only. Configured authority (local flag,
+// endpoint, registration, policy, display origin, rank) is stamped by the
+// registry from its own host records and a hostile probe result can never
+// override it.
+func TestRegistryProbeCannotOverrideConfiguredAuthority(t *testing.T) {
+	clock := newManualClock(time.Unix(100, 0))
+	probe := newTestProbe(1)
+	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
+	reg := registration(t, "user@host:22", 1)
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
+	startRegistry(t, registry)
+
+	call := receiveCall(t, probe)
+	require.True(t, call.registration.Equal(reg))
+
+	// Every authority field is invented by the probe, including a local flag,
+	// a foreign endpoint and registration, a different policy, and display/rank
+	// hints. None of it may reach the published projection.
+	hostilePolicy := poolPolicy()
+	hostilePolicy.Trust = "attacker"
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Local:         true,
+		Endpoint:      "attacker@evil",
+		DisplayOrigin: "evil",
+		Rank:          42,
+		Registration:  registration(t, "attacker@evil", 9),
+		Policy:        hostilePolicy,
+		Availability:  domain.RemoteAvailabilityReachable,
+	}}
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
+	})
+	require.False(t, host.Local)
+	require.Equal(t, reg.Endpoint, host.Endpoint)
+	require.Equal(t, domain.RemoteDisplayOrigin(reg.Endpoint), host.DisplayOrigin)
+	require.Zero(t, host.Rank)
+	require.True(t, host.Registration.Equal(reg))
+	require.Equal(t, poolPolicy(), host.Policy)
+	require.NotEqual(t, hostilePolicy, host.Policy)
+	require.Len(t, registry.Snapshot().Daemons, 1)
+}
+
+// TestRegistryPublishesObservedDaemonIdentity proves observed identity,
+// incarnation, protocol version, and capabilities flow from a probe result into
+// the published snapshot; configured authority is stamped alongside them.
+func TestRegistryPublishesObservedDaemonIdentity(t *testing.T) {
+	clock := newManualClock(time.Unix(100, 0))
+	probe := newTestProbe(1)
+	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
+	reg := registration(t, "user@host:22", 1)
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
+	startRegistry(t, registry)
+
+	call := receiveCall(t, probe)
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Identity:        "authed-daemon",
+		Incarnation:     ports.BrokerDaemonIncarnation{7, 11},
+		ProtocolVersion: protocol.Version,
+		Capabilities:    protocol.CapabilityResume | protocol.CapabilityUDP,
+		Availability:    domain.RemoteAvailabilityReachable,
+	}}
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+		return !host.Checking && host.Identity != ""
+	})
+	require.Equal(t, ports.BrokerDaemonIdentity("authed-daemon"), host.Identity)
+	require.Equal(t, ports.BrokerDaemonIncarnation{7, 11}, host.Incarnation)
+	require.Equal(t, protocol.Version, host.ProtocolVersion)
+	require.Equal(t, protocol.CapabilityResume|protocol.CapabilityUDP, host.Capabilities)
+	require.Equal(t, poolPolicy(), host.Policy)
+	require.NoError(t, registry.Snapshot().Validate())
+}
+
+// TestRegistryRejectsObservedIdentityWithoutProtocolVersion pins the partial
+// identity rule: an observation that reports identity and incarnation without a
+// protocol version fails ports validation and is classified as an invalid
+// response, so it never publishes a half-observed daemon.
+func TestRegistryRejectsObservedIdentityWithoutProtocolVersion(t *testing.T) {
+	// The contract itself rejects partial identity.
+	require.Error(t, (ports.BrokerDaemonObservation{
+		DisplayOrigin: "host",
+		Policy:        poolPolicy(),
+		Identity:      "authed-daemon",
+		Incarnation:   ports.BrokerDaemonIncarnation{7},
+		Availability:  domain.RemoteAvailabilityReachable,
+	}).Validate())
+
+	clock := newManualClock(time.Unix(100, 0))
+	probe := newTestProbe(1)
+	registry := newTestRegistry(t, 1, newTestStore(), probe, clock)
+	reg := registration(t, "user@host:22", 1)
+	require.NoError(t, registry.setHosts(hostRecords(reg)))
+	startRegistry(t, registry)
+
+	call := receiveCall(t, probe)
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Identity:     "authed-daemon",
+		Incarnation:  ports.BrokerDaemonIncarnation{7},
+		Availability: domain.RemoteAvailabilityReachable,
+	}}
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+		return !host.Checking && host.ConsecutiveFailures == 1
+	})
+	require.Equal(t, domain.RemoteAvailabilityInvalidResponse, host.Availability)
+	require.Equal(t, domain.RemoteFailureInvalidResponse, host.LastFailure.Kind)
+	require.Empty(t, host.Identity, "partial identity must never be published")
+	require.True(t, host.Incarnation.IsZero())
+}
+
+// TestRegistryPublishesRemoteDaemonsInRegistrationOrder pins the publication
+// invariant: remote daemons appear in durable membership registration order (no
+// local producer exists yet, so the snapshot carries remotes only).
+func TestRegistryPublishesRemoteDaemonsInRegistrationOrder(t *testing.T) {
+	registry := newTestRegistry(t, 1, newTestStore(), newTestProbe(1), newManualClock(time.Unix(100, 0)))
+	first := registration(t, "a.test", 1)
+	second := registration(t, "b.test", 2)
+	third := registration(t, "c.test", 3)
+	require.NoError(t, registry.setHosts(hostRecords(first, second)))
+	require.Equal(t, []string{"a.test", "b.test"}, daemonEndpoints(registry.Snapshot()))
+
+	// Membership changes publish in the new registration order, not sorted and
+	// not map order.
+	require.NoError(t, registry.setHosts(hostRecords(third, second, first)))
+	require.Equal(t, []string{"c.test", "b.test", "a.test"}, daemonEndpoints(registry.Snapshot()))
+}
+
+func daemonEndpoints(snapshot ports.BrokerSnapshot) []string {
+	endpoints := make([]string, 0, len(snapshot.Daemons))
+	for _, daemon := range snapshot.Daemons {
+		endpoints = append(endpoints, daemon.Endpoint)
+	}
+	return endpoints
+}
+
+// TestDurableProjectionDropsLocalObservationAndPolicy pins the durable format
+// decision: the persistable copy carries remote observations only (a local
+// daemon observation is process-local) and omits policy, because membership is
+// the single policy authority and the loader re-stamps it.
+func TestDurableProjectionDropsLocalObservationAndPolicy(t *testing.T) {
+	reg := registration(t, "user@host:22", 1)
+	snapshot := ports.BrokerSnapshot{Epoch: 1, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+		{Local: true, DisplayOrigin: "local", Policy: poolPolicy(), Availability: domain.RemoteAvailabilityReachable},
+		{Endpoint: reg.Endpoint, DisplayOrigin: domain.RemoteDisplayOrigin(reg.Endpoint), Registration: reg, Policy: poolPolicy(), Availability: domain.RemoteAvailabilityReachable},
+	}}
+	out := durable(snapshot)
+	require.Len(t, out.Daemons, 1)
+	require.False(t, out.Daemons[0].Local)
+	require.Equal(t, reg.Endpoint, out.Daemons[0].Endpoint)
+	require.Equal(t, ports.BrokerPolicy{}, out.Daemons[0].Policy)
+	require.Nil(t, out.Removed)
+	// The published snapshot the caller handed in is untouched.
+	require.Len(t, snapshot.Daemons, 2)
+	require.Equal(t, poolPolicy(), snapshot.Daemons[0].Policy)
+}
+
+// TestHostDisplayOriginIsBounded pins the presentation-hint bound: a derived
+// origin is clamped rune-safely at the ports limit so an over-long configured
+// endpoint still yields a valid publication instead of an unobservable host.
+func TestHostDisplayOriginIsBounded(t *testing.T) {
+	require.Equal(t, "host:22", hostDisplayOrigin("user@host:22"))
+	require.Equal(t, "plain.test", hostDisplayOrigin("plain.test"))
+
+	origin := hostDisplayOrigin("user@" + strings.Repeat("€", 100))
+	require.LessOrEqual(t, len(origin), ports.BrokerMaxDisplayOriginBytes)
+	require.True(t, utf8.ValidString(origin))
+	require.NotEmpty(t, origin)
 }

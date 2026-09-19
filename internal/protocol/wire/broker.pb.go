@@ -1155,17 +1155,29 @@ func (x *Reconcile) GetRegistration() *RemoteRegistration {
 // OpenStream asks the broker to open one independently cancellable logical
 // stream to the owning daemon. env is the per-request session environment
 // and is never inherited from the broker process environment.
+//
+// admission is the closed attachment-admission taxonomy: an attachment
+// stream names exactly how the daemon must admit it, while control and
+// observation streams carry none (0). name is validated session-name
+// authority for create-named and is empty for every other variant.
 type OpenStream struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ref   *BrokerStreamRef       `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	// Closed taxonomy: 1 = attachment, 2 = control, 3 = observation.
-	Purpose       uint32              `protobuf:"varint,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
-	Local         bool                `protobuf:"varint,3,opt,name=local,proto3" json:"local,omitempty"`
-	Endpoint      string              `protobuf:"bytes,4,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	Registration  *RemoteRegistration `protobuf:"bytes,5,opt,name=registration,proto3" json:"registration,omitempty"`
-	Target        *ExactTarget        `protobuf:"bytes,6,opt,name=target,proto3" json:"target,omitempty"`
-	Env           []string            `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty"`
-	Policy        *BrokerWirePolicy   `protobuf:"bytes,8,opt,name=policy,proto3" json:"policy,omitempty"`
+	Purpose      uint32              `protobuf:"varint,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	Local        bool                `protobuf:"varint,3,opt,name=local,proto3" json:"local,omitempty"`
+	Endpoint     string              `protobuf:"bytes,4,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	Registration *RemoteRegistration `protobuf:"bytes,5,opt,name=registration,proto3" json:"registration,omitempty"`
+	// Present only for exact attach/resume; the zero-value message is never
+	// sent for a creation admission.
+	Target *ExactTarget      `protobuf:"bytes,6,opt,name=target,proto3" json:"target,omitempty"`
+	Env    []string          `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty"`
+	Policy *BrokerWirePolicy `protobuf:"bytes,8,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Closed admission taxonomy: 0 = none (control/observation), 1 = exact
+	// attach/resume, 2 = create named, 3 = create ephemeral.
+	Admission uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
+	// Validated session name for create-named; empty otherwise.
+	Name          string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1254,6 +1266,20 @@ func (x *OpenStream) GetPolicy() *BrokerWirePolicy {
 		return x.Policy
 	}
 	return nil
+}
+
+func (x *OpenStream) GetAdmission() uint32 {
+	if x != nil {
+		return x.Admission
+	}
+	return 0
+}
+
+func (x *OpenStream) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 // ClientStreamData carries one opaque client-to-daemon stream frame.
@@ -1411,7 +1437,7 @@ type SnapshotPart struct {
 	// Types that are valid to be assigned to Part:
 	//
 	//	*SnapshotPart_Begin
-	//	*SnapshotPart_Host
+	//	*SnapshotPart_Daemon
 	//	*SnapshotPart_Session
 	//	*SnapshotPart_Tombstone
 	//	*SnapshotPart_End
@@ -1494,10 +1520,10 @@ func (x *SnapshotPart) GetBegin() *SnapshotBegin {
 	return nil
 }
 
-func (x *SnapshotPart) GetHost() *SnapshotHost {
+func (x *SnapshotPart) GetDaemon() *SnapshotDaemon {
 	if x != nil {
-		if x, ok := x.Part.(*SnapshotPart_Host); ok {
-			return x.Host
+		if x, ok := x.Part.(*SnapshotPart_Daemon); ok {
+			return x.Daemon
 		}
 	}
 	return nil
@@ -1538,8 +1564,8 @@ type SnapshotPart_Begin struct {
 	Begin *SnapshotBegin `protobuf:"bytes,10,opt,name=begin,proto3,oneof"`
 }
 
-type SnapshotPart_Host struct {
-	Host *SnapshotHost `protobuf:"bytes,11,opt,name=host,proto3,oneof"`
+type SnapshotPart_Daemon struct {
+	Daemon *SnapshotDaemon `protobuf:"bytes,15,opt,name=daemon,proto3,oneof"`
 }
 
 type SnapshotPart_Session struct {
@@ -1556,7 +1582,7 @@ type SnapshotPart_End struct {
 
 func (*SnapshotPart_Begin) isSnapshotPart_Part() {}
 
-func (*SnapshotPart_Host) isSnapshotPart_Part() {}
+func (*SnapshotPart_Daemon) isSnapshotPart_Part() {}
 
 func (*SnapshotPart_Session) isSnapshotPart_Part() {}
 
@@ -1565,11 +1591,15 @@ func (*SnapshotPart_Tombstone) isSnapshotPart_Part() {}
 func (*SnapshotPart_End) isSnapshotPart_Part() {}
 
 // SnapshotBegin opens a snapshot publication with its element counts.
+// host_count counts every daemon part in the transfer (the local daemon plus
+// every remote host), and local_present reports whether daemon index 0 is the
+// local daemon. A publication carries at most one local daemon, always first.
 type SnapshotBegin struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	HostCount      uint32                 `protobuf:"varint,1,opt,name=host_count,json=hostCount,proto3" json:"host_count,omitempty"`
 	SessionCount   uint32                 `protobuf:"varint,2,opt,name=session_count,json=sessionCount,proto3" json:"session_count,omitempty"`
 	TombstoneCount uint32                 `protobuf:"varint,3,opt,name=tombstone_count,json=tombstoneCount,proto3" json:"tombstone_count,omitempty"`
+	LocalPresent   bool                   `protobuf:"varint,4,opt,name=local_present,json=localPresent,proto3" json:"local_present,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1625,46 +1655,69 @@ func (x *SnapshotBegin) GetTombstoneCount() uint32 {
 	return 0
 }
 
-// SnapshotHost is one host projection (ports.RemoteHostSnapshot). The
-// endpoint and display origin stay separate: the latter is
-// presentation-only. Sessions travel as separate SnapshotSession parts.
-type SnapshotHost struct {
+func (x *SnapshotBegin) GetLocalPresent() bool {
+	if x != nil {
+		return x.LocalPresent
+	}
+	return false
+}
+
+// SnapshotDaemon is one daemon projection (ports.BrokerDaemonObservation),
+// local or remote. Configured authority (endpoint, registration, policy,
+// display origin, rank) stays separate from observed state (identity,
+// incarnation, version, capabilities, availability, failure, freshness),
+// and observation never invents unknown values. registration is absent for
+// the local daemon; policy is always present. Sessions travel as separate
+// SnapshotSession parts.
+type SnapshotDaemon struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HostIndex     uint32                 `protobuf:"varint,1,opt,name=host_index,json=hostIndex,proto3" json:"host_index,omitempty"`
-	Endpoint      string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	DisplayOrigin string                 `protobuf:"bytes,3,opt,name=display_origin,json=displayOrigin,proto3" json:"display_origin,omitempty"`
-	Rank          uint32                 `protobuf:"varint,4,opt,name=rank,proto3" json:"rank,omitempty"`
-	Registration  *RemoteRegistration    `protobuf:"bytes,5,opt,name=registration,proto3" json:"registration,omitempty"`
-	// Closed availability taxonomy; 0 is the zero value.
-	Availability        uint32           `protobuf:"varint,6,opt,name=availability,proto3" json:"availability,omitempty"`
-	Checking            bool             `protobuf:"varint,7,opt,name=checking,proto3" json:"checking,omitempty"`
-	LastAttempt         *BrokerTimestamp `protobuf:"bytes,8,opt,name=last_attempt,json=lastAttempt,proto3" json:"last_attempt,omitempty"`
-	LastSuccess         *BrokerTimestamp `protobuf:"bytes,9,opt,name=last_success,json=lastSuccess,proto3" json:"last_success,omitempty"`
-	NextDue             *BrokerTimestamp `protobuf:"bytes,10,opt,name=next_due,json=nextDue,proto3" json:"next_due,omitempty"`
-	ConsecutiveFailures uint64           `protobuf:"varint,11,opt,name=consecutive_failures,json=consecutiveFailures,proto3" json:"consecutive_failures,omitempty"`
-	FailureEpisode      uint64           `protobuf:"varint,12,opt,name=failure_episode,json=failureEpisode,proto3" json:"failure_episode,omitempty"`
+	Local         bool                   `protobuf:"varint,2,opt,name=local,proto3" json:"local,omitempty"`
+	Endpoint      string                 `protobuf:"bytes,3,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	DisplayOrigin string                 `protobuf:"bytes,4,opt,name=display_origin,json=displayOrigin,proto3" json:"display_origin,omitempty"`
+	Rank          uint32                 `protobuf:"varint,5,opt,name=rank,proto3" json:"rank,omitempty"`
+	Registration  *RemoteRegistration    `protobuf:"bytes,6,opt,name=registration,proto3" json:"registration,omitempty"`
+	Policy        *BrokerWirePolicy      `protobuf:"bytes,7,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Authenticated daemon identity; empty until observed.
+	DaemonIdentity string `protobuf:"bytes,8,opt,name=daemon_identity,json=daemonIdentity,proto3" json:"daemon_identity,omitempty"`
+	// Daemon process incarnation; exactly 16 bytes when an identity is
+	// present and absent otherwise.
+	DaemonIncarnation []byte `protobuf:"bytes,9,opt,name=daemon_incarnation,json=daemonIncarnation,proto3" json:"daemon_incarnation,omitempty"`
+	// Observed daemon protocol version; 0 = unobserved.
+	ProtocolVersion uint32 `protobuf:"varint,10,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	// Observed capability bitmask (mirrors protocol.Capability* bits).
+	Capabilities uint32 `protobuf:"varint,11,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	// Closed availability taxonomy (domain.RemoteAvailability); 0 is
+	// invalid, an unobserved daemon carries RemoteAvailabilityUnknown.
+	Availability        uint32           `protobuf:"varint,12,opt,name=availability,proto3" json:"availability,omitempty"`
+	Checking            bool             `protobuf:"varint,13,opt,name=checking,proto3" json:"checking,omitempty"`
+	LastAttempt         *BrokerTimestamp `protobuf:"bytes,14,opt,name=last_attempt,json=lastAttempt,proto3" json:"last_attempt,omitempty"`
+	LastSuccess         *BrokerTimestamp `protobuf:"bytes,15,opt,name=last_success,json=lastSuccess,proto3" json:"last_success,omitempty"`
+	NextDue             *BrokerTimestamp `protobuf:"bytes,16,opt,name=next_due,json=nextDue,proto3" json:"next_due,omitempty"`
+	ConsecutiveFailures uint64           `protobuf:"varint,17,opt,name=consecutive_failures,json=consecutiveFailures,proto3" json:"consecutive_failures,omitempty"`
+	FailureEpisode      uint64           `protobuf:"varint,18,opt,name=failure_episode,json=failureEpisode,proto3" json:"failure_episode,omitempty"`
 	// Closed cause taxonomy (domain.RemoteFailureKind); 0 = none.
-	FailureKind    uint32 `protobuf:"varint,13,opt,name=failure_kind,json=failureKind,proto3" json:"failure_kind,omitempty"`
-	InventoryKnown bool   `protobuf:"varint,14,opt,name=inventory_known,json=inventoryKnown,proto3" json:"inventory_known,omitempty"`
-	SessionCount   uint32 `protobuf:"varint,15,opt,name=session_count,json=sessionCount,proto3" json:"session_count,omitempty"`
+	FailureKind    uint32 `protobuf:"varint,19,opt,name=failure_kind,json=failureKind,proto3" json:"failure_kind,omitempty"`
+	InventoryKnown bool   `protobuf:"varint,20,opt,name=inventory_known,json=inventoryKnown,proto3" json:"inventory_known,omitempty"`
+	SessionCount   uint32 `protobuf:"varint,21,opt,name=session_count,json=sessionCount,proto3" json:"session_count,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
-func (x *SnapshotHost) Reset() {
-	*x = SnapshotHost{}
+func (x *SnapshotDaemon) Reset() {
+	*x = SnapshotDaemon{}
 	mi := &file_broker_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SnapshotHost) String() string {
+func (x *SnapshotDaemon) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SnapshotHost) ProtoMessage() {}
+func (*SnapshotDaemon) ProtoMessage() {}
 
-func (x *SnapshotHost) ProtoReflect() protoreflect.Message {
+func (x *SnapshotDaemon) ProtoReflect() protoreflect.Message {
 	mi := &file_broker_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1676,122 +1729,167 @@ func (x *SnapshotHost) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SnapshotHost.ProtoReflect.Descriptor instead.
-func (*SnapshotHost) Descriptor() ([]byte, []int) {
+// Deprecated: Use SnapshotDaemon.ProtoReflect.Descriptor instead.
+func (*SnapshotDaemon) Descriptor() ([]byte, []int) {
 	return file_broker_proto_rawDescGZIP(), []int{20}
 }
 
-func (x *SnapshotHost) GetHostIndex() uint32 {
+func (x *SnapshotDaemon) GetHostIndex() uint32 {
 	if x != nil {
 		return x.HostIndex
 	}
 	return 0
 }
 
-func (x *SnapshotHost) GetEndpoint() string {
+func (x *SnapshotDaemon) GetLocal() bool {
+	if x != nil {
+		return x.Local
+	}
+	return false
+}
+
+func (x *SnapshotDaemon) GetEndpoint() string {
 	if x != nil {
 		return x.Endpoint
 	}
 	return ""
 }
 
-func (x *SnapshotHost) GetDisplayOrigin() string {
+func (x *SnapshotDaemon) GetDisplayOrigin() string {
 	if x != nil {
 		return x.DisplayOrigin
 	}
 	return ""
 }
 
-func (x *SnapshotHost) GetRank() uint32 {
+func (x *SnapshotDaemon) GetRank() uint32 {
 	if x != nil {
 		return x.Rank
 	}
 	return 0
 }
 
-func (x *SnapshotHost) GetRegistration() *RemoteRegistration {
+func (x *SnapshotDaemon) GetRegistration() *RemoteRegistration {
 	if x != nil {
 		return x.Registration
 	}
 	return nil
 }
 
-func (x *SnapshotHost) GetAvailability() uint32 {
+func (x *SnapshotDaemon) GetPolicy() *BrokerWirePolicy {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
+}
+
+func (x *SnapshotDaemon) GetDaemonIdentity() string {
+	if x != nil {
+		return x.DaemonIdentity
+	}
+	return ""
+}
+
+func (x *SnapshotDaemon) GetDaemonIncarnation() []byte {
+	if x != nil {
+		return x.DaemonIncarnation
+	}
+	return nil
+}
+
+func (x *SnapshotDaemon) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *SnapshotDaemon) GetCapabilities() uint32 {
+	if x != nil {
+		return x.Capabilities
+	}
+	return 0
+}
+
+func (x *SnapshotDaemon) GetAvailability() uint32 {
 	if x != nil {
 		return x.Availability
 	}
 	return 0
 }
 
-func (x *SnapshotHost) GetChecking() bool {
+func (x *SnapshotDaemon) GetChecking() bool {
 	if x != nil {
 		return x.Checking
 	}
 	return false
 }
 
-func (x *SnapshotHost) GetLastAttempt() *BrokerTimestamp {
+func (x *SnapshotDaemon) GetLastAttempt() *BrokerTimestamp {
 	if x != nil {
 		return x.LastAttempt
 	}
 	return nil
 }
 
-func (x *SnapshotHost) GetLastSuccess() *BrokerTimestamp {
+func (x *SnapshotDaemon) GetLastSuccess() *BrokerTimestamp {
 	if x != nil {
 		return x.LastSuccess
 	}
 	return nil
 }
 
-func (x *SnapshotHost) GetNextDue() *BrokerTimestamp {
+func (x *SnapshotDaemon) GetNextDue() *BrokerTimestamp {
 	if x != nil {
 		return x.NextDue
 	}
 	return nil
 }
 
-func (x *SnapshotHost) GetConsecutiveFailures() uint64 {
+func (x *SnapshotDaemon) GetConsecutiveFailures() uint64 {
 	if x != nil {
 		return x.ConsecutiveFailures
 	}
 	return 0
 }
 
-func (x *SnapshotHost) GetFailureEpisode() uint64 {
+func (x *SnapshotDaemon) GetFailureEpisode() uint64 {
 	if x != nil {
 		return x.FailureEpisode
 	}
 	return 0
 }
 
-func (x *SnapshotHost) GetFailureKind() uint32 {
+func (x *SnapshotDaemon) GetFailureKind() uint32 {
 	if x != nil {
 		return x.FailureKind
 	}
 	return 0
 }
 
-func (x *SnapshotHost) GetInventoryKnown() bool {
+func (x *SnapshotDaemon) GetInventoryKnown() bool {
 	if x != nil {
 		return x.InventoryKnown
 	}
 	return false
 }
 
-func (x *SnapshotHost) GetSessionCount() uint32 {
+func (x *SnapshotDaemon) GetSessionCount() uint32 {
 	if x != nil {
 		return x.SessionCount
 	}
 	return 0
 }
 
-// SnapshotSession is one catalogue session bound to its host by index.
+// SnapshotSession is one catalogue session bound to its daemon by index.
+// local marks a session of the local daemon; its host_index is then exactly
+// 0 and follows the local daemon part rather than a remote host index.
 type SnapshotSession struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HostIndex     uint32                 `protobuf:"varint,1,opt,name=host_index,json=hostIndex,proto3" json:"host_index,omitempty"`
 	SessionIndex  uint32                 `protobuf:"varint,2,opt,name=session_index,json=sessionIndex,proto3" json:"session_index,omitempty"`
 	Session       *BrokerCatalogSession  `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
+	Local         bool                   `protobuf:"varint,4,opt,name=local,proto3" json:"local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1845,6 +1943,13 @@ func (x *SnapshotSession) GetSession() *BrokerCatalogSession {
 		return x.Session
 	}
 	return nil
+}
+
+func (x *SnapshotSession) GetLocal() bool {
+	if x != nil {
+		return x.Local
+	}
+	return false
 }
 
 // SnapshotTombstone fences one retired host registration so a stale probe
@@ -2625,7 +2730,7 @@ const file_broker_proto_rawDesc = "" +
 	"\bendpoint\x18\x03 \x01(\tR\bendpoint\"\x80\x01\n" +
 	"\tReconcile\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12C\n" +
-	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\"\xc8\x02\n" +
+	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\"\xfa\x02\n" +
 	"\n" +
 	"OpenStream\x12.\n" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\x12\x18\n" +
@@ -2635,7 +2740,10 @@ const file_broker_proto_rawDesc = "" +
 	"\fregistration\x18\x05 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x120\n" +
 	"\x06target\x18\x06 \x01(\v2\x18.vev.wire.v1.ExactTargetR\x06target\x12\x10\n" +
 	"\x03env\x18\a \x03(\tR\x03env\x125\n" +
-	"\x06policy\x18\b \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\"V\n" +
+	"\x06policy\x18\b \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\x12\x1c\n" +
+	"\tadmission\x18\t \x01(\rR\tadmission\x12\x12\n" +
+	"\x04name\x18\n" +
+	" \x01(\tR\x04name\"V\n" +
 	"\x10ClientStreamData\x12.\n" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\"=\n" +
@@ -2643,7 +2751,7 @@ const file_broker_proto_rawDesc = "" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\"<\n" +
 	"\n" +
 	"Registered\x12.\n" +
-	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\"\xa5\x03\n" +
+	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\"\xab\x03\n" +
 	"\fSnapshotPart\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x1e\n" +
 	"\n" +
@@ -2652,40 +2760,48 @@ const file_broker_proto_rawDesc = "" +
 	"\brevision\x18\x03 \x01(\x04R\brevision\x12\x14\n" +
 	"\x05index\x18\x04 \x01(\rR\x05index\x122\n" +
 	"\x05begin\x18\n" +
-	" \x01(\v2\x1a.vev.wire.v1.SnapshotBeginH\x00R\x05begin\x12/\n" +
-	"\x04host\x18\v \x01(\v2\x19.vev.wire.v1.SnapshotHostH\x00R\x04host\x128\n" +
+	" \x01(\v2\x1a.vev.wire.v1.SnapshotBeginH\x00R\x05begin\x125\n" +
+	"\x06daemon\x18\x0f \x01(\v2\x1b.vev.wire.v1.SnapshotDaemonH\x00R\x06daemon\x128\n" +
 	"\asession\x18\f \x01(\v2\x1c.vev.wire.v1.SnapshotSessionH\x00R\asession\x12>\n" +
 	"\ttombstone\x18\r \x01(\v2\x1e.vev.wire.v1.SnapshotTombstoneH\x00R\ttombstone\x12,\n" +
 	"\x03end\x18\x0e \x01(\v2\x18.vev.wire.v1.SnapshotEndH\x00R\x03endB\x06\n" +
-	"\x04part\"|\n" +
+	"\x04part\"\xa1\x01\n" +
 	"\rSnapshotBegin\x12\x1d\n" +
 	"\n" +
 	"host_count\x18\x01 \x01(\rR\thostCount\x12#\n" +
 	"\rsession_count\x18\x02 \x01(\rR\fsessionCount\x12'\n" +
-	"\x0ftombstone_count\x18\x03 \x01(\rR\x0etombstoneCount\"\x91\x05\n" +
-	"\fSnapshotHost\x12\x1d\n" +
+	"\x0ftombstone_count\x18\x03 \x01(\rR\x0etombstoneCount\x12#\n" +
+	"\rlocal_present\x18\x04 \x01(\bR\flocalPresent\"\x87\a\n" +
+	"\x0eSnapshotDaemon\x12\x1d\n" +
 	"\n" +
-	"host_index\x18\x01 \x01(\rR\thostIndex\x12\x1a\n" +
-	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12%\n" +
-	"\x0edisplay_origin\x18\x03 \x01(\tR\rdisplayOrigin\x12\x12\n" +
-	"\x04rank\x18\x04 \x01(\rR\x04rank\x12C\n" +
-	"\fregistration\x18\x05 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x12\"\n" +
-	"\favailability\x18\x06 \x01(\rR\favailability\x12\x1a\n" +
-	"\bchecking\x18\a \x01(\bR\bchecking\x12?\n" +
-	"\flast_attempt\x18\b \x01(\v2\x1c.vev.wire.v1.BrokerTimestampR\vlastAttempt\x12?\n" +
-	"\flast_success\x18\t \x01(\v2\x1c.vev.wire.v1.BrokerTimestampR\vlastSuccess\x127\n" +
-	"\bnext_due\x18\n" +
-	" \x01(\v2\x1c.vev.wire.v1.BrokerTimestampR\anextDue\x121\n" +
-	"\x14consecutive_failures\x18\v \x01(\x04R\x13consecutiveFailures\x12'\n" +
-	"\x0ffailure_episode\x18\f \x01(\x04R\x0efailureEpisode\x12!\n" +
-	"\ffailure_kind\x18\r \x01(\rR\vfailureKind\x12'\n" +
-	"\x0finventory_known\x18\x0e \x01(\bR\x0einventoryKnown\x12#\n" +
-	"\rsession_count\x18\x0f \x01(\rR\fsessionCount\"\x92\x01\n" +
+	"host_index\x18\x01 \x01(\rR\thostIndex\x12\x14\n" +
+	"\x05local\x18\x02 \x01(\bR\x05local\x12\x1a\n" +
+	"\bendpoint\x18\x03 \x01(\tR\bendpoint\x12%\n" +
+	"\x0edisplay_origin\x18\x04 \x01(\tR\rdisplayOrigin\x12\x12\n" +
+	"\x04rank\x18\x05 \x01(\rR\x04rank\x12C\n" +
+	"\fregistration\x18\x06 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x125\n" +
+	"\x06policy\x18\a \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\x12'\n" +
+	"\x0fdaemon_identity\x18\b \x01(\tR\x0edaemonIdentity\x12-\n" +
+	"\x12daemon_incarnation\x18\t \x01(\fR\x11daemonIncarnation\x12)\n" +
+	"\x10protocol_version\x18\n" +
+	" \x01(\rR\x0fprotocolVersion\x12\"\n" +
+	"\fcapabilities\x18\v \x01(\rR\fcapabilities\x12\"\n" +
+	"\favailability\x18\f \x01(\rR\favailability\x12\x1a\n" +
+	"\bchecking\x18\r \x01(\bR\bchecking\x12?\n" +
+	"\flast_attempt\x18\x0e \x01(\v2\x1c.vev.wire.v1.BrokerTimestampR\vlastAttempt\x12?\n" +
+	"\flast_success\x18\x0f \x01(\v2\x1c.vev.wire.v1.BrokerTimestampR\vlastSuccess\x127\n" +
+	"\bnext_due\x18\x10 \x01(\v2\x1c.vev.wire.v1.BrokerTimestampR\anextDue\x121\n" +
+	"\x14consecutive_failures\x18\x11 \x01(\x04R\x13consecutiveFailures\x12'\n" +
+	"\x0ffailure_episode\x18\x12 \x01(\x04R\x0efailureEpisode\x12!\n" +
+	"\ffailure_kind\x18\x13 \x01(\rR\vfailureKind\x12'\n" +
+	"\x0finventory_known\x18\x14 \x01(\bR\x0einventoryKnown\x12#\n" +
+	"\rsession_count\x18\x15 \x01(\rR\fsessionCount\"\xa8\x01\n" +
 	"\x0fSnapshotSession\x12\x1d\n" +
 	"\n" +
 	"host_index\x18\x01 \x01(\rR\thostIndex\x12#\n" +
 	"\rsession_index\x18\x02 \x01(\rR\fsessionIndex\x12;\n" +
-	"\asession\x18\x03 \x01(\v2!.vev.wire.v1.BrokerCatalogSessionR\asession\"\xac\x01\n" +
+	"\asession\x18\x03 \x01(\v2!.vev.wire.v1.BrokerCatalogSessionR\asession\x12\x14\n" +
+	"\x05local\x18\x04 \x01(\bR\x05local\"\xac\x01\n" +
 	"\x11SnapshotTombstone\x12'\n" +
 	"\x0ftombstone_index\x18\x01 \x01(\rR\x0etombstoneIndex\x12C\n" +
 	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x12)\n" +
@@ -2767,7 +2883,7 @@ var file_broker_proto_goTypes = []any{
 	(*Registered)(nil),           // 17: vev.wire.v1.Registered
 	(*SnapshotPart)(nil),         // 18: vev.wire.v1.SnapshotPart
 	(*SnapshotBegin)(nil),        // 19: vev.wire.v1.SnapshotBegin
-	(*SnapshotHost)(nil),         // 20: vev.wire.v1.SnapshotHost
+	(*SnapshotDaemon)(nil),       // 20: vev.wire.v1.SnapshotDaemon
 	(*SnapshotSession)(nil),      // 21: vev.wire.v1.SnapshotSession
 	(*SnapshotTombstone)(nil),    // 22: vev.wire.v1.SnapshotTombstone
 	(*SnapshotEnd)(nil),          // 23: vev.wire.v1.SnapshotEnd
@@ -2820,32 +2936,33 @@ var file_broker_proto_depIdxs = []int32{
 	0,  // 33: vev.wire.v1.Registered.scope:type_name -> vev.wire.v1.BrokerScope
 	0,  // 34: vev.wire.v1.SnapshotPart.scope:type_name -> vev.wire.v1.BrokerScope
 	19, // 35: vev.wire.v1.SnapshotPart.begin:type_name -> vev.wire.v1.SnapshotBegin
-	20, // 36: vev.wire.v1.SnapshotPart.host:type_name -> vev.wire.v1.SnapshotHost
+	20, // 36: vev.wire.v1.SnapshotPart.daemon:type_name -> vev.wire.v1.SnapshotDaemon
 	21, // 37: vev.wire.v1.SnapshotPart.session:type_name -> vev.wire.v1.SnapshotSession
 	22, // 38: vev.wire.v1.SnapshotPart.tombstone:type_name -> vev.wire.v1.SnapshotTombstone
 	23, // 39: vev.wire.v1.SnapshotPart.end:type_name -> vev.wire.v1.SnapshotEnd
-	33, // 40: vev.wire.v1.SnapshotHost.registration:type_name -> vev.wire.v1.RemoteRegistration
-	4,  // 41: vev.wire.v1.SnapshotHost.last_attempt:type_name -> vev.wire.v1.BrokerTimestamp
-	4,  // 42: vev.wire.v1.SnapshotHost.last_success:type_name -> vev.wire.v1.BrokerTimestamp
-	4,  // 43: vev.wire.v1.SnapshotHost.next_due:type_name -> vev.wire.v1.BrokerTimestamp
-	31, // 44: vev.wire.v1.SnapshotSession.session:type_name -> vev.wire.v1.BrokerCatalogSession
-	33, // 45: vev.wire.v1.SnapshotTombstone.registration:type_name -> vev.wire.v1.RemoteRegistration
-	0,  // 46: vev.wire.v1.OperationResult.scope:type_name -> vev.wire.v1.BrokerScope
-	3,  // 47: vev.wire.v1.OperationResult.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	1,  // 48: vev.wire.v1.StreamOpened.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	1,  // 49: vev.wire.v1.ServerStreamData.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	1,  // 50: vev.wire.v1.StreamClosed.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	3,  // 51: vev.wire.v1.StreamClosed.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	1,  // 52: vev.wire.v1.Progress.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	0,  // 53: vev.wire.v1.BrokerErrorMessage.scope:type_name -> vev.wire.v1.BrokerScope
-	3,  // 54: vev.wire.v1.BrokerErrorMessage.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	0,  // 55: vev.wire.v1.Shutdown.scope:type_name -> vev.wire.v1.BrokerScope
-	32, // 56: vev.wire.v1.BrokerCatalogSession.tabs:type_name -> vev.wire.v1.BrokerCatalogTab
-	57, // [57:57] is the sub-list for method output_type
-	57, // [57:57] is the sub-list for method input_type
-	57, // [57:57] is the sub-list for extension type_name
-	57, // [57:57] is the sub-list for extension extendee
-	0,  // [0:57] is the sub-list for field type_name
+	33, // 40: vev.wire.v1.SnapshotDaemon.registration:type_name -> vev.wire.v1.RemoteRegistration
+	2,  // 41: vev.wire.v1.SnapshotDaemon.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	4,  // 42: vev.wire.v1.SnapshotDaemon.last_attempt:type_name -> vev.wire.v1.BrokerTimestamp
+	4,  // 43: vev.wire.v1.SnapshotDaemon.last_success:type_name -> vev.wire.v1.BrokerTimestamp
+	4,  // 44: vev.wire.v1.SnapshotDaemon.next_due:type_name -> vev.wire.v1.BrokerTimestamp
+	31, // 45: vev.wire.v1.SnapshotSession.session:type_name -> vev.wire.v1.BrokerCatalogSession
+	33, // 46: vev.wire.v1.SnapshotTombstone.registration:type_name -> vev.wire.v1.RemoteRegistration
+	0,  // 47: vev.wire.v1.OperationResult.scope:type_name -> vev.wire.v1.BrokerScope
+	3,  // 48: vev.wire.v1.OperationResult.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	1,  // 49: vev.wire.v1.StreamOpened.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	1,  // 50: vev.wire.v1.ServerStreamData.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	1,  // 51: vev.wire.v1.StreamClosed.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	3,  // 52: vev.wire.v1.StreamClosed.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	1,  // 53: vev.wire.v1.Progress.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	0,  // 54: vev.wire.v1.BrokerErrorMessage.scope:type_name -> vev.wire.v1.BrokerScope
+	3,  // 55: vev.wire.v1.BrokerErrorMessage.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	0,  // 56: vev.wire.v1.Shutdown.scope:type_name -> vev.wire.v1.BrokerScope
+	32, // 57: vev.wire.v1.BrokerCatalogSession.tabs:type_name -> vev.wire.v1.BrokerCatalogTab
+	58, // [58:58] is the sub-list for method output_type
+	58, // [58:58] is the sub-list for method input_type
+	58, // [58:58] is the sub-list for extension type_name
+	58, // [58:58] is the sub-list for extension extendee
+	0,  // [0:58] is the sub-list for field type_name
 }
 
 func init() { file_broker_proto_init() }
@@ -2879,7 +2996,7 @@ func file_broker_proto_init() {
 	}
 	file_broker_proto_msgTypes[18].OneofWrappers = []any{
 		(*SnapshotPart_Begin)(nil),
-		(*SnapshotPart_Host)(nil),
+		(*SnapshotPart_Daemon)(nil),
 		(*SnapshotPart_Session)(nil),
 		(*SnapshotPart_Tombstone)(nil),
 		(*SnapshotPart_End)(nil),

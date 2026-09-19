@@ -203,7 +203,8 @@ func (s *serverSession) startStream(m brokerwire.OpenStream) {
 		return
 	}
 	request := ports.BrokerOpenStreamRequest{
-		Epoch: m.Epoch, Purpose: m.Purpose, Local: m.Local,
+		Epoch: m.Epoch, Purpose: m.Purpose, Admission: m.Admission, Name: m.Name,
+		Local:      m.Local,
 		Connection: m.Connection, Stream: m.Stream,
 		Endpoint: m.Endpoint, Registration: m.Registration,
 		Target: m.Target, Env: m.Env, Policy: m.Policy,

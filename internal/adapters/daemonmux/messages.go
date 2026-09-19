@@ -80,6 +80,8 @@ func (r StreamRef) Validate() error {
 type Open struct {
 	Ref          StreamRef
 	Purpose      ports.BrokerStreamPurpose
+	Admission    ports.BrokerStreamAdmission
+	Name         string
 	Local        bool
 	Endpoint     string
 	Registration domain.RemoteRegistration

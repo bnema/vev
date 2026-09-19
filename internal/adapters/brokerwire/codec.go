@@ -419,7 +419,8 @@ func unsubscribeFromWire(message *wire.Unsubscribe) (Unsubscribe, error) {
 
 func openStreamToWire(m OpenStream) (*wire.OpenStream, error) {
 	request := ports.BrokerOpenStreamRequest{
-		Epoch: m.Epoch, Purpose: m.Purpose, Local: m.Local,
+		Epoch: m.Epoch, Purpose: m.Purpose, Admission: m.Admission, Name: m.Name,
+		Local:      m.Local,
 		Connection: m.Connection, Stream: m.Stream,
 		Endpoint: m.Endpoint, Registration: m.Registration,
 		Target: m.Target, Env: m.Env, Policy: m.Policy,
@@ -450,20 +451,62 @@ func openStreamToWire(m OpenStream) (*wire.OpenStream, error) {
 	default:
 		return nil, ErrInvalidMessage
 	}
+	admission, err := admissionToWire(m.Admission)
+	if err != nil {
+		return nil, err
+	}
 	out := &wire.OpenStream{
 		Ref:     refToWire(m.Epoch, m.Connection, m.Stream),
 		Purpose: purpose, Local: m.Local, Endpoint: m.Endpoint,
 		Env:    append([]string(nil), m.Env...),
 		Policy: policyToWire(m.Policy),
+		// The admission taxonomy mirrors the port values (0 none, 1 exact,
+		// 2 create named, 3 create ephemeral); the name travels only for the
+		// create-named variant.
+		Admission: admission, Name: m.Name,
 	}
 	if !m.Local {
 		out.Registration = registrationToWire(m.Registration)
 	}
-	if m.Purpose == ports.BrokerStreamAttachment {
-		target := m.Target
-		out.Target = exactTargetToWire(target)
+	// Only exact attach/resume carries a session target; a creation
+	// admission carries a zero target that must never be encoded as a
+	// present message.
+	if m.Purpose == ports.BrokerStreamAttachment && m.Admission == ports.BrokerAdmissionExact {
+		out.Target = exactTargetToWire(m.Target)
 	}
 	return out, nil
+}
+
+// admissionToWire maps the closed admission taxonomy onto its wire code.
+func admissionToWire(admission ports.BrokerStreamAdmission) (uint32, error) {
+	switch admission {
+	case 0:
+		return 0, nil
+	case ports.BrokerAdmissionExact:
+		return 1, nil
+	case ports.BrokerAdmissionCreateNamed:
+		return 2, nil
+	case ports.BrokerAdmissionCreateEphemeral:
+		return 3, nil
+	default:
+		return 0, errConvertRange
+	}
+}
+
+// admissionFromWire maps a wire admission code onto the closed taxonomy.
+func admissionFromWire(value uint32) (ports.BrokerStreamAdmission, error) {
+	switch value {
+	case 0:
+		return 0, nil
+	case 1:
+		return ports.BrokerAdmissionExact, nil
+	case 2:
+		return ports.BrokerAdmissionCreateNamed, nil
+	case 3:
+		return ports.BrokerAdmissionCreateEphemeral, nil
+	default:
+		return 0, errConvertRange
+	}
 }
 
 func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
@@ -486,6 +529,10 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 	default:
 		return OpenStream{}, ErrInvalidMessage
 	}
+	admission, err := admissionFromWire(message.GetAdmission())
+	if err != nil {
+		return OpenStream{}, ErrInvalidMessage
+	}
 	local := message.GetLocal()
 	var registration domain.RemoteRegistration
 	if !local {
@@ -496,8 +543,10 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 	} else if message.GetRegistration() != nil {
 		return OpenStream{}, ErrInvalidMessage
 	}
+	// Only exact attach/resume carries a session target. A present target on
+	// any other admission or purpose is malformed.
 	var target protocol.ExactSessionTarget
-	if purpose == ports.BrokerStreamAttachment {
+	if purpose == ports.BrokerStreamAttachment && admission == ports.BrokerAdmissionExact {
 		target, err = exactTargetFromWire(message.GetTarget())
 		if err != nil {
 			return OpenStream{}, ErrInvalidMessage
@@ -519,11 +568,14 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 	endpoint := message.GetEndpoint()
 	candidate := OpenStream{
 		Epoch: epoch, Connection: connection, Stream: stream,
-		Purpose: purpose, Local: local, Endpoint: endpoint,
+		Purpose: purpose, Admission: admission, Name: message.GetName(),
+		Local:        local,
+		Endpoint:     endpoint,
 		Registration: registration, Target: target, Env: env, Policy: policy,
 	}
 	request := ports.BrokerOpenStreamRequest{
-		Epoch: candidate.Epoch, Purpose: candidate.Purpose, Local: candidate.Local,
+		Epoch: candidate.Epoch, Purpose: candidate.Purpose,
+		Admission: candidate.Admission, Name: candidate.Name, Local: candidate.Local,
 		Connection: candidate.Connection, Stream: candidate.Stream,
 		Endpoint: candidate.Endpoint, Registration: candidate.Registration,
 		Target: candidate.Target, Env: candidate.Env, Policy: candidate.Policy,
@@ -780,26 +832,30 @@ func snapshotPartToWire(m SnapshotPart) (*wire.SnapshotPart, error) {
 	}
 	switch part := m.Part.(type) {
 	case SnapshotBegin:
-		if part.HostCount > ports.BrokerMaxHosts ||
-			part.SessionCount > ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost ||
+		if part.HostCount > ports.BrokerMaxDaemonsPerSnapshot ||
+			part.SessionCount > ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost ||
 			part.TombstoneCount > ports.BrokerMaxTombstones {
 			return nil, ErrTooLarge
 		}
+		if part.LocalPresent && part.HostCount == 0 {
+			return nil, ErrInvalidMessage
+		}
 		out.Part = &wire.SnapshotPart_Begin{Begin: &wire.SnapshotBegin{
 			HostCount: part.HostCount, SessionCount: part.SessionCount, TombstoneCount: part.TombstoneCount,
+			LocalPresent: part.LocalPresent,
 		}}
 	case *SnapshotBegin:
 		if part == nil {
 			return nil, ErrInvalidMessage
 		}
 		return snapshotPartToWire(SnapshotPart{Epoch: m.Epoch, Connection: m.Connection, Generation: m.Generation, Revision: m.Revision, Index: m.Index, Part: *part})
-	case SnapshotHostPart:
-		converted, err := snapshotHostToWire(part)
+	case SnapshotDaemonPart:
+		converted, err := snapshotDaemonToWire(part)
 		if err != nil {
 			return nil, err
 		}
-		out.Part = &wire.SnapshotPart_Host{Host: converted}
-	case *SnapshotHostPart:
+		out.Part = &wire.SnapshotPart_Daemon{Daemon: converted}
+	case *SnapshotDaemonPart:
 		if part == nil {
 			return nil, ErrInvalidMessage
 		}
@@ -867,34 +923,38 @@ func snapshotPartFromWire(message *wire.SnapshotPart) (SnapshotPart, error) {
 		if payload.Begin == nil {
 			return SnapshotPart{}, ErrInvalidMessage
 		}
-		if payload.Begin.GetHostCount() > ports.BrokerMaxHosts ||
-			payload.Begin.GetSessionCount() > ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost ||
+		if payload.Begin.GetHostCount() > ports.BrokerMaxDaemonsPerSnapshot ||
+			payload.Begin.GetSessionCount() > ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost ||
 			payload.Begin.GetTombstoneCount() > ports.BrokerMaxTombstones {
 			return SnapshotPart{}, ErrTooLarge
+		}
+		if payload.Begin.GetLocalPresent() && payload.Begin.GetHostCount() == 0 {
+			return SnapshotPart{}, ErrInvalidMessage
 		}
 		part.Part = SnapshotBegin{
 			HostCount:      payload.Begin.GetHostCount(),
 			SessionCount:   payload.Begin.GetSessionCount(),
 			TombstoneCount: payload.Begin.GetTombstoneCount(),
+			LocalPresent:   payload.Begin.GetLocalPresent(),
 		}
-	case *wire.SnapshotPart_Host:
-		if payload.Host == nil {
+	case *wire.SnapshotPart_Daemon:
+		if payload.Daemon == nil {
 			return SnapshotPart{}, ErrInvalidMessage
 		}
-		host, index, sessionCount, err := snapshotHostFromWire(payload.Host)
+		daemon, index, sessionCount, err := snapshotDaemonFromWire(payload.Daemon)
 		if err != nil {
 			return SnapshotPart{}, err
 		}
-		part.Part = SnapshotHostPart{HostIndex: index, Host: host, SessionCount: sessionCount}
+		part.Part = SnapshotDaemonPart{HostIndex: index, Daemon: daemon, SessionCount: sessionCount}
 	case *wire.SnapshotPart_Session:
 		if payload.Session == nil {
 			return SnapshotPart{}, ErrInvalidMessage
 		}
-		session, hostIndex, sessionIndex, err := snapshotSessionFromWire(payload.Session)
+		session, hostIndex, sessionIndex, local, err := snapshotSessionFromWire(payload.Session)
 		if err != nil {
 			return SnapshotPart{}, err
 		}
-		part.Part = SnapshotSessionPart{HostIndex: hostIndex, SessionIndex: sessionIndex, Session: session}
+		part.Part = SnapshotSessionPart{HostIndex: hostIndex, SessionIndex: sessionIndex, Local: local, Session: session}
 	case *wire.SnapshotPart_Tombstone:
 		if payload.Tombstone == nil {
 			return SnapshotPart{}, ErrInvalidMessage
@@ -922,118 +982,167 @@ func snapshotPartFromWire(message *wire.SnapshotPart) (SnapshotPart, error) {
 	return part, nil
 }
 
-func snapshotHostToWire(part SnapshotHostPart) (*wire.SnapshotHost, error) {
-	if part.HostIndex >= ports.BrokerMaxHosts {
+// snapshotDaemonToWire converts one daemon part losslessly. It refuses a
+// malformed local/remote authority pairing, a partial identity, an
+// out-of-range enum or rank, a session inventory that could not be durable,
+// inline sessions (they travel separately), and any index or count above
+// the snapshot bounds.
+func snapshotDaemonToWire(part SnapshotDaemonPart) (*wire.SnapshotDaemon, error) {
+	if part.HostIndex >= ports.BrokerMaxDaemonsPerSnapshot {
 		return nil, ErrTooLarge
 	}
-	host := part.Host
-	if err := validateSnapshotHostFields(host); err != nil {
+	daemon := part.Daemon
+	if err := validateSnapshotDaemonFields(daemon); err != nil {
 		return nil, err
 	}
-	if err := host.Registration.Validate(); err != nil {
+	if err := daemon.Validate(); err != nil {
 		return nil, ErrInvalidMessage
 	}
-	if host.Endpoint != host.Registration.Endpoint {
-		return nil, ErrInvalidMessage
+	if !daemon.Local {
+		if err := ports.ValidateDurableHostProjection(daemon); err != nil {
+			return nil, ErrInvalidMessage
+		}
 	}
-	if err := ports.ValidateDurableHostProjection(host); err != nil {
-		return nil, ErrInvalidMessage
-	}
-	if len(host.Sessions) != 0 {
+	if len(daemon.Sessions) != 0 {
 		return nil, ErrInvalidMessage
 	}
 	if part.SessionCount > ports.BrokerMaxSessionsPerHost {
 		return nil, ErrTooLarge
 	}
-	lastAttemptSeconds, lastAttemptNanos := brokerTimeToWire(host.LastAttempt)
-	lastSuccessSeconds, lastSuccessNanos := brokerTimeToWire(host.LastSuccess)
-	nextDueSeconds, nextDueNanos := brokerTimeToWire(host.NextDue)
-	return &wire.SnapshotHost{
-		HostIndex: part.HostIndex, Endpoint: host.Endpoint, DisplayOrigin: host.DisplayOrigin,
-		Rank: uint32(host.Rank), Registration: registrationToWire(host.Registration),
-		Availability: uint32(host.Availability), Checking: host.Checking,
+	lastAttemptSeconds, lastAttemptNanos := brokerTimeToWire(daemon.LastAttempt)
+	lastSuccessSeconds, lastSuccessNanos := brokerTimeToWire(daemon.LastSuccess)
+	nextDueSeconds, nextDueNanos := brokerTimeToWire(daemon.NextDue)
+	var registration *wire.RemoteRegistration
+	if !daemon.Local {
+		registration = registrationToWire(daemon.Registration)
+	}
+	var incarnation []byte
+	if !daemon.Incarnation.IsZero() {
+		incarnation = append([]byte(nil), daemon.Incarnation[:]...)
+	}
+	return &wire.SnapshotDaemon{
+		HostIndex: part.HostIndex, Local: daemon.Local,
+		Endpoint: daemon.Endpoint, DisplayOrigin: daemon.DisplayOrigin,
+		Rank: uint32(daemon.Rank), Registration: registration,
+		Policy:         policyToWire(daemon.Policy),
+		DaemonIdentity: string(daemon.Identity), DaemonIncarnation: incarnation,
+		ProtocolVersion: uint32(daemon.ProtocolVersion), Capabilities: daemon.Capabilities,
+		Availability: uint32(daemon.Availability), Checking: daemon.Checking,
 		LastAttempt:         &wire.BrokerTimestamp{Seconds: lastAttemptSeconds, Nanos: lastAttemptNanos},
 		LastSuccess:         &wire.BrokerTimestamp{Seconds: lastSuccessSeconds, Nanos: lastSuccessNanos},
 		NextDue:             &wire.BrokerTimestamp{Seconds: nextDueSeconds, Nanos: nextDueNanos},
-		ConsecutiveFailures: uint64(host.ConsecutiveFailures), FailureEpisode: host.FailureEpisode,
-		FailureKind:    uint32(host.LastFailure.Kind),
-		InventoryKnown: host.InventoryKnown, SessionCount: part.SessionCount,
+		ConsecutiveFailures: uint64(daemon.ConsecutiveFailures), FailureEpisode: daemon.FailureEpisode,
+		FailureKind:    uint32(daemon.LastFailure.Kind),
+		InventoryKnown: daemon.InventoryKnown, SessionCount: part.SessionCount,
 	}, nil
 }
 
-func snapshotHostFromWire(message *wire.SnapshotHost) (ports.RemoteHostSnapshot, uint32, uint32, error) {
-	var host ports.RemoteHostSnapshot
+func snapshotDaemonFromWire(message *wire.SnapshotDaemon) (ports.BrokerDaemonObservation, uint32, uint32, error) {
+	var daemon ports.BrokerDaemonObservation
 	if message == nil {
-		return host, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
-	if message.GetHostIndex() >= ports.BrokerMaxHosts {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrTooLarge
+	if message.GetHostIndex() >= ports.BrokerMaxDaemonsPerSnapshot {
+		return daemon, 0, 0, ErrTooLarge
 	}
+	local := message.GetLocal()
 	endpoint := message.GetEndpoint()
-	if err := validateBrokerEndpoint(endpoint); err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, err
-	}
 	origin := message.GetDisplayOrigin()
 	if err := validateBrokerOrigin(origin); err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, err
+		return daemon, 0, 0, err
 	}
-	registration, err := registrationFromWire(message.GetRegistration())
+	var registration domain.RemoteRegistration
+	if local {
+		if message.GetRegistration() != nil || endpoint != "" {
+			return daemon, 0, 0, ErrInvalidMessage
+		}
+	} else {
+		if err := validateBrokerEndpoint(endpoint); err != nil {
+			return daemon, 0, 0, err
+		}
+		converted, err := registrationFromWire(message.GetRegistration())
+		if err != nil {
+			return daemon, 0, 0, ErrInvalidMessage
+		}
+		if endpoint != converted.Endpoint {
+			return daemon, 0, 0, ErrInvalidMessage
+		}
+		registration = converted
+	}
+	policy, err := policyFromWire(message.GetPolicy())
 	if err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
-	if endpoint != registration.Endpoint {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+	raw := message.GetDaemonIncarnation()
+	if len(raw) != 0 && len(raw) != len(daemon.Incarnation) {
+		return daemon, 0, 0, errConvertRange
+	}
+	if len(raw) == len(daemon.Incarnation) {
+		copy(daemon.Incarnation[:], raw)
+	}
+	protocolVersion, err := brokerEnum16[uint16](message.GetProtocolVersion())
+	if err != nil {
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	availability, err := brokerEnum8[domain.RemoteAvailability](message.GetAvailability())
 	if err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, err
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	if availability < domain.RemoteAvailabilityUnknown || availability > domain.RemoteAvailabilityInvalidResponse {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	failureKind, err := brokerEnum8[domain.RemoteFailureKind](message.GetFailureKind())
 	if err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, err
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	if failureKind > domain.RemoteFailureInvalidResponse {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	lastAttempt, err := brokerTimeFromWire(message.GetLastAttempt().GetSeconds(), message.GetLastAttempt().GetNanos())
 	if err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	lastSuccess, err := brokerTimeFromWire(message.GetLastSuccess().GetSeconds(), message.GetLastSuccess().GetNanos())
 	if err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	nextDue, err := brokerTimeFromWire(message.GetNextDue().GetSeconds(), message.GetNextDue().GetNanos())
 	if err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrInvalidMessage
+		return daemon, 0, 0, ErrInvalidMessage
 	}
 	if message.GetConsecutiveFailures() > math.MaxUint32 {
-		return ports.RemoteHostSnapshot{}, 0, 0, errConvertRange
+		return daemon, 0, 0, errConvertRange
 	}
-	sessionCount := message.GetSessionCount()
-	if sessionCount > ports.BrokerMaxSessionsPerHost {
-		return ports.RemoteHostSnapshot{}, 0, 0, ErrTooLarge
+	if message.GetSessionCount() > ports.BrokerMaxSessionsPerHost {
+		return daemon, 0, 0, ErrTooLarge
 	}
-	host = ports.RemoteHostSnapshot{
-		Endpoint: endpoint, DisplayOrigin: origin, Rank: int(message.GetRank()),
-		Registration: registration, Availability: availability, Checking: message.GetChecking(),
+	daemon = ports.BrokerDaemonObservation{
+		Local: local, Endpoint: endpoint, DisplayOrigin: origin, Rank: int(message.GetRank()),
+		Registration: registration, Policy: policy,
+		Identity: ports.BrokerDaemonIdentity(message.GetDaemonIdentity()), Incarnation: daemon.Incarnation,
+		ProtocolVersion: protocolVersion, Capabilities: message.GetCapabilities(),
+		Availability: availability, Checking: message.GetChecking(),
 		LastAttempt: lastAttempt, LastSuccess: lastSuccess, NextDue: nextDue,
 		ConsecutiveFailures: uint(message.GetConsecutiveFailures()), FailureEpisode: message.GetFailureEpisode(),
 		LastFailure:    domain.RemoteFailure{Kind: failureKind},
 		InventoryKnown: message.GetInventoryKnown(),
 		Sessions:       []catalogue.RemoteCatalogSession{},
 	}
-	if err := validateSnapshotHostFields(host); err != nil {
-		return ports.RemoteHostSnapshot{}, 0, 0, err
+	if err := validateSnapshotDaemonFields(daemon); err != nil {
+		return daemon, 0, 0, err
 	}
-	return host, message.GetHostIndex(), message.GetSessionCount(), nil
+	if err := daemon.Validate(); err != nil {
+		return daemon, 0, 0, ErrInvalidMessage
+	}
+	return daemon, message.GetHostIndex(), message.GetSessionCount(), nil
 }
 
 func snapshotSessionToWire(part SnapshotSessionPart) (*wire.SnapshotSession, error) {
-	if part.HostIndex >= ports.BrokerMaxHosts {
+	if part.Local {
+		if part.HostIndex != 0 {
+			return nil, ErrInvalidMessage
+		}
+	} else if part.HostIndex >= ports.BrokerMaxDaemonsPerSnapshot {
 		return nil, ErrTooLarge
 	}
 	if part.SessionIndex >= ports.BrokerMaxSessionsPerHost {
@@ -1044,26 +1153,32 @@ func snapshotSessionToWire(part SnapshotSessionPart) (*wire.SnapshotSession, err
 	}
 	return &wire.SnapshotSession{
 		HostIndex: part.HostIndex, SessionIndex: part.SessionIndex,
+		Local:   part.Local,
 		Session: catalogSessionToWire(part.Session),
 	}, nil
 }
 
-func snapshotSessionFromWire(message *wire.SnapshotSession) (catalogue.RemoteCatalogSession, uint32, uint32, error) {
+func snapshotSessionFromWire(message *wire.SnapshotSession) (catalogue.RemoteCatalogSession, uint32, uint32, bool, error) {
 	var session catalogue.RemoteCatalogSession
 	if message == nil {
-		return session, 0, 0, ErrInvalidMessage
+		return session, 0, 0, false, ErrInvalidMessage
 	}
-	if message.GetHostIndex() >= ports.BrokerMaxHosts {
-		return catalogue.RemoteCatalogSession{}, 0, 0, ErrTooLarge
+	local := message.GetLocal()
+	if local {
+		if message.GetHostIndex() != 0 {
+			return session, 0, 0, false, ErrInvalidMessage
+		}
+	} else if message.GetHostIndex() >= ports.BrokerMaxDaemonsPerSnapshot {
+		return session, 0, 0, false, ErrTooLarge
 	}
 	if message.GetSessionIndex() >= ports.BrokerMaxSessionsPerHost {
-		return catalogue.RemoteCatalogSession{}, 0, 0, ErrTooLarge
+		return session, 0, 0, false, ErrTooLarge
 	}
 	converted, err := catalogSessionFromWire(message.GetSession())
 	if err != nil {
-		return catalogue.RemoteCatalogSession{}, 0, 0, err
+		return session, 0, 0, false, err
 	}
-	return converted, message.GetHostIndex(), message.GetSessionIndex(), nil
+	return converted, message.GetHostIndex(), message.GetSessionIndex(), local, nil
 }
 
 func operationResultToWire(m OperationResult) (*wire.OperationResult, error) {

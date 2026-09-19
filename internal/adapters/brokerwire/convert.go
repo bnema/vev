@@ -435,24 +435,31 @@ func validateCatalogSession(session catalogue.RemoteCatalogSession) error {
 	return nil
 }
 
-// validateSnapshotHostBounds enforces the per-host snapshot contract:
+// validateSnapshotDaemonFields enforces the per-daemon snapshot contract:
 // endpoint grammar, presentation origin, rank fit, closed availability and
-// failure taxonomies, and time values that survive the wire exactly.
-func validateSnapshotHostFields(host ports.RemoteHostSnapshot) error {
-	if err := validateBrokerEndpoint(host.Endpoint); err != nil {
+// failure taxonomies, and a syntactically present policy. The full port
+// projection rules (identity/incarnation pairing, observed version,
+// inventory, local authority) are re-checked by BrokerDaemonObservation
+// validation and, for remotes, the durable projection rule.
+func validateSnapshotDaemonFields(daemon ports.BrokerDaemonObservation) error {
+	if daemon.Local {
+		if daemon.Endpoint != "" {
+			return ErrInvalidMessage
+		}
+	} else if err := validateBrokerEndpoint(daemon.Endpoint); err != nil {
 		return err
 	}
-	if err := validateBrokerOrigin(host.DisplayOrigin); err != nil {
+	if err := validateBrokerOrigin(daemon.DisplayOrigin); err != nil {
 		return err
 	}
-	if host.Rank < 0 || host.Rank > math.MaxUint32 {
+	if daemon.Rank < 0 || daemon.Rank > math.MaxUint32 {
 		return errConvertRange
 	}
-	if host.Availability < domain.RemoteAvailabilityUnknown ||
-		host.Availability > domain.RemoteAvailabilityInvalidResponse {
+	if daemon.Availability < domain.RemoteAvailabilityUnknown ||
+		daemon.Availability > domain.RemoteAvailabilityInvalidResponse {
 		return ErrInvalidMessage
 	}
-	if host.LastFailure.Kind > domain.RemoteFailureInvalidResponse {
+	if daemon.LastFailure.Kind > domain.RemoteFailureInvalidResponse {
 		return ErrInvalidMessage
 	}
 	return nil

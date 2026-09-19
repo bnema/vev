@@ -24,10 +24,10 @@ import (
 // session-less hosts.
 func TestSnapshotPartsLayoutRoundTrips(t *testing.T) {
 	snapshot := testSnapshot(9, 12)
-	snapshot.Hosts = append(snapshot.Hosts, testHostAt(1))
+	snapshot.Daemons = append(snapshot.Daemons, testDaemonAt(1))
 	snapshot.Removed = []ports.BrokerHostTombstone{{
 		Endpoint:        "retired@old:22",
-		Registration:    testHostAt(0).Registration,
+		Registration:    testDaemonAt(0).Registration,
 		RetiredRevision: 3,
 	}}
 	snapshot.Removed[0].Registration.Endpoint = "retired@old:22"
@@ -61,9 +61,9 @@ func TestSnapshotPartsLayoutRoundTrips(t *testing.T) {
 	}
 	require.True(t, found, "the transfer must commit")
 	require.Equal(t, snapshot.Revision, committed.Revision)
-	require.Len(t, committed.Hosts, 2)
-	require.Len(t, committed.Hosts[0].Sessions, 2)
-	for _, host := range committed.Hosts {
+	require.Len(t, committed.Daemons, 2)
+	require.Len(t, committed.Daemons[0].Sessions, 2)
+	for _, host := range committed.Daemons {
 		for _, session := range host.Sessions {
 			require.Equal(t, []catalogue.RemoteCatalogTab{}, session.Tabs)
 		}
@@ -72,13 +72,54 @@ func TestSnapshotPartsLayoutRoundTrips(t *testing.T) {
 	require.Equal(t, "retired@old:22", committed.Removed[0].Endpoint)
 }
 
+// TestSnapshotPartsLocalDaemonLayoutRoundTrips proves the emitter and the
+// assembler agree on a local-first transfer: Begin advertises local_present,
+// the local daemon is index 0 with its session bound locally, and the committed
+// snapshot reproduces the local-first publication.
+func TestSnapshotPartsLocalDaemonLayoutRoundTrips(t *testing.T) {
+	snapshot := testLocalSnapshot(4, 2)
+	require.NoError(t, snapshot.Validate())
+
+	parts, err := snapshotParts(snapshot, 4, ports.BrokerConnectionID{4, 4}, 2)
+	require.NoError(t, err)
+	require.Len(t, parts, 1+2+2+1)
+
+	begin, ok := parts[0].Part.(brokerwire.SnapshotBegin)
+	require.True(t, ok)
+	require.True(t, begin.LocalPresent)
+	require.Equal(t, uint32(2), begin.HostCount)
+	require.Equal(t, uint32(2), begin.SessionCount)
+
+	assembler := brokerwire.NewSnapshotAssembler(4, ports.BrokerConnectionID{4, 4}, brokerwire.WithGeneration(2))
+	var committed ports.BrokerSnapshot
+	found := false
+	for index, part := range parts {
+		require.Equal(t, uint32(index), part.Index)
+		done, assembled, err := assembler.Add(part)
+		require.NoError(t, err, "part %d", index)
+		if done {
+			committed = assembled
+			found = true
+		}
+	}
+	require.True(t, found, "the transfer must commit")
+	require.Equal(t, snapshot.Revision, committed.Revision)
+	require.Len(t, committed.Daemons, 2)
+	require.True(t, committed.Daemons[0].Local)
+	require.Empty(t, committed.Daemons[0].Endpoint)
+	require.Len(t, committed.Daemons[0].Sessions, 1)
+	require.Equal(t, snapshot.Daemons[0].Sessions[0].Name, committed.Daemons[0].Sessions[0].Name)
+	require.Equal(t, "user0@host0:22", committed.Daemons[1].Endpoint)
+	require.Len(t, committed.Daemons[1].Sessions, 1)
+}
+
 // TestSnapshotPartsRefusesOverBoundInventory proves the emitter fails closed on
 // an inventory the peer's assembler would refuse, instead of silently sending a
 // transfer that can never commit.
 func TestSnapshotPartsRefusesOverBoundInventory(t *testing.T) {
 	snapshot := testSnapshot(1, 1)
 	over := make([]catalogue.RemoteCatalogSession, ports.BrokerMaxSessionsPerHost+1)
-	snapshot.Hosts[0].Sessions = over
+	snapshot.Daemons[0].Sessions = over
 	_, err := snapshotParts(snapshot, 1, ports.BrokerConnectionID{1}, 1)
 	require.Error(t, err)
 

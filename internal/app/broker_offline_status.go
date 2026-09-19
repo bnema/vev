@@ -627,13 +627,21 @@ func probeBrokerStatus(ctx context.Context, socketPath string) (brokerStatusRepo
 }
 
 // readyBrokerStatus projects one committed snapshot into the ready report.
+// HostCount counts configured remote hosts; the local daemon observation is
+// not a configured host.
 func readyBrokerStatus(socketPath string, snapshot ports.BrokerSnapshot) brokerStatusReport {
+	hosts := 0
+	for _, daemon := range snapshot.Daemons {
+		if !daemon.Local {
+			hosts++
+		}
+	}
 	return brokerStatusReport{
 		Status:    "ready",
 		Endpoint:  socketPath,
 		Epoch:     snapshot.Epoch,
 		Revision:  snapshot.Revision,
-		HostCount: len(snapshot.Hosts),
+		HostCount: hosts,
 	}
 }
 

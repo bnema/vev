@@ -193,7 +193,7 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
   `go tool buf generate`, and handle the new variant in `sessionwire`.
   Never edit generated `*.pb.go`; never add manual IDs or dispatch tables.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `54`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `55`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
 
 ## Broker wire core (Plan 001 P3.1, not activated)
 
@@ -264,6 +264,30 @@ underlying Close error. Timer ownership is single-goroutine; Stop followed by a
 nonblocking drain on false precedes Reset, supporting buffered timer adapters.
 Policy identities have independent field-labelled validation and a named bound.
 These are P2.2 port contracts, not a wire migration or production activation.
+
+## Broker registry and daemon observation (Plan 001 P5.2a, not activated)
+
+`internal/usecase/broker.Registry` owns configured hosts and their immutable
+observation projections. `ports.BrokerDaemonObservation` is the broker-native
+projection of one daemon, local or remote: configured authority (local flag,
+endpoint, registration, policy, display origin, rank) is stamped by the
+registry from durable membership and never taken from a probe, while observed
+identity, process incarnation, protocol version, capability bitmask,
+availability, failure/freshness state, and the exact session catalogue come
+only from probe results. Unknown identity or version is zero, never invented;
+an observed identity always carries a protocol version, and availability is
+never zero (an unobserved daemon carries `RemoteAvailabilityUnknown`). A
+`ports.BrokerSnapshot` publishes these observations (`Daemons`, local entry
+first when present, then remotes in registration order) plus the tombstone
+set; `brokerwire` mirrors them through `SnapshotBegin`/`SnapshotDaemon`/
+`SnapshotSession` parts. Local observations are never durable: the snapshot
+store persists and reloads remote observations only, with policy re-stamped
+from membership on load, so membership stays the single policy authority.
+Observing a daemon never attaches to it and never starts a stopped one.
+Attachment streams declare one closed admission variant
+(`ports.BrokerStreamAdmission`: exact attach/resume, named creation, ephemeral
+creation) validated identically at the ports, broker IPC, and daemonmux
+boundaries.
 
 ## Broker local IPC (Plan 001 P3.3, not activated)
 

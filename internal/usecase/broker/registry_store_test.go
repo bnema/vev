@@ -17,7 +17,7 @@ func TestRegistryRestoresAuthoritativeMembership(t *testing.T) {
 			old := registration(t, "host", 1)
 			current := old
 			store := portsmocks.NewMockBrokerHostStore(t)
-			snapshot := ports.BrokerSnapshot{Epoch: 1, Revision: 9, Hosts: []ports.RemoteHostSnapshot{{Endpoint: "host", Registration: old, Availability: domain.RemoteAvailabilityReachable, InventoryKnown: true}}}
+			snapshot := ports.BrokerSnapshot{Epoch: 1, Revision: 9, Daemons: []ports.BrokerDaemonObservation{{Endpoint: "host", Registration: old, Availability: domain.RemoteAvailabilityReachable, InventoryKnown: true}}}
 			hosts := ports.BrokerHosts{Revision: 4}
 			if mode == "replaced" {
 				current.Generation++
@@ -36,12 +36,12 @@ func TestRegistryRestoresAuthoritativeMembership(t *testing.T) {
 			require.Equal(t, ports.BrokerEpoch(2), got.Epoch)
 			require.Equal(t, ports.BrokerRevision(1), got.Revision)
 			if mode == "removed" {
-				require.Empty(t, got.Hosts)
+				require.Empty(t, got.Daemons)
 				return
 			}
-			require.Len(t, got.Hosts, 1)
-			require.Equal(t, current, got.Hosts[0].Registration)
-			require.Equal(t, mode == "matching", got.Hosts[0].InventoryKnown)
+			require.Len(t, got.Daemons, 1)
+			require.Equal(t, current, got.Daemons[0].Registration)
+			require.Equal(t, mode == "matching", got.Daemons[0].InventoryKnown)
 		})
 	}
 }
@@ -98,7 +98,7 @@ func TestRegistryRestoreIsReadOnlyAndPublicationLocal(t *testing.T) {
 	clock := newManualClock(time.Unix(100, 0))
 	reg := registration(t, "host", 1)
 	store := portsmocks.NewMockBrokerHostStore(t)
-	store.EXPECT().Load().Return(ports.BrokerSnapshot{Epoch: 5, Revision: 4096, Hosts: []ports.RemoteHostSnapshot{{
+	store.EXPECT().Load().Return(ports.BrokerSnapshot{Epoch: 5, Revision: 4096, Daemons: []ports.BrokerDaemonObservation{{
 		Endpoint: reg.Endpoint, Registration: reg, Availability: domain.RemoteAvailabilityReachable, InventoryKnown: true,
 	}}}, nil).Once()
 	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 99, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy()}}}, nil).Once()
@@ -110,7 +110,7 @@ func TestRegistryRestoreIsReadOnlyAndPublicationLocal(t *testing.T) {
 	require.Equal(t, ports.BrokerEpoch(6), snapshot.Epoch)
 	// Restoring reuses the matching observation but never republishes it: a
 	// fresh process adopts authority and rewrites only when it observes.
-	require.Len(t, snapshot.Hosts, 1)
-	require.True(t, snapshot.Hosts[0].InventoryKnown)
-	require.Equal(t, domain.RemoteAvailabilityReachable, snapshot.Hosts[0].Availability)
+	require.Len(t, snapshot.Daemons, 1)
+	require.True(t, snapshot.Daemons[0].InventoryKnown)
+	require.Equal(t, domain.RemoteAvailabilityReachable, snapshot.Daemons[0].Availability)
 }

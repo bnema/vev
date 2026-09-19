@@ -486,7 +486,8 @@ func (c *client) OpenStream(ctx context.Context, request ports.BrokerOpenStreamR
 	// dispatched, because the local identity is already admitted either way.
 	if _, err := c.sendContext(ctx, brokerwire.OpenStream{
 		Epoch: scoped.Epoch, Connection: scoped.Connection, Stream: scoped.Stream,
-		Purpose: scoped.Purpose, Local: scoped.Local,
+		Purpose: scoped.Purpose, Admission: scoped.Admission, Name: scoped.Name,
+		Local:    scoped.Local,
 		Endpoint: scoped.Endpoint, Registration: scoped.Registration,
 		Target: scoped.Target, Env: scoped.Env, Policy: scoped.Policy,
 	}); err != nil {

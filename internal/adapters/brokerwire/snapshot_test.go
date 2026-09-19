@@ -25,15 +25,30 @@ func testSnapshotAssembler(t *testing.T, opts ...SnapshotOption) *SnapshotAssemb
 	return NewSnapshotAssembler(epoch, connection, opts...)
 }
 
-// testHostAt builds one catalogue-valid host projection for host index i.
-func testHostAt(i int) ports.RemoteHostSnapshot {
+// testDaemonAt builds one catalogue-valid remote daemon projection for daemon
+// index i. Sessions are attached by the sample helpers; the emitter strips
+// them before a daemon part travels.
+func testDaemonAt(i int) ports.BrokerDaemonObservation {
 	endpoint := fmt.Sprintf("user%d@host%d:22", i, i)
-	return ports.RemoteHostSnapshot{
+	return ports.BrokerDaemonObservation{
 		Endpoint:       endpoint,
 		DisplayOrigin:  endpoint,
 		Registration:   domain.RemoteRegistration{Endpoint: endpoint, Incarnation: [16]byte{0x10, byte(i + 1), 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0, 0x11}, Generation: domain.RemoteGeneration(i + 1)},
+		Policy:         testPolicy(),
 		Availability:   domain.RemoteAvailabilityReachable,
 		LastSuccess:    time.Unix(1700000000+int64(i), 0).UTC(),
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{},
+	}
+}
+
+// testLocalDaemonAt builds the local daemon projection.
+func testLocalDaemonAt() ports.BrokerDaemonObservation {
+	return ports.BrokerDaemonObservation{
+		Local:          true,
+		DisplayOrigin:  "local",
+		Policy:         testPolicy(),
+		Availability:   domain.RemoteAvailabilityReachable,
 		InventoryKnown: true,
 		Sessions:       []catalogue.RemoteCatalogSession{},
 	}
@@ -59,29 +74,39 @@ func testTombstoneAt(i int) ports.BrokerHostTombstone {
 	}
 }
 
-func sampleSnapshotHosts() []ports.RemoteHostSnapshot {
-	host0 := testHostAt(0)
-	host0.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(0, 0), testSessionAt(0, 1)}
-	host1 := testHostAt(1)
-	host1.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(1, 0)}
-	return []ports.RemoteHostSnapshot{host0, host1}
+func sampleSnapshotDaemons() []ports.BrokerDaemonObservation {
+	daemon0 := testDaemonAt(0)
+	daemon0.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(0, 0), testSessionAt(0, 1)}
+	daemon1 := testDaemonAt(1)
+	daemon1.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(1, 0)}
+	return []ports.BrokerDaemonObservation{daemon0, daemon1}
+}
+
+// sampleLocalSnapshotDaemons builds a local-first publication: the local daemon
+// at index 0 with two sessions, then one remote daemon with one session.
+func sampleLocalSnapshotDaemons() []ports.BrokerDaemonObservation {
+	local := testLocalDaemonAt()
+	local.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(0, 0), testSessionAt(0, 1)}
+	remote := testDaemonAt(0)
+	remote.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(1, 0)}
+	return []ports.BrokerDaemonObservation{local, remote}
 }
 
 func sampleSnapshotTombstones() []ports.BrokerHostTombstone {
 	return []ports.BrokerHostTombstone{testTombstoneAt(0)}
 }
 
-func snapshotSessionTotal(hosts []ports.RemoteHostSnapshot) int {
+func snapshotSessionTotal(daemons []ports.BrokerDaemonObservation) int {
 	total := 0
-	for _, host := range hosts {
-		total += len(host.Sessions)
+	for _, daemon := range daemons {
+		total += len(daemon.Sessions)
 	}
 	return total
 }
 
-// snapshotPartsFor lays out one exact transfer: Begin(0), hosts with their
+// snapshotPartsFor lays out one exact transfer: Begin(0), daemons with their
 // sessions, tombstones, End. Indexes are exact sequential positions.
-func snapshotPartsFor(gen uint64, rev ports.BrokerRevision, hosts []ports.RemoteHostSnapshot, tombstones []ports.BrokerHostTombstone) []SnapshotPart {
+func snapshotPartsFor(gen uint64, rev ports.BrokerRevision, daemons []ports.BrokerDaemonObservation, tombstones []ports.BrokerHostTombstone) []SnapshotPart {
 	epoch, connection := testSnapshotScope()
 	next := uint32(0)
 	part := func(payload SnapshotPartPayload) SnapshotPart {
@@ -89,19 +114,21 @@ func snapshotPartsFor(gen uint64, rev ports.BrokerRevision, hosts []ports.Remote
 		next++
 		return out
 	}
+	localPresent := len(daemons) > 0 && daemons[0].Local
 	parts := []SnapshotPart{part(SnapshotBegin{
-		HostCount:      uint32(len(hosts)),
-		SessionCount:   uint32(snapshotSessionTotal(hosts)),
+		HostCount:      uint32(len(daemons)),
+		SessionCount:   uint32(snapshotSessionTotal(daemons)),
 		TombstoneCount: uint32(len(tombstones)),
+		LocalPresent:   localPresent,
 	})}
-	for hostIndex, host := range hosts {
-		// Host parts carry no inline sessions: the advertised count is
+	for daemonIndex, daemon := range daemons {
+		// Daemon parts carry no inline sessions: the advertised count is
 		// followed by that many session parts.
-		projection := host.Clone()
+		projection := daemon.Clone()
 		projection.Sessions = []catalogue.RemoteCatalogSession{}
-		parts = append(parts, part(SnapshotHostPart{HostIndex: uint32(hostIndex), Host: projection, SessionCount: uint32(len(host.Sessions))}))
-		for sessionIndex, session := range host.Sessions {
-			parts = append(parts, part(SnapshotSessionPart{HostIndex: uint32(hostIndex), SessionIndex: uint32(sessionIndex), Session: session}))
+		parts = append(parts, part(SnapshotDaemonPart{HostIndex: uint32(daemonIndex), Daemon: projection, SessionCount: uint32(len(daemon.Sessions))}))
+		for sessionIndex, session := range daemon.Sessions {
+			parts = append(parts, part(SnapshotSessionPart{HostIndex: uint32(daemonIndex), SessionIndex: uint32(sessionIndex), Local: daemon.Local, Session: session}))
 		}
 	}
 	for tombstoneIndex, tombstone := range tombstones {
@@ -136,15 +163,15 @@ func runSnapshotParts(a *SnapshotAssembler, parts []SnapshotPart) error {
 }
 
 func TestSnapshotAssemblerBoundsConstants(t *testing.T) {
-	require.Equal(t, 16514, MaxSnapshotParts)
-	require.Equal(t, 1+64+64*256+64+1, MaxSnapshotParts)
+	require.Equal(t, 16771, MaxSnapshotParts)
+	require.Equal(t, 1+ports.BrokerMaxDaemonsPerSnapshot+ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost+ports.BrokerMaxTombstones+1, MaxSnapshotParts)
 	require.Equal(t, uint64(80<<20), MaxSnapshotStagedBytes)
 }
 
 // TestSnapshotAssemblerExactTransfer proves exact order, count, and index
 // acceptance, and that committed order matches the staged order.
 func TestSnapshotAssemblerExactTransfer(t *testing.T) {
-	hosts := sampleSnapshotHosts()
+	hosts := sampleSnapshotDaemons()
 	tombstones := sampleSnapshotTombstones()
 	parts := snapshotPartsFor(5, 3, hosts, tombstones)
 	require.Len(t, parts, 1+2+3+1+1)
@@ -169,13 +196,13 @@ func TestSnapshotAssemblerExactTransfer(t *testing.T) {
 	epoch, connection := testSnapshotScope()
 	require.Equal(t, epoch, committed.Epoch)
 	require.Equal(t, ports.BrokerRevision(3), committed.Revision)
-	require.Len(t, committed.Hosts, 2)
-	require.Equal(t, "user0@host0:22", committed.Hosts[0].Endpoint)
-	require.Equal(t, "user1@host1:22", committed.Hosts[1].Endpoint)
-	require.Equal(t, 2, len(committed.Hosts[0].Sessions))
-	require.Equal(t, "s00-000", committed.Hosts[0].Sessions[0].Name)
-	require.Equal(t, "s00-001", committed.Hosts[0].Sessions[1].Name)
-	require.Equal(t, "s01-000", committed.Hosts[1].Sessions[0].Name)
+	require.Len(t, committed.Daemons, 2)
+	require.Equal(t, "user0@host0:22", committed.Daemons[0].Endpoint)
+	require.Equal(t, "user1@host1:22", committed.Daemons[1].Endpoint)
+	require.Equal(t, 2, len(committed.Daemons[0].Sessions))
+	require.Equal(t, "s00-000", committed.Daemons[0].Sessions[0].Name)
+	require.Equal(t, "s00-001", committed.Daemons[0].Sessions[1].Name)
+	require.Equal(t, "s01-000", committed.Daemons[1].Sessions[0].Name)
 	require.Len(t, committed.Removed, 1)
 	require.Equal(t, "retired0@old0:22", committed.Removed[0].Endpoint)
 	_ = connection
@@ -192,8 +219,87 @@ func TestSnapshotAssemblerEmptyTransfer(t *testing.T) {
 	completed, snapshot, err := a.Add(parts[1])
 	require.NoError(t, err)
 	require.True(t, completed)
-	require.Empty(t, snapshot.Hosts)
+	require.Empty(t, snapshot.Daemons)
 	require.Empty(t, snapshot.Removed)
+}
+
+// TestSnapshotAssemblerLocalDaemonTransfer proves a local-first transfer with a
+// local daemon and its sessions commits with the local entry first, and that
+// local sessions bind to index 0 while a mismatched local flag is refused.
+func TestSnapshotAssemblerLocalDaemonTransfer(t *testing.T) {
+	daemons := sampleLocalSnapshotDaemons()
+	parts := snapshotPartsFor(5, 1, daemons, nil)
+	require.Len(t, parts, 1+2+3+1)
+	begin, ok := parts[0].Part.(SnapshotBegin)
+	require.True(t, ok)
+	require.True(t, begin.LocalPresent)
+	require.Equal(t, uint32(2), begin.HostCount)
+	require.Equal(t, uint32(3), begin.SessionCount)
+
+	a := testSnapshotAssembler(t)
+	completed, snapshot, err := addAll(a, parts)
+	require.NoError(t, err)
+	require.True(t, completed)
+	require.Len(t, snapshot.Daemons, 2)
+	require.True(t, snapshot.Daemons[0].Local)
+	require.Empty(t, snapshot.Daemons[0].Endpoint)
+	require.Equal(t, "user0@host0:22", snapshot.Daemons[1].Endpoint)
+	require.Len(t, snapshot.Daemons[0].Sessions, 2)
+	require.Equal(t, "s00-000", snapshot.Daemons[0].Sessions[0].Name)
+	require.Len(t, snapshot.Daemons[1].Sessions, 1)
+	requireValidBrokerSnapshot(t, snapshot)
+
+	t.Run("local session marked remote refused", func(t *testing.T) {
+		a := testSnapshotAssembler(t)
+		require.NoError(t, runSnapshotParts(a, parts[:2]))
+		require.True(t, a.StagingActive())
+		mismatched := parts[2]
+		mismatched.Part = SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Local: false, Session: testSessionAt(0, 0)}
+		_, _, err := a.Add(mismatched)
+		require.ErrorIs(t, err, ErrSnapshotInvalid)
+		require.False(t, a.StagingActive())
+	})
+
+	t.Run("non-local daemon under local_present refused", func(t *testing.T) {
+		a := testSnapshotAssembler(t)
+		begin := parts[0]
+		begin.Part = SnapshotBegin{HostCount: 1, LocalPresent: true}
+		require.NoError(t, runSnapshotParts(a, []SnapshotPart{begin}))
+		daemonPart := parts[1]
+		daemonPart.Part = SnapshotDaemonPart{HostIndex: 0, Daemon: testDaemonAt(0)}
+		_, _, err := a.Add(daemonPart)
+		require.ErrorIs(t, err, ErrSnapshotInvalid)
+		require.False(t, a.StagingActive())
+	})
+
+	t.Run("local daemon without local_present refused", func(t *testing.T) {
+		a := testSnapshotAssembler(t)
+		begin := parts[0]
+		begin.Part = SnapshotBegin{HostCount: 1}
+		require.NoError(t, runSnapshotParts(a, []SnapshotPart{begin}))
+		daemonPart := parts[1]
+		daemonPart.Part = SnapshotDaemonPart{HostIndex: 0, Daemon: testLocalDaemonAt()}
+		_, _, err := a.Add(daemonPart)
+		require.ErrorIs(t, err, ErrSnapshotInvalid)
+		require.False(t, a.StagingActive())
+	})
+}
+
+// addAll stages every part in order and returns the final commit result.
+func addAll(a *SnapshotAssembler, parts []SnapshotPart) (bool, ports.BrokerSnapshot, error) {
+	completed := false
+	var snapshot ports.BrokerSnapshot
+	for _, part := range parts {
+		published, committed, err := a.Add(part)
+		if err != nil {
+			return false, ports.BrokerSnapshot{}, err
+		}
+		if published {
+			completed = true
+			snapshot = committed
+		}
+	}
+	return completed, snapshot, nil
 }
 
 // TestSnapshotAssemblerTransferRejections proves malformed indexes, counts,
@@ -201,7 +307,7 @@ func TestSnapshotAssemblerEmptyTransfer(t *testing.T) {
 // retain the committed snapshot.
 func TestSnapshotAssemblerTransferRejections(t *testing.T) {
 	base := func() []SnapshotPart {
-		return snapshotPartsFor(5, 3, sampleSnapshotHosts(), sampleSnapshotTombstones())
+		return snapshotPartsFor(5, 3, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 	}
 	mutate := func(parts []SnapshotPart, index int, apply func(*SnapshotPart)) []SnapshotPart {
 		out := cloneSnapshotParts(parts)
@@ -217,10 +323,10 @@ func TestSnapshotAssemblerTransferRejections(t *testing.T) {
 		{"non-begin first", base()[1:], ErrSnapshotInvalid},
 		{"missing session part", append(cloneSnapshotParts(base()[:3]), base()[4:]...), ErrSnapshotInvalid},
 		{"duplicate host index", mutate(base(), 4, func(p *SnapshotPart) {
-			p.Part = SnapshotHostPart{HostIndex: 0, Host: testHostAt(1), SessionCount: 1}
+			p.Part = SnapshotDaemonPart{HostIndex: 0, Daemon: testDaemonAt(1), SessionCount: 1}
 		}), ErrSnapshotInvalid},
 		{"host index skips ahead", mutate(base(), 4, func(p *SnapshotPart) {
-			p.Part = SnapshotHostPart{HostIndex: 5, Host: testHostAt(1), SessionCount: 1}
+			p.Part = SnapshotDaemonPart{HostIndex: 5, Daemon: testDaemonAt(1), SessionCount: 1}
 		}), ErrSnapshotInvalid},
 		{"session host index mismatch", mutate(base(), 3, func(p *SnapshotPart) {
 			p.Part = SnapshotSessionPart{HostIndex: 1, SessionIndex: 1, Session: testSessionAt(0, 1)}
@@ -234,15 +340,15 @@ func TestSnapshotAssemblerTransferRejections(t *testing.T) {
 			p.Part = SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Session: session}
 		}), ErrSnapshotInvalid},
 		{"host carries inline sessions", mutate(base(), 1, func(p *SnapshotPart) {
-			host := testHostAt(0)
+			host := testDaemonAt(0)
 			host.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(0, 0)}
-			p.Part = SnapshotHostPart{HostIndex: 0, Host: host, SessionCount: 1}
+			p.Part = SnapshotDaemonPart{HostIndex: 0, Daemon: host, SessionCount: 1}
 		}), ErrSnapshotInvalid},
 		{"host session count over maximum", mutate(base(), 1, func(p *SnapshotPart) {
-			p.Part = SnapshotHostPart{HostIndex: 0, Host: testHostAt(0), SessionCount: uint32(ports.BrokerMaxSessionsPerHost) + 1}
+			p.Part = SnapshotDaemonPart{HostIndex: 0, Daemon: testDaemonAt(0), SessionCount: uint32(ports.BrokerMaxSessionsPerHost) + 1}
 		}), ErrTooLarge},
 		{"host session count exceeds advertised total", mutate(base(), 1, func(p *SnapshotPart) {
-			p.Part = SnapshotHostPart{HostIndex: 0, Host: testHostAt(0), SessionCount: 3}
+			p.Part = SnapshotDaemonPart{HostIndex: 0, Daemon: testDaemonAt(0), SessionCount: 3}
 		}), ErrSnapshotInvalid},
 		{"tombstone before all sessions", func() []SnapshotPart {
 			parts := base()
@@ -265,37 +371,37 @@ func TestSnapshotAssemblerTransferRejections(t *testing.T) {
 			p.Part = SnapshotBegin{HostCount: 2, SessionCount: 4, TombstoneCount: 1}
 		}), ErrSnapshotInvalid},
 		{"begin host count over maximum", mutate(base(), 0, func(p *SnapshotPart) {
-			p.Part = SnapshotBegin{HostCount: uint32(ports.BrokerMaxHosts) + 1}
+			p.Part = SnapshotBegin{HostCount: uint32(ports.BrokerMaxDaemonsPerSnapshot) + 1}
 		}), ErrTooLarge},
 		{"begin session count over maximum", mutate(base(), 0, func(p *SnapshotPart) {
-			p.Part = SnapshotBegin{HostCount: 1, SessionCount: uint32(ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost) + 1}
+			p.Part = SnapshotBegin{HostCount: 1, SessionCount: uint32(ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost) + 1}
 		}), ErrTooLarge},
 		{"begin tombstone count over maximum", mutate(base(), 0, func(p *SnapshotPart) {
 			p.Part = SnapshotBegin{HostCount: 1, TombstoneCount: uint32(ports.BrokerMaxTombstones) + 1}
 		}), ErrTooLarge},
 		{"commit duplicate host endpoint", func() []SnapshotPart {
-			hosts := sampleSnapshotHosts()
+			hosts := sampleSnapshotDaemons()
 			hosts[1].Endpoint = hosts[0].Endpoint
 			hosts[1].Registration.Endpoint = hosts[0].Endpoint
 			return snapshotPartsFor(5, 3, hosts, nil)
 		}(), ErrSnapshotInvalid},
 		{"commit host endpoint registration mismatch", func() []SnapshotPart {
-			hosts := sampleSnapshotHosts()
+			hosts := sampleSnapshotDaemons()
 			hosts[0].Endpoint = "other@elsewhere:22"
 			return snapshotPartsFor(5, 3, hosts, nil)
 		}(), ErrSnapshotInvalid},
 		{"commit invalid projection", func() []SnapshotPart {
-			hosts := sampleSnapshotHosts()
+			hosts := sampleSnapshotDaemons()
 			hosts[0].Availability = 0
 			return snapshotPartsFor(5, 3, hosts, nil)
 		}(), ErrSnapshotInvalid},
 		{"commit duplicate session name", func() []SnapshotPart {
-			hosts := sampleSnapshotHosts()
+			hosts := sampleSnapshotDaemons()
 			hosts[0].Sessions[1].Name = hosts[0].Sessions[0].Name
 			return snapshotPartsFor(5, 3, hosts, nil)
 		}(), ErrSnapshotInvalid},
 		{"commit tombstone for live host", func() []SnapshotPart {
-			hosts := sampleSnapshotHosts()
+			hosts := sampleSnapshotDaemons()
 			tombstone := testTombstoneAt(0)
 			tombstone.Endpoint = hosts[0].Endpoint
 			tombstone.Registration.Endpoint = hosts[0].Endpoint
@@ -319,7 +425,7 @@ func TestSnapshotAssemblerTransferRejections(t *testing.T) {
 // survives.
 func TestSnapshotAssemblerLatePartAfterCommit(t *testing.T) {
 	a := testSnapshotAssembler(t)
-	parts := snapshotPartsFor(5, 3, sampleSnapshotHosts(), sampleSnapshotTombstones())
+	parts := snapshotPartsFor(5, 3, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 	require.NoError(t, runSnapshotParts(a, parts))
 	late := parts[len(parts)-1]
 	late.Index = uint32(len(parts))
@@ -331,13 +437,13 @@ func TestSnapshotAssemblerLatePartAfterCommit(t *testing.T) {
 	require.Equal(t, ports.BrokerRevision(3), committed.Revision)
 }
 
-// TestSnapshotAssemblerBounds proves the 16,514-part and 80 MiB staged
+// TestSnapshotAssemblerBounds proves the 16,771-part and 80 MiB staged
 // ceilings: maximum counts commit, one over is refused.
 func TestSnapshotAssemblerBounds(t *testing.T) {
 	t.Run("maximum counts commit", func(t *testing.T) {
-		hosts := make([]ports.RemoteHostSnapshot, ports.BrokerMaxHosts)
+		hosts := make([]ports.BrokerDaemonObservation, ports.BrokerMaxDaemonsPerSnapshot)
 		for i := range hosts {
-			host := testHostAt(i)
+			host := testDaemonAt(i)
 			sessions := make([]catalogue.RemoteCatalogSession, ports.BrokerMaxSessionsPerHost)
 			for j := range sessions {
 				sessions[j] = testSessionAt(i, j)
@@ -363,9 +469,9 @@ func TestSnapshotAssemblerBounds(t *testing.T) {
 			}
 		}
 		require.True(t, completed)
-		require.Len(t, snapshot.Hosts, ports.BrokerMaxHosts)
+		require.Len(t, snapshot.Daemons, ports.BrokerMaxDaemonsPerSnapshot)
 		require.Len(t, snapshot.Removed, ports.BrokerMaxTombstones)
-		for _, host := range snapshot.Hosts {
+		for _, host := range snapshot.Daemons {
 			require.Len(t, host.Sessions, ports.BrokerMaxSessionsPerHost)
 		}
 		require.Equal(t, ports.BrokerRevision(12), snapshot.Revision)
@@ -375,7 +481,7 @@ func TestSnapshotAssemblerBounds(t *testing.T) {
 		a := testSnapshotAssembler(t)
 		_, _, err := a.Add(SnapshotPart{
 			Epoch: 7, Connection: testConnectionID(0x21), Generation: 1, Revision: 1, Index: 0,
-			Part: SnapshotBegin{HostCount: 1, SessionCount: uint32(ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost) + 1},
+			Part: SnapshotBegin{HostCount: 1, SessionCount: uint32(ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost) + 1},
 		})
 		require.ErrorIs(t, err, ErrTooLarge)
 		require.False(t, a.StagingActive())
@@ -383,7 +489,7 @@ func TestSnapshotAssemblerBounds(t *testing.T) {
 
 	t.Run("staged byte ceiling aborts and retains", func(t *testing.T) {
 		a := testSnapshotAssembler(t, WithMaxStagedBytes(200))
-		parts := snapshotPartsFor(5, 3, sampleSnapshotHosts(), nil)
+		parts := snapshotPartsFor(5, 3, sampleSnapshotDaemons(), nil)
 		// Begin (32) + host part stay within the cap; the first session part
 		// crosses it.
 		require.NoError(t, runSnapshotParts(a, parts[:2]))
@@ -441,12 +547,12 @@ func TestSnapshotHostileMaxTabsBound(t *testing.T) {
 	session := testSessionAt(0, 0)
 	session.Tabs = maxTabs
 	perSession := estimateCatalogSessionBytes(session)
-	worst := perSession * uint64(ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost)
+	worst := perSession * uint64(ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost)
 	require.Greater(t, worst, MaxSnapshotStagedBytes, "hostile max tabs must cross the 80 MiB ceiling")
 
-	host := testHostAt(0)
+	host := testDaemonAt(0)
 	host.Sessions = []catalogue.RemoteCatalogSession{session}
-	parts := snapshotPartsFor(9, 1, []ports.RemoteHostSnapshot{host}, nil)
+	parts := snapshotPartsFor(9, 1, []ports.BrokerDaemonObservation{host}, nil)
 
 	tight := testSnapshotAssembler(t, WithMaxStagedBytes(perSession))
 	require.NoError(t, runSnapshotParts(tight, parts[:2]))
@@ -459,22 +565,22 @@ func TestSnapshotHostileMaxTabsBound(t *testing.T) {
 	require.NoError(t, runSnapshotParts(generous, parts))
 	committed, ok := generous.Snapshot()
 	require.True(t, ok)
-	require.Len(t, committed.Hosts, 1)
-	require.Len(t, committed.Hosts[0].Sessions, 1)
-	require.Len(t, committed.Hosts[0].Sessions[0].Tabs, catalogue.RemoteCatalogMaxTabsPerSess)
+	require.Len(t, committed.Daemons, 1)
+	require.Len(t, committed.Daemons[0].Sessions, 1)
+	require.Len(t, committed.Daemons[0].Sessions[0].Tabs, catalogue.RemoteCatalogMaxTabsPerSess)
 }
 
 // TestSnapshotAssemblerAtomicCommit proves publication happens only at End
 // and that the returned snapshot is a defensive clone.
 func TestSnapshotAssemblerAtomicCommit(t *testing.T) {
 	a := testSnapshotAssembler(t)
-	first := snapshotPartsFor(5, 1, sampleSnapshotHosts(), sampleSnapshotTombstones())
+	first := snapshotPartsFor(5, 1, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 	require.NoError(t, runSnapshotParts(a, first))
 	committed, ok := a.Snapshot()
 	require.True(t, ok)
 	require.Equal(t, ports.BrokerRevision(1), committed.Revision)
 
-	second := snapshotPartsFor(5, 2, sampleSnapshotHosts(), nil)
+	second := snapshotPartsFor(5, 2, sampleSnapshotDaemons(), nil)
 	for _, part := range second[:len(second)-1] {
 		completed, _, err := a.Add(part)
 		require.NoError(t, err)
@@ -494,18 +600,18 @@ func TestSnapshotAssemblerAtomicCommit(t *testing.T) {
 
 	// The committed snapshot is immutable to the caller: mutating a returned
 	// value never reaches the assembler.
-	published.Hosts[0].Endpoint = "mutated@nowhere:22"
-	published.Hosts[0].Sessions[0].Tabs = []catalogue.RemoteCatalogTab{{ID: "injected", Index: 0, Name: "injected"}}
-	published.Hosts[0].Sessions[0].Name = "mutated"
+	published.Daemons[0].Endpoint = "mutated@nowhere:22"
+	published.Daemons[0].Sessions[0].Tabs = []catalogue.RemoteCatalogTab{{ID: "injected", Index: 0, Name: "injected"}}
+	published.Daemons[0].Sessions[0].Name = "mutated"
 	again, ok := a.Snapshot()
 	require.True(t, ok)
-	require.Equal(t, "user0@host0:22", again.Hosts[0].Endpoint)
-	require.Equal(t, "s00-000", again.Hosts[0].Sessions[0].Name)
-	require.Empty(t, again.Hosts[0].Sessions[0].Tabs)
+	require.Equal(t, "user0@host0:22", again.Daemons[0].Endpoint)
+	require.Equal(t, "s00-000", again.Daemons[0].Sessions[0].Name)
+	require.Empty(t, again.Daemons[0].Sessions[0].Tabs)
 
 	// An aborted transfer retains the committed snapshot.
-	require.NoError(t, runSnapshotParts(a, snapshotPartsFor(5, 3, sampleSnapshotHosts(), nil)[:2]))
-	_, _, err = a.Add(snapshotPartsFor(5, 3, sampleSnapshotHosts(), nil)[4])
+	require.NoError(t, runSnapshotParts(a, snapshotPartsFor(5, 3, sampleSnapshotDaemons(), nil)[:2]))
+	_, _, err = a.Add(snapshotPartsFor(5, 3, sampleSnapshotDaemons(), nil)[4])
 	require.ErrorIs(t, err, ErrSnapshotInvalid)
 	again, ok = a.Snapshot()
 	require.True(t, ok)
@@ -517,13 +623,13 @@ func TestSnapshotAssemblerAtomicCommit(t *testing.T) {
 // transfer starts from index 0.
 func TestSnapshotAssemblerInterruptedRetention(t *testing.T) {
 	a := testSnapshotAssembler(t)
-	parts := snapshotPartsFor(5, 1, sampleSnapshotHosts(), sampleSnapshotTombstones())
+	parts := snapshotPartsFor(5, 1, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 	require.NoError(t, runSnapshotParts(a, parts))
 	committed, ok := a.Snapshot()
 	require.True(t, ok)
 	require.Equal(t, ports.BrokerRevision(1), committed.Revision)
 
-	restart := snapshotPartsFor(5, 2, sampleSnapshotHosts(), sampleSnapshotTombstones())
+	restart := snapshotPartsFor(5, 2, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 	require.NoError(t, runSnapshotParts(a, restart[:3]))
 	require.True(t, a.StagingActive())
 	a.DiscardStaging()
@@ -555,7 +661,7 @@ func TestSnapshotAssemblerInterruptedRetention(t *testing.T) {
 // staging.
 func TestSnapshotAssemblerRevisionFencing(t *testing.T) {
 	a := testSnapshotAssembler(t)
-	hosts := sampleSnapshotHosts()
+	hosts := sampleSnapshotDaemons()
 	require.NoError(t, runSnapshotParts(a, snapshotPartsFor(5, 5, hosts, nil)))
 
 	t.Run("older revision refused", func(t *testing.T) {
@@ -607,7 +713,7 @@ func TestSnapshotAssemblerRevisionFencing(t *testing.T) {
 // replaces staging: equal revisions restart progress, newer revisions
 // coalesce.
 func TestSnapshotAssemblerCoalescing(t *testing.T) {
-	hosts := sampleSnapshotHosts()
+	hosts := sampleSnapshotDaemons()
 	base := snapshotPartsFor(5, 3, hosts, nil)
 
 	a := testSnapshotAssembler(t)
@@ -644,7 +750,7 @@ func TestSnapshotAssemblerCoalescing(t *testing.T) {
 // one generation, ignores stale parts, rejects future parts, and refuses a
 // zero generation.
 func TestSnapshotAssemblerGenerationFencing(t *testing.T) {
-	hosts := sampleSnapshotHosts()
+	hosts := sampleSnapshotDaemons()
 	base := snapshotPartsFor(5, 3, hosts, nil)
 
 	t.Run("zero generation refused", func(t *testing.T) {
@@ -703,7 +809,7 @@ func TestSnapshotAssemblerGenerationFencing(t *testing.T) {
 // TestSnapshotAssemblerScopeFencing proves every part must carry the exact
 // assigned epoch and connection, whether or not a transfer is in flight.
 func TestSnapshotAssemblerScopeFencing(t *testing.T) {
-	base := snapshotPartsFor(5, 3, sampleSnapshotHosts(), nil)
+	base := snapshotPartsFor(5, 3, sampleSnapshotDaemons(), nil)
 	cases := []struct {
 		name  string
 		apply func(*SnapshotPart)
@@ -737,7 +843,7 @@ func TestSnapshotAssemblerScopeFencing(t *testing.T) {
 // TestSnapshotAssemblerZeroRevision proves a zero revision is refused.
 func TestSnapshotAssemblerZeroRevision(t *testing.T) {
 	a := testSnapshotAssembler(t)
-	part := snapshotPartsFor(5, 3, sampleSnapshotHosts(), nil)[0]
+	part := snapshotPartsFor(5, 3, sampleSnapshotDaemons(), nil)[0]
 	part.Revision = 0
 	_, _, err := a.Add(part)
 	require.ErrorIs(t, err, ErrSnapshotInvalid)
@@ -769,13 +875,13 @@ func TestSnapshotAssemblerNilAndEmptySafety(t *testing.T) {
 // part from the first one.
 func TestSnapshotAssemblerPinnedGeneration(t *testing.T) {
 	a := testSnapshotAssembler(t, WithGeneration(5))
-	stale := snapshotPartsFor(4, 1, sampleSnapshotHosts(), nil)[0]
+	stale := snapshotPartsFor(4, 1, sampleSnapshotDaemons(), nil)[0]
 	_, _, err := a.Add(stale)
 	require.ErrorIs(t, err, ErrStaleGeneration)
-	future := snapshotPartsFor(6, 1, sampleSnapshotHosts(), nil)[0]
+	future := snapshotPartsFor(6, 1, sampleSnapshotDaemons(), nil)[0]
 	_, _, err = a.Add(future)
 	require.ErrorIs(t, err, ErrFutureGeneration)
-	require.NoError(t, runSnapshotParts(a, snapshotPartsFor(5, 1, sampleSnapshotHosts(), nil)))
+	require.NoError(t, runSnapshotParts(a, snapshotPartsFor(5, 1, sampleSnapshotDaemons(), nil)))
 	committed, ok := a.Snapshot()
 	require.True(t, ok)
 	require.Equal(t, ports.BrokerRevision(1), committed.Revision)
@@ -786,7 +892,7 @@ func TestSnapshotAssemblerPinnedGeneration(t *testing.T) {
 // keeps publishing it until a newer transfer commits.
 func TestSnapshotAssemblerAdoptCommitted(t *testing.T) {
 	source := testSnapshotAssembler(t)
-	require.NoError(t, runSnapshotParts(source, snapshotPartsFor(5, 3, sampleSnapshotHosts(), sampleSnapshotTombstones())))
+	require.NoError(t, runSnapshotParts(source, snapshotPartsFor(5, 3, sampleSnapshotDaemons(), sampleSnapshotTombstones())))
 	committed, ok := source.Snapshot()
 	require.True(t, ok)
 
@@ -801,24 +907,24 @@ func TestSnapshotAssemblerAdoptCommitted(t *testing.T) {
 	require.Len(t, adopted.Removed, 1)
 
 	// An older revision and a foreign epoch are ignored.
-	target.adoptCommitted(ports.BrokerSnapshot{Epoch: committed.Epoch, Revision: 2, Hosts: committed.Hosts})
-	target.adoptCommitted(ports.BrokerSnapshot{Epoch: committed.Epoch + 1, Revision: 9, Hosts: committed.Hosts})
+	target.adoptCommitted(ports.BrokerSnapshot{Epoch: committed.Epoch, Revision: 2, Daemons: committed.Daemons})
+	target.adoptCommitted(ports.BrokerSnapshot{Epoch: committed.Epoch + 1, Revision: 9, Daemons: committed.Daemons})
 	adopted, ok = target.Snapshot()
 	require.True(t, ok)
 	require.Equal(t, ports.BrokerRevision(3), adopted.Revision)
 
 	// A newer transfer commits over the adopted snapshot.
-	require.NoError(t, runSnapshotParts(target, snapshotPartsFor(6, 4, sampleSnapshotHosts(), nil)))
+	require.NoError(t, runSnapshotParts(target, snapshotPartsFor(6, 4, sampleSnapshotDaemons(), nil)))
 	adopted, ok = target.Snapshot()
 	require.True(t, ok)
 	require.Equal(t, ports.BrokerRevision(4), adopted.Revision)
 	require.Empty(t, adopted.Removed)
 
 	// The adopted value is independent of the source.
-	adopted.Hosts[0].Endpoint = "mutated@nowhere:22"
+	adopted.Daemons[0].Endpoint = "mutated@nowhere:22"
 	again, ok := source.Snapshot()
 	require.True(t, ok)
-	require.Equal(t, "user0@host0:22", again.Hosts[0].Endpoint)
+	require.Equal(t, "user0@host0:22", again.Daemons[0].Endpoint)
 }
 
 // TestSnapshotAssemblerConcurrentReaders is a deterministic race test: one
@@ -849,7 +955,7 @@ func TestSnapshotAssemblerConcurrentReaders(t *testing.T) {
 		}()
 	}
 	for revision := 1; revision <= revisions; revision++ {
-		parts := snapshotPartsFor(5, ports.BrokerRevision(revision), sampleSnapshotHosts(), nil)
+		parts := snapshotPartsFor(5, ports.BrokerRevision(revision), sampleSnapshotDaemons(), nil)
 		for _, part := range parts {
 			_, _, err := a.Add(part)
 			require.NoError(t, err)
@@ -886,7 +992,7 @@ func fuzzSnapshotAssemblerSeeds(tb testing.TB) [][]byte {
 		require.NoError(tb, err)
 		return raw
 	}
-	parts := snapshotPartsFor(4, 2, sampleSnapshotHosts(), sampleSnapshotTombstones())
+	parts := snapshotPartsFor(4, 2, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 	frames := make([][]byte, 0, len(parts))
 	for _, part := range parts {
 		frames = append(frames, encode(part))
@@ -946,11 +1052,15 @@ func FuzzSnapshotAssembler(f *testing.F) {
 }
 
 // requireValidBrokerSnapshot asserts one published snapshot is exactly what the
-// assembler promises: a validated snapshot with durable host projections.
+// assembler promises: a validated snapshot with durable remote daemon
+// projections (the local daemon is process-local and never durable).
 func requireValidBrokerSnapshot(t *testing.T, snapshot ports.BrokerSnapshot) {
 	t.Helper()
 	require.NoError(t, snapshot.Validate())
-	for _, host := range snapshot.Hosts {
-		require.NoError(t, ports.ValidateDurableHostProjection(host))
+	for _, daemon := range snapshot.Daemons {
+		if daemon.Local {
+			continue
+		}
+		require.NoError(t, ports.ValidateDurableHostProjection(daemon))
 	}
 }

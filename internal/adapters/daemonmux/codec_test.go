@@ -94,7 +94,7 @@ func mustEncodeServer(t *testing.T, message ServerMessage) []byte {
 
 func testOpen() Open {
 	return Open{
-		Ref: testRef(5), Purpose: ports.BrokerStreamAttachment, Local: false,
+		Ref: testRef(5), Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Local: false,
 		Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(),
 		Env: []string{"TERM=xterm-256color"}, Policy: testPolicy(),
 	}
@@ -661,4 +661,122 @@ func FuzzDecodeServer(f *testing.F) {
 	f.Fuzz(func(t *testing.T, payload []byte) {
 		_, _ = DecodeServer(payload, testEnvelopeCeiling, testChunkCeiling)
 	})
+}
+
+// TestMuxAdmissionVariants proves the attachment-admission contract travels
+// the mux wire losslessly and rejects every incoherent combination at the
+// same boundary the ports contract rejects it.
+func TestMuxAdmissionVariants(t *testing.T) {
+	roundTrip := func(t *testing.T, open Open) Open {
+		t.Helper()
+		raw, err := EncodeClient(open, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		decoded, err := DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		open, ok := decoded.(Open)
+		require.True(t, ok)
+		return open
+	}
+	t.Run("exact attach round-trips", func(t *testing.T) {
+		require.Equal(t, testOpen(), roundTrip(t, testOpen()))
+	})
+	t.Run("named creation round-trips", func(t *testing.T) {
+		named := testOpen()
+		named.Admission = ports.BrokerAdmissionCreateNamed
+		named.Name = "work"
+		named.Target = protocol.ExactSessionTarget{}
+		require.Equal(t, named, roundTrip(t, named))
+	})
+	t.Run("ephemeral creation round-trips", func(t *testing.T) {
+		ephemeral := testOpen()
+		ephemeral.Admission = ports.BrokerAdmissionCreateEphemeral
+		ephemeral.Target = protocol.ExactSessionTarget{}
+		require.Equal(t, ephemeral, roundTrip(t, ephemeral))
+	})
+	t.Run("control never carries admission", func(t *testing.T) {
+		control := Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}
+		require.Equal(t, control, roundTrip(t, control))
+		mutated := mustEncodeClient(t, control)
+		envelope := &wire.MuxClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(mutated, envelope))
+		envelope.GetOpen().Admission = 2
+		envelope.GetOpen().Name = "work"
+		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("exact with a creation name is refused", func(t *testing.T) {
+		open := testOpen()
+		open.Name = "work"
+		_, err := EncodeClient(open, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("named creation with a target is refused", func(t *testing.T) {
+		named := testOpen()
+		named.Admission = ports.BrokerAdmissionCreateNamed
+		named.Name = "work"
+		_, err := EncodeClient(named, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("unknown admission code is refused", func(t *testing.T) {
+		raw := mustEncodeClient(t, testOpen())
+		envelope := &wire.MuxClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpen().Admission = 9
+		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+}
+
+// TestMuxAdmissionWireRange proves the MuxOpen decoder narrows the wire
+// admission field before any cast: the accepted semantic set (no admission, or
+// one of the three closed admission codes) is unchanged, while every wire value
+// whose high bits would alias a valid code is refused instead of silently
+// truncating onto that code.
+func TestMuxAdmissionWireRange(t *testing.T) {
+	control := Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}
+	named := testOpen()
+	named.Admission = ports.BrokerAdmissionCreateNamed
+	named.Name = "work"
+	named.Target = protocol.ExactSessionTarget{}
+	ephemeral := testOpen()
+	ephemeral.Admission = ports.BrokerAdmissionCreateEphemeral
+	ephemeral.Target = protocol.ExactSessionTarget{}
+
+	tests := []struct {
+		name      string
+		base      Open
+		admission uint32
+		wantErr   bool
+	}{
+		{"no admission on a control stream", control, 0, false},
+		{"exact admission", testOpen(), uint32(ports.BrokerAdmissionExact), false},
+		{"create-named admission", named, uint32(ports.BrokerAdmissionCreateNamed), false},
+		{"create-ephemeral admission", ephemeral, uint32(ports.BrokerAdmissionCreateEphemeral), false},
+		{"wire value 257 aliasing exact", testOpen(), 257, true},
+		{"wire value 258 aliasing create-named", named, 258, true},
+		{"wire value 1024 aliasing no admission", control, 1024, true},
+		{"wire value max uint32", control, 1<<32 - 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := mustEncodeClient(t, tc.base)
+			envelope := &wire.MuxClientEnvelope{}
+			require.NoError(t, proto.Unmarshal(raw, envelope))
+			envelope.GetOpen().Admission = tc.admission
+			mutated, err := proto.Marshal(envelope)
+			require.NoError(t, err)
+			decoded, err := DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrInvalidMessage)
+				require.Zero(t, decoded, "an out-of-range wire value is never accepted as an alias")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.base, decoded)
+		})
+	}
 }

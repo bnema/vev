@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -286,14 +287,18 @@ func (s *Store) Store(snapshot ports.BrokerSnapshot) error {
 	}
 	// Removed tombstones and in-flight checking/failure detail are process-local
 	// fencing and observation state; the durable snapshot never carries them, so
-	// sanitize the caller's copy before validating the durable shape.
+	// sanitize the caller's copy before validating the durable shape. Policy is
+	// membership authority, not observation state, so the durable format omits
+	// it too: membership is the single policy authority and the loader re-stamps
+	// every restored observation from the matching record.
 	snapshot = snapshot.Clone()
 	snapshot.Removed = nil
-	for i := range snapshot.Hosts {
-		snapshot.Hosts[i].Checking = false
-		snapshot.Hosts[i].LastFailure.Err = nil
+	for i := range snapshot.Daemons {
+		snapshot.Daemons[i].Checking = false
+		snapshot.Daemons[i].LastFailure.Err = nil
+		snapshot.Daemons[i].Policy = ports.BrokerPolicy{}
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := validateDurableSnapshot(snapshot); err != nil {
 		return err
 	}
 	if s.writeEpoch != 0 && s.writeEpoch != snapshot.Epoch {
@@ -304,10 +309,10 @@ func (s *Store) Store(snapshot ports.BrokerSnapshot) error {
 		return ErrStale
 	}
 	// Reject rather than partially adopt a queued publication from retired hosts.
-	for _, h := range snapshot.Hosts {
+	for _, daemon := range snapshot.Daemons {
 		found := false
 		for _, a := range s.state.Hosts.Hosts {
-			if h.Registration.Equal(a.Registration) {
+			if daemon.Registration.Equal(a.Registration) {
 				found = true
 			}
 		}
@@ -323,14 +328,15 @@ func (s *Store) Store(snapshot ports.BrokerSnapshot) error {
 	s.writeEpoch = snapshot.Epoch
 	return nil
 }
+
 func filter(snapshot ports.BrokerSnapshot, hosts ports.BrokerHosts) ports.BrokerSnapshot {
 	out := snapshot.Clone()
-	out.Hosts = nil
+	out.Daemons = nil
 	out.Removed = nil
-	for _, h := range snapshot.Hosts {
+	for _, daemon := range snapshot.Daemons {
 		for _, a := range hosts.Hosts {
-			if h.Registration.Equal(a.Registration) {
-				out.Hosts = append(out.Hosts, h.Clone())
+			if daemon.Registration.Equal(a.Registration) {
+				out.Daemons = append(out.Daemons, daemon.Clone())
 			}
 		}
 	}
@@ -360,31 +366,95 @@ func validate(st state) error {
 		return invalid("%v", err)
 	}
 	if st.Snapshot.Epoch == 0 {
-		if st.Snapshot.Revision != 0 || len(st.Snapshot.Hosts) != 0 || len(st.Snapshot.Removed) != 0 {
+		if st.Snapshot.Revision != 0 || len(st.Snapshot.Daemons) != 0 || len(st.Snapshot.Removed) != 0 {
 			return invalid("invalid empty snapshot")
 		}
 		return nil
 	}
-	if err := st.Snapshot.Validate(); err != nil {
+	if err := validateDurableSnapshot(st.Snapshot); err != nil {
 		return invalid("%v", err)
 	}
-	for _, h := range st.Snapshot.Hosts {
+	for _, daemon := range st.Snapshot.Daemons {
 		found := false
 		for _, a := range st.Hosts.Hosts {
-			if h.Registration.Equal(a.Registration) {
+			if daemon.Registration.Equal(a.Registration) {
 				found = true
 			}
 		}
-		if !found || h.Checking || h.LastFailure.Err != nil {
+		if !found || daemon.Checking || daemon.LastFailure.Err != nil {
 			return invalid("non-authoritative snapshot")
-		}
-		// The store enforces the same durable projection rules the registry
-		// checks before publishing, so an accepted publication always persists.
-		if err := ports.ValidateDurableHostProjection(h); err != nil {
-			return invalid("%v", err)
 		}
 	}
 	return nil
+}
+
+// validateDurableSnapshot reports whether a snapshot satisfies the durable
+// shape: an empty placeholder stays empty, and a populated snapshot carries
+// only non-local daemon observations bound to an exact valid registration with
+// a closed availability/failure range and a catalogue-valid inventory. Policy
+// and display authority are deliberately excluded: the durable format omits
+// policy (membership is the single policy authority and the loader re-stamps
+// it) and display hints are derived presentation state, never durable
+// authority. Transient checking and live failure causes are sanitized away by
+// the callers before this rule runs.
+func validateDurableSnapshot(snapshot ports.BrokerSnapshot) error {
+	if snapshot.Epoch == 0 {
+		if snapshot.Revision != 0 || len(snapshot.Daemons) != 0 || len(snapshot.Removed) != 0 {
+			return errors.New("invalid empty snapshot")
+		}
+		return nil
+	}
+	if snapshot.Revision == 0 {
+		return errors.New("snapshot has no revision")
+	}
+	if len(snapshot.Daemons) > ports.BrokerMaxDaemonsPerSnapshot {
+		return errors.New("snapshot has too many daemons")
+	}
+	seen := make(map[string]struct{}, len(snapshot.Daemons))
+	for _, daemon := range snapshot.Daemons {
+		if err := validateDurableObservation(daemon); err != nil {
+			return err
+		}
+		if _, duplicate := seen[daemon.Endpoint]; duplicate {
+			return errors.New("snapshot has duplicate host")
+		}
+		seen[daemon.Endpoint] = struct{}{}
+	}
+	if len(snapshot.Removed) > ports.BrokerMaxTombstones {
+		return errors.New("snapshot has too many tombstones")
+	}
+	for _, tombstone := range snapshot.Removed {
+		if err := tombstone.Validate(); err != nil {
+			return err
+		}
+		if _, live := seen[tombstone.Endpoint]; live {
+			return errors.New("snapshot carries a live host as tombstone")
+		}
+	}
+	return nil
+}
+
+// validateDurableObservation reports whether one daemon observation may be
+// durable: it is remote-only (a local daemon observation is never durable), it
+// carries an exact valid registration matching its endpoint, and it satisfies
+// the ports durable projection rules shared with the registry.
+func validateDurableObservation(daemon ports.BrokerDaemonObservation) error {
+	if daemon.Local {
+		return errors.New("local daemon observation is never durable")
+	}
+	if err := domain.ValidateRemoteHostTarget(daemon.Endpoint); err != nil {
+		return err
+	}
+	if err := daemon.Registration.Validate(); err != nil {
+		return err
+	}
+	if daemon.Endpoint != daemon.Registration.Endpoint {
+		return errors.New("observation endpoint does not match registration")
+	}
+	if len(daemon.Sessions) > 0 && !daemon.InventoryKnown {
+		return errors.New("observation carries sessions without known inventory")
+	}
+	return ports.ValidateDurableHostProjection(daemon)
 }
 func (s *Store) commit(next state) error {
 	if err := validate(next); err != nil {

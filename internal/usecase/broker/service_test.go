@@ -110,8 +110,8 @@ func TestAuthorityAdmissionContextNotRetained(t *testing.T) {
 	// The admission context is discarded: the connection keeps serving after the
 	// caller's setup deadline expires.
 	cancel()
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{registration(t, "user@host:22", 1)}))
-	require.Len(t, service.Snapshot().Hosts, 1)
+	require.NoError(t, registry.setHosts(hostRecords(registration(t, "user@host:22", 1))))
+	require.Len(t, service.Snapshot().Daemons, 1)
 
 	stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 	require.NoError(t, err)
@@ -251,14 +251,14 @@ func TestServiceSnapshotDelegates(t *testing.T) {
 	require.NoError(t, err)
 	defer sub.Close()
 
-	require.NoError(t, registry.setHosts([]domain.RemoteRegistration{registration(t, "user@host:22", 1)}))
+	require.NoError(t, registry.setHosts(hostRecords(registration(t, "user@host:22", 1))))
 	select {
 	case <-sub.Changed():
 	case <-time.After(time.Second):
 		t.Fatal("the connection subscription must observe a registry publication")
 	}
 	require.Equal(t, registry.Snapshot(), service.Snapshot())
-	require.Len(t, service.Snapshot().Hosts, 1)
+	require.Len(t, service.Snapshot().Daemons, 1)
 }
 
 func TestServiceOperationLeaseLifetime(t *testing.T) {
@@ -443,7 +443,7 @@ func TestServiceOfflineMembershipRefusal(t *testing.T) {
 	require.False(t, removed)
 	require.ErrorIs(t, err, ErrOfflineMembership)
 
-	require.Empty(t, registry.Snapshot().Hosts, "a refused mutation must not touch authority")
+	require.Empty(t, registry.Snapshot().Daemons, "a refused mutation must not touch authority")
 	before := registry.Snapshot()
 	service.RequestReconcile("new@host:22")
 	require.Equal(t, before, registry.Snapshot(), "reconcile must be a no-op")
@@ -456,7 +456,7 @@ func TestRegistryObservationDisabledRestoresAndPublishes(t *testing.T) {
 	store.loaded = ports.BrokerSnapshot{
 		Epoch:    9,
 		Revision: 4,
-		Hosts: []ports.RemoteHostSnapshot{{
+		Daemons: []ports.BrokerDaemonObservation{{
 			Endpoint:     endpoint,
 			Registration: registration(t, endpoint, 1),
 			Availability: domain.RemoteAvailabilityReachable,
@@ -482,7 +482,7 @@ func TestRegistryObservationDisabledIssuesNoProbesOrTimers(t *testing.T) {
 	probe := newTestProbe(4)
 	r, err := NewRegistryWithConfig(1, store, probe, clock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
-	require.NoError(t, r.setHosts([]domain.RemoteRegistration{registration(t, "user@host:22", 1)}))
+	require.NoError(t, r.setHosts(hostRecords(registration(t, "user@host:22", 1))))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

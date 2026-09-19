@@ -871,22 +871,22 @@ func (_m *MockBrokerHostProbe) EXPECT() *MockBrokerHostProbe_Expecter {
 }
 
 // Probe provides a mock function for the type MockBrokerHostProbe
-func (_mock *MockBrokerHostProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.RemoteHostSnapshot, error) {
+func (_mock *MockBrokerHostProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
 	ret := _mock.Called(ctx, registration)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Probe")
 	}
 
-	var r0 ports.RemoteHostSnapshot
+	var r0 ports.BrokerDaemonObservation
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration) (ports.RemoteHostSnapshot, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration) (ports.BrokerDaemonObservation, error)); ok {
 		return returnFunc(ctx, registration)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration) ports.RemoteHostSnapshot); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration) ports.BrokerDaemonObservation); ok {
 		r0 = returnFunc(ctx, registration)
 	} else {
-		r0 = ret.Get(0).(ports.RemoteHostSnapshot)
+		r0 = ret.Get(0).(ports.BrokerDaemonObservation)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, domain.RemoteRegistration) error); ok {
 		r1 = returnFunc(ctx, registration)
@@ -926,12 +926,12 @@ func (_c *MockBrokerHostProbe_Probe_Call) Run(run func(ctx context.Context, regi
 	return _c
 }
 
-func (_c *MockBrokerHostProbe_Probe_Call) Return(remoteHostSnapshot ports.RemoteHostSnapshot, err error) *MockBrokerHostProbe_Probe_Call {
-	_c.Call.Return(remoteHostSnapshot, err)
+func (_c *MockBrokerHostProbe_Probe_Call) Return(brokerDaemonObservation ports.BrokerDaemonObservation, err error) *MockBrokerHostProbe_Probe_Call {
+	_c.Call.Return(brokerDaemonObservation, err)
 	return _c
 }
 
-func (_c *MockBrokerHostProbe_Probe_Call) RunAndReturn(run func(ctx context.Context, registration domain.RemoteRegistration) (ports.RemoteHostSnapshot, error)) *MockBrokerHostProbe_Probe_Call {
+func (_c *MockBrokerHostProbe_Probe_Call) RunAndReturn(run func(ctx context.Context, registration domain.RemoteRegistration) (ports.BrokerDaemonObservation, error)) *MockBrokerHostProbe_Probe_Call {
 	_c.Call.Return(run)
 	return _c
 }

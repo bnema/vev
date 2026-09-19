@@ -270,7 +270,7 @@ func openToWire(m Open) (*wire.MuxOpen, error) {
 		return nil, ErrInvalidMessage
 	}
 	request := ports.BrokerOpenStreamRequest{
-		Epoch: m.Ref.Epoch, Purpose: m.Purpose, Local: m.Local,
+		Epoch: m.Ref.Epoch, Purpose: m.Purpose, Admission: m.Admission, Name: m.Name, Local: m.Local,
 		Connection: m.Ref.Connection, Stream: m.Ref.Client,
 		Endpoint: m.Endpoint, Registration: m.Registration,
 		Target: m.Target, Env: m.Env, Policy: m.Policy,
@@ -304,7 +304,11 @@ func openToWire(m Open) (*wire.MuxOpen, error) {
 		out.Registration = registrationToWire(m.Registration)
 	}
 	if m.Purpose == ports.BrokerStreamAttachment {
-		out.Target = exactTargetToWire(m.Target)
+		out.Admission = uint32(m.Admission)
+		out.Name = m.Name
+		if m.Admission == ports.BrokerAdmissionExact {
+			out.Target = exactTargetToWire(m.Target)
+		}
 	}
 	return out, nil
 }
@@ -322,6 +326,16 @@ func openFromWire(message *wire.MuxOpen) (Open, error) {
 	if err != nil {
 		return Open{}, err
 	}
+	// Narrow the wire uint32 before the cast: a value whose high bits
+	// truncate onto a valid admission code would otherwise alias silently.
+	admission, err := muxEnum8[ports.BrokerStreamAdmission](message.GetAdmission())
+	if err != nil {
+		return Open{}, ErrInvalidMessage
+	}
+	name := message.GetName()
+	if purpose != ports.BrokerStreamAttachment && (admission != 0 || name != "") {
+		return Open{}, ErrInvalidMessage
+	}
 	local := message.GetLocal()
 	var registration domain.RemoteRegistration
 	if !local {
@@ -334,8 +348,12 @@ func openFromWire(message *wire.MuxOpen) (Open, error) {
 	}
 	var target protocol.ExactSessionTarget
 	if purpose == ports.BrokerStreamAttachment {
-		target, err = exactTargetFromWire(message.GetTarget())
-		if err != nil {
+		if admission == ports.BrokerAdmissionExact {
+			target, err = exactTargetFromWire(message.GetTarget())
+			if err != nil {
+				return Open{}, ErrInvalidMessage
+			}
+		} else if message.GetTarget() != nil {
 			return Open{}, ErrInvalidMessage
 		}
 	} else if message.GetTarget() != nil {
@@ -354,11 +372,11 @@ func openFromWire(message *wire.MuxOpen) (Open, error) {
 	}
 	endpoint := message.GetEndpoint()
 	candidate := Open{
-		Ref: ref, Purpose: purpose, Local: local, Endpoint: endpoint,
+		Ref: ref, Purpose: purpose, Admission: admission, Name: name, Local: local, Endpoint: endpoint,
 		Registration: registration, Target: target, Env: env, Policy: policy,
 	}
 	request := ports.BrokerOpenStreamRequest{
-		Epoch: candidate.Ref.Epoch, Purpose: candidate.Purpose, Local: candidate.Local,
+		Epoch: candidate.Ref.Epoch, Purpose: candidate.Purpose, Admission: candidate.Admission, Name: candidate.Name, Local: candidate.Local,
 		Connection: candidate.Ref.Connection, Stream: candidate.Ref.Client,
 		Endpoint: candidate.Endpoint, Registration: candidate.Registration,
 		Target: candidate.Target, Env: candidate.Env, Policy: candidate.Policy,

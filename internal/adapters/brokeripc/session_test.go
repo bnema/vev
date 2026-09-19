@@ -132,6 +132,33 @@ func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 	require.ErrorIs(t, session.CloseStream(ports.BrokerConnectionID{0x99}, 2), ports.BrokerAdmissionStale)
 }
 
+// TestOpenStreamAdmissionRoundTrips proves the attachment-admission contract
+// travels the IPC wire: a create-named request reaches the core with exactly
+// its admission and validated name.
+func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
+	e := startEndpoint(t, Config{})
+	client, _ := e.pair()
+	core := e.authority.last()
+	require.NotNil(t, core)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{
+		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateNamed, Name: "work",
+		Local: true, Policy: testPolicy(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stream)
+
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	require.Len(t, core.opens, 1)
+	require.Equal(t, ports.BrokerAdmissionCreateNamed, core.opens[0].Admission)
+	require.Equal(t, "work", core.opens[0].Name)
+	require.Equal(t, ports.BrokerStreamAttachment, core.opens[0].Purpose)
+	require.True(t, core.opens[0].Local)
+}
+
 // TestRegistrationAssignsScopeAtAccept proves the client adapter adopts exactly
 // the scope the listener assigned at accept.
 func TestRegistrationAssignsScopeAtAccept(t *testing.T) {
@@ -158,10 +185,10 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 
 	got := client.Snapshot()
 	require.Equal(t, e.epoch, got.Epoch)
-	require.Len(t, got.Hosts, 1)
-	require.Equal(t, snapshot.Hosts[0].Endpoint, got.Hosts[0].Endpoint)
-	require.Len(t, got.Hosts[0].Sessions, 2)
-	require.Equal(t, snapshot.Hosts[0].Sessions[0].Name, got.Hosts[0].Sessions[0].Name)
+	require.Len(t, got.Daemons, 1)
+	require.Equal(t, snapshot.Daemons[0].Endpoint, got.Daemons[0].Endpoint)
+	require.Len(t, got.Daemons[0].Sessions, 2)
+	require.Equal(t, snapshot.Daemons[0].Sessions[0].Name, got.Daemons[0].Sessions[0].Name)
 
 	select {
 	case <-sub.Changed():
@@ -619,11 +646,11 @@ func TestRequestReconcileIsBoundedHint(t *testing.T) {
 	snapshot := e.publish(e.epoch, 4)
 	require.Eventually(t, func() bool { return client.Snapshot().Revision == 4 }, 5*time.Second, 10*time.Millisecond)
 
-	client.RequestReconcile(snapshot.Hosts[0].Endpoint)
+	client.RequestReconcile(snapshot.Daemons[0].Endpoint)
 	require.Eventually(t, func() bool {
 		core.mu.Lock()
 		defer core.mu.Unlock()
-		return len(core.reconcile) == 1 && core.reconcile[0] == snapshot.Hosts[0].Endpoint
+		return len(core.reconcile) == 1 && core.reconcile[0] == snapshot.Daemons[0].Endpoint
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
@@ -689,12 +716,12 @@ func TestSessionHandshakeFailureIsStreamLocal(t *testing.T) {
 func TestDomainFixturesAreValid(t *testing.T) {
 	snapshot := testSnapshot(1, 1)
 	require.NoError(t, snapshot.Validate())
-	for _, host := range snapshot.Hosts {
+	for _, host := range snapshot.Daemons {
 		require.NoError(t, ports.ValidateDurableHostProjection(host))
 	}
 	require.NoError(t, testPolicy().Validate())
 	catalogueSession := testSessionAt(0, 0)
 	require.False(t, strings.HasPrefix(catalogueSession.Name, " "))
-	require.NotEqual(t, domain.RemoteAvailabilityUnknown, testHostAt(0).Availability)
+	require.NotEqual(t, domain.RemoteAvailabilityUnknown, testDaemonAt(0).Availability)
 	require.True(t, errors.Is(errors.Join(ErrScopeMismatch, ports.BrokerAdmissionStale), ports.BrokerAdmissionStale))
 }

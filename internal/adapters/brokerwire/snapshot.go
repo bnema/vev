@@ -9,36 +9,40 @@
 //
 // Transfer layout (indexes are exact positions):
 //
-//	Begin(0) Host/Session... Tombstone... End(N-1)
+//	Begin(0) Daemon/Session... Tombstone... End(N-1)
 //
-// Begin carries the total host, session, and tombstone counts. Host parts
-// arrive in host_index order; each Host advertises how many Session parts
-// follow it immediately, with per-host session_index order. Tombstones
-// arrive in tombstone_index order after all hosts and sessions. End closes
-// the transfer. Total parts are 1 + hosts + sessions + tombstones + 1,
-// bounded by MaxSnapshotParts (64 hosts, 64*256 sessions, 64 tombstones).
+// Begin carries the total daemon, session, and tombstone counts plus whether
+// the local daemon is present. Daemon parts arrive in host_index order, with
+// the local daemon (when present) first at index 0 and remotes following in
+// registration order; each Daemon advertises how many Session parts follow it
+// immediately, with per-daemon session_index order. A session of the local
+// daemon carries Local=true and host_index 0. Tombstones arrive in
+// tombstone_index order after all daemons and sessions. End closes the
+// transfer. Total parts are 1 + daemons + sessions + tombstones + 1, bounded
+// by MaxSnapshotParts (65 daemons, 65*256 sessions, 64 tombstones).
 //
 // Bounds: at most MaxSnapshotParts parts and MaxSnapshotStagedBytes staged
 // estimate per transfer. The staged estimate is a deterministic function of
-// endpoint, origin, session, tab, and tombstone text lengths plus fixed
-// per-part overhead; it bounds hostile memory without measuring wire bytes.
+// endpoint, origin, policy, identity, session, tab, and tombstone text lengths
+// plus fixed per-part overhead; it bounds hostile memory without measuring
+// wire bytes.
 //
 // Publication is atomic: the committed snapshot is replaced only when End
 // arrives with exact indexes and the assembled BrokerSnapshot passes
-// ports.BrokerSnapshot.Validate plus per-host
-// ports.ValidateDurableHostProjection. Any malformed index, count, order,
-// or validation failure aborts staging and retains the old snapshot. A new
-// Begin for the same generation with a newer revision coalesces by
-// replacing staging; an older revision is rejected and retains both the
-// committed snapshot and any staging in flight. Equal revisions are allowed
-// so a resync may republish the committed revision.
+// ports.BrokerSnapshot.Validate plus, for every remote daemon,
+// ports.ValidateDurableHostProjection. Any malformed index, count, order, or
+// validation failure aborts staging and retains the old snapshot. A new Begin
+// for the same generation with a newer revision coalesces by replacing
+// staging; an older revision is rejected and retains both the committed
+// snapshot and any staging in flight. Equal revisions are allowed so a resync
+// may republish the committed revision.
 //
 // Generation fencing: the assembler belongs to exactly one nonzero
 // subscription generation, adopted from the first Begin or pinned by
-// WithGeneration. Parts with a stale generation are ignored without
-// touching staging; parts with a future generation are rejected, whether or
-// not a transfer is in flight. Scope fencing is exact: every part must carry
-// the assembler's epoch and connection.
+// WithGeneration. Parts with a stale generation are ignored without touching
+// staging; parts with a future generation are rejected, whether or not a
+// transfer is in flight. Scope fencing is exact: every part must carry the
+// assembler's epoch and connection.
 //
 // There is no I/O, socket, pump, or P3.2 transport here. The owning
 // Connection discards staging on generation advance, unsubscribe, or close.
@@ -53,9 +57,9 @@ import (
 )
 
 const (
-	// MaxSnapshotParts bounds one multipart publication: 1 Begin + 64
-	// hosts + 64*256 sessions + 64 tombstones + 1 End.
-	MaxSnapshotParts = 1 + ports.BrokerMaxHosts + ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost + ports.BrokerMaxTombstones + 1
+	// MaxSnapshotParts bounds one multipart publication: 1 Begin + 65 daemons
+	// + 65*256 sessions + 64 tombstones + 1 End.
+	MaxSnapshotParts = 1 + ports.BrokerMaxDaemonsPerSnapshot + ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost + ports.BrokerMaxTombstones + 1
 	// MaxSnapshotStagedBytes bounds the deterministic staged estimate of
 	// one transfer (80 MiB).
 	MaxSnapshotStagedBytes = uint64(80 << 20)
@@ -121,16 +125,36 @@ type snapshotStaging struct {
 	hostCount      uint32
 	sessionTotal   uint32
 	tombstoneCount uint32
+	localPresent   bool
 	totalParts     uint32
 	nextIndex      uint32
-	hosts          []ports.RemoteHostSnapshot
-	hostExpected   []uint32
-	hostSeen       []uint32
-	hostsSeen      uint32
+	daemons        []ports.BrokerDaemonObservation
+	daemonExpected []uint32
+	daemonSeen     []uint32
+	daemonsSeen    uint32
 	sessionsSeen   uint32
 	tombstones     []ports.BrokerHostTombstone
 	tombstonesSeen uint32
 	stagedBytes    uint64
+}
+
+// newSnapshotStaging allocates one transfer's staging from a validated Begin.
+func newSnapshotStaging(generation SubscriptionGeneration, revision ports.BrokerRevision, begin SnapshotBegin) *snapshotStaging {
+	total := 1 + uint64(begin.HostCount) + uint64(begin.SessionCount) + uint64(begin.TombstoneCount) + 1
+	return &snapshotStaging{
+		generation:     generation,
+		revision:       revision,
+		hostCount:      begin.HostCount,
+		sessionTotal:   begin.SessionCount,
+		tombstoneCount: begin.TombstoneCount,
+		localPresent:   begin.LocalPresent,
+		totalParts:     uint32(total),
+		nextIndex:      1,
+		daemons:        make([]ports.BrokerDaemonObservation, begin.HostCount),
+		daemonExpected: make([]uint32, begin.HostCount),
+		daemonSeen:     make([]uint32, begin.HostCount),
+		tombstones:     make([]ports.BrokerHostTombstone, begin.TombstoneCount),
+	}
 }
 
 // NewSnapshotAssembler binds an assembler to one exact scope assigned by
@@ -242,23 +266,7 @@ func (a *SnapshotAssembler) Add(part SnapshotPart) (bool, ports.BrokerSnapshot, 
 		if a.hasCommitted && part.Revision < a.committed.Revision {
 			return false, ports.BrokerSnapshot{}, ErrSnapshotStale
 		}
-		total := 1 + uint64(begin.HostCount) + uint64(begin.SessionCount) + uint64(begin.TombstoneCount) + 1
-		if total > uint64(MaxSnapshotParts) {
-			return false, ports.BrokerSnapshot{}, ErrTooLarge
-		}
-		staging := &snapshotStaging{
-			generation:     part.Generation,
-			revision:       part.Revision,
-			hostCount:      begin.HostCount,
-			sessionTotal:   begin.SessionCount,
-			tombstoneCount: begin.TombstoneCount,
-			totalParts:     uint32(total),
-			nextIndex:      1,
-			hosts:          make([]ports.RemoteHostSnapshot, begin.HostCount),
-			hostExpected:   make([]uint32, begin.HostCount),
-			hostSeen:       make([]uint32, begin.HostCount),
-			tombstones:     make([]ports.BrokerHostTombstone, begin.TombstoneCount),
-		}
+		staging := newSnapshotStaging(part.Generation, part.Revision, begin)
 		staged := estimatePartBytes(part)
 		if staged > a.maxStagedBytes {
 			return false, ports.BrokerSnapshot{}, ErrTooLarge
@@ -284,11 +292,6 @@ func (a *SnapshotAssembler) Add(part SnapshotPart) (bool, ports.BrokerSnapshot, 
 			a.staging = nil
 			return false, ports.BrokerSnapshot{}, err
 		}
-		total := 1 + uint64(begin.HostCount) + uint64(begin.SessionCount) + uint64(begin.TombstoneCount) + 1
-		if total > uint64(MaxSnapshotParts) {
-			a.staging = nil
-			return false, ports.BrokerSnapshot{}, ErrTooLarge
-		}
 		switch {
 		case part.Revision == staging.revision:
 			// Restart of the same transfer: discard progress.
@@ -299,19 +302,7 @@ func (a *SnapshotAssembler) Add(part SnapshotPart) (bool, ports.BrokerSnapshot, 
 		default:
 			return false, ports.BrokerSnapshot{}, ErrSnapshotStale
 		}
-		fresh := &snapshotStaging{
-			generation:     part.Generation,
-			revision:       part.Revision,
-			hostCount:      begin.HostCount,
-			sessionTotal:   begin.SessionCount,
-			tombstoneCount: begin.TombstoneCount,
-			totalParts:     uint32(total),
-			nextIndex:      1,
-			hosts:          make([]ports.RemoteHostSnapshot, begin.HostCount),
-			hostExpected:   make([]uint32, begin.HostCount),
-			hostSeen:       make([]uint32, begin.HostCount),
-			tombstones:     make([]ports.BrokerHostTombstone, begin.TombstoneCount),
-		}
+		fresh := newSnapshotStaging(part.Generation, part.Revision, begin)
 		staged := estimatePartBytes(part)
 		if staged > a.maxStagedBytes {
 			a.staging = nil
@@ -342,9 +333,9 @@ func (a *SnapshotAssembler) Add(part SnapshotPart) (bool, ports.BrokerSnapshot, 
 		return false, ports.BrokerSnapshot{}, ErrTooLarge
 	}
 	switch payload := part.Part.(type) {
-	case SnapshotHostPart, *SnapshotHostPart:
-		hostPart := normalizeHostPart(payload)
-		if err := a.stageHost(staging, hostPart); err != nil {
+	case SnapshotDaemonPart, *SnapshotDaemonPart:
+		daemonPart := normalizeDaemonPart(payload)
+		if err := a.stageDaemon(staging, daemonPart); err != nil {
 			a.staging = nil
 			return false, ports.BrokerSnapshot{}, err
 		}
@@ -394,17 +385,17 @@ func normalizeBegin(payload SnapshotPartPayload) (SnapshotBegin, bool) {
 	}
 }
 
-func normalizeHostPart(payload SnapshotPartPayload) SnapshotHostPart {
+func normalizeDaemonPart(payload SnapshotPartPayload) SnapshotDaemonPart {
 	switch p := payload.(type) {
-	case SnapshotHostPart:
+	case SnapshotDaemonPart:
 		return p
-	case *SnapshotHostPart:
+	case *SnapshotDaemonPart:
 		if p == nil {
-			return SnapshotHostPart{HostIndex: ^uint32(0)}
+			return SnapshotDaemonPart{HostIndex: ^uint32(0)}
 		}
 		return *p
 	default:
-		return SnapshotHostPart{HostIndex: ^uint32(0)}
+		return SnapshotDaemonPart{HostIndex: ^uint32(0)}
 	}
 }
 
@@ -437,19 +428,24 @@ func normalizeTombstonePart(payload SnapshotPartPayload) SnapshotTombstonePart {
 }
 
 func checkBeginCounts(begin SnapshotBegin) error {
-	if begin.HostCount > uint32(ports.BrokerMaxHosts) ||
-		begin.SessionCount > uint32(ports.BrokerMaxHosts*ports.BrokerMaxSessionsPerHost) ||
+	if begin.HostCount > uint32(ports.BrokerMaxDaemonsPerSnapshot) ||
+		begin.SessionCount > uint32(ports.BrokerMaxDaemonsPerSnapshot*ports.BrokerMaxSessionsPerHost) ||
 		begin.TombstoneCount > uint32(ports.BrokerMaxTombstones) {
 		return ErrTooLarge
+	}
+	// A local daemon occupies daemon index 0, so it can only be present when
+	// at least one daemon part follows.
+	if begin.LocalPresent && begin.HostCount == 0 {
+		return ErrSnapshotInvalid
 	}
 	return nil
 }
 
-func (a *SnapshotAssembler) stageHost(staging *snapshotStaging, part SnapshotHostPart) error {
-	if staging.hostsSeen >= staging.hostCount {
+func (a *SnapshotAssembler) stageDaemon(staging *snapshotStaging, part SnapshotDaemonPart) error {
+	if staging.daemonsSeen >= staging.hostCount {
 		return ErrSnapshotInvalid
 	}
-	if part.HostIndex != staging.hostsSeen {
+	if part.HostIndex != staging.daemonsSeen {
 		return ErrSnapshotInvalid
 	}
 	if part.HostIndex >= staging.hostCount {
@@ -458,46 +454,60 @@ func (a *SnapshotAssembler) stageHost(staging *snapshotStaging, part SnapshotHos
 	if part.SessionCount > uint32(ports.BrokerMaxSessionsPerHost) {
 		return ErrTooLarge
 	}
-	if len(part.Host.Sessions) != 0 {
+	if len(part.Daemon.Sessions) != 0 {
+		return ErrSnapshotInvalid
+	}
+	// The local daemon is always first: daemon index 0 is local exactly when
+	// Begin advertised it, and no later daemon may be local.
+	if part.HostIndex == 0 {
+		if part.Daemon.Local != staging.localPresent {
+			return ErrSnapshotInvalid
+		}
+	} else if part.Daemon.Local {
 		return ErrSnapshotInvalid
 	}
 	var seen uint64
-	for _, n := range staging.hostExpected[:staging.hostsSeen] {
+	for _, n := range staging.daemonExpected[:staging.daemonsSeen] {
 		seen += uint64(n)
 	}
 	if seen+uint64(part.SessionCount) > uint64(staging.sessionTotal) {
 		return ErrSnapshotInvalid
 	}
-	// Remaining hosts must still be able to fill the advertised total:
-	// even if every remaining host carried the per-host maximum, the
+	// Remaining daemons must still be able to fill the advertised total:
+	// even if every remaining daemon carried the per-daemon maximum, the
 	// total must stay reachable. This is checked exactly at End; here we
 	// only refuse an already-exceeded sum.
-	staging.hosts[part.HostIndex] = part.Host.Clone()
-	staging.hostExpected[part.HostIndex] = part.SessionCount
-	staging.hostSeen[part.HostIndex] = 0
-	staging.hostsSeen++
+	staging.daemons[part.HostIndex] = part.Daemon.Clone()
+	staging.daemonExpected[part.HostIndex] = part.SessionCount
+	staging.daemonSeen[part.HostIndex] = 0
+	staging.daemonsSeen++
 	return nil
 }
 
 func (a *SnapshotAssembler) stageSession(staging *snapshotStaging, part SnapshotSessionPart) error {
-	if staging.hostsSeen == 0 || staging.hostsSeen > staging.hostCount {
+	if staging.daemonsSeen == 0 || staging.daemonsSeen > staging.hostCount {
 		return ErrSnapshotInvalid
 	}
-	current := staging.hostsSeen - 1
+	current := staging.daemonsSeen - 1
 	if part.HostIndex != current {
 		return ErrSnapshotInvalid
 	}
 	if current >= staging.hostCount {
 		return ErrSnapshotInvalid
 	}
-	expected := staging.hostExpected[current]
-	if staging.hostSeen[current] >= expected {
+	expected := staging.daemonExpected[current]
+	if staging.daemonSeen[current] >= expected {
 		return ErrSnapshotInvalid
 	}
-	if part.SessionIndex != staging.hostSeen[current] {
+	if part.SessionIndex != staging.daemonSeen[current] {
 		return ErrSnapshotInvalid
 	}
-	if part.HostIndex >= uint32(ports.BrokerMaxHosts) || part.SessionIndex >= uint32(ports.BrokerMaxSessionsPerHost) {
+	// A session belongs to the daemon it follows: a local session binds to
+	// the local daemon at index 0, and a remote session to a remote daemon.
+	if part.Local != staging.daemons[current].Local {
+		return ErrSnapshotInvalid
+	}
+	if part.HostIndex >= uint32(ports.BrokerMaxDaemonsPerSnapshot) || part.SessionIndex >= uint32(ports.BrokerMaxSessionsPerHost) {
 		return ErrTooLarge
 	}
 	if staging.sessionsSeen >= staging.sessionTotal {
@@ -510,16 +520,16 @@ func (a *SnapshotAssembler) stageSession(staging *snapshotStaging, part Snapshot
 	tabs := make([]catalogue.RemoteCatalogTab, len(session.Tabs))
 	copy(tabs, session.Tabs)
 	session.Tabs = tabs
-	host := staging.hosts[current]
-	host.Sessions = append(host.Sessions, session)
-	staging.hosts[current] = host
-	staging.hostSeen[current]++
+	daemon := staging.daemons[current]
+	daemon.Sessions = append(daemon.Sessions, session)
+	staging.daemons[current] = daemon
+	staging.daemonSeen[current]++
 	staging.sessionsSeen++
 	return nil
 }
 
 func (a *SnapshotAssembler) stageTombstone(staging *snapshotStaging, part SnapshotTombstonePart) error {
-	if staging.hostsSeen != staging.hostCount || staging.sessionsSeen != staging.sessionTotal {
+	if staging.daemonsSeen != staging.hostCount || staging.sessionsSeen != staging.sessionTotal {
 		return ErrSnapshotInvalid
 	}
 	if staging.tombstonesSeen >= staging.tombstoneCount {
@@ -541,33 +551,37 @@ func (a *SnapshotAssembler) stageTombstone(staging *snapshotStaging, part Snapsh
 }
 
 func (a *SnapshotAssembler) commitStaging(staging *snapshotStaging) (ports.BrokerSnapshot, error) {
-	if staging.hostsSeen != staging.hostCount || staging.sessionsSeen != staging.sessionTotal || staging.tombstonesSeen != staging.tombstoneCount {
+	if staging.daemonsSeen != staging.hostCount || staging.sessionsSeen != staging.sessionTotal || staging.tombstonesSeen != staging.tombstoneCount {
 		return ports.BrokerSnapshot{}, ErrSnapshotInvalid
 	}
 	if staging.nextIndex != staging.totalParts-1 {
 		return ports.BrokerSnapshot{}, ErrSnapshotInvalid
 	}
 	var sum uint64
-	for _, n := range staging.hostExpected {
+	for _, n := range staging.daemonExpected {
 		sum += uint64(n)
 	}
 	if sum != uint64(staging.sessionTotal) {
 		return ports.BrokerSnapshot{}, ErrSnapshotInvalid
 	}
-	hosts := make([]ports.RemoteHostSnapshot, len(staging.hosts))
-	for i, host := range staging.hosts {
-		hosts[i] = host.Clone()
-		if hosts[i].Sessions == nil {
-			hosts[i].Sessions = []catalogue.RemoteCatalogSession{}
+	daemons := make([]ports.BrokerDaemonObservation, len(staging.daemons))
+	for i, daemon := range staging.daemons {
+		daemons[i] = daemon.Clone()
+		if daemons[i].Sessions == nil {
+			daemons[i].Sessions = []catalogue.RemoteCatalogSession{}
 		}
 	}
 	removed := append([]ports.BrokerHostTombstone(nil), staging.tombstones...)
-	snapshot := ports.BrokerSnapshot{Epoch: a.epoch, Revision: staging.revision, Hosts: hosts, Removed: removed}
+	snapshot := ports.BrokerSnapshot{Epoch: a.epoch, Revision: staging.revision, Daemons: daemons, Removed: removed}
 	if err := snapshot.Validate(); err != nil {
 		return ports.BrokerSnapshot{}, ErrSnapshotInvalid
 	}
-	for _, host := range hosts {
-		if err := ports.ValidateDurableHostProjection(host); err != nil {
+	for _, daemon := range daemons {
+		// The local daemon is process-local state and is never durable.
+		if daemon.Local {
+			continue
+		}
+		if err := ports.ValidateDurableHostProjection(daemon); err != nil {
 			return ports.BrokerSnapshot{}, ErrSnapshotInvalid
 		}
 	}
@@ -579,13 +593,13 @@ func estimatePartBytes(part SnapshotPart) uint64 {
 	switch payload := part.Part.(type) {
 	case SnapshotBegin, *SnapshotBegin:
 		return overhead
-	case SnapshotHostPart:
-		return uint64(len(payload.Host.Endpoint)+len(payload.Host.DisplayOrigin)+len(payload.Host.Registration.Endpoint)+64) + overhead
-	case *SnapshotHostPart:
+	case SnapshotDaemonPart:
+		return estimateDaemonBytes(payload.Daemon) + overhead
+	case *SnapshotDaemonPart:
 		if payload == nil {
 			return overhead
 		}
-		return uint64(len(payload.Host.Endpoint)+len(payload.Host.DisplayOrigin)+len(payload.Host.Registration.Endpoint)+64) + overhead
+		return estimateDaemonBytes(payload.Daemon) + overhead
 	case SnapshotSessionPart:
 		return estimateCatalogSessionBytes(payload.Session) + overhead
 	case *SnapshotSessionPart:
@@ -605,6 +619,16 @@ func estimatePartBytes(part SnapshotPart) uint64 {
 	default:
 		return overhead
 	}
+}
+
+// estimateDaemonBytes bounds one daemon projection's staged memory: every
+// configured-authority and observed-identity string plus a fixed per-daemon
+// charge.
+func estimateDaemonBytes(daemon ports.BrokerDaemonObservation) uint64 {
+	text := len(daemon.Endpoint) + len(daemon.DisplayOrigin) + len(daemon.Registration.Endpoint) +
+		len(daemon.Policy.Transport) + len(daemon.Policy.Trust) + len(daemon.Policy.Launch) + len(daemon.Policy.Isolation) +
+		len(daemon.Identity)
+	return uint64(text + 64)
 }
 
 // estimateCatalogSessionBytes bounds one session's staged memory. It charges

@@ -11,12 +11,13 @@ import (
 // Snapshot publication (P3.3).
 //
 // A broker publication travels as the exact multipart transfer the P3.1
-// assembler accepts: Begin(index 0, element counts), then every host part in
-// host-index order immediately followed by that host's session parts in
-// session-index order, then the tombstones, then End at the final index. Host
-// parts carry no inline sessions; sessions travel as their own parts. Both
-// sides agree on one deterministic layout, so the receiving assembler commits
-// only a transfer whose indexes, counts, and order are exact.
+// assembler accepts: Begin(index 0, element counts), then every daemon part in
+// daemon-index order immediately followed by that daemon's session parts in
+// session-index order, then the tombstones, then End at the final index. The
+// local daemon, when present, is daemon index 0 and its sessions carry
+// Local=true. Daemon parts carry no inline sessions; sessions travel as their
+// own parts. Both sides agree on one deterministic layout, so the receiving
+// assembler commits only a transfer whose indexes, counts, and order are exact.
 //
 // The emitter refuses a transfer the peer's assembler would refuse: more parts
 // than MaxSnapshotParts, or a total encoded payload above the staged ceiling.
@@ -33,20 +34,21 @@ func snapshotParts(snapshot ports.BrokerSnapshot, epoch ports.BrokerEpoch, conne
 	if snapshot.Revision == 0 {
 		return nil, errors.New("brokeripc: snapshot publication has no revision")
 	}
-	if len(snapshot.Hosts) > ports.BrokerMaxHosts || len(snapshot.Removed) > ports.BrokerMaxTombstones {
-		return nil, errors.New("brokeripc: snapshot publication exceeds host bound")
+	if len(snapshot.Daemons) > ports.BrokerMaxDaemonsPerSnapshot || len(snapshot.Removed) > ports.BrokerMaxTombstones {
+		return nil, errors.New("brokeripc: snapshot publication exceeds daemon bound")
 	}
 	sessions := 0
-	for _, host := range snapshot.Hosts {
-		if len(host.Sessions) > ports.BrokerMaxSessionsPerHost {
+	for _, daemon := range snapshot.Daemons {
+		if len(daemon.Sessions) > ports.BrokerMaxSessionsPerHost {
 			return nil, errors.New("brokeripc: snapshot publication exceeds session bound")
 		}
-		sessions += len(host.Sessions)
+		sessions += len(daemon.Sessions)
 	}
-	total := 1 + len(snapshot.Hosts) + sessions + len(snapshot.Removed) + 1
+	total := 1 + len(snapshot.Daemons) + sessions + len(snapshot.Removed) + 1
 	if total > brokerwire.MaxSnapshotParts {
 		return nil, errors.New("brokeripc: snapshot publication exceeds part bound")
 	}
+	localPresent := len(snapshot.Daemons) > 0 && snapshot.Daemons[0].Local
 
 	parts := make([]brokerwire.SnapshotPart, 0, total)
 	base := func(part brokerwire.SnapshotPartPayload) brokerwire.SnapshotPart {
@@ -56,23 +58,25 @@ func snapshotParts(snapshot ports.BrokerSnapshot, epoch ports.BrokerEpoch, conne
 		}
 	}
 	parts = append(parts, base(brokerwire.SnapshotBegin{
-		HostCount:      uint32(len(snapshot.Hosts)),
+		HostCount:      uint32(len(snapshot.Daemons)),
 		SessionCount:   uint32(sessions),
 		TombstoneCount: uint32(len(snapshot.Removed)),
+		LocalPresent:   localPresent,
 	}))
-	for hostIndex, host := range snapshot.Hosts {
-		projection := host.Clone()
+	for daemonIndex, daemon := range snapshot.Daemons {
+		projection := daemon.Clone()
 		sessionCount := len(projection.Sessions)
 		projection.Sessions = nil
-		parts = append(parts, base(brokerwire.SnapshotHostPart{
-			HostIndex:    uint32(hostIndex),
-			Host:         projection,
+		parts = append(parts, base(brokerwire.SnapshotDaemonPart{
+			HostIndex:    uint32(daemonIndex),
+			Daemon:       projection,
 			SessionCount: uint32(sessionCount),
 		}))
-		for sessionIndex, session := range host.Sessions {
+		for sessionIndex, session := range daemon.Sessions {
 			parts = append(parts, base(brokerwire.SnapshotSessionPart{
-				HostIndex:    uint32(hostIndex),
+				HostIndex:    uint32(daemonIndex),
 				SessionIndex: uint32(sessionIndex),
+				Local:        daemon.Local,
 				Session:      cloneCatalogSession(session),
 			}))
 		}

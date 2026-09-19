@@ -5,10 +5,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/stretchr/testify/require"
 )
 
 func testBrokerRegistration(endpoint string, incarnation byte, generation domain.RemoteGeneration) domain.RemoteRegistration {
@@ -37,11 +39,21 @@ func testBrokerPolicy() BrokerPolicy {
 	}
 }
 
-func testBrokerHost(endpoint string) RemoteHostSnapshot {
-	return RemoteHostSnapshot{
+func testBrokerObservation(endpoint string) BrokerDaemonObservation {
+	return BrokerDaemonObservation{
 		Endpoint:      endpoint,
 		DisplayOrigin: endpoint,
 		Registration:  testBrokerRegistration(endpoint, 1, 1),
+		Policy:        testBrokerPolicy(),
+		Availability:  domain.RemoteAvailabilityReachable,
+	}
+}
+
+func testLocalBrokerObservation() BrokerDaemonObservation {
+	return BrokerDaemonObservation{
+		Local:         true,
+		DisplayOrigin: "local",
+		Policy:        testBrokerPolicy(),
 		Availability:  domain.RemoteAvailabilityReachable,
 	}
 }
@@ -50,7 +62,7 @@ func validBrokerSnapshot() BrokerSnapshot {
 	return BrokerSnapshot{
 		Epoch:    3,
 		Revision: 9,
-		Hosts:    []RemoteHostSnapshot{testBrokerHost("user@arch")},
+		Daemons:  []BrokerDaemonObservation{testBrokerObservation("user@arch")},
 	}
 }
 
@@ -76,36 +88,45 @@ func TestValidateDurableHostProjection(t *testing.T) {
 	}
 	tests := []struct {
 		name    string
-		mutate  func(*RemoteHostSnapshot)
+		mutate  func(*BrokerDaemonObservation)
 		wantErr bool
 	}{
-		{name: "empty inventory", mutate: func(*RemoteHostSnapshot) {}},
-		{name: "valid inventory", mutate: func(h *RemoteHostSnapshot) { h.Sessions = []catalogue.RemoteCatalogSession{session} }},
-		{name: "zero availability", mutate: func(h *RemoteHostSnapshot) { h.Availability = 0 }, wantErr: true},
-		{name: "unknown availability", mutate: func(h *RemoteHostSnapshot) { h.Availability = domain.RemoteAvailabilityUnknown }},
-		{name: "availability past the closed range", mutate: func(h *RemoteHostSnapshot) { h.Availability = domain.RemoteAvailabilityInvalidResponse + 1 }, wantErr: true},
-		{name: "failure kind past the closed range", mutate: func(h *RemoteHostSnapshot) { h.LastFailure.Kind = domain.RemoteFailureInvalidResponse + 1 }, wantErr: true},
-		{name: "missing lifecycle identity", mutate: func(h *RemoteHostSnapshot) {
-			h.Sessions = []catalogue.RemoteCatalogSession{{Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: []catalogue.RemoteCatalogTab{}}}
+		{name: "empty inventory", mutate: func(*BrokerDaemonObservation) {}},
+		{name: "valid inventory", mutate: func(o *BrokerDaemonObservation) {
+			o.InventoryKnown = true
+			o.Sessions = []catalogue.RemoteCatalogSession{session}
+		}},
+		{name: "local observation", mutate: func(o *BrokerDaemonObservation) {
+			*o = testLocalBrokerObservation()
 		}, wantErr: true},
-		{name: "absent tab list", mutate: func(h *RemoteHostSnapshot) {
+		{name: "zero availability", mutate: func(o *BrokerDaemonObservation) { o.Availability = 0 }, wantErr: true},
+		{name: "unknown availability", mutate: func(o *BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityUnknown }},
+		{name: "availability past the closed range", mutate: func(o *BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityInvalidResponse + 1 }, wantErr: true},
+		{name: "failure kind past the closed range", mutate: func(o *BrokerDaemonObservation) { o.LastFailure.Kind = domain.RemoteFailureInvalidResponse + 1 }, wantErr: true},
+		{name: "missing lifecycle identity", mutate: func(o *BrokerDaemonObservation) {
+			o.InventoryKnown = true
+			o.Sessions = []catalogue.RemoteCatalogSession{{Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: []catalogue.RemoteCatalogTab{}}}
+		}, wantErr: true},
+		{name: "absent tab list", mutate: func(o *BrokerDaemonObservation) {
 			broken := session
 			broken.Tabs = nil
-			h.Sessions = []catalogue.RemoteCatalogSession{broken}
+			o.InventoryKnown = true
+			o.Sessions = []catalogue.RemoteCatalogSession{broken}
 		}, wantErr: true},
-		{name: "sessions past the catalogue bound", mutate: func(h *RemoteHostSnapshot) {
-			h.Sessions = make([]catalogue.RemoteCatalogSession, catalogue.RemoteCatalogMaxSessions+1)
-			for i := range h.Sessions {
-				h.Sessions[i] = session
+		{name: "sessions past the catalogue bound", mutate: func(o *BrokerDaemonObservation) {
+			o.InventoryKnown = true
+			o.Sessions = make([]catalogue.RemoteCatalogSession, catalogue.RemoteCatalogMaxSessions+1)
+			for i := range o.Sessions {
+				o.Sessions[i] = session
 			}
 		}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			host := testBrokerHost("user@arch")
-			host.LastSuccess = time.Unix(50, 0)
-			tc.mutate(&host)
-			if gotErr := ValidateDurableHostProjection(host); (gotErr != nil) != tc.wantErr {
+			obs := testBrokerObservation("user@arch")
+			obs.LastSuccess = time.Unix(50, 0)
+			tc.mutate(&obs)
+			if gotErr := ValidateDurableHostProjection(obs); (gotErr != nil) != tc.wantErr {
 				t.Fatalf("ValidateDurableHostProjection() = %v, wantErr %t", gotErr, tc.wantErr)
 			}
 		})
@@ -121,21 +142,27 @@ func TestBrokerSnapshotValidateBounds(t *testing.T) {
 		{name: "valid", mutate: func(*BrokerSnapshot) {}, wantErr: false},
 		{name: "zero epoch", mutate: func(s *BrokerSnapshot) { s.Epoch = 0 }, wantErr: true},
 		{name: "zero revision", mutate: func(s *BrokerSnapshot) { s.Revision = 0 }, wantErr: true},
-		{name: "too many hosts", mutate: func(s *BrokerSnapshot) {
-			s.Hosts = make([]RemoteHostSnapshot, BrokerMaxHosts+1)
-			for i := range s.Hosts {
-				s.Hosts[i] = testBrokerHost("user@arch")
-				s.Hosts[i].Registration = testBrokerRegistration("user@arch", 1, 1)
+		{name: "too many daemons", mutate: func(s *BrokerSnapshot) {
+			s.Daemons = make([]BrokerDaemonObservation, BrokerMaxDaemonsPerSnapshot+1)
+			for i := range s.Daemons {
+				s.Daemons[i] = testBrokerObservation("user@arch")
+				s.Daemons[i].Registration = testBrokerRegistration("user@arch", 1, 1)
 			}
 		}, wantErr: true},
+		{name: "local daemon plus remote hosts is valid", mutate: func(s *BrokerSnapshot) {
+			s.Daemons = append([]BrokerDaemonObservation{testLocalBrokerObservation()}, s.Daemons...)
+		}},
+		{name: "two local daemons", mutate: func(s *BrokerSnapshot) {
+			s.Daemons = append(s.Daemons, testLocalBrokerObservation(), testLocalBrokerObservation())
+		}, wantErr: true},
 		{name: "duplicate host", mutate: func(s *BrokerSnapshot) {
-			s.Hosts = append(s.Hosts, testBrokerHost("user@arch"))
+			s.Daemons = append(s.Daemons, testBrokerObservation("user@arch"))
 		}, wantErr: true},
 		{name: "endpoint registration mismatch", mutate: func(s *BrokerSnapshot) {
-			s.Hosts[0].Registration = testBrokerRegistration("user@other", 1, 1)
+			s.Daemons[0].Registration = testBrokerRegistration("user@other", 1, 1)
 		}, wantErr: true},
 		{name: "zero registration incarnation", mutate: func(s *BrokerSnapshot) {
-			s.Hosts[0].Registration = domain.RemoteRegistration{Endpoint: "user@arch", Generation: 1}
+			s.Daemons[0].Registration = domain.RemoteRegistration{Endpoint: "user@arch", Generation: 1}
 		}, wantErr: true},
 		{name: "live host as tombstone", mutate: func(s *BrokerSnapshot) {
 			s.Removed = []BrokerHostTombstone{{
@@ -228,7 +255,9 @@ func TestBrokerSnapshotEpochRevisionOrdering(t *testing.T) {
 
 func TestBrokerSnapshotCloneAndFind(t *testing.T) {
 	original := validBrokerSnapshot()
-	original.Hosts[0].Sessions = []catalogue.RemoteCatalogSession{{
+	original.Daemons = append([]BrokerDaemonObservation{testLocalBrokerObservation()}, original.Daemons...)
+	original.Daemons[1].InventoryKnown = true
+	original.Daemons[1].Sessions = []catalogue.RemoteCatalogSession{{
 		LifecycleID: testBrokerLifecycle(),
 		Name:        "work",
 		State:       catalogue.RemoteCatalogSessionUp,
@@ -241,9 +270,18 @@ func TestBrokerSnapshotCloneAndFind(t *testing.T) {
 	if _, ok := cloned.Find("user@mule"); ok {
 		t.Fatal("Find() must miss unknown endpoints")
 	}
-	cloned.Hosts[0].Sessions[0].Name = "mutated"
-	cloned.Hosts[0].Sessions[0].Tabs[0].ID = "mutated"
-	if original.Hosts[0].Sessions[0].Name != "work" || original.Hosts[0].Sessions[0].Tabs[0].ID != "tab-1" {
+	local := 0
+	for _, daemon := range cloned.Daemons {
+		if daemon.Local {
+			local++
+		}
+	}
+	if local != 1 {
+		t.Fatalf("Clone() lost the local daemon entry: %d local entries", local)
+	}
+	cloned.Daemons[1].Sessions[0].Name = "mutated"
+	cloned.Daemons[1].Sessions[0].Tabs[0].ID = "mutated"
+	if original.Daemons[1].Sessions[0].Name != "work" || original.Daemons[1].Sessions[0].Tabs[0].ID != "tab-1" {
 		t.Fatal("Clone() shares memory with the original")
 	}
 }
@@ -352,6 +390,7 @@ func TestBrokerOpenStreamRequestValidate(t *testing.T) {
 	valid := func() BrokerOpenStreamRequest {
 		return BrokerOpenStreamRequest{
 			Epoch: 1, Purpose: BrokerStreamAttachment,
+			Admission:    BrokerAdmissionExact,
 			Connection:   BrokerConnectionID{1},
 			Stream:       2,
 			Endpoint:     "user@arch",
@@ -378,6 +417,26 @@ func TestBrokerOpenStreamRequestValidate(t *testing.T) {
 		}},
 		{name: "bad session name", mutate: func(r *BrokerOpenStreamRequest) {
 			r.Target = protocol.ExactSessionTarget{LifecycleID: testBrokerLifecycle(), SessionName: "bad name!"}
+		}},
+		{name: "exact admission carries a creation name", mutate: func(r *BrokerOpenStreamRequest) {
+			r.Name = "work"
+		}},
+		{name: "named creation carries an exact target", mutate: func(r *BrokerOpenStreamRequest) {
+			r.Admission = BrokerAdmissionCreateNamed
+			r.Name = "work"
+		}},
+		{name: "named creation with invalid name", mutate: func(r *BrokerOpenStreamRequest) {
+			r.Admission = BrokerAdmissionCreateNamed
+			r.Name = "bad name!"
+			r.Target = protocol.ExactSessionTarget{}
+		}},
+		{name: "ephemeral creation carries a name", mutate: func(r *BrokerOpenStreamRequest) {
+			r.Admission = BrokerAdmissionCreateEphemeral
+			r.Target = protocol.ExactSessionTarget{}
+			r.Name = "work"
+		}},
+		{name: "ephemeral creation carries a target", mutate: func(r *BrokerOpenStreamRequest) {
+			r.Admission = BrokerAdmissionCreateEphemeral
 		}},
 		{name: "too many env entries", mutate: func(r *BrokerOpenStreamRequest) {
 			r.Env = make([]string, BrokerMaxEnvEntries+1)
@@ -546,24 +605,107 @@ func TestBrokerInterfacesArePorts(t *testing.T) {
 	}
 }
 
+// TestSanitizeBrokerDisplayText pins the sanitizer to the display validator:
+// every result is valid UTF-8 and carries no rune validateBrokerDisplayText
+// refuses, so a producer can sanitize a derived presentation hint and never
+// publish a value its own contract rejects.
+func TestSanitizeBrokerDisplayText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "ordinary text is returned unchanged", input: "user@arch", want: "user@arch"},
+		{name: "login-prefixed origin is returned unchanged", input: "user@host.example:2222", want: "user@host.example:2222"},
+		{name: "accented and emoji text is kept intact", input: "caf\u00e9 \U0001f5a5", want: "caf\u00e9 \U0001f5a5"},
+		{name: "right-to-left override is dropped", input: "sh\u202eell", want: "shell"},
+		{name: "left-to-right embedding is dropped", input: "a\u202ab", want: "ab"},
+		{name: "C0 control is dropped", input: "a\x00b\x1bc", want: "abc"},
+		{name: "line separator is dropped", input: "a\u2028b", want: "ab"},
+		{name: "paragraph separator is dropped", input: "a\u2029b", want: "ab"},
+		{name: "invalid utf-8 is replaced", input: "ok\xff\xfe", want: "ok\ufffd\ufffd"},
+		{name: "every rune disallowed yields empty", input: "\u202e\u2028\x00", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeBrokerDisplayText(tc.input)
+			require.Equal(t, tc.want, got)
+			require.True(t, utf8.ValidString(got), "sanitized text must always be valid UTF-8")
+			require.Equal(t, -1, strings.IndexFunc(got, func(r rune) bool { return !brokerDisplayRuneAllowed(r) }), "sanitized text must carry no disallowed rune")
+			require.NoError(t, validateBrokerDisplayText(got, BrokerMaxDisplayOriginBytes, "display origin"))
+		})
+	}
+}
+
+// TestBrokerSnapshotValidateLocalDaemonPlacement pins the wire placement rule:
+// the local daemon observation is carried at index zero only, a local
+// observation anywhere else is refused, and a local daemon is still refused
+// when it appears twice.
+func TestBrokerSnapshotValidateLocalDaemonPlacement(t *testing.T) {
+	tests := []struct {
+		name            string
+		daemons         []BrokerDaemonObservation
+		wantErrContains string
+	}{
+		{
+			name:    "local daemon first",
+			daemons: []BrokerDaemonObservation{testLocalBrokerObservation(), testBrokerObservation("user@arch")},
+		},
+		{
+			name:            "local daemon at index one is refused",
+			daemons:         []BrokerDaemonObservation{testBrokerObservation("user@arch"), testLocalBrokerObservation()},
+			wantErrContains: "local daemon at index 1",
+		},
+		{
+			name:            "local daemon after two remotes is refused",
+			daemons:         []BrokerDaemonObservation{testBrokerObservation("user@arch"), testBrokerObservation("user@other"), testLocalBrokerObservation()},
+			wantErrContains: "local daemon at index 2",
+		},
+		{
+			name:            "two local daemons are refused",
+			daemons:         []BrokerDaemonObservation{testLocalBrokerObservation(), testLocalBrokerObservation()},
+			wantErrContains: "more than one local daemon",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := validBrokerSnapshot()
+			snapshot.Daemons = tc.daemons
+			err := snapshot.Validate()
+			if tc.wantErrContains != "" {
+				require.ErrorContains(t, err, tc.wantErrContains)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestBrokerStreamPurposeShapes(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		purpose BrokerStreamPurpose
-		target  bool
-		env     bool
-		valid   bool
+		name       string
+		purpose    BrokerStreamPurpose
+		admission  BrokerStreamAdmission
+		createName string
+		target     bool
+		env        bool
+		valid      bool
 	}{
-		{"attachment", BrokerStreamAttachment, true, true, true},
-		{"attachment missing target", BrokerStreamAttachment, false, false, false},
-		{"control", BrokerStreamControl, false, false, true},
-		{"observation", BrokerStreamObservation, false, false, true},
-		{"control target", BrokerStreamControl, true, false, false},
-		{"observation env", BrokerStreamObservation, false, true, false},
-		{"unknown", 0, false, false, false},
+		{"attachment exact", BrokerStreamAttachment, BrokerAdmissionExact, "", true, true, true},
+		{"attachment missing target", BrokerStreamAttachment, BrokerAdmissionExact, "", false, false, false},
+		{"attachment missing admission", BrokerStreamAttachment, 0, "", true, false, false},
+		{"attachment named creation", BrokerStreamAttachment, BrokerAdmissionCreateNamed, "work", false, true, true},
+		{"attachment ephemeral creation", BrokerStreamAttachment, BrokerAdmissionCreateEphemeral, "", false, true, true},
+		{"control", BrokerStreamControl, 0, "", false, false, true},
+		{"observation", BrokerStreamObservation, 0, "", false, false, true},
+		{"control target", BrokerStreamControl, 0, "", true, false, false},
+		{"control admission", BrokerStreamControl, BrokerAdmissionExact, "", false, false, false},
+		{"observation env", BrokerStreamObservation, 0, "", false, true, false},
+		{"observation admission", BrokerStreamObservation, BrokerAdmissionCreateEphemeral, "", false, false, false},
+		{"unknown", 0, 0, "", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: tc.purpose, Policy: testBrokerPolicy()}
+			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: tc.purpose, Admission: tc.admission, Name: tc.createName, Policy: testBrokerPolicy()}
 			if tc.target {
 				r.Target = testBrokerTarget()
 			}

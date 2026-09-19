@@ -82,7 +82,12 @@ record remains authoritative for generation. Transient checking/error objects
 are never persisted. Retirement tombstones are process-local fencing state and
 are never durable: the registry's persistable copy and the store both clear
 `Snapshot.Removed` before writing, so reopening sees membership without stale
-tombstones. No environment, launch, or trust policy is guessed.
+tombstones. Policy is membership authority, not observation state, so the
+durable observation format omits it: the loader re-stamps every restored
+observation from the matching `ports.BrokerHostRecord`, keeping membership the
+single policy authority. A local daemon observation is process-local and never
+durable: the store rejects one outright. No environment, launch, or trust policy
+is guessed.
 
 Production cutover, lifecycle supervision, and IPC composition remain later
 phases. Close ordering must drain registry snapshot writers before releasing the

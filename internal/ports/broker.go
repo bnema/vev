@@ -233,16 +233,18 @@ func (t BrokerHostTombstone) Fences(candidate domain.RemoteRegistration) bool {
 		t.Registration.Generation >= candidate.Generation
 }
 
-// BrokerSnapshot is an immutable, fully defensive broker publication. Hosts
-// reuse the ordered RemoteHostSnapshot projection; Removed carries the
-// bounded tombstone set that fences stale authority. Nested slices are
-// never mutated after publication. Removed is process-local fencing state and
-// is never durable: a BrokerSnapshotStore persists and reloads hosts without
-// tombstones.
+// BrokerSnapshot is an immutable, fully defensive broker publication.
+// Daemons carries the broker-native daemon observations (Plan 001 P5.2a):
+// the local daemon entry first when present, then remote hosts in
+// registration order. Removed carries the bounded tombstone set that fences
+// stale authority. Nested slices are never mutated after publication.
+// Tombstones and the local daemon observation are process-local state and
+// are never durable: a BrokerSnapshotStore persists and reloads remote
+// daemon observations only.
 type BrokerSnapshot struct {
 	Epoch    BrokerEpoch
 	Revision BrokerRevision
-	Hosts    []RemoteHostSnapshot
+	Daemons  []BrokerDaemonObservation
 	Removed  []BrokerHostTombstone
 }
 
@@ -253,30 +255,35 @@ func (s BrokerSnapshot) Validate() error {
 	if s.Revision == 0 {
 		return errors.New("ports: broker snapshot has no revision")
 	}
-	if len(s.Hosts) > BrokerMaxHosts {
-		return errors.New("ports: broker snapshot has too many hosts")
+	if len(s.Daemons) > BrokerMaxDaemonsPerSnapshot {
+		return errors.New("ports: broker snapshot has too many daemons")
+	}
+	local := false
+	seen := make(map[string]struct{}, len(s.Daemons))
+	for i, daemon := range s.Daemons {
+		if err := daemon.Validate(); err != nil {
+			return fmt.Errorf("ports: broker snapshot daemon %d: %w", i, err)
+		}
+		if daemon.Local {
+			if local {
+				return errors.New("ports: broker snapshot has more than one local daemon")
+			}
+			// The wire layout carries the local daemon at index zero only, so a
+			// local observation anywhere else is a publication the peer's
+			// assembler refuses. Refuse it at the contract gate instead.
+			if i != 0 {
+				return fmt.Errorf("ports: broker snapshot carries its local daemon at index %d", i)
+			}
+			local = true
+			continue
+		}
+		if _, dup := seen[daemon.Endpoint]; dup {
+			return fmt.Errorf("ports: broker snapshot has duplicate host %q", daemon.Endpoint)
+		}
+		seen[daemon.Endpoint] = struct{}{}
 	}
 	if len(s.Removed) > BrokerMaxTombstones {
 		return errors.New("ports: broker snapshot has too many tombstones")
-	}
-	seen := make(map[string]struct{}, len(s.Hosts))
-	for _, host := range s.Hosts {
-		if err := domain.ValidateRemoteHostTarget(host.Endpoint); err != nil {
-			return fmt.Errorf("ports: broker snapshot: %w", err)
-		}
-		if err := host.Registration.Validate(); err != nil {
-			return fmt.Errorf("ports: broker snapshot: %w", err)
-		}
-		if host.Endpoint != host.Registration.Endpoint {
-			return errors.New("ports: broker snapshot host endpoint does not match registration")
-		}
-		if len(host.Sessions) > BrokerMaxSessionsPerHost {
-			return errors.New("ports: broker snapshot host has too many sessions")
-		}
-		if _, dup := seen[host.Endpoint]; dup {
-			return fmt.Errorf("ports: broker snapshot has duplicate host %q", host.Endpoint)
-		}
-		seen[host.Endpoint] = struct{}{}
 	}
 	for _, tombstone := range s.Removed {
 		if err := tombstone.Validate(); err != nil {
@@ -289,26 +296,27 @@ func (s BrokerSnapshot) Validate() error {
 	return nil
 }
 
-// Clone returns a defensive copy with independent host, session, tab, and
+// Clone returns a defensive copy with independent daemon, session, and
 // tombstone slices.
 func (s BrokerSnapshot) Clone() BrokerSnapshot {
 	out := s
-	out.Hosts = make([]RemoteHostSnapshot, len(s.Hosts))
-	for i, host := range s.Hosts {
-		out.Hosts[i] = host.Clone()
+	out.Daemons = make([]BrokerDaemonObservation, len(s.Daemons))
+	for i, daemon := range s.Daemons {
+		out.Daemons[i] = daemon.Clone()
 	}
 	out.Removed = append([]BrokerHostTombstone(nil), s.Removed...)
 	return out
 }
 
-// Find returns the snapshot for an exact endpoint identity.
-func (s BrokerSnapshot) Find(endpoint string) (RemoteHostSnapshot, bool) {
-	for _, host := range s.Hosts {
-		if host.Endpoint == endpoint {
-			return host, true
+// Find returns the observation for an exact remote endpoint identity. The
+// local daemon has no endpoint and is located by its Local flag.
+func (s BrokerSnapshot) Find(endpoint string) (BrokerDaemonObservation, bool) {
+	for _, daemon := range s.Daemons {
+		if !daemon.Local && daemon.Endpoint == endpoint {
+			return daemon, true
 		}
 	}
-	return RemoteHostSnapshot{}, false
+	return BrokerDaemonObservation{}, false
 }
 
 // Supersedes reports whether s is newer than other. Any epoch change
@@ -342,14 +350,58 @@ func BrokerCompletionIsStale(currentRegistration domain.RemoteRegistration, curr
 	return !currentRegistration.Equal(completionRegistration)
 }
 
+// BrokerStreamAdmission is the closed attachment-admission taxonomy
+// (Plan 001 P5.3a, contract-only until the admission slice wires it):
+// an attachment stream names exactly how the daemon must admit it.
+// Control and observation streams carry no admission.
+type BrokerStreamAdmission uint8
+
+const (
+	// BrokerAdmissionExact attaches to one exact session lifecycle identity;
+	// the daemon revalidates it before attachment.
+	BrokerAdmissionExact BrokerStreamAdmission = iota + 1
+	// BrokerAdmissionCreateNamed creates one named session when the stream
+	// attaches; the name is validated session-name authority.
+	BrokerAdmissionCreateNamed
+	// BrokerAdmissionCreateEphemeral creates one ephemeral session when the
+	// stream attaches.
+	BrokerAdmissionCreateEphemeral
+)
+
+func (a BrokerStreamAdmission) String() string {
+	switch a {
+	case BrokerAdmissionExact:
+		return "exact"
+	case BrokerAdmissionCreateNamed:
+		return "create_named"
+	case BrokerAdmissionCreateEphemeral:
+		return "create_ephemeral"
+	default:
+		return fmt.Sprintf("invalid(%d)", uint8(a))
+	}
+}
+
+func (a BrokerStreamAdmission) Validate() error {
+	switch a {
+	case BrokerAdmissionExact, BrokerAdmissionCreateNamed, BrokerAdmissionCreateEphemeral:
+		return nil
+	default:
+		return errors.New("ports: invalid broker stream admission")
+	}
+}
+
 // BrokerOpenStreamRequest asks the broker to open one independently
 // cancellable logical stream to the owning daemon. The daemon revalidates
-// the exact session identity before attachment. Env is the per-request
-// session environment; it is never inherited from the broker process
-// environment.
+// the exact session identity before attachment. Admission selects the
+// attachment admission variant; Name is the validated session name for
+// BrokerAdmissionCreateNamed and is empty for every other variant. Env is
+// the per-request session environment; it is never inherited from the
+// broker process environment.
 type BrokerOpenStreamRequest struct {
 	Epoch        BrokerEpoch
 	Purpose      BrokerStreamPurpose
+	Admission    BrokerStreamAdmission
+	Name         string
 	Local        bool
 	Connection   BrokerConnectionID
 	Stream       BrokerStreamID
@@ -384,11 +436,34 @@ func (r BrokerOpenStreamRequest) Validate() error {
 	}
 	switch r.Purpose {
 	case BrokerStreamAttachment:
-		if err := r.Target.Validate(); err != nil {
+		if err := r.Admission.Validate(); err != nil {
 			return err
 		}
+		switch r.Admission {
+		case BrokerAdmissionExact:
+			if err := r.Target.Validate(); err != nil {
+				return err
+			}
+			if r.Name != "" {
+				return errors.New("ports: exact admission carries a creation name")
+			}
+		case BrokerAdmissionCreateNamed:
+			if r.Target != (protocol.ExactSessionTarget{}) {
+				return errors.New("ports: named creation carries an exact target")
+			}
+			if err := domain.ValidateSessionName(r.Name); err != nil {
+				return fmt.Errorf("ports: invalid creation session name: %w", err)
+			}
+		case BrokerAdmissionCreateEphemeral:
+			if r.Target != (protocol.ExactSessionTarget{}) {
+				return errors.New("ports: ephemeral creation carries an exact target")
+			}
+			if r.Name != "" {
+				return errors.New("ports: ephemeral creation carries a session name")
+			}
+		}
 	case BrokerStreamControl, BrokerStreamObservation:
-		if r.Target != (protocol.ExactSessionTarget{}) || len(r.Env) != 0 {
+		if r.Admission != 0 || r.Name != "" || r.Target != (protocol.ExactSessionTarget{}) || len(r.Env) != 0 {
 			return errors.New("ports: control/observation carries attachment state")
 		}
 	default:
@@ -644,21 +719,27 @@ type BrokerSnapshotStore interface {
 }
 
 // BrokerHostProbe observes one exact host registration without creating an
-// attachment. The returned projection must describe the same registration and
-// must satisfy the durable projection rules (see
-// ValidateDurableHostProjection): the registry re-checks exactly those rules,
-// so an over-bound or catalogue-invalid session inventory is classified as an
-// invalid response and never published. Implementations should therefore
-// validate the projection with catalogue.ValidateRemoteCatalog against the
-// RemoteCatalogMax* bounds before returning it rather than relying on that
-// rejection. Probe must return promptly once ctx is cancelled: the registry
-// cancels the attempt context when a registration is replaced or removed, and
-// when the run settles. A probe that
-// ignores cancellation delays that retirement and can overlap a replacement
-// attempt for the same endpoint. Stale completions that arrive anyway are
-// fenced by epoch and registration identity before publication.
+// attachment. The probe reports only observed state in a
+// BrokerDaemonObservation: the observed daemon identity, incarnation,
+// protocol version, capabilities, availability, failure, freshness, and
+// session inventory. Configured authority (endpoint, registration, policy,
+// display origin, rank) is stamped by the registry from its own records and
+// never trusted from the probe; unknown identity, version, or inventory is
+// zero and is never invented. The returned observation must satisfy the
+// durable projection rules (see ValidateDurableHostProjection): the registry
+// re-checks exactly those rules, so an over-bound or catalogue-invalid session
+// inventory is classified as an invalid response and never published.
+// Implementations should therefore validate the observation with
+// catalogue.ValidateRemoteCatalog against the RemoteCatalogMax* bounds
+// before returning it rather than relying on that rejection. Probe must
+// return promptly once ctx is cancelled: the registry cancels the attempt
+// context when a registration is replaced or removed, and when the run
+// settles. A probe that ignores cancellation delays that retirement and can
+// overlap a replacement attempt for the same endpoint. Stale completions
+// that arrive anyway are fenced by epoch and registration identity before
+// publication.
 type BrokerHostProbe interface {
-	Probe(ctx context.Context, registration domain.RemoteRegistration) (RemoteHostSnapshot, error)
+	Probe(ctx context.Context, registration domain.RemoteRegistration) (BrokerDaemonObservation, error)
 }
 
 // BrokerPhysicalConnection is one pooled physical transport to an
@@ -773,9 +854,38 @@ func validateBrokerDisplayText(value string, maxBytes int, label string) error {
 		return fmt.Errorf("ports: broker %s is not valid UTF-8", label)
 	}
 	for _, r := range value {
-		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || r == '\u2028' || r == '\u2029' {
+		if !brokerDisplayRuneAllowed(r) {
 			return fmt.Errorf("ports: broker %s contains disallowed characters", label)
 		}
 	}
 	return nil
+}
+
+// brokerDisplayRuneAllowed reports whether one rune may appear in broker
+// display text. Controls, bidi controls, and the Unicode line separators are
+// refused: none of them carries presentation value, and each lets a value
+// reorder or split the text rendered around it.
+func brokerDisplayRuneAllowed(r rune) bool {
+	return !unicode.IsControl(r) && !unicode.Is(unicode.Bidi_Control, r) && r != '\u2028' && r != '\u2029'
+}
+
+// SanitizeBrokerDisplayText returns value with every rune broker display text
+// refuses removed, and always as valid UTF-8. Producers apply it to the
+// presentation hints they derive rather than receive: a hint derived from
+// routing authority is not itself authority, so a configured target the
+// routing validator accepts still yields text the display rule accepts instead
+// of a publication the wire refuses. The result is not length-checked; the
+// caller applies the bound for its own field.
+func SanitizeBrokerDisplayText(value string) string {
+	if utf8.ValidString(value) && strings.IndexFunc(value, func(r rune) bool { return !brokerDisplayRuneAllowed(r) }) < 0 {
+		return value
+	}
+	var safe strings.Builder
+	safe.Grow(len(value))
+	for _, r := range value {
+		if brokerDisplayRuneAllowed(r) {
+			safe.WriteRune(r)
+		}
+	}
+	return safe.String()
 }

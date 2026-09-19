@@ -178,9 +178,12 @@ func brokerServerSamples() map[string]*BrokerServerEnvelope {
 		"registered": {Payload: &BrokerServerEnvelope_Registered{Registered: &Registered{Scope: brokerScope()}}},
 		"snapshot_part": {Payload: &BrokerServerEnvelope_SnapshotPart{SnapshotPart: &SnapshotPart{
 			Scope: brokerScope(), Generation: 2, Revision: 5, Index: 9,
-			Part: &SnapshotPart_Host{Host: &SnapshotHost{
+			Part: &SnapshotPart_Daemon{Daemon: &SnapshotDaemon{
 				HostIndex: 1, Endpoint: "dev@host:22", DisplayOrigin: "dev@host",
-				Rank: 2, Registration: brokerRegistration(), Availability: 1,
+				Rank: 2, Registration: brokerRegistration(), Policy: &BrokerWirePolicy{ProtocolVersion: 55},
+				DaemonIdentity: "authed-daemon", DaemonIncarnation: bytes.Repeat([]byte{0x9}, 16),
+				ProtocolVersion: 55, Capabilities: 1,
+				Availability:        1,
 				Checking:            true,
 				LastAttempt:         &BrokerTimestamp{Seconds: 1700000000, Nanos: 1},
 				LastSuccess:         &BrokerTimestamp{Seconds: 1700000001, Nanos: 2},
@@ -249,11 +252,11 @@ func TestBrokerEnvelopeRoundTrip(t *testing.T) {
 		})
 	}
 
-	// The snapshot nested unions round-trip their non-host parts too, so
+	// The snapshot nested unions round-trip their non-daemon parts too, so
 	// every part tag is exercised.
 	for name, part := range map[string]*SnapshotPart{
-		"begin":     {Part: &SnapshotPart_Begin{Begin: &SnapshotBegin{HostCount: 1, SessionCount: 2, TombstoneCount: 3}}},
-		"session":   {Part: &SnapshotPart_Session{Session: &SnapshotSession{HostIndex: 1, SessionIndex: 2, Session: brokerCatalogSession()}}},
+		"begin":     {Part: &SnapshotPart_Begin{Begin: &SnapshotBegin{HostCount: 1, SessionCount: 2, TombstoneCount: 3, LocalPresent: true}}},
+		"session":   {Part: &SnapshotPart_Session{Session: &SnapshotSession{HostIndex: 1, SessionIndex: 2, Session: brokerCatalogSession(), Local: true}}},
 		"tombstone": {Part: &SnapshotPart_Tombstone{Tombstone: &SnapshotTombstone{TombstoneIndex: 3, Registration: brokerRegistration(), RetiredRevision: 4}}},
 		"end":       {Part: &SnapshotPart_End{End: &SnapshotEnd{}}},
 	} {
@@ -318,9 +321,9 @@ func TestBrokerEnvelopeDuplicateAlternatives(t *testing.T) {
 	}
 
 	// The nested snapshot part union is exclusive as well.
-	host := mustMarshalBroker(t, &SnapshotPart{Part: &SnapshotPart_Host{Host: &SnapshotHost{Endpoint: "dev@host:22"}}})
+	daemon := mustMarshalBroker(t, &SnapshotPart{Part: &SnapshotPart_Daemon{Daemon: &SnapshotDaemon{Endpoint: "dev@host:22"}}})
 	end := mustMarshalBroker(t, &SnapshotPart{Part: &SnapshotPart_End{End: &SnapshotEnd{}}})
-	if err := ScanEnvelope(&SnapshotPart{}, append(append([]byte(nil), host...), end...)); !errors.Is(err, ErrScanDuplicate) {
+	if err := ScanEnvelope(&SnapshotPart{}, append(append([]byte(nil), daemon...), end...)); !errors.Is(err, ErrScanDuplicate) {
 		t.Fatalf("duplicate snapshot part = %v, want ErrScanDuplicate", err)
 	}
 }
@@ -353,12 +356,12 @@ func TestBrokerEnvelopeRejectsUnknownAndWrongTypes(t *testing.T) {
 	}
 
 	// Unknown field inside a nested snapshot part message.
-	part := protowire.AppendTag(nil, 11, protowire.BytesType) // SnapshotPart.host
-	host := protowire.AppendTag(nil, 2, protowire.BytesType)  // SnapshotHost.endpoint
-	host = protowire.AppendBytes(host, []byte("dev@host:22"))
-	host = protowire.AppendTag(host, 99, protowire.VarintType)
-	host = protowire.AppendVarint(host, 1)
-	part = protowire.AppendBytes(part, host)
+	part := protowire.AppendTag(nil, 15, protowire.BytesType)  // SnapshotPart.daemon
+	daemon := protowire.AppendTag(nil, 3, protowire.BytesType) // SnapshotDaemon.endpoint
+	daemon = protowire.AppendBytes(daemon, []byte("dev@host:22"))
+	daemon = protowire.AppendTag(daemon, 99, protowire.VarintType)
+	daemon = protowire.AppendVarint(daemon, 1)
+	part = protowire.AppendBytes(part, daemon)
 	raw = protowire.AppendTag(nil, 202, protowire.BytesType) // BrokerServerEnvelope.snapshot_part
 	raw = protowire.AppendBytes(raw, part)
 	if err := ScanEnvelope(&BrokerServerEnvelope{}, raw); !errors.Is(err, ErrScanUnknown) {

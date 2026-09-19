@@ -74,19 +74,39 @@ func testCatalogSession() catalogue.RemoteCatalogSession {
 	}
 }
 
-func testHostSnapshot() ports.RemoteHostSnapshot {
-	return ports.RemoteHostSnapshot{
-		Endpoint:       "dev@host:22",
-		DisplayOrigin:  "dev@host",
-		Rank:           2,
-		Registration:   testRegistration(),
+// testDaemonObservation builds one observed, catalogue-valid remote daemon
+// projection. Sessions are empty: they travel as separate parts.
+func testDaemonObservation() ports.BrokerDaemonObservation {
+	return ports.BrokerDaemonObservation{
+		Endpoint:        "dev@host:22",
+		DisplayOrigin:   "dev@host",
+		Rank:            2,
+		Registration:    testRegistration(),
+		Policy:          testPolicy(),
+		Identity:        ports.BrokerDaemonIdentity("authed-daemon"),
+		Incarnation:     ports.BrokerDaemonIncarnation{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		ProtocolVersion: protocol.Version,
+		Capabilities:    protocol.CapabilityResume | protocol.CapabilityUDP,
+		Availability:    domain.RemoteAvailabilityReachable,
+		Checking:        true,
+		LastAttempt:     time.Unix(1700000000, 1).UTC(),
+		LastSuccess:     time.Unix(1700000001, 2).UTC(),
+		NextDue:         time.Unix(1700000002, 3).UTC(),
+		FailureEpisode:  6,
+		LastFailure:     domain.RemoteFailure{Kind: domain.RemoteFailureTransport},
+		InventoryKnown:  true,
+		Sessions:        []catalogue.RemoteCatalogSession{},
+	}
+}
+
+// testLocalDaemonObservation builds the local daemon projection: no endpoint,
+// no registration, always a valid policy, and an explicit availability.
+func testLocalDaemonObservation() ports.BrokerDaemonObservation {
+	return ports.BrokerDaemonObservation{
+		Local:          true,
+		DisplayOrigin:  "local",
+		Policy:         testPolicy(),
 		Availability:   domain.RemoteAvailabilityReachable,
-		Checking:       true,
-		LastAttempt:    time.Unix(1700000000, 1).UTC(),
-		LastSuccess:    time.Unix(1700000001, 2).UTC(),
-		NextDue:        time.Unix(1700000002, 3).UTC(),
-		FailureEpisode: 6,
-		LastFailure:    domain.RemoteFailure{Kind: domain.RemoteFailureTransport},
 		InventoryKnown: true,
 		Sessions:       []catalogue.RemoteCatalogSession{},
 	}
@@ -334,7 +354,7 @@ func TestBrokerClientVariants(t *testing.T) {
 		{"add_host", AddHost{Epoch: 7, Connection: connection, Operation: operation, Endpoint: "dev@host:22"}, 105},
 		{"remove_host", RemoveHost{Epoch: 7, Connection: connection, Operation: operation, Endpoint: "dev@host:22"}, 106},
 		{"reconcile", Reconcile{Epoch: 7, Connection: connection, Registration: testRegistration()}, 107},
-		{"open_stream", OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"TERM=xterm"}, Policy: testPolicy()}, 108},
+		{"open_stream", OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"TERM=xterm"}, Policy: testPolicy()}, 108},
 		{"client_stream_data", ClientStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")}, 109},
 		{"close_stream", CloseStream{Epoch: 7, Connection: connection, Stream: 3}, 110},
 	}
@@ -353,6 +373,141 @@ func TestBrokerClientVariants(t *testing.T) {
 	}
 }
 
+// TestBrokerOpenStreamAdmissionVariants pins the attachment-admission
+// contract: exact, create-named, and create-ephemeral round-trip, control
+// carries none, and wrong admission/purpose/name/target combinations are
+// refused exactly like ports.BrokerOpenStreamRequest.Validate.
+func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
+	connection := testConnectionID(0x11)
+	base := func() OpenStream {
+		return OpenStream{
+			Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment,
+			Endpoint: "dev@host:22", Registration: testRegistration(), Policy: testPolicy(),
+		}
+	}
+	roundTrips := []struct {
+		name    string
+		message OpenStream
+	}{
+		{"exact", func() OpenStream {
+			message := base()
+			message.Admission = ports.BrokerAdmissionExact
+			message.Target = testTarget()
+			return message
+		}()},
+		{"create named", func() OpenStream {
+			message := base()
+			message.Admission = ports.BrokerAdmissionCreateNamed
+			message.Name = "work"
+			return message
+		}()},
+		{"create ephemeral", func() OpenStream {
+			message := base()
+			message.Admission = ports.BrokerAdmissionCreateEphemeral
+			return message
+		}()},
+		{"control carries none", OpenStream{
+			Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl,
+			Local: true, Policy: testPolicy(),
+		}},
+	}
+	for _, tc := range roundTrips {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := mustEncodeClient(t, tc.message)
+			decoded, err := DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			require.Equal(t, tc.message, decoded)
+		})
+	}
+
+	t.Run("wrong combinations refused", func(t *testing.T) {
+		exact := func() OpenStream {
+			message := base()
+			message.Admission = ports.BrokerAdmissionExact
+			message.Target = testTarget()
+			return message
+		}
+		cases := map[string]OpenStream{
+			"attachment without admission": func() OpenStream { m := base(); return m }(),
+			"exact with name": func() OpenStream {
+				m := exact()
+				m.Name = "work"
+				return m
+			}(),
+			"named with target": func() OpenStream {
+				m := base()
+				m.Admission = ports.BrokerAdmissionCreateNamed
+				m.Name = "work"
+				m.Target = testTarget()
+				return m
+			}(),
+			"named without name": func() OpenStream {
+				m := base()
+				m.Admission = ports.BrokerAdmissionCreateNamed
+				return m
+			}(),
+			"ephemeral with name": func() OpenStream {
+				m := base()
+				m.Admission = ports.BrokerAdmissionCreateEphemeral
+				m.Name = "work"
+				return m
+			}(),
+			"control with admission": OpenStream{
+				Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl,
+				Local: true, Policy: testPolicy(), Admission: ports.BrokerAdmissionExact,
+			},
+		}
+		for name, message := range cases {
+			t.Run(name, func(t *testing.T) {
+				_, err := EncodeClient(message, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+			})
+		}
+	})
+
+	t.Run("unknown admission code refused on decode", func(t *testing.T) {
+		message := base()
+		message.Admission = ports.BrokerAdmissionExact
+		message.Target = testTarget()
+		raw := mustEncodeClient(t, message)
+		envelope := &wire.BrokerClientEnvelope{}
+		require.NoError(t, wire.ScanEnvelope(envelope, raw))
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpenStream().Admission = 9
+		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+}
+
+// TestBrokerSnapshotDaemonByteForByte proves the daemon and session parts are
+// byte-for-byte stable across an encode/decode/re-encode cycle, including an
+// observed identity/incarnation/version/capability set, the local daemon, and a
+// locally-bound session.
+func TestBrokerSnapshotDaemonByteForByte(t *testing.T) {
+	connection := testConnectionID(0x11)
+	messages := []struct {
+		name    string
+		message SnapshotPart
+	}{
+		{"observed remote daemon", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 1, Part: SnapshotDaemonPart{HostIndex: 1, Daemon: testDaemonObservation(), SessionCount: 1}}},
+		{"local daemon", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 0, Part: SnapshotDaemonPart{HostIndex: 0, Daemon: testLocalDaemonObservation(), SessionCount: 1}}},
+		{"local session", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 2, Part: SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Local: true, Session: testCatalogSession()}}},
+	}
+	for _, tc := range messages {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := mustEncodeServer(t, tc.message)
+			decoded, err := DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			require.Equal(t, tc.message, decoded)
+			again, err := EncodeServer(decoded, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			require.Equal(t, raw, again, "re-encode must be byte-for-byte identical")
+		})
+	}
+}
+
 // TestBrokerServerVariants inventories every server variant tag.
 func TestBrokerServerVariants(t *testing.T) {
 	connection := testConnectionID(0x11)
@@ -363,11 +518,13 @@ func TestBrokerServerVariants(t *testing.T) {
 		tag     protowire.Number
 	}{
 		{"registered", Registered{Epoch: 7, Connection: connection}, 201},
-		{"snapshot_begin", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 0, Part: SnapshotBegin{HostCount: 1, SessionCount: 2, TombstoneCount: 0}}, 202},
-		{"snapshot_host", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 1, Part: SnapshotHostPart{HostIndex: 0, Host: testHostSnapshot(), SessionCount: 1}}, 202},
-		{"snapshot_session", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 2, Part: SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Session: testCatalogSession()}}, 202},
-		{"snapshot_tombstone", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 3, Part: SnapshotTombstonePart{TombstoneIndex: 0, Registration: testRegistration(), RetiredRevision: 4}}, 202},
-		{"snapshot_end", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 4, Part: SnapshotEnd{}}, 202},
+		{"snapshot_begin", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 0, Part: SnapshotBegin{HostCount: 2, SessionCount: 2, TombstoneCount: 0, LocalPresent: true}}, 202},
+		{"snapshot_daemon", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 1, Part: SnapshotDaemonPart{HostIndex: 0, Daemon: testLocalDaemonObservation(), SessionCount: 0}}, 202},
+		{"snapshot_daemon_remote", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 2, Part: SnapshotDaemonPart{HostIndex: 1, Daemon: testDaemonObservation(), SessionCount: 1}}, 202},
+		{"snapshot_session", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 3, Part: SnapshotSessionPart{HostIndex: 1, SessionIndex: 0, Session: testCatalogSession()}}, 202},
+		{"snapshot_session_local", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 4, Part: SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Local: true, Session: testCatalogSession()}}, 202},
+		{"snapshot_tombstone", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 5, Part: SnapshotTombstonePart{TombstoneIndex: 0, Registration: testRegistration(), RetiredRevision: 4}}, 202},
+		{"snapshot_end", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 6, Part: SnapshotEnd{}}, 202},
 		{"operation_result", OperationResult{Epoch: 7, Connection: connection, Operation: operation, Outcome: ports.BrokerOutcomeFailed, Removed: true, Error: testErrorDetail(), HasError: true}, 203},
 		{"stream_opened", StreamOpened{Epoch: 7, Connection: connection, Stream: 3}, 204},
 		{"server_stream_data", ServerStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")}, 205},
@@ -445,15 +602,16 @@ func TestBrokerTabIndexBound(t *testing.T) {
 	require.ErrorIs(t, err, errConvertRange)
 }
 
-// mutateHostIndex re-encodes one host snapshot part envelope with its host
-// index overwritten, so decode can be fed a value encode would never emit.
-func mutateHostIndex(t *testing.T, part SnapshotPart, hostIndex uint32) []byte {
+// mutateDaemonIndex re-encodes one daemon snapshot part envelope with its
+// daemon index overwritten, so decode can be fed a value encode would never
+// emit.
+func mutateDaemonIndex(t *testing.T, part SnapshotPart, hostIndex uint32) []byte {
 	t.Helper()
 	raw := mustEncodeServer(t, part)
 	envelope := &wire.BrokerServerEnvelope{}
 	require.NoError(t, wire.ScanEnvelope(envelope, raw))
 	require.NoError(t, proto.Unmarshal(raw, envelope))
-	envelope.GetSnapshotPart().GetHost().HostIndex = hostIndex
+	envelope.GetSnapshotPart().GetDaemon().HostIndex = hostIndex
 	mutated, err := proto.Marshal(envelope)
 	require.NoError(t, err)
 	return mutated
@@ -476,57 +634,57 @@ func mutateSessionIndexes(t *testing.T, part SnapshotPart, hostIndex, sessionInd
 
 // TestBrokerSnapshotIndexBounds proves snapshot part indexes are strict
 // ranges: max-1 is accepted on both encode and decode, and max is refused as a
-// range refusal on both paths. Host indexes are bounded by BrokerMaxHosts and
-// session indexes by BrokerMaxSessionsPerHost.
+// range refusal on both paths. Daemon indexes are bounded by
+// BrokerMaxDaemonsPerSnapshot and session indexes by BrokerMaxSessionsPerHost.
 func TestBrokerSnapshotIndexBounds(t *testing.T) {
 	connection := testConnectionID(0x11)
-	hostPart := func(hostIndex uint32) SnapshotPart {
-		return SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 1, Part: SnapshotHostPart{HostIndex: hostIndex, Host: testHostSnapshot()}}
+	daemonPart := func(hostIndex uint32) SnapshotPart {
+		return SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 1, Part: SnapshotDaemonPart{HostIndex: hostIndex, Daemon: testDaemonObservation()}}
 	}
 	sessionPart := func(hostIndex, sessionIndex uint32) SnapshotPart {
 		return SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 2, Part: SnapshotSessionPart{HostIndex: hostIndex, SessionIndex: sessionIndex, Session: testCatalogSession()}}
 	}
 
-	t.Run("host part at max-1 accepted", func(t *testing.T) {
-		message := hostPart(ports.BrokerMaxHosts - 1)
+	t.Run("daemon part at max-1 accepted", func(t *testing.T) {
+		message := daemonPart(ports.BrokerMaxDaemonsPerSnapshot - 1)
 		raw := mustEncodeServer(t, message)
 		decoded, err := DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		require.Equal(t, message, decoded)
-		decoded, err = DecodeServer(mutateHostIndex(t, message, ports.BrokerMaxHosts-1), testEnvelopeCeiling, testChunkCeiling)
+		decoded, err = DecodeServer(mutateDaemonIndex(t, message, ports.BrokerMaxDaemonsPerSnapshot-1), testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		require.Equal(t, message, decoded)
 	})
 
-	t.Run("host part at max refused", func(t *testing.T) {
-		_, err := EncodeServer(hostPart(ports.BrokerMaxHosts), testEnvelopeCeiling, testChunkCeiling)
+	t.Run("daemon part at max refused", func(t *testing.T) {
+		_, err := EncodeServer(daemonPart(ports.BrokerMaxDaemonsPerSnapshot), testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
-		_, err = DecodeServer(mutateHostIndex(t, hostPart(0), ports.BrokerMaxHosts), testEnvelopeCeiling, testChunkCeiling)
+		_, err = DecodeServer(mutateDaemonIndex(t, daemonPart(0), ports.BrokerMaxDaemonsPerSnapshot), testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 
-	t.Run("host part at uint32 maximum refused", func(t *testing.T) {
-		_, err := EncodeServer(hostPart(^uint32(0)), testEnvelopeCeiling, testChunkCeiling)
+	t.Run("daemon part at uint32 maximum refused", func(t *testing.T) {
+		_, err := EncodeServer(daemonPart(^uint32(0)), testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
-		_, err = DecodeServer(mutateHostIndex(t, hostPart(0), ^uint32(0)), testEnvelopeCeiling, testChunkCeiling)
+		_, err = DecodeServer(mutateDaemonIndex(t, daemonPart(0), ^uint32(0)), testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 
 	t.Run("session part at max-1 accepted", func(t *testing.T) {
-		message := sessionPart(ports.BrokerMaxHosts-1, ports.BrokerMaxSessionsPerHost-1)
+		message := sessionPart(ports.BrokerMaxDaemonsPerSnapshot-1, ports.BrokerMaxSessionsPerHost-1)
 		raw := mustEncodeServer(t, message)
 		decoded, err := DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		require.Equal(t, message, decoded)
-		decoded, err = DecodeServer(mutateSessionIndexes(t, message, ports.BrokerMaxHosts-1, ports.BrokerMaxSessionsPerHost-1), testEnvelopeCeiling, testChunkCeiling)
+		decoded, err = DecodeServer(mutateSessionIndexes(t, message, ports.BrokerMaxDaemonsPerSnapshot-1, ports.BrokerMaxSessionsPerHost-1), testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		require.Equal(t, message, decoded)
 	})
 
 	t.Run("session part host index at max refused", func(t *testing.T) {
-		_, err := EncodeServer(sessionPart(ports.BrokerMaxHosts, 0), testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeServer(sessionPart(ports.BrokerMaxDaemonsPerSnapshot, 0), testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
-		_, err = DecodeServer(mutateSessionIndexes(t, sessionPart(0, 0), ports.BrokerMaxHosts, 0), testEnvelopeCeiling, testChunkCeiling)
+		_, err = DecodeServer(mutateSessionIndexes(t, sessionPart(0, 0), ports.BrokerMaxDaemonsPerSnapshot, 0), testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 
@@ -591,10 +749,10 @@ func TestBrokerBounds(t *testing.T) {
 		for i := range many {
 			many[i] = "A=B"
 		}
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: many, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: many, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
 		oversize := []string{"K=" + strings.Repeat("x", ports.BrokerMaxEnvEntryBytes)}
-		_, err = EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: oversize, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		_, err = EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: oversize, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 	t.Run("error text", func(t *testing.T) {
@@ -604,7 +762,7 @@ func TestBrokerBounds(t *testing.T) {
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 	t.Run("snapshot counts", func(t *testing.T) {
-		_, err := EncodeServer(SnapshotPart{Epoch: 7, Connection: connection, Generation: 1, Revision: 1, Index: 0, Part: SnapshotBegin{HostCount: ports.BrokerMaxHosts + 1}}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeServer(SnapshotPart{Epoch: 7, Connection: connection, Generation: 1, Revision: 1, Index: 0, Part: SnapshotBegin{HostCount: ports.BrokerMaxDaemonsPerSnapshot + 1}}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 	t.Run("control env carries no attachment state", func(t *testing.T) {
@@ -693,7 +851,7 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("taxonomy switches", func(t *testing.T) {
-		raw := mustEncodeClient(t, OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()})
+		raw := mustEncodeClient(t, OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()})
 		envelope := &wire.BrokerClientEnvelope{}
 		require.NoError(t, wire.ScanEnvelope(envelope, raw))
 		require.NoError(t, proto.Unmarshal(raw, envelope))
@@ -725,11 +883,11 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("env without equals refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"NOEQUALS"}, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"NOEQUALS"}, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("invalid policy refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: ports.BrokerPolicy{}}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: ports.BrokerPolicy{}}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("snapshot revision zero refused", func(t *testing.T) {
@@ -741,7 +899,7 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("local open with registration refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Local: true, Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Local: true, Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("bad shutdown reason refused", func(t *testing.T) {
@@ -845,7 +1003,7 @@ func fuzzClientSeeds(t testing.TB) [][]byte {
 	for _, message := range []ClientMessage{
 		Register{},
 		Subscribe{Epoch: 7, Connection: testConnectionID(0x11), Generation: 1},
-		OpenStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Purpose: ports.BrokerStreamAttachment, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()},
+		OpenStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()},
 		ClientStreamData{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Data: []byte("frame")},
 		CloseStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3},
 	} {

@@ -131,12 +131,24 @@ func migrate(o Options) (recovery, error) {
 				// Unbound v2/v3 cache data is validated and backed up, never promoted
 				// to authority. v4 can seed only its exact surviving incarnation.
 				if e.Host == h.Registration.Endpoint && e.Incarnation == h.Registration.Incarnation {
-					r.State.Snapshot.Hosts = append(r.State.Snapshot.Hosts, ports.RemoteHostSnapshot{Endpoint: e.Host, Registration: h.Registration, Availability: domain.RemoteAvailabilityUnknown, InventoryKnown: true, LastSuccess: e.FetchedAt, Sessions: e.Sessions})
+					// A legacy cache entry carries only observed sessions: daemon
+					// identity, incarnation, protocol version, and capabilities stay
+					// zero (never invented), and policy stays absent because the
+					// loader re-stamps it from membership.
+					r.State.Snapshot.Daemons = append(r.State.Snapshot.Daemons, ports.BrokerDaemonObservation{
+						Endpoint:       e.Host,
+						DisplayOrigin:  domain.RemoteDisplayOrigin(e.Host),
+						Registration:   h.Registration,
+						Availability:   domain.RemoteAvailabilityUnknown,
+						InventoryKnown: true,
+						LastSuccess:    e.FetchedAt,
+						Sessions:       e.Sessions,
+					})
 				}
 			}
 		}
 	}
-	if len(r.State.Snapshot.Hosts) > 0 {
+	if len(r.State.Snapshot.Daemons) > 0 {
 		var epoch [8]byte
 		if _, err = rand.Read(epoch[:]); err != nil {
 			return r, err

@@ -123,7 +123,7 @@ func TestConnStateString(t *testing.T) {
 // Register -> Closing -> Closed.
 func TestConnectionLifecycle(t *testing.T) {
 	op := operationIDAt(1)
-	part := snapshotPartsFor(1, 1, sampleSnapshotHosts(), nil)[0]
+	part := snapshotPartsFor(1, 1, sampleSnapshotDaemons(), nil)[0]
 	cases := []struct {
 		name      string
 		setup     func(*testing.T) *Connection
@@ -285,7 +285,7 @@ func stageConnectionPart(t *testing.T, conn *Connection, part SnapshotPart) {
 func TestConnectionSubscriptionStagingRetention(t *testing.T) {
 	conn := readyTestConnection(t)
 	require.NoError(t, conn.Subscribe(1))
-	for _, part := range snapshotPartsFor(1, 4, sampleSnapshotHosts(), sampleSnapshotTombstones()) {
+	for _, part := range snapshotPartsFor(1, 4, sampleSnapshotDaemons(), sampleSnapshotTombstones()) {
 		stageConnectionPart(t, conn, part)
 	}
 	committed, ok := conn.Snapshot()
@@ -293,7 +293,7 @@ func TestConnectionSubscriptionStagingRetention(t *testing.T) {
 	require.Equal(t, ports.BrokerRevision(4), committed.Revision)
 
 	// In-flight staging of the active generation is discarded on advance.
-	inFlight := snapshotPartsFor(1, 6, sampleSnapshotHosts(), nil)
+	inFlight := snapshotPartsFor(1, 6, sampleSnapshotDaemons(), nil)
 	stageConnectionPart(t, conn, inFlight[0])
 	require.True(t, conn.StagingActive())
 	require.NoError(t, conn.Subscribe(2))
@@ -312,7 +312,7 @@ func TestConnectionSubscriptionStagingRetention(t *testing.T) {
 	future.Generation = 3
 	_, _, err = conn.AddSnapshotPart(future)
 	require.ErrorIs(t, err, ErrFutureGeneration)
-	next := snapshotPartsFor(2, 5, sampleSnapshotHosts(), nil)
+	next := snapshotPartsFor(2, 5, sampleSnapshotDaemons(), nil)
 	_, _, err = conn.AddSnapshotPart(next[1])
 	require.ErrorIs(t, err, ErrSnapshotInvalid)
 	require.False(t, conn.StagingActive())
@@ -352,7 +352,7 @@ func TestConnectionSnapshotParts(t *testing.T) {
 	t.Run("future generation rejected", func(t *testing.T) {
 		conn := readyTestConnection(t)
 		require.NoError(t, conn.Subscribe(2))
-		part := snapshotPartsFor(1, 1, sampleSnapshotHosts(), nil)[0]
+		part := snapshotPartsFor(1, 1, sampleSnapshotDaemons(), nil)[0]
 		part.Generation = 3
 		_, _, err := conn.AddSnapshotPart(part)
 		require.ErrorIs(t, err, ErrFutureGeneration)
@@ -364,11 +364,11 @@ func TestConnectionSnapshotParts(t *testing.T) {
 	t.Run("foreign scope rejected", func(t *testing.T) {
 		conn := readyTestConnection(t)
 		require.NoError(t, conn.Subscribe(2))
-		part := snapshotPartsFor(2, 1, sampleSnapshotHosts(), nil)[0]
+		part := snapshotPartsFor(2, 1, sampleSnapshotDaemons(), nil)[0]
 		part.Epoch = 8
 		_, _, err := conn.AddSnapshotPart(part)
 		require.ErrorIs(t, err, ErrScopeMismatch)
-		part = snapshotPartsFor(2, 1, sampleSnapshotHosts(), nil)[0]
+		part = snapshotPartsFor(2, 1, sampleSnapshotDaemons(), nil)[0]
 		part.Connection = testConnectionID(0x77)
 		_, _, err = conn.AddSnapshotPart(part)
 		require.ErrorIs(t, err, ErrScopeMismatch)
@@ -377,7 +377,7 @@ func TestConnectionSnapshotParts(t *testing.T) {
 	t.Run("complete transfer through the connection", func(t *testing.T) {
 		conn := readyTestConnection(t)
 		require.NoError(t, conn.Subscribe(9))
-		parts := snapshotPartsFor(9, 2, sampleSnapshotHosts(), sampleSnapshotTombstones())
+		parts := snapshotPartsFor(9, 2, sampleSnapshotDaemons(), sampleSnapshotTombstones())
 		var published bool
 		for _, part := range parts {
 			completed, _, err := conn.AddSnapshotPart(part)
@@ -410,7 +410,7 @@ func TestConnectionExactScopeRegistration(t *testing.T) {
 	_, err = connectionStreams(conn).Close(other, 1)
 	require.ErrorIs(t, err, ErrScopeMismatch)
 
-	part := snapshotPartsFor(1, 1, sampleSnapshotHosts(), nil)[0]
+	part := snapshotPartsFor(1, 1, sampleSnapshotDaemons(), nil)[0]
 	part.Connection = other.Connection
 	part.Epoch = other.Epoch
 	require.NoError(t, conn.Subscribe(1))
@@ -914,7 +914,7 @@ func TestStreamTrackerConcurrentFrames(t *testing.T) {
 func TestConnectionConcurrentWork(t *testing.T) {
 	conn := readyTestConnection(t)
 	require.NoError(t, conn.Subscribe(1))
-	hosts := sampleSnapshotHosts()
+	hosts := sampleSnapshotDaemons()
 	const revisions = 20
 	const operations = 32
 	for i := 0; i < operations; i++ {
@@ -1069,7 +1069,7 @@ func TestConnectionCloseRaceNoPostCloseSnapshotCommit(t *testing.T) {
 		for i := 0; i < attempts; i++ {
 			conn := readyTestConnection(t)
 			require.NoError(t, conn.Subscribe(2))
-			parts := snapshotPartsFor(2, revision, sampleSnapshotHosts(), nil)
+			parts := snapshotPartsFor(2, revision, sampleSnapshotDaemons(), nil)
 			end := parts[len(parts)-1]
 			for _, part := range parts[:len(parts)-1] {
 				stageConnectionPart(t, conn, part)

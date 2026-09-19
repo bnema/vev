@@ -99,12 +99,16 @@ func (Reconcile) brokerClientMessage() {}
 
 // OpenStream asks the broker to open one independently cancellable logical
 // stream to the owning daemon. Env is the per-request session environment
-// and is never inherited from the broker process environment.
+// and is never inherited from the broker process environment. Admission
+// selects the attachment admission variant; Name is the validated session
+// name for create-named and is empty otherwise.
 type OpenStream struct {
 	Epoch        ports.BrokerEpoch
 	Connection   ports.BrokerConnectionID
 	Stream       ports.BrokerStreamID
 	Purpose      ports.BrokerStreamPurpose
+	Admission    ports.BrokerStreamAdmission
+	Name         string
 	Local        bool
 	Endpoint     string
 	Registration domain.RemoteRegistration
@@ -163,29 +167,34 @@ func (SnapshotPart) brokerServerMessage() {}
 type SnapshotPartPayload interface{ snapshotPartPayload() }
 
 // SnapshotBegin opens a snapshot publication with its element counts.
+// HostCount counts every daemon part in the transfer (the local daemon plus
+// every remote host); LocalPresent reports whether daemon index 0 is local.
 type SnapshotBegin struct {
 	HostCount      uint32
 	SessionCount   uint32
 	TombstoneCount uint32
+	LocalPresent   bool
 }
 
 func (SnapshotBegin) snapshotPartPayload() {}
 
-// SnapshotHostPart is one host projection. Sessions travel as separate
-// SnapshotSessionPart parts bound by host index; SessionCount advertises
-// how many follow. The embedded Host must carry no inline sessions.
-type SnapshotHostPart struct {
+// SnapshotDaemonPart is one daemon projection. Sessions travel as separate
+// SnapshotSessionPart parts bound by daemon index; SessionCount advertises
+// how many follow. The embedded Daemon must carry no inline sessions.
+type SnapshotDaemonPart struct {
 	HostIndex    uint32
-	Host         ports.RemoteHostSnapshot
+	Daemon       ports.BrokerDaemonObservation
 	SessionCount uint32
 }
 
-func (SnapshotHostPart) snapshotPartPayload() {}
+func (SnapshotDaemonPart) snapshotPartPayload() {}
 
-// SnapshotSessionPart is one catalogue session bound to its host by index.
+// SnapshotSessionPart is one catalogue session bound to its daemon by index.
+// Local marks a session of the local daemon: HostIndex is then exactly 0.
 type SnapshotSessionPart struct {
 	HostIndex    uint32
 	SessionIndex uint32
+	Local        bool
 	Session      catalogue.RemoteCatalogSession
 }
 

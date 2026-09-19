@@ -150,6 +150,11 @@ message Reconcile {
 // OpenStream asks the broker to open one independently cancellable logical
 // stream to the owning daemon. env is the per-request session environment
 // and is never inherited from the broker process environment.
+//
+// admission is the closed attachment-admission taxonomy: an attachment
+// stream names exactly how the daemon must admit it, while control and
+// observation streams carry none (0). name is validated session-name
+// authority for create-named and is empty for every other variant.
 message OpenStream {
   BrokerStreamRef ref = 1;
   // Closed taxonomy: 1 = attachment, 2 = control, 3 = observation.
@@ -157,9 +162,16 @@ message OpenStream {
   bool local = 3;
   string endpoint = 4;
   RemoteRegistration registration = 5;
+  // Present only for exact attach/resume; the zero-value message is never
+  // sent for a creation admission.
   ExactTarget target = 6;
   repeated string env = 7;
   BrokerWirePolicy policy = 8;
+  // Closed admission taxonomy: 0 = none (control/observation), 1 = exact
+  // attach/resume, 2 = create named, 3 = create ephemeral.
+  uint32 admission = 9;
+  // Validated session name for create-named; empty otherwise.
+  string name = 10;
 }
 
 // ClientStreamData carries one opaque client-to-daemon stream frame.
@@ -188,7 +200,7 @@ message SnapshotPart {
   uint32 index = 4;
   oneof part {
     SnapshotBegin begin = 10;
-    SnapshotHost host = 11;
+    SnapshotDaemon daemon = 15;
     SnapshotSession session = 12;
     SnapshotTombstone tombstone = 13;
     SnapshotEnd end = 14;
@@ -196,40 +208,63 @@ message SnapshotPart {
 }
 
 // SnapshotBegin opens a snapshot publication with its element counts.
+// host_count counts every daemon part in the transfer (the local daemon plus
+// every remote host), and local_present reports whether daemon index 0 is the
+// local daemon. A publication carries at most one local daemon, always first.
 message SnapshotBegin {
   uint32 host_count = 1;
   uint32 session_count = 2;
   uint32 tombstone_count = 3;
+  bool local_present = 4;
 }
 
-// SnapshotHost is one host projection (ports.RemoteHostSnapshot). The
-// endpoint and display origin stay separate: the latter is
-// presentation-only. Sessions travel as separate SnapshotSession parts.
-message SnapshotHost {
+// SnapshotDaemon is one daemon projection (ports.BrokerDaemonObservation),
+// local or remote. Configured authority (endpoint, registration, policy,
+// display origin, rank) stays separate from observed state (identity,
+// incarnation, version, capabilities, availability, failure, freshness),
+// and observation never invents unknown values. registration is absent for
+// the local daemon; policy is always present. Sessions travel as separate
+// SnapshotSession parts.
+message SnapshotDaemon {
   uint32 host_index = 1;
-  string endpoint = 2;
-  string display_origin = 3;
-  uint32 rank = 4;
-  RemoteRegistration registration = 5;
-  // Closed availability taxonomy; 0 is the zero value.
-  uint32 availability = 6;
-  bool checking = 7;
-  BrokerTimestamp last_attempt = 8;
-  BrokerTimestamp last_success = 9;
-  BrokerTimestamp next_due = 10;
-  uint64 consecutive_failures = 11;
-  uint64 failure_episode = 12;
+  bool local = 2;
+  string endpoint = 3;
+  string display_origin = 4;
+  uint32 rank = 5;
+  RemoteRegistration registration = 6;
+  BrokerWirePolicy policy = 7;
+  // Authenticated daemon identity; empty until observed.
+  string daemon_identity = 8;
+  // Daemon process incarnation; exactly 16 bytes when an identity is
+  // present and absent otherwise.
+  bytes daemon_incarnation = 9;
+  // Observed daemon protocol version; 0 = unobserved.
+  uint32 protocol_version = 10;
+  // Observed capability bitmask (mirrors protocol.Capability* bits).
+  uint32 capabilities = 11;
+  // Closed availability taxonomy (domain.RemoteAvailability); 0 is
+  // invalid, an unobserved daemon carries RemoteAvailabilityUnknown.
+  uint32 availability = 12;
+  bool checking = 13;
+  BrokerTimestamp last_attempt = 14;
+  BrokerTimestamp last_success = 15;
+  BrokerTimestamp next_due = 16;
+  uint64 consecutive_failures = 17;
+  uint64 failure_episode = 18;
   // Closed cause taxonomy (domain.RemoteFailureKind); 0 = none.
-  uint32 failure_kind = 13;
-  bool inventory_known = 14;
-  uint32 session_count = 15;
+  uint32 failure_kind = 19;
+  bool inventory_known = 20;
+  uint32 session_count = 21;
 }
 
-// SnapshotSession is one catalogue session bound to its host by index.
+// SnapshotSession is one catalogue session bound to its daemon by index.
+// local marks a session of the local daemon; its host_index is then exactly
+// 0 and follows the local daemon part rather than a remote host index.
 message SnapshotSession {
   uint32 host_index = 1;
   uint32 session_index = 2;
   BrokerCatalogSession session = 3;
+  bool local = 4;
 }
 
 // SnapshotTombstone fences one retired host registration so a stale probe

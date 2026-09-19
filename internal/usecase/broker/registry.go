@@ -8,10 +8,12 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -79,7 +81,15 @@ type Registry struct {
 	// completion is fenced even when the endpoint is removed and re-added with
 	// the identical registration.
 	attempts uint64
-	hosts    map[string]ports.RemoteHostSnapshot
+	// hosts is the broker-native projection per endpoint. Configured
+	// authority (endpoint, registration, policy, display origin, rank) is
+	// stamped here from durable membership; probe results only supply observed
+	// state and can never override it.
+	hosts map[string]ports.BrokerDaemonObservation
+	// order is the publication order of remote hosts: registration order from
+	// durable membership. A snapshot carries the local daemon first (when a
+	// producer exists) and then these remotes in this order.
+	order []string
 	// inflight records the one admitted attempt per endpoint. The record
 	// carries the attempt's derived context cancel so a retired attempt is
 	// released the moment its registration is replaced, removed, or the run
@@ -128,7 +138,7 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 	r := &Registry{
 		epoch: epoch, probe: probe, clock: clock, log: log,
 		observationDisabled: cfg.ObservationDisabled,
-		hosts:               make(map[string]ports.RemoteHostSnapshot), inflight: make(map[string]*probeAttempt),
+		hosts:               make(map[string]ports.BrokerDaemonObservation), inflight: make(map[string]*probeAttempt),
 		pending: make(map[string]bool), tombstones: make(map[string]ports.BrokerHostTombstone),
 		subs: make(map[*subscription]struct{}), wake: make(chan struct{}, 1),
 		freshFor: defaultFreshFor, retryBase: defaultRetryBase, retryMax: defaultRetryLimit,
@@ -183,17 +193,85 @@ func (r *Registry) projectMembership(hosts ports.BrokerHosts) error {
 	if err := hosts.Validate(); err != nil {
 		return err
 	}
-	next := make(map[string]ports.RemoteHostSnapshot, len(hosts.Hosts))
-	for _, record := range hosts.Hosts {
+	next := make(map[string]ports.BrokerDaemonObservation, len(hosts.Hosts))
+	order := make([]string, 0, len(hosts.Hosts))
+	for rank, record := range hosts.Hosts {
 		registration := record.Registration
 		restored, present := r.hosts[registration.Endpoint]
 		if !present || !restored.Registration.Equal(registration) {
-			restored = ports.RemoteHostSnapshot{Endpoint: registration.Endpoint, Registration: registration, Availability: domain.RemoteAvailabilityUnknown}
+			restored = ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnknown}
 		}
-		next[registration.Endpoint] = restored
+		projection := stampHostAuthority(restored, record, rank)
+		// A durable membership whose projection cannot be published is refused
+		// here, at the boundary that owns authority, instead of silently
+		// leaving the registry unable to publish anything.
+		if err := projection.Validate(); err != nil {
+			return fmt.Errorf("broker: host record %q is not publishable: %w", registration.Endpoint, err)
+		}
+		next[registration.Endpoint] = projection
+		order = append(order, registration.Endpoint)
 	}
 	r.hosts = next
+	r.order = order
 	return nil
+}
+
+// stampHostAuthority overwrites the configured authority fields of a daemon
+// projection with durable membership authority. Membership is the single
+// authority for endpoint, registration, policy, and the presentation hints
+// derived from them; a probe, a restored durable observation, or any other
+// producer can never supply or override them. The durable observation format
+// deliberately carries no policy (see durable), so this stamp is also what
+// gives every restored observation a valid policy.
+func stampHostAuthority(observation ports.BrokerDaemonObservation, record ports.BrokerHostRecord, rank int) ports.BrokerDaemonObservation {
+	observation.Local = false
+	observation.Endpoint = record.Registration.Endpoint
+	observation.DisplayOrigin = hostDisplayOrigin(record.Registration.Endpoint)
+	observation.Rank = rank
+	observation.Registration = record.Registration
+	observation.Policy = record.Policy
+	if observation.Availability == 0 {
+		// An unobserved daemon reports the explicit unknown availability; zero
+		// is never a valid publication.
+		observation.Availability = domain.RemoteAvailabilityUnknown
+	}
+	return observation
+}
+
+// stampObservationAuthority copies the configured authority already stamped on
+// a live projection onto a fresh probe result. Probe results supply only
+// observed state, so their endpoint, registration, policy, display origin, and
+// rank fields are discarded wholesale.
+func stampObservationAuthority(observation, authority ports.BrokerDaemonObservation) ports.BrokerDaemonObservation {
+	observation.Local = false
+	observation.Endpoint = authority.Endpoint
+	observation.DisplayOrigin = authority.DisplayOrigin
+	observation.Rank = authority.Rank
+	observation.Registration = authority.Registration
+	observation.Policy = authority.Policy
+	return observation
+}
+
+// hostDisplayOrigin derives the presentation hint for a configured host. The
+// routing endpoint stays authoritative; the origin is only the login prefix
+// stripped for display, and an endpoint that carries none is its own origin.
+// The hint is sanitized to the display-text rule before it is clamped rune- and
+// byte-safely to the ports bound: an endpoint the routing validator accepts may
+// still carry bidi or control runes, and rendering those would let a derived
+// hint reorder the picker text around it. A derived hint carries no routing
+// authority, so the refused runes are dropped rather than the host rejected. A
+// target left with no displayable rune at all yields no origin, which its
+// caller refuses as unpublishable membership instead of inventing display text.
+func hostDisplayOrigin(endpoint string) string {
+	origin := ports.SanitizeBrokerDisplayText(domain.RemoteDisplayOrigin(endpoint))
+	if len(origin) <= ports.BrokerMaxDisplayOriginBytes {
+		return origin
+	}
+	truncated := origin[:ports.BrokerMaxDisplayOriginBytes]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
 // restore adopts a validated durable snapshot. A zero-epoch snapshot is only
@@ -207,7 +285,7 @@ func (r *Registry) projectMembership(hosts ports.BrokerHosts) error {
 // fencing state and never survive a restart.
 func (r *Registry) restore(snapshot ports.BrokerSnapshot) error {
 	if snapshot.Epoch == 0 {
-		if len(snapshot.Hosts) > 0 || len(snapshot.Removed) > 0 || snapshot.Revision != 0 {
+		if len(snapshot.Daemons) > 0 || len(snapshot.Removed) > 0 || snapshot.Revision != 0 {
 			return errors.New("broker: persisted snapshot has no epoch")
 		}
 		return nil
@@ -215,15 +293,76 @@ func (r *Registry) restore(snapshot ports.BrokerSnapshot) error {
 	if snapshot.Epoch == r.epoch {
 		return errors.New("broker: persisted snapshot epoch matches the new registry epoch")
 	}
-	if err := snapshot.Validate(); err != nil {
+	if err := validateRestoredSnapshot(snapshot); err != nil {
 		return err
 	}
-	for _, host := range snapshot.Hosts {
-		host = host.Clone()
-		host.Checking = false
-		r.hosts[host.Endpoint] = host
+	for _, daemon := range snapshot.Daemons {
+		daemon = daemon.Clone()
+		daemon.Checking = false
+		r.hosts[daemon.Endpoint] = daemon
 	}
 	return nil
+}
+
+// validateRestoredSnapshot applies the durable shape rules to a snapshot read
+// back from a store: every observation must be a remote, non-local projection
+// of an exact valid registration whose endpoint matches, with a closed
+// availability/failure range and a catalogue-valid inventory. Policy and
+// display authority are deliberately not checked here because the durable
+// format omits policy and projectMembership stamps both from membership, so a
+// restored observation is always remote-only and always carries authority once
+// membership is projected.
+func validateRestoredSnapshot(snapshot ports.BrokerSnapshot) error {
+	if snapshot.Revision == 0 {
+		return errors.New("broker: persisted snapshot has no revision")
+	}
+	if len(snapshot.Daemons) > ports.BrokerMaxDaemonsPerSnapshot {
+		return errors.New("broker: persisted snapshot has too many daemons")
+	}
+	seen := make(map[string]struct{}, len(snapshot.Daemons))
+	for _, daemon := range snapshot.Daemons {
+		if err := validateDurableObservation(daemon); err != nil {
+			return err
+		}
+		if _, duplicate := seen[daemon.Endpoint]; duplicate {
+			return fmt.Errorf("broker: persisted snapshot has duplicate host %q", daemon.Endpoint)
+		}
+		seen[daemon.Endpoint] = struct{}{}
+	}
+	if len(snapshot.Removed) > ports.BrokerMaxTombstones {
+		return errors.New("broker: persisted snapshot has too many tombstones")
+	}
+	for _, tombstone := range snapshot.Removed {
+		if err := tombstone.Validate(); err != nil {
+			return err
+		}
+		if _, live := seen[tombstone.Endpoint]; live {
+			return fmt.Errorf("broker: persisted snapshot carries live host %q as tombstone", tombstone.Endpoint)
+		}
+	}
+	return nil
+}
+
+// validateDurableObservation reports whether one observation satisfies the
+// durable shape shared with the offline store: remote-only, an exact valid
+// registration matching its endpoint, and the ports durable projection rules.
+func validateDurableObservation(daemon ports.BrokerDaemonObservation) error {
+	if daemon.Local {
+		return errors.New("broker: persisted local daemon observation")
+	}
+	if err := domain.ValidateRemoteHostTarget(daemon.Endpoint); err != nil {
+		return fmt.Errorf("broker: persisted observation: %w", err)
+	}
+	if err := daemon.Registration.Validate(); err != nil {
+		return fmt.Errorf("broker: persisted observation: %w", err)
+	}
+	if daemon.Endpoint != daemon.Registration.Endpoint {
+		return errors.New("broker: persisted observation endpoint does not match registration")
+	}
+	if len(daemon.Sessions) > 0 && !daemon.InventoryKnown {
+		return errors.New("broker: persisted observation carries sessions without known inventory")
+	}
+	return ports.ValidateDurableHostProjection(daemon)
 }
 
 // Snapshot returns a defensive immutable copy without I/O.
@@ -262,10 +401,12 @@ func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
 	if err := ports.ValidateBrokerHostRecords(records); err != nil {
 		return err
 	}
-	next := make(map[string]ports.RemoteHostSnapshot, len(records))
-	for _, record := range records {
+	next := make(map[string]ports.BrokerDaemonObservation, len(records))
+	order := make([]string, 0, len(records))
+	for rank, record := range records {
 		reg := record.Registration
-		next[reg.Endpoint] = ports.RemoteHostSnapshot{Endpoint: reg.Endpoint, Registration: reg, Availability: domain.RemoteAvailabilityUnknown}
+		next[reg.Endpoint] = stampHostAuthority(ports.BrokerDaemonObservation{}, record, rank)
+		order = append(order, reg.Endpoint)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -279,7 +420,7 @@ func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
 		return fmt.Errorf("broker: replace hosts: %w", err)
 	}
 	r.authority = ports.BrokerHosts{Revision: r.authority.Revision + 1, Hosts: records}
-	r.setHostsLocked(next)
+	r.setHostsLocked(next, order)
 	return nil
 }
 
@@ -291,19 +432,33 @@ func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
 // Removed registrations retire bounded tombstones so a stale completion can
 // never revive them; replaced or re-added endpoints are fenced by the
 // registry attempt token instead.
-func (r *Registry) setHosts(registrations []domain.RemoteRegistration) error {
-	if len(registrations) > ports.BrokerMaxHosts {
-		return fmt.Errorf("broker: %d host registrations exceed the limit of %d", len(registrations), ports.BrokerMaxHosts)
+func (r *Registry) setHosts(records []ports.BrokerHostRecord) error {
+	if len(records) > ports.BrokerMaxHosts {
+		return fmt.Errorf("broker: %d host registrations exceed the limit of %d", len(records), ports.BrokerMaxHosts)
 	}
-	next := make(map[string]ports.RemoteHostSnapshot, len(registrations))
-	for _, registration := range registrations {
-		if err := registration.Validate(); err != nil {
+	next := make(map[string]ports.BrokerDaemonObservation, len(records))
+	order := make([]string, 0, len(records))
+	for rank, record := range records {
+		if err := record.Registration.Validate(); err != nil {
 			return err
 		}
+		if err := record.Policy.Validate(); err != nil {
+			return err
+		}
+		registration := record.Registration
 		if _, duplicate := next[registration.Endpoint]; duplicate {
 			return errors.New("broker: duplicate host registration")
 		}
-		next[registration.Endpoint] = ports.RemoteHostSnapshot{Endpoint: registration.Endpoint, Registration: registration, Availability: domain.RemoteAvailabilityUnknown}
+		observation := stampHostAuthority(ports.BrokerDaemonObservation{}, record, rank)
+		// Membership the registry cannot publish is a caller error, refused here
+		// rather than left to freeze every later publication: an endpoint whose
+		// derived display hint is empty after the display rule drops its runes
+		// makes every snapshot carrying it invalid.
+		if err := observation.Validate(); err != nil {
+			return fmt.Errorf("broker: host record %q is not publishable: %w", registration.Endpoint, err)
+		}
+		next[registration.Endpoint] = observation
+		order = append(order, registration.Endpoint)
 	}
 
 	r.mu.Lock()
@@ -311,21 +466,27 @@ func (r *Registry) setHosts(registrations []domain.RemoteRegistration) error {
 	if r.revisionExhaustedLocked() {
 		return fmt.Errorf("broker: set hosts: %w", ports.ErrBrokerRevisionExhausted)
 	}
-	r.setHostsLocked(next)
+	r.setHostsLocked(next, order)
 	return nil
 }
 
 // setHostsLocked applies only a projection; the public path commits authority
 // first. The caller holds mu through both steps, fencing probe completions.
-func (r *Registry) setHostsLocked(next map[string]ports.RemoteHostSnapshot) {
-	if registrationsUnchanged(r.hosts, next) {
+// order is the registration order the projection was built from; it becomes
+// the publication order of remote daemons.
+func (r *Registry) setHostsLocked(next map[string]ports.BrokerDaemonObservation, order []string) {
+	if registrationsUnchanged(r.hosts, next, r.order, order) {
 		return
 	}
 	for endpoint, current := range r.hosts {
 		candidate, present := next[endpoint]
-		if present && current.Registration.Equal(candidate.Registration) {
-			// Unchanged registration: keep the live observation as is.
-			next[endpoint] = current
+		if present && current.Registration.Equal(candidate.Registration) && current.Policy == candidate.Policy {
+			// Unchanged authority: keep the live observation as is. Rank is the
+			// one authority field that follows membership order rather than the
+			// record, so it is re-stamped from the new projection.
+			kept := current
+			kept.Rank = candidate.Rank
+			next[endpoint] = kept
 			continue
 		}
 		// A retired registration owns no observation: cancelling its attempt
@@ -351,6 +512,7 @@ func (r *Registry) setHostsLocked(next map[string]ports.RemoteHostSnapshot) {
 		delete(r.tombstones, endpoint)
 	}
 	r.hosts = next
+	r.order = order
 	r.publishLocked(true)
 	r.hint()
 }
@@ -480,7 +642,7 @@ type probeResult struct {
 	endpoint     string
 	registration domain.RemoteRegistration
 	attempt      uint64
-	snapshot     ports.RemoteHostSnapshot
+	snapshot     ports.BrokerDaemonObservation
 	err          error
 	at           time.Time
 }
@@ -547,9 +709,10 @@ func (r *Registry) apply(result probeResult) {
 
 	kind, availability, failed := observationOutcome(result)
 	if !failed {
-		observed := result.snapshot.Clone()
-		observed.Endpoint = result.endpoint
-		observed.Registration = result.registration
+		// Configured authority comes only from the registry's own projection:
+		// a probe result supplies observed state, never endpoint, registration,
+		// policy, display origin, or rank.
+		observed := stampObservationAuthority(result.snapshot.Clone(), current)
 		observed.Checking = false
 		observed.LastAttempt = result.at
 		observed.LastSuccess = result.at
@@ -557,10 +720,16 @@ func (r *Registry) apply(result probeResult) {
 		observed.ConsecutiveFailures = 0
 		observed.LastFailure = domain.RemoteFailure{}
 		observed.FailureEpisode = current.FailureEpisode
-		// A projection the durable store would reject is an invalid response,
-		// not an observation: publishing it would leave the registry valid but
-		// permanently unpersisted. The store applies the same rule.
-		if err := ports.ValidateDurableHostProjection(observed); err != nil {
+		// The published observation must be fully valid once authority is
+		// stamped: a probe that invents partial identity (identity without a
+		// protocol version) or an inventory without a known catalogue is an
+		// invalid response, never a published observation. The durable rule is
+		// re-checked too: a projection the offline store would reject is never
+		// published as if it had persisted. The store applies the same rule.
+		if err := observed.Validate(); err != nil {
+			r.log.Debug("broker: observation is invalid", "endpoint", result.endpoint, "err", err)
+			kind, availability, failed = domain.RemoteFailureInvalidResponse, domain.RemoteAvailabilityInvalidResponse, true
+		} else if err := ports.ValidateDurableHostProjection(observed); err != nil {
 			r.log.Debug("broker: observation is not persistable", "endpoint", result.endpoint, "err", err)
 			kind, availability, failed = domain.RemoteFailureInvalidResponse, domain.RemoteAvailabilityInvalidResponse, true
 		} else {
@@ -687,16 +856,23 @@ func (r *Registry) nextDelay(now time.Time) time.Duration {
 	return 0
 }
 
-// registrationsUnchanged reports exact membership equality: the same
-// endpoints bound to the same registration identities. Projection fields such
-// as availability, checking, or inventory never participate.
-func registrationsUnchanged(current, next map[string]ports.RemoteHostSnapshot) bool {
+// registrationsUnchanged reports exact membership equality: the same endpoints
+// in the same registration order, bound to the same registration identities and
+// policy. Publication order and presentation rank are functions of durable
+// membership order, so a reordering of identical records is a membership change
+// that must republish; otherwise the same durable state yields different
+// publications depending on process history. Projection fields such as
+// availability, checking, or inventory never participate.
+func registrationsUnchanged(current, next map[string]ports.BrokerDaemonObservation, currentOrder, nextOrder []string) bool {
 	if len(current) != len(next) {
+		return false
+	}
+	if !slices.Equal(currentOrder, nextOrder) {
 		return false
 	}
 	for endpoint, candidate := range next {
 		existing, ok := current[endpoint]
-		if !ok || !existing.Registration.Equal(candidate.Registration) {
+		if !ok || !existing.Registration.Equal(candidate.Registration) || existing.Policy != candidate.Policy {
 			return false
 		}
 	}
@@ -782,13 +958,28 @@ func (r *Registry) publishLocked(persist bool) {
 	if r.revisionExhaustedLocked() {
 		return
 	}
-	r.revision++
-	hosts := make([]ports.RemoteHostSnapshot, 0, len(r.hosts))
-	for _, host := range r.hosts {
-		hosts = append(hosts, host.Clone())
+	// Remote daemons are published in registration order. The local daemon,
+	// when a producer exists (Plan 001 P5.3a), is prepended ahead of these;
+	// the registry produces no local observation yet and never invents one.
+	daemons := make([]ports.BrokerDaemonObservation, 0, len(r.hosts))
+	for _, endpoint := range r.order {
+		host, ok := r.hosts[endpoint]
+		if !ok {
+			continue
+		}
+		daemons = append(daemons, host.Clone())
 	}
-	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Endpoint < hosts[j].Endpoint })
-	snapshot := ports.BrokerSnapshot{Epoch: r.epoch, Revision: r.revision, Hosts: hosts, Removed: r.tombstonesLocked()}
+	snapshot := ports.BrokerSnapshot{Epoch: r.epoch, Revision: r.revision + 1, Daemons: daemons, Removed: r.tombstonesLocked()}
+	if err := snapshot.Validate(); err != nil {
+		// Fail closed: a publication the wire refuses aborts every client
+		// connection on subscribe, so an invalid projection is never published.
+		// The last valid snapshot stays current, nothing is persisted, and the
+		// revision series does not advance past a publication that never
+		// happened.
+		r.log.Error("broker: refused invalid snapshot publication", "revision", r.revision+1, "err", err)
+		return
+	}
+	r.revision = snapshot.Revision
 	r.current.Store(&snapshot)
 	if persist {
 		// enqueue only stages an immutable publication: rendering the durable
@@ -807,12 +998,30 @@ func (r *Registry) publishLocked(persist bool) {
 // they retire registrations only for this process lifetime and a restart never
 // adopts them, so persisting them would leak stale authority into durable
 // state. Removed is therefore cleared before persistence.
+//
+// Policy is membership authority, not observation state, so the durable format
+// deliberately omits it: membership is the single policy authority, and the
+// loader re-stamps every restored observation from the matching
+// ports.BrokerHostRecord (see stampHostAuthority). Persisting it would create a
+// second, stale authority that a later membership change could contradict.
+//
+// Only remote observations are durable: a local daemon observation is
+// process-local state and is dropped here (the store also rejects one), so a
+// future local producer can never break durable persistence.
 func durable(snapshot ports.BrokerSnapshot) ports.BrokerSnapshot {
 	out := snapshot.Clone()
 	out.Removed = nil
-	for i := range out.Hosts {
-		out.Hosts[i].Checking = false
+	daemons := out.Daemons[:0]
+	for _, daemon := range out.Daemons {
+		if daemon.Local {
+			continue
+		}
+		daemon.Checking = false
+		daemon.LastFailure.Err = nil
+		daemon.Policy = ports.BrokerPolicy{}
+		daemons = append(daemons, daemon)
 	}
+	out.Daemons = daemons
 	return out
 }
 

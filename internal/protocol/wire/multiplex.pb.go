@@ -120,13 +120,18 @@ type MuxOpen struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ref   *MuxStreamRef          `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	// Closed taxonomy: 1 = attachment, 2 = control, 3 = observation.
-	Purpose       uint32              `protobuf:"varint,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
-	Local         bool                `protobuf:"varint,3,opt,name=local,proto3" json:"local,omitempty"`
-	Endpoint      string              `protobuf:"bytes,4,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	Registration  *RemoteRegistration `protobuf:"bytes,5,opt,name=registration,proto3" json:"registration,omitempty"`
-	Target        *ExactTarget        `protobuf:"bytes,6,opt,name=target,proto3" json:"target,omitempty"`
-	Env           []string            `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty"`
-	Policy        *BrokerWirePolicy   `protobuf:"bytes,8,opt,name=policy,proto3" json:"policy,omitempty"`
+	Purpose      uint32              `protobuf:"varint,2,opt,name=purpose,proto3" json:"purpose,omitempty"`
+	Local        bool                `protobuf:"varint,3,opt,name=local,proto3" json:"local,omitempty"`
+	Endpoint     string              `protobuf:"bytes,4,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	Registration *RemoteRegistration `protobuf:"bytes,5,opt,name=registration,proto3" json:"registration,omitempty"`
+	Target       *ExactTarget        `protobuf:"bytes,6,opt,name=target,proto3" json:"target,omitempty"`
+	Env          []string            `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty"`
+	Policy       *BrokerWirePolicy   `protobuf:"bytes,8,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Closed attachment-admission taxonomy (ports.BrokerStreamAdmission):
+	// 0 = none (control/observation), 1 = exact attach/resume carrying
+	// target, 2 = create named carrying name, 3 = create ephemeral.
+	Admission     uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
+	Name          string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -215,6 +220,20 @@ func (x *MuxOpen) GetPolicy() *BrokerWirePolicy {
 		return x.Policy
 	}
 	return nil
+}
+
+func (x *MuxOpen) GetAdmission() uint32 {
+	if x != nil {
+		return x.Admission
+	}
+	return 0
+}
+
+func (x *MuxOpen) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 // MuxOpened confirms one logical stream is established.
@@ -1005,7 +1024,7 @@ const file_multiplex_proto_rawDesc = "" +
 	"\x12physical_stream_id\x18\x01 \x01(\x04R\x10physicalStreamId\x12!\n" +
 	"\fbroker_epoch\x18\x02 \x01(\x04R\vbrokerEpoch\x12#\n" +
 	"\rconnection_id\x18\x03 \x01(\fR\fconnectionId\x12(\n" +
-	"\x10client_stream_id\x18\x04 \x01(\x04R\x0eclientStreamId\"\xc2\x02\n" +
+	"\x10client_stream_id\x18\x04 \x01(\x04R\x0eclientStreamId\"\xf4\x02\n" +
 	"\aMuxOpen\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.vev.wire.v1.MuxStreamRefR\x03ref\x12\x18\n" +
 	"\apurpose\x18\x02 \x01(\rR\apurpose\x12\x14\n" +
@@ -1014,7 +1033,10 @@ const file_multiplex_proto_rawDesc = "" +
 	"\fregistration\x18\x05 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x120\n" +
 	"\x06target\x18\x06 \x01(\v2\x18.vev.wire.v1.ExactTargetR\x06target\x12\x10\n" +
 	"\x03env\x18\a \x03(\tR\x03env\x125\n" +
-	"\x06policy\x18\b \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\"8\n" +
+	"\x06policy\x18\b \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\x12\x1c\n" +
+	"\tadmission\x18\t \x01(\rR\tadmission\x12\x12\n" +
+	"\x04name\x18\n" +
+	" \x01(\tR\x04name\"8\n" +
 	"\tMuxOpened\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.vev.wire.v1.MuxStreamRefR\x03ref\"o\n" +
 	"\n" +

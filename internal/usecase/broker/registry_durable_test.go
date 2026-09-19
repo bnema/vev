@@ -10,6 +10,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,22 +39,22 @@ func TestRegistryDurableReplaceHostsRestart(t *testing.T) {
 			require.NoError(t, err)
 			defer r.settle()
 			require.Equal(t, previous, r.authority.Hosts)
-			require.Len(t, r.Snapshot().Hosts, len(previous))
+			require.Len(t, r.Snapshot().Daemons, len(previous))
 			if len(previous) > 0 {
-				require.True(t, r.Snapshot().Hosts[0].InventoryKnown, "advisory observation must also survive restart")
+				require.True(t, r.Snapshot().Daemons[0].InventoryKnown, "advisory observation must also survive restart")
 			}
 			require.NoError(t, r.ReplaceHosts(stage.records))
 			authority, err := store.LoadHosts()
 			require.NoError(t, err)
 			require.Equal(t, r.authority, authority)
 			require.Equal(t, stage.records, authority.Hosts)
-			require.Len(t, r.Snapshot().Hosts, len(stage.records))
+			require.Len(t, r.Snapshot().Daemons, len(stage.records))
 			if len(stage.records) > 0 {
 				reg := stage.records[0].Registration
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				r.inflight[reg.Endpoint] = &probeAttempt{token: 1, cancel: cancel}
-				r.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: 1, at: r.clock.Now(), snapshot: ports.RemoteHostSnapshot{Availability: domain.RemoteAvailabilityReachable, InventoryKnown: true}})
+				r.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: 1, at: r.clock.Now(), snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable, InventoryKnown: true}})
 				require.ErrorIs(t, ctx.Err(), context.Canceled)
 			}
 			r.settle() // flush before inspecting persisted projection
@@ -121,7 +122,7 @@ func TestRegistryReplaceHostsAfterShutdownIsTyped(t *testing.T) {
 	store := newTestStore()
 	r := newTestRegistry(t, 1, store, newTestProbe(1), newManualClock(time.Unix(100, 0)))
 	record := ports.BrokerHostRecord{Registration: registration(t, "host", 1), Pinned: true, Policy: poolPolicy()}
-	require.NoError(t, r.setHosts([]domain.RemoteRegistration{record.Registration}))
+	require.NoError(t, r.setHosts(hostRecords(record.Registration)))
 	r.settle()
 
 	before := r.Snapshot()
@@ -150,7 +151,7 @@ func TestRegistryDurableChurnFlushesLatestMembership(t *testing.T) {
 		record.Registration.Generation++
 		record.Policy.Trust = "replacement-trust"
 		require.NoError(t, r.ReplaceHosts([]ports.BrokerHostRecord{record}))
-		require.Equal(t, record.Registration, r.Snapshot().Hosts[0].Registration)
+		require.Equal(t, record.Registration, r.Snapshot().Daemons[0].Registration)
 		if i < 20 {
 			require.NoError(t, r.ReplaceHosts(nil))
 		}
@@ -162,4 +163,65 @@ func TestRegistryDurableChurnFlushesLatestMembership(t *testing.T) {
 	authority, err := store.LoadHosts()
 	require.NoError(t, err)
 	require.Equal(t, r.authority, authority)
+}
+
+// TestRegistryDurableRoundTripObservedIdentity proves the durable format carries
+// observed daemon identity, incarnation, protocol version, and capabilities
+// across a restart. The durable copy deliberately omits policy; the loader
+// re-stamps it from the matching membership record, which remains the single
+// policy authority.
+func TestRegistryDurableRoundTripObservedIdentity(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "broker")
+	record := ports.BrokerHostRecord{Registration: registration(t, "host", 1), Pinned: true, Policy: poolPolicy()}
+
+	store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: dir})
+	require.NoError(t, err)
+	r, err := NewRegistry(1, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
+	require.NoError(t, err)
+	require.NoError(t, r.ReplaceHosts([]ports.BrokerHostRecord{record}))
+
+	reg := record.Registration
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.inflight[reg.Endpoint] = &probeAttempt{token: 1, cancel: cancel}
+	r.apply(probeResult{endpoint: reg.Endpoint, registration: reg, attempt: 1, at: r.clock.Now(), snapshot: ports.BrokerDaemonObservation{
+		Identity:        "authed-daemon",
+		Incarnation:     ports.BrokerDaemonIncarnation{4, 5},
+		ProtocolVersion: protocol.Version,
+		Capabilities:    protocol.CapabilityResume,
+		Availability:    domain.RemoteAvailabilityReachable,
+	}})
+	observed, ok := r.Snapshot().Find(reg.Endpoint)
+	require.True(t, ok)
+	require.Equal(t, ports.BrokerDaemonIdentity("authed-daemon"), observed.Identity)
+	require.ErrorIs(t, ctx.Err(), context.Canceled, "applying the result retires the attempt context")
+	// Policy is membership authority, never durable observation state.
+	require.Equal(t, ports.BrokerPolicy{}, durable(r.Snapshot()).Daemons[0].Policy)
+
+	r.settle() // flush before reopening
+	require.NoError(t, store.Close())
+
+	reopened, err := brokerstore.OpenOffline(brokerstore.Options{Dir: dir})
+	require.NoError(t, err)
+	defer reopened.Close()
+	persisted, err := reopened.Load()
+	require.NoError(t, err)
+	require.Len(t, persisted.Daemons, 1)
+	require.Equal(t, ports.BrokerPolicy{}, persisted.Daemons[0].Policy, "the durable format omits policy")
+	require.Equal(t, ports.BrokerDaemonIdentity("authed-daemon"), persisted.Daemons[0].Identity)
+	require.Equal(t, ports.BrokerDaemonIncarnation{4, 5}, persisted.Daemons[0].Incarnation)
+	require.Equal(t, protocol.Version, persisted.Daemons[0].ProtocolVersion)
+	require.Equal(t, protocol.CapabilityResume, persisted.Daemons[0].Capabilities)
+	r2, err := NewRegistry(2, reopened, newTestProbe(1), newManualClock(time.Unix(200, 0)), nil)
+	require.NoError(t, err)
+	defer r2.settle()
+
+	restored, ok := r2.Snapshot().Find(reg.Endpoint)
+	require.True(t, ok)
+	require.Equal(t, observed.Identity, restored.Identity)
+	require.Equal(t, observed.Incarnation, restored.Incarnation)
+	require.Equal(t, observed.ProtocolVersion, restored.ProtocolVersion)
+	require.Equal(t, observed.Capabilities, restored.Capabilities)
+	require.Equal(t, domain.RemoteAvailabilityReachable, restored.Availability)
+	require.Equal(t, poolPolicy(), restored.Policy, "the loader re-stamps policy from membership")
 }

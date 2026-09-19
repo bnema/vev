@@ -45,13 +45,14 @@ func testPolicy() ports.BrokerPolicy {
 	}
 }
 
-// testHostAt builds one catalogue-valid host projection for index i.
-func testHostAt(i int) ports.RemoteHostSnapshot {
+// testDaemonAt builds one catalogue-valid remote daemon projection for index i.
+func testDaemonAt(i int) ports.BrokerDaemonObservation {
 	endpoint := fmt.Sprintf("user%d@host%d:22", i, i)
-	return ports.RemoteHostSnapshot{
+	return ports.BrokerDaemonObservation{
 		Endpoint:       endpoint,
 		DisplayOrigin:  endpoint,
 		Registration:   domain.RemoteRegistration{Endpoint: endpoint, Incarnation: [16]byte{0x10, byte(i + 1), 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0, 0x11}, Generation: domain.RemoteGeneration(i + 1)},
+		Policy:         testPolicy(),
 		Availability:   domain.RemoteAvailabilityReachable,
 		LastSuccess:    time.Unix(1700000000+int64(i), 0).UTC(),
 		InventoryKnown: true,
@@ -71,9 +72,25 @@ func testSessionAt(host, index int) catalogue.RemoteCatalogSession {
 
 // testSnapshot builds one valid publication for an epoch and revision.
 func testSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision) ports.BrokerSnapshot {
-	host := testHostAt(0)
-	host.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(0, 0), testSessionAt(0, 1)}
-	return ports.BrokerSnapshot{Epoch: epoch, Revision: revision, Hosts: []ports.RemoteHostSnapshot{host}}
+	daemon := testDaemonAt(0)
+	daemon.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(0, 0), testSessionAt(0, 1)}
+	return ports.BrokerSnapshot{Epoch: epoch, Revision: revision, Daemons: []ports.BrokerDaemonObservation{daemon}}
+}
+
+// testLocalSnapshot builds one valid publication whose first daemon is local:
+// the local daemon with one session followed by one remote daemon with one.
+func testLocalSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision) ports.BrokerSnapshot {
+	local := ports.BrokerDaemonObservation{
+		Local:          true,
+		DisplayOrigin:  "local",
+		Policy:         testPolicy(),
+		Availability:   domain.RemoteAvailabilityReachable,
+		InventoryKnown: true,
+		Sessions:       []catalogue.RemoteCatalogSession{testSessionAt(0, 0)},
+	}
+	remote := testDaemonAt(0)
+	remote.Sessions = []catalogue.RemoteCatalogSession{testSessionAt(1, 0)}
+	return ports.BrokerSnapshot{Epoch: epoch, Revision: revision, Daemons: []ports.BrokerDaemonObservation{local, remote}}
 }
 
 // snapshotHub is a multi-subscriber publication hub standing in for the broker

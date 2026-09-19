@@ -17,9 +17,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testPolicy() ports.BrokerPolicy {
+	return ports.BrokerPolicy{ProtocolVersion: 1, CatalogSchemaVersion: 1, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: "quic", Trust: "known-hosts", Launch: "explicit", Isolation: "user"}
+}
+
+// observation builds a remote daemon observation that satisfies the durable
+// shape: an exact registration, a derived display origin, and a reachable
+// availability. Policy is intentionally left absent: the loader stamps it from
+// membership, never from the durable snapshot.
+func observation(endpoint string, registration domain.RemoteRegistration) ports.BrokerDaemonObservation {
+	return ports.BrokerDaemonObservation{
+		Endpoint:      endpoint,
+		DisplayOrigin: domain.RemoteDisplayOrigin(endpoint),
+		Registration:  registration,
+		Availability:  domain.RemoteAvailabilityReachable,
+	}
+}
+
 func options(t *testing.T) Options {
 	t.Helper()
-	return Options{Dir: filepath.Join(t.TempDir(), "broker"), LegacyHosts: "testdata/hosts-v3.json", LegacyCache: "testdata/cache-v4.json", Policies: map[string]ports.BrokerPolicy{"user@arch": {ProtocolVersion: 1, CatalogSchemaVersion: 1, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: "quic", Trust: "known-hosts", Launch: "explicit", Isolation: "user"}}}
+	return Options{Dir: filepath.Join(t.TempDir(), "broker"), LegacyHosts: "testdata/hosts-v3.json", LegacyCache: "testdata/cache-v4.json", Policies: map[string]ports.BrokerPolicy{"user@arch": testPolicy()}}
 }
 func TestPriorFixtures(t *testing.T) {
 	for h := 1; h <= 3; h++ {
@@ -46,11 +63,11 @@ func TestPriorFixtures(t *testing.T) {
 				snap, err := s.Load()
 				require.NoError(t, err)
 				if h == 3 && c == 4 {
-					require.Len(t, snap.Hosts, 1)
-					require.Len(t, snap.Hosts[0].Sessions, 1)
-					require.Equal(t, "t_work", snap.Hosts[0].Sessions[0].Tabs[0].ID)
+					require.Len(t, snap.Daemons, 1)
+					require.Len(t, snap.Daemons[0].Sessions, 1)
+					require.Equal(t, "t_work", snap.Daemons[0].Sessions[0].Tabs[0].ID)
 				} else {
-					require.Empty(t, snap.Hosts)
+					require.Empty(t, snap.Daemons)
 				}
 				require.NoError(t, s.Close())
 				o.LegacyHosts = "missing"
@@ -453,7 +470,7 @@ func TestAuthorityGenerationPolicyAndRemoveReAdd(t *testing.T) {
 
 	// A queued publication from the retired incarnation is refused even though
 	// its revision is newer.
-	require.ErrorIs(t, s.Store(ports.BrokerSnapshot{Epoch: 9, Revision: 1, Hosts: []ports.RemoteHostSnapshot{{Endpoint: base.Registration.Endpoint, Registration: base.Registration, Availability: domain.RemoteAvailabilityReachable}}}), ErrStale)
+	require.ErrorIs(t, s.Store(ports.BrokerSnapshot{Epoch: 9, Revision: 1, Daemons: []ports.BrokerDaemonObservation{observation(base.Registration.Endpoint, base.Registration)}}), ErrStale)
 
 	// Re-adding the endpoint needs a fresh incarnation; the retired
 	// observation never comes back for it.
@@ -620,9 +637,26 @@ func TestFencingAndCommitFaults(t *testing.T) {
 		defer s.Close()
 		got, err := s.Load()
 		require.NoError(t, err)
-		require.Empty(t, got.Hosts)
+		require.Empty(t, got.Daemons)
 		gotH, err := s.LoadHosts()
 		require.NoError(t, err)
 		require.Equal(t, h.Hosts, gotH.Hosts)
 	})
+}
+
+// TestLocalDaemonObservationIsNeverDurable pins the durable boundary: a local
+// daemon observation is process-local state and the store refuses it outright,
+// so it can never become durable authority.
+func TestLocalDaemonObservationIsNeverDurable(t *testing.T) {
+	s, err := OpenOffline(options(t))
+	require.NoError(t, err)
+	defer s.Close()
+	err = s.Store(ports.BrokerSnapshot{Epoch: 9, Revision: 1, Daemons: []ports.BrokerDaemonObservation{{
+		Local:         true,
+		DisplayOrigin: "local",
+		Policy:        testPolicy(),
+		Availability:  domain.RemoteAvailabilityReachable,
+	}}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "never durable")
 }
