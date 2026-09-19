@@ -216,6 +216,12 @@ type SupervisorConfig struct {
 	// randomness seam so tests can pin the retry cadence exactly. Optional; the
 	// default is a process-local random source.
 	Jitter func() float64
+	// Picker is the client-owned picker (Plan 001 P5.2b). When set, the
+	// supervisor folds every broker publication into it and hands it every
+	// terminal read from the same single input lifetime used for EOF detection,
+	// so the picker never starts a second reader. When nil the supervisor drops
+	// terminal input exactly as P5.1a does. Optional.
+	Picker pickerHost
 }
 
 // Supervisor owns one autonomous client process: raw mode, one terminal input
@@ -242,6 +248,11 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	}
 	if cfg.Render == nil {
 		cfg.Render = func(State) {}
+	}
+	if supervisorNil(cfg.Picker) {
+		// Normalize a typed-nil picker so Run's nil check and the input
+		// lifetime's consumer check are both safe.
+		cfg.Picker = nil
 	}
 	if cfg.Jitter == nil {
 		cfg.Jitter = rand.Float64
@@ -279,7 +290,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	input := startTerminalInputLifetime(s.cfg.Terminal.In())
+	input := startTerminalInputLifetime(s.cfg.Terminal.In(), s.cfg.Picker)
 
 	// The active connection is owned across loop iterations. retire is
 	// idempotent so every exit path closes exactly the connection it adopted.
@@ -356,9 +367,15 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 
 		service, sub = result.service, result.sub
+		if s.cfg.Picker != nil {
+			// Render the first committed publication immediately, before waiting
+			// for the next one; the picker never shows a stale empty catalogue
+			// while an established connection already has state.
+			s.cfg.Picker.ApplySnapshot(service.Snapshot())
+		}
 		s.transition(supervisorEvent{kind: supervisorReady})
 
-		lossErr, terminated, termErr := s.awaitLoss(ctx, input, service)
+		lossErr, terminated, termErr := s.awaitLoss(ctx, input, service, sub)
 		retire()
 		if terminated {
 			s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
@@ -511,14 +528,22 @@ func (s *Supervisor) awaitAttempt(ctx context.Context, input *terminalInputLifet
 // awaitLoss waits for an established connection to be lost, or for the run to
 // be terminated first. A loss is reported with the service's stable terminal
 // cause.
-func (s *Supervisor) awaitLoss(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) (error, bool, error) {
-	select {
-	case <-service.Done():
-		return service.Err(), false, nil
-	case <-ctx.Done():
-		return nil, true, ctx.Err()
-	case err := <-input.EOF():
-		return nil, true, terminalReadCause(err)
+func (s *Supervisor) awaitLoss(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, sub ports.BrokerSubscription) (error, bool, error) {
+	var changed <-chan struct{}
+	if s.cfg.Picker != nil && !supervisorNil(sub) {
+		changed = sub.Changed()
+	}
+	for {
+		select {
+		case <-service.Done():
+			return service.Err(), false, nil
+		case <-changed:
+			s.cfg.Picker.ApplySnapshot(service.Snapshot())
+		case <-ctx.Done():
+			return nil, true, ctx.Err()
+		case err := <-input.EOF():
+			return nil, true, terminalReadCause(err)
+		}
 	}
 }
 
@@ -671,17 +696,21 @@ func (s *Supervisor) transition(event supervisorEvent) {
 // terminalInputLifetime owns the single read of the controlling terminal. It is
 // started once and never replaced: a bare io.Reader cannot be interrupted, so
 // the goroutine may outlive Run when stdin never reaches EOF, exactly like the
-// attach client's input pump. It never closes caller-owned input, and P5.1a
-// discards read bytes because picker interaction is a later slice.
+// attach client's input pump. It never closes caller-owned input. When a picker
+// consumer is supplied (Plan 001 P5.2b) each read is handed to it from this one
+// reader, so the picker never starts a second reader; without a consumer the
+// bytes are discarded exactly as P5.1a does.
 type terminalInputLifetime struct {
-	eof  chan error
-	once sync.Once
+	eof      chan error
+	once     sync.Once
+	consumer pickerInputConsumer
 }
 
 // startTerminalInputLifetime starts the single terminal read. A nil reader is
-// treated as an immediate orderly EOF.
-func startTerminalInputLifetime(in io.Reader) *terminalInputLifetime {
-	lifetime := &terminalInputLifetime{eof: make(chan error, 1)}
+// treated as an immediate orderly EOF. A nil consumer discards read bytes; a
+// non-nil consumer owns them for the picker presentation.
+func startTerminalInputLifetime(in io.Reader, consumer pickerInputConsumer) *terminalInputLifetime {
+	lifetime := &terminalInputLifetime{eof: make(chan error, 1), consumer: consumer}
 	if supervisorNil(in) {
 		lifetime.finish(io.EOF)
 		return lifetime
@@ -699,6 +728,11 @@ func startTerminalInputLifetime(in io.Reader) *terminalInputLifetime {
 				// progress; keep reading so a well-behaved reader is never
 				// mistaken for EOF.
 				continue
+			}
+			if lifetime.consumer != nil {
+				// The consumer may retain a partial escape or UTF-8 prefix, so it
+				// gets its own copy rather than the reused read buffer.
+				lifetime.consumer.ConsumeTerminalRead(append([]byte(nil), buffer[:n]...))
 			}
 		}
 	}()

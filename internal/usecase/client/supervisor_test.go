@@ -239,26 +239,32 @@ func (c *supervisorTestConnector) awaitStart(t *testing.T) int {
 	}
 }
 
-// supervisorTestHub is one broker publication source. subscribe hands out the
-// current change channel, and publish retires and replaces it, so a stale
-// subscription can never observe a newer publication.
+// supervisorTestHub is one broker publication source. It conforms to
+// ports.BrokerSubscription: each subscriber owns its own capacity-one channel,
+// a publication offers a non-blocking wake to every live subscriber and never
+// replaces or closes a channel, and a subscriber re-reads the newest snapshot
+// on wake. A slow or parked subscriber therefore can never block the
+// publisher or busy-spin.
 type supervisorTestHub struct {
 	mu       sync.Mutex
 	snapshot ports.BrokerSnapshot
-	changed  chan struct{}
+	subs     map[chan struct{}]struct{}
 }
 
 func newSupervisorTestHub() *supervisorTestHub {
-	return &supervisorTestHub{changed: make(chan struct{})}
+	return &supervisorTestHub{subs: make(map[chan struct{}]struct{})}
 }
 
 func (h *supervisorTestHub) publish(snapshot ports.BrokerSnapshot) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.snapshot = snapshot
-	changed := h.changed
-	h.changed = make(chan struct{})
-	h.mu.Unlock()
-	close(changed)
+	for changed := range h.subs {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (h *supervisorTestHub) current() ports.BrokerSnapshot {
@@ -268,14 +274,22 @@ func (h *supervisorTestHub) current() ports.BrokerSnapshot {
 }
 
 func (h *supervisorTestHub) subscribe(closeFn func()) ports.BrokerSubscription {
+	changed := make(chan struct{}, 1)
 	h.mu.Lock()
-	changed := h.changed
+	h.subs[changed] = struct{}{}
 	h.mu.Unlock()
-	return supervisorTestSubscription{changed: changed, closeFn: closeFn}
+	return supervisorTestSubscription{changed: changed, closeFn: func() {
+		h.mu.Lock()
+		delete(h.subs, changed)
+		h.mu.Unlock()
+		if closeFn != nil {
+			closeFn()
+		}
+	}}
 }
 
 type supervisorTestSubscription struct {
-	changed <-chan struct{}
+	changed chan struct{}
 	closeFn func()
 }
 
@@ -407,6 +421,12 @@ func (s *supervisorTestService) lose(err error) { s.terminate(err) }
 
 func (s *supervisorTestService) publish(epoch ports.BrokerEpoch, revision ports.BrokerRevision) {
 	s.hub.publish(ports.BrokerSnapshot{Epoch: epoch, Revision: revision})
+}
+
+// publishSnapshot publishes one complete broker snapshot, as a real service
+// does, so a test can deliver a second-and-later catalogue publication.
+func (s *supervisorTestService) publishSnapshot(snapshot ports.BrokerSnapshot) {
+	s.hub.publish(snapshot)
 }
 
 func (s *supervisorTestService) closedCh() <-chan struct{} { return s.closed }
@@ -1281,4 +1301,45 @@ func TestSupervisorNilSubscriptionIsTypedUnavailable(t *testing.T) {
 			require.Equal(t, 1, terminal.restoreCount())
 		})
 	}
+}
+
+// TestSupervisorTestHubModelsSubscriptionContract pins the fake against
+// ports.BrokerSubscription: each subscriber owns a distinct capacity-one
+// channel that is never replaced or closed on publish, and a publication is a
+// non-blocking offer so a parked subscriber can never busy-spin the publisher.
+func TestSupervisorTestHubModelsSubscriptionContract(t *testing.T) {
+	hub := newSupervisorTestHub()
+	first := hub.subscribe(nil)
+	second := hub.subscribe(nil)
+	require.NotEqual(t, first.Changed(), second.Changed(), "each subscriber owns its own channel")
+
+	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 1})
+	for name, sub := range map[string]ports.BrokerSubscription{"first": first, "second": second} {
+		select {
+		case <-sub.Changed():
+		default:
+			t.Fatalf("subscriber %s must receive the publication", name)
+		}
+	}
+
+	// A second publication while a wake is still buffered is a non-blocking
+	// drop, and the channel identity is never replaced.
+	channel := first.Changed()
+	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 2})
+	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 3})
+	require.Equal(t, channel, first.Changed())
+	select {
+	case <-first.Changed():
+	default:
+		t.Fatal("a publication after the drained wake must offer a new wake")
+	}
+
+	first.Close()
+	hub.publish(ports.BrokerSnapshot{Epoch: 1, Revision: 4})
+	select {
+	case <-first.Changed():
+		t.Fatal("a closed subscription must not receive further wakes")
+	default:
+	}
+	require.Equal(t, ports.BrokerRevision(4), hub.current().Revision)
 }
