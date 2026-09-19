@@ -86,6 +86,24 @@ func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 	}
 }
 
+func TestP54LocalRefusalIsNotReportedAsDestinationFailure(t *testing.T) {
+	picker := newAttachTestPicker()
+	notices := make(chan LifecycleNotice, 4)
+	harness := startAttachHarness(t, picker)
+	harness.sup.cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+
+	// The committed selection is refused locally, before any destination exists:
+	// reporting that as a destination failure would name the wrong cause.
+	picker.mu.Lock()
+	picker.resolveErr = pickerCatalogueError{Code: pickerCatalogueGone, Text: "the committed session is gone"}
+	picker.mu.Unlock()
+	picker.commit(sessionTestRequest(true))
+
+	awaitPickerState(t, harness.sup)
+	require.Equal(t, LifecycleNoticeSelectionUnavailable, (<-notices).Kind)
+	require.Empty(t, harness.service.openedRequests(), "a refused selection never dials a destination")
+}
+
 func TestP54ResolveInitialUsesRealCatalogueCreation(t *testing.T) {
 	clock := newSupervisorTestClock()
 	catalogue, _ := pickerTestCatalogue(t)

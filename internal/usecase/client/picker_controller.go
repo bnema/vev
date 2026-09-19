@@ -68,8 +68,10 @@ type pickerHost interface {
 }
 
 // pickerInputConsumer is the supervisor's narrow input seam. ConsumeTerminalRead
-// returns true when the picker owned and consumed the read; false leaves the
-// read to the supervisor's ordinary (P5.1a) handling.
+// returns true when the picker owned and consumed the read. It returns false for
+// bytes the picker declined, which are then dropped: the supervisor keeps no
+// ordinary terminal handling alongside the picker, so a declined read has no
+// second owner to hand it to.
 type pickerInputConsumer interface {
 	ConsumeTerminalRead(data []byte) bool
 }

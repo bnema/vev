@@ -432,10 +432,17 @@ func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputL
 // reportAttachmentFailure returns to the picker with a typed, visible failure.
 func (s *Supervisor) reportAttachmentFailure(err error) {
 	s.transition(supervisorEvent{kind: supervisorAttachEnded, err: err})
+	// Classification order matters: a local refusal never dialed a destination,
+	// so it must not be reported as one, and only a genuinely unknown outcome
+	// gets its own notice.
+	var catalogueErr pickerCatalogueError
 	var brokerErr ports.BrokerError
-	if errors.As(err, &brokerErr) && brokerErr.Code == ports.BrokerErrorOutcomeUnknown {
+	switch {
+	case errors.As(err, &catalogueErr):
+		s.notifyLifecycle(LifecycleNoticeSelectionUnavailable)
+	case errors.As(err, &brokerErr) && brokerErr.Code == ports.BrokerErrorOutcomeUnknown:
 		s.notifyLifecycle(LifecycleNoticeOutcomeUnknown)
-	} else {
+	default:
 		s.notifyLifecycle(LifecycleNoticeDestinationFailed)
 	}
 	s.notifyAttachment(err)

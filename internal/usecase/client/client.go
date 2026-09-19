@@ -3627,15 +3627,20 @@ type terminalInputPump struct {
 	activation         uint64
 	closed             bool
 	active             bool
-	readyMu            sync.Mutex
-	ready              map[uint64]chan struct{}
-	claimChanged       chan struct{}
-	space              chan struct{}
-	state              chan struct{}
-	exited             chan struct{}
-	afterRevoke        func() // test synchronization hook
-	startMu            sync.Once
-	stopMu             sync.Once
+	// readCause stores the cause the terminal reader ended with. The reader
+	// enqueues its final result for a consumer to report, but the exit watcher
+	// can win that race, so the cause is recorded here as well: a read failure
+	// must never be published as an orderly EOF.
+	readCause    error
+	readyMu      sync.Mutex
+	ready        map[uint64]chan struct{}
+	claimChanged chan struct{}
+	space        chan struct{}
+	state        chan struct{}
+	exited       chan struct{}
+	afterRevoke  func() // test synchronization hook
+	startMu      sync.Once
+	stopMu       sync.Once
 }
 
 func newTerminalInputPump(in io.Reader) *terminalInputPump {
@@ -3914,6 +3919,7 @@ func (p *terminalInputPump) start() {
 					continue
 				}
 				if err != nil {
+					p.setReadCause(err)
 					p.finish()
 					return
 				}
@@ -3929,6 +3935,30 @@ func (p *terminalInputPump) hasExited() bool {
 	default:
 		return false
 	}
+}
+
+// setReadCause records the cause the terminal reader ended with. An orderly EOF
+// is the absence of a failure and stays zero, so cause reports io.EOF for it.
+func (p *terminalInputPump) setReadCause(err error) {
+	if err == nil || errors.Is(err, io.EOF) {
+		return
+	}
+	p.mu.Lock()
+	if p.readCause == nil {
+		p.readCause = err
+	}
+	p.mu.Unlock()
+}
+
+// cause reports why the terminal read ended: the read failure when there was
+// one, otherwise an orderly EOF.
+func (p *terminalInputPump) cause() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.readCause != nil {
+		return p.readCause
+	}
+	return io.EOF
 }
 
 func (p *terminalInputPump) isClosed() bool {

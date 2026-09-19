@@ -138,8 +138,11 @@ type attachTestPicker struct {
 	consumed  int
 	op        pickerOp
 	key       string
-	request   ports.BrokerOpenStreamRequest
-	resolved  int
+	// resolveErr makes ResolveKey refuse locally, which is how a test reaches
+	// the local-refusal classification without dialing anything.
+	resolveErr error
+	request    ports.BrokerOpenStreamRequest
+	resolved   int
 }
 
 func newAttachTestPicker() *attachTestPicker {
@@ -186,6 +189,9 @@ func (p *attachTestPicker) ResolveKey(key string, base pickerResolveBase) (ports
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.resolved++
+	if p.resolveErr != nil {
+		return ports.BrokerOpenStreamRequest{}, p.resolveErr
+	}
 	request := p.request
 	request.Connection = base.Connection
 	request.Stream = base.Stream

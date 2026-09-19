@@ -240,6 +240,11 @@ const (
 	LifecycleNoticeBrokerLost
 	LifecycleNoticeBrokerReconnected
 	LifecycleNoticeOutcomeUnknown
+	// LifecycleNoticeSelectionUnavailable reports a local refusal: the picker
+	// could not resolve the committed selection against the current catalogue,
+	// or initial navigation had nothing to resolve. No destination was dialed,
+	// so reporting it as a destination failure would name the wrong cause.
+	LifecycleNoticeSelectionUnavailable
 )
 
 // LifecycleNotice carries classification only; adapter diagnostics and free
@@ -956,7 +961,11 @@ func startTerminalInputLifetime(in io.Reader, consumer pickerInputConsumer) *ter
 	go lifetime.runPicker()
 	go func() {
 		<-lifetime.pump.exited
-		lifetime.finish(io.EOF)
+		// Publish the cause the reader actually ended with. The reader enqueues
+		// its final result for the consumer, but this watcher can win that race,
+		// and reporting a read failure as an orderly EOF would return a clean
+		// status for a terminal that failed.
+		lifetime.finish(lifetime.pump.cause())
 	}()
 	return lifetime
 }
