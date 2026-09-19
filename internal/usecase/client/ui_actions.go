@@ -27,6 +27,29 @@ func (u *UI) bindForeground(ctx context.Context, input *terminalInputPump, consu
 	return u.generation
 }
 
+// releaseForeground retires exactly the binding installed for generation. It
+// is called when the supervisor begins finalizing the attachment, before the
+// pump claim can return to the picker. Detached is the honest publication while
+// no session owns input; it also gives observers a committed status that cannot
+// be mistaken for an actionable attachment.
+func (u *UI) releaseForeground(generation uint64) {
+	u.mu.Lock()
+	if generation != u.generation {
+		u.mu.Unlock()
+		return
+	}
+	u.input = nil
+	u.consumer = 0
+	u.foreground = nil
+	u.boundary = ports.UIActionResult{}
+	if u.pending != 0 {
+		u.finishLocked(u.pending, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
+	}
+	u.signalLocked()
+	u.mu.Unlock()
+	u.status(ports.UIStatusDetached)
+}
+
 func (u *UI) accept(id, generation uint64) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -120,6 +143,12 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 	if request.Attachment != u.handle {
 		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrStaleAttachment}
 	}
+	u.mu.Lock()
+	available := u.input != nil
+	u.mu.Unlock()
+	if !available {
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrUnavailable}
+	}
 	snapshot, err := u.state.Snapshot()
 	if err != nil {
 		return ports.UIActionResult{}, err
@@ -140,6 +169,10 @@ func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.U
 		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrInvalidRequest}
 	}
 	u.mu.Lock()
+	if u.input == nil {
+		u.mu.Unlock()
+		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrUnavailable}
+	}
 	if request.Generation != u.generation {
 		u.mu.Unlock()
 		return ports.UIActionResult{}, &ports.UIError{Code: ports.UIErrStaleAttachment}

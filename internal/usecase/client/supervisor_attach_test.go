@@ -31,9 +31,33 @@ type attachTestTerminal struct {
 	flushes        int
 	restores       int
 	publications   []ports.UIContext
+	pending        ports.UIContext
+	revision       uint64
+	txDepth        int
+	txFailed       bool
+	available      bool
 	successes      []bool
 	publishEntered chan struct{}
 	publishRelease <-chan struct{}
+	// publishMatch narrows the publication block to one matching transaction.
+	// A nil predicate blocks every publication, which is what the existing
+	// initial-publication tests rely on.
+	publishMatch func(ports.UIContext) bool
+	// detachedSignals receives one signal per committed Detached publication, so
+	// a test observes attachment release without polling.
+	detachedSignals chan struct{}
+	// events records the transaction order: each begin, each publication, and
+	// each successful drain. A test proves release ordering against it instead
+	// of inferring it from separate slices.
+	events  []attachTestEvent
+	changes chan struct{}
+}
+
+// attachTestEvent is one ordered terminal transaction event.
+type attachTestEvent struct {
+	kind   string // begin | publish | drain
+	status ports.UIPresentationStatus
+	state  uint64
 }
 
 func (t *attachTestTerminal) EnterRaw() (func() error, error) {
@@ -62,28 +86,123 @@ func (t *attachTestTerminal) Flush() error {
 	return nil
 }
 
-func (t *attachTestTerminal) BeginOutput(ports.UIContext) {}
+func (t *attachTestTerminal) BeginOutput(ctx ports.UIContext) {
+	t.mu.Lock()
+	if ctx.AttachmentHandle == "" && len(t.publications) != 0 {
+		ctx.AttachmentHandle = t.publications[len(t.publications)-1].AttachmentHandle
+	}
+	if ctx.Generation == 0 && len(t.publications) != 0 {
+		ctx.Generation = t.publications[len(t.publications)-1].Generation
+	}
+	if t.txDepth == 0 {
+		t.pending = ctx
+		t.txFailed = false
+		t.events = append(t.events, attachTestEvent{kind: "begin", status: ctx.Status, state: ctx.OutputState})
+	}
+	t.txDepth++
+	t.mu.Unlock()
+}
 
 func (t *attachTestTerminal) EndOutput(success bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.successes = append(t.successes, success)
+	if t.txDepth == 0 {
+		return
+	}
+	if !success {
+		t.txFailed = true
+	}
+	t.txDepth--
+	if t.txDepth != 0 {
+		return
+	}
+	if t.txFailed {
+		t.available = false
+		t.pending = ports.UIContext{}
+		return
+	}
+	t.publications = append(t.publications, t.pending)
+	t.revision++
+	t.events = append(t.events, attachTestEvent{kind: "drain", status: t.pending.Status, state: t.pending.OutputState})
+	t.available = true
+	t.pending = ports.UIContext{}
 }
 
 func (t *attachTestTerminal) PublishContext(uiContext ports.UIContext) error {
-	if t.publishEntered != nil {
-		select {
-		case t.publishEntered <- struct{}{}:
-		default:
+	if t.publishMatch == nil || t.publishMatch(uiContext) {
+		if t.publishEntered != nil {
+			select {
+			case t.publishEntered <- struct{}{}:
+			default:
+			}
 		}
-	}
-	if t.publishRelease != nil {
-		<-t.publishRelease
+		if t.publishRelease != nil {
+			<-t.publishRelease
+		}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.available {
+		return ports.ErrUIUnavailable
+	}
+	if uiContext.AttachmentHandle == "" && len(t.publications) != 0 {
+		uiContext.AttachmentHandle = t.publications[len(t.publications)-1].AttachmentHandle
+	}
+	if uiContext.Generation == 0 && len(t.publications) != 0 {
+		uiContext.Generation = t.publications[len(t.publications)-1].Generation
+	}
 	t.publications = append(t.publications, uiContext)
+	t.revision++
+	t.events = append(t.events, attachTestEvent{kind: "publish", status: uiContext.Status, state: uiContext.OutputState})
+	if uiContext.Status == ports.UIStatusDetached && t.detachedSignals != nil {
+		select {
+		case t.detachedSignals <- struct{}{}:
+		default:
+		}
+	}
 	return nil
+}
+
+func (t *attachTestTerminal) Snapshot() (ports.UISnapshot, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var ctx ports.UIContext
+	if len(t.publications) != 0 {
+		ctx = t.publications[len(t.publications)-1]
+	}
+	if !t.available || t.revision == 0 {
+		return ports.UISnapshot{}, ports.ErrUIUnavailable
+	}
+	return ports.UISnapshot{Revision: t.revision, Context: ctx}, nil
+}
+
+func (t *attachTestTerminal) Changes() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.changes == nil {
+		t.changes = make(chan struct{})
+	}
+	return t.changes
+}
+
+func (t *attachTestTerminal) publicationList() []ports.UIContext {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]ports.UIContext(nil), t.publications...)
+}
+
+// eventIndex reports the position of the first matching transaction event, or
+// -1 when it never happened.
+func (t *attachTestTerminal) eventIndex(kind string, status ports.UIPresentationStatus, state uint64) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, event := range t.events {
+		if event.kind == kind && event.status == status && event.state == state {
+			return i
+		}
+	}
+	return -1
 }
 
 func (t *attachTestTerminal) written() string {
@@ -329,6 +448,14 @@ func awaitAttachedState(t *testing.T, sup *Supervisor) {
 	require.Eventually(t, func() bool { return sup.State().Presentation == PresentAttached }, 5*time.Second, time.Millisecond)
 }
 
+// authorityState reports the current foreground slot state without racing the
+// supervisor's own transitions.
+func (a *attachmentAuthority) authorityState() attachmentAuthorityState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state
+}
+
 // awaitPickerState waits until the supervisor is back in the picker.
 func awaitPickerState(t *testing.T, sup *Supervisor) {
 	t.Helper()
@@ -376,6 +503,360 @@ func TestSupervisorReducerAttachmentPresentation(t *testing.T) {
 // TestSupervisorAttachmentLocalRemoteParity proves the same supervisor path
 // opens the exact resolved request for a local and a remote selection, with no
 // dialer choice in the client.
+func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
+	picker := newAttachTestPicker()
+	var stream *sessionTestStream
+	var streamMu sync.Mutex
+	var ui *UI
+	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+		cfg.UI = ui
+	})
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		admitted := newSessionTestStream()
+		streamMu.Lock()
+		stream = admitted
+		streamMu.Unlock()
+		return admitted, nil
+	})
+
+	// Picker ownership has no UI binding, so this would fail if actions could
+	// collide with or bypass the picker's exclusive input claim.
+	_, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: 1, Text: "picker"})
+	var pickerErr *ports.UIError
+	require.ErrorAs(t, err, &pickerErr)
+	require.Equal(t, ports.UIErrUnavailable, pickerErr.Code)
+
+	picker.commit(sessionTestRequest(true))
+	require.Eventually(t, func() bool {
+		streamMu.Lock()
+		defer streamMu.Unlock()
+		return stream != nil && len(stream.messages()) > 0
+	}, 5*time.Second, time.Millisecond)
+	streamMu.Lock()
+	admitted := stream
+	streamMu.Unlock()
+	deliverReadyStream(t, admitted)
+	awaitAttachedState(t, harness.sup)
+	attachedOutput := sessionTestOutput(2, "\x1b[Hattached")
+	attachedOutput.Full = false
+	attachedOutput.Base = 1
+	attachedOutput.New = 2
+	admitted.deliver(attachedOutput)
+
+	var snapshot ports.UISnapshot
+	require.Eventually(t, func() bool {
+		var captureErr error
+		snapshot, captureErr = ui.Capture(ui.Handle())
+		return captureErr == nil && snapshot.Context.Status == ports.UIStatusAttached
+	}, 5*time.Second, time.Millisecond)
+	require.Equal(t, ports.UIStatusAttached, snapshot.Context.Status)
+	require.NotZero(t, snapshot.Context.Generation)
+	actionDone := make(chan error, 1)
+	go func() {
+		_, actionErr := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Text: "automated"})
+		actionDone <- actionErr
+	}()
+	var actionID uint64
+	require.Eventually(t, func() bool {
+		var fenced bool
+		for _, message := range admitted.messages() {
+			switch typed := message.(type) {
+			case protocol.Input:
+				if string(typed.Data) == "automated" {
+					actionID = typed.ActionID
+				}
+			case protocol.UIFence:
+				fenced = actionID != 0 && typed.ActionID == actionID
+			}
+		}
+		return fenced
+	}, 5*time.Second, time.Millisecond, "admitted actions must be followed by their UI fence")
+	processedOutput := sessionTestOutput(3, "\x1b[Hprocessed")
+	processedOutput.Full = false
+	processedOutput.Base = 2
+	processedOutput.New = 3
+	processedOutput.Context.Publication = 3
+	admitted.deliver(processedOutput)
+	var boundary ports.UIActionResult
+	require.Eventually(t, func() bool {
+		ui.mu.Lock()
+		boundary = ui.boundary
+		ui.mu.Unlock()
+		return boundary.Revision != 0 && boundary.Context.OutputState == processedOutput.New && boundary.Context.ViewPublication == processedOutput.Context.Publication
+	}, 5*time.Second, time.Millisecond, "the action-specific output must be the committed processing boundary")
+	admitted.deliver(protocol.UIReceipt{ActionID: actionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
+	select {
+	case actionErr := <-actionDone:
+		require.NoError(t, actionErr, "receipt routing must complete the admitted action as processed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("processed UI action did not complete")
+	}
+
+	// Ending the stream releases before picker reacquisition. A stale request
+	// would be admitted here if finalization forgot to retire the binding.
+	admitted.deliver(protocol.Detached{})
+	awaitPickerState(t, harness.sup)
+	ui.mu.Lock()
+	require.Nil(t, ui.input, "attachment finalization must revoke the UI pump binding")
+	require.Zero(t, ui.consumer, "attachment finalization must revoke the UI consumer")
+	require.Nil(t, ui.foreground, "attachment finalization must retire the UI foreground")
+	ui.mu.Unlock()
+	_, err = ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Text: "stale"})
+	var staleErr *ports.UIError
+	require.ErrorAs(t, err, &staleErr)
+	require.Equal(t, ports.UIErrUnavailable, staleErr.Code)
+
+	// Reconnecting installs a fresh UI-owned generation. The prior generation
+	// remains stale even while another attachment is actionable.
+	reconnected := newSessionTestStream()
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return reconnected, nil
+	})
+	picker.commit(sessionTestRequest(true))
+	awaitHello(t, reconnected)
+	deliverReadyStream(t, reconnected)
+	awaitAttachedState(t, harness.sup)
+	reconnectedOutput := sessionTestOutput(2, "\x1b[Hreconnected")
+	reconnectedOutput.Full = false
+	reconnectedOutput.Base = 1
+	reconnectedOutput.New = 2
+	reconnected.deliver(reconnectedOutput)
+	require.Eventually(t, func() bool {
+		current, captureErr := ui.Capture(ui.Handle())
+		return captureErr == nil && current.Context.Status == ports.UIStatusAttached && current.Context.Generation != snapshot.Context.Generation
+	}, 5*time.Second, time.Millisecond)
+	_, err = ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Text: "still-stale"})
+	staleErr = nil
+	require.ErrorAs(t, err, &staleErr)
+	require.Equal(t, ports.UIErrStaleAttachment, staleErr.Code)
+	select {
+	case <-actionDone: // completion may be receipt-driven or retired on release.
+	default:
+	}
+}
+
+// TestSupervisorUIActionReleaseWaitsForInFlightOutput pins GO-201: finalization
+// must not release the UI foreground binding while a foreground output
+// transaction is in flight. The release publishes Detached, so releasing it
+// early would publish an unattached presentation while a newer session frame
+// was still being written, and would return the picker claim before the last
+// frame committed. The mutation this test pins moves releaseForeground before
+// lease.stop in attachmentForeground.finalize.
+func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
+	const inFlightState = 2
+	picker := newAttachTestPicker()
+	var (
+		streamMu sync.Mutex
+		stream   *sessionTestStream
+		ui       *UI
+	)
+	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+		cfg.UI = ui
+	})
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		admitted := newSessionTestStream()
+		streamMu.Lock()
+		stream = admitted
+		streamMu.Unlock()
+		return admitted, nil
+	})
+
+	// Installed before the commit, so the supervisor's publication goroutine
+	// always observes them: only the attached frame with inFlightState blocks.
+	terminal := harness.terminal
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseOutput := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseOutput()
+	detached := make(chan struct{}, 4)
+	terminal.publishMatch = func(ctx ports.UIContext) bool {
+		return ctx.Status == ports.UIStatusAttached && ctx.OutputState == inFlightState
+	}
+	terminal.publishEntered = entered
+	terminal.publishRelease = release
+	terminal.detachedSignals = detached
+
+	picker.commit(sessionTestRequest(true))
+	awaitStreamHello(t, &streamMu, &stream)
+	streamMu.Lock()
+	admitted := stream
+	streamMu.Unlock()
+	deliverReadyStream(t, admitted)
+	awaitAttachedState(t, harness.sup)
+
+	// Block one foreground output transaction after BeginOutput and before its
+	// commit, so the send lease is held while finalization begins.
+	inFlight := sessionTestOutput(inFlightState, "\x1b[Hin-flight")
+	inFlight.Full = false
+	inFlight.Base = 1
+	inFlight.New = inFlightState
+	admitted.deliver(inFlight)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the foreground output transaction never reached its publication boundary")
+	}
+	require.Equal(t, -1, terminal.eventIndex("drain", ports.UIStatusAttached, inFlightState), "the in-flight frame must still hold its transaction")
+
+	// Cancel the attachment while that transaction is in flight.
+	harness.service.lose(errors.New("attachment lost"))
+	require.Eventually(t, func() bool {
+		return harness.sup.attachments.authority.authorityState() == authorityFinalizing
+	}, 5*time.Second, time.Millisecond, "attachment finalization must begin while the frame is in flight")
+
+	// Finalization cannot complete, and Detached cannot be published, until the
+	// in-flight transaction drains.
+	require.Never(t, func() bool {
+		select {
+		case <-detached:
+			return true
+		default:
+			return false
+		}
+	}, 50*time.Millisecond, time.Millisecond, "Detached must not publish while a foreground transaction is in flight")
+	require.Equal(t, authorityFinalizing, harness.sup.attachments.authority.authorityState(), "finalize still waits on the output transaction")
+	require.False(t, admitted.closedNow(), "the retired stream is released only after the drain")
+	require.False(t, picker.owns(), "the picker claim returns only after the drain")
+	require.Equal(t, PresentAttached, harness.sup.State().Presentation, "the attachment is still presented while its last frame drains")
+	ui.mu.Lock()
+	require.NotNil(t, ui.input, "the UI foreground binding is released only after the drain")
+	require.NotNil(t, ui.foreground, "the UI foreground context is retired only after the drain")
+	ui.mu.Unlock()
+
+	releaseOutput()
+	select {
+	case <-detached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("attachment finalization never published Detached")
+	}
+
+	// The newer frame commits before Detached, and Detached carries the
+	// committed frame rather than the superseded one.
+	drained := terminal.eventIndex("drain", ports.UIStatusAttached, inFlightState)
+	published := terminal.eventIndex("publish", ports.UIStatusDetached, inFlightState)
+	require.GreaterOrEqual(t, drained, 0, "the in-flight frame must commit once it drains")
+	require.Greater(t, published, drained, "Detached must be published only after the newer frame commits")
+	publications := terminal.publicationList()
+	require.GreaterOrEqual(t, len(publications), 2)
+	last := publications[len(publications)-1]
+	require.Equal(t, ports.UIStatusDetached, last.Status)
+	require.Equal(t, uint64(inFlightState), last.OutputState, "Detached carries the committed newer frame")
+	prior := publications[len(publications)-2]
+	require.Equal(t, ports.UIStatusAttached, prior.Status)
+	require.Equal(t, uint64(inFlightState), prior.OutputState)
+
+	// Finalization completes and hands the picker claim back.
+	require.Eventually(t, func() bool {
+		ui.mu.Lock()
+		released := ui.input == nil && ui.consumer == 0 && ui.foreground == nil
+		ui.mu.Unlock()
+		return released && picker.owns() && harness.sup.attachments.authority.authorityState() == authorityIdle && admitted.closedNow()
+	}, 5*time.Second, time.Millisecond, "finalization must complete and return the picker claim")
+	require.Equal(t, PresentPicker, harness.sup.State().Presentation)
+}
+
+func TestSupervisorUIViewUpdateCommitsActionBoundaryWithoutBytes(t *testing.T) {
+	picker := newAttachTestPicker()
+	var ui *UI
+	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+		cfg.UI = ui
+	})
+	stream := newSessionTestStream()
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return stream, nil
+	})
+	picker.commit(sessionTestRequest(true))
+	awaitHello(t, stream)
+	deliverReadyStream(t, stream)
+	awaitAttachedState(t, harness.sup)
+	initialOutput := sessionTestOutput(2, "\x1b[Hmetadata-base")
+	initialOutput.Full = false
+	initialOutput.Base = 1
+	initialOutput.New = 2
+	initialOutput.Context.Publication = 2
+	stream.deliver(initialOutput)
+
+	var snapshot ports.UISnapshot
+	require.Eventually(t, func() bool {
+		var err error
+		snapshot, err = ui.Capture(ui.Handle())
+		return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.OutputState == 2
+	}, 5*time.Second, time.Millisecond)
+	actionDone := make(chan error, 1)
+	go func() {
+		_, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Text: "metadata"})
+		actionDone <- err
+	}()
+	var actionID uint64
+	require.Eventually(t, func() bool {
+		for _, message := range stream.messages() {
+			if fence, ok := message.(protocol.UIFence); ok {
+				actionID = fence.ActionID
+				return actionID != 0
+			}
+		}
+		return false
+	}, 5*time.Second, time.Millisecond)
+	view := protocol.ViewContext{Publication: 3, Route: snapshot.Context.Route, TabID: "metadata-tab", FocusedPaneID: "metadata-pane"}
+	view.Route.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "alpha"}
+	stream.deliver(protocol.UIViewUpdate{Epoch: 1, State: 2, Context: view})
+	require.Eventually(t, func() bool {
+		current, err := ui.Capture(ui.Handle())
+		return err == nil && current.Context.ViewPublication == 3 && current.Context.TabID == "metadata-tab"
+	}, 5*time.Second, time.Millisecond, "metadata-only update must commit through the foreground transaction")
+	stream.deliver(protocol.UIReceipt{ActionID: actionID, Epoch: 1, State: 2, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
+	select {
+	case err := <-actionDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("metadata-only committed boundary did not complete action")
+	}
+}
+
+func TestSupervisorUIViewUpdateRequestsOneCoalescedReset(t *testing.T) {
+	picker := newAttachTestPicker()
+	harness := startAttachHarness(t, picker)
+	stream := newSessionTestStream()
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return stream, nil
+	})
+	picker.commit(sessionTestRequest(true))
+	awaitHello(t, stream)
+	deliverReadyStream(t, stream)
+	awaitAttachedState(t, harness.sup)
+	bad := protocol.UIViewUpdate{Epoch: 9, State: 9, Context: protocol.ViewContext{Publication: 2, Route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "alpha"}}, TabID: "future", FocusedPaneID: "future"}}
+	stream.deliver(bad)
+	stream.deliver(bad)
+	require.Eventually(t, func() bool {
+		count := 0
+		for _, message := range stream.messages() {
+			if _, ok := message.(protocol.OutputResetRequest); ok {
+				count++
+			}
+		}
+		return count == 1
+	}, 5*time.Second, time.Millisecond, "future view dependencies must request one coalesced reset")
+}
+
+func TestSupervisorWithoutUIDoesNotBindActions(t *testing.T) {
+	picker := newAttachTestPicker()
+	harness := startAttachHarness(t, picker)
+	require.Nil(t, harness.sup.cfg.UI, "the optional seam must preserve publication-only composition")
+	require.Nil(t, harness.sup.attachments.actionUI, "mutation that binds an implicit UI changes no-UI behavior")
+}
+
+func TestUIActionWithoutInputReturnsUnavailable(t *testing.T) {
+	ui := NewUI(&attachTestTerminal{}, newSupervisorTestClock())
+	_, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: 1, Text: "x"})
+	var uiErr *ports.UIError
+	require.ErrorAs(t, err, &uiErr)
+	require.Equal(t, ports.UIErrUnavailable, uiErr.Code)
+}
+
 func TestSupervisorAttachmentLocalRemoteParity(t *testing.T) {
 	for _, local := range []bool{true, false} {
 		name := "remote"

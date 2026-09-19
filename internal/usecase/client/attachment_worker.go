@@ -11,6 +11,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // Attachment worker mechanisms (Plan 001 P5.1b, offline and unactivated).
@@ -44,14 +45,11 @@ import (
 // activation it must use this same pump for picker and attachment consumers;
 // never start both readers. Runner and supervisor wiring remain unchanged.
 //
-// UI actions are deliberately not part of this slice. AttachmentForeground has
-// no action admission seam and attachmentHostConfig has no Actions field:
-// binding UI.bindForeground and admitting actions requires the P5 supervisor's
-// automation loop, which does not exist yet, so exposing it would publish a
-// generation no component can drive. The transactional UI output path
-// (ports.UIOutputTransaction, reached through Output) stays independent and
-// usable. When the P5 supervisor owns input automation, it must bind and revoke
-// UI actions at the same foreground boundaries this host finalizes.
+// UI action admission is optional and reuses this host's single pump claim.
+// Binding occurs after grant claims the pump and before the worker starts;
+// release occurs when finalization starts, before the claim can return to the
+// picker. The UI-generated generation is authoritative and is stamped onto the
+// attachment token and every publication.
 
 // attachmentWorkerJoinTimeout bounds the supervisor's join of a cancelled
 // worker during the final input window. A worker that honors neither
@@ -125,8 +123,9 @@ type AttachmentEvent struct {
 // AttachmentInputEvent is one authorized terminal input delivery. Err carries a
 // terminal read failure (for example io.EOF) alongside any final bytes.
 type AttachmentInputEvent struct {
-	Data []byte
-	Err  error
+	Data     []byte
+	Err      error
+	actionID uint64
 }
 
 // AttachmentForeground is the supervisor-granted handle through which a worker
@@ -227,8 +226,7 @@ func (a *attachmentAuthority) currentToken() AttachmentToken {
 
 // grant installs fg as the sole foreground in the active state. It fails while
 // another grant is live or while the shared input pump already has a consumer,
-// which is what keeps exactly one foreground owner. The host never allocates a
-// UI generation here: UI action binding is deferred to the P5 supervisor.
+// which is what keeps exactly one foreground owner.
 func (a *attachmentAuthority) grant(fg *attachmentForeground) bool {
 	if a == nil || fg == nil {
 		return false
@@ -344,10 +342,8 @@ func (a *attachmentAuthority) retain(fg *attachmentForeground, fn func()) bool {
 }
 
 // attachmentHostConfig supplies the supervisor-owned dependencies. Terminal,
-// clock, and input belong to the supervisor; UI and OnAttached are optional
-// seams. There is no Actions seam: UI action admission needs the P5
-// supervisor's automation loop before it can be exposed (see the package
-// integration requirement above).
+// clock, and input belong to the supervisor; UI seams and OnAttached are
+// optional.
 type attachmentHostConfig struct {
 	// Terminal is the controlling terminal the supervisor owns. Optional only
 	// so a mechanism test can omit output entirely; production supplies it.
@@ -363,6 +359,8 @@ type attachmentHostConfig struct {
 	// UI is the supervisor-owned UI publication transaction. When nil it is
 	// taken from Terminal when that implements ports.UIOutputTransaction.
 	UI ports.UIOutputTransaction
+	// ActionUI optionally binds automation to the same claimed input consumer.
+	ActionUI *UI
 	// OnAttached observes a successful MarkAttached. Optional.
 	OnAttached func(AttachmentToken)
 }
@@ -377,6 +375,7 @@ type attachmentHost struct {
 	clock     ports.Clock
 	input     *terminalInputPump
 	ui        ports.UIOutputTransaction
+	actionUI  *UI
 	resizes   <-chan domain.Geometry
 	actions   <-chan AttachmentLifecycleAction
 	onAttach  func(AttachmentToken)
@@ -413,6 +412,7 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		clock:          clock,
 		input:          cfg.Input,
 		ui:             ui,
+		actionUI:       cfg.ActionUI,
 		resizes:        resizes,
 		actions:        cfg.Actions,
 		onAttach:       cfg.OnAttached,
@@ -431,8 +431,10 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 //   - the shared input pump already has a consumer (a picker or rival
 //     foreground owns input).
 //
-// The granted token, event token, and published UI context always use the
-// caller-supplied Generation. The caller must Wait or Cancel the returned run.
+// The granted token and event token always retain the caller-supplied
+// supervisor generation. When action UI is configured, its independent
+// generation is used only for UI publication and action fencing. The caller
+// must Wait or Cancel the returned run.
 func (h *attachmentHost) Begin(ctx context.Context, token AttachmentToken, worker AttachmentWorker, stream ports.BrokerLogicalConnection) (*attachmentRun, bool) {
 	if h == nil || token.IsZero() || supervisorNil(worker) || supervisorNil(stream) {
 		return nil, false
@@ -445,6 +447,9 @@ func (h *attachmentHost) Begin(ctx context.Context, token AttachmentToken, worke
 	if !h.authority.grant(fg) {
 		cancel()
 		return nil, false
+	}
+	if h.actionUI != nil {
+		fg.uiGeneration = h.actionUI.bindForeground(workerCtx, fg.input, fg.consumer)
 	}
 	run := &attachmentRun{
 		host:    h,
@@ -674,18 +679,19 @@ func (r *attachmentRun) join() {
 // AttachmentForeground. It reuses the existing terminal input pump for input
 // and the existing foreground send lease for output serialization.
 type attachmentForeground struct {
-	authority *attachmentAuthority
-	token     AttachmentToken
-	stream    ports.BrokerLogicalConnection
-	input     *terminalInputPump
-	consumer  uint64
-	lease     *foregroundSendLease
-	term      ports.Terminal
-	ui        ports.UIOutputTransaction
-	resizes   <-chan domain.Geometry
-	actions   <-chan AttachmentLifecycleAction
-	host      *attachmentHost
-	done      chan struct{}
+	authority    *attachmentAuthority
+	token        AttachmentToken
+	stream       ports.BrokerLogicalConnection
+	input        *terminalInputPump
+	consumer     uint64
+	lease        *foregroundSendLease
+	term         ports.Terminal
+	ui           ports.UIOutputTransaction
+	uiGeneration uint64
+	resizes      <-chan domain.Geometry
+	actions      <-chan AttachmentLifecycleAction
+	host         *attachmentHost
+	done         chan struct{}
 	// finalizedOnce and finishedOnce split the single teardown into the
 	// deterministic final input window: finalize closes Done and stops output
 	// first, finish revokes the retained consumer only after the join.
@@ -704,6 +710,26 @@ type attachmentForeground struct {
 
 // Token is the generation/attempt identity of this grant.
 func (f *attachmentForeground) Token() AttachmentToken { return f.token }
+
+func (f *attachmentForeground) actionableGeneration() uint64 {
+	if f.uiGeneration != 0 {
+		return f.uiGeneration
+	}
+	return f.token.Generation
+}
+
+func (f *attachmentForeground) uiPublished() {
+	if f.uiGeneration == 0 || f.host == nil || f.host.actionUI == nil {
+		return
+	}
+	f.host.actionUI.published(f.uiGeneration)
+}
+
+func (f *attachmentForeground) uiReceipt(receipt protocol.UIReceipt) {
+	if f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
+		f.host.actionUI.receipt(f.uiGeneration, receipt)
+	}
+}
 
 // Stream is the supervisor-admitted logical stream this worker owns.
 func (f *attachmentForeground) Stream() ports.BrokerLogicalConnection { return f.stream }
@@ -729,6 +755,9 @@ func (f *attachmentForeground) finalize() {
 		f.authority.beginFinalize(f)
 		if f.lease != nil {
 			f.lease.stop()
+		}
+		if f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
+			f.host.actionUI.releaseForeground(f.uiGeneration)
 		}
 		close(f.done)
 	})
@@ -788,7 +817,7 @@ func (f *attachmentForeground) Input(ctx context.Context) (AttachmentInputEvent,
 		result, ok := f.input.take(ctx, f.consumer)
 		if ok {
 			f.beginDelivery()
-			return AttachmentInputEvent{Data: result.data, Err: result.err}, true
+			return AttachmentInputEvent{Data: result.data, Err: result.err, actionID: result.actionID}, true
 		}
 		if ctx.Err() != nil {
 			return AttachmentInputEvent{}, false
@@ -798,6 +827,20 @@ func (f *attachmentForeground) Input(ctx context.Context) (AttachmentInputEvent,
 			return AttachmentInputEvent{}, false
 		case <-f.done:
 			return AttachmentInputEvent{}, false
+		case request := <-f.input.automation:
+			f.input.mu.Lock()
+			clean := f.input.consumer == f.consumer && request.consumer == f.consumer && f.input.pending == nil && len(f.input.residual) == 0 && f.input.delivering == 0
+			f.input.mu.Unlock()
+			clean = clean && request.ctx.Err() == nil && request.record.source == terminalInputAutomation && request.record.actionID != 0 && request.record.generation == f.uiGeneration && request.record.endBatch && len(request.record.data) > 0 && len(request.record.data) <= uiMaxInputBytes && validUIKeyBatch(request.record.data)
+			if clean && request.owner != nil {
+				clean = request.owner.accept(request.record.actionID, request.record.generation)
+			}
+			request.admitted <- clean
+			if !clean {
+				continue
+			}
+			request.dispatched <- true
+			return AttachmentInputEvent{Data: append([]byte(nil), request.record.data...), actionID: request.record.actionID}, true
 		case <-f.input.readyFor(f.consumer):
 		}
 	}
@@ -927,10 +970,15 @@ func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) er
 			outputErr = ports.ErrUIUnavailable
 			return true
 		}
-		uiContext.Generation = f.token.Generation
+		uiContext.Generation = f.actionableGeneration()
 		f.ui.BeginOutput(uiContext)
 		success := false
-		defer func() { f.ui.EndOutput(success) }()
+		defer func() {
+			f.ui.EndOutput(success)
+			if success {
+				f.uiPublished()
+			}
+		}()
 		// An unavailable capture means the optional UI observation channel is
 		// disabled or closed, so the terminal frame still writes and flushes.
 		// Any other publication error aborts before the frame is written.

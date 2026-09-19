@@ -279,6 +279,10 @@ type SupervisorConfig struct {
 	// randomness seam so tests can pin the retry cadence exactly. Optional; the
 	// default is a process-local random source.
 	Jitter func() float64
+	// UI optionally enables supervisor-owned action admission. Each attachment
+	// is bound only after it owns the pump claim; no UI preserves the prior
+	// publication-only behavior with no admitted automation.
+	UI *UI
 	// Picker is the client-owned picker (Plan 001 P5.2b). When set, the
 	// supervisor folds every broker publication into it and hands it every
 	// terminal read from the same single input lifetime used for EOF detection,
@@ -385,12 +389,13 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	// The host is the supervisor's existing foreground grant. It owns no raw
 	// mode and starts no reader: the supervisor keeps its one terminal input
 	// lifetime, so the attachment path adds neither a second reader nor a
-	// second writer. Terminal input pumping into a session and UI actions are
-	// deliberately left to P5.4 (see the P5.1b integration note).
+	// second writer. The optional UI binds to this host's existing pump claim;
+	// it never starts another terminal reader.
 	supervisor.attachments = newAttachmentHost(attachmentHostConfig{
 		Terminal:   cfg.Terminal,
 		Clock:      cfg.Clock,
 		Actions:    cfg.LifecycleActions,
+		ActionUI:   cfg.UI,
 		OnAttached: func(AttachmentToken) { supervisor.transition(supervisorEvent{kind: supervisorAttached}) },
 	})
 	return supervisor, nil

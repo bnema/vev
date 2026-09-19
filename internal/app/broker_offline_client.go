@@ -81,7 +81,7 @@ func runBrokerClientCommand(ctx context.Context, options brokerClientOptions) er
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	switch options.harness {
 	case offlineClientTerminal:
-		return runOfflineClient(ctx, brokeripc.SocketPath(layout.Runtime), term.New(), log, nil, nil)
+		return runOfflineClient(ctx, brokeripc.SocketPath(layout.Runtime), term.New(), nil, log, nil, nil)
 	case offlineClientUIDriver:
 		terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: uiDriverDefaultColumns, Rows: uiDriverDefaultRows}}, "")
 		if err != nil {
@@ -99,7 +99,7 @@ func runBrokerClientCommand(ctx context.Context, options brokerClientOptions) er
 // physical terminal, headless UI driver, and browser terminal harnesses. The
 // connector is the real broker IPC adapter and InitialNavigation opens a real
 // broker logical stream; no direct daemon dialer is present.
-func runOfflineClient(ctx context.Context, socket string, terminal ports.Terminal, log *slog.Logger, onState func(client.State), onFailure func(error)) error {
+func runOfflineClient(ctx context.Context, socket string, terminal ports.Terminal, ui *client.UI, log *slog.Logger, onState func(client.State), onFailure func(error)) error {
 	if terminal == nil {
 		return errors.New("vev: offline client requires a terminal")
 	}
@@ -140,6 +140,7 @@ func runOfflineClient(ctx context.Context, socket string, terminal ports.Termina
 		Connector:         brokeripc.NewConnector(socket, brokeripc.Config{}),
 		Terminal:          terminal,
 		Clock:             clk,
+		UI:                ui,
 		Picker:            picker,
 		InitialNavigation: &navigation,
 		AttachmentEnvironment: client.AttachmentEnvironment{
@@ -175,7 +176,7 @@ func runOfflineUIDriver(ctx context.Context, socket string, terminal *uiterm.Ter
 	runnerDone := make(chan error, 1)
 	states := make(chan client.State, 1)
 	go func() {
-		runnerDone <- runOfflineClient(runCtx, socket, terminal, log, func(state client.State) {
+		runnerDone <- runOfflineClient(runCtx, socket, terminal, ui, log, func(state client.State) {
 			select {
 			case states <- state:
 			default:
@@ -183,20 +184,17 @@ func runOfflineUIDriver(ctx context.Context, socket string, terminal *uiterm.Ter
 		}, nil)
 	}()
 
-	var state client.State
 	select {
-	case state = <-states:
+	case <-states:
 	case err := <-runnerDone:
 		return err
 	case <-runCtx.Done():
 		return runCtx.Err()
 	}
-	// The autonomous supervisor publishes terminal transactions but does not own
-	// the ordinary Runner's UI action-binding loop. Reconnecting is therefore
-	// the honest discovery status, and Control is false: advertising control
-	// would invite actions that no foreground binding can accept. Generation is
-	// the real supervisor attempt generation rather than a fabricated constant.
-	ready := uidriver.Ready{Attachment: ui.Handle(), Generation: state.Generation, Control: false, Status: ports.UIStatusReconnecting}
+	// Ready advertises the currently actionable UI generation. Before the first
+	// attachment there is no actionable generation; attached snapshots publish
+	// the non-zero generation clients must fence actions against.
+	ready := uidriver.Ready{Attachment: ui.Handle(), Control: true, Status: ports.UIStatusReconnecting}
 	server := uidriver.New(ui, clock.New())
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(runCtx, stream, ready) }()

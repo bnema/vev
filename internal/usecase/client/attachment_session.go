@@ -178,7 +178,7 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 				return state, &event
 			}
 			state = next
-			if err := fg.Output(state.uiContext(ports.UIContext{Generation: token.Generation}, ports.UIStatusTransitioning), typed.Data); err != nil {
+			if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusTransitioning), typed.Data); err != nil {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing initial output: %w", err)}
 				return state, &event
 			}
@@ -233,6 +233,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	go pumpAttachmentInput(pumpCtx, fg, outgoing)
 	go pumpAttachmentGeometry(pumpCtx, fg, outgoing)
 	go pumpAttachmentLifecycle(pumpCtx, fg, outgoing)
+	outputResetRequested := false
 	for {
 		select {
 		case result := <-incoming:
@@ -246,9 +247,27 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					continue
 				}
 				state = next
-				if err := fg.Output(state.uiContext(ports.UIContext{Generation: token.Generation}, ports.UIStatusAttached), typed.Data); err != nil {
+				outputResetRequested = false
+				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
 				}
+			case protocol.UIViewUpdate:
+				next, accepted, needsReset := state.nextView(typed)
+				if needsReset && !outputResetRequested {
+					if err := w.send(ctx, fg, stream, protocol.OutputResetRequest{}); err != nil {
+						return w.settle(ctx, fg, stream, token, err)
+					}
+					outputResetRequested = true
+				}
+				if !accepted {
+					continue
+				}
+				state = next
+				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), nil); err != nil {
+					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing view update: %w", err)}
+				}
+			case protocol.UIReceipt:
+				attachmentUIReceipt(fg, typed)
 			case protocol.ErrorMsg:
 				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
 			case protocol.Detached:
@@ -267,6 +286,11 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			}
 			if event.input != nil {
 				fg.AckInput()
+				if event.input.actionID != 0 {
+					if err := w.send(ctx, fg, stream, protocol.UIFence{ActionID: event.input.actionID}); err != nil {
+						return w.settle(ctx, fg, stream, token, err)
+					}
+				}
 			}
 			if event.action == AttachmentDetachToPicker {
 				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded, Err: errDetachToPicker}
@@ -279,6 +303,24 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		case <-fg.Done():
 			return w.settle(ctx, fg, stream, token, errAttachmentForegroundRevoked)
 		}
+	}
+}
+
+type attachmentUIForeground interface {
+	actionableGeneration() uint64
+	uiReceipt(protocol.UIReceipt)
+}
+
+func attachmentActionableGeneration(fg AttachmentForeground, token AttachmentToken) uint64 {
+	if ui, ok := fg.(attachmentUIForeground); ok {
+		return ui.actionableGeneration()
+	}
+	return token.Generation
+}
+
+func attachmentUIReceipt(fg AttachmentForeground, receipt protocol.UIReceipt) {
+	if ui, ok := fg.(attachmentUIForeground); ok {
+		ui.uiReceipt(receipt)
 	}
 }
 
@@ -300,7 +342,7 @@ func pumpAttachmentInput(ctx context.Context, fg AttachmentForeground, out chan<
 		sequence++
 		copyEvent := event
 		select {
-		case out <- attachmentClientEvent{message: protocol.Input{InputSeq: sequence, Data: append([]byte(nil), event.Data...)}, input: &copyEvent}:
+		case out <- attachmentClientEvent{message: protocol.Input{InputSeq: sequence, ActionID: event.actionID, Data: append([]byte(nil), event.Data...)}, input: &copyEvent}:
 		case <-ctx.Done():
 			fg.PreserveInput(event.Data)
 			return

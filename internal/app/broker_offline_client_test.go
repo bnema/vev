@@ -242,7 +242,7 @@ func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 	done := make(chan error, 1)
 	failures := make(chan error, 1)
 	go func() {
-		done <- runOfflineClient(ctx, fixture.socket, terminal, discardLog(), nil, func(err error) {
+		done <- runOfflineClient(ctx, fixture.socket, terminal, nil, discardLog(), nil, func(err error) {
 			select {
 			case failures <- err:
 			default:
@@ -294,9 +294,9 @@ func TestOfflineClientUIDriverReachesSessionThroughBrokerIPC(t *testing.T) {
 	case ready := <-readyResult:
 		result, ok := ready["result"].(map[string]any)
 		require.True(t, ok)
-		require.Equal(t, false, result["control"], "autonomous supervisor has no UI action binding")
-		require.Equal(t, string(ports.UIStatusReconnecting), result["status"], "reconnecting is the honest discovery status until autonomous UI binding exists")
-		require.NotZero(t, result["generation"], "ready carries the real supervisor generation")
+		require.Equal(t, true, result["control"], "autonomous supervisor binds UI actions")
+		require.Equal(t, string(ports.UIStatusReconnecting), result["status"], "ready precedes the attachment publication")
+		require.Equal(t, float64(0), result["generation"], "ready has no actionable generation before attachment publication")
 	case err := <-readyError:
 		t.Fatalf("decode UI-driver ready: %v", err)
 	case <-time.After(brokerTestWait):
@@ -512,7 +512,7 @@ func TestOfflineClientBrowserReachesSessionThroughBrokerIPC(t *testing.T) {
 	defer cancel()
 	token := strings.Repeat("b", 43)
 	handler, err := webterm.NewServer(ctx, webterm.Settings{}, token, func(runCtx context.Context, terminal *webterm.Terminal) error {
-		return runOfflineClient(runCtx, fixture.socket, terminal, discardLog(), nil, nil)
+		return runOfflineClient(runCtx, fixture.socket, terminal, nil, discardLog(), nil, nil)
 	})
 	require.NoError(t, err)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { r.Host = webterm.Address; handler.ServeHTTP(w, r) }))
