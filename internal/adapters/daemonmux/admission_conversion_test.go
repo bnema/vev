@@ -37,19 +37,33 @@ func TestOpenMessageCarriesAttachmentAdmission(t *testing.T) {
 		createAs  string
 	}{
 		{
-			name:      "exact attach keeps its exact target",
-			request:   func() ports.BrokerOpenStreamRequest { r := base; r.Admission = ports.BrokerAdmissionExact; r.Target = target; return r }(),
+			name: "exact attach keeps its exact target",
+			request: func() ports.BrokerOpenStreamRequest {
+				r := base
+				r.Admission = ports.BrokerAdmissionExact
+				r.Target = target
+				return r
+			}(),
 			admission: ports.BrokerAdmissionExact,
 		},
 		{
-			name:      "named creation keeps its name",
-			request:   func() ports.BrokerOpenStreamRequest { r := base; r.Admission = ports.BrokerAdmissionCreateNamed; r.Name = "work"; return r }(),
+			name: "named creation keeps its name",
+			request: func() ports.BrokerOpenStreamRequest {
+				r := base
+				r.Admission = ports.BrokerAdmissionCreateNamed
+				r.Name = "work"
+				return r
+			}(),
 			admission: ports.BrokerAdmissionCreateNamed,
 			createAs:  "work",
 		},
 		{
-			name:      "ephemeral creation keeps its variant",
-			request:   func() ports.BrokerOpenStreamRequest { r := base; r.Admission = ports.BrokerAdmissionCreateEphemeral; return r }(),
+			name: "ephemeral creation keeps its variant",
+			request: func() ports.BrokerOpenStreamRequest {
+				r := base
+				r.Admission = ports.BrokerAdmissionCreateEphemeral
+				return r
+			}(),
 			admission: ports.BrokerAdmissionCreateEphemeral,
 		},
 	}
