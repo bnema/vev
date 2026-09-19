@@ -745,11 +745,11 @@ func (f *attachmentForeground) Resize(ctx context.Context) (domain.Geometry, boo
 }
 
 // Output holds the same send lease across the entire UI observation boundary.
-// It mirrors the legacy attach output path: a UI capture that is merely
-// unavailable (ports.ErrUIUnavailable) never stops the frame, so the write and
-// flush still proceed; any other publication failure aborts. EndOutput success
-// follows the frame write and flush, so a failed publication, short write, or
-// failed write or flush leaves EndOutput(false).
+// UIOutputTransaction is an observation channel, not attachment commit
+// authority: an unavailable or closed observation channel does not stop the
+// terminal frame. Other publication failures abort. Successful terminal write,
+// flush, and EndOutput(true) commit the frame; any failed or short write or
+// failed flush leaves EndOutput(false).
 func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) error {
 	if f == nil {
 		return errAttachmentForegroundRevoked
@@ -772,9 +772,9 @@ func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) er
 		f.ui.BeginOutput(uiContext)
 		success := false
 		defer func() { f.ui.EndOutput(success) }()
-		// An unavailable UI capture is tolerated, exactly like the legacy attach
-		// path: the frame is still written and flushed. Any other publication
-		// error aborts before the frame is written.
+		// An unavailable capture means the optional UI observation channel is
+		// disabled or closed, so the terminal frame still writes and flushes.
+		// Any other publication error aborts before the frame is written.
 		if err := f.ui.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
 			outputErr = err
 			return true

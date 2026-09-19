@@ -322,6 +322,12 @@ type supervisorTestService struct {
 	// closeEntered reports that Close began waiting on it.
 	closeGate    chan struct{}
 	closeEntered chan struct{}
+
+	// openStream scripts logical-stream admission for the P5.3b attachment
+	// path. When nil, OpenStream keeps the historical refusal. openCalls
+	// records every exact request the supervisor admitted.
+	openStream func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)
+	openCalls  []ports.BrokerOpenStreamRequest
 }
 
 func newSupervisorTestService(id ports.BrokerConnectionID) *supervisorTestService {
@@ -355,8 +361,29 @@ func (s *supervisorTestService) Subscribe() (ports.BrokerSubscription, error) {
 	}), nil
 }
 
-func (s *supervisorTestService) OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-	return nil, errors.New("supervisor test service does not support streams")
+func (s *supervisorTestService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+	s.mu.Lock()
+	s.openCalls = append(s.openCalls, request)
+	open := s.openStream
+	s.mu.Unlock()
+	if open == nil {
+		return nil, errors.New("supervisor test service does not support streams")
+	}
+	return open(ctx, request)
+}
+
+// setOpenStream installs the logical-stream admission all P5.3b tests drive.
+func (s *supervisorTestService) setOpenStream(open func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.openStream = open
+}
+
+// openedRequests returns a copy of every exact stream request admitted so far.
+func (s *supervisorTestService) openedRequests() []ports.BrokerOpenStreamRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ports.BrokerOpenStreamRequest(nil), s.openCalls...)
 }
 
 func (s *supervisorTestService) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {

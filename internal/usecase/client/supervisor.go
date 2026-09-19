@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
@@ -153,6 +154,17 @@ const (
 	// supervisorBrokerLoss is the loss of an established connection observed
 	// through BrokerService.Done/Err while no logical stream is held.
 	supervisorBrokerLoss
+	// supervisorAttachBegin marks the admission of one committed attachment
+	// stream: the picker released input and the supervisor is presenting the
+	// connecting state until the initial publication is committed.
+	supervisorAttachBegin
+	// supervisorAttached marks a committed initial publication (Plan 001
+	// P5.3b): the worker proved the full output frame was written, flushed,
+	// and UI-committed. Welcome alone never produces it.
+	supervisorAttached
+	// supervisorAttachEnded returns a settled attachment to the picker without
+	// restarting the process. event.err carries the typed failure, if any.
+	supervisorAttachEnded
 	// supervisorNonRetryable is a failure that retrying can never fix.
 	supervisorNonRetryable
 	// supervisorTerminal ends the process: terminal EOF, process cancellation,
@@ -182,6 +194,21 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 	case supervisorTransientFailure, supervisorBrokerLoss:
 		state.Connectivity = ConnectivityRetryWait
 		state.Attempt++
+		state.Err = event.err
+	case supervisorAttachBegin:
+		// Connecting is the honest presentation until the committed initial
+		// publication: the broker connection is still ready and the attempt
+		// cadence is untouched.
+		state.Presentation = PresentConnecting
+		state.Err = nil
+	case supervisorAttached:
+		state.Presentation = PresentAttached
+		state.Err = nil
+	case supervisorAttachEnded:
+		// A settled attachment always returns to the picker in the same
+		// process, attached or not; a stream that fails after attachment must
+		// never leave the attached presentation showing.
+		state.Presentation = PresentPicker
 		state.Err = event.err
 	case supervisorNonRetryable:
 		state.Connectivity = ConnectivityDisconnected
@@ -222,6 +249,18 @@ type SupervisorConfig struct {
 	// so the picker never starts a second reader. When nil the supervisor drops
 	// terminal input exactly as P5.1a does. Optional.
 	Picker pickerHost
+	// AttachmentEnvironment is composition-owned process context copied into
+	// each attachment Hello. The use case deliberately does not inspect the
+	// process environment; omitted fields retain their protocol zero values.
+	AttachmentEnvironment AttachmentEnvironment
+}
+
+// AttachmentEnvironment is the composition seam for client environment data
+// carried by attachment Hello messages.
+type AttachmentEnvironment struct {
+	TermEnv   string
+	Cwd       string
+	TrueColor bool
 }
 
 // Supervisor owns one autonomous client process: raw mode, one terminal input
@@ -231,6 +270,21 @@ type Supervisor struct {
 
 	mu    sync.Mutex
 	state State
+
+	// attachments is the single foreground host every committed attachment
+	// runs through (Plan 001 P5.3b). The supervisor owns it for the whole run
+	// and retains close authority over each stream it admits.
+	attachments *attachmentHost
+	// nextStream is the strictly increasing logical stream ID allocator for
+	// the current broker connection. Failed admitted opens consume their ID,
+	// exactly as the pool contract requires.
+	nextStream atomic.Uint64
+	// nextAttachment identifies one attachment run within the connection
+	// attempt generation.
+	nextAttachment atomic.Uint64
+	// clientID is the stable client identity carried in every Hello this
+	// supervisor sends, across reconnects and attachments.
+	clientID [16]byte
 }
 
 // NewSupervisor validates the required dependencies and returns a supervisor
@@ -257,10 +311,22 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	if cfg.Jitter == nil {
 		cfg.Jitter = rand.Float64
 	}
-	return &Supervisor{
-		cfg:   cfg,
-		state: State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
-	}, nil
+	supervisor := &Supervisor{
+		cfg:      cfg,
+		state:    State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
+		clientID: newClientID(),
+	}
+	// The host is the supervisor's existing foreground grant. It owns no raw
+	// mode and starts no reader: the supervisor keeps its one terminal input
+	// lifetime, so the attachment path adds neither a second reader nor a
+	// second writer. Terminal input pumping into a session and UI actions are
+	// deliberately left to P5.4 (see the P5.1b integration note).
+	supervisor.attachments = newAttachmentHost(attachmentHostConfig{
+		Terminal:   cfg.Terminal,
+		Clock:      cfg.Clock,
+		OnAttached: func(AttachmentToken) { supervisor.transition(supervisorEvent{kind: supervisorAttached}) },
+	})
+	return supervisor, nil
 }
 
 // State returns the current immutable projection.
@@ -375,12 +441,30 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 		s.transition(supervisorEvent{kind: supervisorReady})
 
-		lossErr, terminated, termErr := s.awaitLoss(ctx, input, service, sub)
-		retire()
-		if terminated {
-			s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
-			return termErr
+		// Ready phase: fold publications, admit committed attachments one at a
+		// time, and return to the picker after each. A committed attachment
+		// never replaces the broker connection; only a broker loss leaves this
+		// loop, and cancellation or terminal EOF ends the run.
+		var lossErr error
+	ready:
+		for {
+			ready := s.awaitReady(ctx, input, service, sub)
+			if ready.terminated {
+				retire()
+				s.transition(supervisorEvent{kind: supervisorTerminal, err: ready.termErr})
+				return ready.termErr
+			}
+			if ready.commitKey == "" {
+				lossErr = ready.lossErr
+				break ready
+			}
+			if terminated, termErr := s.runCommittedAttachment(ctx, input, service, ready.commitKey); terminated {
+				retire()
+				s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
+				return termErr
+			}
 		}
+		retire()
 		if cause := ctx.Err(); cause != nil {
 			// Parent cancellation wins over a loss that settled at the same instant,
 			// exactly as it does at the attempt settle. The connection was already
@@ -525,26 +609,69 @@ func (s *Supervisor) awaitAttempt(ctx context.Context, input *terminalInputLifet
 	}
 }
 
-// awaitLoss waits for an established connection to be lost, or for the run to
-// be terminated first. A loss is reported with the service's stable terminal
-// cause.
-func (s *Supervisor) awaitLoss(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, sub ports.BrokerSubscription) (error, bool, error) {
+// readyOutcome is the result of one wait inside the established-connection
+// phase: either the broker connection was lost, the run was terminated, or a
+// committed picker selection is ready to be attached.
+type readyOutcome struct {
+	// commitKey is the exact catalogue key captured with a commit decision. A
+	// non-empty value names one attachment to admit; the ready loop never
+	// resolves anything else.
+	commitKey string
+	// lossErr is the broker service's stable terminal cause when the
+	// established connection was lost.
+	lossErr error
+	// terminated reports that the run itself must end, with termErr carrying
+	// the process cancellation or terminal-read cause.
+	terminated bool
+	termErr    error
+}
+
+// awaitReady waits for an established connection to be lost, for a committed
+// picker selection, or for the run to be terminated first. Publications are
+// folded into the picker as they arrive; a commit decision wakes the loop so
+// the supervisor can admit exactly the row the user committed. It opens no
+// stream and starts no terminal work itself.
+func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, sub ports.BrokerSubscription) readyOutcome {
 	var changed <-chan struct{}
-	if s.cfg.Picker != nil && !supervisorNil(sub) {
-		changed = sub.Changed()
+	var ops <-chan struct{}
+	if s.cfg.Picker != nil {
+		if !supervisorNil(sub) {
+			changed = sub.Changed()
+		}
+		ops = s.cfg.Picker.OpsReady()
 	}
 	for {
 		select {
 		case <-service.Done():
-			return service.Err(), false, nil
+			return readyOutcome{lossErr: service.Err()}
 		case <-changed:
 			s.cfg.Picker.ApplySnapshot(service.Snapshot())
+		case <-ops:
+			if key, ok := s.takeCommittedKey(); ok {
+				return readyOutcome{commitKey: key}
+			}
 		case <-ctx.Done():
-			return nil, true, ctx.Err()
+			return readyOutcome{terminated: true, termErr: ctx.Err()}
 		case err := <-input.EOF():
-			return nil, true, terminalReadCause(err)
+			return readyOutcome{terminated: true, termErr: terminalReadCause(err)}
 		}
 	}
+}
+
+// takeCommittedKey drains exactly one committed presentation decision. Only a
+// commit with a captured catalogue key admits an attachment; every other
+// decision (cursor moves, search, kill, close) is consumed and dropped here,
+// so picker input alone can never open, write, or retarget a session.
+func (s *Supervisor) takeCommittedKey() (string, bool) {
+	picker := s.cfg.Picker
+	if picker == nil {
+		return "", false
+	}
+	op, key := picker.TakeOp()
+	if !op.commit || key == "" {
+		return "", false
+	}
+	return key, true
 }
 
 // awaitTermination parks the supervisor on the picker after a non-retryable

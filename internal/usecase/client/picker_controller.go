@@ -37,11 +37,31 @@ import (
 // pickerHost is the supervisor's view of the client-owned picker. The
 // supervisor applies each broker publication and hands it every terminal read
 // from its single input lifetime; the picker decides ownership.
+//
+// The commit seam (Plan 001 P5.3b) is what lets the supervisor turn a user
+// commit into one exact broker stream without ever reading the presentation
+// model itself: the picker records the decision and the key it committed
+// atomically, the supervisor wakes on OpsReady, and ResolveKey revalidates
+// exactly that key. The picker never opens a stream, and the supervisor never
+// reconstructs a selection from a display label.
 type pickerHost interface {
 	pickerInputConsumer
 	// ApplySnapshot folds one broker publication into the catalogue and
 	// refreshes the presentation immediately.
 	ApplySnapshot(ports.BrokerSnapshot)
+	// TakeOp returns and clears the accumulated presentation decision together
+	// with the catalogue key captured with a commit decision.
+	TakeOp() (pickerOp, string)
+	// ResolveKey revalidates exactly one committed catalogue key into the
+	// exact broker stream request the user committed.
+	ResolveKey(string, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
+	// SetOwnsInput releases or re-acquires picker input ownership at an attach
+	// boundary, so exactly one owner consumes the shared terminal reader.
+	SetOwnsInput(bool)
+	// OpsReady wakes the supervisor when a presentation decision was recorded.
+	// It is a capacity-one coalescing signal, never closed while the picker
+	// lives, so a driver that ignores it only misses a wakeup, never blocks.
+	OpsReady() <-chan struct{}
 }
 
 // pickerInputConsumer is the supervisor's narrow input seam. ConsumeTerminalRead
@@ -74,6 +94,7 @@ type pickerController struct {
 	notices     ui.ToastManager
 	interaction uint64
 	ownsInput   bool
+	opsReady    chan struct{}
 	lastOp      pickerOp
 	// lastCommitKey is the catalogue key captured with the pending commit
 	// decision, so TakeOp can hand a driver the exact committed row.
@@ -92,6 +113,7 @@ func newPickerController(clock ports.Clock, freshness time.Duration) *pickerCont
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
 		renderer:  newPickerRenderer(),
 		ownsInput: true,
+		opsReady:  make(chan struct{}, 1),
 	}
 	controller.consumer.setOwned(pickerGeneration, pickerGeneration)
 	return controller
@@ -167,6 +189,24 @@ func (p *pickerController) recordOpLocked(op pickerOp) {
 		p.lastCommitKey = p.commitKeyLocked()
 	}
 	p.lastOp = mergePickerOps(p.lastOp, op)
+	if p.lastOp.commit {
+		// Coalesce exactly one wakeup: a driver that has not yet run TakeOp
+		// re-reads the accumulated decision, so a dropped signal is harmless.
+		select {
+		case p.opsReady <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// OpsReady wakes the supervisor when a commit decision was recorded. It is a
+// capacity-one coalescing signal; TakeOp remains the authority on what was
+// decided, so a driver never infers the decision from the wakeup alone.
+func (p *pickerController) OpsReady() <-chan struct{} {
+	if p == nil {
+		return nil
+	}
+	return p.opsReady
 }
 
 // commitKeyLocked returns the opaque catalogue key of the row under the cursor

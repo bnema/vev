@@ -799,12 +799,11 @@ func pickerMergeAuthority(current, incoming ports.BrokerDaemonObservation) ports
 	return merged
 }
 
-// pickerObservationStatus classifies one observation into a row badge. It
-// mirrors the legacy daemon-served classifier (directorySessionReason):
-// availability is decided first, so an unobserved (Availability Unknown) or
-// unreachable daemon is never reported as a version mismatch. A version
-// mismatch is derived only for a reachable observation whose observed
-// ProtocolVersion differs from its policy's required version.
+// pickerObservationStatus classifies one observation into a row badge using
+// the shared domain.RemoteReason taxonomy: availability is decided first, so
+// an unobserved (Availability Unknown) or unreachable daemon is never reported
+// as a version mismatch. A version mismatch is derived only for a reachable
+// observation whose observed ProtocolVersion differs from policy.
 func pickerObservationStatus(observation ports.BrokerDaemonObservation, fresh bool) protocol.PickerLineStatus {
 	switch observation.Availability {
 	case domain.RemoteAvailabilityUnreachable, domain.RemoteAvailabilityAuthFailed:
@@ -829,10 +828,10 @@ func pickerObservationStatus(observation ports.BrokerDaemonObservation, fresh bo
 }
 
 // pickerObservationReason classifies one observation into a bounded display
-// reason. As with the badge, availability is decided first; the version branch
-// applies only to a reachable observation whose observed version differs from
-// policy. Unobserved and unknown availability render as refreshing, matching
-// the legacy daemon-served classifier.
+// reason from the shared domain.RemoteReason taxonomy. Availability is decided
+// first; the version branch applies only to a reachable observation whose
+// observed version differs from policy. Unobserved and unknown availability
+// render as refreshing.
 func pickerObservationReason(observation ports.BrokerDaemonObservation, fresh bool) string {
 	switch observation.Availability {
 	case domain.RemoteAvailabilityUnreachable:
