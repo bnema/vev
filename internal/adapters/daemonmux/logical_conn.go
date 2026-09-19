@@ -167,6 +167,8 @@ func openMessage(physical PhysicalStreamID, request ports.BrokerOpenStreamReques
 			Client:     request.Stream,
 		},
 		Purpose:      request.Purpose,
+		Admission:    request.Admission,
+		Name:         request.Name,
 		Local:        request.Local,
 		Endpoint:     request.Endpoint,
 		Registration: request.Registration,
