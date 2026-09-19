@@ -244,12 +244,15 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 	stopEntry()
 	openCancel()
 	if err != nil {
-		if raw != nil {
+		// A failed open may still carry a typed-nil connection, which compares
+		// unequal to nil while holding no receiver: closing it would dereference
+		// a nil pointer.
+		if !nilDependency(raw) {
 			_ = raw.Close()
 		}
 		return nil, p.streamTerminal(ctx, entry, req, normalizePoolError(err))
 	}
-	if raw == nil {
+	if nilDependency(raw) {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: ports.BrokerAdmissionInvalid}
 	}
 	if terminal := p.streamTerminal(ctx, entry, req, nil); terminal != nil {

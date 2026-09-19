@@ -114,6 +114,31 @@ func TestPoolRefusedResolutionNeverDials(t *testing.T) {
 	require.Zero(t, dials.Load(), "a refused request must never dial")
 }
 
+// TestPoolOpenFailureWithTypedNilConnection proves a failed open that still
+// carries a typed-nil logical connection is not closed, and never panics the
+// serving goroutine. A concrete-typed adapter returning a nil pointer directly
+// produces an interface that compares unequal to nil while holding no receiver.
+func TestPoolOpenFailureWithTypedNilConnection(t *testing.T) {
+	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+		return &fakePhysical{
+			endpoint: e,
+			done:     make(chan struct{}),
+			open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				var absent *fakeLogical
+				return absent, errors.New("open failed")
+			},
+		}, nil
+	})
+	id, err := p.RegisterClient()
+	require.NoError(t, err)
+
+	stream, err := p.OpenStream(context.Background(), poolRequest(id, 1))
+	require.Error(t, err)
+	require.True(t, stream == nil, "a failed open must not yield a stream")
+	var typed ports.BrokerError
+	require.ErrorAs(t, err, &typed)
+}
+
 func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 	var calls atomic.Int32
 	var physical *fakePhysical

@@ -374,6 +374,9 @@ func (c *LogicalConnection) ReceiveServer() (protocol.ServerMessage, error) {
 // stream. Close is idempotent and concurrent-safe; every caller observes the
 // same stored transport Close error.
 func (c *LogicalConnection) Close() error {
+	if c == nil {
+		return nil
+	}
 	c.closeOnce.Do(func() {
 		// Discard what the engine already accepted before closing locally: this
 		// side stops reading as soon as it closes, so draining first is what lets

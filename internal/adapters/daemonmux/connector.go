@@ -287,7 +287,18 @@ func (c *PhysicalConnection) OpenStream(ctx context.Context, request ports.Broke
 	if !request.Policy.Compatible(c.policy) {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy}
 	}
-	return c.logical.Open(ctx, request)
+	// Never hand back a typed nil: Open returns a concrete *LogicalConnection, so
+	// returning it directly on the error path would wrap a nil pointer in a
+	// non-nil interface, and a caller that checks the interface against nil would
+	// then call a method on it.
+	connection, err := c.logical.Open(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if connection == nil {
+		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: ports.BrokerAdmissionInvalid}
+	}
+	return connection, nil
 }
 
 // Close tears the physical connection down exactly once: it closes the pump,
