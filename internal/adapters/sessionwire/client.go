@@ -16,6 +16,11 @@ import (
 type clientConnection struct {
 	raw      wire.Transport
 	ceilings protoCeilings
+	// ceilingsMu guards ceilings. The lazy preamble publishes the negotiated
+	// values from whichever goroutine first uses the connection, while another
+	// goroutine may already be asking for capabilities or starting a send, so
+	// the once-guarded write is not by itself a happens-before edge for them.
+	ceilingsMu sync.Mutex
 
 	preambleOnce sync.Once
 	preambleErr  error
@@ -112,14 +117,31 @@ func (c *clientConnection) ensurePreamble() error {
 	c.preambleOnce.Do(func() {
 		ctx, cancel := context.WithDeadline(context.Background(), c.deadline)
 		defer cancel()
-		c.ceilings, c.preambleErr = runProtoClientPreamble(ctx, c.raw, c.ceilings)
-		if c.preambleErr != nil {
+		next, err := runProtoClientPreamble(ctx, c.raw, c.limits())
+		c.publishLimits(next)
+		c.preambleErr = err
+		if err != nil {
 			_ = c.raw.Close()
 		}
 		c.finishPreamble()
 	})
 	c.runHandshakeHooks()
 	return c.preambleErr
+}
+
+// limits returns the negotiated ceilings under the lock the preamble publishes
+// them through.
+func (c *clientConnection) limits() protoCeilings {
+	c.ceilingsMu.Lock()
+	defer c.ceilingsMu.Unlock()
+	return c.ceilings
+}
+
+// publishLimits records the ceilings one preamble negotiation produced.
+func (c *clientConnection) publishLimits(next protoCeilings) {
+	c.ceilingsMu.Lock()
+	c.ceilings = next
+	c.ceilingsMu.Unlock()
 }
 
 func (c *clientConnection) SendClient(message protocol.ClientMessage) error {
@@ -134,7 +156,7 @@ func (c *clientConnection) SendClient(message protocol.ClientMessage) error {
 	if err != nil {
 		return err
 	}
-	if err := checkCategoryCeiling(raw, clientEnvelopeCategory(raw), c.ceilings.maxReceiveEnvelopeBytes); err != nil {
+	if err := checkCategoryCeiling(raw, clientEnvelopeCategory(raw), c.limits().maxReceiveEnvelopeBytes); err != nil {
 		return err
 	}
 	return c.raw.Send(wire.Envelope{Payload: raw})
@@ -148,7 +170,8 @@ func (c *clientConnection) ReceiveServer() (protocol.ServerMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	message, decodeErr := decodeServerEnvelopeWithin(envelope.Payload, c.ceilings.maxReceiveEnvelopeBytes, c.ceilings.outputDataLimit)
+	limits := c.limits()
+	message, decodeErr := decodeServerEnvelopeWithin(envelope.Payload, limits.maxReceiveEnvelopeBytes, limits.outputDataLimit)
 	if decodeErr == nil {
 		return message, nil
 	}
@@ -156,7 +179,7 @@ func (c *clientConnection) ReceiveServer() (protocol.ServerMessage, error) {
 }
 
 func (c *clientConnection) Capabilities() protocol.ConnectionCapabilities {
-	return rawCapabilities(c.raw, c.ceilings.outputDataLimit)
+	return rawCapabilities(c.raw, c.limits().outputDataLimit)
 }
 
 func (c *clientConnection) LinkState() ports.LinkState         { return rawLinkState(c.raw) }
@@ -192,7 +215,9 @@ func (c *clientConnection) ensurePreambleWith(ctx context.Context) error {
 	c.preambleOnce.Do(func() {
 		ctx, cancel := context.WithDeadline(ctx, c.deadline)
 		defer cancel()
-		c.ceilings, c.preambleErr = runProtoClientPreamble(ctx, c.raw, c.ceilings)
+		next, err := runProtoClientPreamble(ctx, c.raw, c.limits())
+		c.publishLimits(next)
+		c.preambleErr = err
 		c.finishPreamble()
 	})
 	c.runHandshakeHooks()

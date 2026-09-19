@@ -24,6 +24,11 @@ var (
 type serverConnection struct {
 	raw      wire.Transport
 	ceilings protoCeilings
+	// ceilingsMu guards ceilings. The lazy preamble publishes the negotiated
+	// values from whichever goroutine first uses the connection, while another
+	// goroutine may already be asking for capabilities, so the once-guarded write
+	// is not by itself a happens-before edge for that reader.
+	ceilingsMu sync.Mutex
 
 	preambleOnce sync.Once
 	preambleErr  error
@@ -137,14 +142,32 @@ func (c *serverConnection) ensurePreamble() error {
 	c.preambleOnce.Do(func() {
 		ctx, cancel := context.WithDeadline(context.Background(), c.deadline)
 		defer cancel()
-		c.ceilings, c.preambleErr = runProtoServerPreamble(ctx, c.raw, c.ceilings)
-		if c.preambleErr != nil {
+		next, err := runProtoServerPreamble(ctx, c.raw, c.limits())
+		c.publishLimits(next)
+		c.preambleErr = err
+		if err != nil {
 			_ = c.raw.Close()
 		}
 		c.finishPreamble()
 	})
 	c.runHandshakeHooks()
 	return c.preambleErr
+}
+
+// limits returns the negotiated ceilings under the lock the preamble publishes
+// them through. Send paths may read them without the lock once ensurePreamble
+// has returned, because that call orders the publish before the read.
+func (c *serverConnection) limits() protoCeilings {
+	c.ceilingsMu.Lock()
+	defer c.ceilingsMu.Unlock()
+	return c.ceilings
+}
+
+// publishLimits records the ceilings one preamble negotiation produced.
+func (c *serverConnection) publishLimits(next protoCeilings) {
+	c.ceilingsMu.Lock()
+	c.ceilings = next
+	c.ceilingsMu.Unlock()
 }
 
 func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
@@ -439,7 +462,7 @@ func clientFailureFor(envelope *wire.ClientEnvelope, err error) *protocol.Decode
 }
 
 func (c *serverConnection) Capabilities() protocol.ConnectionCapabilities {
-	return rawCapabilities(c.raw, c.ceilings.outputDataLimit)
+	return rawCapabilities(c.raw, c.limits().outputDataLimit)
 }
 
 func (c *serverConnection) LinkState() ports.LinkState         { return rawLinkState(c.raw) }
