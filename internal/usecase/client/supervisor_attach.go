@@ -375,22 +375,33 @@ func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputL
 	var brokerLost bool
 	var terminated bool
 	var termErr error
-	select {
-	case result = <-settled:
-	case <-service.Done():
-		brokerLost = true
-		// The broker connection is gone; the supervisor cancels the run and
-		// lets the ready loop observe the loss and retire the connection.
-		run.Cancel()
-		result = <-settled
-	case <-ctx.Done():
-		run.Cancel()
-		result = <-settled
-		terminated, termErr = true, ctx.Err()
-	case err := <-input.EOF():
-		run.Cancel()
-		result = <-settled
-		terminated, termErr = true, terminalReadCause(err)
+settlement:
+	for {
+		// Begin has admitted the foreground, which can write before MarkAttached
+		// and before the initial publication. Keep presentation invalidation
+		// buffered for the next picker state; consuming it here could overlay
+		// session output with a second terminal writer.
+		select {
+		case result = <-settled:
+			break settlement
+		case <-service.Done():
+			brokerLost = true
+			// The broker connection is gone; the supervisor cancels the run and
+			// lets the ready loop observe the loss and retire the connection.
+			run.Cancel()
+			result = <-settled
+			break settlement
+		case <-ctx.Done():
+			run.Cancel()
+			result = <-settled
+			terminated, termErr = true, ctx.Err()
+			break settlement
+		case err := <-input.EOF():
+			run.Cancel()
+			result = <-settled
+			terminated, termErr = true, terminalReadCause(err)
+			break settlement
+		}
 	}
 
 	if terminated {

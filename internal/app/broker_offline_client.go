@@ -105,17 +105,57 @@ func runOfflineClient(ctx context.Context, socket string, terminal ports.Termina
 	}
 	clk := clock.New()
 	picker := client.NewPicker(clk, 0)
+	navigation := client.InitialNavigationCreateEphemeral
+	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
+		Connector:         brokeripc.NewConnector(socket, brokeripc.Config{}),
+		Terminal:          terminal,
+		Clock:             clk,
+		UI:                ui,
+		Picker:            picker,
+		InitialNavigation: &navigation,
+		AttachmentEnvironment: client.AttachmentEnvironment{
+			TermEnv: os.Getenv("TERM"), Cwd: currentWorkingDirectory(), TrueColor: client.DetectTrueColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
+		},
+		Render: offlineClientRender(terminal, picker, onState),
+		Notify: func(_ client.State, err error) {
+			if onFailure != nil {
+				onFailure(err)
+			}
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if log != nil {
+		log.Debug("broker_offline_client", "socket", socket)
+	}
+	return supervisor.Run(ctx)
+}
+
+// offlineClientRender is the production offline render callback. Every state
+// reaches the optional observer; the terminal is written only while the shared
+// client.PickerPresentation fence admits the presentation, which is exactly
+// PresentPicker. That is what lets a resize invalidation repaint the picker at
+// its current geometry while refusing the pre-attachment connecting transition,
+// whose admitted foreground already owns the same terminal writer.
+//
+// ResizeEvents has exactly one consumer for the whole supervisor run: its
+// attachment geometry collector. Picker rendering samples Geometry here at
+// render time instead of competing for that single event channel, so a repaint
+// always observes the latest size.
+//
+// The fence is exactly PickerPresentation. An attached foreground owns the
+// terminal writer and a terminating process is leaving it, so neither is ever
+// painted over from here.
+func offlineClientRender(terminal ports.Terminal, picker *client.Picker, onState func(client.State)) func(client.State) {
 	var writer sync.Mutex
-	render := func(state client.State) {
+	return func(state client.State) {
 		if onState != nil {
 			onState(state)
 		}
-		if state.Presentation != client.PresentPicker {
+		if !client.PickerPresentation(state) {
 			return
 		}
-		// ResizeEvents has exactly one consumer for the whole supervisor run:
-		// its attachment geometry collector. Picker rendering samples Geometry
-		// here instead of competing for that single event channel.
 		geometry, err := terminal.Geometry()
 		if err != nil {
 			return
@@ -135,31 +175,6 @@ func runOfflineClient(ctx context.Context, socket string, terminal ports.Termina
 		}
 		_ = terminal.Flush()
 	}
-	navigation := client.InitialNavigationCreateEphemeral
-	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
-		Connector:         brokeripc.NewConnector(socket, brokeripc.Config{}),
-		Terminal:          terminal,
-		Clock:             clk,
-		UI:                ui,
-		Picker:            picker,
-		InitialNavigation: &navigation,
-		AttachmentEnvironment: client.AttachmentEnvironment{
-			TermEnv: os.Getenv("TERM"), Cwd: currentWorkingDirectory(), TrueColor: client.DetectTrueColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
-		},
-		Render: render,
-		Notify: func(_ client.State, err error) {
-			if onFailure != nil {
-				onFailure(err)
-			}
-		},
-	})
-	if err != nil {
-		return err
-	}
-	if log != nil {
-		log.Debug("broker_offline_client", "socket", socket)
-	}
-	return supervisor.Run(ctx)
 }
 
 func currentWorkingDirectory() string {

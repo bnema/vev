@@ -21,9 +21,10 @@ import (
 // invariants or consume a pending user decision before the supervisor handles
 // it.
 //
-// Painting is allowed only while the supervisor reports PresentPicker. A
-// composition must not paint picker bytes during an attachment: the attachment
-// writes through the same terminal, and nothing serializes those two writers.
+// Painting is allowed only while PickerPresentation reports true. In
+// particular, PresentConnecting is not safe: once the attachment foreground is
+// admitted it owns the same terminal writer before MarkAttached or the initial
+// publication. Nothing serializes picker painting with that foreground.
 // The picker deliberately neither owns a terminal writer nor consumes the
 // terminal resize channel; the composition supplies its current geometry when
 // rendering.
@@ -34,6 +35,14 @@ type Picker struct {
 // Picker is the supervisor's picker seam: the value assigned to
 // SupervisorConfig.Picker.
 var _ pickerHost = (*Picker)(nil)
+
+// PickerPresentation reports whether composition-owned picker bytes may be
+// written for state. This is intentionally narrower than "not attached": an
+// admitted foreground can write while the public presentation is still
+// PresentConnecting.
+func PickerPresentation(state State) bool {
+	return state.Presentation == PresentPicker
+}
 
 // NewPicker composes one client-owned picker. A nil clock uses the system
 // clock, and a zero freshness uses the catalogue default.

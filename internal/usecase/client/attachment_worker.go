@@ -381,14 +381,15 @@ type attachmentHost struct {
 	onAttach  func(AttachmentToken)
 	authority attachmentAuthority
 
-	geometryMu     sync.Mutex
-	geometry       domain.Geometry
-	geometryValid  bool
-	geometrySeq    uint64
-	geometryUpdate chan struct{}
-	geometryCancel context.CancelFunc
-	geometryDone   chan struct{}
-	ownerBoundary  bool
+	geometryMu         sync.Mutex
+	geometry           domain.Geometry
+	geometryValid      bool
+	geometrySeq        uint64
+	geometryUpdate     chan struct{}
+	presentationUpdate chan struct{}
+	geometryCancel     context.CancelFunc
+	geometryDone       chan struct{}
+	ownerBoundary      bool
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -408,15 +409,16 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		resizes = cfg.Terminal.ResizeEvents()
 	}
 	return &attachmentHost{
-		term:           cfg.Terminal,
-		clock:          clock,
-		input:          cfg.Input,
-		ui:             ui,
-		actionUI:       cfg.ActionUI,
-		resizes:        resizes,
-		actions:        cfg.Actions,
-		onAttach:       cfg.OnAttached,
-		geometryUpdate: make(chan struct{}, 1),
+		term:               cfg.Terminal,
+		clock:              clock,
+		input:              cfg.Input,
+		ui:                 ui,
+		actionUI:           cfg.ActionUI,
+		resizes:            resizes,
+		actions:            cfg.Actions,
+		onAttach:           cfg.OnAttached,
+		geometryUpdate:     make(chan struct{}, 1),
+		presentationUpdate: make(chan struct{}, 1),
 	}
 }
 
@@ -526,6 +528,14 @@ func (h *attachmentHost) startGeometry(ctx context.Context) {
 				h.geometryMu.Unlock()
 				select {
 				case h.geometryUpdate <- struct{}{}:
+				default:
+				}
+				// Presentation invalidation is deliberately independent from the
+				// attachment geometry sequence/wakeup. The supervisor consumes this
+				// coalesced signal and decides whether a picker presentation may be
+				// repainted; this collector never renders directly.
+				select {
+				case h.presentationUpdate <- struct{}{}:
 				default:
 				}
 			case <-geometryCtx.Done():

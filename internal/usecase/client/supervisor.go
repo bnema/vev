@@ -266,9 +266,17 @@ type SupervisorConfig struct {
 	// clock.
 	Clock ports.Clock
 	// Render asks the composition to paint the current state. It is called for
-	// visible transitions and after picker catalogue publications; while the
-	// state reports PresentPicker, the composition paints from Picker.Render
-	// and Picker.RenderNotice. Optional; the default renders nothing.
+	// visible transitions, after picker catalogue publications, and for every
+	// resize invalidation the supervisor's serialized waits consume. The
+	// composition paints only for the states PickerPresentation admits, which is
+	// exactly PresentPicker, using Picker.Render and Picker.RenderNotice and
+	// sampling Terminal.Geometry at render time so a resize repaint observes the
+	// latest size. PresentConnecting is deliberately not admitted: an admitted
+	// attachment foreground owns the terminal writer from Begin, before the
+	// attached marker and the initial publication, so painting then would
+	// overwrite session output. An attached foreground still owns the terminal
+	// and a terminating process is leaving it, so neither is ever painted over
+	// by a resize invalidation. Optional; the default renders nothing.
 	Render func(State)
 	// Notify surfaces a connectivity failure without leaving the picker.
 	// Optional; the default notifies nothing.
@@ -693,13 +701,17 @@ func (s *Supervisor) connectAttempt(ctx context.Context, generation uint64) supe
 // awaitAttempt waits for the in-flight attempt to settle, or for the run to be
 // terminated first.
 func (s *Supervisor) awaitAttempt(ctx context.Context, input *terminalInputLifetime, outcome <-chan supervisorAttempt) (supervisorAttempt, bool, error) {
-	select {
-	case result := <-outcome:
-		return result, false, nil
-	case <-ctx.Done():
-		return supervisorAttempt{}, true, ctx.Err()
-	case err := <-input.EOF():
-		return supervisorAttempt{}, true, terminalReadCause(err)
+	for {
+		select {
+		case result := <-outcome:
+			return result, false, nil
+		case <-ctx.Done():
+			return supervisorAttempt{}, true, ctx.Err()
+		case err := <-input.EOF():
+			return supervisorAttempt{}, true, terminalReadCause(err)
+		case <-s.presentationInvalidation():
+			s.renderResizeInvalidation()
+		}
 	}
 }
 
@@ -749,6 +761,8 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 			return readyOutcome{terminated: true, termErr: ctx.Err()}
 		case err := <-input.EOF():
 			return readyOutcome{terminated: true, termErr: terminalReadCause(err)}
+		case <-s.presentationInvalidation():
+			s.renderResizeInvalidation()
 		}
 	}
 }
@@ -773,11 +787,15 @@ func (s *Supervisor) takeCommittedKey() (string, bool) {
 // failure until the terminal ends or the process is cancelled. A clean terminal
 // EOF returns nil; every other cause is reported.
 func (s *Supervisor) awaitTermination(ctx context.Context, input *terminalInputLifetime) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-input.EOF():
-		return terminalReadCause(err)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-input.EOF():
+			return terminalReadCause(err)
+		case <-s.presentationInvalidation():
+			s.renderResizeInvalidation()
+		}
 	}
 }
 
@@ -791,13 +809,17 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 	}
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
-	select {
-	case <-timer.C():
-		return false, nil
-	case <-ctx.Done():
-		return true, ctx.Err()
-	case err := <-input.EOF():
-		return true, terminalReadCause(err)
+	for {
+		select {
+		case <-timer.C():
+			return false, nil
+		case <-ctx.Done():
+			return true, ctx.Err()
+		case err := <-input.EOF():
+			return true, terminalReadCause(err)
+		case <-s.presentationInvalidation():
+			s.renderResizeInvalidation()
+		}
 	}
 }
 
@@ -930,6 +952,39 @@ func (s *Supervisor) renderCurrent() {
 		return
 	}
 	s.cfg.Render(s.State())
+}
+
+// presentationInvalidation returns the coalesced resize invalidation the
+// supervisor's serialized waits select on, or nil when there is no attachment
+// host to collect resizes. A nil signal is simply never ready, so a supervisor
+// with no host (the zero value, or one whose host was detached) parks on its
+// remaining arms instead of dereferencing a nil host. Selecting on a nil
+// channel is safe in both directions. The returned channel is receive-only: the
+// supervisor only ever consumes an invalidation, and the attachment settlement
+// wait deliberately does not select on it at all, so an invalidation raised
+// while a foreground is admitted stays buffered for the next picker state.
+func (s *Supervisor) presentationInvalidation() <-chan struct{} {
+	if s == nil || s.attachments == nil {
+		return nil
+	}
+	return s.attachments.presentationUpdate
+}
+
+// renderResizeInvalidation runs only on the supervisor's serialized control
+// path, so resize collection cannot write the terminal and an attached
+// foreground is never painted over. The composition's renderer is invoked only
+// for a presentation PickerPresentation admits, which is exactly PresentPicker;
+// it samples Terminal.Geometry at render time. A pre-attachment connecting
+// presentation is refused here for the same reason as an attached one: the
+// admitted foreground already owns the same terminal writer.
+func (s *Supervisor) renderResizeInvalidation() {
+	if s == nil || s.cfg.Render == nil {
+		return
+	}
+	state := s.State()
+	if PickerPresentation(state) {
+		s.cfg.Render(state)
+	}
 }
 
 // terminalInputLifetime owns the single read of the controlling terminal. It is
