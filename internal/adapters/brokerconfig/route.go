@@ -93,8 +93,10 @@ type Route struct {
 	// is a digest of the route contents, so it leaks no route detail and can
 	// never collide with a distinct route.
 	address string
-	// local is true for a Unix route that this process can dial directly, which
-	// is the route a remote-side mux helper bridges to.
+	// local is true for a Unix route that this process can dial directly. Such a
+	// route is the carriage a remote-side mux helper bridges to when a
+	// registration provisions it; a local binding's own carriage is dialled by
+	// the broker itself and is never a helper route.
 	local bool
 }
 
@@ -121,7 +123,8 @@ func (r Route) ConnectTimeout() time.Duration { return r.trust.connectTimeout }
 func (r Route) Address() string { return r.address }
 
 // IsLocal reports whether the route dials a Unix socket this process can reach
-// directly, which is the route a remote-side mux helper bridges to.
+// directly. A local binding's carriage and a registration's Unix carriage are
+// both local; only the latter is a route a remote-side mux helper bridges to.
 func (r Route) IsLocal() bool { return r.local }
 
 // Validate re-checks one already-parsed route. Parsed routes are validated

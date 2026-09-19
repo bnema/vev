@@ -18,6 +18,15 @@ type PoolLimits struct {
 	Idle                                         time.Duration
 }
 
+// poolKey is the exact authenticated (identity, policy) pair the broker pools
+// one physical transport by. The resolved endpoint's opaque address is
+// deliberately excluded: it selects the transport, not the pooling identity.
+//
+// A local stream request carries no endpoint and no registration, so its key is
+// the broker-owned local identity and policy the resolver returns. Every local
+// stream therefore shares one pooled physical connection to the local daemon,
+// exactly as every stream to one remote identity does; the local daemon is not
+// a configured host, so no registration participates in its key.
 type poolKey struct {
 	identity ports.BrokerDaemonIdentity
 	policy   ports.BrokerPolicy

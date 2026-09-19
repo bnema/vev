@@ -15,7 +15,10 @@
 // addresses, identities, and policies. A client request can name a configured
 // endpoint and must carry that endpoint's exact registration and compatible
 // policy; it can never supply an address, identity, secret, command, or policy
-// of its own, and an unknown or stale request is refused without dialing. The
+// of its own, and an unknown or stale request is refused without dialing. A
+// local request carries no endpoint or registration and is instead fenced
+// against the optional broker-owned local binding (identity, policy, and Unix
+// daemonmux route), so it too can never supply authority of its own. The
 // route's pool address is an opaque digest, so no route detail is exposed to the
 // pooling layer.
 //
@@ -80,9 +83,13 @@ var (
 	// errStaleRegistration reports a request whose registration no longer
 	// matches the provisioned immutable registration.
 	errStaleRegistration = errors.New("brokerconfig: stale broker registration")
-	// errNoLocalRoute reports a local request: the offline sandbox provisions
-	// remote Unix mux routes only, so it owns no local service binding.
+	// errNoLocalRoute reports a local request when the configuration provisions
+	// no broker-owned local binding, so the broker owns no local route.
 	errNoLocalRoute = errors.New("brokerconfig: offline broker has no local route")
+	// errLocalPolicyConflict reports a local request whose policy is not exactly
+	// compatible with the provisioned local policy. The provisioned policy stays
+	// authoritative: the request can never widen, narrow, or replace it.
+	errLocalPolicyConflict = errors.New("brokerconfig: local request policy conflicts with the provisioned local policy")
 )
 
 // Layout names the sandbox-owned paths derived from one offline root. Every
@@ -218,6 +225,30 @@ type Registration struct {
 	Route        Route
 }
 
+// LocalBinding is the broker-owned binding for the broker's own machine
+// daemon (Plan 001 P5.3a). Unlike a remote Registration it carries no
+// registration: the local daemon is not a configured host, so a local stream
+// request is fenced only against this binding's identity, policy, and route.
+// The identity and policy are authoritative here and are the exact source of
+// the resolved endpoint and of the published local observation's configured
+// authority, so a local request can never select an identity or policy of its
+// own.
+type LocalBinding struct {
+	// Identity is the stable authenticated daemon identity the local
+	// daemonmux carriage must present during the physical preamble.
+	Identity ports.BrokerDaemonIdentity
+	// DisplayOrigin is the presentation hint published for the local
+	// observation. It is sanitized at load time and is never routing authority.
+	DisplayOrigin string
+	// Policy is the exact connection policy the local carriage negotiates.
+	Policy ports.BrokerPolicy
+	// Route is the broker-owned local daemonmux carriage. It is always a Unix
+	// route this process dials directly (Route.IsLocal() is true). The broker
+	// dials it itself, so it is never a remote-side mux helper route
+	// (Config.LocalMuxRoute).
+	Route Route
+}
+
 // pooledIdentity is the exact (authenticated identity, policy) pair the broker
 // pool keys one physical transport by. The pool deliberately ignores the opaque
 // route address, so two registrations that share a pair share one pooled
@@ -233,6 +264,10 @@ type Config struct {
 	byAddress  map[string]Route
 	unixRoutes []Route
 	order      []string
+	// local is the optional broker-owned local binding. It is nil when the
+	// configuration provisions no local route, in which case a local request is
+	// refused and no local observation is produced.
+	local *LocalBinding
 	// idleGrace is the provisioned effective idle grace; hasIdleGrace records
 	// whether the file provisioned one, so a caller can distinguish "no
 	// provisioning, use the built-in default" from "provisioned".
@@ -279,7 +314,7 @@ func Load(layout Layout) (*Config, error) {
 		}
 		config.idleGrace, config.hasIdleGrace = grace, true
 	}
-	pooledRoutes := make(map[pooledIdentity]string, len(document.Registrations))
+	pooledRoutes := make(map[pooledIdentity]string, len(document.Registrations)+1)
 	for i, entry := range document.Registrations {
 		registration, err := entry.validate()
 		if err != nil {
@@ -310,7 +345,64 @@ func Load(layout Layout) (*Config, error) {
 		}
 		config.order = append(config.order, registration.Registration.Endpoint)
 	}
+	local, err := parseLocal(document.Local)
+	if err != nil {
+		return nil, fmt.Errorf("brokerconfig: %s: local: %w", ConfigFileName, err)
+	}
+	if local != nil {
+		if err := rejectRouteOverlap(local.Route.Path(), layout.reserved); err != nil {
+			return nil, fmt.Errorf("brokerconfig: %s: local: %w", ConfigFileName, err)
+		}
+		// The pool keys one physical transport by (identity, policy) and ignores
+		// the route address, so a local binding that shares a remote (or another
+		// local) pair must agree on the one route that transport dials. Refuse a
+		// second route for the same pair, exactly as the registration loop does.
+		key := pooledIdentity{identity: local.Identity, policy: local.Policy}
+		address := local.Route.Address()
+		if existing, present := pooledRoutes[key]; present && existing != address {
+			return nil, fmt.Errorf("brokerconfig: %s: local identity %q and policy already provisioned on a different route", ConfigFileName, local.Identity)
+		}
+		pooledRoutes[key] = address
+		config.byAddress[address] = local.Route
+		config.local = local
+	}
 	return config, nil
+}
+
+// parseLocal strictly parses the optional local binding. A nil document
+// provisions no local route. The identity and policy are required and
+// validated; the route must be a local Unix daemonmux carriage, because the
+// local daemon is reached in-process over a private Unix socket and never
+// through an SSH or QUIC carriage. The display origin is sanitized and
+// defaults to the broker-owned value "local", so an absent or wholly
+// undisplayable origin never yields an empty publication.
+func parseLocal(document *localDocument) (*LocalBinding, error) {
+	if document == nil {
+		return nil, nil
+	}
+	identity := ports.BrokerDaemonIdentity(document.Identity)
+	if err := identity.Validate(); err != nil {
+		return nil, err
+	}
+	policy, err := document.Policy.validate()
+	if err != nil {
+		return nil, err
+	}
+	route, err := parseRoute(document.Route)
+	if err != nil {
+		return nil, err
+	}
+	if !route.IsLocal() {
+		return nil, errors.New("local route must be a Unix daemonmux carriage")
+	}
+	origin := ports.SanitizeBrokerDisplayText(document.DisplayOrigin)
+	if origin == "" {
+		origin = LocalDisplayOrigin
+	}
+	if len(origin) > ports.BrokerMaxDisplayOriginBytes {
+		return nil, fmt.Errorf("local display origin exceeds %d bytes", ports.BrokerMaxDisplayOriginBytes)
+	}
+	return &LocalBinding{Identity: identity, DisplayOrigin: origin, Policy: policy, Route: route}, nil
 }
 
 // appendUnixRouteOnce adds a local Unix route unless an identical route (the
@@ -324,6 +416,20 @@ func appendUnixRouteOnce(routes []Route, route Route) []Route {
 		}
 	}
 	return append(routes, route)
+}
+
+// LocalDisplayOrigin is the broker-owned default presentation hint for the
+// broker's own machine daemon when the configuration provisions none.
+const LocalDisplayOrigin = "local"
+
+// LocalBinding returns the provisioned broker-owned local binding and whether
+// one exists. A nil configuration or one without a local object provisions
+// nothing, and a local request is then refused.
+func (c *Config) LocalBinding() (LocalBinding, bool) {
+	if c == nil || c.local == nil {
+		return LocalBinding{}, false
+	}
+	return *c.local, true
 }
 
 // Endpoints returns the configured endpoints in file order. The result is a
@@ -358,7 +464,8 @@ func (c *Config) RouteByAddress(address string) (Route, bool) {
 // LocalMuxRoute returns the single provisioned Unix route a remote-side mux
 // helper bridges to. A configuration that provisions no Unix route, or more
 // than one, is refused: a helper must never guess which daemon-mux endpoint it
-// serves.
+// serves. The local binding's own carriage is deliberately excluded: the broker
+// dials it itself, and no remote-side helper ever bridges it.
 func (c *Config) LocalMuxRoute() (Route, error) {
 	if c == nil {
 		return Route{}, errors.New("brokerconfig: no configuration")
@@ -378,19 +485,32 @@ func (c *Config) Resolver() *Resolver {
 	if c == nil {
 		return &Resolver{byEndpoint: map[string]Registration{}}
 	}
-	return &Resolver{byEndpoint: c.byEndpoint}
+	return &Resolver{byEndpoint: c.byEndpoint, local: c.local}
 }
 
 // configDocument is the strict on-disk shape. Unknown fields are refused by the
 // decoder, so the file cannot smuggle additional behavior.
 type configDocument struct {
 	Marker string `json:"marker"`
+	// Local optionally provisions the broker-owned local binding. It is the
+	// only source of the local identity, policy, and daemonmux route.
+	Local *localDocument `json:"local,omitempty"`
 	// IdleGrace optionally provisions the sandbox's effective idle grace as a Go
 	// duration string (for example "90s"). It is the single deterministic source
 	// for the idle grace, because a status probe cannot read a running broker's
 	// effective grace through the broker IPC protocol.
 	IdleGrace     string            `json:"idleGrace,omitempty"`
 	Registrations []registrationRaw `json:"registrations"`
+}
+
+// localDocument is the strict on-disk shape of the broker-owned local binding.
+// The route must be a local Unix daemonmux carriage, the identity and policy
+// are required, and the display origin is optional (defaulting to "local").
+type localDocument struct {
+	Identity      string          `json:"identity"`
+	DisplayOrigin string          `json:"displayOrigin,omitempty"`
+	Route         json.RawMessage `json:"route"`
+	Policy        policyRaw       `json:"policy"`
 }
 
 // registrationRaw is the raw JSON registration before semantic validation.

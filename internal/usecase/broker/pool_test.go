@@ -87,6 +87,33 @@ func await(t *testing.T, ch <-chan struct{}) {
 	}
 }
 
+// TestPoolRefusedResolutionNeverDials proves a refused resolution is terminal:
+// the pool returns the typed broker error and never asks the connector to open
+// a physical transport, so an unprovisioned or conflicting request can never
+// reach an address. The same ordering fences a refused local request.
+func TestPoolRefusedResolutionNeverDials(t *testing.T) {
+	var dials atomic.Int32
+	resolver := poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("refused")}
+	})
+	connector := poolConnector(func(context.Context, ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+		dials.Add(1)
+		return nil, nil
+	})
+	pool, err := NewPool(1, resolver, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 8, Streams: 8, StreamsPerClient: 8, Idle: time.Minute})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pool.Close()) })
+
+	id, err := pool.RegisterClient()
+	require.NoError(t, err)
+	_, err = pool.OpenStream(context.Background(), poolRequest(id, 1))
+	require.Error(t, err)
+	var typed ports.BrokerError
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
+	require.Zero(t, dials.Load(), "a refused request must never dial")
+}
+
 func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 	var calls atomic.Int32
 	var physical *fakePhysical

@@ -270,24 +270,64 @@ These are P2.2 port contracts, not a wire migration or production activation.
 `internal/usecase/broker.Registry` owns configured hosts and their immutable
 observation projections. `ports.BrokerDaemonObservation` is the broker-native
 projection of one daemon, local or remote: configured authority (local flag,
-endpoint, registration, policy, display origin, rank) is stamped by the
-registry from durable membership and never taken from a probe, while observed
-identity, process incarnation, protocol version, capability bitmask,
-availability, failure/freshness state, and the exact session catalogue come
-only from probe results. Unknown identity or version is zero, never invented;
-an observed identity always carries a protocol version, and availability is
-never zero (an unobserved daemon carries `RemoteAvailabilityUnknown`). A
+endpoint, registration, policy, display origin, rank) is never taken from a
+probe, while observed identity, process incarnation, protocol version,
+capability bitmask, availability, failure/freshness state, and the exact
+session catalogue come only from probe results. A remote host's authority is
+stamped by the registry from durable membership; the local entry's authority is
+stamped from the broker's configured local binding, because the local daemon
+has no registration and no durable membership. Unknown identity or version is
+zero, never invented; an observed identity always carries a protocol version,
+and availability is never zero (an unobserved daemon carries
+`RemoteAvailabilityUnknown`). A
 `ports.BrokerSnapshot` publishes these observations (`Daemons`, local entry
 first when present, then remotes in registration order) plus the tombstone
 set; `brokerwire` mirrors them through `SnapshotBegin`/`SnapshotDaemon`/
 `SnapshotSession` parts. Local observations are never durable: the snapshot
-store persists and reloads remote observations only, with policy re-stamped
-from membership on load, so membership stays the single policy authority.
-Observing a daemon never attaches to it and never starts a stopped one.
+store persists and reloads remote observations only, with remote policy
+re-stamped from membership on load, so membership stays the single policy
+authority for remotes. Observing a daemon never attaches to it and never starts
+a stopped one.
 Attachment streams declare one closed admission variant
 (`ports.BrokerStreamAdmission`: exact attach/resume, named creation, ephemeral
 creation) validated identically at the ports, broker IPC, and daemonmux
 boundaries.
+
+## Broker-owned local route (Plan 001 P5.3a, not activated)
+
+The broker reaches its own machine daemon, which is not a configured host, over
+one broker-owned local binding. `internal/adapters/brokerconfig` parses an
+optional top-level `local` object beside the registrations: the required
+`identity`, `route`, and `policy`, plus an optional `displayOrigin` that is
+sanitized and defaults to `local`. The route must be a Unix daemonmux carriage
+this process dials directly, so an SSH or QUIC route is refused and the binding
+can never name another machine. The identity, policy, and route are the only
+source of local authority, and `Config.LocalBinding` alone publishes them. The
+binding's own carriage is deliberately excluded from `Config.LocalMuxRoute`:
+that route is the single registration carriage a remote-side mux helper bridges
+to, and no helper ever bridges the broker's own local carriage.
+
+A local open-stream request carries no endpoint and no registration, so the
+resolver fences it against the binding's identity and policy instead: a request
+whose policy conflicts with the provisioned local policy is refused, and a
+configuration with no local object provisions no local route. The resolved
+(identity, policy) pair is the pool key, so every local logical stream shares
+one physical daemonmux carriage to the local daemon, exactly as every stream to
+one remote identity does; the route's opaque address selects that carriage and
+never participates in the key.
+
+The registry publishes a local observation whenever a local producer is
+configured, always at index zero ahead of every remote and never more than one.
+Its configured authority (local flag, display origin, policy, rank) is stamped
+from the binding and never from durable membership, since the local daemon has
+no membership; its observed identity, incarnation, protocol version,
+availability, and session catalogue come only from the local probe. The local
+entry is never durable: the snapshot store persists and reloads remote
+observations only. Observing the local daemon completes only the daemonmux
+physical preamble and closes the carriage, so it never opens a logical stream
+(never attaches) and only ever dials an existing local Unix socket, so it never
+starts a stopped daemon. Nothing in `internal/app` or `main` activates this
+composition for ordinary operation; P7 performs the coordinated cutover.
 
 ## Broker local IPC (Plan 001 P3.3, not activated)
 

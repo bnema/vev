@@ -48,6 +48,11 @@ type RegistryConfig struct {
 	// expected to be immutable for the run; a caller that needs observation
 	// keeps the zero-value config.
 	ObservationDisabled bool
+	// Local, when non-nil, enables observation of the broker's own machine
+	// daemon. The registry then publishes the local entry at index zero, ahead
+	// of every remote, and never persists it. Local is refused together with
+	// ObservationDisabled: a read-only registry owns no local producer.
+	Local *LocalObservation
 }
 
 // Registry owns configured hosts and their immutable observation projection.
@@ -102,6 +107,17 @@ type Registry struct {
 	wake       chan struct{}
 	running    atomic.Int32
 
+	// local selects observation of the broker's own machine daemon. It is nil
+	// for a remote-only registry. localHost is the configured local authority
+	// stamped onto every publication (Local, DisplayOrigin, Policy, Rank) plus
+	// the observed state a probe supplies; localAttempt is the one admitted
+	// local probe. The local entry is never durable and is never invented: until
+	// a probe answers, the configured authority is published with unknown
+	// availability and zero observed identity.
+	local        *LocalObservation
+	localHost    ports.BrokerDaemonObservation
+	localAttempt *probeAttempt
+
 	freshFor  time.Duration
 	retryBase time.Duration
 	retryMax  time.Duration
@@ -123,13 +139,19 @@ func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe por
 
 // NewRegistryWithConfig restores a validated durable snapshot under a fresh
 // broker epoch and selects the run mode from cfg. Observation-disabled mode
-// tolerates a nil probe because such a registry never probes; every other
-// dependency is required exactly as NewRegistry requires it.
+// tolerates a nil probe because such a registry never probes, and a registry
+// configured with a local observation producer (Local) tolerates a nil remote
+// probe as long as it owns no remote membership. Every other dependency is
+// required exactly as NewRegistry requires it.
 func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock ports.Clock, log *slog.Logger, cfg RegistryConfig) (*Registry, error) {
 	if epoch == 0 || nilDependency(store) || nilDependency(clock) {
 		return nil, errors.New("broker: invalid registry dependencies")
 	}
-	if !cfg.ObservationDisabled && nilDependency(probe) {
+	// A remote probe is required to observe remotes, but a registry that
+	// observes only its own machine daemon (Local) may omit it. Such a registry
+	// never owns a remote host: projectMembership and the mutation paths refuse
+	// remote membership rather than silently never probing it.
+	if !cfg.ObservationDisabled && nilDependency(probe) && cfg.Local == nil {
 		return nil, errors.New("broker: invalid registry dependencies")
 	}
 	if log == nil {
@@ -143,6 +165,23 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 		subs: make(map[*subscription]struct{}), wake: make(chan struct{}, 1),
 		freshFor: defaultFreshFor, retryBase: defaultRetryBase, retryMax: defaultRetryLimit,
 		jitter: jittered,
+	}
+	if cfg.ObservationDisabled && cfg.Local != nil {
+		return nil, errors.New("broker: observation-disabled registry cannot observe the local daemon")
+	}
+	if cfg.Local != nil {
+		if err := cfg.Local.validate(); err != nil {
+			return nil, err
+		}
+		// Copy the configured authority: the registry reads it from the probe
+		// and publish paths, and a caller that kept the pointer could otherwise
+		// mutate authority after construction.
+		local := *cfg.Local
+		r.local = &local
+		r.localHost = ports.BrokerDaemonObservation{Local: true, DisplayOrigin: cfg.Local.DisplayOrigin, Policy: cfg.Local.Policy, Availability: domain.RemoteAvailabilityUnknown}
+		if err := r.localHost.Validate(); err != nil {
+			return nil, fmt.Errorf("broker: invalid local observation authority: %w", err)
+		}
 	}
 	r.store = newSnapshotWriter(store, log)
 	snapshot, err := store.Load()
@@ -192,6 +231,9 @@ func nilDependency(dependency any) bool {
 func (r *Registry) projectMembership(hosts ports.BrokerHosts) error {
 	if err := hosts.Validate(); err != nil {
 		return err
+	}
+	if len(hosts.Hosts) > 0 && !r.observationDisabled && nilDependency(r.probe) {
+		return errors.New("broker: remote hosts require a host probe")
 	}
 	next := make(map[string]ports.BrokerDaemonObservation, len(hosts.Hosts))
 	order := make([]string, 0, len(hosts.Hosts))
@@ -413,6 +455,9 @@ func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
 	if r.running.Load() == runStopped {
 		return fmt.Errorf("broker: membership replacement: %w", ports.ErrBrokerRegistryClosed)
 	}
+	if len(records) > 0 && !r.observationDisabled && nilDependency(r.probe) {
+		return errors.New("broker: remote hosts require a host probe")
+	}
 	if r.revisionExhaustedLocked() {
 		return fmt.Errorf("broker: membership replacement: %w", ports.ErrBrokerRevisionExhausted)
 	}
@@ -435,6 +480,9 @@ func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
 func (r *Registry) setHosts(records []ports.BrokerHostRecord) error {
 	if len(records) > ports.BrokerMaxHosts {
 		return fmt.Errorf("broker: %d host registrations exceed the limit of %d", len(records), ports.BrokerMaxHosts)
+	}
+	if len(records) > 0 && !r.observationDisabled && nilDependency(r.probe) {
+		return errors.New("broker: remote hosts require a host probe")
 	}
 	next := make(map[string]ports.BrokerDaemonObservation, len(records))
 	order := make([]string, 0, len(records))
@@ -608,7 +656,15 @@ func (r *Registry) Run(ctx context.Context) {
 func (r *Registry) settle() {
 	r.mu.Lock()
 	r.cancelAllInflightLocked()
+	if r.localAttempt != nil {
+		r.localAttempt.cancel()
+		r.localAttempt = nil
+	}
 	cleared := false
+	if r.local != nil && r.localHost.Checking {
+		r.localHost.Checking = false
+		cleared = true
+	}
 	for endpoint, host := range r.hosts {
 		if !host.Checking {
 			continue
@@ -645,6 +701,9 @@ type probeResult struct {
 	snapshot     ports.BrokerDaemonObservation
 	err          error
 	at           time.Time
+	// local marks the result of one local probe attempt, which carries no
+	// endpoint or registration and is applied to the configured local entry.
+	local bool
 }
 
 func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- probeResult) {
@@ -682,6 +741,9 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 	// Only an observation that actually started changes the projection; an
 	// idle dispatch must not bump the revision or wake subscribers. The
 	// in-flight projection is never persisted: Checking is transient.
+	if r.dispatchLocalLocked(ctx, now, results) {
+		started = true
+	}
 	if started {
 		r.publishLocked(false)
 	}
@@ -691,6 +753,10 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 func (r *Registry) apply(result probeResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if result.local {
+		r.applyLocal(result)
+		return
+	}
 	current, ok := r.hosts[result.endpoint]
 	attempt := r.inflight[result.endpoint]
 	if !ok || !current.Registration.Equal(result.registration) || attempt == nil || attempt.token != result.attempt {
@@ -834,6 +900,14 @@ func (r *Registry) nextDelay(now time.Time) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var earliest time.Time
+	if r.local != nil && r.localAttempt == nil {
+		if r.localHost.NextDue.IsZero() {
+			return 0
+		}
+		if earliest.IsZero() || r.localHost.NextDue.Before(earliest) {
+			earliest = r.localHost.NextDue
+		}
+	}
 	for endpoint, host := range r.hosts {
 		// An observation already in flight is completed by its result, never
 		// by the schedule; waiting on it here would spin the run loop.
@@ -958,10 +1032,14 @@ func (r *Registry) publishLocked(persist bool) {
 	if r.revisionExhaustedLocked() {
 		return
 	}
-	// Remote daemons are published in registration order. The local daemon,
-	// when a producer exists (Plan 001 P5.3a), is prepended ahead of these;
-	// the registry produces no local observation yet and never invents one.
-	daemons := make([]ports.BrokerDaemonObservation, 0, len(r.hosts))
+	// Remote daemons are published in registration order. The broker's own
+	// machine daemon, when a producer is configured (Plan 001 P5.3a), is the
+	// prepended entry at index zero; without a producer the registry produces no
+	// local observation and never invents one.
+	daemons := make([]ports.BrokerDaemonObservation, 0, len(r.hosts)+1)
+	if r.local != nil {
+		daemons = append(daemons, r.localHost.Clone())
+	}
 	for _, endpoint := range r.order {
 		host, ok := r.hosts[endpoint]
 		if !ok {
