@@ -58,10 +58,14 @@ type Authority struct {
 var _ ports.BrokerAuthority = (*Authority)(nil)
 
 // NewAuthority composes one connection-scoped broker authority over an existing
-// registry, pool, and supervisor. All three must be live and share epoch. The
-// registry must be observation-disabled: this authority's sessions expose
-// immutable offline membership, so an observing registry would probe hosts the
-// service refuses to manage.
+// registry, pool, and supervisor. All three must be live and share epoch.
+//
+// The authority's connections expose immutable membership: they neither add nor
+// remove hosts. It therefore accepts an observation-disabled registry, or an
+// observer whose observation is limited to the broker's own daemon, and refuses
+// a registry that observes configured hosts the service would refuse to manage.
+// A local-only observer has no remote membership to manage: its local entry is
+// configured authority supplied by the composition, not membership.
 //
 // The caller owns the dependencies' lifecycles. In particular it must start the
 // registry's single Registry.Run to own and drain the durable writer, and must
@@ -76,8 +80,8 @@ func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, super
 	if registry.epoch != epoch || pool.epoch != epoch {
 		return nil, errors.New("broker: authority epoch mismatch")
 	}
-	if !registry.observationDisabled {
-		return nil, errors.New("broker: authority requires an observation-disabled registry")
+	if !registry.observationDisabled && !registry.observesLocalOnly() {
+		return nil, errors.New("broker: authority requires an observation-disabled registry or a local-only observer")
 	}
 	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor}, nil
 }

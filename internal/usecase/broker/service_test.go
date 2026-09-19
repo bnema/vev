@@ -126,6 +126,27 @@ func TestAuthorityValidation(t *testing.T) {
 	_, err = NewAuthority(1, observing, pool, supervisor)
 	require.Error(t, err, "an observing registry must be refused by an offline authority")
 
+	// An observer that is limited to the broker's own daemon is served: it has
+	// no remote membership for the authority's immutable-membership connections
+	// to manage, and its local entry is configured authority rather than
+	// membership.
+	localOnly, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{Local: &LocalObservation{
+		DisplayOrigin: "local",
+		Policy:        poolPolicy(),
+		Probe:         newScriptedLocalProbe(1),
+	}})
+	require.NoError(t, err)
+	_, err = NewAuthority(1, localOnly, pool, supervisor)
+	require.NoError(t, err, "a local-only observer must be served")
+
+	// The same observer stops being served as soon as it owns remote membership
+	// the authority's connections could never manage.
+	observerWithMembership, err := NewRegistry(1, newTestStore(), newTestProbe(1), clock, nil)
+	require.NoError(t, err)
+	require.NoError(t, observerWithMembership.setHosts(hostRecords(registration(t, "user@host:22", 1))))
+	_, err = NewAuthority(1, observerWithMembership, pool, supervisor)
+	require.Error(t, err, "an observer that owns remote membership must be refused")
+
 	disabled, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	_, err = NewAuthority(2, disabled, pool, supervisor)

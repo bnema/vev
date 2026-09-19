@@ -75,6 +75,17 @@ func (l *LocalObservation) validate() error {
 	return nil
 }
 
+// observesLocalOnly reports whether this registry observes only the broker's
+// own daemon: observation is enabled, a local binding is configured, and no
+// remote membership is projected. It is the registry-side answer an authority
+// needs, because an authority whose connections expose immutable membership may
+// serve an observer only when there is no remote membership to manage.
+func (r *Registry) observesLocalOnly() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.observationDisabled && r.local != nil && len(r.hosts) == 0
+}
+
 // dispatchLocalLocked admits at most one local probe attempt when its schedule
 // says it is due. Callers must hold r.mu. It reports whether an attempt
 // started, so dispatch publishes the transient Checking state exactly once.
