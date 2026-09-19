@@ -525,7 +525,7 @@ func TestSupervisorReducerTransitions(t *testing.T) {
 			name:  "broker loss returns to picker retry wait",
 			state: State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Attempt: 0, Generation: 5},
 			event: supervisorEvent{kind: supervisorBrokerLoss, err: transient},
-			want:  State{Presentation: PresentPicker, Connectivity: ConnectivityRetryWait, Attempt: 1, Generation: 5, Err: transient},
+			want:  State{Presentation: PresentPicker, Connectivity: ConnectivityRetryWait, Attempt: 1, Generation: 5, Err: transient, ReadyLost: true},
 		},
 		{
 			name:  "non-retryable failure disconnects and stays on the picker",

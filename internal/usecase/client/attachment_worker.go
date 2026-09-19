@@ -157,10 +157,11 @@ type AttachmentForeground interface {
 	// so a cancelled worker can still save input; it is a no-op once authority is
 	// revoked.
 	PreserveInput(data []byte)
-	// Resize blocks until the next authorized terminal resize. It returns false
-	// once authority is revoked or ctx ends. A nil or closed resize source is
-	// disabled, not an attachment end; Resize waits for cancellation in that case.
+	// Resize blocks until the latest authorized terminal resize for this
+	// attachment. It returns false once authority is revoked or ctx ends.
 	Resize(ctx context.Context) (domain.Geometry, bool)
+	// Lifecycle blocks for one explicit typed lifecycle action.
+	Lifecycle(ctx context.Context) (AttachmentLifecycleActionKind, bool)
 	// Output publishes context and writes and flushes bytes in one authorized
 	// transaction. Missing UI or terminal returns ports.ErrUIUnavailable.
 	Output(uiContext ports.UIContext, data []byte) error
@@ -210,6 +211,18 @@ type attachmentAuthority struct {
 	mu      sync.Mutex
 	current *attachmentForeground
 	state   attachmentAuthorityState
+}
+
+func (a *attachmentAuthority) currentToken() AttachmentToken {
+	if a == nil {
+		return AttachmentToken{}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.current == nil {
+		return AttachmentToken{}
+	}
+	return a.current.token
 }
 
 // grant installs fg as the sole foreground in the active state. It fails while
@@ -345,6 +358,8 @@ type attachmentHostConfig struct {
 	// Input is the supervisor-owned single terminal reader. The host claims one
 	// consumer per foreground and revokes it after finalization. Optional.
 	Input *terminalInputPump
+	// Actions carries explicit lifecycle decisions for the current attachment.
+	Actions <-chan AttachmentLifecycleAction
 	// UI is the supervisor-owned UI publication transaction. When nil it is
 	// taken from Terminal when that implements ports.UIOutputTransaction.
 	UI ports.UIOutputTransaction
@@ -363,8 +378,18 @@ type attachmentHost struct {
 	input     *terminalInputPump
 	ui        ports.UIOutputTransaction
 	resizes   <-chan domain.Geometry
+	actions   <-chan AttachmentLifecycleAction
 	onAttach  func(AttachmentToken)
 	authority attachmentAuthority
+
+	geometryMu     sync.Mutex
+	geometry       domain.Geometry
+	geometryValid  bool
+	geometrySeq    uint64
+	geometryUpdate chan struct{}
+	geometryCancel context.CancelFunc
+	geometryDone   chan struct{}
+	ownerBoundary  bool
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -384,12 +409,14 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		resizes = cfg.Terminal.ResizeEvents()
 	}
 	return &attachmentHost{
-		term:     cfg.Terminal,
-		clock:    clock,
-		input:    cfg.Input,
-		ui:       ui,
-		resizes:  resizes,
-		onAttach: cfg.OnAttached,
+		term:           cfg.Terminal,
+		clock:          clock,
+		input:          cfg.Input,
+		ui:             ui,
+		resizes:        resizes,
+		actions:        cfg.Actions,
+		onAttach:       cfg.OnAttached,
+		geometryUpdate: make(chan struct{}, 1),
 	}
 }
 
@@ -452,6 +479,82 @@ func (h *attachmentHost) Run(ctx context.Context, token AttachmentToken, worker 
 }
 
 // newForeground allocates a candidate; grant claims input before publishing it.
+func (h *attachmentHost) setInput(input *terminalInputPump) {
+	if h == nil {
+		return
+	}
+	h.input = input
+	h.ownerBoundary = true
+}
+
+func (h *attachmentHost) startGeometry(ctx context.Context) {
+	if h == nil {
+		return
+	}
+	if h.geometryDone != nil {
+		select {
+		case <-h.geometryDone:
+			h.geometryDone = nil
+			h.geometryCancel = nil
+		default:
+			return
+		}
+	}
+	geometryCtx, cancel := context.WithCancel(ctx)
+	h.geometryCancel = cancel
+	h.geometryDone = make(chan struct{})
+	go func() {
+		defer close(h.geometryDone)
+		for {
+			select {
+			case geometry, ok := <-h.resizes:
+				if !ok {
+					return
+				}
+				if !geometry.Valid() {
+					continue
+				}
+				h.geometryMu.Lock()
+				h.geometry = geometry.NormalizePixels()
+				h.geometryValid = true
+				h.geometrySeq++
+				h.geometryMu.Unlock()
+				select {
+				case h.geometryUpdate <- struct{}{}:
+				default:
+				}
+			case <-geometryCtx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (h *attachmentHost) stopGeometry() {
+	if h == nil || h.geometryCancel == nil {
+		return
+	}
+	h.geometryCancel()
+	<-h.geometryDone
+	h.geometryCancel = nil
+	h.geometryDone = nil
+}
+
+func (h *attachmentHost) latestGeometry() (domain.Geometry, bool) {
+	if h == nil {
+		return domain.Geometry{}, false
+	}
+	h.geometryMu.Lock()
+	defer h.geometryMu.Unlock()
+	return h.geometry, h.geometryValid
+}
+
+func (h *attachmentHost) geometryAfter(sequence uint64) (domain.Geometry, uint64, bool) {
+	h.geometryMu.Lock()
+	defer h.geometryMu.Unlock()
+	return h.geometry, h.geometrySeq, h.geometryValid && h.geometrySeq > sequence
+}
+
 func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.BrokerLogicalConnection) *attachmentForeground {
 	return &attachmentForeground{
 		authority:  &h.authority,
@@ -462,6 +565,8 @@ func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.Broke
 		term:       h.term,
 		ui:         h.ui,
 		resizes:    h.resizes,
+		actions:    h.actions,
+		host:       h,
 		done:       make(chan struct{}),
 		decided:    true,
 		onAttached: h.onAttach,
@@ -578,6 +683,8 @@ type attachmentForeground struct {
 	term      ports.Terminal
 	ui        ports.UIOutputTransaction
 	resizes   <-chan domain.Geometry
+	actions   <-chan AttachmentLifecycleAction
+	host      *attachmentHost
 	done      chan struct{}
 	// finalizedOnce and finishedOnce split the single teardown into the
 	// deterministic final input window: finalize closes Done and stops output
@@ -588,10 +695,11 @@ type attachmentForeground struct {
 	// by marking a freshly received delivery undecided; AckInput or PreserveInput
 	// decides it at most once. decided starts true, so a decision with no
 	// outstanding delivery is refused instead of silently committing nothing.
-	deliveryMu sync.Mutex
-	decided    bool
-	attached   atomic.Bool
-	onAttached func(AttachmentToken)
+	deliveryMu  sync.Mutex
+	decided     bool
+	geometrySeq uint64
+	attached    atomic.Bool
+	onAttached  func(AttachmentToken)
 }
 
 // Token is the generation/attempt identity of this grant.
@@ -633,7 +741,15 @@ func (f *attachmentForeground) finish() {
 	if f == nil {
 		return
 	}
-	f.finishedOnce.Do(func() { f.authority.revoke(f) })
+	f.finishedOnce.Do(func() {
+		// Autonomous supervisor foregrounds have a host-lifetime geometry
+		// collector. At that owner-class boundary, no attachment byte may reach
+		// the picker. Isolated legacy worker replacement remains lossless.
+		if f.input != nil && f.host != nil && f.host.ownerBoundary {
+			f.input.dropOwned(f.consumer)
+		}
+		f.authority.revoke(f)
+	})
 }
 
 // beginDelivery opens the decision window for the delivery the worker just
@@ -682,7 +798,7 @@ func (f *attachmentForeground) Input(ctx context.Context) (AttachmentInputEvent,
 			return AttachmentInputEvent{}, false
 		case <-f.done:
 			return AttachmentInputEvent{}, false
-		case <-f.input.ready:
+		case <-f.input.readyFor(f.consumer):
 		}
 	}
 }
@@ -717,29 +833,72 @@ func (f *attachmentForeground) PreserveInput(data []byte) {
 }
 
 // Resize waits for the next authorized terminal resize.
+func (f *attachmentForeground) Lifecycle(ctx context.Context) (AttachmentLifecycleActionKind, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if !f.authority.actionAuthorized(f) {
+			return 0, false
+		}
+		select {
+		case action, ok := <-f.actions:
+			if !ok || !f.authority.actionAuthorized(f) {
+				return 0, false
+			}
+			if action.Token != f.token {
+				continue
+			}
+			return action.Kind, action.Kind == AttachmentDetachToPicker || action.Kind == AttachmentDetachAndExit
+		case <-ctx.Done():
+			return 0, false
+		case <-f.done:
+			return 0, false
+		}
+	}
+}
+
 func (f *attachmentForeground) Resize(ctx context.Context) (domain.Geometry, bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !f.authority.actionAuthorized(f) {
+	if !f.authority.actionAuthorized(f) || f.host == nil {
 		return domain.Geometry{}, false
 	}
-	resizes := f.resizes
-	for {
-		select {
-		case geometry, ok := <-resizes:
-			if !ok {
-				resizes = nil
-				continue
-			} // uiterm has no resize source
-			if !f.authority.actionAuthorized(f) {
+	if !f.host.ownerBoundary {
+		resizes := f.resizes
+		for {
+			select {
+			case geometry, ok := <-resizes:
+				if !ok {
+					resizes = nil
+					continue
+				}
+				if !f.authority.actionAuthorized(f) {
+					return domain.Geometry{}, false
+				}
+				return geometry, true
+			case <-ctx.Done():
+				return domain.Geometry{}, false
+			case <-f.done:
 				return domain.Geometry{}, false
 			}
-			return geometry, true
+		}
+	}
+	for {
+		if geometry, next, ok := f.host.geometryAfter(f.geometrySeq); ok {
+			f.geometrySeq = next
+			if f.authority.actionAuthorized(f) {
+				return geometry, true
+			}
+			return domain.Geometry{}, false
+		}
+		select {
 		case <-ctx.Done():
 			return domain.Geometry{}, false
 		case <-f.done:
 			return domain.Geometry{}, false
+		case <-f.host.geometryUpdate:
 		}
 	}
 }

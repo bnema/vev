@@ -23,9 +23,8 @@ import (
 //
 // The worker owns no endpoint, route, raw mode, terminal writer, or second
 // reader. It reaches the terminal only through the supervisor-granted
-// AttachmentForeground. Terminal input pumping into the session and UI action
-// admission are deliberately left to P5.4, exactly as the P5.1b host documents,
-// so this slice adds no path from picker input to a session.
+// AttachmentForeground. Input, geometry and lifecycle sends therefore retain
+// the foreground token and stop when the grant is superseded.
 
 var (
 	// errAttachmentDeadline is the stable local sentinel of an expired
@@ -214,36 +213,125 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 	}
 }
 
-// pumpAttached publishes accepted output after attachment until the stream
-// ends. It never unmarks attachment: a stream failure ends the run as
-// lost/ended, so the supervisor returns to the picker and never keeps the
-// attached presentation showing.
+type attachmentClientEvent struct {
+	message protocol.ClientMessage
+	input   *AttachmentInputEvent
+	action  AttachmentLifecycleActionKind
+}
+
+var (
+	errDetachToPicker = errors.New("client: detach to picker")
+	errDetachAndExit  = errors.New("client: detach and exit")
+)
+
+// pumpAttached publishes output and concurrently forwards the foreground's
+// authorized input, latest geometry and explicit lifecycle decision.
 func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, token AttachmentToken, state outputApplyState, incoming <-chan serverReceive) AttachmentEvent {
+	pumpCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	outgoing := make(chan attachmentClientEvent)
+	go pumpAttachmentInput(pumpCtx, fg, outgoing)
+	go pumpAttachmentGeometry(pumpCtx, fg, outgoing)
+	go pumpAttachmentLifecycle(pumpCtx, fg, outgoing)
 	for {
-		message, err := w.awaitServer(ctx, fg, incoming)
-		if err != nil {
-			return w.settle(ctx, fg, stream, token, err)
-		}
-		switch typed := message.(type) {
-		case protocol.Output:
-			next, ok := state.next(typed)
-			if !ok {
-				// A frame outside the output chain after attachment is ignored
-				// rather than replaying stale cells.
-				continue
+		select {
+		case result := <-incoming:
+			if result.err != nil {
+				return w.settle(ctx, fg, stream, token, result.err)
 			}
-			state = next
-			if err := fg.Output(state.uiContext(ports.UIContext{Generation: token.Generation}, ports.UIStatusAttached), typed.Data); err != nil {
-				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
+			switch typed := result.message.(type) {
+			case protocol.Output:
+				next, ok := state.next(typed)
+				if !ok {
+					continue
+				}
+				state = next
+				if err := fg.Output(state.uiContext(ports.UIContext{Generation: token.Generation}, ports.UIStatusAttached), typed.Data); err != nil {
+					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
+				}
+			case protocol.ErrorMsg:
+				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
+			case protocol.Detached:
+				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded}
 			}
-		case protocol.ErrorMsg:
-			return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
-		case protocol.Detached:
-			return AttachmentEvent{Token: token, Kind: AttachmentEventEnded}
-		default:
-			// Messages outside the attached output flow are consumed and
-			// ignored until the stream ends; this slice adds no other handler.
+		case event := <-outgoing:
+			if event.input != nil && event.input.Err != nil {
+				fg.PreserveInput(event.input.Data)
+				return w.settle(ctx, fg, stream, token, event.input.Err)
+			}
+			if err := w.send(ctx, fg, stream, event.message); err != nil {
+				if event.input != nil {
+					fg.PreserveInput(event.input.Data)
+				}
+				return w.settle(ctx, fg, stream, token, err)
+			}
+			if event.input != nil {
+				fg.AckInput()
+			}
+			if event.action == AttachmentDetachToPicker {
+				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded, Err: errDetachToPicker}
+			}
+			if event.action == AttachmentDetachAndExit {
+				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded, Err: errDetachAndExit}
+			}
+		case <-ctx.Done():
+			return w.settle(ctx, fg, stream, token, ctx.Err())
+		case <-fg.Done():
+			return w.settle(ctx, fg, stream, token, errAttachmentForegroundRevoked)
 		}
+	}
+}
+
+func pumpAttachmentInput(ctx context.Context, fg AttachmentForeground, out chan<- attachmentClientEvent) {
+	var sequence uint64
+	for {
+		event, ok := fg.Input(ctx)
+		if !ok {
+			return
+		}
+		if event.Err != nil {
+			select {
+			case out <- attachmentClientEvent{input: &event}:
+			case <-ctx.Done():
+				fg.PreserveInput(event.Data)
+			}
+			return
+		}
+		sequence++
+		copyEvent := event
+		select {
+		case out <- attachmentClientEvent{message: protocol.Input{InputSeq: sequence, Data: append([]byte(nil), event.Data...)}, input: &copyEvent}:
+		case <-ctx.Done():
+			fg.PreserveInput(event.Data)
+			return
+		}
+	}
+}
+
+func pumpAttachmentGeometry(ctx context.Context, fg AttachmentForeground, out chan<- attachmentClientEvent) {
+	for {
+		geometry, ok := fg.Resize(ctx)
+		if !ok {
+			return
+		}
+		geometry = geometry.NormalizePixels()
+		select {
+		case out <- attachmentClientEvent{message: protocol.Resize{Size: geometry.Size, PixelWidth: geometry.PixelWidth, PixelHeight: geometry.PixelHeight}}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func pumpAttachmentLifecycle(ctx context.Context, fg AttachmentForeground, out chan<- attachmentClientEvent) {
+	action, ok := fg.Lifecycle(ctx)
+	if !ok {
+		return
+	}
+	select {
+	case out <- attachmentClientEvent{message: protocol.Detach{}, action: action}:
+	case <-ctx.Done():
+		return
 	}
 }
 

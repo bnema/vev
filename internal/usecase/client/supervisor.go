@@ -137,6 +137,9 @@ type State struct {
 	// Err is the most recent visible connectivity failure, nil while healthy
 	// and before any failure.
 	Err error
+	// ReadyLost is set only when an established ready generation was lost and
+	// cleared by the replacement's committed publication.
+	ReadyLost bool
 }
 
 // supervisorEventKind is one input to the pure supervisor reducer.
@@ -191,7 +194,12 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		state.Connectivity = ConnectivityReady
 		state.Attempt = 0
 		state.Err = nil
-	case supervisorTransientFailure, supervisorBrokerLoss:
+	case supervisorTransientFailure:
+		state.Connectivity = ConnectivityRetryWait
+		state.Attempt++
+		state.Err = event.err
+	case supervisorBrokerLoss:
+		state.ReadyLost = state.Connectivity == ConnectivityReady
 		state.Connectivity = ConnectivityRetryWait
 		state.Attempt++
 		state.Err = event.err
@@ -221,6 +229,25 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 	return state
 }
 
+// LifecycleNoticeKind is one bounded autonomous lifecycle transition.
+type LifecycleNoticeKind uint8
+
+const (
+	LifecycleNoticeDetachToPicker LifecycleNoticeKind = iota + 1
+	LifecycleNoticeDetachAndExit
+	LifecycleNoticeSessionEnded
+	LifecycleNoticeDestinationFailed
+	LifecycleNoticeBrokerLost
+	LifecycleNoticeBrokerReconnected
+	LifecycleNoticeOutcomeUnknown
+)
+
+// LifecycleNotice carries classification only; adapter diagnostics and free
+// text never cross this presentation seam.
+type LifecycleNotice struct {
+	Kind LifecycleNoticeKind
+}
+
 // SupervisorConfig supplies the autonomous client's dependencies. The
 // connector, terminal, and clock are required; render, notify, and jitter are
 // injectable seams with safe defaults. Render, notify, and jitter must not
@@ -239,6 +266,8 @@ type SupervisorConfig struct {
 	// Notify surfaces a connectivity failure without leaving the picker.
 	// Optional; the default notifies nothing.
 	Notify func(State, error)
+	// NotifyLifecycle reports typed, bounded lifecycle transitions.
+	NotifyLifecycle func(LifecycleNotice)
 	// Jitter returns an equal-jitter fraction in [0,1). It is the only
 	// randomness seam so tests can pin the retry cadence exactly. Optional; the
 	// default is a process-local random source.
@@ -253,6 +282,14 @@ type SupervisorConfig struct {
 	// each attachment Hello. The use case deliberately does not inspect the
 	// process environment; omitted fields retain their protocol zero values.
 	AttachmentEnvironment AttachmentEnvironment
+	// LifecycleActions carries explicit attachment lifecycle requests. A nil
+	// channel disables external lifecycle actions. The actions are typed so
+	// detach-to-picker can never be confused with detach-and-exit.
+	LifecycleActions <-chan AttachmentLifecycleAction
+	// InitialNavigation optionally requests one broker-native navigation after
+	// the first committed catalogue publication. It is used by no-argument
+	// composition to create an ephemeral session without a special attach path.
+	InitialNavigation *InitialNavigation
 }
 
 // AttachmentEnvironment is the composition seam for client environment data
@@ -261,6 +298,28 @@ type AttachmentEnvironment struct {
 	TermEnv   string
 	Cwd       string
 	TrueColor bool
+}
+
+// InitialNavigation is a one-shot client navigation intent.
+type InitialNavigation uint8
+
+const (
+	// InitialNavigationCreateEphemeral creates a broker-routed ephemeral session.
+	InitialNavigationCreateEphemeral InitialNavigation = iota + 1
+)
+
+// AttachmentLifecycleAction is an explicit process/attachment decision.
+type AttachmentLifecycleActionKind uint8
+
+const (
+	AttachmentDetachToPicker AttachmentLifecycleActionKind = iota + 1
+	AttachmentDetachAndExit
+)
+
+// AttachmentLifecycleAction targets exactly one granted attachment.
+type AttachmentLifecycleAction struct {
+	Token AttachmentToken
+	Kind  AttachmentLifecycleActionKind
 }
 
 // Supervisor owns one autonomous client process: raw mode, one terminal input
@@ -324,6 +383,7 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	supervisor.attachments = newAttachmentHost(attachmentHostConfig{
 		Terminal:   cfg.Terminal,
 		Clock:      cfg.Clock,
+		Actions:    cfg.LifecycleActions,
 		OnAttached: func(AttachmentToken) { supervisor.transition(supervisorEvent{kind: supervisorAttached}) },
 	})
 	return supervisor, nil
@@ -357,6 +417,10 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	}()
 
 	input := startTerminalInputLifetime(s.cfg.Terminal.In(), s.cfg.Picker)
+	defer input.stop()
+	s.attachments.setInput(input.pump)
+	s.attachments.startGeometry(ctx)
+	defer s.attachments.stopGeometry()
 
 	// The active connection is owned across loop iterations. retire is
 	// idempotent so every exit path closes exactly the connection it adopted.
@@ -439,7 +503,23 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 			// while an established connection already has state.
 			s.cfg.Picker.ApplySnapshot(service.Snapshot())
 		}
+		wasReadyLost := s.State().ReadyLost
 		s.transition(supervisorEvent{kind: supervisorReady})
+		if wasReadyLost {
+			s.notifyLifecycle(LifecycleNoticeBrokerReconnected)
+			s.mu.Lock()
+			s.state.ReadyLost = false
+			s.mu.Unlock()
+		}
+		if s.cfg.InitialNavigation != nil {
+			navigation := *s.cfg.InitialNavigation
+			s.cfg.InitialNavigation = nil
+			if terminated, termErr := s.runInitialNavigation(ctx, input, service, navigation); terminated {
+				retire()
+				s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
+				return termErr
+			}
+		}
 
 		// Ready phase: fold publications, admit committed attachments one at a
 		// time, and return to the picker after each. A committed attachment
@@ -474,6 +554,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 			s.transition(supervisorEvent{kind: supervisorTerminal, err: cause})
 			return cause
 		}
+		s.notifyLifecycle(LifecycleNoticeBrokerLost)
 		if terminated, termErr := s.retryFailure(ctx, input, supervisorBrokerLoss, normalizeUnavailable(lossErr)); terminated {
 			return termErr
 		}
@@ -802,6 +883,12 @@ func normalizeUnavailable(err error) error {
 }
 
 // notify surfaces a connectivity failure through the optional notifier.
+func (s *Supervisor) notifyLifecycle(kind LifecycleNoticeKind) {
+	if s != nil && s.cfg.NotifyLifecycle != nil {
+		s.cfg.NotifyLifecycle(LifecycleNotice{Kind: kind})
+	}
+}
+
 func (s *Supervisor) notify(err error) {
 	if s.cfg.Notify == nil || err == nil {
 		return
@@ -831,6 +918,10 @@ type terminalInputLifetime struct {
 	eof      chan error
 	once     sync.Once
 	consumer pickerInputConsumer
+	pump     *terminalInputPump
+
+	mu       sync.Mutex
+	pickerID uint64
 }
 
 // startTerminalInputLifetime starts the single terminal read. A nil reader is
@@ -842,28 +933,105 @@ func startTerminalInputLifetime(in io.Reader, consumer pickerInputConsumer) *ter
 		lifetime.finish(io.EOF)
 		return lifetime
 	}
+	lifetime.pump = newTerminalInputPump(in)
+	lifetime.pump.start()
+	if consumer != nil {
+		lifetime.acquirePicker()
+	}
+	go lifetime.runPicker()
 	go func() {
-		buffer := make([]byte, 4096)
-		for {
-			n, err := in.Read(buffer)
-			if err != nil {
-				lifetime.finish(err)
-				return
-			}
-			if n == 0 {
-				// A zero-byte, nil-error read is legal but cannot make
-				// progress; keep reading so a well-behaved reader is never
-				// mistaken for EOF.
-				continue
-			}
-			if lifetime.consumer != nil {
-				// The consumer may retain a partial escape or UTF-8 prefix, so it
-				// gets its own copy rather than the reused read buffer.
-				lifetime.consumer.ConsumeTerminalRead(append([]byte(nil), buffer[:n]...))
-			}
-		}
+		<-lifetime.pump.exited
+		lifetime.finish(io.EOF)
 	}()
 	return lifetime
+}
+
+func (l *terminalInputLifetime) acquirePicker() {
+	if l == nil || l.pump == nil || l.consumer == nil {
+		return
+	}
+	l.mu.Lock()
+	if l.pickerID != 0 {
+		l.mu.Unlock()
+		return
+	}
+	if id, ok := l.pump.tryClaim(); ok {
+		l.pickerID = id
+		l.mu.Unlock()
+		return
+	}
+	l.mu.Unlock()
+	// A finalizing attachment still owns the claim. Retry when that claim is
+	// actually released rather than permanently abandoning picker input.
+	go func() {
+		select {
+		case <-l.pump.claimChanged:
+			l.acquirePicker()
+		case <-l.pump.done:
+		}
+	}()
+}
+
+func (l *terminalInputLifetime) releasePicker() {
+	if l == nil || l.pump == nil {
+		return
+	}
+	l.mu.Lock()
+	id := l.pickerID
+	l.pickerID = 0
+	l.mu.Unlock()
+	if id != 0 {
+		l.pump.ack(id)
+		// Drop picker-owned bytes that were queued but never presented before
+		// changing owner class; they are not session input.
+		l.pump.dropOwned(id)
+		l.pump.revoke(id)
+	}
+}
+
+func (l *terminalInputLifetime) runPicker() {
+	if l == nil || l.pump == nil {
+		return
+	}
+	for {
+		l.mu.Lock()
+		id := l.pickerID
+		l.mu.Unlock()
+		if id == 0 {
+			select {
+			case <-l.pump.claimChanged:
+			case <-l.pump.done:
+				return
+			}
+			continue
+		}
+		result, ok := l.pump.take(context.Background(), id)
+		if !ok {
+			select {
+			case <-l.pump.readyFor(id):
+			case <-l.pump.claimChanged:
+			case <-l.pump.done:
+				return
+			}
+			continue
+		}
+		if len(result.data) != 0 {
+			l.consumer.ConsumeTerminalRead(result.data)
+		}
+		l.pump.ack(id)
+		if result.err != nil {
+			l.finish(result.err)
+			return
+		}
+	}
+}
+
+func (l *terminalInputLifetime) stop() {
+	if l == nil || l.pump == nil {
+		return
+	}
+	l.pump.stop()
+	l.pump.suspend()
 }
 
 // finish publishes the terminal cause exactly once.

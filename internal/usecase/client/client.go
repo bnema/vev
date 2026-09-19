@@ -435,7 +435,7 @@ func (r *Runner) probeKittyDirectGraphics(ctx context.Context, input *terminalIn
 		case <-timer.C():
 			replay = append(replay, probe.Finish()...)
 			goto done
-		case <-input.ready:
+		case <-input.readyFor(consumer):
 			result, ok := input.take(ctx, consumer)
 			if !ok {
 				if ctx.Err() != nil {
@@ -3627,7 +3627,9 @@ type terminalInputPump struct {
 	activation         uint64
 	closed             bool
 	active             bool
-	ready              chan struct{}
+	readyMu            sync.Mutex
+	ready              map[uint64]chan struct{}
+	claimChanged       chan struct{}
 	space              chan struct{}
 	state              chan struct{}
 	exited             chan struct{}
@@ -3640,15 +3642,16 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	space := make(chan struct{}, 1)
 	space <- struct{}{}
 	return &terminalInputPump{
-		in:         in,
-		done:       make(chan struct{}),
-		automation: make(chan terminalAutomationRequest),
-		activation: 1,
-		active:     true,
-		ready:      make(chan struct{}, 1),
-		space:      space,
-		state:      make(chan struct{}, 1),
-		exited:     make(chan struct{}),
+		in:           in,
+		done:         make(chan struct{}),
+		automation:   make(chan terminalAutomationRequest),
+		activation:   1,
+		active:       true,
+		ready:        make(map[uint64]chan struct{}),
+		claimChanged: make(chan struct{}, 1),
+		space:        space,
+		state:        make(chan struct{}, 1),
+		exited:       make(chan struct{}),
 	}
 }
 
@@ -3665,13 +3668,23 @@ func (p *terminalInputPump) claim() uint64 {
 // tryClaim lets competing foreground owners decline admission without panicking.
 func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.consumer != 0 {
+		p.mu.Unlock()
 		return 0, false
 	}
 	p.nextID++
 	p.consumer = p.nextID
-	return p.consumer, true
+	consumer := p.consumer
+	p.readyMu.Lock()
+	p.ready[consumer] = make(chan struct{}, 1)
+	p.readyMu.Unlock()
+	ready := (len(p.residual) != 0 || p.pending != nil) && p.delivering == 0
+	p.mu.Unlock()
+	p.signalClaimChanged()
+	if ready {
+		p.signalReady(consumer)
+	}
+	return consumer, true
 }
 
 // revoke invalidates an attempt before its replacement is allowed to claim
@@ -3681,22 +3694,48 @@ func (p *terminalInputPump) revoke(consumer uint64) {
 	if p.consumer == consumer {
 		p.consumer = 0
 	}
-	// An unacknowledged read was never delivered by this scanner. Leave it
-	// pending and make it available to its replacement.
 	if p.delivering == consumer {
+		// Legacy attach-attempt replacement remains lossless. Autonomous
+		// supervisor ownership uses ack-before-picker-handoff and
+		// drop-before-attachment-handoff, so bytes cannot cross owner kinds.
 		p.delivering = 0
 		p.deliveringResidual = false
 	}
 	p.mu.Unlock()
-	p.signalReady()
+	p.readyMu.Lock()
+	delete(p.ready, consumer)
+	p.readyMu.Unlock()
+	p.signalClaimChanged()
 	if p.afterRevoke != nil {
 		p.afterRevoke()
 	}
 }
 
-func (p *terminalInputPump) signalReady() {
+func (p *terminalInputPump) signalClaimChanged() {
 	select {
-	case p.ready <- struct{}{}:
+	case p.claimChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (p *terminalInputPump) readyFor(consumer uint64) <-chan struct{} {
+	p.readyMu.Lock()
+	defer p.readyMu.Unlock()
+	return p.ready[consumer]
+}
+
+func (p *terminalInputPump) signalReady(consumer uint64) {
+	if consumer == 0 {
+		return
+	}
+	p.readyMu.Lock()
+	ready := p.ready[consumer]
+	p.readyMu.Unlock()
+	if ready == nil {
+		return
+	}
+	select {
+	case ready <- struct{}{}:
 	default:
 	}
 }
@@ -3716,8 +3755,9 @@ func (p *terminalInputPump) enqueue(result terminalReadResult, activation uint64
 		return false
 	}
 	p.pending = &result
+	consumer := p.consumer
 	p.mu.Unlock()
-	p.signalReady()
+	p.signalReady(consumer)
 	return true
 }
 
@@ -3727,11 +3767,7 @@ func (p *terminalInputPump) enqueue(result terminalReadResult, activation uint64
 func (p *terminalInputPump) take(ctx context.Context, consumer uint64) (terminalReadResult, bool) {
 	p.mu.Lock()
 	if ctx.Err() != nil || p.consumer != consumer || p.delivering != 0 {
-		ready := (len(p.residual) != 0 || p.pending != nil) && p.delivering == 0
 		p.mu.Unlock()
-		if ready {
-			p.signalReady()
-		}
 		return terminalReadResult{}, false
 	}
 	if len(p.residual) != 0 {
@@ -3770,6 +3806,33 @@ func (p *terminalInputPump) preserveResidual(consumer uint64, data []byte) {
 
 // ack commits scanner delivery of a leased read and lets the lifecycle reader
 // accept the next result. Only the consumer that holds the lease can ack it.
+// dropOwned disposes every undecided byte at an autonomous owner-class
+// boundary. Picker-queued bytes are dropped before attachment claim, and
+// attachment-queued bytes are dropped before picker claim. No delivery,
+// pending read, or preserved residual may cross between those owner classes.
+// revoke remains lossless for legacy attachment-to-attachment replacement.
+func (p *terminalInputPump) dropOwned(consumer uint64) {
+	p.mu.Lock()
+	if p.consumer != consumer {
+		p.mu.Unlock()
+		return
+	}
+	hadPending := p.pending != nil
+	p.pending = nil
+	p.residual = nil
+	if p.delivering == consumer {
+		p.delivering = 0
+		p.deliveringResidual = false
+	}
+	p.mu.Unlock()
+	if hadPending {
+		select {
+		case p.space <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func (p *terminalInputPump) ack(consumer uint64) {
 	p.mu.Lock()
 	if p.consumer != consumer || p.delivering != consumer {
@@ -3788,7 +3851,7 @@ func (p *terminalInputPump) ack(consumer uint64) {
 	p.mu.Unlock()
 	if wasResidual {
 		if more {
-			p.signalReady()
+			p.signalReady(consumer)
 		}
 		return
 	}
@@ -3799,7 +3862,7 @@ func (p *terminalInputPump) finish() {
 	p.mu.Lock()
 	p.closed = true
 	p.mu.Unlock()
-	p.signalReady()
+	p.signalClaimChanged()
 	p.signalState()
 }
 
@@ -3893,7 +3956,7 @@ func (p *terminalInputPump) suspend() {
 		}
 	}
 	p.signalState()
-	p.signalReady()
+	p.signalClaimChanged()
 }
 
 func (p *terminalInputPump) resume() {
@@ -3915,7 +3978,7 @@ func (p *terminalInputPump) stop() {
 		p.closed = true
 		p.mu.Unlock()
 		close(p.done)
-		p.signalReady()
+		p.signalClaimChanged()
 		p.signalState()
 	})
 }
@@ -4266,7 +4329,7 @@ func (p *stdinPump) run() {
 			result = request.record
 			automated = true
 			actionID.Store(result.actionID)
-		case <-input.ready:
+		case <-input.readyFor(consumer):
 			var ok bool
 			result, ok = input.take(p.ctx, consumer)
 			if !ok {

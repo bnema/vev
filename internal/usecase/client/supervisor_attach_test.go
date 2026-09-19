@@ -166,6 +166,22 @@ func (p *attachTestPicker) TakeOp() (pickerOp, string) {
 	return op, key
 }
 
+func (p *attachTestPicker) ResolveInitial(navigation InitialNavigation, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+	if navigation != InitialNavigationCreateEphemeral {
+		return ports.BrokerOpenStreamRequest{}, errors.New("unexpected initial navigation")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolved++
+	request := p.request
+	request.Admission = ports.BrokerAdmissionCreateEphemeral
+	request.Target = protocol.ExactSessionTarget{}
+	request.Local = true
+	request.Connection = base.Connection
+	request.Stream = base.Stream
+	return request, nil
+}
+
 func (p *attachTestPicker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -232,6 +248,10 @@ type attachTestHarness struct {
 // startAttachHarness runs one supervisor over a scripted picker and service.
 // The caller installs service.setOpenStream before committing a selection.
 func startAttachHarness(t *testing.T, picker pickerHost) *attachTestHarness {
+	return startAttachHarnessConfig(t, picker, nil)
+}
+
+func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*SupervisorConfig)) *attachTestHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := newSupervisorTestClock()
@@ -243,13 +263,17 @@ func startAttachHarness(t *testing.T, picker pickerHost) *attachTestHarness {
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) {
 		return service, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{
+	cfg := SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,
 		Clock:     clock,
 		Jitter:    func() float64 { return 0 },
 		Picker:    picker,
-	})
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	sup := mustSupervisor(t, cfg)
 
 	harness := &attachTestHarness{sup: sup, service: service, clock: clock, terminal: terminal, reader: reader, cancel: cancel, runDone: make(chan struct{})}
 	go func() {

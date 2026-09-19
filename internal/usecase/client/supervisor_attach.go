@@ -238,6 +238,16 @@ type attachmentSettlement struct {
 // the exact broker stream request the user committed. The stream ID is
 // allocated strictly increasing per connection and is consumed even when
 // resolution refuses, matching the pool's never-reused ID contract.
+func (s *Supervisor) resolveInitialStreamRequest(service ports.BrokerService, navigation InitialNavigation) (ports.BrokerOpenStreamRequest, error) {
+	resolver, ok := s.cfg.Picker.(interface {
+		ResolveInitial(InitialNavigation, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
+	})
+	if !ok {
+		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation is unavailable"}
+	}
+	return resolver.ResolveInitial(navigation, pickerResolveBase{Connection: service.ConnectionID(), Stream: ports.BrokerStreamID(s.nextStream.Add(1))})
+}
+
 func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, key string) (ports.BrokerOpenStreamRequest, error) {
 	base := pickerResolveBase{
 		Connection: service.ConnectionID(),
@@ -250,9 +260,13 @@ func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, 
 // request. The worker receives no endpoint, route, or raw-mode authority: it
 // only drives the typed session protocol on the stream the supervisor opened.
 func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, beforeAttached func() error) (AttachmentWorker, error) {
-	geometry, err := s.cfg.Terminal.Geometry()
-	if err != nil {
-		return nil, fmt.Errorf("vev: reading terminal geometry: %w", err)
+	geometry, ok := s.attachments.latestGeometry()
+	if !ok {
+		var err error
+		geometry, err = s.cfg.Terminal.Geometry()
+		if err != nil {
+			return nil, fmt.Errorf("vev: reading terminal geometry: %w", err)
+		}
 	}
 	environment := s.cfg.AttachmentEnvironment
 	return newSessionAttachmentWorker(sessionAttachmentConfig{
@@ -272,20 +286,19 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 // the picker. It reports terminated=true only when the run itself must end
 // (process cancellation or terminal EOF); every attachment outcome returns to
 // the picker in the same process.
-func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, key string) (bool, error) {
-	picker := s.cfg.Picker
-	if picker == nil {
+func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, navigation InitialNavigation) (bool, error) {
+	request, err := s.resolveInitialStreamRequest(service, navigation)
+	if err != nil {
+		s.reportAttachmentFailure(err)
 		return false, nil
 	}
-	// Present connecting before releasing picker input, so a slow resolve/open
-	// never leaves a visible picker whose keystrokes are silently discarded.
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
-	// Release picker input for the whole attachment. Exactly one owner
-	// consumes the shared terminal reader, so picker input can never reach a
-	// session and the attachment path starts no second reader.
-	picker.SetOwnsInput(false)
-	defer picker.SetOwnsInput(true)
+	return s.runResolvedAttachment(ctx, input, service, request)
+}
 
+func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, key string) (bool, error) {
+	if s.cfg.Picker == nil {
+		return false, nil
+	}
 	request, err := s.resolveCommittedStreamRequest(service, key)
 	if err != nil {
 		// A refused selection is a typed presentation notice; it never opens a
@@ -293,7 +306,21 @@ func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminal
 		s.reportAttachmentFailure(err)
 		return false, nil
 	}
+	return s.runResolvedAttachment(ctx, input, service, request)
+}
 
+func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest) (bool, error) {
+	picker := s.cfg.Picker
+	if picker == nil {
+		return false, nil
+	}
+	picker.SetOwnsInput(false)
+	input.releasePicker()
+	defer func() {
+		picker.SetOwnsInput(true)
+		input.acquirePicker()
+	}()
+	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
 
@@ -351,11 +378,13 @@ func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputL
 	}()
 
 	var result attachmentSettlement
+	var brokerLost bool
 	var terminated bool
 	var termErr error
 	select {
 	case result = <-settled:
 	case <-service.Done():
+		brokerLost = true
 		// The broker connection is gone; the supervisor cancels the run and
 		// lets the ready loop observe the loss and retire the connection.
 		run.Cancel()
@@ -379,8 +408,19 @@ func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputL
 		s.notifyAttachment(timeout)
 		return false, nil
 	}
+	if errors.Is(result.event.Err, errDetachAndExit) {
+		s.transition(supervisorEvent{kind: supervisorAttachEnded})
+		s.notifyLifecycle(LifecycleNoticeDetachAndExit)
+		return true, nil
+	}
+	if errors.Is(result.event.Err, errDetachToPicker) {
+		s.transition(supervisorEvent{kind: supervisorAttachEnded})
+		s.notifyLifecycle(LifecycleNoticeDetachToPicker)
+		return false, nil
+	}
 	if result.adopted && (result.event.Kind == AttachmentEventLost || result.event.Kind == AttachmentEventFailed) {
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: result.event.Err})
+		s.notifyLifecycle(LifecycleNoticeDestinationFailed)
 		s.notifyAttachment(result.event.Err)
 		return false, nil
 	}
@@ -389,12 +429,21 @@ func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputL
 	// failed after attachment was lost/failed above, so it can never leave the
 	// attached presentation showing.
 	s.transition(supervisorEvent{kind: supervisorAttachEnded})
+	if !brokerLost {
+		s.notifyLifecycle(LifecycleNoticeSessionEnded)
+	}
 	return false, nil
 }
 
 // reportAttachmentFailure returns to the picker with a typed, visible failure.
 func (s *Supervisor) reportAttachmentFailure(err error) {
 	s.transition(supervisorEvent{kind: supervisorAttachEnded, err: err})
+	var brokerErr ports.BrokerError
+	if errors.As(err, &brokerErr) && brokerErr.Code == ports.BrokerErrorOutcomeUnknown {
+		s.notifyLifecycle(LifecycleNoticeOutcomeUnknown)
+	} else {
+		s.notifyLifecycle(LifecycleNoticeDestinationFailed)
+	}
 	s.notifyAttachment(err)
 }
 

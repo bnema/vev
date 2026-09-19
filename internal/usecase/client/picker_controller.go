@@ -361,6 +361,15 @@ func (p *pickerController) Resolve(base pickerResolveBase) (ports.BrokerOpenStre
 	return p.ResolveKey(key, base)
 }
 
+// ResolveInitial resolves the one-shot no-argument ephemeral creation through
+// the current catalogue. It does not inspect mutable picker model state.
+func (p *pickerController) ResolveInitial(navigation InitialNavigation, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+	if navigation != InitialNavigationCreateEphemeral || p == nil || p.catalogue == nil {
+		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation is not available"}
+	}
+	return p.catalogue.ResolveCreation(true, "", pickerSelectionCreateEphemeral, "", base)
+}
+
 // ResolveKey revalidates exactly the supplied catalogue key against the latest
 // applied snapshot and returns the exact broker stream request. It is the
 // commit path: the key captured atomically with the commit decision (see
