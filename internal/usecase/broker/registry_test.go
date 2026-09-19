@@ -864,9 +864,16 @@ func TestRegistryUnchangedSetHostsIsNoOpAndReorderRepublishes(t *testing.T) {
 		calls[call.registration.Endpoint] = call
 	}
 	require.Len(t, calls, 2)
+	// Dispatch starts each probe while it holds the registry lock and publishes
+	// the in-flight projection at the end of the same critical section, so a
+	// received call is not yet a visible Checking state. Wait for the
+	// publication instead of assuming it has landed.
+	for endpoint := range calls {
+		waitHost(t, registry, endpoint, func(host ports.BrokerDaemonObservation) bool { return host.Checking })
+	}
 	before := registry.Snapshot()
 	for _, host := range before.Daemons {
-		require.True(t, host.Checking)
+		require.Truef(t, host.Checking, "host %q is not checking: %+v", host.Endpoint, before.Daemons)
 	}
 
 	// Identical membership in the same order never republishes and never
