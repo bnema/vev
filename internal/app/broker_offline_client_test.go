@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
+	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -26,18 +28,23 @@ import (
 	"github.com/bnema/vev/internal/adapters/webterm"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
 type offlineClientFixture struct {
-	root        string
-	socket      string
-	streams     <-chan struct{}
-	cancel      context.CancelFunc
-	prodRuntime string
-	prodState   string
+	root          string
+	socket        string
+	streams       <-chan struct{}
+	physical      <-chan struct{}
+	physicalCount func() int
+	policy        ports.BrokerPolicy
+	losePhysical  func()
+	cancel        context.CancelFunc
+	prodRuntime   string
+	prodState     string
 }
 
 func startOfflineClientFixture(t *testing.T) offlineClientFixture {
@@ -62,6 +69,9 @@ func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 
 	rawListener, err := ipc.ListenMux(route)
 	require.NoError(t, err)
+	physicalSeen := make(chan struct{}, 8)
+	var physicalMu sync.Mutex
+	var physicalConnections []io.Closer
 	aggregate := daemonmux.NewAggregateListener()
 	binding, err := daemonmux.NewServerBinding(brokerLocalTestIdentity, ports.BrokerDaemonIncarnation{1}, policy)
 	require.NoError(t, err)
@@ -73,6 +83,13 @@ func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 			raw, acceptErr := rawListener.Accept()
 			if acceptErr != nil {
 				return
+			}
+			physicalMu.Lock()
+			physicalConnections = append(physicalConnections, raw)
+			physicalMu.Unlock()
+			select {
+			case physicalSeen <- struct{}{}:
+			default:
 			}
 			go func() { _ = mux.Adopt(ctx, raw) }()
 		}
@@ -107,7 +124,20 @@ func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 		}
 		requireProductionUntouched(t, prodRuntime, prodState)
 	})
-	return offlineClientFixture{root: root, socket: socket, streams: streamSeen, cancel: cancel, prodRuntime: prodRuntime, prodState: prodState}
+	losePhysical := func() {
+		physicalMu.Lock()
+		connections := append([]io.Closer(nil), physicalConnections...)
+		physicalMu.Unlock()
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}
+	physicalCount := func() int {
+		physicalMu.Lock()
+		defer physicalMu.Unlock()
+		return len(physicalConnections)
+	}
+	return offlineClientFixture{root: root, socket: socket, streams: streamSeen, physical: physicalSeen, physicalCount: physicalCount, policy: policy, losePhysical: losePhysical, cancel: cancel, prodRuntime: prodRuntime, prodState: prodState}
 }
 
 type countingServerListener struct {
@@ -281,6 +311,199 @@ func TestOfflineClientUIDriverReachesSessionThroughBrokerIPC(t *testing.T) {
 	case <-time.After(brokerTestWait):
 		t.Fatal("offline UI driver did not stop")
 	}
+}
+
+func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
+	fixture := startOfflineClientFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
+	defer cancel()
+
+	service, err := brokeripc.NewConnector(fixture.socket, brokeripc.Config{}).Connect(ctx)
+	require.NoError(t, err)
+	defer service.Close()
+	connections := make([]ports.BrokerLogicalConnection, 3)
+	welcomes := make([]protocol.Welcome, 3)
+	for i := range connections {
+		request := ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamAttachment, Local: true, Policy: fixture.policy}
+		if i == 0 {
+			request.Admission, request.Name = ports.BrokerAdmissionCreateNamed, "shared"
+		} else {
+			require.NotNil(t, welcomes[0].CommittedIdentity)
+			request.Admission, request.Target = ports.BrokerAdmissionExact, welcomes[0].CommittedIdentity.Target
+		}
+		connection, err := service.OpenStream(ctx, request)
+		require.NoError(t, err)
+		connections[i] = connection
+		hello := protocol.Hello{Version: protocol.Version, ClientID: [16]byte{9}, Size: domain.Size{Cols: 80 + i*10, Rows: 24 + i}}
+		if i == 0 {
+			hello.Intent, hello.Name = protocol.IntentNew, "shared"
+		} else {
+			hello.Intent, hello.Name, hello.ExactTarget = protocol.IntentAttach, "shared", &request.Target
+		}
+		require.NoError(t, connection.SendClient(hello))
+		welcomes[i] = receiveOfflineWelcome(t, connection)
+	}
+	for range connections {
+		awaitLogicalStream(t, fixture.streams)
+	}
+	// The fixture also performs one observation dial. The three attachment
+	// streams must add only one pooled carriage, never one carriage per client.
+	for range 2 {
+		select {
+		case <-fixture.physical:
+		case <-time.After(brokerTestWait):
+			t.Fatal("expected observation and pooled attachment transports")
+		}
+	}
+	baselinePhysical := fixture.physicalCount()
+	t.Cleanup(func() {
+		require.Equal(t, baselinePhysical, fixture.physicalCount(), "logical attachments opened another daemonmux carriage")
+	})
+
+	for i, welcome := range welcomes {
+		require.Equal(t, "shared", welcome.SessionName)
+		require.NotZero(t, welcome.ResumeToken, "attachment %d has no independent resume token", i)
+		for j := range i {
+			require.NotEqual(t, welcomes[j].ResumeToken, welcome.ResumeToken, "same client process identity collapsed attachments %d and %d", j, i)
+		}
+	}
+	// Resize remains attachment session traffic: each logical stream reports its
+	// own window after distinct claims rather than a broker-coalesced peer size.
+	sizes := make([]domain.Size, len(connections))
+	for i, connection := range connections {
+		sizes[i] = domain.Size{Cols: 101 + i*11, Rows: 31 + i}
+		require.NoError(t, connection.SendClient(protocol.Resize{Size: sizes[i]}))
+	}
+	for i, connection := range connections {
+		require.Equal(t, sizes[i], receiveOfflineOutputSize(t, connection, sizes[i]))
+	}
+	require.NoError(t, connections[0].SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: 6, Attached: true, Slug: "next-tab"}))
+	require.True(t, receiveOfflineCommandResult(t, connections[0], 6).OK)
+	require.Equal(t, sizes[0], receiveOfflineOutputSize(t, connections[0], sizes[0]))
+	for _, connection := range connections {
+		require.NoError(t, connection.SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: 7, Attached: true, Slug: "next-tab"}))
+		result := receiveOfflineCommandResult(t, connection, 7)
+		require.True(t, result.OK, result.Text)
+	}
+
+	require.NoError(t, connections[0].SendClient(protocol.Detach{}))
+	receiveOfflineDetached(t, connections[0])
+	require.NoError(t, connections[0].Close())
+	for i := 1; i < len(connections); i++ {
+		requestID := uint64(20 + i)
+		require.NoError(t, connections[i].SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: requestID, Attached: true, Slug: "next-tab"}))
+		require.True(t, receiveOfflineCommandResult(t, connections[i], requestID).OK)
+	}
+	for i := 1; i < len(connections); i++ {
+		require.NoError(t, connections[i].Close())
+	}
+}
+
+func TestOfflineBrokerPhysicalLossSettlesEverySharedStream(t *testing.T) {
+	fixture := startOfflineClientFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
+	defer cancel()
+	service, err := brokeripc.NewConnector(fixture.socket, brokeripc.Config{}).Connect(ctx)
+	require.NoError(t, err)
+	defer service.Close()
+
+	var target protocol.ExactSessionTarget
+	connections := make([]ports.BrokerLogicalConnection, 3)
+	for i := range connections {
+		request := ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamAttachment, Local: true, Policy: fixture.policy}
+		if i == 0 {
+			request.Admission, request.Name = ports.BrokerAdmissionCreateNamed, "loss"
+		} else {
+			request.Admission, request.Target = ports.BrokerAdmissionExact, target
+		}
+		connection, err := service.OpenStream(ctx, request)
+		require.NoError(t, err)
+		connections[i] = connection
+		hello := protocol.Hello{Version: protocol.Version, ClientID: [16]byte{3}, Size: domain.Size{Cols: 80 + i, Rows: 24}, Intent: protocol.IntentAttach, Name: "loss", ExactTarget: &target}
+		if i == 0 {
+			hello.Intent, hello.ExactTarget = protocol.IntentNew, nil
+		}
+		require.NoError(t, connection.SendClient(hello))
+		welcome := receiveOfflineWelcome(t, connection)
+		if i == 0 {
+			require.NotNil(t, welcome.CommittedIdentity)
+			target = welcome.CommittedIdentity.Target
+		}
+	}
+	fixture.losePhysical()
+	for i, connection := range connections {
+		select {
+		case <-connection.Done():
+			// Closing the accepted raw carriage is an orderly transport loss at
+			// this seam; the required invariant is that every stream settles.
+		case <-time.After(brokerTestWait):
+			t.Fatalf("stream %d survived physical transport loss", i)
+		}
+	}
+}
+
+func receiveOfflineWelcome(t *testing.T, connection ports.BrokerLogicalConnection) protocol.Welcome {
+	t.Helper()
+	message := receiveOfflineMessage(t, connection, "Welcome", func(message protocol.ServerMessage) bool {
+		_, ok := message.(protocol.Welcome)
+		return ok
+	})
+	return message.(protocol.Welcome)
+}
+
+func receiveOfflineOutputSize(t *testing.T, connection ports.BrokerLogicalConnection, expected domain.Size) domain.Size {
+	t.Helper()
+	message := receiveOfflineMessage(t, connection, "Output size", func(message protocol.ServerMessage) bool {
+		output, ok := message.(protocol.Output)
+		return ok && output.Size == expected
+	})
+	return message.(protocol.Output).Size
+}
+
+func receiveOfflineCommandResult(t *testing.T, connection ports.BrokerLogicalConnection, requestID uint64) protocol.CommandResult {
+	t.Helper()
+	message := receiveOfflineMessage(t, connection, "CommandResult", func(message protocol.ServerMessage) bool {
+		result, ok := message.(protocol.CommandResult)
+		return ok && result.RequestID == requestID
+	})
+	return message.(protocol.CommandResult)
+}
+
+func receiveOfflineDetached(t *testing.T, connection ports.BrokerLogicalConnection) {
+	t.Helper()
+	receiveOfflineMessage(t, connection, "Detached", func(message protocol.ServerMessage) bool {
+		_, ok := message.(protocol.Detached)
+		return ok
+	})
+}
+
+func receiveOfflineMessage(t *testing.T, connection ports.BrokerLogicalConnection, want string, match func(protocol.ServerMessage) bool) protocol.ServerMessage {
+	t.Helper()
+	type result struct {
+		message protocol.ServerMessage
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		for {
+			message, err := connection.ReceiveServer()
+			if err != nil || match(message) {
+				resultCh <- result{message: message, err: err}
+				return
+			}
+		}
+	}()
+	select {
+	case received := <-resultCh:
+		require.NoError(t, received.err, "waiting for %s", want)
+		return received.message
+	case <-connection.Done():
+		t.Fatalf("connection settled while waiting for %s: %v", want, connection.Err())
+	case <-time.After(brokerTestWait):
+		_ = connection.Close()
+		t.Fatalf("timed out waiting for %s", want)
+	}
+	return nil
 }
 
 func TestOfflineClientBrowserReachesSessionThroughBrokerIPC(t *testing.T) {
