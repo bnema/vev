@@ -176,9 +176,7 @@ func TestClientConnectionOutlivesSetupContext(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	require.ErrorIs(t, setupCtx.Err(), context.DeadlineExceeded, "the setup context must have expired")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	require.NoError(t, client.AddHost(ctx, "after@setup:22"), "a registered connection must outlive its setup context")
+	requireConnectionDelegates(t, client)
 }
 
 // TestServerRegistrationBudgetSettlesSilentPeer proves a same-user peer cannot
@@ -279,9 +277,7 @@ func TestServerRegistrationBudgetLeavesRegisteredSessionHealthy(t *testing.T) {
 
 	// Outlive the accept-time registration budget.
 	time.Sleep(400 * time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	require.NoError(t, client.AddHost(ctx, "after@budget:22"))
+	requireConnectionDelegates(t, client)
 	select {
 	case <-core.done:
 		t.Fatal("a session that registered in time must not be settled by the registration budget")

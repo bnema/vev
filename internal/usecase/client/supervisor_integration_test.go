@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokeripc"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -55,9 +56,16 @@ func (c *integrationCore) OpenStream(context.Context, ports.BrokerOpenStreamRequ
 func (c *integrationCore) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {
 	return nil
 }
-func (c *integrationCore) AddHost(context.Context, string) error            { return nil }
-func (c *integrationCore) RemoveHost(context.Context, string) (bool, error) { return false, nil }
-func (c *integrationCore) RequestReconcile(string)                          {}
+func (c *integrationCore) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return domain.RemoteRegistration{}, nil
+}
+func (c *integrationCore) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
+	return false, nil
+}
+func (c *integrationCore) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return domain.RemoteRegistration{}, nil
+}
+func (c *integrationCore) RequestReconcile(string) {}
 
 func (c *integrationCore) Close() error {
 	c.once.Do(func() {

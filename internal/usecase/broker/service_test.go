@@ -2,10 +2,13 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -13,23 +16,32 @@ import (
 )
 
 // newTestAuthority composes one offline authority over an observation-disabled
-// registry, a bounded pool, and a supervisor on a long grace. Every dependency
-// is drained at test end so no run goroutine leaks between tests: the registry
-// run is canceled and joined (which flushes and stops its durable writer), the
-// pool is closed, and the supervisor is closed.
+// registry, a bounded pool, and a supervisor on a long grace.
 func newTestAuthority(t testing.TB, epoch ports.BrokerEpoch, probe ports.BrokerHostProbe, connector poolConnector) (*Authority, *Registry, *Pool, *Supervisor, *manualClock, *testStore) {
 	t.Helper()
 	clock := newManualClock(time.Unix(0, 0))
 	store := newTestStore()
 	registry, err := NewRegistryWithConfig(epoch, store, probe, clock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
+	authority, pool, supervisor, _ := composeTestAuthority(t, epoch, registry, connector, clock)
+	return authority, registry, pool, supervisor, clock, store
+}
+
+// composeTestAuthority wires one existing registry into a bounded pool and a
+// supervisor on a long grace, and owns the single Registry.Run. Every dependency
+// is drained at test end so no run goroutine leaks between tests: the registry
+// run is canceled and joined (which flushes and stops its durable writer), the
+// pool is closed, and the supervisor is closed. The supervisor's own manual
+// clock is returned so a test can drive the idle lifecycle.
+func composeTestAuthority(t testing.TB, epoch ports.BrokerEpoch, registry *Registry, connector poolConnector, clock *manualClock) (*Authority, *Pool, *Supervisor, *manualClock) {
+	t.Helper()
 	resolver := poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
 		return ports.BrokerResolvedEndpoint{Identity: "canonical", Policy: r.Policy, Address: "fake"}, nil
 	})
 	pool, err := NewPool(epoch, resolver, connector, clock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
-	supervisor, _ := newTestSupervisor(t, time.Hour)
+	supervisor, idleClock := newTestSupervisor(t, time.Hour)
 	authority, err := NewAuthority(epoch, registry, pool, supervisor)
 	require.NoError(t, err)
 	// The caller owns Registry.Run (see NewAuthority): start the single run and
@@ -39,7 +51,70 @@ func newTestAuthority(t testing.TB, epoch ports.BrokerEpoch, probe ports.BrokerH
 	registryDone := make(chan struct{})
 	go func() { defer close(registryDone); registry.Run(registryCtx) }()
 	t.Cleanup(func() { stopRegistry(); <-registryDone })
-	return authority, registry, pool, supervisor, clock, store
+	return authority, pool, supervisor, idleClock
+}
+
+// newServiceMembershipFixture composes one admitted authority over an
+// observation-disabled registry with the requested membership mode. The store is
+// the caller's, so a test can observe the exact CAS count and inject failures.
+func newServiceMembershipFixture(t testing.TB, store ports.BrokerHostStore, mode MembershipMode) (*Authority, *Registry, *Supervisor, *manualClock) {
+	t.Helper()
+	clock := newManualClock(time.Unix(0, 0))
+	registry, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{
+		MembershipMode:       mode,
+		ObservationDisabled:  true,
+		IncarnationGenerator: (&incarnationSequencer{}).generate,
+	})
+	require.NoError(t, err)
+	registry.jitter = identityJitter
+	authority, _, supervisor, idleClock := composeTestAuthority(t, 1, registry, immediateConnector, clock)
+	return authority, registry, supervisor, idleClock
+}
+
+// requireImmutableRefusal asserts one service-level membership mutation was
+// refused with the typed immutable code 12 and the ports sentinel.
+func requireImmutableRefusal(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	var refusal ports.BrokerError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, ports.BrokerErrorMembershipImmutable, refusal.Code)
+	require.Equal(t, ports.BrokerErrorCode(12), refusal.Code, "immutable membership is the exact code 12")
+	require.ErrorIs(t, err, ports.ErrBrokerMembershipImmutable)
+}
+
+// casThenGateStore commits its membership CAS and then parks the mutation until
+// release, so a test can make a caller cancellation arrive strictly after the
+// durable commit point but before the mutation returns.
+type casThenGateStore struct {
+	*testStore
+	committed chan struct{}
+	release   chan struct{}
+}
+
+func newCASThenGateStore() *casThenGateStore {
+	return &casThenGateStore{testStore: newTestStore(), committed: make(chan struct{}, 1), release: make(chan struct{})}
+}
+
+func (s *casThenGateStore) ReplaceHosts(expected uint64, hosts []ports.BrokerHostRecord) error {
+	if err := s.testStore.ReplaceHosts(expected, hosts); err != nil {
+		return err
+	}
+	select {
+	case s.committed <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return nil
+}
+
+// releaseCAS lets a parked post-commit mutation return.
+func (s *casThenGateStore) releaseCAS() {
+	select {
+	case <-s.release:
+	default:
+		close(s.release)
+	}
 }
 
 // immediateConnector returns one healthy physical connection for any endpoint.
@@ -121,34 +196,38 @@ func TestAuthorityAdmissionContextNotRetained(t *testing.T) {
 func TestAuthorityValidation(t *testing.T) {
 	_, _, pool, supervisor, clock, _ := newTestAuthority(t, 1, nil, immediateConnector)
 
-	observing, err := NewRegistry(1, newTestStore(), newTestProbe(1), clock, nil)
+	// Live membership mutation is composed in this slice, so the authority no
+	// longer refuses a registry that owns remote membership its connections can
+	// now manage: a mutable remote registry is served.
+	mutableRemote, err := NewRegistryWithConfig(1, newTestStore(), newTestProbe(1), clock, nil, RegistryConfig{MembershipMode: MembershipMutable})
 	require.NoError(t, err)
-	_, err = NewAuthority(1, observing, pool, supervisor)
-	require.Error(t, err, "an observing registry must be refused by an offline authority")
+	t.Cleanup(mutableRemote.settle)
+	require.NoError(t, mutableRemote.setHosts(hostRecords(registration(t, "user@host:22", 1))))
+	_, err = NewAuthority(1, mutableRemote, pool, supervisor)
+	require.NoError(t, err, "a mutable remote registry must be served")
 
-	// An observer that is limited to the broker's own daemon is served: it has
-	// no remote membership for the authority's immutable-membership connections
-	// to manage, and its local entry is configured authority rather than
-	// membership.
+	// A local-only observer is served: its entry is configured authority rather
+	// than membership, so it has nothing for the authority's connections to
+	// manage either.
 	localOnly, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{Local: &LocalObservation{
 		DisplayOrigin: "local",
 		Policy:        poolPolicy(),
 		Probe:         newScriptedLocalProbe(1),
 	}})
 	require.NoError(t, err)
+	t.Cleanup(localOnly.settle)
 	_, err = NewAuthority(1, localOnly, pool, supervisor)
 	require.NoError(t, err, "a local-only observer must be served")
 
-	// The same observer stops being served as soon as it owns remote membership
-	// the authority's connections could never manage.
-	observerWithMembership, err := NewRegistry(1, newTestStore(), newTestProbe(1), clock, nil)
-	require.NoError(t, err)
-	require.NoError(t, observerWithMembership.setHosts(hostRecords(registration(t, "user@host:22", 1))))
-	_, err = NewAuthority(1, observerWithMembership, pool, supervisor)
-	require.Error(t, err, "an observer that owns remote membership must be refused")
+	// Construction still rejects remote observation without a probe: a registry
+	// that would observe remotes but owns no probe cannot be constructed, so no
+	// authority ever receives one.
+	_, err = NewRegistry(1, newTestStore(), nil, clock, nil)
+	require.ErrorContains(t, err, "invalid registry dependencies", "remote observation without a probe must be refused")
 
 	disabled, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
+	t.Cleanup(disabled.settle)
 	_, err = NewAuthority(2, disabled, pool, supervisor)
 	require.Error(t, err, "an epoch mismatch must be refused")
 
@@ -449,25 +528,272 @@ func TestServiceShutdownTerminatesOwnedWork(t *testing.T) {
 	require.Zero(t, clients)
 }
 
-func TestServiceOfflineMembershipRefusal(t *testing.T) {
-	authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+// TestServiceImmutableMembershipRefusesEveryMutation proves the immutable
+// connection refuses all three membership mutations with the typed immutable
+// code 12 and the ports sentinel before any durable authority moves: no CAS is
+// attempted, no publication changes, and reconcile stays a no-op.
+func TestServiceImmutableMembershipRefusesEveryMutation(t *testing.T) {
+	store := newMembershipStore()
+	authority, registry, _, _ := newServiceMembershipFixture(t, store, MembershipImmutable)
 	service, err := authority.AdmitClient(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-	err = service.AddHost(context.Background(), "new@host:22")
-	require.ErrorIs(t, err, ErrOfflineMembership)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-
-	removed, err := service.RemoveHost(context.Background(), "new@host:22")
-	require.False(t, removed)
-	require.ErrorIs(t, err, ErrOfflineMembership)
-
-	require.Empty(t, registry.Snapshot().Daemons, "a refused mutation must not touch authority")
 	before := registry.Snapshot()
+	_, err = service.AddHost(context.Background(), "new@host:22", poolPolicy())
+	requireImmutableRefusal(t, err)
+
+	removed, err := service.RemoveHost(context.Background(), registration(t, "new@host:22", 1))
+	require.False(t, removed)
+	requireImmutableRefusal(t, err)
+
+	updated, err := service.UpdateHostPolicy(context.Background(), registration(t, "new@host:22", 1), policyWithTrust("changed-trust"))
+	require.Equal(t, domain.RemoteRegistration{}, updated)
+	requireImmutableRefusal(t, err)
+
+	require.Equal(t, 0, store.casCalls(), "an immutable refusal never reaches the store CAS")
+	require.Equal(t, before, registry.Snapshot(), "a refused mutation must not touch authority")
+
 	service.RequestReconcile("new@host:22")
 	require.Equal(t, before, registry.Snapshot(), "reconcile must be a no-op")
+}
+
+// TestServiceMutableMembershipDelegatesOnce proves an admitted mutable
+// connection delegates each mutation exactly once to durable authority: each
+// call crosses the store CAS exactly once and returns the registry's own
+// result.
+func TestServiceMutableMembershipDelegatesOnce(t *testing.T) {
+	store := newMembershipStore()
+	authority, registry, _, _ := newServiceMembershipFixture(t, store, MembershipMutable)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	added, err := service.AddHost(context.Background(), "user@host:22", poolPolicy())
+	require.NoError(t, err)
+	require.False(t, added.IsZero())
+	require.Equal(t, 1, store.casCalls(), "one addition crosses the store CAS exactly once")
+
+	updated, err := service.UpdateHostPolicy(context.Background(), added, policyWithTrust("changed-trust"))
+	require.NoError(t, err)
+	require.Equal(t, added.Generation+1, updated.Generation)
+	require.Equal(t, added.Incarnation, updated.Incarnation)
+	require.Equal(t, 2, store.casCalls(), "one policy update crosses the store CAS exactly once")
+
+	removed, err := service.RemoveHost(context.Background(), updated)
+	require.NoError(t, err)
+	require.True(t, removed)
+	require.Equal(t, 3, store.casCalls(), "one removal crosses the store CAS exactly once")
+	require.Empty(t, registry.Snapshot().Daemons)
+}
+
+// TestServiceMutationLeasePinsIdleLifecycle proves an in-flight membership
+// mutation holds one operation lease: the idle timer stays disarmed while the
+// mutation is parked past the grace, and the broker expires only after it
+// returns and the lease is released.
+func TestServiceMutationLeasePinsIdleLifecycle(t *testing.T) {
+	store := newCASThenGateStore()
+	authority, _, supervisor, idleClock := newServiceMembershipFixture(t, store, MembershipMutable)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	type outcome struct {
+		registration domain.RemoteRegistration
+		err          error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		registration, err := service.AddHost(context.Background(), "user@host:22", poolPolicy())
+		result <- outcome{registration: registration, err: err}
+	}()
+
+	// The CAS has committed and the mutation is parked, so its operation lease is
+	// held: the idle timer is disarmed even well past the grace.
+	select {
+	case <-store.committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the mutation never reached the store CAS")
+	}
+	_, operations, armed, _ := supervisorState(supervisor)
+	require.Equal(t, 1, operations, "the in-flight mutation holds one operation lease")
+	require.False(t, armed, "a held operation lease disarms the idle timer")
+	idleClock.Advance(time.Hour * 24)
+	requireSupervisorOpen(t, supervisor)
+
+	store.releaseCAS()
+	got := <-result
+	require.NoError(t, got.err)
+	require.False(t, got.registration.IsZero())
+
+	// The lease is released: the idle timer re-arms and the broker expires a
+	// plain grace later. The connection still holds its client lease, so drop it
+	// first.
+	require.NoError(t, service.Close())
+	_, operations, armed, _ = supervisorState(supervisor)
+	require.Zero(t, operations)
+	require.True(t, armed)
+	idleClock.Advance(time.Hour)
+	await(t, supervisor.Done())
+}
+
+// TestServiceCloseCancelsInFlightRegistryMutation proves Close cancels and
+// drains an in-flight registry mutation: the connection context reaches the
+// registry's mutation context, the caller observes the typed cancellation, and
+// Close returns only after the mutation has joined.
+func TestServiceCloseCancelsInFlightRegistryMutation(t *testing.T) {
+	store := newMembershipStore()
+	authority, registry, supervisor, _ := newServiceMembershipFixture(t, store, MembershipMutable)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+
+	// Hold the registry lock so the mutation parks before it consults its
+	// context, and Close can cancel the connection context while it waits.
+	registry.mu.Lock()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			registry.mu.Unlock()
+		}
+	})
+
+	type outcome struct {
+		removed bool
+		err     error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		removed, err := service.RemoveHost(context.Background(), registration(t, "user@host:22", 1))
+		result <- outcome{removed: removed, err: err}
+	}()
+
+	// Wait until the mutation holds its operation lease, which is strictly after
+	// it registered with the connection's drain group.
+	require.Eventually(t, func() bool {
+		_, operations, _, _ := supervisorState(supervisor)
+		return operations == 1
+	}, 5*time.Second, time.Millisecond, "the mutation never reached its operation lease")
+
+	// Close cancels the connection context and waits for the in-flight mutation
+	// to drain. It cannot return while the mutation is parked.
+	closed := make(chan error, 1)
+	go func() { closed <- service.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned before the in-flight mutation drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Release the registry lock: the mutation now observes the cancelled
+	// connection context instead of committing.
+	registry.mu.Unlock()
+	released = true
+
+	got := <-result
+	require.ErrorIs(t, got.err, context.Canceled, "the in-flight mutation observes the connection cancellation")
+	require.False(t, got.removed)
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close never returned after the mutation drained")
+	}
+	require.Zero(t, store.casCalls(), "a cancelled mutation never reaches the store CAS")
+	require.Empty(t, registry.Snapshot().Daemons, "a cancelled mutation never mutates authority")
+}
+
+// TestServiceMutationCancellationAfterCommitStillReportsSuccess proves a caller
+// cancellation that arrives strictly after the durable CAS still reports the
+// committed success: the registry's mutation context is not consulted after
+// commit, so the value crosses the CAS and returns rather than surfacing a
+// cancellation for a mutation that did commit.
+func TestServiceMutationCancellationAfterCommitStillReportsSuccess(t *testing.T) {
+	store := newCASThenGateStore()
+	authority, _, _, _ := newServiceMembershipFixture(t, store, MembershipMutable)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome struct {
+		registration domain.RemoteRegistration
+		err          error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		registration, err := service.AddHost(ctx, "user@host:22", poolPolicy())
+		result <- outcome{registration: registration, err: err}
+	}()
+
+	select {
+	case <-store.committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the mutation never reached the store CAS")
+	}
+	// The commit already happened; a cancellation now cannot un-commit it.
+	cancel()
+	store.releaseCAS()
+
+	got := <-result
+	require.NoError(t, got.err, "a cancellation after the CAS must not turn a committed mutation into a failure")
+	require.False(t, got.registration.IsZero())
+}
+
+// TestServiceMembershipErrorMapping proves the service classifies a durable
+// store outcome-unknown as the typed unknown code with its cause preserved, and
+// surfaces the exact conflict code for a conflicting authority change.
+func TestServiceMembershipErrorTextIsWireSafe(t *testing.T) {
+	secretPath := "/home/alice/.config/vev/private-hosts.json"
+	cause := errors.New(secretPath + "\x00\n" + strings.Repeat("é", ports.BrokerMaxErrorBytes))
+	err := membershipError(ports.BrokerStoreOutcomeUnknownError{Err: cause})
+	var failure ports.BrokerError
+	require.ErrorAs(t, err, &failure)
+	require.NoError(t, failure.Validate())
+	require.LessOrEqual(t, len(failure.Text), ports.BrokerMaxErrorBytes)
+	require.NotContains(t, failure.Text, "\x00")
+	require.NotContains(t, failure.Text, "\n")
+	require.NotContains(t, failure.Text, secretPath)
+	require.Equal(t, "mutation outcome is unknown", failure.Text)
+	require.ErrorIs(t, failure, cause)
+	require.True(t, utf8.ValidString(failure.Text))
+}
+
+func TestServiceMembershipErrorMapping(t *testing.T) {
+	t.Run("outcome unknown maps to outcome-unknown with its cause", func(t *testing.T) {
+		cause := errors.New("power loss")
+		store := newMembershipStore()
+		store.failCAS(ports.BrokerStoreOutcomeUnknownError{Err: cause})
+		authority, _, _, _ := newServiceMembershipFixture(t, store, MembershipMutable)
+		service, err := authority.AdmitClient(context.Background())
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+		_, err = service.AddHost(context.Background(), "user@host:22", poolPolicy())
+		require.Error(t, err)
+		var failure ports.BrokerError
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code)
+		require.ErrorIs(t, err, cause, "the underlying store cause stays inspectable")
+		var unknown ports.BrokerStoreOutcomeUnknownError
+		require.ErrorAs(t, err, &unknown)
+	})
+
+	t.Run("an exact conflict maps to code 11", func(t *testing.T) {
+		store := newMembershipStore()
+		store.failCAS(ports.ErrBrokerHostConflict)
+		authority, _, _, _ := newServiceMembershipFixture(t, store, MembershipMutable)
+		service, err := authority.AdmitClient(context.Background())
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+		_, err = service.UpdateHostPolicy(context.Background(), registration(t, "user@host:22", 1), poolPolicy())
+		require.Error(t, err)
+		var failure ports.BrokerError
+		require.ErrorAs(t, err, &failure)
+		require.Equal(t, ports.BrokerErrorHostConflict, failure.Code)
+		require.Equal(t, ports.BrokerErrorCode(11), failure.Code, "host conflict is the exact code 11")
+		require.ErrorIs(t, err, ports.ErrBrokerHostConflict)
+	})
 }
 
 func TestRegistryObservationDisabledRestoresAndPublishes(t *testing.T) {

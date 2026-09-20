@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -150,7 +151,7 @@ func (s *serverSession) wakePublisher() {
 // bound and runs it in its own goroutine. A duplicate admission is dropped:
 // exactly one completion ever travels for one operation identity, and the peer's
 // own tracker already fences replays.
-func (s *serverSession) startMutation(operation ports.BrokerOperationID, run func(context.Context) (bool, error)) error {
+func (s *serverSession) startMutation(operation ports.BrokerOperationID, kind brokerwire.RegisterMutationKind, run func(context.Context) (domain.RemoteRegistration, bool, error)) error {
 	if err := s.conn.AdmitOperation(operation); err != nil {
 		switch {
 		case errors.Is(err, brokerwire.ErrOperationCompleted), errors.Is(err, brokerwire.ErrOperationPending):
@@ -165,21 +166,33 @@ func (s *serverSession) startMutation(operation ports.BrokerOperationID, run fun
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		removed, err := run(s.ctx)
+		registration, removed, err := run(s.ctx)
 		outcome := ports.BrokerOutcomeOK
 		if err != nil {
 			outcome = ports.BrokerOutcomeFailed
+			var unknown ports.BrokerStoreOutcomeUnknownError
+			var unknownPointer *ports.BrokerStoreOutcomeUnknownError
+			if errors.As(err, &unknown) || errors.As(err, &unknownPointer) {
+				outcome = ports.BrokerOutcomeUnknown
+			}
+			registration = domain.RemoteRegistration{}
+			removed = false
 		}
 		_ = s.conn.CompleteOperation(operation, outcome)
 		if s.ctx.Err() != nil {
 			return
 		}
 		detail := errorDetail(err)
-		if err := s.send(brokerwire.OperationResult{
+		result := brokerwire.OperationResult{
 			Epoch: s.epoch, Connection: s.scope.Connection, Operation: operation,
-			Outcome: outcome, Removed: removed,
+			Outcome: outcome, Removed: removed, Registration: registration,
 			Error: detail, HasError: detail != (brokerwire.ErrorDetail{}),
-		}); err != nil {
+		}
+		if err := result.ValidateForMutation(kind); err != nil {
+			s.abort(errors.Join(ErrProtocol, err))
+			return
+		}
+		if err := s.send(result); err != nil {
 			s.abort(err)
 		}
 	}()

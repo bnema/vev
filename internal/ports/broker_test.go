@@ -510,6 +510,8 @@ func TestBrokerErrorTerminalOutcomes(t *testing.T) {
 		{code: BrokerErrorConflictingPolicy, wantTerminal: false},
 		{code: BrokerErrorExplicitExit, wantTerminal: true},
 		{code: BrokerErrorFatalTerminal, wantTerminal: true},
+		{code: BrokerErrorHostConflict, wantTerminal: false},
+		{code: BrokerErrorMembershipImmutable, wantTerminal: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.code.String(), func(t *testing.T) {

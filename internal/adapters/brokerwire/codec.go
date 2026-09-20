@@ -175,6 +175,17 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Br
 			return nil, ErrInvalidMessage
 		}
 		return encodeClientEnvelope(*m, maxChunkBytes)
+	case UpdateHostPolicy:
+		converted, err := updateHostPolicyToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_UpdateHostPolicy{UpdateHostPolicy: converted}}, nil
+	case *UpdateHostPolicy:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeClientEnvelope(*m, maxChunkBytes)
 	case Reconcile:
 		converted, err := reconcileToWire(m)
 		if err != nil {
@@ -251,6 +262,8 @@ func decodeClientEnvelope(envelope *wire.BrokerClientEnvelope, maxChunkBytes uin
 		return addHostFromWire(payload.AddHost)
 	case *wire.BrokerClientEnvelope_RemoveHost:
 		return removeHostFromWire(payload.RemoveHost)
+	case *wire.BrokerClientEnvelope_UpdateHostPolicy:
+		return updateHostPolicyFromWire(payload.UpdateHostPolicy)
 	case *wire.BrokerClientEnvelope_Reconcile:
 		return reconcileFromWire(payload.Reconcile)
 	case *wire.BrokerClientEnvelope_OpenStream:
@@ -284,10 +297,17 @@ func addHostToWire(m AddHost) (*wire.AddHost, error) {
 	if err := validateBrokerEndpoint(m.Endpoint); err != nil {
 		return nil, err
 	}
+	// Policy is required authority: a zero or invalid policy is refused
+	// here rather than travelling as an absent message the peer must
+	// interpret.
+	if err := m.Policy.Validate(); err != nil {
+		return nil, ErrInvalidMessage
+	}
 	return &wire.AddHost{
 		Scope:       scopeToWire(m.Epoch, m.Connection),
 		OperationId: operationToWire(m.Operation),
 		Endpoint:    m.Endpoint,
+		Policy:      policyToWire(m.Policy),
 	}, nil
 }
 
@@ -307,7 +327,11 @@ func addHostFromWire(message *wire.AddHost) (AddHost, error) {
 	if err := validateBrokerEndpoint(message.GetEndpoint()); err != nil {
 		return AddHost{}, err
 	}
-	return AddHost{Epoch: epoch, Connection: connection, Operation: operation, Endpoint: message.GetEndpoint()}, nil
+	policy, err := policyFromWire(message.GetPolicy())
+	if err != nil {
+		return AddHost{}, ErrInvalidMessage
+	}
+	return AddHost{Epoch: epoch, Connection: connection, Operation: operation, Endpoint: message.GetEndpoint(), Policy: policy}, nil
 }
 
 func removeHostToWire(m RemoveHost) (*wire.RemoveHost, error) {
@@ -320,13 +344,15 @@ func removeHostToWire(m RemoveHost) (*wire.RemoveHost, error) {
 	if err := m.Operation.Validate(); err != nil {
 		return nil, ErrInvalidMessage
 	}
-	if err := validateBrokerEndpoint(m.Endpoint); err != nil {
-		return nil, err
+	// Removal carries exact authority, never a bare endpoint: a zero or
+	// partial registration could not fence a remove/re-add race.
+	if err := m.Registration.Validate(); err != nil {
+		return nil, ErrInvalidMessage
 	}
 	return &wire.RemoveHost{
-		Scope:       scopeToWire(m.Epoch, m.Connection),
-		OperationId: operationToWire(m.Operation),
-		Endpoint:    m.Endpoint,
+		Scope:        scopeToWire(m.Epoch, m.Connection),
+		OperationId:  operationToWire(m.Operation),
+		Registration: registrationToWire(m.Registration),
 	}, nil
 }
 
@@ -343,10 +369,59 @@ func removeHostFromWire(message *wire.RemoveHost) (RemoveHost, error) {
 	if err != nil {
 		return RemoveHost{}, ErrInvalidMessage
 	}
-	if err := validateBrokerEndpoint(message.GetEndpoint()); err != nil {
-		return RemoveHost{}, err
+	registration, err := registrationFromWire(message.GetRegistration())
+	if err != nil {
+		return RemoveHost{}, ErrInvalidMessage
 	}
-	return RemoveHost{Epoch: epoch, Connection: connection, Operation: operation, Endpoint: message.GetEndpoint()}, nil
+	return RemoveHost{Epoch: epoch, Connection: connection, Operation: operation, Registration: registration}, nil
+}
+
+func updateHostPolicyToWire(m UpdateHostPolicy) (*wire.UpdateHostPolicy, error) {
+	if m.Epoch == 0 {
+		return nil, ErrInvalidMessage
+	}
+	if err := m.Connection.Validate(); err != nil {
+		return nil, ErrInvalidMessage
+	}
+	if err := m.Operation.Validate(); err != nil {
+		return nil, ErrInvalidMessage
+	}
+	if err := m.Registration.Validate(); err != nil {
+		return nil, ErrInvalidMessage
+	}
+	if err := m.Policy.Validate(); err != nil {
+		return nil, ErrInvalidMessage
+	}
+	return &wire.UpdateHostPolicy{
+		Scope:        scopeToWire(m.Epoch, m.Connection),
+		OperationId:  operationToWire(m.Operation),
+		Registration: registrationToWire(m.Registration),
+		Policy:       policyToWire(m.Policy),
+	}, nil
+}
+
+func updateHostPolicyFromWire(message *wire.UpdateHostPolicy) (UpdateHostPolicy, error) {
+	var out UpdateHostPolicy
+	if message == nil {
+		return out, ErrInvalidMessage
+	}
+	epoch, connection, err := scopeFromWire(message.GetScope())
+	if err != nil {
+		return UpdateHostPolicy{}, ErrInvalidMessage
+	}
+	operation, err := operationFromWire(message.GetOperationId())
+	if err != nil {
+		return UpdateHostPolicy{}, ErrInvalidMessage
+	}
+	registration, err := registrationFromWire(message.GetRegistration())
+	if err != nil {
+		return UpdateHostPolicy{}, ErrInvalidMessage
+	}
+	policy, err := policyFromWire(message.GetPolicy())
+	if err != nil {
+		return UpdateHostPolicy{}, ErrInvalidMessage
+	}
+	return UpdateHostPolicy{Epoch: epoch, Connection: connection, Operation: operation, Registration: registration, Policy: policy}, nil
 }
 
 func reconcileToWire(m Reconcile) (*wire.Reconcile, error) {
@@ -1220,10 +1295,29 @@ func operationResultToWire(m OperationResult) (*wire.OperationResult, error) {
 	if err := result.Validate(); err != nil {
 		return nil, ErrInvalidMessage
 	}
+	hasRegistration := m.Registration != (domain.RemoteRegistration{})
+	// The presence rules that hold without knowing the request kind: removal
+	// and registration never travel together, a failed or outcome-unknown
+	// result carries neither authority and must carry its typed error, and a
+	// successful result carries no error. The per-kind rule (an
+	// AddHost/UpdateHostPolicy success needs a registration, a RemoveHost
+	// success must not) is enforced where the pending request is known; the
+	// stateless codec has no such state.
+	if err := validateResultAuthority(m.Outcome, m.Removed, hasRegistration, m.HasError); err != nil {
+		return nil, err
+	}
+	var registration *wire.RemoteRegistration
+	if hasRegistration {
+		if err := m.Registration.Validate(); err != nil {
+			return nil, ErrInvalidMessage
+		}
+		registration = registrationToWire(m.Registration)
+	}
 	out := &wire.OperationResult{
 		Scope:       scopeToWire(m.Epoch, m.Connection),
 		OperationId: operationToWire(m.Operation),
 		Outcome:     outcome, Removed: m.Removed,
+		Registration: registration,
 	}
 	if m.HasError {
 		out.Error = errorDetailToWire(m.Error)
@@ -1255,9 +1349,18 @@ func operationResultFromWire(message *wire.OperationResult) (OperationResult, er
 	default:
 		return OperationResult{}, ErrInvalidMessage
 	}
+	var registration domain.RemoteRegistration
+	if message.GetRegistration() != nil {
+		converted, err := registrationFromWire(message.GetRegistration())
+		if err != nil {
+			return OperationResult{}, ErrInvalidMessage
+		}
+		registration = converted
+	}
 	result := OperationResult{
 		Epoch: epoch, Connection: connection, Operation: operation,
 		Outcome: outcome, Removed: message.GetRemoved(),
+		Registration: registration,
 	}
 	if message.GetError() != nil {
 		detail, err := errorDetailFromWire(message.GetError())
@@ -1266,6 +1369,9 @@ func operationResultFromWire(message *wire.OperationResult) (OperationResult, er
 		}
 		result.Error = detail
 		result.HasError = true
+	}
+	if err := validateResultAuthority(result.Outcome, result.Removed, registration != (domain.RemoteRegistration{}), result.HasError); err != nil {
+		return OperationResult{}, err
 	}
 	semantic := ports.BrokerOperationResult{Operation: result.Operation, Outcome: result.Outcome}
 	if result.HasError {

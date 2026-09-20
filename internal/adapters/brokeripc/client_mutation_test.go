@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -122,6 +123,7 @@ func newGatedClient(t *testing.T, cfg Config) (*client, *gatedTransport) {
 		ctx:       ctx,
 		cancel:    cancel,
 		pending:   make(map[ports.BrokerOperationID]chan operationResult),
+		kinds:     make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
 		streams:   make(map[ports.BrokerStreamID]*clientStream),
 		done:      make(chan struct{}),
 	}
@@ -129,36 +131,102 @@ func newGatedClient(t *testing.T, cfg Config) (*client, *gatedTransport) {
 	return c, transport
 }
 
-// mutationOutcome is one AddHost or RemoveHost result.
+// mutationOutcome is one membership mutation result: the removal bool, the
+// authoritative registration (additions and policy updates), and the typed
+// error a caller observes.
 type mutationOutcome struct {
-	removed bool
-	err     error
+	removed      bool
+	registration domain.RemoteRegistration
+	err          error
 }
 
-// mutationCall adapts one mutating operation to the shared table shape.
+// mutationCall adapts one public ports.BrokerService membership method to the
+// shared table shape. Every entry drives the real public API, so the wire
+// request the carriage captures is exactly the one production sends.
 type mutationCall struct {
 	name        string
 	endpoint    string
 	wantRemoved bool
-	call        func(ctx context.Context, c *client, endpoint string) (bool, error)
+	kind        brokerwire.RegisterMutationKind
+	call        func(ctx context.Context, c *client) (bool, domain.RemoteRegistration, error)
+	// success builds the payload of one legal wire result for this request
+	// kind; the test fills in the connection scope and operation identity.
+	success func(operation ports.BrokerOperationID) brokerwire.OperationResult
 }
 
 var mutationCalls = []mutationCall{
 	{
 		name:     "AddHost",
 		endpoint: "new@host:22",
-		call: func(ctx context.Context, c *client, endpoint string) (bool, error) {
-			return false, c.AddHost(ctx, endpoint)
+		kind:     brokerwire.MutationKindAddHost,
+		call: func(ctx context.Context, c *client) (bool, domain.RemoteRegistration, error) {
+			registration, err := c.AddHost(ctx, "new@host:22", testPolicy())
+			return false, registration, err
+		},
+		success: func(operation ports.BrokerOperationID) brokerwire.OperationResult {
+			return brokerwire.OperationResult{
+				Operation: operation, Outcome: ports.BrokerOutcomeOK,
+				Registration: mutationRegistration("new@host:22"),
+			}
 		},
 	},
 	{
 		name:        "RemoveHost",
 		endpoint:    "known",
 		wantRemoved: true,
-		call: func(ctx context.Context, c *client, endpoint string) (bool, error) {
-			return c.RemoveHost(ctx, endpoint)
+		kind:        brokerwire.MutationKindRemoveHost,
+		call: func(ctx context.Context, c *client) (bool, domain.RemoteRegistration, error) {
+			removed, err := c.RemoveHost(ctx, mutationRegistration("known"))
+			return removed, domain.RemoteRegistration{}, err
+		},
+		success: func(operation ports.BrokerOperationID) brokerwire.OperationResult {
+			return brokerwire.OperationResult{Operation: operation, Outcome: ports.BrokerOutcomeOK, Removed: true}
 		},
 	},
+	{
+		name:     "UpdateHostPolicy",
+		endpoint: "known",
+		kind:     brokerwire.MutationKindUpdateHostPolicy,
+		call: func(ctx context.Context, c *client) (bool, domain.RemoteRegistration, error) {
+			registration, err := c.UpdateHostPolicy(ctx, mutationRegistration("known"), testPolicy())
+			return false, registration, err
+		},
+		success: func(operation ports.BrokerOperationID) brokerwire.OperationResult {
+			expected := mutationRegistration("known")
+			expected.Generation++
+			return brokerwire.OperationResult{Operation: operation, Outcome: ports.BrokerOutcomeOK, Registration: expected}
+		},
+	},
+}
+
+// mutationRegistration builds one valid exact registration for a mutation
+// fixture.
+func mutationRegistration(endpoint string) domain.RemoteRegistration {
+	registration, err := domain.NewRemoteRegistration(endpoint, [16]byte{0x11})
+	if err != nil {
+		panic(err)
+	}
+	return registration
+}
+
+// run drives one table entry through the public API.
+func (call mutationCall) run(ctx context.Context, c *client) (bool, domain.RemoteRegistration, error) {
+	return call.call(ctx, c)
+}
+
+// deliverSuccess plays one legal success result for a captured request.
+func (call mutationCall) deliverSuccess(t *testing.T, c *client, operation ports.BrokerOperationID) {
+	t.Helper()
+	result := call.success(operation)
+	result.Epoch = c.scope.Epoch
+	result.Connection = c.scope.Connection
+	require.NoError(t, c.dispatch(result))
+}
+
+// deliverResult plays one explicit broker reply for a captured request.
+func deliverResult(t *testing.T, c *client, result brokerwire.OperationResult) {
+	t.Helper()
+	require.NoError(t, c.dispatch(result))
 }
 
 // awaitResult waits for one mutation call to return.
@@ -195,23 +263,57 @@ func operationOf(t *testing.T, message brokerwire.ClientMessage) ports.BrokerOpe
 		return m.Operation
 	case brokerwire.RemoveHost:
 		return m.Operation
+	case brokerwire.UpdateHostPolicy:
+		return m.Operation
 	default:
 		t.Fatalf("unexpected client message %T", message)
 		return ports.BrokerOperationID{}
 	}
 }
 
-// endpointOf extracts the target of one captured request.
+// endpointOf extracts the target of one captured request. An AddHost names
+// its endpoint directly; a RemoveHost or UpdateHostPolicy carries exact
+// registration authority, whose endpoint is the target.
 func endpointOf(t *testing.T, message brokerwire.ClientMessage) string {
 	t.Helper()
 	switch m := message.(type) {
 	case brokerwire.AddHost:
 		return m.Endpoint
 	case brokerwire.RemoveHost:
-		return m.Endpoint
+		return m.Registration.Endpoint
+	case brokerwire.UpdateHostPolicy:
+		return m.Registration.Endpoint
 	default:
 		t.Fatalf("unexpected client message %T", message)
 		return ""
+	}
+}
+
+// registrationOf extracts the exact expected registration of one captured
+// request. An AddHost carries no expected authority, only its policy.
+func registrationOf(t *testing.T, message brokerwire.ClientMessage) (domain.RemoteRegistration, bool) {
+	t.Helper()
+	switch m := message.(type) {
+	case brokerwire.RemoveHost:
+		return m.Registration, true
+	case brokerwire.UpdateHostPolicy:
+		return m.Registration, true
+	default:
+		return domain.RemoteRegistration{}, false
+	}
+}
+
+// policyOf extracts the policy of one captured request.
+func policyOf(t *testing.T, message brokerwire.ClientMessage) ports.BrokerPolicy {
+	t.Helper()
+	switch m := message.(type) {
+	case brokerwire.AddHost:
+		return m.Policy
+	case brokerwire.UpdateHostPolicy:
+		return m.Policy
+	default:
+		t.Fatalf("client message %T carries no policy", message)
+		return ports.BrokerPolicy{}
 	}
 }
 
@@ -226,19 +328,75 @@ func pendingOperations(c *client) []ports.BrokerOperationID {
 	return out
 }
 
-// deliverResult plays one broker reply for a captured request.
-func deliverResult(t *testing.T, c *client, operation ports.BrokerOperationID, outcome ports.BrokerMutationOutcome, removed bool) {
+func requireNoPendingMutationState(t *testing.T, c *client) {
 	t.Helper()
-	require.NoError(t, c.dispatch(brokerwire.OperationResult{
-		Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-		Operation: operation, Outcome: outcome, Removed: removed,
-	}))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.Empty(t, c.pending, "pending replies must be released")
+	require.Empty(t, c.kinds, "pending mutation kinds must be released")
 }
 
-// TestMutationSendUncertaintyTaxonomy pins the decision table for both mutating
-// operations: a request that definitely never left is a definite error with zero
+// TestPublicMembershipAPIDelegatesExactAuthority proves the public membership
+// surface reaches the carriage with the caller's exact authority and returns the
+// broker's authority verbatim: an addition returns the minted registration, a
+// policy update returns the generation-advanced registration, and a removal
+// returns the exact bool. Each call sends exactly one request carrying the
+// caller's policy or exact registration, and never re-derives one locally.
+func TestPublicMembershipAPIDelegatesExactAuthority(t *testing.T) {
+	policy := testPolicy()
+	cases := []struct {
+		name  string
+		index int
+	}{
+		{name: "AddHost", index: 0},
+		{name: "RemoveHost", index: 1},
+		{name: "UpdateHostPolicy", index: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := mutationCalls[tc.index]
+			c, g := newGatedClient(t, Config{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			results := make(chan mutationOutcome, 1)
+			go func() {
+				removed, registration, err := call.run(ctx, c)
+				results <- mutationOutcome{removed: removed, registration: registration, err: err}
+			}()
+
+			request := awaitSend(t, g)
+			operation := operationOf(t, request)
+			require.Equal(t, call.endpoint, endpointOf(t, request), "the captured request is the caller's own")
+			if expected, ok := registrationOf(t, request); ok {
+				require.Equal(t, mutationRegistration(call.endpoint), expected,
+					"the exact expected registration must travel unmodified")
+				require.NotZero(t, expected.Generation, "a removal or update never drops its fencing generation")
+			}
+			if call.kind != brokerwire.MutationKindRemoveHost {
+				require.Equal(t, policy, policyOf(t, request), "the caller's exact policy must travel")
+			}
+			kind, ok := brokerwire.MutationKindOf(request)
+			require.True(t, ok, "the captured request must be a membership mutation")
+			require.Equal(t, call.kind, kind, "the client must emit the request kind the table names")
+			g.releaseSend(nil)
+			call.deliverSuccess(t, c, operation)
+
+			got := awaitResult(t, results)
+			require.NoError(t, got.err)
+			require.Equal(t, call.wantRemoved, got.removed)
+			want := call.success(operation).Registration
+			require.Equal(t, want, got.registration, "the client returns the broker's authority verbatim")
+			require.Equal(t, 1, g.sendCount(), "one delegation is exactly one wire request")
+			require.Empty(t, pendingOperations(c))
+		})
+	}
+}
+
+// TestMutationSendUncertaintyTaxonomy pins the decision table for every mutating
+// operation: a request that definitely never left is a definite error with zero
 // sends; any failure observed after the attempt was launched is outcome-unknown
-// with exactly one send.
+// with exactly one send and no replay.
 func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 	scenarios := []struct {
 		name string
@@ -273,10 +431,31 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 			wantUnknown: true,
 		},
 		{
+			name: "reply lost after the request was sent",
+			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+				_ = awaitSend(t, g)
+				g.releaseSend(nil)
+				// The attempt completed, so the call now waits for its reply; only
+				// the connection's terminal outcome ends that wait.
+				require.NoError(t, c.Close())
+			},
+			wantSends:   1,
+			wantUnknown: true,
+		},
+		{
 			name: "Send fails after the request was captured",
 			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
 				_ = awaitSend(t, g)
 				g.releaseSend(errTestCarriage)
+			},
+			wantSends:   1,
+			wantUnknown: true,
+		},
+		{
+			name: "carriage EOF after the request was captured",
+			drive: func(t *testing.T, c *client, g *gatedTransport, cancel context.CancelFunc) {
+				_ = awaitSend(t, g)
+				g.releaseSend(io.EOF)
 			},
 			wantSends:   1,
 			wantUnknown: true,
@@ -293,14 +472,16 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 				}
 				results := make(chan mutationOutcome, 1)
 				go func() {
-					removed, err := call.call(ctx, c, call.endpoint)
-					results <- mutationOutcome{removed: removed, err: err}
+					removed, registration, err := call.run(ctx, c)
+					results <- mutationOutcome{removed: removed, registration: registration, err: err}
 				}()
 				if tt.drive != nil {
 					tt.drive(t, c, g, cancel)
 				}
 				got := awaitResult(t, results)
 				require.False(t, got.removed, "no reply means the target is never reported removed")
+				require.Equal(t, domain.RemoteRegistration{}, got.registration,
+					"no reply means no registration authority is invented")
 				if tt.wantUnknown {
 					var failure ports.BrokerError
 					require.ErrorAs(t, got.err, &failure)
@@ -313,7 +494,7 @@ func TestMutationSendUncertaintyTaxonomy(t *testing.T) {
 						"a request that never left must not be reported as a broker outcome")
 				}
 				require.Equal(t, tt.wantSends, g.sendCount(), "the request must travel at most once")
-				require.Empty(t, pendingOperations(c), "every mutation releases its pending slot")
+				requireNoPendingMutationState(t, c)
 			})
 		}
 	}
@@ -327,24 +508,13 @@ func TestMutationDefiniteFailureRecordsAndReleases(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Driving mutate directly makes the operation identity observable even
-	// though the request is never encoded for the wire.
-	var operation ports.BrokerOperationID
-	result, err := c.mutate(ctx, func(id ports.BrokerOperationID) brokerwire.ClientMessage {
-		operation = id
-		return brokerwire.AddHost{
-			Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: id, Endpoint: "pre@host:22",
-		}
-	})
+	// Driving the public API with an already-cancelled caller is the definite
+	// no-dispatch case: no request is encoded for the wire.
+	added, err := c.AddHost(ctx, "pre@host:22", testPolicy())
 	require.ErrorIs(t, err, context.Canceled)
-	require.Equal(t, operationResult{}, result)
-	require.NotZero(t, operation)
+	require.Equal(t, domain.RemoteRegistration{}, added)
 	require.Zero(t, g.sendCount(), "a pre-cancelled caller never enters the carriage")
 	require.Empty(t, pendingOperations(c), "the definite failure releases its pending slot")
-
-	// The identity is recorded with an outcome, not left in flight: admitting it
-	// again is deduped, which is only true once the tracker was completed.
-	require.ErrorIs(t, c.conn.AdmitOperation(operation), brokerwire.ErrOperationCompleted)
 
 	// The bound of one proves the slot is genuinely free: a fresh mutation is
 	// admitted and completes normally.
@@ -352,12 +522,13 @@ func TestMutationDefiniteFailureRecordsAndReleases(t *testing.T) {
 	defer cancelFresh()
 	results := make(chan mutationOutcome, 1)
 	go func() {
-		removed, callErr := c.RemoveHost(fresh, "known")
-		results <- mutationOutcome{removed: removed, err: callErr}
+		removed, registration, callErr := mutationCalls[1].run(fresh, c)
+		results <- mutationOutcome{removed: removed, registration: registration, err: callErr}
 	}()
 	request := awaitSend(t, g)
+	operation := operationOf(t, request)
 	g.releaseSend(nil)
-	deliverResult(t, c, operationOf(t, request), ports.BrokerOutcomeOK, true)
+	mutationCalls[1].deliverSuccess(t, c, operation)
 	got := awaitResult(t, results)
 	require.NoError(t, got.err)
 	require.True(t, got.removed)
@@ -376,12 +547,13 @@ func TestMutationUnknownOutcomeReleasesWithoutResend(t *testing.T) {
 
 			results := make(chan mutationOutcome, 1)
 			go func() {
-				removed, err := call.call(ctx, c, call.endpoint)
-				results <- mutationOutcome{removed: removed, err: err}
+				removed, registration, err := call.run(ctx, c)
+				results <- mutationOutcome{removed: removed, registration: registration, err: err}
 			}()
 			request := awaitSend(t, g)
 			operation := operationOf(t, request)
 			require.Equal(t, call.endpoint, endpointOf(t, request), "the captured request is the caller's own")
+			g.releaseSend(nil)
 			cancel()
 			got := awaitResult(t, results)
 			var failure ports.BrokerError
@@ -389,19 +561,18 @@ func TestMutationUnknownOutcomeReleasesWithoutResend(t *testing.T) {
 			require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code)
 			require.False(t, got.removed)
 			require.Equal(t, 1, g.sendCount(), "an uncertain attempt is never resent")
-			// The cancelled attempt is still held inside the carriage. Hand it its
-			// result now, so the next mutation's attempt is the only one waiting
-			// on the shared release channel.
-			g.releaseSend(errTestCarriage)
 
 			// The identity was completed once, so its pending slot is released
 			// rather than left in flight.
 			require.ErrorIs(t, c.conn.AdmitOperation(operation), brokerwire.ErrOperationCompleted)
 			require.Empty(t, pendingOperations(c))
 
-			// A late result for the completed identity is dropped, and it never
-			// provokes another wire attempt.
-			deliverResult(t, c, operation, ports.BrokerOutcomeOK, true)
+			// A late legal result for the completed identity is dropped, and it
+			// never provokes another wire attempt.
+			late := call.success(operation)
+			late.Epoch = c.scope.Epoch
+			late.Connection = c.scope.Connection
+			deliverResult(t, c, late)
 			require.Empty(t, pendingOperations(c))
 			require.Equal(t, 1, g.sendCount())
 
@@ -411,12 +582,12 @@ func TestMutationUnknownOutcomeReleasesWithoutResend(t *testing.T) {
 			defer cancelFresh()
 			next := make(chan mutationOutcome, 1)
 			go func() {
-				removed, err := call.call(fresh, c, call.endpoint)
-				next <- mutationOutcome{removed: removed, err: err}
+				removed, registration, err := call.run(fresh, c)
+				next <- mutationOutcome{removed: removed, registration: registration, err: err}
 			}()
 			second := awaitSend(t, g)
 			g.releaseSend(nil)
-			deliverResult(t, c, operationOf(t, second), ports.BrokerOutcomeOK, call.wantRemoved)
+			call.deliverSuccess(t, c, operationOf(t, second))
 			done := awaitResult(t, next)
 			require.NoError(t, done.err)
 			require.Equal(t, call.wantRemoved, done.removed)
@@ -426,7 +597,7 @@ func TestMutationUnknownOutcomeReleasesWithoutResend(t *testing.T) {
 }
 
 // TestMutationDeliveredReplyIsDefinite proves an ordinary delivered reply stays
-// the definite outcome for both operations, and a repeated result for the same
+// the definite outcome for every operation, and a repeated result for the same
 // identity changes nothing.
 func TestMutationDeliveredReplyIsDefinite(t *testing.T) {
 	for _, call := range mutationCalls {
@@ -437,14 +608,14 @@ func TestMutationDeliveredReplyIsDefinite(t *testing.T) {
 
 			results := make(chan mutationOutcome, 1)
 			go func() {
-				removed, err := call.call(ctx, c, call.endpoint)
-				results <- mutationOutcome{removed: removed, err: err}
+				removed, registration, err := call.run(ctx, c)
+				results <- mutationOutcome{removed: removed, registration: registration, err: err}
 			}()
 			request := awaitSend(t, g)
 			operation := operationOf(t, request)
 			require.Equal(t, call.endpoint, endpointOf(t, request))
 			g.releaseSend(nil)
-			deliverResult(t, c, operation, ports.BrokerOutcomeOK, call.wantRemoved)
+			call.deliverSuccess(t, c, operation)
 			got := awaitResult(t, results)
 			require.NoError(t, got.err)
 			require.Equal(t, call.wantRemoved, got.removed)
@@ -452,11 +623,222 @@ func TestMutationDeliveredReplyIsDefinite(t *testing.T) {
 			require.Empty(t, pendingOperations(c))
 
 			// A replayed result for an already settled identity is dropped.
-			deliverResult(t, c, operation, ports.BrokerOutcomeUnknown, true)
+			replay := call.success(operation)
+			replay.Epoch = c.scope.Epoch
+			replay.Connection = c.scope.Connection
+			deliverResult(t, c, replay)
 			require.Empty(t, pendingOperations(c))
 			require.Equal(t, 1, g.sendCount())
 		})
 	}
+}
+
+// TestMutationInvalidResultIsOutcomeUnknownAndAbortsProtocol proves every result
+// that cannot carry authority for its request is refused rather than applied: a
+// result of the wrong kind, a success missing its registration authority, a
+// removal success that also carries a registration, and a result with a
+// malformed error detail each complete the caller as outcome-unknown and settle
+// the connection with a malformed-frame protocol violation.
+func TestMutationInvalidResultIsOutcomeUnknownAndAbortsProtocol(t *testing.T) {
+	cases := []struct {
+		name   string
+		call   mutationCall
+		result func(c *client, operation ports.BrokerOperationID) brokerwire.OperationResult
+	}{
+		{
+			name: "wrong kind for an addition",
+			call: mutationCalls[0],
+			result: func(c *client, operation ports.BrokerOperationID) brokerwire.OperationResult {
+				return brokerwire.OperationResult{
+					Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation,
+					Outcome: ports.BrokerOutcomeOK, Removed: true,
+				}
+			},
+		},
+		{
+			name: "addition success missing its registration",
+			call: mutationCalls[0],
+			result: func(c *client, operation ports.BrokerOperationID) brokerwire.OperationResult {
+				return brokerwire.OperationResult{
+					Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation,
+					Outcome: ports.BrokerOutcomeOK,
+				}
+			},
+		},
+		{
+			name: "policy update success missing its registration",
+			call: mutationCalls[2],
+			result: func(c *client, operation ports.BrokerOperationID) brokerwire.OperationResult {
+				return brokerwire.OperationResult{
+					Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation,
+					Outcome: ports.BrokerOutcomeOK,
+				}
+			},
+		},
+		{
+			name: "removal success carrying a registration",
+			call: mutationCalls[1],
+			result: func(c *client, operation ports.BrokerOperationID) brokerwire.OperationResult {
+				return brokerwire.OperationResult{
+					Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation,
+					Outcome: ports.BrokerOutcomeOK, Removed: true, Registration: mutationRegistration("known"),
+				}
+			},
+		},
+		{
+			name: "malformed error detail",
+			call: mutationCalls[0],
+			result: func(c *client, operation ports.BrokerOperationID) brokerwire.OperationResult {
+				return brokerwire.OperationResult{
+					Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation,
+					Outcome: ports.BrokerOutcomeFailed,
+					Error:   brokerwire.ErrorDetail{Code: ports.BrokerErrorCode(99), Text: "bogus"}, HasError: true,
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, g := newGatedClient(t, Config{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			results := make(chan mutationOutcome, 1)
+			go func() {
+				removed, registration, err := tc.call.run(ctx, c)
+				results <- mutationOutcome{removed: removed, registration: registration, err: err}
+			}()
+			request := awaitSend(t, g)
+			operation := operationOf(t, request)
+			g.releaseSend(nil)
+
+			dispatchErr := c.dispatch(tc.result(c, operation))
+			require.Error(t, dispatchErr, "an invalid result must settle the connection")
+			require.ErrorIs(t, dispatchErr, ErrMalformedFrame, "an invalid result is a protocol violation")
+
+			got := awaitResult(t, results)
+			var failure ports.BrokerError
+			require.ErrorAs(t, got.err, &failure)
+			require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
+				"a result that cannot be applied must never look like a definite outcome")
+			require.False(t, got.removed)
+			require.Equal(t, domain.RemoteRegistration{}, got.registration)
+			require.Equal(t, 1, g.sendCount(), "an invalid result must never provoke a replay")
+			require.Empty(t, pendingOperations(c))
+		})
+	}
+}
+
+// scriptedTransport is a client carriage whose single inbound frame can be
+// injected: the reader goroutine consumes it and then blocks until the test
+// closes the carriage. It lets a test drive the client's real run loop with one
+// malformed frame and observe how a pending mutation is settled.
+type scriptedTransport struct {
+	ready chan wire.Envelope
+	done  chan struct{}
+	once  sync.Once
+
+	mu    sync.Mutex
+	sends []wire.Envelope
+}
+
+func newScriptedTransport() *scriptedTransport {
+	return &scriptedTransport{ready: make(chan wire.Envelope, 1), done: make(chan struct{})}
+}
+
+func (t *scriptedTransport) deliver(envelope wire.Envelope) { t.ready <- envelope }
+
+func (t *scriptedTransport) Send(envelope wire.Envelope) error {
+	t.mu.Lock()
+	t.sends = append(t.sends, envelope)
+	t.mu.Unlock()
+	return nil
+}
+
+func (t *scriptedTransport) RecvBounded(uint64) (wire.Envelope, error) {
+	select {
+	case envelope := <-t.ready:
+		return envelope, nil
+	case <-t.done:
+		return wire.Envelope{}, io.EOF
+	}
+}
+
+func (t *scriptedTransport) Recv() (wire.Envelope, error) { return t.RecvBounded(0) }
+
+func (t *scriptedTransport) Close() error {
+	t.once.Do(func() { close(t.done) })
+	return nil
+}
+
+func (t *scriptedTransport) sendCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.sends)
+}
+
+// TestMalformedResultFrameSettlesPendingMutationAsUnknown proves a malformed
+// server frame the reader refuses settles the connection and is reported to a
+// pending mutation as outcome-unknown, never as a definite failure: the request
+// was already sent, so the caller must refresh rather than replay it.
+func TestMalformedResultFrameSettlesPendingMutationAsUnknown(t *testing.T) {
+	transport := newScriptedTransport()
+	scope := brokerwire.Scope{
+		Epoch:      ports.BrokerEpoch(0x72),
+		Connection: ports.BrokerConnectionID{0x72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01},
+	}
+	conn, err := brokerwire.NewConnection(scope)
+	require.NoError(t, err)
+	require.NoError(t, conn.SignalPreamble())
+	require.NoError(t, conn.Register())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &client{
+		transport: transport,
+		ceilings:  brokerwire.DefaultCeilings(),
+		scope:     scope,
+		conn:      conn,
+		cfg:       Config{}.withDefaults(),
+		ctx:       ctx,
+		cancel:    cancel,
+		pending:   make(map[ports.BrokerOperationID]chan operationResult),
+		kinds:     make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
+		streams:   make(map[ports.BrokerStreamID]*clientStream),
+		done:      make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	go c.run()
+
+	results := make(chan mutationOutcome, 1)
+	go func() {
+		removed, err := c.RemoveHost(context.Background(), mutationRegistration("known"))
+		results <- mutationOutcome{removed: removed, err: err}
+	}()
+	require.Eventually(t, func() bool { return transport.sendCount() == 1 }, 5*time.Second, time.Millisecond,
+		"the mutation request must be launched before the malformed frame arrives")
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	require.Equal(t, 1, pending, "the mutation must still be pending when the malformed frame arrives")
+
+	// One frame the strict scanner refuses: a payload that is not a valid server
+	// envelope. The reader settles the connection on it.
+	transport.deliver(wire.Envelope{Payload: []byte{0xFF, 0xFF, 0xFF}})
+
+	got := awaitResult(t, results)
+	var failure ports.BrokerError
+	require.ErrorAs(t, got.err, &failure)
+	require.Equal(t, ports.BrokerErrorOutcomeUnknown, failure.Code,
+		"a malformed frame after dispatch must never look like a definite outcome")
+	require.False(t, got.removed)
+	require.Equal(t, domain.RemoteRegistration{}, got.registration)
+	require.Equal(t, 1, transport.sendCount(), "the request must have travelled exactly once")
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the malformed frame must settle the connection")
+	}
+	require.ErrorIs(t, c.Err(), ErrMalformedFrame)
 }
 
 // TestSendContextPreflightClassification pins the private helper's taxonomy
@@ -478,7 +860,7 @@ func TestSendContextPreflightClassification(t *testing.T) {
 		cancel()
 		attempted, err := c.sendContext(ctx, brokerwire.AddHost{
 			Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-			Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22",
+			Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22", Policy: testPolicy(),
 		})
 		require.False(t, attempted)
 		require.ErrorIs(t, err, context.Canceled)
@@ -490,7 +872,7 @@ func TestSendContextPreflightClassification(t *testing.T) {
 		require.NoError(t, c.Close())
 		attempted, err := c.sendContext(context.Background(), brokerwire.AddHost{
 			Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-			Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22",
+			Operation: ports.BrokerOperationID{0x01}, Endpoint: "pre@host:22", Policy: testPolicy(),
 		})
 		require.False(t, attempted)
 		require.ErrorIs(t, err, ErrConnectionClosed)
@@ -507,7 +889,7 @@ func TestSendContextPreflightClassification(t *testing.T) {
 		go func() {
 			attempted, err := c.sendContext(context.Background(), brokerwire.RemoveHost{
 				Epoch: c.scope.Epoch, Connection: c.scope.Connection,
-				Operation: ports.BrokerOperationID{0x02}, Endpoint: "known",
+				Operation: ports.BrokerOperationID{0x02}, Registration: mutationRegistration("known"),
 			})
 			done <- sendResult{attempted: attempted, err: err}
 		}()

@@ -43,14 +43,11 @@ func (r *rawCarriage) send(t *testing.T, message brokerwire.ClientMessage) {
 	require.NoError(t, r.transport.Send(wire.Envelope{Payload: payload}))
 }
 
-// recv reads and decodes one server message.
+// recv reads and decodes one server message under the standard test bound, so a
+// broken session fails as a bounded test error instead of hanging the package.
 func (r *rawCarriage) recv(t *testing.T) brokerwire.ServerMessage {
 	t.Helper()
-	envelope, err := r.transport.RecvBounded(r.ceilings.MaxReceiveEnvelopeBytes)
-	require.NoError(t, err)
-	message, err := brokerwire.DecodeServer(envelope.Payload, r.ceilings.MaxReceiveEnvelopeBytes, r.ceilings.StreamChunkLimit)
-	require.NoError(t, err)
-	return message
+	return r.recvWithin(t, 5*time.Second)
 }
 
 // register completes the registration exchange and returns the assigned scope.
@@ -127,8 +124,7 @@ func TestWrongDirectionFrameClosesConnection(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, raw.transport.Send(wire.Envelope{Payload: payload}))
 
-	_, err = raw.transport.RecvBounded(raw.ceilings.MaxReceiveEnvelopeBytes)
-	require.Error(t, err, "a wrong-direction frame must settle the connection")
+	require.Error(t, raw.awaitReadError(t, 5*time.Second), "a wrong-direction frame must settle the connection")
 
 	// The listener keeps serving other clients.
 	client, err := Dial(context.Background(), e.path, Config{HandshakeTimeout: time.Second})
@@ -144,8 +140,7 @@ func TestMalformedApplicationFrameClosesConnection(t *testing.T) {
 	raw.register(t)
 
 	require.NoError(t, raw.transport.Send(wire.Envelope{Payload: []byte{0x78, 0x01}}))
-	_, err := raw.transport.RecvBounded(raw.ceilings.MaxReceiveEnvelopeBytes)
-	require.Error(t, err)
+	require.Error(t, raw.awaitReadError(t, 5*time.Second))
 
 	client, err := Dial(context.Background(), e.path, Config{HandshakeTimeout: time.Second})
 	require.NoError(t, err)
@@ -214,8 +209,7 @@ func TestDuplicateRegisterClosesConnection(t *testing.T) {
 	raw.register(t)
 
 	raw.send(t, brokerwire.Register{})
-	_, err := raw.transport.RecvBounded(raw.ceilings.MaxReceiveEnvelopeBytes)
-	require.Error(t, err)
+	require.Error(t, raw.awaitReadError(t, 5*time.Second))
 }
 
 // TestMismatchedScopeIsFenced proves a frame carrying a connection identity that

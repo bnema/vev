@@ -14,6 +14,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -705,16 +706,25 @@ func (s *serverSession) dispatch(message brokerwire.ClientMessage) error {
 		if !s.scopeMatches(m.Epoch, m.Connection) {
 			return s.refuseScope()
 		}
-		return s.startMutation(m.Operation, func(ctx context.Context) (bool, error) {
-			return false, s.core.AddHost(ctx, m.Endpoint)
+		return s.startMutation(m.Operation, brokerwire.MutationKindAddHost, func(ctx context.Context) (domain.RemoteRegistration, bool, error) {
+			registration, err := s.core.AddHost(ctx, m.Endpoint, m.Policy)
+			return registration, false, err
 		})
 	case brokerwire.RemoveHost:
 		if !s.scopeMatches(m.Epoch, m.Connection) {
 			return s.refuseScope()
 		}
-		return s.startMutation(m.Operation, func(ctx context.Context) (bool, error) {
-			removed, err := s.core.RemoveHost(ctx, m.Endpoint)
-			return removed, err
+		return s.startMutation(m.Operation, brokerwire.MutationKindRemoveHost, func(ctx context.Context) (domain.RemoteRegistration, bool, error) {
+			removed, err := s.core.RemoveHost(ctx, m.Registration)
+			return domain.RemoteRegistration{}, removed, err
+		})
+	case brokerwire.UpdateHostPolicy:
+		if !s.scopeMatches(m.Epoch, m.Connection) {
+			return s.refuseScope()
+		}
+		return s.startMutation(m.Operation, brokerwire.MutationKindUpdateHostPolicy, func(ctx context.Context) (domain.RemoteRegistration, bool, error) {
+			registration, err := s.core.UpdateHostPolicy(ctx, m.Registration, m.Policy)
+			return registration, false, err
 		})
 	case brokerwire.Reconcile:
 		if !s.scopeMatches(m.Epoch, m.Connection) {
@@ -941,13 +951,18 @@ func (s *serverSession) CloseStream(connection ports.BrokerConnectionID, stream 
 }
 
 // AddHost delegates one mutating operation to the admitted core service.
-func (s *serverSession) AddHost(ctx context.Context, target string) error {
-	return s.core.AddHost(ctx, target)
+func (s *serverSession) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return s.core.AddHost(ctx, endpoint, policy)
 }
 
 // RemoveHost delegates one mutating operation to the admitted core service.
-func (s *serverSession) RemoveHost(ctx context.Context, target string) (bool, error) {
-	return s.core.RemoveHost(ctx, target)
+func (s *serverSession) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
+	return s.core.RemoveHost(ctx, expected)
+}
+
+// UpdateHostPolicy delegates one mutating operation to the admitted core service.
+func (s *serverSession) UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return s.core.UpdateHostPolicy(ctx, expected, policy)
 }
 
 // RequestReconcile delegates one reconcile hint to the admitted core service.

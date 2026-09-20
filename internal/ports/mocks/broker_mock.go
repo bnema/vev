@@ -146,20 +146,29 @@ func (_m *MockBrokerService) EXPECT() *MockBrokerService_Expecter {
 }
 
 // AddHost provides a mock function for the type MockBrokerService
-func (_mock *MockBrokerService) AddHost(ctx context.Context, target string) error {
-	ret := _mock.Called(ctx, target)
+func (_mock *MockBrokerService) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	ret := _mock.Called(ctx, endpoint, policy)
 
 	if len(ret) == 0 {
 		panic("no return value specified for AddHost")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
-		r0 = returnFunc(ctx, target)
-	} else {
-		r0 = ret.Error(0)
+	var r0 domain.RemoteRegistration
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error)); ok {
+		return returnFunc(ctx, endpoint, policy)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, ports.BrokerPolicy) domain.RemoteRegistration); ok {
+		r0 = returnFunc(ctx, endpoint, policy)
+	} else {
+		r0 = ret.Get(0).(domain.RemoteRegistration)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, ports.BrokerPolicy) error); ok {
+		r1 = returnFunc(ctx, endpoint, policy)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockBrokerService_AddHost_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddHost'
@@ -169,12 +178,13 @@ type MockBrokerService_AddHost_Call struct {
 
 // AddHost is a helper method to define mock.On call
 //   - ctx context.Context
-//   - target string
-func (_e *MockBrokerService_Expecter) AddHost(ctx any, target any) *MockBrokerService_AddHost_Call {
-	return &MockBrokerService_AddHost_Call{Call: _e.mock.On("AddHost", ctx, target)}
+//   - endpoint string
+//   - policy ports.BrokerPolicy
+func (_e *MockBrokerService_Expecter) AddHost(ctx any, endpoint any, policy any) *MockBrokerService_AddHost_Call {
+	return &MockBrokerService_AddHost_Call{Call: _e.mock.On("AddHost", ctx, endpoint, policy)}
 }
 
-func (_c *MockBrokerService_AddHost_Call) Run(run func(ctx context.Context, target string)) *MockBrokerService_AddHost_Call {
+func (_c *MockBrokerService_AddHost_Call) Run(run func(ctx context.Context, endpoint string, policy ports.BrokerPolicy)) *MockBrokerService_AddHost_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -184,20 +194,25 @@ func (_c *MockBrokerService_AddHost_Call) Run(run func(ctx context.Context, targ
 		if args[1] != nil {
 			arg1 = args[1].(string)
 		}
+		var arg2 ports.BrokerPolicy
+		if args[2] != nil {
+			arg2 = args[2].(ports.BrokerPolicy)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
 }
 
-func (_c *MockBrokerService_AddHost_Call) Return(err error) *MockBrokerService_AddHost_Call {
-	_c.Call.Return(err)
+func (_c *MockBrokerService_AddHost_Call) Return(remoteRegistration domain.RemoteRegistration, err error) *MockBrokerService_AddHost_Call {
+	_c.Call.Return(remoteRegistration, err)
 	return _c
 }
 
-func (_c *MockBrokerService_AddHost_Call) RunAndReturn(run func(ctx context.Context, target string) error) *MockBrokerService_AddHost_Call {
+func (_c *MockBrokerService_AddHost_Call) RunAndReturn(run func(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error)) *MockBrokerService_AddHost_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -508,8 +523,8 @@ func (_c *MockBrokerService_OpenStream_Call) RunAndReturn(run func(ctx context.C
 }
 
 // RemoveHost provides a mock function for the type MockBrokerService
-func (_mock *MockBrokerService) RemoveHost(ctx context.Context, target string) (bool, error) {
-	ret := _mock.Called(ctx, target)
+func (_mock *MockBrokerService) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
+	ret := _mock.Called(ctx, expected)
 
 	if len(ret) == 0 {
 		panic("no return value specified for RemoveHost")
@@ -517,16 +532,16 @@ func (_mock *MockBrokerService) RemoveHost(ctx context.Context, target string) (
 
 	var r0 bool
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (bool, error)); ok {
-		return returnFunc(ctx, target)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration) (bool, error)); ok {
+		return returnFunc(ctx, expected)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) bool); ok {
-		r0 = returnFunc(ctx, target)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration) bool); ok {
+		r0 = returnFunc(ctx, expected)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
-		r1 = returnFunc(ctx, target)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, domain.RemoteRegistration) error); ok {
+		r1 = returnFunc(ctx, expected)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -540,20 +555,20 @@ type MockBrokerService_RemoveHost_Call struct {
 
 // RemoveHost is a helper method to define mock.On call
 //   - ctx context.Context
-//   - target string
-func (_e *MockBrokerService_Expecter) RemoveHost(ctx any, target any) *MockBrokerService_RemoveHost_Call {
-	return &MockBrokerService_RemoveHost_Call{Call: _e.mock.On("RemoveHost", ctx, target)}
+//   - expected domain.RemoteRegistration
+func (_e *MockBrokerService_Expecter) RemoveHost(ctx any, expected any) *MockBrokerService_RemoveHost_Call {
+	return &MockBrokerService_RemoveHost_Call{Call: _e.mock.On("RemoveHost", ctx, expected)}
 }
 
-func (_c *MockBrokerService_RemoveHost_Call) Run(run func(ctx context.Context, target string)) *MockBrokerService_RemoveHost_Call {
+func (_c *MockBrokerService_RemoveHost_Call) Run(run func(ctx context.Context, expected domain.RemoteRegistration)) *MockBrokerService_RemoveHost_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 string
+		var arg1 domain.RemoteRegistration
 		if args[1] != nil {
-			arg1 = args[1].(string)
+			arg1 = args[1].(domain.RemoteRegistration)
 		}
 		run(
 			arg0,
@@ -568,7 +583,7 @@ func (_c *MockBrokerService_RemoveHost_Call) Return(b bool, err error) *MockBrok
 	return _c
 }
 
-func (_c *MockBrokerService_RemoveHost_Call) RunAndReturn(run func(ctx context.Context, target string) (bool, error)) *MockBrokerService_RemoveHost_Call {
+func (_c *MockBrokerService_RemoveHost_Call) RunAndReturn(run func(ctx context.Context, expected domain.RemoteRegistration) (bool, error)) *MockBrokerService_RemoveHost_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -708,6 +723,78 @@ func (_c *MockBrokerService_Subscribe_Call) Return(brokerSubscription ports.Brok
 }
 
 func (_c *MockBrokerService_Subscribe_Call) RunAndReturn(run func() (ports.BrokerSubscription, error)) *MockBrokerService_Subscribe_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateHostPolicy provides a mock function for the type MockBrokerService
+func (_mock *MockBrokerService) UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	ret := _mock.Called(ctx, expected, policy)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateHostPolicy")
+	}
+
+	var r0 domain.RemoteRegistration
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error)); ok {
+		return returnFunc(ctx, expected, policy)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) domain.RemoteRegistration); ok {
+		r0 = returnFunc(ctx, expected, policy)
+	} else {
+		r0 = ret.Get(0).(domain.RemoteRegistration)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) error); ok {
+		r1 = returnFunc(ctx, expected, policy)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockBrokerService_UpdateHostPolicy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateHostPolicy'
+type MockBrokerService_UpdateHostPolicy_Call struct {
+	*mock.Call
+}
+
+// UpdateHostPolicy is a helper method to define mock.On call
+//   - ctx context.Context
+//   - expected domain.RemoteRegistration
+//   - policy ports.BrokerPolicy
+func (_e *MockBrokerService_Expecter) UpdateHostPolicy(ctx any, expected any, policy any) *MockBrokerService_UpdateHostPolicy_Call {
+	return &MockBrokerService_UpdateHostPolicy_Call{Call: _e.mock.On("UpdateHostPolicy", ctx, expected, policy)}
+}
+
+func (_c *MockBrokerService_UpdateHostPolicy_Call) Run(run func(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy)) *MockBrokerService_UpdateHostPolicy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 domain.RemoteRegistration
+		if args[1] != nil {
+			arg1 = args[1].(domain.RemoteRegistration)
+		}
+		var arg2 ports.BrokerPolicy
+		if args[2] != nil {
+			arg2 = args[2].(ports.BrokerPolicy)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockBrokerService_UpdateHostPolicy_Call) Return(remoteRegistration domain.RemoteRegistration, err error) *MockBrokerService_UpdateHostPolicy_Call {
+	_c.Call.Return(remoteRegistration, err)
+	return _c
+}
+
+func (_c *MockBrokerService_UpdateHostPolicy_Call) RunAndReturn(run func(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error)) *MockBrokerService_UpdateHostPolicy_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -1,7 +1,7 @@
 // Broker wire schema: the client/server broker conversations.
 //
 // The broker is an independently versioned conversation from the session
-// protocol: client tags 101-110 and server tags 201-209 are disjoint from
+// protocol: client tags 101-111 and server tags 201-209 are disjoint from
 // every session tag, and each direction is its own closed oneof union.
 // Scope (broker epoch plus client connection) is carried explicitly on
 // every payload so stream IDs and events never cross a scope. Semantic
@@ -52,7 +52,7 @@ message BrokerErrorDetail {
   // Closed taxonomy: 1 = unavailable, 2 = incompatible, 3 = timeout,
   // 4 = cancelled, 5 = outcome_unknown, 6 = attachment_lost,
   // 7 = stale_epoch, 8 = conflicting_policy, 9 = explicit_exit,
-  // 10 = fatal_terminal.
+  // 10 = fatal_terminal, 11 = host_conflict, 12 = membership_immutable.
   uint32 code = 1;
   string text = 2;
   // Closed admission-refusal taxonomy; 0 = none. Codes are assigned by the
@@ -85,6 +85,7 @@ message BrokerClientEnvelope {
     OpenStream open_stream = 108;
     ClientStreamData client_stream_data = 109;
     CloseStream close_stream = 110;
+    UpdateHostPolicy update_host_policy = 111;
   }
 }
 
@@ -127,18 +128,34 @@ message Unsubscribe {
 }
 
 // AddHost adds one configured host registration. operation_id is the
-// idempotency identity of this mutating operation.
+// idempotency identity of this mutating operation. policy is mandatory:
+// the request is refused unless it carries an exact valid policy, so a
+// membership addition can never be authorized by an absent policy.
 message AddHost {
   BrokerScope scope = 1;
   bytes operation_id = 2; // exactly 16 bytes
   string endpoint = 3;
+  BrokerWirePolicy policy = 4;
 }
 
-// RemoveHost removes one configured host registration.
+// RemoveHost removes exactly the registration carried by registration
+// (endpoint, incarnation, and generation). A request whose authority does
+// not exactly match the current registration is refused rather than
+// applied to an endpoint name.
 message RemoveHost {
   BrokerScope scope = 1;
   bytes operation_id = 2; // exactly 16 bytes
-  string endpoint = 3;
+  RemoteRegistration registration = 3;
+}
+
+// UpdateHostPolicy replaces the policy of exactly the registration carried
+// by registration and answers with the advanced registration authority.
+// policy is mandatory: an absent policy is refused like an invalid one.
+message UpdateHostPolicy {
+  BrokerScope scope = 1;
+  bytes operation_id = 2; // exactly 16 bytes
+  RemoteRegistration registration = 3;
+  BrokerWirePolicy policy = 4;
 }
 
 // Reconcile hands the broker one exact registration to probe.
@@ -279,7 +296,10 @@ message SnapshotTombstone {
 message SnapshotEnd {}
 
 // OperationResult is exactly one completion for one admitted mutating
-// operation.
+// operation. removed and registration are presence-carrying authority:
+// an authoritative success carries the resulting registration, a removal
+// success carries none, and a failed or outcome-unknown result carries
+// neither removal nor registration, only its typed error.
 message OperationResult {
   BrokerScope scope = 1;
   bytes operation_id = 2; // exactly 16 bytes
@@ -287,6 +307,7 @@ message OperationResult {
   uint32 outcome = 3;
   bool removed = 4;
   BrokerErrorDetail error = 5;
+  RemoteRegistration registration = 6;
 }
 
 // StreamOpened confirms one logical stream is established.

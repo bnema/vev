@@ -453,8 +453,8 @@ func TestConcurrentDialAndClose(t *testing.T) {
 				t.Errorf("Dial: %v", err)
 				return
 			}
-			if err := client.AddHost(ctx, "late@host:22"); err != nil {
-				t.Errorf("AddHost: %v", err)
+			if err := connectionDelegates(ctx, client); err != nil {
+				t.Errorf("connection refused a membership round trip: %v", err)
 			}
 			_ = client.Close()
 		}()

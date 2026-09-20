@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/streamframe"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -121,6 +122,7 @@ func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier)
 		ctx:       ctx,
 		cancel:    cancelSession,
 		pending:   make(map[ports.BrokerOperationID]chan operationResult),
+		kinds:     make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
 		streams:   make(map[ports.BrokerStreamID]*clientStream),
 		done:      make(chan struct{}),
 	}
@@ -192,9 +194,10 @@ func exchangeRegister(transport wire.BoundedTransport, ceilings brokerwire.Ceili
 
 // operationResult is one reply to a mutating operation.
 type operationResult struct {
-	outcome ports.BrokerMutationOutcome
-	removed bool
-	detail  brokerwire.ErrorDetail
+	outcome      ports.BrokerMutationOutcome
+	removed      bool
+	registration domain.RemoteRegistration
+	detail       brokerwire.ErrorDetail
 }
 
 // client implements ports.BrokerService over one broker IPC connection.
@@ -217,6 +220,7 @@ type client struct {
 	nextStream ports.BrokerStreamID
 	snapshot   ports.BrokerSnapshot
 	pending    map[ports.BrokerOperationID]chan operationResult
+	kinds      map[ports.BrokerOperationID]brokerwire.RegisterMutationKind
 	streams    map[ports.BrokerStreamID]*clientStream
 	closeOnce  sync.Once
 	done       chan struct{}
@@ -267,10 +271,21 @@ func (c *client) dispatch(message brokerwire.ServerMessage) error {
 		if !c.scopeMatches(m.Epoch, m.Connection) {
 			return errors.Join(ErrScopeMismatch, ErrProtocol)
 		}
-		// The operation's waiter records the tracker completion exactly once;
-		// a result with no waiter (an abandoned or replayed operation) is
-		// dropped here.
-		c.completeOperation(m.Operation, operationResult{outcome: m.Outcome, removed: m.Removed, detail: m.Error})
+		c.mu.Lock()
+		_, ok := c.pending[m.Operation]
+		kind := c.kinds[m.Operation]
+		c.mu.Unlock()
+		// An abandoned or replayed completion has no authority over current
+		// state and is dropped. A completion for a live operation must satisfy
+		// that request kind's payload invariant.
+		if !ok {
+			return nil
+		}
+		if err := m.ValidateForMutation(kind); err != nil {
+			c.completeOperation(m.Operation, operationResult{outcome: ports.BrokerOutcomeUnknown, detail: errorDetail(err)})
+			return errors.Join(ErrMalformedFrame, err)
+		}
+		c.completeOperation(m.Operation, operationResult{outcome: m.Outcome, removed: m.Removed, registration: m.Registration, detail: m.Error})
 		return nil
 	case brokerwire.StreamOpened:
 		if !c.scopeMatches(m.Epoch, m.Connection) {
@@ -361,17 +376,26 @@ func (c *client) publish(snapshot ports.BrokerSnapshot) {
 	}
 }
 
+// releaseOperation removes all client-side state for an operation.
+func (c *client) releaseOperation(operation ports.BrokerOperationID) {
+	c.mu.Lock()
+	delete(c.pending, operation)
+	delete(c.kinds, operation)
+	c.mu.Unlock()
+}
+
 // completeOperation hands one result to the operation's waiter, if any.
 func (c *client) completeOperation(operation ports.BrokerOperationID, result operationResult) {
 	c.mu.Lock()
-	ch := c.pending[operation]
+	reply, ok := c.pending[operation]
 	delete(c.pending, operation)
+	delete(c.kinds, operation)
 	c.mu.Unlock()
-	if ch == nil {
+	if !ok {
 		return
 	}
 	select {
-	case ch <- result:
+	case reply <- result:
 	default:
 	}
 }
@@ -533,30 +557,37 @@ func (c *client) CloseStream(connection ports.BrokerConnectionID, stream ports.B
 	return nil
 }
 
-// AddHost requests one host registration. A lost reply is reported as
-// outcome-unknown, never as an invitation to replay blindly.
-func (c *client) AddHost(ctx context.Context, target string) error {
-	result, err := c.mutate(ctx, func(operation ports.BrokerOperationID) brokerwire.ClientMessage {
-		return brokerwire.AddHost{Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation, Endpoint: target}
+// AddHost sends one exact endpoint and policy mutation.
+func (c *client) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	result, err := c.mutate(ctx, brokerwire.MutationKindAddHost, func(operation ports.BrokerOperationID) brokerwire.ClientMessage {
+		return brokerwire.AddHost{Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation, Endpoint: endpoint, Policy: policy}
 	})
 	if err != nil {
-		return err
+		return domain.RemoteRegistration{}, err
 	}
-	return mutationFailure(result)
+	return result.registration, mutationFailure(result)
 }
 
-// RemoveHost requests one host removal and reports whether the host was present.
-func (c *client) RemoveHost(ctx context.Context, target string) (bool, error) {
-	result, err := c.mutate(ctx, func(operation ports.BrokerOperationID) brokerwire.ClientMessage {
-		return brokerwire.RemoveHost{Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation, Endpoint: target}
+// RemoveHost sends one exact-registration mutation.
+func (c *client) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
+	result, err := c.mutate(ctx, brokerwire.MutationKindRemoveHost, func(operation ports.BrokerOperationID) brokerwire.ClientMessage {
+		return brokerwire.RemoveHost{Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation, Registration: expected}
 	})
 	if err != nil {
 		return false, err
 	}
-	if err := mutationFailure(result); err != nil {
-		return false, err
+	return result.removed, mutationFailure(result)
+}
+
+// UpdateHostPolicy sends one exact-registration replacement policy mutation.
+func (c *client) UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	result, err := c.mutate(ctx, brokerwire.MutationKindUpdateHostPolicy, func(operation ports.BrokerOperationID) brokerwire.ClientMessage {
+		return brokerwire.UpdateHostPolicy{Epoch: c.scope.Epoch, Connection: c.scope.Connection, Operation: operation, Registration: expected, Policy: policy}
+	})
+	if err != nil {
+		return domain.RemoteRegistration{}, err
 	}
-	return result.removed, nil
+	return result.registration, mutationFailure(result)
 }
 
 // RequestReconcile asks the broker to re-observe one endpoint. The port carries
@@ -631,7 +662,7 @@ func (c *client) scopeRequest(request ports.BrokerOpenStreamRequest) (ports.Brok
 // error and records a failed outcome; once the wire attempt was launched, every
 // failure is reported as outcome-unknown, so a caller refreshes authoritative
 // state instead of replaying a non-idempotent mutation blindly.
-func (c *client) mutate(ctx context.Context, build func(ports.BrokerOperationID) brokerwire.ClientMessage) (operationResult, error) {
+func (c *client) mutate(ctx context.Context, kind brokerwire.RegisterMutationKind, build func(ports.BrokerOperationID) brokerwire.ClientMessage) (operationResult, error) {
 	operation, err := newOperationID()
 	if err != nil {
 		return operationResult{}, err
@@ -652,14 +683,16 @@ func (c *client) mutate(ctx context.Context, build func(ports.BrokerOperationID)
 		return operationResult{}, admissionError(err)
 	}
 	c.pending[operation] = reply
+	if c.kinds == nil {
+		c.kinds = make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind)
+	}
+	c.kinds[operation] = kind
 	c.mu.Unlock()
 	// No result observed is exactly the outcome-unknown case; a request that
 	// was never launched is recorded as failed instead.
 	outcome := ports.BrokerOutcomeUnknown
 	defer func() {
-		c.mu.Lock()
-		delete(c.pending, operation)
-		c.mu.Unlock()
+		c.releaseOperation(operation)
 		_ = c.conn.CompleteOperation(operation, outcome)
 	}()
 	attempted, err := c.sendContext(ctx, build(operation))

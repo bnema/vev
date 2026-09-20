@@ -351,14 +351,15 @@ func TestBrokerClientVariants(t *testing.T) {
 		{"subscribe", Subscribe{Epoch: 7, Connection: connection, Generation: 1}, 102},
 		{"resync", Resync{Epoch: 7, Connection: connection, Generation: 2}, 103},
 		{"unsubscribe", Unsubscribe{Epoch: 7, Connection: connection, Generation: 3}, 104},
-		{"add_host", AddHost{Epoch: 7, Connection: connection, Operation: operation, Endpoint: "dev@host:22"}, 105},
-		{"remove_host", RemoveHost{Epoch: 7, Connection: connection, Operation: operation, Endpoint: "dev@host:22"}, 106},
+		{"add_host", AddHost{Epoch: 7, Connection: connection, Operation: operation, Endpoint: "dev@host:22", Policy: testPolicy()}, 105},
+		{"remove_host", RemoveHost{Epoch: 7, Connection: connection, Operation: operation, Registration: testRegistration()}, 106},
 		{"reconcile", Reconcile{Epoch: 7, Connection: connection, Registration: testRegistration()}, 107},
 		{"open_stream", OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"TERM=xterm"}, Policy: testPolicy()}, 108},
 		{"client_stream_data", ClientStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")}, 109},
 		{"close_stream", CloseStream{Epoch: 7, Connection: connection, Stream: 3}, 110},
+		{"update_host_policy", UpdateHostPolicy{Epoch: 7, Connection: connection, Operation: operation, Registration: testRegistration(), Policy: testPolicy()}, 111},
 	}
-	require.Len(t, messages, 10)
+	require.Len(t, messages, 11)
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := mustEncodeClient(t, tc.message)
@@ -525,7 +526,9 @@ func TestBrokerServerVariants(t *testing.T) {
 		{"snapshot_session_local", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 4, Part: SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Local: true, Session: testCatalogSession()}}, 202},
 		{"snapshot_tombstone", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 5, Part: SnapshotTombstonePart{TombstoneIndex: 0, Registration: testRegistration(), RetiredRevision: 4}}, 202},
 		{"snapshot_end", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 6, Part: SnapshotEnd{}}, 202},
-		{"operation_result", OperationResult{Epoch: 7, Connection: connection, Operation: operation, Outcome: ports.BrokerOutcomeFailed, Removed: true, Error: testErrorDetail(), HasError: true}, 203},
+		{"operation_result", OperationResult{Epoch: 7, Connection: connection, Operation: operation, Outcome: ports.BrokerOutcomeFailed, Error: testErrorDetail(), HasError: true}, 203},
+		{"operation_result_add", OperationResult{Epoch: 7, Connection: connection, Operation: operation, Outcome: ports.BrokerOutcomeOK, Registration: testRegistration()}, 203},
+		{"operation_result_remove", OperationResult{Epoch: 7, Connection: connection, Operation: operation, Outcome: ports.BrokerOutcomeOK, Removed: true}, 203},
 		{"stream_opened", StreamOpened{Epoch: 7, Connection: connection, Stream: 3}, 204},
 		{"server_stream_data", ServerStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")}, 205},
 		{"stream_closed", StreamClosed{Epoch: 7, Connection: connection, Stream: 3, Error: testErrorDetail(), HasError: true}, 206},
@@ -811,7 +814,7 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		// declared detail still round-trips exactly.
 		_, err := EncodeServer(StreamClosed{Epoch: 7, Connection: connection, Stream: 3}, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
-		_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK}, testEnvelopeCeiling, testChunkCeiling)
+		_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK, Registration: testRegistration()}, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		declared := OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeFailed, Error: detail, HasError: true}
 		decoded, err := DecodeServer(mustEncodeServer(t, declared), testEnvelopeCeiling, testChunkCeiling)
@@ -846,8 +849,103 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		_, err := EncodeServer(BrokerErrorMessage{Epoch: 7, Connection: connection, Error: boundary}, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 	})
+	t.Run("membership request authority", func(t *testing.T) {
+		base := AddHost{Epoch: 7, Connection: connection, Operation: testOperationID(1), Endpoint: "dev@host:22", Policy: testPolicy()}
+		// An absent policy is not authority: it is refused exactly like an
+		// invalid one rather than inherited from a default.
+		missing := base
+		missing.Policy = ports.BrokerPolicy{}
+		_, err := EncodeClient(missing, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+
+		// A partial registration is not exact authority either.
+		_, err = EncodeClient(RemoveHost{Epoch: 7, Connection: connection, Operation: testOperationID(1)}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		partial := testRegistration()
+		partial.Incarnation = [16]byte{}
+		_, err = EncodeClient(RemoveHost{Epoch: 7, Connection: connection, Operation: testOperationID(1), Registration: partial}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		partial = testRegistration()
+		partial.Generation = 0
+		_, err = EncodeClient(RemoveHost{Epoch: 7, Connection: connection, Operation: testOperationID(1), Registration: partial}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+
+		update := UpdateHostPolicy{Epoch: 7, Connection: connection, Operation: testOperationID(1), Registration: testRegistration(), Policy: testPolicy()}
+		missingPolicy := update
+		missingPolicy.Policy = ports.BrokerPolicy{}
+		_, err = EncodeClient(missingPolicy, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		missingRegistration := update
+		missingRegistration.Registration = domain.RemoteRegistration{}
+		_, err = EncodeClient(missingRegistration, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("membership result presence", func(t *testing.T) {
+		// A result may never carry both removal and registration, and a
+		// failed or outcome-unknown result may carry neither authority and
+		// must carry its typed error.
+		both := OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK, Removed: true, Registration: testRegistration()}
+		_, err := EncodeServer(both, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		for _, outcome := range []ports.BrokerMutationOutcome{ports.BrokerOutcomeFailed, ports.BrokerOutcomeUnknown} {
+			_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: outcome, Registration: testRegistration(), Error: testErrorDetail(), HasError: true}, testEnvelopeCeiling, testChunkCeiling)
+			require.ErrorIs(t, err, ErrInvalidMessage)
+			_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: outcome, Removed: true, Error: testErrorDetail(), HasError: true}, testEnvelopeCeiling, testChunkCeiling)
+			require.ErrorIs(t, err, ErrInvalidMessage)
+			// Neither authority without an error is refused too: a failure
+			// with no detail would read as an unexplained refusal.
+			_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: outcome}, testEnvelopeCeiling, testChunkCeiling)
+			require.ErrorIs(t, err, ErrInvalidMessage)
+		}
+		// A success carries no error at all.
+		_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK, Registration: testRegistration(), Error: testErrorDetail(), HasError: true}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		// A partial registration is refused on the result path too.
+		partial := testRegistration()
+		partial.Incarnation = [16]byte{}
+		_, err = EncodeServer(OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK, Registration: partial}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("membership result authority by mutation kind", func(t *testing.T) {
+		registration := testRegistration()
+		add := OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK, Registration: registration}
+		require.NoError(t, add.ValidateForMutation(MutationKindAddHost))
+		require.ErrorIs(t, add.ValidateForMutation(MutationKindRemoveHost), ErrInvalidMessage)
+		require.NoError(t, add.ValidateForMutation(MutationKindUpdateHostPolicy))
+
+		remove := OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeOK, Removed: true}
+		require.NoError(t, remove.ValidateForMutation(MutationKindRemoveHost))
+		require.ErrorIs(t, remove.ValidateForMutation(MutationKindAddHost), ErrInvalidMessage)
+		require.ErrorIs(t, remove.ValidateForMutation(MutationKindUpdateHostPolicy), ErrInvalidMessage)
+
+		failed := OperationResult{Epoch: 7, Connection: connection, Operation: testOperationID(1), Outcome: ports.BrokerOutcomeFailed, Error: testErrorDetail(), HasError: true}
+		for _, kind := range []RegisterMutationKind{MutationKindAddHost, MutationKindRemoveHost, MutationKindUpdateHostPolicy} {
+			require.NoError(t, failed.ValidateForMutation(kind))
+		}
+		// A kind outside the closed taxonomy is refused, never guessed.
+		require.Error(t, add.ValidateForMutation(RegisterMutationKind(9)))
+		// The request-side classifier names exactly the three mutations.
+		for message, want := range map[ClientMessage]RegisterMutationKind{
+			AddHost{}:          MutationKindAddHost,
+			RemoveHost{}:       MutationKindRemoveHost,
+			UpdateHostPolicy{}: MutationKindUpdateHostPolicy,
+			Subscribe{}:        0,
+		} {
+			got, ok := MutationKindOf(message)
+			if want == 0 {
+				require.False(t, ok)
+				continue
+			}
+			require.True(t, ok)
+			require.Equal(t, want, got)
+		}
+		require.Equal(t, "add_host", MutationKindAddHost.String())
+		require.Equal(t, "remove_host", MutationKindRemoveHost.String())
+		require.Equal(t, "update_host_policy", MutationKindUpdateHostPolicy.String())
+		require.Equal(t, "unknown", RegisterMutationKind(9).String())
+	})
 	t.Run("bad endpoint", func(t *testing.T) {
-		_, err := EncodeClient(AddHost{Epoch: 7, Connection: connection, Operation: testOperationID(1), Endpoint: "not a host"}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(AddHost{Epoch: 7, Connection: connection, Operation: testOperationID(1), Endpoint: "not a host", Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("taxonomy switches", func(t *testing.T) {
@@ -974,8 +1072,12 @@ func TestBrokerWrongDirection(t *testing.T) {
 func TestBrokerCorruptInputSmoke(t *testing.T) {
 	seeds := [][]byte{
 		mustEncodeClient(t, Register{}),
+		mustEncodeClient(t, AddHost{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x21), Endpoint: "dev@host:22", Policy: testPolicy()}),
+		mustEncodeClient(t, RemoveHost{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x22), Registration: testRegistration()}),
+		mustEncodeClient(t, UpdateHostPolicy{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x23), Registration: testRegistration(), Policy: testPolicy()}),
 		mustEncodeClient(t, OpenStream{Epoch: 7, Connection: testConnectionID(2), Stream: 3, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}),
 		mustEncodeServer(t, SnapshotPart{Epoch: 7, Connection: testConnectionID(2), Generation: 1, Revision: 1, Index: 0, Part: SnapshotEnd{}}),
+		mustEncodeServer(t, OperationResult{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x24), Outcome: ports.BrokerOutcomeFailed, Error: testErrorDetail(), HasError: true}),
 		mustEncodeServer(t, Shutdown{Epoch: 7, Connection: testConnectionID(2), Reason: ShutdownIdleExit}),
 	}
 	for _, seed := range seeds {
@@ -1003,6 +1105,9 @@ func fuzzClientSeeds(t testing.TB) [][]byte {
 	for _, message := range []ClientMessage{
 		Register{},
 		Subscribe{Epoch: 7, Connection: testConnectionID(0x11), Generation: 1},
+		AddHost{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x11), Endpoint: "dev@host:22", Policy: testPolicy()},
+		RemoveHost{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x12), Registration: testRegistration()},
+		UpdateHostPolicy{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x13), Registration: testRegistration(), Policy: testPolicy()},
 		OpenStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()},
 		ClientStreamData{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Data: []byte("frame")},
 		CloseStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3},
@@ -1021,6 +1126,7 @@ func fuzzServerSeeds(t testing.TB) [][]byte {
 		Registered{Epoch: 7, Connection: testConnectionID(0x11)},
 		SnapshotPart{Epoch: 7, Connection: testConnectionID(0x11), Generation: 2, Revision: 5, Index: 0, Part: SnapshotEnd{}},
 		SnapshotPart{Epoch: 7, Connection: testConnectionID(0x11), Generation: 2, Revision: 5, Index: 2, Part: SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Session: testCatalogSession()}},
+		OperationResult{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x14), Outcome: ports.BrokerOutcomeOK, Registration: testRegistration()},
 		BrokerErrorMessage{Epoch: 7, Connection: testConnectionID(0x11), Error: testErrorDetail()},
 		Shutdown{Epoch: 7, Connection: testConnectionID(0x11), Reason: ShutdownTerminating},
 	} {

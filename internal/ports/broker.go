@@ -563,6 +563,8 @@ const (
 	BrokerErrorConflictingPolicy
 	BrokerErrorExplicitExit
 	BrokerErrorFatalTerminal
+	BrokerErrorHostConflict
+	BrokerErrorMembershipImmutable
 )
 
 func (c BrokerErrorCode) String() string {
@@ -587,6 +589,10 @@ func (c BrokerErrorCode) String() string {
 		return "explicit_exit"
 	case BrokerErrorFatalTerminal:
 		return "fatal_terminal"
+	case BrokerErrorHostConflict:
+		return "host_conflict"
+	case BrokerErrorMembershipImmutable:
+		return "membership_immutable"
 	default:
 		return "unknown"
 	}
@@ -597,7 +603,8 @@ func (c BrokerErrorCode) Validate() error {
 	case BrokerErrorUnavailable, BrokerErrorIncompatible, BrokerErrorTimeout,
 		BrokerErrorCancelled, BrokerErrorOutcomeUnknown, BrokerErrorAttachmentLost,
 		BrokerErrorStaleEpoch, BrokerErrorConflictingPolicy,
-		BrokerErrorExplicitExit, BrokerErrorFatalTerminal:
+		BrokerErrorExplicitExit, BrokerErrorFatalTerminal,
+		BrokerErrorHostConflict, BrokerErrorMembershipImmutable:
 		return nil
 	default:
 		return errors.New("ports: invalid broker error code")
@@ -698,8 +705,12 @@ type BrokerService interface {
 	Subscribe() (BrokerSubscription, error)
 	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
 	CloseStream(connection BrokerConnectionID, stream BrokerStreamID) error
-	AddHost(ctx context.Context, target string) error
-	RemoveHost(ctx context.Context, target string) (bool, error)
+	// AddHost durably adds or pins endpoint under policy and returns its authority.
+	AddHost(ctx context.Context, endpoint string, policy BrokerPolicy) (domain.RemoteRegistration, error)
+	// RemoveHost removes only the exact expected registration.
+	RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error)
+	// UpdateHostPolicy changes policy only for exact expected authority and returns the advanced registration.
+	UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy BrokerPolicy) (domain.RemoteRegistration, error)
 	RequestReconcile(endpoint string)
 	Close() error
 }

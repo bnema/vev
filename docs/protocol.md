@@ -97,7 +97,7 @@ connection and correlated by `RequestID`.
 ## Broker negotiation
 
 Broker connections are a separate conversation from the session protocol.
-`internal/adapters/brokerwire` owns it: client tags 101-110 and server tags
+`internal/adapters/brokerwire` owns it: client tags 101-111 and server tags
 201-209 are disjoint from every session tag, and each direction is its own
 closed directional `oneof` union. A broker connection opens with exactly one
 broker preamble (`PreambleRequest` client → server, `PreambleResponse` server

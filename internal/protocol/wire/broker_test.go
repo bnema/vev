@@ -19,7 +19,7 @@ import (
 var brokerClientTags = map[string]protoreflect.FieldNumber{
 	"register": 101, "subscribe": 102, "resync": 103, "unsubscribe": 104,
 	"add_host": 105, "remove_host": 106, "reconcile": 107, "open_stream": 108,
-	"client_stream_data": 109, "close_stream": 110,
+	"client_stream_data": 109, "close_stream": 110, "update_host_policy": 111,
 }
 
 // brokerServerTags is the frozen server tag inventory.
@@ -151,9 +151,14 @@ func brokerClientSamples() map[string]*BrokerClientEnvelope {
 		"unsubscribe": {Payload: &BrokerClientEnvelope_Unsubscribe{Unsubscribe: &Unsubscribe{Scope: brokerScope(), Generation: 1 << 42}}},
 		"add_host": {Payload: &BrokerClientEnvelope_AddHost{AddHost: &AddHost{
 			Scope: brokerScope(), OperationId: bytes.Repeat([]byte{0x44}, 16), Endpoint: "dev@host:22",
+			Policy: brokerPolicy(),
 		}}},
 		"remove_host": {Payload: &BrokerClientEnvelope_RemoveHost{RemoveHost: &RemoveHost{
-			Scope: brokerScope(), OperationId: bytes.Repeat([]byte{0x45}, 16), Endpoint: "dev@host:23",
+			Scope: brokerScope(), OperationId: bytes.Repeat([]byte{0x45}, 16), Registration: brokerRegistration(),
+		}}},
+		"update_host_policy": {Payload: &BrokerClientEnvelope_UpdateHostPolicy{UpdateHostPolicy: &UpdateHostPolicy{
+			Scope: brokerScope(), OperationId: bytes.Repeat([]byte{0x46}, 16),
+			Registration: brokerRegistration(), Policy: brokerPolicy(),
 		}}},
 		"reconcile": {Payload: &BrokerClientEnvelope_Reconcile{Reconcile: &Reconcile{
 			Scope: brokerScope(), Registration: brokerRegistration(),
@@ -180,9 +185,9 @@ func brokerServerSamples() map[string]*BrokerServerEnvelope {
 			Scope: brokerScope(), Generation: 2, Revision: 5, Index: 9,
 			Part: &SnapshotPart_Daemon{Daemon: &SnapshotDaemon{
 				HostIndex: 1, Endpoint: "dev@host:22", DisplayOrigin: "dev@host",
-				Rank: 2, Registration: brokerRegistration(), Policy: &BrokerWirePolicy{ProtocolVersion: 55},
+				Rank: 2, Registration: brokerRegistration(), Policy: &BrokerWirePolicy{ProtocolVersion: 56},
 				DaemonIdentity: "authed-daemon", DaemonIncarnation: bytes.Repeat([]byte{0x9}, 16),
-				ProtocolVersion: 55, Capabilities: 1,
+				ProtocolVersion: 56, Capabilities: 1,
 				Availability:        1,
 				Checking:            true,
 				LastAttempt:         &BrokerTimestamp{Seconds: 1700000000, Nanos: 1},
@@ -193,7 +198,7 @@ func brokerServerSamples() map[string]*BrokerServerEnvelope {
 			}},
 		}}},
 		"operation_result": {Payload: &BrokerServerEnvelope_OperationResult{OperationResult: &OperationResult{
-			Scope: brokerScope(), OperationId: bytes.Repeat([]byte{0x77}, 16), Outcome: 2, Removed: true,
+			Scope: brokerScope(), OperationId: bytes.Repeat([]byte{0x77}, 16), Outcome: 2,
 			Error: &BrokerErrorDetail{Code: 2, Text: "incompatible", AdmissionCode: 1, FailureKind: 3},
 		}}},
 		"stream_opened": {Payload: &BrokerServerEnvelope_StreamOpened{StreamOpened: &StreamOpened{Ref: brokerRef()}}},
@@ -437,6 +442,71 @@ func TestBrokerEnvelopeTrailingGarbage(t *testing.T) {
 		payload := append(append([]byte(nil), raw...), tail...)
 		if err := ScanEnvelope(&BrokerServerEnvelope{}, payload); err == nil {
 			t.Fatalf("trailing %x accepted", tail)
+		}
+	}
+}
+
+// TestBrokerMembershipSchemaShape pins the Phase C1 membership layout: the new
+// client variant, the required policy on AddHost/UpdateHostPolicy, the exact
+// registration on RemoveHost/UpdateHostPolicy, and the registration member of
+// OperationResult. A field that moves would silently change the meaning of a
+// mutating request without changing its tag.
+func TestBrokerMembershipSchemaShape(t *testing.T) {
+	fields := func(message proto.Message) map[string]protoreflect.FieldNumber {
+		t.Helper()
+		descriptor := message.ProtoReflect().Descriptor()
+		out := make(map[string]protoreflect.FieldNumber, descriptor.Fields().Len())
+		for i := range descriptor.Fields().Len() {
+			field := descriptor.Fields().Get(i)
+			out[string(field.Name())] = field.Number()
+		}
+		return out
+	}
+
+	if got, want := oneofTags(t, &BrokerClientEnvelope{})["update_host_policy"], protoreflect.FieldNumber(111); got != want {
+		t.Fatalf("BrokerClientEnvelope.update_host_policy = %d, want %d", got, want)
+	}
+
+	addHost := fields(&AddHost{})
+	if addHost["policy"] != 4 {
+		t.Fatalf("AddHost.policy = %d, want 4 (required authority)", addHost["policy"])
+	}
+	removeHost := fields(&RemoveHost{})
+	if removeHost["registration"] != 3 {
+		t.Fatalf("RemoveHost.registration = %d, want 3", removeHost["registration"])
+	}
+	if _, present := removeHost["endpoint"]; present {
+		t.Fatal("RemoveHost still carries an endpoint field; removal is exact-registration authority")
+	}
+	update := fields(&UpdateHostPolicy{})
+	if update["registration"] != 3 || update["policy"] != 4 {
+		t.Fatalf("UpdateHostPolicy fields = %v, want registration 3 and policy 4", update)
+	}
+	result := fields(&OperationResult{})
+	if result["registration"] != 6 {
+		t.Fatalf("OperationResult.registration = %d, want 6", result["registration"])
+	}
+
+	// Every membership sample survives strict scan, unmarshal, and equality,
+	// and every strict prefix of it is refused.
+	for name, sample := range brokerClientSamples() {
+		switch name {
+		case "add_host", "remove_host", "update_host_policy":
+		default:
+			continue
+		}
+		raw := mustMarshalBroker(t, sample)
+		decoded := &BrokerClientEnvelope{}
+		if err := validatedUnmarshal(decoded, raw); err != nil {
+			t.Fatalf("%s: validatedUnmarshal() = %v", name, err)
+		}
+		if !proto.Equal(sample, decoded) {
+			t.Fatalf("%s: roundtrip mismatch:\n got %v\nwant %v", name, decoded, sample)
+		}
+		for size := range len(raw) {
+			if err := ScanEnvelope(&BrokerClientEnvelope{}, raw[:size]); err == nil {
+				t.Fatalf("%s prefix[:%d] accepted", name, size)
+			}
 		}
 	}
 }

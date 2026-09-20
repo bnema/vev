@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -21,24 +22,9 @@ import (
 // admission only and is never retained; the admitted service owns a
 // connection-lived context derived from the supervisor root.
 //
-// This composition is deliberately offline and immutable: its registry runs
-// observation-disabled, so the returned service publishes and subscribes to
-// durable snapshots but never probes or reconciles, and host membership is
-// refused rather than mutated. Live membership mutation is composed in a later
-// slice.
-
-// ErrOfflineMembership is the typed refusal returned by AddHost and RemoveHost
-// on an offline broker connection: membership is immutable for the
-// connection's lifetime and the refusal never touches durable authority.
-// Callers classify it with errors.Is instead of matching message text.
-var ErrOfflineMembership = errors.New("broker: offline membership is immutable")
-
-// offlineMembershipRefusal is the typed, presentation-safe refusal. It is a
-// ports.BrokerError so the wire layer classifies it without message matching,
-// and it carries ErrOfflineMembership for errors.Is.
-func offlineMembershipRefusal() error {
-	return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: ErrOfflineMembership.Error(), Cause: ErrOfflineMembership}
-}
+// Registry construction determines observation and membership policy. The
+// authority preserves those guards and exposes admitted mutations through the
+// connection-scoped service.
 
 // Authority admits one accepted client connection to the broker core. It owns
 // no lifetime of its own: the supervisor owns the broker lifetime, the registry
@@ -60,13 +46,6 @@ var _ ports.BrokerAuthority = (*Authority)(nil)
 // NewAuthority composes one connection-scoped broker authority over an existing
 // registry, pool, and supervisor. All three must be live and share epoch.
 //
-// The authority's connections expose immutable membership: they neither add nor
-// remove hosts. It therefore accepts an observation-disabled registry, or an
-// observer whose observation is limited to the broker's own daemon, and refuses
-// a registry that observes configured hosts the service would refuse to manage.
-// A local-only observer has no remote membership to manage: its local entry is
-// configured authority supplied by the composition, not membership.
-//
 // The caller owns the dependencies' lifecycles. In particular it must start the
 // registry's single Registry.Run to own and drain the durable writer, and must
 // cancel that run context and join Run before the store is closed. NewAuthority
@@ -79,9 +58,6 @@ func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, super
 	}
 	if registry.epoch != epoch || pool.epoch != epoch {
 		return nil, errors.New("broker: authority epoch mismatch")
-	}
-	if !registry.observationDisabled && !registry.observesLocalOnly() {
-		return nil, errors.New("broker: authority requires an observation-disabled registry or a local-only observer")
 	}
 	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor}, nil
 }
@@ -132,8 +108,8 @@ type Service struct {
 	mu     sync.Mutex
 	closed bool
 	subs   map[*serviceSubscription]struct{}
-	// wg counts in-flight OpenStream calls so Close drains them, and their
-	// operation leases, before it releases the connection resources.
+	// wg counts in-flight stream opens and membership mutations so Close drains
+	// them, and their operation leases, before releasing connection resources.
 	wg sync.WaitGroup
 
 	closeOnce sync.Once
@@ -265,18 +241,79 @@ func (s *Service) CloseStream(connection ports.BrokerConnectionID, stream ports.
 	return s.pool.CloseStream(s.id, stream)
 }
 
-// AddHost refuses host admission: this connection has immutable offline
-// membership, so no mutation is attempted.
-func (s *Service) AddHost(context.Context, string) error { return offlineMembershipRefusal() }
-
-// RemoveHost refuses host removal without mutating authority. The result is the
-// explicit false/refusal pair.
-func (s *Service) RemoveHost(context.Context, string) (bool, error) {
-	return false, offlineMembershipRefusal()
+// AddHost delegates one admitted membership mutation to the registry.
+func (s *Service) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return serviceMutation(s, ctx, func(ctx context.Context) (domain.RemoteRegistration, error) {
+		return s.registry.AddHost(ctx, endpoint, policy)
+	})
 }
 
-// RequestReconcile is deliberately a no-op: an offline connection has no
-// observation to reconcile, so the hint starts no probe, timer, or reconcile.
+// RemoveHost delegates one admitted exact-registration removal to the registry.
+func (s *Service) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
+	return serviceMutation(s, ctx, func(ctx context.Context) (bool, error) {
+		return s.registry.RemoveHost(ctx, expected)
+	})
+}
+
+// UpdateHostPolicy delegates one admitted exact-registration policy update.
+func (s *Service) UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return serviceMutation(s, ctx, func(ctx context.Context) (domain.RemoteRegistration, error) {
+		return s.registry.UpdateHostPolicy(ctx, expected, policy)
+	})
+}
+
+func serviceMutation[T any](s *Service, ctx context.Context, mutate func(context.Context) (T, error)) (T, error) {
+	var zero T
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return zero, ports.BrokerAdmissionClosed
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+	defer s.wg.Done()
+
+	operation, err := s.supervisor.AdmitOperation()
+	if err != nil {
+		return zero, err
+	}
+	defer operation.Release()
+
+	operationCtx, release := s.openContext(ctx)
+	defer release()
+	value, err := mutate(operationCtx)
+	return value, membershipError(err)
+}
+
+func membershipError(err error) error {
+	if err == nil {
+		return nil
+	}
+	code := ports.BrokerErrorCode(0)
+	text := ""
+	var brokerError ports.BrokerError
+	switch {
+	case errors.Is(err, ports.ErrBrokerHostConflict):
+		code, text = ports.BrokerErrorHostConflict, "host registration conflict"
+	case errors.Is(err, ports.ErrBrokerMembershipImmutable):
+		code, text = ports.BrokerErrorMembershipImmutable, "broker membership is immutable"
+	case errors.As(err, &brokerError) && brokerError.Code == ports.BrokerErrorConflictingPolicy:
+		code, text = ports.BrokerErrorConflictingPolicy, "host policy conflicts with existing policy"
+	default:
+		var unknown ports.BrokerStoreOutcomeUnknownError
+		var unknownPointer *ports.BrokerStoreOutcomeUnknownError
+		if errors.As(err, &unknown) || errors.As(err, &unknownPointer) {
+			code, text = ports.BrokerErrorOutcomeUnknown, "mutation outcome is unknown"
+		}
+	}
+	if code == 0 {
+		return err
+	}
+	return ports.BrokerError{Code: code, Text: text, Cause: err}
+}
+
+// RequestReconcile remains a no-op until the observation service exposes a
+// connection-safe reconcile seam.
 func (s *Service) RequestReconcile(string) {}
 
 // Close cancels and drains every owned resource exactly once: in-flight setup

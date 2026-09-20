@@ -390,10 +390,16 @@ func (s *supervisorTestService) CloseStream(ports.BrokerConnectionID, ports.Brok
 	return nil
 }
 
-func (s *supervisorTestService) AddHost(context.Context, string) error { return nil }
+func (s *supervisorTestService) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return domain.RemoteRegistration{}, nil
+}
 
-func (s *supervisorTestService) RemoveHost(context.Context, string) (bool, error) {
+func (s *supervisorTestService) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
 	return false, nil
+}
+
+func (s *supervisorTestService) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	return domain.RemoteRegistration{}, nil
 }
 
 func (s *supervisorTestService) RequestReconcile(string) {}

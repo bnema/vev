@@ -1,7 +1,7 @@
 // Broker wire schema: the client/server broker conversations.
 //
 // The broker is an independently versioned conversation from the session
-// protocol: client tags 101-110 and server tags 201-209 are disjoint from
+// protocol: client tags 101-111 and server tags 201-209 are disjoint from
 // every session tag, and each direction is its own closed oneof union.
 // Scope (broker epoch plus client connection) is carried explicitly on
 // every payload so stream IDs and events never cross a scope. Semantic
@@ -245,7 +245,7 @@ type BrokerErrorDetail struct {
 	// Closed taxonomy: 1 = unavailable, 2 = incompatible, 3 = timeout,
 	// 4 = cancelled, 5 = outcome_unknown, 6 = attachment_lost,
 	// 7 = stale_epoch, 8 = conflicting_policy, 9 = explicit_exit,
-	// 10 = fatal_terminal.
+	// 10 = fatal_terminal, 11 = host_conflict, 12 = membership_immutable.
 	Code uint32 `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
 	Text string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
 	// Closed admission-refusal taxonomy; 0 = none. Codes are assigned by the
@@ -387,6 +387,7 @@ type BrokerClientEnvelope struct {
 	//	*BrokerClientEnvelope_OpenStream
 	//	*BrokerClientEnvelope_ClientStreamData
 	//	*BrokerClientEnvelope_CloseStream
+	//	*BrokerClientEnvelope_UpdateHostPolicy
 	Payload       isBrokerClientEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -519,6 +520,15 @@ func (x *BrokerClientEnvelope) GetCloseStream() *CloseStream {
 	return nil
 }
 
+func (x *BrokerClientEnvelope) GetUpdateHostPolicy() *UpdateHostPolicy {
+	if x != nil {
+		if x, ok := x.Payload.(*BrokerClientEnvelope_UpdateHostPolicy); ok {
+			return x.UpdateHostPolicy
+		}
+	}
+	return nil
+}
+
 type isBrokerClientEnvelope_Payload interface {
 	isBrokerClientEnvelope_Payload()
 }
@@ -563,6 +573,10 @@ type BrokerClientEnvelope_CloseStream struct {
 	CloseStream *CloseStream `protobuf:"bytes,110,opt,name=close_stream,json=closeStream,proto3,oneof"`
 }
 
+type BrokerClientEnvelope_UpdateHostPolicy struct {
+	UpdateHostPolicy *UpdateHostPolicy `protobuf:"bytes,111,opt,name=update_host_policy,json=updateHostPolicy,proto3,oneof"`
+}
+
 func (*BrokerClientEnvelope_Register) isBrokerClientEnvelope_Payload() {}
 
 func (*BrokerClientEnvelope_Subscribe) isBrokerClientEnvelope_Payload() {}
@@ -582,6 +596,8 @@ func (*BrokerClientEnvelope_OpenStream) isBrokerClientEnvelope_Payload() {}
 func (*BrokerClientEnvelope_ClientStreamData) isBrokerClientEnvelope_Payload() {}
 
 func (*BrokerClientEnvelope_CloseStream) isBrokerClientEnvelope_Payload() {}
+
+func (*BrokerClientEnvelope_UpdateHostPolicy) isBrokerClientEnvelope_Payload() {}
 
 // BrokerServerEnvelope is the closed server-to-client broker union. Exactly
 // one variant must be set per envelope.
@@ -977,12 +993,15 @@ func (x *Unsubscribe) GetGeneration() uint64 {
 }
 
 // AddHost adds one configured host registration. operation_id is the
-// idempotency identity of this mutating operation.
+// idempotency identity of this mutating operation. policy is mandatory:
+// the request is refused unless it carries an exact valid policy, so a
+// membership addition can never be authorized by an absent policy.
 type AddHost struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Scope         *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	OperationId   []byte                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // exactly 16 bytes
 	Endpoint      string                 `protobuf:"bytes,3,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	Policy        *BrokerWirePolicy      `protobuf:"bytes,4,opt,name=policy,proto3" json:"policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1038,12 +1057,22 @@ func (x *AddHost) GetEndpoint() string {
 	return ""
 }
 
-// RemoveHost removes one configured host registration.
+func (x *AddHost) GetPolicy() *BrokerWirePolicy {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
+}
+
+// RemoveHost removes exactly the registration carried by registration
+// (endpoint, incarnation, and generation). A request whose authority does
+// not exactly match the current registration is refused rather than
+// applied to an endpoint name.
 type RemoveHost struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Scope         *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	OperationId   []byte                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // exactly 16 bytes
-	Endpoint      string                 `protobuf:"bytes,3,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	Registration  *RemoteRegistration    `protobuf:"bytes,3,opt,name=registration,proto3" json:"registration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1092,11 +1121,82 @@ func (x *RemoveHost) GetOperationId() []byte {
 	return nil
 }
 
-func (x *RemoveHost) GetEndpoint() string {
+func (x *RemoveHost) GetRegistration() *RemoteRegistration {
 	if x != nil {
-		return x.Endpoint
+		return x.Registration
 	}
-	return ""
+	return nil
+}
+
+// UpdateHostPolicy replaces the policy of exactly the registration carried
+// by registration and answers with the advanced registration authority.
+// policy is mandatory: an absent policy is refused like an invalid one.
+type UpdateHostPolicy struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Scope         *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	OperationId   []byte                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // exactly 16 bytes
+	Registration  *RemoteRegistration    `protobuf:"bytes,3,opt,name=registration,proto3" json:"registration,omitempty"`
+	Policy        *BrokerWirePolicy      `protobuf:"bytes,4,opt,name=policy,proto3" json:"policy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateHostPolicy) Reset() {
+	*x = UpdateHostPolicy{}
+	mi := &file_broker_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateHostPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateHostPolicy) ProtoMessage() {}
+
+func (x *UpdateHostPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_broker_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateHostPolicy.ProtoReflect.Descriptor instead.
+func (*UpdateHostPolicy) Descriptor() ([]byte, []int) {
+	return file_broker_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *UpdateHostPolicy) GetScope() *BrokerScope {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+func (x *UpdateHostPolicy) GetOperationId() []byte {
+	if x != nil {
+		return x.OperationId
+	}
+	return nil
+}
+
+func (x *UpdateHostPolicy) GetRegistration() *RemoteRegistration {
+	if x != nil {
+		return x.Registration
+	}
+	return nil
+}
+
+func (x *UpdateHostPolicy) GetPolicy() *BrokerWirePolicy {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
 }
 
 // Reconcile hands the broker one exact registration to probe.
@@ -1110,7 +1210,7 @@ type Reconcile struct {
 
 func (x *Reconcile) Reset() {
 	*x = Reconcile{}
-	mi := &file_broker_proto_msgTypes[13]
+	mi := &file_broker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1122,7 +1222,7 @@ func (x *Reconcile) String() string {
 func (*Reconcile) ProtoMessage() {}
 
 func (x *Reconcile) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[13]
+	mi := &file_broker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1135,7 +1235,7 @@ func (x *Reconcile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reconcile.ProtoReflect.Descriptor instead.
 func (*Reconcile) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{13}
+	return file_broker_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Reconcile) GetScope() *BrokerScope {
@@ -1184,7 +1284,7 @@ type OpenStream struct {
 
 func (x *OpenStream) Reset() {
 	*x = OpenStream{}
-	mi := &file_broker_proto_msgTypes[14]
+	mi := &file_broker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1196,7 +1296,7 @@ func (x *OpenStream) String() string {
 func (*OpenStream) ProtoMessage() {}
 
 func (x *OpenStream) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[14]
+	mi := &file_broker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1209,7 +1309,7 @@ func (x *OpenStream) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenStream.ProtoReflect.Descriptor instead.
 func (*OpenStream) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{14}
+	return file_broker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *OpenStream) GetRef() *BrokerStreamRef {
@@ -1293,7 +1393,7 @@ type ClientStreamData struct {
 
 func (x *ClientStreamData) Reset() {
 	*x = ClientStreamData{}
-	mi := &file_broker_proto_msgTypes[15]
+	mi := &file_broker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1305,7 +1405,7 @@ func (x *ClientStreamData) String() string {
 func (*ClientStreamData) ProtoMessage() {}
 
 func (x *ClientStreamData) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[15]
+	mi := &file_broker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1318,7 +1418,7 @@ func (x *ClientStreamData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientStreamData.ProtoReflect.Descriptor instead.
 func (*ClientStreamData) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{15}
+	return file_broker_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ClientStreamData) GetRef() *BrokerStreamRef {
@@ -1345,7 +1445,7 @@ type CloseStream struct {
 
 func (x *CloseStream) Reset() {
 	*x = CloseStream{}
-	mi := &file_broker_proto_msgTypes[16]
+	mi := &file_broker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1357,7 +1457,7 @@ func (x *CloseStream) String() string {
 func (*CloseStream) ProtoMessage() {}
 
 func (x *CloseStream) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[16]
+	mi := &file_broker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1370,7 +1470,7 @@ func (x *CloseStream) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseStream.ProtoReflect.Descriptor instead.
 func (*CloseStream) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{16}
+	return file_broker_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CloseStream) GetRef() *BrokerStreamRef {
@@ -1390,7 +1490,7 @@ type Registered struct {
 
 func (x *Registered) Reset() {
 	*x = Registered{}
-	mi := &file_broker_proto_msgTypes[17]
+	mi := &file_broker_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1402,7 +1502,7 @@ func (x *Registered) String() string {
 func (*Registered) ProtoMessage() {}
 
 func (x *Registered) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[17]
+	mi := &file_broker_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1415,7 +1515,7 @@ func (x *Registered) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Registered.ProtoReflect.Descriptor instead.
 func (*Registered) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{17}
+	return file_broker_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Registered) GetScope() *BrokerScope {
@@ -1448,7 +1548,7 @@ type SnapshotPart struct {
 
 func (x *SnapshotPart) Reset() {
 	*x = SnapshotPart{}
-	mi := &file_broker_proto_msgTypes[18]
+	mi := &file_broker_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1460,7 +1560,7 @@ func (x *SnapshotPart) String() string {
 func (*SnapshotPart) ProtoMessage() {}
 
 func (x *SnapshotPart) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[18]
+	mi := &file_broker_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1473,7 +1573,7 @@ func (x *SnapshotPart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotPart.ProtoReflect.Descriptor instead.
 func (*SnapshotPart) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{18}
+	return file_broker_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SnapshotPart) GetScope() *BrokerScope {
@@ -1606,7 +1706,7 @@ type SnapshotBegin struct {
 
 func (x *SnapshotBegin) Reset() {
 	*x = SnapshotBegin{}
-	mi := &file_broker_proto_msgTypes[19]
+	mi := &file_broker_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1618,7 +1718,7 @@ func (x *SnapshotBegin) String() string {
 func (*SnapshotBegin) ProtoMessage() {}
 
 func (x *SnapshotBegin) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[19]
+	mi := &file_broker_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1631,7 +1731,7 @@ func (x *SnapshotBegin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotBegin.ProtoReflect.Descriptor instead.
 func (*SnapshotBegin) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{19}
+	return file_broker_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SnapshotBegin) GetHostCount() uint32 {
@@ -1706,7 +1806,7 @@ type SnapshotDaemon struct {
 
 func (x *SnapshotDaemon) Reset() {
 	*x = SnapshotDaemon{}
-	mi := &file_broker_proto_msgTypes[20]
+	mi := &file_broker_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1718,7 +1818,7 @@ func (x *SnapshotDaemon) String() string {
 func (*SnapshotDaemon) ProtoMessage() {}
 
 func (x *SnapshotDaemon) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[20]
+	mi := &file_broker_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1731,7 +1831,7 @@ func (x *SnapshotDaemon) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotDaemon.ProtoReflect.Descriptor instead.
 func (*SnapshotDaemon) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{20}
+	return file_broker_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SnapshotDaemon) GetHostIndex() uint32 {
@@ -1896,7 +1996,7 @@ type SnapshotSession struct {
 
 func (x *SnapshotSession) Reset() {
 	*x = SnapshotSession{}
-	mi := &file_broker_proto_msgTypes[21]
+	mi := &file_broker_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1908,7 +2008,7 @@ func (x *SnapshotSession) String() string {
 func (*SnapshotSession) ProtoMessage() {}
 
 func (x *SnapshotSession) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[21]
+	mi := &file_broker_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1921,7 +2021,7 @@ func (x *SnapshotSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotSession.ProtoReflect.Descriptor instead.
 func (*SnapshotSession) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{21}
+	return file_broker_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SnapshotSession) GetHostIndex() uint32 {
@@ -1965,7 +2065,7 @@ type SnapshotTombstone struct {
 
 func (x *SnapshotTombstone) Reset() {
 	*x = SnapshotTombstone{}
-	mi := &file_broker_proto_msgTypes[22]
+	mi := &file_broker_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1977,7 +2077,7 @@ func (x *SnapshotTombstone) String() string {
 func (*SnapshotTombstone) ProtoMessage() {}
 
 func (x *SnapshotTombstone) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[22]
+	mi := &file_broker_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1990,7 +2090,7 @@ func (x *SnapshotTombstone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotTombstone.ProtoReflect.Descriptor instead.
 func (*SnapshotTombstone) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{22}
+	return file_broker_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SnapshotTombstone) GetTombstoneIndex() uint32 {
@@ -2023,7 +2123,7 @@ type SnapshotEnd struct {
 
 func (x *SnapshotEnd) Reset() {
 	*x = SnapshotEnd{}
-	mi := &file_broker_proto_msgTypes[23]
+	mi := &file_broker_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2035,7 +2135,7 @@ func (x *SnapshotEnd) String() string {
 func (*SnapshotEnd) ProtoMessage() {}
 
 func (x *SnapshotEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[23]
+	mi := &file_broker_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2048,26 +2148,30 @@ func (x *SnapshotEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotEnd.ProtoReflect.Descriptor instead.
 func (*SnapshotEnd) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{23}
+	return file_broker_proto_rawDescGZIP(), []int{24}
 }
 
 // OperationResult is exactly one completion for one admitted mutating
-// operation.
+// operation. removed and registration are presence-carrying authority:
+// an authoritative success carries the resulting registration, a removal
+// success carries none, and a failed or outcome-unknown result carries
+// neither removal nor registration, only its typed error.
 type OperationResult struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Scope       *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
 	OperationId []byte                 `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"` // exactly 16 bytes
 	// Closed taxonomy: 1 = ok, 2 = failed, 3 = outcome_unknown.
-	Outcome       uint32             `protobuf:"varint,3,opt,name=outcome,proto3" json:"outcome,omitempty"`
-	Removed       bool               `protobuf:"varint,4,opt,name=removed,proto3" json:"removed,omitempty"`
-	Error         *BrokerErrorDetail `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	Outcome       uint32              `protobuf:"varint,3,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	Removed       bool                `protobuf:"varint,4,opt,name=removed,proto3" json:"removed,omitempty"`
+	Error         *BrokerErrorDetail  `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	Registration  *RemoteRegistration `protobuf:"bytes,6,opt,name=registration,proto3" json:"registration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OperationResult) Reset() {
 	*x = OperationResult{}
-	mi := &file_broker_proto_msgTypes[24]
+	mi := &file_broker_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2079,7 +2183,7 @@ func (x *OperationResult) String() string {
 func (*OperationResult) ProtoMessage() {}
 
 func (x *OperationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[24]
+	mi := &file_broker_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2092,7 +2196,7 @@ func (x *OperationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationResult.ProtoReflect.Descriptor instead.
 func (*OperationResult) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{24}
+	return file_broker_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *OperationResult) GetScope() *BrokerScope {
@@ -2130,6 +2234,13 @@ func (x *OperationResult) GetError() *BrokerErrorDetail {
 	return nil
 }
 
+func (x *OperationResult) GetRegistration() *RemoteRegistration {
+	if x != nil {
+		return x.Registration
+	}
+	return nil
+}
+
 // StreamOpened confirms one logical stream is established.
 type StreamOpened struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2140,7 +2251,7 @@ type StreamOpened struct {
 
 func (x *StreamOpened) Reset() {
 	*x = StreamOpened{}
-	mi := &file_broker_proto_msgTypes[25]
+	mi := &file_broker_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2152,7 +2263,7 @@ func (x *StreamOpened) String() string {
 func (*StreamOpened) ProtoMessage() {}
 
 func (x *StreamOpened) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[25]
+	mi := &file_broker_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2165,7 +2276,7 @@ func (x *StreamOpened) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamOpened.ProtoReflect.Descriptor instead.
 func (*StreamOpened) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{25}
+	return file_broker_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *StreamOpened) GetRef() *BrokerStreamRef {
@@ -2186,7 +2297,7 @@ type ServerStreamData struct {
 
 func (x *ServerStreamData) Reset() {
 	*x = ServerStreamData{}
-	mi := &file_broker_proto_msgTypes[26]
+	mi := &file_broker_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2198,7 +2309,7 @@ func (x *ServerStreamData) String() string {
 func (*ServerStreamData) ProtoMessage() {}
 
 func (x *ServerStreamData) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[26]
+	mi := &file_broker_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2211,7 +2322,7 @@ func (x *ServerStreamData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerStreamData.ProtoReflect.Descriptor instead.
 func (*ServerStreamData) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{26}
+	return file_broker_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ServerStreamData) GetRef() *BrokerStreamRef {
@@ -2240,7 +2351,7 @@ type StreamClosed struct {
 
 func (x *StreamClosed) Reset() {
 	*x = StreamClosed{}
-	mi := &file_broker_proto_msgTypes[27]
+	mi := &file_broker_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2252,7 +2363,7 @@ func (x *StreamClosed) String() string {
 func (*StreamClosed) ProtoMessage() {}
 
 func (x *StreamClosed) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[27]
+	mi := &file_broker_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2265,7 +2376,7 @@ func (x *StreamClosed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamClosed.ProtoReflect.Descriptor instead.
 func (*StreamClosed) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{27}
+	return file_broker_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *StreamClosed) GetRef() *BrokerStreamRef {
@@ -2294,7 +2405,7 @@ type Progress struct {
 
 func (x *Progress) Reset() {
 	*x = Progress{}
-	mi := &file_broker_proto_msgTypes[28]
+	mi := &file_broker_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2306,7 +2417,7 @@ func (x *Progress) String() string {
 func (*Progress) ProtoMessage() {}
 
 func (x *Progress) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[28]
+	mi := &file_broker_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2319,7 +2430,7 @@ func (x *Progress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Progress.ProtoReflect.Descriptor instead.
 func (*Progress) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{28}
+	return file_broker_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *Progress) GetRef() *BrokerStreamRef {
@@ -2354,7 +2465,7 @@ type BrokerErrorMessage struct {
 
 func (x *BrokerErrorMessage) Reset() {
 	*x = BrokerErrorMessage{}
-	mi := &file_broker_proto_msgTypes[29]
+	mi := &file_broker_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2366,7 +2477,7 @@ func (x *BrokerErrorMessage) String() string {
 func (*BrokerErrorMessage) ProtoMessage() {}
 
 func (x *BrokerErrorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[29]
+	mi := &file_broker_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2379,7 +2490,7 @@ func (x *BrokerErrorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BrokerErrorMessage.ProtoReflect.Descriptor instead.
 func (*BrokerErrorMessage) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{29}
+	return file_broker_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *BrokerErrorMessage) GetScope() *BrokerScope {
@@ -2409,7 +2520,7 @@ type Shutdown struct {
 
 func (x *Shutdown) Reset() {
 	*x = Shutdown{}
-	mi := &file_broker_proto_msgTypes[30]
+	mi := &file_broker_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2421,7 +2532,7 @@ func (x *Shutdown) String() string {
 func (*Shutdown) ProtoMessage() {}
 
 func (x *Shutdown) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[30]
+	mi := &file_broker_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2434,7 +2545,7 @@ func (x *Shutdown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Shutdown.ProtoReflect.Descriptor instead.
 func (*Shutdown) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{30}
+	return file_broker_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Shutdown) GetScope() *BrokerScope {
@@ -2480,7 +2591,7 @@ type BrokerCatalogSession struct {
 
 func (x *BrokerCatalogSession) Reset() {
 	*x = BrokerCatalogSession{}
-	mi := &file_broker_proto_msgTypes[31]
+	mi := &file_broker_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2492,7 +2603,7 @@ func (x *BrokerCatalogSession) String() string {
 func (*BrokerCatalogSession) ProtoMessage() {}
 
 func (x *BrokerCatalogSession) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[31]
+	mi := &file_broker_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2505,7 +2616,7 @@ func (x *BrokerCatalogSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BrokerCatalogSession.ProtoReflect.Descriptor instead.
 func (*BrokerCatalogSession) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{31}
+	return file_broker_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *BrokerCatalogSession) GetLifecycleId() []byte {
@@ -2585,7 +2696,7 @@ type BrokerCatalogTab struct {
 
 func (x *BrokerCatalogTab) Reset() {
 	*x = BrokerCatalogTab{}
-	mi := &file_broker_proto_msgTypes[32]
+	mi := &file_broker_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2597,7 +2708,7 @@ func (x *BrokerCatalogTab) String() string {
 func (*BrokerCatalogTab) ProtoMessage() {}
 
 func (x *BrokerCatalogTab) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_proto_msgTypes[32]
+	mi := &file_broker_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2610,7 +2721,7 @@ func (x *BrokerCatalogTab) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BrokerCatalogTab.ProtoReflect.Descriptor instead.
 func (*BrokerCatalogTab) Descriptor() ([]byte, []int) {
-	return file_broker_proto_rawDescGZIP(), []int{32}
+	return file_broker_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *BrokerCatalogTab) GetId() string {
@@ -2674,7 +2785,7 @@ const file_broker_proto_rawDesc = "" +
 	"\ffailure_kind\x18\x04 \x01(\rR\vfailureKind\"A\n" +
 	"\x0fBrokerTimestamp\x12\x18\n" +
 	"\aseconds\x18\x01 \x01(\x03R\aseconds\x12\x14\n" +
-	"\x05nanos\x18\x02 \x01(\x05R\x05nanos\"\xec\x04\n" +
+	"\x05nanos\x18\x02 \x01(\x05R\x05nanos\"\xbb\x05\n" +
 	"\x14BrokerClientEnvelope\x123\n" +
 	"\bregister\x18e \x01(\v2\x15.vev.wire.v1.RegisterH\x00R\bregister\x126\n" +
 	"\tsubscribe\x18f \x01(\v2\x16.vev.wire.v1.SubscribeH\x00R\tsubscribe\x12-\n" +
@@ -2687,7 +2798,8 @@ const file_broker_proto_rawDesc = "" +
 	"\vopen_stream\x18l \x01(\v2\x17.vev.wire.v1.OpenStreamH\x00R\n" +
 	"openStream\x12M\n" +
 	"\x12client_stream_data\x18m \x01(\v2\x1d.vev.wire.v1.ClientStreamDataH\x00R\x10clientStreamData\x12=\n" +
-	"\fclose_stream\x18n \x01(\v2\x18.vev.wire.v1.CloseStreamH\x00R\vcloseStreamB\t\n" +
+	"\fclose_stream\x18n \x01(\v2\x18.vev.wire.v1.CloseStreamH\x00R\vcloseStream\x12M\n" +
+	"\x12update_host_policy\x18o \x01(\v2\x1d.vev.wire.v1.UpdateHostPolicyH\x00R\x10updateHostPolicyB\t\n" +
 	"\apayload\"\x84\x05\n" +
 	"\x14BrokerServerEnvelope\x12:\n" +
 	"\n" +
@@ -2718,16 +2830,22 @@ const file_broker_proto_rawDesc = "" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x02 \x01(\x04R\n" +
-	"generation\"x\n" +
+	"generation\"\xaf\x01\n" +
 	"\aAddHost\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\fR\voperationId\x12\x1a\n" +
-	"\bendpoint\x18\x03 \x01(\tR\bendpoint\"{\n" +
+	"\bendpoint\x18\x03 \x01(\tR\bendpoint\x125\n" +
+	"\x06policy\x18\x04 \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\"\xa4\x01\n" +
 	"\n" +
 	"RemoveHost\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12!\n" +
-	"\foperation_id\x18\x02 \x01(\fR\voperationId\x12\x1a\n" +
-	"\bendpoint\x18\x03 \x01(\tR\bendpoint\"\x80\x01\n" +
+	"\foperation_id\x18\x02 \x01(\fR\voperationId\x12C\n" +
+	"\fregistration\x18\x03 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\"\xe1\x01\n" +
+	"\x10UpdateHostPolicy\x12.\n" +
+	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12!\n" +
+	"\foperation_id\x18\x02 \x01(\fR\voperationId\x12C\n" +
+	"\fregistration\x18\x03 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x125\n" +
+	"\x06policy\x18\x04 \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\"\x80\x01\n" +
 	"\tReconcile\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12C\n" +
 	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\"\xfa\x02\n" +
@@ -2806,13 +2924,14 @@ const file_broker_proto_rawDesc = "" +
 	"\x0ftombstone_index\x18\x01 \x01(\rR\x0etombstoneIndex\x12C\n" +
 	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\x12)\n" +
 	"\x10retired_revision\x18\x03 \x01(\x04R\x0fretiredRevision\"\r\n" +
-	"\vSnapshotEnd\"\xce\x01\n" +
+	"\vSnapshotEnd\"\x93\x02\n" +
 	"\x0fOperationResult\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\fR\voperationId\x12\x18\n" +
 	"\aoutcome\x18\x03 \x01(\rR\aoutcome\x12\x18\n" +
 	"\aremoved\x18\x04 \x01(\bR\aremoved\x124\n" +
-	"\x05error\x18\x05 \x01(\v2\x1e.vev.wire.v1.BrokerErrorDetailR\x05error\">\n" +
+	"\x05error\x18\x05 \x01(\v2\x1e.vev.wire.v1.BrokerErrorDetailR\x05error\x12C\n" +
+	"\fregistration\x18\x06 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\">\n" +
 	"\fStreamOpened\x12.\n" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\"V\n" +
 	"\x10ServerStreamData\x12.\n" +
@@ -2861,7 +2980,7 @@ func file_broker_proto_rawDescGZIP() []byte {
 	return file_broker_proto_rawDescData
 }
 
-var file_broker_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_broker_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_broker_proto_goTypes = []any{
 	(*BrokerScope)(nil),          // 0: vev.wire.v1.BrokerScope
 	(*BrokerStreamRef)(nil),      // 1: vev.wire.v1.BrokerStreamRef
@@ -2876,28 +2995,29 @@ var file_broker_proto_goTypes = []any{
 	(*Unsubscribe)(nil),          // 10: vev.wire.v1.Unsubscribe
 	(*AddHost)(nil),              // 11: vev.wire.v1.AddHost
 	(*RemoveHost)(nil),           // 12: vev.wire.v1.RemoveHost
-	(*Reconcile)(nil),            // 13: vev.wire.v1.Reconcile
-	(*OpenStream)(nil),           // 14: vev.wire.v1.OpenStream
-	(*ClientStreamData)(nil),     // 15: vev.wire.v1.ClientStreamData
-	(*CloseStream)(nil),          // 16: vev.wire.v1.CloseStream
-	(*Registered)(nil),           // 17: vev.wire.v1.Registered
-	(*SnapshotPart)(nil),         // 18: vev.wire.v1.SnapshotPart
-	(*SnapshotBegin)(nil),        // 19: vev.wire.v1.SnapshotBegin
-	(*SnapshotDaemon)(nil),       // 20: vev.wire.v1.SnapshotDaemon
-	(*SnapshotSession)(nil),      // 21: vev.wire.v1.SnapshotSession
-	(*SnapshotTombstone)(nil),    // 22: vev.wire.v1.SnapshotTombstone
-	(*SnapshotEnd)(nil),          // 23: vev.wire.v1.SnapshotEnd
-	(*OperationResult)(nil),      // 24: vev.wire.v1.OperationResult
-	(*StreamOpened)(nil),         // 25: vev.wire.v1.StreamOpened
-	(*ServerStreamData)(nil),     // 26: vev.wire.v1.ServerStreamData
-	(*StreamClosed)(nil),         // 27: vev.wire.v1.StreamClosed
-	(*Progress)(nil),             // 28: vev.wire.v1.Progress
-	(*BrokerErrorMessage)(nil),   // 29: vev.wire.v1.BrokerErrorMessage
-	(*Shutdown)(nil),             // 30: vev.wire.v1.Shutdown
-	(*BrokerCatalogSession)(nil), // 31: vev.wire.v1.BrokerCatalogSession
-	(*BrokerCatalogTab)(nil),     // 32: vev.wire.v1.BrokerCatalogTab
-	(*RemoteRegistration)(nil),   // 33: vev.wire.v1.RemoteRegistration
-	(*ExactTarget)(nil),          // 34: vev.wire.v1.ExactTarget
+	(*UpdateHostPolicy)(nil),     // 13: vev.wire.v1.UpdateHostPolicy
+	(*Reconcile)(nil),            // 14: vev.wire.v1.Reconcile
+	(*OpenStream)(nil),           // 15: vev.wire.v1.OpenStream
+	(*ClientStreamData)(nil),     // 16: vev.wire.v1.ClientStreamData
+	(*CloseStream)(nil),          // 17: vev.wire.v1.CloseStream
+	(*Registered)(nil),           // 18: vev.wire.v1.Registered
+	(*SnapshotPart)(nil),         // 19: vev.wire.v1.SnapshotPart
+	(*SnapshotBegin)(nil),        // 20: vev.wire.v1.SnapshotBegin
+	(*SnapshotDaemon)(nil),       // 21: vev.wire.v1.SnapshotDaemon
+	(*SnapshotSession)(nil),      // 22: vev.wire.v1.SnapshotSession
+	(*SnapshotTombstone)(nil),    // 23: vev.wire.v1.SnapshotTombstone
+	(*SnapshotEnd)(nil),          // 24: vev.wire.v1.SnapshotEnd
+	(*OperationResult)(nil),      // 25: vev.wire.v1.OperationResult
+	(*StreamOpened)(nil),         // 26: vev.wire.v1.StreamOpened
+	(*ServerStreamData)(nil),     // 27: vev.wire.v1.ServerStreamData
+	(*StreamClosed)(nil),         // 28: vev.wire.v1.StreamClosed
+	(*Progress)(nil),             // 29: vev.wire.v1.Progress
+	(*BrokerErrorMessage)(nil),   // 30: vev.wire.v1.BrokerErrorMessage
+	(*Shutdown)(nil),             // 31: vev.wire.v1.Shutdown
+	(*BrokerCatalogSession)(nil), // 32: vev.wire.v1.BrokerCatalogSession
+	(*BrokerCatalogTab)(nil),     // 33: vev.wire.v1.BrokerCatalogTab
+	(*RemoteRegistration)(nil),   // 34: vev.wire.v1.RemoteRegistration
+	(*ExactTarget)(nil),          // 35: vev.wire.v1.ExactTarget
 }
 var file_broker_proto_depIdxs = []int32{
 	0,  // 0: vev.wire.v1.BrokerStreamRef.scope:type_name -> vev.wire.v1.BrokerScope
@@ -2907,62 +3027,69 @@ var file_broker_proto_depIdxs = []int32{
 	10, // 4: vev.wire.v1.BrokerClientEnvelope.unsubscribe:type_name -> vev.wire.v1.Unsubscribe
 	11, // 5: vev.wire.v1.BrokerClientEnvelope.add_host:type_name -> vev.wire.v1.AddHost
 	12, // 6: vev.wire.v1.BrokerClientEnvelope.remove_host:type_name -> vev.wire.v1.RemoveHost
-	13, // 7: vev.wire.v1.BrokerClientEnvelope.reconcile:type_name -> vev.wire.v1.Reconcile
-	14, // 8: vev.wire.v1.BrokerClientEnvelope.open_stream:type_name -> vev.wire.v1.OpenStream
-	15, // 9: vev.wire.v1.BrokerClientEnvelope.client_stream_data:type_name -> vev.wire.v1.ClientStreamData
-	16, // 10: vev.wire.v1.BrokerClientEnvelope.close_stream:type_name -> vev.wire.v1.CloseStream
-	17, // 11: vev.wire.v1.BrokerServerEnvelope.registered:type_name -> vev.wire.v1.Registered
-	18, // 12: vev.wire.v1.BrokerServerEnvelope.snapshot_part:type_name -> vev.wire.v1.SnapshotPart
-	24, // 13: vev.wire.v1.BrokerServerEnvelope.operation_result:type_name -> vev.wire.v1.OperationResult
-	25, // 14: vev.wire.v1.BrokerServerEnvelope.stream_opened:type_name -> vev.wire.v1.StreamOpened
-	26, // 15: vev.wire.v1.BrokerServerEnvelope.server_stream_data:type_name -> vev.wire.v1.ServerStreamData
-	27, // 16: vev.wire.v1.BrokerServerEnvelope.stream_closed:type_name -> vev.wire.v1.StreamClosed
-	28, // 17: vev.wire.v1.BrokerServerEnvelope.progress:type_name -> vev.wire.v1.Progress
-	29, // 18: vev.wire.v1.BrokerServerEnvelope.broker_error_message:type_name -> vev.wire.v1.BrokerErrorMessage
-	30, // 19: vev.wire.v1.BrokerServerEnvelope.shutdown:type_name -> vev.wire.v1.Shutdown
-	0,  // 20: vev.wire.v1.Subscribe.scope:type_name -> vev.wire.v1.BrokerScope
-	0,  // 21: vev.wire.v1.Resync.scope:type_name -> vev.wire.v1.BrokerScope
-	0,  // 22: vev.wire.v1.Unsubscribe.scope:type_name -> vev.wire.v1.BrokerScope
-	0,  // 23: vev.wire.v1.AddHost.scope:type_name -> vev.wire.v1.BrokerScope
-	0,  // 24: vev.wire.v1.RemoveHost.scope:type_name -> vev.wire.v1.BrokerScope
-	0,  // 25: vev.wire.v1.Reconcile.scope:type_name -> vev.wire.v1.BrokerScope
-	33, // 26: vev.wire.v1.Reconcile.registration:type_name -> vev.wire.v1.RemoteRegistration
-	1,  // 27: vev.wire.v1.OpenStream.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	33, // 28: vev.wire.v1.OpenStream.registration:type_name -> vev.wire.v1.RemoteRegistration
-	34, // 29: vev.wire.v1.OpenStream.target:type_name -> vev.wire.v1.ExactTarget
-	2,  // 30: vev.wire.v1.OpenStream.policy:type_name -> vev.wire.v1.BrokerWirePolicy
-	1,  // 31: vev.wire.v1.ClientStreamData.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	1,  // 32: vev.wire.v1.CloseStream.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	0,  // 33: vev.wire.v1.Registered.scope:type_name -> vev.wire.v1.BrokerScope
-	0,  // 34: vev.wire.v1.SnapshotPart.scope:type_name -> vev.wire.v1.BrokerScope
-	19, // 35: vev.wire.v1.SnapshotPart.begin:type_name -> vev.wire.v1.SnapshotBegin
-	20, // 36: vev.wire.v1.SnapshotPart.daemon:type_name -> vev.wire.v1.SnapshotDaemon
-	21, // 37: vev.wire.v1.SnapshotPart.session:type_name -> vev.wire.v1.SnapshotSession
-	22, // 38: vev.wire.v1.SnapshotPart.tombstone:type_name -> vev.wire.v1.SnapshotTombstone
-	23, // 39: vev.wire.v1.SnapshotPart.end:type_name -> vev.wire.v1.SnapshotEnd
-	33, // 40: vev.wire.v1.SnapshotDaemon.registration:type_name -> vev.wire.v1.RemoteRegistration
-	2,  // 41: vev.wire.v1.SnapshotDaemon.policy:type_name -> vev.wire.v1.BrokerWirePolicy
-	4,  // 42: vev.wire.v1.SnapshotDaemon.last_attempt:type_name -> vev.wire.v1.BrokerTimestamp
-	4,  // 43: vev.wire.v1.SnapshotDaemon.last_success:type_name -> vev.wire.v1.BrokerTimestamp
-	4,  // 44: vev.wire.v1.SnapshotDaemon.next_due:type_name -> vev.wire.v1.BrokerTimestamp
-	31, // 45: vev.wire.v1.SnapshotSession.session:type_name -> vev.wire.v1.BrokerCatalogSession
-	33, // 46: vev.wire.v1.SnapshotTombstone.registration:type_name -> vev.wire.v1.RemoteRegistration
-	0,  // 47: vev.wire.v1.OperationResult.scope:type_name -> vev.wire.v1.BrokerScope
-	3,  // 48: vev.wire.v1.OperationResult.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	1,  // 49: vev.wire.v1.StreamOpened.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	1,  // 50: vev.wire.v1.ServerStreamData.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	1,  // 51: vev.wire.v1.StreamClosed.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	3,  // 52: vev.wire.v1.StreamClosed.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	1,  // 53: vev.wire.v1.Progress.ref:type_name -> vev.wire.v1.BrokerStreamRef
-	0,  // 54: vev.wire.v1.BrokerErrorMessage.scope:type_name -> vev.wire.v1.BrokerScope
-	3,  // 55: vev.wire.v1.BrokerErrorMessage.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	0,  // 56: vev.wire.v1.Shutdown.scope:type_name -> vev.wire.v1.BrokerScope
-	32, // 57: vev.wire.v1.BrokerCatalogSession.tabs:type_name -> vev.wire.v1.BrokerCatalogTab
-	58, // [58:58] is the sub-list for method output_type
-	58, // [58:58] is the sub-list for method input_type
-	58, // [58:58] is the sub-list for extension type_name
-	58, // [58:58] is the sub-list for extension extendee
-	0,  // [0:58] is the sub-list for field type_name
+	14, // 7: vev.wire.v1.BrokerClientEnvelope.reconcile:type_name -> vev.wire.v1.Reconcile
+	15, // 8: vev.wire.v1.BrokerClientEnvelope.open_stream:type_name -> vev.wire.v1.OpenStream
+	16, // 9: vev.wire.v1.BrokerClientEnvelope.client_stream_data:type_name -> vev.wire.v1.ClientStreamData
+	17, // 10: vev.wire.v1.BrokerClientEnvelope.close_stream:type_name -> vev.wire.v1.CloseStream
+	13, // 11: vev.wire.v1.BrokerClientEnvelope.update_host_policy:type_name -> vev.wire.v1.UpdateHostPolicy
+	18, // 12: vev.wire.v1.BrokerServerEnvelope.registered:type_name -> vev.wire.v1.Registered
+	19, // 13: vev.wire.v1.BrokerServerEnvelope.snapshot_part:type_name -> vev.wire.v1.SnapshotPart
+	25, // 14: vev.wire.v1.BrokerServerEnvelope.operation_result:type_name -> vev.wire.v1.OperationResult
+	26, // 15: vev.wire.v1.BrokerServerEnvelope.stream_opened:type_name -> vev.wire.v1.StreamOpened
+	27, // 16: vev.wire.v1.BrokerServerEnvelope.server_stream_data:type_name -> vev.wire.v1.ServerStreamData
+	28, // 17: vev.wire.v1.BrokerServerEnvelope.stream_closed:type_name -> vev.wire.v1.StreamClosed
+	29, // 18: vev.wire.v1.BrokerServerEnvelope.progress:type_name -> vev.wire.v1.Progress
+	30, // 19: vev.wire.v1.BrokerServerEnvelope.broker_error_message:type_name -> vev.wire.v1.BrokerErrorMessage
+	31, // 20: vev.wire.v1.BrokerServerEnvelope.shutdown:type_name -> vev.wire.v1.Shutdown
+	0,  // 21: vev.wire.v1.Subscribe.scope:type_name -> vev.wire.v1.BrokerScope
+	0,  // 22: vev.wire.v1.Resync.scope:type_name -> vev.wire.v1.BrokerScope
+	0,  // 23: vev.wire.v1.Unsubscribe.scope:type_name -> vev.wire.v1.BrokerScope
+	0,  // 24: vev.wire.v1.AddHost.scope:type_name -> vev.wire.v1.BrokerScope
+	2,  // 25: vev.wire.v1.AddHost.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	0,  // 26: vev.wire.v1.RemoveHost.scope:type_name -> vev.wire.v1.BrokerScope
+	34, // 27: vev.wire.v1.RemoveHost.registration:type_name -> vev.wire.v1.RemoteRegistration
+	0,  // 28: vev.wire.v1.UpdateHostPolicy.scope:type_name -> vev.wire.v1.BrokerScope
+	34, // 29: vev.wire.v1.UpdateHostPolicy.registration:type_name -> vev.wire.v1.RemoteRegistration
+	2,  // 30: vev.wire.v1.UpdateHostPolicy.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	0,  // 31: vev.wire.v1.Reconcile.scope:type_name -> vev.wire.v1.BrokerScope
+	34, // 32: vev.wire.v1.Reconcile.registration:type_name -> vev.wire.v1.RemoteRegistration
+	1,  // 33: vev.wire.v1.OpenStream.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	34, // 34: vev.wire.v1.OpenStream.registration:type_name -> vev.wire.v1.RemoteRegistration
+	35, // 35: vev.wire.v1.OpenStream.target:type_name -> vev.wire.v1.ExactTarget
+	2,  // 36: vev.wire.v1.OpenStream.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	1,  // 37: vev.wire.v1.ClientStreamData.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	1,  // 38: vev.wire.v1.CloseStream.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	0,  // 39: vev.wire.v1.Registered.scope:type_name -> vev.wire.v1.BrokerScope
+	0,  // 40: vev.wire.v1.SnapshotPart.scope:type_name -> vev.wire.v1.BrokerScope
+	20, // 41: vev.wire.v1.SnapshotPart.begin:type_name -> vev.wire.v1.SnapshotBegin
+	21, // 42: vev.wire.v1.SnapshotPart.daemon:type_name -> vev.wire.v1.SnapshotDaemon
+	22, // 43: vev.wire.v1.SnapshotPart.session:type_name -> vev.wire.v1.SnapshotSession
+	23, // 44: vev.wire.v1.SnapshotPart.tombstone:type_name -> vev.wire.v1.SnapshotTombstone
+	24, // 45: vev.wire.v1.SnapshotPart.end:type_name -> vev.wire.v1.SnapshotEnd
+	34, // 46: vev.wire.v1.SnapshotDaemon.registration:type_name -> vev.wire.v1.RemoteRegistration
+	2,  // 47: vev.wire.v1.SnapshotDaemon.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	4,  // 48: vev.wire.v1.SnapshotDaemon.last_attempt:type_name -> vev.wire.v1.BrokerTimestamp
+	4,  // 49: vev.wire.v1.SnapshotDaemon.last_success:type_name -> vev.wire.v1.BrokerTimestamp
+	4,  // 50: vev.wire.v1.SnapshotDaemon.next_due:type_name -> vev.wire.v1.BrokerTimestamp
+	32, // 51: vev.wire.v1.SnapshotSession.session:type_name -> vev.wire.v1.BrokerCatalogSession
+	34, // 52: vev.wire.v1.SnapshotTombstone.registration:type_name -> vev.wire.v1.RemoteRegistration
+	0,  // 53: vev.wire.v1.OperationResult.scope:type_name -> vev.wire.v1.BrokerScope
+	3,  // 54: vev.wire.v1.OperationResult.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	34, // 55: vev.wire.v1.OperationResult.registration:type_name -> vev.wire.v1.RemoteRegistration
+	1,  // 56: vev.wire.v1.StreamOpened.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	1,  // 57: vev.wire.v1.ServerStreamData.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	1,  // 58: vev.wire.v1.StreamClosed.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	3,  // 59: vev.wire.v1.StreamClosed.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	1,  // 60: vev.wire.v1.Progress.ref:type_name -> vev.wire.v1.BrokerStreamRef
+	0,  // 61: vev.wire.v1.BrokerErrorMessage.scope:type_name -> vev.wire.v1.BrokerScope
+	3,  // 62: vev.wire.v1.BrokerErrorMessage.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	0,  // 63: vev.wire.v1.Shutdown.scope:type_name -> vev.wire.v1.BrokerScope
+	33, // 64: vev.wire.v1.BrokerCatalogSession.tabs:type_name -> vev.wire.v1.BrokerCatalogTab
+	65, // [65:65] is the sub-list for method output_type
+	65, // [65:65] is the sub-list for method input_type
+	65, // [65:65] is the sub-list for extension type_name
+	65, // [65:65] is the sub-list for extension extendee
+	0,  // [0:65] is the sub-list for field type_name
 }
 
 func init() { file_broker_proto_init() }
@@ -2982,6 +3109,7 @@ func file_broker_proto_init() {
 		(*BrokerClientEnvelope_OpenStream)(nil),
 		(*BrokerClientEnvelope_ClientStreamData)(nil),
 		(*BrokerClientEnvelope_CloseStream)(nil),
+		(*BrokerClientEnvelope_UpdateHostPolicy)(nil),
 	}
 	file_broker_proto_msgTypes[6].OneofWrappers = []any{
 		(*BrokerServerEnvelope_Registered)(nil),
@@ -2994,7 +3122,7 @@ func file_broker_proto_init() {
 		(*BrokerServerEnvelope_BrokerErrorMessage)(nil),
 		(*BrokerServerEnvelope_Shutdown)(nil),
 	}
-	file_broker_proto_msgTypes[18].OneofWrappers = []any{
+	file_broker_proto_msgTypes[19].OneofWrappers = []any{
 		(*SnapshotPart_Begin)(nil),
 		(*SnapshotPart_Daemon)(nil),
 		(*SnapshotPart_Session)(nil),
@@ -3007,7 +3135,7 @@ func file_broker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_broker_proto_rawDesc), len(file_broker_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -3,7 +3,7 @@
 // physical connection.
 //
 // daemonmux is a third conversation, separate from the session protocol
-// (tags 1-32) and the broker protocol (client 101-110, server 201-209):
+// (tags 1-32) and the broker protocol (client 101-111, server 201-209):
 // client tags 301-304 and server tags 401-405 are disjoint from every other
 // tag, and each direction is its own closed oneof union. The physical
 // preamble is a separate adapter message pair, not an envelope variant:

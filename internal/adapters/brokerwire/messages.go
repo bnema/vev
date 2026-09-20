@@ -67,26 +67,47 @@ type Unsubscribe struct {
 
 func (Unsubscribe) brokerClientMessage() {}
 
-// AddHost adds one configured host registration. Operation is the
-// idempotency identity of this mutating operation.
+// AddHost adds one configured host registration under an exact policy.
+// Operation is the idempotency identity of this mutating operation. Policy
+// is required authority: an absent or invalid policy is refused rather than
+// inherited, so a membership addition can never be authorized by a zero
+// policy.
 type AddHost struct {
 	Epoch      ports.BrokerEpoch
 	Connection ports.BrokerConnectionID
 	Operation  ports.BrokerOperationID
 	Endpoint   string
+	Policy     ports.BrokerPolicy
 }
 
 func (AddHost) brokerClientMessage() {}
 
-// RemoveHost removes one configured host registration.
+// RemoveHost removes exactly one configured host registration: the request
+// carries the full expected authority (endpoint, incarnation, and
+// generation), never a bare endpoint name, so a stale removal can never
+// retire a re-added host.
 type RemoveHost struct {
-	Epoch      ports.BrokerEpoch
-	Connection ports.BrokerConnectionID
-	Operation  ports.BrokerOperationID
-	Endpoint   string
+	Epoch        ports.BrokerEpoch
+	Connection   ports.BrokerConnectionID
+	Operation    ports.BrokerOperationID
+	Registration domain.RemoteRegistration
 }
 
 func (RemoveHost) brokerClientMessage() {}
+
+// UpdateHostPolicy replaces the policy of exactly one configured
+// registration. Registration is the exact expected authority and Policy is
+// the required replacement, so an update can neither target an endpoint
+// name nor be authorized by a zero policy.
+type UpdateHostPolicy struct {
+	Epoch        ports.BrokerEpoch
+	Connection   ports.BrokerConnectionID
+	Operation    ports.BrokerOperationID
+	Registration domain.RemoteRegistration
+	Policy       ports.BrokerPolicy
+}
+
+func (UpdateHostPolicy) brokerClientMessage() {}
 
 // Reconcile hands the broker one exact registration to probe.
 type Reconcile struct {
@@ -216,20 +237,164 @@ type SnapshotEnd struct{}
 func (SnapshotEnd) snapshotPartPayload() {}
 
 // OperationResult is exactly one completion for one admitted mutating
-// operation. Removed reports the host is gone; Error carries the typed
-// failure when Outcome is failed or outcome-unknown. HasError=false means no
-// detail at all: encode refuses a nonzero Error rather than dropping it.
+// operation. Removed and Registration are presence-carrying authority: a
+// successful addition or policy update carries the resulting registration,
+// a successful removal reports Removed and carries no registration, and a
+// failed or outcome-unknown result carries neither authority, only its
+// typed error. Error carries the typed failure when Outcome is failed or
+// outcome-unknown; HasError=false means no detail at all, and both a
+// nonzero Error under HasError=false and an error on a successful outcome
+// are refused rather than dropped.
 type OperationResult struct {
-	Epoch      ports.BrokerEpoch
-	Connection ports.BrokerConnectionID
-	Operation  ports.BrokerOperationID
-	Outcome    ports.BrokerMutationOutcome
-	Removed    bool
-	Error      ErrorDetail
-	HasError   bool
+	Epoch        ports.BrokerEpoch
+	Connection   ports.BrokerConnectionID
+	Operation    ports.BrokerOperationID
+	Outcome      ports.BrokerMutationOutcome
+	Removed      bool
+	Registration domain.RemoteRegistration
+	Error        ErrorDetail
+	HasError     bool
 }
 
 func (OperationResult) brokerServerMessage() {}
+
+// RegisterMutationKind is the closed taxonomy of membership mutations. A
+// result's required authority depends on which request produced it, so the
+// taxonomy is explicit instead of being re-derived from a message type at
+// each result site.
+type RegisterMutationKind uint8
+
+const (
+	// MutationKindAddHost is an AddHost request: its success carries the
+	// authoritative registration.
+	MutationKindAddHost RegisterMutationKind = iota + 1
+	// MutationKindRemoveHost is a RemoveHost request: its success reports
+	// removal and carries no registration.
+	MutationKindRemoveHost
+	// MutationKindUpdateHostPolicy is an UpdateHostPolicy request: its
+	// success carries the advanced registration.
+	MutationKindUpdateHostPolicy
+)
+
+func (k RegisterMutationKind) String() string {
+	switch k {
+	case MutationKindAddHost:
+		return "add_host"
+	case MutationKindRemoveHost:
+		return "remove_host"
+	case MutationKindUpdateHostPolicy:
+		return "update_host_policy"
+	default:
+		return "unknown"
+	}
+}
+
+// Validate rejects a kind outside the closed membership-mutation taxonomy.
+func (k RegisterMutationKind) Validate() error {
+	switch k {
+	case MutationKindAddHost, MutationKindRemoveHost, MutationKindUpdateHostPolicy:
+		return nil
+	default:
+		return errConvertRange
+	}
+}
+
+// MutationKindOf classifies one client message that mutates host membership.
+// It is the request-side authority a per-kind result rule needs; pending
+// operation tracking is deliberately not wired here.
+func MutationKindOf(message ClientMessage) (RegisterMutationKind, bool) {
+	switch m := message.(type) {
+	case AddHost:
+		return MutationKindAddHost, true
+	case *AddHost:
+		if m == nil {
+			return 0, false
+		}
+		return MutationKindAddHost, true
+	case RemoveHost:
+		return MutationKindRemoveHost, true
+	case *RemoveHost:
+		if m == nil {
+			return 0, false
+		}
+		return MutationKindRemoveHost, true
+	case UpdateHostPolicy:
+		return MutationKindUpdateHostPolicy, true
+	case *UpdateHostPolicy:
+		if m == nil {
+			return 0, false
+		}
+		return MutationKindUpdateHostPolicy, true
+	default:
+		return 0, false
+	}
+}
+
+// validateResultAuthority enforces the presence rules of one mutating result
+// that hold without knowing which request produced it: removal and
+// registration never travel together, a successful result never carries an
+// error, and a failed or outcome-unknown result carries neither authority,
+// only its typed error. The per-kind rule (an AddHost or UpdateHostPolicy
+// success must carry a registration, a RemoveHost success must not) is
+// enforced by ValidateForMutation at the owning site, because the stateless
+// codec has no pending-operation state to consult. A successful removal with
+// no authority is legal: an absent host is an idempotent no-op, not an error.
+func validateResultAuthority(outcome ports.BrokerMutationOutcome, removed, hasRegistration, hasError bool) error {
+	if err := outcome.Validate(); err != nil {
+		return ErrInvalidMessage
+	}
+	if removed && hasRegistration {
+		return ErrInvalidMessage
+	}
+	if outcome == ports.BrokerOutcomeOK {
+		if hasError {
+			return ErrInvalidMessage
+		}
+		return nil
+	}
+	if removed || hasRegistration || !hasError {
+		return ErrInvalidMessage
+	}
+	return nil
+}
+
+// ValidateForMutation enforces the full authority rule of one mutating result
+// against the kind of request it completes. AddHost and UpdateHostPolicy
+// succeed with the authoritative registration, RemoveHost succeeds with
+// removal and no registration, and every failed or outcome-unknown result
+// carries neither authority, only its validated typed error.
+func (r OperationResult) ValidateForMutation(kind RegisterMutationKind) error {
+	if err := kind.Validate(); err != nil {
+		return err
+	}
+	hasRegistration := r.Registration != (domain.RemoteRegistration{})
+	if err := validateResultAuthority(r.Outcome, r.Removed, hasRegistration, r.HasError); err != nil {
+		return err
+	}
+	if r.HasError {
+		if err := r.Error.validate(); err != nil {
+			return err
+		}
+	}
+	switch r.Outcome {
+	case ports.BrokerOutcomeOK:
+		switch kind {
+		case MutationKindRemoveHost:
+			if hasRegistration {
+				return ErrInvalidMessage
+			}
+		default:
+			if !hasRegistration {
+				return ErrInvalidMessage
+			}
+		}
+	default:
+		if r.Removed || hasRegistration || !r.HasError {
+			return ErrInvalidMessage
+		}
+	}
+	return nil
+}
 
 // StreamOpened confirms one logical stream is established.
 type StreamOpened struct {
