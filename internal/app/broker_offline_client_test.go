@@ -378,12 +378,12 @@ func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 		require.Equal(t, sizes[i], receiveOfflineOutputSize(t, connection, sizes[i]))
 	}
 	require.NoError(t, connections[0].SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: 6, Attached: true, Slug: "next-tab"}))
-	require.True(t, receiveOfflineCommandResult(t, connections[0], 6).OK)
+	require.True(t, receiveOfflineCommandResult(t, connections[0], 6).Outcome == protocol.CommandSucceeded)
 	require.Equal(t, sizes[0], receiveOfflineOutputSize(t, connections[0], sizes[0]))
 	for _, connection := range connections {
 		require.NoError(t, connection.SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: 7, Attached: true, Slug: "next-tab"}))
 		result := receiveOfflineCommandResult(t, connection, 7)
-		require.True(t, result.OK, result.Text)
+		require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	}
 
 	require.NoError(t, connections[0].SendClient(protocol.Detach{}))
@@ -392,7 +392,7 @@ func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	for i := 1; i < len(connections); i++ {
 		requestID := uint64(20 + i)
 		require.NoError(t, connections[i].SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: requestID, Attached: true, Slug: "next-tab"}))
-		require.True(t, receiveOfflineCommandResult(t, connections[i], requestID).OK)
+		require.True(t, receiveOfflineCommandResult(t, connections[i], requestID).Outcome == protocol.CommandSucceeded)
 	}
 	for i := 1; i < len(connections); i++ {
 		require.NoError(t, connections[i].Close())

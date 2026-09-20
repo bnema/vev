@@ -1,6 +1,16 @@
 # Architecture
 
-vev uses a hexagonal core with typed session messages at the client and daemon boundary. Binary framing and carriage selection stay outside the use cases.
+vev uses a hexagonal core with typed session messages at the client and daemon boundary. Binary framing and carriage selection stay outside the use cases. The current strict protocol version is 58.
+
+`CommandResult` has a closed explicit outcome contract:
+
+| Outcome | Meaning | Fields |
+| --- | --- | --- |
+| `succeeded` | The command completed successfully. | code and text are empty; output may be present. |
+| `failed` | A definite failure, including validation/cancellation before dispatch. | code is nonzero; output is empty. |
+| `outcome_unknown` | Dispatch was attempted but no final outcome can be established (timeout, cancellation, EOF, or lost reply). | code and output are empty; callers must not replay automatically. |
+
+Every result retains the request ID for strict correlation. Version negotiation requires exact equality, so protocol 58 intentionally has no compatibility fallback for the deleted legacy `ok` field.
 
 ## Package ownership
 
@@ -197,7 +207,7 @@ Use cases exchange `protocol.ClientMessage` and `protocol.ServerMessage` values.
   `go tool buf generate`, and handle the new variant in `sessionwire`.
   Never edit generated `*.pb.go`; never add manual IDs or dispatch tables.
 - Implement I/O, queues, workers, environment integration, or technology selection in an adapter or `internal/app`.
-- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `57`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
+- Bump `internal/protocol.Version` for negotiated wire layout changes (currently `58`). The preamble epoch (`wire.ProtocolEpoch`, QUIC ALPN `vev/1`) bumps only for an intentional clean break.
 
 ## Broker wire core (Plan 001 P3.1, not activated)
 

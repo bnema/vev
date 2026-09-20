@@ -127,6 +127,30 @@ func cmdHelp(invocation cmdInvocation) string {
 
 var errDaemonUnreachable = errors.New("daemon not running")
 
+// errCommandNotSent reports a command request that was never placed on the wire
+// because its caller was already canceled. The outcome is definite: the daemon
+// cannot have acted, so it must not be reported as indeterminate.
+var errCommandNotSent = errors.New("command request not sent")
+
+// errCommandOutcomeUnknown reports a command whose reply was lost, wrong-typed,
+// uncorrelated, malformed, or never observed before the deadline. The daemon may
+// already have committed the command, so the outcome is indeterminate, the
+// request is never replayed, and a late result cannot change the verdict.
+var errCommandOutcomeUnknown = errors.New("vev: command outcome unknown")
+
+// commandOutcomeUnknown classifies one observation detail as an indeterminate
+// command outcome while preserving that detail's exact message and unwrap chain.
+type commandOutcomeUnknown struct{ detail error }
+
+func (e *commandOutcomeUnknown) Error() string {
+	return "command outcome unknown: " + e.detail.Error()
+}
+func (e *commandOutcomeUnknown) Unwrap() error { return e.detail }
+
+// Is reports the shared unknown-outcome sentinel so callers classify a lost
+// reply without matching on its observation text.
+func (*commandOutcomeUnknown) Is(target error) bool { return target == errCommandOutcomeUnknown }
+
 type cmdDeps struct {
 	stdout io.Writer
 	getenv func(string) string
@@ -191,6 +215,13 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 	requestID, outcome := tracker.Publish(generation)
 	request.RequestID = requestID
 	connection := sessionwire.NewClientConnection(transport)
+	// A caller already canceled before the send has a definite not-sent outcome:
+	// the request is never placed on the wire, so nothing can commit and the
+	// request is never replayed.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		tracker.Remove(requestID, generation)
+		return fmt.Errorf("%w: %w", errCommandNotSent, ctxErr)
+	}
 	if err := connection.SendClient(request); err != nil {
 		tracker.Remove(requestID, generation)
 		return &exitCoded{code: 3, err: fmt.Errorf("sending command: %w", err)}
@@ -206,7 +237,14 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 			tracker.Fail(requestID, generation, fmt.Errorf("unexpected command reply %T", reply))
 			return
 		}
-		result.RequestID = requestID
+		if result.RequestID != requestID {
+			tracker.Fail(requestID, generation, fmt.Errorf("unexpected command reply request ID %d", result.RequestID))
+			return
+		}
+		if !result.Valid() {
+			tracker.Fail(requestID, generation, errors.New("malformed command outcome"))
+			return
+		}
 		tracker.Complete(generation, result)
 	}()
 	commandClock := deps.clock
@@ -215,9 +253,21 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 	}
 	result, err := tracker.Wait(ctx, commandClock, requestID, generation, outcome)
 	if err != nil {
-		return &exitCoded{code: 3, err: err}
+		// A reply that never arrives (loss, EOF, cancellation, or deadline) leaves
+		// the outcome indeterminate: the request was sent, so it is never replayed.
+		return &exitCoded{code: 3, err: &commandOutcomeUnknown{detail: err}}
 	}
-	if !result.OK {
+	if result.Outcome == protocol.CommandOutcomeUnknown {
+		text := result.Text
+		if text == "" {
+			text = "daemon did not report a final outcome"
+		}
+		return &exitCoded{code: 3, err: &commandOutcomeUnknown{detail: errors.New(text)}}
+	}
+	if result.Outcome != protocol.CommandSucceeded {
+		if result.Text == "" {
+			result.Text = "command failed"
+		}
 		if result.Code == protocol.ErrInvalidCommandArgs {
 			return &exitCoded{code: 2, err: errors.New(result.Text)}
 		}

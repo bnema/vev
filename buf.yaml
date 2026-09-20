@@ -15,3 +15,8 @@ breaking:
     # One approved clean break at the migration baseline: the Protobuf
     # schema epoch starts here and replaces the custom MsgType codecs.
     - EXTENSION_NO_DELETE
+  ignore_only:
+    # Protocol v58 intentionally replaces CommandResult.ok with a closed
+    # outcome. Strict version equality prevents cross-version decoding.
+    FIELD_NO_DELETE:
+      - internal/protocol/wire/schema/command.proto

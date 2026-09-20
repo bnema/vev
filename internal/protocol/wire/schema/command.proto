@@ -20,11 +20,21 @@ message CommandRequest {
   bool json = 10;
 }
 
-// CommandResult reports a control command's outcome.
+// CommandOutcome is the closed terminal state of a command request.
+enum CommandOutcome {
+  COMMAND_OUTCOME_UNSPECIFIED = 0;
+  COMMAND_OUTCOME_SUCCEEDED = 1;
+  COMMAND_OUTCOME_FAILED = 2;
+  COMMAND_OUTCOME_UNKNOWN = 3;
+}
+
+// CommandResult reports a control command's explicit terminal outcome.
 message CommandResult {
   uint64 request_id = 1;
-  bool ok = 2;
+  reserved 2;
+  reserved "ok";
   uint32 code = 3;
   string text = 4;
   string output = 5;
+  CommandOutcome outcome = 6;
 }

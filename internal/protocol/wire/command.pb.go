@@ -24,6 +24,59 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// CommandOutcome is the closed terminal state of a command request.
+type CommandOutcome int32
+
+const (
+	CommandOutcome_COMMAND_OUTCOME_UNSPECIFIED CommandOutcome = 0
+	CommandOutcome_COMMAND_OUTCOME_SUCCEEDED   CommandOutcome = 1
+	CommandOutcome_COMMAND_OUTCOME_FAILED      CommandOutcome = 2
+	CommandOutcome_COMMAND_OUTCOME_UNKNOWN     CommandOutcome = 3
+)
+
+// Enum value maps for CommandOutcome.
+var (
+	CommandOutcome_name = map[int32]string{
+		0: "COMMAND_OUTCOME_UNSPECIFIED",
+		1: "COMMAND_OUTCOME_SUCCEEDED",
+		2: "COMMAND_OUTCOME_FAILED",
+		3: "COMMAND_OUTCOME_UNKNOWN",
+	}
+	CommandOutcome_value = map[string]int32{
+		"COMMAND_OUTCOME_UNSPECIFIED": 0,
+		"COMMAND_OUTCOME_SUCCEEDED":   1,
+		"COMMAND_OUTCOME_FAILED":      2,
+		"COMMAND_OUTCOME_UNKNOWN":     3,
+	}
+)
+
+func (x CommandOutcome) Enum() *CommandOutcome {
+	p := new(CommandOutcome)
+	*p = x
+	return p
+}
+
+func (x CommandOutcome) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CommandOutcome) Descriptor() protoreflect.EnumDescriptor {
+	return file_command_proto_enumTypes[0].Descriptor()
+}
+
+func (CommandOutcome) Type() protoreflect.EnumType {
+	return &file_command_proto_enumTypes[0]
+}
+
+func (x CommandOutcome) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CommandOutcome.Descriptor instead.
+func (CommandOutcome) EnumDescriptor() ([]byte, []int) {
+	return file_command_proto_rawDescGZIP(), []int{0}
+}
+
 // CommandRequest asks the daemon to run one control command.
 type CommandRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -141,14 +194,14 @@ func (x *CommandRequest) GetJson() bool {
 	return false
 }
 
-// CommandResult reports a control command's outcome.
+// CommandResult reports a control command's explicit terminal outcome.
 type CommandResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	Ok            bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
 	Code          uint32                 `protobuf:"varint,3,opt,name=code,proto3" json:"code,omitempty"`
 	Text          string                 `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"`
 	Output        string                 `protobuf:"bytes,5,opt,name=output,proto3" json:"output,omitempty"`
+	Outcome       CommandOutcome         `protobuf:"varint,6,opt,name=outcome,proto3,enum=vev.wire.v1.CommandOutcome" json:"outcome,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -190,13 +243,6 @@ func (x *CommandResult) GetRequestId() uint64 {
 	return 0
 }
 
-func (x *CommandResult) GetOk() bool {
-	if x != nil {
-		return x.Ok
-	}
-	return false
-}
-
 func (x *CommandResult) GetCode() uint32 {
 	if x != nil {
 		return x.Code
@@ -218,6 +264,13 @@ func (x *CommandResult) GetOutput() string {
 	return ""
 }
 
+func (x *CommandResult) GetOutcome() CommandOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return CommandOutcome_COMMAND_OUTCOME_UNSPECIFIED
+}
+
 var File_command_proto protoreflect.FileDescriptor
 
 const file_command_proto_rawDesc = "" +
@@ -237,14 +290,19 @@ const file_command_proto_rawDesc = "" +
 	"\vtarget_pane\x18\t \x01(\tR\n" +
 	"targetPane\x12\x12\n" +
 	"\x04json\x18\n" +
-	" \x01(\bR\x04json\"~\n" +
+	" \x01(\bR\x04json\"\xaf\x01\n" +
 	"\rCommandResult\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x0e\n" +
-	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x12\n" +
+	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x12\n" +
 	"\x04code\x18\x03 \x01(\rR\x04code\x12\x12\n" +
 	"\x04text\x18\x04 \x01(\tR\x04text\x12\x16\n" +
-	"\x06output\x18\x05 \x01(\tR\x06outputB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
+	"\x06output\x18\x05 \x01(\tR\x06output\x125\n" +
+	"\aoutcome\x18\x06 \x01(\x0e2\x1b.vev.wire.v1.CommandOutcomeR\aoutcomeJ\x04\b\x02\x10\x03R\x02ok*\x89\x01\n" +
+	"\x0eCommandOutcome\x12\x1f\n" +
+	"\x1bCOMMAND_OUTCOME_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19COMMAND_OUTCOME_SUCCEEDED\x10\x01\x12\x1a\n" +
+	"\x16COMMAND_OUTCOME_FAILED\x10\x02\x12\x1b\n" +
+	"\x17COMMAND_OUTCOME_UNKNOWN\x10\x03B-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
 	file_command_proto_rawDescOnce sync.Once
@@ -258,17 +316,20 @@ func file_command_proto_rawDescGZIP() []byte {
 	return file_command_proto_rawDescData
 }
 
+var file_command_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_command_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_command_proto_goTypes = []any{
-	(*CommandRequest)(nil), // 0: vev.wire.v1.CommandRequest
-	(*CommandResult)(nil),  // 1: vev.wire.v1.CommandResult
+	(CommandOutcome)(0),    // 0: vev.wire.v1.CommandOutcome
+	(*CommandRequest)(nil), // 1: vev.wire.v1.CommandRequest
+	(*CommandResult)(nil),  // 2: vev.wire.v1.CommandResult
 }
 var file_command_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: vev.wire.v1.CommandResult.outcome:type_name -> vev.wire.v1.CommandOutcome
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_command_proto_init() }
@@ -281,13 +342,14 @@ func file_command_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_command_proto_rawDesc), len(file_command_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_command_proto_goTypes,
 		DependencyIndexes: file_command_proto_depIdxs,
+		EnumInfos:         file_command_proto_enumTypes,
 		MessageInfos:      file_command_proto_msgTypes,
 	}.Build()
 	File_command_proto = out.File

@@ -93,7 +93,7 @@ func TestProtoServerRoundTrips(t *testing.T) {
 		protocol.Detached{Reason: protocol.ReasonDetach},
 		protocol.Pong{},
 		protocol.Sessions{},
-		protocol.CommandResult{RequestID: 1, OK: true},
+		protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded},
 		protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded},
 		protocol.KillResult{RequestID: 2, Outcome: protocol.KillFailed, Code: protocol.ErrNoSuchSession, Text: "no such session: work", Failures: []protocol.KillFailure{{Class: "stopped", Name: "work", Text: "delete failed"}}},
 		protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach},

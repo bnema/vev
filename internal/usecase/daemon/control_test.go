@@ -80,7 +80,7 @@ func TestConsumeOrExpelControlSelfTargetsNonFocusedPane(t *testing.T) {
 		TargetPane:    targetStableID,
 	})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	require.Empty(t, result.Output)
 	require.Zero(t, testAttachmentTabIndex(h.session), "--self must not change the attachment tab")
 	h.tab.mu.Lock()
@@ -111,7 +111,7 @@ func TestConsumeOrExpelControlEdgeNoopReturnsOKAndPreservesFocus(t *testing.T) {
 		TargetPane:    h.panes["pane-1"].stableID,
 	})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	require.Empty(t, result.Output)
 	require.Equal(t, before, h.snapshot())
 	require.Empty(t, h.daemon.notices.history())
@@ -148,7 +148,7 @@ func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
 	timer.ch <- time.Time{}
 	result := awaitCommandResult(t, sends)
 	require.Equal(t, uint64(17), result.RequestID)
-	require.Equal(t, protocol.ErrInternal, result.Code)
+	require.Equal(t, uint16(0), result.Code)
 	require.Equal(t, ErrCommandRequestTimeout.Error(), result.Text)
 	require.NoError(t, <-done)
 	close(factory.release)
@@ -203,7 +203,7 @@ func TestHandleConnRoutesCommand(t *testing.T) {
 	d.handleConn(tr)
 
 	result := awaitCommandResult(t, sends)
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 }
 
 func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
@@ -248,7 +248,7 @@ func TestHandleCommandDispatchAndTargetErrors(t *testing.T) {
 				tt.arrange(d)
 			}
 			result := sendCommand(t, d, tt.request)
-			require.False(t, result.OK)
+			require.False(t, result.Outcome == protocol.CommandSucceeded)
 			require.Equal(t, tt.code, result.Code)
 		})
 	}
@@ -263,7 +263,7 @@ func TestHandleCommandResolvesStaleSessionNameByStableIDs(t *testing.T) {
 		TargetSession: "old-name", TargetTab: "t_work", TargetPane: "p_work",
 	})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	require.Equal(t, uint64(1), sess.mruAt.Load())
 }
 
@@ -283,7 +283,7 @@ func TestHandleCommandStableIDsResolveSessionWithoutSelectingTab(t *testing.T) {
 		TargetTab: "t_second", TargetPane: "p_second",
 	})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	first.mu.Lock()
 	require.Equal(t, "targeted", first.name)
 	first.mu.Unlock()
@@ -315,7 +315,7 @@ func TestHandleCommandStableIDsDoNotRedirectSplitFromCurrentFocus(t *testing.T) 
 		TargetTab: "t_origin", TargetPane: "p_origin",
 	})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	sess.mu.Lock()
 	activeIndex := testAttachmentTabIndexLocked(sess)
 	sess.mu.Unlock()
@@ -351,7 +351,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 		Slug: "rename-tab", Args: []string{"invoking"}, Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
-	require.True(t, rename.OK, rename.Text)
+	require.True(t, rename.Outcome == protocol.CommandSucceeded, rename.Text)
 	active.mu.Lock()
 	require.Empty(t, active.name)
 	active.mu.Unlock()
@@ -363,7 +363,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 		Slug: "split-right", Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
-	require.True(t, split.OK, split.Text)
+	require.True(t, split.Outcome == protocol.CommandSucceeded, split.Text)
 	active.mu.Lock()
 	require.Len(t, active.panes, 1)
 	active.mu.Unlock()
@@ -377,7 +377,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 		Slug: "grow-pane-width", Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
-	require.True(t, grow.OK, grow.Text)
+	require.True(t, grow.Outcome == protocol.CommandSucceeded, grow.Text)
 	invoking.mu.Lock()
 	require.Equal(t, beforeFocus, invoking.tree.Focus, "targeted resize must not refocus the tab")
 	require.Equal(t, beforeGeneration+1, invoking.layoutGeneration)
@@ -391,7 +391,7 @@ func TestHandleCommandSelfTargetsNonActiveTabAndPane(t *testing.T) {
 		Slug: "equalize-panes", Self: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
-	require.True(t, equalize.OK, equalize.Text)
+	require.True(t, equalize.Outcome == protocol.CommandSucceeded, equalize.Text)
 	invoking.mu.Lock()
 	require.Equal(t, beforeFocus, invoking.tree.Focus, "targeted equalize must not refocus the tab")
 	for _, child := range invoking.tree.Root.Children {
@@ -416,8 +416,8 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 					d := newTestDaemon(t, factory, stubClock{})
 					t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 					sess := addControlSession(d, "work", "t_work", "p_work")
-					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
-					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-down", TargetSession: "work"}).OK)
+					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
+					require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-down", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 					tb := testAttachmentTab(sess)
 					tb.mu.Lock()
 					generation := tb.layoutGeneration
@@ -429,7 +429,7 @@ func TestResizeControlOneShotsTargetDetachedSessions(t *testing.T) {
 					request := target.request()
 					request.Slug = slug
 					result := sendCommand(t, d, request)
-					require.True(t, result.OK, result.Text)
+					require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 					require.Empty(t, result.Output)
 					tb.mu.Lock()
 					require.Equal(t, generation+1, tb.layoutGeneration, "one accepted action has one layout generation boundary")
@@ -451,7 +451,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_active", "p_active")
-	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 	active := sess.tabs[0]
 	locator := newTabWithStableID("t_locator", "p_locator", newQuietPTY(), domain.Size{Cols: 80, Rows: 22})
 	locator.ctx, locator.cancel = context.WithCancel(d.serveCtx)
@@ -466,7 +466,7 @@ func TestResizeControlNonSelfVEVLocatorUsesActiveTarget(t *testing.T) {
 	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "grow-pane-width", TargetSession: "work", TargetTab: "t_locator", TargetPane: "p_locator",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	active.mu.Lock()
 	require.Equal(t, before+1, active.layoutGeneration, "stable IDs locate the session but must not redirect a non-self action")
 	active.mu.Unlock()
@@ -483,7 +483,7 @@ func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	t.Cleanup(func() { factory.close(); d.sessWg.Wait() })
 	sess := addControlSession(d, "work", "t_work", "p_work")
-	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	tb.size.Cols = 41
@@ -491,7 +491,7 @@ func TestResizeControlTooSmallUsesStableFailure(t *testing.T) {
 	tb.mu.Unlock()
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
-	require.False(t, result.OK)
+	require.False(t, result.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrNoSuchTarget, result.Code)
 	require.Equal(t, "pane cannot be resized further", result.Text)
 }
@@ -510,7 +510,7 @@ func TestHandleCommandSelfListPanesUsesInvokingTab(t *testing.T) {
 		Slug: "list-panes", Self: true, JSON: true,
 		TargetSession: "work", TargetTab: "t_invoking", TargetPane: "p_invoking",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	require.Contains(t, result.Output, "p_invoking")
 	require.NotContains(t, result.Output, "p_active")
 }
@@ -523,7 +523,7 @@ func TestHandleCommandRenameSessionRejectsInvalidNameAsCommandArgs(t *testing.T)
 		Slug: "rename-session", Args: []string{"invalid name"}, TargetSession: "work",
 	})
 
-	require.False(t, result.OK)
+	require.False(t, result.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInvalidCommandArgs, result.Code)
 }
 
@@ -540,7 +540,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 			target: daemonActionTarget{session: sess, tab: stale},
 		}, protocol.CommandRequest{Slug: "close-tab"})
 
-		require.False(t, result.OK)
+		require.False(t, result.Outcome == protocol.CommandSucceeded)
 		require.Equal(t, protocol.ErrInternal, result.Code)
 		require.Len(t, sess.tabs, 1, "a stale close must retain the live tab")
 	})
@@ -558,7 +558,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 
 		result := sendCommand(t, d, protocol.CommandRequest{Slug: "close-pane", TargetSession: "work"})
 
-		require.False(t, result.OK)
+		require.False(t, result.Outcome == protocol.CommandSucceeded)
 		require.Equal(t, protocol.ErrInternal, result.Code)
 		d.mu.Lock()
 		require.Same(t, sess, d.sessions[sess.id], "failed final-pane close must retain the session")
@@ -580,7 +580,7 @@ func TestCloseCommandsReportMutationOutcome(t *testing.T) {
 
 		result := sendCommand(t, d, protocol.CommandRequest{Slug: "close-tab", TargetSession: "work"})
 
-		require.True(t, result.OK, result.Text)
+		require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 		sess.mu.Lock()
 		require.Len(t, sess.tabs, 1)
 		require.Equal(t, "t_second", sess.tabs[0].stableID)
@@ -623,7 +623,7 @@ func TestHandleCommandHeadlessMutations(t *testing.T) {
 
 			result := sendCommand(t, d, protocol.CommandRequest{Slug: tt.slug, Args: tt.args, TargetSession: "work"})
 
-			require.True(t, result.OK, result.Text)
+			require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 			tt.verify(t, d, sess)
 		})
 	}
@@ -642,7 +642,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	d.mu.Lock()
 	created := d.findByNameLocked("scripted")
 	d.mu.Unlock()
@@ -659,7 +659,7 @@ func TestHandleCommandNewSessionInheritsHeadlessIdentityAndViewport(t *testing.T
 	require.Empty(t, source.snapshotAttachments())
 
 	taken := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
-	require.False(t, taken.OK)
+	require.False(t, taken.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrNameTaken, taken.Code)
 }
 
@@ -676,7 +676,7 @@ func TestHandleCommandNewSessionPreservesSourceGeometry(t *testing.T) {
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "new-session", Args: []string{"scripted"}, TargetSession: "work"})
 
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	d.mu.Lock()
 	created := d.findByNameLocked("scripted")
 	d.mu.Unlock()
@@ -698,11 +698,11 @@ func TestHandleCommandValidatesToastAndQueuesForDetachedSession(t *testing.T) {
 	sess := addControlSession(d, "work", "t_work", "p_work")
 
 	bad := sendCommand(t, d, protocol.CommandRequest{Slug: "toast", Args: []string{"-l", "loud", "hello"}, TargetSession: "work"})
-	require.False(t, bad.OK)
+	require.False(t, bad.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInvalidCommandArgs, bad.Code)
 
 	good := sendCommand(t, d, protocol.CommandRequest{Slug: "toast", Args: []string{"-l", "warn", "hello"}, TargetSession: "work"})
-	require.True(t, good.OK, good.Text)
+	require.True(t, good.Outcome == protocol.CommandSucceeded, good.Text)
 	d.notices.mu.Lock()
 	require.Len(t, d.notices.pending, 1)
 	require.Equal(t, domain.NoticeUser, d.notices.pending[0].Code)
@@ -716,16 +716,16 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 	sess.tabs[0].name = "shell"
 
 	sessions := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
-	require.True(t, sessions.OK, sessions.Text)
+	require.True(t, sessions.Outcome == protocol.CommandSucceeded, sessions.Text)
 	require.Contains(t, sessions.Output, "NAME\tSTATE\tTABS\tATTACHED\tACTIVE")
 	require.Contains(t, sessions.Output, "work\tephemeral\t1\tfalse\ttrue")
 
 	tabs := sendCommand(t, d, protocol.CommandRequest{Slug: "list-tabs", TargetSession: "work"})
-	require.True(t, tabs.OK, tabs.Text)
+	require.True(t, tabs.Outcome == protocol.CommandSucceeded, tabs.Text)
 	require.Contains(t, tabs.Output, "0\tt_work\tshell\t1\ttrue")
 
 	panes := sendCommand(t, d, protocol.CommandRequest{Slug: "list-panes", TargetSession: "work", JSON: true})
-	require.True(t, panes.OK, panes.Text)
+	require.True(t, panes.Outcome == protocol.CommandSucceeded, panes.Text)
 	var decoded []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(panes.Output), &decoded))
 	require.Len(t, decoded, 1)
@@ -741,7 +741,7 @@ func TestRemoteCatalogLeavesStoppedSessionsStopped(t *testing.T) {
 	d.mu.Unlock()
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	// Observation is read-only: the stopped record stays stopped, is not
 	// resumed into a live session, and is not purged.
@@ -783,18 +783,18 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	d.mu.Unlock()
 
 	listBefore := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
-	require.True(t, listBefore.OK, listBefore.Text)
+	require.True(t, listBefore.Outcome == protocol.CommandSucceeded, listBefore.Text)
 
 	missingJSON := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog"})
-	require.False(t, missingJSON.OK)
+	require.False(t, missingJSON.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInvalidCommandArgs, missingJSON.Code)
 
 	withArgs := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", Args: []string{"extra"}, JSON: true})
-	require.False(t, withArgs.OK)
+	require.False(t, withArgs.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInvalidCommandArgs, withArgs.Code)
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	require.True(t, strings.HasSuffix(result.Output, "\n"), "catalog output must be newline-terminated")
 
 	var catalog catalogue.RemoteCatalog
@@ -818,7 +818,7 @@ func TestRemoteCatalogJSONOutput(t *testing.T) {
 	require.Equal(t, catalogue.RemoteCatalogSessionDown, catalog.Sessions[1].State)
 
 	listAfter := sendCommand(t, d, protocol.CommandRequest{Slug: "list-sessions"})
-	require.True(t, listAfter.OK, listAfter.Text)
+	require.True(t, listAfter.Outcome == protocol.CommandSucceeded, listAfter.Text)
 	require.Equal(t, listBefore.Output, listAfter.Output)
 	require.Contains(t, listAfter.Output, "work\tnamed\t2\ttrue\t")
 	require.NotContains(t, listAfter.Output, "old")
@@ -840,7 +840,7 @@ func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
 	}
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	var catalog catalogue.RemoteCatalog
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &catalog))
 	require.Equal(t, []catalogue.RemoteCatalogSession{{
@@ -872,7 +872,7 @@ func TestRemoteCatalogRejectsTooManyTabs(t *testing.T) {
 	sess.mu.Unlock()
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
-	require.False(t, result.OK)
+	require.False(t, result.Outcome == protocol.CommandSucceeded)
 	require.Contains(t, result.Text, "too many tabs")
 }
 
@@ -927,8 +927,8 @@ func TestHandleCommandSerializesSelfTargetOnNonActiveTab(t *testing.T) {
 	close(factory.release)
 	<-firstDone
 	<-secondDone
-	require.True(t, awaitCommandResult(t, firstSends).OK)
-	require.True(t, awaitCommandResult(t, secondSends).OK)
+	require.True(t, awaitCommandResult(t, firstSends).Outcome == protocol.CommandSucceeded)
+	require.True(t, awaitCommandResult(t, secondSends).Outcome == protocol.CommandSucceeded)
 
 	sess.mu.Lock()
 	require.Zero(t, testAttachmentTabIndexLocked(sess), "self commands must not select the invoking tab")
@@ -975,7 +975,7 @@ func TestHandleCommandMovePaneUsesActiveFocusedSourceWithSessionFlag(t *testing.
 	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "work",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 1)
@@ -1008,7 +1008,7 @@ func TestHandleCommandMovePanePurgeAdmissionMapsToRetryableError(t *testing.T) {
 	result := sendCommand(t, d, protocol.CommandRequest{
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, TargetSession: "work",
 	})
-	require.False(t, result.OK)
+	require.False(t, result.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInternal, result.Code)
 	require.Equal(t, errPurgeAdmissionClosed.Error(), result.Text)
 	d.endPurgeAdmission()
@@ -1030,7 +1030,7 @@ func TestHandleCommandMovePaneSelfUsesStableSourceIDs(t *testing.T) {
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "work", TargetTab: "t_inactive", TargetPane: "p_inactive",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	active := source.tabs[0]
 	active.mu.Lock()
@@ -1068,7 +1068,7 @@ func TestHandleCommandMoveTabUsesActiveTabWithoutSelf(t *testing.T) {
 		Slug: "move-tab", Args: []string{"dest"}, TargetSession: "work", Self: false,
 		TargetTab: "t_second", TargetPane: "p_second",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 1)
@@ -1096,7 +1096,7 @@ func TestHandleCommandMoveTabSelfUsesStableTab(t *testing.T) {
 		Slug: "move-tab", Args: []string{"dest"}, Self: true,
 		TargetSession: "work", TargetTab: "t_second", TargetPane: "p_second",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 1)
@@ -1215,7 +1215,7 @@ func TestHandleCommandMoveCommandsRejectInvalidArgsAndTargets(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
 			request := tt.arrange(d)
 			result := sendCommand(t, d, request)
-			require.False(t, result.OK)
+			require.False(t, result.Outcome == protocol.CommandSucceeded)
 			require.Equal(t, tt.code, result.Code)
 			if tt.text != "" {
 				require.Equal(t, tt.text, result.Text)
@@ -1234,7 +1234,7 @@ func TestHandleCommandMovePaneRelocatedStableIDsOverrideAdvisorySessionName(t *t
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "old-name", TargetTab: "t_work", TargetPane: "p_work",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 0)
@@ -1266,7 +1266,7 @@ func TestHandleCommandMovePaneStableIDsLocateSessionWithoutSelfRedirect(t *testi
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "old-name", TargetTab: "t_inactive", TargetPane: "p_inactive",
 	})
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 
 	source.mu.Lock()
 	require.Len(t, source.tabs, 1)
@@ -1332,7 +1332,7 @@ func TestHandleCommandOppositeMoveCommandsDoNotDeadlock(t *testing.T) {
 		select {
 		case <-done:
 			result := awaitCommandResult(t, sends)
-			require.True(t, result.OK, result.Text)
+			require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 		case <-time.After(5 * time.Second):
 			t.Fatal("opposite-direction move commands deadlocked")
 		}
@@ -1514,7 +1514,7 @@ func TestCloseTabParticipantsChangedReportsRetryable(t *testing.T) {
 	t.Cleanup(func() { d.afterAttachmentEffectParticipantsSnapshotted = nil })
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "close-tab", TargetSession: "work"})
-	require.False(t, result.OK)
+	require.False(t, result.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInternal, result.Code)
 	require.Equal(t, sessionKillRetryMessage, result.Text)
 

@@ -190,7 +190,7 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 		t.Run(tt.slug, func(t *testing.T) {
 			parsed, err := parseArgs(append([]string{"cmd", tt.slug}, tt.args...))
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{OK: true})}
+			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
 			require.NoError(t, runCmdWithDeps(context.Background(), parsed.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "" },
@@ -208,7 +208,7 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 }
 
 func TestRemoteCatalogCommandEnsuresDaemon(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{OK: true})}
+	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
 	ensureCalls := 0
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
 		stdout: io.Discard,
@@ -235,7 +235,7 @@ func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {
 	} {
 		t.Run(invocation.slug+"/"+strconv.Itoa(len(invocation.args)), func(t *testing.T) {
 			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{
-				Code: protocol.ErrInvalidCommandArgs, Text: "invalid command arguments",
+				Outcome: protocol.CommandFailed, Code: protocol.ErrInvalidCommandArgs, Text: "invalid command arguments",
 			})}
 			err := runCmdWithDeps(context.Background(), invocation, cmdDeps{
 				stdout: io.Discard,
@@ -257,7 +257,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 		t.Run(slug, func(t *testing.T) {
 			invocation, err := parseArgs([]string{"cmd", "--self", slug})
 			require.NoError(t, err)
-			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{OK: true})}
+			transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
 			require.NoError(t, runCmdWithDeps(context.Background(), invocation.cmd, cmdDeps{
 				stdout: io.Discard,
 				getenv: func(string) string { return "session=work,tab=t_abc,pane=p_def" },
@@ -277,7 +277,7 @@ func TestTargetPaneCmdsParseAndUseSelfTarget(t *testing.T) {
 }
 
 func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{OK: true, Output: "done"})}
+	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded, Output: "done"})}
 	out := new(strings.Builder)
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right", self: true}, cmdDeps{
 		stdout: out,
@@ -304,7 +304,7 @@ func TestRunCmdBuildsOneShotTargetedRequest(t *testing.T) {
 }
 
 func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{OK: true})}
+	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -324,7 +324,7 @@ func TestRunCmdVEVWithoutSelfUsesIDsOnlyAsSessionLocator(t *testing.T) {
 }
 
 func TestRunCmdExplicitSessionDoesNotUseEnvIDsWithoutSelf(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{OK: true})}
+	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "new-tab", session: "current"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "session=old,tab=t_abc,pane=p_def" },
@@ -407,18 +407,23 @@ func TestRunCmdTimesOutPendingRequest(t *testing.T) {
 	}
 }
 
-func TestRunCmdZeroRequestIDReplyReturnsDaemonError(t *testing.T) {
-	const want = "daemon error"
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{
-		Code: protocol.ErrInternal, Text: want,
+func TestRunCmdZeroRequestIDReplyIsRejected(t *testing.T) {
+	const want = "unexpected command reply request ID 0"
+	transport := &cmdTestTransport{preserveReplyID: true, recv: mustServerEnvelope(protocol.CommandResult{
+		Outcome: protocol.CommandFailed, Code: protocol.ErrInternal, Text: want,
 	})}
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "split-right"}, cmdDeps{
 		stdout: io.Discard,
 		getenv: func(string) string { return "" },
 		dial:   func(context.Context, string) (wire.Transport, error) { return transport, nil },
 	})
-	if err == nil || err.Error() != want {
-		t.Fatalf("error = %v, want daemon error %q", err, want)
+	// A correctly typed but uncorrelated reply is an indeterminate outcome, not a
+	// definite daemon failure: the request was sent, so it is never replayed.
+	if err == nil || !errors.Is(err, errCommandOutcomeUnknown) {
+		t.Fatalf("error = %v, want an outcome-unknown rejection of reply request ID 0", err)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want message containing %q", err, want)
 	}
 	if errors.Is(err, daemon.ErrCommandRequestTimeout) {
 		t.Fatalf("error = %v, want daemon error instead of timeout", err)
@@ -452,22 +457,22 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 	}{
 		{
 			name:     "invalid command arguments are usage errors",
-			result:   protocol.CommandResult{Code: protocol.ErrInvalidCommandArgs, Text: "usage: toast [-l level] <message>"},
+			result:   protocol.CommandResult{Outcome: protocol.CommandFailed, Code: protocol.ErrInvalidCommandArgs, Text: "usage: toast [-l level] <message>"},
 			wantCode: 2,
 		},
 		{
 			name:     "missing runtime target is a command failure",
-			result:   protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "no live sessions"},
+			result:   protocol.CommandResult{Outcome: protocol.CommandFailed, Code: protocol.ErrNoSuchTarget, Text: "no live sessions"},
 			wantCode: 1,
 		},
 		{
 			name:     "resize not in split remains an exit one failure",
-			result:   protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "pane is not in a split"},
+			result:   protocol.CommandResult{Outcome: protocol.CommandFailed, Code: protocol.ErrNoSuchTarget, Text: "pane is not in a split"},
 			wantCode: 1,
 		},
 		{
 			name:     "resize minimum remains an exit one failure",
-			result:   protocol.CommandResult{Code: protocol.ErrNoSuchTarget, Text: "pane cannot be resized further"},
+			result:   protocol.CommandResult{Outcome: protocol.CommandFailed, Code: protocol.ErrNoSuchTarget, Text: "pane cannot be resized further"},
 			wantCode: 1,
 		},
 	}
@@ -487,13 +492,15 @@ func TestRunCmdClassifiesDaemonCommandErrors(t *testing.T) {
 }
 
 type cmdTestTransport struct {
-	sent        []wire.Envelope
-	recv        wire.Envelope
-	recvErr     error
-	recvCalls   int
-	closeCalls  int
-	recvStarted chan struct{}
-	recvGate    <-chan struct{}
+	sent            []wire.Envelope
+	recv            wire.Envelope
+	recvErr         error
+	recvCalls       int
+	closeCalls      int
+	recvStarted     chan struct{}
+	replyStarted    chan struct{}
+	recvGate        <-chan struct{}
+	preserveReplyID bool
 }
 
 func (t *cmdTestTransport) Send(frame wire.Envelope) error {
@@ -515,8 +522,27 @@ func (t *cmdTestTransport) Recv() (wire.Envelope, error) {
 	if t.recvCalls == 1 {
 		return mustPreambleResponse(), nil
 	}
+	if t.replyStarted != nil {
+		select {
+		case <-t.replyStarted:
+		default:
+			close(t.replyStarted)
+		}
+	}
 	if t.recvGate != nil {
 		<-t.recvGate
+	}
+	if t.recvErr == nil && !t.preserveReplyID {
+		message, err := sessionwire.DecodeServerEnvelope(t.recv.Payload)
+		if err == nil {
+			if result, ok := message.(protocol.CommandResult); ok && result.RequestID == 0 {
+				requestMessage, decodeErr := sessionwire.DecodeClientEnvelope(t.sent[1].Payload)
+				if decodeErr == nil {
+					result.RequestID = requestMessage.(protocol.CommandRequest).RequestID
+					t.recv = mustServerEnvelope(result)
+				}
+			}
+		}
 	}
 	return t.recv, t.recvErr
 }

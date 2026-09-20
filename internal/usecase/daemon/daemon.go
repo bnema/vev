@@ -1263,7 +1263,7 @@ func (d *Daemon) handleInitialDecodeFailure(ctx context.Context, tr ports.Server
 		if failure.Version != 0 && failure.Version != protocol.Version {
 			code, text = protocol.ErrVersionMismatch, "protocol version mismatch"
 		}
-		send(protocol.CommandResult{RequestID: failure.RequestID, Code: code, Text: text})
+		send(protocol.CommandResult{RequestID: failure.RequestID, Outcome: protocol.CommandFailed, Code: code, Text: text})
 	case protocol.DecodeMessageKill:
 		send(serverError(protocol.ErrInternal, "malformed kill request"))
 	case protocol.DecodeMessageRemotePreview:

@@ -315,7 +315,10 @@ func (d *Daemon) commandResultEffect(effect *attachmentEffect) (*attachmentEffec
 }
 
 func (d *Daemon) executeAttachedCommand(effect *attachmentEffect, request protocol.CommandRequest) protocol.CommandResult {
-	result := protocol.CommandResult{RequestID: request.RequestID}
+	// Every validation arm below answers with a definite failure; the
+	// success arm replaces the outcome explicitly. A zero (unspecified)
+	// outcome would be refused by the wire decoder on the client side.
+	result := protocol.CommandResult{RequestID: request.RequestID, Outcome: protocol.CommandFailed}
 	if request.Version != protocol.Version {
 		result.Code = protocol.ErrInvalidCommandArgs
 		result.Text = "unsupported command protocol version"
@@ -369,7 +372,7 @@ func (d *Daemon) executeAttachedCommand(effect *attachmentEffect, request protoc
 		return cmd.Run(paletteExec{d: d, sess: sess, ac: effect.ac, effect: effect}, request.Args)
 	})
 	if err == nil {
-		result.OK = true
+		result.Outcome = protocol.CommandSucceeded
 		return result
 	}
 	if errors.Is(err, command.ErrInvalidArguments) {

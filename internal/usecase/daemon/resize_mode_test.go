@@ -57,11 +57,11 @@ func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	sess := addControlSession(d, "work", "t_work", "p_work")
 
 	tooEarly := sendCommand(t, d, protocol.CommandRequest{Slug: "grow-pane-width", TargetSession: "work"})
-	require.False(t, tooEarly.OK)
+	require.False(t, tooEarly.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrNoSuchTarget, tooEarly.Code)
 	require.Equal(t, "pane is not in a split", tooEarly.Text)
 
-	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).OK)
+	require.True(t, sendCommand(t, d, protocol.CommandRequest{Slug: "split-right", TargetSession: "work"}).Outcome == protocol.CommandSucceeded)
 	tb := testAttachmentTab(sess)
 	tb.mu.Lock()
 	beforeFocus := tb.tree.Focus
@@ -88,7 +88,7 @@ func TestResizeControlHeadlessAndErrors(t *testing.T) {
 	tb.mu.Unlock()
 
 	equalized := sendCommand(t, d, protocol.CommandRequest{Slug: "equalize-panes", TargetSession: "work"})
-	require.True(t, equalized.OK, equalized.Text)
+	require.True(t, equalized.Outcome == protocol.CommandSucceeded, equalized.Text)
 	require.Empty(t, equalized.Output)
 }
 

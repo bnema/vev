@@ -72,7 +72,7 @@ func TestClientConnectionDecodesEveryServerMessage(t *testing.T) {
 		{name: "detached", message: protocol.Detached{Reason: protocol.ReasonDetach}},
 		{name: "pong", message: protocol.Pong{}},
 		{name: "sessions", message: protocol.Sessions{}},
-		{name: "command result", message: protocol.CommandResult{RequestID: 1, OK: true}},
+		{name: "command result", message: protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded}},
 		{name: "kill result", message: protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded}},
 		{name: "kill result partial failures", message: protocol.KillResult{RequestID: 2, Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: "partial", Failures: []protocol.KillFailure{{Class: "stopped", Name: "work", Text: "boom"}}}},
 		{name: "attach target", message: protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}},

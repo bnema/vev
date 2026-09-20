@@ -235,7 +235,7 @@ func TestPurgeAdmissionGatesAndReopens(t *testing.T) {
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "work", TargetTab: "t_work", TargetPane: "p_work",
 	})
-	require.False(t, rejected.OK, "a move during the purge must be rejected")
+	require.False(t, rejected.Outcome == protocol.CommandSucceeded, "a move during the purge must be rejected")
 
 	d.endPurgeAdmission()
 	require.NoError(t, awaitTestValue(t, created, "route did not resume after purge admission reopened"))
@@ -245,7 +245,7 @@ func TestPurgeAdmissionGatesAndReopens(t *testing.T) {
 		Slug: "move-pane", Args: []string{"dest", "t_dest"}, Self: true,
 		TargetSession: "work", TargetTab: "t_work", TargetPane: "p_work",
 	})
-	require.True(t, accepted.OK, accepted.Text)
+	require.True(t, accepted.Outcome == protocol.CommandSucceeded, accepted.Text)
 }
 
 // TestPurgeAllLinearizesConcurrentCreate races KillAll against a route create.
@@ -664,7 +664,7 @@ func TestCommandPathPurgeAdmissionMapsToRetryableError(t *testing.T) {
 		Slug: "new-session", Args: []string{"fresh"}, Self: true,
 		TargetSession: "work", TargetTab: "t_work", TargetPane: "p_work",
 	})
-	require.False(t, result.OK)
+	require.False(t, result.Outcome == protocol.CommandSucceeded)
 	require.Equal(t, protocol.ErrInternal, result.Code)
 	require.Equal(t, errPurgeAdmissionClosed.Error(), result.Text)
 	d.endPurgeAdmission()

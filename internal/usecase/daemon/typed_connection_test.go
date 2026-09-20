@@ -335,7 +335,7 @@ func (d *Daemon) handleCommandFrame(connection ports.ServerConnection, envelope 
 					code = protocol.ErrVersionMismatch
 					text = "protocol version mismatch"
 				}
-				return d.sendCommandResult(connection, protocol.CommandResult{RequestID: failure.RequestID, Code: code, Text: text})
+				return d.sendCommandResult(connection, protocol.CommandResult{RequestID: failure.RequestID, Outcome: protocol.CommandFailed, Code: code, Text: text})
 			case protocol.DecodeMessageHello:
 				if failure.Version != 0 && failure.Version != protocol.Version {
 					code = protocol.ErrVersionMismatch
@@ -345,11 +345,11 @@ func (d *Daemon) handleCommandFrame(connection ports.ServerConnection, envelope 
 				}
 			}
 		}
-		return d.sendCommandResult(connection, protocol.CommandResult{Code: code, Text: text})
+		return d.sendCommandResult(connection, protocol.CommandResult{Outcome: protocol.CommandFailed, Code: code, Text: text})
 	}
 	command, ok := request.(protocol.CommandRequest)
 	if !ok {
-		return d.sendCommandResult(connection, protocol.CommandResult{Code: protocol.ErrInternal, Text: "expected command"})
+		return d.sendCommandResult(connection, protocol.CommandResult{Outcome: protocol.CommandFailed, Code: protocol.ErrInternal, Text: "expected command"})
 	}
 	return d.handleCommand(connection, command)
 }

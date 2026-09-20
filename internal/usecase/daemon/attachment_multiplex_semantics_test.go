@@ -131,7 +131,7 @@ func TestMultiplexAttachmentLocalStateAndFrames(t *testing.T) {
 	result, ok := decodeServerMessage(t, awaitFrame(t, firstFrames, "CommandResult")).(protocol.CommandResult)
 	require.True(t, ok)
 	require.Equal(t, uint64(77), result.RequestID)
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	select {
 	case frame := <-peerFrames:
 		if command, ok := decodeServerMessage(t, frame).(protocol.CommandResult); ok && command.RequestID == 77 {

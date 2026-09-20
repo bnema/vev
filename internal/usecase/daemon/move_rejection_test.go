@@ -106,7 +106,7 @@ func TestMoveRejectionPresentationParity(t *testing.T) {
 			require.Equal(t, tt.paletteText, userErr.Msg)
 
 			result := moveCommandFailure(tt.err)
-			require.False(t, result.OK)
+			require.False(t, result.Outcome == protocol.CommandSucceeded)
 			require.Equal(t, descriptor.CommandCode, result.Code)
 			require.Equal(t, descriptor.CommandText, result.Text)
 			require.Equal(t, protocol.ErrNoSuchTarget, result.Code)

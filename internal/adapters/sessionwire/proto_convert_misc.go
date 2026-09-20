@@ -289,19 +289,29 @@ func errorFromWire(message *wire.ErrorMsg) (protocol.ErrorMsg, error) {
 	return protocol.ErrorMsg{Code: code, Text: message.GetText()}, nil
 }
 
-func commandResultToWire(message protocol.CommandResult) *wire.CommandResult {
-	return &wire.CommandResult{RequestId: message.RequestID, Ok: message.OK, Code: uint32(message.Code), Text: message.Text, Output: message.Output}
+func commandResultToWire(message protocol.CommandResult) (*wire.CommandResult, error) {
+	if !message.Valid() {
+		return nil, errProtoConvertRange
+	}
+	return &wire.CommandResult{RequestId: message.RequestID, Outcome: wire.CommandOutcome(message.Outcome), Code: uint32(message.Code), Text: message.Text, Output: message.Output}, nil
 }
 
 func commandResultFromWire(message *wire.CommandResult) (protocol.CommandResult, error) {
-	if message == nil {
+	// The outcome is narrowed through a closed-range check before the cast:
+	// a 32-bit wire value whose low byte would otherwise truncate into a valid
+	// outcome (257 -> Succeeded, 259 -> Unknown) is refused, not aliased.
+	if message == nil || message.GetOutcome() < wire.CommandOutcome_COMMAND_OUTCOME_SUCCEEDED || message.GetOutcome() > wire.CommandOutcome_COMMAND_OUTCOME_UNKNOWN {
 		return protocol.CommandResult{}, errProtoConvertRange
 	}
 	code, err := mustUint16(message.GetCode())
 	if err != nil {
 		return protocol.CommandResult{}, err
 	}
-	return protocol.CommandResult{RequestID: message.GetRequestId(), OK: message.GetOk(), Code: code, Text: message.GetText(), Output: message.GetOutput()}, nil
+	result := protocol.CommandResult{RequestID: message.GetRequestId(), Outcome: protocol.CommandOutcome(message.GetOutcome()), Code: code, Text: message.GetText(), Output: message.GetOutput()}
+	if !result.Valid() {
+		return protocol.CommandResult{}, errProtoConvertRange
+	}
+	return result, nil
 }
 
 func uiFenceToWire(message protocol.UIFence) *wire.UIFence {

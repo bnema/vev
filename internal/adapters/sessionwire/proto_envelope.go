@@ -393,7 +393,11 @@ func encodeProtoServer(message protocol.ServerMessage) (*wire.ServerEnvelope, er
 		}
 		return encodeProtoServer(*m)
 	case protocol.CommandResult:
-		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_CommandResult{CommandResult: commandResultToWire(m)}}, nil
+		converted, err := commandResultToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_CommandResult{CommandResult: converted}}, nil
 	case protocol.KillResult:
 		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_KillResult{KillResult: killResultToWire(m)}}, nil
 	case *protocol.KillResult:

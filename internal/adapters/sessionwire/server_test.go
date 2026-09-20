@@ -61,7 +61,7 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	detached := protocol.Detached{Reason: protocol.ReasonDetach}
 	pong := protocol.Pong{}
 	sessions := protocol.Sessions{}
-	commandResult := protocol.CommandResult{RequestID: 1, OK: true}
+	commandResult := protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded}
 	killResult := protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded}
 	killFailure := protocol.KillResult{RequestID: 2, Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: "partial", Failures: []protocol.KillFailure{{Class: "stopped", Name: "work", Text: "boom"}}}
 	attachTarget := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}

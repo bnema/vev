@@ -339,7 +339,7 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 		{
 			name:    "incompatible version",
 			payload: versionMismatch,
-			want:    &protocol.CommandResult{RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
+			want:    &protocol.CommandResult{Outcome: protocol.CommandFailed, RequestID: 42, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"},
 		},
 		{
 			// A single zero byte carries no recoverable envelope tag:

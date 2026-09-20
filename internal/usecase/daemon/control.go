@@ -23,11 +23,12 @@ func (d *Daemon) handleCommand(tr ports.ServerConnection, request protocol.Comma
 	defer func() { _ = tr.Close() }()
 
 	if request.Version != protocol.Version {
-		return d.sendCommandResult(tr, protocol.CommandResult{RequestID: request.RequestID, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
+		return d.sendCommandResult(tr, protocol.CommandResult{RequestID: request.RequestID, Outcome: protocol.CommandFailed, Code: protocol.ErrVersionMismatch, Text: "protocol version mismatch"})
 	}
 	if request.Attached {
 		return d.sendCommandResult(tr, protocol.CommandResult{
 			RequestID: request.RequestID,
+			Outcome:   protocol.CommandFailed,
 			Code:      protocol.ErrNotScriptable,
 			Text:      "attached command relay is not enabled",
 		})
@@ -55,7 +56,7 @@ func (d *Daemon) handleCommand(tr ports.ServerConnection, request protocol.Comma
 	if waitErr != nil {
 		return d.sendCommandResult(tr, protocol.CommandResult{
 			RequestID: request.RequestID,
-			Code:      protocol.ErrInternal,
+			Outcome:   protocol.CommandOutcomeUnknown,
 			Text:      waitErr.Error(),
 		})
 	}
@@ -152,7 +153,7 @@ func (d *Daemon) dispatchCommand(ctx context.Context, request protocol.CommandRe
 func (d *Daemon) runControl(cmd command.Command, exec controlExec, request protocol.CommandRequest) protocol.CommandResult {
 	result, err := cmd.Control(exec, request.Args, command.ControlOptions{JSON: request.JSON})
 	if err == nil {
-		return protocol.CommandResult{OK: true, Output: result.Output}
+		return protocol.CommandResult{Outcome: protocol.CommandSucceeded, Output: result.Output}
 	}
 	switch {
 	case errors.Is(err, command.ErrInvalidArguments), errors.Is(err, errSessionNameRequired), errors.Is(err, domain.ErrInvalidSessionName):
@@ -181,7 +182,7 @@ func (d *Daemon) runControl(cmd command.Command, exec controlExec, request proto
 }
 
 func commandFailure(code uint16, text string) protocol.CommandResult {
-	return protocol.CommandResult{Code: code, Text: text}
+	return protocol.CommandResult{Outcome: protocol.CommandFailed, Code: code, Text: text}
 }
 
 // resolveTargetSession applies explicit-name, stable-ID, then unique-session

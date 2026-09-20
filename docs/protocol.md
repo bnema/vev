@@ -77,7 +77,7 @@ mutation:
 |---|---|---|
 | `DecodeMessageHello`, version mismatch | `ErrorMsg{ErrVersionMismatch}` | no |
 | `DecodeMessageHello`, malformed | `ErrorMsg{ErrInternal}` | no |
-| `DecodeMessageCommand` | `CommandResult{Code, Text}` | yes, else silent close |
+| `DecodeMessageCommand` | `CommandResult{Outcome, Code, Text}` | yes, else silent close |
 | `DecodeMessageKill` | `ErrorMsg{ErrInternal}` | no — a malformed kill has no reliable RequestID to correlate a `KillResult` to |
 | `DecodeMessageRemotePreview` | `RemotePreview{Status: Malformed}` | no |
 | `DecodeMessageNavigationInventory` | `NavigationInventoryResponse{Invalid / VersionMismatch}` | yes, else silent close |
@@ -92,7 +92,9 @@ negotiation: equality is mandatory.
 
 Command requests additionally carry a 10-second result deadline
 (`daemon/command_tracker.go:CommandRequestTimeout`), tracked per
-connection and correlated by `RequestID`.
+connection and correlated by `RequestID`. Every dispatched request produces
+one closed `CommandResult` outcome: succeeded, failed, or outcome unknown.
+Timeout or reply loss after dispatch is outcome unknown and is never replayed.
 
 ## Broker negotiation
 
@@ -196,16 +198,17 @@ answers every normally decoded kill request with exactly one correlated
 `KillOutcomeUnknown`. The client consumes that result; a close without a
 result, a mismatched `RequestID`, or a wrong-typed reply is `outcome unknown`
 and is never replayed, so a control failure whose response cannot be delivered
-is never mistaken for success. The remaining one-shot controls (`List`,
-`CommandRequest`, remote preview, inventory, and picker control) have no
-explicit per-request result. They do not treat close as success: the daemon
-attempts one response and then closes, and a client that receives no valid
-response reports a receive error rather than a silent success. Because no
-typed result exists, an undeliverable response is logged daemon-side only where
-the handler has a send-failure path (`CommandRequest`, remote preview) and is
-otherwise unrecorded, so the client is left without any outcome at all; these
-paths stay weaker than the explicit `KillResult`, and replacing them with
-explicit per-request results belongs to the P7 cutover (GO-005).
+is never mistaken for success. `CommandRequest` follows the same correlated
+model through `CommandResult`: succeeded, failed, or outcome unknown. A timeout,
+close, cancellation, malformed reply, or mismatched `RequestID` after send is
+outcome unknown and is never replayed.
+
+The remaining one-shot controls (`List`, remote preview, inventory, and picker
+control) do not treat close as success, but they have no closed outcome field.
+The daemon attempts one response and then closes; a client that receives no
+valid response reports a receive error. An undeliverable response is logged
+only where the handler has a send-failure path, so these controls remain weaker
+than `KillResult` and `CommandResult`.
 
 ## Limits
 

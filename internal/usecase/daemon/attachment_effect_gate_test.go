@@ -742,7 +742,7 @@ func TestAttachedNavigationCommandSendsResultAfterLocalTransition(t *testing.T) 
 			break
 		}
 	}
-	require.True(t, result.OK, result.Text)
+	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
 	var action protocol.RouteNavigationAction
 	for _, frame := range frames {
 		message, err := sessionwire.DecodeServerEnvelope(frame.Payload)

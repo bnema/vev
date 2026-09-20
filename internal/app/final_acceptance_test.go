@@ -141,8 +141,8 @@ func TestAcceptanceAttachedCommandUsesItsConnectionOnly(t *testing.T) {
 
 	firstResult := awaitAcceptanceCommandResult(t, first, firstPump, 101, "new-tab")
 	secondResult := awaitAcceptanceCommandResult(t, second, secondPump, 202, "new-tab")
-	require.True(t, firstResult.OK, firstResult.Text)
-	require.True(t, secondResult.OK, secondResult.Text)
+	require.True(t, firstResult.Outcome == protocol.CommandSucceeded, firstResult.Text)
+	require.True(t, secondResult.Outcome == protocol.CommandSucceeded, secondResult.Text)
 	require.Empty(t, firstResult.Output)
 	require.Empty(t, secondResult.Output)
 	require.NotEqual(t, firstResult.RequestID, secondResult.RequestID)
