@@ -214,8 +214,11 @@ func (r recovery) verify() error {
 }
 func digest(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }
 func (s *Store) ready() error {
-	if s.lock == nil || s.failed {
-		return errors.New("brokerstore: closed or outcome unknown; reopen required")
+	if s.failed {
+		return ports.BrokerStoreOutcomeUnknownError{Err: errors.New("brokerstore: poisoned; reopen required")}
+	}
+	if s.lock == nil {
+		return errors.New("brokerstore: closed")
 	}
 	return nil
 }
@@ -510,16 +513,22 @@ func (s *Store) write(name string, value any) error {
 	if err = os.Rename(f.Name(), filepath.Join(s.dir, name)); err != nil {
 		return err
 	}
+	unknown := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return ports.BrokerStoreOutcomeUnknownError{Err: err}
+	}
 	if err = s.boundary(name + ":rename"); err != nil {
-		return err
+		return unknown(err)
 	}
 	d, err := os.Open(s.dir)
 	if err != nil {
-		return err
+		return unknown(err)
 	}
 	defer d.Close()
 	if err = d.Sync(); err != nil {
-		return err
+		return unknown(err)
 	}
-	return s.boundary(name + ":dirsync")
+	return unknown(s.boundary(name + ":dirsync"))
 }

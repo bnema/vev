@@ -217,6 +217,14 @@ func TestErrorDetailMapping(t *testing.T) {
 		{"invalid", ports.BrokerAdmissionInvalid, ports.BrokerErrorUnavailable, 4},
 		{"deadline", context.DeadlineExceeded, ports.BrokerErrorTimeout, 0},
 		{"cancelled", context.Canceled, ports.BrokerErrorCancelled, 0},
+		// An indeterminate store outcome is classified before the context and
+		// transport rules: a failure after the durable commit point must never be
+		// presented as a retryable timeout, however its cause would classify
+		// alone. Both the value and the pointer form are legal errors because the
+		// ports type carries value-receiver methods.
+		{"outcome unknown value", ports.BrokerStoreOutcomeUnknownError{Err: errors.New("power loss")}, ports.BrokerErrorOutcomeUnknown, 0},
+		{"outcome unknown wrapping deadline", ports.BrokerStoreOutcomeUnknownError{Err: context.DeadlineExceeded}, ports.BrokerErrorOutcomeUnknown, 0},
+		{"outcome unknown pointer", &ports.BrokerStoreOutcomeUnknownError{Err: context.DeadlineExceeded}, ports.BrokerErrorOutcomeUnknown, 0},
 		{"unknown", errors.New("boom"), ports.BrokerErrorUnavailable, 0},
 	}
 	for _, tc := range cases {

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -39,8 +40,21 @@ const (
 	runStopped
 )
 
-// RegistryConfig selects how a Registry runs. The zero value observes hosts.
+// MembershipMode controls whether runtime membership mutation is admitted.
+type MembershipMode uint8
+
+const (
+	MembershipImmutable MembershipMode = iota
+	MembershipMutable
+)
+
+// RegistryConfig selects how a Registry runs. The zero value observes hosts
+// with immutable membership.
 type RegistryConfig struct {
+	MembershipMode MembershipMode
+	// IncarnationGenerator is an injectable entropy seam for mutable additions.
+	// Nil uses crypto/rand.
+	IncarnationGenerator func() ([16]byte, error)
 	// ObservationDisabled runs the registry as a read-only snapshot owner: it
 	// restores and publishes durable state, owns and drains its writer, and
 	// honors the Run lifecycle, but issues no probes, arms no timers, and never
@@ -65,6 +79,8 @@ type Registry struct {
 	// observationDisabled is fixed at construction: a disabled registry never
 	// observes, so it has no probe, timer, or reconcile work to do.
 	observationDisabled bool
+	membershipMode      MembershipMode
+	newIncarnation      func() ([16]byte, error)
 
 	// hostStore and authority are the synchronous membership owner. Only this
 	// registry may mutate the store while it is live; the caller owns Close.
@@ -144,6 +160,9 @@ func NewRegistry(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe por
 // probe as long as it owns no remote membership. Every other dependency is
 // required exactly as NewRegistry requires it.
 func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore, probe ports.BrokerHostProbe, clock ports.Clock, log *slog.Logger, cfg RegistryConfig) (*Registry, error) {
+	if cfg.MembershipMode != MembershipImmutable && cfg.MembershipMode != MembershipMutable {
+		return nil, errors.New("broker: invalid membership mode")
+	}
 	if epoch == 0 || nilDependency(store) || nilDependency(clock) {
 		return nil, errors.New("broker: invalid registry dependencies")
 	}
@@ -157,10 +176,15 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 	if log == nil {
 		log = slog.Default()
 	}
+	generator := cfg.IncarnationGenerator
+	if generator == nil {
+		generator = func() (id [16]byte, err error) { _, err = rand.Read(id[:]); return id, err }
+	}
 	r := &Registry{
 		epoch: epoch, probe: probe, clock: clock, log: log,
 		observationDisabled: cfg.ObservationDisabled,
-		hosts:               make(map[string]ports.BrokerDaemonObservation), inflight: make(map[string]*probeAttempt),
+		membershipMode:      cfg.MembershipMode, newIncarnation: generator,
+		hosts: make(map[string]ports.BrokerDaemonObservation), inflight: make(map[string]*probeAttempt),
 		pending: make(map[string]bool), tombstones: make(map[string]ports.BrokerHostTombstone),
 		subs: make(map[*subscription]struct{}), wake: make(chan struct{}, 1),
 		freshFor: defaultFreshFor, retryBase: defaultRetryBase, retryMax: defaultRetryLimit,
@@ -426,47 +450,197 @@ func (r *Registry) Subscribe() ports.BrokerSubscription {
 	return s
 }
 
-// ReplaceHosts durably replaces membership and explicit policy using the loaded
-// authority revision. Success means membership is committed, not that advisory
-// observations have flushed. Store errors (including stale authority) are
-// returned without changing the projection, probe attempts, or local token.
-// A settled run reports ports.ErrBrokerRegistryClosed and an exhausted revision
-// series reports ports.ErrBrokerRevisionExhausted; both refuse the mutation
-// before the store CAS, so a refusal never changes durable authority either.
-// Conflicts are not retried or refreshed implicitly: reconcile by reopening the
-// owner. Callers must supply fresh incarnations when removing and re-adding.
-// Even identical records perform CAS so stale authority cannot report success.
-// The synchronous write holds mu; Snapshot remains lock-free, but scheduling
-// waits for membership durability. Observation writes remain asynchronous.
-func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
-	records = append([]ports.BrokerHostRecord(nil), records...)
+// AddHost adds or pins endpoint under policy. Duplicate same-policy additions
+// CAS-verify authority and preserve identity; a conflicting policy is refused.
+func (r *Registry) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	if err := domain.ValidateRemoteHostTarget(endpoint); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	if err := policy.Validate(); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.mutableLocked(ctx); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	records := append([]ports.BrokerHostRecord(nil), r.authority.Hosts...)
+	for i := range records {
+		if records[i].Registration.Endpoint != endpoint {
+			continue
+		}
+		if records[i].Policy != policy {
+			return domain.RemoteRegistration{}, ports.ErrBrokerHostConflict
+		}
+		records[i].Pinned = true
+		if err := r.commitMembershipLocked(records); err != nil {
+			return domain.RemoteRegistration{}, err
+		}
+		return records[i].Registration, nil
+	}
+	id, err := r.newIncarnation()
+	if err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	reg, err := domain.NewRemoteRegistration(endpoint, id)
+	if err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	if reg.IsZero() {
+		return domain.RemoteRegistration{}, errors.New("broker: incarnation generator returned zero")
+	}
+	records = append(records, ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: policy})
+	if err := r.commitMembershipLocked(records); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	return reg, nil
+}
+
+// RemoveHost removes only the exact expected registration.
+func (r *Registry) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
+	if err := expected.Validate(); err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.mutableLocked(ctx); err != nil {
+		return false, err
+	}
+	records := append([]ports.BrokerHostRecord(nil), r.authority.Hosts...)
+	for i := range records {
+		if records[i].Registration.Endpoint != expected.Endpoint {
+			continue
+		}
+		if !records[i].Registration.Equal(expected) {
+			return false, ports.ErrBrokerHostConflict
+		}
+		records = append(records[:i], records[i+1:]...)
+		if err := r.commitMembershipLocked(records); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	// A no-op still verifies the loaded revision.
+	return false, r.commitMembershipLocked(records)
+}
+
+// UpdateHostPolicy updates exact authority and advances its generation.
+func (r *Registry) UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
+	if err := expected.Validate(); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	if err := policy.Validate(); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.mutableLocked(ctx); err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	records := append([]ports.BrokerHostRecord(nil), r.authority.Hosts...)
+	for i := range records {
+		if records[i].Registration.Endpoint != expected.Endpoint {
+			continue
+		}
+		if !records[i].Registration.Equal(expected) {
+			return domain.RemoteRegistration{}, ports.ErrBrokerHostConflict
+		}
+		if records[i].Policy == policy {
+			if err := r.commitMembershipLocked(records); err != nil {
+				return domain.RemoteRegistration{}, err
+			}
+			return expected, nil
+		}
+		if expected.Generation == ^domain.RemoteGeneration(0) {
+			return domain.RemoteRegistration{}, ports.ErrBrokerRevisionExhausted
+		}
+		records[i].Registration.Generation++
+		records[i].Policy = policy
+		if err := r.commitMembershipLocked(records); err != nil {
+			return domain.RemoteRegistration{}, err
+		}
+		return records[i].Registration, nil
+	}
+	return domain.RemoteRegistration{}, ports.ErrBrokerHostConflict
+}
+
+func (r *Registry) mutableLocked(ctx context.Context) error {
+	if r.membershipMode != MembershipMutable {
+		return ports.ErrBrokerMembershipImmutable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r.running.Load() == runStopped {
+		return ports.ErrBrokerRegistryClosed
+	}
+	if r.revisionExhaustedLocked() {
+		return ports.ErrBrokerRevisionExhausted
+	}
+	return nil
+}
+
+// commitMembershipLocked is the sole mutable-membership durable commit path.
+// It installs projection only after CAS success.
+func (r *Registry) commitMembershipLocked(records []ports.BrokerHostRecord) error {
 	if err := ports.ValidateBrokerHostRecords(records); err != nil {
 		return err
+	}
+	if len(records) > 0 && !r.observationDisabled && nilDependency(r.probe) {
+		return errors.New("broker: remote hosts require a host probe")
 	}
 	next := make(map[string]ports.BrokerDaemonObservation, len(records))
 	order := make([]string, 0, len(records))
 	for rank, record := range records {
-		reg := record.Registration
-		next[reg.Endpoint] = stampHostAuthority(ports.BrokerDaemonObservation{}, record, rank)
-		order = append(order, reg.Endpoint)
+		observation := stampHostAuthority(ports.BrokerDaemonObservation{}, record, rank)
+		// A membership the registry cannot publish is refused here, before the
+		// store CAS, rather than persisted and left to freeze every later
+		// publication: an endpoint whose derived display hint is empty after the
+		// display rule drops its runes makes every snapshot carrying it invalid.
+		if err := observation.Validate(); err != nil {
+			return fmt.Errorf("broker: host record %q is not publishable: %w", record.Registration.Endpoint, err)
+		}
+		next[record.Registration.Endpoint] = observation
+		order = append(order, record.Registration.Endpoint)
+	}
+	if err := r.hostStore.ReplaceHosts(r.authority.Revision, records); err != nil {
+		return fmt.Errorf("broker: replace hosts: %w", err)
+	}
+	r.authority = ports.BrokerHosts{Revision: r.authority.Revision + 1, Hosts: append([]ports.BrokerHostRecord(nil), records...)}
+	r.setHostsLocked(next, order)
+	return nil
+}
+
+// ReplaceHosts durably replaces membership and explicit policy using the loaded
+// authority revision. It delegates to commitMembershipLocked, the same
+// validated commit path the runtime mutations use, so membership whose
+// projection could never be published is refused before the store CAS instead
+// of being persisted and silently freezing every later publication. Success
+// means membership is committed, not that advisory observations have flushed.
+// Store errors (including stale authority) are returned without changing the
+// projection, probe attempts, or local token. A settled run reports
+// ports.ErrBrokerRegistryClosed and an exhausted revision series reports
+// ports.ErrBrokerRevisionExhausted; both refuse the mutation before the store
+// CAS, so a refusal never changes durable authority either. Conflicts are not
+// retried or refreshed implicitly: reconcile by reopening the owner. Callers
+// must supply fresh incarnations when removing and re-adding. Even identical
+// records perform CAS so stale authority cannot report success. The synchronous
+// write holds mu; Snapshot remains lock-free, but scheduling waits for
+// membership durability. Observation writes remain asynchronous.
+func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
+	records = append([]ports.BrokerHostRecord(nil), records...)
+	if err := ports.ValidateBrokerHostRecords(records); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running.Load() == runStopped {
 		return fmt.Errorf("broker: membership replacement: %w", ports.ErrBrokerRegistryClosed)
 	}
-	if len(records) > 0 && !r.observationDisabled && nilDependency(r.probe) {
-		return errors.New("broker: remote hosts require a host probe")
-	}
 	if r.revisionExhaustedLocked() {
 		return fmt.Errorf("broker: membership replacement: %w", ports.ErrBrokerRevisionExhausted)
 	}
-	if err := r.hostStore.ReplaceHosts(r.authority.Revision, records); err != nil {
-		return fmt.Errorf("broker: replace hosts: %w", err)
-	}
-	r.authority = ports.BrokerHosts{Revision: r.authority.Revision + 1, Hosts: records}
-	r.setHostsLocked(next, order)
-	return nil
+	return r.commitMembershipLocked(records)
 }
 
 // setHosts is projection-only; it is private so callers cannot bypass durable

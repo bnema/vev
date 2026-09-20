@@ -13,6 +13,9 @@ import (
 // invalid state is resolved offline from the recovery record. None of them is
 // ever retried blindly inside the store.
 var (
+	// ErrBrokerMembershipImmutable reports that a registry was not explicitly
+	// configured to accept membership mutations.
+	ErrBrokerMembershipImmutable = errors.New("ports: broker membership is immutable")
 	// ErrBrokerHostConflict reports that durable host authority changed under
 	// the caller's expected revision, or that the supplied membership would
 	// regress or re-trust an existing registration without a fresh identity.
@@ -24,6 +27,18 @@ var (
 	// Such state is never silently replaced or rolled back by the store.
 	ErrBrokerStoreInvalidState = errors.New("ports: broker durable store state is invalid")
 )
+
+// BrokerStoreOutcomeUnknownError reports a write failure after the durable
+// commit point. Callers must reopen and reload authority rather than retrying.
+type BrokerStoreOutcomeUnknownError struct{ Err error }
+
+func (e BrokerStoreOutcomeUnknownError) Error() string {
+	if e.Err == nil {
+		return "ports: broker store outcome unknown"
+	}
+	return "ports: broker store outcome unknown: " + e.Err.Error()
+}
+func (e BrokerStoreOutcomeUnknownError) Unwrap() error { return e.Err }
 
 // BrokerHostRecord is durable registration authority. Membership and policy
 // are never inferred from an observation or from the broker environment.

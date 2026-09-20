@@ -118,7 +118,14 @@ func errorDetail(err error) brokerwire.ErrorDetail {
 		}
 		return detail
 	}
+	// The ports type carries value-receiver methods, so both the value and the
+	// pointer form are legal errors; classify either rather than letting the
+	// pointer form fall through to a retryable-looking code.
+	var outcomeUnknown ports.BrokerStoreOutcomeUnknownError
+	var outcomeUnknownPtr *ports.BrokerStoreOutcomeUnknownError
 	switch {
+	case errors.As(err, &outcomeUnknown), errors.As(err, &outcomeUnknownPtr):
+		return brokerwire.ErrorDetail{Code: ports.BrokerErrorOutcomeUnknown}
 	case errors.Is(err, context.DeadlineExceeded):
 		return brokerwire.ErrorDetail{Code: ports.BrokerErrorTimeout}
 	case errors.Is(err, context.Canceled):

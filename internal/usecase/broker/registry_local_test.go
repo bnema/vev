@@ -458,3 +458,51 @@ func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
 	require.NoError(t, second.Close())
 	require.NoError(t, physical.Close())
 }
+
+// TestRegistryMutableAddHostLocalOnlyNoRemoteProbe proves a mutable registry that
+// observes only the broker's own machine daemon (a configured local observation
+// and no remote probe) refuses a remote addition outright: the refusal is
+// typed, it never reaches the durable store CAS, authority and projection stay
+// exactly as loaded, and the registry keeps serving its local entry instead of
+// panicking on the absent remote probe. A mutable registry is the interesting
+// case because the immutable default refuses before the membership mode is even
+// consulted.
+func TestRegistryMutableAddHostLocalOnlyNoRemoteProbe(t *testing.T) {
+	clock := newManualClock(time.Unix(100, 0))
+	store := newMembershipStore()
+	local := newScriptedLocalProbe(1)
+	registry, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{
+		MembershipMode:       MembershipMutable,
+		IncarnationGenerator: (&incarnationSequencer{}).generate,
+		Local:                &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
+	})
+	require.NoError(t, err)
+	registry.jitter = identityJitter
+
+	authority := registry.authority
+	before := registry.Snapshot()
+	require.NotPanics(t, func() {
+		_, err = registry.AddHost(context.Background(), "user@host:22", poolPolicy())
+	}, "an absent remote probe must be refused, never dereferenced")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "remote hosts require a host probe")
+	require.Equal(t, 0, store.casCalls(), "the refusal happens before the store CAS")
+	require.Equal(t, authority, registry.authority, "a refused add never moves authority")
+	require.Equal(t, before, registry.Snapshot(), "a refused add never publishes")
+
+	// The local entry stays observable: the refusal never leaves the registry
+	// unable to publish what it still owns.
+	startRegistry(t, registry)
+	call := receiveLocalCall(t, local)
+	call.result <- localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Identity:        "local-daemon",
+		Incarnation:     ports.BrokerDaemonIncarnation{9},
+		ProtocolVersion: protocol.Version,
+		Availability:    domain.RemoteAvailabilityReachable,
+	}}
+	host := waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool {
+		return !o.Checking && o.Availability == domain.RemoteAvailabilityReachable
+	})
+	require.True(t, host.Local)
+	require.Len(t, registry.Snapshot().Daemons, 1)
+}
