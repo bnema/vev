@@ -312,9 +312,18 @@ func membershipError(err error) error {
 	return ports.BrokerError{Code: code, Text: text, Cause: err}
 }
 
-// RequestReconcile remains a no-op until the observation service exposes a
-// connection-safe reconcile seam.
-func (s *Service) RequestReconcile(string) {}
+// RequestReconcile schedules one coalesced observation for a configured
+// endpoint. The registry validates membership and drops unknown endpoints, so
+// this hint cannot expand authority or start an attachment.
+func (s *Service) RequestReconcile(endpoint string) {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return
+	}
+	s.registry.RequestProbe(endpoint)
+}
 
 // Close cancels and drains every owned resource exactly once: in-flight setup
 // opens and live streams stop, subscriptions close, the pool client is retired,

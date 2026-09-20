@@ -531,7 +531,7 @@ func TestServiceShutdownTerminatesOwnedWork(t *testing.T) {
 // TestServiceImmutableMembershipRefusesEveryMutation proves the immutable
 // connection refuses all three membership mutations with the typed immutable
 // code 12 and the ports sentinel before any durable authority moves: no CAS is
-// attempted, no publication changes, and reconcile stays a no-op.
+// attempted and no publication changes.
 func TestServiceImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	store := newMembershipStore()
 	authority, registry, _, _ := newServiceMembershipFixture(t, store, MembershipImmutable)
@@ -555,7 +555,44 @@ func TestServiceImmutableMembershipRefusesEveryMutation(t *testing.T) {
 	require.Equal(t, before, registry.Snapshot(), "a refused mutation must not touch authority")
 
 	service.RequestReconcile("new@host:22")
-	require.Equal(t, before, registry.Snapshot(), "reconcile must be a no-op")
+	require.Equal(t, before, registry.Snapshot(), "an unknown reconcile hint cannot change authority")
+}
+
+func TestServiceRequestReconcileDelegatesToRegistry(t *testing.T) {
+	clock := newManualClock(time.Unix(0, 0))
+	store := newTestStore()
+	registration := registration(t, "user@host:22", 1)
+	store.hosts = ports.BrokerHosts{Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: registration, Pinned: true, Policy: poolPolicy()}}}
+	probe := newTestProbe(2)
+	registry, err := NewRegistry(1, store, probe, clock, nil)
+	require.NoError(t, err)
+	registry.jitter = identityJitter
+	authority, _, _, _ := composeTestAuthority(t, 1, registry, immediateConnector, clock)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	var initial probeCall
+	require.Eventually(t, func() bool {
+		select {
+		case initial = <-probe.calls:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	initial.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Identity: "daemon", Incarnation: ports.BrokerDaemonIncarnation{1}, ProtocolVersion: 1, Availability: domain.RemoteAvailabilityReachable}}
+	service.RequestReconcile(registration.Endpoint)
+	var reconciled probeCall
+	require.Eventually(t, func() bool {
+		select {
+		case reconciled = <-probe.calls:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	require.Equal(t, registration, reconciled.registration)
 }
 
 // TestServiceMutableMembershipDelegatesOnce proves an admitted mutable
