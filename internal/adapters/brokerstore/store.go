@@ -1,5 +1,4 @@
-// Package brokerstore provides offline-only broker persistence. OpenOffline is
-// never composed into application wiring. Legacy sources are immutable inputs:
+// Package brokerstore provides broker persistence. Legacy sources are immutable inputs:
 // the lifetime lock is the same hosts.json.lock the legacy host writer takes,
 // so a live host writer is excluded, but the legacy catalog cache source has no
 // lock at all and must be immutable or quiesced. No environment policy is
@@ -83,7 +82,7 @@ func (m manifest) source(label manifestSourceLabel) (manifestSource, bool) {
 	return manifestSource{}, false
 }
 
-// Options names a private offline destination and immutable legacy inputs.
+// Options names a private destination and immutable legacy inputs.
 // Policies must explicitly cover every imported endpoint. Fault is a test seam
 // called after each durable-write boundary; an error poisons this open handle.
 type Options struct {
@@ -113,11 +112,13 @@ type Store struct {
 
 var _ ports.BrokerHostStore = (*Store)(nil)
 
-// OpenOffline returns only after validated unified state is durable. The
+// Open returns only after validated unified state is durable. The
 // recovery record is written first and retained forever as the rollback copy;
 // restart reuses its generated identities instead of migrating a second time.
 // An existing corrupt state is an error, never silently replaced by a backup.
-func OpenOffline(o Options) (*Store, error) {
+// Open acquires exclusive lifetime ownership, migrates immutable legacy input
+// when needed, and returns the durable broker store.
+func Open(o Options) (*Store, error) {
 	if err := safedir.EnsurePrivate(o.Dir); err != nil {
 		return nil, err
 	}

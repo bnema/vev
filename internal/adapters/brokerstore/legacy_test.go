@@ -26,7 +26,7 @@ func TestCacheStrictFailures(t *testing.T) {
 			o := options(t)
 			o.LegacyCache = filepath.Join(t.TempDir(), "cache")
 			require.NoError(t, os.WriteFile(o.LegacyCache, []byte(data), 0600))
-			_, err := OpenOffline(o)
+			_, err := Open(o)
 			require.Error(t, err)
 		})
 	}
@@ -34,7 +34,7 @@ func TestCacheStrictFailures(t *testing.T) {
 
 func TestRecoveryCorruption(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 	require.NoError(t, os.Remove(filepath.Join(o.Dir, "state.json")))
@@ -46,13 +46,13 @@ func TestRecoveryCorruption(t *testing.T) {
 	// Use the production atomic writer without changing its digest metadata.
 	writer := Store{dir: o.Dir}
 	require.NoError(t, writer.write("recovery.json", r))
-	_, err = OpenOffline(o)
+	_, err = Open(o)
 	require.ErrorContains(t, err, "digest mismatch")
 }
 
 func TestDefensiveCopiesAndConcurrentAccess(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	defer s.Close()
 	h, err := s.LoadHosts()

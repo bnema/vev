@@ -49,7 +49,7 @@ func TestPriorFixtures(t *testing.T) {
 				require.NoError(t, err)
 				beforeC, err := os.ReadFile(o.LegacyCache)
 				require.NoError(t, err)
-				s, err := OpenOffline(o)
+				s, err := Open(o)
 				require.NoError(t, err)
 				hosts, err := s.LoadHosts()
 				require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestPriorFixtures(t *testing.T) {
 				o.LegacyHosts = "missing"
 				o.LegacyCache = "missing"
 				o.Policies = nil
-				s, err = OpenOffline(o)
+				s, err = Open(o)
 				require.NoError(t, err)
 				defer s.Close()
 				again, err := s.LoadHosts()
@@ -107,7 +107,7 @@ func TestMigrationFaultRestart(t *testing.T) {
 					}
 					return nil
 				}
-				s, err := OpenOffline(o)
+				s, err := Open(o)
 				require.ErrorIs(t, err, fault)
 				require.Nil(t, s)
 				var saved recovery
@@ -116,7 +116,7 @@ func TestMigrationFaultRestart(t *testing.T) {
 					require.NoError(t, strict(raw, &saved))
 				}
 				o.Fault = nil
-				s, err = OpenOffline(o)
+				s, err = Open(o)
 				require.NoError(t, err)
 				defer s.Close()
 				hosts, err := s.LoadHosts()
@@ -130,7 +130,7 @@ func TestMigrationFaultRestart(t *testing.T) {
 }
 func TestLockLifetime(t *testing.T) {
 	if dir := os.Getenv("VEV_BROKERSTORE_LOCK_TEST"); dir != "" {
-		s, err := OpenOffline(Options{Dir: dir})
+		s, err := Open(Options{Dir: dir})
 		if s != nil {
 			s.Close()
 		}
@@ -140,7 +140,7 @@ func TestLockLifetime(t *testing.T) {
 		return
 	}
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	// The lifetime lock carries the legacy host writer's exact file name, so a
 	// store opened beside a live hosts.json excludes that writer too.
@@ -158,14 +158,14 @@ func TestLockLifetime(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			other, e := OpenOffline(o)
+			other, e := Open(o)
 			if other != nil {
 				_ = other.Close()
-				outcomes[i] = fmt.Errorf("concurrent OpenOffline returned a store: %w", ports.ErrBrokerStoreLocked)
+				outcomes[i] = fmt.Errorf("concurrent Open returned a store: %w", ports.ErrBrokerStoreLocked)
 				return
 			}
 			if !errors.Is(e, ErrLocked) || !errors.Is(e, ports.ErrBrokerStoreLocked) {
-				outcomes[i] = fmt.Errorf("concurrent OpenOffline error = %v, want ErrLocked", e)
+				outcomes[i] = fmt.Errorf("concurrent Open error = %v, want ErrLocked", e)
 			}
 		}(i)
 	}
@@ -176,7 +176,7 @@ func TestLockLifetime(t *testing.T) {
 	require.NoError(t, s.Close())
 	_, err = s.Load()
 	require.Error(t, err)
-	s, err = OpenOffline(o)
+	s, err = Open(o)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 }
@@ -185,7 +185,7 @@ func TestLockLifetime(t *testing.T) {
 // writer does and proves the store refuses to own the same directory.
 func TestLockExcludesLegacyHostWriter(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 
@@ -194,12 +194,12 @@ func TestLockExcludesLegacyHostWriter(t *testing.T) {
 	defer legacyLock.Close()
 	require.NoError(t, syscall.Flock(int(legacyLock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
 
-	_, err = OpenOffline(o)
+	_, err = Open(o)
 	require.ErrorIs(t, err, ErrLocked)
 	require.ErrorIs(t, err, ports.ErrBrokerStoreLocked)
 
 	require.NoError(t, syscall.Flock(int(legacyLock.Fd()), syscall.LOCK_UN))
-	s, err = OpenOffline(o)
+	s, err = Open(o)
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 }
@@ -213,21 +213,21 @@ func TestStrictCorruption(t *testing.T) {
 			o := options(t)
 			o.LegacyHosts = filepath.Join(t.TempDir(), "hosts")
 			require.NoError(t, os.WriteFile(o.LegacyHosts, []byte(raw), 0600))
-			s, err := OpenOffline(o)
+			s, err := Open(o)
 			require.Error(t, err)
 			require.Nil(t, s)
 			_, err = os.Stat(filepath.Join(o.Dir, "state.json"))
 			require.True(t, os.IsNotExist(err))
 		})
 	}
-	t.Run("no implicit policy", func(t *testing.T) { o := options(t); o.Policies = nil; _, err := OpenOffline(o); require.Error(t, err) })
+	t.Run("no implicit policy", func(t *testing.T) { o := options(t); o.Policies = nil; _, err := Open(o); require.Error(t, err) })
 	t.Run("state never falls back", func(t *testing.T) {
 		o := options(t)
-		s, err := OpenOffline(o)
+		s, err := Open(o)
 		require.NoError(t, err)
 		require.NoError(t, s.Close())
 		require.NoError(t, os.WriteFile(filepath.Join(o.Dir, "state.json"), []byte(`{`), 0600))
-		_, err = OpenOffline(o)
+		_, err = Open(o)
 		require.Error(t, err)
 	})
 	t.Run("source symlink", func(t *testing.T) {
@@ -235,13 +235,13 @@ func TestStrictCorruption(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "link")
 		require.NoError(t, os.Symlink(o.LegacyHosts, p))
 		o.LegacyHosts = p
-		_, err := OpenOffline(o)
+		_, err := Open(o)
 		require.Error(t, err)
 	})
 }
 func TestDurableStateSentinelMapping(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 
 	// A conflicting authority token is a host conflict, not a generic failure.
@@ -257,7 +257,7 @@ func TestDurableStateSentinelMapping(t *testing.T) {
 	// Closing releases ownership without discarding the durable files.
 	require.Error(t, s.ReplaceHosts(1, nil))
 	require.NoError(t, os.WriteFile(filepath.Join(o.Dir, "state.json"), []byte(`{`), 0600))
-	_, err = OpenOffline(o)
+	_, err = Open(o)
 	require.ErrorIs(t, err, ErrInvalidState)
 	require.ErrorIs(t, err, ports.ErrBrokerStoreInvalidState)
 }
@@ -275,7 +275,7 @@ func TestNonRegularInputsAreRejected(t *testing.T) {
 				require.NoError(t, syscall.Mkfifo(path, 0600))
 			}
 			o.LegacyHosts = path
-			s, err := OpenOffline(o)
+			s, err := Open(o)
 			require.Error(t, err)
 			require.Nil(t, s)
 			_, err = os.Stat(filepath.Join(o.Dir, "state.json"))
@@ -291,7 +291,7 @@ func TestNonRegularInputsAreRejected(t *testing.T) {
 func TestCommittedStateAndRecoveryAreNeverFollowed(t *testing.T) {
 	t.Run("state", func(t *testing.T) {
 		o := options(t)
-		s, err := OpenOffline(o)
+		s, err := Open(o)
 		require.NoError(t, err)
 		require.NoError(t, s.Close())
 
@@ -303,7 +303,7 @@ func TestCommittedStateAndRecoveryAreNeverFollowed(t *testing.T) {
 		require.NoError(t, os.Remove(state))
 		require.NoError(t, os.Symlink(target, state))
 
-		_, err = OpenOffline(o)
+		_, err = Open(o)
 		require.ErrorIs(t, err, ErrInvalidState)
 		require.ErrorIs(t, err, ports.ErrBrokerStoreInvalidState)
 		after, err := os.ReadFile(target)
@@ -312,7 +312,7 @@ func TestCommittedStateAndRecoveryAreNeverFollowed(t *testing.T) {
 	})
 	t.Run("recovery", func(t *testing.T) {
 		o := options(t)
-		s, err := OpenOffline(o)
+		s, err := Open(o)
 		require.NoError(t, err)
 		require.NoError(t, s.Close())
 
@@ -325,7 +325,7 @@ func TestCommittedStateAndRecoveryAreNeverFollowed(t *testing.T) {
 		require.NoError(t, os.Remove(filepath.Join(o.Dir, "state.json")))
 		require.NoError(t, os.Symlink(target, recoveryPath))
 
-		_, err = OpenOffline(o)
+		_, err = Open(o)
 		require.ErrorIs(t, err, ErrInvalidState)
 		require.ErrorIs(t, err, ports.ErrBrokerStoreInvalidState)
 		_, err = os.Stat(filepath.Join(o.Dir, "state.json"))
@@ -351,7 +351,7 @@ func TestManifestDistinguishesAbsentFromEmptySources(t *testing.T) {
 	absent.LegacyHosts = ""
 	absent.LegacyCache = ""
 	absent.Policies = nil
-	absentStore, err := OpenOffline(absent)
+	absentStore, err := Open(absent)
 	require.NoError(t, err)
 	defer absentStore.Close()
 	hosts, err := absentStore.LoadHosts()
@@ -369,7 +369,7 @@ func TestManifestDistinguishesAbsentFromEmptySources(t *testing.T) {
 	empty.LegacyCache = ""
 	empty.LegacyHosts = filepath.Join(t.TempDir(), "hosts")
 	require.NoError(t, os.WriteFile(empty.LegacyHosts, []byte(`{"version":1,"hosts":[]}`), 0600))
-	emptyStore, err := OpenOffline(empty)
+	emptyStore, err := Open(empty)
 	require.NoError(t, err)
 	defer emptyStore.Close()
 	stillEmpty, err := emptyStore.LoadHosts()
@@ -401,7 +401,7 @@ func TestManifestDistinguishesAbsentFromEmptySources(t *testing.T) {
 	require.NoError(t, writer.write("recovery.json", r))
 	require.NoError(t, os.Remove(filepath.Join(empty.Dir, "state.json")))
 	require.NoError(t, emptyStore.Close())
-	_, err = OpenOffline(Options{Dir: empty.Dir})
+	_, err = Open(Options{Dir: empty.Dir})
 	require.ErrorIs(t, err, ErrInvalidState)
 	require.ErrorContains(t, err, "absent membership source")
 }
@@ -410,7 +410,7 @@ func TestManifestDistinguishesAbsentFromEmptySources(t *testing.T) {
 // or accepting an exhausted authority token.
 func TestRevisionOverflowIsRefused(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	defer s.Close()
 	h, err := s.LoadHosts()
@@ -429,7 +429,7 @@ func TestRevisionOverflowIsRefused(t *testing.T) {
 // incarnation.
 func TestAuthorityGenerationPolicyAndRemoveReAdd(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	defer s.Close()
 	h, err := s.LoadHosts()
@@ -495,7 +495,7 @@ func TestAuthorityGenerationPolicyAndRemoveReAdd(t *testing.T) {
 // as ErrBrokerStoreInvalidState: the durable state is a victim, not the cause.
 func TestReplaceHostsRejectsCallerInputBeforeCAS(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	defer s.Close()
 	h, err := s.LoadHosts()
@@ -548,7 +548,7 @@ func TestReplaceHostsRejectsCallerInputBeforeCAS(t *testing.T) {
 // Removed, instead of being rejected as durable-state corruption.
 func TestDurableSnapshotDropsProcessLocalTombstones(t *testing.T) {
 	o := options(t)
-	s, err := OpenOffline(o)
+	s, err := Open(o)
 	require.NoError(t, err)
 	h, err := s.LoadHosts()
 	require.NoError(t, err)
@@ -567,7 +567,7 @@ func TestDurableSnapshotDropsProcessLocalTombstones(t *testing.T) {
 	require.Empty(t, stored.Removed)
 	require.NoError(t, s.Close())
 
-	s, err = OpenOffline(o)
+	s, err = Open(o)
 	require.NoError(t, err)
 	defer s.Close()
 	reopened, err := s.Load()
@@ -579,7 +579,7 @@ func TestFencingAndCommitFaults(t *testing.T) {
 	for _, point := range []string{"write", "sync", "rename", "dirsync"} {
 		t.Run(point, func(t *testing.T) {
 			o := options(t)
-			s, err := OpenOffline(o)
+			s, err := Open(o)
 			require.NoError(t, err)
 			h, err := s.LoadHosts()
 			require.NoError(t, err)
@@ -606,7 +606,7 @@ func TestFencingAndCommitFaults(t *testing.T) {
 			_, err = s.LoadHosts()
 			require.Error(t, err)
 			require.NoError(t, s.Close())
-			s, err = OpenOffline(o)
+			s, err = Open(o)
 			require.NoError(t, err)
 			defer s.Close()
 			h, err = s.LoadHosts()
@@ -622,7 +622,7 @@ func TestFencingAndCommitFaults(t *testing.T) {
 	}
 	t.Run("generation and restart", func(t *testing.T) {
 		o := options(t)
-		s, err := OpenOffline(o)
+		s, err := Open(o)
 		require.NoError(t, err)
 		h, err := s.LoadHosts()
 		require.NoError(t, err)
@@ -632,7 +632,7 @@ func TestFencingAndCommitFaults(t *testing.T) {
 		require.NoError(t, s.ReplaceHosts(h.Revision, h.Hosts))
 		require.ErrorIs(t, s.Store(snap), ErrStale)
 		require.NoError(t, s.Close())
-		s, err = OpenOffline(o)
+		s, err = Open(o)
 		require.NoError(t, err)
 		defer s.Close()
 		got, err := s.Load()
@@ -648,7 +648,7 @@ func TestFencingAndCommitFaults(t *testing.T) {
 // daemon observation is process-local state and the store refuses it outright,
 // so it can never become durable authority.
 func TestLocalDaemonObservationIsNeverDurable(t *testing.T) {
-	s, err := OpenOffline(options(t))
+	s, err := Open(options(t))
 	require.NoError(t, err)
 	defer s.Close()
 	err = s.Store(ports.BrokerSnapshot{Epoch: 9, Revision: 1, Daemons: []ports.BrokerDaemonObservation{{

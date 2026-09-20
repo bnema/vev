@@ -35,7 +35,7 @@ func newDurableMutableRegistry(t *testing.T, epoch ports.BrokerEpoch, store port
 
 func openDurableStore(t *testing.T, dir string, fault func(string) error) *brokerstore.Store {
 	t.Helper()
-	store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: dir, Fault: fault})
+	store, err := brokerstore.Open(brokerstore.Options{Dir: dir, Fault: fault})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return store
@@ -230,7 +230,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 func TestRegistryMutableOutcomeUnknownRequiresReopen(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	fault := errors.New("power loss")
-	// The fault is armed only after OpenOffline so the store can be created and
+	// The fault is armed only after Open so the store can be created and
 	// seeded normally; state.json:rename fires after the rename, so the commit
 	// point was already crossed when the failure is reported.
 	var armed atomic.Bool

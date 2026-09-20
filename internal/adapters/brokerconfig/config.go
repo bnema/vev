@@ -288,7 +288,13 @@ type Config struct {
 // route for the same pair is refused rather than silently dialed or ignored. A
 // missing or malformed config is an error, never an empty default.
 func Load(layout Layout) (*Config, error) {
-	raw, err := readConfig(filepath.Join(layout.Root, ConfigFileName))
+	return LoadPath(layout, filepath.Join(layout.Root, ConfigFileName))
+}
+
+// LoadPath parses the broker configuration at an explicit application-owned
+// path while retaining the route and reserved-path validation from layout.
+func LoadPath(layout Layout, path string) (*Config, error) {
+	raw, err := readConfig(path)
 	if err != nil {
 		return nil, err
 	}

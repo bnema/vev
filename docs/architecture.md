@@ -416,7 +416,7 @@ It is excluded from public help and changes no ordinary command, path, or
 factory. The root must be absolute, cleaned, symlink-free, and outside the
 production runtime and state directories; the runtime, state, and log paths are
 derived only beneath it and secured with `pkg/safedir.EnsurePrivate`, and the
-durable store is opened with `brokerstore.OpenOffline` over the sandbox state
+durable store is opened with `brokerstore.Open` over the sandbox state
 directory with no legacy inputs.
 
 `internal/adapters/brokerconfig` owns the strict sandbox configuration: a

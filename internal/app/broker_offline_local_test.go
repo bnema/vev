@@ -255,7 +255,7 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 
 	stateDir := filepath.Join(shortTempDir(t, "vevs"), "state")
 	require.NoError(t, os.MkdirAll(stateDir, 0o700))
-	store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: stateDir})
+	store, err := brokerstore.Open(brokerstore.Options{Dir: stateDir})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 

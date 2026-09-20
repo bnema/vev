@@ -32,7 +32,7 @@ func TestRegistryDurableReplaceHostsRestart(t *testing.T) {
 		{"add", []ports.BrokerHostRecord{first}}, {"remove", nil}, {"re-add", []ports.BrokerHostRecord{readded}}, {"restart", []ports.BrokerHostRecord{readded}},
 	} {
 		t.Run(stage.name, func(t *testing.T) {
-			store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: dir})
+			store, err := brokerstore.Open(brokerstore.Options{Dir: dir})
 			require.NoError(t, err)
 			defer store.Close()
 			r, err := NewRegistry(ports.BrokerEpoch(i+1), store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
@@ -70,7 +70,7 @@ func TestRegistryDurableReplaceHostsRestart(t *testing.T) {
 func TestRegistryDurableConflictDoesNotMutateProjection(t *testing.T) {
 	for _, mode := range []string{"stale revision", "policy without new generation"} {
 		t.Run(mode, func(t *testing.T) {
-			store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: filepath.Join(t.TempDir(), "broker")})
+			store, err := brokerstore.Open(brokerstore.Options{Dir: filepath.Join(t.TempDir(), "broker")})
 			require.NoError(t, err)
 			defer store.Close()
 			record := ports.BrokerHostRecord{Registration: registration(t, "host", 1), Pinned: true, Policy: poolPolicy()}
@@ -138,7 +138,7 @@ func TestRegistryReplaceHostsAfterShutdownIsTyped(t *testing.T) {
 // the newest post-CAS publication must always flush; churn cannot leave the
 // registry permanently publishing membership that the store will reject.
 func TestRegistryDurableChurnFlushesLatestMembership(t *testing.T) {
-	store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: filepath.Join(t.TempDir(), "broker")})
+	store, err := brokerstore.Open(brokerstore.Options{Dir: filepath.Join(t.TempDir(), "broker")})
 	require.NoError(t, err)
 	defer store.Close()
 	r, err := NewRegistry(1, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
@@ -174,7 +174,7 @@ func TestRegistryDurableRoundTripObservedIdentity(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	record := ports.BrokerHostRecord{Registration: registration(t, "host", 1), Pinned: true, Policy: poolPolicy()}
 
-	store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: dir})
+	store, err := brokerstore.Open(brokerstore.Options{Dir: dir})
 	require.NoError(t, err)
 	r, err := NewRegistry(1, store, newTestProbe(1), newManualClock(time.Unix(100, 0)), nil)
 	require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestRegistryDurableRoundTripObservedIdentity(t *testing.T) {
 	r.settle() // flush before reopening
 	require.NoError(t, store.Close())
 
-	reopened, err := brokerstore.OpenOffline(brokerstore.Options{Dir: dir})
+	reopened, err := brokerstore.Open(brokerstore.Options{Dir: dir})
 	require.NoError(t, err)
 	defer reopened.Close()
 	persisted, err := reopened.Load()

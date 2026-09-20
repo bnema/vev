@@ -1,6 +1,6 @@
 # Offline broker store (Plan 001 P2.3)
 
-`OpenOffline` is deliberately not wired into application composition. Supply a
+`Open` is deliberately not wired into application composition. Supply a
 private destination directory, immutable copies of any legacy inputs, and an
 explicit policy for each imported endpoint. An empty input path means no input;
 a named missing, empty, corrupt, or unsupported file fails closed. The lifetime

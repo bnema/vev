@@ -247,7 +247,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	}
 	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
 
-	store, err := brokerstore.OpenOffline(brokerstore.Options{Dir: layout.State})
+	store, err := brokerstore.Open(brokerstore.Options{Dir: layout.State})
 	if err != nil {
 		return fmt.Errorf("vev: open broker sandbox store: %w", err)
 	}
