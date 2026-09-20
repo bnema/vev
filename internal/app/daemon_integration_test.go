@@ -150,62 +150,53 @@ func killDaemon(dir string) error {
 	return requestKill(dir, protocol.KillDaemon)
 }
 
+// nextKillRequestID allocates a unique nonzero correlation ID for one control
+// request, matching the production caller contract.
+var killRequestSeq atomic.Uint64
+
+func nextKillRequestID() uint64 { return killRequestSeq.Add(1) }
+
 // killNamedSession deletes one named live or stopped session over the control
 // connection, using the same wire scope the client sends for `kill -s NAME`.
+// It sends a unique RequestID and consumes the matching KillResult: a failed
+// outcome is an error, and a close without a result is never read as success.
 func killNamedSession(dir, name string) error {
-	raw, err := ipc.DialContext(context.Background(), dir)
-	if err != nil {
-		return err
-	}
-	conn := sessionwire.NewClientConnection(raw)
-	defer func() { _ = conn.Close() }()
-	if err := conn.SendClient(protocol.Kill{Scope: protocol.KillSession, Name: name}); err != nil {
-		return err
-	}
-	reply, err := receiveKillReply(conn, daemonStopTimeout)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if em, ok := reply.(protocol.ErrorMsg); ok {
-		return fmt.Errorf("kill failed: %s", em.Text)
-	}
-	return nil
+	return controlKill(dir, protocol.KillScope(protocol.KillSession), name)
 }
 
 func requestKill(dir string, scope protocol.KillScope) error {
+	return controlKill(dir, scope, "")
+}
+
+func controlKill(dir string, scope protocol.KillScope, name string) error {
 	raw, err := ipc.DialContext(context.Background(), dir)
 	if err != nil {
 		return err
 	}
 	conn := sessionwire.NewClientConnection(raw)
 	defer func() { _ = conn.Close() }()
-	if err := conn.SendClient(protocol.Kill{Scope: scope}); err != nil {
+	requestID := nextKillRequestID()
+	if err := conn.SendClient(protocol.Kill{RequestID: requestID, Scope: scope, Name: name}); err != nil {
 		return err
 	}
-	reply, err := receiveKillReply(conn, daemonStopTimeout)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
+	result, err := awaitKillResult(conn, requestID, daemonStopTimeout)
 	if err != nil {
 		return err
 	}
-	em, ok := reply.(protocol.ErrorMsg)
-	if !ok {
+	switch result.Outcome {
+	case protocol.KillSucceeded:
 		return nil
+	case protocol.KillFailed:
+		return fmt.Errorf("kill failed: %s", result.Text)
+	default:
+		return fmt.Errorf("kill outcome unknown: %s", result.Text)
 	}
-	return fmt.Errorf("kill failed: %s", em.Text)
 }
 
-func receiveKillReply(conn ports.ClientConnection, timeout time.Duration) (protocol.ServerMessage, error) {
+// awaitKillResult reads one correlated KillResult with a bounded timeout. A
+// close, a wrong type, or a mismatched RequestID is a definite error rather
+// than an inferred success, so a lost result is never reported as a kill.
+func awaitKillResult(conn ports.ClientConnection, requestID uint64, timeout time.Duration) (protocol.KillResult, error) {
 	type result struct {
 		message protocol.ServerMessage
 		err     error
@@ -218,16 +209,29 @@ func receiveKillReply(conn ports.ClientConnection, timeout time.Duration) (proto
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	var reply result
 	select {
-	case reply := <-received:
-		return reply.message, reply.err
+	case reply = <-received:
 	case <-timer.C:
 		_ = conn.Close()
-		reply := <-received
-		return reply.message, errors.Join(context.DeadlineExceeded, reply.err)
+		reply = <-received
+		return protocol.KillResult{}, errors.Join(context.DeadlineExceeded, reply.err)
 	}
+	if reply.err != nil {
+		return protocol.KillResult{}, reply.err
+	}
+	killResult, ok := reply.message.(protocol.KillResult)
+	if !ok {
+		return protocol.KillResult{}, fmt.Errorf("unexpected reply %T to kill", reply.message)
+	}
+	if killResult.RequestID != requestID {
+		return protocol.KillResult{}, fmt.Errorf("kill result request id %d, want %d", killResult.RequestID, requestID)
+	}
+	return killResult, nil
 }
 
+// blockingClientConnection parks ReceiveServer until Close, so a test can prove
+// the bounded await returns on timeout rather than hanging.
 type blockingClientConnection struct {
 	closed chan struct{}
 	once   sync.Once
@@ -252,12 +256,59 @@ func (c *blockingClientConnection) Close() error {
 	return nil
 }
 
-func TestReceiveKillReplyTimesOut(t *testing.T) {
+// TestAwaitKillResultTimesOut proves the bounded result await reports a timeout
+// (never a silent success) and closes the exact connection when no
+// KillResult arrives.
+func TestAwaitKillResultTimesOut(t *testing.T) {
 	conn := &blockingClientConnection{closed: make(chan struct{})}
-	_, err := receiveKillReply(conn, 10*time.Millisecond)
+	_, err := awaitKillResult(conn, 1, 10*time.Millisecond)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
+
+// TestAwaitKillResultRejectsUncorrelatedReply proves a reply of the wrong type
+// or with a mismatched RequestID is a definite error, so a lost or stale result
+// is never mistaken for this request's success.
+func TestAwaitKillResultRejectsUncorrelatedReply(t *testing.T) {
+	tests := []struct {
+		name  string
+		reply protocol.ServerMessage
+	}{
+		{name: "wrong type", reply: protocol.Pong{}},
+		{name: "wrong request id", reply: protocol.KillResult{RequestID: 9, Outcome: protocol.KillSucceeded}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := &scriptedKillReplyConnection{reply: tt.reply}
+			_, err := awaitKillResult(conn, 1, time.Second)
+			require.Error(t, err)
+		})
+	}
+}
+
+// scriptedKillReplyConnection returns exactly one canned server message.
+type scriptedKillReplyConnection struct {
+	reply protocol.ServerMessage
+}
+
+func (*scriptedKillReplyConnection) SendClient(protocol.ClientMessage) error { return nil }
+
+func (c *scriptedKillReplyConnection) ReceiveServer() (protocol.ServerMessage, error) {
+	if c.reply == nil {
+		return nil, io.EOF
+	}
+	reply := c.reply
+	c.reply = nil
+	return reply, nil
+}
+
+func (*scriptedKillReplyConnection) Capabilities() protocol.ConnectionCapabilities {
+	return protocol.ConnectionCapabilities{}
+}
+
+func (*scriptedKillReplyConnection) LinkState() ports.LinkState         { return ports.LinkState(0) }
+func (*scriptedKillReplyConnection) LinkEvents() <-chan ports.LinkEvent { return nil }
+func (*scriptedKillReplyConnection) Close() error                       { return nil }
 
 // mustHelloBytes encodes a minimal valid Hello for first-frame shape probes.
 func mustHelloBytes() []byte {

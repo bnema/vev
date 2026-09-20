@@ -90,6 +90,22 @@ message Kill {
   string name = 1;
   // Closed scope taxonomy: 0 = session, 1 = daemon, 2 = all.
   uint32 scope = 2;
+  uint64 request_id = 3;
+}
+
+message KillFailure {
+  string class = 1;
+  string name = 2;
+  string text = 3;
+}
+
+message KillResult {
+  uint64 request_id = 1;
+  // Closed outcome taxonomy: 1 = succeeded, 2 = failed, 3 = outcome unknown.
+  uint32 outcome = 2;
+  uint32 code = 3;
+  string text = 4;
+  repeated KillFailure failures = 5;
 }
 
 // Detached reports why an attachment ended.

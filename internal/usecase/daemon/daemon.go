@@ -1326,29 +1326,40 @@ func (d *Daemon) handleList(tr ports.ServerConnection) {
 }
 
 // handleKill terminates the requested live session or stopped named session,
-// purges every session (KillAll), or stops the daemon (KillDaemon), and closes
-// the control connection; the resulting EOF is the client's success signal.
-// KillAll leaves the daemon active; KillDaemon is the explicit stop.
+// purges every session (KillAll), or accepts daemon shutdown (KillDaemon).
+// Every normally decoded request receives exactly one correlated result before
+// the control connection closes. KillAll leaves the daemon active.
 func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 	defer func() { _ = tr.Close() }()
+	send := func(result protocol.KillResult) {
+		result.RequestID = request.RequestID
+		d.logKillResultSendFailure(result, d.boundedControlSend(tr, result))
+	}
 
 	switch request.Scope {
 	case protocol.KillAll:
 		result := d.purgeAllSessions(protocol.ReasonSessionKilled)
 		if result.Superseded() {
-			d.logControlSendFailure("kill all superseded response", d.boundedControlSend(tr, serverError(protocol.ErrServerShutdown, "daemon is shutting down")))
+			send(protocol.KillResult{Outcome: protocol.KillOutcomeUnknown, Code: protocol.ErrServerShutdown, Text: "daemon is shutting down"})
 			return
 		}
 		if result.Failed() {
-			d.logControlSendFailure("kill all failure response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, result.summary())))
+			failures := make([]protocol.KillFailure, 0, min(len(result.Failures), purgeSummaryFailureLimit))
+			for _, failure := range result.Failures[:min(len(result.Failures), purgeSummaryFailureLimit)] {
+				failures = append(failures, protocol.KillFailure{Class: failure.Class.String(), Name: failure.Name, Text: failure.Err.Error()})
+			}
+			send(protocol.KillResult{Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: result.summary(), Failures: failures})
+			return
 		}
+		send(protocol.KillResult{Outcome: protocol.KillSucceeded})
 		return
 	case protocol.KillDaemon:
+		send(protocol.KillResult{Outcome: protocol.KillSucceeded})
 		d.shutdownAll(protocol.ReasonServerShutdown)
 		return
 	case protocol.KillSession:
 	default:
-		d.logControlSendFailure("invalid kill scope response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, "invalid kill scope")))
+		send(protocol.KillResult{Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: "invalid kill scope"})
 		return
 	}
 
@@ -1361,15 +1372,17 @@ func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 			// deletion order as live and offline purges.
 			if err := d.retryStoppedPurge(request.Name); err != nil {
 				d.log.Warn("deleting stopped session failed", "err", err, "session", request.Name)
-				d.logControlSendFailure("stopped delete failure response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting stopped session failed")))
+				send(protocol.KillResult{Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: "deleting stopped session failed"})
+				return
 			}
+			send(protocol.KillResult{Outcome: protocol.KillSucceeded})
 			return
 		}
 	}
 	d.mu.Unlock()
 
 	if target == nil {
-		d.logControlSendFailure("no such session response", d.boundedControlSend(tr, serverError(protocol.ErrNoSuchSession, "no such session: "+request.Name)))
+		send(protocol.KillResult{Outcome: protocol.KillFailed, Code: protocol.ErrNoSuchSession, Text: "no such session: " + request.Name})
 		return
 	}
 	if err := d.killSession(target, protocol.ReasonSessionKilled, true); err != nil {
@@ -1377,11 +1390,13 @@ func (d *Daemon) handleKill(tr ports.ServerConnection, request protocol.Kill) {
 			// The exact session was not removed; a concurrent detach or token
 			// resume invalidated the teardown snapshot. Report the retryable
 			// outcome instead of a permanent delete failure.
-			d.logControlSendFailure("session delete retry response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, sessionKillRetryMessage)))
+			send(protocol.KillResult{Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: sessionKillRetryMessage})
 			return
 		}
-		d.logControlSendFailure("session delete failure response", d.boundedControlSend(tr, serverError(protocol.ErrInternal, "deleting persisted session failed")))
+		send(protocol.KillResult{Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: "deleting persisted session failed"})
+		return
 	}
+	send(protocol.KillResult{Outcome: protocol.KillSucceeded})
 }
 
 // handleHello runs the attach handshake for direct package callers. Accepted

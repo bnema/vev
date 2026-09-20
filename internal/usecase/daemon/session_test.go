@@ -144,7 +144,7 @@ func TestKillAllEmptyDaemonKeepsServing(t *testing.T) {
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
-	tr, _, _ := newConn(t, mustClientEnvelope(protocol.Kill{Scope: protocol.KillAll}))
+	tr, _, _ := newConn(t, mustClientEnvelope(protocol.Kill{RequestID: 1, Scope: protocol.KillAll}))
 	d.handleConn(tr)
 
 	select {

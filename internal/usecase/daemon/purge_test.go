@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -791,8 +792,9 @@ func TestPurgeAllSupersededByExplicitShutdownPreservesStopAuthority(t *testing.T
 	d.waitNotifies()
 }
 
-// TestPurgeAllLogsFailedControlSend proves a purge failure that cannot be
-// delivered is logged, so a client observing EOF cannot silently infer success.
+// TestPurgeAllLogsFailedControlSend proves a purge failure result that cannot be
+// delivered is logged, so a client that never observes the explicit correlated
+// KillResult cannot silently infer success from a close.
 func TestPurgeAllLogsFailedControlSend(t *testing.T) {
 	repository := newSelectivePurgeRepository(map[domain.IncarnationID]error{{2}: errors.New("delete failed")})
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
@@ -809,10 +811,12 @@ func TestPurgeAllLogsFailedControlSend(t *testing.T) {
 	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(errors.New("client gone")).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
-	d.handleKill(tr, protocol.Kill{Scope: protocol.KillAll})
+	d.handleKill(tr, protocol.Kill{RequestID: 1, Scope: protocol.KillAll})
 
-	require.Contains(t, logged.String(), "kill all failure response")
+	require.Contains(t, logged.String(), "kill result")
 	require.Contains(t, logged.String(), "client gone")
+	require.Contains(t, logged.String(), "outcome="+strconv.Itoa(int(protocol.KillFailed)), "the send-failure log must name the unobserved outcome")
+	require.Contains(t, logged.String(), "code="+strconv.Itoa(int(protocol.ErrInternal)), "the send-failure log must name the unobserved code")
 }
 
 // TestPurgeResultSummaryBoundsWireDetail proves the partial-failure summary is

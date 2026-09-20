@@ -138,5 +138,6 @@ message ServerEnvelope {
     PickerControlResponse picker_control_response = 28;
     AttachmentSuspended attachment_suspended = 31;
     AttachmentActivated attachment_activated = 32;
+    KillResult kill_result = 33;
   }
 }

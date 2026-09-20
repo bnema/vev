@@ -27,7 +27,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "detach", want: protocol.Detach{}},
 		{name: "ping", want: protocol.Ping{}},
 		{name: "list", want: protocol.List{}},
-		{name: "kill", want: protocol.Kill{Name: "work"}},
+		{name: "kill", want: protocol.Kill{RequestID: 1, Name: "work"}},
 		{name: "theme", want: protocol.Theme{TrueColor: true}},
 		{name: "ack", want: protocol.Ack{Epoch: 1, State: 2}},
 		{name: "image", want: protocol.ImagePush{InputSeq: 2, Mime: "image/png", Data: []byte{1}}},
@@ -62,6 +62,8 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 	pong := protocol.Pong{}
 	sessions := protocol.Sessions{}
 	commandResult := protocol.CommandResult{RequestID: 1, OK: true}
+	killResult := protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded}
+	killFailure := protocol.KillResult{RequestID: 2, Outcome: protocol.KillFailed, Code: protocol.ErrInternal, Text: "partial", Failures: []protocol.KillFailure{{Class: "stopped", Name: "work", Text: "boom"}}}
 	attachTarget := protocol.AttachTarget{Session: "work", Intent: protocol.IntentAttach}
 	preview := protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewUnavailable}
 	identity := protocol.CommittedRouteIdentity{Target: exact}
@@ -86,6 +88,8 @@ func TestServerConnectionEncodesEveryServerMessage(t *testing.T) {
 		{name: "pong", message: pong},
 		{name: "sessions", message: sessions},
 		{name: "command result", message: commandResult},
+		{name: "kill result", message: killResult},
+		{name: "kill result partial failures", message: killFailure},
 		{name: "attach target", message: attachTarget},
 		{name: "preview", message: preview},
 		{name: "identity", message: identity},

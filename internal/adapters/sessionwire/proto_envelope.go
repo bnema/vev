@@ -394,6 +394,13 @@ func encodeProtoServer(message protocol.ServerMessage) (*wire.ServerEnvelope, er
 		return encodeProtoServer(*m)
 	case protocol.CommandResult:
 		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_CommandResult{CommandResult: commandResultToWire(m)}}, nil
+	case protocol.KillResult:
+		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_KillResult{KillResult: killResultToWire(m)}}, nil
+	case *protocol.KillResult:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoServer(*m)
 	case *protocol.CommandResult:
 		if m == nil {
 			return nil, ErrInvalidMessage
@@ -732,6 +739,8 @@ func decodeProtoServer(envelope *wire.ServerEnvelope) (protocol.ServerMessage, e
 		return sessionsFromWire(payload.Sessions)
 	case *wire.ServerEnvelope_CommandResult:
 		return commandResultFromWire(payload.CommandResult)
+	case *wire.ServerEnvelope_KillResult:
+		return killResultFromWire(payload.KillResult)
 	case *wire.ServerEnvelope_AttachTarget:
 		return attachTargetFromWire(payload.AttachTarget)
 	case *wire.ServerEnvelope_RemotePreview:

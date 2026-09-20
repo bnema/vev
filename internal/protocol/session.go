@@ -16,7 +16,7 @@ import (
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 56
+const Version uint16 = 57
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -295,8 +295,31 @@ const (
 )
 
 type Kill struct {
+	RequestID uint64
+	Name      string
+	Scope     KillScope
+}
+
+type KillOutcome uint8
+
+const (
+	KillSucceeded KillOutcome = iota + 1
+	KillFailed
+	KillOutcomeUnknown
+)
+
+type KillFailure struct {
+	Class string
 	Name  string
-	Scope KillScope
+	Text  string
+}
+
+type KillResult struct {
+	RequestID uint64
+	Outcome   KillOutcome
+	Code      uint16
+	Text      string
+	Failures  []KillFailure
 }
 
 type SessionState uint8

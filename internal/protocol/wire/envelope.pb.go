@@ -893,6 +893,7 @@ type ServerEnvelope struct {
 	//	*ServerEnvelope_PickerControlResponse
 	//	*ServerEnvelope_AttachmentSuspended
 	//	*ServerEnvelope_AttachmentActivated
+	//	*ServerEnvelope_KillResult
 	Payload       isServerEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1205,6 +1206,15 @@ func (x *ServerEnvelope) GetAttachmentActivated() *AttachmentActivated {
 	return nil
 }
 
+func (x *ServerEnvelope) GetKillResult() *KillResult {
+	if x != nil {
+		if x, ok := x.Payload.(*ServerEnvelope_KillResult); ok {
+			return x.KillResult
+		}
+	}
+	return nil
+}
+
 type isServerEnvelope_Payload interface {
 	isServerEnvelope_Payload()
 }
@@ -1329,6 +1339,10 @@ type ServerEnvelope_AttachmentActivated struct {
 	AttachmentActivated *AttachmentActivated `protobuf:"bytes,32,opt,name=attachment_activated,json=attachmentActivated,proto3,oneof"`
 }
 
+type ServerEnvelope_KillResult struct {
+	KillResult *KillResult `protobuf:"bytes,33,opt,name=kill_result,json=killResult,proto3,oneof"`
+}
+
 func (*ServerEnvelope_Welcome) isServerEnvelope_Payload() {}
 
 func (*ServerEnvelope_Error) isServerEnvelope_Payload() {}
@@ -1388,6 +1402,8 @@ func (*ServerEnvelope_PickerControlResponse) isServerEnvelope_Payload() {}
 func (*ServerEnvelope_AttachmentSuspended) isServerEnvelope_Payload() {}
 
 func (*ServerEnvelope_AttachmentActivated) isServerEnvelope_Payload() {}
+
+func (*ServerEnvelope_KillResult) isServerEnvelope_Payload() {}
 
 var File_envelope_proto protoreflect.FileDescriptor
 
@@ -1449,7 +1465,7 @@ const file_envelope_proto_rawDesc = "" +
 	"\x16picker_control_request\x18\x1c \x01(\v2!.vev.wire.v1.PickerControlRequestH\x00R\x14pickerControlRequest\x12O\n" +
 	"\x12suspend_attachment\x18\x1d \x01(\v2\x1e.vev.wire.v1.SuspendAttachmentH\x00R\x11suspendAttachment\x12R\n" +
 	"\x13activate_attachment\x18\x1e \x01(\v2\x1f.vev.wire.v1.ActivateAttachmentH\x00R\x12activateAttachmentB\t\n" +
-	"\apayload\"\xee\x11\n" +
+	"\apayload\"\xaa\x12\n" +
 	"\x0eServerEnvelope\x120\n" +
 	"\awelcome\x18\x01 \x01(\v2\x14.vev.wire.v1.WelcomeH\x00R\awelcome\x12-\n" +
 	"\x05error\x18\x02 \x01(\v2\x15.vev.wire.v1.ErrorMsgH\x00R\x05error\x12-\n" +
@@ -1482,7 +1498,9 @@ const file_envelope_proto_rawDesc = "" +
 	"\x0epicker_preview\x18\x1b \x01(\v2\x1a.vev.wire.v1.PickerPreviewH\x00R\rpickerPreview\x12\\\n" +
 	"\x17picker_control_response\x18\x1c \x01(\v2\".vev.wire.v1.PickerControlResponseH\x00R\x15pickerControlResponse\x12U\n" +
 	"\x14attachment_suspended\x18\x1f \x01(\v2 .vev.wire.v1.AttachmentSuspendedH\x00R\x13attachmentSuspended\x12U\n" +
-	"\x14attachment_activated\x18  \x01(\v2 .vev.wire.v1.AttachmentActivatedH\x00R\x13attachmentActivatedB\t\n" +
+	"\x14attachment_activated\x18  \x01(\v2 .vev.wire.v1.AttachmentActivatedH\x00R\x13attachmentActivated\x12:\n" +
+	"\vkill_result\x18! \x01(\v2\x17.vev.wire.v1.KillResultH\x00R\n" +
+	"killResultB\t\n" +
 	"\apayloadJ\x04\b\x1d\x10\x1eJ\x04\b\x1e\x10\x1fB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
@@ -1564,6 +1582,7 @@ var file_envelope_proto_goTypes = []any{
 	(*PickerControlResponse)(nil),          // 62: vev.wire.v1.PickerControlResponse
 	(*AttachmentSuspended)(nil),            // 63: vev.wire.v1.AttachmentSuspended
 	(*AttachmentActivated)(nil),            // 64: vev.wire.v1.AttachmentActivated
+	(*KillResult)(nil),                     // 65: vev.wire.v1.KillResult
 }
 var file_envelope_proto_depIdxs = []int32{
 	0,  // 0: vev.wire.v1.PreambleRequest.role:type_name -> vev.wire.v1.PreambleRole
@@ -1629,11 +1648,12 @@ var file_envelope_proto_depIdxs = []int32{
 	62, // 60: vev.wire.v1.ServerEnvelope.picker_control_response:type_name -> vev.wire.v1.PickerControlResponse
 	63, // 61: vev.wire.v1.ServerEnvelope.attachment_suspended:type_name -> vev.wire.v1.AttachmentSuspended
 	64, // 62: vev.wire.v1.ServerEnvelope.attachment_activated:type_name -> vev.wire.v1.AttachmentActivated
-	63, // [63:63] is the sub-list for method output_type
-	63, // [63:63] is the sub-list for method input_type
-	63, // [63:63] is the sub-list for extension type_name
-	63, // [63:63] is the sub-list for extension extendee
-	0,  // [0:63] is the sub-list for field type_name
+	65, // 63: vev.wire.v1.ServerEnvelope.kill_result:type_name -> vev.wire.v1.KillResult
+	64, // [64:64] is the sub-list for method output_type
+	64, // [64:64] is the sub-list for method input_type
+	64, // [64:64] is the sub-list for extension type_name
+	64, // [64:64] is the sub-list for extension extendee
+	0,  // [0:64] is the sub-list for field type_name
 }
 
 func init() { file_envelope_proto_init() }
@@ -1709,6 +1729,7 @@ func file_envelope_proto_init() {
 		(*ServerEnvelope_PickerControlResponse)(nil),
 		(*ServerEnvelope_AttachmentSuspended)(nil),
 		(*ServerEnvelope_AttachmentActivated)(nil),
+		(*ServerEnvelope_KillResult)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

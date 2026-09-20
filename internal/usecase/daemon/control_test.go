@@ -1482,13 +1482,15 @@ func TestHandleKillSessionParticipantsChangedReportsRetryable(t *testing.T) {
 	t.Cleanup(func() { d.afterAttachmentEffectParticipantsSnapshotted = nil })
 
 	tr, sends := newCapturingTransport(t)
-	d.handleKill(tr, protocol.Kill{Scope: protocol.KillSession, Name: "work"})
+	d.handleKill(tr, protocol.Kill{RequestID: 1, Scope: protocol.KillSession, Name: "work"})
 
-	frame := awaitFrame(t, sends, "Error")
-	msg, ok := decodeServerMessage(t, frame).(protocol.ErrorMsg)
+	frame := awaitFrame(t, sends, "KillResult")
+	result, ok := decodeServerMessage(t, frame).(protocol.KillResult)
 	require.True(t, ok)
-	require.Equal(t, protocol.ErrInternal, msg.Code)
-	require.Equal(t, sessionKillRetryMessage, msg.Text)
+	require.Equal(t, uint64(1), result.RequestID)
+	require.Equal(t, protocol.KillFailed, result.Outcome)
+	require.Equal(t, protocol.ErrInternal, result.Code)
+	require.Equal(t, sessionKillRetryMessage, result.Text)
 	require.Equal(t, 1, sessionCount(d), "an aborted direct kill must leave the session live")
 	require.Same(t, sess, firstSession(d))
 }

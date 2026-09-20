@@ -87,12 +87,14 @@ func (d *Daemon) boundedControlSend(tr ports.ServerConnection, message protocol.
 	return err
 }
 
-// logControlSendFailure records that an error response could not be delivered.
-// A one-shot control client treats EOF as success, so a failed error send would
-// otherwise let it infer success from a silent close.
-func (d *Daemon) logControlSendFailure(operation string, err error) {
+// logKillResultSendFailure records that one one-shot kill result could not be
+// delivered. The kill path answers with an explicit correlated KillResult, so a
+// failed result send leaves the client at outcome-unknown rather than letting it
+// infer success from a silent close; the outcome and code fields preserve what
+// the client never observed.
+func (d *Daemon) logKillResultSendFailure(result protocol.KillResult, err error) {
 	if err != nil {
-		d.log.Warn("control error response send failed", "operation", operation, "err", err)
+		d.log.Warn("control error response send failed", "operation", "kill result", "outcome", result.Outcome, "code", result.Code, "err", err)
 	}
 }
 

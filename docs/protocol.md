@@ -28,7 +28,7 @@ Server → client: `Welcome`, `ErrorMsg`, `Output`, `Detached`, `Pong`,
 `NavigationInventoryResponse`, `NavigationInventoryDemand`,
 `NavigationInventorySelection`, `PickerOffer`, `PickerSnapshot`,
 `PickerClosed`, `PickerResult`, `PickerFailure`, `PickerPreview`,
-`PickerControlResponse`.
+`PickerControlResponse`, `KillResult`.
 
 `RouteNavigationFailure` is the one payload that appears in both unions.
 `sessionwire` conversion switches (`decodeProtoClient`/`decodeProtoServer`,
@@ -78,7 +78,7 @@ mutation:
 | `DecodeMessageHello`, version mismatch | `ErrorMsg{ErrVersionMismatch}` | no |
 | `DecodeMessageHello`, malformed | `ErrorMsg{ErrInternal}` | no |
 | `DecodeMessageCommand` | `CommandResult{Code, Text}` | yes, else silent close |
-| `DecodeMessageKill` | `ErrorMsg{ErrInternal}` | no |
+| `DecodeMessageKill` | `ErrorMsg{ErrInternal}` | no — a malformed kill has no reliable RequestID to correlate a `KillResult` to |
 | `DecodeMessageRemotePreview` | `RemotePreview{Status: Malformed}` | no |
 | `DecodeMessageNavigationInventory` | `NavigationInventoryResponse{Invalid / VersionMismatch}` | yes, else silent close |
 | other / unknown | `ErrorMsg{ErrInternal, "expected hello"}` | no |
@@ -188,14 +188,24 @@ while `pickerOpen`; only typed picker messages act.
   and carry no async byte-budget charge; async sends are charged on
   admission and released exactly once on dequeue.
 
-Current state: a one-shot control client uses the daemon closing the
-connection (EOF) as its success signal, so a control failure whose error
-response cannot be delivered would otherwise be indistinguishable from
-success; the daemon only logs such a failed send
-(`daemon.logControlSendFailure`) before closing. The wire-level decision for that
-residual belongs to the P7 explicit result protocol, which replaces close-as-
-success with an explicit per-request result; until that cutover the close-based
-convention is kept unchanged (GO-005, deferred to P7).
+Current state: the one-shot kill control paths have moved to the explicit
+result protocol. `Kill` carries a unique nonzero `RequestID`, and the daemon
+answers every normally decoded kill request with exactly one correlated
+`KillResult` before the control connection closes: `KillSucceeded`,
+`KillFailed` (with a bounded structured `Failures` list), or a definite
+`KillOutcomeUnknown`. The client consumes that result; a close without a
+result, a mismatched `RequestID`, or a wrong-typed reply is `outcome unknown`
+and is never replayed, so a control failure whose response cannot be delivered
+is never mistaken for success. The remaining one-shot controls (`List`,
+`CommandRequest`, remote preview, inventory, and picker control) have no
+explicit per-request result. They do not treat close as success: the daemon
+attempts one response and then closes, and a client that receives no valid
+response reports a receive error rather than a silent success. Because no
+typed result exists, an undeliverable response is logged daemon-side only where
+the handler has a send-failure path (`CommandRequest`, remote preview) and is
+otherwise unrecorded, so the client is left without any outcome at all; these
+paths stay weaker than the explicit `KillResult`, and replacing them with
+explicit per-request results belongs to the P7 cutover (GO-005).
 
 ## Limits
 

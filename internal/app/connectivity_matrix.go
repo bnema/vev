@@ -117,7 +117,7 @@ var connectivityMatrix = []connectivityEntry{
 			"forceStopDaemonFallback (force_stop.go)",
 		},
 		PersistMutation: true,
-		Notes:           "Offline runOfflineNamedKill mutation becomes daemon-owned via broker. Kill-all purges sessions and leaves the daemon running; daemon-stop is the distinct explicit stop.",
+		Notes:           "Offline runOfflineNamedKill mutation becomes daemon-owned via broker. Kill-all purges sessions and leaves the daemon running; daemon-stop is the distinct explicit stop. Direct force-stop is offered only when the typed endpoint is unreachable, never after a request may have been delivered.",
 	},
 	{
 		Kind:    "kindCmd",

@@ -138,7 +138,7 @@ func forceStopDaemon(ctx context.Context, runtimeDir string, hooks forceStopHook
 
 	confirmed, err := hooks.confirm(fmt.Sprintf(
 		"vev: daemon process %d (%s) still owns %s after the typed kill request failed.\n"+
-			"vev: it may be incompatible or unreachable. Send SIGTERM to process %d?",
+			"vev: it is unreachable through the typed control endpoint. Send SIGTERM to process %d?",
 		candidate.PID, candidate.Command, lifecycle.Path(runtimeDir), candidate.PID))
 	if err != nil {
 		return err
@@ -284,10 +284,12 @@ var forceStopDaemonFn = func(ctx context.Context) error {
 	return forceStopDaemon(ctx, ipc.SocketDir(), defaultForceStopHooks())
 }
 
-// forceStopDaemonFallback offers the interactive force-stop after the typed
-// KillDaemon protocol failed. When no verified daemon process holds lifecycle
-// ownership, the original failure is returned unchanged so the caller keeps its
-// own diagnosis.
+// forceStopDaemonFallback offers the interactive force-stop when the daemon
+// cannot be reached through the typed protocol. Once a request may have been
+// delivered, the caller preserves its explicit or outcome-unknown result rather
+// than bypassing the protocol with a direct process signal. When no verified
+// daemon process holds lifecycle ownership, the original failure is returned
+// unchanged so the caller keeps its own diagnosis.
 func forceStopDaemonFallback(ctx context.Context, cause error) error {
 	err := forceStopDaemonFn(ctx)
 	if errors.Is(err, errForceStopNotApplicable) {

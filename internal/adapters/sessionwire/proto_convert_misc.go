@@ -187,7 +187,7 @@ func detachedFromWire(message *wire.Detached) (protocol.Detached, error) {
 }
 
 func killToWire(message protocol.Kill) *wire.Kill {
-	return &wire.Kill{Name: message.Name, Scope: uint32(message.Scope)}
+	return &wire.Kill{Name: message.Name, Scope: uint32(message.Scope), RequestId: message.RequestID}
 }
 
 func killFromWire(message *wire.Kill) (protocol.Kill, error) {
@@ -201,7 +201,36 @@ func killFromWire(message *wire.Kill) (protocol.Kill, error) {
 	if scope != protocol.KillSession && scope != protocol.KillDaemon && scope != protocol.KillAll {
 		return protocol.Kill{}, errProtoConvertRange
 	}
-	return protocol.Kill{Name: message.GetName(), Scope: scope}, nil
+	if message.GetRequestId() == 0 {
+		return protocol.Kill{}, errProtoConvertRange
+	}
+	return protocol.Kill{RequestID: message.GetRequestId(), Name: message.GetName(), Scope: scope}, nil
+}
+
+func killResultToWire(message protocol.KillResult) *wire.KillResult {
+	out := &wire.KillResult{RequestId: message.RequestID, Outcome: uint32(message.Outcome), Code: uint32(message.Code), Text: message.Text}
+	for _, failure := range message.Failures {
+		out.Failures = append(out.Failures, &wire.KillFailure{Class: failure.Class, Name: failure.Name, Text: failure.Text})
+	}
+	return out
+}
+
+func killResultFromWire(message *wire.KillResult) (protocol.KillResult, error) {
+	if message == nil || message.GetRequestId() == 0 || message.GetOutcome() < uint32(protocol.KillSucceeded) || message.GetOutcome() > uint32(protocol.KillOutcomeUnknown) {
+		return protocol.KillResult{}, errProtoConvertRange
+	}
+	code, err := mustUint16(message.GetCode())
+	if err != nil {
+		return protocol.KillResult{}, err
+	}
+	out := protocol.KillResult{RequestID: message.GetRequestId(), Outcome: protocol.KillOutcome(message.GetOutcome()), Code: code, Text: message.GetText()}
+	for _, failure := range message.GetFailures() {
+		if failure == nil {
+			return protocol.KillResult{}, errProtoConvertRange
+		}
+		out.Failures = append(out.Failures, protocol.KillFailure{Class: failure.GetClass(), Name: failure.GetName(), Text: failure.GetText()})
+	}
+	return out, nil
 }
 
 func sessionsToWire(message protocol.Sessions) *wire.Sessions {

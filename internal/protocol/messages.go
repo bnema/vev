@@ -42,6 +42,7 @@ func (Detached) serverMessage()                     {}
 func (Pong) serverMessage()                         {}
 func (Sessions) serverMessage()                     {}
 func (CommandResult) serverMessage()                {}
+func (KillResult) serverMessage()                   {}
 func (AttachTarget) serverMessage()                 {}
 func (RemotePreview) serverMessage()                {}
 func (CommittedRouteIdentity) serverMessage()       {}

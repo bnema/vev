@@ -147,6 +147,8 @@ func serverMessageNameForTest(payload []byte) string {
 		return "Sessions"
 	case protocol.CommandResult:
 		return "CommandResult"
+	case protocol.KillResult:
+		return "KillResult"
 	case protocol.AttachTarget:
 		return "AttachTarget"
 	case protocol.RemotePreview:

@@ -674,6 +674,7 @@ type Kill struct {
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Closed scope taxonomy: 0 = session, 1 = daemon, 2 = all.
 	Scope         uint32 `protobuf:"varint,2,opt,name=scope,proto3" json:"scope,omitempty"`
+	RequestId     uint64 `protobuf:"varint,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -722,6 +723,150 @@ func (x *Kill) GetScope() uint32 {
 	return 0
 }
 
+func (x *Kill) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+type KillFailure struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Class         string                 `protobuf:"bytes,1,opt,name=class,proto3" json:"class,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KillFailure) Reset() {
+	*x = KillFailure{}
+	mi := &file_session_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KillFailure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KillFailure) ProtoMessage() {}
+
+func (x *KillFailure) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KillFailure.ProtoReflect.Descriptor instead.
+func (*KillFailure) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *KillFailure) GetClass() string {
+	if x != nil {
+		return x.Class
+	}
+	return ""
+}
+
+func (x *KillFailure) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *KillFailure) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type KillResult struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	RequestId uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// Closed outcome taxonomy: 1 = succeeded, 2 = failed, 3 = outcome unknown.
+	Outcome       uint32         `protobuf:"varint,2,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	Code          uint32         `protobuf:"varint,3,opt,name=code,proto3" json:"code,omitempty"`
+	Text          string         `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"`
+	Failures      []*KillFailure `protobuf:"bytes,5,rep,name=failures,proto3" json:"failures,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KillResult) Reset() {
+	*x = KillResult{}
+	mi := &file_session_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KillResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KillResult) ProtoMessage() {}
+
+func (x *KillResult) ProtoReflect() protoreflect.Message {
+	mi := &file_session_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KillResult.ProtoReflect.Descriptor instead.
+func (*KillResult) Descriptor() ([]byte, []int) {
+	return file_session_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *KillResult) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *KillResult) GetOutcome() uint32 {
+	if x != nil {
+		return x.Outcome
+	}
+	return 0
+}
+
+func (x *KillResult) GetCode() uint32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+func (x *KillResult) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *KillResult) GetFailures() []*KillFailure {
+	if x != nil {
+		return x.Failures
+	}
+	return nil
+}
+
 // Detached reports why an attachment ended.
 type Detached struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -733,7 +878,7 @@ type Detached struct {
 
 func (x *Detached) Reset() {
 	*x = Detached{}
-	mi := &file_session_proto_msgTypes[8]
+	mi := &file_session_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -745,7 +890,7 @@ func (x *Detached) String() string {
 func (*Detached) ProtoMessage() {}
 
 func (x *Detached) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[8]
+	mi := &file_session_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -758,7 +903,7 @@ func (x *Detached) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Detached.ProtoReflect.Descriptor instead.
 func (*Detached) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{8}
+	return file_session_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Detached) GetReason() uint32 {
@@ -777,7 +922,7 @@ type Detach struct {
 
 func (x *Detach) Reset() {
 	*x = Detach{}
-	mi := &file_session_proto_msgTypes[9]
+	mi := &file_session_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +934,7 @@ func (x *Detach) String() string {
 func (*Detach) ProtoMessage() {}
 
 func (x *Detach) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[9]
+	mi := &file_session_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +947,7 @@ func (x *Detach) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Detach.ProtoReflect.Descriptor instead.
 func (*Detach) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{9}
+	return file_session_proto_rawDescGZIP(), []int{11}
 }
 
 // Ping / Pong are empty keepalive markers.
@@ -814,7 +959,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_session_proto_msgTypes[10]
+	mi := &file_session_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -826,7 +971,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[10]
+	mi := &file_session_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -839,7 +984,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{10}
+	return file_session_proto_rawDescGZIP(), []int{12}
 }
 
 type Pong struct {
@@ -850,7 +995,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_session_proto_msgTypes[11]
+	mi := &file_session_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -862,7 +1007,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[11]
+	mi := &file_session_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -875,7 +1020,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{11}
+	return file_session_proto_rawDescGZIP(), []int{13}
 }
 
 // List asks for the one-shot session listing. Empty marker.
@@ -887,7 +1032,7 @@ type List struct {
 
 func (x *List) Reset() {
 	*x = List{}
-	mi := &file_session_proto_msgTypes[12]
+	mi := &file_session_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -899,7 +1044,7 @@ func (x *List) String() string {
 func (*List) ProtoMessage() {}
 
 func (x *List) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[12]
+	mi := &file_session_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -912,7 +1057,7 @@ func (x *List) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use List.ProtoReflect.Descriptor instead.
 func (*List) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{12}
+	return file_session_proto_rawDescGZIP(), []int{14}
 }
 
 // RouteRef is an opaque client-ledger reference.
@@ -926,7 +1071,7 @@ type RouteRef struct {
 
 func (x *RouteRef) Reset() {
 	*x = RouteRef{}
-	mi := &file_session_proto_msgTypes[13]
+	mi := &file_session_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -938,7 +1083,7 @@ func (x *RouteRef) String() string {
 func (*RouteRef) ProtoMessage() {}
 
 func (x *RouteRef) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[13]
+	mi := &file_session_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -951,7 +1096,7 @@ func (x *RouteRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteRef.ProtoReflect.Descriptor instead.
 func (*RouteRef) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{13}
+	return file_session_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RouteRef) GetKey() uint64 {
@@ -980,7 +1125,7 @@ type RouteAttentionTarget struct {
 
 func (x *RouteAttentionTarget) Reset() {
 	*x = RouteAttentionTarget{}
-	mi := &file_session_proto_msgTypes[14]
+	mi := &file_session_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -992,7 +1137,7 @@ func (x *RouteAttentionTarget) String() string {
 func (*RouteAttentionTarget) ProtoMessage() {}
 
 func (x *RouteAttentionTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[14]
+	mi := &file_session_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1005,7 +1150,7 @@ func (x *RouteAttentionTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteAttentionTarget.ProtoReflect.Descriptor instead.
 func (*RouteAttentionTarget) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{14}
+	return file_session_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RouteAttentionTarget) GetRef() *RouteRef {
@@ -1039,7 +1184,7 @@ type RouteAttentionSubscription struct {
 
 func (x *RouteAttentionSubscription) Reset() {
 	*x = RouteAttentionSubscription{}
-	mi := &file_session_proto_msgTypes[15]
+	mi := &file_session_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1051,7 +1196,7 @@ func (x *RouteAttentionSubscription) String() string {
 func (*RouteAttentionSubscription) ProtoMessage() {}
 
 func (x *RouteAttentionSubscription) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[15]
+	mi := &file_session_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1064,7 +1209,7 @@ func (x *RouteAttentionSubscription) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteAttentionSubscription.ProtoReflect.Descriptor instead.
 func (*RouteAttentionSubscription) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{15}
+	return file_session_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RouteAttentionSubscription) GetTargets() []*RouteAttentionTarget {
@@ -1094,7 +1239,7 @@ type RecentRouteEntry struct {
 
 func (x *RecentRouteEntry) Reset() {
 	*x = RecentRouteEntry{}
-	mi := &file_session_proto_msgTypes[16]
+	mi := &file_session_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1106,7 +1251,7 @@ func (x *RecentRouteEntry) String() string {
 func (*RecentRouteEntry) ProtoMessage() {}
 
 func (x *RecentRouteEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[16]
+	mi := &file_session_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1119,7 +1264,7 @@ func (x *RecentRouteEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecentRouteEntry.ProtoReflect.Descriptor instead.
 func (*RecentRouteEntry) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{16}
+	return file_session_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RecentRouteEntry) GetKey() uint64 {
@@ -1200,7 +1345,7 @@ type RecentRouteSnapshot struct {
 
 func (x *RecentRouteSnapshot) Reset() {
 	*x = RecentRouteSnapshot{}
-	mi := &file_session_proto_msgTypes[17]
+	mi := &file_session_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1212,7 +1357,7 @@ func (x *RecentRouteSnapshot) String() string {
 func (*RecentRouteSnapshot) ProtoMessage() {}
 
 func (x *RecentRouteSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[17]
+	mi := &file_session_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1225,7 +1370,7 @@ func (x *RecentRouteSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecentRouteSnapshot.ProtoReflect.Descriptor instead.
 func (*RecentRouteSnapshot) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{17}
+	return file_session_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RecentRouteSnapshot) GetGeneration() uint64 {
@@ -1283,7 +1428,7 @@ type RouteNavigationAction struct {
 
 func (x *RouteNavigationAction) Reset() {
 	*x = RouteNavigationAction{}
-	mi := &file_session_proto_msgTypes[18]
+	mi := &file_session_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1295,7 +1440,7 @@ func (x *RouteNavigationAction) String() string {
 func (*RouteNavigationAction) ProtoMessage() {}
 
 func (x *RouteNavigationAction) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[18]
+	mi := &file_session_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1308,7 +1453,7 @@ func (x *RouteNavigationAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteNavigationAction.ProtoReflect.Descriptor instead.
 func (*RouteNavigationAction) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{18}
+	return file_session_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RouteNavigationAction) GetCauseActionId() uint64 {
@@ -1354,7 +1499,7 @@ type RouteCreateSessionAction struct {
 
 func (x *RouteCreateSessionAction) Reset() {
 	*x = RouteCreateSessionAction{}
-	mi := &file_session_proto_msgTypes[19]
+	mi := &file_session_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1366,7 +1511,7 @@ func (x *RouteCreateSessionAction) String() string {
 func (*RouteCreateSessionAction) ProtoMessage() {}
 
 func (x *RouteCreateSessionAction) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[19]
+	mi := &file_session_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1379,7 +1524,7 @@ func (x *RouteCreateSessionAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteCreateSessionAction.ProtoReflect.Descriptor instead.
 func (*RouteCreateSessionAction) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{19}
+	return file_session_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RouteCreateSessionAction) GetCauseActionId() uint64 {
@@ -1439,7 +1584,7 @@ type RouteNavigationFailure struct {
 
 func (x *RouteNavigationFailure) Reset() {
 	*x = RouteNavigationFailure{}
-	mi := &file_session_proto_msgTypes[20]
+	mi := &file_session_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1451,7 +1596,7 @@ func (x *RouteNavigationFailure) String() string {
 func (*RouteNavigationFailure) ProtoMessage() {}
 
 func (x *RouteNavigationFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[20]
+	mi := &file_session_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1464,7 +1609,7 @@ func (x *RouteNavigationFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteNavigationFailure.ProtoReflect.Descriptor instead.
 func (*RouteNavigationFailure) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{20}
+	return file_session_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RouteNavigationFailure) GetKey() uint64 {
@@ -1499,7 +1644,7 @@ type SessionCreationFailure struct {
 
 func (x *SessionCreationFailure) Reset() {
 	*x = SessionCreationFailure{}
-	mi := &file_session_proto_msgTypes[21]
+	mi := &file_session_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1511,7 +1656,7 @@ func (x *SessionCreationFailure) String() string {
 func (*SessionCreationFailure) ProtoMessage() {}
 
 func (x *SessionCreationFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[21]
+	mi := &file_session_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1524,7 +1669,7 @@ func (x *SessionCreationFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionCreationFailure.ProtoReflect.Descriptor instead.
 func (*SessionCreationFailure) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{21}
+	return file_session_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SessionCreationFailure) GetRequestId() uint64 {
@@ -1552,7 +1697,7 @@ type RoutePosition struct {
 
 func (x *RoutePosition) Reset() {
 	*x = RoutePosition{}
-	mi := &file_session_proto_msgTypes[22]
+	mi := &file_session_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1564,7 +1709,7 @@ func (x *RoutePosition) String() string {
 func (*RoutePosition) ProtoMessage() {}
 
 func (x *RoutePosition) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[22]
+	mi := &file_session_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1577,7 +1722,7 @@ func (x *RoutePosition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoutePosition.ProtoReflect.Descriptor instead.
 func (*RoutePosition) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{22}
+	return file_session_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *RoutePosition) GetTarget() *ExactTarget {
@@ -1605,7 +1750,7 @@ type RouteRetired struct {
 
 func (x *RouteRetired) Reset() {
 	*x = RouteRetired{}
-	mi := &file_session_proto_msgTypes[23]
+	mi := &file_session_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1617,7 +1762,7 @@ func (x *RouteRetired) String() string {
 func (*RouteRetired) ProtoMessage() {}
 
 func (x *RouteRetired) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[23]
+	mi := &file_session_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1630,7 +1775,7 @@ func (x *RouteRetired) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteRetired.ProtoReflect.Descriptor instead.
 func (*RouteRetired) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{23}
+	return file_session_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *RouteRetired) GetRef() *RouteRef {
@@ -1659,7 +1804,7 @@ type SamePeerSwitchRequest struct {
 
 func (x *SamePeerSwitchRequest) Reset() {
 	*x = SamePeerSwitchRequest{}
-	mi := &file_session_proto_msgTypes[24]
+	mi := &file_session_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1671,7 +1816,7 @@ func (x *SamePeerSwitchRequest) String() string {
 func (*SamePeerSwitchRequest) ProtoMessage() {}
 
 func (x *SamePeerSwitchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[24]
+	mi := &file_session_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1684,7 +1829,7 @@ func (x *SamePeerSwitchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SamePeerSwitchRequest.ProtoReflect.Descriptor instead.
 func (*SamePeerSwitchRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{24}
+	return file_session_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SamePeerSwitchRequest) GetRequestId() uint64 {
@@ -1720,7 +1865,7 @@ type SamePeerSwitchFailure struct {
 
 func (x *SamePeerSwitchFailure) Reset() {
 	*x = SamePeerSwitchFailure{}
-	mi := &file_session_proto_msgTypes[25]
+	mi := &file_session_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1732,7 +1877,7 @@ func (x *SamePeerSwitchFailure) String() string {
 func (*SamePeerSwitchFailure) ProtoMessage() {}
 
 func (x *SamePeerSwitchFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[25]
+	mi := &file_session_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1745,7 +1890,7 @@ func (x *SamePeerSwitchFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SamePeerSwitchFailure.ProtoReflect.Descriptor instead.
 func (*SamePeerSwitchFailure) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{25}
+	return file_session_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SamePeerSwitchFailure) GetRequestId() uint64 {
@@ -1772,7 +1917,7 @@ type SuspendAttachment struct {
 
 func (x *SuspendAttachment) Reset() {
 	*x = SuspendAttachment{}
-	mi := &file_session_proto_msgTypes[26]
+	mi := &file_session_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1784,7 +1929,7 @@ func (x *SuspendAttachment) String() string {
 func (*SuspendAttachment) ProtoMessage() {}
 
 func (x *SuspendAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[26]
+	mi := &file_session_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1797,7 +1942,7 @@ func (x *SuspendAttachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SuspendAttachment.ProtoReflect.Descriptor instead.
 func (*SuspendAttachment) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{26}
+	return file_session_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *SuspendAttachment) GetRequestId() uint64 {
@@ -1818,7 +1963,7 @@ type AttachmentSuspended struct {
 
 func (x *AttachmentSuspended) Reset() {
 	*x = AttachmentSuspended{}
-	mi := &file_session_proto_msgTypes[27]
+	mi := &file_session_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1830,7 +1975,7 @@ func (x *AttachmentSuspended) String() string {
 func (*AttachmentSuspended) ProtoMessage() {}
 
 func (x *AttachmentSuspended) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[27]
+	mi := &file_session_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1843,7 +1988,7 @@ func (x *AttachmentSuspended) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachmentSuspended.ProtoReflect.Descriptor instead.
 func (*AttachmentSuspended) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{27}
+	return file_session_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *AttachmentSuspended) GetRequestId() uint64 {
@@ -1875,7 +2020,7 @@ type ActivateAttachment struct {
 
 func (x *ActivateAttachment) Reset() {
 	*x = ActivateAttachment{}
-	mi := &file_session_proto_msgTypes[28]
+	mi := &file_session_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1887,7 +2032,7 @@ func (x *ActivateAttachment) String() string {
 func (*ActivateAttachment) ProtoMessage() {}
 
 func (x *ActivateAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[28]
+	mi := &file_session_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1900,7 +2045,7 @@ func (x *ActivateAttachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivateAttachment.ProtoReflect.Descriptor instead.
 func (*ActivateAttachment) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{28}
+	return file_session_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ActivateAttachment) GetRequestId() uint64 {
@@ -1961,7 +2106,7 @@ type AttachmentActivated struct {
 
 func (x *AttachmentActivated) Reset() {
 	*x = AttachmentActivated{}
-	mi := &file_session_proto_msgTypes[29]
+	mi := &file_session_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1973,7 +2118,7 @@ func (x *AttachmentActivated) String() string {
 func (*AttachmentActivated) ProtoMessage() {}
 
 func (x *AttachmentActivated) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[29]
+	mi := &file_session_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1986,7 +2131,7 @@ func (x *AttachmentActivated) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachmentActivated.ProtoReflect.Descriptor instead.
 func (*AttachmentActivated) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{29}
+	return file_session_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *AttachmentActivated) GetRequestId() uint64 {
@@ -2090,10 +2235,24 @@ const file_session_proto_rawDesc = "" +
 	"\x04tabs\x18\x05 \x01(\rR\x04tabs\x12\x1a\n" +
 	"\battached\x18\x06 \x01(\bR\battached\"@\n" +
 	"\bSessions\x124\n" +
-	"\bsessions\x18\x01 \x03(\v2\x18.vev.wire.v1.SessionInfoR\bsessions\"0\n" +
+	"\bsessions\x18\x01 \x03(\v2\x18.vev.wire.v1.SessionInfoR\bsessions\"O\n" +
 	"\x04Kill\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
-	"\x05scope\x18\x02 \x01(\rR\x05scope\"\"\n" +
+	"\x05scope\x18\x02 \x01(\rR\x05scope\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x03 \x01(\x04R\trequestId\"K\n" +
+	"\vKillFailure\x12\x14\n" +
+	"\x05class\x18\x01 \x01(\tR\x05class\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"\xa3\x01\n" +
+	"\n" +
+	"KillResult\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x18\n" +
+	"\aoutcome\x18\x02 \x01(\rR\aoutcome\x12\x12\n" +
+	"\x04code\x18\x03 \x01(\rR\x04code\x12\x12\n" +
+	"\x04text\x18\x04 \x01(\tR\x04text\x124\n" +
+	"\bfailures\x18\x05 \x03(\v2\x18.vev.wire.v1.KillFailureR\bfailures\"\"\n" +
 	"\bDetached\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\rR\x06reason\"\b\n" +
 	"\x06Detach\"\x06\n" +
@@ -2212,7 +2371,7 @@ func file_session_proto_rawDescGZIP() []byte {
 	return file_session_proto_rawDescData
 }
 
-var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_session_proto_goTypes = []any{
 	(*Hello)(nil),                      // 0: vev.wire.v1.Hello
 	(*Welcome)(nil),                    // 1: vev.wire.v1.Welcome
@@ -2222,60 +2381,63 @@ var file_session_proto_goTypes = []any{
 	(*SessionInfo)(nil),                // 5: vev.wire.v1.SessionInfo
 	(*Sessions)(nil),                   // 6: vev.wire.v1.Sessions
 	(*Kill)(nil),                       // 7: vev.wire.v1.Kill
-	(*Detached)(nil),                   // 8: vev.wire.v1.Detached
-	(*Detach)(nil),                     // 9: vev.wire.v1.Detach
-	(*Ping)(nil),                       // 10: vev.wire.v1.Ping
-	(*Pong)(nil),                       // 11: vev.wire.v1.Pong
-	(*List)(nil),                       // 12: vev.wire.v1.List
-	(*RouteRef)(nil),                   // 13: vev.wire.v1.RouteRef
-	(*RouteAttentionTarget)(nil),       // 14: vev.wire.v1.RouteAttentionTarget
-	(*RouteAttentionSubscription)(nil), // 15: vev.wire.v1.RouteAttentionSubscription
-	(*RecentRouteEntry)(nil),           // 16: vev.wire.v1.RecentRouteEntry
-	(*RecentRouteSnapshot)(nil),        // 17: vev.wire.v1.RecentRouteSnapshot
-	(*RouteNavigationAction)(nil),      // 18: vev.wire.v1.RouteNavigationAction
-	(*RouteCreateSessionAction)(nil),   // 19: vev.wire.v1.RouteCreateSessionAction
-	(*RouteNavigationFailure)(nil),     // 20: vev.wire.v1.RouteNavigationFailure
-	(*SessionCreationFailure)(nil),     // 21: vev.wire.v1.SessionCreationFailure
-	(*RoutePosition)(nil),              // 22: vev.wire.v1.RoutePosition
-	(*RouteRetired)(nil),               // 23: vev.wire.v1.RouteRetired
-	(*SamePeerSwitchRequest)(nil),      // 24: vev.wire.v1.SamePeerSwitchRequest
-	(*SamePeerSwitchFailure)(nil),      // 25: vev.wire.v1.SamePeerSwitchFailure
-	(*SuspendAttachment)(nil),          // 26: vev.wire.v1.SuspendAttachment
-	(*AttachmentSuspended)(nil),        // 27: vev.wire.v1.AttachmentSuspended
-	(*ActivateAttachment)(nil),         // 28: vev.wire.v1.ActivateAttachment
-	(*AttachmentActivated)(nil),        // 29: vev.wire.v1.AttachmentActivated
-	(*RemoteTarget)(nil),               // 30: vev.wire.v1.RemoteTarget
-	(*ExactTarget)(nil),                // 31: vev.wire.v1.ExactTarget
+	(*KillFailure)(nil),                // 8: vev.wire.v1.KillFailure
+	(*KillResult)(nil),                 // 9: vev.wire.v1.KillResult
+	(*Detached)(nil),                   // 10: vev.wire.v1.Detached
+	(*Detach)(nil),                     // 11: vev.wire.v1.Detach
+	(*Ping)(nil),                       // 12: vev.wire.v1.Ping
+	(*Pong)(nil),                       // 13: vev.wire.v1.Pong
+	(*List)(nil),                       // 14: vev.wire.v1.List
+	(*RouteRef)(nil),                   // 15: vev.wire.v1.RouteRef
+	(*RouteAttentionTarget)(nil),       // 16: vev.wire.v1.RouteAttentionTarget
+	(*RouteAttentionSubscription)(nil), // 17: vev.wire.v1.RouteAttentionSubscription
+	(*RecentRouteEntry)(nil),           // 18: vev.wire.v1.RecentRouteEntry
+	(*RecentRouteSnapshot)(nil),        // 19: vev.wire.v1.RecentRouteSnapshot
+	(*RouteNavigationAction)(nil),      // 20: vev.wire.v1.RouteNavigationAction
+	(*RouteCreateSessionAction)(nil),   // 21: vev.wire.v1.RouteCreateSessionAction
+	(*RouteNavigationFailure)(nil),     // 22: vev.wire.v1.RouteNavigationFailure
+	(*SessionCreationFailure)(nil),     // 23: vev.wire.v1.SessionCreationFailure
+	(*RoutePosition)(nil),              // 24: vev.wire.v1.RoutePosition
+	(*RouteRetired)(nil),               // 25: vev.wire.v1.RouteRetired
+	(*SamePeerSwitchRequest)(nil),      // 26: vev.wire.v1.SamePeerSwitchRequest
+	(*SamePeerSwitchFailure)(nil),      // 27: vev.wire.v1.SamePeerSwitchFailure
+	(*SuspendAttachment)(nil),          // 28: vev.wire.v1.SuspendAttachment
+	(*AttachmentSuspended)(nil),        // 29: vev.wire.v1.AttachmentSuspended
+	(*ActivateAttachment)(nil),         // 30: vev.wire.v1.ActivateAttachment
+	(*AttachmentActivated)(nil),        // 31: vev.wire.v1.AttachmentActivated
+	(*RemoteTarget)(nil),               // 32: vev.wire.v1.RemoteTarget
+	(*ExactTarget)(nil),                // 33: vev.wire.v1.ExactTarget
 }
 var file_session_proto_depIdxs = []int32{
-	30, // 0: vev.wire.v1.Hello.remote_target:type_name -> vev.wire.v1.RemoteTarget
-	31, // 1: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
+	32, // 0: vev.wire.v1.Hello.remote_target:type_name -> vev.wire.v1.RemoteTarget
+	33, // 1: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
 	3,  // 2: vev.wire.v1.Welcome.committed_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	31, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
-	30, // 4: vev.wire.v1.AttachTarget.remote_target:type_name -> vev.wire.v1.RemoteTarget
-	31, // 5: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
+	33, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 4: vev.wire.v1.AttachTarget.remote_target:type_name -> vev.wire.v1.RemoteTarget
+	33, // 5: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
 	5,  // 6: vev.wire.v1.Sessions.sessions:type_name -> vev.wire.v1.SessionInfo
-	13, // 7: vev.wire.v1.RouteAttentionTarget.ref:type_name -> vev.wire.v1.RouteRef
-	31, // 8: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
-	14, // 9: vev.wire.v1.RouteAttentionSubscription.targets:type_name -> vev.wire.v1.RouteAttentionTarget
-	31, // 10: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
-	13, // 11: vev.wire.v1.RecentRouteSnapshot.active:type_name -> vev.wire.v1.RouteRef
-	16, // 12: vev.wire.v1.RecentRouteSnapshot.active_entry:type_name -> vev.wire.v1.RecentRouteEntry
-	13, // 13: vev.wire.v1.RecentRouteSnapshot.previous:type_name -> vev.wire.v1.RouteRef
-	13, // 14: vev.wire.v1.RecentRouteSnapshot.home:type_name -> vev.wire.v1.RouteRef
-	16, // 15: vev.wire.v1.RecentRouteSnapshot.entries:type_name -> vev.wire.v1.RecentRouteEntry
-	31, // 16: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
-	13, // 17: vev.wire.v1.RouteRetired.ref:type_name -> vev.wire.v1.RouteRef
-	31, // 18: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
-	31, // 19: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
-	31, // 20: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
-	31, // 21: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
-	3,  // 22: vev.wire.v1.AttachmentActivated.identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	8,  // 7: vev.wire.v1.KillResult.failures:type_name -> vev.wire.v1.KillFailure
+	15, // 8: vev.wire.v1.RouteAttentionTarget.ref:type_name -> vev.wire.v1.RouteRef
+	33, // 9: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
+	16, // 10: vev.wire.v1.RouteAttentionSubscription.targets:type_name -> vev.wire.v1.RouteAttentionTarget
+	33, // 11: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
+	15, // 12: vev.wire.v1.RecentRouteSnapshot.active:type_name -> vev.wire.v1.RouteRef
+	18, // 13: vev.wire.v1.RecentRouteSnapshot.active_entry:type_name -> vev.wire.v1.RecentRouteEntry
+	15, // 14: vev.wire.v1.RecentRouteSnapshot.previous:type_name -> vev.wire.v1.RouteRef
+	15, // 15: vev.wire.v1.RecentRouteSnapshot.home:type_name -> vev.wire.v1.RouteRef
+	18, // 16: vev.wire.v1.RecentRouteSnapshot.entries:type_name -> vev.wire.v1.RecentRouteEntry
+	33, // 17: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
+	15, // 18: vev.wire.v1.RouteRetired.ref:type_name -> vev.wire.v1.RouteRef
+	33, // 19: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 20: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 21: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 22: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
+	3,  // 23: vev.wire.v1.AttachmentActivated.identity:type_name -> vev.wire.v1.CommittedRouteIdentity
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_session_proto_init() }
@@ -2290,7 +2452,7 @@ func file_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_session_proto_rawDesc), len(file_session_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   30,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
