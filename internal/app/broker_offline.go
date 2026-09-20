@@ -287,7 +287,22 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err != nil {
 		return err
 	}
-	registry, err := broker.NewRegistryWithConfig(epoch, store, nil, clk, log, registryConfig)
+	connector, err := brokerMuxConnector(config, log)
+	if err != nil {
+		return err
+	}
+	resolver := config.Resolver()
+	var remoteProbe ports.BrokerHostProbe
+	if len(config.Endpoints()) != 0 {
+		remoteProbe = &brokerRemoteProbe{
+			epoch: epoch, resolver: resolver, connector: connector,
+			policy: func(endpoint string) (ports.BrokerPolicy, bool) {
+				registration, ok := config.Registration(endpoint)
+				return registration.Policy, ok
+			},
+		}
+	}
+	registry, err := broker.NewRegistryWithConfig(epoch, store, remoteProbe, clk, log, registryConfig)
 	if err != nil {
 		return err
 	}
@@ -297,11 +312,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err := supervisor.RegisterRunner("registry", registry); err != nil {
 		return err
 	}
-	connector, err := brokerMuxConnector(config, log)
-	if err != nil {
-		return err
-	}
-	pool, err := broker.NewPool(epoch, config.Resolver(), connector, clk, brokerServePoolLimits)
+	pool, err := broker.NewPool(epoch, resolver, connector, clk, brokerServePoolLimits)
 	if err != nil {
 		return err
 	}

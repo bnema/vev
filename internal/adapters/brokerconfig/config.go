@@ -441,6 +441,15 @@ func (c *Config) Endpoints() []string {
 	return append([]string(nil), c.order...)
 }
 
+// Registration returns the immutable configured authority for one endpoint.
+func (c *Config) Registration(endpoint string) (Registration, bool) {
+	if c == nil {
+		return Registration{}, false
+	}
+	registration, ok := c.byEndpoint[endpoint]
+	return registration, ok
+}
+
 // IdleGrace returns the provisioned effective idle grace and whether the
 // configuration provisioned one. A nil configuration provisions nothing.
 func (c *Config) IdleGrace() (time.Duration, bool) {
