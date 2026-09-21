@@ -630,10 +630,10 @@ func TestEmphasisStyle(t *testing.T) {
 			want:  base,
 		},
 		{
-			name:  "theme missing truecolor returns base unchanged",
+			name:  "known theme without truecolor applies bold",
 			theme: Theme{Foreground: usableTheme.Foreground, Background: usableTheme.Background, HasFG: true, HasBG: true, Known: true},
 			base:  base,
-			want:  base,
+			want:  renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1, G: 2, B: 3}, Bold: true},
 		},
 	}
 	for _, tt := range tests {

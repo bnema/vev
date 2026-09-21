@@ -13,7 +13,7 @@ const (
 
 // Accent is the single terminal-owned color selected for chrome. IndexedOnly
 // means the slot may decorate foregrounds and borders, but cannot fill RGB
-// backgrounds because terminal defaults or truecolor support are unavailable.
+// backgrounds because the terminal's semantic foreground or background is unknown.
 type Accent struct {
 	RGB         renderer.RGB
 	Slot        uint8
@@ -267,7 +267,7 @@ func resolvedAccent(t Theme, color renderer.RGB, slot uint8) Accent {
 		RGB:         color,
 		Slot:        slot,
 		Known:       true,
-		IndexedOnly: !t.TrueColor || !t.HasFG || !t.HasBG,
+		IndexedOnly: !t.HasFG || !t.HasBG,
 	}
 }
 

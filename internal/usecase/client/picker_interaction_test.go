@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
+	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -14,7 +15,7 @@ import (
 
 func TestPickerRendererClearsPreviousBoundsAcrossResizes(t *testing.T) {
 	loop := pickerLoopFixture(t)
-	r := &pickerRenderer{}
+	r := newPickerRenderer(ansirenderer.ColorProfileTrueColor)
 	screen := renderer.NewScreen(100, 30)
 	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
 
@@ -38,9 +39,40 @@ func TestPickerRendererClearsPreviousBoundsAcrossResizes(t *testing.T) {
 	require.Equal(t, '┌', snapshot.Row(newBounds.Y)[newBounds.X].Rune, "new picker border must be rendered")
 }
 
+func TestPickerRendererPreservesANSI256ProfileAcrossResize(t *testing.T) {
+	loop := pickerLoopFixture(t)
+	styles := picker.RenderStyles{
+		Selection: rgbPickerStyle(), SelectionName: rgbPickerStyle(), SelectionMuted: rgbPickerStyle(),
+		Name: rgbPickerStyle(), Detail: rgbPickerStyle(), Background: rgbPickerStyle(), Base: rgbPickerStyle(),
+		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Status: rgbPickerStyle(),
+		SearchMatch: rgbPickerStyle(), SelectionMatch: rgbPickerStyle(),
+	}
+
+	indexed := newPickerRenderer(ansirenderer.ColorProfileANSI256)
+	indexed.renderStyles = []picker.RenderStyles{styles}
+	for _, size := range []domain.Size{{Cols: 100, Rows: 30}, {Cols: 80, Rows: 24}} {
+		output := string(indexed.render(loop, size, emptyPickerPreview()))
+		require.Regexp(t, `(?:38|48);5;`, output, "picker did not emit indexed color at %v", size)
+		require.NotRegexp(t, `(?:38|48|58);2;`, output, "picker emitted truecolor at %v", size)
+	}
+
+	truecolor := newPickerRenderer(ansirenderer.ColorProfileTrueColor)
+	truecolor.renderStyles = []picker.RenderStyles{styles}
+	require.Regexp(t, `(?:38|48);2;`, string(truecolor.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview())))
+}
+
+func rgbPickerStyle() renderer.Style {
+	style := renderer.DefaultStyle()
+	style.HasForegroundRGB = true
+	style.ForegroundRGB = renderer.RGB{R: 12, G: 120, B: 231}
+	style.HasBackgroundRGB = true
+	style.BackgroundRGB = renderer.RGB{R: 23, G: 45, B: 67}
+	return style
+}
+
 func TestPickerRendererResetProtectsRepaintedSessionFromPreviousLease(t *testing.T) {
 	loop := pickerLoopFixture(t)
-	r := &pickerRenderer{}
+	r := newPickerRenderer(ansirenderer.ColorProfileTrueColor)
 	screen := renderer.NewScreen(100, 30)
 	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
 	screen.Write(r.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
