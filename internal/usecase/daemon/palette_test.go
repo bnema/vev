@@ -179,13 +179,12 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 	forcedLight := defaults
 	forcedLight.Theme = domain.ThemeLight
 	tests := []struct {
-		name    string
-		raw     themeui.Theme
-		config  domain.Config
-		indexed bool
+		name   string
+		raw    themeui.Theme
+		config domain.Config
 	}{
 		{name: "truecolor accent", raw: accentTheme, config: defaults},
-		{name: "indexed only", raw: indexedTheme, config: defaults, indexed: true},
+		{name: "ansi256", raw: indexedTheme, config: defaults},
 		{name: "palette off", raw: accentTheme, config: paletteOff},
 		{name: "forced dark", raw: accentTheme, config: forcedDark},
 		{name: "forced light", raw: accentTheme, config: forcedLight},
@@ -216,9 +215,6 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 			require.Equal(t, state.styles.PickerDescription.HasForegroundRGB, inactive.HasForegroundRGB)
 			require.Equal(t, state.styles.PickerDescription.ForegroundRGB, inactive.ForegroundRGB)
 			require.False(t, inactive.HasBackgroundRGB)
-			if tt.indexed {
-				require.Equal(t, 2, inactive.Foreground)
-			}
 			require.True(t, state.overlays.palette.inner.At(31, 1).Style.Equal(state.styles.PickerBase), "inactive row filler keeps the terminal background")
 
 			selected := state.overlays.palette.inner.At(4, 2).Style

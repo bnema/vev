@@ -24,14 +24,14 @@ func TestResolveAccentIndexedFallbackTruthTable(t *testing.T) {
 			want:   Accent{Slot: 5, IndexedOnly: true},
 		},
 		{
-			name: "explicit known slot without truecolor is indexed only",
+			name: "explicit known slot without truecolor remains semantic",
 			theme: func() Theme {
 				t := paletteTheme(map[int]renderer.RGB{5: teal})
 				t.TrueColor = false
 				return t
 			}(),
 			policy: explicit,
-			want:   Accent{RGB: teal, Slot: 5, Known: true, IndexedOnly: true},
+			want:   Accent{RGB: teal, Slot: 5, Known: true},
 		},
 		{
 			name: "automatic absent osc palette keeps dark scheme indexed blue fallback",

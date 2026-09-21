@@ -19,11 +19,13 @@ type Theme struct {
 	PaletteKnown uint16
 	HasFG        bool
 	HasBG        bool
-	TrueColor    bool
-	Known        bool
-	SchemeKnown  bool
-	Light        bool
-	UsePalette   bool
+	// TrueColor records output capability for transport compatibility. Semantic
+	// styles remain RGB; the attachment renderer quantizes them when necessary.
+	TrueColor   bool
+	Known       bool
+	SchemeKnown bool
+	Light       bool
+	UsePalette  bool
 }
 
 // PaletteColor returns a palette color only when palette inheritance is
@@ -591,7 +593,7 @@ func SelectionStyle(t Theme) renderer.Style {
 }
 
 func usable(t Theme) bool {
-	return t.Known && t.TrueColor && t.HasFG && t.HasBG
+	return t.Known && t.HasFG && t.HasBG
 }
 
 func inverseStyle() renderer.Style {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
+	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev-vt/protocol/terminalquery"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
@@ -1759,7 +1760,11 @@ func (a *attachAttempt) run(ctx context.Context) attachResult {
 	// client-picker interaction: acquisition barrier, local ownership,
 	// and ordered release. The daemon keeps mutation authority.
 	var pickerPresentation pickerLease
-	pickerRenderer := newPickerRenderer()
+	pickerColorProfile := ansirenderer.ColorProfileANSI256
+	if trueColor {
+		pickerColorProfile = ansirenderer.ColorProfileTrueColor
+	}
+	pickerRenderer := newPickerRenderer(pickerColorProfile)
 	termSize := func() domain.Size {
 		geometry, err := term.Geometry()
 		if err != nil {

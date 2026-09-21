@@ -527,7 +527,7 @@ func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) 
 		policy domain.ThemeAccent
 	}{
 		{name: "truecolor accent", theme: accentTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
-		{name: "indexed only", theme: indexedTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
+		{name: "ansi256", theme: indexedTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2}},
 		{name: "palette off", theme: paletteOffTheme, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
 		{name: "forced dark", theme: themeui.BuiltinDark, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
 		{name: "forced light", theme: themeui.BuiltinLight, policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto}},
@@ -551,10 +551,6 @@ func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) 
 			require.Equal(t, styles.SurfaceInactive.Canonical().Background, inactive.Background)
 			require.Equal(t, styles.SurfaceInactive.HasBackgroundRGB, inactive.HasBackgroundRGB)
 			require.Equal(t, styles.SurfaceInactive.BackgroundRGB, inactive.BackgroundRGB)
-			if tt.name == "indexed only" {
-				require.Equal(t, 2, inactive.Foreground)
-				require.False(t, inactive.HasBackgroundRGB)
-			}
 
 			selected := frame.At(4, 2).Style
 			require.True(t, selected.Equal(styles.PickerSelectionMuted))

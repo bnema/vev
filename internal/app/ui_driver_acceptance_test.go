@@ -90,9 +90,20 @@ func TestHeadlessDriverUsesRealRunnerAndDaemon(t *testing.T) {
 	})
 	paletteClose := readDriverTestEnvelope(t, decoder)
 	require.Nil(t, paletteClose.Error)
+	var paletteCloseResult struct {
+		ActionID uint64 `json:"action_id"`
+	}
+	require.NoError(t, json.Unmarshal(paletteClose.Result, &paletteCloseResult))
+	require.NotZero(t, paletteCloseResult.ActionID)
+	writeDriverTestRequest(t, clientSide, map[string]any{
+		"version": 1, "id": 4, "op": "wait", "attachment": readyResult.Attachment,
+		"after_action": paletteCloseResult.ActionID, "expect": map[string]string{"status": "attached"},
+	})
+	paletteClosed := readDriverTestEnvelope(t, decoder)
+	require.Nil(t, paletteClosed.Error)
 
 	writeDriverTestRequest(t, clientSide, map[string]any{
-		"version": 1, "id": 4, "op": "text", "attachment": readyResult.Attachment,
+		"version": 1, "id": 5, "op": "text", "attachment": readyResult.Attachment,
 		"generation": readyResult.Generation, "text": "printf 'HEADLESS_%s' OK",
 	})
 	textAction := readDriverTestEnvelope(t, decoder)
@@ -105,7 +116,7 @@ func TestHeadlessDriverUsesRealRunnerAndDaemon(t *testing.T) {
 	require.Equal(t, ports.UIActionProcessed, actionResult.Status)
 
 	writeDriverTestRequest(t, clientSide, map[string]any{
-		"version": 1, "id": 5, "op": "keys", "attachment": readyResult.Attachment,
+		"version": 1, "id": 6, "op": "keys", "attachment": readyResult.Attachment,
 		"generation": readyResult.Generation, "keys": []string{"Enter"},
 	})
 	enterAction := readDriverTestEnvelope(t, decoder)
@@ -117,14 +128,14 @@ func TestHeadlessDriverUsesRealRunnerAndDaemon(t *testing.T) {
 	require.NotZero(t, enterResult.ActionID)
 
 	writeDriverTestRequest(t, clientSide, map[string]any{
-		"version": 1, "id": 6, "op": "wait", "attachment": readyResult.Attachment,
+		"version": 1, "id": 7, "op": "wait", "attachment": readyResult.Attachment,
 		"after_action": enterResult.ActionID, "expect": map[string]string{"text_contains": "HEADLESS_OK"},
 	})
 	wait := readDriverTestEnvelope(t, decoder)
 	require.Nil(t, wait.Error)
 
 	writeDriverTestRequest(t, clientSide, map[string]any{
-		"version": 1, "id": 7, "op": "capture", "attachment": readyResult.Attachment,
+		"version": 1, "id": 8, "op": "capture", "attachment": readyResult.Attachment,
 	})
 	capture := readDriverTestEnvelope(t, decoder)
 	require.Nil(t, capture.Error)
