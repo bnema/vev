@@ -3,6 +3,7 @@ package brokeripc
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -365,6 +366,65 @@ func TestOpenStreamCarriesTypedTraffic(t *testing.T) {
 		require.Equal(t, protocol.Pong{}, message, "the daemon message must reach the client")
 	case <-time.After(5 * time.Second):
 		t.Fatal("daemon message never reached the client")
+	}
+}
+
+// TestReplyReachesClientBeforeOrderlyStreamClose proves a reply the broker core
+// sends immediately before an orderly stream end (a StreamClosed carrying no
+// error) always reaches the client's ReceiveServer before it observes EOF.
+// This is the exact end-to-end sequence that dropped about 70% of `vev ls`
+// calls: the daemon's handleList receives the request, does
+// SendServer(Sessions) then Close, so the broker forwards protocol.Sessions and
+// immediately sees the core end orderly. Before the fix, watchCore settled the
+// stream (closing the client-side pipe and discarding its queue) racing the
+// client's read of the already-forwarded reply; the client observed io.EOF
+// instead of the reply and reported the broker operation lost or its outcome
+// unknown. It is run repeatedly under -race because the race window is narrow,
+// not guaranteed on a single pass.
+//
+// The request is sent and its receipt is confirmed before the daemon answers,
+// exactly like every real caller (BrokerOperations always calls SendClient
+// before ReceiveServer): a reply pushed before the daemon has even received
+// the request races this fake's own SendClient/Done selection, which is a
+// harness artifact unrelated to the fix under test.
+func TestReplyReachesClientBeforeOrderlyStreamClose(t *testing.T) {
+	e := startEndpoint(t, Config{})
+	const iterations = 200
+	for i := 0; i < iterations; i++ {
+		client, _ := e.pair()
+		core := e.authority.last()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		stream, err := client.OpenStream(ctx, openRequest(1))
+		require.NoError(t, err)
+
+		conn := core.logicalConn(1)
+		require.NotNil(t, conn, "iteration %d: the broker core must admit exactly one stream", i)
+
+		require.NoError(t, stream.SendClient(protocol.List{}), "iteration %d", i)
+		select {
+		case <-conn.fromClient:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: request never reached the daemon", i)
+		}
+
+		// The daemon answers and, back to back, ends the stream orderly: exactly
+		// the sequence SendServer(Sessions) then Close produces.
+		conn.toClient <- protocol.Sessions{}
+		require.NoError(t, conn.Close())
+
+		message, err := stream.ReceiveServer()
+		require.NoError(t, err, "iteration %d: the reply must reach the client before EOF", i)
+		require.Equal(t, protocol.Sessions{}, message, "iteration %d", i)
+
+		// The stream settles orderly right after: a further receive observes a
+		// clean EOF, never an error, and never blocks.
+		_, err = stream.ReceiveServer()
+		require.ErrorIs(t, err, io.EOF, "iteration %d", i)
+
+		_ = stream.Close()
+		_ = client.Close()
+		cancel()
 	}
 }
 

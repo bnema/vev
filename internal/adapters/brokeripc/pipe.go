@@ -128,7 +128,12 @@ func (p *streamPipe) deliver(chunk []byte) error {
 }
 
 // closeWith settles the pipe exactly once with cause. A nil cause is an orderly
-// close; every blocked Read observes it promptly.
+// close; every blocked Read observes it promptly. On a nil cause, any chunks
+// already queued are kept: Read serves them first and only returns io.EOF once
+// the queue is drained, so a reply that arrived just before an orderly peer
+// close is never discarded underneath its reader. An error cause is a failure:
+// the queue is discarded, since its content can no longer be trusted to reach
+// a consumer that is being torn down for cause.
 func (p *streamPipe) closeWith(cause error) {
 	p.mu.Lock()
 	if p.closed {
@@ -137,8 +142,10 @@ func (p *streamPipe) closeWith(cause error) {
 	}
 	p.closed = true
 	p.err = cause
-	p.queue = nil
-	p.queued = 0
+	if cause != nil {
+		p.queue = nil
+		p.queued = 0
+	}
 	p.mu.Unlock()
 	close(p.closedCh)
 	select {

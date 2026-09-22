@@ -120,12 +120,20 @@ func (st *serverStream) relayServer() {
 }
 
 // watchCore publishes the core connection's terminal outcome even when no read
-// is in flight.
+// is in flight. It settles the stream itself only for a failure: an orderly
+// core end (Err()==nil) is left to relayServer, whose own core.ReceiveServer()
+// call observes the same terminal outcome right after forwarding any reply
+// that was already in flight, and settles the stream from there. Settling here
+// on every Done would race relayServer's in-flight wire.SendServer and could
+// close the carriage while a received reply is still being written out to the
+// client, discarding it.
 func (st *serverStream) watchCore() {
 	defer st.session.wg.Done()
 	select {
 	case <-st.core.Done():
-		st.fail(coreFailure(st.core, nil))
+		if err := st.core.Err(); err != nil {
+			st.fail(coreFailure(st.core, nil))
+		}
 	case <-st.done:
 	}
 }

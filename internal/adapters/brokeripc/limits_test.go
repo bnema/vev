@@ -168,9 +168,21 @@ func TestStreamPipeBoundsAndClose(t *testing.T) {
 	require.Equal(t, "one", string(buf[:n]))
 	require.NoError(t, pipe.deliver([]byte("three")))
 
+	// An orderly Close keeps what is already queued ("two" and "three"): Read
+	// drains it before observing io.EOF, so a chunk delivered just ahead of an
+	// orderly close is never discarded underneath its reader (see
+	// TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose for the focused
+	// coverage of this behavior).
 	require.NoError(t, pipe.Close())
 	require.ErrorIs(t, pipe.deliver([]byte("four")), ErrStreamGone)
-	_, err = pipe.Read(buf)
+	drained := make([]byte, 8)
+	n, err = pipe.Read(drained)
+	require.NoError(t, err)
+	require.Equal(t, "two", string(drained[:n]))
+	n, err = pipe.Read(drained)
+	require.NoError(t, err)
+	require.Equal(t, "three", string(drained[:n]))
+	_, err = pipe.Read(drained)
 	require.ErrorIs(t, err, io.EOF)
 
 	// A reader parked on an empty pipe is released by closeWith with its cause.

@@ -309,6 +309,16 @@ func (c *fakeLogicalConn) SendClient(message protocol.ClientMessage) error {
 }
 
 func (c *fakeLogicalConn) ReceiveServer() (protocol.ServerMessage, error) {
+	// A message already queued when Close ran must still be observed first: a
+	// real carriage never reports the connection done before a message the peer
+	// sent ahead of an orderly close has been delivered. Draining non-blocking
+	// before the select keeps that ordering deterministic instead of racing a
+	// buffered send against an already-closed done channel.
+	select {
+	case message := <-c.toClient:
+		return message, nil
+	default:
+	}
 	select {
 	case message := <-c.toClient:
 		return message, nil
