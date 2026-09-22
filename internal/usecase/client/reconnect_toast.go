@@ -10,32 +10,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
-const reconnectToastMessage = "offline; retrying…"
-
-func reconnectStageMessage(stage reconnectStage) string {
-	switch stage {
-	case reconnectStageDegraded:
-		return "connection degraded"
-	case reconnectStageProbingUDP:
-		return "probing UDP path"
-	case reconnectStageSSH:
-		return "offline; retrying… reconnecting through SSH"
-	case reconnectStageOfflineRetrying:
-		return reconnectToastMessage
-	default:
-		return reconnectToastMessage
-	}
-}
-
-func drawReconnectToast(out io.Writer, size domain.Size) error {
-	_, err := drawReconnectToastStage(out, size, reconnectStageOfflineRetrying)
-	return err
-}
-
-func drawReconnectToastStage(out io.Writer, size domain.Size, stage reconnectStage) (domain.Rect, error) {
-	return drawClientToast(out, size, reconnectStageMessage(stage))
-}
-
 // drawClientToast draws a client-local toast without changing terminal state.
 // The attach main loop owns both this write and the later daemon-frame
 // reconciliation; input pumps must only publish a request for it.
@@ -47,16 +21,8 @@ func drawClientToast(out io.Writer, size domain.Size, message string) (domain.Re
 	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
 }
 
-func reconnectToastBounds(size domain.Size) domain.Rect {
-	return reconnectToastBoundsFor(size, reconnectToastMessage)
-}
-
 func reconnectToastBoundsFor(size domain.Size, message string) domain.Rect {
 	return ui.ToastBounds(size, ui.Toast{Message: message, Anchor: domain.AnchorCenter})
-}
-
-func reconnectToastLines(bounds domain.Rect) []string {
-	return reconnectToastLinesFor(bounds, reconnectToastMessage)
 }
 
 func reconnectToastLinesFor(bounds domain.Rect, message string) []string {

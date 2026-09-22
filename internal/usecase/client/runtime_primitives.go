@@ -56,12 +56,3 @@ func (l *foregroundSendLease) stop() {
 }
 
 const stdinBufSize = 4096
-
-type reconnectStage uint8
-
-const (
-	reconnectStageDegraded reconnectStage = iota + 1
-	reconnectStageProbingUDP
-	reconnectStageSSH
-	reconnectStageOfflineRetrying
-)

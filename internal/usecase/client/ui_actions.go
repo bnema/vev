@@ -274,7 +274,9 @@ func (u *UI) trackDispatch(ctx context.Context, id uint64, dispatched <-chan boo
 				u.mu.Lock()
 				if _, exists := u.records[id]; exists {
 					u.dispatched[id] = true
-					u.completeHandoffLocked()
+					if u.handoff != nil && u.handoff.boundary.Revision != 0 {
+						u.finishLocked(u.handoff.actionID, ports.UIActionProcessed, u.handoff.boundary)
+					}
 				}
 				u.mu.Unlock()
 			}
