@@ -138,6 +138,26 @@ Remote host commands, listing, and successful direct-attach learning are always 
 
 `vev ls <host>` and `vev ls --all` run `ssh -- <host> 'vev cmd remote-catalog --json'` for each known host. OpenSSH resolves aliases and connection settings from your SSH config. Remote session names appear as `session@host`. `vev ls --all` prints local sessions first, then remote sessions in merged host order. A catalog failure is reported after the successful output with the host and error; the command exits non-zero so partial output is not mistaken for a complete inventory.
 
+### Warm remote transports
+
+The connection broker keeps a remote's physical transport warm after the last terminal client leaves it. Returning to that remote opens a new logical stream over the retained, already authenticated SSH or QUIC connection: no second SSH bootstrap, QUIC handshake, or remote helper start. Broker observation probes borrow the same pooled transport instead of dialing their own. The remote daemon sees a fresh attach; session state lives on the daemon, so the screen and scrollback are unchanged.
+
+Retention is set in the broker configuration, `~/.config/vev/broker.json` (`$XDG_CONFIG_HOME` respected), which the broker creates on first use. It is read when the broker starts.
+
+```json
+{
+  "marker": "vev.broker.offline/v1",
+  "registrations": [],
+  "warmTransports": 8,
+  "warmIdleTimeout": "off"
+}
+```
+
+- `warmTransports`: 0–64 idle transports kept warm, default 8. When one more goes idle, the least recently idled one closes. `0` closes a transport as soon as its last stream ends. Transports with an attached client never count.
+- `warmIdleTimeout`: `off` (default, no age bound) or a positive Go duration up to `24h`, such as `30s` or `5m`. A warm transport closes that long after it went idle.
+
+A remote closing the connection also evicts it; the next visit dials normally. Warm transports never keep the broker alive: when the broker stops after its idle grace, it closes them. Aliases stay distinct unless the broker authenticated them as the same daemon under the same connection policy. These keys replace the client-side `remote.attachment-cache`, `remote.attachment-cache-capacity`, and `remote.attachment-cache-idle-timeout` settings, which no longer exist.
+
 ## Logs and durable state
 
 Set `VEV_LOG=debug`, `VEV_LOG=warn`, or `VEV_LOG=error` to change verbosity; the default is `info`. JSON-line logs such as `vev-daemon.log` live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset. The same state directory contains the strict session catalogue, any private pre-migration catalogue backup, notices, `hosts.json`, and `snapshots/`. The lifecycle lock and socket live in `$XDG_RUNTIME_DIR/vev` (with platform runtime fallbacks).

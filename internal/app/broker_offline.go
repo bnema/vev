@@ -59,7 +59,16 @@ var brokerServePoolLimits = broker.PoolLimits{
 	Clients:          brokeripc.DefaultMaxClients,
 	Streams:          256,
 	StreamsPerClient: 64,
-	Idle:             5 * time.Minute,
+	Warm:             brokerconfig.DefaultWarmTransports,
+}
+
+// brokerPoolLimits applies the configured warm transport retention to the
+// fixed pool bounds.
+func brokerPoolLimits(config *brokerconfig.Config) broker.PoolLimits {
+	limits := brokerServePoolLimits
+	limits.Warm = config.WarmTransports()
+	limits.Idle = config.WarmIdleTimeout()
+	return limits
 }
 
 // brokerServeOptions is the parsed hidden invocation.
@@ -429,7 +438,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err := supervisor.RegisterRunner("registry", registry); err != nil {
 		return err
 	}
-	pool, err := broker.NewPool(epoch, resolver, binder, connector, clk, brokerServePoolLimits)
+	pool, err := broker.NewPool(epoch, resolver, binder, connector, clk, brokerPoolLimits(config))
 	if err != nil {
 		return err
 	}

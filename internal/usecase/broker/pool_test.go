@@ -90,7 +90,7 @@ func setupPool(t testing.TB, connector poolConnector) (*Pool, *manualClock) {
 	binder := poolBinder(func(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
 		return request.Identity, nil
 	})
-	p, err := NewPool(1, resolver, binder, connector, clock, PoolLimits{Physical: 2, Clients: 128, Streams: 128, StreamsPerClient: 128, Idle: time.Minute})
+	p, err := NewPool(1, resolver, binder, connector, clock, PoolLimits{Physical: 2, Clients: 128, Streams: 128, StreamsPerClient: 128, Warm: 2, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, p.Close()) })
 	return p, clock
@@ -120,7 +120,7 @@ func TestPoolRefusedResolutionNeverDials(t *testing.T) {
 	binder := poolBinder(func(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
 		return request.Identity, nil
 	})
-	pool, err := NewPool(1, resolver, binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 8, Streams: 8, StreamsPerClient: 8, Idle: time.Minute})
+	pool, err := NewPool(1, resolver, binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 8, Streams: 8, StreamsPerClient: 8, Warm: 1, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
 

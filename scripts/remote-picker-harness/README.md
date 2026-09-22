@@ -41,22 +41,28 @@ committed contexts are captured: no host state, sockets, or key material.
 | `local-palette-cycle` | M1 local IPC: palette open/action/close, committed output, stable lifecycle |
 | `direct-remote-named@quic` | M2 direct named remote QUIC: exact fixture lifecycle, committed output, stable lifecycle |
 | `direct-remote-named@stdio` | M3 direct named remote explicit stdio: same semantics over SSH stdio |
-| `warm-reuse@quic` | Warm hybrid QUIC: local→named remote→local→same remote in one Runner, same remote lifecycle, retained and new committed output, exactly one suspend/activate and one remote attach |
-| `warm-reuse@stdio` | Warm hybrid stdio: same shape across the retained SSH process |
+| `warm-reuse@quic` | Warm hybrid QUIC: local→named remote→local→same remote in one client, same remote lifecycle, retained and new committed output, no second broker dial |
+| `warm-reuse@stdio` | Warm hybrid stdio: same shape across the broker's retained SSH process |
 | `hybrid-exact-return@quic` | M4 hybrid QUIC: local→remote→exact local return with committed action |
 | `hybrid-exact-return@stdio` | M5 hybrid stdio: same shape across close/dial |
 | `client-picker-navigate-local@quic` | M1: client-owned picker presented by the client, searched commit, cancel without a route change |
 | `client-picker-navigate-direct@quic` | M2: same over the remote serving daemon, no local daemon involved |
 | `client-picker-navigate-direct@stdio` | M3: same across stdio |
 
-Warm reuse asserts deterministic no-redial evidence rather than timing: the
-client debug log must carry exactly one `remote attachment suspended` and one
-`warm remote attachment activated` for the origin/session and zero
-`warm remote activation failed`, and the remote daemon log must show exactly
-one `client attached` for that session. A cold fallback or second bootstrap
-(or, when the remote proxy log is available, a second proxy start) fails the
-scenario. The remote committed lifecycle and the retained pane output before
-and after the round trip are compared directly.
+Warm reuse is owned by the connection broker, which replaced the client's
+suspended-attachment cache (`remote.attachment-cache*`). Leaving a remote ends
+its logical attachment; the broker keeps the physical SSH/QUIC transport warm
+(`warmTransports` and `warmIdleTimeout` in `broker.json`, see
+[configuration](../../docs/configuration.md#warm-remote-transports)), and the
+return attaches afresh over it. The scenario asserts deterministic no-redial
+evidence rather than timing: the client container's broker log
+(`~/.local/state/vev/broker/log/vev-daemon.log`) must carry zero
+`broker_remote_dial` events from the first remote commit to the end of the
+journey, so a second bootstrap by the attach or by an observation probe fails
+the scenario. The remote daemon's `client attached` count is recorded in the
+evidence, not asserted: each visit is a new logical attachment. The remote
+committed lifecycle and the retained pane output before and after the round
+trip are compared directly.
 
 A failed assertion fails the command. This is a targeted regression, not an
 exhaustive transport or geometry matrix. For a focused run, set

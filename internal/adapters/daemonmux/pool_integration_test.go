@@ -51,7 +51,7 @@ func p3cRemoteRequest(connection ports.BrokerConnectionID, endpoint string, stre
 
 // p3cPoolLimits bounds one pool with room for two aliases and two streams.
 func p3cPoolLimits() broker.PoolLimits {
-	return broker.PoolLimits{Physical: 2, Clients: 2, Streams: 4, StreamsPerClient: 4, Idle: time.Hour}
+	return broker.PoolLimits{Physical: 2, Clients: 2, Streams: 4, StreamsPerClient: 4, Warm: 2, Idle: time.Hour}
 }
 
 // TestPoolSharesCompatibleAliasesOverOnePhysical proves the pool pools two

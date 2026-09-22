@@ -13,9 +13,18 @@ import (
 
 // PoolLimits bound live physical keys, clients, reservations (including I/O in
 // flight), and logical streams. No unbounded queue or alias cache is retained.
+//
+// Warm and Idle bound warm reuse: a published physical transport whose last
+// logical stream closed stays warm so a returning client opens a new logical
+// stream without another dial, SSH bootstrap, or QUIC handshake. At most Warm
+// idle transports are retained; releasing one more retires the least recently
+// idled first. Zero Warm retires a transport as soon as it goes idle. A
+// positive Idle retires a transport that long after it went idle; zero Idle
+// sets no age bound, so retention then ends only through Warm eviction,
+// physical loss, or Close. Warm transports never pin the broker lifecycle.
 type PoolLimits struct {
-	Physical, Clients, Streams, StreamsPerClient int
-	Idle                                         time.Duration
+	Physical, Clients, Streams, StreamsPerClient, Warm int
+	Idle                                               time.Duration
 }
 
 // poolKey is the exact authenticated (identity, policy) pair the broker pools
@@ -66,6 +75,9 @@ type poolEntry struct {
 	err         error
 	refs        int
 	retiring    bool
+	// idleOrder is nonzero while the published entry is warm (no reservation)
+	// and orders warm entries for least-recently-idled eviction.
+	idleOrder uint64
 }
 
 // Pool is transport independent and is not production-composed in P2.2.
@@ -82,6 +94,7 @@ type Pool struct {
 	cancel    context.CancelFunc
 	closed    bool
 	next      uint64
+	idleOrder uint64
 	clients   map[ports.BrokerConnectionID]*poolClient
 	entries   map[poolKey]*poolEntry
 	pending   map[pendingKey]*poolEntry
@@ -90,7 +103,7 @@ type Pool struct {
 }
 
 func NewPool(epoch ports.BrokerEpoch, routes ports.BrokerRouteAuthority, binder ports.BrokerIdentityBinder, connector ports.BrokerEndpointConnector, clock ports.Clock, limits PoolLimits) (*Pool, error) {
-	if epoch == 0 || routes == nil || binder == nil || connector == nil || clock == nil || limits.Physical <= 0 || limits.Clients <= 0 || limits.Streams <= 0 || limits.StreamsPerClient <= 0 || limits.Idle <= 0 {
+	if epoch == 0 || routes == nil || binder == nil || connector == nil || clock == nil || limits.Physical <= 0 || limits.Clients <= 0 || limits.Streams <= 0 || limits.StreamsPerClient <= 0 || limits.Warm < 0 || limits.Idle < 0 {
 		return nil, ports.BrokerAdmissionInvalid
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,12 +204,14 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		delete(c.streams, req.Stream)
 		p.streams--
 		var abandon context.CancelFunc
+		var evicted []context.CancelFunc
 		reservedEntry := r.entry
 		if reservedEntry != nil {
 			reservedEntry.refs--
 			if reservedEntry.refs == 0 {
 				select {
 				case <-reservedEntry.ready:
+					evicted = p.idleLocked(reservedEntry)
 				default:
 					reservedEntry.retiring = true
 					abandon = reservedEntry.cancel
@@ -210,6 +225,9 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		p.mu.Unlock()
 		if abandon != nil {
 			abandon()
+		}
+		for _, evict := range evicted {
+			evict()
 		}
 		p.wg.Done()
 	}
@@ -265,6 +283,7 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		go p.runEntry(entry, resolved)
 	}
 	entry.refs++
+	entry.idleOrder = 0
 	r.entry = entry
 	p.mu.Unlock()
 	select {
@@ -340,6 +359,7 @@ func (p *Pool) redirectReservation(entry *poolEntry, reservation *reservation) (
 	}
 	entry.refs--
 	winner.refs++
+	winner.idleOrder = 0
 	reservation.entry = winner
 	return winner, nil
 }
@@ -381,15 +401,24 @@ func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 		return
 	}
 	if err == nil {
-		timer := p.clock.NewTimer(p.limits.Idle)
-		defer stopPoolTimer(timer)
+		// Zero Idle sets no age bound: no timer exists and a nil expiry channel
+		// never fires, so only Warm eviction, physical loss, or Close retire.
+		var timer ports.Timer
+		if p.limits.Idle > 0 {
+			timer = p.clock.NewTimer(p.limits.Idle)
+			defer stopPoolTimer(timer)
+		}
 		for {
 			p.mu.Lock()
 			idle := e.refs == 0
 			p.mu.Unlock()
-			stopPoolTimer(timer)
-			if idle {
-				timer.Reset(p.limits.Idle)
+			var expiry <-chan time.Time
+			if timer != nil {
+				stopPoolTimer(timer)
+				if idle {
+					timer.Reset(p.limits.Idle)
+					expiry = timer.C()
+				}
 			}
 			select {
 			case <-e.ctx.Done():
@@ -398,7 +427,7 @@ func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 				goto retire
 			case <-e.wake:
 				continue
-			case <-timer.C():
+			case <-expiry:
 				p.mu.Lock()
 				if e.refs == 0 {
 					e.retiring = true
@@ -426,6 +455,38 @@ retire:
 		delete(p.pending, e.pending)
 	}
 	p.mu.Unlock()
+}
+
+// idleLocked marks a published entry whose last reservation just ended as warm
+// and returns the cancellations that retire warm entries beyond limits.Warm,
+// least recently idled first. The caller runs them after unlocking. An entry
+// that failed, lost a redirect race, or is already retiring is never warm.
+func (p *Pool) idleLocked(e *poolEntry) []context.CancelFunc {
+	if e.err != nil || e.redirect != nil || e.retiring || p.entries[e.key] != e {
+		return nil
+	}
+	p.idleOrder++
+	e.idleOrder = p.idleOrder
+	var warm []*poolEntry
+	for _, candidate := range p.entries {
+		if candidate.idleOrder != 0 && candidate.refs == 0 && !candidate.retiring {
+			warm = append(warm, candidate)
+		}
+	}
+	var evicted []context.CancelFunc
+	for len(warm) > p.limits.Warm {
+		oldest := 0
+		for i := range warm {
+			if warm[i].idleOrder < warm[oldest].idleOrder {
+				oldest = i
+			}
+		}
+		victim := warm[oldest]
+		victim.retiring = true
+		evicted = append(evicted, victim.cancel)
+		warm = append(warm[:oldest], warm[oldest+1:]...)
+	}
+	return evicted
 }
 
 // SharedPhysical returns the published physical transport the pool holds for

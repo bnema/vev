@@ -14,10 +14,10 @@ reaches the driver process.
 
 Direct-remote scenarios use ``--remote ENDPOINT --session NAME`` against a
 named fixture session: a named exact remote target, never an ephemeral
-attach. The warm-reuse scenario keeps one client Runner across a
+attach. The warm-reuse scenario keeps one client across a
 local -> named remote -> local -> same named remote journey and pins the
-retained attachment with client debug logs, the remote daemon's attach
-count, and the committed remote lifecycle.
+broker's warm physical transport with the broker's remote-dial log, plus
+the committed remote lifecycle and retained output.
 """
 
 import json
@@ -36,6 +36,8 @@ STATE_LOG_DIR = "$HOME/.local/state/vev"
 CLIENT_LOG = "vev-client.log"
 DAEMON_LOG = "vev-daemon.log"
 STDIO_LOG = "vev-stdio.log"
+# The broker logs one broker_remote_dial per remote physical bootstrap.
+BROKER_LOG = "broker/log/vev-daemon.log"
 REMOTE_CACHE_FILE = "remote-catalog-cache.json"
 INVENTORY_TIMEOUT_S = 45
 ARTIFACTS_DIR = os.environ.get("VEV_ACCEPTANCE_ARTIFACTS_DIR", "").strip()
@@ -376,16 +378,18 @@ def scenario_direct_remote_named(client_container, remote_container, env):
 
 
 def scenario_warm_reuse(client_container, remote_container, env):
-    """Warm remote reuse across one client Runner.
+    """Warm remote reuse through the broker's warm transport pool.
 
-    Journey: local -> named remote -> local -> same named remote. The remote
-    attachment is expected to suspend on the way back to local and reactivate
-    warm on the return: same committed remote lifecycle, retained pane output,
-    and new committed output. No-redial evidence is deterministic: the client
-    debug log records exactly one suspend and one warm activation (zero
-    fallbacks), and the remote daemon records exactly one attach for the
-    session, so a second bootstrap or dial would be visible. When the remote
-    proxy debug log is available it must also show exactly one proxy start.
+    Journey: local -> named remote -> local -> same named remote. Leaving the
+    remote ends its logical attachment, but the broker keeps the physical
+    SSH/QUIC transport warm (broker.json warmTransports/warmIdleTimeout).
+    The return attaches afresh over that transport: same committed remote
+    lifecycle, retained pane output, and new committed output. No-redial
+    evidence is deterministic: the broker log records zero broker_remote_dial
+    events from the first remote commit to the end of the journey, so a second
+    SSH bootstrap or QUIC handshake (by the attach or by an observation probe)
+    fails the scenario. The remote daemon's attach count is recorded, not
+    asserted: each visit is a new logical attachment by design.
     """
     mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
@@ -400,14 +404,13 @@ def scenario_warm_reuse(client_container, remote_container, env):
     remote_lifecycle = fixture_session["lifecycle_id"]
     # Snapshot log positions after the fixture so only events from this client
     # journey are counted.
-    client_offset = log_size(client_container, CLIENT_LOG)
     remote_offset = log_size(remote_container, DAEMON_LOG)
-    stdio_offset = log_size(remote_container, STDIO_LOG)
     driver = Driver(client_container, ["--session", local_name], env=env)
     evidence = {"scenario": "warm-reuse", "mode": mode,
                 "local_session": local_name, "remote_session": remote_name,
                 "remote_lifecycle": remote_lifecycle,
                 "fixture_session": fixture_session}
+    broker_offset = None
     try:
         initial = driver.call("capture")["context"]
         check(initial["session"]["session_name"] == local_name,
@@ -420,15 +423,17 @@ def scenario_warm_reuse(client_container, remote_container, env):
         check(first_remote["session"] == fixture_session,
               "first remote attach did not commit the exact named lifecycle", first_remote)
         evidence["first_remote"] = first_remote
+        # Every dial after this point would be a re-bootstrap.
+        broker_offset = log_size(client_container, BROKER_LOG)
         # Committed output while the remote pane is authoritative.
         commit_output(driver, "printf 'WARM_%s' PERSIST", "WARM_PERSIST")
-        # 2. remote -> local: the remote attachment suspends and stays warm.
+        # 2. remote -> local: the logical attachment ends; the transport stays warm.
         switch_route(driver, local_name, "local", local_lifecycle)
         local_return = driver.call("capture")["context"]
         check(local_return["session"]["session_name"] == local_name,
               "return to local did not commit", local_return)
         evidence["local_return"] = local_return
-        # 3. local -> same named remote: the retained transport reactivates.
+        # 3. local -> same named remote: a new attach over the warm transport.
         switch_route(driver, remote_name, "remote", remote_lifecycle)
         second_remote = driver.call("capture")["context"]
         check(second_remote["session"]["lifecycle_id"] == remote_lifecycle,
@@ -445,41 +450,22 @@ def scenario_warm_reuse(client_container, remote_container, env):
         evidence["after_warm_output"] = after_output
     finally:
         driver.close()
-        client_events = json_events(log_since(client_container, CLIENT_LOG, client_offset))
-        remote_events = json_events(log_since(remote_container, DAEMON_LOG, remote_offset))
-        stdio_events = json_events(log_since(remote_container, STDIO_LOG, stdio_offset))
-        evidence["log_counts"] = {
-            "client_suspended": count_events(
-                client_events, "remote attachment suspended",
-                origin="remote", session=remote_name),
-            "client_warm_activated": count_events(
-                client_events, "warm remote attachment activated",
-                origin="remote", session=remote_name, lifecycle=remote_lifecycle),
-            "client_warm_failed": count_events(
-                client_events, "warm remote activation failed",
-                origin="remote", session=remote_name),
-            "remote_client_attached": count_events(
-                remote_events, "client attached", session=remote_name),
-            "remote_proxy_started": (
-                count_events(stdio_events, "stdio proxy starting") +
-                count_events(stdio_events, "quic proxy starting")),
-        }
+        if broker_offset is not None:
+            broker_events = json_events(log_since(client_container, BROKER_LOG, broker_offset))
+            remote_events = json_events(log_since(remote_container, DAEMON_LOG, remote_offset))
+            evidence["log_counts"] = {
+                "broker_remote_dials_after_first_attach": count_events(
+                    broker_events, "broker_remote_dial"),
+                "remote_client_attached": count_events(
+                    remote_events, "client attached", session=remote_name),
+            }
         write_artifact(f"warm-reuse-{mode}.json", evidence)
     counts = evidence["log_counts"]
-    check(counts["client_suspended"] == 1,
-          "expected exactly one remote attachment suspension", counts)
-    check(counts["client_warm_activated"] == 1,
-          "expected exactly one warm remote activation", counts)
-    check(counts["client_warm_failed"] == 0,
-          "warm activation failed or fell back to a cold dial", counts)
-    check(counts["remote_client_attached"] == 1,
-          "remote daemon saw a second bootstrap/attach (redial)", counts)
-    if counts["remote_proxy_started"]:
-        check(counts["remote_proxy_started"] == 1,
-              "remote proxy started more than once (redial)", counts)
+    check(counts["broker_remote_dials_after_first_attach"] == 0,
+          "broker re-bootstrapped the remote instead of reusing the warm transport", counts)
     print(f"PASS warm-reuse mode={mode} local={local_name} remote={remote_name} "
           f"lifecycle={remote_lifecycle[:8]} "
-          f"attaches={counts['remote_client_attached']}")
+          f"attaches={counts['remote_client_attached']} redials=0")
 
 
 def picker_topology(env):

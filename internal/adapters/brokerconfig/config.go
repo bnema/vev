@@ -64,6 +64,16 @@ const MaxConfigBytes = 1 << 20
 // cannot make an offline broker effectively immortal.
 const MaxIdleGrace = 24 * time.Hour
 
+// Warm transport retention (the broker-owned replacement for the removed
+// client remote.attachment-cache keys). DefaultWarmTransports matches that
+// cache's default capacity; MaxWarmTransports matches the pool's physical
+// bound. The default idle timeout is off (no age bound), also matching it;
+// a provisioned timeout is bounded by MaxIdleGrace.
+const (
+	DefaultWarmTransports = 8
+	MaxWarmTransports     = 64
+)
+
 // Sandbox directory names derived from one offline root. SpawnDirName is the
 // private directory under Runtime that holds the descriptor-backed
 // spawn-election lock, deliberately separate from the broker lifetime lock in
@@ -273,6 +283,10 @@ type Config struct {
 	// provisioning, use the built-in default" from "provisioned".
 	idleGrace    time.Duration
 	hasIdleGrace bool
+	// warmTransports and warmIdleTimeout bound warm physical transport reuse;
+	// see WarmTransports and WarmIdleTimeout.
+	warmTransports  int
+	warmIdleTimeout time.Duration
 }
 
 // Load reads and strictly validates the config marker inside layout.Root.
@@ -344,6 +358,9 @@ func loadPath(layout Layout, path string, authoritativeLocal *LocalBinding) (*Co
 			return nil, fmt.Errorf("brokerconfig: %s: idleGrace must be positive and at most %s", ConfigFileName, MaxIdleGrace)
 		}
 		config.idleGrace, config.hasIdleGrace = grace, true
+	}
+	if config.warmTransports, config.warmIdleTimeout, err = document.warm(); err != nil {
+		return nil, err
 	}
 	pooledRoutes := make(map[pooledIdentity]string, len(document.Registrations)+1)
 	for i, entry := range document.Registrations {
@@ -496,6 +513,25 @@ func (c *Config) IdleGrace() (time.Duration, bool) {
 	return c.idleGrace, c.hasIdleGrace
 }
 
+// WarmTransports returns how many idle physical transports the broker keeps
+// warm for reuse. Zero disables warm reuse. A nil configuration uses the
+// default.
+func (c *Config) WarmTransports() int {
+	if c == nil {
+		return DefaultWarmTransports
+	}
+	return c.warmTransports
+}
+
+// WarmIdleTimeout returns how long an idle physical transport stays warm.
+// Zero means no age bound.
+func (c *Config) WarmIdleTimeout() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.warmIdleTimeout
+}
+
 // RouteByAddress resolves one opaque pool address back to the route it was
 // derived from. The address is produced only by this configuration's own
 // routes, so an unknown address is refused rather than dialed.
@@ -545,8 +581,32 @@ type configDocument struct {
 	// duration string (for example "90s"). It is the single deterministic source
 	// for the idle grace, because a status probe cannot read a running broker's
 	// effective grace through the broker IPC protocol.
-	IdleGrace     string            `json:"idleGrace,omitempty"`
-	Registrations []registrationRaw `json:"registrations"`
+	IdleGrace string `json:"idleGrace,omitempty"`
+	// WarmTransports optionally bounds idle physical transports kept warm for
+	// reuse (0 through MaxWarmTransports; 0 disables warm reuse).
+	WarmTransports *int `json:"warmTransports,omitempty"`
+	// WarmIdleTimeout optionally expires a warm transport: "off" (no age
+	// bound, the default) or a positive Go duration up to MaxIdleGrace.
+	WarmIdleTimeout string            `json:"warmIdleTimeout,omitempty"`
+	Registrations   []registrationRaw `json:"registrations"`
+}
+
+func (d configDocument) warm() (int, time.Duration, error) {
+	count := DefaultWarmTransports
+	if d.WarmTransports != nil {
+		count = *d.WarmTransports
+		if count < 0 || count > MaxWarmTransports {
+			return 0, 0, fmt.Errorf("brokerconfig: %s: warmTransports must be between 0 and %d", ConfigFileName, MaxWarmTransports)
+		}
+	}
+	if d.WarmIdleTimeout == "" || d.WarmIdleTimeout == "off" {
+		return count, 0, nil
+	}
+	timeout, err := time.ParseDuration(d.WarmIdleTimeout)
+	if err != nil || timeout <= 0 || timeout > MaxIdleGrace {
+		return 0, 0, fmt.Errorf("brokerconfig: %s: warmIdleTimeout %q must be off or a positive duration of at most %s", ConfigFileName, d.WarmIdleTimeout, MaxIdleGrace)
+	}
+	return count, timeout, nil
 }
 
 // localDocument is the strict on-disk shape of the broker-owned local binding.

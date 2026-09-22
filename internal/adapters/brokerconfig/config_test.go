@@ -656,3 +656,51 @@ func TestLoadIdleGrace(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadWarmTransports(t *testing.T) {
+	document := func(extra map[string]any) map[string]any {
+		d := map[string]any{"marker": Marker, "registrations": []any{}}
+		for k, v := range extra {
+			d[k] = v
+		}
+		return d
+	}
+	tests := []struct {
+		name        string
+		document    map[string]any
+		wantCount   int
+		wantTimeout time.Duration
+		wantErr     string
+	}{
+		{name: "defaults match the old client cache", document: document(nil), wantCount: DefaultWarmTransports},
+		{name: "explicit off", document: document(map[string]any{"warmIdleTimeout": "off"}), wantCount: DefaultWarmTransports},
+		{name: "bounded count and grace", document: document(map[string]any{"warmTransports": 2, "warmIdleTimeout": "5m"}), wantCount: 2, wantTimeout: 5 * time.Minute},
+		{name: "zero disables warm reuse", document: document(map[string]any{"warmTransports": 0}), wantCount: 0},
+		{name: "maximum count", document: document(map[string]any{"warmTransports": MaxWarmTransports}), wantCount: MaxWarmTransports},
+		{name: "negative count", document: document(map[string]any{"warmTransports": -1}), wantErr: "warmTransports must be between"},
+		{name: "oversized count", document: document(map[string]any{"warmTransports": MaxWarmTransports + 1}), wantErr: "warmTransports must be between"},
+		{name: "non-integer count", document: document(map[string]any{"warmTransports": "8"}), wantErr: "warmTransports"},
+		{name: "invalid timeout", document: document(map[string]any{"warmIdleTimeout": "soon"}), wantErr: "warmIdleTimeout"},
+		{name: "zero timeout", document: document(map[string]any{"warmIdleTimeout": "0s"}), wantErr: "warmIdleTimeout"},
+		{name: "oversized timeout", document: document(map[string]any{"warmIdleTimeout": (MaxIdleGrace + time.Second).String()}), wantErr: "warmIdleTimeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeConfig(t, root, tt.document, 0o600)
+			layout, err := ResolveLayout(root, nil)
+			require.NoError(t, err)
+			config, err := Load(layout)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantCount, config.WarmTransports())
+			require.Equal(t, tt.wantTimeout, config.WarmIdleTimeout())
+		})
+	}
+	var none *Config
+	require.Equal(t, DefaultWarmTransports, none.WarmTransports())
+	require.Zero(t, none.WarmIdleTimeout())
+}

@@ -262,6 +262,11 @@ func brokerRouteAuthorityMatches(config *brokerconfig.Config, target ports.Broke
 // through the broker-owned local daemon start; every other Unix route is a
 // provisioned endpoint carriage that the broker only ever dials.
 func dialBrokerRoute(ctx context.Context, route brokerconfig.Route, target ports.BrokerDialTarget, log *slog.Logger) (daemonmux.RawFramedTransport, error) {
+	if !target.Fence.Local && log != nil {
+		// One line per remote physical bootstrap: warm reuse is verified by
+		// the absence of this event, not by timing.
+		log.Info("broker_remote_dial", "endpoint", target.Fence.Registration.Endpoint, "route", string(route.Kind()))
+	}
 	switch route.Kind() {
 	case brokerconfig.RouteUnix:
 		if target.Fence.Local {

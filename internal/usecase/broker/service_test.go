@@ -39,7 +39,7 @@ func composeTestAuthority(t testing.TB, epoch ports.BrokerEpoch, registry *Regis
 	resolver := poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.Policy, Address: "fake", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "canonical", Bound: true}}, nil
 	})
-	pool, err := NewPool(epoch, resolver, registry, connector, clock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Idle: time.Minute})
+	pool, err := NewPool(epoch, resolver, registry, connector, clock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Warm: 4, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
 	supervisor, idleClock := newTestSupervisor(t, time.Hour)

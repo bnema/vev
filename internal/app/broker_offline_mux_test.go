@@ -574,6 +574,9 @@ func TestBrokerMuxDialFloodedStderrIsReapedAndSanitized(t *testing.T) {
 	require.NoError(t, waitForProcessExit(pid, 3*time.Second), "the flooding bootstrap must be reaped")
 
 	record := decodeBootstrapDiagnostic(t, logs.Bytes())
+	// Each remote physical bootstrap logs exactly one broker_remote_dial; the
+	// warm-reuse harness asserts its absence.
+	require.Equal(t, 1, bytes.Count(logs.Bytes(), []byte(`"msg":"broker_remote_dial"`)))
 	require.NotEmpty(t, record.Diagnostic)
 	require.LessOrEqual(t, len(record.Diagnostic), 512, "the captured diagnostic must stay bounded")
 	for _, r := range record.Diagnostic {
@@ -764,11 +767,18 @@ type bootstrapDiagnostic struct {
 }
 
 // decodeBootstrapDiagnostic decodes the single sanitized diagnostic the broker
-// logs for a failed bootstrap.
+// logs for a failed bootstrap. Other records (the broker_remote_dial line) are
+// skipped; exactly one diagnostic must be present.
 func decodeBootstrapDiagnostic(t *testing.T, raw []byte) bootstrapDiagnostic {
 	t.Helper()
-	var record bootstrapDiagnostic
-	require.NoError(t, json.Unmarshal(bytes.TrimSpace(raw), &record))
-	require.Equal(t, "broker_mux_bootstrap_stderr", record.Message)
-	return record
+	var found []bootstrapDiagnostic
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+		var record bootstrapDiagnostic
+		require.NoError(t, json.Unmarshal(line, &record))
+		if record.Message == "broker_mux_bootstrap_stderr" {
+			found = append(found, record)
+		}
+	}
+	require.Len(t, found, 1)
+	return found[0]
 }
