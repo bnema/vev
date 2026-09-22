@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -113,7 +114,7 @@ func newPickerController(clock ports.Clock, freshness time.Duration) *pickerCont
 	controller := &pickerController{
 		clock:     clock,
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
-		renderer:  newPickerRenderer(),
+		renderer:  newPickerRenderer(ansirenderer.ColorProfileTrueColor),
 		ownsInput: true,
 		opsReady:  make(chan struct{}, 1),
 	}
