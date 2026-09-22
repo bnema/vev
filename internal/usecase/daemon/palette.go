@@ -737,12 +737,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	if !attachmentHandoff && !d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 		return
 	}
-	// A client-owned picker may acquire presentation as soon as its offer's
-	// output barrier is displayed. Commit the palette-free base first so that
-	// barrier can never name a frame which still contains the command palette.
-	if cmd.Slug == "session-picker" {
-		d.invalidateRenderNow(sess, ac, true, "palette.go:session-picker-base")
-	}
 	sess.dispatchMu.Lock()
 	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect, redrawClosedPalette: true}, args)
 	sess.dispatchMu.Unlock()
@@ -1199,23 +1193,8 @@ func (e paletteExec) RenameTabTo(name string) error {
 }
 
 func (e paletteExec) OpenSessionPicker() error {
-	if e.ac == nil || e.ac.overlays == nil {
+	if e.ac == nil {
 		return errAttachmentTransition
-	}
-	// The palette already closed on execute (see handlePaletteInput):
-	// only invalidate when the close actually changed overlay state, then
-	// open the picker interaction on a freshly admitted effect so the
-	// opener's fence retires on the authoritative repaint below.
-	overlays := e.ac.overlays
-	overlays.paletteMu.Lock()
-	generation := overlays.paletteGeneration
-	query := ""
-	if overlays.palette != nil {
-		query = overlays.palette.Query()
-	}
-	overlays.paletteMu.Unlock()
-	if e.d.closeExecutedPalette(e.ac, e.effect, generation, query) {
-		e.d.invalidateRender(e.sess, e.ac, true, "palette.go:session-picker")
 	}
 	effect := e.effect
 	if effect == nil {
@@ -1226,16 +1205,13 @@ func (e paletteExec) OpenSessionPicker() error {
 		}
 		defer fresh.End()
 		effect = fresh
-	} else {
-		fresh, admitted := e.ac.beginAttachmentEffect(effect.capability())
-		if !admitted {
-			return errAttachmentTransition
-		}
-		fresh.uiActionID = effect.uiActionID
-		defer fresh.End()
-		effect = fresh
 	}
-	return e.d.openPickerForAttachment(e.ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0)
+	// End the attachment; the client supervisor, not an interaction on this
+	// connection, owns the next picker presentation and its input.
+	if !e.d.clientGoneForAttachmentReason(effect, true, protocol.ReasonDetachToPicker) {
+		return errAttachmentTransition
+	}
+	return nil
 }
 
 func (e paletteExec) OpenNotifications() error {

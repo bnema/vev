@@ -28,7 +28,7 @@ func TestOpenPickerForIntentRejectsNonYieldingSource(t *testing.T) {
 		wantErr error
 	}{
 		{name: "move tab", intent: protocol.PickerIntentMoveTab, wantErr: errSessionCannotYieldMoves},
-		{name: "navigation", intent: protocol.PickerIntentNavigation, wantErr: nil},
+		{name: "navigation", intent: protocol.PickerIntentNavigation, wantErr: errClientOwnedNavigation},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

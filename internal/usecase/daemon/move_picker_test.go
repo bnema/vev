@@ -518,8 +518,10 @@ func TestMovePickerCompositeFollowCompletionReadmitsSupersededCapability(t *test
 // concurrent reconnect or transition that won the gate after publication. It
 // republishes the current capability directly so it also works while a render
 // effect may still be in flight.
+type replacementServerConnection struct{ *mockServerConnection }
+
 func supersedeAttachmentCapabilityForTest(published attachmentCapability, base *mockServerConnection) {
-	wrapper := &pickerSnapshotFailTransport{mockServerConnection: base}
+	wrapper := &replacementServerConnection{mockServerConnection: base}
 	published.ac.replaceTransport(wrapper)
 	current := captureAttachmentCapability(published.ac.currentAttachmentSession(), published.ac, wrapper)
 	gate := &published.ac.lifecycle

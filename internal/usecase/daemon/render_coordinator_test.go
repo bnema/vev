@@ -1226,7 +1226,7 @@ func TestProducerInvalidations(t *testing.T) {
 			interaction: true,
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
 				effect := admitPickerEffectForTest(t, sess, ac)
-				require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
+				require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentMovePane, moveSourceLocator{}, 0))
 			},
 		},
 		{

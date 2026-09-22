@@ -1343,15 +1343,8 @@ func TestPaletteExecMethods(t *testing.T) {
 	require.True(t, ac.overlays.promptActive())
 	d.closePrompt(ac)
 	require.True(t, sess.ephemeral)
-	require.NoError(t, exec.OpenSessionPicker())
-	require.True(t, ac.overlays.pickerClientActive())
-	ac.overlays.pickerMu.Lock()
-	interaction := ac.overlays.pickerInteraction
-	ac.overlays.pickerMu.Unlock()
-	effect, admitted := ac.beginAttachmentEffect(captureAttachmentCapability(sess, ac, ac.transport()))
-	require.True(t, admitted)
-	require.True(t, d.closePickerForAttachment(ac, effect, interaction))
-	effect.End()
+	// OpenSessionPicker ends this attachment; its lifecycle contract is tested
+	// separately by TestSessionPickerCommandDetachesToClientPicker.
 	require.NoError(t, exec.EnterVisualMode())
 	require.True(t, ac.overlays.copyActive())
 	d.exitCopyMode(ac)

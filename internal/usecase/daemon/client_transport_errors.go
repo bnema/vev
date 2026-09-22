@@ -49,6 +49,10 @@ func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed 
 }
 
 func (d *Daemon) clientGoneForAttachment(effect *attachmentEffect, explicit bool) bool {
+	return d.clientGoneForAttachmentReason(effect, explicit, protocol.ReasonDetach)
+}
+
+func (d *Daemon) clientGoneForAttachmentReason(effect *attachmentEffect, explicit bool, reason uint8) bool {
 	if effect == nil {
 		return false
 	}
@@ -67,11 +71,15 @@ func (d *Daemon) clientGoneForAttachment(effect *attachmentEffect, explicit bool
 		d.clearParkingInFlightIfAbandoned(sess, capability.ac, parkingToken)
 		return false
 	}
-	d.finishClientGone(sess, capability.ac, capability.transport.transport, explicit, true)
+	d.finishClientGoneReason(sess, capability.ac, capability.transport.transport, explicit, true, reason)
 	return true
 }
 
 func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit, notice bool) {
+	d.finishClientGoneReason(sess, ac, failed, explicit, notice, protocol.ReasonDetach)
+}
+
+func (d *Daemon) finishClientGoneReason(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit, notice bool, reason uint8) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -116,7 +124,7 @@ func (d *Daemon) finishClientGone(sess *session, ac *attachedClient, failed port
 		// (the client is actively awaiting it), but deadline-bounded so a
 		// wedged client cannot pin this conn handler and hang Serve's
 		// connWg.Wait.
-		d.boundedSend(ac, serverDetached(protocol.ReasonDetach))
+		d.boundedSend(ac, serverDetached(reason))
 	}
 	_ = ac.closeCapturedTransport(oldTr)
 	d.log.Info("client detached", "session", name, "explicit", explicit)

@@ -235,13 +235,6 @@ func (d *Daemon) handleActiveAttachmentClientMessage(capability attachmentCapabi
 			d.refreshPalette(effect.ac)
 			d.invalidateRender(effect.sess, effect.ac, true, "client_frame_routing.go:inventory-publication")
 		}
-	case protocol.PickerBegin:
-		if effect.ac == nil || effect.ac.overlays == nil {
-			break
-		}
-		if err := d.openPickerForAttachment(effect.ac, effect, message.Intent, moveSourceLocator{}, message.RequestID); err != nil {
-			d.reportAttachmentError(effect.sess, err)
-		}
 	case protocol.PickerClose:
 		if effect.ac == nil || effect.ac.overlays == nil {
 			break

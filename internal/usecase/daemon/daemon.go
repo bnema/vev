@@ -1222,10 +1222,6 @@ func (d *Daemon) handleConn(tr ports.ServerConnection) {
 		stopTransport()
 		finishHandshake()
 		d.handleNavigationInventory(tr, message)
-	case protocol.PickerControlRequest:
-		stopTransport()
-		finishHandshake()
-		d.handlePickerControl(tr, message)
 	case protocol.Kill:
 		stopTransport()
 		finishHandshake()

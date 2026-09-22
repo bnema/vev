@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 
@@ -9,13 +10,14 @@ import (
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
-// This file owns the serving-daemon side of the picker interaction. The
-// daemon is the data and action authority: it publishes one structured line
-// set per source, resolves opaque keys, and performs the navigation, move, or
-// kill the client asked for. It never owns a presentation model.
+// This file retains the serving-daemon move-destination interaction. It must
+// never admit a navigation intent: session-picker ends the attachment and the
+// client supervisor owns all subsequent navigation and terminal input.
 
 // servingPickerSourceID names the source the serving daemon itself owns.
 const servingPickerSourceID = protocol.PickerServingSourceID
+
+var errClientOwnedNavigation = errors.New("session navigation is client-owned")
 
 // pickerDuplicateRows reports the first repeated row key with a readable
 // identity for both rows. A refused snapshot otherwise says only that a key
@@ -78,6 +80,9 @@ func (ac *attachedClient) pickerState() (open bool, interaction uint64, intent p
 func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentEffect, intent protocol.PickerIntent, source moveSourceLocator, requestID uint64) error {
 	if ac == nil || ac.overlays == nil || effect == nil || !effect.current() {
 		return errAttachmentTransition
+	}
+	if intent != protocol.PickerIntentMoveTab && intent != protocol.PickerIntentMovePane {
+		return errClientOwnedNavigation
 	}
 	sess := effect.sess
 	if intent != protocol.PickerIntentNavigation {

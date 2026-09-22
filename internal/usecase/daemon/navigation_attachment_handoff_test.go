@@ -21,13 +21,6 @@ func TestNavigationHandoffsDropReplacedInitiatorWithoutMutation(t *testing.T) {
 		check          func(*testing.T, *Daemon, *session, *session)
 	}{
 		{
-			name: "picker selection", releasedAction: "detach",
-			run: func(d *Daemon, source, target *session, ac *attachedClient, effect *attachmentEffect) error {
-				require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
-				return d.switchToTargetForAttachment(effect, picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "picker-select")
-			},
-		},
-		{
 			name: "palette session", releasedAction: "detach",
 			run: func(d *Daemon, _ *session, target *session, _ *attachedClient, effect *attachmentEffect) error {
 				return d.switchToTargetForAttachment(effect, picker.Target{Session: target.id, TabIndex: 1}, sessionHandoffGuard{}, "palette-session")

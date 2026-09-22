@@ -201,8 +201,6 @@ func serverMessageName(message protocol.ServerMessage) string {
 		return "PickerFailure"
 	case protocol.PickerPreview:
 		return "PickerPreview"
-	case protocol.PickerControlResponse:
-		return "PickerControlResponse"
 	default:
 		return ""
 	}

@@ -33,7 +33,7 @@ type overlayRuntime struct {
 	// interactions reject); revisions are the per-source published versions
 	// (older or duplicate revisions discard); keys maps opaque row keys of the
 	// serving source to resolved targets; intent and moverSource are the
-	// daemon-side facts captured at open; requestID echoes a client PickerBegin.
+	// daemon-side facts captured at open; requestID echoes a client client picker request.
 	pickerOpen        bool
 	pickerInteraction uint64
 	pickerRevisions   map[string]uint64
