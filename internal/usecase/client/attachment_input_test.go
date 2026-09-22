@@ -10,7 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/stretchr/testify/mock"
 )
 
 // Ported from the old client's palette_attach_generation_test.go and paste
@@ -40,6 +43,10 @@ type inputHarness struct {
 // clock is separate from the host clock, so every timer on it belongs to the
 // input path.
 func startInputHarness(t *testing.T, themes *terminalThemeState) *inputHarness {
+	return startInputHarnessWithConfig(t, themes, sessionTestRequest(true), nil)
+}
+
+func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, request ports.BrokerOpenStreamRequest, clipboard ports.ClipboardReader) *inputHarness {
 	t.Helper()
 	reader := &inputTestReader{chunks: make(chan []byte, 16)}
 	pump := newTerminalInputPump(reader)
@@ -56,9 +63,10 @@ func startInputHarness(t *testing.T, themes *terminalThemeState) *inputHarness {
 		events: make(chan AttachmentEvent, 1),
 	}
 	host := newAttachmentHost(attachmentHostConfig{Terminal: h.term, Clock: newSupervisorTestClock(), Input: pump})
-	cfg := sessionTestWorkerConfig(sessionTestRequest(true))
+	cfg := sessionTestWorkerConfig(request)
 	cfg.Clock = h.clock
 	cfg.Theme = themes
+	cfg.Clipboard = clipboard
 	cfg.TrueColor = true
 	worker, err := newSessionAttachmentWorker(cfg)
 	require.NoError(t, err)
@@ -122,6 +130,52 @@ func (h *inputHarness) awaitInputs(t *testing.T, n int) []string {
 func (h *inputHarness) awaitQueries(t *testing.T, query string, n int) {
 	t.Helper()
 	require.Eventually(t, func() bool { return strings.Count(h.term.written(), query) >= n }, 5*time.Second, time.Millisecond, "worker never wrote query #%d %q", n, query)
+}
+
+func TestAttachmentInputRemoteClipboardImageAndFallback(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		mime string
+		data []byte
+		err  error
+		want protocol.ClientMessage
+	}{
+		{name: "image", mime: "image/png", data: []byte{1, 2}, want: protocol.ImagePush{Mime: "image/png", Data: []byte{1, 2}}},
+		{name: "no image forwards key", err: ports.ErrNoClipboardImage, want: protocol.Input{Data: []byte{ctrlV}}},
+		{name: "oversized image forwards key", mime: "image/png", data: make([]byte, maxClipboardImagePush+1), want: protocol.Input{Data: []byte{ctrlV}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := portsmocks.NewMockClipboardReader(t)
+			reader.EXPECT().ReadImage(mock.Anything).Return(tt.mime, tt.data, tt.err).Once()
+			h := startInputHarnessWithConfig(t, nil, sessionTestRequest(false), reader)
+			h.send("before\x16after")
+			require.Eventually(t, func() bool {
+				return len(h.stream.messages()) >= 4
+			}, 5*time.Second, time.Millisecond)
+			h.end(t)
+			var got []protocol.ClientMessage
+			for _, msg := range h.stream.messages() {
+				switch msg.(type) {
+				case protocol.Input, protocol.ImagePush, protocol.ClientNotice:
+					got = append(got, msg)
+				}
+			}
+			require.IsType(t, protocol.Input{}, got[0])
+			require.Equal(t, []byte("before"), got[0].(protocol.Input).Data)
+			if tt.name == "oversized image forwards key" {
+				require.Equal(t, protocol.ClientNotice{Action: protocol.ClientNoticeClipboardTooLarge}, got[1])
+				got = append(got[:1], got[2:]...)
+			}
+			switch want := tt.want.(type) {
+			case protocol.Input:
+				require.Equal(t, want.Data, got[1].(protocol.Input).Data)
+			case protocol.ImagePush:
+				require.Equal(t, want.Mime, got[1].(protocol.ImagePush).Mime)
+				require.Equal(t, want.Data, got[1].(protocol.ImagePush).Data)
+			}
+			require.Equal(t, []byte("after"), got[2].(protocol.Input).Data)
+		})
+	}
 }
 
 func paletteReply(foreground, background string, slot uint8, color string) string {

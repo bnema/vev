@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
@@ -42,6 +43,7 @@ type brokerClientConfig struct {
 	Connector ports.BrokerConnector
 	Terminal  ports.Terminal
 	Clock     ports.Clock
+	Clipboard ports.ClipboardReader
 	UI        *client.UI
 	// InitialNavigation is the one-shot intent decided before the connection.
 	// Its zero value is InitialNavigationPicker, which opens nothing.
@@ -218,12 +220,17 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 	if sessionEnv.Cwd != "" {
 		attachmentEnv.Cwd = sessionEnv.Cwd
 	}
+	reader := cfg.Clipboard
+	if reader == nil {
+		reader = clipboard.New()
+	}
 	picker := client.NewPicker(clk, 0, attachmentEnv.TrueColor)
 	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
 		Connector:                cfg.Connector,
 		Terminal:                 cfg.Terminal,
 		Clock:                    clk,
+		Clipboard:                reader,
 		UI:                       cfg.UI,
 		Picker:                   picker,
 		InitialNavigation:        cfg.InitialNavigation,

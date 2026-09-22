@@ -76,6 +76,8 @@ type sessionAttachmentConfig struct {
 	// the worker queries the terminal palette and sends protocol.Theme; when
 	// nil, replies are still stripped from input but no query is written.
 	Theme *terminalThemeState
+	// Clipboard reads images on remote attachments only.
+	Clipboard ports.ClipboardReader
 	// Tab is the exact tab a picker tab row committed; its zero value
 	// attaches at session level.
 	Tab attachmentTab
@@ -302,7 +304,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	var samePeerRequests uint64
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.TrueColor)}
 	defer picker.stopEscape()
-	input := newAttachmentInput(w, fg, stream, picker)
+	input := newAttachmentInput(ctx, w, fg, stream, picker)
 	defer input.close()
 	if err := input.start(ctx); err != nil {
 		return w.settle(ctx, fg, stream, token, err)

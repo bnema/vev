@@ -289,6 +289,8 @@ type SupervisorConfig struct {
 	// Clock supplies the retry timers. Required; use ports.Clock, not the wall
 	// clock.
 	Clock ports.Clock
+	// Clipboard is the client-side image clipboard for remote attachments.
+	Clipboard ports.ClipboardReader
 	// Render asks the composition to paint the current state. It is called for
 	// visible transitions, after picker catalogue publications, and for every
 	// resize invalidation the supervisor's serialized waits consume. The

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -41,10 +42,11 @@ type attachmentInput struct {
 	// included) is withheld before it is forwarded as ordinary input.
 	markerTimer ports.Timer
 
-	paste  *pasteCoalescer
-	mu     sync.Mutex
-	queued [][]byte
-	wake   chan struct{}
+	paste     *pasteCoalescer
+	clipboard *clipboardIntercept
+	mu        sync.Mutex
+	queued    []protocol.ClientMessage
+	wake      chan struct{}
 
 	// palette is nil when detection is disabled: no retained theme or no
 	// query seam on the foreground. Replies are stripped either way.
@@ -97,7 +99,7 @@ func (d *paletteDeadline) fired(kind paletteGenerationEventKind) paletteGenerati
 	return event
 }
 
-func newAttachmentInput(w *sessionAttachmentWorker, fg AttachmentForeground, stream ports.BrokerLogicalConnection, picker *attachmentMovePicker) *attachmentInput {
+func newAttachmentInput(ctx context.Context, w *sessionAttachmentWorker, fg AttachmentForeground, stream ports.BrokerLogicalConnection, picker *attachmentMovePicker) *attachmentInput {
 	in := &attachmentInput{
 		worker: w,
 		fg:     fg,
@@ -108,6 +110,16 @@ func newAttachmentInput(w *sessionAttachmentWorker, fg AttachmentForeground, str
 		themes: w.cfg.Theme,
 	}
 	in.paste = newPasteCoalescer(in.clock, in.enqueue)
+	if !w.cfg.Request.Local && w.cfg.Clipboard != nil {
+		in.clipboard = &clipboardIntercept{
+			ctx: ctx, coalescer: in.paste, reader: w.cfg.Clipboard,
+			log: slog.Default(), next: in.paste.Scan,
+			sendImage: func(mime string, data []byte) {
+				in.enqueueImage(mime, data)
+			},
+			sendNotice: func(action uint8) { in.enqueueNotice(action) },
+		}
+	}
 	if query, ok := fg.(attachmentQueryForeground); ok && in.themes != nil {
 		in.query = query
 		in.palette = newPaletteGenerationCoordinator()
@@ -121,8 +133,20 @@ func (in *attachmentInput) enqueue(data []byte) {
 	if len(data) == 0 {
 		return
 	}
+	in.queue(protocol.Input{Data: append([]byte(nil), data...)})
+}
+
+func (in *attachmentInput) enqueueImage(mime string, data []byte) {
+	in.queue(protocol.ImagePush{Mime: mime, Data: append([]byte(nil), data...)})
+}
+
+func (in *attachmentInput) enqueueNotice(action uint8) {
+	in.queue(protocol.ClientNotice{Action: action})
+}
+
+func (in *attachmentInput) queue(message protocol.ClientMessage) {
 	in.mu.Lock()
-	in.queued = append(in.queued, append([]byte(nil), data...))
+	in.queued = append(in.queued, message)
 	in.mu.Unlock()
 	select {
 	case in.wake <- struct{}{}:
@@ -261,7 +285,11 @@ func (in *attachmentInput) route(ctx context.Context, state outputApplyState, da
 	if err != nil || consumed {
 		return err
 	}
-	in.paste.Scan(data)
+	if in.clipboard != nil {
+		in.clipboard.Scan(data)
+	} else {
+		in.paste.Scan(data)
+	}
 	return in.flush(ctx)
 }
 
@@ -271,8 +299,16 @@ func (in *attachmentInput) flush(ctx context.Context) error {
 	queued := in.queued
 	in.queued = nil
 	in.mu.Unlock()
-	for _, data := range queued {
-		if err := in.send(ctx, protocol.Input{InputSeq: in.nextSeq(), Data: data}); err != nil {
+	for _, message := range queued {
+		switch m := message.(type) {
+		case protocol.Input:
+			m.InputSeq = in.nextSeq()
+			message = m
+		case protocol.ImagePush:
+			m.InputSeq = in.nextSeq()
+			message = m
+		}
+		if err := in.send(ctx, message); err != nil {
 			return err
 		}
 	}
