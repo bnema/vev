@@ -5,24 +5,15 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/broker"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
-
-// sharedPhysicalsFunc adapts a closure to the probe's pool lending seam.
-type sharedPhysicalsFunc func(ports.BrokerDaemonIdentity, ports.BrokerPolicy) (ports.BrokerPhysicalConnection, bool)
-
-func (f sharedPhysicalsFunc) SharedPhysical(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy) (ports.BrokerPhysicalConnection, bool) {
-	return f(identity, policy)
-}
-
-func (sharedPhysicalsFunc) AdoptPhysical(ports.BrokerPhysicalConnection, ports.BrokerPolicy) bool {
-	return false
-}
 
 // TestBrokerRemoteProbeBorrowsWarmTransport proves observation reuses the
 // broker pool's attached or warm transport instead of bootstrapping SSH/QUIC
@@ -69,8 +60,10 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 			}
 			if tt.bound && tt.shared {
 				if tt.openErr != nil {
-					physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(nil, tt.openErr)
-					physical.EXPECT().Done().Return(done)
+					if !tt.retired {
+						physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(nil, tt.openErr)
+						physical.EXPECT().Done().Return(done)
+					}
 				} else {
 					logical := portsmocks.NewMockBrokerLogicalConnection(t)
 					var sent protocol.CommandRequest
@@ -91,12 +84,20 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 				epoch: 7, routes: routes, binder: portsmocks.NewMockBrokerIdentityBinder(t), connector: connector,
 				hosts: &routeTestHosts{record: record, found: true},
 			}
-			probe.shared.share(sharedPhysicalsFunc(func(gotIdentity ports.BrokerDaemonIdentity, gotPolicy ports.BrokerPolicy) (ports.BrokerPhysicalConnection, bool) {
-				if !tt.shared || gotIdentity != identity || gotPolicy != policy {
-					return nil, false
-				}
-				return physical, true
-			}))
+			// Use the real pool for borrowing. Stateful pool retirement is
+			// covered with a fake physical in broker's worker tests.
+			pool, err := broker.NewPool(7, routes, probe.binder, connector, clock.New(), broker.PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, pool.Close()) })
+			if tt.shared && tt.bound && !tt.retired {
+				physical.EXPECT().Policy().Return(policy).Maybe()
+				physical.EXPECT().Identity().Return(identity).Maybe()
+				physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1}).Maybe()
+				physical.EXPECT().Done().Return(done).Maybe()
+				physical.EXPECT().Close().Return(nil).Maybe()
+				require.True(t, pool.AdoptPhysical(physical, policy))
+			}
+			probe.shared.share(pool)
 
 			observation, err := probe.Probe(context.Background(), registration)
 			switch {
