@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"time"
@@ -28,6 +29,15 @@ func transitionMessage(target protocol.AttachTarget) string {
 		verb = "Starting "
 	}
 	return verb + label + "…"
+}
+
+// RenderTransitionNotice draws one connecting frame for the terminal owner.
+func RenderTransitionNotice(size domain.Size, frame int, message string) []byte {
+	var out bytes.Buffer
+	if _, err := drawTransitionToast(&out, size, frame, message); err != nil {
+		return nil
+	}
+	return out.Bytes()
 }
 
 func drawTransitionToast(out io.Writer, size domain.Size, frame int, message string) (domain.Rect, error) {

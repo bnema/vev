@@ -281,6 +281,14 @@ type LifecycleNotice struct {
 // connector, terminal, and clock are required; render, notify, and jitter are
 // injectable seams with safe defaults. Render, notify, and jitter must not
 // block: the supervisor drives them from its single run goroutine.
+// SpinnerPresentation advances a transition frame on the serialized control
+// path, never from a competing terminal writer goroutine.
+type SpinnerPresentation interface {
+	Spinner() <-chan time.Time
+	AdvanceSpinner(State)
+	StopSpinner()
+}
+
 type SupervisorConfig struct {
 	// Connector establishes the broker connection. Required.
 	Connector ports.BrokerConnector
@@ -303,7 +311,8 @@ type SupervisorConfig struct {
 	// overwrite session output. An attached foreground still owns the terminal
 	// and a terminating process is leaving it, so neither is ever painted over
 	// by a resize invalidation. Optional; the default renders nothing.
-	Render func(State)
+	Render  func(State)
+	Spinner SpinnerPresentation
 	// Notify surfaces a connectivity failure without leaving the picker.
 	// Optional; the default notifies nothing.
 	Notify func(State, error)
@@ -785,6 +794,8 @@ func (s *Supervisor) awaitAttempt(ctx context.Context, input *terminalInputLifet
 			return supervisorAttempt{}, true, terminalReadCause(err)
 		case <-s.presentationInvalidation():
 			s.renderResizeInvalidation()
+		case <-s.spinnerTick():
+			s.cfg.Spinner.AdvanceSpinner(s.State())
 		}
 	}
 }
@@ -985,6 +996,8 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 			return true, terminalReadCause(err)
 		case <-s.presentationInvalidation():
 			s.renderResizeInvalidation()
+		case <-s.spinnerTick():
+			s.cfg.Spinner.AdvanceSpinner(s.State())
 		}
 	}
 }
@@ -1120,9 +1133,19 @@ func (s *Supervisor) transition(event supervisorEvent) {
 	if state.Presentation != previous {
 		s.publishPresentation(state.Presentation)
 	}
+	if s.cfg.Spinner != nil && state.Presentation != PresentConnecting && state.Connectivity != ConnectivityRetryWait && state.Connectivity != ConnectivityConnectingBroker {
+		s.cfg.Spinner.StopSpinner()
+	}
 	if s.cfg.Render != nil {
 		s.cfg.Render(state)
 	}
+}
+
+func (s *Supervisor) spinnerTick() <-chan time.Time {
+	if s.cfg.Spinner == nil {
+		return nil
+	}
+	return s.cfg.Spinner.Spinner()
 }
 
 // publishPresentation publishes one supervisor-owned presentation through the

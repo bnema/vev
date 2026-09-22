@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
@@ -88,6 +89,9 @@ type brokerClientPresentation struct {
 	// channel.
 	ui      *client.UI
 	onState func(client.State)
+	clock   ports.Clock
+	spinner ports.Timer
+	frame   int
 
 	mu sync.Mutex
 }
@@ -116,28 +120,40 @@ func (p *brokerClientPresentation) Render(state client.State) {
 	if p.onState != nil {
 		p.onState(state)
 	}
-	if !client.PickerPresentation(state) {
-		return
-	}
-	geometry, err := p.terminal.Geometry()
-	if err != nil {
-		return
-	}
-	frame := p.picker.Render(geometry.Size)
-	notice := p.picker.RenderNotice(geometry.Size)
-	if len(frame) == 0 && len(notice) == 0 {
+	if !client.PickerPresentation(state) && (state.Presentation != client.PresentConnecting || p.clock == nil) {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	geometry, err := p.terminal.Geometry()
+	if err != nil {
+		return
+	}
+	var frame, notice []byte
+	if client.PickerPresentation(state) {
+		frame = p.picker.Render(geometry.Size)
+		notice = p.picker.RenderNotice(geometry.Size)
+	} else {
+		frame = client.RenderTransitionNotice(geometry.Size, p.frame, "Connecting to session…")
+	}
+	if state.Connectivity == client.ConnectivityRetryWait {
+		notice = client.RenderTransitionNotice(geometry.Size, p.frame, "Connection lost; retrying…")
+	}
+	if len(frame) == 0 && len(notice) == 0 {
+		return
+	}
 	writer := p.terminal.Out()
 	if writer == nil {
 		return
 	}
 	transaction, _ := p.terminal.(ports.UIOutputTransaction)
+	context := p.pickerContext()
+	if state.Presentation == client.PresentConnecting {
+		context.Status = ports.UIStatusConnecting
+	}
 	if transaction != nil {
-		transaction.BeginOutput(p.pickerContext())
-		if err := transaction.PublishContext(p.pickerContext()); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+		transaction.BeginOutput(context)
+		if err := transaction.PublishContext(context); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
 			transaction.EndOutput(false)
 			return
 		}
@@ -159,6 +175,33 @@ func (p *brokerClientPresentation) Render(state client.State) {
 	if transaction != nil {
 		transaction.EndOutput(success)
 	}
+}
+
+func (p *brokerClientPresentation) Spinner() <-chan time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.spinner == nil {
+		p.spinner = p.clock.NewTimer(120 * time.Millisecond)
+	}
+	return p.spinner.C()
+}
+
+func (p *brokerClientPresentation) AdvanceSpinner(state client.State) {
+	p.mu.Lock()
+	p.frame++
+	if p.spinner != nil {
+		p.spinner.Reset(120 * time.Millisecond)
+	}
+	p.mu.Unlock()
+	p.Render(state)
+}
+
+func (p *brokerClientPresentation) StopSpinner() {
+	p.mu.Lock()
+	if p.spinner != nil {
+		p.spinner.Stop()
+	}
+	p.mu.Unlock()
 }
 
 // pickerContext is the Picker presentation of this run: the stable UI handle and
@@ -225,7 +268,7 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 		reader = clipboard.New()
 	}
 	picker := client.NewPicker(clk, 0, attachmentEnv.TrueColor)
-	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState}
+	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState, clock: clk}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
 		Connector:                cfg.Connector,
 		Terminal:                 cfg.Terminal,
@@ -246,7 +289,18 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 			}
 			presentation.Failure(err)
 		},
-		NotifyLifecycle: cfg.OnLifecycle,
+		NotifyLifecycle: func(notice client.LifecycleNotice) {
+			if cfg.OnLifecycle != nil {
+				cfg.OnLifecycle(notice)
+			}
+			if notice.Kind == client.LifecycleNoticeBrokerLost {
+				picker.OfferNotice("broker-lost", "Connection lost; retrying…")
+			}
+			if notice.Kind == client.LifecycleNoticeBrokerReconnected {
+				picker.OfferNotice("broker-reconnected", "Connection restored")
+			}
+		},
+		Spinner: presentation,
 	})
 	if err != nil {
 		return err
