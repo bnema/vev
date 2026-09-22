@@ -76,6 +76,9 @@ type sessionAttachmentConfig struct {
 	// the worker queries the terminal palette and sends protocol.Theme; when
 	// nil, replies are still stripped from input but no query is written.
 	Theme *terminalThemeState
+	// Tab is the exact tab a picker tab row committed; its zero value
+	// attaches at session level.
+	Tab attachmentTab
 }
 
 // sessionAttachmentWorker implements AttachmentWorker for one broker logical
@@ -199,7 +202,7 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 				return state, &event
 			}
 			state = next
-			attachmentNoteCommitted(fg, state.context.Route.Target)
+			attachmentNoteCommitted(fg, state.context)
 			// The frame transaction is the pre-attach publication: it commits the first
 			// session bytes with the Connecting presentation and, through the foreground
 			// shape rule, a public generation of zero. Attached is published only after
@@ -264,9 +267,9 @@ func attachmentOverlay(fg AttachmentForeground) attachmentOverlayForeground {
 	return overlay
 }
 
-func attachmentNoteCommitted(fg AttachmentForeground, target protocol.ExactSessionTarget) {
+func attachmentNoteCommitted(fg AttachmentForeground, view protocol.ViewContext) {
 	if overlay := attachmentOverlay(fg); overlay != nil {
-		overlay.noteCommitted(target)
+		overlay.noteCommitted(view.Route.Target, view.TabID)
 	}
 }
 
@@ -287,8 +290,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	outputResetRequested := false
 	overlay := attachmentOverlay(fg)
 	var repaint <-chan struct{}
+	var tabSelections <-chan domain.TabStableID
 	if overlay != nil {
 		repaint = overlay.overlayRepaint()
+		tabSelections = overlay.tabSelections()
 	}
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.TrueColor)}
 	defer picker.stopEscape()
@@ -323,6 +328,12 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				return w.settle(ctx, fg, stream, token, err)
 			}
 			outputResetRequested = true
+		case tab := <-tabSelections:
+			// The picker overlay committed another tab of this session: switch
+			// the attachment's view in place instead of reconnecting.
+			if err := w.send(ctx, fg, stream, protocol.SelectTab{TabID: tab}); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-picker.escape():
 			picker.escapeFired()
 			op, changed := picker.move.flush()
@@ -341,7 +352,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 				state = next
 				outputResetRequested = false
-				attachmentNoteCommitted(fg, state.context.Route.Target)
+				attachmentNoteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
 				}
@@ -360,6 +371,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					continue
 				}
 				state = next
+				attachmentNoteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), nil); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing view update: %w", err)}
 				}
@@ -618,6 +630,14 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		// the name is carried rather than left empty. It is copied from the
 		// request's own validated target, never invented.
 		hello.Name = target.SessionName
+		switch {
+		case w.cfg.Tab.stopped != nil && !request.Local:
+			// A stopped remote tab is restored through its exact selector.
+			selector := *w.cfg.Tab.stopped
+			hello.SessionTarget = &selector
+		case w.cfg.Tab.preferred != "":
+			hello.PreferredTabID = w.cfg.Tab.preferred
+		}
 	case ports.BrokerAdmissionCreateNamed:
 		hello.Intent = protocol.IntentNew
 		hello.Name = request.Name

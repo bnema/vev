@@ -1,6 +1,7 @@
 package client
 
 import (
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -78,6 +79,8 @@ func (o *attachmentPickerOverlay) enter() {
 		return
 	}
 	picker.ApplySnapshot(o.service.Snapshot())
+	// A fresh overlay starts on the attached session's tab.
+	s.setPickerCurrent(o.current())
 	// A decision recorded before the overlay existed never applies to it.
 	picker.TakeOp()
 	picker.SetOwnsInput(true)
@@ -143,25 +146,50 @@ func (o *attachmentPickerOverlay) takeOp() {
 		// attachment to return to, so nothing here ends the process.
 		o.exit()
 	case op.commit && key != "":
-		request, err := s.resolveCommittedStreamRequest(o.service, key)
+		request, tab, err := s.resolveCommittedStreamRequest(o.service, key)
 		if err != nil {
 			// The picker already shows the bounded refusal; the attachment
 			// stays live under the overlay.
 			s.renderCurrent()
 			return
 		}
-		if o.sameTarget(request) {
+		if o.sameTarget(request) && tab.stopped == nil {
+			// Another tab of the attached session switches in place; the
+			// attachment is never reconnected for it.
+			_, current, _ := s.attachments.committedView()
+			if tab.preferred != "" && tab.preferred != current {
+				s.attachments.requestTabSelection(o.run.token, tab.preferred)
+			}
 			o.exit()
 			return
 		}
-		s.pendingSwap = &request
+		s.pendingSwap = &pickerAttachmentTarget{request: request, tab: tab}
 		o.swapping = true
 		s.preview.close(o.picker())
 		s.attachments.requestDetach(o.run.token)
+	case op.kill && key != "":
+		s.startPickerKill(o.service, key)
+		s.renderCurrent()
 	default:
 		s.refreshPreview(o.service)
 		s.renderCurrent()
 	}
+}
+
+// current names the attachment this overlay is presented over, so the picker
+// opens on its session and tab.
+func (o *attachmentPickerOverlay) current() pickerCurrent {
+	target, tab, known := o.sup.attachments.committedView()
+	if !known {
+		if o.request.Admission != ports.BrokerAdmissionExact {
+			return pickerCurrent{}
+		}
+		target = o.request.Target
+	}
+	if target.LifecycleID == (domain.SessionLifecycleID{}) {
+		return pickerCurrent{}
+	}
+	return pickerCurrent{known: true, local: o.request.Local, endpoint: o.request.Endpoint, lifecycle: target.LifecycleID, tab: tab}
 }
 
 // sameTarget reports whether request names the session this attachment is

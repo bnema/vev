@@ -79,6 +79,29 @@ func (p *Picker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpe
 	return p.controller.ResolveKey(key, base)
 }
 
+// ResolveKeyTarget resolves a committed key plus the exact tab it names.
+func (p *Picker) ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+	if p == nil || p.controller == nil {
+		return (*pickerController)(nil).ResolveKeyTarget(key, base)
+	}
+	return p.controller.ResolveKeyTarget(key, base)
+}
+
+// ResolveKill revalidates one kill key for the supervisor.
+func (p *Picker) ResolveKill(key string) (pickerKillTarget, error) {
+	if p == nil || p.controller == nil {
+		return (*pickerController)(nil).ResolveKill(key)
+	}
+	return p.controller.ResolveKill(key)
+}
+
+// SetCurrent names the attachment the picker is presented over.
+func (p *Picker) SetCurrent(current pickerCurrent) {
+	if p != nil && p.controller != nil {
+		p.controller.SetCurrent(current)
+	}
+}
+
 // SetOwnsInput updates picker input ownership at an attachment boundary.
 func (p *Picker) PreviewRequest(connection ports.BrokerConnectionID, stream ports.BrokerStreamID, size domain.Size) (ports.BrokerOpenStreamRequest, protocol.RemotePreviewRequest, bool) {
 	if p == nil || p.controller == nil {

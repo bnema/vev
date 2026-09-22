@@ -301,13 +301,14 @@ func TestPickerControllerNotOwningInputLeavesReadUnconsumed(t *testing.T) {
 
 func TestPickerControllerKeepsProgressInRowsAndSurfacesFailuresAsNotices(t *testing.T) {
 	controller, clock := pickerTestController(t)
-	checking := pickerTestLocalObservation(clock.Now(), pickerTestSession("alpha", 1, catalogue_Up))
+	checking := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now(), pickerTestSession("alpha", 1, catalogue_Up))
 	checking.Checking = true
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{checking}})
-	require.Empty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "ordinary refreshing progress stays in the host row")
+	require.Empty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "ordinary refreshing progress stays in the rows")
 
-	unreachable := pickerTestLocalObservation(clock.Now())
+	unreachable := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
 	unreachable.Availability = domain.RemoteAvailabilityUnreachable
+	unreachable.FailureEpisode = 1
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{unreachable}})
 	require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "an unavailable host is surfaced as a failure")
 }
@@ -589,7 +590,7 @@ func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
 // row and surfaces no failure toast.
 func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testing.T) {
 	controller, clock := pickerTestController(t)
-	unobserved := pickerTestUnobservedObservation(clock.Now(), pickerTestSession("alpha", 1, catalogue_Up))
+	unobserved := pickerTestUnobservedObservation(clock.Now())
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}})
 
 	controller.mu.Lock()

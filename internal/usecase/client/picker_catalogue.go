@@ -105,6 +105,18 @@ func (c pickerCatalogueErrorCode) String() string {
 type pickerCatalogueError struct {
 	Code pickerCatalogueErrorCode
 	Text string
+	// Notice is the bounded user-facing sentence shown for this refusal when
+	// the generic "picker selection <code>" wording would name the wrong
+	// thing, as for a remote host known to be failing.
+	Notice string
+}
+
+// noticeText is the sentence a picker toast shows for this refusal.
+func (e pickerCatalogueError) noticeText() string {
+	if e.Notice != "" {
+		return e.Notice
+	}
+	return e.Error()
 }
 
 func (e pickerCatalogueError) Error() string {
@@ -146,6 +158,20 @@ type pickerSelectionRef struct {
 	lifecycle    domain.SessionLifecycleID
 	name         string
 	createName   string
+	// tab names one tab row inside the session; its zero value is a
+	// session-level selection.
+	tab pickerTabRef
+}
+
+// pickerTabRef is the exact tab a tab row names, captured when it was
+// projected: the stable ID when the catalogue carries one, and the ordinal,
+// raw name, and tab count a stopped remote selector needs otherwise.
+type pickerTabRef struct {
+	present bool
+	id      domain.TabStableID
+	index   int
+	name    string
+	count   int
 }
 
 // pickerResolveBase carries the live broker connection identity a resolved
@@ -185,8 +211,15 @@ type pickerCatalogue struct {
 	refs         map[string]pickerSelectionRef
 	retired      map[string]pickerSelectionRef
 	retiredOrder []string
+	// lines/cursor are the grouped projection; recent/recentCursor the flat
+	// recency projection. Both carry the same keys and actions.
 	lines        []protocol.PickerLine
 	cursor       protocol.PickerCursor
+	recent       []protocol.PickerLine
+	recentCursor protocol.PickerCursor
+	// current is the attachment the picker is presented over; it only
+	// decides where a fresh cursor starts.
+	current pickerCurrent
 }
 
 // newPickerCatalogue builds an empty projection.
@@ -291,14 +324,44 @@ func (c *pickerCatalogue) Cursor() protocol.PickerCursor {
 	return c.cursor
 }
 
-// projection returns the current rows and cursor hint together.
-func (c *pickerCatalogue) projection() ([]protocol.PickerLine, protocol.PickerCursor) {
+// projections returns the recent and grouped projections together, so both
+// always describe the same publication.
+func (c *pickerCatalogue) projections() (recent, grouped protocol.PickerProjection) {
 	if c == nil {
-		return nil, protocol.PickerCursor{}
+		return protocol.PickerProjection{}, protocol.PickerProjection{}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]protocol.PickerLine(nil), c.lines...), c.cursor
+	recent = protocol.PickerProjection{Lines: append([]protocol.PickerLine(nil), c.recent...), Cursor: c.recentCursor}
+	grouped = protocol.PickerProjection{Lines: append([]protocol.PickerLine(nil), c.lines...), Cursor: c.cursor}
+	return recent, grouped
+}
+
+// RecentLines returns a copy of the flat recency projection.
+func (c *pickerCatalogue) RecentLines() []protocol.PickerLine {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.PickerLine(nil), c.recent...)
+}
+
+// SetCurrent records the attachment the picker is presented over (or none)
+// and recomputes the cursor hints.
+func (c *pickerCatalogue) SetCurrent(current pickerCurrent) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.current == current {
+		return
+	}
+	c.current = current
+	if c.snapshot.Epoch != 0 {
+		c.projectLocked()
+	}
 }
 
 // Ref returns the exact selection identity recorded for one row key, including
@@ -336,6 +399,24 @@ func (c *pickerCatalogue) Resolve(key string, base pickerResolveBase) (ports.Bro
 	return c.resolveRefLocked(ref, base)
 }
 
+// ResolveTarget is Resolve plus the exact tab the row names, both revalidated
+// under one lock against the same publication.
+func (c *pickerCatalogue) ResolveTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+	if c == nil {
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "no catalogue"}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ref, ok := c.refs[key]
+	if !ok {
+		ref, ok = c.retired[key]
+	}
+	if !ok {
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker row is not in the catalogue"}
+	}
+	return resolvePickerTarget(c.snapshot.Epoch, c.authorityForRefLocked(ref), ref, base, true)
+}
+
 // ResolveRef revalidates an exact selection identity a driver captured when it
 // displayed the row. It is the entry point for a selection held across a
 // broker epoch or an equivalent output boundary, where the key alone would be
@@ -357,6 +438,8 @@ func (c *pickerCatalogue) resetLocked() {
 	c.retiredOrder = nil
 	c.lines = nil
 	c.cursor = protocol.PickerCursor{}
+	c.recent = nil
+	c.recentCursor = protocol.PickerCursor{}
 }
 
 // mergeHostsLocked folds the newest publication into the per-daemon state. A
@@ -391,96 +474,6 @@ func (c *pickerCatalogue) mergeHostsLocked() {
 	}
 }
 
-// projectLocked rebuilds the ordered rows and their opaque keys from the
-// current host state. It is deterministic: the same inputs always produce the
-// same keys, order, and actions.
-func (c *pickerCatalogue) projectLocked() {
-	now := c.clock.Now()
-	refs := make(map[string]pickerSelectionRef)
-	lines := make([]protocol.PickerLine, 0, len(c.hosts)*2)
-	for _, key := range c.order {
-		host, ok := c.hosts[key]
-		if !ok {
-			continue
-		}
-		observation := host.observation
-		fresh := c.freshLocked(observation, now)
-		compatible := pickerObservationCompatible(observation)
-		available := observation.Availability == domain.RemoteAvailabilityReachable
-		eligible := compatible && available && fresh
-		origin := pickerOriginLabel(observation)
-		// Admission is deliberately more permissive than eligibility: a stale,
-		// unavailable, or not-yet-observed daemon is still selectable, because
-		// only the destination revalidates the exact identity and only it may
-		// start a stopped target under the resolved policy. Only a known
-		// incompatibility refuses immediately. Eligibility still drives the
-		// informational dimming and badges.
-		admissible := !pickerObservationKnownIncompatible(observation)
-
-		lines = append(lines, protocol.PickerLine{Kind: protocol.PickerLineSection, Label: origin, Dim: true})
-		lines = append(lines, protocol.PickerLine{
-			Key:          pickerHostRowKey(observation),
-			Kind:         protocol.PickerLineHost,
-			Label:        "status",
-			Detail:       pickerHostDetail(observation),
-			Status:       pickerObservationStatus(observation, fresh),
-			StatusDetail: pickerObservationReason(observation, fresh),
-			Focusable:    false,
-		})
-
-		for i := range observation.Sessions {
-			session := observation.Sessions[i]
-			if session.LifecycleID == (domain.SessionLifecycleID{}) {
-				// A session without a lifecycle cannot be addressed exactly and
-				// is never invented into one.
-				continue
-			}
-			ref := pickerSelectionRef{
-				kind:         pickerSelectionExact,
-				epoch:        c.snapshot.Epoch,
-				local:        observation.Local,
-				endpoint:     observation.Endpoint,
-				registration: observation.Registration,
-				lifecycle:    session.LifecycleID,
-				name:         session.Name,
-			}
-			rowKey := pickerSessionRowKey(ref)
-			refs[rowKey] = ref
-			selectable := admissible && session.State != catalogue.RemoteCatalogSessionBroken
-			actions := protocol.PickerLineActions(0)
-			if selectable {
-				actions = protocol.PickerCanNavigate
-			}
-			status := pickerSessionStatus(session)
-			reason := pickerObservationReason(observation, fresh)
-			if reason == "" {
-				reason = session.Reason
-			}
-			lines = append(lines, protocol.PickerLine{
-				Key:          rowKey,
-				Kind:         protocol.PickerLineSession,
-				Label:        session.Name,
-				Detail:       pickerSessionDetail(session),
-				Status:       status,
-				StatusDetail: reason,
-				Stopped:      session.State == catalogue.RemoteCatalogSessionDown,
-				// Dim keeps the informational eligibility signal (fresh,
-				// compatible, reachable) and the hard non-committable state
-				// (known incompatibility, broken session). It never removes the
-				// ability to try an explicit bounded attach or creation.
-				Dim:       !eligible || !selectable,
-				Focusable: true,
-				Actions:   actions,
-				Ephemeral: session.Ephemeral,
-			})
-		}
-	}
-	c.moveRetiredLocked(refs)
-	c.refs = refs
-	c.lines = lines
-	c.cursor = pickerCatalogueCursor(lines)
-}
-
 // moveRetiredLocked keeps the last known ref of a key that left the current
 // projection so a late selection can still be classified as gone or replaced.
 func (c *pickerCatalogue) moveRetiredLocked(next map[string]pickerSelectionRef) {
@@ -503,7 +496,8 @@ func (c *pickerCatalogue) moveRetiredLocked(next map[string]pickerSelectionRef) 
 // resolveRefLocked revalidates exactly one captured selection against the
 // latest applied publication.
 func (c *pickerCatalogue) resolveRefLocked(ref pickerSelectionRef, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	return resolvePickerRequest(c.snapshot.Epoch, c.authorityForRefLocked(ref), ref, base)
+	request, _, err := resolvePickerTarget(c.snapshot.Epoch, c.authorityForRefLocked(ref), ref, base, true)
+	return request, err
 }
 
 // authorityForRefLocked selects the merged observation one selection names. The
@@ -581,21 +575,42 @@ func pickerAuthorityInSnapshot(snapshot ports.BrokerSnapshot, ref pickerSelectio
 // start-if-needed authorization; a policy that forbids launching still refuses
 // visibly at the destination.
 func resolvePickerRequest(epoch ports.BrokerEpoch, authority pickerResolveAuthority, ref pickerSelectionRef, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+	request, _, err := resolvePickerTarget(epoch, authority, ref, base, false)
+	return request, err
+}
+
+// resolvePickerTarget is resolvePickerRequest plus the exact tab a tab row
+// names. refuseFailing is the picker's instant refusal (Plan 003 B4): a
+// remote host the broker observed failing (unreachable, authentication, or an
+// invalid response) refuses with a notice instead of a slow attempt that
+// would fail the same way. An explicit CLI target keeps the attempt.
+func resolvePickerTarget(epoch ports.BrokerEpoch, authority pickerResolveAuthority, ref pickerSelectionRef, base pickerResolveBase, refuseFailing bool) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+	fail := func(err error) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
+	}
 	if epoch == 0 {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "broker catalogue is unavailable"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "broker catalogue is unavailable"})
 	}
 	if ref.epoch != 0 && ref.epoch != epoch {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueEpochStale, Text: "broker epoch changed"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueEpochStale, Text: "broker epoch changed"})
 	}
 	if !authority.found {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueGone, Text: "host is no longer in the catalogue"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueGone, Text: "host is no longer in the catalogue"})
 	}
 	observation := authority.observation
 	if !ref.local && !observation.Registration.Equal(ref.registration) {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "host identity was replaced"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "host identity was replaced"})
 	}
 	if observation.Availability == domain.RemoteAvailabilityIncompatible || pickerObservationVersionMismatch(observation) {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueIncompatible, Text: "host protocol is incompatible"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueIncompatible, Text: "host protocol is incompatible"})
+	}
+	if refuseFailing && !ref.local && pickerObservationFailing(observation) {
+		reason := pickerObservationReason(observation, false)
+		return fail(pickerCatalogueError{
+			Code:   pickerCatalogueUnavailable,
+			Text:   "host " + reason,
+			Notice: pickerUnavailableNotice(ref, observation, reason),
+		})
 	}
 	request := ports.BrokerOpenStreamRequest{
 		Epoch:        epoch,
@@ -614,40 +629,46 @@ func resolvePickerRequest(epoch ports.BrokerEpoch, authority pickerResolveAuthor
 	if !ref.local {
 		request.Endpoint = observation.Endpoint
 	}
+	var tab attachmentTab
 	switch ref.kind {
 	case pickerSelectionExact:
 		session, ok := pickerFindSession(observation.Sessions, ref.lifecycle)
 		if !ok {
 			if pickerSessionReplaced(observation.Sessions, ref) {
-				return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "session identity was replaced"}
+				return fail(pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "session identity was replaced"})
 			}
-			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueGone, Text: "session is no longer in the catalogue"}
+			return fail(pickerCatalogueError{Code: pickerCatalogueGone, Text: "session is no longer in the catalogue"})
 		}
 		if session.Name != ref.name {
 			// The exact identity is the lifecycle/name pair the daemon
 			// revalidates: a renamed lifecycle is a different selection.
-			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "session identity was replaced"}
+			return fail(pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "session identity was replaced"})
 		}
 		if session.State == catalogue.RemoteCatalogSessionBroken {
-			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "session is broken"}
+			return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "session is broken"})
 		}
+		resolved, err := pickerResolveTab(ref, session)
+		if err != nil {
+			return fail(err)
+		}
+		tab = resolved
 		request.Admission = ports.BrokerAdmissionExact
 		request.Target = protocol.ExactSessionTarget{LifecycleID: session.LifecycleID, SessionName: session.Name}
 	case pickerSelectionCreateNamed:
 		if err := domain.ValidateSessionName(ref.createName); err != nil {
-			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueInvalidName, Text: "session name is not valid"}
+			return fail(pickerCatalogueError{Code: pickerCatalogueInvalidName, Text: "session name is not valid"})
 		}
 		request.Admission = ports.BrokerAdmissionCreateNamed
 		request.Name = ref.createName
 	case pickerSelectionCreateEphemeral:
 		request.Admission = ports.BrokerAdmissionCreateEphemeral
 	default:
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker selection kind is unknown"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker selection kind is unknown"})
 	}
 	if err := request.Validate(); err != nil {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker stream request is not valid"}
+		return fail(pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker stream request is not valid"})
 	}
-	return request, nil
+	return request, tab, nil
 }
 
 // freshLocked reports whether LastSuccess is inside the freshness window. An
@@ -657,47 +678,6 @@ func (c *pickerCatalogue) freshLocked(observation ports.BrokerDaemonObservation,
 		return false
 	}
 	return now.Sub(observation.LastSuccess) <= c.freshness
-}
-
-// pickerHostDiagnostic is one bounded, presentation-safe catalogue observation
-// the controller surfaces as a toast.
-type pickerHostDiagnostic struct {
-	Key     string
-	Origin  string
-	Status  protocol.PickerLineStatus
-	Message string
-}
-
-// diagnostics reports actionable host failures. Ordinary observation progress
-// and catalogue aging remain visible on the host status row and never become
-// intrusive toasts.
-func (c *pickerCatalogue) diagnostics() []pickerHostDiagnostic {
-	if c == nil {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.clock.Now()
-	diagnostics := make([]pickerHostDiagnostic, 0, len(c.hosts))
-	for _, key := range c.order {
-		host, ok := c.hosts[key]
-		if !ok {
-			continue
-		}
-		observation := host.observation
-		fresh := c.freshLocked(observation, now)
-		status := pickerObservationStatus(observation, fresh)
-		if status != protocol.PickerLineStatusDown && status != protocol.PickerLineStatusError && status != protocol.PickerLineStatusVersion {
-			continue
-		}
-		diagnostics = append(diagnostics, pickerHostDiagnostic{
-			Key:     pickerHostRowKey(observation),
-			Origin:  pickerOriginLabel(observation),
-			Status:  status,
-			Message: pickerObservationReason(observation, fresh),
-		})
-	}
-	return diagnostics
 }
 
 func pickerDaemonKey(local bool, endpoint string) string {

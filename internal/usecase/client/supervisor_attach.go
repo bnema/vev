@@ -272,22 +272,39 @@ func classifyInitialNavigationFailure(err error) error {
 	return pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation could not be resolved"}
 }
 
-func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, key string) (ports.BrokerOpenStreamRequest, error) {
+func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, key string) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	stream, err := service.NextStreamID()
 	if err != nil {
-		return ports.BrokerOpenStreamRequest{}, err
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
 	base := pickerResolveBase{
 		Connection: service.ConnectionID(),
 		Stream:     stream,
 	}
-	return s.cfg.Picker.ResolveKey(key, base)
+	if resolver, ok := s.cfg.Picker.(pickerTargetResolver); ok {
+		return resolver.ResolveKeyTarget(key, base)
+	}
+	request, err := s.cfg.Picker.ResolveKey(key, base)
+	return request, attachmentTab{}, err
+}
+
+// pickerTargetResolver is the optional tab-aware resolution of the real
+// picker; a scripted picker may resolve sessions only.
+type pickerTargetResolver interface {
+	ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error)
+}
+
+// pickerAttachmentTarget is one resolved attachment: the exact broker stream
+// request and the tab its Hello selects.
+type pickerAttachmentTarget struct {
+	request ports.BrokerOpenStreamRequest
+	tab     attachmentTab
 }
 
 // newAttachmentWorker builds the real typed-session worker for one admitted
 // request. The worker receives no endpoint, route, or raw-mode authority: it
 // only drives the typed session protocol on the stream the supervisor opened.
-func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, beforeAttached func() error, sessionEnv SessionEnvironment) (AttachmentWorker, error) {
+func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, tab attachmentTab, beforeAttached func() error, sessionEnv SessionEnvironment) (AttachmentWorker, error) {
 	geometry, ok := s.attachments.latestGeometry()
 	if !ok {
 		var err error
@@ -308,6 +325,7 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 		BeforeAttached:     beforeAttached,
 		Clock:              s.cfg.Clock,
 		Theme:              &s.theme,
+		Tab:                tab,
 	})
 	if err != nil {
 		return nil, err
@@ -388,24 +406,24 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 		s.reportAttachmentFailure(err)
 		return false, nil
 	}
-	return s.runResolvedAttachment(ctx, input, service, request, SessionEnvironmentLocalCLI)
+	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request}, SessionEnvironmentLocalCLI)
 }
 
 func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, key string) (bool, error) {
 	if s.cfg.Picker == nil {
 		return false, nil
 	}
-	request, err := s.resolveCommittedStreamRequest(service, key)
+	request, tab, err := s.resolveCommittedStreamRequest(service, key)
 	if err != nil {
 		// A refused selection is a typed presentation notice; it never opens a
 		// stream or becomes a session write.
 		s.reportAttachmentFailure(err)
 		return false, nil
 	}
-	return s.runResolvedAttachment(ctx, input, service, request, SessionEnvironmentLocalPicker)
+	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request, tab: tab}, SessionEnvironmentLocalPicker)
 }
 
-func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest, localProvenance SessionEnvironmentProvenance) (bool, error) {
+func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error) {
 	picker := s.cfg.Picker
 	if picker == nil {
 		return false, nil
@@ -416,25 +434,27 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		// Whoever owned the terminal since the last picker frame, the next
 		// frame must draw the whole box again.
 		s.invalidatePickerPresentation()
+		// Back on the plain picker there is no attachment to start on.
+		s.setPickerCurrent(pickerCurrent{})
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
 	for {
-		terminated, termErr, swap := s.attachOnce(ctx, input, service, request, localProvenance)
+		terminated, termErr, swap := s.attachOnce(ctx, input, service, target, localProvenance)
 		if terminated || swap == nil {
 			return terminated, termErr
 		}
 		// A commit from the picker overlay to another target: the previous
 		// attachment detached cleanly, and the swap goes through Connecting
 		// exactly like any committed selection.
-		request, localProvenance = *swap, SessionEnvironmentLocalPicker
+		target, localProvenance = *swap, SessionEnvironmentLocalPicker
 	}
 }
 
 // attachOnce runs one resolved attachment end to end. A non-nil swap names the
-// next request the picker overlay committed while this attachment was live.
-func (s *Supervisor) attachOnce(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest, localProvenance SessionEnvironmentProvenance) (bool, error, *ports.BrokerOpenStreamRequest) {
-	terminated, termErr := s.attachResolved(ctx, input, service, request, localProvenance)
+// next target the picker overlay committed while this attachment was live.
+func (s *Supervisor) attachOnce(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error, *pickerAttachmentTarget) {
+	terminated, termErr := s.attachResolved(ctx, input, service, target, localProvenance)
 	swap := s.pendingSwap
 	s.pendingSwap = nil
 	if terminated {
@@ -443,7 +463,8 @@ func (s *Supervisor) attachOnce(ctx context.Context, input *terminalInputLifetim
 	return false, nil, swap
 }
 
-func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest, localProvenance SessionEnvironmentProvenance) (bool, error) {
+func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error) {
+	request := target.request
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
@@ -479,7 +500,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		return false, nil
 	}
 
-	worker, err := s.newAttachmentWorker(request, func() error {
+	worker, err := s.newAttachmentWorker(request, target.tab, func() error {
 		deadline.disarm()
 		if deadline.expired.Load() {
 			return errAttachmentDeadline
@@ -542,6 +563,8 @@ settlement:
 			overlay.takeOp()
 		case <-overlay.invalidation():
 			overlay.resize()
+		case outcome := <-s.kills.results():
+			s.finishPickerKill(service, outcome)
 		case <-service.Done():
 			brokerLost = true
 			// The broker connection is gone; the supervisor cancels the run and

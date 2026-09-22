@@ -2,7 +2,6 @@ package client
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,36 +169,39 @@ func TestPickerCatalogueEmptySnapshot(t *testing.T) {
 func TestPickerCatalogueProjectionCases(t *testing.T) {
 	clock := newSupervisorTestClock()
 	now := clock.Now()
+	navigateKill := protocol.PickerCanNavigate | protocol.PickerCanKill
 
 	tests := []struct {
-		name            string
-		daemons         []ports.BrokerDaemonObservation
-		wantSections    []string
-		wantSessions    []string
-		wantSessionKeys map[string]bool // label -> action available
-		wantStatus      map[string]protocol.PickerLineStatus
-		wantDim         map[string]bool
+		name         string
+		daemons      []ports.BrokerDaemonObservation
+		wantSections []string
+		wantSessions []string
+		wantActions  map[string]protocol.PickerLineActions
+		wantStatus   map[string]protocol.PickerLineStatus
+		wantDim      map[string]bool
+		wantHostRow  bool
 	}{
 		{
-			name:            "local only",
-			daemons:         []ports.BrokerDaemonObservation{pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up), pickerTestSession("beta", 2, catalogue_Up))},
-			wantSections:    []string{"local"},
-			wantSessions:    []string{"alpha", "beta"},
-			wantSessionKeys: map[string]bool{"alpha": true, "beta": true},
+			name:         "local only",
+			daemons:      []ports.BrokerDaemonObservation{pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up), pickerTestSession("beta", 2, catalogue_Up))},
+			wantSections: []string{"local"},
+			wantSessions: []string{"alpha", "beta"},
+			wantActions:  map[string]protocol.PickerLineActions{"alpha": navigateKill, "beta": navigateKill},
 		},
 		{
-			name:         "unobserved local daemon still projects",
+			name:         "unobserved local daemon with no session shows its status",
 			daemons:      []ports.BrokerDaemonObservation{pickerTestUnobservedObservation(now)},
 			wantSections: []string{"local"},
 			wantSessions: []string{},
 			wantStatus:   map[string]protocol.PickerLineStatus{"local": protocol.PickerLineStatusStale},
+			wantHostRow:  true,
 		},
 		{
-			name:            "no local daemon entry",
-			daemons:         []ports.BrokerDaemonObservation{pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 3, catalogue_Up))},
-			wantSections:    []string{"user@arch"},
-			wantSessions:    []string{"remote-a"},
-			wantSessionKeys: map[string]bool{"remote-a": true},
+			name:         "no local daemon entry",
+			daemons:      []ports.BrokerDaemonObservation{pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 3, catalogue_Up))},
+			wantSections: []string{"user@arch"},
+			wantSessions: []string{"remote-a"},
+			wantActions:  map[string]protocol.PickerLineActions{"remote-a": protocol.PickerCanNavigate},
 		},
 		{
 			name: "stale observation stays explicitly selectable",
@@ -210,14 +212,14 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 					return observation
 				}(),
 			},
-			wantSections:    []string{"local"},
-			wantSessions:    []string{"alpha"},
-			wantSessionKeys: map[string]bool{"alpha": true},
-			wantStatus:      map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusUp, "local": protocol.PickerLineStatusStale},
-			wantDim:         map[string]bool{"alpha": true},
+			wantSections: []string{"local"},
+			wantSessions: []string{"alpha"},
+			wantActions:  map[string]protocol.PickerLineActions{"alpha": navigateKill},
+			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusUp},
+			wantDim:      map[string]bool{"alpha": true},
 		},
 		{
-			name: "unavailable host stays explicitly selectable",
+			name: "unavailable host keeps its rows and hides the redundant status row",
 			daemons: []ports.BrokerDaemonObservation{
 				func() ports.BrokerDaemonObservation {
 					observation := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 3, catalogue_Up))
@@ -225,11 +227,25 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 					return observation
 				}(),
 			},
-			wantSections:    []string{"user@arch"},
-			wantSessions:    []string{"remote-a"},
-			wantSessionKeys: map[string]bool{"remote-a": true},
-			wantStatus:      map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp, "user@arch": protocol.PickerLineStatusDown},
-			wantDim:         map[string]bool{"remote-a": true},
+			wantSections: []string{"user@arch"},
+			wantSessions: []string{"remote-a"},
+			wantActions:  map[string]protocol.PickerLineActions{"remote-a": protocol.PickerCanNavigate},
+			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp},
+			wantDim:      map[string]bool{"remote-a": true},
+		},
+		{
+			name: "unavailable host without sessions shows its status row",
+			daemons: []ports.BrokerDaemonObservation{
+				func() ports.BrokerDaemonObservation {
+					observation := pickerTestRemoteObservation("user@arch", 1, 1, now)
+					observation.Availability = domain.RemoteAvailabilityUnreachable
+					return observation
+				}(),
+			},
+			wantSections: []string{"user@arch"},
+			wantSessions: []string{},
+			wantStatus:   map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusDown},
+			wantHostRow:  true,
 		},
 		{
 			name: "incompatible host",
@@ -240,20 +256,20 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 					return observation
 				}(),
 			},
-			wantSections:    []string{"user@arch"},
-			wantSessions:    []string{"remote-a"},
-			wantSessionKeys: map[string]bool{"remote-a": false},
-			wantStatus:      map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp, "user@arch": protocol.PickerLineStatusVersion},
-			wantDim:         map[string]bool{"remote-a": true},
+			wantSections: []string{"user@arch"},
+			wantSessions: []string{"remote-a"},
+			wantActions:  map[string]protocol.PickerLineActions{"remote-a": 0},
+			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp},
+			wantDim:      map[string]bool{"remote-a": true},
 		},
 		{
-			name:            "broken session",
-			daemons:         []ports.BrokerDaemonObservation{pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Broken))},
-			wantSections:    []string{"local"},
-			wantSessions:    []string{"alpha"},
-			wantSessionKeys: map[string]bool{"alpha": false},
-			wantStatus:      map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusError},
-			wantDim:         map[string]bool{"alpha": true},
+			name:         "broken session is only killable",
+			daemons:      []ports.BrokerDaemonObservation{pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Broken))},
+			wantSections: []string{"local"},
+			wantSessions: []string{"alpha"},
+			wantActions:  map[string]protocol.PickerLineActions{"alpha": protocol.PickerCanKill},
+			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusError},
+			wantDim:      map[string]bool{"alpha": true},
 		},
 	}
 
@@ -264,21 +280,16 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			lines := catalogue.Lines()
 			require.Equal(t, tt.wantSections, pickerSectionLabels(lines))
 			require.Equal(t, tt.wantSessions, pickerSessionLabels(lines))
-			for label, actionable := range tt.wantSessionKeys {
+			_, hasHost := pickerHostLine(lines)
+			require.Equal(t, tt.wantHostRow, hasHost, "a host status row is published only when it adds information")
+			for label, actions := range tt.wantActions {
 				line, ok := pickerLineByLabel(lines, label)
 				require.True(t, ok, "session %q must be projected", label)
 				require.True(t, line.Focusable, "a projected row is always a cursor destination")
-				if actionable {
-					require.Equal(t, protocol.PickerCanNavigate, line.Actions, "an eligible row admits navigation")
-				} else {
-					require.Zero(t, line.Actions, "a refused row is inspectable but never committable")
-				}
+				require.Equal(t, actions, line.Actions, "row %q actions", label)
 			}
 			for label, status := range tt.wantStatus {
 				line, ok := pickerLineByLabel(lines, label)
-				if !ok && (label == "local" || strings.Contains(label, "@")) {
-					line, ok = pickerHostLine(lines)
-				}
 				require.True(t, ok, "row %q must be projected", label)
 				require.Equal(t, status, line.Status, "row %q badge", label)
 			}
@@ -322,6 +333,7 @@ func TestPickerCatalogueMonotonicUpdates(t *testing.T) {
 // catalogue state into every literal.
 const (
 	catalogue_Up     = catalogue.RemoteCatalogSessionState("up")
+	catalogue_Down   = catalogue.RemoteCatalogSessionState("down")
 	catalogue_Broken = catalogue.RemoteCatalogSessionState("broken")
 )
 
@@ -510,11 +522,24 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 			wantErr: pickerCatalogueIncompatible,
 		},
 		{
-			name: "unavailable host is still explicitly selectable",
+			// Plan 003 B4: a remote host the broker observed failing refuses
+			// instantly instead of a slow attempt that fails the same way.
+			name: "unreachable remote host refuses instantly",
 			build: func(t *testing.T, catalogue *pickerCatalogue, _ *supervisorTestClock) string {
 				unavailable := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 2, catalogue_Up))
 				unavailable.Availability = domain.RemoteAvailabilityUnreachable
 				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unavailable}}))
+				line, ok := pickerLineByLabel(catalogue.Lines(), "remote-a")
+				require.True(t, ok)
+				return line.Key
+			},
+			wantErr: pickerCatalogueUnavailable,
+		},
+		{
+			name: "stale reachable remote host stays attemptable",
+			build: func(t *testing.T, catalogue *pickerCatalogue, _ *supervisorTestClock) string {
+				stale := pickerTestRemoteObservation("user@arch", 1, 1, now.Add(-24*time.Hour), pickerTestSession("remote-a", 2, catalogue_Up))
+				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{stale}}))
 				line, ok := pickerLineByLabel(catalogue.Lines(), "remote-a")
 				require.True(t, ok)
 				return line.Key
@@ -891,17 +916,14 @@ func TestPickerCatalogueUnobservedDaemonProjects(t *testing.T) {
 	lines := catalogue.Lines()
 	require.Equal(t, []string{"local"}, pickerSectionLabels(lines))
 	require.Equal(t, []string{"alpha"}, pickerSessionLabels(lines))
-	host, ok := pickerHostLine(lines)
-	require.True(t, ok)
-	require.Equal(t, "status", host.Label)
-	require.False(t, host.Focusable, "host status is informational, not a duplicate destination")
-	require.Equal(t, protocol.PickerLineStatusStale, host.Status)
-	require.Equal(t, domain.RemoteReasonRefreshing, host.StatusDetail, "an unobserved daemon refreshes, it is not a version mismatch")
+	_, hasHost := pickerHostLine(lines)
+	require.False(t, hasHost, "the session rows already carry the host state")
 	session, ok := pickerLineByLabel(lines, "alpha")
 	require.True(t, ok)
 	require.True(t, session.Focusable)
-	require.Equal(t, protocol.PickerCanNavigate, session.Actions, "an unobserved daemon may still be attempted explicitly")
+	require.Equal(t, protocol.PickerCanNavigate|protocol.PickerCanKill, session.Actions, "an unobserved daemon may still be attempted explicitly")
 	require.True(t, session.Dim)
+	require.Equal(t, domain.RemoteReasonRefreshing, session.StatusDetail, "an unobserved daemon refreshes, it is not a version mismatch")
 }
 
 // TestPickerCatalogueOriginLabelNeverShowsRawEndpoint proves display labels

@@ -609,6 +609,7 @@ func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.Broke
 		decided:    true,
 		onAttached: h.onAttach,
 		repaint:    make(chan struct{}, 1),
+		tabSelect:  make(chan domain.TabStableID, 1),
 	}
 }
 
@@ -664,16 +665,23 @@ func (h *attachmentHost) endNavigationOverlay() {
 // output for, so the supervisor can tell a commit to the attached session from
 // a commit elsewhere.
 func (h *attachmentHost) committedTarget() (protocol.ExactSessionTarget, bool) {
+	target, _, ok := h.committedView()
+	return target, ok
+}
+
+// committedView reports the session and the tab the current foreground last
+// committed output for.
+func (h *attachmentHost) committedView() (protocol.ExactSessionTarget, domain.TabStableID, bool) {
 	if h == nil {
-		return protocol.ExactSessionTarget{}, false
+		return protocol.ExactSessionTarget{}, "", false
 	}
 	fg := h.authority.foreground()
 	if fg == nil {
-		return protocol.ExactSessionTarget{}, false
+		return protocol.ExactSessionTarget{}, "", false
 	}
 	fg.overlayMu.Lock()
 	defer fg.overlayMu.Unlock()
-	return fg.committed, fg.committedKnown
+	return fg.committed, fg.committedTab, fg.committedKnown
 }
 
 // committedTargetOrZero is committedTarget with an unknown target as zero.
@@ -683,6 +691,29 @@ func (h *attachmentHost) committedTargetOrZero() protocol.ExactSessionTarget {
 		return protocol.ExactSessionTarget{}
 	}
 	return target
+}
+
+// requestTabSelection asks the current foreground's worker to show one tab of
+// its attached session in place. The newest request replaces an unsent one.
+func (h *attachmentHost) requestTabSelection(token AttachmentToken, tab domain.TabStableID) bool {
+	if h == nil || tab == "" {
+		return false
+	}
+	fg := h.authority.foreground()
+	if fg == nil || fg.token != token {
+		return false
+	}
+	for {
+		select {
+		case fg.tabSelect <- tab:
+			return true
+		default:
+		}
+		select {
+		case <-fg.tabSelect:
+		default:
+		}
+	}
 }
 
 // requestDetach asks the current foreground's worker to detach explicitly, so
@@ -721,7 +752,8 @@ type attachmentOverlayForeground interface {
 	divertInput(data []byte) bool
 	overlayRepaint() <-chan struct{}
 	overlayOutput(uiContext ports.UIContext, data []byte) error
-	noteCommitted(target protocol.ExactSessionTarget)
+	noteCommitted(target protocol.ExactSessionTarget, tab domain.TabStableID)
+	tabSelections() <-chan domain.TabStableID
 }
 
 var _ attachmentOverlayForeground = (*attachmentForeground)(nil)
@@ -833,14 +865,23 @@ func (f *attachmentForeground) overlayRepaint() <-chan struct{} {
 	return f.repaint
 }
 
-func (f *attachmentForeground) noteCommitted(target protocol.ExactSessionTarget) {
+func (f *attachmentForeground) noteCommitted(target protocol.ExactSessionTarget, tab domain.TabStableID) {
 	if f == nil {
 		return
 	}
 	f.overlayMu.Lock()
 	f.committed = target
+	f.committedTab = tab
 	f.committedKnown = true
 	f.overlayMu.Unlock()
+}
+
+// tabSelections carries the supervisor's in-place tab switches to the worker.
+func (f *attachmentForeground) tabSelections() <-chan domain.TabStableID {
+	if f == nil {
+		return nil
+	}
+	return f.tabSelect
 }
 
 // overlayOutput writes one overlay frame through the same lease and UI
@@ -1026,10 +1067,13 @@ type attachmentForeground struct {
 	overlay        attachmentOverlayKind
 	overlaySink    pickerInputConsumer
 	committed      protocol.ExactSessionTarget
+	committedTab   domain.TabStableID
 	committedKnown bool
 	// repaint wakes the worker to request an authoritative repaint once an
 	// overlay released the terminal.
 	repaint chan struct{}
+	// tabSelect carries one pending in-place tab switch to the worker.
+	tabSelect chan domain.TabStableID
 }
 
 // Token is the generation/attempt identity of this grant.

@@ -509,7 +509,7 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 			attached := newSessionTestAttachments()
 			supervisor := &Supervisor{cfg: SupervisorConfig{Terminal: terminal, AttachmentEnvironment: tt.env}, clientID: [16]byte{1}}
 			request := sessionTestRequest(true)
-			worker, err := supervisor.newAttachmentWorker(request, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
+			worker, err := supervisor.newAttachmentWorker(request, attachmentTab{}, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
 			require.NoError(t, err)
 			events := make(chan AttachmentEvent, 1)
 			host := newWorkerTestHost(terminal, nil, attached.record)

@@ -2,12 +2,14 @@ package client
 
 import (
 	"bytes"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -102,7 +104,12 @@ type pickerController struct {
 	// lastCommitKey is the catalogue key captured with the pending commit
 	// decision, so TakeOp can hand a driver the exact committed row.
 	lastCommitKey string
-	preview       pickerusecase.Preview
+	// lastKillKey is the catalogue key captured with a pending kill decision.
+	lastKillKey string
+	// noticedFailures records the failure episode already toasted per remote
+	// host, so one outage toasts once (main's notifyNewRemoteFailures).
+	noticedFailures map[string]uint64
+	preview         pickerusecase.Preview
 	// flushStop cancels the armed lone-escape flush. It is non-nil exactly
 	// while one flush is armed for the currently withheld prefix.
 	flushStop chan struct{}
@@ -195,8 +202,11 @@ func (p *pickerController) recordOpLocked(op pickerOp) {
 	if op.commit {
 		p.lastCommitKey = p.commitKeyLocked()
 	}
+	if op.kill {
+		p.lastKillKey = p.killKeyLocked()
+	}
 	p.lastOp = mergePickerOps(p.lastOp, op)
-	if p.lastOp.commit || p.lastOp.close {
+	if p.lastOp.commit || p.lastOp.close || p.lastOp.kill {
 		// Coalesce exactly one wakeup: a driver that has not yet run TakeOp
 		// re-reads the accumulated decision, so a dropped signal is harmless.
 		select {
@@ -229,6 +239,19 @@ func (p *pickerController) commitKeyLocked() string {
 	return selection.Key
 }
 
+// killKeyLocked returns the opaque catalogue key of the row under the cursor
+// when it authorises destruction, or the empty string.
+func (p *pickerController) killKeyLocked() string {
+	if p.loop == nil {
+		return ""
+	}
+	selection, ok := killSelection(p.loop, 0)
+	if !ok {
+		return ""
+	}
+	return selection.Key
+}
+
 // TakeOp returns and clears the accumulated presentation decision since the
 // last call, together with the catalogue key of the row the commit decision
 // selected at the moment it was recorded. Resolving that key with ResolveKey
@@ -243,8 +266,14 @@ func (p *pickerController) TakeOp() (pickerOp, string) {
 	defer p.mu.Unlock()
 	op := p.lastOp
 	key := p.lastCommitKey
+	if !op.commit {
+		// A kill carries its own captured row; a commit in the same read wins
+		// because it leaves the picker anyway.
+		key = p.lastKillKey
+	}
 	p.lastOp = pickerOp{}
 	p.lastCommitKey = ""
+	p.lastKillKey = ""
 	return op, key
 }
 
@@ -392,7 +421,15 @@ func (p *pickerController) PreviewRequest(connection ports.BrokerConnectionID, s
 		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
 	}
 	session, ok := pickerFindSession(authority.observation.Sessions, ref.lifecycle)
-	if !ok || session.State == "down" || session.ActiveTabID == "" {
+	if !ok || session.State != catalogue.RemoteCatalogSessionUp {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	// A tab row previews its own tab; a session row previews the active one.
+	previewTab := domain.TabStableID(session.ActiveTabID)
+	if ref.tab.present {
+		previewTab = ref.tab.id
+	}
+	if previewTab == "" {
 		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
 	}
 	viewport := pickerPreviewSize(size)
@@ -402,7 +439,7 @@ func (p *pickerController) PreviewRequest(connection ports.BrokerConnectionID, s
 		// local daemon; "local" is the broker's canonical local authority.
 		endpoint = "local"
 	}
-	target := domain.RemoteSessionTarget{Endpoint: endpoint, DisplayOrigin: authority.observation.DisplayOrigin, LifecycleID: session.LifecycleID, SessionName: session.Name, LiveTabID: domain.TabStableID(session.ActiveTabID)}
+	target := domain.RemoteSessionTarget{Endpoint: endpoint, DisplayOrigin: authority.observation.DisplayOrigin, LifecycleID: session.LifecycleID, SessionName: session.Name, LiveTabID: previewTab}
 	preview := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: clampPreviewDimension(viewport.Cols, protocol.RemotePreviewMaxWidth), Height: clampPreviewDimension(viewport.Rows, protocol.RemotePreviewMaxHeight)}
 	route.Purpose = ports.BrokerStreamObservation
 	route.Admission = 0
@@ -510,12 +547,66 @@ func (p *pickerController) ResolveKey(key string, base pickerResolveBase) (ports
 		}
 		return ports.BrokerOpenStreamRequest{}, err
 	}
-	request, err := p.catalogue.Resolve(key, base)
-	if err != nil {
-		p.offerNotice("picker-refusal", err.Error())
-		return ports.BrokerOpenStreamRequest{}, err
+	request, _, err := p.ResolveKeyTarget(key, base)
+	return request, err
+}
+
+// ResolveKeyTarget is ResolveKey plus the exact tab the committed row names.
+func (p *pickerController) ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+	if p == nil || p.catalogue == nil {
+		err := pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
+		if p != nil {
+			p.offerNotice("picker-refusal", err.Error())
+		}
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
-	return request, nil
+	request, tab, err := p.catalogue.ResolveTarget(key, base)
+	if err != nil {
+		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
+	}
+	return request, tab, nil
+}
+
+// ResolveKill revalidates one kill key; a refusal is surfaced as a notice.
+func (p *pickerController) ResolveKill(key string) (pickerKillTarget, error) {
+	if p == nil || p.catalogue == nil {
+		return pickerKillTarget{}, pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
+	}
+	target, err := p.catalogue.ResolveKill(key)
+	if err != nil {
+		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
+		return pickerKillTarget{}, err
+	}
+	return target, nil
+}
+
+// SetCurrent names the attachment the picker is about to be presented over
+// (or none) and restarts the presentation, so a fresh picker opens with the
+// cursor on that session's tab and no leftover search, exactly as each daemon
+// interaction did on main.
+func (p *pickerController) SetCurrent(current pickerCurrent) {
+	if p == nil || p.catalogue == nil {
+		return
+	}
+	p.catalogue.SetCurrent(current)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.catalogue.Epoch() == 0 {
+		return
+	}
+	p.loop = nil
+	p.rebuildLocked()
+	p.renderer.invalidate()
+}
+
+// pickerRefusalNotice is the toast text for one resolution refusal.
+func pickerRefusalNotice(err error) string {
+	var typed pickerCatalogueError
+	if errors.As(err, &typed) {
+		return typed.noticeText()
+	}
+	return err.Error()
 }
 
 // displayedKey names the row under the cursor, whether or not it admits an
@@ -577,42 +668,53 @@ func (p *pickerController) handleRead(data []byte) bool {
 }
 
 func (p *pickerController) rebuildLocked() {
-	lines, cursor := p.catalogue.projection()
+	recent, grouped := p.catalogue.projections()
 	revision := uint64(p.catalogue.Revision())
-	if p.loop == nil {
-		p.interaction++
-		p.loop = pickerLoopFromSnapshot(protocol.PickerSnapshot{
+	snapshot := func() protocol.PickerSnapshot {
+		return protocol.PickerSnapshot{
 			InteractionID:  p.interaction,
 			SourceID:       pickerCatalogueSourceID,
 			SourceRevision: revision,
-			Lines:          lines,
-			Cursor:         cursor,
-		}, protocol.PickerIntentNavigation, defaultPickerSort())
+			Lines:          grouped.Lines,
+			Cursor:         grouped.Cursor,
+			Recent:         recent,
+			Grouped:        grouped,
+		}
+	}
+	if p.loop == nil {
+		p.interaction++
+		p.loop = pickerLoopFromSnapshot(snapshot(), protocol.PickerIntentNavigation, defaultPickerSort())
 		return
 	}
-	p.loop.replaceLines(protocol.PickerSnapshot{
-		InteractionID:  p.interaction,
-		SourceID:       pickerCatalogueSourceID,
-		SourceRevision: revision,
-		Lines:          lines,
-		Cursor:         cursor,
-	})
+	p.loop.replaceLines(snapshot())
 }
 
-// offerDiagnosticsLocked surfaces every host that is not a clean, fresh,
-// compatible, reachable daemon as a bounded toast. The toast manager keeps one
-// entry per host key, so the notices stay bounded regardless of update rate.
+// offerDiagnosticsLocked toasts each remote host failure once per failure
+// episode (main's notifyNewRemoteFailures). Ordinary observation progress and
+// catalogue aging stay on the rows; a recovered host forgets its episode so a
+// later outage toasts again.
 func (p *pickerController) offerDiagnosticsLocked() {
-	for _, diagnostic := range p.catalogue.diagnostics() {
-		if diagnostic.Message == "" {
+	failing := make(map[string]struct{})
+	for _, failure := range p.catalogue.failures() {
+		failing[failure.key] = struct{}{}
+		if noticed, ok := p.noticedFailures[failure.key]; ok && noticed == failure.episode {
 			continue
 		}
+		if p.noticedFailures == nil {
+			p.noticedFailures = make(map[string]uint64)
+		}
+		p.noticedFailures[failure.key] = failure.episode
 		p.notices.Show(p.clock.Now(), ui.Toast{
-			ID:       "picker-host:" + diagnostic.Key,
-			Message:  diagnostic.Origin + ": " + diagnostic.Message,
+			ID:       "picker-host:" + failure.key,
+			Message:  failure.message,
 			Anchor:   domain.AnchorCenter,
 			Duration: pickerNoticeLifetime,
 		})
+	}
+	for key := range p.noticedFailures {
+		if _, ok := failing[key]; !ok {
+			delete(p.noticedFailures, key)
+		}
 	}
 }
 

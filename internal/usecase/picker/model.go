@@ -535,6 +535,10 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			continue
 		}
 		if r.rendersAsHeader() {
+			if r.line.Attention && x < contentClipX {
+				// A session header rings when any of its tabs does.
+				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, " "+string(ui.AttentionGlyph), base)
+			}
 			if r.line.Detail != "" && x < contentClipX {
 				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, " ", detailStyle)
 			}

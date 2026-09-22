@@ -409,7 +409,9 @@ type Supervisor struct {
 	// pendingSwap is the request the picker overlay committed to another
 	// target while an attachment was live. It is only touched from the run
 	// goroutine and consumed by runResolvedAttachment.
-	pendingSwap *ports.BrokerOpenStreamRequest
+	pendingSwap *pickerAttachmentTarget
+	// kills runs the picker's `x` operations off the run goroutine.
+	kills pickerKills
 }
 
 // NewSupervisor validates the required dependencies and returns a supervisor
@@ -508,6 +510,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		sub     ports.BrokerSubscription
 	)
 	retire := func() {
+		s.retirePickerKill()
 		s.preview.close(s.cfg.Picker)
 		s.readySub = nil
 		if sub != nil {
@@ -825,8 +828,15 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 			if s.preview.publish(s.cfg.Picker) {
 				s.renderCurrent()
 			}
+		case outcome := <-s.kills.results():
+			s.finishPickerKill(service, outcome)
 		case <-ops:
 			op, key := s.cfg.Picker.TakeOp()
+			if op.kill && !op.commit && !op.close {
+				s.startPickerKill(service, key)
+				s.renderCurrent()
+				continue
+			}
 			if !op.close && !op.commit {
 				s.refreshPreview(service)
 				s.renderCurrent()
@@ -890,6 +900,11 @@ func (s *Supervisor) takePickerClose() bool {
 	}
 	if op.close && !op.exit {
 		s.offerPickerNotice("picker-exit-hint", "no session attached: press Ctrl+C to quit")
+		s.renderCurrent()
+	}
+	if op.kill && !op.commit && !op.close && key != "" {
+		// A kill needs the broker's control stream; it is refused, not queued.
+		s.offerPickerNotice("picker-kill", "couldn't kill: broker unavailable")
 		s.renderCurrent()
 	}
 	return op.close && op.exit

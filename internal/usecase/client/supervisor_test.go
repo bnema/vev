@@ -329,6 +329,7 @@ type supervisorTestService struct {
 	openStream func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)
 	openCalls  []ports.BrokerOpenStreamRequest
 	nextStream ports.BrokerStreamID
+	reconciles []string
 }
 
 func newSupervisorTestService(id ports.BrokerConnectionID) *supervisorTestService {
@@ -416,7 +417,18 @@ func (s *supervisorTestService) UpdateHostPolicy(context.Context, domain.RemoteR
 	return domain.RemoteRegistration{}, nil
 }
 
-func (s *supervisorTestService) RequestReconcile(string) {}
+func (s *supervisorTestService) RequestReconcile(endpoint string) {
+	s.mu.Lock()
+	s.reconciles = append(s.reconciles, endpoint)
+	s.mu.Unlock()
+}
+
+// reconcileHints returns every re-observation hint the supervisor asked for.
+func (s *supervisorTestService) reconcileHints() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.reconciles...)
+}
 
 func (s *supervisorTestService) Close() error {
 	s.closeOnce.Do(func() {

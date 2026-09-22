@@ -1,11 +1,13 @@
 package picker
 
 import (
+	"strings"
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/stretchr/testify/require"
 )
 
@@ -319,6 +321,30 @@ func TestRenderAttentionMarkerFollowsTheTabName(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 60, Rows: 6}, Preview{})
 	require.Contains(t, rowText(frame.Row(1)), "build")
 	require.NotEqual(t, rowText(frame.Row(0)), rowText(frame.Row(1)))
+}
+
+// TestRenderAttentionBellOnHeadersAndTabs pins Plan 003 C1: a session header
+// and a tab row both draw the bell right after their name when they ring, and
+// neither draws it otherwise.
+func TestRenderAttentionBellOnHeadersAndTabs(t *testing.T) {
+	bell := string(ui.AttentionGlyph)
+	tests := []struct {
+		name string
+		line protocol.PickerLine
+		want bool
+	}{
+		{name: "ringing header", line: protocol.PickerLine{Key: "s1", Kind: protocol.PickerLineSession, Label: "work", Detail: "attached", Attention: true}, want: true},
+		{name: "quiet header", line: protocol.PickerLine{Key: "s1", Kind: protocol.PickerLineSession, Label: "work", Detail: "attached"}},
+		{name: "ringing tab", line: protocol.PickerLine{Key: "t1", Kind: protocol.PickerLineTab, Label: "build", Attention: true, Focusable: true, Actions: protocol.PickerCanNavigate}, want: true},
+		{name: "quiet tab", line: protocol.PickerLine{Key: "t1", Kind: protocol.PickerLineTab, Label: "build", Focusable: true, Actions: protocol.PickerCanNavigate}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New([]protocol.PickerLine{tt.line}, Config{Intent: protocol.PickerIntentNavigation})
+			text := rowText(m.Render(domain.Size{Cols: 60, Rows: 6}, Preview{}).Row(0))
+			require.Equal(t, tt.want, strings.Contains(text, tt.line.Label+" "+bell), "row %q", text)
+		})
+	}
 }
 
 func TestSearchMatchesLabelsAndDetails(t *testing.T) {
