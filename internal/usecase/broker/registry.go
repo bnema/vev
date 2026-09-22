@@ -133,6 +133,12 @@ type Registry struct {
 	local        *LocalObservation
 	localHost    ports.BrokerDaemonObservation
 	localAttempt *probeAttempt
+	// localPending marks explicit demand for a local re-probe ahead of its
+	// scheduled freshness window: RequestProbe("") and a completed local control
+	// stream or attach both set it. dispatchLocalLocked honors it the same way
+	// pending honors remote demand, admitting the attempt before NextDue and
+	// clearing the flag the moment the attempt starts.
+	localPending bool
 
 	freshFor  time.Duration
 	retryBase time.Duration
@@ -835,13 +841,21 @@ func (r *Registry) cancelAllInflightLocked() {
 
 // RequestProbe is non-blocking and coalesces concurrent demand per endpoint.
 // A disabled registry never observes, so the demand is dropped without
-// scheduling anything.
+// scheduling anything. An empty endpoint requests a local re-probe instead of a
+// configured remote: the broker's own machine daemon is re-observed ahead of
+// its scheduled freshness window, honored by dispatchLocalLocked exactly like
+// pending honors remote demand. A registry with no local observation producer
+// drops it, just like an unknown remote endpoint is dropped.
 func (r *Registry) RequestProbe(endpoint string) {
 	if r.observationDisabled {
 		return
 	}
 	r.mu.Lock()
-	if _, ok := r.hosts[endpoint]; ok {
+	if endpoint == "" {
+		if r.local != nil {
+			r.localPending = true
+		}
+	} else if _, ok := r.hosts[endpoint]; ok {
 		r.pending[endpoint] = true
 	}
 	r.mu.Unlock()

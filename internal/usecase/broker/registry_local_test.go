@@ -69,6 +69,20 @@ func receiveLocalCall(t *testing.T, probe *scriptedLocalProbe) localProbeCall {
 	}
 }
 
+// requireNoLocalProbeWithin asserts a negative scheduling outcome: no local
+// probe attempt starts inside window, so the test observes "nothing happened"
+// without sleeping on the behavior under test.
+func requireNoLocalProbeWithin(t *testing.T, probe *scriptedLocalProbe, window time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case <-probe.calls:
+		t.Fatal("unexpected local probe attempt")
+	case <-timer.C:
+	}
+}
+
 // newLocalTestRegistry builds a registry that observes the broker's own machine
 // daemon through localProbe, beside an optional remote probe.
 func newLocalTestRegistry(t *testing.T, store ports.BrokerHostStore, remoteProbe ports.BrokerHostProbe, localProbe LocalProbe, clock *manualClock) *Registry {
@@ -196,6 +210,82 @@ func TestRegistryLocalObservationNeverInventsState(t *testing.T) {
 		require.NotEqual(t, hostilePolicy, host.Policy)
 		require.Zero(t, host.Rank)
 	})
+}
+
+// TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly proves the local
+// pending re-probe flag (set by RequestProbe("")) is the only thing that
+// admits a local attempt ahead of its scheduled NextDue: neither an explicit
+// unknown result nor a plain success schedules an early re-probe on its own,
+// but a reconcile requested right after either one is dispatched immediately,
+// on the fake clock, with no time advance at all. This is the fix for the
+// stale local catalogue after create/attach (`ls --all`/the picker showing a
+// new or newly-attached session for up to the retry/fresh interval): the
+// service now calls RequestProbe("") once a local control or attachment
+// stream completes, and this test pins the registry-side half of that fix.
+func TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly(t *testing.T) {
+	reachable := localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+		Identity:        "local-daemon",
+		Incarnation:     ports.BrokerDaemonIncarnation{9},
+		ProtocolVersion: protocol.Version,
+		Availability:    domain.RemoteAvailabilityReachable,
+	}}
+	unknown := localProbeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnknown}}
+
+	tests := []struct {
+		name             string
+		first            localProbeAnswer
+		requestReconcile bool
+		wantReprobe      bool
+	}{
+		{
+			name:        "after an unknown result, no reconcile never re-probes before due",
+			first:       unknown,
+			wantReprobe: false,
+		},
+		{
+			name:        "after a success, no reconcile never re-probes before due",
+			first:       reachable,
+			wantReprobe: false,
+		},
+		{
+			name:             "after an unknown result, an explicit local reconcile re-probes before due",
+			first:            unknown,
+			requestReconcile: true,
+			wantReprobe:      true,
+		},
+		{
+			name:             "after a success, an explicit local reconcile re-probes before due",
+			first:            reachable,
+			requestReconcile: true,
+			wantReprobe:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := newManualClock(time.Unix(100, 0))
+			local := newScriptedLocalProbe(2)
+			registry := newLocalTestRegistry(t, newTestStore(), nil, local, clock)
+			startRegistry(t, registry)
+
+			call := receiveLocalCall(t, local)
+			call.result <- tt.first
+			waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
+
+			if tt.requestReconcile {
+				registry.RequestProbe("")
+			}
+
+			// No clock advance at all: NextDue (freshFor after success, the retry
+			// delay after unknown) is still in the future either way, so only the
+			// pending flag - never the schedule - can explain a dispatch here.
+			if tt.wantReprobe {
+				receiveLocalCall(t, local)
+			} else {
+				requireNoLocalProbeWithin(t, local, probeGrace)
+			}
+		})
+	}
 }
 
 // TestRegistryLocalObservationValidatesProbeResults proves an invalid observed

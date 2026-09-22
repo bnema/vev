@@ -266,6 +266,17 @@ func (s *Service) OpenStream(ctx context.Context, request ports.BrokerOpenStream
 	go func() {
 		<-stream.Done()
 		release()
+		// A completed local control or attachment stream is the natural signal
+		// that the local daemon's own catalogue may have just changed (a session
+		// was created, killed, or its attachment state flipped): mark a local
+		// re-probe pending so the next dispatch observes it ahead of the
+		// freshness window instead of leaving `ls --all`/the picker stale for up
+		// to the retry/fresh interval. An observation stream never triggers this:
+		// it is the probe traffic itself, and re-arming from it would starve the
+		// schedule instead of catching up to it.
+		if request.Local && (request.Purpose == ports.BrokerStreamControl || request.Purpose == ports.BrokerStreamAttachment) {
+			s.registry.RequestProbe("")
+		}
 	}()
 	return stream, nil
 }

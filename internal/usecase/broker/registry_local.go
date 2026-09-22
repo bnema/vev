@@ -79,15 +79,18 @@ func (l *LocalObservation) validate() error {
 }
 
 // dispatchLocalLocked admits at most one local probe attempt when its schedule
-// says it is due. Callers must hold r.mu. It reports whether an attempt
-// started, so dispatch publishes the transient Checking state exactly once.
+// says it is due, or immediately when localPending marks explicit demand for a
+// re-probe ahead of schedule. Callers must hold r.mu. It reports whether an
+// attempt started, so dispatch publishes the transient Checking state exactly
+// once.
 func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, results chan<- probeResult) bool {
 	if r.local == nil || r.localAttempt != nil {
 		return false
 	}
-	if !r.localHost.NextDue.IsZero() && now.Before(r.localHost.NextDue) {
+	if !r.localPending && !r.localHost.NextDue.IsZero() && now.Before(r.localHost.NextDue) {
 		return false
 	}
+	r.localPending = false
 	r.attempts++
 	attempt := r.attempts
 	probeCtx, cancel := context.WithCancel(ctx)
