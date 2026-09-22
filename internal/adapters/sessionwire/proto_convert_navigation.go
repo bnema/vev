@@ -71,7 +71,23 @@ func recentRouteEntryToWire(entry protocol.RecentRouteEntry) (*wire.RecentRouteE
 		Ephemeral:    entry.Ephemeral,
 		Attention:    entry.Attention,
 		Reachability: uint32(entry.Reachability),
+		AttentionSeq: entry.AttentionSeq,
 	}, nil
+}
+
+func routeHostToWire(host protocol.RouteHost) *wire.RouteHost {
+	return &wire.RouteHost{Key: host.Key, Generation: host.Generation, Label: host.Label, Kind: uint32(host.Kind)}
+}
+
+func routeHostFromWire(message *wire.RouteHost) (protocol.RouteHost, error) {
+	if message == nil {
+		return protocol.RouteHost{}, protocol.ErrInvalidRouteWire
+	}
+	kind, err := enum8[protocol.RouteKind](message.GetKind())
+	if err != nil {
+		return protocol.RouteHost{}, err
+	}
+	return protocol.RouteHost{Key: message.GetKey(), Generation: message.GetGeneration(), Label: message.GetLabel(), Kind: kind}, nil
 }
 
 func recentRouteEntryFromWire(message *wire.RecentRouteEntry) (protocol.RecentRouteEntry, error) {
@@ -98,6 +114,7 @@ func recentRouteEntryFromWire(message *wire.RecentRouteEntry) (protocol.RecentRo
 	if err != nil {
 		return protocol.RecentRouteEntry{}, err
 	}
+	entry.AttentionSeq = message.GetAttentionSeq()
 	return entry, nil
 }
 

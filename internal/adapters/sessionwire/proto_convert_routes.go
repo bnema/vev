@@ -175,6 +175,9 @@ func recentRouteSnapshotToWire(message protocol.RecentRouteSnapshot) (*wire.Rece
 		}
 		out.Entries = append(out.Entries, converted)
 	}
+	for _, host := range message.Hosts {
+		out.Hosts = append(out.Hosts, routeHostToWire(host))
+	}
 	return out, nil
 }
 
@@ -198,6 +201,13 @@ func recentRouteSnapshotFromWire(message *wire.RecentRouteSnapshot) (protocol.Re
 			return protocol.RecentRouteSnapshot{}, err
 		}
 		snapshot.Entries = append(snapshot.Entries, converted)
+	}
+	for _, host := range message.GetHosts() {
+		converted, err := routeHostFromWire(host)
+		if err != nil {
+			return protocol.RecentRouteSnapshot{}, err
+		}
+		snapshot.Hosts = append(snapshot.Hosts, converted)
 	}
 	if err := snapshot.Validate(); err != nil {
 		return protocol.RecentRouteSnapshot{}, err

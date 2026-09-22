@@ -349,6 +349,19 @@ type RecentRouteEntry struct {
 	Ephemeral    bool
 	Attention    bool
 	Reachability RouteReachability
+	// AttentionSeq orders attention onsets across every daemon the client
+	// observes: a smaller value is older. It is zero without attention.
+	AttentionSeq uint64
+}
+
+// RouteHost is one daemon the client can create a session on, other than
+// the serving daemon. Its reference shares the entry namespace; it carries
+// no endpoint, dialer, or credential.
+type RouteHost struct {
+	Key        uint64
+	Generation uint64
+	Label      string
+	Kind       RouteKind
 }
 
 // RecentRouteSnapshot is an immutable, bounded publication of the client
@@ -363,6 +376,8 @@ type RecentRouteSnapshot struct {
 	Previous    RouteRef
 	Home        RouteRef
 	Entries     []RecentRouteEntry
+	// Hosts are the creation destinations besides the serving daemon.
+	Hosts []RouteHost
 }
 
 // validateRecentRouteEntry enforces one entry's identity and display bounds.
@@ -388,6 +403,22 @@ func validateRecentRouteEntry(entry RecentRouteEntry) error {
 	if entry.Reachability.Validate() != nil {
 		return fmt.Errorf("%w: invalid route reachability", ErrInvalidRouteWire)
 	}
+	if entry.AttentionSeq != 0 && !entry.Attention {
+		return fmt.Errorf("%w: attention order without attention", ErrInvalidRouteWire)
+	}
+	return nil
+}
+
+func validateRouteHost(host RouteHost) error {
+	if host.Key == 0 || host.Generation == 0 {
+		return fmt.Errorf("%w: route host identity is zero", ErrInvalidRouteWire)
+	}
+	if err := ValidateRouteLabel(host.Label, false); err != nil {
+		return fmt.Errorf("%w: route host label: %v", ErrInvalidRouteWire, err)
+	}
+	if host.Kind.Validate() != nil {
+		return fmt.Errorf("%w: invalid route host kind", ErrInvalidRouteWire)
+	}
 	return nil
 }
 
@@ -400,7 +431,10 @@ func (s RecentRouteSnapshot) Validate() error {
 	if len(s.Entries) > RouteSnapshotMaxEntries {
 		return fmt.Errorf("%w: too many route entries", ErrInvalidRouteWire)
 	}
-	if s.Generation == 0 && (len(s.Entries) != 0 || s.ActiveEntry != (RecentRouteEntry{})) {
+	if len(s.Hosts) > RouteSnapshotMaxHosts {
+		return fmt.Errorf("%w: too many route hosts", ErrInvalidRouteWire)
+	}
+	if s.Generation == 0 && (len(s.Entries) != 0 || len(s.Hosts) != 0 || s.ActiveEntry != (RecentRouteEntry{})) {
 		return fmt.Errorf("%w: non-empty snapshot has zero generation", ErrInvalidRouteWire)
 	}
 	for _, ref := range []RouteRef{s.Active, s.Previous, s.Home} {
@@ -434,6 +468,16 @@ func (s RecentRouteSnapshot) Validate() error {
 		ref := RouteRef{Key: entry.Key, Generation: entry.Generation}
 		if _, exists := refs[ref]; exists {
 			return fmt.Errorf("%w: duplicate route entry", ErrInvalidRouteWire)
+		}
+		refs[ref] = struct{}{}
+	}
+	for _, host := range s.Hosts {
+		if err := validateRouteHost(host); err != nil {
+			return err
+		}
+		ref := RouteRef{Key: host.Key, Generation: host.Generation}
+		if _, exists := refs[ref]; exists || ref == s.Active {
+			return fmt.Errorf("%w: duplicate route host", ErrInvalidRouteWire)
 		}
 		refs[ref] = struct{}{}
 	}
@@ -612,5 +656,7 @@ const (
 	// of work a receiver performs before returning to its transport loop. The
 	// private client history may use a smaller product cap.
 	RouteSnapshotMaxEntries = 32
-	RouteLabelMaxBytes      = 256
+	// RouteSnapshotMaxHosts bounds the creation destinations of one snapshot.
+	RouteSnapshotMaxHosts = 32
+	RouteLabelMaxBytes    = 256
 )

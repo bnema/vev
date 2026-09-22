@@ -160,6 +160,17 @@ message RecentRouteEntry {
   bool attention = 8;
   // Closed reachability taxonomy: 0 = unknown, 1 = reachable, 2 = unavailable.
   uint32 reachability = 9;
+  // Client-assigned attention onset order; zero without attention.
+  uint64 attention_seq = 10;
+}
+
+// RouteHost is one creation destination other than the serving daemon.
+message RouteHost {
+  uint64 key = 1;
+  uint64 generation = 2;
+  string label = 3;
+  // Closed kind taxonomy: 1 = local, 2 = remote.
+  uint32 kind = 4;
 }
 
 // RecentRouteSnapshot is an immutable bounded route publication.
@@ -170,6 +181,7 @@ message RecentRouteSnapshot {
   RouteRef previous = 4;
   RouteRef home = 5;
   repeated RecentRouteEntry entries = 6;
+  repeated RouteHost hosts = 7;
 }
 
 // RouteNavigationAction asks the client to resolve one ledger entry.
