@@ -10,10 +10,8 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -46,113 +44,85 @@ func beginRecentRoutePaletteEffect(t *testing.T, d *Daemon, sess *session, ac *a
 	return effect
 }
 
-func TestCreateSessionDestinationResultsUseStructuredRouteAuthority(t *testing.T) {
+// TestCreateSessionDestinationResultsUseClientRouteHosts pins E3: every
+// create destination besides the serving daemon is a client route host,
+// carried by reference only (no endpoint), and the serving daemon creates in
+// place.
+func TestCreateSessionDestinationResultsUseClientRouteHosts(t *testing.T) {
 	lifecycle := domain.SessionLifecycleID{1}
-	snapshot := protocol.RecentRouteSnapshot{
-		Generation: 4,
-		Active:     protocol.RouteRef{Key: 2, Generation: 3},
-		ActiveEntry: protocol.RecentRouteEntry{
-			Key: 2, Generation: 3, Kind: protocol.RouteKindRemote, HostLabel: "host-a",
-			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
+	remoteActive := protocol.RecentRouteEntry{
+		Key: 2, Generation: 3, Kind: protocol.RouteKindRemote, HostLabel: "host-a",
+		Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
+	}
+	localActive := remoteActive
+	localActive.Kind, localActive.HostLabel = protocol.RouteKindLocal, ""
+	type want struct {
+		kind   palette.CreateSessionDestinationKind
+		origin string
+		route  protocol.RouteRef
+	}
+	tests := []struct {
+		name     string
+		snapshot protocol.RecentRouteSnapshot
+		want     []want
+	}{
+		{
+			name: "remote attachment creates in place, locally, or on another host",
+			snapshot: protocol.RecentRouteSnapshot{
+				Generation: 4, Active: protocol.RouteRef{Key: 2, Generation: 3}, ActiveEntry: remoteActive,
+				Hosts: []protocol.RouteHost{
+					{Key: 5, Generation: 1, Label: "local", Kind: protocol.RouteKindLocal},
+					{Key: 6, Generation: 1, Label: "ops@arch", Kind: protocol.RouteKindRemote},
+				},
+			},
+			want: []want{
+				{kind: palette.CreateSessionOnServingDaemon, origin: "host-a"},
+				{kind: palette.CreateSessionOnLocalRoute, route: protocol.RouteRef{Key: 5, Generation: 1}},
+				{kind: palette.CreateSessionOnRemoteHost, origin: "arch", route: protocol.RouteRef{Key: 6, Generation: 1}},
+			},
 		},
-		Home: protocol.RouteRef{Key: 1, Generation: 2},
-		Entries: []protocol.RecentRouteEntry{{
-			Key: 1, Generation: 2, Kind: protocol.RouteKindLocal,
-			Target: testRouteTarget("home", 2), Name: "home",
-		}},
+		{
+			name: "local attachment is home",
+			snapshot: protocol.RecentRouteSnapshot{
+				Generation: 4, Active: protocol.RouteRef{Key: 2, Generation: 3}, Home: protocol.RouteRef{Key: 2, Generation: 3}, ActiveEntry: localActive,
+				Hosts: []protocol.RouteHost{{Key: 6, Generation: 1, Label: "host-b", Kind: protocol.RouteKindRemote}},
+			},
+			want: []want{
+				{kind: palette.CreateSessionOnLocalRoute, route: protocol.RouteRef{Key: 2, Generation: 3}},
+				{kind: palette.CreateSessionOnRemoteHost, origin: "host-b", route: protocol.RouteRef{Key: 6, Generation: 1}},
+			},
+		},
+		{
+			name: "a remote home is never inferred local",
+			snapshot: protocol.RecentRouteSnapshot{
+				Generation: 1, Active: protocol.RouteRef{Key: 2, Generation: 3}, Home: protocol.RouteRef{Key: 2, Generation: 3}, ActiveEntry: remoteActive,
+			},
+			want: []want{{kind: palette.CreateSessionOnServingDaemon, origin: "host-a"}},
+		},
 	}
-	hosts := []ports.RemoteHostSnapshot{
-		{Endpoint: "host-a", Sessions: []catalogue.RemoteCatalogSession{{Name: "work", LifecycleID: lifecycle}}},
-		{Endpoint: "host-b"},
-		{Endpoint: "host-c"},
-		{Endpoint: "host-d"},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, tt.snapshot.Validate())
+			results := createSessionDestinationResults(tt.snapshot, lifecycle)
+			require.Len(t, results, len(tt.want))
+			for i, expected := range tt.want {
+				_, kind, origin, endpoint, route, ok := results[i].CreateSessionDestination()
+				require.True(t, ok)
+				require.Equal(t, expected.kind, kind)
+				require.Equal(t, expected.origin, origin)
+				require.Equal(t, expected.route, route)
+				require.Empty(t, endpoint, "a destination never carries an endpoint")
+			}
+		})
 	}
-
-	results := createSessionDestinationResults(snapshot, lifecycle, hosts)
-	require.Len(t, results, 5)
-	_, kind, _, endpoint, route, ok := results[0].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnLocalRoute, kind)
-	require.Equal(t, snapshot.Home, route)
-	require.Empty(t, endpoint)
-	snapshotGeneration, ok := results[0].CreateSessionSnapshotGeneration()
-	require.True(t, ok)
-	require.Equal(t, snapshot.Generation, snapshotGeneration)
-	_, kind, origin, endpoint, _, ok := results[1].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnServingDaemon, kind)
-	require.Equal(t, "host-a", origin)
-	require.Empty(t, endpoint)
-	_, kind, origin, endpoint, _, ok = results[2].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
-	require.Equal(t, "host-b", origin)
-	require.Equal(t, "host-b", endpoint)
-	// Stale inventory stays attemptable: freshness renders, registration
-	// authorizes. The destination rejects precisely on exact identity.
-	_, kind, origin, endpoint, _, ok = results[3].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
-	require.Equal(t, "host-c", origin)
-	require.Equal(t, "host-c", endpoint)
 }
 
 func TestRemoteCreateSessionDestinationRequiresAttachmentEffect(t *testing.T) {
 	result := palette.NewCreateSessionDestination(
-		palette.CreateSessionOnRemoteHost, "host-a", "host-a", protocol.RouteRef{}, 0,
+		palette.CreateSessionOnRemoteHost, "host-a", "", protocol.RouteRef{Key: 1, Generation: 1}, 1,
 	)
 	err := (paletteExec{}).validateCreateSessionDestination(nil, result)
 	require.ErrorIs(t, err, errCreateDestinationUnavailable)
-}
-
-// TestCreateSessionDestinationsKeepCollidingDisplayOrigins proves the
-// serving-daemon suppression compares exact endpoint identity, not display
-// labels: user@arch and ops@arch share the origin "arch", but only the
-// endpoint serving the active route is suppressed.
-func TestCreateSessionDestinationsKeepCollidingDisplayOrigins(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{7}
-	snapshot := protocol.RecentRouteSnapshot{
-		Generation: 1,
-		Active:     protocol.RouteRef{Key: 1, Generation: 1},
-		ActiveEntry: protocol.RecentRouteEntry{
-			Key: 1, Generation: 1, Kind: protocol.RouteKindRemote, HostLabel: "arch",
-			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
-		},
-	}
-	hosts := []ports.RemoteHostSnapshot{
-		{Endpoint: "user@arch", Sessions: []catalogue.RemoteCatalogSession{{Name: "work", LifecycleID: lifecycle}}},
-		{Endpoint: "ops@arch"},
-	}
-
-	results := createSessionDestinationResults(snapshot, lifecycle, hosts)
-	require.Len(t, results, 2)
-	_, kind, origin, endpoint, _, ok := results[0].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnServingDaemon, kind)
-	require.Equal(t, "arch", origin)
-	_, kind, origin, endpoint, _, ok = results[1].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnRemoteHost, kind)
-	require.Equal(t, "arch", origin)
-	require.Equal(t, "ops@arch", endpoint)
-}
-
-func TestCreateSessionDestinationResultsDoNotInferLocalFromRemoteHome(t *testing.T) {
-	lifecycle := domain.SessionLifecycleID{1}
-	snapshot := protocol.RecentRouteSnapshot{
-		Generation: 1,
-		Active:     protocol.RouteRef{Key: 1, Generation: 1},
-		Home:       protocol.RouteRef{Key: 1, Generation: 1},
-		ActiveEntry: protocol.RecentRouteEntry{
-			Key: 1, Generation: 1, Kind: protocol.RouteKindRemote, HostLabel: "host-a",
-			Target: protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "work"}, Name: "work",
-		},
-	}
-	results := createSessionDestinationResults(snapshot, lifecycle, nil)
-	require.Len(t, results, 1)
-	_, kind, _, _, _, ok := results[0].CreateSessionDestination()
-	require.True(t, ok)
-	require.Equal(t, palette.CreateSessionOnServingDaemon, kind)
 }
 
 func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t *testing.T) {

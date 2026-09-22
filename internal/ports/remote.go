@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
@@ -24,11 +23,6 @@ type RemoteHostStore interface {
 // RemoteCatalogClient fetches a versioned session catalogue from a remote host.
 type RemoteCatalogClient interface {
 	List(ctx context.Context, target string) (catalogue.RemoteCatalog, error)
-}
-
-// RemotePreviewClient fetches one bounded, exact-target viewport.
-type RemotePreviewClient interface {
-	Preview(ctx context.Context, target domain.RemoteSessionTarget, width, height uint16) (protocol.RemotePreview, error)
 }
 
 // RemoteCatalogCache persists complete remote discovery snapshots independently

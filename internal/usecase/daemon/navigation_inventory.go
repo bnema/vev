@@ -6,7 +6,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
 // navigationInventoryEntryKey derives a stable opaque key for an unchanged
@@ -41,31 +40,15 @@ func (d *Daemon) answerNavigationInventory(request protocol.NavigationInventoryR
 	return d.snapshotNavigationInventory(request.RequestID)
 }
 
-// snapshotNavigationInventory packs complete source groups, local first, then
-// deterministic host order. A source exceeding its row limit becomes an
-// explicit too_large row with no activatable entries; it never invalidates
-// other complete groups. Encoded-byte overflow degrades the largest group to
-// status-only instead of silently truncating.
+// snapshotNavigationInventory answers with this daemon's own sessions only:
+// other daemons are observed by the client's broker, never relayed here.
 func (d *Daemon) snapshotNavigationInventory(requestID uint64) protocol.NavigationInventoryResponse {
-	inv := d.captureSessionInventory(viewOptions{}, false)
-	groups := make([]protocol.NavigationInventorySourceGroup, 0, len(inv.hosts)+1)
-	groups = append(groups, d.localInventoryGroup(inv.localSessionInventory))
-	for _, host := range inv.hosts {
-		groups = append(groups, remoteInventoryGroup(host))
-	}
-	if len(groups) > protocol.NavigationInventoryMaxSourceGroups {
-		groups = groups[:protocol.NavigationInventoryMaxSourceGroups]
-	}
-	response := protocol.NavigationInventoryResponse{RequestID: requestID, Operation: protocol.NavigationInventorySnapshot, Status: protocol.NavigationInventoryOK, Groups: groups}
-	return fitNavigationInventoryResponse(response)
+	return d.localNavigationInventorySnapshot(requestID)
 }
 
 // localNavigationInventorySnapshot is the prepared local-only navigation
 // projection (Plan 001 P4.3): exactly one local source group, built from the
-// remote-free capture. It never reads the remote directory, so the source
-// control daemon's own export cannot observe or depend on remote monitoring.
-// The hybrid snapshotNavigationInventory composes this group with foreign
-// source groups through the same localInventoryGroup projection.
+// daemon's own capture.
 func (d *Daemon) localNavigationInventorySnapshot(requestID uint64) protocol.NavigationInventoryResponse {
 	inv := d.captureLocalSessionInventory(viewOptions{}, false)
 	response := protocol.NavigationInventoryResponse{
@@ -105,66 +88,6 @@ func (d *Daemon) localInventoryGroup(inv localSessionInventory) protocol.Navigat
 		return protocol.NavigationInventorySourceGroup{SourceKey: group.SourceKey, Status: protocol.NavigationInventorySourceTooLarge}
 	}
 	return group
-}
-
-// remoteInventoryGroup projects one configured remote source with its own
-// status. Broken sessions keep a diagnostic row; stale, unreachable,
-// auth-failed, and malformed observations stay attemptable with a
-// presentation reason, per the shared activation policy.
-func remoteInventoryGroup(host ports.RemoteHostSnapshot) protocol.NavigationInventorySourceGroup {
-	if host.Endpoint == "" {
-		return protocol.NavigationInventorySourceGroup{Status: protocol.NavigationInventorySourceUnavailable}
-	}
-	// Remote source keys are opaque identifiers, never raw endpoints: the
-	// relay forwards them to the serving daemon, which only ever sees
-	// display origins. The endpoint hash keeps keys stable across polls
-	// (so refreshes do not churn admissions) while a host literally named
-	// "local" cannot collide with the reserved local source. Resolve maps
-	// back through the request registration, never the key.
-	group := protocol.NavigationInventorySourceGroup{SourceKey: remoteInventorySourceKey(host.Endpoint), Status: protocol.NavigationInventorySourceOK}
-	eligible := 0
-	for _, session := range host.Sessions {
-		if session.Ephemeral {
-			continue
-		}
-		eligible++
-	}
-	if eligible > protocol.NavigationInventoryMaxRemoteEntriesPerSource {
-		return protocol.NavigationInventorySourceGroup{SourceKey: group.SourceKey, Status: protocol.NavigationInventorySourceTooLarge}
-	}
-	for _, session := range host.Sessions {
-		if session.Ephemeral {
-			continue
-		}
-		key, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}, session)
-		if key.Validate() != nil {
-			continue
-		}
-		reason := directorySessionReason(host, session, target)
-		state := string(session.State)
-		if session.State == catalogue.RemoteCatalogSessionBroken || target.Validate() != nil {
-			state = string(catalogue.RemoteCatalogSessionBroken)
-		}
-		group.Entries = append(group.Entries, protocol.NavigationInventoryEntry{
-			SourceKey:     group.SourceKey,
-			EntryKey:      navigationInventoryEntryKey(session.LifecycleID, session.Name),
-			Name:          session.Name,
-			DisplayOrigin: key.DisplayOrigin,
-			State:         state,
-			Reason:        reason,
-		})
-	}
-	if host.Availability != domain.RemoteAvailabilityReachable && len(group.Entries) == 0 {
-		group.Status = protocol.NavigationInventorySourceUnavailable
-	}
-	return group
-}
-
-// remoteInventorySourceKey derives the stable opaque identifier for a
-// configured remote endpoint. The hash domain-separates inventory keys so
-// relayed identifiers disclose nothing about local SSH configuration.
-func remoteInventorySourceKey(endpoint string) string {
-	return protocol.RemoteInventorySourceKey(endpoint)
 }
 
 // navigationInventoryEncodedBudget mirrors the wire export budget without
@@ -236,22 +159,9 @@ func (d *Daemon) resolveNavigationInventory(request protocol.NavigationInventory
 		response.Resolved = &resolved
 		return response
 	}
-	target, ok := d.resolveRemoteInventoryEntry(request)
-	if !ok {
-		response.Status = protocol.NavigationInventoryUnavailable
-		return response
-	}
-	if target.Validate() != nil {
-		response.Status = protocol.NavigationInventoryInvalid
-		return response
-	}
-	response.Status = protocol.NavigationInventoryOK
-	resolved := protocol.AttachTarget{
-		Endpoint: request.Registration.Endpoint, Session: target.SessionName,
-		Intent: protocol.IntentAttach, SessionTarget: ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target)),
-		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-	}
-	response.Resolved = &resolved
+	// Remote sources are the client broker's; this daemon resolves only its
+	// own sessions.
+	response.Status = protocol.NavigationInventoryUnavailable
 	return response
 }
 
@@ -290,30 +200,4 @@ func localNavigationResolveEntry(inv localSessionInventory, entryKey string) (pr
 		return protocol.ExactSessionTarget{LifecycleID: entry.incarnation, SessionName: entry.name}, true
 	}
 	return protocol.ExactSessionTarget{}, false
-}
-
-// resolveRemoteInventoryEntry checks the stored registration identity, then
-// matches the opaque key against the source's current sessions. Known valid
-// cached targets with stale or failed observations stay attemptable;
-// destination attach still validates exactly.
-func (d *Daemon) resolveRemoteInventoryEntry(request protocol.NavigationInventoryRequest) (domain.RemoteSessionTarget, bool) {
-	snapshot := d.remoteDirectorySnapshot()
-	host, ok := snapshot.Find(request.Registration.Endpoint)
-	if !ok || !host.Registration.Equal(request.Registration) {
-		return domain.RemoteSessionTarget{}, false
-	}
-	for _, session := range host.Sessions {
-		if session.Ephemeral {
-			continue
-		}
-		if navigationInventoryEntryKey(session.LifecycleID, session.Name) != request.EntryKey {
-			continue
-		}
-		_, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}, session)
-		if session.State == catalogue.RemoteCatalogSessionBroken {
-			return domain.RemoteSessionTarget{}, false
-		}
-		return target, true
-	}
-	return domain.RemoteSessionTarget{}, false
 }

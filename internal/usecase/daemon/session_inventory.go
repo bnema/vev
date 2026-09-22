@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"time"
-
-	"github.com/bnema/vev/internal/ports"
 )
 
 // inventoriedLiveSession pairs a live session pointer with its immutable
@@ -18,8 +16,7 @@ type inventoriedLiveSession struct {
 // localSessionInventory is the remote-free capture consumed by the prepared
 // local projections: the local catalogue export, the local navigation source
 // group, and the local picker/control projection. It copies active and
-// inactive records and never reads the remote directory, so a local-only
-// projection cannot observe or depend on remote monitoring.
+// inactive records of this daemon only.
 //
 // d.mu is released before any per-session snapshot, preserving the
 // established lock ordering. Copied values are coherent per exact target,
@@ -31,14 +28,11 @@ type localSessionInventory struct {
 }
 
 // sessionInventory is the daemon-owned common capture consumed by the
-// palette, picker, and catalog export projections. It composes the remote-free
-// local capture (localSessionInventory) with the current foreign
-// remote-directory rows. Monitoring state itself is not carried here: the
-// hybrid picker projection reads it directly from currentRemoteDirectory, so
-// there is exactly one source for it.
+// palette, picker, and catalog export projections. The daemon observes only
+// its own sessions: other daemons reach the palette through the client's
+// route snapshot (Plan 003 E3).
 type sessionInventory struct {
 	localSessionInventory
-	hosts []ports.RemoteHostSnapshot
 }
 
 // captureLocalSessionInventory copies registry pointers and inactive records
@@ -74,15 +68,9 @@ func (d *Daemon) captureLocalSessionInventory(opts viewOptions, refreshTitles bo
 	return localSessionInventory{live: live, stopped: stopped, now: d.daemonNow()}
 }
 
-// captureSessionInventory composes the remote-free local capture with the
-// current foreign remote-directory rows. The daemon-side monitor stays
-// intentionally active in this state (coordinated P7 removal set), so hybrid
-// projections keep their foreign rows; a nil directory yields an empty,
-// uninitialized publication and never gates local behavior.
+// captureSessionInventory is the palette, picker, and catalog capture.
 func (d *Daemon) captureSessionInventory(opts viewOptions, refreshTitles bool) sessionInventory {
-	local := d.captureLocalSessionInventory(opts, refreshTitles)
-	hosts, _, _ := d.currentRemoteDirectory()
-	return sessionInventory{localSessionInventory: local, hosts: hosts}
+	return sessionInventory{localSessionInventory: d.captureLocalSessionInventory(opts, refreshTitles)}
 }
 
 // resumableStopped returns stopped sessions eligible for resume display,

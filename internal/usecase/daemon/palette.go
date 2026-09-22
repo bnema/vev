@@ -7,7 +7,6 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -116,51 +115,57 @@ func routeEntryForRef(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteR
 	return protocol.RecentRouteEntry{}, false
 }
 
-func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID, hosts []ports.RemoteHostSnapshot) []palette.Result {
-	results := make([]palette.Result, 0, len(hosts)+2)
-	servingOrigin := ""
-	servingEndpoint := ""
+// createSessionDestinationResults lists where CNS may create a session: the
+// serving daemon itself, and every other daemon the client published as a
+// route host (Plan 003 E3). Only the serving daemon creates in place; every
+// other destination is created by the client through its broker.
+func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID) []palette.Result {
+	results := make([]palette.Result, 0, len(snapshot.Hosts)+1)
 	if home, ok := routeEntryForRef(snapshot, snapshot.Home); ok && home.Kind == protocol.RouteKindLocal {
 		results = append(results, palette.NewCreateSessionDestination(
 			palette.CreateSessionOnLocalRoute, "", "", snapshot.Home, snapshot.Generation,
 		))
 	}
 	if active, ok := activeRouteEntryForLifecycle(snapshot, currentLifecycle); ok && active.Kind == protocol.RouteKindRemote {
-		servingOrigin = paletteRemoteDisplayOrigin(active.HostLabel)
-		servingEndpoint = servingRouteEndpoint(hosts, active.Target.LifecycleID)
 		results = append(results, palette.NewCreateSessionDestination(
-			palette.CreateSessionOnServingDaemon, servingOrigin, "", protocol.RouteRef{}, 0,
+			palette.CreateSessionOnServingDaemon, paletteRemoteDisplayOrigin(active.HostLabel), "", protocol.RouteRef{}, 0,
 		))
 	}
-	for _, host := range hosts {
-		if host.Endpoint == "" {
-			continue
-		}
-		displayOrigin := paletteRemoteDisplayOrigin(host.Endpoint)
-		if servingEndpoint != "" && host.Endpoint == servingEndpoint {
+	for _, host := range snapshot.Hosts {
+		ref := protocol.RouteRef{Key: host.Key, Generation: host.Generation}
+		if host.Kind == protocol.RouteKindLocal {
+			results = append(results, palette.NewCreateSessionDestination(
+				palette.CreateSessionOnLocalRoute, "", "", ref, snapshot.Generation,
+			))
 			continue
 		}
 		results = append(results, palette.NewCreateSessionDestination(
-			palette.CreateSessionOnRemoteHost, displayOrigin, host.Endpoint, protocol.RouteRef{}, 0,
+			palette.CreateSessionOnRemoteHost, paletteRemoteDisplayOrigin(host.Label), "", ref, snapshot.Generation,
 		))
 	}
 	return results
 }
 
-// servingRouteEndpoint resolves the exact endpoint serving the active
-// remote route by matching its session lifecycle against the directory
-// inventory. Display origins collide across login prefixes (vev@arch vs
-// arch), so only an exact lifecycle match suppresses the duplicate
-// per-host destination.
-func servingRouteEndpoint(hosts []ports.RemoteHostSnapshot, lifecycle domain.SessionLifecycleID) string {
-	for _, host := range hosts {
-		for _, session := range host.Sessions {
-			if session.LifecycleID == lifecycle {
-				return host.Endpoint
-			}
+// routeHostForRef finds one creation host of the snapshot.
+func routeHostForRef(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteRef) (protocol.RouteHost, bool) {
+	for _, host := range snapshot.Hosts {
+		if host.Key == ref.Key && host.Generation == ref.Generation && !ref.IsZero() {
+			return host, true
 		}
 	}
-	return ""
+	return protocol.RouteHost{}, false
+}
+
+// routeCreationKind reports the kind of daemon one creation reference names:
+// a route entry (or the active route) or a route host.
+func routeCreationKind(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteRef) (protocol.RouteKind, bool) {
+	if entry, ok := routeEntryForRef(snapshot, ref); ok {
+		return entry.Kind, true
+	}
+	if host, ok := routeHostForRef(snapshot, ref); ok {
+		return host.Kind, true
+	}
+	return 0, false
 }
 
 func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemonDisplayOrigin string) bool {
@@ -171,13 +176,13 @@ func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemon
 		paletteRemoteDisplayOrigin(entry.HostLabel) == daemonDisplayOrigin
 }
 
-// paletteResults projects the shared daemon inventory for the palette. It keeps
-// quick-switch exclusions, compact labels, commands, and history behavior;
-// discovery, exact-target construction, and attemptability facts stay shared
-// with the picker through remoteCatalogSessionTarget/directorySessionReason.
+// paletteResults projects the daemon's own inventory plus the client's route
+// snapshot for the palette. It keeps quick-switch exclusions, compact labels,
+// commands, and history behavior; other daemons' sessions and hosts come only
+// from the client routes (Plan 003 E3), and committing one navigates through
+// the client.
 func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot protocol.RecentRouteSnapshot) []palette.Result {
 	inv := d.captureSessionInventory(viewOptions{}, false)
-	hosts := inv.hosts
 	stopped := inv.resumableStopped()
 	represented := make(map[paletteSessionIdentity]struct{}, len(inv.live)+len(inv.stopped)+len(routeSnapshot.Entries))
 	for _, entry := range inv.stopped {
@@ -190,7 +195,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		current.mu.Unlock()
 	}
 	daemonDisplayOrigin := paletteDaemonDisplayOrigin(routeSnapshot, currentLifecycle)
-	hybrid := len(hosts) > 0 || daemonDisplayOrigin != ""
+	hybrid := len(routeSnapshot.Hosts) > 0 || daemonDisplayOrigin != ""
 	for _, entry := range routeSnapshot.Entries {
 		hybrid = hybrid || entry.Kind == protocol.RouteKindRemote
 	}
@@ -198,13 +203,8 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		daemonDisplayOrigin = "local"
 	}
 
-	remoteSessionCount := 0
-	for _, host := range hosts {
-		remoteSessionCount += len(host.Sessions)
-	}
-
-	destinations := createSessionDestinationResults(routeSnapshot, currentLifecycle, hosts)
-	results := make([]palette.Result, 0, len(commands)+len(destinations)+len(inv.live)+len(stopped)+remoteSessionCount+len(routeSnapshot.Entries))
+	destinations := createSessionDestinationResults(routeSnapshot, currentLifecycle)
+	results := make([]palette.Result, 0, len(commands)+len(destinations)+len(inv.live)+len(stopped)+len(routeSnapshot.Entries))
 	for _, cmd := range commands {
 		results = append(results, palette.NewCommandResult(cmd))
 	}
@@ -234,34 +234,6 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		results = append(results, palette.NewStoppedSessionResultWithDisplayOrigin(target, time.Unix(0, candidate.createdAt), daemonDisplayOrigin))
 		represented[localPaletteSessionIdentity(target.LifecycleID)] = struct{}{}
 	}
-	type discoveredRemote struct {
-		identity paletteSessionIdentity
-		result   palette.Result
-	}
-	discovered := make([]discoveredRemote, 0, remoteSessionCount)
-	discoveredByPresentation := make(map[remotePalettePresentationIdentity][]paletteSessionIdentity, remoteSessionCount)
-	for _, host := range hosts {
-		for _, session := range host.Sessions {
-			if session.Ephemeral {
-				continue
-			}
-			key, target := remoteCatalogSessionTarget(domain.RemoteSessionKey{
-				Host: host.Endpoint, Name: session.Name,
-			}, session)
-			if key.Validate() != nil || target.Validate() != nil {
-				continue
-			}
-			identity := remotePaletteSessionIdentity(key.Host, session.LifecycleID)
-			presentation := remotePalettePresentationIdentity{
-				origin: key.DisplayOrigin, name: session.Name, lifecycle: session.LifecycleID,
-			}
-			discovered = append(discovered, discoveredRemote{
-				identity: identity,
-				result:   palette.NewRemoteSessionResult(key, target, directorySessionReason(host, session, target)),
-			})
-			discoveredByPresentation[presentation] = append(discoveredByPresentation[presentation], identity)
-		}
-	}
 	for _, entry := range routeSnapshot.Entries {
 		if entry.Name == "" {
 			continue
@@ -285,23 +257,7 @@ func (d *Daemon) paletteResults(current *session, commands []command.Command, ro
 		}))
 		if entry.Kind == protocol.RouteKindLocal {
 			represented[identity] = struct{}{}
-			continue
 		}
-		presentation := remotePalettePresentationIdentity{
-			origin:    domain.RemoteDisplayOrigin(entry.HostLabel),
-			name:      entry.Target.SessionName,
-			lifecycle: entry.Target.LifecycleID,
-		}
-		if matches := discoveredByPresentation[presentation]; len(matches) == 1 {
-			represented[matches[0]] = struct{}{}
-		}
-	}
-	for _, remote := range discovered {
-		if _, exists := represented[remote.identity]; exists {
-			continue
-		}
-		results = append(results, remote.result)
-		represented[remote.identity] = struct{}{}
 	}
 	return results
 }
@@ -407,10 +363,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 	var cmd command.Command
 	var sessionTarget palette.Result
 	var hasSessionTarget bool
-	var remoteTarget domain.RemoteSessionTarget
-	var remoteKey domain.RemoteSessionKey
-	var remoteUnavailableReason string
-	var hasRemoteTarget bool
 	var importedSourceKey, importedEntryKey string
 	var hasImportedTarget bool
 	var routeTarget protocol.RouteNavigationAction
@@ -496,16 +448,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 					routeSnapshot = ac.overlays.paletteRouteSnapshot
 					routeSnapshot.Entries = append([]protocol.RecentRouteEntry(nil), routeSnapshot.Entries...)
 				}
-			} else if target, ok := selected.RemoteSessionTarget(); ok {
-				key, keyOK := selected.RemoteSessionKey()
-				if !keyOK {
-					changed = true
-					return
-				}
-				remoteTarget = target
-				remoteKey = key
-				remoteUnavailableReason, _ = selected.RemoteSessionUnavailableReason()
-				hasRemoteTarget = true
 			} else if sourceKey, entryKey, ok := selected.ImportedSessionKey(); ok {
 				importedSourceKey = sourceKey
 				importedEntryKey = entryKey
@@ -592,29 +534,6 @@ func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...
 		}
 		if current := ac.currentAttachmentSession(); current != nil {
 			d.invalidateRender(current, ac, true, "palette.go")
-		}
-		return
-	}
-
-	if hasRemoteTarget {
-		if effect == nil {
-			ac.paletteFailure(generation, rawQuery, "requested remote session is unavailable")
-			d.invalidateRender(entry, ac, true, "palette.go")
-			return
-		}
-		target := picker.Target{
-			Session: remoteKey.ID(), Incarnation: remoteKey.LifecycleID, Name: remoteKey.Display(),
-			RemoteKey: &remoteKey, RemoteTarget: &remoteTarget, RemoteHost: remoteKey.Host,
-			UnavailableReason: remoteUnavailableReason, TabIndex: -1,
-		}
-		err := d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{}, "palette-remote-session")
-		if err == nil {
-			d.closeExecutedPalette(ac, effect, generation, rawQuery)
-			return
-		}
-		if !errors.Is(err, errAttachmentTransition) {
-			ac.paletteFailure(generation, rawQuery, "requested remote session is unavailable")
-			d.invalidateRender(entry, ac, true, "palette.go")
 		}
 		return
 	}
@@ -900,14 +819,16 @@ func (e paletteExec) CreateSessionNamed(name string) error {
 }
 
 func (e paletteExec) validateCreateSessionDestination(effect *attachmentEffect, result palette.Result) error {
-	_, kind, _, endpoint, route, ok := result.CreateSessionDestination()
+	_, kind, _, _, route, ok := result.CreateSessionDestination()
 	if !ok {
 		return errCreateDestinationUnavailable
 	}
 	switch kind {
 	case palette.CreateSessionOnServingDaemon:
 		return nil
-	case palette.CreateSessionOnLocalRoute:
+	case palette.CreateSessionOnLocalRoute, palette.CreateSessionOnRemoteHost:
+		// Another daemon is a client route: its reference must still name a
+		// daemon of the kind shown in the latest snapshot.
 		if e.ac == nil {
 			return errCreateDestinationUnavailable
 		}
@@ -915,17 +836,16 @@ func (e paletteExec) validateCreateSessionDestination(effect *attachmentEffect, 
 		if !ok || snapshotGeneration == 0 {
 			return errCreateDestinationUnavailable
 		}
+		want := protocol.RouteKindLocal
+		if kind == palette.CreateSessionOnRemoteHost {
+			want = protocol.RouteKindRemote
+		}
 		snapshot := e.ac.routeSnapshotCopy()
-		entry, valid := routeEntryForRef(snapshot, route)
-		if !valid || snapshot.Generation != snapshotGeneration || entry.Kind != protocol.RouteKindLocal {
+		got, valid := routeCreationKind(snapshot, route)
+		if !valid || snapshot.Generation != snapshotGeneration || got != want {
 			return errCreateDestinationUnavailable
 		}
 		if effect == nil && snapshot.Active != route {
-			return errCreateDestinationUnavailable
-		}
-		return nil
-	case palette.CreateSessionOnRemoteHost:
-		if effect == nil || !e.d.remoteCreateHostReady(endpoint) {
 			return errCreateDestinationUnavailable
 		}
 		return nil
@@ -945,7 +865,7 @@ func (e paletteExec) createSessionOnValidatedDestination(effect *attachmentEffec
 	if err := domain.ValidateSessionName(name); err != nil {
 		return err
 	}
-	_, kind, _, endpoint, route, _ := result.CreateSessionDestination()
+	_, kind, _, _, route, _ := result.CreateSessionDestination()
 	if kind == palette.CreateSessionOnServingDaemon ||
 		(kind == palette.CreateSessionOnLocalRoute && e.ac != nil && e.ac.routeSnapshotCopy().Active == route) {
 		if effect == nil {
@@ -961,7 +881,8 @@ func (e paletteExec) createSessionOnValidatedDestination(effect *attachmentEffec
 		requestID = e.d.creationRequestSeq.Add(1)
 	}
 	switch kind {
-	case palette.CreateSessionOnLocalRoute:
+	case palette.CreateSessionOnLocalRoute, palette.CreateSessionOnRemoteHost:
+		// The client creates it through its broker and swaps to it.
 		snapshotGeneration, _ := result.CreateSessionSnapshotGeneration()
 		action := protocol.RouteCreateSessionAction{
 			RequestID: requestID, SnapshotGeneration: snapshotGeneration,
@@ -971,33 +892,9 @@ func (e paletteExec) createSessionOnValidatedDestination(effect *attachmentEffec
 			return err
 		}
 		return nil
-	case palette.CreateSessionOnRemoteHost:
-		handoff := protocol.AttachTarget{
-			RequestID: requestID, Endpoint: endpoint, Session: name, Intent: protocol.IntentNew,
-			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-		}
-		if err := protocol.ValidateAttachTarget(handoff); err != nil {
-			return errAttachmentTransition
-		}
-		if err := effect.sendControl(handoff); err != nil {
-			return err
-		}
-		e.d.clientGoneForAttachment(effect, false)
-		return nil
 	default:
 		return errAttachmentTransition
 	}
-}
-
-func (d *Daemon) remoteCreateHostReady(endpoint string) bool {
-	if d == nil || domain.ValidateRemoteHostTarget(endpoint) != nil {
-		return false
-	}
-	// Registration is creation authority: any registered endpoint is
-	// attemptable at any inventory age. Freshness renders; the destination
-	// rejects precisely on exact identity.
-	_, ok := d.remoteDirectorySnapshot().Find(endpoint)
-	return ok
 }
 
 func (e paletteExec) CreateEphemeralSession() error {

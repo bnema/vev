@@ -12,10 +12,8 @@ import (
 // Broker-native daemon observation (Plan 001 P5.2a).
 //
 // BrokerDaemonObservation is the broker's own projection of one daemon, local
-// or remote. It deliberately does not reuse RemoteHostSnapshot: that type
-// belongs to the legacy remote monitor and carries no daemon identity,
-// incarnation, version, capability, or policy authority. The broker
-// projection keeps configured authority separate from observed state:
+// or remote, and the only one: no daemon monitors another. It keeps
+// configured authority separate from observed state:
 //
 //   - configured authority: Local flag, Endpoint, Registration, Policy, and
 //     the presentation hints DisplayOrigin and Rank. The registry stamps

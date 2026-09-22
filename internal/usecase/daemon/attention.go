@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -45,10 +47,12 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	d.pokeAttentionTicker()
 }
 
-// jumpAttention switches to the oldest pending attention target, local tab
-// first and then another session's. Returning nil never implies a switch
-// happened — it also covers "no target exists", which is routine and not an
-// error. Only a failure to reach a target that does exist is a genuine error.
+// jumpAttention switches to the oldest pending attention target: a tab of the
+// attached session first, then another session of this daemon, then the
+// oldest bell among the client's routes on any other daemon, which the client
+// navigates to (Plan 003 C5). Returning nil never implies a switch happened —
+// it also covers "no target exists", which is routine and not an error. Only
+// a failure to reach a target that does exist is a genuine error.
 func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {
 	return d.jumpAttentionForAttachment(sess, ac, nil)
 }
@@ -71,13 +75,72 @@ func (d *Daemon) jumpAttentionForAttachment(sess *session, ac *attachedClient, e
 
 	target, ok := d.oldestOtherSessionAttention(sess)
 	if !ok {
-		return nil
+		return d.jumpRouteAttention(sess, ac, effect)
 	}
 	pickerTarget := picker.Target{Session: target.sessionID, TabIndex: target.tabIndex}
 	if effect == nil {
 		return d.switchToTarget(sess, ac, pickerTarget)
 	}
 	return d.switchActiveTargetForAttachment(effect, pickerTarget)
+}
+
+// jumpRouteAttention asks the client to navigate to the oldest attention
+// route it published for another daemon. The serving daemon's own sessions
+// were already considered, so a local route of this daemon is skipped.
+func (d *Daemon) jumpRouteAttention(sess *session, ac *attachedClient, effect *attachmentEffect) error {
+	entry, ok := oldestRouteAttention(ac.routeSnapshotCopy(), d.ownsLifecycle)
+	if !ok {
+		return nil
+	}
+	exec := paletteExec{d: d, sess: sess, attachment: sess, ac: ac, effect: effect}
+	err := exec.NavigateRecentRoute(entry)
+	if errors.Is(err, errAttachmentTransition) {
+		return nil
+	}
+	return err
+}
+
+// oldestRouteAttention selects the route whose attention the client observed
+// first. owned reports lifecycles this daemon serves itself.
+func oldestRouteAttention(snapshot protocol.RecentRouteSnapshot, owned func(domain.SessionLifecycleID) bool) (protocol.RouteNavigationAction, bool) {
+	var best protocol.RecentRouteEntry
+	found := false
+	for _, entry := range snapshot.Entries {
+		if !entry.Attention || entry.AttentionSeq == 0 || owned(entry.Target.LifecycleID) {
+			continue
+		}
+		if !found || entry.AttentionSeq < best.AttentionSeq {
+			best, found = entry, true
+		}
+	}
+	if !found || snapshot.Generation == 0 {
+		return protocol.RouteNavigationAction{}, false
+	}
+	return protocol.RouteNavigationAction{SnapshotGeneration: snapshot.Generation, Key: best.Key, Generation: best.Generation}, true
+}
+
+// ownsLifecycle reports whether this daemon holds the lifecycle, live or
+// stopped.
+func (d *Daemon) ownsLifecycle(lifecycle domain.SessionLifecycleID) bool {
+	d.mu.Lock()
+	sessions := sessionsSnapshot(d.sessions)
+	stopped := false
+	for _, inactive := range d.inactive {
+		stopped = stopped || inactive.incarnation == lifecycle
+	}
+	d.mu.Unlock()
+	if stopped {
+		return true
+	}
+	for _, sess := range sessions {
+		sess.mu.Lock()
+		owned := sess.incarnation == lifecycle
+		sess.mu.Unlock()
+		if owned {
+			return true
+		}
+	}
+	return false
 }
 
 func oldestAttentionTab(sess *session) (int, bool) {

@@ -361,19 +361,6 @@ type Daemon struct {
 	notices                        *noticeCenter
 	resumeParkGrace                time.Duration
 	suspendedSafetyExpiry          time.Duration
-	remotePreview                  remotePreviewState
-	remotePreviewClient            ports.RemotePreviewClient
-	// remoteDirectory is the snapshot-only projection served by the remote
-	// monitor. Presentation reads it without I/O; nil disables remote
-	// directory projections without affecting local behavior.
-	remoteDirectory ports.RemoteDirectory
-	// remoteFailureNoticed tracks active observation failure episodes so
-	// bounded retries do not produce repeated global toasts.
-	remoteFailureNoticeMu sync.Mutex
-	remoteFailureNoticed  map[string]uint64
-	// remoteMonitorRun starts the monitor policy loop. Serve owns its
-	// lifetime; nil disables background monitoring.
-	remoteMonitorRun func(context.Context) error
 	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
 	// (see clipboard.go); empty means use os.TempDir().
 	tempDir string
@@ -485,25 +472,6 @@ type Option func(*Daemon)
 // second reporting worker around it.
 func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
 	return func(d *Daemon) { d.runtimeObserver = observer }
-}
-
-// WithRemoteMonitor installs the snapshot-only remote directory and the
-// monitor runner. Serve starts the runner without waiting for registry,
-// cache or runtime readiness and stops it with its own context.
-//
-// The daemon-side monitor stays intentionally active in this state: it is part
-// of the coordinated P7 removal set, so no polling gate, feature switch, or
-// early shutdown path is added here (GO-001, deferred to P7).
-func WithRemoteMonitor(directory ports.RemoteDirectory, run func(context.Context) error) Option {
-	return func(d *Daemon) {
-		d.remoteDirectory = directory
-		d.remoteMonitorRun = run
-	}
-}
-
-// WithRemotePreview installs the optional non-attaching remote viewport client.
-func WithRemotePreview(client ports.RemotePreviewClient) Option {
-	return func(d *Daemon) { d.remotePreviewClient = client }
 }
 
 // WithShell overrides the command (and its args) each session spawns. The
@@ -833,11 +801,6 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	return d
 }
 
-// remoteMonitorShutdownJoin bounds the daemon's wait for monitor teardown.
-// The monitor bounds its own runtime cleanup to two seconds; this join only
-// covers scheduling slack and never enters the session worker group.
-const remoteMonitorShutdownJoin = 3 * time.Second
-
 // Serve runs the accept loop over l, owning it for the loop's lifetime. It
 // returns only on ctx cancellation or an explicit daemon shutdown request
 // (KillDaemon), never when the session registry drains to empty: final
@@ -850,49 +813,6 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 	defer d.serveCancel()
 	d.hardCtx, d.hardCancel = context.WithCancel(context.Background())
 	defer d.hardCancel()
-
-	// Remote directory projections relay without I/O: the watcher rebuilds
-	// only open views on publication and never requests reconciliation.
-	// The watcher and the monitor runner share one bounded shutdown budget
-	// below, outside the session worker group.
-	watcherDone := make(chan struct{})
-	if d.remoteDirectory != nil {
-		go func() {
-			defer close(watcherDone)
-			d.watchRemoteDirectory(d.serveCtx)
-		}()
-	} else {
-		close(watcherDone)
-	}
-	var monitorDone chan error
-	if d.remoteMonitorRun != nil {
-		monitorDone = make(chan error, 1)
-		go func() { monitorDone <- d.remoteMonitorRun(d.serveCtx) }()
-	}
-	// Bounded join outside the session worker group: remote teardown never
-	// extends daemon shutdown past this single budget. The monitor runner
-	// owns its runtime's two-second cleanup join, so joining the runner
-	// transitively joins the workers; the watcher owns no I/O or workers.
-	// This join is a wall-time operational bound on purpose: it uses the
-	// package wall clock (like the handshake timeout) instead of the
-	// injected daemon clock, whose timers may never fire in tests.
-	defer func() {
-		join := systemClock{}.NewTimer(remoteMonitorShutdownJoin)
-		defer join.Stop()
-		if monitorDone != nil {
-			select {
-			case <-monitorDone:
-			case <-join.C():
-				d.log.Warn("remote monitor shutdown join timed out")
-				return
-			}
-		}
-		select {
-		case <-watcherDone:
-		case <-join.C():
-			d.log.Warn("remote directory watcher shutdown join timed out")
-		}
-	}()
 
 	d.sessWg.Go(func() {
 		d.attentionAnimator(d.serveCtx)
@@ -1212,12 +1132,10 @@ func (d *Daemon) handleConn(tr ports.ServerConnection) {
 		if err := d.handleCommand(tr, message); err != nil {
 			d.log.Warn("command handler failed", "err", err)
 		}
-	case protocol.RemotePreviewRequest:
+	case protocol.RemotePreviewWatch:
 		stopTransport()
 		finishHandshake()
-		if err := d.handleRemotePreview(tr, message); err != nil {
-			d.log.Warn("remote preview handler failed", "err", err)
-		}
+		d.serveRemotePreviewWatch(tr, message)
 	case protocol.NavigationInventoryRequest:
 		stopTransport()
 		finishHandshake()

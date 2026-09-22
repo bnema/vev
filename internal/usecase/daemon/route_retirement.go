@@ -5,41 +5,25 @@ import (
 	"maps"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// retiredRoutes uses only authoritative observations. An unavailable remote
-// source retains its history; a successful empty catalogue proves absence.
-func retiredRoutes(subscription protocol.RouteAttentionSubscription, after map[protocol.RouteAttentionTarget]time.Time, inv sessionInventory) []protocol.RouteRetired {
+// retiredRoutes uses only authoritative observations: this daemon's own
+// lifecycles. Another daemon's routes are the client's broker to retire.
+func retiredRoutes(subscription protocol.RouteAttentionSubscription, _ map[protocol.RouteAttentionTarget]time.Time, inv sessionInventory) []protocol.RouteRetired {
 	var retired []protocol.RouteRetired
 	for _, target := range subscription.Targets {
-		known, present := target.SourceKey == "", false
-		if known {
-			for _, item := range inv.live {
-				present = present || item.view.incarnation == target.Target.LifecycleID
-			}
-			for _, stopped := range inv.stopped {
-				present = present || stopped.incarnation == target.Target.LifecycleID
-			}
-		} else {
-			for _, host := range inv.hosts {
-				if protocol.RemoteInventorySourceKey(host.Endpoint) != target.SourceKey {
-					continue
-				}
-				// A cached success (or a fetch already running at admission)
-				// may predate creation of this lifecycle. Only a later-started,
-				// completed successful observation can establish absence.
-				admitted, fenced := after[target]
-				known = fenced && host.InventoryKnown && host.Availability == domain.RemoteAvailabilityReachable &&
-					!host.Checking && host.LastAttempt.After(admitted) && !host.LastSuccess.Before(host.LastAttempt)
-				for _, session := range host.Sessions {
-					present = present || session.LifecycleID == target.Target.LifecycleID
-				}
-				break
-			}
+		if target.SourceKey != "" {
+			continue
 		}
-		if known && !present {
+		present := false
+		for _, item := range inv.live {
+			present = present || item.view.incarnation == target.Target.LifecycleID
+		}
+		for _, stopped := range inv.stopped {
+			present = present || stopped.incarnation == target.Target.LifecycleID
+		}
+		if !present {
 			retired = append(retired, protocol.RouteRetired{Ref: target.Ref, Target: target.Target})
 		}
 	}
