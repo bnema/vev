@@ -110,16 +110,12 @@ func clientMessageName(t *testing.T, envelope wire.Envelope) string {
 		return "NavigationInventoryPublication"
 	case protocol.NavigationInventoryFailure:
 		return "NavigationInventoryFailure"
-	case protocol.PickerBegin:
-		return "PickerBegin"
 	case protocol.PickerClose:
 		return "PickerClose"
 	case protocol.PickerSelection:
 		return "PickerSelection"
 	case protocol.PickerPreviewRequest:
 		return "PickerPreviewRequest"
-	case protocol.PickerControlRequest:
-		return "PickerControlRequest"
 	default:
 		return ""
 	}
@@ -189,8 +185,6 @@ func serverMessageNameForTest(payload []byte) string {
 		return "PickerFailure"
 	case protocol.PickerPreview:
 		return "PickerPreview"
-	case protocol.PickerControlResponse:
-		return "PickerControlResponse"
 	default:
 		return ""
 	}

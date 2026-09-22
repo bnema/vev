@@ -508,7 +508,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			name = "  " + name
 		}
 		badge := ""
-		if r.rendersAsHeader() {
+		if r.rendersAsHeader() && !(r.kind() == protocol.PickerLineSession && r.line.Status == protocol.PickerLineStatusUp) {
 			badge = lineStatusBadge(r.line.Status)
 		}
 		contentClipX := clipX
@@ -535,6 +535,9 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			continue
 		}
 		if r.rendersAsHeader() {
+			if r.line.Detail != "" && x < contentClipX {
+				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, " ", detailStyle)
+			}
 			detail := ui.TruncateText(r.line.Detail, contentClipX-x)
 			detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
 			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
@@ -549,6 +552,9 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			x = ui.DrawText(frame, x, rect.Y+y, clipX, " "+string(ui.AttentionGlyph), base)
 		}
 
+		if r.line.Detail != "" && x < clipX {
+			x = ui.DrawText(frame, x, rect.Y+y, clipX, " ", detailStyle)
+		}
 		detail := ui.TruncateText(r.line.Detail, clipX-x)
 		detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
 		drawMatchedText(frame, x, rect.Y+y, clipX, detail, detailStyle, nameMatchStyle, detailPositions)

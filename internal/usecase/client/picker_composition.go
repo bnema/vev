@@ -5,6 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // Picker is the composition seam over the client-owned picker.
@@ -75,6 +76,25 @@ func (p *Picker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpe
 }
 
 // SetOwnsInput updates picker input ownership at an attachment boundary.
+func (p *Picker) PreviewRequest(connection ports.BrokerConnectionID, stream ports.BrokerStreamID, size domain.Size) (ports.BrokerOpenStreamRequest, protocol.RemotePreviewRequest, bool) {
+	if p == nil || p.controller == nil {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	return p.controller.PreviewRequest(connection, stream, size)
+}
+
+func (p *Picker) SetPreview(preview protocol.RemotePreview) {
+	if p != nil && p.controller != nil {
+		p.controller.SetPreview(preview)
+	}
+}
+
+func (p *Picker) ClearPreview() {
+	if p != nil && p.controller != nil {
+		p.controller.ClearPreview()
+	}
+}
+
 func (p *Picker) SetOwnsInput(owns bool) {
 	if p == nil || p.controller == nil {
 		return

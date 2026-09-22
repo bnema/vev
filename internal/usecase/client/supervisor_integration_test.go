@@ -61,6 +61,10 @@ func (c *integrationCore) Subscribe() (ports.BrokerSubscription, error) {
 	return integrationSubscription{changed: c.changed}, nil
 }
 
+func (c *integrationCore) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return nil, errors.New("integration core does not support preview")
+}
+
 func (c *integrationCore) OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	return nil, errors.New("integration core does not support streams")
 }

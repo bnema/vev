@@ -301,6 +301,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			case protocol.ErrorMsg:
 				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
 			case protocol.Detached:
+				if typed.Reason == protocol.ReasonDetachToPicker {
+					return attachmentLifecycleEnd(token, AttachmentDetachToPicker)
+				}
 				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded}
 			}
 		case event := <-outgoing:
@@ -322,11 +325,8 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					}
 				}
 			}
-			if event.action == AttachmentDetachToPicker {
-				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded, Err: errDetachToPicker}
-			}
-			if event.action == AttachmentDetachAndExit {
-				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded, Err: errDetachAndExit}
+			if event.action != 0 {
+				return attachmentLifecycleEnd(token, event.action)
 			}
 		case <-ctx.Done():
 			return w.settle(ctx, fg, stream, token, ctx.Err())
@@ -334,6 +334,16 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			return w.settle(ctx, fg, stream, token, errAttachmentForegroundRevoked)
 		}
 	}
+}
+
+// attachmentLifecycleEnd gives local and daemon-triggered lifecycle actions
+// the same settlement path: drain/revoke foreground before publishing picker.
+func attachmentLifecycleEnd(token AttachmentToken, action AttachmentLifecycleActionKind) AttachmentEvent {
+	err := errDetachToPicker
+	if action == AttachmentDetachAndExit {
+		err = errDetachAndExit
+	}
+	return AttachmentEvent{Token: token, Kind: AttachmentEventEnded, Err: err}
 }
 
 type attachmentUIForeground interface {

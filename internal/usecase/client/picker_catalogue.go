@@ -421,11 +421,11 @@ func (c *pickerCatalogue) projectLocked() {
 		lines = append(lines, protocol.PickerLine{
 			Key:          pickerHostRowKey(observation),
 			Kind:         protocol.PickerLineHost,
-			Label:        origin,
+			Label:        "status",
 			Detail:       pickerHostDetail(observation),
 			Status:       pickerObservationStatus(observation, fresh),
 			StatusDetail: pickerObservationReason(observation, fresh),
-			Focusable:    true,
+			Focusable:    false,
 		})
 
 		for i := range observation.Sessions {
@@ -668,8 +668,9 @@ type pickerHostDiagnostic struct {
 	Message string
 }
 
-// diagnostics reports every projected host that is not a clean, fresh,
-// compatible, reachable daemon, so the controller can surface it.
+// diagnostics reports actionable host failures. Ordinary observation progress
+// and catalogue aging remain visible on the host status row and never become
+// intrusive toasts.
 func (c *pickerCatalogue) diagnostics() []pickerHostDiagnostic {
 	if c == nil {
 		return nil
@@ -685,13 +686,14 @@ func (c *pickerCatalogue) diagnostics() []pickerHostDiagnostic {
 		}
 		observation := host.observation
 		fresh := c.freshLocked(observation, now)
-		if pickerObservationCompatible(observation) && observation.Availability == domain.RemoteAvailabilityReachable && fresh && !observation.Checking {
+		status := pickerObservationStatus(observation, fresh)
+		if status != protocol.PickerLineStatusDown && status != protocol.PickerLineStatusError && status != protocol.PickerLineStatusVersion {
 			continue
 		}
 		diagnostics = append(diagnostics, pickerHostDiagnostic{
 			Key:     pickerHostRowKey(observation),
 			Origin:  pickerOriginLabel(observation),
-			Status:  pickerObservationStatus(observation, fresh),
+			Status:  status,
 			Message: pickerObservationReason(observation, fresh),
 		})
 	}

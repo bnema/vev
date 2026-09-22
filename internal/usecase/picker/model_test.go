@@ -297,7 +297,7 @@ func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 60, Rows: 8}, Preview{})
 	require.Equal(t, 60, frame.Width)
 	require.Equal(t, 8, frame.Height)
-	require.Contains(t, rowText(frame.Row(0)), "[up]")
+	require.NotContains(t, rowText(frame.Row(0)), "[up]")
 	require.Contains(t, rowText(frame.Row(1)), "[stopped]")
 }
 

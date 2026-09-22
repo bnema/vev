@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -109,6 +110,15 @@ func pickerTestCatalogue(t *testing.T) (*pickerCatalogue, *supervisorTestClock) 
 func pickerLineByLabel(lines []protocol.PickerLine, label string) (protocol.PickerLine, bool) {
 	for _, line := range lines {
 		if line.Kind != protocol.PickerLineSection && line.Label == label {
+			return line, true
+		}
+	}
+	return protocol.PickerLine{}, false
+}
+
+func pickerHostLine(lines []protocol.PickerLine) (protocol.PickerLine, bool) {
+	for _, line := range lines {
+		if line.Kind == protocol.PickerLineHost {
 			return line, true
 		}
 	}
@@ -266,6 +276,9 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			}
 			for label, status := range tt.wantStatus {
 				line, ok := pickerLineByLabel(lines, label)
+				if !ok && (label == "local" || strings.Contains(label, "@")) {
+					line, ok = pickerHostLine(lines)
+				}
 				require.True(t, ok, "row %q must be projected", label)
 				require.Equal(t, status, line.Status, "row %q badge", label)
 			}
@@ -878,8 +891,10 @@ func TestPickerCatalogueUnobservedDaemonProjects(t *testing.T) {
 	lines := catalogue.Lines()
 	require.Equal(t, []string{"local"}, pickerSectionLabels(lines))
 	require.Equal(t, []string{"alpha"}, pickerSessionLabels(lines))
-	host, ok := pickerLineByLabel(lines, "local")
+	host, ok := pickerHostLine(lines)
 	require.True(t, ok)
+	require.Equal(t, "status", host.Label)
+	require.False(t, host.Focusable, "host status is informational, not a duplicate destination")
 	require.Equal(t, protocol.PickerLineStatusStale, host.Status)
 	require.Equal(t, domain.RemoteReasonRefreshing, host.StatusDetail, "an unobserved daemon refreshes, it is not a version mismatch")
 	session, ok := pickerLineByLabel(lines, "alpha")

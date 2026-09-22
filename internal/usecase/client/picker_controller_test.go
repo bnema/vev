@@ -240,7 +240,7 @@ func TestPickerControllerInputRouting(t *testing.T) {
 		wantOp          pickerOp
 	}{
 		{name: "down", chunk: []byte("\x1b[B"), wantCursor: "beta"},
-		{name: "up rests on the host row", chunk: []byte("\x1b[A"), wantNoSelection: true},
+		{name: "up skips informational host row", chunk: []byte("\x1b[A"), wantCursor: "alpha"},
 		{name: "search entry", chunk: []byte("/"), wantCursor: "alpha", wantSearch: true},
 		{name: "search text", chunk: []byte("/al"), wantCursor: "alpha", wantSearch: true, wantQuery: "al"},
 		{name: "enter commits", chunk: []byte("/al\r"), wantCursor: "alpha", wantSearch: true, wantQuery: "al", wantOp: pickerOp{commit: true}},
@@ -299,12 +299,12 @@ func TestPickerControllerNotOwningInputLeavesReadUnconsumed(t *testing.T) {
 	require.True(t, controller.ConsumeTerminalRead([]byte("j")))
 }
 
-func TestPickerControllerSurfacesProgressAndFailuresAsNotices(t *testing.T) {
+func TestPickerControllerKeepsProgressInRowsAndSurfacesFailuresAsNotices(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	checking := pickerTestLocalObservation(clock.Now(), pickerTestSession("alpha", 1, catalogue_Up))
 	checking.Checking = true
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{checking}})
-	require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "a refreshing host is surfaced as progress")
+	require.Empty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "ordinary refreshing progress stays in the host row")
 
 	unreachable := pickerTestLocalObservation(clock.Now())
 	unreachable.Availability = domain.RemoteAvailabilityUnreachable
@@ -585,8 +585,8 @@ func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
 
 // TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch pins the
 // availability-first classification at the controller boundary: an unobserved
-// daemon (Availability Unknown, ProtocolVersion 0) surfaces a refreshing
-// notice, never a version_mismatch.
+// daemon (Availability Unknown, ProtocolVersion 0) keeps refreshing on its
+// row and surfaces no failure toast.
 func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	unobserved := pickerTestUnobservedObservation(clock.Now(), pickerTestSession("alpha", 1, catalogue_Up))
@@ -595,9 +595,12 @@ func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testi
 	controller.mu.Lock()
 	active := controller.notices.Active(clock.Now())
 	controller.mu.Unlock()
-	require.Len(t, active, 1)
-	require.Equal(t, "local: "+domain.RemoteReasonRefreshing, active[0].Message)
-	require.NotContains(t, active[0].Message, domain.RemoteReasonVersionMismatch)
+	require.Empty(t, active)
+	lines := controller.Catalogue().Lines()
+	host, ok := pickerHostLine(lines)
+	require.True(t, ok)
+	require.Equal(t, domain.RemoteReasonRefreshing, host.StatusDetail)
+	require.NotEqual(t, domain.RemoteReasonVersionMismatch, host.StatusDetail)
 }
 
 // TestPickerControllerRenderNoticeSelectsNewest pins that the notice shown is

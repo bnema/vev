@@ -371,6 +371,10 @@ func (s *supervisorTestService) Subscribe() (ports.BrokerSubscription, error) {
 	}), nil
 }
 
+func (s *supervisorTestService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return nil, errors.New("supervisor test service does not support preview")
+}
+
 func (s *supervisorTestService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	s.openCalls = append(s.openCalls, request)
@@ -1436,4 +1440,53 @@ func TestSupervisorTestHubModelsSubscriptionContract(t *testing.T) {
 	default:
 	}
 	require.Equal(t, ports.BrokerRevision(4), hub.current().Revision)
+}
+
+// Raw-mode Ctrl-C is input, not SIGINT. It must work before a broker exists,
+// including during a blocked connect and after permanent or transient failures.
+func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
+	for _, phase := range []string{"connecting", "retry", "nonretryable"} {
+		t.Run(phase, func(t *testing.T) {
+			reader := newPickerChunkReader()
+			defer reader.close()
+			terminal := newSupervisorTestTerminal(reader)
+			clock := newSupervisorTestClock()
+			reached := make(chan struct{}, 1)
+			connector := newSupervisorTestConnector(func(ctx context.Context, _ int) (ports.BrokerService, error) {
+				if phase == "connecting" {
+					reached <- struct{}{}
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				code := ports.BrokerErrorUnavailable
+				if phase == "nonretryable" {
+					code = ports.BrokerErrorIncompatible
+				}
+				return nil, ports.BrokerError{Code: code, Text: "test refusal"}
+			})
+			s := mustSupervisor(t, SupervisorConfig{
+				Connector: connector, Terminal: terminal, Clock: clock,
+				Picker: NewPicker(clock, 0),
+				Notify: func(State, error) { reached <- struct{}{} },
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- s.Run(ctx) }()
+			select {
+			case <-reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("did not reach test phase")
+			}
+			reader.push([]byte{3})
+			select {
+			case err := <-result:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Ctrl-C did not exit with stdin still open")
+			}
+			require.Equal(t, 1, terminal.restoreCount())
+			require.True(t, clock.allStopped())
+		})
+	}
 }

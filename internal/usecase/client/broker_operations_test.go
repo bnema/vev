@@ -177,6 +177,10 @@ func (s *brokerOpsTestService) Subscribe() (ports.BrokerSubscription, error) {
 	return nil, errors.New("broker ops test service does not support subscriptions")
 }
 
+func (s *brokerOpsTestService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return nil, errors.New("broker ops test service does not support preview")
+}
+
 func (s *brokerOpsTestService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	s.opens = append(s.opens, request)

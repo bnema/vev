@@ -349,6 +349,11 @@ type AttachmentLifecycleAction struct {
 type Supervisor struct {
 	cfg SupervisorConfig
 
+	// pendingPickerKey retains a commit observed while connecting. It is
+	// revalidated against the adopted service just like a ready-phase commit.
+	pendingPickerKey string
+	preview          previewManager
+
 	mu    sync.Mutex
 	state State
 
@@ -468,6 +473,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		sub     ports.BrokerSubscription
 	)
 	retire := func() {
+		s.preview.close(s.cfg.Picker)
 		if sub != nil {
 			sub.Close()
 			sub = nil
@@ -545,6 +551,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 		wasReadyLost := s.State().ReadyLost
 		s.transition(supervisorEvent{kind: supervisorReady})
+		s.refreshPreview(service)
 		if wasReadyLost {
 			s.notifyLifecycle(LifecycleNoticeBrokerReconnected)
 			s.mu.Lock()
@@ -720,6 +727,10 @@ func (s *Supervisor) awaitAttempt(ctx context.Context, input *terminalInputLifet
 		select {
 		case result := <-outcome:
 			return result, false, nil
+		case <-s.pickerOps():
+			if s.takePickerClose() {
+				return supervisorAttempt{}, true, nil
+			}
 		case <-ctx.Done():
 			return supervisorAttempt{}, true, ctx.Err()
 		case err := <-input.EOF():
@@ -753,6 +764,10 @@ type readyOutcome struct {
 // the supervisor can admit exactly the row the user committed. It opens no
 // stream and starts no terminal work itself.
 func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, sub ports.BrokerSubscription) readyOutcome {
+	if key := s.pendingPickerKey; key != "" {
+		s.pendingPickerKey = ""
+		return readyOutcome{commitKey: key}
+	}
 	var changed <-chan struct{}
 	var ops <-chan struct{}
 	if s.cfg.Picker != nil {
@@ -767,9 +782,25 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 			return readyOutcome{lossErr: service.Err()}
 		case <-changed:
 			s.cfg.Picker.ApplySnapshot(service.Snapshot())
+			s.refreshPreview(service)
 			s.renderCurrent()
+		case <-s.preview.changed():
+			if s.preview.publish(s.cfg.Picker) {
+				s.renderCurrent()
+			}
 		case <-ops:
-			if key, ok := s.takeCommittedKey(); ok {
+			op, key := s.cfg.Picker.TakeOp()
+			if !op.close && !op.commit {
+				s.refreshPreview(service)
+				s.renderCurrent()
+				continue
+			}
+			if op.close {
+				s.preview.close(s.cfg.Picker)
+				return readyOutcome{terminated: true}
+			}
+			if op.commit && key != "" {
+				s.preview.close(s.cfg.Picker)
 				return readyOutcome{commitKey: key}
 			}
 		case <-ctx.Done():
@@ -777,25 +808,39 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 		case err := <-input.EOF():
 			return readyOutcome{terminated: true, termErr: terminalReadCause(err)}
 		case <-s.presentationInvalidation():
+			s.refreshPreview(service)
 			s.renderResizeInvalidation()
 		}
 	}
 }
 
-// takeCommittedKey drains exactly one committed presentation decision. Only a
-// commit with a captured catalogue key admits an attachment; every other
-// decision (cursor moves, search, kill, close) is consumed and dropped here,
-// so picker input alone can never open, write, or retarget a session.
-func (s *Supervisor) takeCommittedKey() (string, bool) {
-	picker := s.cfg.Picker
-	if picker == nil {
-		return "", false
+func (s *Supervisor) refreshPreview(service ports.BrokerService) {
+	if s == nil || s.cfg.Picker == nil {
+		return
 	}
-	op, key := picker.TakeOp()
-	if !op.commit || key == "" {
-		return "", false
+	geometry, err := s.cfg.Terminal.Geometry()
+	if err != nil || !geometry.Valid() {
+		s.preview.close(s.cfg.Picker)
+		return
 	}
-	return key, true
+	s.preview.refresh(service, s.cfg.Picker, geometry.Size)
+}
+
+// pickerOps is nil when no picker owns presentation decisions.
+func (s *Supervisor) pickerOps() <-chan struct{} {
+	if s.cfg.Picker == nil {
+		return nil
+	}
+	return s.cfg.Picker.OpsReady()
+}
+
+// takePickerClose honors exit while offline without losing a racing commit.
+func (s *Supervisor) takePickerClose() bool {
+	op, key := s.cfg.Picker.TakeOp()
+	if op.commit && key != "" {
+		s.pendingPickerKey = key
+	}
+	return op.close
 }
 
 // awaitTermination parks the supervisor on the picker after a non-retryable
@@ -804,6 +849,10 @@ func (s *Supervisor) takeCommittedKey() (string, bool) {
 func (s *Supervisor) awaitTermination(ctx context.Context, input *terminalInputLifetime) error {
 	for {
 		select {
+		case <-s.pickerOps():
+			if s.takePickerClose() {
+				return nil
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-input.EOF():
@@ -826,6 +875,10 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 	defer stopSupervisorTimer(timer)
 	for {
 		select {
+		case <-s.pickerOps():
+			if s.takePickerClose() {
+				return true, nil
+			}
 		case <-timer.C():
 			return false, nil
 		case <-ctx.Done():

@@ -9,6 +9,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
@@ -102,6 +103,7 @@ type pickerController struct {
 	// lastCommitKey is the catalogue key captured with the pending commit
 	// decision, so TakeOp can hand a driver the exact committed row.
 	lastCommitKey string
+	preview       pickerusecase.Preview
 }
 
 // newPickerController builds a picker over an empty catalogue. The picker owns
@@ -192,7 +194,7 @@ func (p *pickerController) recordOpLocked(op pickerOp) {
 		p.lastCommitKey = p.commitKeyLocked()
 	}
 	p.lastOp = mergePickerOps(p.lastOp, op)
-	if p.lastOp.commit {
+	if p.lastOp.commit || p.lastOp.close {
 		// Coalesce exactly one wakeup: a driver that has not yet run TakeOp
 		// re-reads the accumulated decision, so a dropped signal is harmless.
 		select {
@@ -202,7 +204,7 @@ func (p *pickerController) recordOpLocked(op pickerOp) {
 	}
 }
 
-// OpsReady wakes the supervisor when a commit decision was recorded. It is a
+// OpsReady wakes the supervisor when a commit or close was recorded. It is a
 // capacity-one coalescing signal; TakeOp remains the authority on what was
 // decided, so a driver never infers the decision from the wakeup alone.
 func (p *pickerController) OpsReady() <-chan struct{} {
@@ -289,7 +291,77 @@ func (p *pickerController) Render(size domain.Size) []byte {
 	if p.loop == nil {
 		return nil
 	}
-	return p.renderer.render(p.loop, size, emptyPickerPreview())
+	return p.renderer.render(p.loop, size, p.preview)
+}
+
+func (p *pickerController) SetPreview(preview protocol.RemotePreview) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rows := preview.FrameRows()
+	if preview.Status != protocol.RemotePreviewOK || rows == nil {
+		p.preview = pickerusecase.Preview{}
+		return
+	}
+	p.preview = pickerusecase.Preview{Rows: rows, Width: int(preview.Width), Height: int(preview.Height)}
+}
+
+// PreviewRequest derives preview authority from the exact catalogue ref behind
+// the selected row. Only live exact sessions with an authoritative active tab
+// are previewable; create rows and stopped sessions are deliberately refused.
+func (p *pickerController) PreviewRequest(connection ports.BrokerConnectionID, stream ports.BrokerStreamID, size domain.Size) (ports.BrokerOpenStreamRequest, protocol.RemotePreviewRequest, bool) {
+	key, ok := p.CursorKey()
+	if !ok || p.catalogue == nil {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	ref, ok := p.catalogue.Ref(key)
+	if !ok || ref.kind != pickerSelectionExact {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	route, err := p.catalogue.ResolveRef(ref, pickerResolveBase{Connection: connection, Stream: stream})
+	if err != nil {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	p.catalogue.mu.Lock()
+	authority := p.catalogue.authorityForRefLocked(ref)
+	p.catalogue.mu.Unlock()
+	if !authority.found {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	session, ok := pickerFindSession(authority.observation.Sessions, ref.lifecycle)
+	if !ok || session.State == "down" || session.ActiveTabID == "" {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	viewport := pickerPreviewSize(size)
+	endpoint := authority.observation.Endpoint
+	if authority.observation.Local {
+		// RemoteSessionTarget still requires a non-empty route identity for the
+		// local daemon; "local" is the broker's canonical local authority.
+		endpoint = "local"
+	}
+	target := domain.RemoteSessionTarget{Endpoint: endpoint, DisplayOrigin: authority.observation.DisplayOrigin, LifecycleID: session.LifecycleID, SessionName: session.Name, LiveTabID: domain.TabStableID(session.ActiveTabID)}
+	preview := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: clampPreviewDimension(viewport.Cols, protocol.RemotePreviewMaxWidth), Height: clampPreviewDimension(viewport.Rows, protocol.RemotePreviewMaxHeight)}
+	route.Purpose = ports.BrokerStreamObservation
+	route.Admission = 0
+	route.Name = ""
+	route.Target = protocol.ExactSessionTarget{}
+	route.Env = nil
+	route.StartMode = ports.BrokerDaemonExistingOnly
+	if route.Validate() != nil || protocol.ValidateRemotePreviewRequest(preview) != nil {
+		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+	}
+	return route, preview, true
+}
+
+func (p *pickerController) ClearPreview() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.preview = pickerusecase.Preview{}
+	p.mu.Unlock()
 }
 
 // RenderNotice composes the newest bounded catalogue notice as a client-local
@@ -417,13 +489,27 @@ func (p *pickerController) handleRead(data []byte) bool {
 	if !consumed {
 		return false
 	}
-	if p.loop == nil || outcome.interaction != pickerGeneration || outcome.generation != pickerGeneration {
-		// The picker owns input before its first publication: the batch is
-		// consumed and dropped, never forwarded.
+	if outcome.interaction != pickerGeneration || outcome.generation != pickerGeneration {
 		return true
 	}
-	op, _ := applyPickerBatch(p.loop, outcome.events)
+	if p.loop == nil {
+		// Before a catalogue exists only an explicit interrupt is actionable.
+		// Use decoded events so a pasted Ctrl-C is not mistaken for an exit.
+		for _, event := range outcome.events {
+			if event.kind == pickerEventKey && event.key == "Ctrl+C" {
+				p.recordOpLocked(pickerOp{close: true})
+			}
+		}
+		return true
+	}
+	op, changed := applyPickerBatch(p.loop, outcome.events)
 	p.recordOpLocked(op)
+	if changed {
+		select {
+		case p.opsReady <- struct{}{}:
+		default:
+		}
+	}
 	return true
 }
 
