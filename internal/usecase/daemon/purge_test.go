@@ -692,7 +692,7 @@ func TestRemoteTargetRouteWaitsForPurgeAdmission(t *testing.T) {
 	go func() {
 		_, _, routeErr := d.routeWithContext(context.Background(), protocol.Hello{
 			Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz,
-			RemoteTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+			SessionTarget: ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target)), EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}, tr)
 		result <- routeErr
 	}()

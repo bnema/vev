@@ -90,6 +90,43 @@ func (s *sessionTestStream) Err() error {
 	return s.err
 }
 
+type blockingSendSessionStream struct {
+	*sessionTestStream
+	entered  chan struct{}
+	finished chan struct{}
+}
+
+func (s *blockingSendSessionStream) SendClient(protocol.ClientMessage) error {
+	close(s.entered)
+	<-s.closed
+	close(s.finished)
+	return errSessionTestClosed
+}
+
+func TestSessionAttachmentSendCancellationClosesStreamAndJoinsSend(t *testing.T) {
+	stream := &blockingSendSessionStream{sessionTestStream: newSessionTestStream(), entered: make(chan struct{}), finished: make(chan struct{})}
+	fg := &attachmentForeground{done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan error, 1)
+	go func() {
+		returned <- (&sessionAttachmentWorker{}).send(ctx, fg, stream, protocol.Detach{})
+	}()
+
+	<-stream.entered
+	cancel()
+	require.ErrorIs(t, <-returned, context.Canceled)
+	select {
+	case <-stream.Done():
+	default:
+		t.Fatal("cancellation did not close stream")
+	}
+	select {
+	case <-stream.finished:
+	default:
+		t.Fatal("send goroutine was not joined")
+	}
+}
+
 func (s *sessionTestStream) deliver(message protocol.ServerMessage) {
 	select {
 	case s.incoming <- message:
@@ -183,9 +220,10 @@ func sessionTestRequest(local bool) ports.BrokerOpenStreamRequest {
 
 func sessionTestWorkerConfig(request ports.BrokerOpenStreamRequest) sessionAttachmentConfig {
 	return sessionAttachmentConfig{
-		Request:  request,
-		ClientID: [16]byte{0xAB},
-		Geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
+		Request:            request,
+		ClientID:           [16]byte{0xAB},
+		Geometry:           domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
+		SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Env: append([]string(nil), request.Env...)},
 	}
 }
 
@@ -226,7 +264,8 @@ func (a *sessionTestAttachments) token(t *testing.T) AttachmentToken {
 func sessionTestRun(t *testing.T, stream ports.BrokerLogicalConnection, terminal *workerTestTerminal, cfg sessionAttachmentConfig, attached *sessionTestAttachments) <-chan AttachmentEvent {
 	t.Helper()
 	host := newWorkerTestHost(terminal, nil, attached.record)
-	worker := newSessionAttachmentWorker(cfg)
+	worker, err := newSessionAttachmentWorker(cfg)
+	require.NoError(t, err)
 	events := make(chan AttachmentEvent, 1)
 	go func() {
 		event, _ := host.Run(context.Background(), AttachmentToken{Generation: 4, Attempt: 1}, worker, stream)
@@ -268,6 +307,11 @@ func TestSessionAttachmentWorkerStaysConnectingUntilPublication(t *testing.T) {
 	require.Equal(t, protocol.IntentAttach, hello.Intent)
 	require.NotNil(t, hello.ExactTarget)
 	require.False(t, hello.Remote)
+	// An exact attach carries its target's session name: the strict Hello
+	// contract requires Name to equal the exact target's name, so an empty Name
+	// would be rejected before the daemon ever routes it.
+	require.Equal(t, hello.ExactTarget.SessionName, hello.Name)
+	require.NoError(t, protocol.ValidateHello(hello))
 
 	stream.deliver(protocol.Welcome{SessionName: "alpha"})
 	// Welcome alone must not attach, write, or publish.
@@ -279,8 +323,23 @@ func TestSessionAttachmentWorkerStaysConnectingUntilPublication(t *testing.T) {
 	require.Equal(t, AttachmentToken{Generation: 4, Attempt: 1}, attached.token(t))
 	require.Equal(t, "\x1b[Hready", terminal.written())
 	require.Equal(t, 1, terminal.flushCount())
-	require.Len(t, terminal.publications(), 1)
-	require.Equal(t, ports.UIStatusTransitioning, terminal.publications()[0].Status)
+	require.Len(t, terminal.publications(), 2)
+	// The frame commits the pre-attach Connecting presentation with a public
+	// generation of zero, then the committed Attached presentation carries the
+	// real action generation without writing a second frame.
+	require.Equal(t, ports.UIStatusConnecting, terminal.publications()[0].Status)
+	require.Zero(t, terminal.publications()[0].Generation)
+	require.Equal(t, ports.UIStatusAttached, terminal.publications()[1].Status)
+	require.Equal(t, uint64(4), terminal.publications()[1].Generation)
+	require.Equal(t, 1, terminal.flushCount(), "the attached presentation writes no second frame")
+	require.Eventually(t, func() bool {
+		for _, message := range stream.messages() {
+			if ack, ok := message.(protocol.Ack); ok {
+				return ack == (protocol.Ack{Epoch: 1, State: 1})
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond, "committed initial output must release the daemon output window")
 
 	require.NoError(t, stream.Close())
 	select {
@@ -449,7 +508,8 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 			terminal := newWorkerTestTerminal()
 			attached := newSessionTestAttachments()
 			supervisor := &Supervisor{cfg: SupervisorConfig{Terminal: terminal, AttachmentEnvironment: tt.env}, clientID: [16]byte{1}}
-			worker, err := supervisor.newAttachmentWorker(sessionTestRequest(true), nil)
+			request := sessionTestRequest(true)
+			worker, err := supervisor.newAttachmentWorker(request, nil, SessionEnvironment{Provenance: SessionEnvironmentLocalCLI, Cwd: tt.env.Cwd, Env: append([]string(nil), request.Env...)})
 			require.NoError(t, err)
 			events := make(chan AttachmentEvent, 1)
 			host := newWorkerTestHost(terminal, nil, attached.record)

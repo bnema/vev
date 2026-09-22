@@ -1,7 +1,12 @@
 package ports
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"unicode"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol/catalogue"
@@ -40,6 +45,89 @@ func (e BrokerStoreOutcomeUnknownError) Error() string {
 }
 func (e BrokerStoreOutcomeUnknownError) Unwrap() error { return e.Err }
 
+type BrokerRouteKind string
+
+const (
+	BrokerRouteUnix        BrokerRouteKind = "unix"
+	BrokerRouteSSHStdio    BrokerRouteKind = "ssh-stdio"
+	BrokerRouteSSHQUIC     BrokerRouteKind = "ssh-quic"
+	BrokerMaxRouteArgv                     = 32
+	BrokerMaxRouteArgBytes                 = 4 << 10
+)
+
+// BrokerRouteSpec is durable routing authority. Adapters derive all runtime
+// trust, timeout, address and launch details from policy and this minimal route.
+type BrokerRouteSpec struct {
+	Kind   BrokerRouteKind
+	Path   string
+	Target string
+	Argv   []string
+}
+
+func (r BrokerRouteSpec) Validate() error {
+	switch r.Kind {
+	case BrokerRouteUnix:
+		if r.Path == "" || !filepath.IsAbs(r.Path) || filepath.Clean(r.Path) != r.Path || r.Target != "" || len(r.Argv) != 0 {
+			return errors.New("ports: invalid unix broker route")
+		}
+	case BrokerRouteSSHStdio, BrokerRouteSSHQUIC:
+		if r.Path != "" || domain.ValidateRemoteHostTarget(r.Target) != nil || len(r.Argv) == 0 || len(r.Argv) > BrokerMaxRouteArgv {
+			return errors.New("ports: invalid ssh broker route")
+		}
+		for _, arg := range r.Argv {
+			if arg == "" || len(arg) > BrokerMaxRouteArgBytes || strings.IndexFunc(arg, func(v rune) bool { return v == 0 || unicode.IsControl(v) }) >= 0 {
+				return fmt.Errorf("ports: invalid ssh broker route argv")
+			}
+		}
+	default:
+		return errors.New("ports: unknown broker route kind")
+	}
+	return nil
+}
+
+func (r BrokerRouteSpec) Clone() BrokerRouteSpec {
+	r.Argv = append([]string(nil), r.Argv...)
+	return r
+}
+
+// BrokerRouteForTransport maps the closed legacy policy transport vocabulary
+// to canonical remote routes.
+func BrokerRouteForTransport(transport, endpoint string) (BrokerRouteSpec, error) {
+	switch transport {
+	case "ssh-stdio", "stdio":
+		return BrokerRouteSpec{Kind: BrokerRouteSSHStdio, Target: endpoint, Argv: []string{"vev", "_broker-mux-stdio", "--production"}}, nil
+	case "ssh-quic", "quic":
+		return BrokerRouteSpec{Kind: BrokerRouteSSHQUIC, Target: endpoint, Argv: []string{"vev", "_broker-mux-quic-bootstrap", "--production"}}, nil
+	default:
+		return BrokerRouteSpec{}, fmt.Errorf("ports: unsupported broker transport %q", transport)
+	}
+}
+
+func CloneBrokerHostRecords(hosts []BrokerHostRecord) []BrokerHostRecord {
+	out := append([]BrokerHostRecord(nil), hosts...)
+	for i := range out {
+		out[i].Route = out[i].Route.Clone()
+	}
+	return out
+}
+
+// UpgradeBrokerHostRoutes upgrades records written before routes became
+// explicit. It is intentionally closed over the approved remote vocabulary.
+func UpgradeBrokerHostRoutes(hosts []BrokerHostRecord) ([]BrokerHostRecord, error) {
+	out := CloneBrokerHostRecords(hosts)
+	for i := range out {
+		if out[i].Route.Kind != "" {
+			continue
+		}
+		route, err := BrokerRouteForTransport(out[i].Policy.Transport, out[i].Registration.Endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("ports: upgrade broker route for %q: %w", out[i].Registration.Endpoint, err)
+		}
+		out[i].Route = route
+	}
+	return out, nil
+}
+
 // BrokerHostRecord is durable registration authority. Membership and policy
 // are never inferred from an observation or from the broker environment.
 type BrokerHostRecord struct {
@@ -47,6 +135,10 @@ type BrokerHostRecord struct {
 	Pinned       bool
 	Learned      bool
 	Policy       BrokerPolicy
+	Route        BrokerRouteSpec
+	// Identity is the durable authenticated daemon binding. Empty means the
+	// registration has not completed first contact yet.
+	Identity BrokerDaemonIdentity
 }
 
 // BrokerHosts is an optimistic-concurrency token and the ordered authority.
@@ -81,6 +173,14 @@ func ValidateBrokerHostRecords(hosts []BrokerHostRecord) error {
 		if err := host.Policy.Validate(); err != nil {
 			return err
 		}
+		if err := host.Route.Validate(); err != nil {
+			return err
+		}
+		if host.Identity != "" {
+			if err := host.Identity.Validate(); err != nil {
+				return err
+			}
+		}
 		if (!host.Pinned && !host.Learned) || seen[host.Registration.Endpoint] {
 			return errors.New("ports: invalid broker membership")
 		}
@@ -97,6 +197,12 @@ func ValidateBrokerHostRecords(hosts []BrokerHostRecord) error {
 // before its compare-and-swap, so malformed caller input is reported as a
 // caller error and never as invalid durable state. Close releases exclusive
 // ownership; no operation is valid after Close.
+// BrokerHostAuthorityReader exposes committed durable routing authority.
+// Returned records must be defensive deep copies.
+type BrokerHostAuthorityReader interface {
+	LookupHost(ctx context.Context, endpoint string) (BrokerHostRecord, bool, error)
+}
+
 type BrokerHostStore interface {
 	BrokerSnapshotStore
 	LoadHosts() (BrokerHosts, error)

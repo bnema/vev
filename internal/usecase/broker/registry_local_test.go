@@ -437,7 +437,7 @@ func TestRegistryLocalOnlyRefusesRestoredRemoteMembership(t *testing.T) {
 func TestPoolLocalStreamsShareOnePhysicalEntry(t *testing.T) {
 	var connects atomic.Int32
 	var physical *fakePhysical
-	pool, _ := setupPool(t, func(_ context.Context, endpoint ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	pool, _ := setupPool(t, func(_ context.Context, endpoint ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		connects.Add(1)
 		physical = &fakePhysical{endpoint: endpoint, done: make(chan struct{})}
 		return physical, nil

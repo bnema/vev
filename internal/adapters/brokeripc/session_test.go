@@ -109,9 +109,7 @@ func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	opened, err := session.OpenStream(ctx, ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl, Local: true, Stream: 1, Policy: testPolicy(),
-	})
+	opened, err := session.OpenStream(ctx, openRequest(1))
 	require.NoError(t, err)
 	require.NotNil(t, opened)
 
@@ -143,10 +141,7 @@ func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionCreateNamed, Name: "work",
-		Local: true, Policy: testPolicy(),
-	})
+	stream, err := client.OpenStream(ctx, attachmentRequest(1, ports.BrokerAdmissionCreateNamed, "work"))
 	require.NoError(t, err)
 	require.NotNil(t, stream)
 
@@ -157,6 +152,42 @@ func TestOpenStreamAdmissionRoundTrips(t *testing.T) {
 	require.Equal(t, "work", core.opens[0].Name)
 	require.Equal(t, ports.BrokerStreamAttachment, core.opens[0].Purpose)
 	require.True(t, core.opens[0].Local)
+	require.Equal(t, ports.BrokerDaemonStartIfNeeded, core.opens[0].StartMode)
+}
+
+// TestObservationForcesExistingOnly proves the observation authorization
+// travels the IPC wire: a control stream may carry start-if-needed, while an
+// observation must carry existing-only and a spawn-capable observation is
+// refused before any frame travels.
+func TestObservationForcesExistingOnly(t *testing.T) {
+	e := startEndpoint(t, Config{})
+	client, _ := e.pair()
+	core := e.authority.last()
+	require.NotNil(t, core)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	streamID := nextStreamID(t, client)
+	observation := openRequest(streamID)
+	observation.Purpose = ports.BrokerStreamObservation
+	observation.StartMode = ports.BrokerDaemonExistingOnly
+	stream, err := client.OpenStream(ctx, observation)
+	require.NoError(t, err)
+	require.NoError(t, stream.Close())
+
+	// A spawn-capable observation is refused locally: it never reaches the
+	// admitted core at all.
+	startable := openRequest(nextStreamID(t, client))
+	startable.Purpose = ports.BrokerStreamObservation
+	startable.StartMode = ports.BrokerDaemonStartIfNeeded
+	_, err = client.OpenStream(ctx, startable)
+	require.ErrorIs(t, err, ports.BrokerAdmissionInvalid, "observation never authorizes a spawn")
+
+	core.mu.Lock()
+	defer core.mu.Unlock()
+	require.Len(t, core.opens, 1, "only the existing-only observation reached the core")
+	require.Equal(t, ports.BrokerStreamObservation, core.opens[0].Purpose)
+	require.Equal(t, ports.BrokerDaemonExistingOnly, core.opens[0].StartMode)
 }
 
 // TestRegistrationAssignsScopeAtAccept proves the client adapter adopts exactly
@@ -304,11 +335,7 @@ func TestOpenStreamCarriesTypedTraffic(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl,
-		Local:   true,
-		Policy:  testPolicy(),
-	})
+	stream, err := client.OpenStream(ctx, openRequest(1))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stream.Close() })
 
@@ -351,11 +378,7 @@ func TestOpenStreamRefusedByCoreReachesClient(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl,
-		Local:   true,
-		Policy:  testPolicy(),
-	})
+	stream, err := client.OpenStream(ctx, openRequest(1))
 	require.Error(t, err)
 	require.Nil(t, stream)
 	var failure ports.BrokerError
@@ -379,9 +402,9 @@ func TestTerminalStreamFailureFailsOnlyThatStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	first, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	first, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
-	second, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	second, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
 
@@ -419,7 +442,7 @@ func TestCloseStreamRetiresBothSides(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	stream, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	require.NoError(t, client.CloseStream(client.ConnectionID(), 1))
 
@@ -705,7 +728,7 @@ func TestDisconnectCleanupReleasesEveryOwnedResource(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	_, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	conn := core.logicalConn(1)
 	require.NotNil(t, conn)
@@ -767,7 +790,7 @@ func TestClientStreamBackpressureSettlesOnlyThatStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	stream, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	conn := core.logicalConn(1)
 	require.NotNil(t, conn)
@@ -802,7 +825,7 @@ func TestOrderlyStreamCloseReportsNoError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	stream, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
 	select {
@@ -825,23 +848,36 @@ func TestScopeIdentityFencing(t *testing.T) {
 	defer cancel()
 	foreign := ports.BrokerConnectionID{0x99}
 	_, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl, Local: true, Connection: foreign, Policy: testPolicy(),
+		Purpose: ports.BrokerStreamControl, Local: true, Stream: 1, Connection: foreign, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
 	})
 	require.ErrorIs(t, err, ports.BrokerAdmissionStale)
 
 	_, err = client.OpenStream(ctx, ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl, Local: true, Epoch: e.epoch + 1, Policy: testPolicy(),
+		Purpose: ports.BrokerStreamControl, Local: true, Stream: 1, Epoch: e.epoch + 1, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
 	})
 	require.ErrorIs(t, err, ErrScopeMismatch)
 	var stale ports.BrokerError
 	require.ErrorAs(t, err, &stale)
 	require.Equal(t, ports.BrokerErrorStaleEpoch, stale.Code)
 
-	first, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	// A concurrent lower identity is admitted: an ID allocated before a higher
+	// one can legitimately arrive after it.
+	first, err := client.OpenStream(ctx, openRequest(2))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
-	_, err = client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Stream: 1, Policy: testPolicy()})
-	require.ErrorIs(t, err, ports.BrokerAdmissionStale)
+	second, err := client.OpenStream(ctx, openRequest(1))
+	require.NoError(t, err, "a concurrent lower identity is admitted, not refused as stale")
+	t.Cleanup(func() { _ = second.Close() })
+	// Replaying a consumed identity is refused, and so is an identity evicted
+	// past the anti-replay window.
+	_, err = client.OpenStream(ctx, openRequest(1))
+	require.ErrorIs(t, err, ports.BrokerAdmissionStale, "a replayed identity is stale")
+	_, err = client.OpenStream(ctx, openRequest(ports.BrokerStreamWindowSize+3))
+	require.NoError(t, err)
+	_, err = client.OpenStream(ctx, openRequest(1))
+	require.ErrorIs(t, err, ports.BrokerAdmissionStale, "an identity evicted from the window is stale")
+	_, err = client.OpenStream(ctx, openRequest(0))
+	require.ErrorIs(t, err, ports.BrokerAdmissionInvalid, "a zero identity is never admitted")
 }
 
 // TestRequestReconcileIsBoundedHint proves the reconcile hint is sent only for an
@@ -881,7 +917,7 @@ func TestCoreErrorSurfacesAsTypedFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	stream, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stream.Close() })
 
@@ -906,7 +942,7 @@ func TestSessionHandshakeFailureIsStreamLocal(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stream, err := client.OpenStream(ctx, ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	stream, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
 	conn := core.logicalConn(1)
 	require.NotNil(t, conn)

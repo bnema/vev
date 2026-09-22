@@ -134,6 +134,30 @@ func TestProtoServerRoundTrips(t *testing.T) {
 	}
 }
 
+func TestSessionAttachTargetFromWireRejectsInvalidRawName(t *testing.T) {
+	lifecycle := lifecycleToWire(domain.SessionLifecycleID{1})
+	for _, rawName := range []string{string(make([]byte, 257)), "bad\nname"} {
+		_, err := sessionAttachTargetFromWire(&wire.SessionAttachTarget{LifecycleId: lifecycle, SessionName: "work", TabIndex: proto.Int32(0), TabRawName: rawName, TabExpectedCount: 1, Stopped: true})
+		require.Error(t, err)
+	}
+}
+
+func TestSessionAttachTargetTabIndexPresence(t *testing.T) {
+	lifecycle := lifecycleToWire(domain.SessionLifecycleID{1})
+
+	zero, err := sessionAttachTargetFromWire(&wire.SessionAttachTarget{LifecycleId: lifecycle, SessionName: "work", TabIndex: proto.Int32(0), TabRawName: "first", TabExpectedCount: 1, Stopped: true})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), zero.TabIndex)
+
+	absent, err := sessionAttachTargetFromWire(&wire.SessionAttachTarget{LifecycleId: lifecycle, SessionName: "work", Stopped: true})
+	require.NoError(t, err)
+	require.Equal(t, protocol.NoTabIndex, absent.TabIndex)
+
+	encoded, err := sessionAttachTargetToWire(zero)
+	require.NoError(t, err)
+	require.Zero(t, encoded.GetTabIndex())
+}
+
 // TestProtoWrongDirectionRejects proves a server payload in a client
 // envelope (and vice versa) fails before any mutation.
 func TestProtoWrongDirectionRejects(t *testing.T) {

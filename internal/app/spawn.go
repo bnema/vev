@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/platform"
@@ -101,39 +102,34 @@ func retryAttempts[T any](ctx context.Context, cfg backoffConfig, attempt func()
 	}
 }
 
-func waitForLifecycleAvailability(ctx context.Context, runtimeDir string, cfg backoffConfig) (lifecycleOwnership, error) {
-	return retryAttempts(ctx, cfg, func() (lifecycleOwnership, bool, error) {
-		owner, err := daemonLifecycleProbe.TryAcquire(runtimeDir)
+// waitForTargetOrLifecycle is the shared election primitive behind every
+// connect-or-spawn path: it repeatedly dials the target and probes lifecycle
+// ownership in lockDir until one of the two is available, a non-contention
+// failure is reported, or the caller's context or the retry budget ends. It is
+// generic over the dial result so the session transport and the daemonmux
+// carriage obey exactly one election discipline instead of two that could drift
+// apart. The dial closure and lockDir stay separate because the daemon's
+// lifecycle lock lives in its runtime directory while a session transport and
+// a daemonmux carriage are two different endpoints of the same daemon.
+func waitForTargetOrLifecycle[T any](ctx context.Context, lockDir string, dial func(ctx context.Context) (T, error), cfg backoffConfig) (T, lifecycleOwnership, error) {
+	type targetOrLifecycle struct {
+		target T
+		owner  lifecycleOwnership
+	}
+	result, err := retryAttempts(ctx, cfg, func() (targetOrLifecycle, bool, error) {
+		if target, err := dial(ctx); err == nil {
+			return targetOrLifecycle{target: target}, true, nil
+		}
+		owner, err := daemonLifecycleProbe.TryAcquire(lockDir)
 		if err == nil {
-			return owner, true, nil
+			return targetOrLifecycle{owner: owner}, true, nil
 		}
 		if !errors.Is(err, lifecycle.ErrBusy) {
-			return nil, false, err
+			return targetOrLifecycle{}, false, err
 		}
-		return nil, false, nil
+		return targetOrLifecycle{}, false, nil
 	})
-}
-
-type daemonOrLifecycle struct {
-	transport wire.Transport
-	owner     lifecycleOwnership
-}
-
-func waitForDaemonOrLifecycle(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (wire.Transport, lifecycleOwnership, error) {
-	result, err := retryAttempts(ctx, cfg, func() (daemonOrLifecycle, bool, error) {
-		if transport, err := dial(ctx, dir); err == nil {
-			return daemonOrLifecycle{transport: transport}, true, nil
-		}
-		owner, err := daemonLifecycleProbe.TryAcquire(dir)
-		if err == nil {
-			return daemonOrLifecycle{owner: owner}, true, nil
-		}
-		if !errors.Is(err, lifecycle.ErrBusy) {
-			return daemonOrLifecycle{}, false, err
-		}
-		return daemonOrLifecycle{}, false, nil
-	})
-	return result.transport, result.owner, err
+	return result.target, result.owner, err
 }
 
 func waitBackoff(ctx context.Context, duration time.Duration) error {
@@ -148,61 +144,95 @@ func waitBackoff(ctx context.Context, duration time.Duration) error {
 }
 
 // ensureDaemonWithLifecycle never elects a spawner while another lifecycle
-// owner may still be initializing or tearing down durable state.
+// owner may still be initializing or tearing down durable state. It is the
+// session-transport spelling of the shared election primitive.
 func ensureDaemonWithLifecycle(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (wire.Transport, error) {
+	return ensureTargetWithLifecycle(ctx, dir, func(ctx context.Context) (wire.Transport, error) { return dial(ctx, dir) }, spawn, cfg)
+}
+
+// ensureMuxDaemon returns a raw framed carriage to a running daemon, electing
+// exactly one spawner under the same lifecycle and spawn-lock discipline the
+// public session socket already uses. lockDir owns the daemon's lifecycle and
+// spawn locks; carriage is the private daemonmux endpoint the dial closure
+// reaches. Its readiness proof is the carriage itself: it never dials a
+// session, opens a session control stream, or otherwise asks the daemon a
+// session question.
+func ensureMuxDaemon(ctx context.Context, lockDir, carriage string, dial func(ctx context.Context, carriage string) (daemonmux.RawFramedTransport, error), spawn spawnFunc, cfg backoffConfig) (daemonmux.RawFramedTransport, error) {
+	return ensureTargetWithLifecycle(ctx, lockDir, func(ctx context.Context) (daemonmux.RawFramedTransport, error) { return dial(ctx, carriage) }, spawn, cfg)
+}
+
+// ensureTargetWithLifecycle is the shared connect-or-spawn election: one dial,
+// then lifecycle availability, then exactly one elected spawner, then a bounded
+// redial of the same target. It never spawns while another lifecycle owner may
+// still be initializing or tearing down durable state, and it returns the
+// dialed value unchanged.
+func ensureTargetWithLifecycle[T any](ctx context.Context, lockDir string, dial func(ctx context.Context) (T, error), spawn spawnFunc, cfg backoffConfig) (T, error) {
+	var zero T
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return zero, err
 	}
-	if transport, err := dial(ctx, dir); err == nil {
-		return transport, nil
+	if target, err := dial(ctx); err == nil {
+		return target, nil
 	}
-	transport, owner, err := waitForDaemonOrLifecycle(ctx, dir, dial, cfg)
+	target, owner, err := waitForTargetOrLifecycle(ctx, lockDir, dial, cfg)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
-	if transport != nil {
-		return transport, nil
+	if any(target) != nil {
+		// The target is an interface (a session transport or a raw mux
+		// carriage), so this is the same nil test the typed spelling used: a
+		// non-nil interface value means the dial succeeded.
+		return target, nil
 	}
 	if err := owner.Release(); err != nil {
-		return nil, fmt.Errorf("vev: release lifecycle spawn probe: %w", err)
+		return zero, fmt.Errorf("vev: release lifecycle spawn probe: %w", err)
 	}
-	return ensureDaemon(ctx, dir, dial, spawn, cfg)
+	return ensureTarget(ctx, lockDir, dial, spawn, cfg)
 }
 
 // ensureDaemon returns a transport to a running daemon, spawning one if
 // necessary after ensureDaemonWithLifecycle has established lifecycle
 // availability. Tests also exercise this lower-level spawn election directly.
 func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (wire.Transport, error) {
+	return ensureTarget(ctx, dir, func(ctx context.Context) (wire.Transport, error) { return dial(ctx, dir) }, spawn, cfg)
+}
+
+// ensureTarget is the shared spawn election: it dials once, then takes the
+// spawn lock in lockDir, and only the elected winner spawns. Every dialer —
+// the session transport and the daemonmux carriage — therefore observes the
+// same single-spawner guarantee.
+func ensureTarget[T any](ctx context.Context, lockDir string, dial func(ctx context.Context) (T, error), spawn spawnFunc, cfg backoffConfig) (T, error) {
+	var zero T
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return zero, err
 	}
-	if t, err := dial(ctx, dir); err == nil {
-		slog.Debug("daemon already reachable", "socket_dir", dir)
+	if t, err := dial(ctx); err == nil {
+		slog.Debug("daemon already reachable", "socket_dir", lockDir)
 		return t, nil
 	}
 
-	release, acquired, err := acquireSpawnLock(dir)
+	release, acquired, err := acquireSpawnLock(lockDir)
 	if err != nil {
-		return nil, fmt.Errorf("vev: acquiring spawn lock: %w", err)
+		return zero, fmt.Errorf("vev: acquiring spawn lock: %w", err)
 	}
 	if acquired {
 		// We won the election: spawn, and hold the lock until the socket is
 		// dialable (or spawn fails) so late-arriving clients keep waiting
 		// rather than spawning a second daemon.
 		defer release()
-		slog.Info("spawning daemon", "socket_dir", dir)
+		slog.Info("spawning daemon", "socket_dir", lockDir)
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return zero, err
 		}
 		if err := spawn(); err != nil {
 			slog.Error("daemon spawn failed", "err", err)
-			return nil, fmt.Errorf("vev: spawning daemon: %w", err)
+			return zero, fmt.Errorf("vev: spawning daemon: %w", err)
 		}
 	} else {
-		slog.Debug("waiting for daemon spawned by another process", "socket_dir", dir)
+		slog.Debug("waiting for daemon spawned by another process", "socket_dir", lockDir)
 	}
 
-	return retryDial(ctx, dir, dial, cfg)
+	return retryTarget(ctx, lockDir, dial, cfg)
 }
 
 // acquireSpawnLock attempts to create the spawn-lock directory. It returns
@@ -238,14 +268,29 @@ func acquireSpawnLock(dir string) (release func(), acquired bool, err error) {
 // retryDial dials repeatedly with exponential backoff until the daemon
 // answers, the context is cancelled, or the total budget is exhausted.
 func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (wire.Transport, error) {
-	transport, err := retryAttempts(ctx, cfg, func() (wire.Transport, bool, error) {
-		transport, err := dial(ctx, dir)
-		return transport, err == nil, nil
+	return retryTarget(ctx, dir, func(ctx context.Context) (wire.Transport, error) { return dial(ctx, dir) }, cfg)
+}
+
+// retryTarget is the shared bounded redial: it repeats the same dial with
+// exponential backoff until it answers, the caller's context ends, or the total
+// budget is exhausted. It is generic so the daemonmux carriage retries under
+// exactly the budget the session transport uses.
+func retryTarget[T any](ctx context.Context, lockDir string, dial func(ctx context.Context) (T, error), cfg backoffConfig) (T, error) {
+	var lastDialErr error
+	target, err := retryAttempts(ctx, cfg, func() (T, bool, error) {
+		target, dialErr := dial(ctx)
+		if dialErr != nil {
+			lastDialErr = dialErr
+		}
+		return target, dialErr == nil, nil
 	})
 	if errors.Is(err, ErrDaemonUnreachable) {
-		slog.Error("daemon did not become reachable before retry budget expired", "socket_dir", dir, "budget", cfg.total)
+		slog.Error("daemon did not become reachable before retry budget expired", "socket_dir", lockDir, "budget", cfg.total, "last_dial_error", lastDialErr)
+		if lastDialErr != nil {
+			err = fmt.Errorf("%w: last dial: %v", ErrDaemonUnreachable, lastDialErr)
+		}
 	}
-	return transport, err
+	return target, err
 }
 
 // realDial is the production dialer.

@@ -120,15 +120,17 @@ func TestLoadValidConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{testEndpoint}, config.Endpoints())
 
-	resolved, err := config.Resolver().Resolve(context.Background(), ports.BrokerOpenStreamRequest{
+	resolved, err := config.Resolver().ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
 		Purpose:      ports.BrokerStreamControl,
 		Endpoint:     testEndpoint,
 		Registration: testRegistration(),
 		Policy:       testPolicy(),
+		StartMode:    ports.BrokerDaemonExistingOnly,
 	})
 	require.NoError(t, err)
-	require.Equal(t, ports.BrokerDaemonIdentity("offline-daemon"), resolved.Identity)
+	require.Equal(t, ports.BrokerDaemonIdentity("offline-daemon"), resolved.ExpectedIdentity.Identity)
 	require.Equal(t, testPolicy(), resolved.Policy)
+	require.Equal(t, ports.BrokerDaemonExistingOnly, resolved.StartMode, "resolution propagates the requested start mode")
 
 	local, err := config.LocalMuxRoute()
 	require.NoError(t, err)
@@ -484,14 +486,16 @@ func TestLoadAliasesShareOneRoute(t *testing.T) {
 	for _, endpoint := range []string{first, second} {
 		registration := testRegistration()
 		registration.Endpoint = endpoint
-		resolved, err := config.Resolver().Resolve(context.Background(), ports.BrokerOpenStreamRequest{
+		resolved, err := config.Resolver().ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
 			Purpose:      ports.BrokerStreamControl,
 			Endpoint:     endpoint,
 			Registration: registration,
 			Policy:       testPolicy(),
+			StartMode:    ports.BrokerDaemonStartIfNeeded,
 		})
 		require.NoError(t, err)
 		require.Equal(t, local.Address(), resolved.Address)
+		require.Equal(t, ports.BrokerDaemonStartIfNeeded, resolved.StartMode)
 	}
 }
 
@@ -535,12 +539,13 @@ func TestResolverRefusals(t *testing.T) {
 		Endpoint:     testEndpoint,
 		Registration: testRegistration(),
 		Policy:       testPolicy(),
+		StartMode:    ports.BrokerDaemonExistingOnly,
 	}
 
 	t.Run("unknown endpoint", func(t *testing.T) {
 		request := base
 		request.Endpoint = "other@daemon"
-		_, err := resolver.Resolve(context.Background(), request)
+		_, err := resolver.ResolveDialTarget(context.Background(), request)
 		var typed ports.BrokerError
 		require.ErrorAs(t, err, &typed)
 		require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
@@ -549,7 +554,7 @@ func TestResolverRefusals(t *testing.T) {
 	t.Run("local request", func(t *testing.T) {
 		request := base
 		request.Local = true
-		_, err := resolver.Resolve(context.Background(), request)
+		_, err := resolver.ResolveDialTarget(context.Background(), request)
 		var typed ports.BrokerError
 		require.ErrorAs(t, err, &typed)
 		require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
@@ -558,7 +563,7 @@ func TestResolverRefusals(t *testing.T) {
 	t.Run("stale registration", func(t *testing.T) {
 		request := base
 		request.Registration.Generation = 2
-		_, err := resolver.Resolve(context.Background(), request)
+		_, err := resolver.ResolveDialTarget(context.Background(), request)
 		var typed ports.BrokerError
 		require.ErrorAs(t, err, &typed)
 		require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
@@ -567,7 +572,7 @@ func TestResolverRefusals(t *testing.T) {
 	t.Run("conflicting policy", func(t *testing.T) {
 		request := base
 		request.Policy.Transport = "other-transport"
-		_, err := resolver.Resolve(context.Background(), request)
+		_, err := resolver.ResolveDialTarget(context.Background(), request)
 		var typed ports.BrokerError
 		require.ErrorAs(t, err, &typed)
 		require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
@@ -575,7 +580,7 @@ func TestResolverRefusals(t *testing.T) {
 	t.Run("cancelled context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := resolver.Resolve(ctx, base)
+		_, err := resolver.ResolveDialTarget(ctx, base)
 		require.ErrorIs(t, err, context.Canceled)
 	})
 }

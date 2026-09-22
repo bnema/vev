@@ -43,6 +43,41 @@ func TestHelloSemanticValidation(t *testing.T) {
 	}
 }
 
+func TestSessionAttachTargetOrdinalValidationIsStrict(t *testing.T) {
+	valid := SessionAttachTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work", TabIndex: 0, TabRawName: "first", TabExpectedCount: 1, Stopped: true}
+	require.NoError(t, valid.Validate())
+
+	tests := []struct {
+		name   string
+		mutate func(*SessionAttachTarget)
+	}{
+		{name: "expected count required", mutate: func(target *SessionAttachTarget) { target.TabExpectedCount = 0 }},
+		{name: "index bounded by expected count", mutate: func(target *SessionAttachTarget) { target.TabIndex = 1 }},
+		{name: "raw name too long", mutate: func(target *SessionAttachTarget) { target.TabRawName = string(make([]byte, 257)) }},
+		{name: "raw name control", mutate: func(target *SessionAttachTarget) { target.TabRawName = "bad\nname" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := valid
+			test.mutate(&target)
+			require.Error(t, target.Validate())
+		})
+	}
+
+	index, ok := valid.ResolveTab([]domain.TabSelectorTab{{Name: "first"}})
+	require.True(t, ok)
+	require.Zero(t, index)
+	_, ok = valid.ResolveTab([]domain.TabSelectorTab{{Name: "replaced"}})
+	require.False(t, ok)
+	_, ok = valid.ResolveTab([]domain.TabSelectorTab{{Name: "first"}, {Name: "second"}})
+	require.False(t, ok)
+
+	empty := SessionAttachTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work", TabIndex: NoTabIndex, Stopped: true}
+	require.NoError(t, empty.Validate())
+	_, ok = empty.ResolveTab([]domain.TabSelectorTab{{Name: "first"}, {Name: "second"}})
+	require.False(t, ok)
+}
+
 func TestOutputSemanticValidation(t *testing.T) {
 	context := ViewContext{
 		Publication: 1,

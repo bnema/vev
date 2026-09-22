@@ -15,13 +15,23 @@ import (
 
 // handshakeEndpoint is the independently resolved endpoint the client verifies
 // the daemon response against.
-func handshakeEndpoint(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy) ports.BrokerResolvedEndpoint {
-	return ports.BrokerResolvedEndpoint{Identity: identity, Policy: policy, Address: "quic://127.0.0.1:7777"}
+func handshakeEndpoint(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy) ports.BrokerDialTarget {
+	return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: policy, Address: "quic://127.0.0.1:7777", StartMode: ports.BrokerDaemonExistingOnly, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: identity, Bound: true}}
 }
 
 func mustServerBinding(t *testing.T) ServerBinding {
 	t.Helper()
 	binding, err := NewServerBinding(testIdentity(), testIncarnation(), testPolicy())
+	require.NoError(t, err)
+	return binding
+}
+
+// mustRemoteServerBinding provisions the same authority with the remote
+// locality, for tests whose Open requests carry a validated remote
+// registration rather than a local endpoint.
+func mustRemoteServerBinding(t *testing.T) ServerBinding {
+	t.Helper()
+	binding, err := NewServerBindings(testIdentity(), testIncarnation(), []ServerPolicyAdmission{remoteAcceptance(testPolicy())})
 	require.NoError(t, err)
 	return binding
 }
@@ -274,6 +284,8 @@ func TestServerHandshakeAcceptsAndNegotiates(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, binding, result.Binding)
 	require.Equal(t, EffectiveMuxCeilings(clientCeilings, serverCeilings), result.Ceilings)
+	require.Equal(t, testPolicy(), result.Policy, "the accepted policy is the provisioned member")
+	require.Equal(t, ports.SessionOriginLocal, result.Origin, "the accepted origin is the provisioned locality")
 	require.Equal(t, 0, carrier.closeCalls())
 
 	decoded, err := DecodePreambleResponseBytes(awaitSentFrame(t, carrier))

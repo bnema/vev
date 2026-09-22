@@ -68,7 +68,35 @@ class Driver:
         self.request_id = 0
         ready = self._read("discovery")
         self.attachment = ready["attachment"]
-        self.generation = ready["generation"]
+        # Ready never promises an attachment: the generation is zero until a
+        # committed attachment publishes one, and the status may be any
+        # presentation. Wait for the attached publication explicitly instead
+        # of assuming ready.Generation == 1.
+        self.generation = ready.get("generation", 0)
+        if ready.get("status") != "attached":
+            self.generation = self._await_attached()
+
+    def _await_attached(self):
+        """Wait for the committed attached publication and return its generation.
+
+        ``capture`` works in every presentation state, so polling it is safe
+        while the driver is still connecting. Only a committed ``attached``
+        publication with a nonzero generation is returned; anything else is
+        polled again until the bounded deadline.
+        """
+        deadline = time.monotonic() + INVENTORY_TIMEOUT_S
+        while True:
+            if time.monotonic() > deadline:
+                self.close()
+                raise DriverError("driver never published an attached generation")
+            self.request_id += 1
+            self.process.stdin.write(json.dumps(dict(
+                version=1, id=self.request_id, op="capture",
+                attachment=self.attachment)) + "\n")
+            self.process.stdin.flush()
+            context = self._read("attached publication").get("context", {})
+            if context.get("status") == "attached" and context.get("generation"):
+                return context["generation"]
 
     def _read(self, what):
         deadline = time.monotonic() + REQUEST_TIMEOUT_S

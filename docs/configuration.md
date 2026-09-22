@@ -7,13 +7,6 @@ vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means d
 web.listen = 127.0.0.1:8778
 web.origin = http://127.0.0.1:8778
 
-# Client startup setting: retain suspended remote attachments. Reuse is on by
-# default; off disables it. Capacity bounds dormant destinations (LRU). An
-# optional positive idle timeout expires dormant entries; off has no age bound.
-remote.attachment-cache = on
-remote.attachment-cache-capacity = 8
-remote.attachment-cache-idle-timeout = off
-
 # Theme: auto follows the client; dark/light use neutral built-in defaults.
 theme = auto
 # In auto mode with palette inheritance enabled, infer a terminal accent.
@@ -94,38 +87,6 @@ code.detach = DET
 ```
 
 Invalid values log a warning and resolve that setting to its default on both initial load and reload.
-
-## Remote attachment cache
-
-These keys are read when a terminal client starts, not hot reloaded.
-`remote.attachment-cache` is `on` (default) or `off`. With reuse enabled the
-runner retains at most `remote.attachment-cache-capacity` dormant destinations
-(default `8`), evicting the least-recently used one when a new suspension would
-exceed capacity. `remote.attachment-cache-idle-timeout` is `off` (default, no
-age bound) or a positive Go duration such as `30s` or `5m`; a positive value
-expires a dormant entry that long after it was suspended.
-
-Navigating away suspends the remote attachment. Returning before eviction or
-expiry reuses its authenticated connection without another bootstrap or dial.
-Dormant attachments have no terminal input, output, or geometry authority.
-Expiry, remote closure, or rejected activation evicts the connection; selecting
-that endpoint then uses normal reconnect/attach behavior. Independently of the
-client policy, the daemon force-retires an attachment suspended for 24 hours as
-a safety bound. Endpoint aliases remain distinct, even if they resolve to the
-same server. Exiting the client closes its retained connections. Heartbeat or
-liveness traffic never refreshes
-activity: a successful use followed by suspension marks the entry most
-recently used, and only user navigation changes recency.
-
-Retention is bounded by the LRU capacity and, when configured, the idle
-timeout, so visiting many distinct endpoints cannot retain more than the
-capacity. Each dormant entry retains a transport, a reader, and daemon
-attachment state; SSH stdio can also retain an SSH process. The client inbox is
-bounded and dormant output is discarded. Warm reactivation has a short
-client-local budget: a stalled retained transport is logically relinquished at
-that deadline and the client cold-attaches immediately while the old transport
-retires in the background. Use `remote.attachment-cache = off` when no
-retention is wanted.
 
 ## Scrollback
 

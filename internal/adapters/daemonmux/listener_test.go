@@ -179,7 +179,7 @@ func newListenerHarnessWithCeilings(t *testing.T, budget time.Duration, queueLim
 	t.Helper()
 	brokerPump, daemonPump, start := newPairedPumpsUnstarted(t, ceilings)
 	clock := newListenerClock(time.Now())
-	listener, err := newListener(daemonPump, budget, queueLimit, clock)
+	listener, err := newListener(daemonPump, budget, queueLimit, clock, localAcceptance(logicalTestPolicy()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	start()
@@ -351,20 +351,27 @@ func (d *listenerDaemon) await(t *testing.T, count int) {
 }
 
 func TestNewListenerValidation(t *testing.T) {
+	local := localAcceptance(testPolicy())
 	t.Run("nil pump", func(t *testing.T) {
-		listener, err := NewListener(nil)
+		listener, err := NewListener(nil, local)
 		require.ErrorIs(t, err, ErrListenerConfig)
 		require.Nil(t, listener)
 	})
 	t.Run("broker-side pump is refused", func(t *testing.T) {
 		pump, _ := newTestPump(t, DirectionServer)
-		listener, err := NewListener(pump)
+		listener, err := NewListener(pump, local)
+		require.ErrorIs(t, err, ErrListenerConfig)
+		require.Nil(t, listener)
+	})
+	t.Run("invalid accepted entry is refused", func(t *testing.T) {
+		pump, _ := newTestPump(t, DirectionClient)
+		listener, err := NewListener(pump, ServerPolicyAdmission{})
 		require.ErrorIs(t, err, ErrListenerConfig)
 		require.Nil(t, listener)
 	})
 	t.Run("daemon-side pump is accepted", func(t *testing.T) {
 		pump, _ := newTestPump(t, DirectionClient)
-		listener, err := NewListener(pump)
+		listener, err := NewListener(pump, local)
 		require.NoError(t, err)
 		require.NotNil(t, listener)
 		require.Equal(t, "daemonmux", listener.Addr())
@@ -1211,7 +1218,7 @@ func TestNewListenerRefusesStartedPump(t *testing.T) {
 	pump, _ := newTestPump(t, DirectionClient)
 	pump.Start(context.Background())
 
-	listener, err := NewListener(pump)
+	listener, err := NewListener(pump, localAcceptance(testPolicy()))
 	require.ErrorIs(t, err, ErrListenerConfig)
 	require.ErrorIs(t, err, ErrAdmissionObserverLate)
 	require.Nil(t, listener)

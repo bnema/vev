@@ -43,7 +43,7 @@ type attachTestTerminal struct {
 	// A nil predicate blocks every publication, which is what the existing
 	// initial-publication tests rely on.
 	publishMatch func(ports.UIContext) bool
-	// detachedSignals receives one signal per committed Detached publication, so
+	// detachedSignals receives one signal per committed Picker publication, so
 	// a test observes attachment release without polling.
 	detachedSignals chan struct{}
 	// events records the transaction order: each begin, each publication, and
@@ -88,10 +88,10 @@ func (t *attachTestTerminal) Flush() error {
 
 func (t *attachTestTerminal) BeginOutput(ctx ports.UIContext) {
 	t.mu.Lock()
-	if ctx.AttachmentHandle == "" && len(t.publications) != 0 {
+	if ctx.AttachmentHandle == "" && len(t.publications) != 0 && ctx.Status == ports.UIStatusAttached {
 		ctx.AttachmentHandle = t.publications[len(t.publications)-1].AttachmentHandle
 	}
-	if ctx.Generation == 0 && len(t.publications) != 0 {
+	if ctx.Generation == 0 && len(t.publications) != 0 && ctx.Status == ports.UIStatusAttached {
 		ctx.Generation = t.publications[len(t.publications)-1].Generation
 	}
 	if t.txDepth == 0 {
@@ -146,16 +146,21 @@ func (t *attachTestTerminal) PublishContext(uiContext ports.UIContext) error {
 	if !t.available {
 		return ports.ErrUIUnavailable
 	}
-	if uiContext.AttachmentHandle == "" && len(t.publications) != 0 {
-		uiContext.AttachmentHandle = t.publications[len(t.publications)-1].AttachmentHandle
-	}
-	if uiContext.Generation == 0 && len(t.publications) != 0 {
-		uiContext.Generation = t.publications[len(t.publications)-1].Generation
+	// The composition terminal applies the published-context shape rule the real
+	// uiterm terminal applies: only an Attached presentation inherits a missing
+	// handle or generation; Picker and Connecting are recorded exactly as stated.
+	if uiContext.Status == ports.UIStatusAttached {
+		if uiContext.AttachmentHandle == "" && len(t.publications) != 0 {
+			uiContext.AttachmentHandle = t.publications[len(t.publications)-1].AttachmentHandle
+		}
+		if uiContext.Generation == 0 && len(t.publications) != 0 {
+			uiContext.Generation = t.publications[len(t.publications)-1].Generation
+		}
 	}
 	t.publications = append(t.publications, uiContext)
 	t.revision++
 	t.events = append(t.events, attachTestEvent{kind: "publish", status: uiContext.Status, state: uiContext.OutputState})
-	if uiContext.Status == ports.UIStatusDetached && t.detachedSignals != nil {
+	if uiContext.Status == ports.UIStatusPicker && t.detachedSignals != nil {
 		select {
 		case t.detachedSignals <- struct{}{}:
 		default:
@@ -288,22 +293,6 @@ func (p *attachTestPicker) TakeOp() (pickerOp, string) {
 	return op, key
 }
 
-func (p *attachTestPicker) ResolveInitial(navigation InitialNavigation, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	if navigation != InitialNavigationCreateEphemeral {
-		return ports.BrokerOpenStreamRequest{}, errors.New("unexpected initial navigation")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.resolved++
-	request := p.request
-	request.Admission = ports.BrokerAdmissionCreateEphemeral
-	request.Target = protocol.ExactSessionTarget{}
-	request.Local = true
-	request.Connection = base.Connection
-	request.Stream = base.Stream
-	return request, nil
-}
-
 func (p *attachTestPicker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -381,7 +370,9 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
-	terminal := &attachTestTerminal{in: reader}
+	// available starts true, exactly like a real composition terminal: a
+	// presentation-only publication is observable before any frame drains.
+	terminal := &attachTestTerminal{in: reader, available: true}
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publish(3, 1)
 
@@ -638,7 +629,7 @@ func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 
 // TestSupervisorUIActionReleaseWaitsForInFlightOutput pins GO-201: finalization
 // must not release the UI foreground binding while a foreground output
-// transaction is in flight. The release publishes Detached, so releasing it
+// transaction is in flight. The release publishes Picker, so releasing it
 // early would publish an unattached presentation while a newer session frame
 // was still being written, and would return the picker claim before the last
 // frame committed. The mutation this test pins moves releaseForeground before
@@ -707,7 +698,7 @@ func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 		return harness.sup.attachments.authority.authorityState() == authorityFinalizing
 	}, 5*time.Second, time.Millisecond, "attachment finalization must begin while the frame is in flight")
 
-	// Finalization cannot complete, and Detached cannot be published, until the
+	// Finalization cannot complete, and Picker cannot be published, until the
 	// in-flight transaction drains.
 	require.Never(t, func() bool {
 		select {
@@ -716,7 +707,7 @@ func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 		default:
 			return false
 		}
-	}, 50*time.Millisecond, time.Millisecond, "Detached must not publish while a foreground transaction is in flight")
+	}, 50*time.Millisecond, time.Millisecond, "Picker must not publish while a foreground transaction is in flight")
 	require.Equal(t, authorityFinalizing, harness.sup.attachments.authority.authorityState(), "finalize still waits on the output transaction")
 	require.False(t, admitted.closedNow(), "the retired stream is released only after the drain")
 	require.False(t, picker.owns(), "the picker claim returns only after the drain")
@@ -730,20 +721,21 @@ func TestSupervisorUIActionReleaseWaitsForInFlightOutput(t *testing.T) {
 	select {
 	case <-detached:
 	case <-time.After(5 * time.Second):
-		t.Fatal("attachment finalization never published Detached")
+		t.Fatal("attachment finalization never published Picker")
 	}
 
-	// The newer frame commits before Detached, and Detached carries the
-	// committed frame rather than the superseded one.
+	// The newer frame commits before Picker, and Picker carries no committed
+	// output boundary: an unattached presentation never presents session
+	// metadata.
 	drained := terminal.eventIndex("drain", ports.UIStatusAttached, inFlightState)
-	published := terminal.eventIndex("publish", ports.UIStatusDetached, inFlightState)
+	published := terminal.eventIndex("publish", ports.UIStatusPicker, 0)
 	require.GreaterOrEqual(t, drained, 0, "the in-flight frame must commit once it drains")
-	require.Greater(t, published, drained, "Detached must be published only after the newer frame commits")
+	require.Greater(t, published, drained, "Picker must be published only after the newer frame commits")
 	publications := terminal.publicationList()
 	require.GreaterOrEqual(t, len(publications), 2)
 	last := publications[len(publications)-1]
-	require.Equal(t, ports.UIStatusDetached, last.Status)
-	require.Equal(t, uint64(inFlightState), last.OutputState, "Detached carries the committed newer frame")
+	require.Equal(t, ports.UIStatusPicker, last.Status)
+	require.Zero(t, last.OutputState, "Picker carries no committed output boundary")
 	prior := publications[len(publications)-2]
 	require.Equal(t, ports.UIStatusAttached, prior.Status)
 	require.Equal(t, uint64(inFlightState), prior.OutputState)
@@ -903,7 +895,13 @@ func TestSupervisorAttachmentLocalRemoteParity(t *testing.T) {
 			deliverReadyStream(t, admitted)
 			awaitAttachedState(t, harness.sup)
 			require.Equal(t, "\x1b[Hready", harness.terminal.written())
-			require.Equal(t, []bool{true}, harness.terminal.successes, "the frame committed through the UI transaction")
+			// Two transactions commit on this attachment: the initial frame under the
+			// pre-attach Connecting presentation, then the committed Attached
+			// presentation with no bytes of its own.
+			require.Equal(t, []bool{true, true}, harness.terminal.successes, "both publications committed through the UI transaction")
+			publications := harness.terminal.publicationList()
+			require.Equal(t, ports.UIStatusConnecting, publications[0].Status)
+			require.Equal(t, ports.UIStatusAttached, publications[len(publications)-1].Status)
 		})
 	}
 }
@@ -1214,6 +1212,58 @@ func TestSupervisorAttachmentCancellationRetiresGeneration(t *testing.T) {
 	require.Empty(t, harness.terminal.publications, "a cancelled attachment never published")
 }
 
+// TestSupervisorConnectingWhileAcquisitionBlockedPublishesNoSessionMetadata pins
+// the blocked-acquisition presentation: while the logical stream open is still
+// in flight, the published presentation is Connecting with the run's handle and
+// no session metadata or actionable generation, and capture and wait remain
+// usable in that state.
+func TestSupervisorConnectingWhileAcquisitionBlockedPublishesNoSessionMetadata(t *testing.T) {
+	picker := newAttachTestPicker()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	var ui *UI
+	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+		cfg.UI = ui
+	})
+	harness.service.setOpenStream(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		select {
+		case <-release:
+			return newSessionTestStream(), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+
+	picker.commit(sessionTestRequest(true))
+	require.Eventually(t, func() bool { return len(harness.service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond, "the acquisition is in flight")
+
+	// The acquisition is blocked, so the run publishes Connecting and stays
+	// usable: capture and wait both work in that presentation.
+	connecting := ports.UIStatusConnecting
+	matched, err := ui.Wait(t.Context(), ports.UIWaitRequest{Attachment: ui.Handle(), Expect: ports.UIExpect{Status: &connecting}})
+	require.NoError(t, err)
+	require.Equal(t, ports.UIStatusConnecting, matched.Context.Status)
+	require.Zero(t, matched.Context.Generation, "a blocked acquisition never publishes an actionable generation")
+	require.Equal(t, protocol.ExactSessionTarget{}, matched.Context.Route.Target, "Connecting presents no session identity")
+	require.Equal(t, ui.Handle(), matched.Context.AttachmentHandle, "Connecting still presents the run's stable handle")
+	snapshot, err := ui.Capture(ui.Handle())
+	require.NoError(t, err)
+	require.Equal(t, ports.UIStatusConnecting, snapshot.Context.Status)
+
+	// Input actions are attachment actions: refused while the attachment has not
+	// committed.
+	_, err = ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: 1, Keys: []string{"Escape"}})
+	var actionErr *ports.UIError
+	require.ErrorAs(t, err, &actionErr)
+	require.Equal(t, ports.UIErrUnavailable, actionErr.Code)
+
+	releaseOnce.Do(func() { close(release) })
+	harness.cancel()
+	require.ErrorIs(t, harness.waitRun(t), context.Canceled)
+}
+
 // TestSupervisorPickerInputNeverReachesSession proves picker bytes produce no
 // stream open, no session write, and no terminal write.
 func TestSupervisorPickerInputNeverReachesSession(t *testing.T) {
@@ -1245,7 +1295,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	clock := newSupervisorTestClock()
 	reader := newPickerChunkReader()
 	t.Cleanup(reader.close)
-	terminal := &attachTestTerminal{in: reader}
+	terminal := &attachTestTerminal{in: reader, available: true}
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
 	admittedStreams := make(chan *sessionTestStream, 1)

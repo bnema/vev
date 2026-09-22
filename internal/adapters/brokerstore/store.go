@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"syscall"
 
@@ -68,8 +69,10 @@ type manifestSource struct {
 }
 
 type manifest struct {
-	Version int
-	Sources []manifestSource
+	Version         int
+	Sources         []manifestSource
+	ImportVersion   int
+	ImportCompleted bool
 }
 
 // source returns the manifest entry for one generic role label.
@@ -88,6 +91,8 @@ func (m manifest) source(label manifestSourceLabel) (manifestSource, bool) {
 type Options struct {
 	Dir, LegacyHosts, LegacyCache string
 	Policies                      map[string]ports.BrokerPolicy
+	InitialHosts                  []ports.BrokerHostRecord
+	InitialImportProvided         bool
 	Fault                         func(string) error
 }
 
@@ -183,7 +188,23 @@ func Open(o Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = validate(s.state); err != nil {
+	upgraded, upgradeErr := ports.UpgradeBrokerHostRoutes(s.state.Hosts.Hosts)
+	if upgradeErr != nil {
+		return nil, upgradeErr
+	}
+	if !reflect.DeepEqual(upgraded, s.state.Hosts.Hosts) {
+		next := s.state
+		next.Hosts.Hosts = upgraded
+		next.Manifest.ImportVersion = 1
+		next.Manifest.ImportCompleted = true
+		recovery := recovery{State: next}
+		if err = s.write("recovery.json", recovery); err != nil {
+			return nil, err
+		}
+		if err = s.commit(next); err != nil {
+			return nil, err
+		}
+	} else if err = validate(s.state); err != nil {
 		return nil, err
 	}
 	ok = true
@@ -240,7 +261,7 @@ func (s *Store) LoadHosts() (ports.BrokerHosts, error) {
 		return ports.BrokerHosts{}, err
 	}
 	h := s.state.Hosts
-	h.Hosts = append([]ports.BrokerHostRecord(nil), h.Hosts...)
+	h.Hosts = ports.CloneBrokerHostRecords(h.Hosts)
 	return h, nil
 }
 func (s *Store) Load() (ports.BrokerSnapshot, error) {
@@ -267,7 +288,7 @@ func (s *Store) ReplaceHosts(expected uint64, hosts []ports.BrokerHostRecord) er
 		return ErrStale
 	}
 	next := s.state
-	next.Hosts = ports.BrokerHosts{Revision: expected + 1, Hosts: append([]ports.BrokerHostRecord(nil), hosts...)}
+	next.Hosts = ports.BrokerHosts{Revision: expected + 1, Hosts: ports.CloneBrokerHostRecords(hosts)}
 	// Policy changes require a new registration generation as well; otherwise
 	// an already queued observation could be accepted under changed trust.
 	for _, h := range hosts {
@@ -349,6 +370,9 @@ func filter(snapshot ports.BrokerSnapshot, hosts ports.BrokerHosts) ports.Broker
 func validate(st state) error {
 	if st.Manifest.Version != 1 {
 		return invalid("unsupported manifest")
+	}
+	if st.Manifest.ImportVersion != 1 || !st.Manifest.ImportCompleted {
+		return invalid("initial import is incomplete")
 	}
 	labels := make(map[manifestSourceLabel]bool, len(st.Manifest.Sources))
 	for _, source := range st.Manifest.Sources {

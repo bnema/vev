@@ -10,14 +10,37 @@ import (
 )
 
 // UIPresentationStatus describes what the client is currently presenting.
+//
+// It is a closed union of exactly three presentations. Picker and Connecting
+// own no session, so their published context carries neither an actionable
+// generation nor a session identity; only Attached publishes the real action
+// generation with a validated session identity and a committed publication.
+// The former transition states are removed without alias: a reconnect is
+// Connecting, a detach is Picker, and terminating closes the UI service instead
+// of becoming a fourth persistent presentation.
 type UIPresentationStatus string
 
 const (
-	UIStatusAttached      UIPresentationStatus = "attached"
-	UIStatusTransitioning UIPresentationStatus = "transitioning"
-	UIStatusReconnecting  UIPresentationStatus = "reconnecting"
-	UIStatusDetached      UIPresentationStatus = "detached"
+	// UIStatusPicker presents the local session picker. It is ready without a
+	// broker and without a daemon.
+	UIStatusPicker UIPresentationStatus = "picker"
+	// UIStatusConnecting presents an attachment attempt that has not committed
+	// its first frame yet.
+	UIStatusConnecting UIPresentationStatus = "connecting"
+	// UIStatusAttached presents a committed attachment.
+	UIStatusAttached UIPresentationStatus = "attached"
 )
+
+// Valid reports whether s is one of the three decided presentations. The zero
+// value is not a presentation: a publication must name the state it means.
+func (s UIPresentationStatus) Valid() bool {
+	switch s {
+	case UIStatusPicker, UIStatusConnecting, UIStatusAttached:
+		return true
+	default:
+		return false
+	}
+}
 
 // UIColorKind identifies how a terminal color is represented.
 type UIColorKind uint8

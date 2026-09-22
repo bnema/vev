@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
+	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -207,23 +208,21 @@ func TestMoveCmdPreservesPositionalArguments(t *testing.T) {
 	}
 }
 
-func TestRemoteCatalogCommandEnsuresDaemon(t *testing.T) {
-	transport := &cmdTestTransport{recv: mustServerEnvelope(protocol.CommandResult{Outcome: protocol.CommandSucceeded})}
-	ensureCalls := 0
+func TestRemoteCatalogCommandUsesBroker(t *testing.T) {
+	stream := newSeamBrokerStream(protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded})
+	service := newSeamBrokerService(stream)
 	err := runCmdWithDeps(context.Background(), cmdInvocation{slug: "remote-catalog", jsonOut: true}, cmdDeps{
-		stdout: io.Discard,
-		getenv: func(string) string { return "" },
+		stdout:  io.Discard,
+		getenv:  func(string) string { return "" },
+		connect: func(context.Context) (ports.BrokerService, error) { return service, nil },
 		dial: func(context.Context, string) (wire.Transport, error) {
-			t.Fatal("remote catalog used non-starting daemon dial")
+			t.Fatal("remote catalog bypassed the broker")
 			return nil, errors.New("unexpected dial")
-		},
-		ensure: func(context.Context, string) (wire.Transport, error) {
-			ensureCalls++
-			return transport, nil
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, 1, ensureCalls)
+	require.Len(t, service.openedRequests(), 1)
+	require.Equal(t, ports.BrokerStreamControl, service.openedRequests()[0].Purpose)
 }
 
 func TestMoveCmdInvalidArgumentResultExitsTwo(t *testing.T) {

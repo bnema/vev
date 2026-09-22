@@ -516,7 +516,7 @@ func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.ServerConnectio
 		d.mu.Unlock()
 		return d.resumeParked(h, tr, sz)
 	}
-	if credentialMatch && h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
+	if credentialMatch && h.SessionTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.SessionTarget) {
 		d.mu.Unlock()
 		return nil, nil, false, &protoErr{protocol.ErrNoSuchTarget, "remote target no longer matches resumed session"}
 	}
@@ -648,7 +648,7 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 		d.log.Warn("resume rejected", "session", sess.nameSnapshot(), "err", reason)
 		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
-	if h.RemoteTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.RemoteTarget) {
+	if h.SessionTarget != nil && !d.remoteTargetMatchesSessionLocked(sess, *h.SessionTarget) {
 		return nil, nil, false, &protoErr{protocol.ErrNoSuchTarget, "remote target no longer matches resumed session"}
 	}
 	// Claim the attachment while retaining the old credential until Welcome is

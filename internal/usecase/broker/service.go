@@ -108,6 +108,12 @@ type Service struct {
 	mu     sync.Mutex
 	closed bool
 	subs   map[*serviceSubscription]struct{}
+	// nextStream is this connection's strictly increasing, never-zero logical
+	// stream ID allocator. It is the only allocator on this connection: the
+	// supervisor and the broker operations each read one identity here and carry
+	// it on OpenStream rather than relying on an implicit allocation there. An
+	// allocated identity is consumed even when the open it names is refused.
+	nextStream ports.BrokerStreamID
 	// wg counts in-flight stream opens and membership mutations so Close drains
 	// them, and their operation leases, before releasing connection resources.
 	wg sync.WaitGroup
@@ -147,6 +153,27 @@ func newService(epoch ports.BrokerEpoch, id ports.BrokerConnectionID, registry *
 // ConnectionID returns the pool identity assigned at admission. Clients carry
 // it on stream operations so a stale request can be fenced.
 func (s *Service) ConnectionID() ports.BrokerConnectionID { return s.id }
+
+// NextStreamID allocates this connection's next logical stream identity. It is
+// thread-safe, strictly monotone, and never zero, performs no I/O, and refuses
+// a closed connection or an exhausted counter rather than wrapping. It is the
+// only allocation seam on this connection: supervisor and BrokerOperations both
+// allocate here and carry the resulting identity on the request.
+func (s *Service) NextStreamID() (ports.BrokerStreamID, error) {
+	if s == nil {
+		return 0, ports.BrokerAdmissionClosed
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, ports.BrokerAdmissionClosed
+	}
+	if s.nextStream == ^ports.BrokerStreamID(0) {
+		return 0, ports.BrokerAdmissionLimit
+	}
+	s.nextStream++
+	return s.nextStream, nil
+}
 
 // Done closes exactly once when this connection is terminal: the broker root
 // shut down or Close settled it locally. Err is stable afterwards.

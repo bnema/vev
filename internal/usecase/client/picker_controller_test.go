@@ -312,25 +312,26 @@ func TestPickerControllerSurfacesProgressAndFailuresAsNotices(t *testing.T) {
 	require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}), "an unavailable host is surfaced as a failure")
 }
 
-// TestPickerControllerResolveRefusesInspectableRow: a row the picker displays
-// for inspection (a stale host) still resolves to a typed refusal, so the user
-// never gets a generic failure for a known cause.
-func TestPickerControllerResolveRefusesInspectableRow(t *testing.T) {
+// TestPickerControllerResolveInspectableRowStillResolvesExplicitly: a stale row
+// the picker displays for inspection still resolves to one exact request,
+// because freshness is presentation information and only the destination may
+// refuse the exact identity. The informational row stays dimmed and badged.
+func TestPickerControllerResolveInspectableRowStillResolvesExplicitly(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	stale := pickerTestLocalObservation(clock.Now().Add(-2*pickerTestFreshness), pickerTestSession("alpha", 1, catalogue_Up))
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{stale}})
 
-	// The cursor first rests on the host status row, then reaches the stale
-	// session row; neither admits an action.
-	_, ok := controller.CursorKey()
-	require.False(t, ok)
-	controller.ConsumeTerminalRead([]byte("j"))
+	// The stale session row stays a cursor destination and admits an explicit
+	// attempt; only the host status row itself is never committable.
+	key, ok := controller.CursorKey()
+	require.True(t, ok, "a stale session row stays a cursor destination")
+	require.NotEmpty(t, key)
 	require.False(t, controller.modelSearchActive(t))
 
-	_, err := controller.Resolve(pickerTestBase())
-	require.Error(t, err)
-	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueStale), "a stale row refuses with its exact cause")
-	require.NotEmpty(t, controller.RenderNotice(domain.Size{Cols: 80, Rows: 24}))
+	request, err := controller.Resolve(pickerTestBase())
+	require.NoError(t, err)
+	require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
+	require.Equal(t, "alpha", request.Target.SessionName)
 }
 
 // TestPickerControllerResolveUsesLatestSnapshot proves resolution revalidates

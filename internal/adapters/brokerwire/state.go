@@ -81,9 +81,9 @@ var (
 	ErrUnknownOperation = errors.New("brokerwire: unknown operation")
 	// ErrInvalidStream reports a zero stream identity.
 	ErrInvalidStream = errors.New("brokerwire: invalid broker stream")
-	// ErrStreamIDReused reports a stream identity that is not strictly above
-	// every allocated identity: stream IDs strictly increase and are never
-	// reused.
+	// ErrStreamIDReused reports a stream identity that is already consumed or
+	// evicted outside the bounded anti-replay window. Stream identities are
+	// allocated by the calling service and are never reused.
 	ErrStreamIDReused = errors.New("brokerwire: stream ID is not fresh")
 	// ErrFutureStream reports a frame for a stream identity that was never
 	// allocated.
@@ -718,17 +718,22 @@ const (
 )
 
 // StreamTracker bounds the logical streams of one connection scope. Stream
-// identities strictly increase and are never reused. At most MaxStreams
-// streams are opening or open at once; at most MaxRetiredStreams retired
-// records are retained, so an older late frame is still classified as
-// retired rather than mistaken for a future stream. It is safe for
-// concurrent use.
+// identities are allocated by the calling service and may arrive slightly out
+// of order when two opens race, so admission uses one bounded anti-replay
+// window instead of a bare high-water mark: every unconsumed identity inside
+// the window is admitted exactly once, a duplicate is refused, and an identity
+// that trails the newest admitted identity by the window size is stale. At most
+// MaxStreams streams are opening or open at once; at most MaxRetiredStreams
+// retired records are retained, so an older late frame is still classified as
+// retired rather than mistaken for a future stream. It is safe for concurrent
+// use.
 type StreamTracker struct {
 	mu      sync.Mutex
 	scope   Scope
 	states  map[ports.BrokerStreamID]StreamState
 	retired []ports.BrokerStreamID
 	highest ports.BrokerStreamID
+	window  ports.BrokerStreamWindow
 	active  int
 }
 
@@ -743,8 +748,12 @@ func newStreamTracker(scope Scope) (*StreamTracker, error) {
 	return &StreamTracker{scope: scope, states: make(map[ports.BrokerStreamID]StreamState, MaxStreams)}, nil
 }
 
-// Open allocates one fresh logical stream in Opening state. The identity must
-// be strictly above every allocated identity and must not already be in use.
+// Open allocates one fresh logical stream in Opening state. The identity is
+// admitted on this connection's bounded anti-replay window: it must be
+// unconsumed and inside the window, and it must not already be in use. An
+// identity allocated by a concurrent open is therefore admitted even when it
+// arrives just after a higher one, while a replay and an identity evicted past
+// the window are both refused.
 func (t *StreamTracker) Open(scope Scope, stream ports.BrokerStreamID) error {
 	if t == nil {
 		return ErrConnectionClosed
@@ -757,14 +766,19 @@ func (t *StreamTracker) Open(scope Scope, stream ports.BrokerStreamID) error {
 	if err := stream.Validate(); err != nil {
 		return ErrInvalidStream
 	}
-	if stream <= t.highest {
+	if err := t.window.Admit(stream); err != nil {
+		// A duplicate or an identity evicted from the window is stale rather
+		// than malformed, so the caller can classify it as a never-reused
+		// identity instead of a protocol violation.
 		return ErrStreamIDReused
 	}
 	if t.active >= MaxStreams {
 		return ErrTooManyStreams
 	}
 	t.states[stream] = StreamOpening
-	t.highest = stream
+	if stream > t.highest {
+		t.highest = stream
+	}
 	t.active++
 	return nil
 }
@@ -909,5 +923,6 @@ func (t *StreamTracker) reset() {
 	t.states = make(map[ports.BrokerStreamID]StreamState, MaxStreams)
 	t.retired = nil
 	t.highest = 0
+	t.window = ports.BrokerStreamWindow{}
 	t.active = 0
 }

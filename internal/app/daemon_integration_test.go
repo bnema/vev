@@ -719,7 +719,9 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	awaitText(t, p, sz, "TEMP")
 	require.NoError(t, tr.Close())
 
-	require.NoError(t, runKill(context.Background(), "", false, true))
+	// An ephemeral session lives only while its daemon does; the explicit daemon
+	// stop over the typed control wire ends that daemon.
+	require.NoError(t, killDaemon(dir))
 	select {
 	case err := <-served:
 		require.NoError(t, err)
@@ -731,7 +733,7 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	sessions := listRemoteSessions(t, dir)
 	require.Empty(t, sessions.Sessions)
 
-	require.NoError(t, runKill(context.Background(), "", false, true))
+	require.NoError(t, killDaemon(dir))
 	select {
 	case err := <-served2:
 		require.NoError(t, err)
@@ -1005,61 +1007,6 @@ func TestMultipleClientsOneLifecycleOwner(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Zero(t, spawns.Load())
-}
-
-func TestListWaitsForLifecycleOwner(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
-	require.NoError(t, p.Close())
-	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
-	require.NoError(t, err)
-
-	done := make(chan error, 1)
-	go func() { done <- runList(context.Background(), command{kind: kindList}) }()
-	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
-	require.NoError(t, owner.Release())
-	require.NoError(t, <-done)
-}
-
-func TestOfflineKillWaitsForLifecycleOwner(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
-	now := time.Now().UnixNano()
-	require.NoError(t, p.Save(persist.Record{Name: "named", IncarnationID: domain.IncarnationID{1}, CreatedAt: now, UpdatedAt: now}))
-	require.NoError(t, p.Close())
-	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
-	require.NoError(t, err)
-
-	done := make(chan error, 1)
-	go func() { done <- runKill(context.Background(), "named", false, false) }()
-	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
-	require.NoError(t, owner.Release())
-	require.NoError(t, <-done)
-}
-
-func TestKillDaemonWaitsForOwnershipTransfer(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-	owner, err := lifecycle.TryAcquire(ipc.SocketDir())
-	require.NoError(t, err)
-	_, served := startDaemonInDir(t, ipc.SocketDir())
-
-	done := make(chan error, 1)
-	go func() { done <- requestDaemonStop(context.Background()) }()
-	select {
-	case err := <-served:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("daemon did not stop")
-	}
-	require.Never(t, func() bool { return len(done) != 0 }, 50*time.Millisecond, time.Millisecond)
-	require.NoError(t, owner.Release())
-	require.NoError(t, <-done)
 }
 
 func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {

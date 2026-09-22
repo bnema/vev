@@ -309,7 +309,7 @@ func TestBrokerServeRoundTrip(t *testing.T) {
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
 
-	socketPath := awaitSandboxReady(t, ready)
+	socketPath := awaitSandboxReady(t, ready, done)
 
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), brokerTestWait)
 	defer clientCancel()
@@ -317,11 +317,15 @@ func TestBrokerServeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = service.Close() }()
 
+	streamID, err := service.NextStreamID()
+	require.NoError(t, err)
 	stream, err := service.OpenStream(clientCtx, ports.BrokerOpenStreamRequest{
 		Purpose:      ports.BrokerStreamControl,
+		Stream:       streamID,
 		Endpoint:     brokerTestEndpoint,
 		Registration: brokerTestRegistration(),
 		Policy:       policy,
+		StartMode:    ports.BrokerDaemonStartIfNeeded,
 	})
 	require.NoError(t, err)
 	defer func() { _ = stream.Close() }()
@@ -355,14 +359,17 @@ func TestBrokerServeRoundTrip(t *testing.T) {
 
 // awaitSandboxReady waits for the sandbox readiness hook and returns the
 // reported socket path.
-func awaitSandboxReady(t *testing.T, ready <-chan string) string {
+func awaitSandboxReady(t *testing.T, ready <-chan string, done <-chan error) string {
 	t.Helper()
 	select {
 	case socketPath := <-ready:
 		require.NotEmpty(t, socketPath)
 		return socketPath
+	case err := <-done:
+		t.Fatalf("sandbox exited before readiness: %v", err)
+		return ""
 	case <-time.After(brokerTestWait):
-		t.Fatal("sandbox never reported readiness")
+		t.Fatal("sandbox never reported readiness and did not exit")
 		return ""
 	}
 }
@@ -403,7 +410,7 @@ func TestBrokerServeIdleShutdownOnEmptyConfig(t *testing.T) {
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
 
-	socketPath := awaitSandboxReady(t, ready)
+	socketPath := awaitSandboxReady(t, ready, done)
 	waitForSandboxShutdown(t, clk, done)
 
 	requireSocketRemoved(t, socketPath)
@@ -430,7 +437,7 @@ func TestBrokerServeCancelCleanup(t *testing.T) {
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
 
-	socketPath := awaitSandboxReady(t, ready)
+	socketPath := awaitSandboxReady(t, ready, done)
 	awaitSandboxCancel(t, cancel, done)
 
 	requireSocketRemoved(t, socketPath)
@@ -474,7 +481,7 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
 
-	awaitSandboxReady(t, ready)
+	awaitSandboxReady(t, ready, done)
 	select {
 	case err := <-done:
 		require.NoError(t, err)
@@ -496,7 +503,7 @@ func TestBrokerServeRefusesDuplicateOwnership(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
-	socketPath := awaitSandboxReady(t, ready)
+	socketPath := awaitSandboxReady(t, ready, done)
 
 	// A second foreground owner fails fast on the lifetime lock.
 	secondDeps, _ := testBrokerServeDeps(newSandboxClock())
@@ -554,7 +561,7 @@ func newBrokerMuxFixture(t *testing.T, policy ports.BrokerPolicy) *brokerMuxFixt
 	for i := range incarnation {
 		incarnation[i] = byte(0x10 + i)
 	}
-	binding, err := daemonmux.NewServerBinding(ports.BrokerDaemonIdentity(brokerTestIdentity), incarnation, policy)
+	binding, err := daemonmux.NewServerBindings(ports.BrokerDaemonIdentity(brokerTestIdentity), incarnation, []daemonmux.ServerPolicyAdmission{{Policy: policy, Origin: ports.SessionOriginRemote}})
 	require.NoError(t, err)
 	supervisor, err := daemonmux.NewServerSupervisor(aggregate, binding, daemonmux.DefaultMuxCeilings(), 8)
 	require.NoError(t, err)

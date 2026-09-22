@@ -6,7 +6,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// follow joins an immutable navigation cause to the Runner's existing handoff.
+// follow joins an immutable navigation cause to the UI's existing handoff.
 // It selects no route and never retries or opens a connection itself.
 func (u *UI) follow(generation, actionID uint64) bool {
 	var dispatchContext context.Context
@@ -63,8 +63,8 @@ func (u *UI) failHandoff() {
 	}
 }
 
-// destinationFull is called only after the existing handoff owner validates,
-// writes and publishes its destination full Output. Identity alone is not proof.
+// destinationFull is called only after the attachment owner validates, writes,
+// and publishes its destination full Output. Identity alone is not proof.
 func (u *UI) destinationFull(generation uint64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()

@@ -61,8 +61,14 @@ type connectivityEntry struct {
 	Summary string
 	Owner   connectivityOwner
 	// DirectDialDebt lists today's direct-daemon dial symbols that the
-	// cutover removes for broker-only entries. Empty for infra/local rows.
+	// cutover removes for broker-only entries. Empty for infra/local rows and
+	// for a broker-only row that has already completed its cutover.
 	DirectDialDebt []string
+	// Migrated marks a broker-only row whose cutover is complete: it keeps no
+	// direct dial, no host-store write, and no persist mutation, so its debt
+	// list is deliberately empty. It exists so a finished row is declared
+	// explicitly instead of being mistaken for an unreviewed one.
+	Migrated bool
 	// HostStoreWrite reports a RemoteHostStore constructor/writer today.
 	// Only the broker owns the host store after cutover.
 	HostStoreWrite bool
@@ -77,28 +83,19 @@ type connectivityEntry struct {
 var connectivityMatrix = []connectivityEntry{
 	{
 		Kind:    "kindAttach",
-		Summary: "interactive terminal attach/new/ephemeral, incl. remote attach, detached creation, attach preflight",
+		Summary: "interactive terminal attach/new/ephemeral, incl. remote attach, detached creation, and the UI-driver/web path",
 		Owner:   connectivityBrokerOnly,
 		DirectDialDebt: []string{
-			"localDaemonDialer.Dial (run.go)",
-			"dialOnlyLocalDialer.Dial inventory control (run.go)",
 			"ensureDaemonWithLifecycle detached creation (run.go createDetachedLocalSession)",
-			"registry.ResolveEndpoint remote carriage (run.go runAttachWithDeps)",
-			"listSessionsWithDialer attach preflight (attach_preflight.go sessionExists)",
 		},
-		Notes: "vev without arguments keeps creating an ephemeral session; creation is expressed as client navigation through the broker.",
+		Notes: "The ordinary terminal path is already broker-only: runAttach translates the parsed CLI target into client.InitialNavigation/Resolver, connect-or-spawns the per-user broker, and delegates to the shared runBrokerClient (run.go, broker_client.go). The old direct-dialer attach composition and its attach preflight and client host registry are removed; the UI-driver and browser compositions delegate to the shared broker client. The only remaining debt is the nested-session detached creation path, which still dials the local daemon directly and is expressed as broker navigation for ordinary attach.",
 	},
 	{
-		Kind:    "kindList",
-		Summary: "session list: local, per-host, and --all",
-		Owner:   connectivityBrokerOnly,
-		DirectDialDebt: []string{
-			"realDial listSessionsWithDialer (run.go)",
-			"waitForDaemonOrLifecycle list path (run.go)",
-			"RemoteCatalogClient.List over SSH (remote_hosts.go listAllSessions/listOneRemoteHost)",
-		},
-		PersistMutation: true,
-		Notes:           "Offline persist.LoadReadOnly list path becomes a daemon-owned operation through the broker; observation never attaches.",
+		Kind:     "kindList",
+		Summary:  "session list: local, per-host, and --all",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Cutover complete: runList reaches the per-user broker through the private connectBroker seam (run.go) and reads BrokerOperations.List for the local list or runBrokerSnapshotList for per-host/--all. It keeps no persist read, no daemon dialer, and no direct-dial list path. Remote observation never attaches.",
 	},
 	{
 		Kind:           "kindHost",
@@ -109,15 +106,11 @@ var connectivityMatrix = []connectivityEntry{
 		Notes:          "Second host-store writer today; broker is the sole writer after cutover. Host list is store-only (no dial).",
 	},
 	{
-		Kind:    "kindKill",
-		Summary: "kill one session, kill-all, explicit daemon-stop",
-		Owner:   connectivityBrokerOnly,
-		DirectDialDebt: []string{
-			"waitForDaemonOrLifecycle realDial kill path (run.go)",
-			"forceStopDaemonFallback (force_stop.go)",
-		},
-		PersistMutation: true,
-		Notes:           "Offline runOfflineNamedKill mutation becomes daemon-owned via broker. Kill-all purges sessions and leaves the daemon running; daemon-stop is the distinct explicit stop. Direct force-stop is offered only when the typed endpoint is unreachable, never after a request may have been delivered.",
+		Kind:     "kindKill",
+		Summary:  "kill one session, kill-all, explicit daemon-stop",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Cutover complete: runKill and requestDaemonStop reach the per-user broker through the private connectBroker seam (run.go) and drive BrokerOperations.Kill/KillAll/StopDaemon. Daemon-stop uses ExistingOnly, so it can never start what it is stopping; kill-all purges sessions and leaves the daemon running. The offline persisted-mutation path and the direct force-stop fallback are removed, so no request is ever bypassed with a direct process signal.",
 	},
 	{
 		Kind:    "kindCmd",
@@ -130,28 +123,32 @@ var connectivityMatrix = []connectivityEntry{
 		Notes: "Command tracker semantics unchanged; only the carriage moves behind the broker.",
 	},
 	{
-		Kind:    "kindUIDriver",
-		Summary: "headless UI-driver attach",
-		Owner:   connectivityBrokerOnly,
-		DirectDialDebt: []string{
-			"localDaemonDialer launch/local paths (ui_driver.go, run.go runAttachWithDeps)",
-			"configuredRemoteLaunches dialerFactory (ui_driver.go)",
-		},
-		Notes: "Launch-owned remote dialer and cleanup move behind the broker; UI-driver keeps no parallel carriage.",
+		Kind:     "kindUIDriver",
+		Summary:  "headless UI-driver attach",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Cutover complete: the driver composes the process' production broker connector and the shared terminal initial-navigation translation through runUIDriverClient. It keeps no launch configuration, no dialer, no endpoint, and no daemon ownership.",
 	},
 	{
-		Kind:           "kindWebDaemon",
-		Summary:        "browser gateway launcher",
-		Owner:          connectivityBrokerOnly,
-		DirectDialDebt: []string{"gateway session path via runAttachWithDeps (web_daemon.go)"},
-		Notes:          "Launcher mechanics stay local; gateway session traffic goes through the broker like any client.",
+		Kind:     "kindUIRemoteCleanup",
+		Summary:  "UI fixture cleanup through broker control",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Cleanup uses the broker-owned daemon-stop operation and keeps no direct daemon carriage.",
 	},
 	{
-		Kind:           "kindWebServe",
-		Summary:        "browser gateway server",
-		Owner:          connectivityBrokerOnly,
-		DirectDialDebt: []string{"gateway session path via runAttachWithDeps (web_daemon.go)"},
-		Notes:          "One client runner per WebSocket; no bypass of the broker façade.",
+		Kind:     "kindWebDaemon",
+		Summary:  "browser gateway launcher",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Launcher mechanics stay local. Cutover complete: the gateway server composes the shared runBrokerClient over the process' production broker connector (web_daemon.go runWebTerminalClient), so gateway session traffic goes through the broker like any client. The launcher keeps no dialer, no session carriage, and no daemon ownership.",
+	},
+	{
+		Kind:     "kindWebServe",
+		Summary:  "browser gateway server",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Cutover complete: every authenticated WebSocket owns exactly one runBrokerClient over the shared production broker connector, with the virtual webterm.Terminal as that run's terminal, the no-argument local ephemeral creation as its closed initial navigation, and the standard presentation callbacks. It keeps no direct daemon dialer, no sessionwire carriage, no remote factory, and no launch configuration; disconnect cancels only that supervisor's service and logical stream.",
 	},
 	{
 		Kind:    "kindDaemon",
@@ -184,25 +181,16 @@ var connectivityMatrix = []connectivityEntry{
 		Notes:   "Blind proxy may forward raw envelopes; exposes no bytes to use cases and owns no sessions.",
 	},
 	{
-		Kind:    "kindRemotePreview",
-		Summary: "_remote-preview SSH-side preview carriage",
-		Owner:   connectivityTransportInfra,
-		DirectDialDebt: []string{
-			"ipc.DialContext direct local dial (remote_preview.go)",
-		},
-		Notes: "Far-side helper only. Client-facing previews flow through broker snapshots after cutover; this helper never becomes a client façade. Direct-dial debt is recorded here rather than as broker debt because the helper itself stays infra.",
-	},
-	{
-		Kind:    "kindUIRemoteCleanup",
-		Summary: "_ui-cleanup remote-side launch cleanup",
-		Owner:   connectivityTransportInfra,
-		Notes:   "Scoped remote cleanup; never launches observers or brokers recursively.",
-	},
-	{
 		Kind:    "kindWebRenew",
 		Summary: "browser token renewal",
 		Owner:   connectivityLocalOnly,
 		Notes:   "Local control only; no daemon or session connectivity.",
+	},
+	{
+		Kind:    "kindBrokerReady",
+		Summary: "hidden dial-only broker readiness probe",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Dials only the selected broker IPC socket, registers, subscribes, and reads snapshots; it never ensures, spawns, opens a logical stream, reconciles, or mutates.",
 	},
 	{
 		Kind:    "kindHelp",
@@ -223,6 +211,12 @@ var connectivityMatrix = []connectivityEntry{
 		Notes:   "Foreground sandbox process over its own private root: no production runtime/state, no daemon dial, no RemoteHostStore, and no session persistence. It composes the broker under a temporary offline config and does not become a client façade or an ordinary command.",
 	},
 	{
+		Kind:    "kindProductionBrokerServe",
+		Summary: "hidden production broker server",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Foreground production broker using only productionBrokerLayout and productionBrokerConfigPath; it accepts no offline root.",
+	},
+	{
 		Kind:    "kindBrokerClient",
 		Summary: "hidden _broker-client autonomous offline client harness",
 		Owner:   connectivityLocalOnly,
@@ -233,6 +227,12 @@ var connectivityMatrix = []connectivityEntry{
 		Summary: "hidden _broker-launcher detached offline broker launcher",
 		Owner:   connectivityLocalOnly,
 		Notes:   "Process mechanics only, scoped to one operator-supplied offline root: it starts _broker-serve in a new session and exits, like the daemon launcher, and never dials a daemon, owns the host store, or mutates persistence.",
+	},
+	{
+		Kind:    "kindProductionBrokerLauncher",
+		Summary: "hidden detached production broker launcher",
+		Owner:   connectivityLocalOnly,
+		Notes:   "Process mechanics for the production broker only; it accepts no offline root and starts the production serve role in a new session.",
 	},
 	{
 		Kind:    "kindBrokerStatus",
@@ -247,7 +247,7 @@ var connectivityMatrix = []connectivityEntry{
 		DirectDialDebt: []string{
 			"ipc.DialMuxContext local daemonmux carriage (broker_offline_mux.go)",
 		},
-		Notes: "Remote-side helper over one operator-supplied offline root: it bridges its own stdio to the single provisioned private Unix daemonmux carriage. It never starts a broker, observer, or ordinary daemon, never dials the production daemon socket, and never fabricates a daemon incarnation. Direct-dial debt is recorded here rather than as broker debt because the helper itself stays transport infra.",
+		Notes: "Remote-side helper over one operator-supplied offline root: it bridges its own stdio to the single provisioned private Unix daemonmux carriage. It never starts a broker, observer, or recursive helper, never dials the production daemon socket, and never fabricates a daemon incarnation. It starts the daemon behind that carriage only under the propagated --daemon-start if-needed authorization and only when its own provisioned policy permits launching; otherwise it dials only an existing carriage. Direct-dial debt is recorded here rather than as broker debt because the helper itself stays transport infra.",
 	},
 	{
 		Kind:    "kindBrokerMuxQUICBootstrap",
@@ -262,7 +262,7 @@ var connectivityMatrix = []connectivityEntry{
 		DirectDialDebt: []string{
 			"ipc.DialMuxContext local daemonmux carriage (broker_offline_mux.go)",
 		},
-		Notes: "Mints one ephemeral authenticated QUIC server, admits exactly one carriage, and bridges it to the single provisioned private Unix daemonmux carriage. It never dials the production daemon socket, never starts a daemon, and never fabricates a daemon incarnation.",
+		Notes: "Mints one ephemeral authenticated QUIC server, admits exactly one carriage, and bridges it to the single provisioned private Unix daemonmux carriage. It never dials the production daemon socket, never fabricates a daemon incarnation, and starts the daemon behind that carriage only under the propagated --daemon-start if-needed authorization and its own provisioned launch policy.",
 	},
 }
 

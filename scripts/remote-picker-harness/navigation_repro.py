@@ -20,8 +20,27 @@ class Driver:
         )
         ready = json.loads(self.process.stdout.readline())["result"]
         self.attachment = ready["attachment"]
-        self.generation = ready["generation"]
         self.request_id = 0
+        # Ready never promises an attachment: the generation is zero until a
+        # committed attachment publishes one. Wait for the attached
+        # publication explicitly instead of assuming ready.Generation == 1.
+        self.generation = ready.get("generation", 0)
+        if ready.get("status") != "attached":
+            self.generation = self._await_attached()
+
+    def _await_attached(self):
+        """Poll capture until the committed attached generation is published."""
+        while True:
+            self.request_id += 1
+            self.process.stdin.write(json.dumps(dict(
+                version=1, id=self.request_id, op="capture",
+                attachment=self.attachment)) + "\n")
+            self.process.stdin.flush()
+            response = json.loads(self.process.stdout.readline())
+            assert "error" not in response, response
+            context = response["result"].get("context", {})
+            if context.get("status") == "attached" and context.get("generation"):
+                return context["generation"]
 
     def call(self, operation, **fields):
         self.request_id += 1

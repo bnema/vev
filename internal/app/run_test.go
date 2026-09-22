@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,25 +15,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/clock"
+	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/quic"
-	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
-	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
-	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
-	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
-	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,94 +108,6 @@ type fakeLifecycleOwnership struct {
 }
 
 func (o fakeLifecycleOwnership) Release() error { return o.release() }
-
-type fakeLifecycleProbe struct {
-	owner lifecycleOwnership
-	err   error
-}
-
-func (p fakeLifecycleProbe) TryAcquire(string) (lifecycleOwnership, error) {
-	return p.owner, p.err
-}
-
-func TestJoinLifecycleReleaseError(t *testing.T) {
-	operationErr := errors.New("operation failed")
-	releaseErr := errors.New("release failed")
-
-	tests := []struct {
-		name         string
-		operationErr error
-		releaseErr   error
-		wantErrors   []error
-	}{
-		{
-			name:       "successful operation preserves release failure",
-			releaseErr: releaseErr,
-			wantErrors: []error{releaseErr},
-		},
-		{
-			name:         "operation and release failures are joined",
-			operationErr: operationErr,
-			releaseErr:   releaseErr,
-			wantErrors:   []error{operationErr, releaseErr},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.operationErr
-			joinLifecycleReleaseError(&got, fakeLifecycleOwnership{release: func() error {
-				return tt.releaseErr
-			}})
-
-			for _, wantErr := range tt.wantErrors {
-				require.ErrorIs(t, got, wantErr)
-			}
-		})
-	}
-}
-
-func TestOfflineCommandsPropagateLifecycleReleaseErrors(t *testing.T) {
-	releaseErr := errors.New("release failed")
-
-	tests := []struct {
-		name             string
-		run              func(context.Context) error
-		wantOperationErr string
-	}{
-		{
-			name: "list joins release failure to success",
-			run: func(ctx context.Context) error {
-				return runList(ctx, command{kind: kindList})
-			},
-		},
-		{
-			name: "kill joins release failure to operation failure",
-			run: func(ctx context.Context) error {
-				return runKill(ctx, "", false, false)
-			},
-			wantOperationErr: "vev: no daemon running",
-		},
-	}
-
-	originalProbe := daemonLifecycleProbe
-	t.Cleanup(func() { daemonLifecycleProbe = originalProbe })
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			daemonLifecycleProbe = fakeLifecycleProbe{
-				owner: fakeLifecycleOwnership{release: func() error { return releaseErr }},
-			}
-
-			err := tt.run(context.Background())
-			require.ErrorIs(t, err, releaseErr)
-			if tt.wantOperationErr != "" {
-				require.ErrorContains(t, err, tt.wantOperationErr)
-			}
-		})
-	}
-}
 
 func TestCatalogueFailureDoesNotListen(t *testing.T) {
 	originalOpenCatalogue, originalListenDaemon := openCatalogue, listenDaemon
@@ -386,7 +290,7 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 		after, readErr := os.ReadFile(persist.StorePath(stateDir))
 		require.NoError(t, readErr)
 		require.Equal(t, before, after, "failed startup must leave the catalogue untouched")
-		_, statErr := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
+		_, statErr := os.Stat(daemonmux.SocketPath(runtimeDir))
 		require.ErrorIs(t, statErr, os.ErrNotExist)
 	})
 
@@ -415,9 +319,9 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 		})
 
 		require.Eventually(t, func() bool {
-			_, err := os.Stat(filepath.Join(runtimeDir, "daemon.sock"))
+			_, err := os.Stat(daemonmux.SocketPath(runtimeDir))
 			return err == nil
-		}, 5*time.Second, time.Millisecond, "daemon socket was not published")
+		}, 5*time.Second, time.Millisecond, "daemon mux socket was not published")
 		require.FileExists(t, persist.StorePath(stateDir))
 	})
 
@@ -636,6 +540,8 @@ func TestParseArgs(t *testing.T) {
 		{name: "no args -> ephemeral attach", args: nil, wantKind: kindAttach, wantIntent: protocol.IntentEphemeral},
 		{name: "empty slice -> ephemeral attach", args: []string{}, wantKind: kindAttach, wantIntent: protocol.IntentEphemeral},
 		{name: "new named", args: []string{"new", "work"}, wantKind: kindAttach, wantIntent: protocol.IntentNew, wantName: "work"},
+		{name: "new remote", args: []string{"new", "work", "user@example.com"}, wantKind: kindAttach, wantIntent: protocol.IntentNew, wantName: "work", wantRemote: "user@example.com"},
+		{name: "new invalid remote", args: []string{"new", "work", "bad host"}, wantErr: true, nonUsageErr: true},
 		{name: "new without name", args: []string{"new"}, wantErr: true},
 		{name: "new empty name", args: []string{"new", ""}, wantErr: true},
 		{name: "new command override unsupported", args: []string{"new", "work", "--", "sh"}, wantErr: true},
@@ -759,31 +665,6 @@ func TestParseArgsNewRejectsUnsafeSessionName(t *testing.T) {
 	}
 }
 
-func TestAttachTargetsCreateCommonSessionRequest(t *testing.T) {
-	tests := []struct {
-		name string
-		arg  string
-		want client.AttachRequest
-	}{
-		{name: "local host", arg: "work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
-		{name: "remote host", arg: "user@example.com:work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
-		{name: "remote ipv4", arg: "user@192.0.2.10:work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
-		{name: "remote ipv6", arg: "user@[2001:db8::1]:work", want: client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd, err := parseArgs([]string{"attach", tt.arg})
-			require.NoError(t, err)
-			connection, err := client.NewSessionConnection(sessionwire.NewClientConnection(wiremocks.NewMockTransport(t)), client.SessionTarget{
-				Intent:      cmd.intent,
-				SessionName: cmd.name,
-			})
-			require.NoError(t, err)
-			require.Equal(t, tt.want, connection.AttachRequest())
-		})
-	}
-}
-
 func TestListShowsBroken(t *testing.T) {
 	var out bytes.Buffer
 	printSessions(&out, []protocol.SessionInfo{
@@ -833,100 +714,6 @@ func newTestPersister(t *testing.T, stateDir string) *persist.Persister {
 	return persist.New(store)
 }
 
-func TestRunListReadsDownSessionsWithoutDaemon(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-
-	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
-	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatalf("Save error = %v", err)
-	}
-	if err := p.Close(); err != nil {
-		t.Fatalf("Close error = %v", err)
-	}
-
-	got := captureStdout(t, func() {
-		if err := runList(context.Background(), command{kind: kindList}); err != nil {
-			t.Fatalf("runList error = %v", err)
-		}
-	})
-	for _, want := range []string{"stored", "down", "-"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("runList output %q missing %q", got, want)
-		}
-	}
-}
-
-func TestRunListUnreadableCatalogueProvidesResetGuidance(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	stateDir := filepath.Join(stateRoot, "vev")
-	runtimeDir := filepath.Join(runtimeRoot, "vev")
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-	require.NoError(t, safedir.EnsurePrivate(stateDir))
-
-	catalogue := persist.StorePath(stateDir)
-	before := []byte("corrupt catalogue")
-	require.NoError(t, os.WriteFile(catalogue, before, 0o600))
-
-	var runErr error
-	stdout := captureStdout(t, func() { runErr = Run([]string{"ls"}) })
-	require.Empty(t, stdout)
-	require.Error(t, runErr)
-	require.ErrorContains(t, runErr, stateDir)
-	require.ErrorContains(t, runErr, "rm -rf "+stateDir)
-	require.NoFileExists(t, filepath.Join(runtimeDir, "daemon.sock"))
-	after, err := os.ReadFile(catalogue)
-	require.NoError(t, err)
-	require.Equal(t, before, after)
-}
-
-func TestRunKillMissingStoppedSessionDoesNotCreateStore(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-
-	err := runKill(context.Background(), "missing", false, false)
-	if err == nil || !strings.Contains(err.Error(), "no such session: missing") {
-		t.Fatalf("runKill error = %v, want no such session", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(stateRoot, "vev", "sessions.kv")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("sessions.kv stat error = %v, want not exist", statErr)
-	}
-}
-
-func TestRunKillDeletesStoppedSessionWithoutDaemon(t *testing.T) {
-	stateRoot, runtimeRoot := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateRoot)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
-
-	p := newTestPersister(t, filepath.Join(stateRoot, "vev"))
-	now := time.Now().UnixNano()
-	if err := p.Save(persist.Record{Name: "stored", IncarnationID: domain.IncarnationID{1}, Cwd: t.TempDir(), CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatalf("Save error = %v", err)
-	}
-	if err := p.Close(); err != nil {
-		t.Fatalf("Close error = %v", err)
-	}
-	got := captureStdout(t, func() {
-		if err := runKill(context.Background(), "stored", false, false); err != nil {
-			t.Fatalf("runKill error = %v", err)
-		}
-	})
-	if !strings.Contains(got, "killed stored") {
-		t.Fatalf("runKill output = %q, want success", got)
-	}
-	records, err := persist.LoadReadOnly(filepath.Join(stateRoot, "vev"))
-	if err != nil {
-		t.Fatalf("LoadReadOnly error = %v", err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("records after kill = %#v, want none", records)
-	}
-}
-
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -954,373 +741,6 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-func TestRunAttachRejectsNestedVEVBeforeDial(t *testing.T) {
-	called := false
-	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "outer", nil, runAttachDeps{
-		createDetached: func(context.Context, string) error {
-			called = true
-			return nil
-		},
-	})
-	if err == nil {
-		t.Fatal("runAttach with VEV set returned nil error")
-	}
-	if called {
-		t.Fatal("runAttach dialed while nested attach should be rejected")
-	}
-	if !strings.Contains(err.Error(), "sessions should be nested with care") {
-		t.Fatalf("runAttach error = %q, want nested-session warning", err)
-	}
-}
-
-func TestRunAttachNestedNewCreatesDetachedSession(t *testing.T) {
-	var gotName string
-	err := runAttachWithDeps(context.Background(), protocol.IntentNew, "scratch", "", "outer", nil, runAttachDeps{
-		createDetached: func(_ context.Context, name string) error {
-			gotName = name
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("runAttachWithDeps returned error: %v", err)
-	}
-	if gotName != "scratch" {
-		t.Fatalf("detached name = %q, want scratch", gotName)
-	}
-}
-
-func TestDetachedLocalHelloIncludesTrueColor(t *testing.T) {
-	t.Setenv("TERM", "xterm-direct")
-	t.Setenv("COLORTERM", "")
-
-	hello := detachedLocalHello("scratch", "/tmp/work")
-
-	require.Equal(t, protocol.IntentNew, hello.Intent)
-	require.Equal(t, "scratch", hello.Name)
-	require.Equal(t, "xterm-direct", hello.TermEnv)
-	require.Equal(t, "/tmp/work", hello.Cwd)
-	require.True(t, hello.TrueColor)
-	require.Equal(t, os.Environ(), hello.Env)
-}
-
-type namedDialer struct{ name string }
-
-func (d namedDialer) Dial(context.Context) (wire.Transport, error) {
-	return nil, fmt.Errorf("not used: %s", d.name)
-}
-
-func requireNamedClientDialer(t *testing.T, ctx context.Context, dialer ports.ClientDialer, name string) {
-	t.Helper()
-	_, err := dialer.Dial(ctx)
-	require.EqualError(t, err, "not used: "+name)
-}
-
-func TestRunAttachWithDepsSelectsRemoteTransport(t *testing.T) {
-	tests := []struct {
-		name              string
-		selectedTransport string
-		wantMode          remoteadapter.TransportMode
-	}{
-		{name: "default remote mode is quic", selectedTransport: "", wantMode: remoteadapter.TransportQUIC},
-		{name: "explicit stdio mode", selectedTransport: "stdio", wantMode: remoteadapter.TransportStdio},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var gotDialer string
-			var gotRemote bool
-			var gotClipboard ports.ClipboardReader
-			clip := portsmocks.NewMockClipboardReader(t)
-			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("remote.example", "", tt.wantMode, mock.Anything).Return(namedDialer{name: "remote"}, nil)
-
-			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-				remoteDialerFactory:     factory.DialerForRemote,
-				selectedRemoteTransport: tt.selectedTransport,
-				clipboard:               clip,
-				runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
-					requireNamedClientDialer(t, ctx, deps.Dialer, "remote")
-					gotDialer = "remote"
-					gotRemote = deps.Remote
-					if !request.Remote || request.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
-						t.Fatal("direct CLI remote attach must use the remote daemon environment")
-					}
-					gotClipboard = deps.Clipboard
-					if request.Intent != protocol.IntentAttach || request.SessionName != "work" {
-						t.Fatalf("intent/name = %d/%q, want attach/work", request.Intent, request.SessionName)
-					}
-					return nil
-				},
-			})
-			if err != nil {
-				t.Fatalf("runAttachWithDeps returned error: %v", err)
-			}
-			if gotDialer != "remote" {
-				t.Fatalf("remote dialer = %q, want remote", gotDialer)
-			}
-			if !gotRemote {
-				t.Fatal("remote attach must pass remote=true to runClient")
-			}
-			if gotClipboard != ports.ClipboardReader(clip) {
-				t.Fatalf("remote attach must thread the configured ClipboardReader through, got %#v", gotClipboard)
-			}
-		})
-	}
-}
-
-// TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority pins that the
-// launching client resolves its endpoint through the registry the composition
-// root injects: the runner receives that registry, and the endpoint is resolved
-// exactly once for the route it starts on.
-func TestRunAttachWithDepsDirectAttachOwnsOneEndpointAuthority(t *testing.T) {
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-
-	var registryDials int
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory.DialerForRemote,
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			require.True(t, request.Remote)
-			require.Equal(t, protocol.EnvironmentPolicyDaemonOwned, request.EnvironmentPolicy)
-			require.NotNil(t, deps.HostRegistry, "a launched client must own a host registry")
-			binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), "remote.example")
-			require.NoError(t, resolveErr)
-			require.NotNil(t, binding.Dialer)
-			registryDials++
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, 1, registryDials)
-}
-
-func TestRunAttachWithDepsRemotePickerHandoffReopensDirectConnection(t *testing.T) {
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote-1"}, nil).Once()
-	factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote-2"}, nil).Once()
-	var calls int
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory.DialerForRemote,
-		runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			calls++
-			require.NotNil(t, deps.Dialer)
-			require.True(t, request.Remote)
-			wantPolicy := protocol.EnvironmentPolicyDaemonOwned
-			if calls > 1 {
-				wantPolicy = protocol.EnvironmentPolicyClientOwned
-			}
-			require.Equal(t, wantPolicy, request.EnvironmentPolicy, "the selected handoff must control environment ownership")
-			if calls == 1 {
-				return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: protocol.IntentAttach}}
-			}
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, 2, calls, "a picker handoff must close the old connection and open a fresh direct connection")
-}
-
-// TestRunAttachWithDepsReusesOneEndpointBinding pins that the registry the
-// runner receives resolves each endpoint once: revisiting a host, even for a
-// different session, hands back the same typed dialer and never rebuilds the
-// carriage.
-func TestRunAttachWithDepsReusesOneEndpointBinding(t *testing.T) {
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-
-	var first, second ports.ClientDialer
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory.DialerForRemote,
-		runClient: func(_ context.Context, deps client.Dependencies, _ client.AttachRequest) error {
-			resolve := func() ports.ClientDialer {
-				binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), "remote.example")
-				require.NoError(t, resolveErr)
-				return binding.Dialer
-			}
-			first, second = resolve(), resolve()
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, first)
-	require.Equal(t, first, second, "revisiting an endpoint must reuse its binding")
-}
-
-func TestRunAttachWithDepsBoundsRepeatedAttachTargetHandoffs(t *testing.T) {
-	factory := newRemoteDialerFactoryMock(t)
-	// The registry resolves the endpoint once: every repeated handoff reuses
-	// that binding, and the attempt bound is what the loop still enforces.
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-
-	calls := 0
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory.DialerForRemote,
-		runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
-			calls++
-			return &client.AttachTargetError{Target: protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentAttach}}
-		},
-	})
-	require.ErrorContains(t, err, "attach handoff exceeded maximum")
-	require.Equal(t, maxAttachTargetHandoffs+1, calls)
-}
-
-func TestRunAttachWithDepsLocalPickerHandoffAttachesSelectedRemote(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		intent    uint8
-		requestID uint64
-		policy    protocol.EnvironmentPolicy
-	}{
-		{name: "attach", intent: protocol.IntentAttach},
-		{name: "create", intent: protocol.IntentNew, requestID: 1, policy: protocol.EnvironmentPolicyDaemonOwned},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("selected.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-			target := protocol.AttachTarget{Endpoint: "selected.example", Session: "picked", Intent: tt.intent, RequestID: tt.requestID, EnvironmentPolicy: tt.policy}
-			want := client.AttachRequest{Intent: tt.intent, SessionName: "picked", Remote: true, Origin: protocol.RouteOriginDiscovery, OriginKey: "selected.example", HostLabel: "selected.example", EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}
-			localCalls, remoteCalls := 0, 0
-			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "", "", nil, runAttachDeps{
-				localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
-				remoteDialerFactory: factory.DialerForRemote,
-				runClient: func(_ context.Context, deps client.Dependencies, request client.AttachRequest) error {
-					if deps.Remote {
-						remoteCalls++
-						require.Equal(t, want, request)
-						return nil
-					}
-					localCalls++
-					require.Equal(t, client.AttachRequest{Intent: protocol.IntentAttach, SessionName: "work", Origin: protocol.RouteOriginLocal, OriginKey: "local"}, request)
-					binding, resolveErr := deps.HostRegistry.ResolveEndpoint(context.Background(), target.Endpoint)
-					require.NoError(t, resolveErr)
-					require.NotNil(t, binding.Dialer)
-					return &client.AttachTargetError{Target: target}
-				},
-			})
-			require.NoError(t, err)
-			require.Equal(t, 1, localCalls, "the failed local picker attach must not retry locally")
-			require.Equal(t, 1, remoteCalls, "the selected target must be dialed and attached exactly once")
-		})
-	}
-}
-
-func TestRunAttachWithDepsRejectsInvalidHandoffBeforeDialing(t *testing.T) {
-	tests := []struct {
-		name   string
-		target protocol.AttachTarget
-	}{
-		{name: "invalid host", target: protocol.AttachTarget{Endpoint: "remote host", Session: "work", Intent: protocol.IntentAttach}},
-		{name: "invalid session", target: protocol.AttachTarget{Endpoint: "remote.example", Session: "bad name", Intent: protocol.IntentAttach}},
-		{name: "tokenless resume", target: protocol.AttachTarget{Endpoint: "remote.example", Session: "work", Intent: protocol.IntentResume}},
-		{
-			name: "tokenless resume with remote target",
-			target: protocol.AttachTarget{
-				Endpoint: "remote.example", Session: "work", Intent: protocol.IntentResume,
-				RemoteTarget: &domain.RemoteSessionTarget{
-					Endpoint: "remote.example", DisplayOrigin: "remote.example",
-					LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work", LiveTabID: "tab-1",
-				},
-				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			factory := newRemoteDialerFactoryMock(t)
-			factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(namedDialer{name: "remote"}, nil).Once()
-			calls := 0
-			err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-				remoteDialerFactory: factory.DialerForRemote,
-				runClient: func(_ context.Context, _ client.Dependencies, _ client.AttachRequest) error {
-					calls++
-					return &client.AttachTargetError{Target: tt.target}
-				},
-			})
-			require.ErrorContains(t, err, "invalid remote attach handoff")
-			require.Equal(t, 1, calls)
-		})
-	}
-}
-
-func TestRunAttachWithDepsRejectsInvalidRemoteTransportBeforeDialing(t *testing.T) {
-	factory := newRemoteDialerFactoryMock(t)
-	runClientCalled := false
-
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory:     factory.DialerForRemote,
-		selectedRemoteTransport: "serial",
-		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
-			runClientCalled = true
-			return nil
-		},
-	})
-	if err == nil || err.Error() != `vev: invalid remote transport "serial" (want "quic" or "stdio")` {
-		t.Fatalf("runAttachWithDeps error = %v, want invalid transport", err)
-	}
-	if runClientCalled {
-		t.Fatal("runClient called after invalid remote transport")
-	}
-}
-
-func TestRunAttachWithDepsReturnsFactoryErrorBeforeRunClient(t *testing.T) {
-	factoryErr := errors.New("factory failed")
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportQUIC, mock.Anything).Return(nil, factoryErr)
-	runClientCalled := false
-
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "work", "remote.example", "", nil, runAttachDeps{
-		remoteDialerFactory: factory.DialerForRemote,
-		runClient: func(context.Context, client.Dependencies, client.AttachRequest) error {
-			runClientCalled = true
-			return nil
-		},
-	})
-	if !errors.Is(err, factoryErr) {
-		t.Fatalf("runAttachWithDeps error = %v, want %v", err, factoryErr)
-	}
-	if runClientCalled {
-		t.Fatal("runClient called after remote factory error")
-	}
-}
-
-func TestRunAttachWithDepsBuildsLocalDialer(t *testing.T) {
-	var gotDialer string
-	gotRemote := true
-	var gotClipboard ports.ClipboardReader
-	clip := portsmocks.NewMockClipboardReader(t)
-	factory := newRemoteDialerFactoryMock(t)
-	err := runAttachWithDeps(context.Background(), protocol.IntentEphemeral, "", "", "", nil, runAttachDeps{
-		localDialer:         func() wire.Dialer { return namedDialer{name: "local"} },
-		remoteDialerFactory: factory.DialerForRemote,
-		clipboard:           clip,
-		runClient: func(ctx context.Context, deps client.Dependencies, request client.AttachRequest) error {
-			requireNamedClientDialer(t, ctx, deps.Dialer, "local")
-			gotDialer = "local"
-			gotRemote = deps.Remote
-			if request.Remote {
-				t.Fatal("local carriage metadata must not be in the attach request")
-			}
-			gotClipboard = deps.Clipboard
-			if request.Intent != protocol.IntentEphemeral || request.SessionName != "" {
-				t.Fatalf("intent/name = %d/%q, want ephemeral/empty", request.Intent, request.SessionName)
-			}
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("runAttachWithDeps returned error: %v", err)
-	}
-	if gotDialer != "local" {
-		t.Fatalf("local dialer = %q, want local", gotDialer)
-	}
-	if gotRemote {
-		t.Fatal("local attach must pass remote=false to runClient")
-	}
-	if gotClipboard != ports.ClipboardReader(clip) {
-		t.Fatalf("local attach must retain the ClipboardReader for later remote handoffs, got %#v", gotClipboard)
-	}
-}
-
 func TestPprofAddrIsLoopback(t *testing.T) {
 	tests := []struct {
 		addr string
@@ -1342,75 +762,4 @@ func TestPprofAddrIsLoopback(t *testing.T) {
 			}
 		})
 	}
-}
-
-type appCatalogCacheStub struct {
-	loads int
-}
-
-func (s *appCatalogCacheStub) Load() ([]catalogue.RemoteCatalogCacheEntry, error) {
-	s.loads++
-	return nil, nil
-}
-
-func (s *appCatalogCacheStub) Store([]catalogue.RemoteCatalogCacheEntry) error { return nil }
-
-func TestRemoteDiscoveryDaemonOptionWiresProductionPorts(t *testing.T) {
-	oldHostStore := newRemoteHostStore
-	oldCatalogCache := newRemoteCatalogCache
-	oldCatalogClient := newRemoteCatalogClient
-	oldDialerFactory := newRemoteDialerFactoryWithRuntimeObserver
-	t.Cleanup(func() {
-		newRemoteHostStore = oldHostStore
-		newRemoteCatalogCache = oldCatalogCache
-		newRemoteCatalogClient = oldCatalogClient
-		newRemoteDialerFactoryWithRuntimeObserver = oldDialerFactory
-	})
-
-	stateDir := t.TempDir()
-	cache := &appCatalogCacheStub{}
-	var hostPath, cachePath string
-	newRemoteHostStore = func(path string) ports.RemoteHostStore {
-		hostPath = path
-		return nil
-	}
-	newRemoteCatalogCache = func(path string) ports.RemoteCatalogCache {
-		cachePath = path
-		return cache
-	}
-	newRemoteCatalogClient = func() ports.RemoteCatalogClient { return nil }
-	newRemoteDialerFactoryWithRuntimeObserver = func(ports.SerializedRuntimeObserver) remoteDialerForTarget { return nil }
-
-	option, err := remoteDiscoveryDaemonOption(stateDir, "stdio", clock.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	require.NoError(t, err)
-	_ = daemon.New(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), option)
-	require.Equal(t, remoteadapter.HostStorePath(stateDir), hostPath)
-	require.Equal(t, remoteadapter.CatalogCachePath(stateDir), cachePath)
-	require.Equal(t, 0, cache.loads, "daemon constructors must stay I/O-free; the cache warms asynchronously in Serve")
-}
-
-func TestRemoteDiscoveryDaemonOptionRejectsInvalidTransport(t *testing.T) {
-	_, err := remoteDiscoveryDaemonOption(t.TempDir(), "serial", clock.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	require.EqualError(t, err, `vev: invalid remote transport "serial" (want "quic" or "stdio")`)
-}
-
-func TestRunAttachWithDepsDaemonRejectionStillSurfaces(t *testing.T) {
-	// The preflight found the session, but the daemon still rejects the
-	// attach (e.g. it died between listing and Hello): the rejection must
-	// surface unchanged and must never trigger a create prompt.
-	var promptOut strings.Builder
-	rejected := &client.ProtocolError{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: scratch"}
-	var intents []uint8
-	err := runAttachWithDeps(context.Background(), protocol.IntentAttach, "scratch", "", "", nil, runAttachDeps{
-		localDialer:        sessionListDialer(t, []protocol.SessionInfo{{Name: "scratch"}}),
-		terminal:           terminalStub(t, strings.NewReader("y\n"), &promptOut),
-		interactiveConsole: interactiveProbe(true),
-		runClient: func(_ context.Context, _ client.Dependencies, request client.AttachRequest) error {
-			intents = append(intents, request.Intent)
-			return rejected
-		},
-	})
-	require.Equal(t, rejected, err)
-	require.Equal(t, []uint8{protocol.IntentAttach}, intents)
-	require.Empty(t, promptOut.String())
 }

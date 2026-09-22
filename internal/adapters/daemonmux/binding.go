@@ -1,91 +1,123 @@
 package daemonmux
 
-// Server binding (P3.2a).
-//
-// ServerBinding is the daemon's validated, immutable authority for one
-// accepted daemonmux physical connection: the stable authenticated daemon
-// identity used for pooling, this process incarnation used to detect a
-// restart behind that identity, and the exact connection policy the daemon
-// requires. It is constructed once, validates its own invariants, exposes
-// only read accessors, and is never mutated, so a later change to a caller's
-// local value cannot weaken what the server handshake already enforced.
-//
-// The server handshake compares a client's requested policy against this
-// binding rather than echoing the request back: an accepted response carries
-// the binding's identity, incarnation, and policy. Identity is stable across
-// restarts; the incarnation is a freshly sampled nonzero 16-byte value.
-//
-// Authentication premise: the binding is only as trustworthy as the carrier
-// that carried the handshake. The carriage must already be authenticated
-// (for example an established QUIC channel with an exact peer pin) before a
-// connection reaches this handshake, and the expected endpoint binding is
-// authoritative. This package never authenticates a carrier and never treats
-// an in-band identity claim as proof.
-
 import (
 	"errors"
 
 	"github.com/bnema/vev/internal/ports"
 )
 
-// ErrInvalidBinding reports a daemon-side physical binding that is not
-// authoritative: an invalid or empty authenticated daemon identity, a zero
-// daemon incarnation, or an invalid connection policy. NewServerBinding
-// refuses it once, at construction, so the handshake never re-validates an
-// unusable binding.
-var ErrInvalidBinding = errors.New("daemonmux: invalid server binding")
+// ErrInvalidBinding reports an invalid daemon authority. An authority must
+// contain a valid identity, a non-zero incarnation, and a non-empty closed set
+// of distinct, valid provisioned admissions.
+var ErrInvalidBinding = errors.New("daemonmux: invalid server bindings")
 
-// ServerBinding is the daemon's validated, immutable physical binding for one
-// accepted daemonmux connection. Its fields are unexported and reachable only
-// through the Identity, Incarnation, and Policy accessors, so a ServerBinding
-// value is immutable once constructed and safe to copy and share.
+// ServerPolicyAdmission is one provisioned carriage shape the daemon accepts:
+// the exact connection policy for that shape and the locality it serves. A
+// daemon serves its own local carriage and each provisioned remote transport, so
+// one binding legitimately carries several entries; the origin makes the
+// accepted locality explicit rather than inferring it from the peer's Open.
+//
+// The origin is per policy, not globally unique: two remote transport policies
+// (for example quic and stdio) share the one remote locality, so admission
+// resolves origin from the accepted policy entry rather than a global origin
+// table.
+type ServerPolicyAdmission struct {
+	Policy ports.BrokerPolicy
+	Origin ports.SessionConnectionOrigin
+}
+
+// Validate enforces the closed provisioned-entry contract: a valid exact policy
+// and a known locality. A missing or invalid origin is refused, so an accepted
+// entry can never inherit an implicit locality.
+func (e ServerPolicyAdmission) Validate() error {
+	if err := e.Policy.Validate(); err != nil {
+		return err
+	}
+	return e.Origin.Validate()
+}
+
+// ServerBinding is an immutable daemon authority. The entry slice is cloned at
+// construction and is never exposed, making the admitted set safe to share
+// between concurrent handshakes.
 type ServerBinding struct {
 	identity    ports.BrokerDaemonIdentity
 	incarnation ports.BrokerDaemonIncarnation
-	policy      ports.BrokerPolicy
+	entries     []ServerPolicyAdmission
 }
 
-// NewServerBinding validates and returns the daemon's immutable physical
-// binding. It refuses an invalid authenticated identity, a zero incarnation,
-// or an invalid policy with ErrInvalidBinding; the returned binding either
-// validates completely or is never handed out.
-func NewServerBinding(identity ports.BrokerDaemonIdentity, incarnation ports.BrokerDaemonIncarnation, policy ports.BrokerPolicy) (ServerBinding, error) {
-	binding := ServerBinding{identity: identity, incarnation: incarnation, policy: policy}
+// NewServerBindings constructs a closed admission authority from provisioned
+// entries. An empty set, a duplicate policy, an invalid policy, and an unknown
+// origin are rejected. Entries are cloned, so a later change to the caller's
+// slice cannot weaken what the handshake already enforced.
+func NewServerBindings(identity ports.BrokerDaemonIdentity, incarnation ports.BrokerDaemonIncarnation, entries []ServerPolicyAdmission) (ServerBinding, error) {
+	binding := ServerBinding{identity: identity, incarnation: incarnation, entries: append([]ServerPolicyAdmission(nil), entries...)}
 	if err := binding.Validate(); err != nil {
 		return ServerBinding{}, err
 	}
 	return binding, nil
 }
 
-// Identity returns the stable authenticated daemon identity the binding
-// advertises and pools on.
-func (b ServerBinding) Identity() ports.BrokerDaemonIdentity { return b.identity }
+// NewServerBinding is retained as a source-compatible shorthand for fixtures
+// that provision exactly one local policy. It is never used by production
+// composition, which builds the daemon's whole closed set with NewServerBindings.
+func NewServerBinding(identity ports.BrokerDaemonIdentity, incarnation ports.BrokerDaemonIncarnation, policy ports.BrokerPolicy) (ServerBinding, error) {
+	return NewServerBindings(identity, incarnation, []ServerPolicyAdmission{{Policy: policy, Origin: ports.SessionOriginLocal}})
+}
 
-// Incarnation returns the nonzero process incarnation the binding advertises
-// so a broker can detect a restart behind the stable identity.
+func (b ServerBinding) Identity() ports.BrokerDaemonIdentity       { return b.identity }
 func (b ServerBinding) Incarnation() ports.BrokerDaemonIncarnation { return b.incarnation }
 
-// Policy returns the exact connection policy the binding requires.
-func (b ServerBinding) Policy() ports.BrokerPolicy { return b.policy }
+// Policy returns the sole entry's policy for legacy single-policy callers. It
+// returns the zero value for a multi-entry authority; admission never uses it.
+func (b ServerBinding) Policy() ports.BrokerPolicy {
+	if len(b.entries) == 1 {
+		return b.entries[0].Policy
+	}
+	return ports.BrokerPolicy{}
+}
 
-// Validate reports whether the binding is authoritative: a valid authenticated
-// identity, a nonzero incarnation, and a valid policy.
+// Origin returns the sole entry's locality for legacy single-policy callers. It
+// returns the unknown origin for a multi-entry authority.
+func (b ServerBinding) Origin() ports.SessionConnectionOrigin {
+	if len(b.entries) == 1 {
+		return b.entries[0].Origin
+	}
+	return ports.SessionOriginUnknown
+}
+
 func (b ServerBinding) Validate() error {
-	if err := b.identity.Validate(); err != nil {
+	if b.identity.Validate() != nil || b.incarnation.Validate() != nil || len(b.entries) == 0 {
 		return ErrInvalidBinding
 	}
-	if err := b.incarnation.Validate(); err != nil {
-		return ErrInvalidBinding
-	}
-	if err := b.policy.Validate(); err != nil {
-		return ErrInvalidBinding
+	for i, entry := range b.entries {
+		if entry.Validate() != nil {
+			return ErrInvalidBinding
+		}
+		for j := 0; j < i; j++ {
+			// Duplicate policy - and therefore a duplicated entry - is refused:
+			// one policy is one carriage shape, so a second entry naming the
+			// same policy would make the accepted locality and policy ambiguous.
+			if entry.Policy.Compatible(b.entries[j].Policy) {
+				return ErrInvalidBinding
+			}
+		}
 	}
 	return nil
 }
 
-// Accepts reports whether the requested policy exactly equals the binding's
-// policy. Pooling requires exact equality across every field, so a request
-// that differs in any field is refused rather than merged or inherited.
+// Accepted returns the exact provisioned entry matching policy, carrying that
+// entry's policy and origin. No merging, inheritance, echo, or fallback is
+// performed: a request differing in one field is refused.
+func (b ServerBinding) Accepted(policy ports.BrokerPolicy) (ServerPolicyAdmission, bool) {
+	for _, provisioned := range b.entries {
+		if provisioned.Policy.Compatible(policy) {
+			return provisioned, true
+		}
+	}
+	return ServerPolicyAdmission{}, false
+}
+
 func (b ServerBinding) Accepts(policy ports.BrokerPolicy) bool {
-	return b.policy.Compatible(policy)
+	_, ok := b.Accepted(policy)
+	return ok
 }

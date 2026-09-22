@@ -64,12 +64,13 @@ func muxOpenRequest(stream uint64, policy ports.BrokerPolicy) ports.BrokerOpenSt
 		Connection: ports.BrokerConnectionID{1},
 		Stream:     ports.BrokerStreamID(stream),
 		Policy:     policy,
+		StartMode:  ports.BrokerDaemonStartIfNeeded,
 	}
 }
 
 // muxEndpoint builds the resolved endpoint the broker verifies against.
-func muxEndpoint(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, address string) ports.BrokerResolvedEndpoint {
-	return ports.BrokerResolvedEndpoint{Identity: identity, Policy: policy, Address: address}
+func muxEndpoint(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, address string) ports.BrokerDialTarget {
+	return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: policy, Address: address, StartMode: ports.BrokerDaemonExistingOnly, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: identity, Bound: true}}
 }
 
 // superviseServer is a test daemon: an AggregateListener plus a
@@ -114,7 +115,7 @@ func newSuperviseServer(t *testing.T, binding ServerBinding, ceilings MuxCeiling
 // dial returns a RawCarrierDialer that produces one fresh real carriage per
 // call and adopts its daemon end.
 func (s *superviseServer) dial() RawCarrierDialer {
-	return func(_ context.Context, _ string) (RawFramedTransport, error) {
+	return func(_ context.Context, _ ports.BrokerDialTarget) (RawFramedTransport, error) {
 		s.dials.Add(1)
 		client, server := rawCarriagePair(s.t)
 		go func() { s.adoptions <- s.supervisor.Adopt(context.Background(), server) }()
@@ -179,16 +180,16 @@ func TestNewEndpointConnectorValidation(t *testing.T) {
 	_, err := NewEndpointConnector(nil, DefaultMuxCeilings())
 	require.ErrorIs(t, err, ErrConnectorConfig)
 
-	_, err = NewEndpointConnector(func(context.Context, string) (RawFramedTransport, error) { return nil, nil }, MuxCeilings{})
+	_, err = NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) { return nil, nil }, MuxCeilings{})
 	require.ErrorIs(t, err, ErrConnectorConfig)
 
-	connector, err := NewEndpointConnector(func(context.Context, string) (RawFramedTransport, error) {
+	connector, err := NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) {
 		t.Fatal("dial must not run for an invalid endpoint")
 		return nil, nil
 	}, DefaultMuxCeilings())
 	require.NoError(t, err)
 
-	_, err = connector.Connect(context.Background(), ports.BrokerResolvedEndpoint{})
+	_, err = connector.Connect(context.Background(), ports.BrokerDialTarget{})
 	require.Error(t, err)
 	var typed ports.BrokerError
 	require.ErrorAs(t, err, &typed)

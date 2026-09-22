@@ -387,7 +387,9 @@ func routeRoleArgs(s scenario, m processMapping, selected transport) roleCommand
 	remote := []string{"attach", "harness@127.0.0.1"}
 	switch m.Role {
 	case "daemon":
-		return roleCommand{Args: []string{"--daemon"}}
+		// The historical role now owns the foreground broker. The broker starts
+		// and reaches the local daemon only through its daemonmux route.
+		return roleCommand{Args: []string{"_broker-production-serve"}}
 	case "client":
 		switch s.Transport {
 		case "local":
@@ -423,9 +425,11 @@ func launchOrder(mappings []processMapping) []processMapping {
 	out := append([]processMapping(nil), mappings...)
 	priority := func(role string) int {
 		switch role {
-		case "daemon":
-			return 0
 		case "ssh_stdio_peer":
+			// Peer preparation installs the per-run SSH shim before the broker is
+			// configured and probed; it does not start the remote process yet.
+			return 0
+		case "daemon":
 			return 1
 		case "client":
 			return 2

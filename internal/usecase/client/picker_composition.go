@@ -15,8 +15,8 @@ import (
 // but it does not provide a working picker.
 //
 // The remaining exported methods are the supervisor contract: ApplySnapshot,
-// TakeOp, ResolveKey, ResolveInitial, SetOwnsInput, OpsReady, and
-// ConsumeTerminalRead. A composition must never drive those methods itself.
+// TakeOp, ResolveKey, SetOwnsInput, OpsReady, and ConsumeTerminalRead. A
+// composition must never drive those methods itself.
 // Doing so can violate the supervisor's single-reader and single-input-owner
 // invariants or consume a pending user decision before the supervisor handles
 // it.
@@ -72,14 +72,6 @@ func (p *Picker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpe
 		return (*pickerController)(nil).ResolveKey(key, base)
 	}
 	return p.controller.ResolveKey(key, base)
-}
-
-// ResolveInitial resolves the supervisor's one-shot initial navigation.
-func (p *Picker) ResolveInitial(navigation InitialNavigation, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	if p == nil || p.controller == nil {
-		return (*pickerController)(nil).ResolveInitial(navigation, base)
-	}
-	return p.controller.ResolveInitial(navigation, base)
 }
 
 // SetOwnsInput updates picker input ownership at an attachment boundary.

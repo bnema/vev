@@ -163,12 +163,7 @@ func decodeExpect(data []byte) (ports.UIExpect, error) {
 			result.TextContains = &text
 		case "status":
 			var status ports.UIPresentationStatus
-			if json.Unmarshal(raw, &status) != nil {
-				return result, invalidRequest()
-			}
-			switch status {
-			case ports.UIStatusAttached, ports.UIStatusTransitioning, ports.UIStatusReconnecting, ports.UIStatusDetached:
-			default:
+			if json.Unmarshal(raw, &status) != nil || !status.Valid() {
 				return result, invalidRequest()
 			}
 			result.Status = &status

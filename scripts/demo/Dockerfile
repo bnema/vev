@@ -1,11 +1,4 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27 AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /out/vev .
-
 FROM archlinux:latest
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
     pacman -Sy --noconfirm archlinux-keyring \
@@ -17,7 +10,9 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
       ncurses openssh util-linux \
       ttf-jetbrains-mono-nerd
 RUN useradd -m -u 1000 demo
-COPY --from=build /out/vev /usr/local/bin/vev
+# P8.2 uses the exact worktree binary built by sandbox-run.sh, never a
+# second in-image build that could diverge from the artifact under test.
+COPY build/vev /usr/local/bin/vev
 COPY scripts/demo/ticker.sh /usr/local/bin/ticker
 COPY scripts/demo/demo-shell.sh /usr/local/bin/demo-shell
 RUN chmod +x /usr/local/bin/ticker /usr/local/bin/demo-shell \
@@ -26,9 +21,9 @@ RUN chmod +x /usr/local/bin/ticker /usr/local/bin/demo-shell \
     && ssh-keygen -A \
     && ssh-keygen -q -t ed25519 -N '' -C vev-demo -f /home/demo/.ssh/id_ed25519 \
     && cp /home/demo/.ssh/id_ed25519.pub /home/demo/.ssh/authorized_keys \
-    && { printf 'remote '; cut -d' ' -f1-2 /etc/ssh/ssh_host_ed25519_key.pub; } > /home/demo/.ssh/known_hosts \
+    && { printf 'remote-a,remote-b '; cut -d' ' -f1-2 /etc/ssh/ssh_host_ed25519_key.pub; } > /home/demo/.ssh/known_hosts \
     && printf '%s\n' \
-      'Host remote' \
+      'Host remote-a remote-b' \
       '    User demo' \
       '    IdentityFile ~/.ssh/id_ed25519' \
       '    IdentitiesOnly yes' \

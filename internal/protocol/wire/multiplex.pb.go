@@ -116,6 +116,8 @@ func (x *MuxStreamRef) GetClientStreamId() uint64 {
 // stream over the physical connection. env is the per-request session
 // environment and is never inherited from the broker process environment.
 // The daemon revalidates the exact session identity before attachment.
+// start_mode carries the broker's explicit daemon-start authorization so a
+// transport can never widen it into a spawn.
 type MuxOpen struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ref   *MuxStreamRef          `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
@@ -130,8 +132,11 @@ type MuxOpen struct {
 	// Closed attachment-admission taxonomy (ports.BrokerStreamAdmission):
 	// 0 = none (control/observation), 1 = exact attach/resume carrying
 	// target, 2 = create named carrying name, 3 = create ephemeral.
-	Admission     uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
-	Name          string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
+	Admission uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
+	Name      string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
+	// Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =
+	// existing_only, 2 = start_if_needed. Always present; zero is refused.
+	StartMode     uint32 `protobuf:"varint,11,opt,name=start_mode,json=startMode,proto3" json:"start_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -234,6 +239,13 @@ func (x *MuxOpen) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *MuxOpen) GetStartMode() uint32 {
+	if x != nil {
+		return x.StartMode
+	}
+	return 0
 }
 
 // MuxOpened confirms one logical stream is established.
@@ -1024,7 +1036,7 @@ const file_multiplex_proto_rawDesc = "" +
 	"\x12physical_stream_id\x18\x01 \x01(\x04R\x10physicalStreamId\x12!\n" +
 	"\fbroker_epoch\x18\x02 \x01(\x04R\vbrokerEpoch\x12#\n" +
 	"\rconnection_id\x18\x03 \x01(\fR\fconnectionId\x12(\n" +
-	"\x10client_stream_id\x18\x04 \x01(\x04R\x0eclientStreamId\"\xf4\x02\n" +
+	"\x10client_stream_id\x18\x04 \x01(\x04R\x0eclientStreamId\"\x93\x03\n" +
 	"\aMuxOpen\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.vev.wire.v1.MuxStreamRefR\x03ref\x12\x18\n" +
 	"\apurpose\x18\x02 \x01(\rR\apurpose\x12\x14\n" +
@@ -1036,7 +1048,9 @@ const file_multiplex_proto_rawDesc = "" +
 	"\x06policy\x18\b \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\x12\x1c\n" +
 	"\tadmission\x18\t \x01(\rR\tadmission\x12\x12\n" +
 	"\x04name\x18\n" +
-	" \x01(\tR\x04name\"8\n" +
+	" \x01(\tR\x04name\x12\x1d\n" +
+	"\n" +
+	"start_mode\x18\v \x01(\rR\tstartMode\"8\n" +
 	"\tMuxOpened\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.vev.wire.v1.MuxStreamRefR\x03ref\"o\n" +
 	"\n" +

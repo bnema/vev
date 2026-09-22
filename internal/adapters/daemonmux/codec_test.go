@@ -43,6 +43,18 @@ func testPolicy() ports.BrokerPolicy {
 	}
 }
 
+// localAcceptance provisions one local carriage entry under policy, matching
+// the local Open requests the shared fixtures send.
+func localAcceptance(policy ports.BrokerPolicy) ServerPolicyAdmission {
+	return ServerPolicyAdmission{Policy: policy, Origin: ports.SessionOriginLocal}
+}
+
+// remoteAcceptance provisions one remote carriage entry under policy, matching
+// a remote Open carrying a validated registration.
+func remoteAcceptance(policy ports.BrokerPolicy) ServerPolicyAdmission {
+	return ServerPolicyAdmission{Policy: policy, Origin: ports.SessionOriginRemote}
+}
+
 func testTarget() protocol.ExactSessionTarget {
 	return protocol.ExactSessionTarget{
 		LifecycleID: domain.SessionLifecycleID{1, 2, 3},
@@ -97,6 +109,7 @@ func testOpen() Open {
 		Ref: testRef(5), Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Local: false,
 		Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(),
 		Env: []string{"TERM=xterm-256color"}, Policy: testPolicy(),
+		StartMode: ports.BrokerDaemonStartIfNeeded,
 	}
 }
 
@@ -371,7 +384,7 @@ func TestMuxValidationNegatives(t *testing.T) {
 		_, err = EncodeServer(Opened{Ref: zeroClient}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
-		_, err = EncodeClient(Open{Ref: zeroClient, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		_, err = EncodeClient(Open{Ref: zeroClient, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("open taxonomy and shape", func(t *testing.T) {
@@ -412,7 +425,7 @@ func TestMuxValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		// A local control open with no attachment state is legal.
-		valid := Open{Ref: testRef(5), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}
+		valid := Open{Ref: testRef(5), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}
 		raw, err := EncodeClient(valid, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		decoded, err := DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
@@ -694,7 +707,7 @@ func TestMuxAdmissionVariants(t *testing.T) {
 		require.Equal(t, ephemeral, roundTrip(t, ephemeral))
 	})
 	t.Run("control never carries admission", func(t *testing.T) {
-		control := Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}
+		control := Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}
 		require.Equal(t, control, roundTrip(t, control))
 		mutated := mustEncodeClient(t, control)
 		envelope := &wire.MuxClientEnvelope{}
@@ -731,13 +744,72 @@ func TestMuxAdmissionVariants(t *testing.T) {
 	})
 }
 
+// TestMuxStartModeRoundTrips proves the daemon-start authorization travels the
+// mux wire losslessly for every stream purpose, that the daemon-side decoder
+// never widens an existing-only authorization, and that the zero and unknown
+// wire codes are refused rather than defaulted.
+func TestMuxStartModeRoundTrips(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      ports.BrokerDaemonStartMode
+		purpose   ports.BrokerStreamPurpose
+		admission ports.BrokerStreamAdmission
+	}{
+		{"existing only control", ports.BrokerDaemonExistingOnly, ports.BrokerStreamControl, 0},
+		{"start if needed control", ports.BrokerDaemonStartIfNeeded, ports.BrokerStreamControl, 0},
+		{"existing only observation", ports.BrokerDaemonExistingOnly, ports.BrokerStreamObservation, 0},
+		{"start if needed exact attach", ports.BrokerDaemonStartIfNeeded, ports.BrokerStreamAttachment, ports.BrokerAdmissionExact},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			open := Open{Ref: testRef(5), Purpose: tc.purpose, Admission: tc.admission, Local: true, Policy: testPolicy(), StartMode: tc.mode}
+			if tc.admission == ports.BrokerAdmissionExact {
+				open.Target = testTarget()
+			}
+			raw, err := EncodeClient(open, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			decoded, err := DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			admitting, ok := decoded.(Open)
+			require.True(t, ok)
+			require.Equal(t, tc.mode, admitting.StartMode)
+		})
+	}
+
+	t.Run("zero wire code is refused", func(t *testing.T) {
+		raw := mustEncodeClient(t, Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonExistingOnly})
+		envelope := &wire.MuxClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpen().StartMode = 0
+		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage, "an absent start mode is never defaulted")
+	})
+
+	t.Run("unknown wire code is refused", func(t *testing.T) {
+		raw := mustEncodeClient(t, Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonExistingOnly})
+		envelope := &wire.MuxClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpen().StartMode = 3
+		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+
+	t.Run("encoding a zero start mode is refused", func(t *testing.T) {
+		_, err := EncodeClient(Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+}
+
 // TestMuxAdmissionWireRange proves the MuxOpen decoder narrows the wire
 // admission field before any cast: the accepted semantic set (no admission, or
 // one of the three closed admission codes) is unchanged, while every wire value
 // whose high bits would alias a valid code is refused instead of silently
 // truncating onto that code.
 func TestMuxAdmissionWireRange(t *testing.T) {
-	control := Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}
+	control := Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}
 	named := testOpen()
 	named.Admission = ports.BrokerAdmissionCreateNamed
 	named.Name = "work"

@@ -177,13 +177,16 @@ func (s *ServerSupervisor) Adopt(ctx context.Context, raw RawFramedTransport) er
 	}
 	// Enforce the accepted physical policy before any fresh inbound Open can be
 	// admitted: the pump's engine must be restricted before the pump starts,
-	// and the listener below is built before that start too.
-	if err := pump.Engine().RestrictAdmissions(result.Binding.Policy()); err != nil {
+	// and the listener below is built before that start too. The accepted entry
+	// carries both the exact policy the engine enforces and the locality origin
+	// the listener stamps on every admitted session connection.
+	accepted := ServerPolicyAdmission{Policy: result.Policy, Origin: result.Origin}
+	if err := pump.Engine().RestrictAdmissions(accepted.Policy); err != nil {
 		_ = pump.Close()
 		return err
 	}
 
-	listener, err := newListener(pump, protocol.HandshakeTimeout, MaxAcceptQueue, s.clock)
+	listener, err := newListener(pump, protocol.HandshakeTimeout, MaxAcceptQueue, s.clock, accepted)
 	if err != nil {
 		_ = pump.Close()
 		return err

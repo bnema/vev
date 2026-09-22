@@ -205,7 +205,7 @@ func (s *testStore) LoadHosts() (ports.BrokerHosts, error) {
 	}
 	authority := ports.BrokerHosts{Revision: 1}
 	for _, host := range s.loaded.Daemons {
-		authority.Hosts = append(authority.Hosts, ports.BrokerHostRecord{Registration: host.Registration, Pinned: true, Policy: poolPolicy()})
+		authority.Hosts = append(authority.Hosts, ports.BrokerHostRecord{Registration: host.Registration, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), host.Registration.Endpoint)})
 	}
 	return authority, nil
 }
@@ -501,11 +501,24 @@ func registration(t *testing.T, endpoint string, marker byte) domain.RemoteRegis
 	return result
 }
 
-// hostRecord builds one pinned authority record with the shared test policy.
-// The projection-only setHosts seam takes records now, so membership carries
-// the same configured authority (registration plus policy) as production.
+// canonicalRoute derives the exact route production would write for one test
+// policy and endpoint. Test policies only use the closed remote transport
+// vocabulary, so the mapping cannot fail; a fixture that hand-builds membership
+// therefore matches what AddHost or UpgradeBrokerHostRoutes would persist.
+func canonicalRoute(policy ports.BrokerPolicy, endpoint string) ports.BrokerRouteSpec {
+	route, err := ports.BrokerRouteForTransport(policy.Transport, endpoint)
+	if err != nil {
+		panic(err)
+	}
+	return route
+}
+
+// hostRecord builds one pinned authority record with the shared test policy and
+// the canonical route production derives from it. The projection-only setHosts
+// seam takes records now, so membership carries the same configured authority
+// (registration, policy, and route) as production.
 func hostRecord(reg domain.RemoteRegistration) ports.BrokerHostRecord {
-	return ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: poolPolicy()}
+	return ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}
 }
 
 func hostRecords(registrations ...domain.RemoteRegistration) []ports.BrokerHostRecord {
@@ -1400,7 +1413,7 @@ func TestRegistryRevisionOverflowFailsClosed(t *testing.T) {
 	// Both mutation paths refuse the change before touching the store or the
 	// projection, so neither durable authority nor the publication series moves.
 	require.ErrorIs(t, registry.setHosts(hostRecords(registration(t, "other.test", 2))), ports.ErrBrokerRevisionExhausted)
-	require.ErrorIs(t, registry.ReplaceHosts([]ports.BrokerHostRecord{{Registration: first, Pinned: true, Policy: poolPolicy()}}), ports.ErrBrokerRevisionExhausted)
+	require.ErrorIs(t, registry.ReplaceHosts([]ports.BrokerHostRecord{{Registration: first, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), first.Endpoint)}}), ports.ErrBrokerRevisionExhausted)
 	require.Equal(t, authority, registry.authority)
 
 	// The publication path itself fails closed too: a direct attempt neither
@@ -1913,7 +1926,7 @@ func TestRegistryReplaceHostsBlockedCASKeepsSnapshotLockFree(t *testing.T) {
 	// The replacement takes the registry lock and parks inside the durable CAS.
 	replaced := make(chan error, 1)
 	go func() {
-		replaced <- registry.ReplaceHosts([]ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy()}})
+		replaced <- registry.ReplaceHosts([]ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}})
 	}()
 	<-store.entered
 	t.Cleanup(store.releaseCAS)

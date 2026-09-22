@@ -394,9 +394,12 @@ func (a BrokerStreamAdmission) Validate() error {
 // cancellable logical stream to the owning daemon. The daemon revalidates
 // the exact session identity before attachment. Admission selects the
 // attachment admission variant; Name is the validated session name for
-// BrokerAdmissionCreateNamed and is empty for every other variant. Env is
-// the per-request session environment; it is never inherited from the
-// broker process environment.
+// BrokerAdmissionCreateNamed and is empty for every other variant. StartMode
+// is the explicit daemon-start authorization this request carries to the
+// transport; Pending acquisition keys on it so an ExistingOnly request is
+// never coalesced with a dial that may start the target. Env is the
+// per-request session environment; it is never inherited from the broker
+// process environment.
 type BrokerOpenStreamRequest struct {
 	Epoch        BrokerEpoch
 	Purpose      BrokerStreamPurpose
@@ -410,6 +413,7 @@ type BrokerOpenStreamRequest struct {
 	Target       protocol.ExactSessionTarget
 	Env          []string
 	Policy       BrokerPolicy
+	StartMode    BrokerDaemonStartMode
 }
 
 func (r BrokerOpenStreamRequest) Validate() error {
@@ -436,6 +440,12 @@ func (r BrokerOpenStreamRequest) Validate() error {
 	}
 	switch r.Purpose {
 	case BrokerStreamAttachment:
+		// An attachment or creation may need to start the target daemon, so an
+		// ExistingOnly authorization is incompatible with it: the mode is
+		// refused rather than silently widened into a spawn.
+		if r.StartMode != BrokerDaemonStartIfNeeded {
+			return errors.New("ports: attachment requires start-if-needed authorization")
+		}
 		if err := r.Admission.Validate(); err != nil {
 			return err
 		}
@@ -466,8 +476,17 @@ func (r BrokerOpenStreamRequest) Validate() error {
 		if r.Admission != 0 || r.Name != "" || r.Target != (protocol.ExactSessionTarget{}) || len(r.Env) != 0 {
 			return errors.New("ports: control/observation carries attachment state")
 		}
+		if r.Purpose == BrokerStreamObservation && r.StartMode != BrokerDaemonExistingOnly {
+			// Observation never starts a target: an observation stream that
+			// authorized a spawn is refused rather than silently narrowed, so a
+			// caller can always trust that observing cannot start a daemon.
+			return errors.New("ports: observation requires existing-only start mode")
+		}
 	default:
 		return errors.New("ports: invalid stream purpose")
+	}
+	if err := r.StartMode.Validate(); err != nil {
+		return err
 	}
 	if uint64(len(r.Env)) > BrokerMaxEnvEntries {
 		return errors.New("ports: broker open stream has too many environment entries")
@@ -693,6 +712,12 @@ type BrokerService interface {
 	// ConnectionID returns the ID assigned when this client connection was
 	// accepted. Clients carry it on stream operations to fence stale requests.
 	ConnectionID() BrokerConnectionID
+	// NextStreamID allocates this connection's next logical stream identity. It
+	// is thread-safe, strictly monotone, and never zero, performs no I/O, and
+	// refuses a closed connection or an exhausted counter rather than wrapping.
+	// The calling service is the only allocator on its own connection, and an
+	// allocated identity is consumed even when the open it names is refused.
+	NextStreamID() (BrokerStreamID, error)
 	// Done closes exactly once when this connection is terminal: the broker
 	// retired it, the carriage failed, or the client closed it locally. Err is
 	// stable afterwards. A client observes Done/Err to attribute a broker loss
@@ -777,7 +802,7 @@ type BrokerPhysicalConnection interface {
 // one endpoint under an exact compatible policy. Conflicting policy is
 // rejected; the first launching client never becomes policy authority.
 type BrokerEndpointConnector interface {
-	Connect(ctx context.Context, endpoint BrokerResolvedEndpoint) (BrokerPhysicalConnection, error)
+	Connect(ctx context.Context, target BrokerDialTarget) (BrokerPhysicalConnection, error)
 }
 
 // BrokerConnector establishes the client-facing broker connection: it connects

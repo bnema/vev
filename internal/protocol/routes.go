@@ -115,6 +115,90 @@ func ValidateRouteLabel(value string, allowEmpty bool) error {
 	return nil
 }
 
+const NoTabIndex int32 = -1
+
+// SessionAttachTarget is the daemon-local, transport-neutral identity used by
+// session handshakes and handoffs. Endpoint, display origin, and registration
+// authority deliberately remain outside this contract.
+type SessionAttachTarget struct {
+	SessionID        domain.SessionID
+	LifecycleID      domain.SessionLifecycleID
+	SessionName      string
+	TabID            domain.TabStableID
+	TabIndex         int32
+	TabRawName       string
+	TabExpectedCount uint16
+	Stopped          bool
+}
+
+func (t SessionAttachTarget) selector() domain.TabSelector {
+	if t.TabID != "" {
+		return domain.NewStableTabSelector(t.TabID)
+	}
+	if t.TabIndex != NoTabIndex {
+		return domain.NewOrdinalTabSelector(uint16(t.TabIndex), t.TabRawName, t.TabExpectedCount)
+	}
+	return domain.TabSelector{}
+}
+
+func (t SessionAttachTarget) ResolveTab(tabs []domain.TabSelectorTab) (int, bool) {
+	selector := t.selector()
+	if selector == (domain.TabSelector{}) {
+		return 0, len(tabs) <= 1
+	}
+	return selector.Resolve(tabs)
+}
+
+func (t SessionAttachTarget) Validate() error {
+	if t.LifecycleID == (domain.SessionLifecycleID{}) {
+		return errors.New("missing session lifecycle")
+	}
+	if err := domain.ValidateSessionName(t.SessionName); err != nil {
+		return fmt.Errorf("invalid session name: %w", err)
+	}
+	if t.Stopped && t.SessionID != "" {
+		return errors.New("stopped target carries a session ID")
+	}
+	switch {
+	case t.TabID != "":
+		if domain.ValidateTabStableID(t.TabID) != nil || t.TabIndex != NoTabIndex || t.TabRawName != "" || t.TabExpectedCount != 0 {
+			return errors.New("invalid stable tab selector")
+		}
+	case t.TabIndex != NoTabIndex:
+		if t.TabIndex < 0 {
+			return errors.New("invalid ordinal tab selector")
+		}
+		if err := domain.NewOrdinalTabSelector(uint16(t.TabIndex), t.TabRawName, t.TabExpectedCount).Validate(); err != nil {
+			return fmt.Errorf("invalid ordinal tab selector: %w", err)
+		}
+	case t.TabRawName != "" || t.TabExpectedCount != 0:
+		return errors.New("incomplete tab selector")
+	}
+	if !t.Stopped && t.TabID == "" {
+		return errors.New("live target requires a stable tab selector")
+	}
+	return nil
+}
+
+// SessionAttachTargetFromRemote strips routing and presentation data from a
+// picker target before it enters the daemon session contract.
+func SessionAttachTargetFromRemote(remote domain.RemoteSessionTarget) SessionAttachTarget {
+	t := SessionAttachTarget{LifecycleID: remote.LifecycleID, SessionName: remote.SessionName, TabIndex: NoTabIndex, Stopped: remote.Stopped}
+	if !remote.Stopped {
+		t.TabID = remote.LiveTabID
+		return t
+	}
+	switch remote.StoppedTab.Kind {
+	case domain.TabSelectorByStableID:
+		t.TabID = remote.StoppedTab.StableID
+	case domain.TabSelectorByOrdinal:
+		t.TabIndex = int32(remote.StoppedTab.Ordinal)
+		t.TabRawName = remote.StoppedTab.RawName
+		t.TabExpectedCount = remote.StoppedTab.ExpectedCount
+	}
+	return t
+}
+
 // ExactSessionTarget is the daemon-neutral identity required to attach to a
 // specific session lifecycle. The transport endpoint is deliberately absent:
 // the selected route's dialer owns that boundary.

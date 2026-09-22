@@ -248,7 +248,7 @@ func (d *Daemon) resolveNavigationInventory(request protocol.NavigationInventory
 	response.Status = protocol.NavigationInventoryOK
 	resolved := protocol.AttachTarget{
 		Endpoint: request.Registration.Endpoint, Session: target.SessionName,
-		Intent: protocol.IntentAttach, RemoteTarget: &target,
+		Intent: protocol.IntentAttach, SessionTarget: ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target)),
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	response.Resolved = &resolved

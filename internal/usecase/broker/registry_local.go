@@ -12,16 +12,19 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Broker-owned local observation (Plan 001 P5.3a).
+// Broker-owned local observation (Plan 001 P5.3a, P7.4b).
 //
 // The broker's own machine daemon is not a configured host: it has no
 // endpoint, no registration, and no durable membership. It is observed through
 // the same probe lifecycle as a remote host, but its configured authority
 // (display origin and policy) is supplied by the composition and its entry is
 // always published first, at index zero, and never persisted. Observing the
-// local daemon only reads: the probe dials the broker-owned local route and
-// completes the daemonmux physical preamble, so it never opens a logical
-// session stream (never attaches) and never starts a stopped daemon.
+// local daemon only reads: the probe dials the broker-owned local route, and
+// the shared observation implementation behind it opens exactly one
+// BrokerStreamObservation stream, asks for the daemon's own catalogue through
+// the existing typed control protocol, and validates the answer. It therefore
+// never attaches, never claims a geometry, never requests an admission, never
+// creates a session or process, and never starts a stopped daemon.
 
 // localProbeKey seeds the deterministic jitter for the local probe schedule.
 // It is a fixed token, so local retry and refresh jitter is reproducible and
@@ -108,7 +111,11 @@ func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, resul
 // applyLocal adopts one completed local probe. Callers must hold r.mu, exactly
 // as Registry.apply requires. A stale attempt touches nothing. A confirmed
 // reachable result publishes the observed state with configured authority
-// stamped on top; every other outcome publishes a typed failure and keeps the
+// stamped on top. An explicit unknown result with no error - the local daemon
+// has not published its identity yet, so observing it is not even attempted -
+// publishes the configured authority with the unknown availability and zero
+// observed identity, and reschedules the next attempt without recording a
+// failure. Every other outcome publishes a typed failure and keeps the
 // last-known identity and inventory, so an unreachable local daemon never
 // reports an invented identity and its availability is never zero.
 func (r *Registry) applyLocal(result probeResult) {
@@ -128,6 +135,21 @@ func (r *Registry) applyLocal(result probeResult) {
 	current := r.localHost
 	current.Checking = false
 	current.LastAttempt = result.at
+
+	// An explicit unknown result with no error means the local daemon has not
+	// published its identity yet, so observing it was not even attempted. That
+	// is not a failure: publish the configured authority with the explicit
+	// unknown availability, keep zero observed identity, and reschedule on the
+	// retry cadence so the first identity is observed promptly instead of
+	// waiting out a healthy refresh interval.
+	if result.err == nil && result.snapshot.Availability == domain.RemoteAvailabilityUnknown {
+		current.Availability = domain.RemoteAvailabilityUnknown
+		current.LastFailure = domain.RemoteFailure{}
+		current.NextDue = result.at.Add(r.jitter(r.retryDelay(1), localProbeKey, result.attempt))
+		r.localHost = current
+		r.publishLocked(true)
+		return
+	}
 
 	kind, availability, failed := observationOutcome(result)
 	if !failed {

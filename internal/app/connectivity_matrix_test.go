@@ -84,6 +84,10 @@ func TestConnectivityMatrixOwnershipRules(t *testing.T) {
 			switch entry.Owner {
 			case connectivityBrokerOnly:
 				hasDebt := len(entry.DirectDialDebt) > 0 || entry.HostStoreWrite || entry.PersistMutation
+				if entry.Migrated {
+					require.False(t, hasDebt, "migrated broker-only %q must declare no remaining migration debt", entry.Kind)
+					break
+				}
 				require.True(t, hasDebt, "broker-only %q must declare migration debt (direct dial, host-store write, or persist mutation)", entry.Kind)
 			case connectivityTransportInfra:
 				require.False(t, entry.HostStoreWrite, "infra %q must never own the host store", entry.Kind)
@@ -144,23 +148,48 @@ func TestConnectivityMatrixCurrentDebtPresent(t *testing.T) {
 		require.Contains(t, body, symbol, "expected debt symbol %q in %q", symbol, file)
 	}
 
-	assertContains("type localDaemonDialer struct", "run.go")
-	assertContains("type dialOnlyLocalDialer struct", "run.go")
-	assertContains("func (d localDaemonDialer) Dial", "run.go")
-	assertContains("func (d dialOnlyLocalDialer) Dial", "run.go")
 	assertContains("func ensureDaemonWithLifecycle", "spawn.go")
-	assertContains("func waitForDaemonOrLifecycle", "spawn.go")
 	assertContains("func realDial", "spawn.go")
 	assertContains("func realSpawn", "spawn.go")
-	assertContains("func (d remoteHostDeps) hostStore", "remote_hosts.go")
-	assertContains("func hostAdd", "remote_hosts.go")
-	assertContains("func hostRm", "remote_hosts.go")
-	assertContains("func listSessionsWithDialer", "run.go")
-	assertContains("func sessionExists", "attach_preflight.go")
-	assertContains("func runOfflineNamedKill", "run.go")
-	assertContains("persist.LoadReadOnly", "run.go")
-	assertContains("persist.OpenOrCreate", "run.go")
-	assertContains("func newClientHostRegistry", "client_hosts.go")
+}
+
+// TestConnectivityMatrixListKillStopAreBrokerOnly pins the P7.4f cutover for
+// the list/kill/stop rows: each reaches the per-user broker through the private
+// connectBroker seam and keeps no removed bypass, so runList and runKill/stop
+// can never read durable state or signal a process directly.
+func TestConnectivityMatrixListKillStopAreBrokerOnly(t *testing.T) {
+	t.Parallel()
+
+	sources := loadAppSources(t, false)
+	runBody, ok := sources["run.go"]
+	require.True(t, ok, "expected app source file run.go")
+	require.Contains(t, runBody, "var connectBroker = connectProductionBroker",
+		"run.go must keep the private connectBroker composition seam")
+	require.Contains(t, runBody, "func runList", "run.go must keep runList")
+	require.Contains(t, runBody, "func runKill", "run.go must keep runKill")
+	require.Contains(t, runBody, "func requestDaemonStop", "run.go must keep requestDaemonStop")
+
+	forbiddenFiles := map[string][]string{
+		"run.go": {
+			"runOfflineNamedKill", "persist.LoadReadOnly", "forceStopDaemonFallback",
+			"forceStopDaemonFn", "waitForDaemonOrLifecycle", "waitForLifecycleAvailability",
+		},
+	}
+	for file, forbidden := range forbiddenFiles {
+		body, ok := sources[file]
+		require.True(t, ok, "expected app source file %q", file)
+		for _, symbol := range forbidden {
+			require.NotContains(t, body, symbol,
+				"%s must not reintroduce the removed bypass %q", file, symbol)
+		}
+	}
+
+	// The whole force-stop subsystem is removed, so no production file may
+	// resurrect an interactive process-signal fallback.
+	for file, body := range sources {
+		require.NotContains(t, body, "forceStop",
+			"the force-stop subsystem must stay removed (%s)", file)
+	}
 }
 
 // TestConnectivityMatrixSingleHostStoreWriterSet fails when a new
@@ -178,8 +207,60 @@ func TestConnectivityMatrixSingleHostStoreWriterSet(t *testing.T) {
 		}
 	}
 	sort.Strings(writers)
-	require.Equal(t, []string{"remote_hosts.go", "run.go"}, writers,
-		"host-store constructor sites changed; update the matrix debt set in the same change")
+	require.Empty(t, writers,
+		"the broker is the sole host-store owner; app must not construct another writer")
+}
+
+// TestConnectivityMatrixReadyProbeIsLocalDialOnly pins the kindBrokerReady row
+// and its production source: the hidden readiness probe is local-only, reaches
+// no daemon or store, and its production body dials, subscribes, and reads only.
+// It must never ensure or spawn a broker, open a logical stream, request a
+// reconcile, or mutate membership; each of those would turn a machine probe
+// into a client façade that changes the state it reports.
+func TestConnectivityMatrixReadyProbeIsLocalDialOnly(t *testing.T) {
+	t.Parallel()
+
+	owner, ok := connectivityOwnerFor("kindBrokerReady")
+	require.True(t, ok, "the readiness probe must have a matrix row")
+	require.Equal(t, connectivityLocalOnly, owner, "the readiness probe is dial-only local infrastructure")
+	for _, entry := range connectivityMatrix {
+		if entry.Kind != "kindBrokerReady" {
+			continue
+		}
+		require.Empty(t, entry.DirectDialDebt, "a dial-only probe owes no connectivity migration")
+		require.False(t, entry.HostStoreWrite, "the readiness probe never owns the host store")
+		require.False(t, entry.PersistMutation, "the readiness probe never mutates session persistence")
+	}
+
+	sources := loadAppSources(t, false)
+	body, ok := sources["broker_ready.go"]
+	require.True(t, ok, "expected app source file broker_ready.go")
+
+	forbidden := []struct {
+		symbol string
+		reason string
+	}{
+		{"ensureBrokerReady", "a readiness probe must never ensure a broker"},
+		{"ensureDaemonWithLifecycle", "a readiness probe must never start a daemon"},
+		{"spawnBrokerLauncher", "a readiness probe must never spawn a broker"},
+		{"spawnProductionBrokerLauncher", "a readiness probe must never spawn a broker"},
+		{"realDial", "a readiness probe dials the broker endpoint only"},
+		{"OpenStream", "a readiness probe opens no logical stream"},
+		{"RequestReconcile", "a readiness probe requests no reconcile"},
+		{"AddHost", "a readiness probe mutates no membership"},
+		{"RemoveHost", "a readiness probe mutates no membership"},
+		{"UpdateHostPolicy", "a readiness probe mutates no membership"},
+		{"NewFileHostStore", "a readiness probe owns no host store"},
+	}
+	for _, forbidden := range forbidden {
+		require.NotContains(t, body, forbidden.symbol, "%s (%s)", forbidden.symbol, forbidden.reason)
+	}
+
+	// Positive pins: the probe is one subscription over one snapshot loop, and
+	// it classifies terminal failures without retrying them.
+	for _, required := range []string{"func runBrokerReady", "func observeBrokerReady", "service.Subscribe()", "service.Snapshot()", "terminalReadyReason", "brokerReadyEndpointSecurity"} {
+		require.Contains(t, body, required, "broker_ready.go must keep %s", required)
+	}
 }
 
 // commandKindsFromRunGo extracts the kind* const names from run.go so the

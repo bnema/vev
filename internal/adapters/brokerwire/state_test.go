@@ -674,8 +674,9 @@ type streamStep struct {
 	wantErr error
 }
 
-// TestStreamTrackerOpenRules proves stream identities strictly increase, are
-// never reused, and that at most MaxStreams streams are concurrent.
+// TestStreamTrackerOpenRules proves a stream identity is admitted at most once
+// inside the bounded anti-replay window, that a concurrent lower identity is not
+// mistaken for a replay, and that at most MaxStreams streams are concurrent.
 func TestStreamTrackerOpenRules(t *testing.T) {
 	scope := testBrokerScope()
 
@@ -685,12 +686,15 @@ func TestStreamTrackerOpenRules(t *testing.T) {
 		require.ErrorIs(t, tr.Open(scope, 0), ErrInvalidStream)
 	})
 
-	t.Run("strictly increasing and never reused", func(t *testing.T) {
+	t.Run("each identity consumed at most once", func(t *testing.T) {
 		tr, err := newStreamTracker(scope)
 		require.NoError(t, err)
 		require.NoError(t, tr.Open(scope, 5))
 		require.ErrorIs(t, tr.Open(scope, 5), ErrStreamIDReused)
-		require.ErrorIs(t, tr.Open(scope, 1), ErrStreamIDReused)
+		// A concurrent lower identity that was allocated first is admitted, not
+		// refused as a replay: two racing opens may be scheduled in either
+		// order.
+		require.NoError(t, tr.Open(scope, 1))
 		require.NoError(t, tr.Opened(scope, 5))
 		require.NoError(t, tr.Open(scope, 6))
 		if disposition, err := tr.Close(scope, 5); err != nil || disposition != StreamAccepted {
@@ -698,7 +702,17 @@ func TestStreamTrackerOpenRules(t *testing.T) {
 		}
 		require.ErrorIs(t, tr.Open(scope, 5), ErrStreamIDReused)
 		require.ErrorIs(t, tr.Open(scope, 6), ErrStreamIDReused)
+		require.ErrorIs(t, tr.Open(scope, 1), ErrStreamIDReused)
 		require.NoError(t, tr.Open(scope, 7))
+	})
+
+	t.Run("identity evicted past the window is stale", func(t *testing.T) {
+		tr, err := newStreamTracker(scope)
+		require.NoError(t, err)
+		require.NoError(t, tr.Open(scope, 1))
+		require.NoError(t, tr.Open(scope, ports.BrokerStreamWindowSize+1))
+		require.ErrorIs(t, tr.Open(scope, 1), ErrStreamIDReused,
+			"an identity that trails the newest admitted one by the window is stale")
 	})
 
 	t.Run("concurrent ceiling", func(t *testing.T) {

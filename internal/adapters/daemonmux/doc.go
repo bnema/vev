@@ -24,11 +24,14 @@
 //
 // The daemon-side physical binding (binding.go) and the stateful physical
 // preamble handshake (handshake.go) are the connection's authority layer. A
-// ServerBinding is a validated, immutable (identity, incarnation, policy)
-// value. The broker-side handshake verifies the accepted response against the
+// ServerBinding is a validated, immutable (identity, incarnation) value over a
+// non-empty closed set of distinct provisioned policy admissions, each naming
+// the exact policy for one carriage shape and its locality (ServerPolicyAdmission).
+// The broker-side handshake verifies the accepted response against the
 // independently resolved endpoint identity and policy, the nonzero
 // incarnation, and the ceilings it offered; the daemon-side handshake enforces
-// the immutable binding instead of echoing the requested policy, negotiates
+// the immutable binding instead of echoing the requested policy, resolves the
+// accepted member (policy plus origin), negotiates
 // the element-wise minima, and refuses with the precise shared rejection code.
 // One caller-supplied context or deadline bounds the single request/response
 // exchange, and every failure closes the carrier; a success leaves it open for
@@ -101,7 +104,14 @@
 // (protocol.HandshakeTimeout) that queue delay and the session handshake share;
 // the deadline and the handshake completion signal are exposed to the daemon
 // through the narrow optional HandshakePlumbing interface, so the daemon adopts
-// this one deadline instead of starting a second one. A stream that reaches its
+// this one deadline instead of starting a second one. Every admitted connection
+// is stamped with the provisioned admission its listener accepted - the exact
+// accepted policy and carriage origin plus the peer's declared purpose, closed
+// admission variant, name, exact target, and bounded environment - and exposes
+// it through the optional ports.SessionAdmissionProvider so a daemon use case
+// consumes the accepting side's authority rather than the peer's Open. An Open
+// whose declared locality contradicts the accepted origin (a liar Local) or that
+// fails the closed admission contract is refused on its own stream. A stream that reaches its
 // deadline, is refused because the accept queue is full, or is reset by the
 // peer is settled on its own: exactly one mux Reset, its admission slot
 // released, and no effect on a sibling or on the physical connection. An
@@ -212,3 +222,8 @@
 // raw remote stderr. daemonmux gains no process, pipe, or framing code from
 // this slice.
 package daemonmux
+
+import "path/filepath"
+
+// SocketPath is the canonical production daemonmux endpoint beneath ipc.SocketDir().
+func SocketPath(socketDir string) string { return filepath.Join(socketDir, "daemonmux.sock") }

@@ -1260,6 +1260,10 @@ func (x *Reconcile) GetRegistration() *RemoteRegistration {
 // stream names exactly how the daemon must admit it, while control and
 // observation streams carry none (0). name is validated session-name
 // authority for create-named and is empty for every other variant.
+// start_mode is the explicit daemon-start authorization carried to the
+// transport: observation and daemon-stop must be existing_only, while
+// attach/creation and the explicit list/mutate controls may be
+// start_if_needed. Zero is invalid and is refused by semantic validation.
 type OpenStream struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ref   *BrokerStreamRef       `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
@@ -1277,7 +1281,10 @@ type OpenStream struct {
 	// attach/resume, 2 = create named, 3 = create ephemeral.
 	Admission uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
 	// Validated session name for create-named; empty otherwise.
-	Name          string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
+	Name string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
+	// Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =
+	// existing_only, 2 = start_if_needed. Always present; zero is refused.
+	StartMode     uint32 `protobuf:"varint,11,opt,name=start_mode,json=startMode,proto3" json:"start_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1380,6 +1387,13 @@ func (x *OpenStream) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *OpenStream) GetStartMode() uint32 {
+	if x != nil {
+		return x.StartMode
+	}
+	return 0
 }
 
 // ClientStreamData carries one opaque client-to-daemon stream frame.
@@ -2848,7 +2862,7 @@ const file_broker_proto_rawDesc = "" +
 	"\x06policy\x18\x04 \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\"\x80\x01\n" +
 	"\tReconcile\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12C\n" +
-	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\"\xfa\x02\n" +
+	"\fregistration\x18\x02 \x01(\v2\x1f.vev.wire.v1.RemoteRegistrationR\fregistration\"\x99\x03\n" +
 	"\n" +
 	"OpenStream\x12.\n" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\x12\x18\n" +
@@ -2861,7 +2875,9 @@ const file_broker_proto_rawDesc = "" +
 	"\x06policy\x18\b \x01(\v2\x1d.vev.wire.v1.BrokerWirePolicyR\x06policy\x12\x1c\n" +
 	"\tadmission\x18\t \x01(\rR\tadmission\x12\x12\n" +
 	"\x04name\x18\n" +
-	" \x01(\tR\x04name\"V\n" +
+	" \x01(\tR\x04name\x12\x1d\n" +
+	"\n" +
+	"start_mode\x18\v \x01(\rR\tstartMode\"V\n" +
 	"\x10ClientStreamData\x12.\n" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\"=\n" +

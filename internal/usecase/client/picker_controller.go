@@ -55,9 +55,6 @@ type pickerHost interface {
 	// ResolveKey revalidates exactly one committed catalogue key into the
 	// exact broker stream request the user committed.
 	ResolveKey(string, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
-	// ResolveInitial resolves the one-shot initial navigation without relying
-	// on mutable presentation selection.
-	ResolveInitial(InitialNavigation, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
 	// SetOwnsInput releases or re-acquires picker input ownership at an attach
 	// boundary, so exactly one owner consumes the shared terminal reader.
 	SetOwnsInput(bool)
@@ -364,15 +361,6 @@ func (p *pickerController) Resolve(base pickerResolveBase) (ports.BrokerOpenStre
 		return ports.BrokerOpenStreamRequest{}, err
 	}
 	return p.ResolveKey(key, base)
-}
-
-// ResolveInitial resolves the one-shot no-argument ephemeral creation through
-// the current catalogue. It does not inspect mutable picker model state.
-func (p *pickerController) ResolveInitial(navigation InitialNavigation, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	if navigation != InitialNavigationCreateEphemeral || p == nil || p.catalogue == nil {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation is not available"}
-	}
-	return p.catalogue.ResolveCreation(true, "", pickerSelectionCreateEphemeral, "", base)
 }
 
 // ResolveKey revalidates exactly the supplied catalogue key against the latest

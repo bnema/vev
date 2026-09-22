@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 )
 
 // Bounded route variants (Plan 001 P3.4 slice E).
@@ -315,6 +316,18 @@ func parseTrust(document *trustDocument) (TrustInputs, error) {
 		trust.connectTimeout = timeout
 	}
 	return trust, nil
+}
+
+// RouteFromSpec materializes canonical durable routing authority. Runtime SSH
+// trust is OpenSSH-owned; no startup configuration lookup participates.
+func RouteFromSpec(spec ports.BrokerRouteSpec) (Route, error) {
+	if err := spec.Validate(); err != nil {
+		return Route{}, err
+	}
+	if spec.Kind == ports.BrokerRouteUnix {
+		return newUnixRoute(spec.Path)
+	}
+	return newSSHRoute(RouteKind(spec.Kind), spec.Target, spec.Argv, TrustInputs{})
 }
 
 func newUnixRoute(path string) (Route, error) {

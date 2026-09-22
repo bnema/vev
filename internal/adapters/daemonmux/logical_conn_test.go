@@ -134,6 +134,7 @@ func controlRequest(stream int) ports.BrokerOpenStreamRequest {
 		Connection: ports.BrokerConnectionID{1},
 		Stream:     ports.BrokerStreamID(stream),
 		Policy:     logicalTestPolicy(),
+		StartMode:  ports.BrokerDaemonStartIfNeeded,
 	}
 }
 

@@ -172,6 +172,10 @@ message Reconcile {
 // stream names exactly how the daemon must admit it, while control and
 // observation streams carry none (0). name is validated session-name
 // authority for create-named and is empty for every other variant.
+// start_mode is the explicit daemon-start authorization carried to the
+// transport: observation and daemon-stop must be existing_only, while
+// attach/creation and the explicit list/mutate controls may be
+// start_if_needed. Zero is invalid and is refused by semantic validation.
 message OpenStream {
   BrokerStreamRef ref = 1;
   // Closed taxonomy: 1 = attachment, 2 = control, 3 = observation.
@@ -189,6 +193,9 @@ message OpenStream {
   uint32 admission = 9;
   // Validated session name for create-named; empty otherwise.
   string name = 10;
+  // Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =
+  // existing_only, 2 = start_if_needed. Always present; zero is refused.
+  uint32 start_mode = 11;
 }
 
 // ClientStreamData carries one opaque client-to-daemon stream frame.

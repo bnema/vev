@@ -54,8 +54,8 @@ func quicCarriageEndpoint(t *testing.T) (*quic.Server, quic.Readiness, string) {
 // single-use token/nonce - and hands the raw bounded transport to the connector
 // unmodified.
 func quicDialer(readiness quic.Readiness) RawCarrierDialer {
-	return func(ctx context.Context, address string) (RawFramedTransport, error) {
-		raw, err := quic.DialMuxContext(ctx, address, readiness, quic.Config{}, quicCarriageDeadline)
+	return func(ctx context.Context, target ports.BrokerDialTarget) (RawFramedTransport, error) {
+		raw, err := quic.DialMuxContext(ctx, target.Address, readiness, quic.Config{}, quicCarriageDeadline)
 		if err != nil {
 			return nil, err
 		}
@@ -66,7 +66,7 @@ func quicDialer(readiness quic.Readiness) RawCarrierDialer {
 // quicDialCarriage establishes the broker end of one real QUIC mux carriage.
 func quicDialCarriage(t *testing.T, ctx context.Context, addr string, readiness quic.Readiness) RawFramedTransport {
 	t.Helper()
-	raw, err := quicDialer(readiness)(ctx, addr)
+	raw, err := quicDialer(readiness)(ctx, ports.BrokerDialTarget{Address: addr})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = raw.Close() })
 	return raw

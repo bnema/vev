@@ -8,6 +8,8 @@ import (
 	"math"
 	"sync"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -22,7 +24,7 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 	if err != nil {
 		return nil, err
 	}
-	remote, err := remoteTargetToWire(message.RemoteTarget)
+	sessionTarget, err := sessionAttachTargetToWire(message.SessionTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +44,7 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 		TrueColor:              message.TrueColor,
 		MaxOutputInFlight:      uint32(message.MaxOutputInFlight),
 		Env:                    append([]string(nil), message.Env...),
-		RemoteTarget:           remote,
+		SessionTarget:          sessionTarget,
 		EnvironmentPolicy:      uint32(message.EnvironmentPolicy),
 		ExactTarget:            exact,
 		PreferredTabId:         string(message.PreferredTabID),
@@ -110,11 +112,11 @@ func helloFromWire(message *wire.Hello) (protocol.Hello, error) {
 	}
 	hello.MaxOutputInFlight = window
 	hello.Env = append([]string(nil), message.GetEnv()...)
-	remote, err := remoteTargetFromWire(message.GetRemoteTarget())
+	sessionTarget, err := sessionAttachTargetFromWire(message.GetSessionTarget())
 	if err != nil {
 		return protocol.Hello{}, err
 	}
-	hello.RemoteTarget = remote
+	hello.SessionTarget = sessionTarget
 	hello.EnvironmentPolicy, err = enum8[protocol.EnvironmentPolicy](message.GetEnvironmentPolicy())
 	if err != nil {
 		return protocol.Hello{}, err
@@ -203,11 +205,47 @@ func committedIdentityFromWire(message *wire.CommittedRouteIdentity) (protocol.C
 	return identity, nil
 }
 
+func sessionAttachTargetToWire(target *protocol.SessionAttachTarget) (*wire.SessionAttachTarget, error) {
+	if target == nil {
+		return nil, nil
+	}
+	if err := target.Validate(); err != nil {
+		return nil, err
+	}
+	message := &wire.SessionAttachTarget{SessionId: string(target.SessionID), LifecycleId: lifecycleToWire(target.LifecycleID), SessionName: target.SessionName, TabId: string(target.TabID), TabRawName: target.TabRawName, TabExpectedCount: uint32(target.TabExpectedCount), Stopped: target.Stopped}
+	if target.TabIndex != protocol.NoTabIndex {
+		message.TabIndex = proto.Int32(target.TabIndex)
+	}
+	return message, nil
+}
+
+func sessionAttachTargetFromWire(message *wire.SessionAttachTarget) (*protocol.SessionAttachTarget, error) {
+	if message == nil {
+		return nil, nil
+	}
+	if message.GetTabExpectedCount() > math.MaxUint16 {
+		return nil, protocol.ErrInvalidAttachTarget
+	}
+	lifecycle, err := lifecycleFromWire(message.GetLifecycleId())
+	if err != nil {
+		return nil, err
+	}
+	tabIndex := protocol.NoTabIndex
+	if message.TabIndex != nil {
+		tabIndex = message.GetTabIndex()
+	}
+	target := &protocol.SessionAttachTarget{SessionID: domain.SessionID(message.GetSessionId()), LifecycleID: lifecycle, SessionName: message.GetSessionName(), TabID: domain.TabStableID(message.GetTabId()), TabIndex: tabIndex, TabRawName: message.GetTabRawName(), TabExpectedCount: uint16(message.GetTabExpectedCount()), Stopped: message.GetStopped()}
+	if err := target.Validate(); err != nil {
+		return nil, err
+	}
+	return target, nil
+}
+
 func attachTargetToWire(message protocol.AttachTarget) (*wire.AttachTarget, error) {
 	if err := protocol.ValidateAttachTarget(message); err != nil {
 		return nil, err
 	}
-	remote, err := remoteTargetToWire(message.RemoteTarget)
+	sessionTarget, err := sessionAttachTargetToWire(message.SessionTarget)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +254,7 @@ func attachTargetToWire(message protocol.AttachTarget) (*wire.AttachTarget, erro
 		Endpoint:          message.Endpoint,
 		Session:           message.Session,
 		Intent:            uint32(message.Intent),
-		RemoteTarget:      remote,
+		SessionTarget:     sessionTarget,
 		EnvironmentPolicy: uint32(message.EnvironmentPolicy),
 		ExactTarget:       exactTargetToWire(message.ExactTarget),
 		SamePeer:          message.SamePeer,
@@ -238,11 +276,11 @@ func attachTargetFromWire(message *wire.AttachTarget) (protocol.AttachTarget, er
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
 	target.Intent = intent
-	remote, err := remoteTargetFromWire(message.GetRemoteTarget())
+	sessionTarget, err := sessionAttachTargetFromWire(message.GetSessionTarget())
 	if err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget
 	}
-	target.RemoteTarget = remote
+	target.SessionTarget = sessionTarget
 	target.EnvironmentPolicy, err = enum8[protocol.EnvironmentPolicy](message.GetEnvironmentPolicy())
 	if err != nil {
 		return protocol.AttachTarget{}, protocol.ErrInvalidAttachTarget

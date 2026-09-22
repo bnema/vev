@@ -219,11 +219,15 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 	if err != nil {
 		return nil, err
 	}
+	hosts.Hosts, err = ports.UpgradeBrokerHostRoutes(hosts.Hosts)
+	if err != nil {
+		return nil, err
+	}
 	if err := r.projectMembership(hosts); err != nil {
 		return nil, err
 	}
 	r.hostStore = store
-	r.authority = ports.BrokerHosts{Revision: hosts.Revision, Hosts: append([]ports.BrokerHostRecord(nil), hosts.Hosts...)}
+	r.authority = ports.BrokerHosts{Revision: hosts.Revision, Hosts: ports.CloneBrokerHostRecords(hosts.Hosts)}
 	r.publishLocked(false)
 	return r, nil
 }
@@ -452,6 +456,21 @@ func (r *Registry) Subscribe() ports.BrokerSubscription {
 
 // AddHost adds or pins endpoint under policy. Duplicate same-policy additions
 // CAS-verify authority and preserve identity; a conflicting policy is refused.
+func (r *Registry) LookupHost(ctx context.Context, endpoint string) (ports.BrokerHostRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.BrokerHostRecord{}, false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, record := range r.authority.Hosts {
+		if record.Registration.Endpoint == endpoint {
+			record.Route = record.Route.Clone()
+			return record, true, nil
+		}
+	}
+	return ports.BrokerHostRecord{}, false, nil
+}
+
 func (r *Registry) AddHost(ctx context.Context, endpoint string, policy ports.BrokerPolicy) (domain.RemoteRegistration, error) {
 	if err := domain.ValidateRemoteHostTarget(endpoint); err != nil {
 		return domain.RemoteRegistration{}, err
@@ -489,7 +508,11 @@ func (r *Registry) AddHost(ctx context.Context, endpoint string, policy ports.Br
 	if reg.IsZero() {
 		return domain.RemoteRegistration{}, errors.New("broker: incarnation generator returned zero")
 	}
-	records = append(records, ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: policy})
+	route, err := ports.BrokerRouteForTransport(policy.Transport, endpoint)
+	if err != nil {
+		return domain.RemoteRegistration{}, err
+	}
+	records = append(records, ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: policy, Route: route})
 	if err := r.commitMembershipLocked(records); err != nil {
 		return domain.RemoteRegistration{}, err
 	}
@@ -497,6 +520,48 @@ func (r *Registry) AddHost(ctx context.Context, endpoint string, policy ports.Br
 }
 
 // RemoveHost removes only the exact expected registration.
+// BindAuthenticatedIdentity durably binds first-contact identity under the
+// exact registration and policy fence. The same binding is idempotent; a
+// different identity is refused and never overwrites authority.
+func (r *Registry) BindAuthenticatedIdentity(ctx context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
+	if err := request.Validate(); err != nil {
+		return "", err
+	}
+	if request.Fence.Local {
+		return request.Identity, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	records := append([]ports.BrokerHostRecord(nil), r.authority.Hosts...)
+	for index := range records {
+		record := &records[index]
+		if record.Identity == request.Identity && record.Policy != request.Policy {
+			return "", ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("broker: authenticated daemon identity is already bound under an incompatible policy")}
+		}
+	}
+	for index := range records {
+		record := &records[index]
+		if !record.Registration.Equal(request.Fence.Registration) || record.Policy != request.Policy {
+			continue
+		}
+		if record.Identity != "" {
+			if record.Identity != request.Identity {
+				return "", ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("broker: authenticated daemon identity conflicts with durable binding")}
+			}
+			return record.Identity, nil
+		}
+		record.Identity = request.Identity
+		if err := r.commitMembershipLocked(records); err != nil {
+			return "", err
+		}
+		return request.Identity, nil
+	}
+	return "", ports.BrokerError{Code: ports.BrokerErrorUnavailable, Cause: errors.New("broker: stale identity binding fence")}
+}
+
 func (r *Registry) RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error) {
 	if err := expected.Validate(); err != nil {
 		return false, err
@@ -554,7 +619,12 @@ func (r *Registry) UpdateHostPolicy(ctx context.Context, expected domain.RemoteR
 		if expected.Generation == ^domain.RemoteGeneration(0) {
 			return domain.RemoteRegistration{}, ports.ErrBrokerRevisionExhausted
 		}
+		route, err := ports.BrokerRouteForTransport(policy.Transport, expected.Endpoint)
+		if err != nil {
+			return domain.RemoteRegistration{}, err
+		}
 		records[i].Registration.Generation++
+		records[i].Route = route
 		records[i].Policy = policy
 		if err := r.commitMembershipLocked(records); err != nil {
 			return domain.RemoteRegistration{}, err
@@ -606,7 +676,7 @@ func (r *Registry) commitMembershipLocked(records []ports.BrokerHostRecord) erro
 	if err := r.hostStore.ReplaceHosts(r.authority.Revision, records); err != nil {
 		return fmt.Errorf("broker: replace hosts: %w", err)
 	}
-	r.authority = ports.BrokerHosts{Revision: r.authority.Revision + 1, Hosts: append([]ports.BrokerHostRecord(nil), records...)}
+	r.authority = ports.BrokerHosts{Revision: r.authority.Revision + 1, Hosts: ports.CloneBrokerHostRecords(records)}
 	r.setHostsLocked(next, order)
 	return nil
 }
@@ -628,7 +698,11 @@ func (r *Registry) commitMembershipLocked(records []ports.BrokerHostRecord) erro
 // write holds mu; Snapshot remains lock-free, but scheduling waits for
 // membership durability. Observation writes remain asynchronous.
 func (r *Registry) ReplaceHosts(records []ports.BrokerHostRecord) error {
-	records = append([]ports.BrokerHostRecord(nil), records...)
+	var err error
+	records, err = ports.UpgradeBrokerHostRoutes(records)
+	if err != nil {
+		return err
+	}
 	if err := ports.ValidateBrokerHostRecords(records); err != nil {
 		return err
 	}

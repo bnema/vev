@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -49,8 +50,11 @@ import (
 const (
 	// pickerCatalogueSourceID names the single client-owned picker source.
 	pickerCatalogueSourceID = "broker"
-	// pickerCatalogueDefaultFreshness bounds how old a LastSuccess may be
-	// before a row is displayed as stale and refused at resolution.
+	// pickerCatalogueDefaultFreshness bounds how old a LastSuccess may be before
+	// a row is displayed as stale. Freshness is presentation information and
+	// never a resolution lock: a stale row is dimmed and badged, but an explicit
+	// attach or creation may still be attempted, because only the destination
+	// revalidates the exact identity.
 	pickerCatalogueDefaultFreshness = 30 * time.Second
 	// pickerCatalogueMaxRetiredRefs bounds the retired-key fence used to
 	// distinguish "gone" from "replaced" after a row leaves the projection.
@@ -66,7 +70,6 @@ const (
 	pickerCatalogueUnknown pickerCatalogueErrorCode = iota + 1
 	pickerCatalogueGone
 	pickerCatalogueReplaced
-	pickerCatalogueStale
 	pickerCatalogueIncompatible
 	pickerCatalogueUnavailable
 	pickerCatalogueEpochStale
@@ -82,8 +85,6 @@ func (c pickerCatalogueErrorCode) String() string {
 		return "gone"
 	case pickerCatalogueReplaced:
 		return "replaced"
-	case pickerCatalogueStale:
-		return "stale"
 	case pickerCatalogueIncompatible:
 		return "incompatible"
 	case pickerCatalogueUnavailable:
@@ -348,30 +349,6 @@ func (c *pickerCatalogue) ResolveRef(ref pickerSelectionRef, base pickerResolveB
 	return c.resolveRefLocked(ref, base)
 }
 
-// ResolveCreation revalidates a named or ephemeral creation against the latest
-// snapshot. The created identity is not invented: the daemon must be present,
-// compatible, available, and fresh, and a named creation needs a valid session
-// name.
-func (c *pickerCatalogue) ResolveCreation(local bool, endpoint string, kind pickerSelectionKind, name string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	if c == nil {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "no catalogue"}
-	}
-	if kind != pickerSelectionCreateNamed && kind != pickerSelectionCreateEphemeral {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "not a creation selection"}
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ref := pickerSelectionRef{kind: kind, epoch: c.snapshot.Epoch, local: local, endpoint: endpoint, createName: name}
-	if !local {
-		host := c.hostForEndpointLocked(endpoint)
-		if host == nil {
-			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueGone, Text: "host is no longer in the catalogue"}
-		}
-		ref.registration = host.observation.Registration
-	}
-	return c.resolveRefLocked(ref, base)
-}
-
 func (c *pickerCatalogue) resetLocked() {
 	c.hosts = make(map[string]*pickerHostState)
 	c.order = nil
@@ -432,6 +409,13 @@ func (c *pickerCatalogue) projectLocked() {
 		available := observation.Availability == domain.RemoteAvailabilityReachable
 		eligible := compatible && available && fresh
 		origin := pickerOriginLabel(observation)
+		// Admission is deliberately more permissive than eligibility: a stale,
+		// unavailable, or not-yet-observed daemon is still selectable, because
+		// only the destination revalidates the exact identity and only it may
+		// start a stopped target under the resolved policy. Only a known
+		// incompatibility refuses immediately. Eligibility still drives the
+		// informational dimming and badges.
+		admissible := !pickerObservationKnownIncompatible(observation)
 
 		lines = append(lines, protocol.PickerLine{Kind: protocol.PickerLineSection, Label: origin, Dim: true})
 		lines = append(lines, protocol.PickerLine{
@@ -462,11 +446,12 @@ func (c *pickerCatalogue) projectLocked() {
 			}
 			rowKey := pickerSessionRowKey(ref)
 			refs[rowKey] = ref
-			selectable := eligible && session.State != catalogue.RemoteCatalogSessionBroken
+			selectable := admissible && session.State != catalogue.RemoteCatalogSessionBroken
 			actions := protocol.PickerLineActions(0)
 			if selectable {
 				actions = protocol.PickerCanNavigate
 			}
+			status := pickerSessionStatus(session)
 			reason := pickerObservationReason(observation, fresh)
 			if reason == "" {
 				reason = session.Reason
@@ -476,13 +461,17 @@ func (c *pickerCatalogue) projectLocked() {
 				Kind:         protocol.PickerLineSession,
 				Label:        session.Name,
 				Detail:       pickerSessionDetail(session),
-				Status:       pickerSessionStatus(session),
+				Status:       status,
 				StatusDetail: reason,
 				Stopped:      session.State == catalogue.RemoteCatalogSessionDown,
-				Dim:          !selectable,
-				Focusable:    true,
-				Actions:      actions,
-				Ephemeral:    session.Ephemeral,
+				// Dim keeps the informational eligibility signal (fresh,
+				// compatible, reachable) and the hard non-committable state
+				// (known incompatibility, broken session). It never removes the
+				// ability to try an explicit bounded attach or creation.
+				Dim:       !eligible || !selectable,
+				Focusable: true,
+				Actions:   actions,
+				Ephemeral: session.Ephemeral,
 			})
 		}
 	}
@@ -511,42 +500,105 @@ func (c *pickerCatalogue) moveRetiredLocked(next map[string]pickerSelectionRef) 
 	}
 }
 
+// resolveRefLocked revalidates exactly one captured selection against the
+// latest applied publication.
 func (c *pickerCatalogue) resolveRefLocked(ref pickerSelectionRef, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	if c.snapshot.Epoch == 0 {
+	return resolvePickerRequest(c.snapshot.Epoch, c.authorityForRefLocked(ref), ref, base)
+}
+
+// authorityForRefLocked selects the merged observation one selection names. The
+// merged host state is used rather than the raw publication, so a slow snapshot
+// can never regress the authority a selection resolves against.
+func (c *pickerCatalogue) authorityForRefLocked(ref pickerSelectionRef) pickerResolveAuthority {
+	for _, key := range c.order {
+		host, ok := c.hosts[key]
+		if !ok {
+			continue
+		}
+		if pickerAuthorityMatches(host.observation, ref) {
+			return pickerResolveAuthority{observation: host.observation, found: true}
+		}
+	}
+	return pickerResolveAuthority{}
+}
+
+// resolveCatalogueRequest resolves one selection against a raw broker
+// publication. It is the entry point of the closed InitialNavigation union,
+// which carries its own destination fence rather than a projected row key.
+func resolveCatalogueRequest(snapshot ports.BrokerSnapshot, ref pickerSelectionRef, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+	return resolvePickerRequest(snapshot.Epoch, pickerAuthorityInSnapshot(snapshot, ref), ref, base)
+}
+
+// pickerResolveAuthority is the single daemon authority one selection names in
+// one publication, merged or raw.
+type pickerResolveAuthority struct {
+	observation ports.BrokerDaemonObservation
+	found       bool
+}
+
+// pickerAuthorityMatches reports whether one observation is the authority a
+// selection names: the local daemon for a local selection, or the exact remote
+// endpoint otherwise.
+func pickerAuthorityMatches(observation ports.BrokerDaemonObservation, ref pickerSelectionRef) bool {
+	if ref.local {
+		return observation.Local
+	}
+	return !observation.Local && observation.Endpoint == ref.endpoint
+}
+
+// pickerAuthorityInSnapshot selects the observation one selection names from a
+// raw broker publication.
+func pickerAuthorityInSnapshot(snapshot ports.BrokerSnapshot, ref pickerSelectionRef) pickerResolveAuthority {
+	for i := range snapshot.Daemons {
+		if pickerAuthorityMatches(snapshot.Daemons[i], ref) {
+			return pickerResolveAuthority{observation: snapshot.Daemons[i], found: true}
+		}
+	}
+	return pickerResolveAuthority{}
+}
+
+// resolvePickerRequest turns one validated selection into the exact broker
+// stream request it names. Connection and Stream come from the caller's own
+// live connection; Policy comes exclusively from the selected observation and
+// the process environment is never read.
+//
+// Refusal rules are deliberately narrow:
+//
+//   - the applied publication must be valid (nonzero epoch);
+//   - a captured epoch must equal the current one, never compare numerically
+//     across broker processes;
+//   - the selected daemon must still be in the publication, and a remote
+//     selection must still match its complete registration (endpoint,
+//     incarnation, and generation), not merely its incarnation, so a
+//     re-registered endpoint or an advanced generation is a replacement;
+//   - a known incompatibility refuses immediately, because no bounded attempt
+//     can succeed against a daemon whose version or availability says so.
+//
+// Freshness is presentation information, not a lock: a stale, unavailable, or
+// not-yet-observed daemon may still be attempted explicitly, because only the
+// daemon revalidates the exact identity and only it may start a stopped target
+// under the resolved policy. The request therefore always carries the explicit
+// start-if-needed authorization; a policy that forbids launching still refuses
+// visibly at the destination.
+func resolvePickerRequest(epoch ports.BrokerEpoch, authority pickerResolveAuthority, ref pickerSelectionRef, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+	if epoch == 0 {
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "broker catalogue is unavailable"}
 	}
-	if ref.epoch != 0 && ref.epoch != c.snapshot.Epoch {
+	if ref.epoch != 0 && ref.epoch != epoch {
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueEpochStale, Text: "broker epoch changed"}
 	}
-	host := c.hostForRefLocked(ref)
-	if host == nil {
+	if !authority.found {
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueGone, Text: "host is no longer in the catalogue"}
 	}
-	observation := host.observation
-	if !ref.local && observation.Registration.Incarnation != ref.registration.Incarnation {
+	observation := authority.observation
+	if !ref.local && !observation.Registration.Equal(ref.registration) {
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "host identity was replaced"}
 	}
-	// Availability is decided before compatibility: an unobserved or
-	// unreachable daemon refuses as unavailable, never as a version mismatch.
-	// Only the legacy incompatible availability state, or a reachable daemon
-	// whose observed version differs from the policy, is incompatible.
-	switch {
-	case observation.Availability == domain.RemoteAvailabilityIncompatible:
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueIncompatible, Text: "host protocol is incompatible"}
-	case observation.Availability != domain.RemoteAvailabilityReachable:
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "host is unavailable"}
-	case observation.ProtocolVersion == 0:
-		// Reachable but unobserved: still never reported as a version mismatch.
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "host is unavailable"}
-	case !pickerObservationCompatible(observation):
+	if observation.Availability == domain.RemoteAvailabilityIncompatible || pickerObservationVersionMismatch(observation) {
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueIncompatible, Text: "host protocol is incompatible"}
 	}
-	if !c.freshLocked(observation, c.clock.Now()) {
-		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueStale, Text: "host observation is stale"}
-	}
-
 	request := ports.BrokerOpenStreamRequest{
-		Epoch:        c.snapshot.Epoch,
+		Epoch:        epoch,
 		Purpose:      ports.BrokerStreamAttachment,
 		Local:        ref.local,
 		Connection:   base.Connection,
@@ -554,6 +606,10 @@ func (c *pickerCatalogue) resolveRefLocked(ref pickerSelectionRef, base pickerRe
 		Registration: observation.Registration,
 		Policy:       observation.Policy,
 		Env:          append([]string(nil), base.Env...),
+		// An attachment or creation may need to start a stopped daemon, so it
+		// carries the explicit start-if-needed authorization; the resolved
+		// policy still decides whether launching is permitted.
+		StartMode: ports.BrokerDaemonStartIfNeeded,
 	}
 	if !ref.local {
 		request.Endpoint = observation.Endpoint
@@ -566,6 +622,11 @@ func (c *pickerCatalogue) resolveRefLocked(ref pickerSelectionRef, base pickerRe
 				return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "session identity was replaced"}
 			}
 			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueGone, Text: "session is no longer in the catalogue"}
+		}
+		if session.Name != ref.name {
+			// The exact identity is the lifecycle/name pair the daemon
+			// revalidates: a renamed lifecycle is a different selection.
+			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueReplaced, Text: "session identity was replaced"}
 		}
 		if session.State == catalogue.RemoteCatalogSessionBroken {
 			return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "session is broken"}
@@ -587,27 +648,6 @@ func (c *pickerCatalogue) resolveRefLocked(ref pickerSelectionRef, base pickerRe
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker stream request is not valid"}
 	}
 	return request, nil
-}
-
-func (c *pickerCatalogue) hostForRefLocked(ref pickerSelectionRef) *pickerHostState {
-	if ref.local {
-		for _, host := range c.hosts {
-			if host.observation.Local {
-				return host
-			}
-		}
-		return nil
-	}
-	return c.hostForEndpointLocked(ref.endpoint)
-}
-
-func (c *pickerCatalogue) hostForEndpointLocked(endpoint string) *pickerHostState {
-	for _, host := range c.hosts {
-		if !host.observation.Local && host.observation.Endpoint == endpoint {
-			return host
-		}
-	}
-	return nil
 }
 
 // freshLocked reports whether LastSuccess is inside the freshness window. An
@@ -683,18 +723,20 @@ func pickerOriginLabel(observation ports.BrokerDaemonObservation) string {
 // pickerHostRowKey is the stable, opaque key of a daemon's status row. It is
 // never a selection: a host row is focusable but not committable.
 func pickerHostRowKey(observation ports.BrokerDaemonObservation) string {
-	return pickerRowKey("h", observation.Local, observation.Endpoint, observation.Registration.Incarnation[:], nil)
+	return pickerRowKey("h", observation.Local, observation.Endpoint, observation.Registration.Incarnation[:], observation.Registration.Generation, nil)
 }
 
 // pickerSessionRowKey is the stable, opaque key of one exact session. It is
-// derived only from identity (endpoint, registration incarnation, session
-// lifecycle), so a rename never changes it and a replaced lifecycle always
-// does.
+// derived from the complete identity (endpoint, registration incarnation and
+// generation, session lifecycle): a rename never changes it, a replaced
+// lifecycle always does, and an advanced registration generation does too. The
+// generation is part of the key precisely so that changed authority requires a
+// fresh explicit selection instead of silently re-binding a displayed row.
 func pickerSessionRowKey(ref pickerSelectionRef) string {
-	return pickerRowKey("s", ref.local, ref.endpoint, ref.registration.Incarnation[:], ref.lifecycle[:])
+	return pickerRowKey("s", ref.local, ref.endpoint, ref.registration.Incarnation[:], ref.registration.Generation, ref.lifecycle[:])
 }
 
-func pickerRowKey(prefix string, local bool, endpoint string, incarnation, lifecycle []byte) string {
+func pickerRowKey(prefix string, local bool, endpoint string, incarnation []byte, generation domain.RemoteGeneration, lifecycle []byte) string {
 	digest := sha256.New()
 	digest.Write([]byte("vev.picker."))
 	digest.Write([]byte(prefix))
@@ -708,6 +750,10 @@ func pickerRowKey(prefix string, local bool, endpoint string, incarnation, lifec
 	digest.Write([]byte(endpoint))
 	digest.Write([]byte{0})
 	digest.Write(incarnation)
+	digest.Write([]byte{0})
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(generation))
+	digest.Write(encoded[:])
 	digest.Write([]byte{0})
 	digest.Write(lifecycle)
 	return prefix + base64.RawURLEncoding.EncodeToString(digest.Sum(nil)[:16])
@@ -757,6 +803,17 @@ func pickerStableHostOrder(previous []string, daemons []ports.BrokerDaemonObserv
 // reported as a version mismatch.
 func pickerObservationCompatible(observation ports.BrokerDaemonObservation) bool {
 	return observation.ProtocolVersion != 0 && observation.ProtocolVersion == observation.Policy.ProtocolVersion
+}
+
+// pickerObservationKnownIncompatible reports whether a daemon is known to be
+// unable to accept an attachment: either its availability was classified as
+// incompatible by the observation itself, or it was observed with a protocol
+// version that differs from its policy's required version. An unobserved or
+// unreachable daemon is not known-incompatible, so an explicit bounded attempt
+// stays possible; that distinction is what lets the picker start a stopped
+// daemon instead of blocking behind observation.
+func pickerObservationKnownIncompatible(observation ports.BrokerDaemonObservation) bool {
+	return observation.Availability == domain.RemoteAvailabilityIncompatible || pickerObservationVersionMismatch(observation)
 }
 
 // pickerObservationVersionMismatch reports whether a daemon that was actually

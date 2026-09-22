@@ -1,17 +1,41 @@
-name: vev-demo
+name: vev-sandbox
 
 services:
-  remote:
-    image: vev-demo
-    hostname: remote
+  remote-a:
+    image: vev-sandbox:${VEV_SANDBOX_TAG:-dev}
+    hostname: remote-a
     user: root
     entrypoint: ["/usr/bin/sshd", "-D", "-e"]
+    networks: [sandbox]
+    environment: &sandbox-env
+      XDG_CONFIG_HOME: /tmp/vev-config
+      XDG_RUNTIME_DIR: /tmp/vev-runtime
+      XDG_STATE_HOME: /tmp/vev-state
+    tmpfs:
+      - /run
+      - /tmp
+
+  remote-b:
+    image: vev-sandbox:${VEV_SANDBOX_TAG:-dev}
+    hostname: remote-b
+    user: root
+    entrypoint: ["/usr/bin/sshd", "-D", "-e"]
+    networks: [sandbox]
+    environment: *sandbox-env
+    tmpfs:
+      - /run
+      - /tmp
 
   client:
-    image: vev-demo
-    depends_on:
-      - remote
-    volumes:
-      - ../../scripts/demo:/tape:ro
-      - ../../scripts/demo/out:/home/demo/out
-      - ../../scripts/demo/out/local:/home/demo/.local
+    image: vev-sandbox:${VEV_SANDBOX_TAG:-dev}
+    hostname: client
+    user: demo
+    entrypoint: ["/bin/sh", "-c", "mkdir -m 700 -p /tmp/vev-config /tmp/vev-runtime /tmp/vev-state; trap : TERM INT; sleep infinity & wait"]
+    networks: [sandbox]
+    environment: *sandbox-env
+    tmpfs:
+      - /tmp
+
+networks:
+  sandbox:
+    internal: true

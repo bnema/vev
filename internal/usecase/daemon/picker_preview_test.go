@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/picker"
 )
@@ -163,86 +161,6 @@ func TestClampPickerPreviewFitsTheRequestedBounds(t *testing.T) {
 // half of the coexistence contract: a remote picker row is still previewed
 // through the daemon's own remote viewport client and its cache, independent of
 // whatever the launching client resolves for itself.
-func TestPickerPreviewCapturesRemoteRowsThroughThePreviewClient(t *testing.T) {
-	clock := &remotePreviewTestClock{now: time.Unix(100, 0)}
-	client := &remotePreviewTestClient{result: remotePreviewCacheResult(remotePreviewCacheTarget(), 1)}
-	d := newTestDaemon(t, nil, clock)
-	d.remotePreviewClient = client
-	target := remotePreviewCacheTarget()
-
-	viewport := d.capturePickerPreview(picker.Target{RemoteTarget: &target}, protocol.PickerIntentNavigation, 1, 1)
-	require.Equal(t, protocol.PickerPreviewOK, viewport.Status)
-	require.Equal(t, uint16(1), viewport.Width)
-	require.Equal(t, 'x', viewport.Cells[0].Rune)
-	require.Equal(t, target, client.lastTarget)
-	require.Equal(t, uint16(1), client.lastWidth)
-
-	// A failed remote fetch reports unavailable instead of a stale viewport.
-	client.err = errors.New("remote host unreachable")
-	client.calls = 0
-	d.remotePreview.cache = nil
-	failed := d.capturePickerPreview(picker.Target{RemoteTarget: &target}, protocol.PickerIntentNavigation, 1, 1)
-	require.Equal(t, protocol.PickerPreviewUnavailable, failed.Status)
-	require.Zero(t, failed.Width)
-	require.Empty(t, failed.Cells)
-}
-
-// TestPickerOpenSurvivesOneHostRegisteredTwice pins the row-key contract: the
-// same machine can be registered under more than one target (a pinned alias and
-// a target learned by attach), and both endpoints legitimately expose the same
-// session lifecycle and name. Row keys must therefore stay unique per endpoint,
-// or the snapshot is rejected and the picker never opens at all.
-func TestPickerOpenSurvivesOneHostRegisteredTwice(t *testing.T) {
-	d := newRemotePickerDaemon()
-	lifecycle := remoteLifecycleForTest()
-	session := catalogue.RemoteCatalogSession{
-		LifecycleID: lifecycle, Name: "work", State: catalogue.RemoteCatalogSessionUp,
-		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-1", Index: 0, Name: "1"}},
-	}
-	seedRemoteDirectory(t, d,
-		reachableDirectoryHost("remote", time.Unix(10, 0), session, secondRemoteSessionForTest()),
-		reachableDirectoryHost("demo@remote", time.Unix(10, 0), session, secondRemoteSessionForTest()),
-	)
-	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-	effect := admitPickerEffectForTest(t, sess, ac)
-
-	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
-	offer := awaitPickerOffer(t, sends)
-	require.Equal(t, protocol.PickerIntentNavigation, offer.Intent)
-	snapshot := awaitPickerSnapshot(t, sends)
-
-	seen := make(map[string]struct{}, len(snapshot.Lines))
-	workRows, sessionRows := 0, 0
-	for _, line := range snapshot.Lines {
-		if line.Key == "" {
-			continue
-		}
-		_, duplicate := seen[line.Key]
-		require.False(t, duplicate, "row key %q was published twice", line.Key)
-		seen[line.Key] = struct{}{}
-		if line.Kind != protocol.PickerLineSession {
-			continue
-		}
-		sessionRows++
-		if line.Label == "work" {
-			workRows++
-		}
-	}
-	require.NotEmpty(t, snapshot.Lines)
-	require.Equal(t, 2, workRows, "both endpoints of the same host must publish their rows")
-	require.Equal(t, 5, sessionRows, "the local session and every remote session must publish its own row")
-}
-
-// secondRemoteSessionForTest is another live session on the same host: two live
-// sessions share an endpoint, so their rows must still be distinct.
-func secondRemoteSessionForTest() catalogue.RemoteCatalogSession {
-	lifecycle := remoteLifecycleForTest()
-	lifecycle[0]++
-	return catalogue.RemoteCatalogSession{
-		LifecycleID: lifecycle, Name: "ticker", State: catalogue.RemoteCatalogSessionUp,
-		Tabs: []catalogue.RemoteCatalogTab{{ID: "tab-2", Index: 0, Name: "1"}},
-	}
-}
 
 // pickerPreviewKeyForSession returns the opaque row key whose target resolves
 // to sess. The preview request names a key, so a cross-session test must read
@@ -387,50 +305,3 @@ func (t manualPreviewTimer) Stop() bool               { return true }
 // the quiet-viewer stale delay: a selected remote row must keep refreshing on
 // its own cadence even when the viewer renders nothing at all. Relying on a
 // viewer render wake left a quiet viewer stale indefinitely.
-func TestRemotePickerPreviewRefreshesWithoutViewerRenderWake(t *testing.T) {
-	target := remotePreviewCacheTarget()
-	clock := newManualPreviewClock(time.Unix(100, 0))
-	client := &remotePreviewTestClient{result: remotePreviewCacheResultRune(target, 1, 'a')}
-	d, sess, ac, sends, effect := pickerClientTestUnit(t)
-	d.clock = clock
-	d.remotePreviewClient = client
-	t.Cleanup(func() {
-		ac.overlays.pickerMu.Lock()
-		cancel := ac.overlays.pickerPreviewCancel
-		ac.overlays.pickerPreviewCancel = nil
-		ac.overlays.pickerMu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-	})
-	openTestPicker(t, d, ac, effect, sends, protocol.PickerIntentNavigation)
-	snapshot := awaitPickerSnapshot(t, sends)
-
-	const key = "remote-row"
-	ac.overlays.pickerMu.Lock()
-	ac.overlays.pickerKeys[key] = picker.Target{RemoteTarget: &target}
-	ac.overlays.pickerMu.Unlock()
-
-	d.handleAttachmentClientMessage(pickerClientCapability(t, ac, sess), pickerPreviewRequestFor(snapshot, key, 1, 1))
-	first := awaitPickerPreview(t, sends)
-	require.Equal(t, protocol.PickerPreviewOK, first.Status)
-	require.Equal(t, 'a', first.Cells[0].Rune)
-	require.Equal(t, 1, client.Calls(), "the initial selection needs exactly one fetch")
-
-	// No viewer render happens at all. Only the selected row's worker may
-	// schedule and drive the next attempt.
-	client.mu.Lock()
-	client.result = remotePreviewCacheResultRune(target, 2, 'b')
-	client.mu.Unlock()
-	clock.awaitTimer(t)
-	clock.fire(time.Unix(101, 0))
-	second := awaitPickerPreview(t, sends)
-	require.Equal(t, 'b', second.Cells[0].Rune, "a quiet viewer must still receive the refreshed row")
-	require.Equal(t, 2, client.Calls())
-
-	// Retiring the interaction cancels the worker, so no further fetch may
-	// happen even though the refresher cadence continues in the background.
-	require.True(t, d.closePickerForAttachment(ac, nil, snapshot.InteractionID))
-	_ = drainAllFrames(sends)
-	require.Equal(t, 2, client.Calls())
-}

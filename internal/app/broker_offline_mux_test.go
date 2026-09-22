@@ -162,21 +162,59 @@ func writeMuxRoot(t *testing.T, route any) string {
 // unexported brokerconfig fields.
 func loadTestRoute(t *testing.T, route any) brokerconfig.Route {
 	t.Helper()
+	_, parsed := loadTestRouteAndConfig(t, route)
+	return parsed
+}
+
+// loadTestRouteAndConfig loads one sandbox configuration and returns both the
+// immutable configuration and the route its resolver publishes, so a test can
+// dial the route the way the broker does: with the whole resolved target.
+func loadTestRouteAndConfig(t *testing.T, route any) (*brokerconfig.Config, brokerconfig.Route) {
+	t.Helper()
 	root := writeMuxRoot(t, route)
 	layout, err := offlineLayout(root)
 	require.NoError(t, err)
 	config, err := brokerconfig.Load(layout)
 	require.NoError(t, err)
-	resolved, err := config.Resolver().Resolve(context.Background(), ports.BrokerOpenStreamRequest{
+	resolved, err := config.Resolver().ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
 		Purpose:      ports.BrokerStreamControl,
+		Stream:       1,
 		Endpoint:     brokerTestEndpoint,
 		Registration: brokerTestRegistration(),
 		Policy:       brokerTestPolicy(),
+		StartMode:    ports.BrokerDaemonStartIfNeeded,
 	})
 	require.NoError(t, err)
 	parsed, ok := config.RouteByAddress(resolved.Address)
 	require.True(t, ok)
-	return parsed
+	return config, parsed
+}
+
+// testMuxDialTarget resolves the exact dial target the broker publishes for one
+// provisioned route under one start authorization, so a test dials the route
+// with the same whole target the pool does.
+func testMuxDialTarget(t *testing.T, config *brokerconfig.Config, route brokerconfig.Route, mode ports.BrokerDaemonStartMode) ports.BrokerDialTarget {
+	t.Helper()
+	resolved, err := config.Resolver().ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
+		Purpose:      ports.BrokerStreamControl,
+		Stream:       1,
+		Endpoint:     brokerTestEndpoint,
+		Registration: brokerTestRegistration(),
+		Policy:       brokerTestPolicy(),
+		StartMode:    mode,
+	})
+	require.NoError(t, err)
+	require.Equal(t, route.Address(), resolved.Address, "the test dials the provisioned route")
+	return resolved
+}
+
+// loadTestRouteTarget loads one sandbox configuration and returns both the
+// parsed route and the exact resolved dial target the broker would publish for
+// it, so a test can call dialBrokerRoute exactly as the pool does.
+func loadTestRouteTarget(t *testing.T, route any) (brokerconfig.Route, ports.BrokerDialTarget) {
+	t.Helper()
+	config, parsed := loadTestRouteAndConfig(t, route)
+	return parsed, testMuxDialTarget(t, config, parsed, ports.BrokerDaemonStartIfNeeded)
 }
 
 // TestParseBrokerMuxArgs pins the strict hidden-helper argument contract.
@@ -187,12 +225,17 @@ func TestParseBrokerMuxArgs(t *testing.T) {
 		wantErr string
 		want    brokerMuxOptions
 	}{
-		{name: "valid", args: []string{"--offline-root", "/srv/sandbox"}, want: brokerMuxOptions{offlineRoot: "/srv/sandbox"}},
+		{name: "valid", args: []string{"--offline-root", "/srv/sandbox"}, want: brokerMuxOptions{offlineRoot: "/srv/sandbox", startMode: ports.BrokerDaemonExistingOnly}},
+		{name: "explicit existing-only", args: []string{"--offline-root", "/srv/sandbox", brokerDaemonStartArg, "existing-only"}, want: brokerMuxOptions{offlineRoot: "/srv/sandbox", startMode: ports.BrokerDaemonExistingOnly}},
+		{name: "explicit if-needed", args: []string{"--offline-root", "/srv/sandbox", brokerDaemonStartArg, "if-needed"}, want: brokerMuxOptions{offlineRoot: "/srv/sandbox", startMode: ports.BrokerDaemonStartIfNeeded}},
 		{name: "missing root", args: nil, wantErr: "requires --offline-root"},
 		{name: "empty root", args: []string{"--offline-root", ""}, wantErr: "requires a path"},
 		{name: "duplicate root", args: []string{"--offline-root", "/a", "--offline-root", "/b"}, wantErr: "duplicate"},
 		{name: "unknown flag", args: []string{"--idle-grace", "1m"}, wantErr: "unknown flag"},
 		{name: "positional", args: []string{"--offline-root", "/a", "extra"}, wantErr: "positional"},
+		{name: "missing daemon-start value", args: []string{"--offline-root", "/a", brokerDaemonStartArg}, wantErr: "requires a value"},
+		{name: "duplicate daemon-start", args: []string{"--offline-root", "/a", brokerDaemonStartArg, "if-needed", brokerDaemonStartArg, "existing-only"}, wantErr: "duplicate"},
+		{name: "unknown daemon-start", args: []string{"--offline-root", "/a", brokerDaemonStartArg, "always"}, wantErr: "unknown daemon start mode"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -203,7 +246,7 @@ func TestParseBrokerMuxArgs(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, brokerMuxOptions{offlineRoot: tt.want.offlineRoot}, command.brokerMux)
+			require.Equal(t, tt.want, command.brokerMux)
 		})
 	}
 }
@@ -245,7 +288,8 @@ func TestSSHMuxCommandSpecPreservesTrustAndNoPTY(t *testing.T) {
 		"argv":   []any{"vev", brokerMuxStdioCommand, "--offline-root", "/srv/remote"},
 		"trust":  map[string]any{"knownHostsFile": "/etc/ssh/known_hosts", "connectTimeout": "30s"},
 	})
-	spec := sshMuxCommandSpec(route)
+	spec, err := sshMuxCommandSpec(route, ports.BrokerDaemonStartIfNeeded)
+	require.NoError(t, err)
 	require.Equal(t, "ssh", spec.Path)
 	require.Equal(t, "-T", spec.Args[0])
 	require.Contains(t, spec.Args, "--")
@@ -254,6 +298,7 @@ func TestSSHMuxCommandSpecPreservesTrustAndNoPTY(t *testing.T) {
 	joined := strings.Join(spec.Args, " ")
 	require.Contains(t, joined, "-- user@host:2222 ")
 	require.Contains(t, joined, brokerMuxStdioCommand)
+	require.Contains(t, joined, "'"+brokerDaemonStartArg+"' 'if-needed'")
 	require.NotContains(t, joined, "StrictHostKeyChecking")
 	require.NotContains(t, joined, "BatchMode")
 	require.NotContains(t, joined, "ProxyCommand")
@@ -270,9 +315,25 @@ func TestSSHMuxCommandSpecPreservesTrustAndNoPTY(t *testing.T) {
 		"target": "host",
 		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--offline-root", "/srv/remote"},
 	})
-	plainSpec := sshMuxCommandSpec(plain)
+	plainSpec, err := sshMuxCommandSpec(plain, ports.BrokerDaemonExistingOnly)
+	require.NoError(t, err)
 	require.Equal(t, []string{"-T", "--"}, append([]string(nil), plainSpec.Args[:2]...))
 	require.NotContains(t, plainSpec.Args, "-o")
+	require.Contains(t, strings.Join(plainSpec.Args, " "), "'"+brokerDaemonStartArg+"' 'existing-only'")
+}
+
+// TestSSHMuxCommandSpecRefusesUnknownStartMode proves a route never carries an
+// unreadable start authorization: an unknown mode is refused instead of
+// defaulting the helper to a permissive one.
+func TestSSHMuxCommandSpecRefusesUnknownStartMode(t *testing.T) {
+	isolateSandboxEnv(t)
+	route := loadTestRoute(t, map[string]any{
+		"kind":   "ssh-stdio",
+		"target": "host",
+		"argv":   []any{"vev", brokerMuxStdioCommand, "--offline-root", "/srv/remote"},
+	})
+	_, err := sshMuxCommandSpec(route, ports.BrokerDaemonStartMode(0))
+	require.Error(t, err)
 }
 
 // TestSSHMuxCommandSpecTargetQuotesSpacesInsideArgv proves a remote argv word
@@ -284,8 +345,12 @@ func TestSSHMuxCommandSpecTargetQuotesSpacesInsideArgv(t *testing.T) {
 		"target": "host",
 		"argv":   []any{"vev", "_broker-mux-stdio", "--offline-root", "/srv/with space"},
 	})
-	spec := sshMuxCommandSpec(route)
+	spec, err := sshMuxCommandSpec(route, ports.BrokerDaemonExistingOnly)
+	require.NoError(t, err)
+	// The whole remote command stays one quoted argv word, so the space-bearing
+	// path is still one word and never becomes a second option.
 	require.Contains(t, spec.Args[len(spec.Args)-1], `'/srv/with space'`)
+	require.Contains(t, spec.Args[len(spec.Args)-1], "'"+brokerDaemonStartArg+"' 'existing-only'")
 }
 
 // TestBrokerQUICPeerAddr pins the host-independent address composition.
@@ -327,11 +392,7 @@ func TestBrokerMuxConnectorRejectsUnknownAddress(t *testing.T) {
 	connector, err := brokerMuxConnector(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 
-	_, err = connector.Connect(context.Background(), ports.BrokerResolvedEndpoint{
-		Identity: brokerTestIdentity,
-		Policy:   brokerTestPolicy(),
-		Address:  "offline-route-00000000000000000000000000000000",
-	})
+	_, err = connector.Connect(context.Background(), ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: brokerTestPolicy(), Address: "offline-route-00000000000000000000000000000000", StartMode: ports.BrokerDaemonStartIfNeeded, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: brokerTestIdentity, Bound: true}})
 	require.Error(t, err)
 	var typed ports.BrokerError
 	require.ErrorAs(t, err, &typed)
@@ -416,14 +477,14 @@ func TestBrokerMuxQUICRejectsBadPinWithoutLeakingSecret(t *testing.T) {
 	tampered.Fingerprint = strings.Repeat("00", 32)
 	t.Setenv(fakeSSHReadyEnv, string(mustJSON(t, tampered)))
 
-	route := loadTestRoute(t, map[string]any{
+	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
 		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--offline-root", "/srv/remote"},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err = dialBrokerRoute(ctx, route, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, err = dialBrokerRoute(ctx, route, target, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Error(t, err)
 	requireBrokerErrorHasNoReadiness(t, err, readiness)
 }
@@ -446,12 +507,12 @@ func TestBrokerMuxQUICRejectsExpiredReadiness(t *testing.T) {
 	}
 	t.Setenv(fakeSSHReadyEnv, string(mustJSON(t, readiness)))
 
-	route := loadTestRoute(t, map[string]any{
+	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
 		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--offline-root", "/srv/remote"},
 	})
-	_, err := dialBrokerRoute(context.Background(), route, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, err := dialBrokerRoute(context.Background(), route, target, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), token)
 	require.NotContains(t, err.Error(), nonce)
@@ -466,7 +527,7 @@ func TestBrokerMuxDialCancellationReapsBootstrap(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "ssh.pid")
 	t.Setenv(fakeSSHPIDEnv, pidFile)
 
-	route := loadTestRoute(t, map[string]any{
+	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
 		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--offline-root", "/srv/remote"},
@@ -474,7 +535,7 @@ func TestBrokerMuxDialCancellationReapsBootstrap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := dialBrokerRoute(ctx, route, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, err := dialBrokerRoute(ctx, route, target, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Error(t, err)
 	require.Less(t, time.Since(start), 3*time.Second, "cancellation must return promptly")
 
@@ -494,7 +555,7 @@ func TestBrokerMuxDialFloodedStderrIsReapedAndSanitized(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "ssh.pid")
 	t.Setenv(fakeSSHPIDEnv, pidFile)
 
-	route := loadTestRoute(t, map[string]any{
+	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
 		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--offline-root", "/srv/remote"},
@@ -504,7 +565,7 @@ func TestBrokerMuxDialFloodedStderrIsReapedAndSanitized(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
-	_, err := dialBrokerRoute(ctx, route, logger)
+	_, err := dialBrokerRoute(ctx, route, target, logger)
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "flood", "bootstrap stderr must never reach the error")
 
@@ -535,13 +596,13 @@ func TestBrokerMuxDialStalledBootstrapUsesSetupTimeout(t *testing.T) {
 	brokerMuxBootstrapReadyTimeout = 250 * time.Millisecond
 	t.Cleanup(func() { brokerMuxBootstrapReadyTimeout = restore })
 
-	route := loadTestRoute(t, map[string]any{
+	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
 		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--offline-root", "/srv/remote"},
 	})
 	start := time.Now()
-	_, err := dialBrokerRoute(context.Background(), route, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, err := dialBrokerRoute(context.Background(), route, target, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	elapsed := time.Since(start)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "read bootstrap readiness")
@@ -575,7 +636,7 @@ func startMuxBrokerServe(t *testing.T, localRoot string) (string, func()) {
 	deps, ready := testBrokerServeDeps(newSandboxClock())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: localRoot}, deps)
-	socketPath := awaitSandboxReady(t, ready)
+	socketPath := awaitSandboxReady(t, ready, done)
 	var once bool
 	stop := func() {
 		if once {
@@ -597,11 +658,15 @@ func requireBrokerPing(t *testing.T, socketPath string) {
 	require.NoError(t, err)
 	defer func() { _ = service.Close() }()
 
+	streamID, err := service.NextStreamID()
+	require.NoError(t, err)
 	stream, err := service.OpenStream(clientCtx, ports.BrokerOpenStreamRequest{
 		Purpose:      ports.BrokerStreamControl,
+		Stream:       streamID,
 		Endpoint:     brokerTestEndpoint,
 		Registration: brokerTestRegistration(),
 		Policy:       brokerTestPolicy(),
+		StartMode:    ports.BrokerDaemonStartIfNeeded,
 	})
 	require.NoError(t, err)
 	defer func() { _ = stream.Close() }()

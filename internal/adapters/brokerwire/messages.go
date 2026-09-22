@@ -122,7 +122,9 @@ func (Reconcile) brokerClientMessage() {}
 // stream to the owning daemon. Env is the per-request session environment
 // and is never inherited from the broker process environment. Admission
 // selects the attachment admission variant; Name is the validated session
-// name for create-named and is empty otherwise.
+// name for create-named and is empty otherwise. StartMode is the explicit
+// daemon-start authorization carried to the transport; it is never zero on an
+// admitted request.
 type OpenStream struct {
 	Epoch        ports.BrokerEpoch
 	Connection   ports.BrokerConnectionID
@@ -136,6 +138,7 @@ type OpenStream struct {
 	Target       protocol.ExactSessionTarget
 	Env          []string
 	Policy       ports.BrokerPolicy
+	StartMode    ports.BrokerDaemonStartMode
 }
 
 func (OpenStream) brokerClientMessage() {}

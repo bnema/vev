@@ -2,7 +2,6 @@ package app
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,12 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/observability"
-	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
-	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -180,27 +175,6 @@ func TestPerformanceTraceSetupRollbackJoinsCloseError(t *testing.T) {
 	}
 }
 
-func TestRunAttachJoinsTraceCloseError(t *testing.T) {
-	traceCloseErr := errors.New("trace close failed")
-	original := newPerformanceTrace
-	newPerformanceTrace = func(ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
-		return observability.NewSerialized(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1), errorCloser{err: traceCloseErr}, nil
-	}
-	t.Cleanup(func() { newPerformanceTrace = original })
-	t.Setenv("VEV", "")
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv(envRemoteTransport, "invalid")
-
-	err := runAttach(context.Background(), protocol.IntentEphemeral, "", "host")
-	if !strings.Contains(err.Error(), "invalid remote transport") {
-		t.Fatalf("runAttach() error = %v, want remote transport validation error", err)
-	}
-	if !errors.Is(err, traceCloseErr) {
-		t.Fatalf("runAttach() error = %v, want joined trace close error %v", err, traceCloseErr)
-	}
-}
-
 type errorCloser struct{ err error }
 
 func (c errorCloser) Close() error { return c.err }
@@ -208,49 +182,3 @@ func (c errorCloser) Close() error { return c.err }
 type runtimeObserverFunc func(ports.RuntimeMark)
 
 func (f runtimeObserverFunc) ObserveRuntime(mark ports.RuntimeMark) { f(mark) }
-
-func TestRunAttachPropagatesOneObserverToRemoteTransportFactory(t *testing.T) {
-	t.Setenv("VEV", "")
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv(envRemoteTransport, string(remoteadapter.TransportStdio))
-
-	observer := observability.NewSerialized(runtimeObserverFunc(func(ports.RuntimeMark) {}), 1)
-	originalTrace := newPerformanceTrace
-	traceCalls := 0
-	newPerformanceTrace = func(ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
-		traceCalls++
-		return observer, &runtimeTraceCloser{reporter: observer}, nil
-	}
-	t.Cleanup(func() { newPerformanceTrace = originalTrace })
-
-	factory := newRemoteDialerFactoryMock(t)
-	factory.EXPECT().DialerForRemote("remote.example", "", remoteadapter.TransportStdio, mock.Anything).Return(namedDialer{name: "remote"}, nil)
-	originalFactory := newRemoteDialerFactoryWithRuntimeObserver
-	factoryCalls := 0
-	newRemoteDialerFactoryWithRuntimeObserver = func(got ports.SerializedRuntimeObserver) remoteDialerForTarget {
-		factoryCalls++
-		if got != observer {
-			t.Fatalf("remote transport observer = %v, want process observer %v", got, observer)
-		}
-		return factory.DialerForRemote
-	}
-	t.Cleanup(func() { newRemoteDialerFactoryWithRuntimeObserver = originalFactory })
-
-	originalRunClient := runClientWithDeps
-	runClientWithDeps = func(ctx context.Context, deps client.Dependencies, _ client.AttachRequest) error {
-		if deps.RuntimeObserver != observer {
-			t.Fatalf("client transport observer = %v, want process observer %v", deps.RuntimeObserver, observer)
-		}
-		requireNamedClientDialer(t, ctx, deps.Dialer, "remote")
-		return nil
-	}
-	t.Cleanup(func() { runClientWithDeps = originalRunClient })
-
-	if err := runAttach(context.Background(), protocol.IntentAttach, "work", "remote.example"); err != nil {
-		t.Fatal(err)
-	}
-	if traceCalls != 1 || factoryCalls != 1 {
-		t.Fatalf("trace/factory calls = %d/%d, want exactly one observer and one transport factory", traceCalls, factoryCalls)
-	}
-}

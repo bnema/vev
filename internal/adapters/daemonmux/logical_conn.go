@@ -175,6 +175,10 @@ func openMessage(physical PhysicalStreamID, request ports.BrokerOpenStreamReques
 		Target:       request.Target,
 		Env:          append([]string(nil), request.Env...),
 		Policy:       request.Policy,
+		// The daemon-start authorization travels with the mux Open, so the
+		// daemon-side transport receives exactly the authority the broker
+		// resolved and can never widen it into a spawn.
+		StartMode: request.StartMode,
 	}
 }
 

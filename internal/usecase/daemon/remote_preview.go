@@ -39,7 +39,7 @@ func (d *Daemon) captureRemotePreview(request protocol.RemotePreviewRequest) (pr
 		d.mu.Unlock()
 		return protocol.RemotePreview{}, errRemotePreviewNoSuchTarget
 	}
-	index, ok := remoteTargetTabIndexLocked(sess, target)
+	index, ok := remoteTargetTabIndexLocked(sess, protocol.SessionAttachTargetFromRemote(target))
 	d.mu.Unlock()
 	if !ok {
 		return protocol.RemotePreview{}, errRemotePreviewNoSuchTarget

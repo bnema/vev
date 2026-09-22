@@ -64,10 +64,10 @@ Every result retains the request ID for strict correlation. Version negotiation 
   composed only by the hidden offline broker entry points (`_broker-serve`,
   `_broker-launcher`, and `_broker-status`).
 - `internal/adapters/uidriver`: owns strict JSONL decoding, response serialization, bounded controller queues, private Unix sockets, peer credentials, and the stdio bridge. It consumes `ports.UIService` and never creates an attachment.
-- `internal/adapters/webterm`: owns the authenticated loopback HTTP/WebSocket frontend, browser event encoding, VT-backed terminal and transactional HTML output. It implements `ports.Terminal`; application composition supplies the ordinary client runner.
+- `internal/adapters/webterm`: owns the authenticated loopback HTTP/WebSocket frontend, browser event encoding, VT-backed terminal and transactional HTML output. It implements `ports.Terminal`; application composition supplies the ordinary client `Supervisor`.
 - `internal/adapters/uiterm`: owns the immutable VT mirror/snapshot and deterministic headless terminal. The concrete terminal writer (`adapters/term`) taps successful writes and flushes into this sink only when observation is enabled.
 - `internal/adapters`: IPC, QUIC, SSH stdio, PTY, terminal, VT-backed UI terminal/observation, JSONL UI-driver sockets, persistence-facing, broker-wire, and observability implementations. `streamframe` owns the shared 4-byte big-endian length framing of one complete Protobuf envelope used by every stream carriage.
-- `internal/app`: CLI parsing and composition. It selects local or remote carriage, wraps raw dialers with `sessionwire`, injects typed ports into use cases, and owns explicit UI-driver endpoint launch configuration.
+- `internal/app`: CLI parsing and composition. It selects local or remote carriage, wraps raw dialers with `sessionwire`, and injects typed ports into use cases. The UI driver keeps no endpoint authority of its own: it composes the process' production broker connector and delegates every transport, daemon, and session decision to the broker.
 - `pkg`: reusable packages that never import `internal`.
 
 ## Dependency direction
@@ -86,15 +86,17 @@ main → app → usecase → ports
 
 ## UI observation and control
 
-Headless UI-driver mode composes one normal `client.Runner`, one `uiterm` terminal, one `client.UI` service, and one bounded JSONL adapter. It does not bypass the palette, input scanners, foreground leases, navigation handoffs, output replay chain, or render publication fences. EOF cancels only that driver and detaches the attachment; it does not kill a session shell.
+Headless UI-driver mode composes one normal `client.Supervisor`, one `uiterm` terminal, one `client.UI` service, and one bounded JSONL adapter. The supervisor obtains snapshots and opens every attachment through the single `ports.BrokerService` façade; the client does not select a daemon carriage or construct a remote registry. It does not bypass the picker, input scanners, foreground leases, navigation handoffs, output replay chain, or render publication fences. EOF cancels only that driver and detaches the attachment; it does not kill a session shell.
 
 Interactive observation is a separate opt-in composition. `term.Terminal` remains the owner of raw mode, physical geometry, terminal queries, serialized output writes, and flush success. Its optional observation sink mirrors byte prefixes and successful flush boundaries into `uiterm`; UI transaction methods are delegated through a composition wrapper so semantic context is committed atomically with the physical flush. A private per-client Unix endpoint uses the same `ports.UIService`; `--ui-control` is the only mode that permits input operations. Slow or disconnected observers cannot claim geometry or block the physical terminal.
 
 ## Browser terminal
 
-`--web-daemon` launches a separate gateway with an inherited HTTP listener, loopback by default. App composition resolves `web.listen`/`web.origin` and CLI overrides before binding. The web adapter validates the configured browser-facing Host and Origin without trusting forwarded headers; a proxy owns TLS. The same-user local control socket returns the running gateway's settings and memory-only credential; readiness probes contact only its local listener. Each authenticated WebSocket owns a normal client runner and a `webterm.Terminal`. The adapter encodes browser events as terminal input, mirrors flushed client output through `vev-vt`, and sends transactional HTML updates. Disconnect cancels only that attachment. The multiplexer remains daemon-owned; browser input does not weaken the restricted UI-driver automation contract.
+`--web-daemon` launches a separate gateway with an inherited HTTP listener, loopback by default. App composition resolves `web.listen`/`web.origin` and CLI overrides before binding. The web adapter validates the configured browser-facing Host and Origin without trusting forwarded headers; a proxy owns TLS. The same-user local control socket returns the running gateway's settings and memory-only credential; readiness probes contact only its local listener. Each authenticated WebSocket owns a normal client `Supervisor` and a `webterm.Terminal`. The adapter encodes browser events as terminal input, mirrors flushed client output through `vev-vt`, and sends transactional HTML updates. Disconnect cancels only that attachment. The multiplexer remains daemon-owned; browser input does not weaken the restricted UI-driver automation contract.
 
 ## Client-owned picker presentation
+
+A client publishes exactly one of three presentations at a time. `picker` is the local picker: the client is usable and describable without a broker and without a daemon. `connecting` is an attachment attempt that has not committed its first frame. `attached` is a committed attachment, and only it carries the validated session identity, the committed output boundary, and the real actionable generation; `picker` and `connecting` carry the run's stable service handle and their status with every session field zeroed, so a capture can never present session metadata as an attachment and no caller can fence an input action against a generation no attachment committed. The former `detached`, `reconnecting`, and `transitioning` values are removed without alias: a reconnect is `connecting`, a detach returns to `picker`, and terminating closes the UI service instead of becoming a fourth persistent presentation. The presentation is published inside the terminal's UI output transaction by its owner: the supervisor publishes `connecting` before the attachment foreground is granted and `picker` after the run drained and revoked, while the admitted foreground publishes `attached` only after its first frame was written, flushed, and committed.
 
 Every attachment presents the navigation picker itself. The serving daemon publishes a typed interaction instead of installing an overlay: `PickerOffer` names the intent and the acquisition barrier, `PickerSnapshot` carries opaque row keys plus display text, `PickerSelection` commits a key at the displayed revision, `PickerClose` retires the interaction in either direction, and `PickerFailure` reports a bounded rejection. The daemon owns no presentation model: it keeps facts, eligibility, and mutations, and resolves committed keys to navigation, move, or kill targets.
 
@@ -116,74 +118,20 @@ A terminal resize reaches the client as one coalesced invalidation owned by the 
 
 Attention is a daemon fact, not an overlay: a bell raised by a PTY, by a status-line notification, or by an agent run marks the owning tab, and the daemon publishes it in the frames its attachments receive. The status bar carries it as a pulsing glyph, the picker session header carries it inline, and `PickerLine.Attention` carries it on the tab row the client renders. Because a client-owned modal suppresses daemon paints, the attention pulse republishes the picker source for every attachment whose interaction the client presents, so a bell raised while the picker is open still reaches the displayed rows.
 
-## Remote hosts
+## Broker-owned hosts and daemon composition
 
-Remote discovery has two owners with separated writers. The daemon composes its own store, catalogue client, cache, and monitor for the structured rows and exact-target validation its picker serves. The launching client composes a runner-scoped `remotes.HostRegistry` over its own store, catalogue client, and a runner-local catalogue cache that seeds from the durable snapshot and never writes it, so one monitor can never truncate the other's file. The registry projects that discovery through `ports.RemoteDirectory` and resolves each endpoint once into a `ports.RemoteEndpointBinding` — the typed dialer every session on that endpoint attaches through, plus the environment to advertise — which the runner reuses for its initial remote attach and for every later handoff. Transport mode, launch allowlist, and endpoint environment stay in `internal/app` behind `ports.RemoteEndpointFactory`; the client never inspects them, and a resolution failure is never cached, so a refused endpoint fails the handoff instead of falling back to another resolver.
+`vev _broker-ready --require local-authority|local-catalogue` is an internal,
+dial-only machine probe. It connects directly to the selected broker IPC
+socket, registers, subscribes, and validates complete snapshots. It never
+ensures or spawns, opens a logical stream, reconciles, or mutates. An optional
+`--offline-root ABS` selects the offline layout. Output is exactly one bounded
+`vev.broker-ready/v1` JSON line with decimal-string epoch/revision IDs. Exit
+codes are 0 ready, 1 internal/write, 2 arguments, 3 timeout, 4 terminal
+security/protocol/configuration failure, and 5 cancellation.
 
-Current state: the daemon-side monitor is deliberately still active. `Serve`
-starts the runner through `daemon.WithRemoteMonitor` and joins it inside the
-bounded remote-shutdown budget, and the daemon keeps its own remote directory
-and host registry. That daemon-owned monitoring (and the host registry that
-feeds it) belongs to the coordinated P7 removal set; it is not removed,
-gated, or polled differently before that cutover, and no polling gate is
-introduced here (GO-001, deferred to P7).
+The broker is the sole façade for local and remote inventory, endpoint membership, policy, observation, and logical session streams. `client.Supervisor` consumes `ports.BrokerService`; it does not import or compose a remote registry, remote adapter, endpoint factory, or direct session dialer. Host mutations and attachment requests therefore pass through the same broker authority and committed snapshot.
 
-## Prepared local inventory boundary (Plan 001 P4.3, preparation only)
-
-The daemon separates local registry state from foreign remote-directory rows.
-`captureLocalSessionInventory` (returning `localSessionInventory`) copies live
-sessions and inactive records and never reads the remote directory;
-`captureSessionInventory` composes that local capture with the foreign rows
-from `currentRemoteDirectory`. The local catalogue export
-(`controlExec.RemoteCatalog`), the prepared navigation projection
-(`localNavigationInventorySnapshot` / `localInventoryGroup`), the prepared
-navigation resolver (`localNavigationResolve`), and the prepared picker
-projection (`localPickerViews` / `localPickerViewProjections`) read only the
-local capture, so they cannot observe or depend on remote monitoring. The
-prepared control resolver (`localPickerControlAttachTarget`) is not an
-inventory projection: it reads the live session registry directly under
-`d.mu` and never the remote directory, the `sessionInventory` composite, or a
-stopped record — only live registry sessions are eligible there.
-
-The current hybrid projections keep their foreign behavior by composing the
-prepared local output with the foreign rows: `snapshotNavigationInventory`
-appends `remoteInventoryGroup` per host, `pickerViewProjections` interleaves
-`foreignPickerViews` between the local live and stopped groups, and
-`pickerControlAttachTarget` delegates to `localPickerControlAttachTarget` (via
-`pickerControlAttachTargetLocal`) after its remote branch. Prepared local
-resolution is exact: a structured foreign source key, registration, remote
-target, or remote key is rejected before any lookup; broken and purging records
-are never resumable; a stopped target that becomes live with the same lifecycle
-resolves; and a stale lifecycle or a same-name replacement never resolves by
-name. The prepared local resolver also rejects a stale preferred tab, but the
-hybrid wrapper preserves the live behavior on top of it: when the exact local
-lifecycle is still current and only the tab vanished between snapshot and
-resolve, it retries with an empty `PreferredTabID`, matching the client's own
-missing-tab fallback instead of failing the attach.
-
-Current ownership: `internal/usecase/daemon` owns the local capture, the
-prepared projections and resolvers, and the hybrid wrappers; `internal/app`
-composes the daemon-side monitor; `internal/adapters/remote` plus the
-runner-scoped `remotes.HostRegistry` own discovery. This is a preparation pass:
-no production composition is cut over, no monitor is gated or removed, no
-public protocol, schema, or version changes, and the signed purge machinery is
-untouched.
-
-P7 removal set: `WithRemoteMonitor` and the `remoteDirectory` /
-`remoteMonitorRun` state; `remoteDirectorySnapshot` and `currentRemoteDirectory`;
-`watchRemoteDirectory`, `refreshRemoteDirectoryViews`, and
-`notifyNewRemoteFailures`; the foreign picker composition (`foreignPickerViews`,
-`remoteInventoryGroup` and the remote groups in `snapshotNavigationInventory`,
-the remote branch of `pickerControlAttachTarget`, `resolveRemoteInventoryEntry`);
-the hybrid wrappers themselves (`captureSessionInventory`, the
-`sessionInventory` composite, `pickerViewProjections`, `pickerControlAttachTarget`
-and its `pickerControlAttachTargetLocal` vanished-tab fallback) once the local
-projections read `localSessionInventory` directly; the remote picker, palette,
-preview, attach, and route projections that read the directory; and the
-daemon-side `ports.RemoteDirectory` / `ports.RemotePreviewClient` composition.
-Once those foreign inputs are deleted, the prepared local functions are the
-whole projection. The daemon-side monitor and host registry stay active until
-then (GO-001, deferred to P7).
+A daemon serves only the sessions on its own machine. It has no remote-directory monitor and does not compose remote transports. In production it accepts the broker's authenticated multiplexed physical carriage through `internal/adapters/daemonmux`; logical observation, control, and attachment streams share that carriage while retaining independent admission and lifetime. The daemon's Unix daemonmux listener is local-only composition infrastructure between the broker and daemon, not a public client endpoint. Ordinary clients connect to `broker.sock` and never dial a daemon socket directly.
 
 ## Session composition
 
@@ -242,11 +190,20 @@ are not keys. Identity plus complete trust, launch, isolation, transport,
 protocol, catalogue, and environment policy select one physical connection;
 authenticated identity and policy are checked again after connection.
 
-Clients receive pool-issued epoch-scoped connection IDs and supply strictly
-increasing stream IDs. Failed admitted opens consume their IDs. Active clients,
-physical keys, and pending/live streams have explicit caps; retired IDs need no
-unbounded tombstone collection. Coalesced connection attempts are independent
-of any single waiter and are canceled when their final reservation leaves.
+Clients receive pool-issued epoch-scoped connection IDs and allocate their own
+logical stream IDs through `BrokerService.NextStreamID`, which is
+thread-safe, strictly monotone, never zero, and refuses an exhausted counter
+instead of wrapping. An allocated ID is consumed even when the open it names is
+refused. Admission at every layer (client, listener, pool) uses one bounded
+anti-replay window of 1024 IDs instead of a bare monotone comparison, so two
+concurrent opens that are scheduled in either order are both admitted while a
+replayed or evicted ID is stale. Active clients, physical keys, and
+pending/live streams have explicit caps; retired IDs need no unbounded tombstone
+collection. Coalesced connection attempts are independent of any single waiter
+and are canceled when their final reservation leaves. Acquisition coalescing
+keys on the exact policy plus the explicit `BrokerDaemonStartMode`, so an
+existing-only request is never shared with a dial that may start the target;
+after authentication the canonical key is identity plus exact policy alone.
 Physical retirement keeps its key occupied until Close finishes. Fake-clock idle
 eviction and shutdown close transports outside the bookkeeping lock.
 
@@ -305,7 +262,13 @@ a stopped one.
 Attachment streams declare one closed admission variant
 (`ports.BrokerStreamAdmission`: exact attach/resume, named creation, ephemeral
 creation) validated identically at the ports, broker IPC, and daemonmux
-boundaries.
+boundaries. Every stream also declares one closed daemon-start authorization
+(`ports.BrokerDaemonStartMode`: `ExistingOnly` or `StartIfNeeded`), carried
+unchanged from the open request through resolution, the wire, and the mux Open:
+observation and daemon-stop are always `ExistingOnly` and never start a target,
+while attach/creation and the explicit list/mutate controls may be
+`StartIfNeeded`; the zero value is refused. The mode can only narrow the
+resolved launch policy, never widen it.
 
 ## Broker-owned local route (Plan 001 P5.3a, not activated)
 
@@ -337,11 +300,55 @@ from the binding and never from durable membership, since the local daemon has
 no membership; its observed identity, incarnation, protocol version,
 availability, and session catalogue come only from the local probe. The local
 entry is never durable: the snapshot store persists and reloads remote
-observations only. Observing the local daemon completes only the daemonmux
-physical preamble and closes the carriage, so it never opens a logical stream
-(never attaches) and only ever dials an existing local Unix socket, so it never
-starts a stopped daemon. Nothing in `internal/app` or `main` activates this
-composition for ordinary operation; P7 performs the coordinated cutover.
+observations only. Observing the local daemon dials only an existing local Unix
+socket, so it never starts a stopped daemon; it completes the authenticated
+daemonmux physical preamble, opens exactly one `BrokerStreamObservation` logical
+stream, sends one typed remote-catalog control request, validates the catalogue
+the daemon answers, and closes the stream and carriage. It sends no `Hello`,
+claims no geometry, requests no admission, creates no session, process, or
+durable identity, and never attaches. The remote host probe and the local probe
+share one semantic implementation, so the two cannot drift apart. Nothing in
+`internal/app` or `main` activates this composition for ordinary operation; P7
+performs the coordinated cutover.
+
+## Broker-owned daemon start (Plan 001 P7, UI-driver slice 1)
+
+The one place a resolved start authorization reaches transport mechanics is
+`internal/app/broker_daemon_start.go`. `daemonmux.RawCarrierDialer` receives the
+whole `ports.BrokerDialTarget` — address, fence, policy, `StartMode`, and
+expected identity — instead of a bare opaque address, so an authorization can
+never be flattened into an address or smuggled through a context value, and the
+carriage owner sees exactly the authority the connector validated and is about
+to verify in the physical preamble. `brokerMuxConnector` looks the route up by
+the target's opaque address, re-checks that the provisioned entry still matches
+the resolved fence and policy, and passes the whole target on.
+
+`dialBrokerLocalDaemon` dials one local daemon for one resolved target.
+`BrokerDaemonExistingOnly` is exactly one private daemonmux carriage dial: no
+lifecycle probe, no spawn lock, no process, and no fallback of any kind.
+`BrokerDaemonStartIfNeeded` performs the same dial first and returns the daemon
+it finds — an already running daemon is never restarted. Only a dial that proves
+absence (an unclassified failure, a cancellation, a foreign path, a rejected
+peer, and a permission refusal all report false) can reach the start, and then
+only when the resolved policy names the broker launch authority and the carriage
+is exactly the private endpoint the launched daemon will publish. A registered
+endpoint is never started by the local mechanics. The start itself is the shared
+election in `spawn.go` — lifecycle availability, one elected spawner under the
+spawn lock, then a bounded redial of the same carriage — so observation and
+daemon-stop stay `ExistingOnly` and a policy that forbids launching still
+refuses visibly. `spawn.go` is generic over the dialed value, so the session
+transport and the daemonmux carriage obey exactly one election discipline, and
+no path here ever dials a session or a session control stream to prove
+readiness.
+
+The remote-side mux helpers apply the same rule from their own broker-owned
+configuration. `dialBrokerRoute` propagates the target's `StartMode` before any
+connect-or-spawn, `sshMuxCommandSpec` appends the closed
+`--daemon-start existing-only|if-needed` word to the provisioned remote argv,
+and `parseBrokerMuxArgs` defaults an absent flag to the safe `existing-only`
+while refusing an unknown value. A helper starts only the daemon behind its own
+provisioned mux carriage, under its own policy, and never starts a broker, an
+observer, or a recursive helper.
 
 ## Broker local IPC (Plan 001 P3.3, not activated)
 
@@ -351,9 +358,7 @@ per-user Unix endpoint. The carriage is the P3.2 private AF_UNIX carriage in
 parent directory, a bound socket tightened to 0600, race-safe recovery of a
 stale socket whose owner died, refusal (never removal) of a path that is not a
 socket, and same-user kernel peer credentials (`SO_PEERCRED` on Linux) on both
-accept and dial, failing closed on a platform or build without that check. The
-endpoint name (`broker.sock`) is deliberately distinct from the daemon's
-`daemon.sock`.
+accept and dial, failing closed on a platform or build without that check. The endpoint name (`broker.sock`) is the client-facing local endpoint. The daemon's Unix daemonmux socket is local-only composition infrastructure owned by the broker/daemon path; it is not published as a client API and ordinary clients never dial it.
 
 The listener owns its accept loop: one client slot is acquired before each
 accept, each accepted carriage completes the broker preamble and broker
@@ -528,13 +533,21 @@ bounded route address: a digest of the route's own contents, so the pooling
 layer never carries a target, a path, or an argv word.
 
 `_broker-serve` composes a transport-selecting `daemonmux.EndpointConnector`. Its
-dial function receives only the opaque address, looks the route up in the
-immutable configuration it was built with, and refuses an address the
-configuration did not produce. A `unix` route dials the provisioned private Unix
-mux carriage directly; an `ssh-stdio` route starts one explicit ssh child (built
+dial function receives the whole resolved `ports.BrokerDialTarget`, looks the
+route up by its opaque address in the immutable configuration it was built
+with, refuses an address the configuration did not produce, and re-checks that
+the provisioned entry still matches the resolved fence and policy before
+dialing. The target travels whole so the closed daemon-start authorization
+reaches the transport owner instead of being flattened into an address. A
+`unix` route dials the provisioned private Unix
+mux carriage directly when it is a provisioned endpoint carriage, and goes
+through the broker-owned daemon start (below) when it is the broker's own local
+binding route; an `ssh-stdio` route starts one explicit ssh child (built
 with `sshstdio.BuildCommandForMux` and carrying only trust inputs that narrow
 verification, never disabling host-key checking, forcing an auth bypass, or
-requesting a PTY) through `sshstdio.DialMuxContext`; an `ssh-quic` route runs one
+requesting a PTY) through `sshstdio.DialMuxContext`, and appends the closed
+`--daemon-start existing-only|if-needed` word to the provisioned remote argv; an
+`ssh-quic` route runs one
 SSH-authenticated QUIC bootstrap, reads exactly one readiness line, and pins the
 freshly minted ephemeral certificate through `quic.DialMuxContext`. One
 caller-supplied setup context bounds bootstrap, pinned dial, and the daemonmux
@@ -551,15 +564,22 @@ and sanitized, so a token, a nonce, or raw remote text never reaches an address,
 a log, or an error.
 
 The three hidden helpers are excluded from public help. `_broker-mux-stdio
---offline-root ABS` validates the sandbox and bridges its own stdio to the single
-provisioned private Unix daemonmux carriage. `_broker-mux-quic-bootstrap
+--offline-root ABS [--daemon-start existing-only|if-needed]` validates the
+sandbox and bridges its own stdio to the single
+provisioned private Unix daemonmux carriage, applying exactly the start
+authorization the broker propagated: an absent flag defaults to the safe
+`existing-only`, an unknown value is refused, and a `start-if-needed` request is
+gated by the helper's own provisioned identity and policy, which can only narrow
+it. `_broker-mux-quic-bootstrap
 --offline-root ABS` validates the sandbox, starts one detached
 `_broker-mux-quic-proxy` in a new session, forwards its single readiness line,
 and exits. `_broker-mux-quic-proxy --offline-root ABS` mints one ephemeral QUIC
 server, admits exactly one authenticated carriage, and bridges it to the same
-private Unix daemonmux carriage. A helper only ever bridges to the configured
-private endpoint: it never starts a broker, an observer, or an ordinary daemon,
-never dials the production daemon socket, and never fabricates a daemon
+private Unix daemonmux carriage under the same propagated authorization. A
+helper only ever bridges to the configured
+private endpoint: it never starts a broker, an observer, or an ordinary daemon
+outside that one daemon-start authorization, never dials the production daemon
+socket, and never fabricates a daemon
 incarnation, which the daemon on the far side of the carriage alone owns.
 Ordinary production composition still waits for P7; the helpers change no
 ordinary command, path, or factory.

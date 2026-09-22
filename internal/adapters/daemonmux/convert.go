@@ -44,6 +44,32 @@ func muxEnum16[T ~uint16](value uint32) (T, error) {
 	return T(value), nil
 }
 
+// startModeToWire maps the closed daemon-start taxonomy onto its wire code.
+// The zero value is refused rather than encoded: a peer must never have to
+// guess whether an absent mode authorized a spawn.
+func startModeToWire(mode ports.BrokerDaemonStartMode) (uint32, error) {
+	switch mode {
+	case ports.BrokerDaemonExistingOnly:
+		return 1, nil
+	case ports.BrokerDaemonStartIfNeeded:
+		return 2, nil
+	default:
+		return 0, errConvertRange
+	}
+}
+
+// startModeFromWire maps a wire daemon-start code onto the closed taxonomy.
+func startModeFromWire(value uint32) (ports.BrokerDaemonStartMode, error) {
+	switch value {
+	case 1:
+		return ports.BrokerDaemonExistingOnly, nil
+	case 2:
+		return ports.BrokerDaemonStartIfNeeded, nil
+	default:
+		return 0, errConvertRange
+	}
+}
+
 func physicalToWire(id PhysicalStreamID) uint64 { return uint64(id) }
 
 func physicalFromWire(value uint64) (PhysicalStreamID, error) {

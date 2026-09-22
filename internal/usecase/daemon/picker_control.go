@@ -86,7 +86,7 @@ func (d *Daemon) pickerControlAttachTarget(target picker.Target) (protocol.Attac
 		if !d.remoteCatalogTargetReady(remote) {
 			return protocol.AttachTarget{}, false
 		}
-		return protocol.AttachTarget{Endpoint: remote.Endpoint, Session: remote.SessionName, Intent: protocol.IntentAttach, RemoteTarget: &remote, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, true
+		return protocol.AttachTarget{Endpoint: remote.Endpoint, Session: remote.SessionName, Intent: protocol.IntentAttach, SessionTarget: ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(remote)), EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned}, true
 	}
 	return d.pickerControlAttachTargetLocal(target)
 }

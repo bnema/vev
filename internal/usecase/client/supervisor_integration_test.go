@@ -35,11 +35,23 @@ type integrationCore struct {
 	done    chan struct{}
 	closed  chan struct{}
 	once    sync.Once
+
+	mu         sync.Mutex
+	nextStream ports.BrokerStreamID
 }
 
 func (c *integrationCore) ConnectionID() ports.BrokerConnectionID { return c.id }
 func (c *integrationCore) Done() <-chan struct{}                  { return c.done }
 func (c *integrationCore) Err() error                             { return nil }
+
+// NextStreamID mirrors the production allocator so the supervisor's single
+// allocation seam is exercised over the real carriage.
+func (c *integrationCore) NextStreamID() (ports.BrokerStreamID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextStream++
+	return c.nextStream, nil
+}
 
 func (c *integrationCore) Snapshot() ports.BrokerSnapshot {
 	return ports.BrokerSnapshot{Epoch: c.epoch, Revision: 1}

@@ -82,7 +82,7 @@ func unixRawCarriagePair(t *testing.T) (RawFramedTransport, RawFramedTransport) 
 // at path through ipc.DialMuxContext (which also verifies same-user peer
 // credentials).
 func unixDialer(path string) RawCarrierDialer {
-	return func(ctx context.Context, _ string) (RawFramedTransport, error) {
+	return func(ctx context.Context, _ ports.BrokerDialTarget) (RawFramedTransport, error) {
 		raw, err := ipc.DialMuxContext(ctx, path)
 		if err != nil {
 			return nil, err

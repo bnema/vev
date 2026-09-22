@@ -454,6 +454,59 @@ func (_c *MockBrokerService_Err_Call) RunAndReturn(run func() error) *MockBroker
 	return _c
 }
 
+// NextStreamID provides a mock function for the type MockBrokerService
+func (_mock *MockBrokerService) NextStreamID() (ports.BrokerStreamID, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for NextStreamID")
+	}
+
+	var r0 ports.BrokerStreamID
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() (ports.BrokerStreamID, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() ports.BrokerStreamID); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(ports.BrokerStreamID)
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockBrokerService_NextStreamID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'NextStreamID'
+type MockBrokerService_NextStreamID_Call struct {
+	*mock.Call
+}
+
+// NextStreamID is a helper method to define mock.On call
+func (_e *MockBrokerService_Expecter) NextStreamID() *MockBrokerService_NextStreamID_Call {
+	return &MockBrokerService_NextStreamID_Call{Call: _e.mock.On("NextStreamID")}
+}
+
+func (_c *MockBrokerService_NextStreamID_Call) Run(run func()) *MockBrokerService_NextStreamID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockBrokerService_NextStreamID_Call) Return(brokerStreamID ports.BrokerStreamID, err error) *MockBrokerService_NextStreamID_Call {
+	_c.Call.Return(brokerStreamID, err)
+	return _c
+}
+
+func (_c *MockBrokerService_NextStreamID_Call) RunAndReturn(run func() (ports.BrokerStreamID, error)) *MockBrokerService_NextStreamID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // OpenStream provides a mock function for the type MockBrokerService
 func (_mock *MockBrokerService) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	ret := _mock.Called(ctx, request)
@@ -1458,8 +1511,8 @@ func (_m *MockBrokerEndpointConnector) EXPECT() *MockBrokerEndpointConnector_Exp
 }
 
 // Connect provides a mock function for the type MockBrokerEndpointConnector
-func (_mock *MockBrokerEndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
-	ret := _mock.Called(ctx, endpoint)
+func (_mock *MockBrokerEndpointConnector) Connect(ctx context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+	ret := _mock.Called(ctx, target)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Connect")
@@ -1467,18 +1520,18 @@ func (_mock *MockBrokerEndpointConnector) Connect(ctx context.Context, endpoint 
 
 	var r0 ports.BrokerPhysicalConnection
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error)); ok {
-		return returnFunc(ctx, endpoint)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)); ok {
+		return returnFunc(ctx, target)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerResolvedEndpoint) ports.BrokerPhysicalConnection); ok {
-		r0 = returnFunc(ctx, endpoint)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ports.BrokerDialTarget) ports.BrokerPhysicalConnection); ok {
+		r0 = returnFunc(ctx, target)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(ports.BrokerPhysicalConnection)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.BrokerResolvedEndpoint) error); ok {
-		r1 = returnFunc(ctx, endpoint)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, ports.BrokerDialTarget) error); ok {
+		r1 = returnFunc(ctx, target)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -1492,20 +1545,20 @@ type MockBrokerEndpointConnector_Connect_Call struct {
 
 // Connect is a helper method to define mock.On call
 //   - ctx context.Context
-//   - endpoint ports.BrokerResolvedEndpoint
-func (_e *MockBrokerEndpointConnector_Expecter) Connect(ctx any, endpoint any) *MockBrokerEndpointConnector_Connect_Call {
-	return &MockBrokerEndpointConnector_Connect_Call{Call: _e.mock.On("Connect", ctx, endpoint)}
+//   - target ports.BrokerDialTarget
+func (_e *MockBrokerEndpointConnector_Expecter) Connect(ctx any, target any) *MockBrokerEndpointConnector_Connect_Call {
+	return &MockBrokerEndpointConnector_Connect_Call{Call: _e.mock.On("Connect", ctx, target)}
 }
 
-func (_c *MockBrokerEndpointConnector_Connect_Call) Run(run func(ctx context.Context, endpoint ports.BrokerResolvedEndpoint)) *MockBrokerEndpointConnector_Connect_Call {
+func (_c *MockBrokerEndpointConnector_Connect_Call) Run(run func(ctx context.Context, target ports.BrokerDialTarget)) *MockBrokerEndpointConnector_Connect_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 ports.BrokerResolvedEndpoint
+		var arg1 ports.BrokerDialTarget
 		if args[1] != nil {
-			arg1 = args[1].(ports.BrokerResolvedEndpoint)
+			arg1 = args[1].(ports.BrokerDialTarget)
 		}
 		run(
 			arg0,
@@ -1520,7 +1573,7 @@ func (_c *MockBrokerEndpointConnector_Connect_Call) Return(brokerPhysicalConnect
 	return _c
 }
 
-func (_c *MockBrokerEndpointConnector_Connect_Call) RunAndReturn(run func(ctx context.Context, endpoint ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error)) *MockBrokerEndpointConnector_Connect_Call {
+func (_c *MockBrokerEndpointConnector_Connect_Call) RunAndReturn(run func(ctx context.Context, target ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)) *MockBrokerEndpointConnector_Connect_Call {
 	_c.Call.Return(run)
 	return _c
 }

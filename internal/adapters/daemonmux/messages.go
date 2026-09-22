@@ -76,7 +76,9 @@ func (r StreamRef) Validate() error {
 
 // Open asks the daemon to open one independently cancellable logical stream
 // over the physical connection. Env is the per-request session environment
-// and is never inherited from the broker process environment.
+// and is never inherited from the broker process environment. StartMode is
+// the broker's explicit daemon-start authorization, propagated unchanged so a
+// transport can never widen it into a spawn.
 type Open struct {
 	Ref          StreamRef
 	Purpose      ports.BrokerStreamPurpose
@@ -88,6 +90,7 @@ type Open struct {
 	Target       protocol.ExactSessionTarget
 	Env          []string
 	Policy       ports.BrokerPolicy
+	StartMode    ports.BrokerDaemonStartMode
 }
 
 func (Open) muxClientMessage() {}

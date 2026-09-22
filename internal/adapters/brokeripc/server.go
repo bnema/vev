@@ -899,6 +899,18 @@ func orderlyDisconnect(err error) bool {
 // ConnectionID returns the identity assigned to this connection at accept.
 func (s *serverSession) ConnectionID() ports.BrokerConnectionID { return s.scope.Connection }
 
+// NextStreamID allocates the next logical stream identity of the admitted core
+// connection. The wire identities are allocated by the calling service and are
+// carried to this listener unchanged; this delegating form exists so a composed
+// caller can use the session as a scoped ports.BrokerService. It never
+// re-allocates a wire identity and performs no I/O.
+func (s *serverSession) NextStreamID() (ports.BrokerStreamID, error) {
+	if s == nil {
+		return 0, ErrSessionClosed
+	}
+	return s.core.NextStreamID()
+}
+
 // Done closes exactly once when this session is terminal: the carriage failed,
 // the peer disconnected, or the owner closed it. Err is stable afterwards.
 func (s *serverSession) Done() <-chan struct{} { return s.done }
@@ -929,7 +941,10 @@ func (s *serverSession) Subscribe() (ports.BrokerSubscription, error) { return s
 // service. The connection's own reader drives the same core through
 // openStreamMessage, which additionally bridges the stream onto the wire; this
 // method exists so a composed caller can use the session as a scoped
-// ports.BrokerService.
+// ports.BrokerService. The stream identity is the one the caller already
+// allocated (NextStreamID) and is transmitted unchanged: this listener never
+// re-allocates a wire identity, whether the request arrives over the wire or
+// through this in-process delegate.
 func (s *serverSession) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	if err := s.checkRequestScope(request.Epoch, request.Connection); err != nil {
 		return nil, err

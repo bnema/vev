@@ -110,11 +110,11 @@ func TestClientTracePairsAfterPTYHangup(t *testing.T) {
 		}
 	}()
 
-	// Wait until the client is attached with a receive pump blocked mid-frame:
-	// its trace then holds one more adapter_receive_start than end. That in-flight
-	// span is exactly what an ungraceful death truncates.
-	if err := waitForInflightReceive(clientMapping.TracePath, 10*time.Second); err != nil {
-		t.Fatalf("client never reached a blocked receive: %v", err)
+	// Wait until the broker-backed client reaches a real attached shell before
+	// severing its terminal. Session carriage tracing now belongs to the broker,
+	// not the thin client process.
+	if err := client.waitForTerminalReady(); err != nil {
+		t.Fatalf("client never reached an attached shell: %v", err)
 	}
 
 	// Sever the controlling terminal with no graceful exit. This is the harness
@@ -183,7 +183,7 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 		var command roleCommand
 		switch pm.Role {
 		case "daemon":
-			command = roleCommand{Args: []string{"--daemon"}}
+			command = routeRoleArgs(s, pm, transport{})
 		case "ssh_stdio_peer":
 			// The transport-neutral _stdio mode requests an ephemeral session.
 			command = roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}}
@@ -231,8 +231,8 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 		}
 	}()
 
-	if err := waitForInflightReceive(peerMapping.TracePath, 10*time.Second); err != nil {
-		t.Fatalf("stdio descendant never reached blocked receive: %v", err)
+	if err := client.waitForTerminalReady(); err != nil {
+		t.Fatalf("stdio client never reached an attached shell: %v", err)
 	}
 	processGroup := client.cmd.Process.Pid
 	if err := client.Close(); err != nil {

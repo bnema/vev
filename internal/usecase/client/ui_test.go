@@ -91,8 +91,10 @@ func TestUIActionTimeoutRetainsExactReceiptBoundary(t *testing.T) {
 	u.published(1)
 	boundary, err := terminal.Snapshot()
 	require.NoError(t, err)
-	// Later presentation-only publication must not shift the action lower bound.
-	view.Status = ports.UIStatusReconnecting
+	// A later committed publication at the same generation must not shift the
+	// action's lower bound: the retained receipt still matches the boundary it
+	// named, never the newer revision.
+	view.Status = ports.UIStatusAttached
 	require.NoError(t, terminal.PublishContext(view))
 	u.receipt(1, protocol.UIReceipt{ActionID: actionErr.ActionID, Epoch: 1, State: 1, ViewPublication: 2, Outcome: protocol.UIReceiptProcessed})
 	u.mu.Lock()
@@ -112,7 +114,7 @@ func TestUIWaitBroadcastAndAttachmentQuota(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); u.Observe(observeCtx) }()
 	t.Cleanup(func() { cancel(); requireSignal(t, done, "observation worker did not stop") })
-	status := ports.UIStatusReconnecting
+	status := ports.UIStatusConnecting
 	results := make(chan error, 4)
 	request := ports.UIWaitRequest{Attachment: u.Handle(), Expect: ports.UIExpect{Status: &status}}
 	for range 4 {
@@ -154,7 +156,7 @@ func TestUIWaitForSnapshotUsesObservationBroadcast(t *testing.T) {
 		}
 	}()
 
-	status := ports.UIStatusReconnecting
+	status := ports.UIStatusConnecting
 	result := make(chan ports.UISnapshot, 1)
 	go func() {
 		snapshot, err := u.WaitForSnapshot(ctx, func(snapshot ports.UISnapshot) bool {

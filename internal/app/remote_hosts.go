@@ -2,17 +2,13 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"sort"
 	"text/tabwriter"
 
-	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
@@ -24,36 +20,18 @@ const (
 	hostActionList = "list"
 )
 
-// remoteHostDeps holds injectable seams for host management and remote listing.
 type remoteHostDeps struct {
-	stateDir  func() string
-	store     ports.RemoteHostStore
-	catalog   ports.RemoteCatalogClient
-	localList func(context.Context) ([]protocol.SessionInfo, error)
-	stdout    io.Writer
+	connect func(context.Context) (ports.BrokerService, error)
+	stdout  io.Writer
 }
 
 func defaultRemoteHostDeps() remoteHostDeps {
-	return remoteHostDeps{
-		stateDir:  platform.StateDir,
-		catalog:   remoteadapter.NewCatalogClient(),
-		localList: listLocalSessions,
-		stdout:    os.Stdout,
-	}
+	return remoteHostDeps{connect: connectProductionBroker, stdout: os.Stdout}
 }
 
 func (d remoteHostDeps) withDefaults() remoteHostDeps {
-	if d.stateDir == nil {
-		d.stateDir = platform.StateDir
-	}
-	if d.store == nil {
-		d.store = remoteadapter.NewFileHostStore(remoteadapter.HostStorePath(d.stateDir()))
-	}
-	if d.catalog == nil {
-		d.catalog = remoteadapter.NewCatalogClient()
-	}
-	if d.localList == nil {
-		d.localList = listLocalSessions
+	if d.connect == nil {
+		d.connect = connectProductionBroker
 	}
 	if d.stdout == nil {
 		d.stdout = os.Stdout
@@ -61,200 +39,114 @@ func (d remoteHostDeps) withDefaults() remoteHostDeps {
 	return d
 }
 
-func (d remoteHostDeps) hostStore() ports.RemoteHostStore {
-	return d.store
-}
-
 func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error {
-	_ = ctx
 	deps = deps.withDefaults()
-
+	service, err := deps.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = service.Close() }()
 	switch cmd.hostAction {
 	case hostActionAdd:
-		return hostAdd(deps, cmd.hostTarget)
+		if err := domain.ValidateRemoteHostTarget(cmd.hostTarget); err != nil {
+			return err
+		}
+		transport, err := remoteTransportModeFromEnv(os.Getenv(envRemoteTransport))
+		if err != nil {
+			return err
+		}
+		_, err = service.AddHost(ctx, cmd.hostTarget, remoteBrokerPolicy(transport))
+		return err
 	case hostActionRm:
-		return hostRm(deps, cmd.hostTarget)
+		if err := domain.ValidateRemoteHostTarget(cmd.hostTarget); err != nil {
+			return err
+		}
+		var registration domain.RemoteRegistration
+		for _, daemon := range service.Snapshot().Daemons {
+			if !daemon.Local && daemon.Endpoint == cmd.hostTarget {
+				registration = daemon.Registration
+				break
+			}
+		}
+		if registration.Endpoint == "" {
+			return fmt.Errorf("vev: unknown host %q", cmd.hostTarget)
+		}
+		removed, err := service.RemoveHost(ctx, registration)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return fmt.Errorf("vev: unknown host %q", cmd.hostTarget)
+		}
+		return nil
 	case hostActionList:
-		return hostList(deps)
+		return printBrokerHosts(deps.stdout, service.Snapshot())
 	default:
 		return usagef("unknown host action %q", cmd.hostAction)
 	}
 }
 
-func hostAdd(deps remoteHostDeps, target string) error {
-	if err := domain.ValidateRemoteHostTarget(target); err != nil {
+func printBrokerHosts(w io.Writer, snapshot ports.BrokerSnapshot) error {
+	if err := snapshot.Validate(); err != nil {
+		return fmt.Errorf("vev: reading broker catalogue: %w", err)
+	}
+	var endpoints []string
+	for _, daemon := range snapshot.Daemons {
+		if !daemon.Local {
+			endpoints = append(endpoints, daemon.Endpoint)
+		}
+	}
+	sort.Strings(endpoints)
+	if len(endpoints) == 0 {
+		_, err := fmt.Fprintln(w, "no hosts")
 		return err
 	}
-	if err := deps.hostStore().AddPinned(target); err != nil {
-		return fmt.Errorf("vev: adding pinned host %q: %w", target, err)
-	}
-	return nil
-}
-
-func hostRm(deps remoteHostDeps, target string) error {
-	if err := domain.ValidateRemoteHostTarget(target); err != nil {
-		return err
-	}
-	deleted, err := deps.hostStore().Remove(target)
-	if err != nil {
-		return fmt.Errorf("vev: removing host %q: %w", target, err)
-	}
-	if !deleted {
-		return fmt.Errorf("vev: unknown host %q", target)
-	}
-	return nil
-}
-
-func hostList(deps remoteHostDeps) error {
-	hosts, err := mergeKnownHosts(deps)
-	if err != nil {
-		return err
-	}
-	if len(hosts) == 0 {
-		_, _ = fmt.Fprintln(deps.stdout, "no hosts")
-		return nil
-	}
-	tw := tabwriter.NewWriter(deps.stdout, 0, 4, 2, ' ', 0)
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TARGET\tSOURCE")
-	for _, host := range hosts {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\n", host.Target, remoteHostSource(host))
+	for _, endpoint := range endpoints {
+		_, _ = fmt.Fprintf(tw, "%s\tbroker\n", endpoint)
 	}
 	return tw.Flush()
 }
 
-func remoteHostSource(host domain.RemoteHost) string {
-	switch {
-	case host.Pinned && host.Learned:
-		return "pinned,learned"
-	case host.Pinned:
-		return "pinned"
-	case host.Learned:
-		return "learned"
-	default:
-		return ""
+func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io.Writer) error {
+	if err := snapshot.Validate(); err != nil {
+		return fmt.Errorf("vev: reading broker catalogue: %w", err)
 	}
-}
-
-func runRemoteList(ctx context.Context, cmd command, deps remoteHostDeps) error {
-	deps = deps.withDefaults()
-
-	hosts, err := mergeKnownHosts(deps)
-	if err != nil {
-		return err
-	}
-	if cmd.listHost != "" {
-		return listOneRemoteHost(ctx, deps, hosts, cmd.listHost)
-	}
-	return listAllSessions(ctx, deps, hosts)
-}
-
-func listOneRemoteHost(ctx context.Context, deps remoteHostDeps, hosts []domain.RemoteHost, target string) error {
-	known := false
-	for _, host := range hosts {
-		if host.Target == target {
-			known = true
-			break
-		}
-	}
-	if !known {
-		return fmt.Errorf("vev: unknown host %q", target)
-	}
-	catalog, err := deps.catalog.List(ctx, target)
-	if err != nil {
-		return fmt.Errorf("vev: listing sessions on %q: %w", target, err)
-	}
-	printSessions(deps.stdout, catalogSessionsAsInfo(target, catalog.Sessions))
-	return nil
-}
-
-// listAllSessions queries hosts sequentially for deterministic output ordering.
-func listAllSessions(ctx context.Context, deps remoteHostDeps, hosts []domain.RemoteHost) error {
-	local, err := deps.localList(ctx)
-	if err != nil {
-		if local != nil {
-			printSessions(deps.stdout, local)
-		}
-		return err
-	}
-	all := append([]protocol.SessionInfo(nil), local...)
-	var hostErrs []error
-	for _, host := range hosts {
-		if err := ctx.Err(); err != nil {
-			printSessions(deps.stdout, all)
-			return err
-		}
-		catalog, listErr := deps.catalog.List(ctx, host.Target)
-		if listErr != nil {
-			hostErrs = append(hostErrs, fmt.Errorf("host %s: %w", host.Target, listErr))
+	var sessions []protocol.SessionInfo
+	found := cmd.listHost == ""
+	for _, daemon := range snapshot.Daemons {
+		if cmd.listHost != "" && (daemon.Local || daemon.Endpoint != cmd.listHost) {
 			continue
 		}
-		all = append(all, catalogSessionsAsInfo(host.Target, catalog.Sessions)...)
+		found = true
+		for i, session := range catalogSessionsAsInfo(daemon.Endpoint, daemon.Sessions) {
+			if daemon.Local {
+				session.Name = daemon.Sessions[i].Name
+			}
+			sessions = append(sessions, session)
+		}
 	}
-	printSessions(deps.stdout, all)
-	if len(hostErrs) > 0 {
-		return errors.Join(hostErrs...)
+	if !found {
+		return fmt.Errorf("vev: unknown host %q", cmd.listHost)
 	}
+	printSessions(stdout, sessions)
 	return nil
 }
 
 func catalogSessionsAsInfo(host string, sessions []catalogue.RemoteCatalogSession) []protocol.SessionInfo {
 	out := make([]protocol.SessionInfo, 0, len(sessions))
 	for _, session := range sessions {
-		info := protocol.SessionInfo{
-			Name:      domain.RemoteSessionDisplay(session.Name, host),
-			Ephemeral: session.Ephemeral,
-			Tabs:      catalogue.SaturateUint16(catalogue.CatalogTabCount(session)),
-			Attached:  session.Attached,
-		}
+		info := protocol.SessionInfo{Name: domain.RemoteSessionDisplay(session.Name, host), Ephemeral: session.Ephemeral, Tabs: catalogue.SaturateUint16(catalogue.CatalogTabCount(session)), Attached: session.Attached}
 		switch session.State {
 		case catalogue.RemoteCatalogSessionUp:
 			info.State = protocol.SessionUp
 		case catalogue.RemoteCatalogSessionDown:
 			info.State = protocol.SessionDown
-		case catalogue.RemoteCatalogSessionBroken:
-			info.State = protocol.SessionBroken
 		default:
-			slog.Debug("remote catalog session has unknown state", "host", host, "session", session.Name, "state", session.State)
 			info.State = protocol.SessionBroken
 		}
 		out = append(out, info)
-	}
-	return out
-}
-
-func mergeKnownHosts(deps remoteHostDeps) ([]domain.RemoteHost, error) {
-	pinned, learned, err := deps.hostStore().Hosts()
-	if err != nil {
-		return nil, fmt.Errorf("vev: reading hosts: %w", err)
-	}
-	return mergeRemoteHosts(pinned, learned), nil
-}
-
-// mergeRemoteHosts returns pinned hosts in stored order, then learned-only
-// hosts in lexical order. Duplicates keep first occurrence and mark both sources.
-func mergeRemoteHosts(pinned, learned []domain.RemoteRegistration) []domain.RemoteHost {
-	pinned = domain.UniqueRemoteRegistrations(pinned)
-	learnedSet := make(map[string]struct{}, len(learned))
-	for _, record := range learned {
-		learnedSet[record.Endpoint] = struct{}{}
-	}
-	pinnedSet := make(map[string]struct{}, len(pinned))
-	out := make([]domain.RemoteHost, 0, len(pinned)+len(learned))
-	for _, record := range pinned {
-		pinnedSet[record.Endpoint] = struct{}{}
-		_, isLearned := learnedSet[record.Endpoint]
-		out = append(out, domain.RemoteHost{Target: record.Endpoint, Pinned: true, Learned: isLearned, Registration: record})
-	}
-	learnedOnly := make([]domain.RemoteRegistration, 0, len(learned))
-	for _, record := range learned {
-		if _, ok := pinnedSet[record.Endpoint]; !ok {
-			learnedOnly = append(learnedOnly, record)
-		}
-	}
-	learnedOnly = domain.UniqueRemoteRegistrations(learnedOnly)
-	sort.Slice(learnedOnly, func(i, j int) bool { return learnedOnly[i].Endpoint < learnedOnly[j].Endpoint })
-	for _, record := range learnedOnly {
-		out = append(out, domain.RemoteHost{Target: record.Endpoint, Learned: true, Registration: record})
 	}
 	return out
 }

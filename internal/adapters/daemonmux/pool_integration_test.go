@@ -13,14 +13,20 @@ import (
 	"github.com/bnema/vev/internal/usecase/broker"
 )
 
-// p3cResolver is a test BrokerEndpointResolver: it returns one authenticated
+// p3cResolver is a test BrokerRouteAuthority: it returns one authenticated
 // endpoint per request, keyed on the request's registration endpoint so two
 // compatible aliases resolve to the same (identity, policy) physical key with
 // distinct adapter routes.
-type p3cResolver func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error)
+type p3cResolver func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error)
 
-func (f p3cResolver) Resolve(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+func (f p3cResolver) ResolveDialTarget(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 	return f(ctx, request)
+}
+
+type p3cBinder struct{}
+
+func (p3cBinder) BindAuthenticatedIdentity(_ context.Context, request ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
+	return request.Identity, nil
 }
 
 // p3cRemoteRequest builds one valid remote control-purpose request.
@@ -39,6 +45,7 @@ func p3cRemoteRequest(connection ports.BrokerConnectionID, endpoint string, stre
 		Endpoint:     endpoint,
 		Registration: registration,
 		Policy:       policy,
+		StartMode:    ports.BrokerDaemonStartIfNeeded,
 	}
 }
 
@@ -51,17 +58,17 @@ func p3cPoolLimits() broker.PoolLimits {
 // compatible aliases over exactly one daemonmux physical connection: only one
 // carriage is dialed, and both logical streams flow over it.
 func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
-	binding := mustServerBinding(t)
+	binding := mustRemoteServerBinding(t)
 	policy := binding.Policy()
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
 	server.serve()
-	resolver := p3cResolver(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+	resolver := p3cResolver(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return muxEndpoint(binding.Identity(), policy, "raw://"+request.Endpoint), nil
 	})
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
@@ -95,13 +102,13 @@ func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 	binding := mustServerBinding(t)
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
-	resolver := p3cResolver(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+	resolver := p3cResolver(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return muxEndpoint(binding.Identity(), binding.Policy(), "raw://conflict"), nil
 	})
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 
@@ -119,17 +126,17 @@ func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 // per affected logical stream through the pool: the pooled stream terminates
 // with a broker stream-lost error once the accepted physical carriage dies.
 func TestPoolSurfacesPhysicalLossPerStream(t *testing.T) {
-	binding := mustServerBinding(t)
+	binding := mustRemoteServerBinding(t)
 	policy := binding.Policy()
 	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
 	server.serve()
-	resolver := p3cResolver(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+	resolver := p3cResolver(func(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 		return muxEndpoint(binding.Identity(), policy, "raw://"+request.Endpoint), nil
 	})
 
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings())
 	require.NoError(t, err)
-	pool, err := broker.NewPool(1, resolver, connector, newListenerClock(time.Now()), p3cPoolLimits())
+	pool, err := broker.NewPool(1, resolver, p3cBinder{}, connector, newListenerClock(time.Now()), p3cPoolLimits())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close() })
 

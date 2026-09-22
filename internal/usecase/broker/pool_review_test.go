@@ -24,7 +24,7 @@ func TestPoolAdapterFailures(t *testing.T) {
 			{"semantic", ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy}, ports.BrokerErrorConflictingPolicy},
 		} {
 			t.Run(stage+"/"+tc.name, func(t *testing.T) {
-				p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+				p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 					if stage == "connector" {
 						return nil, tc.err
 					}
@@ -33,8 +33,8 @@ func TestPoolAdapterFailures(t *testing.T) {
 					}}, nil
 				})
 				if stage == "resolver" {
-					p.resolver = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
-						return ports.BrokerResolvedEndpoint{}, tc.err
+					p.routes = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+						return ports.BrokerDialTarget{}, tc.err
 					})
 				}
 				id, _ := p.RegisterClient()
@@ -51,7 +51,7 @@ func TestPoolAdapterFailures(t *testing.T) {
 func TestPoolRejectedPaths(t *testing.T) {
 	for _, name := range []string{"closed", "epoch", "invalid endpoint", "nil raw", "retiring"} {
 		t.Run(name, func(t *testing.T) {
-			p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+			p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 				return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 					return nil, nil
 				}}, nil
@@ -64,8 +64,8 @@ func TestPoolRejectedPaths(t *testing.T) {
 			case "epoch":
 				req.Epoch++
 			case "invalid endpoint":
-				p.resolver = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
-					return ports.BrokerResolvedEndpoint{}, nil
+				p.routes = poolResolver(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+					return ports.BrokerDialTarget{}, nil
 				})
 			case "retiring":
 				key := poolKey{"canonical", poolPolicy()}
@@ -96,9 +96,34 @@ func TestPoolRejectedPaths(t *testing.T) {
 	}
 }
 
+func TestPoolRedirectRejectsUnavailableWinnerWithoutResurrectingRefs(t *testing.T) {
+	for _, state := range []string{"removed", "retiring"} {
+		t.Run(state, func(t *testing.T) {
+			p, _ := setupPool(t, func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) { panic("unused") })
+			key := poolKey{"canonical", poolPolicy()}
+			winner := &poolEntry{key: key, refs: 2}
+			loser := &poolEntry{redirect: winner, refs: 1}
+			reservation := &reservation{entry: loser}
+			if state == "retiring" {
+				winner.retiring = true
+				p.entries[key] = winner
+			}
+
+			got, err := p.redirectReservation(loser, reservation)
+			require.Nil(t, got)
+			var typed ports.BrokerError
+			require.ErrorAs(t, err, &typed)
+			require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
+			require.Equal(t, 1, loser.refs)
+			require.Equal(t, 2, winner.refs)
+			require.Same(t, loser, reservation.entry)
+		})
+	}
+}
+
 func TestPoolPostOpenPhysicalLoss(t *testing.T) {
 	raw := newFakeLogical()
-	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		f := &fakePhysical{endpoint: e, done: make(chan struct{})}
 		f.open = func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 			_ = f.Close()
@@ -118,7 +143,7 @@ func TestPoolPostOpenPhysicalLoss(t *testing.T) {
 func TestPoolTerminalPrecedence(t *testing.T) {
 	for _, name := range []string{"physical over logical", "request over physical", "shutdown over physical"} {
 		t.Run(name, func(t *testing.T) {
-			p, _ := setupPool(t, func(context.Context, ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+			p, _ := setupPool(t, func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 				panic("unused")
 			})
 			ctx, cancel := context.WithCancel(context.Background())
@@ -193,7 +218,7 @@ func TestPooledStreamPreservesCloseError(t *testing.T) {
 func TestPoolCaps(t *testing.T) {
 	for _, name := range []string{"clients", "streams", "physical"} {
 		t.Run(name, func(t *testing.T) {
-			p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+			p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 				return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
 			})
 			p.limits.Clients = 1
@@ -210,8 +235,8 @@ func TestPoolCaps(t *testing.T) {
 			defer s.Close()
 			if name == "physical" {
 				p.limits.Streams = 2
-				p.resolver = poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
-					return ports.BrokerResolvedEndpoint{Identity: "other", Policy: r.Policy, Address: "route"}, nil
+				p.routes = poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+					return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.Policy, Address: "route", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "other", Bound: true}}, nil
 				})
 			}
 			_, err = p.OpenStream(context.Background(), poolRequest(id, 2))
@@ -221,7 +246,7 @@ func TestPoolCaps(t *testing.T) {
 }
 
 func TestPoolShutdownStreamsCancelled(t *testing.T) {
-	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
 	})
 	id, _ := p.RegisterClient()

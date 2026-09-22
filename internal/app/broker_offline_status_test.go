@@ -296,7 +296,7 @@ func TestBrokerStatusDialOnlyReadyAgainstLiveSandbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, serveDeps)
-	awaitSandboxReady(t, ready)
+	awaitSandboxReady(t, ready, done)
 
 	deps := defaultBrokerStatusDeps()
 	var out bytes.Buffer
@@ -306,9 +306,8 @@ func TestBrokerStatusDialOnlyReadyAgainstLiveSandbox(t *testing.T) {
 	require.Equal(t, "ready", report.Status)
 	require.Positive(t, report.Epoch)
 	require.Positive(t, report.Revision)
-	// The sandbox registry restores from its own empty durable store; the
-	// provisioned endpoints feed the resolver, not the host inventory.
-	require.Zero(t, report.HostCount)
+	// Provisioned endpoints seed durable broker membership before serving.
+	require.Equal(t, 1, report.HostCount)
 
 	awaitSandboxCancel(t, cancel, done)
 	requireProductionUntouched(t, prodRuntime, prodState)

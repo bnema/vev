@@ -24,13 +24,15 @@ message Hello {
   bool true_color = 12;
   uint32 max_output_in_flight = 13;
   repeated string env = 14;
-  RemoteTarget remote_target = 15; // optional pointer
+  reserved 15;
+  reserved "remote_target";
   uint32 environment_policy = 16; // 0 = client-owned, 1 = daemon-owned
   ExactTarget exact_target = 17; // optional pointer
   string preferred_tab_id = 18;
   uint32 navigation_capabilities = 19;
   bool remote = 20;
   bool kitty_direct_graphics = 21;
+  SessionAttachTarget session_target = 22; // optional pointer
 }
 
 // Welcome answers an accepted attach.
@@ -61,12 +63,14 @@ message AttachTarget {
   string endpoint = 2;
   string session = 3;
   uint32 intent = 4;
-  RemoteTarget remote_target = 5; // optional pointer
+  reserved 5;
+  reserved "remote_target";
   uint32 environment_policy = 6;
   ExactTarget exact_target = 7; // optional pointer
   bool same_peer = 8;
   string preferred_tab_id = 9;
   uint64 cause_action_id = 10;
+  SessionAttachTarget session_target = 11; // optional pointer
 }
 
 // SessionInfo is one row of a session listing.

@@ -73,7 +73,15 @@ func (s outputApplyState) nextView(update protocol.UIViewUpdate) (next outputApp
 	return s, true, false
 }
 
+// uiContext composes one publication context from the captured identity and a
+// presentation. It applies the published-context shape rule: only Attached
+// carries the session route, the focus, and the committed output boundary;
+// Picker and Connecting carry the handle and their status with every session
+// field zeroed, so an unattached capture can never present session metadata.
 func (s outputApplyState) uiContext(identity ports.UIContext, status ports.UIPresentationStatus) ports.UIContext {
+	if status != ports.UIStatusAttached {
+		return ports.UIContext{AttachmentHandle: identity.AttachmentHandle, Status: status}
+	}
 	return ports.UIContext{
 		AttachmentHandle: identity.AttachmentHandle, Generation: identity.Generation,
 		Route: s.context.Route, TabID: s.context.TabID, FocusedPaneID: s.context.FocusedPaneID,

@@ -187,26 +187,57 @@ func (u *UI) ActionComplete(actionID uint64) <-chan struct{} {
 	return nil
 }
 
-func (u *UI) status(status ports.UIPresentationStatus) {
+// publishPresentation publishes one unattached presentation of this run. It
+// writes a cleaned context: the run's stable handle and the presentation only,
+// with no session identity and no committed output boundary, and it never
+// changes the internal generation counter. A caller therefore can never fence an
+// action against a fabricated generation, and a capture in Picker or Connecting
+// never leaks session metadata.
+//
+// Attached is deliberately not publishable here. Only the attachment foreground
+// may publish the attached presentation, and only once its first frame was
+// written, flushed, and committed, carrying the real action generation. A closed
+// UI observation channel reports ErrUIUnavailable instead of inventing state.
+func (u *UI) publishPresentation(status ports.UIPresentationStatus) error {
+	if status != ports.UIStatusPicker && status != ports.UIStatusConnecting {
+		return &ports.UIError{Code: ports.UIErrInvalidRequest}
+	}
 	publication, ok := u.state.(ports.UIOutputTransaction)
 	if !ok {
-		return
+		return ports.ErrUIUnavailable
 	}
-	snapshot, err := u.state.Snapshot()
-	if err != nil {
-		return
+	return publication.PublishContext(presentationContext(u.handle, status, ports.UIContext{}))
+}
+
+// PublishPresentation publishes one unattached presentation of this run through
+// the UI owner. It is the composition seam for the presentations the supervisor
+// does not itself drive — the initial Picker a driver publishes before any
+// broker attempt — and it keeps the private shape rule in one place. Attached is
+// refused: only the admitted attachment foreground may publish it.
+func (u *UI) PublishPresentation(status ports.UIPresentationStatus) error {
+	if u == nil {
+		return ports.ErrUIUnavailable
 	}
-	u.mu.Lock()
-	generation := u.generation
-	u.mu.Unlock()
-	snapshot.Context.AttachmentHandle = u.handle
-	snapshot.Context.Generation = generation
-	snapshot.Context.Status = status
-	_ = publication.PublishContext(snapshot.Context) // Unavailable capture remains unavailable.
+	return u.publishPresentation(status)
+}
+
+// presentationContext is the single shape rule for a published UI context. Only
+// Attached may carry the session identity, the committed output boundary, and
+// the real actionable generation; Picker and Connecting carry the run's stable
+// handle and their status alone, with every session field zeroed. It is applied
+// by every publisher, so a capture can never present session metadata as an
+// attachment and an unattached publication can never fence an action against a
+// generation the attachment never committed.
+func presentationContext(handle string, status ports.UIPresentationStatus, identity ports.UIContext) ports.UIContext {
+	if status == ports.UIStatusAttached {
+		identity.AttachmentHandle = handle
+		return identity
+	}
+	return ports.UIContext{AttachmentHandle: handle, Status: status}
 }
 
 // Observe relays the sink's single coalesced signal to bounded concurrent
-// waiters. The Runner owns this worker's lifetime.
+// waiters. Its caller owns this worker's lifetime.
 func (u *UI) Observe(ctx context.Context) {
 	defer func() {
 		u.mu.Lock()
@@ -259,12 +290,8 @@ func validateUIExpect(expect ports.UIExpect) bool {
 	if expect.Focus != nil && (domain.ValidateTabStableID(expect.Focus.TabID) != nil || domain.ValidatePaneStableID(expect.Focus.PaneID) != nil) {
 		return false
 	}
-	if expect.Status != nil {
-		switch *expect.Status {
-		case ports.UIStatusAttached, ports.UIStatusTransitioning, ports.UIStatusReconnecting, ports.UIStatusDetached:
-		default:
-			return false
-		}
+	if expect.Status != nil && !expect.Status.Valid() {
+		return false
 	}
 	return true
 }

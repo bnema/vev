@@ -216,14 +216,16 @@ type client struct {
 	err        error
 	sub        *clientSubscription
 	generation brokerwire.SubscriptionGeneration
-	highest    ports.BrokerStreamID
 	nextStream ports.BrokerStreamID
 	snapshot   ports.BrokerSnapshot
 	pending    map[ports.BrokerOperationID]chan operationResult
 	kinds      map[ports.BrokerOperationID]brokerwire.RegisterMutationKind
-	streams    map[ports.BrokerStreamID]*clientStream
-	closeOnce  sync.Once
-	done       chan struct{}
+	// The connection's own stream tracker is the anti-replay authority for
+	// this connection: it admits every identity at most once inside the bounded
+	// window, whether the open is afterwards accepted or refused.
+	streams   map[ports.BrokerStreamID]*clientStream
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 var _ ports.BrokerService = (*client)(nil)
@@ -349,11 +351,15 @@ func (c *client) dispatch(message brokerwire.ServerMessage) error {
 		}
 		cause := failureFromDetail(m.Error)
 		if cause == nil {
-			cause = ports.BrokerError{Code: ports.BrokerErrorUnavailable}
+			cause = ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "empty broker error frame"}
 		}
 		return cause
 	case brokerwire.Shutdown:
-		return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: m.Text}
+		text := m.Text
+		if text == "" {
+			text = "broker shutdown"
+		}
+		return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: text}
 	default:
 		return errors.Join(ErrProtocol, errors.New("brokeripc: unexpected server message"))
 	}
@@ -402,6 +408,27 @@ func (c *client) completeOperation(operation ports.BrokerOperationID, result ope
 
 // ConnectionID returns the identity assigned to this connection at accept.
 func (c *client) ConnectionID() ports.BrokerConnectionID { return c.scope.Connection }
+
+// NextStreamID allocates this connection's next logical stream identity. It is
+// strictly monotone, never zero, and consumes no wire frame: it is the local
+// allocation of the calling service, which then carries the exact
+// epoch/connection/stream triplet on OpenStream. It performs no I/O and refuses
+// a closed connection or an exhausted counter rather than wrapping.
+func (c *client) NextStreamID() (ports.BrokerStreamID, error) {
+	if c == nil {
+		return 0, ErrConnectionClosed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, c.terminalErrorLocked()
+	}
+	if c.nextStream == ^ports.BrokerStreamID(0) {
+		return 0, ports.BrokerAdmissionLimit
+	}
+	c.nextStream++
+	return c.nextStream, nil
+}
 
 // Done closes exactly once when this connection is terminal: the carriage
 // failed, the broker retired it, or this side closed it. Err is stable
@@ -476,9 +503,13 @@ func (c *client) Subscribe() (ports.BrokerSubscription, error) {
 }
 
 // OpenStream opens one independently cancellable logical stream. An absent
-// epoch, connection, or stream identity is filled from this connection; a
-// caller-supplied identity that belongs elsewhere, or a stream identity that is
-// not strictly increasing, is refused as stale.
+// epoch or connection identity is filled from this connection and a
+// caller-supplied identity that belongs elsewhere is refused as stale. The
+// stream identity must be the exact one the calling service allocated with
+// NextStreamID: it is admitted on this connection's bounded anti-replay window
+// before any frame travels, so a duplicate and an identity evicted past the
+// window are both refused, while a concurrent lower identity that was allocated
+// first is still admitted.
 func (c *client) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	scoped, err := c.scopeRequest(request)
 	if err != nil {
@@ -491,7 +522,10 @@ func (c *client) OpenStream(ctx context.Context, request ports.BrokerOpenStreamR
 		return nil, err
 	}
 	// Admit the identity on the connection's own tracker before any frame
-	// travels, so a racing StreamOpened can never precede local admission.
+	// travels, so a racing StreamOpened can never precede local admission. The
+	// tracker applies the bounded anti-replay window: a duplicate and an
+	// identity evicted past the window are refused, while a concurrent lower
+	// identity that was allocated first is still admitted.
 	if err := c.conn.OpenStream(scoped.Stream); err != nil {
 		c.mu.Unlock()
 		return nil, admissionError(err)
@@ -514,6 +548,7 @@ func (c *client) OpenStream(ctx context.Context, request ports.BrokerOpenStreamR
 		Local:    scoped.Local,
 		Endpoint: scoped.Endpoint, Registration: scoped.Registration,
 		Target: scoped.Target, Env: scoped.Env, Policy: scoped.Policy,
+		StartMode: scoped.StartMode,
 	}); err != nil {
 		c.retireStream(scoped.Stream, err)
 		return nil, err
@@ -615,8 +650,12 @@ func (c *client) Close() error {
 	return nil
 }
 
-// scopeRequest fills an absent identity from this connection and refuses one
-// that belongs elsewhere, then validates the resulting request.
+// scopeRequest fills an absent epoch or connection identity from this
+// connection and refuses one that belongs elsewhere, then validates the
+// resulting request. The stream identity must be present: after cutover the
+// calling service allocates it with NextStreamID and carries the exact
+// epoch/connection/stream triplet, so this adapter never invents an identity on
+// an incomplete request.
 func (c *client) scopeRequest(request ports.BrokerOpenStreamRequest) (ports.BrokerOpenStreamRequest, error) {
 	scoped := request
 	if scoped.Epoch == 0 {
@@ -629,23 +668,9 @@ func (c *client) scopeRequest(request ports.BrokerOpenStreamRequest) (ports.Brok
 	} else if scoped.Connection != c.scope.Connection {
 		return ports.BrokerOpenStreamRequest{}, errors.Join(ErrScopeMismatch, ports.BrokerAdmissionStale)
 	}
-	c.mu.Lock()
-	switch {
-	case scoped.Stream == 0:
-		if c.nextStream == ^ports.BrokerStreamID(0) {
-			c.mu.Unlock()
-			return ports.BrokerOpenStreamRequest{}, ports.BrokerAdmissionLimit
-		}
-		c.nextStream++
-		scoped.Stream = c.nextStream
-		c.highest = scoped.Stream
-	case scoped.Stream <= c.highest:
-		c.mu.Unlock()
-		return ports.BrokerOpenStreamRequest{}, errors.Join(ErrScopeMismatch, ports.BrokerAdmissionStale)
-	default:
-		c.highest = scoped.Stream
+	if scoped.Stream == 0 {
+		return ports.BrokerOpenStreamRequest{}, errors.Join(ports.BrokerAdmissionInvalid, errors.New("brokeripc: open stream request has no stream identity"))
 	}
-	c.mu.Unlock()
 	if err := scoped.Validate(); err != nil {
 		return ports.BrokerOpenStreamRequest{}, errors.Join(ports.BrokerAdmissionInvalid, err)
 	}
@@ -742,7 +767,7 @@ func (c *client) sendAsync(message brokerwire.ClientMessage) error {
 	if async, ok := c.transport.(wire.AsyncTransport); ok {
 		if err := async.SendAsync(wire.Envelope{Payload: payload}); err != nil {
 			if errors.Is(err, streamframe.ErrBackpressure) {
-				return ports.BrokerError{Code: ports.BrokerErrorUnavailable}
+				return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker IPC send queue is full"}
 			}
 			return transportFailure(err)
 		}

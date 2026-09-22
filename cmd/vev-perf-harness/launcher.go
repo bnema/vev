@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,8 +67,10 @@ type cliLauncher struct {
 }
 
 type peerRoute struct {
-	mapping processMapping
-	command roleCommand
+	mapping    processMapping
+	command    roleCommand
+	runtimeDir string
+	stateDir   string
 }
 
 type preparedPeer struct {
@@ -91,6 +94,46 @@ type terminalOutput interface {
 	Close() error
 }
 
+type capturedTerminalOutput struct {
+	file *os.File
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+type synchronizedBuffer struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *synchronizedBuffer) WriteString(value string) {
+	_, _ = b.Write([]byte(value))
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.String()
+}
+
+func (o *capturedTerminalOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	_, _ = o.data.Write(p)
+	o.mu.Unlock()
+	return o.file.Write(p)
+}
+func (o *capturedTerminalOutput) Close() error { return o.file.Close() }
+func (o *capturedTerminalOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.data.String()
+}
+
 var setPTYWinsize = rawterm.SetWinsize
 
 type cliProcess struct {
@@ -108,7 +151,12 @@ type cliProcess struct {
 	shutdown         func() error
 	cleanupRuntime   func() error
 	terminalReady    bool
-	readyPath        string
+	readyCommand     *exec.Cmd
+	startCommand     *exec.Cmd
+	configureCommand *exec.Cmd
+	serverOutput     *synchronizedBuffer
+	peerCommand      *exec.Cmd
+	peerDone         chan error
 	closeResult      error
 }
 
@@ -146,25 +194,80 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	// a role working directory: daemon-owned subprocess cleanup may otherwise
 	// treat the evidence directory as its working tree and remove a preallocated
 	// trace while a later repetition is being merged.
-	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_PERF_BIN", "VEV_REMOTE_TRANSPORT", "XDG_RUNTIME_DIR", "XDG_STATE_HOME"), traceEnvironment(m)...)
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_PERF_BIN", "VEV_REMOTE_TRANSPORT", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME"), traceEnvironment(m)...)
 	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+runtimeDir,
-		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "TERM=xterm-256color", "VEV_PERF_BIN="+bin)
-	if m.Role == "client" {
-		l.mu.Lock()
-		peer, routed := l.peers[runDir]
-		l.mu.Unlock()
-		if routed {
-			mode, err := remoteMode(peer.command.Transport)
-			if err != nil {
-				return nil, err
-			}
-			cmd.Env = append(cmd.Env, "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
+		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "XDG_CONFIG_HOME="+filepath.Join(runDir, "config"), "TERM=xterm-256color", "SHELL=/bin/sh", "VEV_PERF_BIN="+bin)
+	l.mu.Lock()
+	peer, routed := l.peers[runDir]
+	l.mu.Unlock()
+	if routed && (m.Role == "client" || m.Role == "daemon") {
+		mode, err := remoteMode(peer.command.Transport)
+		if err != nil {
+			return nil, err
 		}
+		cmd.Env = append(withoutEnv(cmd.Env, "PATH", "VEV_REMOTE_TRANSPORT"), "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
 	}
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, err
 	}
-	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1), readyPath: filepath.Join(runtimeDir, "vev", "daemon.sock")}
+	if m.Role == "daemon" {
+		configDir := filepath.Join(runDir, "config", "vev")
+		if err := safedir.EnsurePrivate(configDir); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "broker.json"), []byte(`{"marker":"vev.broker.offline/v1","registrations":[]}`), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1), serverOutput: &synchronizedBuffer{}}
+	if m.Role == "daemon" {
+		p.startCommand = exec.Command(bin, "ls")
+		p.startCommand.Env = cmd.Env
+		p.readyCommand = exec.Command(bin, "_broker-ready", "--require", "local-catalogue", "--timeout", "10s")
+		p.readyCommand.Env = cmd.Env
+		l.mu.Lock()
+		peer, routed := l.peers[runDir]
+		l.mu.Unlock()
+		if routed {
+			mode, modeErr := remoteMode(peer.command.Transport)
+			if modeErr != nil {
+				return nil, modeErr
+			}
+			p.configureCommand = exec.Command(bin, "host", "add", "harness@127.0.0.1")
+			p.configureCommand.Env = append(withoutEnv(cmd.Env, "PATH", "VEV_REMOTE_TRANSPORT"), "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
+			peerStart := exec.Command(bin, "--daemon")
+			peerStart.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "PATH"),
+				"PATH="+runDir+":"+os.Getenv("PATH"),
+				"XDG_RUNTIME_DIR="+peer.runtimeDir,
+				"XDG_STATE_HOME="+peer.stateDir,
+				"TERM=xterm-256color")
+			peerStartOutput := &bytes.Buffer{}
+			peerStart.Stdin, peerStart.Stdout, peerStart.Stderr = nil, peerStartOutput, peerStartOutput
+			if err := peerStart.Start(); err != nil {
+				return nil, fmt.Errorf("start remote peer daemon: %w", err)
+			}
+			peerSocket := filepath.Join(peer.runtimeDir, "vev", "daemonmux.sock")
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if info, err := os.Stat(peerSocket); err == nil && info.Mode()&os.ModeSocket != 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					return nil, fmt.Errorf("remote peer daemon did not publish %s (output=%q)", peerSocket, peerStartOutput.String())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			p.peerCommand = peerStart
+			p.peerDone = make(chan error, 1)
+			go func() {
+				err := peerStart.Wait()
+				if err != nil {
+					p.serverOutput.WriteString(" remote-peer: " + err.Error() + " " + peerStartOutput.String())
+				}
+				p.peerDone <- err
+			}()
+		}
+	}
 	if m.Role == "daemon" {
 		p.cleanupRuntime = func() error { return l.releaseRuntime(runDir) }
 	}
@@ -197,7 +300,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 			return nil, err
 		}
 		_ = slave.Close()
-		p.pty, p.output, p.chunks, p.done = master, output, make(chan []byte, 32), make(chan struct{})
+		p.pty, p.output, p.chunks, p.done = master, &capturedTerminalOutput{file: output}, make(chan []byte, 32), make(chan struct{})
 		// Stop workload generation through the attached shell before any signal.
 		// A normal shell exit makes the daemon detach the client; the client then
 		// closes and waits for its ssh transport, allowing a traced _stdio
@@ -213,7 +316,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		if err != nil {
 			return nil, err
 		}
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, p.serverOutput, p.serverOutput
 		if err := cmd.Start(); err != nil {
 			_ = devNull.Close()
 			if p.cleanupRuntime != nil {
@@ -224,9 +327,9 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		_ = devNull.Close()
 	}
 	if m.Role == "daemon" {
-		// Stop the foreground daemon through its public CLI before its bounded
-		// process-group fallback. This lets blocked carriage operations close and
-		// serialize their failed end marks instead of being cut off by SIGKILL.
+		// Ask the daemon owned by the foreground broker to stop before the
+		// broker's bounded process-group fallback. This lets blocked carriage
+		// operations serialize their failed end marks before either process exits.
 		p.shutdown = func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -310,7 +413,13 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	if len(role.Args) != 1 || role.Args[0] != "_stdio" {
 		return nil, fail(fmt.Errorf("unsupported public peer command %q", role.Args))
 	}
-	route := peerRoute{mapping: m, command: role}
+	route := peerRoute{mapping: m, command: role, runtimeDir: filepath.Join(runDir, "peer-runtime"), stateDir: filepath.Join(runDir, "peer-state")}
+	if err := safedir.EnsurePrivate(route.runtimeDir); err != nil {
+		return nil, fail(err)
+	}
+	if err := safedir.EnsurePrivate(route.stateDir); err != nil {
+		return nil, fail(err)
+	}
 	shim := filepath.Join(runDir, "ssh")
 	// The SSH command seam forwards the public _stdio entrypoint with the
 	// peer's unique trace identity, so the peer carrying client traffic is the
@@ -318,8 +427,8 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	body := fmt.Sprintf(`#!/bin/sh
 set -eu
 case "$*" in
-  *"_stdio"*)
-    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[6]q VEV_PERF_RUN=%[7]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _stdio
+  *"_broker-mux-stdio"*)
+    exec env VEV_PERF_TRACE=%[1]q VEV_PERF_PROCESS_ID=%[2]q VEV_PERF_SCENARIO=%[6]q VEV_PERF_RUN=%[7]d XDG_RUNTIME_DIR=%[3]q XDG_STATE_HOME=%[4]q TERM=xterm-256color %[5]q _broker-mux-stdio --production --daemon-start existing-only
     ;;
   *) echo 'vev harness ssh seam rejected non-vev command' >&2; exit 64 ;;
 esac
@@ -402,35 +511,48 @@ func (p *cliProcess) copyTerminal() {
 	}
 }
 
-// WaitReady confirms the explicitly launched public daemon owns its unique
-// socket before a client is launched. Without this barrier, the normal client
-// auto-spawn behavior can create an unmanifested daemon process during startup.
+// WaitReady executes the production dial-only readiness contract under the
+// exact XDG environment shared by the servers and clients. Its bounded JSON
+// stdout, stderr and owner-process death are retained in any failure.
 func (p *cliProcess) WaitReady() error {
-	if p.readyPath == "" {
-		return errors.New("daemon readiness path is empty")
+	if p.startCommand != nil {
+		// The first control stream is only a start authorization. The daemon may
+		// close that stream while publishing its first catalogue, so readiness is
+		// decided exclusively by the semantic probe below.
+		_, _ = p.startCommand.CombinedOutput()
 	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
-	for {
-		if info, err := os.Stat(p.readyPath); err == nil {
-			if info.Mode()&os.ModeSocket == 0 {
-				return fmt.Errorf("daemon readiness path %s is not a socket", p.readyPath)
-			}
-			return nil
+	if p.readyCommand == nil {
+		return errors.New("broker readiness command is empty")
+	}
+	var stdout, stderr bytes.Buffer
+	p.readyCommand.Stdout, p.readyCommand.Stderr = &stdout, &stderr
+	probeDone := make(chan error, 1)
+	if err := p.readyCommand.Start(); err != nil {
+		return fmt.Errorf("start broker readiness probe: %w", err)
+	}
+	go func() { probeDone <- p.readyCommand.Wait() }()
+	select {
+	case err := <-probeDone:
+		if err != nil {
+			return fmt.Errorf("broker readiness probe: %w (stdout=%q stderr=%q)", err, stdout.String(), stderr.String())
 		}
-		select {
-		case err := <-p.waitErr:
-			p.waitErr <- err
-			if err == nil {
-				return errors.New("daemon exited before readiness")
-			}
-			return fmt.Errorf("daemon exited before readiness: %w", err)
-		case <-ticker.C:
-		case <-timer.C:
-			return fmt.Errorf("timed out waiting for daemon socket %s", p.readyPath)
+		var report struct {
+			Status string `json:"status"`
 		}
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &report); err != nil || report.Status != "ready" {
+			return fmt.Errorf("broker readiness invalid JSON/status: %v (stdout=%q stderr=%q)", err, stdout.String(), stderr.String())
+		}
+		if p.configureCommand != nil {
+			if output, err := p.configureCommand.CombinedOutput(); err != nil {
+				return fmt.Errorf("configure remote broker membership: %w (output=%q)", err, output)
+			}
+		}
+		return nil
+	case err := <-p.waitErr:
+		p.waitErr <- err
+		_ = p.readyCommand.Process.Kill()
+		probeErr := <-probeDone
+		return fmt.Errorf("production server group died before readiness: %v (probe=%v stdout=%q stderr=%q servers=%q)", err, probeErr, stdout.String(), stderr.String(), p.serverOutput.String())
 	}
 }
 
@@ -483,16 +605,20 @@ func (p *cliProcess) Measure(input []byte, injected, flushed func() error) error
 func (p *cliProcess) waitForTerminalReady() error {
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
+	var observed []byte
 	for {
 		select {
 		case chunk, ok := <-p.chunks:
 			if !ok {
 				return p.terminalClosedError("readiness output")
 			}
-			if len(chunk) == 0 {
-				continue
+			observed = append(observed, chunk...)
+			if bytes.Contains(observed, []byte("$")) || bytes.Contains(observed, []byte("#")) {
+				return nil
 			}
-			return nil
+			if len(observed) > 64*1024 {
+				observed = append([]byte(nil), observed[len(observed)-32*1024:]...)
+			}
 		case err := <-p.waitErr:
 			// Keep the exit result available to Close, which owns reaping.
 			p.waitErr <- err
@@ -501,9 +627,19 @@ func (p *cliProcess) waitForTerminalReady() error {
 			}
 			return fmt.Errorf("client exited before readiness output: %w", err)
 		case <-timer.C:
+			if captured, ok := p.output.(*capturedTerminalOutput); ok {
+				return fmt.Errorf("timed out waiting for client readiness output (terminal=%q)", tailString(captured.String(), 4096))
+			}
 			return errors.New("timed out waiting for client readiness output")
 		}
 	}
+}
+
+func tailString(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[len(value)-limit:]
 }
 
 func (p *cliProcess) terminalClosedError(boundary string) error {
@@ -541,6 +677,9 @@ func (p *cliProcess) waitForTerminalMarker(marker, input []byte) error {
 			}
 			return fmt.Errorf("client exited before application output: %w", err)
 		case <-timer.C:
+			if captured, ok := p.output.(*capturedTerminalOutput); ok {
+				return fmt.Errorf("timed out waiting for application terminal output (terminal=%q)", captured.String())
+			}
 			return errors.New("timed out waiting for application terminal output")
 		}
 	}
@@ -669,6 +808,17 @@ func (p *cliProcess) Close() error {
 		}
 		if drainDone != nil {
 			<-drainDone
+		}
+		if p.peerCommand != nil && p.peerCommand.Process != nil {
+			_ = p.peerCommand.Process.Signal(syscall.SIGTERM)
+			if p.peerDone != nil {
+				select {
+				case <-p.peerDone:
+				case <-time.After(2 * time.Second):
+					_ = p.peerCommand.Process.Kill()
+					<-p.peerDone
+				}
+			}
 		}
 		if p.output != nil {
 			if err := p.output.Close(); p.closeResult == nil {

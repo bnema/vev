@@ -354,7 +354,7 @@ func TestBrokerClientVariants(t *testing.T) {
 		{"add_host", AddHost{Epoch: 7, Connection: connection, Operation: operation, Endpoint: "dev@host:22", Policy: testPolicy()}, 105},
 		{"remove_host", RemoveHost{Epoch: 7, Connection: connection, Operation: operation, Registration: testRegistration()}, 106},
 		{"reconcile", Reconcile{Epoch: 7, Connection: connection, Registration: testRegistration()}, 107},
-		{"open_stream", OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"TERM=xterm"}, Policy: testPolicy()}, 108},
+		{"open_stream", OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"TERM=xterm"}, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}, 108},
 		{"client_stream_data", ClientStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")}, 109},
 		{"close_stream", CloseStream{Epoch: 7, Connection: connection, Stream: 3}, 110},
 		{"update_host_policy", UpdateHostPolicy{Epoch: 7, Connection: connection, Operation: operation, Registration: testRegistration(), Policy: testPolicy()}, 111},
@@ -384,6 +384,9 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 		return OpenStream{
 			Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment,
 			Endpoint: "dev@host:22", Registration: testRegistration(), Policy: testPolicy(),
+			// An attachment or creation always carries the explicit
+			// start-if-needed authorization; the zero mode is refused.
+			StartMode: ports.BrokerDaemonStartIfNeeded,
 		}
 	}
 	roundTrips := []struct {
@@ -409,7 +412,7 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 		}()},
 		{"control carries none", OpenStream{
 			Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl,
-			Local: true, Policy: testPolicy(),
+			Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
 		}},
 	}
 	for _, tc := range roundTrips {
@@ -455,7 +458,17 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 			}(),
 			"control with admission": OpenStream{
 				Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl,
-				Local: true, Policy: testPolicy(), Admission: ports.BrokerAdmissionExact,
+				Local: true, Policy: testPolicy(), Admission: ports.BrokerAdmissionExact, StartMode: ports.BrokerDaemonStartIfNeeded,
+			},
+			"attachment with zero start mode": func() OpenStream { m := exact(); m.StartMode = 0; return m }(),
+			"attachment with existing-only start mode": func() OpenStream {
+				m := exact()
+				m.StartMode = ports.BrokerDaemonExistingOnly
+				return m
+			}(),
+			"observation with start-if-needed start mode": OpenStream{
+				Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamObservation,
+				Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
 			},
 		}
 		for name, message := range cases {
@@ -476,6 +489,59 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 		require.NoError(t, proto.Unmarshal(raw, envelope))
 		envelope.GetOpenStream().Admission = 9
 		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+
+	t.Run("start mode round-trips and is never defaulted", func(t *testing.T) {
+		// The mode round-trips with the purpose it is legal for: an existing-only
+		// authorization belongs to control/observation, a start-if-needed one to
+		// attachment/control.
+		control := func(mode ports.BrokerDaemonStartMode) OpenStream {
+			return OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: mode}
+		}
+		for _, message := range []OpenStream{
+			control(ports.BrokerDaemonExistingOnly),
+			control(ports.BrokerDaemonStartIfNeeded),
+			func() OpenStream {
+				m := base()
+				m.Admission = ports.BrokerAdmissionExact
+				m.Target = testTarget()
+				m.StartMode = ports.BrokerDaemonStartIfNeeded
+				return m
+			}(),
+		} {
+			decoded, err := DecodeClient(mustEncodeClient(t, message), testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			admitting, ok := decoded.(OpenStream)
+			require.True(t, ok)
+			require.Equal(t, message.StartMode, admitting.StartMode)
+		}
+		// An absent wire mode is refused, never widened into a spawn-capable
+		// default, and an unknown code is refused too.
+		message := base()
+		message.Admission = ports.BrokerAdmissionExact
+		message.Target = testTarget()
+		raw := mustEncodeClient(t, message)
+		envelope := &wire.BrokerClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpenStream().StartMode = 0
+		mutated, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		envelope.GetOpenStream().StartMode = 3
+		mutated, err = proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		// An observation that authorized a spawn is refused rather than narrowed.
+		envelope.GetOpenStream().Purpose = 3
+		envelope.GetOpenStream().StartMode = 2
+		envelope.GetOpenStream().Target = nil
+		envelope.GetOpenStream().Admission = 0
+		mutated, err = proto.Marshal(envelope)
 		require.NoError(t, err)
 		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
@@ -949,7 +1015,7 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("taxonomy switches", func(t *testing.T) {
-		raw := mustEncodeClient(t, OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()})
+		raw := mustEncodeClient(t, OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded})
 		envelope := &wire.BrokerClientEnvelope{}
 		require.NoError(t, wire.ScanEnvelope(envelope, raw))
 		require.NoError(t, proto.Unmarshal(raw, envelope))
@@ -981,11 +1047,11 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("env without equals refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"NOEQUALS"}, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Env: []string{"NOEQUALS"}, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("invalid policy refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: ports.BrokerPolicy{}}, testEnvelopeCeiling, testChunkCeiling)
+		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: ports.BrokerPolicy{}, StartMode: ports.BrokerDaemonStartIfNeeded}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("snapshot revision zero refused", func(t *testing.T) {
@@ -1075,7 +1141,7 @@ func TestBrokerCorruptInputSmoke(t *testing.T) {
 		mustEncodeClient(t, AddHost{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x21), Endpoint: "dev@host:22", Policy: testPolicy()}),
 		mustEncodeClient(t, RemoveHost{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x22), Registration: testRegistration()}),
 		mustEncodeClient(t, UpdateHostPolicy{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x23), Registration: testRegistration(), Policy: testPolicy()}),
-		mustEncodeClient(t, OpenStream{Epoch: 7, Connection: testConnectionID(2), Stream: 3, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}),
+		mustEncodeClient(t, OpenStream{Epoch: 7, Connection: testConnectionID(2), Stream: 3, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}),
 		mustEncodeServer(t, SnapshotPart{Epoch: 7, Connection: testConnectionID(2), Generation: 1, Revision: 1, Index: 0, Part: SnapshotEnd{}}),
 		mustEncodeServer(t, OperationResult{Epoch: 7, Connection: testConnectionID(2), Operation: testOperationID(0x24), Outcome: ports.BrokerOutcomeFailed, Error: testErrorDetail(), HasError: true}),
 		mustEncodeServer(t, Shutdown{Epoch: 7, Connection: testConnectionID(2), Reason: ShutdownIdleExit}),
@@ -1108,7 +1174,7 @@ func fuzzClientSeeds(t testing.TB) [][]byte {
 		AddHost{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x11), Endpoint: "dev@host:22", Policy: testPolicy()},
 		RemoveHost{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x12), Registration: testRegistration()},
 		UpdateHostPolicy{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x13), Registration: testRegistration(), Policy: testPolicy()},
-		OpenStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()},
+		OpenStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded},
 		ClientStreamData{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Data: []byte("frame")},
 		CloseStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3},
 	} {

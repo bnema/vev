@@ -328,6 +328,7 @@ type supervisorTestService struct {
 	// records every exact request the supervisor admitted.
 	openStream func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)
 	openCalls  []ports.BrokerOpenStreamRequest
+	nextStream ports.BrokerStreamID
 }
 
 func newSupervisorTestService(id ports.BrokerConnectionID) *supervisorTestService {
@@ -341,6 +342,15 @@ func newSupervisorTestService(id ports.BrokerConnectionID) *supervisorTestServic
 }
 
 func (s *supervisorTestService) ConnectionID() ports.BrokerConnectionID { return s.id }
+
+// NextStreamID is the connection's only stream allocator, exactly like the
+// production service: the tested supervisor reads every identity here.
+func (s *supervisorTestService) NextStreamID() (ports.BrokerStreamID, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextStream++
+	return s.nextStream, nil
+}
 
 func (s *supervisorTestService) Done() <-chan struct{} { return s.done }
 
@@ -466,6 +476,9 @@ func (s *supervisorTestService) closedCh() <-chan struct{} { return s.closed }
 
 func mustSupervisor(t *testing.T, cfg SupervisorConfig) *Supervisor {
 	t.Helper()
+	if cfg.SessionEnvironment.Provenance == SessionEnvironmentUnspecified {
+		cfg.SessionEnvironment = SessionEnvironment{Provenance: SessionEnvironmentLocalCLI}
+	}
 	sup, err := NewSupervisor(cfg)
 	require.NoError(t, err)
 	return sup

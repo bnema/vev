@@ -218,3 +218,41 @@ func newTestTerminal(t *testing.T, columns, rows int) *Terminal {
 	t.Cleanup(terminal.Close)
 	return terminal
 }
+
+// TestTerminalUnattachedPublicationKeepsStatedIdentity pins the published-context
+// shape rule at the terminal: only an Attached publication inherits a missing
+// handle or generation. A Picker or Connecting publication is recorded exactly
+// as stated, so an unattached capture never shows an old attachment's handle or
+// a generation no attachment committed.
+func TestTerminalUnattachedPublicationKeepsStatedIdentity(t *testing.T) {
+	terminal := newTestTerminal(t, 4, 2)
+
+	// Establish an attached context with a real handle and generation.
+	if err := terminal.PublishContext(ports.UIContext{AttachmentHandle: "attached-handle", Generation: 6, Status: ports.UIStatusAttached}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := terminal.PublishContext(ports.UIContext{AttachmentHandle: "picker-handle", Status: ports.UIStatusPicker}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := terminal.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Context.AttachmentHandle != "picker-handle" || snapshot.Context.Generation != 0 || snapshot.Context.Status != ports.UIStatusPicker {
+		t.Fatalf("picker context = %#v", snapshot.Context)
+	}
+
+	// An Attached publication with a missing handle and generation still inherits
+	// them, exactly as the attachment foreground relies on.
+	if err := terminal.PublishContext(ports.UIContext{Status: ports.UIStatusAttached, OutputState: 3}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = terminal.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Context.AttachmentHandle != "picker-handle" || snapshot.Context.Generation != 0 {
+		t.Fatalf("attached continuity context = %#v", snapshot.Context)
+	}
+}

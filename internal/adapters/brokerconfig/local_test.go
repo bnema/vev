@@ -57,9 +57,10 @@ func loadDocument(t *testing.T, document any, reserved []string) (*Config, error
 // localRequest builds one local open-stream request under the fixture policy.
 func localRequest() ports.BrokerOpenStreamRequest {
 	return ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl,
-		Local:   true,
-		Policy:  testPolicy(),
+		Purpose:   ports.BrokerStreamControl,
+		Local:     true,
+		Policy:    testPolicy(),
+		StartMode: ports.BrokerDaemonStartIfNeeded,
 	}
 }
 
@@ -78,9 +79,9 @@ func TestLoadLocalBinding(t *testing.T) {
 	require.True(t, binding.Route.IsLocal())
 	require.Equal(t, localTestSocket, binding.Route.Path())
 
-	resolved, err := config.Resolver().Resolve(context.Background(), localRequest())
+	resolved, err := config.Resolver().ResolveDialTarget(context.Background(), localRequest())
 	require.NoError(t, err)
-	require.Equal(t, binding.Identity, resolved.Identity)
+	require.Equal(t, binding.Identity, resolved.ExpectedIdentity.Identity)
 	require.Equal(t, binding.Policy, resolved.Policy)
 	require.Equal(t, binding.Route.Address(), resolved.Address)
 
@@ -276,10 +277,10 @@ func TestResolveLocalSuccessAndRefusals(t *testing.T) {
 				cancel()
 				ctx = cancelled
 			}
-			resolved, err := tt.resolver.Resolve(ctx, tt.request)
+			resolved, err := tt.resolver.ResolveDialTarget(ctx, tt.request)
 			if tt.wantErr == nil {
 				require.NoError(t, err)
-				require.Equal(t, binding.Identity, resolved.Identity)
+				require.Equal(t, binding.Identity, resolved.ExpectedIdentity.Identity)
 				require.Equal(t, binding.Policy, resolved.Policy)
 				require.Equal(t, binding.Route.Address(), resolved.Address)
 				return

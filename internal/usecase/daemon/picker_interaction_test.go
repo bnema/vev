@@ -174,34 +174,6 @@ func TestPickerSnapshotPublishesFocusEligibility(t *testing.T) {
 	}
 }
 
-func TestRemotePickerHostRowStaysReachableWithoutCommitting(t *testing.T) {
-	d := newRemotePickerDaemon()
-	seedRemoteDirectory(t, d, ports.RemoteHostSnapshot{
-		Endpoint: "arch", Availability: domain.RemoteAvailabilityUnreachable,
-		InventoryKnown: true, LastSuccess: time.Unix(10, 0),
-	})
-	sess, ac, sends := addRemoteRefreshPickerOwner(t, d, "local")
-	token := sess.captureAttachmentCapability(ac, ac.transport())
-	effect, admitted := ac.beginAttachmentEffect(token)
-	require.True(t, admitted)
-	defer effect.End()
-
-	require.NoError(t, d.openPickerForAttachment(ac, effect, protocol.PickerIntentNavigation, moveSourceLocator{}, 0))
-	_ = awaitPickerOffer(t, sends)
-	snapshot := awaitPickerSnapshot(t, sends)
-
-	hostRows := 0
-	for _, line := range snapshot.Lines {
-		if line.Kind != protocol.PickerLineHost {
-			continue
-		}
-		hostRows++
-		require.True(t, line.Focusable, "a host status row stays reachable for inspection")
-		require.Zero(t, line.Actions, "a host status row never commits")
-	}
-	require.NotZero(t, hostRows, "an unreachable host publishes a status row")
-}
-
 func TestPickerOpenInstallsNoPresentationModel(t *testing.T) {
 	d, _, ac, sends, effect := pickerClientTestUnit(t)
 

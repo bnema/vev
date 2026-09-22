@@ -183,7 +183,7 @@ func sshMuxHelperCommand(mode string, extra ...string) sshstdio.CommandSpec {
 // specification and a counter of how many physical carriages it opened.
 func sshMuxDialer(spec sshstdio.CommandSpec) (RawCarrierDialer, *atomic.Int32) {
 	dials := &atomic.Int32{}
-	return func(ctx context.Context, _ string) (RawFramedTransport, error) {
+	return func(ctx context.Context, _ ports.BrokerDialTarget) (RawFramedTransport, error) {
 		dials.Add(1)
 		return sshstdio.DialMuxContext(ctx, spec, nil)
 	}, dials

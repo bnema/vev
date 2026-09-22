@@ -158,6 +158,7 @@ func TestNegotiatedChunkCeilingIsEnforced(t *testing.T) {
 	raw.send(t, brokerwire.OpenStream{
 		Epoch: scope.Epoch, Connection: scope.Connection, Stream: 1,
 		Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(),
+		StartMode: ports.BrokerDaemonStartIfNeeded,
 	})
 	opened, ok := raw.recv(t).(brokerwire.StreamOpened)
 	require.True(t, ok, "the stream must be established before chunk enforcement matters")
@@ -186,6 +187,7 @@ func TestScopeMismatchOpenStreamIsRefusedAsStale(t *testing.T) {
 	raw.send(t, brokerwire.OpenStream{
 		Epoch: scope.Epoch, Connection: ports.BrokerConnectionID{0x7f},
 		Stream: 1, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(),
+		StartMode: ports.BrokerDaemonStartIfNeeded,
 	})
 	closed, ok := raw.recv(t).(brokerwire.StreamClosed)
 	require.True(t, ok, "a mismatched scope must be answered with StreamClosed")
@@ -196,6 +198,7 @@ func TestScopeMismatchOpenStreamIsRefusedAsStale(t *testing.T) {
 	raw.send(t, brokerwire.OpenStream{
 		Epoch: scope.Epoch, Connection: scope.Connection, Stream: 1,
 		Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(),
+		StartMode: ports.BrokerDaemonStartIfNeeded,
 	})
 	_, ok = raw.recv(t).(brokerwire.StreamOpened)
 	require.True(t, ok)

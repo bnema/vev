@@ -113,7 +113,7 @@ type Hello struct {
 	KittyDirectGraphics    bool
 	MaxOutputInFlight      uint8
 	Env                    []string
-	RemoteTarget           *domain.RemoteSessionTarget
+	SessionTarget          *SessionAttachTarget
 	ExactTarget            *ExactSessionTarget
 	PreferredTabID         domain.TabStableID
 	EnvironmentPolicy      EnvironmentPolicy
@@ -271,7 +271,7 @@ type AttachTarget struct {
 	Endpoint          string
 	Session           string
 	Intent            uint8
-	RemoteTarget      *domain.RemoteSessionTarget
+	SessionTarget     *SessionAttachTarget
 	ExactTarget       *ExactSessionTarget
 	EnvironmentPolicy EnvironmentPolicy
 	SamePeer          bool
@@ -424,20 +424,20 @@ func ValidateHello(h Hello) error {
 		if h.Name != h.ExactTarget.SessionName {
 			return ErrInvalidHello
 		}
-		if h.RemoteTarget != nil && (h.RemoteTarget.LifecycleID != h.ExactTarget.LifecycleID || h.RemoteTarget.SessionName != h.ExactTarget.SessionName) {
+		if h.SessionTarget != nil && (h.SessionTarget.LifecycleID != h.ExactTarget.LifecycleID || h.SessionTarget.SessionName != h.ExactTarget.SessionName) {
 			return ErrInvalidHello
 		}
 	}
-	if h.RemoteTarget == nil {
+	if h.SessionTarget == nil {
 		return nil
 	}
 	if h.EnvironmentPolicy != EnvironmentPolicyDaemonOwned || (h.Intent != IntentAttach && h.Intent != IntentResume) {
 		return ErrInvalidHello
 	}
-	if err := validateRemoteTarget(*h.RemoteTarget); err != nil {
-		return fmt.Errorf("%w: remote target: %v", ErrInvalidHello, err)
+	if err := h.SessionTarget.Validate(); err != nil {
+		return fmt.Errorf("%w: session target: %v", ErrInvalidHello, err)
 	}
-	if h.Name != h.RemoteTarget.SessionName {
+	if h.Name != h.SessionTarget.SessionName {
 		return ErrInvalidHello
 	}
 	return nil
@@ -494,22 +494,22 @@ func ValidateAttachTarget(m AttachTarget) error {
 	if m.ExactTarget != nil && (m.ExactTarget.SessionName != m.Session || m.ExactTarget.Validate() != nil) {
 		return ErrInvalidAttachTarget
 	}
-	if m.SamePeer && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil) {
+	if m.SamePeer && (m.Endpoint != "" || m.SessionTarget != nil || m.ExactTarget == nil) {
 		return ErrInvalidAttachTarget
 	}
-	if m.PreferredTabID != "" && (m.Endpoint != "" || m.RemoteTarget != nil || m.ExactTarget == nil || m.Intent != IntentAttach || domain.ValidateTabStableID(m.PreferredTabID) != nil) {
+	if m.PreferredTabID != "" && (m.Endpoint != "" || m.SessionTarget != nil || m.ExactTarget == nil || m.Intent != IntentAttach || domain.ValidateTabStableID(m.PreferredTabID) != nil) {
 		return ErrInvalidAttachTarget
 	}
-	if m.RemoteTarget == nil {
+	if m.SessionTarget == nil {
 		return nil
 	}
-	if m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned || m.Intent != IntentAttach {
+	if m.Endpoint != "" || m.EnvironmentPolicy != EnvironmentPolicyDaemonOwned || m.Intent != IntentAttach {
 		return ErrInvalidAttachTarget
 	}
-	if err := validateRemoteTarget(*m.RemoteTarget); err != nil {
-		return fmt.Errorf("%w: remote target: %v", ErrInvalidAttachTarget, err)
+	if err := m.SessionTarget.Validate(); err != nil {
+		return fmt.Errorf("%w: session target: %v", ErrInvalidAttachTarget, err)
 	}
-	if m.Endpoint != m.RemoteTarget.Endpoint || m.Session != m.RemoteTarget.SessionName {
+	if m.Session != m.SessionTarget.SessionName {
 		return ErrInvalidAttachTarget
 	}
 	return nil

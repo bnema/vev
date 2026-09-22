@@ -208,6 +208,7 @@ func (s *serverSession) startStream(m brokerwire.OpenStream) {
 		Connection: m.Connection, Stream: m.Stream,
 		Endpoint: m.Endpoint, Registration: m.Registration,
 		Target: m.Target, Env: m.Env, Policy: m.Policy,
+		StartMode: m.StartMode,
 	}
 	s.wg.Add(1)
 	go func() {

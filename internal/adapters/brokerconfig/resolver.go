@@ -7,7 +7,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Resolver is the immutable ports.BrokerEndpointResolver over one parsed
+// Resolver is the immutable ports.BrokerRouteAuthority over one parsed
 // offline configuration. It holds no mutable state and performs no I/O: every
 // Resolve call fences the request against the provisioned registration and
 // returns the configured identity, policy, and opaque route address. A request
@@ -24,7 +24,7 @@ type Resolver struct {
 	local      *LocalBinding
 }
 
-var _ ports.BrokerEndpointResolver = (*Resolver)(nil)
+var _ ports.BrokerRouteAuthority = (*Resolver)(nil)
 
 // Resolve fences one open-stream request against the immutable configuration.
 //
@@ -40,26 +40,30 @@ var _ ports.BrokerEndpointResolver = (*Resolver)(nil)
 // Unknown, stale, conflicting, or unprovisioned requests are refused with a
 // typed broker error and no dial is attempted; a cancelled context is reported
 // as such so the pool classifies it as cancellation rather than unavailability.
-func (r *Resolver) Resolve(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+func (r *Resolver) ResolveDialTarget(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 	if err := ctx.Err(); err != nil {
-		return ports.BrokerResolvedEndpoint{}, err
+		return ports.BrokerDialTarget{}, err
 	}
 	if request.Local {
 		return r.resolveLocal(request)
 	}
 	provisioned, ok := r.byEndpoint[request.Endpoint]
 	if !ok {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Cause: errUnknownEndpoint}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "unknown endpoint", Cause: errUnknownEndpoint}
 	}
 	if !request.Registration.Equal(provisioned.Registration) {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Cause: errStaleRegistration}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "stale registration", Cause: errStaleRegistration}
 	}
 	if !provisioned.Policy.Compatible(request.Policy) {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("brokerconfig: request policy conflicts with the provisioned policy")}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("brokerconfig: request policy conflicts with the provisioned policy")}
 	}
-	resolved := ports.BrokerResolvedEndpoint{Identity: provisioned.Identity, Policy: provisioned.Policy, Address: provisioned.Route.Address()}
+	resolved := ports.BrokerDialTarget{
+		Fence: ports.BrokerEndpointFence{Registration: provisioned.Registration}, Policy: provisioned.Policy, Address: provisioned.Route.Address(),
+		StartMode:        request.StartMode,
+		ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: provisioned.Identity, Bound: provisioned.Identity != ""},
+	}
 	if err := resolved.Validate(); err != nil {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
 	}
 	return resolved, nil
 }
@@ -70,16 +74,20 @@ func (r *Resolver) Resolve(ctx context.Context, request ports.BrokerOpenStreamRe
 // provisioned local policy is refused as a conflicting policy. The resolved
 // identity, policy, and address are the binding's own, so the request supplies
 // none of them.
-func (r *Resolver) resolveLocal(request ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
+func (r *Resolver) resolveLocal(request ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
 	if r.local == nil {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Cause: errNoLocalRoute}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "local route is not provisioned", Cause: errNoLocalRoute}
 	}
 	if !r.local.Policy.Compatible(request.Policy) {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errLocalPolicyConflict}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errLocalPolicyConflict}
 	}
-	resolved := ports.BrokerResolvedEndpoint{Identity: r.local.Identity, Policy: r.local.Policy, Address: r.local.Route.Address()}
+	resolved := ports.BrokerDialTarget{
+		Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.local.Policy, Address: r.local.Route.Address(),
+		StartMode:        request.StartMode,
+		ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: r.local.Identity, Bound: r.local.Identity != ""},
+	}
 	if err := resolved.Validate(); err != nil {
-		return ports.BrokerResolvedEndpoint{}, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
+		return ports.BrokerDialTarget{}, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
 	}
 	return resolved, nil
 }

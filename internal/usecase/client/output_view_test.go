@@ -95,10 +95,24 @@ func TestOutputApplyMetadataOnlyUpdates(t *testing.T) {
 
 func TestOutputUIContextUsesOnlyCapturedIdentity(t *testing.T) {
 	state := outputApplyState{epoch: 2, state: 4, viewRevision: 3, initialized: true, context: testOutputView(7)}
-	got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, ports.UIStatusReconnecting)
+	got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, ports.UIStatusAttached)
 	require.Equal(t, ports.UIContext{
 		AttachmentHandle: "public", Generation: 5, Route: state.context.Route,
 		TabID: state.context.TabID, FocusedPaneID: state.context.FocusedPaneID,
-		OutputEpoch: 2, OutputState: 4, ViewRevision: 3, ViewPublication: 7, Status: ports.UIStatusReconnecting,
+		OutputEpoch: 2, OutputState: 4, ViewRevision: 3, ViewPublication: 7, Status: ports.UIStatusAttached,
 	}, got)
+}
+
+// TestOutputUIContextZeroesUnattachedMetadata pins the shape rule for the two
+// unattached presentations: a Picker or Connecting context carries the run's
+// handle and its status, and never the session route, the focus, or the
+// committed output boundary a committed attachment carries.
+func TestOutputUIContextZeroesUnattachedMetadata(t *testing.T) {
+	state := outputApplyState{epoch: 2, state: 4, viewRevision: 3, initialized: true, context: testOutputView(7)}
+	for _, status := range []ports.UIPresentationStatus{ports.UIStatusPicker, ports.UIStatusConnecting} {
+		t.Run(string(status), func(t *testing.T) {
+			got := state.uiContext(ports.UIContext{AttachmentHandle: "public", Generation: 5}, status)
+			require.Equal(t, ports.UIContext{AttachmentHandle: "public", Status: status}, got)
+		})
+	}
 }

@@ -16,11 +16,9 @@ import (
 
 // Attachment worker mechanisms (Plan 001 P5.1b, offline and unactivated).
 //
-// This file extracts the pieces of the legacy attach attempt that the
-// autonomous supervisor must own, without changing the legacy Runner and
-// without wiring the supervisor into production. It reuses the existing
-// terminal input pump (terminalInputPump) and foreground output gate
-// (foregroundSendLease) rather than duplicating them.
+// This file defines the attachment mechanisms owned by the autonomous
+// supervisor. It reuses the terminal input pump (terminalInputPump) and
+// foreground output gate (foregroundSendLease) rather than duplicating them.
 //
 // Ownership split:
 //
@@ -41,9 +39,8 @@ import (
 //     supervisor granted, so a late result from a canceled or superseded
 //     generation is discarded rather than applied.
 
-// Integration requirement: P5.1a currently owns a rival terminal reader. Before
-// activation it must use this same pump for picker and attachment consumers;
-// never start both readers. Runner and supervisor wiring remain unchanged.
+// Picker and attachment consumers use the same terminal input pump; they must
+// never start rival readers.
 //
 // UI action admission is optional and reuses this host's single pump claim.
 // Binding occurs after grant claims the pump and before the worker starts;
@@ -164,6 +161,11 @@ type AttachmentForeground interface {
 	// Output publishes context and writes and flushes bytes in one authorized
 	// transaction. Missing UI or terminal returns ports.ErrUIUnavailable.
 	Output(uiContext ports.UIContext, data []byte) error
+	// PublishAttached publishes the committed attached presentation once the
+	// first frame was written, flushed, and committed. It is fenced exactly like
+	// Output and writes no terminal bytes: the screen it publishes is the frame
+	// that already drained, so no second writer and no extra flush is needed.
+	PublishAttached(uiContext ports.UIContext) error
 	// MarkAttached records the attached transition. It is refused once authority
 	// is revoked.
 	MarkAttached() bool
@@ -402,11 +404,17 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 	}
 	ui := cfg.UI
 	resizes := (<-chan domain.Geometry)(nil)
+	var initialGeometry domain.Geometry
+	var initialGeometryValid bool
 	if !supervisorNil(cfg.Terminal) {
 		if supervisorNil(ui) {
 			ui, _ = cfg.Terminal.(ports.UIOutputTransaction)
 		}
 		resizes = cfg.Terminal.ResizeEvents()
+		if geometry, err := cfg.Terminal.Geometry(); err == nil && geometry.Valid() {
+			initialGeometry = geometry.NormalizePixels()
+			initialGeometryValid = true
+		}
 	}
 	return &attachmentHost{
 		term:               cfg.Terminal,
@@ -417,6 +425,8 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		resizes:            resizes,
 		actions:            cfg.Actions,
 		onAttach:           cfg.OnAttached,
+		geometry:           initialGeometry,
+		geometryValid:      initialGeometryValid,
 		geometryUpdate:     make(chan struct{}, 1),
 		presentationUpdate: make(chan struct{}, 1),
 	}
@@ -971,7 +981,7 @@ func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) er
 		if !f.authority.actionAuthorized(f) {
 			return false
 		}
-		if supervisorNil(f.ui) || supervisorNil(f.term) {
+		if supervisorNil(f.term) {
 			outputErr = ports.ErrUIUnavailable
 			return true
 		}
@@ -980,21 +990,28 @@ func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) er
 			outputErr = ports.ErrUIUnavailable
 			return true
 		}
-		uiContext.Generation = f.actionableGeneration()
-		f.ui.BeginOutput(uiContext)
+		uiContext = f.presentationContext(uiContext)
+		hasUI := !supervisorNil(f.ui)
+		if hasUI {
+			f.ui.BeginOutput(uiContext)
+		}
 		success := false
 		defer func() {
-			f.ui.EndOutput(success)
-			if success {
-				f.uiPublished()
+			if hasUI {
+				f.ui.EndOutput(success)
+				if success {
+					f.uiPublished()
+				}
 			}
 		}()
 		// An unavailable capture means the optional UI observation channel is
 		// disabled or closed, so the terminal frame still writes and flushes.
 		// Any other publication error aborts before the frame is written.
-		if err := f.ui.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
-			outputErr = err
-			return true
+		if hasUI {
+			if err := f.ui.PublishContext(uiContext); err != nil && !errors.Is(err, ports.ErrUIUnavailable) {
+				outputErr = err
+				return true
+			}
 		}
 		var n int
 		n, outputErr = writer.Write(data)
@@ -1006,6 +1023,62 @@ func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) er
 		}
 		outputErr = f.term.Flush()
 		success = outputErr == nil
+		return true
+	})
+	if !ok {
+		return errAttachmentForegroundRevoked
+	}
+	return outputErr
+}
+
+// presentationContext applies the published-context shape rule to one foreground
+// transaction. Only an Attached transaction carries the real actionable
+// generation and the committed session metadata; any other presentation carries
+// the run's stable UI handle and its status with every other field zeroed. A
+// pre-attach Connecting frame therefore never publishes an actionable
+// generation or session identity, and no caller can fence an action against a
+// generation the attachment has not committed.
+func (f *attachmentForeground) presentationContext(identity ports.UIContext) ports.UIContext {
+	handle := identity.AttachmentHandle
+	if f.host != nil && f.host.actionUI != nil {
+		handle = f.host.actionUI.Handle()
+	}
+	if identity.Status != ports.UIStatusAttached {
+		return ports.UIContext{AttachmentHandle: handle, Status: identity.Status}
+	}
+	identity.Generation = f.actionableGeneration()
+	identity.AttachmentHandle = handle
+	return identity
+}
+
+// PublishAttached publishes the committed attached presentation. It takes the
+// same send lease and the same authorization fence as Output, so it can never
+// race a finalization or a revoked generation, and it writes no bytes: the
+// attached presentation describes the frame that already drained. A closed UI
+// observation channel is tolerated exactly as Output tolerates it, while any
+// other publication failure is reported and leaves the run unattached.
+func (f *attachmentForeground) PublishAttached(uiContext ports.UIContext) error {
+	if f == nil {
+		return errAttachmentForegroundRevoked
+	}
+	var outputErr error
+	ok := f.lease.send(func() bool {
+		if !f.authority.actionAuthorized(f) {
+			return false
+		}
+		if supervisorNil(f.ui) {
+			return true
+		}
+		uiContext = f.presentationContext(uiContext)
+		f.ui.BeginOutput(uiContext)
+		publishErr := f.ui.PublishContext(uiContext)
+		if publishErr != nil && !errors.Is(publishErr, ports.ErrUIUnavailable) {
+			outputErr = publishErr
+			f.ui.EndOutput(false)
+			return true
+		}
+		f.ui.EndOutput(true)
+		f.uiPublished()
 		return true
 	})
 	if !ok {

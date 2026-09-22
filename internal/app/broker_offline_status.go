@@ -59,7 +59,8 @@ import (
 const (
 	// brokerLauncherCommand is the hidden intermediate that starts one detached
 	// `_broker-serve` and exits.
-	brokerLauncherCommand = "_broker-launcher"
+	brokerLauncherCommand           = "_broker-launcher"
+	productionBrokerLauncherCommand = "_broker-production-launcher"
 	// brokerStatusCommand is the hidden broker status probe.
 	brokerStatusCommand = "_broker-status"
 )
@@ -160,6 +161,13 @@ func defaultBrokerStatusDeps() brokerStatusDeps {
 // parseBrokerLauncherArgs strictly parses
 // `_broker-launcher --offline-root ABS [--idle-grace DURATION]`. Unknown flags,
 // duplicate flags, positionals, and non-positive durations are refused.
+func parseProductionBrokerLauncherArgs(args []string) (command, error) {
+	if len(args) != 0 {
+		return command{}, usagef("`%s` does not accept arguments", productionBrokerLauncherCommand)
+	}
+	return command{kind: kindProductionBrokerLauncher}, nil
+}
+
 func parseBrokerLauncherArgs(args []string) (command, error) {
 	var options brokerLauncherOptions
 	var seenRoot, seenGrace bool
@@ -261,6 +269,10 @@ func parseBrokerStatusArgs(args []string) (command, error) {
 
 // runBrokerLauncherCommand runs the hidden launcher. It changes no ordinary
 // command and never runs in production flows.
+func runProductionBrokerLauncherCommand(context.Context) error {
+	return startDetachedBrokerServe([]string{productionBrokerServeCommand})
+}
+
 func runBrokerLauncherCommand(_ context.Context, options brokerLauncherOptions) error {
 	return runBrokerLauncher(options)
 }
@@ -326,7 +338,19 @@ func startDetachedBrokerServe(args []string) error {
 // signal kills a launcher that is still waiting, while killing the launcher
 // after it has started the detached `_broker-serve` does not touch that serve --
 // it is in its own session and was released, so it survives.
+func spawnProductionBrokerLauncher(ctx context.Context) error {
+	return runBrokerLauncherProcess(ctx, []string{productionBrokerLauncherCommand})
+}
+
 func spawnBrokerLauncher(ctx context.Context, root string, grace time.Duration, graceSet bool) error {
+	args := []string{brokerLauncherCommand, "--offline-root", root}
+	if graceSet {
+		args = append(args, "--idle-grace", grace.String())
+	}
+	return runBrokerLauncherProcess(ctx, args)
+}
+
+func runBrokerLauncherProcess(ctx context.Context, args []string) error {
 	exePath, err := selfExePath()
 	if err != nil {
 		return fmt.Errorf("vev: resolving executable path: %w", err)
@@ -337,10 +361,6 @@ func spawnBrokerLauncher(ctx context.Context, root string, grace time.Duration, 
 	}
 	defer func() { _ = devNull.Close() }()
 
-	args := []string{brokerLauncherCommand, "--offline-root", root}
-	if graceSet {
-		args = append(args, "--idle-grace", grace.String())
-	}
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, exePath, args...)
 	cmd.Env = withoutPerformanceTraceEnv(os.Environ())

@@ -82,7 +82,7 @@ func newTerminal(ctx context.Context, geometry domain.Geometry, attachmentHandle
 		screen:          screen,
 		mirror:          allowOversized,
 		geometry:        geometry,
-		context:         ports.UIContext{AttachmentHandle: attachmentHandle, Generation: 1},
+		context:         ports.UIContext{AttachmentHandle: attachmentHandle},
 		available:       true,
 		captureTooLarge: oversized,
 		changes:         make(chan struct{}, 1),
@@ -195,12 +195,7 @@ func (t *Terminal) BeginOutput(context ports.UIContext) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.txDepth == 0 {
-		if context.AttachmentHandle == "" {
-			context.AttachmentHandle = t.context.AttachmentHandle
-		}
-		if context.Generation == 0 {
-			context.Generation = t.context.Generation
-		}
+		context = t.completeContextLocked(context)
 		t.context = context
 		t.txFailed = false
 	}
@@ -234,15 +229,29 @@ func (t *Terminal) PublishContext(context ports.UIContext) error {
 	if t.closed || !t.available {
 		return ports.ErrUIUnavailable
 	}
+	t.context = t.completeContextLocked(context)
+	t.publishLocked()
+	return nil
+}
+
+// completeContextLocked applies the published-context shape rule for one
+// published context. Only an Attached presentation may carry a session
+// identity, a committed output boundary, or an actionable generation, and only
+// it inherits a missing handle or generation from the previous context. Picker
+// and Connecting are normalised to the handle and status they state, so an
+// unattached publication can never expose an old attachment's identity or a
+// generation no attachment committed.
+func (t *Terminal) completeContextLocked(context ports.UIContext) ports.UIContext {
+	if context.Status != ports.UIStatusAttached {
+		return ports.UIContext{AttachmentHandle: context.AttachmentHandle, Status: context.Status}
+	}
 	if context.AttachmentHandle == "" {
 		context.AttachmentHandle = t.context.AttachmentHandle
 	}
 	if context.Generation == 0 {
 		context.Generation = t.context.Generation
 	}
-	t.context = context
-	t.publishLocked()
-	return nil
+	return context
 }
 
 func (t *Terminal) Snapshot() (ports.UISnapshot, error) {

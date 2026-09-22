@@ -379,7 +379,13 @@ func TestAttachmentWorkerPublishesUIAuthorized(t *testing.T) {
 	stream := newWorkerTestStream()
 
 	worker := &fakeWorker{run: func(ctx context.Context, fg AttachmentForeground) AttachmentEvent {
-		if err := fg.Output(ports.UIContext{}, nil); err != nil {
+		// The pre-attach frame commits the Connecting presentation with a public
+		// generation of zero, then the committed Attached presentation carries the
+		// granted action generation.
+		if err := fg.Output(ports.UIContext{Status: ports.UIStatusConnecting}, []byte("frame")); err != nil {
+			return AttachmentEvent{Kind: AttachmentEventFailed, Err: err}
+		}
+		if err := fg.Output(ports.UIContext{Status: ports.UIStatusAttached}, nil); err != nil {
 			return AttachmentEvent{Kind: AttachmentEventFailed, Err: err}
 		}
 		if !fg.MarkAttached() {
@@ -396,8 +402,11 @@ func TestAttachmentWorkerPublishesUIAuthorized(t *testing.T) {
 	require.Equal(t, AttachmentEventEnded, event.Kind)
 
 	publications := term.publications()
-	require.Len(t, publications, 1)
-	require.Equal(t, uint64(7), publications[0].Generation, "the granted generation is stamped")
+	require.Len(t, publications, 2)
+	require.Zero(t, publications[0].Generation, "a Connecting publication never carries an actionable generation")
+	require.Equal(t, ports.UIStatusConnecting, publications[0].Status)
+	require.Equal(t, uint64(7), publications[1].Generation, "the granted generation is stamped on the attached publication")
+	require.Equal(t, ports.UIStatusAttached, publications[1].Status)
 	require.Equal(t, AttachmentToken{Generation: 7, Attempt: 2}, <-attached)
 }
 
@@ -752,7 +761,7 @@ func TestAttachmentWorkerOutputTransaction(t *testing.T) {
 			run, ok := host.Begin(context.Background(), AttachmentToken{9, 2}, blockingWorker(), newWorkerTestStream())
 			require.True(t, ok)
 			defer run.Cancel()
-			err := run.fg.Output(ports.UIContext{Generation: 999}, []byte("frame"))
+			err := run.fg.Output(ports.UIContext{Generation: 999, Status: ports.UIStatusAttached}, []byte("frame"))
 			success := tc.wantErr == nil
 			if success {
 				require.NoError(t, err)
@@ -777,7 +786,6 @@ func TestAttachmentWorkerNilSeams(t *testing.T) {
 	for _, cfg := range []attachmentHostConfig{
 		{},
 		{Terminal: nilTerm, UI: nilTerm, Clock: nilClock},
-		{Terminal: workerBareTerminal{newWorkerTestTerminal()}, UI: nilTerm},
 	} {
 		host := newAttachmentHost(cfg)
 		_, ok := host.Begin(nil, AttachmentToken{1, 1}, nilWorker, newWorkerTestStream())
@@ -790,6 +798,14 @@ func TestAttachmentWorkerNilSeams(t *testing.T) {
 		run.Cancel()
 		require.ErrorIs(t, run.fg.Output(ports.UIContext{}, nil), errAttachmentForegroundRevoked)
 	}
+
+	term := newWorkerTestTerminal()
+	host := newAttachmentHost(attachmentHostConfig{Terminal: workerBareTerminal{term}, UI: nilTerm})
+	run, ok := host.Begin(nil, AttachmentToken{1, 1}, blockingWorker(), newWorkerTestStream())
+	require.True(t, ok)
+	require.NoError(t, run.fg.Output(ports.UIContext{}, []byte("frame")))
+	require.Equal(t, "frame", term.out.String())
+	run.Cancel()
 }
 
 // TestAttachmentWorkerGenerationIsSupervisorSupplied proves the host no longer
@@ -806,7 +822,7 @@ func TestAttachmentWorkerGenerationIsSupervisorSupplied(t *testing.T) {
 		run, ok := host.Begin(context.Background(), AttachmentToken{i, i + 10}, blockingWorker(), newWorkerTestStream())
 		require.True(t, ok)
 		require.Equal(t, AttachmentToken{i, i + 10}, run.fg.Token())
-		require.NoError(t, run.fg.Output(ports.UIContext{Generation: 999}, nil))
+		require.NoError(t, run.fg.Output(ports.UIContext{Generation: 999, Status: ports.UIStatusAttached}, nil))
 		require.Equal(t, i, term.publications()[i-1].Generation)
 		run.Cancel()
 	}

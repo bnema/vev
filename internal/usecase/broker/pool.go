@@ -31,17 +31,38 @@ type poolKey struct {
 	identity ports.BrokerDaemonIdentity
 	policy   ports.BrokerPolicy
 }
+type pendingKey struct {
+	fence  ports.BrokerEndpointFence
+	policy ports.BrokerPolicy
+	// startMode is part of the pending key on purpose: an acquisition that may
+	// start the target daemon must never be coalesced with an ExistingOnly
+	// acquisition that must not, even when they name the same unbound endpoint
+	// and policy. Once the physical connection is authenticated and published,
+	// the canonical key is identity plus exact policy alone: a compatible
+	// transport is shareable regardless of how it was acquired.
+	startMode ports.BrokerDaemonStartMode
+}
 type poolClient struct {
-	high    ports.BrokerStreamID
+	// window is this client's bounded anti-replay admission window. Stream IDs
+	// are allocated by the calling service and may arrive out of order when two
+	// opens race, so a plain monotone high-water mark would refuse a valid
+	// concurrent open; the window admits every unconsumed ID inside it and
+	// refuses duplicates and IDs evicted past its bound.
+	window  ports.BrokerStreamWindow
 	streams map[ports.BrokerStreamID]*reservation
 }
-type reservation struct{ cancel context.CancelFunc }
+type reservation struct {
+	cancel context.CancelFunc
+	entry  *poolEntry
+}
 type poolEntry struct {
 	key         poolKey
+	pending     pendingKey
 	ctx         context.Context
 	cancel      context.CancelFunc
 	ready, wake chan struct{}
 	physical    ports.BrokerPhysicalConnection
+	redirect    *poolEntry
 	err         error
 	refs        int
 	retiring    bool
@@ -52,7 +73,8 @@ type poolEntry struct {
 type Pool struct {
 	mu        sync.Mutex
 	epoch     ports.BrokerEpoch
-	resolver  ports.BrokerEndpointResolver
+	routes    ports.BrokerRouteAuthority
+	binder    ports.BrokerIdentityBinder
 	connector ports.BrokerEndpointConnector
 	clock     ports.Clock
 	limits    PoolLimits
@@ -62,16 +84,17 @@ type Pool struct {
 	next      uint64
 	clients   map[ports.BrokerConnectionID]*poolClient
 	entries   map[poolKey]*poolEntry
+	pending   map[pendingKey]*poolEntry
 	streams   int
 	wg        sync.WaitGroup
 }
 
-func NewPool(epoch ports.BrokerEpoch, resolver ports.BrokerEndpointResolver, connector ports.BrokerEndpointConnector, clock ports.Clock, limits PoolLimits) (*Pool, error) {
-	if epoch == 0 || resolver == nil || connector == nil || clock == nil || limits.Physical <= 0 || limits.Clients <= 0 || limits.Streams <= 0 || limits.StreamsPerClient <= 0 || limits.Idle <= 0 {
+func NewPool(epoch ports.BrokerEpoch, routes ports.BrokerRouteAuthority, binder ports.BrokerIdentityBinder, connector ports.BrokerEndpointConnector, clock ports.Clock, limits PoolLimits) (*Pool, error) {
+	if epoch == 0 || routes == nil || binder == nil || connector == nil || clock == nil || limits.Physical <= 0 || limits.Clients <= 0 || limits.Streams <= 0 || limits.StreamsPerClient <= 0 || limits.Idle <= 0 {
 		return nil, ports.BrokerAdmissionInvalid
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Pool{epoch: epoch, resolver: resolver, connector: connector, clock: clock, limits: limits, ctx: ctx, cancel: cancel, clients: make(map[ports.BrokerConnectionID]*poolClient), entries: make(map[poolKey]*poolEntry)}, nil
+	return &Pool{epoch: epoch, routes: routes, binder: binder, connector: connector, clock: clock, limits: limits, ctx: ctx, cancel: cancel, clients: make(map[ports.BrokerConnectionID]*poolClient), entries: make(map[poolKey]*poolEntry), pending: make(map[pendingKey]*poolEntry)}, nil
 }
 
 // RegisterClient issues epoch-scoped nonreusable identities. The bounded active
@@ -139,12 +162,16 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		cancel()
 		return nil, ports.BrokerAdmissionClosed
 	}
-	if c == nil || req.Stream <= c.high {
+	if c == nil {
 		p.mu.Unlock()
 		cancel()
 		return nil, ports.BrokerAdmissionStale
 	}
-	c.high = req.Stream
+	if err := c.window.Admit(req.Stream); err != nil {
+		p.mu.Unlock()
+		cancel()
+		return nil, err
+	}
 	if p.streams >= p.limits.Streams || len(c.streams) >= p.limits.StreamsPerClient {
 		p.mu.Unlock()
 		cancel()
@@ -164,18 +191,19 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		delete(c.streams, req.Stream)
 		p.streams--
 		var abandon context.CancelFunc
-		if entry != nil {
-			entry.refs--
-			if entry.refs == 0 {
+		reservedEntry := r.entry
+		if reservedEntry != nil {
+			reservedEntry.refs--
+			if reservedEntry.refs == 0 {
 				select {
-				case <-entry.ready:
+				case <-reservedEntry.ready:
 				default:
-					entry.retiring = true
-					abandon = entry.cancel
+					reservedEntry.retiring = true
+					abandon = reservedEntry.cancel
 				}
 			}
 			select {
-			case entry.wake <- struct{}{}:
+			case reservedEntry.wake <- struct{}{}:
 			default:
 			}
 		}
@@ -192,7 +220,7 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		}
 	}()
 	req.Env = append([]string(nil), req.Env...)
-	resolved, err := p.resolver.Resolve(ctx, req)
+	resolved, err := p.routes.ResolveDialTarget(ctx, req)
 	if err != nil {
 		return nil, normalizePoolError(err)
 	}
@@ -205,35 +233,56 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 	if err = ctx.Err(); err != nil {
 		return nil, normalizePoolError(err)
 	}
-	key := poolKey{resolved.Identity, resolved.Policy}
+	key := poolKey{resolved.ExpectedIdentity.Identity, resolved.Policy}
+	pending := pendingKey{fence: resolved.Fence, policy: resolved.Policy, startMode: resolved.StartMode}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return nil, ports.BrokerAdmissionClosed
 	}
-	entry = p.entries[key]
+	if resolved.ExpectedIdentity.Bound {
+		entry = p.entries[key]
+	} else {
+		entry = p.pending[pending]
+	}
 	if entry != nil && entry.retiring {
-		entry = nil
 		p.mu.Unlock()
-		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable}
+		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "selected physical entry is retiring", Cause: errors.New("broker: selected physical entry is retiring")}
 	}
 	if entry == nil {
-		if len(p.entries) >= p.limits.Physical {
+		if len(p.entries)+len(p.pending) >= p.limits.Physical {
 			p.mu.Unlock()
 			return nil, ports.BrokerAdmissionLimit
 		}
 		ectx, ecancel := context.WithCancel(p.ctx)
-		entry = &poolEntry{key: key, ctx: ectx, cancel: ecancel, ready: make(chan struct{}), wake: make(chan struct{}, 1)}
-		p.entries[key] = entry
+		entry = &poolEntry{key: key, pending: pending, ctx: ectx, cancel: ecancel, ready: make(chan struct{}), wake: make(chan struct{}, 1)}
+		if resolved.ExpectedIdentity.Bound {
+			p.entries[key] = entry
+		} else {
+			p.pending[pending] = entry
+		}
 		p.wg.Add(1)
 		go p.runEntry(entry, resolved)
 	}
 	entry.refs++
+	r.entry = entry
 	p.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		return nil, normalizePoolError(ctx.Err())
 	case <-entry.ready:
+	}
+	winner, err := p.redirectReservation(entry, r)
+	if err != nil {
+		return nil, err
+	}
+	if winner != nil {
+		entry = winner
+		select {
+		case <-ctx.Done():
+			return nil, normalizePoolError(ctx.Err())
+		case <-entry.ready:
+		}
 	}
 	if entry.err != nil {
 		return nil, entry.err
@@ -279,15 +328,58 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 	return stream, nil
 }
 
-func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerResolvedEndpoint) {
+func (p *Pool) redirectReservation(entry *poolEntry, reservation *reservation) (*poolEntry, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	winner := entry.redirect
+	if winner == nil {
+		return nil, nil
+	}
+	if current := p.entries[winner.key]; current != winner || winner.retiring {
+		return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "physical identity redirect unavailable"}
+	}
+	entry.refs--
+	winner.refs++
+	reservation.entry = winner
+	return winner, nil
+}
+
+func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 	defer p.wg.Done()
 	physical, err := p.connector.Connect(e.ctx, endpoint)
-	if err == nil && (physical == nil || physical.Identity() != endpoint.Identity || !physical.Policy().Compatible(endpoint.Policy) || physical.Incarnation().Validate() != nil) {
+	if err == nil && (nilDependency(physical) || (endpoint.ExpectedIdentity.Bound && physical.Identity() != endpoint.ExpectedIdentity.Identity) || physical.Identity().Validate() != nil || !physical.Policy().Compatible(endpoint.Policy) || physical.Incarnation().Validate() != nil) {
 		err = ports.BrokerError{Code: ports.BrokerErrorIncompatible}
+	}
+	if err == nil {
+		identity, bindErr := p.binder.BindAuthenticatedIdentity(e.ctx, ports.BrokerIdentityBindingRequest{Fence: endpoint.Fence, Policy: endpoint.Policy, Identity: physical.Identity()})
+		if bindErr != nil {
+			err = bindErr
+		} else if identity != physical.Identity() {
+			err = ports.BrokerError{Code: ports.BrokerErrorIncompatible}
+		}
+	}
+	p.mu.Lock()
+	if !endpoint.ExpectedIdentity.Bound {
+		delete(p.pending, e.pending)
+	}
+	if err == nil {
+		e.key = poolKey{identity: physical.Identity(), policy: endpoint.Policy}
+		if winner := p.entries[e.key]; winner != nil && winner != e && !winner.retiring {
+			e.redirect = winner
+		} else {
+			p.entries[e.key] = e
+		}
 	}
 	e.physical = physical
 	e.err = normalizePoolError(err)
 	close(e.ready)
+	redirect := e.redirect
+	p.mu.Unlock()
+	if redirect != nil {
+		_ = physical.Close()
+		e.cancel()
+		return
+	}
 	if err == nil {
 		timer := p.clock.NewTimer(p.limits.Idle)
 		defer stopPoolTimer(timer)
@@ -327,7 +419,12 @@ retire:
 	}
 	// Keep the key occupied until Close completes: never overlap physicals.
 	p.mu.Lock()
-	delete(p.entries, e.key)
+	if p.entries[e.key] == e {
+		delete(p.entries, e.key)
+	}
+	if p.pending[e.pending] == e {
+		delete(p.pending, e.pending)
+	}
 	p.mu.Unlock()
 }
 

@@ -28,26 +28,26 @@ type Hello struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Version uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
 	// Closed intent taxonomy: 0 = ephemeral, 1 = new, 2 = attach, 3 = resume.
-	Intent                 uint32        `protobuf:"varint,2,opt,name=intent,proto3" json:"intent,omitempty"`
-	ClientId               []byte        `protobuf:"bytes,3,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"` // exactly 16 bytes
-	ResumeToken            uint64        `protobuf:"varint,4,opt,name=resume_token,json=resumeToken,proto3" json:"resume_token,omitempty"`
-	Name                   string        `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
-	Cols                   uint32        `protobuf:"varint,6,opt,name=cols,proto3" json:"cols,omitempty"`
-	Rows                   uint32        `protobuf:"varint,7,opt,name=rows,proto3" json:"rows,omitempty"`
-	PixelWidth             uint32        `protobuf:"varint,8,opt,name=pixel_width,json=pixelWidth,proto3" json:"pixel_width,omitempty"`
-	PixelHeight            uint32        `protobuf:"varint,9,opt,name=pixel_height,json=pixelHeight,proto3" json:"pixel_height,omitempty"`
-	TermEnv                string        `protobuf:"bytes,10,opt,name=term_env,json=termEnv,proto3" json:"term_env,omitempty"`
-	Cwd                    string        `protobuf:"bytes,11,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	TrueColor              bool          `protobuf:"varint,12,opt,name=true_color,json=trueColor,proto3" json:"true_color,omitempty"`
-	MaxOutputInFlight      uint32        `protobuf:"varint,13,opt,name=max_output_in_flight,json=maxOutputInFlight,proto3" json:"max_output_in_flight,omitempty"`
-	Env                    []string      `protobuf:"bytes,14,rep,name=env,proto3" json:"env,omitempty"`
-	RemoteTarget           *RemoteTarget `protobuf:"bytes,15,opt,name=remote_target,json=remoteTarget,proto3" json:"remote_target,omitempty"`                 // optional pointer
-	EnvironmentPolicy      uint32        `protobuf:"varint,16,opt,name=environment_policy,json=environmentPolicy,proto3" json:"environment_policy,omitempty"` // 0 = client-owned, 1 = daemon-owned
-	ExactTarget            *ExactTarget  `protobuf:"bytes,17,opt,name=exact_target,json=exactTarget,proto3" json:"exact_target,omitempty"`                    // optional pointer
-	PreferredTabId         string        `protobuf:"bytes,18,opt,name=preferred_tab_id,json=preferredTabId,proto3" json:"preferred_tab_id,omitempty"`
-	NavigationCapabilities uint32        `protobuf:"varint,19,opt,name=navigation_capabilities,json=navigationCapabilities,proto3" json:"navigation_capabilities,omitempty"`
-	Remote                 bool          `protobuf:"varint,20,opt,name=remote,proto3" json:"remote,omitempty"`
-	KittyDirectGraphics    bool          `protobuf:"varint,21,opt,name=kitty_direct_graphics,json=kittyDirectGraphics,proto3" json:"kitty_direct_graphics,omitempty"`
+	Intent                 uint32               `protobuf:"varint,2,opt,name=intent,proto3" json:"intent,omitempty"`
+	ClientId               []byte               `protobuf:"bytes,3,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"` // exactly 16 bytes
+	ResumeToken            uint64               `protobuf:"varint,4,opt,name=resume_token,json=resumeToken,proto3" json:"resume_token,omitempty"`
+	Name                   string               `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	Cols                   uint32               `protobuf:"varint,6,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows                   uint32               `protobuf:"varint,7,opt,name=rows,proto3" json:"rows,omitempty"`
+	PixelWidth             uint32               `protobuf:"varint,8,opt,name=pixel_width,json=pixelWidth,proto3" json:"pixel_width,omitempty"`
+	PixelHeight            uint32               `protobuf:"varint,9,opt,name=pixel_height,json=pixelHeight,proto3" json:"pixel_height,omitempty"`
+	TermEnv                string               `protobuf:"bytes,10,opt,name=term_env,json=termEnv,proto3" json:"term_env,omitempty"`
+	Cwd                    string               `protobuf:"bytes,11,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	TrueColor              bool                 `protobuf:"varint,12,opt,name=true_color,json=trueColor,proto3" json:"true_color,omitempty"`
+	MaxOutputInFlight      uint32               `protobuf:"varint,13,opt,name=max_output_in_flight,json=maxOutputInFlight,proto3" json:"max_output_in_flight,omitempty"`
+	Env                    []string             `protobuf:"bytes,14,rep,name=env,proto3" json:"env,omitempty"`
+	EnvironmentPolicy      uint32               `protobuf:"varint,16,opt,name=environment_policy,json=environmentPolicy,proto3" json:"environment_policy,omitempty"` // 0 = client-owned, 1 = daemon-owned
+	ExactTarget            *ExactTarget         `protobuf:"bytes,17,opt,name=exact_target,json=exactTarget,proto3" json:"exact_target,omitempty"`                    // optional pointer
+	PreferredTabId         string               `protobuf:"bytes,18,opt,name=preferred_tab_id,json=preferredTabId,proto3" json:"preferred_tab_id,omitempty"`
+	NavigationCapabilities uint32               `protobuf:"varint,19,opt,name=navigation_capabilities,json=navigationCapabilities,proto3" json:"navigation_capabilities,omitempty"`
+	Remote                 bool                 `protobuf:"varint,20,opt,name=remote,proto3" json:"remote,omitempty"`
+	KittyDirectGraphics    bool                 `protobuf:"varint,21,opt,name=kitty_direct_graphics,json=kittyDirectGraphics,proto3" json:"kitty_direct_graphics,omitempty"`
+	SessionTarget          *SessionAttachTarget `protobuf:"bytes,22,opt,name=session_target,json=sessionTarget,proto3" json:"session_target,omitempty"` // optional pointer
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -180,13 +180,6 @@ func (x *Hello) GetEnv() []string {
 	return nil
 }
 
-func (x *Hello) GetRemoteTarget() *RemoteTarget {
-	if x != nil {
-		return x.RemoteTarget
-	}
-	return nil
-}
-
 func (x *Hello) GetEnvironmentPolicy() uint32 {
 	if x != nil {
 		return x.EnvironmentPolicy
@@ -227,6 +220,13 @@ func (x *Hello) GetKittyDirectGraphics() bool {
 		return x.KittyDirectGraphics
 	}
 	return false
+}
+
+func (x *Hello) GetSessionTarget() *SessionAttachTarget {
+	if x != nil {
+		return x.SessionTarget
+	}
+	return nil
 }
 
 // Welcome answers an accepted attach.
@@ -427,12 +427,12 @@ type AttachTarget struct {
 	Endpoint          string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
 	Session           string                 `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
 	Intent            uint32                 `protobuf:"varint,4,opt,name=intent,proto3" json:"intent,omitempty"`
-	RemoteTarget      *RemoteTarget          `protobuf:"bytes,5,opt,name=remote_target,json=remoteTarget,proto3" json:"remote_target,omitempty"` // optional pointer
 	EnvironmentPolicy uint32                 `protobuf:"varint,6,opt,name=environment_policy,json=environmentPolicy,proto3" json:"environment_policy,omitempty"`
 	ExactTarget       *ExactTarget           `protobuf:"bytes,7,opt,name=exact_target,json=exactTarget,proto3" json:"exact_target,omitempty"` // optional pointer
 	SamePeer          bool                   `protobuf:"varint,8,opt,name=same_peer,json=samePeer,proto3" json:"same_peer,omitempty"`
 	PreferredTabId    string                 `protobuf:"bytes,9,opt,name=preferred_tab_id,json=preferredTabId,proto3" json:"preferred_tab_id,omitempty"`
 	CauseActionId     uint64                 `protobuf:"varint,10,opt,name=cause_action_id,json=causeActionId,proto3" json:"cause_action_id,omitempty"`
+	SessionTarget     *SessionAttachTarget   `protobuf:"bytes,11,opt,name=session_target,json=sessionTarget,proto3" json:"session_target,omitempty"` // optional pointer
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -495,13 +495,6 @@ func (x *AttachTarget) GetIntent() uint32 {
 	return 0
 }
 
-func (x *AttachTarget) GetRemoteTarget() *RemoteTarget {
-	if x != nil {
-		return x.RemoteTarget
-	}
-	return nil
-}
-
 func (x *AttachTarget) GetEnvironmentPolicy() uint32 {
 	if x != nil {
 		return x.EnvironmentPolicy
@@ -535,6 +528,13 @@ func (x *AttachTarget) GetCauseActionId() uint64 {
 		return x.CauseActionId
 	}
 	return 0
+}
+
+func (x *AttachTarget) GetSessionTarget() *SessionAttachTarget {
+	if x != nil {
+		return x.SessionTarget
+	}
+	return nil
 }
 
 // SessionInfo is one row of a session listing.
@@ -2173,7 +2173,7 @@ var File_session_proto protoreflect.FileDescriptor
 
 const file_session_proto_rawDesc = "" +
 	"\n" +
-	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\xe3\x05\n" +
+	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\x81\x06\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
 	"\x06intent\x18\x02 \x01(\rR\x06intent\x12\x1b\n" +
@@ -2191,14 +2191,14 @@ const file_session_proto_rawDesc = "" +
 	"\n" +
 	"true_color\x18\f \x01(\bR\ttrueColor\x12/\n" +
 	"\x14max_output_in_flight\x18\r \x01(\rR\x11maxOutputInFlight\x12\x10\n" +
-	"\x03env\x18\x0e \x03(\tR\x03env\x12>\n" +
-	"\rremote_target\x18\x0f \x01(\v2\x19.vev.wire.v1.RemoteTargetR\fremoteTarget\x12-\n" +
+	"\x03env\x18\x0e \x03(\tR\x03env\x12-\n" +
 	"\x12environment_policy\x18\x10 \x01(\rR\x11environmentPolicy\x12;\n" +
 	"\fexact_target\x18\x11 \x01(\v2\x18.vev.wire.v1.ExactTargetR\vexactTarget\x12(\n" +
 	"\x10preferred_tab_id\x18\x12 \x01(\tR\x0epreferredTabId\x127\n" +
 	"\x17navigation_capabilities\x18\x13 \x01(\rR\x16navigationCapabilities\x12\x16\n" +
 	"\x06remote\x18\x14 \x01(\bR\x06remote\x122\n" +
-	"\x15kitty_direct_graphics\x18\x15 \x01(\bR\x13kittyDirectGraphics\"\x84\x02\n" +
+	"\x15kitty_direct_graphics\x18\x15 \x01(\bR\x13kittyDirectGraphics\x12G\n" +
+	"\x0esession_target\x18\x16 \x01(\v2 .vev.wire.v1.SessionAttachTargetR\rsessionTargetJ\x04\b\x0f\x10\x10R\rremote_target\"\x84\x02\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
@@ -2212,20 +2212,20 @@ const file_session_proto_rawDesc = "" +
 	"\x04text\x18\x02 \x01(\tR\x04text\"h\n" +
 	"\x16CommittedRouteIdentity\x120\n" +
 	"\x06target\x18\x01 \x01(\v2\x18.vev.wire.v1.ExactTargetR\x06target\x12\x1c\n" +
-	"\tephemeral\x18\x02 \x01(\bR\tephemeral\"\x96\x03\n" +
+	"\tephemeral\x18\x02 \x01(\bR\tephemeral\"\xb4\x03\n" +
 	"\fAttachTarget\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12\x18\n" +
 	"\asession\x18\x03 \x01(\tR\asession\x12\x16\n" +
-	"\x06intent\x18\x04 \x01(\rR\x06intent\x12>\n" +
-	"\rremote_target\x18\x05 \x01(\v2\x19.vev.wire.v1.RemoteTargetR\fremoteTarget\x12-\n" +
+	"\x06intent\x18\x04 \x01(\rR\x06intent\x12-\n" +
 	"\x12environment_policy\x18\x06 \x01(\rR\x11environmentPolicy\x12;\n" +
 	"\fexact_target\x18\a \x01(\v2\x18.vev.wire.v1.ExactTargetR\vexactTarget\x12\x1b\n" +
 	"\tsame_peer\x18\b \x01(\bR\bsamePeer\x12(\n" +
 	"\x10preferred_tab_id\x18\t \x01(\tR\x0epreferredTabId\x12&\n" +
 	"\x0fcause_action_id\x18\n" +
-	" \x01(\x04R\rcauseActionId\"\xa4\x01\n" +
+	" \x01(\x04R\rcauseActionId\x12G\n" +
+	"\x0esession_target\x18\v \x01(\v2 .vev.wire.v1.SessionAttachTargetR\rsessionTargetJ\x04\b\x05\x10\x06R\rremote_target\"\xa4\x01\n" +
 	"\vSessionInfo\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
@@ -2405,33 +2405,33 @@ var file_session_proto_goTypes = []any{
 	(*AttachmentSuspended)(nil),        // 29: vev.wire.v1.AttachmentSuspended
 	(*ActivateAttachment)(nil),         // 30: vev.wire.v1.ActivateAttachment
 	(*AttachmentActivated)(nil),        // 31: vev.wire.v1.AttachmentActivated
-	(*RemoteTarget)(nil),               // 32: vev.wire.v1.RemoteTarget
-	(*ExactTarget)(nil),                // 33: vev.wire.v1.ExactTarget
+	(*ExactTarget)(nil),                // 32: vev.wire.v1.ExactTarget
+	(*SessionAttachTarget)(nil),        // 33: vev.wire.v1.SessionAttachTarget
 }
 var file_session_proto_depIdxs = []int32{
-	32, // 0: vev.wire.v1.Hello.remote_target:type_name -> vev.wire.v1.RemoteTarget
-	33, // 1: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
+	32, // 0: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
+	33, // 1: vev.wire.v1.Hello.session_target:type_name -> vev.wire.v1.SessionAttachTarget
 	3,  // 2: vev.wire.v1.Welcome.committed_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	33, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
-	32, // 4: vev.wire.v1.AttachTarget.remote_target:type_name -> vev.wire.v1.RemoteTarget
-	33, // 5: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
+	32, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 4: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
+	33, // 5: vev.wire.v1.AttachTarget.session_target:type_name -> vev.wire.v1.SessionAttachTarget
 	5,  // 6: vev.wire.v1.Sessions.sessions:type_name -> vev.wire.v1.SessionInfo
 	8,  // 7: vev.wire.v1.KillResult.failures:type_name -> vev.wire.v1.KillFailure
 	15, // 8: vev.wire.v1.RouteAttentionTarget.ref:type_name -> vev.wire.v1.RouteRef
-	33, // 9: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 9: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
 	16, // 10: vev.wire.v1.RouteAttentionSubscription.targets:type_name -> vev.wire.v1.RouteAttentionTarget
-	33, // 11: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 11: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
 	15, // 12: vev.wire.v1.RecentRouteSnapshot.active:type_name -> vev.wire.v1.RouteRef
 	18, // 13: vev.wire.v1.RecentRouteSnapshot.active_entry:type_name -> vev.wire.v1.RecentRouteEntry
 	15, // 14: vev.wire.v1.RecentRouteSnapshot.previous:type_name -> vev.wire.v1.RouteRef
 	15, // 15: vev.wire.v1.RecentRouteSnapshot.home:type_name -> vev.wire.v1.RouteRef
 	18, // 16: vev.wire.v1.RecentRouteSnapshot.entries:type_name -> vev.wire.v1.RecentRouteEntry
-	33, // 17: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 17: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
 	15, // 18: vev.wire.v1.RouteRetired.ref:type_name -> vev.wire.v1.RouteRef
-	33, // 19: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 20: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 21: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 22: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 19: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 20: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 21: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
+	32, // 22: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
 	3,  // 23: vev.wire.v1.AttachmentActivated.identity:type_name -> vev.wire.v1.CommittedRouteIdentity
 	24, // [24:24] is the sub-list for method output_type
 	24, // [24:24] is the sub-list for method input_type

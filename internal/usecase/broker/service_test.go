@@ -35,10 +35,10 @@ func newTestAuthority(t testing.TB, epoch ports.BrokerEpoch, probe ports.BrokerH
 // clock is returned so a test can drive the idle lifecycle.
 func composeTestAuthority(t testing.TB, epoch ports.BrokerEpoch, registry *Registry, connector poolConnector, clock *manualClock) (*Authority, *Pool, *Supervisor, *manualClock) {
 	t.Helper()
-	resolver := poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerResolvedEndpoint, error) {
-		return ports.BrokerResolvedEndpoint{Identity: "canonical", Policy: r.Policy, Address: "fake"}, nil
+	resolver := poolResolver(func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerDialTarget, error) {
+		return ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: r.Policy, Address: "fake", StartMode: r.StartMode, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "canonical", Bound: true}}, nil
 	})
-	pool, err := NewPool(epoch, resolver, connector, clock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Idle: time.Minute})
+	pool, err := NewPool(epoch, resolver, registry, connector, clock, PoolLimits{Physical: 4, Clients: 8, Streams: 16, StreamsPerClient: 16, Idle: time.Minute})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
 	supervisor, idleClock := newTestSupervisor(t, time.Hour)
@@ -118,7 +118,7 @@ func (s *casThenGateStore) releaseCAS() {
 }
 
 // immediateConnector returns one healthy physical connection for any endpoint.
-func immediateConnector(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+func immediateConnector(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 	return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
 }
 
@@ -298,6 +298,79 @@ func TestServiceOpenStreamScopeFencing(t *testing.T) {
 	}
 }
 
+func TestServiceNextStreamIDAllocation(t *testing.T) {
+	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	t.Run("monotone, nonzero, and never reused", func(t *testing.T) {
+		seen := make(map[ports.BrokerStreamID]bool)
+		previous := ports.BrokerStreamID(0)
+		for range 64 {
+			stream, err := service.NextStreamID()
+			require.NoError(t, err)
+			require.NotZero(t, stream, "an allocated identity is never zero")
+			require.Greater(t, stream, previous, "allocation is strictly monotone")
+			require.False(t, seen[stream], "an identity is never reused")
+			seen[stream] = true
+			previous = stream
+		}
+	})
+
+	t.Run("concurrent allocation is monotone and collision-free", func(t *testing.T) {
+		const count = 256
+		ids := make([]ports.BrokerStreamID, count)
+		errs := make([]error, count)
+		var wg sync.WaitGroup
+		for i := range count {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ids[i], errs[i] = service.NextStreamID()
+			}()
+		}
+		wg.Wait()
+		seen := make(map[ports.BrokerStreamID]bool, count)
+		for i := range count {
+			require.NoError(t, errs[i])
+			require.NotZero(t, ids[i])
+			require.False(t, seen[ids[i]], "two concurrent allocations never collide")
+			seen[ids[i]] = true
+		}
+	})
+
+	t.Run("exhaustion refuses rather than wrapping", func(t *testing.T) {
+		exhausted, err := authority.AdmitClient(context.Background())
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, exhausted.Close()) })
+		exhausted.(*Service).nextStream = ^ports.BrokerStreamID(0)
+		_, err = exhausted.NextStreamID()
+		require.ErrorIs(t, err, ports.BrokerAdmissionLimit, "an exhausted counter never wraps to zero")
+	})
+
+	t.Run("a closed connection refuses", func(t *testing.T) {
+		closed, err := authority.AdmitClient(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, closed.Close())
+		_, err = closed.NextStreamID()
+		require.ErrorIs(t, err, ports.BrokerAdmissionClosed)
+	})
+
+	t.Run("an allocated identity is carried on the request", func(t *testing.T) {
+		stream, err := service.NextStreamID()
+		require.NoError(t, err)
+		request := poolRequest(service.ConnectionID(), 0)
+		request.Stream = stream
+		opened, err := service.OpenStream(context.Background(), request)
+		require.NoError(t, err)
+		require.NoError(t, opened.Close())
+		// Replaying the exact identity is refused as stale.
+		_, err = service.OpenStream(context.Background(), request)
+		require.ErrorIs(t, err, ports.BrokerAdmissionStale)
+	})
+}
+
 func TestServiceCloseStreamScopeFencing(t *testing.T) {
 	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
 	service, err := authority.AdmitClient(context.Background())
@@ -364,7 +437,7 @@ func TestServiceSnapshotDelegates(t *testing.T) {
 func TestServiceOperationLeaseLifetime(t *testing.T) {
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, func(ctx context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	authority, _, _, supervisor, _, _ := newTestAuthority(t, 1, nil, func(ctx context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		close(entered)
 		select {
 		case <-ctx.Done():
@@ -410,7 +483,7 @@ func TestServiceCloseOpenRace(t *testing.T) {
 		t.Run(fmt.Sprintf("round-%d", round), func(t *testing.T) {
 			entered := make(chan struct{})
 			proceed := make(chan struct{})
-			authority, _, pool, supervisor, _, _ := newTestAuthority(t, 1, nil, func(ctx context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+			authority, _, pool, supervisor, _, _ := newTestAuthority(t, 1, nil, func(ctx context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 				close(entered)
 				select {
 				case <-ctx.Done():
@@ -562,7 +635,7 @@ func TestServiceRequestReconcileDelegatesToRegistry(t *testing.T) {
 	clock := newManualClock(time.Unix(0, 0))
 	store := newTestStore()
 	registration := registration(t, "user@host:22", 1)
-	store.hosts = ports.BrokerHosts{Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: registration, Pinned: true, Policy: poolPolicy()}}}
+	store.hosts = ports.BrokerHosts{Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: registration, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), registration.Endpoint)}}}
 	probe := newTestProbe(2)
 	registry, err := NewRegistry(1, store, probe, clock, nil)
 	require.NoError(t, err)
@@ -900,6 +973,7 @@ func TestRegistryObservationDisabledDrainsWriter(t *testing.T) {
 		Registration: registration(t, "user@host:22", 1),
 		Pinned:       true,
 		Policy:       poolPolicy(),
+		Route:        canonicalRoute(poolPolicy(), "user@host:22"),
 	}}))
 	select {
 	case <-store.entered:

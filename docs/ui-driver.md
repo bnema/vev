@@ -4,17 +4,65 @@
 
 ## Headless attachment
 
-Start a new numbered session with the default 80x24 viewport:
+Start a new numbered ephemeral session with the default 80x24 viewport:
 
 ```sh
 vev --ui-driver
 ```
 
-The first line on stdout is the attachment discovery response. It is emitted only after the client has applied and published its initial full view:
+`--ui-driver` uses the per-user broker of the process' own XDG context. It never
+provisions, reconfigures, or destroys a daemon, a session-scoped root, or an
+endpoint: creation is expressed as one initial navigation through the broker, so
+two drivers can share one per-user broker without either owning it.
+
+The closed option set is:
+
+- `--session NAME` creates that named local session instead of an ephemeral one.
+- `--remote ENDPOINT` targets that configured remote endpoint: with `--session`
+it resolves that exact remote session, without it it creates a remote ephemeral
+session. Every remote identity comes from the broker's committed publication,
+never from a hostname or an environment value.
+- `--cols N --rows N` set the viewport, at most 512x256.
+- `--picker` starts with no initial navigation at all and is exclusive of
+`--session` and `--remote`.
+- `--socket ABS` is the JSONL bridge to an already running opted-in client, and
+is exclusive of every headless option.
+
+`--launch-config` no longer exists. It is an unknown option and is refused with
+the usage exit code before any terminal, broker, or filesystem interaction; a
+driver that needs an isolated endpoint provisions it through the broker's own
+configuration instead.
+
+The first line on stdout is the discovery response. It is emitted as soon as the
+client has published its initial state, which does not require a broker or a
+daemon:
 
 ```json
-{"version":1,"id":0,"result":{"attachment":"<opaque-handle>","generation":1,"control":true,"status":"attached"}}
+{"version":1,"id":0,"result":{"attachment":"<opaque-handle>","generation":0,"control":true,"status":"picker"}}
 ```
+
+`status` is a closed union of exactly three presentations:
+
+| `status` | meaning | `generation` | session metadata in `capture`/`wait` | `keys`/`text` |
+|---|---|---:|---|---|
+| `picker` | the local picker; ready without a broker and without a daemon | `0` | all zero | refused (`unavailable`) |
+| `connecting` | an attachment attempt that has not committed its first frame | `0` | all zero | refused (`unavailable`) |
+| `attached` | a committed attachment | nonzero real action generation | the validated session identity and committed boundary | admitted under the current binding |
+
+The former `detached`, `reconnecting`, and `transitioning` states no longer
+exist and are not aliases of these three: a reconnect is `connecting`, a detach
+is `picker`, and terminating closes the service instead of becoming a fourth
+persistent presentation. A driver that never publishes anything is a real local
+error; a destination that is refused, times out, or is lost leaves a published
+`picker` and the same JSONL service running.
+
+The `attachment` handle is the UI service of this run, never a session identity,
+and it is stable for the whole run. `generation` is zero until a committed
+attachment publishes one; a client must wait for `status` to become `attached`
+and use the generation that publication reports, and never assume
+`generation == 1`. A broker that is absent or incompatible is not fatal: the
+driver stays in the picker with a bounded notice and keeps answering `capture`
+and `wait`.
 
 The stream then accepts one JSON object per line. Every request has `version`, a nonzero `id`, `op`, and the discovered `attachment`:
 
@@ -52,7 +100,7 @@ A request timeout only ends that request. If input was already accepted, the res
 {"version":1,"id":6,"op":"wait","attachment":"<opaque-handle>","after_action":4,"timeout_ms":5000,"expect":{"text_contains":"driver ok","status":"attached"}}
 ```
 
-Supported predicates are literal `text_contains`, an exact `session` (`lifecycle_id` and `session_name`), an exact `focus` (`tab_id` and `pane_id`), and `status` (`attached`, `transitioning`, `reconnecting`, or `detached`). Without `after_action`, a wait may match the current published snapshot. With it, only the action's confirmed publication boundary and later snapshots are eligible. This is a postcondition check, not a claim that the action alone caused the text.
+Supported predicates are literal `text_contains`, an exact `session` (`lifecycle_id` and `session_name`), an exact `focus` (`tab_id` and `pane_id`), and `status` (`picker`, `connecting`, or `attached`). Without `after_action`, a wait may match the current published snapshot. With it, only the action's confirmed publication boundary and later snapshots are eligible. This is a postcondition check, not a claim that the action alone caused the text.
 
 ## Limits and errors
 
@@ -66,49 +114,20 @@ Supported predicates are literal `text_contains`, an exact `session` (`lifecycle
 
 Errors are structured and sanitized. Stable codes include `invalid_request`, `unsupported_version`, `permission_denied`, `stale_attachment`, `unavailable`, `timeout`, `outcome_unknown`, `capture_too_large`, `action_expired`, `input_busy`, `busy`, `navigation_failed`, and `endpoint_not_configured`. Error messages contain only the code; screen contents, credentials, endpoint internals, and environment values are not logged or returned.
 
-EOF detaches this driver attachment and closes its access stream. It does not kill shells or sessions on an existing endpoint. For an explicit launch configuration, the app performs a separate owned-endpoint teardown after driver access closes; it stops and removes only roots this invocation created.
+EOF detaches this driver attachment and closes its access stream. It does not kill shells or sessions, does not stop the shared broker, and does not remove any root: the broker, its daemon, and every session stay alive for the other clients, and the pool's own idle shutdown remains the only thing that ends the daemon.
 
-## Explicit launch configuration
+## Isolation
 
-Without `--launch-config`, normal local daemon startup and inherited client environment policy are unchanged. The option is the only way to request an explicit isolated endpoint:
+The driver owns no endpoint root, no daemon, and no process. An isolated endpoint
+is provisioned through the broker's own configuration before the driver starts,
+exactly like any other broker route: the broker is the single authority over
+binary, root, environment, trust, and launch policy, and those values are never a
+payload of a JSONL request, a selected hostname, or a client environment variable.
+There is no per-invocation root creation, no owner token, and no remote cleanup
+step at driver exit.
 
-```sh
-vev --ui-driver --session test --cols 100 --rows 30 \
-  --launch-config /absolute/path/launch.json
-```
-
-The configuration file must be owned by the current user, mode `0600`, valid UTF-8 JSON, and at most 64 KiB:
-
-```json
-{
-  "version": 1,
-  "local": {
-    "binary": "/absolute/path/vev",
-    "root": "/absolute/path/new-local-root",
-    "env": {
-      "HOME": "/home/test",
-      "PATH": "/usr/bin:/bin",
-      "SHELL": "/bin/sh"
-    }
-  },
-  "remotes": [
-    {
-      "endpoint": "user@example.com",
-      "binary": "/absolute/path/vev",
-      "root": "/absolute/path/new-remote-root",
-      "env": {
-        "HOME": "/home/test",
-        "PATH": "/usr/bin:/bin",
-        "SHELL": "/bin/sh"
-      }
-    }
-  ]
-}
-```
-
-`local` may be omitted only for a direct `--remote` start. `remotes` defaults to an empty list. Binary and root paths must be absolute. Environment maps are complete child environments, not merges with the invoking process. `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `VEV_ENV`, and `VEV_ENV_ROOT` are reserved and supplied by vev; they cannot appear in the file. Values are passed as argument data through the existing process/SSH builders, never by shell-concatenating untrusted strings.
-
-A configured root must not exist before the invocation creates it. Local roots and remotely created roots use private derived config, state, runtime, and temporary directories; a remote root is reused only by later connections carrying the same invocation-owned token. A launch-config invocation refuses to fall back to an unlisted remote endpoint, including during catalogue and preview discovery. Directory isolation is not a process, filesystem, or network sandbox; environment files and binaries remain sensitive.
+Directory isolation is not a process, filesystem, or network sandbox; environment
+files and binaries remain sensitive.
 
 ## Existing interactive clients
 

@@ -139,6 +139,15 @@ func pickerTestBase() pickerResolveBase {
 	return pickerResolveBase{Connection: ports.BrokerConnectionID{1}, Stream: ports.BrokerStreamID(1)}
 }
 
+// localDaemonSnapshot publishes one fresh, reachable, compatible local daemon
+// observation with no sessions, which is what the supervisor's readiness gate
+// and its initial navigation both need.
+func localDaemonSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision) ports.BrokerSnapshot {
+	return ports.BrokerSnapshot{Epoch: epoch, Revision: revision, Daemons: []ports.BrokerDaemonObservation{
+		pickerTestLocalObservation(time.Unix(1000, 0)),
+	}}
+}
+
 func TestPickerCatalogueEmptySnapshot(t *testing.T) {
 	catalogue, _ := pickerTestCatalogue(t)
 	require.False(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 0, Revision: 1}), "an invalid snapshot is never applied")
@@ -183,7 +192,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSessionKeys: map[string]bool{"remote-a": true},
 		},
 		{
-			name: "stale observation",
+			name: "stale observation stays explicitly selectable",
 			daemons: []ports.BrokerDaemonObservation{
 				func() ports.BrokerDaemonObservation {
 					observation := pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
@@ -193,12 +202,12 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			},
 			wantSections:    []string{"local"},
 			wantSessions:    []string{"alpha"},
-			wantSessionKeys: map[string]bool{"alpha": false},
+			wantSessionKeys: map[string]bool{"alpha": true},
 			wantStatus:      map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusUp, "local": protocol.PickerLineStatusStale},
 			wantDim:         map[string]bool{"alpha": true},
 		},
 		{
-			name: "unavailable host",
+			name: "unavailable host stays explicitly selectable",
 			daemons: []ports.BrokerDaemonObservation{
 				func() ports.BrokerDaemonObservation {
 					observation := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 3, catalogue_Up))
@@ -208,7 +217,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			},
 			wantSections:    []string{"user@arch"},
 			wantSessions:    []string{"remote-a"},
-			wantSessionKeys: map[string]bool{"remote-a": false},
+			wantSessionKeys: map[string]bool{"remote-a": true},
 			wantStatus:      map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp, "user@arch": protocol.PickerLineStatusDown},
 			wantDim:         map[string]bool{"remote-a": true},
 		},
@@ -345,6 +354,31 @@ func TestPickerCatalogueIdentityReplacement(t *testing.T) {
 	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueReplaced), "same endpoint with a new incarnation is a replacement")
 }
 
+// TestPickerCatalogueRegistrationGenerationChangeRequiresFreshSelection pins the
+// complete-registration equality fence on an interactive selection: a
+// registration whose generation advanced under the same endpoint and
+// incarnation is a replacement, so the displayed row cannot silently re-bind
+// to changed authority.
+func TestPickerCatalogueRegistrationGenerationChangeRequiresFreshSelection(t *testing.T) {
+	clock := newSupervisorTestClock()
+	now := clock.Now()
+	catalogue, _ := pickerTestCatalogue(t)
+
+	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
+		pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up)),
+	}}))
+	line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
+	require.True(t, ok)
+
+	advanced := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("alpha", 1, catalogue_Up))
+	advanced.Registration.Generation = 2
+	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{advanced}}))
+
+	_, err := catalogue.Resolve(line.Key, pickerTestBase())
+	require.Error(t, err)
+	require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueReplaced), "an advanced generation is a replacement: %v", err)
+}
+
 func TestPickerCatalogueStableRowOrder(t *testing.T) {
 	clock := newSupervisorTestClock()
 	now := clock.Now()
@@ -437,7 +471,7 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 			wantErr: pickerCatalogueGone,
 		},
 		{
-			name: "stale observation",
+			name: "stale observation is still explicitly selectable",
 			build: func(t *testing.T, catalogue *pickerCatalogue, clock *supervisorTestClock) string {
 				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
 					pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
@@ -447,7 +481,8 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 				advancePickerClock(clock, 2*pickerTestFreshness)
 				return line.Key
 			},
-			wantErr: pickerCatalogueStale,
+			wantLocal:     true,
+			wantAdmission: ports.BrokerAdmissionExact,
 		},
 		{
 			name: "incompatible host",
@@ -462,7 +497,7 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 			wantErr: pickerCatalogueIncompatible,
 		},
 		{
-			name: "unavailable host",
+			name: "unavailable host is still explicitly selectable",
 			build: func(t *testing.T, catalogue *pickerCatalogue, _ *supervisorTestClock) string {
 				unavailable := pickerTestRemoteObservation("user@arch", 1, 1, now, pickerTestSession("remote-a", 2, catalogue_Up))
 				unavailable.Availability = domain.RemoteAvailabilityUnreachable
@@ -471,7 +506,7 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 				require.True(t, ok)
 				return line.Key
 			},
-			wantErr: pickerCatalogueUnavailable,
+			wantAdmission: ports.BrokerAdmissionExact,
 		},
 		{
 			name: "epoch change",
@@ -522,16 +557,17 @@ func TestPickerCatalogueSelectionResolution(t *testing.T) {
 			wantErr: pickerCatalogueGone,
 		},
 		{
-			name: "broken session",
+			name: "unobserved host refuses as unavailable",
 			build: func(t *testing.T, catalogue *pickerCatalogue, _ *supervisorTestClock) string {
 				require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{
-					pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Broken)),
+					pickerTestUnobservedObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
 				}}))
 				line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
 				require.True(t, ok)
 				return line.Key
 			},
-			wantErr: pickerCatalogueUnavailable,
+			wantLocal:     true,
+			wantAdmission: ports.BrokerAdmissionExact,
 		},
 	}
 
@@ -575,86 +611,6 @@ func TestPickerCatalogueRemoteSelectionCarriesExactIdentity(t *testing.T) {
 	require.Equal(t, registration, request.Registration)
 	require.Equal(t, protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "remote-a"}, request.Target)
 	require.Equal(t, pickerTestPolicy(), request.Policy)
-}
-
-func TestPickerCatalogueCreationResolution(t *testing.T) {
-	clock := newSupervisorTestClock()
-	now := clock.Now()
-	base := pickerTestBase()
-
-	tests := []struct {
-		name          string
-		local         bool
-		endpoint      string
-		kind          pickerSelectionKind
-		sessionName   string
-		snapshot      func() ports.BrokerSnapshot
-		wantErr       pickerCatalogueErrorCode
-		wantAdmission ports.BrokerStreamAdmission
-	}{
-		{
-			name:        "named creation on the local daemon",
-			local:       true,
-			kind:        pickerSelectionCreateNamed,
-			sessionName: "fresh",
-			snapshot: func() ports.BrokerSnapshot {
-				return ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(now)}}
-			},
-			wantAdmission: ports.BrokerAdmissionCreateNamed,
-		},
-		{
-			name:     "ephemeral creation on a remote daemon",
-			endpoint: "user@arch",
-			kind:     pickerSelectionCreateEphemeral,
-			snapshot: func() ports.BrokerSnapshot {
-				return ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestRemoteObservation("user@arch", 1, 1, now)}}
-			},
-			wantAdmission: ports.BrokerAdmissionCreateEphemeral,
-		},
-		{
-			name:  "named creation without a name",
-			local: true,
-			kind:  pickerSelectionCreateNamed,
-			snapshot: func() ports.BrokerSnapshot {
-				return ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(now)}}
-			},
-			wantErr: pickerCatalogueInvalidName,
-		},
-		{
-			name:     "creation on a missing remote daemon",
-			endpoint: "user@arch",
-			kind:     pickerSelectionCreateEphemeral,
-			snapshot: func() ports.BrokerSnapshot { return ports.BrokerSnapshot{Epoch: 3, Revision: 1} },
-			wantErr:  pickerCatalogueGone,
-		},
-		{
-			name:  "creation on an incompatible daemon",
-			local: true,
-			kind:  pickerSelectionCreateEphemeral,
-			snapshot: func() ports.BrokerSnapshot {
-				observation := pickerTestLocalObservation(now)
-				observation.ProtocolVersion = protocol.Version + 1
-				return ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{observation}}
-			},
-			wantErr: pickerCatalogueIncompatible,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			catalogue, _ := pickerTestCatalogue(t)
-			require.True(t, catalogue.Apply(tt.snapshot()))
-			request, err := catalogue.ResolveCreation(tt.local, tt.endpoint, tt.kind, tt.sessionName, base)
-			if tt.wantErr != 0 {
-				require.Error(t, err)
-				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
-				return
-			}
-			require.NoError(t, err)
-			require.NoError(t, request.Validate())
-			require.Equal(t, tt.wantAdmission, request.Admission)
-		})
-	}
 }
 
 func TestPickerCatalogueUnknownKeyRefused(t *testing.T) {
@@ -804,10 +760,13 @@ func TestPickerCatalogueAvailabilityClassifiedBeforeCompatibility(t *testing.T) 
 	}
 }
 
-// TestPickerCatalogueAvailabilityFirstResolution proves resolution checks
-// availability before compatibility, so an unobserved or unreachable host
-// refuses as unavailable rather than as a version mismatch.
-func TestPickerCatalogueAvailabilityFirstResolution(t *testing.T) {
+// TestPickerCatalogueResolutionAdmission pins the narrow refusal rules of the
+// shared resolver: only a known incompatibility (a version mismatch or an
+// availability classified as incompatible) is refused immediately. An
+// unobserved, unreachable, auth-failed, invalid-response, or stale daemon stays
+// explicitly attemptable, because only the destination revalidates the exact
+// identity and only it may start a stopped target under the resolved policy.
+func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 	now := time.Unix(1000, 0)
 	tests := []struct {
 		name    string
@@ -815,46 +774,42 @@ func TestPickerCatalogueAvailabilityFirstResolution(t *testing.T) {
 		wantErr pickerCatalogueErrorCode
 	}{
 		{
-			name:    "unobserved unknown refuses unavailable",
-			daemon:  pickerTestUnobservedObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
-			wantErr: pickerCatalogueUnavailable,
+			name:   "unobserved unknown stays attemptable",
+			daemon: pickerTestUnobservedObservation(now, pickerTestSession("alpha", 1, catalogue_Up)),
 		},
 		{
-			name: "unreachable observed mismatch refuses unavailable",
+			name: "unreachable observed mismatch refuses incompatible",
 			daemon: func() ports.BrokerDaemonObservation {
 				o := pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
 				o.Availability = domain.RemoteAvailabilityUnreachable
 				o.ProtocolVersion = protocol.Version + 1
 				return o
 			}(),
-			wantErr: pickerCatalogueUnavailable,
+			wantErr: pickerCatalogueIncompatible,
 		},
 		{
-			name: "auth failed refuses unavailable",
+			name: "auth failed stays attemptable",
 			daemon: func() ports.BrokerDaemonObservation {
 				o := pickerTestUnobservedObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
 				o.Availability = domain.RemoteAvailabilityAuthFailed
 				return o
 			}(),
-			wantErr: pickerCatalogueUnavailable,
 		},
 		{
-			name: "invalid response refuses unavailable",
+			name: "invalid response stays attemptable",
 			daemon: func() ports.BrokerDaemonObservation {
 				o := pickerTestUnobservedObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
 				o.Availability = domain.RemoteAvailabilityInvalidResponse
 				return o
 			}(),
-			wantErr: pickerCatalogueUnavailable,
 		},
 		{
-			name: "reachable unobserved refuses unavailable",
+			name: "reachable unobserved stays attemptable",
 			daemon: func() ports.BrokerDaemonObservation {
 				o := pickerTestUnobservedObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
 				o.Availability = domain.RemoteAvailabilityReachable
 				return o
 			}(),
-			wantErr: pickerCatalogueUnavailable,
 		},
 		{
 			name: "reachable mismatch refuses incompatible",
@@ -881,9 +836,15 @@ func TestPickerCatalogueAvailabilityFirstResolution(t *testing.T) {
 			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
 			line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
 			require.True(t, ok)
-			_, err := catalogue.Resolve(line.Key, pickerTestBase())
-			require.Error(t, err)
-			require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+			request, err := catalogue.Resolve(line.Key, pickerTestBase())
+			if tt.wantErr != 0 {
+				require.Error(t, err)
+				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, request.Validate())
+			require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode, "an explicit attempt keeps the start authorization")
 		})
 	}
 }
@@ -924,7 +885,7 @@ func TestPickerCatalogueUnobservedDaemonProjects(t *testing.T) {
 	session, ok := pickerLineByLabel(lines, "alpha")
 	require.True(t, ok)
 	require.True(t, session.Focusable)
-	require.Zero(t, session.Actions, "an unobserved host row is inspectable only")
+	require.Equal(t, protocol.PickerCanNavigate, session.Actions, "an unobserved daemon may still be attempted explicitly")
 	require.True(t, session.Dim)
 }
 

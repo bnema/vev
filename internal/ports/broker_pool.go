@@ -1,7 +1,5 @@
 package ports
 
-import "context"
-
 // BrokerMaxAddressBytes bounds the opaque adapter route.
 const BrokerMaxAddressBytes = 4096
 
@@ -14,28 +12,6 @@ const (
 	BrokerStreamObservation
 )
 
-// BrokerResolvedEndpoint is an authenticated service binding, never a hostname
-// guess. Resolver owns registration fencing and machine-wide policy authority.
-// Address is an opaque adapter route, not a pooling identity. Resolution must
-// not start a daemon for observation. Connect must verify Identity and Policy;
-// the pool verifies them again before publication. Incarnation is learned on
-// connection and is deliberately not a stable pooling key.
-type BrokerResolvedEndpoint struct {
-	Identity BrokerDaemonIdentity
-	Policy   BrokerPolicy
-	Address  string
-}
-
-func (e BrokerResolvedEndpoint) Validate() error {
-	if err := e.Identity.Validate(); err != nil {
-		return err
-	}
-	if err := e.Policy.Validate(); err != nil {
-		return err
-	}
-	return validateBrokerToken(e.Address, BrokerMaxAddressBytes, "resolved address")
-}
-
 // Resolve must validate current registration and reject conflicting requested
 // policy. It must honor cancellation and return bounded, authenticated values.
 // No resolver cache or alias normalization in the pool can bypass this check.
@@ -43,10 +19,6 @@ func (e BrokerResolvedEndpoint) Validate() error {
 // semantic rejection and context errors for cancellation/deadline. Unknown
 // errors become Unavailable; causes remain accessible through errors.Is/As.
 // Never place secrets or unbounded adapter diagnostics in BrokerError.Text.
-type BrokerEndpointResolver interface {
-	Resolve(context.Context, BrokerOpenStreamRequest) (BrokerResolvedEndpoint, error)
-}
-
 // BrokerLogicalConnection supplies terminal notification independent of reads.
 // Done closes exactly once; Err is stable afterwards (nil for orderly close).
 // Close is concurrent-safe, prompt, and unblocks all I/O. Physical Close and

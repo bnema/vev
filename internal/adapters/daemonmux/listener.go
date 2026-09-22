@@ -103,6 +103,13 @@ const (
 	listenerClosedText    = "listener closed"
 	handshakeDeadlineText = "handshake deadline exceeded"
 
+	// invalidAdmissionText is the bounded, presentation-safe text of the
+	// stream-local Reset a listener sends when an admitted Open contradicts the
+	// accepted carriage origin (a liar Local) or fails the closed admission
+	// contract. The stream is refused rather than stamped with a provenance the
+	// accepting side did not provision.
+	invalidAdmissionText = "invalid session admission"
+
 	// sessionCarriageClosedText is the bounded, presentation-safe text carried
 	// by the stream-local Reset a listener connection sends when its inner
 	// session carriage closed on its own during the handshake (a sessionwire
@@ -137,6 +144,11 @@ type Listener struct {
 	clock      ports.Clock
 	budget     time.Duration
 	queueLimit int
+	// accepted is the provisioned carriage shape the physical handshake
+	// admitted. Every admitted session connection is stamped with it, so the
+	// daemon consumes the accepting side's authority rather than the peer's
+	// Open.
+	accepted ServerPolicyAdmission
 
 	// mu guards the accept queue, the deadline registry, and the closed flag.
 	// change is the closed-and-replaced broadcast channel every blocked Accept
@@ -154,45 +166,55 @@ type Listener struct {
 }
 
 var (
-	_ ports.ServerListener   = (*Listener)(nil)
-	_ ports.ServerConnection = (*ListenerConnection)(nil)
-	_ HandshakePlumbing      = (*ListenerConnection)(nil)
+	_ ports.ServerListener           = (*Listener)(nil)
+	_ ports.ServerConnection         = (*ListenerConnection)(nil)
+	_ HandshakePlumbing              = (*ListenerConnection)(nil)
+	_ ports.SessionAdmissionProvider = (*ListenerConnection)(nil)
 )
 
 // admittedStream is one inbound logical stream the engine admitted and the
 // listener tracks until it is settled: delivered with a completed handshake, or
-// terminal (expired, peer-settled, refused, or released).
+// terminal (expired, peer-settled, refused, or released). admission is the
+// cloned provisioned admission stamped when the stream was admitted.
 type admittedStream struct {
-	ref      StreamRef
-	deadline time.Time
-	done     <-chan struct{}
-	queued   bool
-	settled  bool
+	ref       StreamRef
+	deadline  time.Time
+	done      <-chan struct{}
+	admission ports.SessionAdmission
+	queued    bool
+	settled   bool
 }
 
 // NewListener returns a listener over one daemon-side pump under the package
 // policy: the accepted absolute handshake deadline budget is
 // protocol.HandshakeTimeout, and the accept queue is bounded by
-// MaxAcceptQueue. The pump must decode broker-to-daemon frames
-// (Inbound == DirectionClient) and emit daemon-to-broker frames, as the daemon
-// side of a pooled physical connection does; a nil, engine-less, or
-// broker-side pump is refused. The pump must not have started: the listener
-// registers the pump's admission observer, and a pump that already started
-// refuses the registration with ErrAdmissionObserverLate (wrapped in
-// ErrListenerConfig), because an observer registered after Start could miss an
-// already-admitted Open.
-func NewListener(pump *Pump) (*Listener, error) {
-	return newListener(pump, protocol.HandshakeTimeout, MaxAcceptQueue, clock.New())
+// MaxAcceptQueue. accepted is the provisioned carriage shape the physical
+// handshake admitted: its exact policy and its locality origin. Every admitted
+// session connection is stamped with it. The pump must decode broker-to-daemon
+// frames (Inbound == DirectionClient) and emit daemon-to-broker frames, as the
+// daemon side of a pooled physical connection does; a nil, engine-less, or
+// broker-side pump, or an invalid accepted entry, is refused. The pump must not
+// have started: the listener registers the pump's admission observer, and a
+// pump that already started refuses the registration with
+// ErrAdmissionObserverLate (wrapped in ErrListenerConfig), because an observer
+// registered after Start could miss an already-admitted Open.
+func NewListener(pump *Pump, accepted ServerPolicyAdmission) (*Listener, error) {
+	return newListener(pump, protocol.HandshakeTimeout, MaxAcceptQueue, clock.New(), accepted)
 }
 
 // newListener builds a listener from explicit policy. budget is the handshake
 // deadline budget each stream receives at admission, limit is the accept-queue
-// bound, and clock supplies the admission time and the deadline timer. The
-// exported constructor delegates with the package policy; a test tightens the
-// budget, the queue bound, or the clock without changing live behavior.
-func newListener(pump *Pump, budget time.Duration, limit int, timeSource ports.Clock) (*Listener, error) {
+// bound, clock supplies the admission time and the deadline timer, and accepted
+// is the provisioned carriage shape stamped on every admitted session
+// connection. The exported constructor delegates with the package policy; a
+// test tightens the budget, the queue bound, or the clock without changing live
+// behavior.
+func newListener(pump *Pump, budget time.Duration, limit int, timeSource ports.Clock, accepted ServerPolicyAdmission) (*Listener, error) {
 	if pump == nil || pump.Engine() == nil || pump.Inbound() != DirectionClient {
 		return nil, ErrListenerConfig
+	}
+	if err := accepted.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrListenerConfig, err)
 	}
 	if budget <= 0 {
 		budget = protocol.HandshakeTimeout
@@ -208,6 +230,7 @@ func newListener(pump *Pump, budget time.Duration, limit int, timeSource ports.C
 		clock:      timeSource,
 		budget:     budget,
 		queueLimit: limit,
+		accepted:   accepted,
 		active:     make(map[PhysicalStreamID]*admittedStream),
 		change:     make(chan struct{}),
 		done:       make(chan struct{}),
@@ -294,16 +317,60 @@ func (l *Listener) Close() error {
 	return nil
 }
 
+// sessionAdmissionFor stamps the provisioned admission metadata onto one
+// admitted Open: the accepted entry's exact policy and origin, plus the peer's
+// closed purpose, attachment variant, name, target, and bounded environment. It
+// refuses an Open whose declared locality contradicts the accepted origin (a
+// liar Local must never be stamped as the provisioned locality), whose offered
+// policy is not the accepted member, or whose shape the closed admission
+// contract rejects, so a consumer only ever receives a validated admission. The
+// policy and locality checks are repeated here rather than relying on the
+// engine's prior restriction, so a listener built without one still enforces
+// the accepted member.
+func sessionAdmissionFor(accepted ServerPolicyAdmission, open Open) (ports.SessionAdmission, error) {
+	if !accepted.Policy.Compatible(open.Policy) {
+		return ports.SessionAdmission{}, ErrInvalidMessage
+	}
+	origin := ports.SessionOriginRemote
+	if open.Local {
+		origin = ports.SessionOriginLocal
+	}
+	if accepted.Origin != origin {
+		return ports.SessionAdmission{}, ErrInvalidMessage
+	}
+	admission := ports.SessionAdmission{
+		Origin:    accepted.Origin,
+		Policy:    accepted.Policy,
+		Purpose:   open.Purpose,
+		Admission: open.Admission,
+		Name:      open.Name,
+		Target:    open.Target,
+		Env:       append([]string(nil), open.Env...),
+	}
+	if err := admission.Validate(); err != nil {
+		return ports.SessionAdmission{}, ErrInvalidMessage
+	}
+	return admission, nil
+}
+
 // onAdmitted is the pump's admission observer. It runs on the pump's reader
-// goroutine immediately after one inbound Open was admitted: it queues the
+// goroutine immediately after one inbound Open was admitted: it stamps the
+// provisioned admission (refusing exactly that stream when the Open contradicts
+// the accepted origin or fails the closed admission contract) and queues the
 // stream under its admission deadline, or refuses exactly that stream when the
 // accept queue is full or the listener is closed. It never blocks - the reader
 // is the one goroutine that applies every inbound frame of the connection.
 func (l *Listener) onAdmitted(open Open) {
 	admitted := l.clock.Now()
+	admission, err := sessionAdmissionFor(l.accepted, open)
+	if err != nil {
+		l.abort(open.Ref.Physical, invalidAdmissionText)
+		return
+	}
 	entry := &admittedStream{
-		ref:      open.Ref,
-		deadline: admitted.Add(l.budget),
+		ref:       open.Ref,
+		deadline:  admitted.Add(l.budget),
+		admission: admission,
 	}
 	if status, ok := l.pump.Engine().Status(open.Ref.Physical); ok {
 		entry.done = status.Done
@@ -620,6 +687,10 @@ type ListenerConnection struct {
 	// admission, resolved once at construction.
 	deadline time.Time
 
+	// admission is the cloned provisioned admission stamped at admission. It is
+	// resolved once at construction and exposed only through a defensive copy.
+	admission ports.SessionAdmission
+
 	terminal  *terminalState
 	watchDone chan struct{}
 	closeOnce sync.Once
@@ -636,7 +707,7 @@ func newListenerConnection(l *Listener, entry *admittedStream) *ListenerConnecti
 	pipe := newMuxStreamPipe(l.pump, entry.ref.Physical, limit, entry.done)
 	raw := newMuxTransport(pipe)
 	connection := &ListenerConnection{
-		ServerConnection: sessionwire.NewServerConnectionWithDeadline(raw, entry.deadline),
+		ServerConnection: sessionwire.NewServerConnectionWithAdmission(raw, entry.deadline, entry.admission),
 		listener:         l,
 		pump:             l.pump,
 		ref:              entry.ref,
@@ -645,6 +716,7 @@ func newListenerConnection(l *Listener, entry *admittedStream) *ListenerConnecti
 		stream:           entry.done,
 		cause:            l.pump.cause(entry.ref.Physical),
 		deadline:         entry.deadline,
+		admission:        entry.admission.Clone(),
 		terminal:         newTerminalState(),
 		watchDone:        make(chan struct{}),
 	}
@@ -659,6 +731,14 @@ func newListenerConnection(l *Listener, entry *admittedStream) *ListenerConnecti
 
 // Ref returns the complete stream reference recorded at admission.
 func (c *ListenerConnection) Ref() StreamRef { return c.ref }
+
+// SessionAdmission returns a defensive copy of the provisioned admission
+// stamped at acceptance, implementing ports.SessionAdmissionProvider. It always
+// reports ok=true: a ListenerConnection is built only from an already-admitted
+// stream whose provenance a listener stamped and validated.
+func (c *ListenerConnection) SessionAdmission() (ports.SessionAdmission, bool) {
+	return c.admission.Clone(), true
+}
 
 // HandshakeDeadline returns the accepted absolute local deadline of the
 // session handshake, fixed at Open admission and plumbing the exact deadline

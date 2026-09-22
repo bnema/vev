@@ -17,9 +17,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/webterm"
 	"github.com/bnema/vev/internal/logging"
-	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
 )
 
 const webStartupTimeout = 10 * time.Second
@@ -148,6 +146,69 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 	}
 }
 
+// webTerminalConnector is the composition-root seam of one browser attachment's
+// broker connector. Production composes the lazy per-user connector, which
+// connect-or-spawns the broker on demand inside Connect; a test substitutes a
+// connector over its own private sandbox.
+var webTerminalConnector = newProductionBrokerConnector
+
+// webTerminal is the terminal of one browser attachment: the adapter's virtual
+// terminal plus the optional UI output transaction the shared supervisor
+// expects. The browser gateway has no UI observation service — the adapter
+// renders from its own VT mirror and change signal — so the transaction is the
+// honest "observation channel unavailable" shape: begin/end bracket the write
+// with no published snapshot, and PublishContext reports ports.ErrUIUnavailable,
+// which the supervisor's foreground deliberately tolerates so the frame is
+// still written and flushed. This keeps the browser run on the same code path
+// as every other frontend without inventing a second renderer or a parallel
+// presentation owner.
+type webTerminal struct {
+	*webterm.Terminal
+}
+
+var _ ports.UIOutputTransaction = webTerminal{}
+
+func (webTerminal) BeginOutput(ports.UIContext) {}
+
+// EndOutput is a no-op: no publication was staged, so nothing is committed or
+// rolled back.
+func (webTerminal) EndOutput(bool) {}
+
+// PublishContext reports the unavailable observation channel. The supervisor
+// tolerates it and still writes the frame; a picker paint does the same.
+func (webTerminal) PublishContext(ports.UIContext) error { return ports.ErrUIUnavailable }
+
+// runWebTerminalClient composes exactly one browser attachment over the shared
+// broker client. Every authenticated WebSocket owns one call, and therefore one
+// client.Picker, one client.Supervisor, one broker service, and one session
+// stream; the virtual webterm.Terminal is simply that run's terminal, so the
+// picker, connecting, and attached presentations and their bounded failures are
+// the same ones the ordinary terminal path presents.
+//
+// It dials no daemon, selects no transport, and keeps no host registry, remote
+// factory, launch configuration, or attachment cache: the broker owns every
+// carriage, and the no-argument product intent is expressed as the closed
+// initial-navigation union, exactly like the sandbox harness. Cancelling the
+// run's context ends only this supervisor and its logical stream — the broker,
+// its daemons, and every other tab stay alive.
+func runWebTerminalClient(ctx context.Context, terminal *webterm.Terminal) error {
+	callbacks := terminalBrokerCallbacks()
+	sessionEnv := terminalSessionEnvironment()
+	attachmentEnv := terminalAttachmentEnvironment()
+	attachmentEnv.Cwd = sessionEnv.Cwd
+	return runBrokerClient(ctx, brokerClientConfig{
+		Connector:             webTerminalConnector(),
+		Terminal:              webTerminal{Terminal: terminal},
+		Clock:                 clock.New(),
+		InitialNavigation:     localEphemeralNavigation(),
+		AttachmentEnvironment: attachmentEnv,
+		SessionEnvironment:    sessionEnv,
+		OnState:               callbacks.OnState,
+		OnFailure:             callbacks.OnFailure,
+		OnLifecycle:           callbacks.OnLifecycle,
+	})
+}
+
 // Preserve the requested address family, including IPv4 wildcard listeners.
 func listenWeb(address string) (net.Listener, error) {
 	addr, err := netip.ParseAddrPort(address)
@@ -195,13 +256,7 @@ func runWebDaemon(parent context.Context, options webOptions) error {
 	}
 	defer closer.Close()
 	handler, err := webterm.NewServer(ctx, settings, token, func(ctx context.Context, terminal *webterm.Terminal) error {
-		clk := clock.New()
-		deps := runAttachDeps{
-			terminal: func() ports.Terminal { return terminal }, clock: func() ports.Clock { return clk },
-			disableCapabilityProbe: true, selectedRemoteTransport: os.Getenv(envRemoteTransport),
-			createDetached: createDetachedLocalSession, stateDir: platform.StateDir,
-		}
-		err := runAttachWithDeps(ctx, protocol.IntentEphemeral, "", "", "", log, deps)
+		err := runWebTerminalClient(ctx, terminal)
 		if err != nil && ctx.Err() == nil {
 			log.Warn("web attachment ended", "error", strings.TrimSpace(err.Error()))
 		}

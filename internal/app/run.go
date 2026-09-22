@@ -26,16 +26,16 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/clipboard"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/config"
+	"github.com/bnema/vev/internal/adapters/daemonidentity"
+	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
 	"github.com/bnema/vev/internal/adapters/quic"
-	remoteadapter "github.com/bnema/vev/internal/adapters/remote"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
@@ -50,7 +50,6 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/internal/usecase/recovery"
-	"github.com/bnema/vev/internal/usecase/remotes"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -68,7 +67,6 @@ const (
 	kindStdio
 	kindQUICBootstrap
 	kindQUICProxy
-	kindRemotePreview
 	kindUIDriver
 	kindUIRemoteCleanup
 	kindWebDaemon
@@ -81,6 +79,9 @@ const (
 	kindBrokerMuxStdio
 	kindBrokerMuxQUICBootstrap
 	kindBrokerMuxQUICProxy
+	kindProductionBrokerServe
+	kindProductionBrokerLauncher
+	kindBrokerReady
 	kindHelp
 	kindVersion
 )
@@ -88,28 +89,28 @@ const (
 // command is the parsed CLI invocation: what to do, plus the attach intent
 // and session name where relevant.
 type command struct {
-	kind                 cmdKind
-	intent               uint8
-	name                 string
-	remoteTarget         string
-	listHost             string
-	listAll              bool
-	hostAction           string
-	hostTarget           string
-	killAll              bool
-	killDaemon           bool
-	cmd                  cmdInvocation
-	brokerServe          brokerServeOptions
-	brokerClient         brokerClientOptions
-	brokerLauncher       brokerLauncherOptions
-	brokerStatus         brokerStatusOptions
-	brokerMux            brokerMuxOptions
-	remotePreviewPayload string
-	uiDriver             uiDriverOptions
-	uiObserve            bool
-	uiControl            bool
-	uiSocket             string
-	web                  webOptions
+	kind           cmdKind
+	intent         uint8
+	name           string
+	remoteTarget   string
+	listHost       string
+	listAll        bool
+	hostAction     string
+	hostTarget     string
+	killAll        bool
+	killDaemon     bool
+	cmd            cmdInvocation
+	brokerServe    brokerServeOptions
+	brokerClient   brokerClientOptions
+	brokerLauncher brokerLauncherOptions
+	brokerStatus   brokerStatusOptions
+	brokerMux      brokerMuxOptions
+	brokerReady    brokerReadyOptions
+	uiDriver       uiDriverOptions
+	uiObserve      bool
+	uiControl      bool
+	uiSocket       string
+	web            webOptions
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -244,12 +245,19 @@ parsedUIFlags:
 		return command{kind: kindDaemonLauncher}, nil
 	case brokerServeCommand:
 		return parseBrokerServeArgs(args[1:])
+	case productionBrokerServeCommand:
+		return parseProductionBrokerServeArgs(args[1:])
 	case brokerClientCommand:
 		return parseBrokerClientArgs(args[1:])
 	case brokerLauncherCommand:
 		return parseBrokerLauncherArgs(args[1:])
+	case productionBrokerLauncherCommand:
+		return parseProductionBrokerLauncherArgs(args[1:])
 	case brokerStatusCommand:
 		return parseBrokerStatusArgs(args[1:])
+	case brokerReadyCommand:
+		options, err := parseBrokerReadyArgs(args[1:])
+		return command{kind: kindBrokerReady, brokerReady: options}, err
 	case brokerMuxStdioCommand:
 		return parseBrokerMuxArgs(brokerMuxStdioCommand, kindBrokerMuxStdio, args[1:])
 	case brokerMuxQUICBootstrapCommand:
@@ -271,11 +279,6 @@ parsedUIFlags:
 			return command{}, usagef("`_quic-proxy` does not accept a session name")
 		}
 		return command{kind: kindQUICProxy}, nil
-	case "_remote-preview":
-		if len(args) != 2 || args[1] == "" {
-			return command{}, usagef("`_remote-preview` requires one encoded request")
-		}
-		return command{kind: kindRemotePreview, remotePreviewPayload: args[1]}, nil
 	case uiRemoteCleanupCommand:
 		if len(args) != 1 {
 			return command{}, usagef("`%s` does not accept arguments", uiRemoteCleanupCommand)
@@ -285,14 +288,24 @@ parsedUIFlags:
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
 		}
-		interactive, err := parseInteractiveUIFlags(args[2:], uiObserve, uiControl, uiSocket)
+		name := args[1]
+		var remoteTarget string
+		optionStart := 2
+		if len(args) > 2 && !strings.HasPrefix(args[2], "--") {
+			remoteTarget = args[2]
+			if err := domain.ValidateRemoteHostTarget(remoteTarget); err != nil {
+				return command{}, err
+			}
+			optionStart = 3
+		}
+		interactive, err := parseInteractiveUIFlags(args[optionStart:], uiObserve, uiControl, uiSocket)
 		if err != nil {
 			return command{}, err
 		}
-		if err := domain.ValidateSessionName(args[1]); err != nil {
+		if err := domain.ValidateSessionName(name); err != nil {
 			return command{}, err
 		}
-		return command{kind: kindAttach, intent: protocol.IntentNew, name: args[1], uiObserve: interactive.observe, uiControl: interactive.control, uiSocket: interactive.socket}, nil
+		return command{kind: kindAttach, intent: protocol.IntentNew, name: name, remoteTarget: remoteTarget, uiObserve: interactive.observe, uiControl: interactive.control, uiSocket: interactive.socket}, nil
 	case "attach", "a":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`attach` requires a session name")
@@ -394,14 +407,18 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runBrokerMuxQUICBootstrapCommand(ctx, cmd.brokerMux)
 	case kindBrokerMuxQUICProxy:
 		return runBrokerMuxQUICProxyCommand(ctx, cmd.brokerMux)
+	case kindProductionBrokerServe:
+		return runBrokerServeCommand(ctx, cmd.brokerServe)
+	case kindProductionBrokerLauncher:
+		return runProductionBrokerLauncherCommand(ctx)
+	case kindBrokerReady:
+		return runBrokerReady(ctx, cmd.brokerReady, os.Stdout)
 	case kindStdio:
 		return runStdio(ctx)
 	case kindQUICBootstrap:
 		return runQUICBootstrap(ctx)
 	case kindQUICProxy:
 		return runQUICProxy(ctx)
-	case kindRemotePreview:
-		return runRemotePreview(ctx, cmd.remotePreviewPayload)
 	case kindUIRemoteCleanup:
 		return runUIRemoteCleanup(ctx)
 	case kindUIDriver:
@@ -468,30 +485,14 @@ func parseHostArgs(args []string) (command, error) {
 	}
 }
 
-type remoteDialerForTarget func(target, session string, mode remoteadapter.TransportMode, log *slog.Logger) (wire.Dialer, error)
-
 // performanceTrace creates one serialized timestamp owner for this process.
 // An empty trace environment leaves all production behavior and wire bytes
 // unchanged.
 // Composition-root factory seams keep observer propagation testable without
 // opening real transports.
-var (
-	newPerformanceTrace                       = performanceTrace
-	newRemoteHostStore                        = remoteadapter.NewFileHostStore
-	newRemoteCatalogCache                     = remoteadapter.NewFileCatalogCache
-	newRemoteCatalogClient                    = remoteadapter.NewCatalogClient
-	newRemotePreviewClient                    = remoteadapter.NewPreviewClient
-	newRemoteDialerFactoryWithRuntimeObserver = func(observer ports.SerializedRuntimeObserver) remoteDialerForTarget {
-		return remoteadapter.NewDialerFactoryWithRuntimeObserver(observer).DialerForRemote
-	}
-	runClientWithDeps runClientFunc = func(
-		ctx context.Context,
-		deps client.Dependencies,
-		request client.AttachRequest,
-	) error {
-		return client.NewRunner(deps).Run(ctx, request)
-	}
-)
+var connectBroker = connectProductionBroker
+
+var newPerformanceTrace = performanceTrace
 
 func performanceTrace(clk ports.Clock) (ports.SerializedRuntimeObserver, io.Closer, error) {
 	return performanceTraceWithFactories(clk, observability.NewJSONL, ports.NewRuntimeCorrelationObserver)
@@ -773,19 +774,6 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	allowedRemoteEndpoints, allowlistConfigured, err := remoteLaunchAllowlistFromEnv()
-	if err != nil {
-		return err
-	}
-	var remoteDiscoveryOpt daemon.Option
-	if allowlistConfigured {
-		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), clk, log, allowedRemoteEndpoints)
-	} else {
-		remoteDiscoveryOpt, err = remoteDiscoveryDaemonOption(platform.StateDir(), os.Getenv(envRemoteTransport), clk, log)
-	}
-	if err != nil {
-		return err
-	}
 	if addr := os.Getenv("VEV_PPROF_ADDR"); addr != "" {
 		if !pprofAddrIsLoopback(addr) {
 			log.Warn("pprof bound to non-loopback address; /debug/pprof is unauthenticated", "addr", addr)
@@ -798,7 +786,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		log.Info("pprof enabled", "addr", addr)
 	}
 
-	daemonOpts := []daemon.Option{remoteDiscoveryOpt}
+	var daemonOpts []daemon.Option
 	developmentTempOpt, err := developmentTempDirOption(safedir.EnsurePrivate)
 	if err != nil {
 		return err
@@ -845,6 +833,43 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 
 	// Construct the catalogue-backed expected-session registry before socket
 	// publication. Phase 3 snapshot restoration remains asynchronous in Serve.
+	identity, err := daemonidentity.LoadOrCreate(stateDir)
+	if err != nil {
+		return fmt.Errorf("vev: establish daemon identity: %w", err)
+	}
+	incarnation, err := daemonidentity.NewIncarnation()
+	if err != nil {
+		return fmt.Errorf("vev: establish daemon incarnation: %w", err)
+	}
+	binding, err := daemonmux.NewServerBindings(identity, incarnation, []daemonmux.ServerPolicyAdmission{
+		{Policy: localDaemonPolicy(), Origin: ports.SessionOriginLocal},
+		{Policy: remoteBrokerPolicy("quic"), Origin: ports.SessionOriginRemote},
+		{Policy: remoteBrokerPolicy("stdio"), Origin: ports.SessionOriginRemote},
+	})
+	if err != nil {
+		return fmt.Errorf("vev: establish daemon mux authority: %w", err)
+	}
+	aggregate := daemonmux.NewAggregateListener()
+	muxSupervisor, err := daemonmux.NewServerSupervisor(aggregate, binding, daemonmux.DefaultMuxCeilings(), 0)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, muxSupervisor.Close()) }()
+	muxListener, err := ipc.ListenMux(daemonmux.SocketPath(ipc.SocketDir()))
+	if err != nil {
+		return fmt.Errorf("vev: listen daemon mux: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, muxListener.Close()) }()
+	go func() {
+		for {
+			raw, acceptErr := muxListener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() { _ = muxSupervisor.Adopt(ctx, raw) }()
+		}
+	}()
+
 	d, ln, err := constructDaemonBeforeSocketPublication(
 		func() *daemon.Daemon { return daemon.New(pty.NewFactory(), clk, log, daemonOpts...) },
 		func(d *daemon.Daemon) error {
@@ -876,7 +901,10 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 			log.Warn("config watcher stopped", "path", configPath, "err", err)
 		}
 	}()
-	if err := d.Serve(ctx, sessionwire.NewServerListener(ln)); err != nil {
+	if err := aggregate.Register(sessionwire.NewServerListener(ln)); err != nil {
+		return fmt.Errorf("vev: register local session listener: %w", err)
+	}
+	if err := d.Serve(ctx, aggregate); err != nil {
 		log.Error("daemon exited", "err", err)
 		return err
 	}
@@ -888,21 +916,19 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 // attach loop. Logging goes to the shared file: the client must never write
 // to the console while the terminal is raw.
 func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (retErr error) {
-	// Treat a controlling-terminal hangup or termination request as a graceful
-	// detach rather than an abrupt process death. Cancelling the context unwinds
-	// the client's pumps, closes its transport, and lets the deferred trace closer
-	// flush the in-flight receive's end mark — so teardown never truncates a span.
-	// Raw mode disables ISIG, so catching SIGINT here does not affect interactive
-	// Ctrl+C, which the daemon delivers to the remote shell as a normal keystroke.
+	if os.Getenv("VEV") != "" {
+		if remoteTarget == "" && intent == protocol.IntentNew {
+			return createDetachedTerminalSession(ctx, name)
+		}
+		return errors.New("vev: sessions should be nested with care; unset VEV to force")
+	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-
-	log, logCloser, err := configureLogging(logging.Client, false)
+	_, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
-
 	clk := clock.New()
 	observer, observerCloser, err := newPerformanceTrace(clk)
 	if err != nil {
@@ -911,17 +937,19 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
 	}
-	return runAttachWithDeps(ctx, intent, name, remoteTarget, os.Getenv("VEV"), log, runAttachDeps{
-		localDialer: func() wire.Dialer {
-			return localDaemonDialer{dir: ipc.SocketDir(), observer: observer}
-		},
-		remoteDialerFactory:     newRemoteDialerFactoryWithRuntimeObserver(observer),
-		selectedRemoteTransport: os.Getenv(envRemoteTransport),
-		runClient:               runClientWithDeps,
-		createDetached:          createDetachedLocalSession,
-		clipboard:               clipboard.New(),
-		runtimeObserver:         observer,
-		stateDir:                platform.StateDir,
+	if observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeTransportDiagnostic, 0, true))
+	}
+	navigation, resolver, err := terminalBrokerNavigation(intent, name, remoteTarget)
+	if err != nil {
+		return err
+	}
+	callbacks := terminalBrokerCallbacks()
+	return runBrokerClient(ctx, brokerClientConfig{
+		Connector: newProductionBrokerConnector(), Terminal: terminalForAttach(), Clock: clk,
+		InitialNavigation: navigation, ResolveInitialNavigation: resolver,
+		AttachmentEnvironment: terminalAttachmentEnvironment(), SessionEnvironment: terminalSessionEnvironment(),
+		OnState: callbacks.OnState, OnLifecycle: callbacks.OnLifecycle, OnFailure: callbacks.OnFailure,
 	})
 }
 
@@ -930,249 +958,14 @@ const (
 	uiRemoteCleanupCommand = "_ui-cleanup"
 )
 
-func defaultLocalDialer() wire.Dialer { return localDaemonDialer{dir: ipc.SocketDir()} }
-
-func defaultRemoteDialerFactory() remoteDialerForTarget {
-	return remoteadapter.NewDialerFactory().DialerForRemote
-}
-
-type runClientFunc func(context.Context, client.Dependencies, client.AttachRequest) error
-
-type runAttachDeps struct {
-	configPath              func() string
-	localDialer             func() wire.Dialer
-	remoteDialerFactory     remoteDialerForTarget
-	selectedRemoteTransport string
-	runClient               runClientFunc
-	createDetached          func(context.Context, string) error
-	runtimeObserver         ports.SerializedRuntimeObserver
-	ui                      *client.UI
-	terminal                func() ports.Terminal
-	// interactiveConsole decides whether the missing-session prompt may read
-	// its answer from a console. Nil probes the client terminal's input.
-	interactiveConsole     func(ports.Terminal) bool
-	clock                  func() ports.Clock
-	disableCapabilityProbe bool
-	localEnvironment       []string
-	remoteEnvironment      func(string) []string
-	// clipboard reads a clipboard image on a remote route's Ctrl+V.
-	// The client retains it across local-to-remote handoffs and only enables
-	// interception while the active route is remote.
-	clipboard ports.ClipboardReader
-	// Optional remote-learning seams.
-	stateDir  func() string
-	hostStore ports.RemoteHostStore
-}
-
-func remoteTransportModeFromEnv(value string) (remoteadapter.TransportMode, error) {
+func remoteTransportModeFromEnv(value string) (string, error) {
 	switch value {
-	case "", string(remoteadapter.TransportQUIC):
-		return remoteadapter.TransportQUIC, nil
-	case string(remoteadapter.TransportStdio):
-		return remoteadapter.TransportStdio, nil
+	case "", "quic":
+		return "quic", nil
+	case "stdio":
+		return "stdio", nil
 	default:
-		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, remoteadapter.TransportQUIC, remoteadapter.TransportStdio)
-	}
-}
-
-func validateRemoteAttachHandoff(target protocol.AttachTarget) error {
-	if err := protocol.ValidateAttachTarget(target); err != nil {
-		return err
-	}
-	if err := domain.ValidateRemoteHostTarget(target.Endpoint); err != nil {
-		return err
-	}
-	if err := domain.ValidateSessionName(target.Session); err != nil {
-		return err
-	}
-	if target.RemoteTarget != nil {
-		if target.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
-			return errors.New("remote picker handoff must use daemon-owned environment")
-		}
-		if target.RemoteTarget.Endpoint != target.Endpoint || target.RemoteTarget.SessionName != target.Session {
-			return errors.New("remote picker handoff identity does not match route")
-		}
-	}
-	return nil
-}
-
-// remoteDiscoveryDaemonOption constructs the daemon-owned discovery ports from
-// the same validated transport selection used by direct remote attach, then
-// composes the bounded remote runtime and its monitor. Construction performs
-// no I/O; the daemon starts the monitor without waiting for readiness.
-func remoteDiscoveryDaemonOption(stateDir, transport string, clk ports.Clock, log *slog.Logger, allowlists ...map[string]struct{}) (daemon.Option, error) {
-	_, err := remoteTransportModeFromEnv(transport)
-	if err != nil {
-		return nil, err
-	}
-	store := ports.RemoteHostStore(newRemoteHostStore(remoteadapter.HostStorePath(stateDir)))
-	catalog := ports.RemoteCatalogClient(newRemoteCatalogClient())
-	cache := ports.RemoteCatalogCache(newRemoteCatalogCache(remoteadapter.CatalogCachePath(stateDir)))
-	previewClient := ports.RemotePreviewClient(newRemotePreviewClient())
-	if len(allowlists) > 0 {
-		allowed := allowlists[0]
-		store = allowlistedRemoteHostStore{delegate: store, allowed: allowed}
-		catalog = allowlistedRemoteCatalogClient{delegate: catalog, allowed: allowed}
-		cache = allowlistedRemoteCatalogCache{delegate: cache, allowed: allowed}
-		previewClient = allowlistedRemotePreviewClient{delegate: previewClient, allowed: allowed}
-	}
-	preview := daemon.WithRemotePreview(previewClient)
-	monitor := remotes.NewMonitor(remoteadapter.NewRuntime(store, catalog, cache, log), clk, log)
-	remoteMonitor := daemon.WithRemoteMonitor(monitor, monitor.Run)
-	return func(d *daemon.Daemon) {
-		preview(d)
-		remoteMonitor(d)
-	}, nil
-}
-
-func runAttachWithDeps(ctx context.Context, intent uint8, name, remoteTarget, activeSession string, log *slog.Logger, deps runAttachDeps) error {
-	if activeSession != "" {
-		if remoteTarget == "" && intent == protocol.IntentNew {
-			return deps.createDetached(ctx, name)
-		}
-		return errors.New("vev: sessions should be nested with care; unset VEV to force")
-	}
-
-	if intent == protocol.IntentAttach && remoteTarget == "" {
-		resolved, err := resolveMissingSessionAttach(ctx, name, deps, log)
-		if err != nil {
-			return err
-		}
-		intent = resolved
-	}
-
-	runClient := deps.runClient
-	if runClient == nil {
-		runClient = runClientWithDeps
-	}
-	localDialer := deps.localDialer
-	if localDialer == nil {
-		localDialer = defaultLocalDialer
-	}
-	mode, modeErr := remoteTransportModeFromEnv(deps.selectedRemoteTransport)
-	if deps.remoteDialerFactory == nil {
-		deps.remoteDialerFactory = defaultRemoteDialerFactory()
-	}
-	var remoteSelection *domain.RemoteSessionTarget
-	remoteEnvironmentPolicy := protocol.EnvironmentPolicyDaemonOwned
-	remoteDisplayOrigin := domain.RemoteDisplayOrigin(remoteTarget)
-	routeOrigin := protocol.RouteOriginLocal
-	routeOriginKey := "local"
-	if remoteTarget != "" {
-		routeOrigin = protocol.RouteOriginRemote
-		routeOriginKey = remoteTarget
-		if modeErr != nil {
-			return modeErr
-		}
-	}
-	pickerHandoff := remoteTarget == ""
-	pickerEnvironmentPolicy := func(target *domain.RemoteSessionTarget, intent uint8, policy protocol.EnvironmentPolicy) protocol.EnvironmentPolicy {
-		if pickerHandoff && target == nil && intent != protocol.IntentNew {
-			return protocol.EnvironmentPolicyDaemonOwned
-		}
-		return policy
-	}
-	configPath := deps.configPath
-	if configPath == nil {
-		configPath = platform.ConfigPath
-	}
-	cfg := loadConfigOrDefaults(log, configPath())
-	// The launching client owns one host registry for the whole run: endpoint
-	// bindings are resolved once and reused by every later handoff, and the
-	// discovery loop it drives lives exactly as long as the runner.
-	registry := newClientHostRegistry(deps, mode, modeErr, log)
-
-	handoffAttempts := 0
-	for {
-		var err error
-		if remoteTarget != "" {
-			if log != nil {
-				log.Info("attaching to remote session", "target", remoteTarget, "name", name, "transport", string(mode))
-			}
-			// The initial remote attach resolves through the same registry as
-			// every later handoff, so one endpoint has one carriage authority.
-			binding, resolveErr := registry.ResolveEndpoint(ctx, remoteTarget)
-			if resolveErr != nil {
-				return resolveErr
-			}
-			err = runClient(ctx, client.Dependencies{
-				AttachmentCache:        cfg.AttachmentCache,
-				Dialer:                 binding.Dialer,
-				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
-				Terminal:               clientTerminal(deps),
-				Clock:                  clientClock(deps),
-				DisableCapabilityProbe: deps.disableCapabilityProbe,
-				UI:                     deps.ui,
-				Clipboard:              deps.clipboard,
-				Logger:                 log,
-				RuntimeObserver:        deps.runtimeObserver,
-				HostRegistry:           registry,
-				Remote:                 true,
-				Origin:                 protocol.RouteOriginRemote,
-				OriginKey:              remoteTarget,
-			}, client.AttachRequest{
-				Intent:            intent,
-				SessionName:       name,
-				Remote:            true,
-				Environment:       binding.Environment,
-				Origin:            routeOrigin,
-				OriginKey:         routeOriginKey,
-				RemoteTarget:      remoteSelection,
-				HostLabel:         remoteDisplayOrigin,
-				EnvironmentPolicy: remoteEnvironmentPolicy,
-			})
-		} else {
-			if log != nil {
-				log.Info("attaching to local session", "intent", intent, "name", name)
-			}
-			err = runClient(ctx, client.Dependencies{
-				AttachmentCache:        cfg.AttachmentCache,
-				Dialer:                 sessionwire.NewClientDialer(localDialer()),
-				LocalControlDialer:     sessionwire.NewClientDialer(dialOnlyLocalDialer{dir: ipc.SocketDir(), observer: deps.runtimeObserver}),
-				Terminal:               clientTerminal(deps),
-				Clock:                  clientClock(deps),
-				DisableCapabilityProbe: deps.disableCapabilityProbe,
-				UI:                     deps.ui,
-				Clipboard:              deps.clipboard,
-				Logger:                 log,
-				RuntimeObserver:        deps.runtimeObserver,
-				HostRegistry:           registry,
-				Remote:                 false,
-				Origin:                 protocol.RouteOriginLocal,
-				OriginKey:              "local",
-			}, client.AttachRequest{Intent: intent, SessionName: name, Environment: append([]string(nil), deps.localEnvironment...), Origin: protocol.RouteOriginLocal, OriginKey: "local"})
-		}
-
-		var handoffErr *client.AttachTargetError
-		if !errors.As(err, &handoffErr) {
-			return err
-		}
-		if handoffErr == nil {
-			return fmt.Errorf("vev: invalid remote attach handoff")
-		}
-		if err := validateRemoteAttachHandoff(handoffErr.Target); err != nil {
-			return fmt.Errorf("vev: invalid remote attach handoff: %w", err)
-		}
-		if handoffAttempts >= maxAttachTargetHandoffs {
-			return fmt.Errorf("vev: attach handoff exceeded maximum of %d attempts", maxAttachTargetHandoffs)
-		}
-		handoffAttempts++
-		remoteTarget = handoffErr.Target.Endpoint
-		remoteDisplayOrigin = domain.RemoteDisplayOrigin(remoteTarget)
-		routeOrigin = protocol.RouteOriginDiscovery
-		routeOriginKey = remoteTarget
-		name = handoffErr.Target.Session
-		intent = handoffErr.Target.Intent
-		remoteSelection = nil
-		if handoffErr.Target.RemoteTarget != nil {
-			copyTarget := *handoffErr.Target.RemoteTarget
-			remoteSelection = &copyTarget
-			remoteDisplayOrigin = copyTarget.DisplayOrigin
-		}
-		remoteEnvironmentPolicy = pickerEnvironmentPolicy(remoteSelection, handoffErr.Target.Intent, handoffErr.Target.EnvironmentPolicy)
-		if modeErr != nil {
-			return modeErr
-		}
+		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, "quic", "stdio")
 	}
 }
 
@@ -1254,102 +1047,28 @@ func receiveKillResult(ctx context.Context, connection ports.ClientConnection, r
 	}
 }
 
-type localDaemonDialer struct {
-	dir         string
-	observer    ports.SerializedRuntimeObserver
-	executable  string
-	environment []string
-}
-
-// dialOnlyLocalDialer is the inventory control source: a typed dial-only
-// connection to the local daemon socket. Unlike localDaemonDialer it never
-// ensures, spawns, or starts the daemon and never creates an attachment: a
-// missing socket reports local control unavailability instead of starting
-// a daemon implicitly.
-type dialOnlyLocalDialer struct {
-	dir      string
-	observer ports.SerializedRuntimeObserver
-}
-
-func (d dialOnlyLocalDialer) Dial(ctx context.Context) (wire.Transport, error) {
-	if d.observer != nil {
-		return ipc.DialContext(ctx, d.dir, ipc.WithRuntimeObserver(d.observer))
-	}
-	return ipc.DialContext(ctx, d.dir)
-}
-
-func (d localDaemonDialer) Dial(ctx context.Context) (wire.Transport, error) {
-	dial := realDial
-	if d.observer != nil {
-		dial = func(ctx context.Context, dir string) (wire.Transport, error) {
-			return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(d.observer))
-		}
-	}
-	spawn := realSpawn
-	if d.executable != "" {
-		spawn = func() error { return spawnDaemonWithEnvironment(d.executable, d.environment) }
-	}
-	return ensureDaemonWithLifecycle(ctx, d.dir, dial, spawn, defaultBackoff)
-}
-
-func detachedLocalHello(name, cwd string) protocol.Hello {
-	termEnv := os.Getenv("TERM")
-	return protocol.Hello{
-		Version:   protocol.Version,
-		Intent:    protocol.IntentNew,
-		Name:      name,
-		Size:      domain.Size{Cols: 80, Rows: 24},
-		TermEnv:   termEnv,
-		Cwd:       cwd,
-		TrueColor: client.DetectTrueColor(termEnv, os.Getenv("COLORTERM"), os.Environ()),
-		Env:       os.Environ(),
-	}
-}
-
 func createDetachedLocalSession(ctx context.Context, name string) error {
-	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), realDial, realSpawn, defaultBackoff)
+	service, err := connectBroker(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errDaemonUnreachable, err)
+	}
+	defer func() { _ = service.Close() }()
+	operations, err := client.NewBrokerOperations(service, clock.New())
 	if err != nil {
 		return err
 	}
-	defer func() { _ = transport.Close() }()
-
-	cwd, err := os.Getwd()
+	identity, _ := parseVEVEnv(os.Getenv("VEV"))
+	result, err := operations.Command(ctx, localBrokerOperationRoute(service.Snapshot()), protocol.CommandRequest{
+		Version: protocol.Version, Slug: "new-session", Args: []string{name}, TargetSession: identity.session,
+	})
 	if err != nil {
-		cwd = ""
+		return err
 	}
-	hello := detachedLocalHello(name, cwd)
-	connection := sessionwire.NewClientConnection(transport)
-	if err := connection.SendClient(hello); err != nil {
-		return fmt.Errorf("vev: creating detached session: %w", err)
-	}
+	return renderDetachedCreationResult(result)
+}
 
-	type detachedReply struct {
-		message protocol.ServerMessage
-		err     error
-	}
-	replyCh := make(chan detachedReply, 1)
-	go func() {
-		message, err := connection.ReceiveServer()
-		replyCh <- detachedReply{message: message, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		_ = transport.Close()
-		return ctx.Err()
-	case reply := <-replyCh:
-		if reply.err != nil {
-			return fmt.Errorf("vev: awaiting detached session creation: %w", reply.err)
-		}
-		switch message := reply.message.(type) {
-		case protocol.Welcome:
-			return nil
-		case protocol.ErrorMsg:
-			return &client.ProtocolError{Code: message.Code, Text: message.Text}
-		default:
-			return fmt.Errorf("vev: unexpected reply %T to detached session creation", reply.message)
-		}
-	}
+func renderDetachedCreationResult(result protocol.CommandResult) error {
+	return renderCommandResult(io.Discard, result)
 }
 
 func runUIRemoteCleanup(ctx context.Context) error {
@@ -1369,41 +1088,41 @@ func runUIRemoteCleanup(ctx context.Context) error {
 func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 	defer cancel()
-
-	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
+	service, err := connectBroker(ctx)
 	if err != nil {
-		return fmt.Errorf("vev: stopping daemon: %w", err)
+		return unreachableBrokerError(err)
 	}
-	if owner != nil {
-		return errors.Join(errDaemonNotRunning, owner.Release())
-	}
-	defer func() { _ = transport.Close() }()
-	connection := sessionwire.NewClientConnection(transport)
-	requestID, err := sendKillRequest(ctx, connection, protocol.Kill{Scope: protocol.KillDaemon})
+	defer func() { _ = service.Close() }()
+	operations, err := client.NewBrokerOperations(service, clock.New())
 	if err != nil {
-		return fmt.Errorf("vev: requesting daemon stop: %w", err)
-	}
-	resultErr := receiveKillResult(ctx, connection, requestID)
-	if resultErr != nil && !errors.Is(resultErr, errKillOutcomeUnknown) {
-		return fmt.Errorf("vev: reading daemon stop reply: %w", resultErr)
-	}
-
-	owner, err = waitForLifecycleAvailability(ctx, ipc.SocketDir(), defaultBackoff)
-	if err != nil {
-		if resultErr != nil {
-			return fmt.Errorf("vev: reading daemon stop reply: %w (lifecycle confirmation also failed: %v)", resultErr, err)
-		}
-		return fmt.Errorf("vev: waiting for daemon ownership transfer: %w", err)
-	}
-	if err := owner.Release(); err != nil {
-		if resultErr != nil {
-			return fmt.Errorf("vev: reading daemon stop reply: %w (confirmed ownership release failed: %v)", resultErr, err)
-		}
 		return err
 	}
-	// When the explicit reply was lost, acquiring daemon lifecycle ownership is
-	// direct authoritative confirmation that the accepted shutdown completed.
-	return nil
+	result, err := operations.StopDaemon(ctx, localBrokerOperationRoute(service.Snapshot()))
+	if err != nil {
+		return err
+	}
+	return brokerKillResultError(result)
+}
+
+func unreachableBrokerError(err error) error {
+	return &exitCoded{code: 3, err: fmt.Errorf("%w: %v", errDaemonUnreachable, err)}
+}
+
+func brokerKillResultError(result protocol.KillResult) error {
+	switch result.Outcome {
+	case protocol.KillSucceeded:
+		return nil
+	case protocol.KillFailed:
+		if result.Text == "" {
+			result.Text = "kill failed"
+		}
+		return errors.New(result.Text)
+	default:
+		if result.Text == "" {
+			result.Text = "daemon did not report a final outcome"
+		}
+		return &exitCoded{code: 3, err: fmt.Errorf("%w: %s", errKillOutcomeUnknown, result.Text)}
+	}
 }
 
 // runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
@@ -1640,108 +1359,27 @@ func copyTransport(ctx context.Context, src, dst wire.Transport) error {
 	}
 }
 
-// runList prints the daemon's session listing. With no daemon running, it
-// falls back to the persisted stopped-session records. Remote forms list one
-// known host or local+remote when --all is set.
-func runList(ctx context.Context, cmd command) (retErr error) {
+// runList obtains local live data or a multi-host catalogue snapshot through
+// the per-user broker. It never dials a daemon directly.
+func runList(ctx context.Context, cmd command) error {
+	service, err := connectBroker(ctx)
+	if err != nil {
+		return unreachableBrokerError(err)
+	}
+	defer func() { _ = service.Close() }()
 	if cmd.listAll || cmd.listHost != "" {
-		return runRemoteList(ctx, cmd, defaultRemoteHostDeps())
+		return runBrokerSnapshotList(cmd, service.Snapshot(), os.Stdout)
 	}
-	sessions, err := listLocalSessions(ctx)
-	if sessions != nil {
-		printSessions(os.Stdout, sessions)
-	}
+	operations, err := client.NewBrokerOperations(service, clock.New())
 	if err != nil {
 		return err
 	}
+	sessions, err := operations.List(ctx, localBrokerOperationRoute(service.Snapshot()))
+	if err != nil {
+		return err
+	}
+	printSessions(os.Stdout, sessions)
 	return nil
-}
-
-func listLocalSessions(ctx context.Context) (_ []protocol.SessionInfo, retErr error) {
-	return listSessionsWithDialer(ctx, func(ctx context.Context) (wire.Transport, error) {
-		return realDial(ctx, ipc.SocketDir())
-	})
-}
-
-// listSessionsWithDialer runs the session listing over an explicit dialer.
-// The attach pre-flight passes the local dialer (spawning the daemon when
-// needed, like any attach); tests inject mocks.
-func listSessionsWithDialer(ctx context.Context, dial func(context.Context) (wire.Transport, error)) (_ []protocol.SessionInfo, retErr error) {
-	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, _ string) (wire.Transport, error) {
-		return dial(ctx)
-	}, defaultBackoff)
-	if err != nil {
-		return nil, fmt.Errorf("vev: waiting for durable session state: %w", err)
-	}
-	if owner != nil {
-		defer joinLifecycleReleaseError(&retErr, owner)
-		records, loadErr := persist.LoadReadOnly(platform.StateDir())
-		if loadErr != nil {
-			if errors.Is(loadErr, persist.ErrCatalogueUnreadable) {
-				return nil, unreadableCatalogueError(platform.StateDir())
-			}
-			return nil, fmt.Errorf("vev: reading stored sessions: %w", loadErr)
-		}
-		infos := make([]protocol.SessionInfo, 0, len(records))
-		for _, r := range records {
-			state := protocol.SessionDown
-			if r.DegradedReason != "" {
-				state = protocol.SessionBroken
-			}
-			infos = append(infos, protocol.SessionInfo{Name: r.Name, State: state})
-		}
-		return infos, nil
-	}
-	reply, err := boundedListExchange(ctx, transport)
-	if err != nil {
-		return nil, err
-	}
-	return decodeSessionListReply(reply)
-}
-
-// preflightListTimeout bounds the attach pre-flight session listing so a
-// socket that accepts but never replies cannot delay the attach fallback
-// or block termination.
-var preflightListTimeout = 5 * time.Second
-
-// boundedListExchange sends a session listing request and reads the reply,
-// closing the transport if the bound lapses or the parent context ends so
-// a socket that accepts but never replies neither delays the attach
-// fallback nor blocks Ctrl-C exit. Transport.Close interrupts blocked Send
-// and Recv.
-func boundedListExchange(ctx context.Context, transport wire.Transport) (protocol.ServerMessage, error) {
-	listCtx, cancel := context.WithTimeout(ctx, preflightListTimeout)
-	defer cancel()
-	stopClose := context.AfterFunc(listCtx, func() { _ = transport.Close() })
-	defer stopClose()
-	defer func() { _ = transport.Close() }()
-
-	connection := sessionwire.NewClientConnection(transport)
-	if err := connection.SendClient(protocol.List{}); err != nil {
-		if listCtx.Err() != nil {
-			return nil, fmt.Errorf("vev: requesting session list: %w", listCtx.Err())
-		}
-		return nil, fmt.Errorf("vev: requesting session list: %w", err)
-	}
-	reply, err := connection.ReceiveServer()
-	if err != nil {
-		if listCtx.Err() != nil {
-			return nil, fmt.Errorf("vev: reading session list: %w", listCtx.Err())
-		}
-		return nil, fmt.Errorf("vev: reading session list: %w", err)
-	}
-	return reply, nil
-}
-
-func decodeSessionListReply(reply protocol.ServerMessage) ([]protocol.SessionInfo, error) {
-	if em, ok := reply.(protocol.ErrorMsg); ok {
-		return nil, fmt.Errorf("vev: %s", em.Text)
-	}
-	sessions, ok := reply.(protocol.Sessions)
-	if !ok {
-		return nil, fmt.Errorf("vev: unexpected reply %T to list", reply)
-	}
-	return sessions.Sessions, nil
 }
 
 // printSessions renders a session table (or a friendly note when empty).
@@ -1782,83 +1420,32 @@ func unreadableCatalogueError(stateDir string) error {
 		"    rm -rf %s", persist.ErrCatalogueUnreadable, stateDir, stateDir)
 }
 
-func runOfflineNamedKill(ctx context.Context, name string) (retErr error) {
-	stateDir := platform.StateDir()
-	if _, err := os.Stat(persist.StorePath(stateDir)); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("vev: no such session: %s", name)
-	} else if err != nil {
-		return fmt.Errorf("vev: reading stored sessions: %w", err)
-	}
-	repository := snapshotadapter.NewRepository(snapshotDir())
-	opened, err := openCatalogue(stateDir)
+// runKill executes all kill operations through the per-user broker.
+func runKill(ctx context.Context, name string, all, daemon bool) error {
+	service, err := connectBroker(ctx)
 	if err != nil {
-		if errors.Is(err, persist.ErrCatalogueUnreadable) {
-			return unreadableCatalogueError(stateDir)
-		}
-		return fmt.Errorf("vev: opening stored sessions: %w", err)
+		return unreachableBrokerError(err)
 	}
-	defer func() { retErr = errors.Join(retErr, opened.Catalogue.Close()) }()
-
-	if _, ok, err := opened.Catalogue.Record(name); err != nil {
-		return fmt.Errorf("vev: reading stored session: %w", err)
-	} else if !ok {
-		return fmt.Errorf("vev: no such session: %s", name)
-	}
-	coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
-	if err := coordinator.Delete(ctx, name); err != nil {
-		return fmt.Errorf("vev: deleting stored session: %w", err)
-	}
-	return nil
-}
-
-// runKill asks the daemon to terminate a named session, every session, or the daemon.
-func runKill(ctx context.Context, name string, all, daemon bool) (retErr error) {
-	transport, owner, err := waitForDaemonOrLifecycle(ctx, ipc.SocketDir(), realDial, defaultBackoff)
+	defer func() { _ = service.Close() }()
+	operations, err := client.NewBrokerOperations(service, clock.New())
 	if err != nil {
-		if daemon && errors.Is(err, ErrDaemonUnreachable) {
-			return forceStopDaemonFallback(ctx, fmt.Errorf("vev: waiting for durable session state: %w", err))
-		}
-		return fmt.Errorf("vev: waiting for durable session state: %w", err)
+		return err
 	}
-	if owner != nil {
-		defer joinLifecycleReleaseError(&retErr, owner)
-		if name != "" && !all && !daemon {
-			if err := runOfflineNamedKill(ctx, name); err != nil {
-				return err
-			}
-			printKillSuccess(name, all, daemon)
-			return nil
-		}
-		return errDaemonNotRunning
+	route := localBrokerOperationRoute(service.Snapshot())
+	var result protocol.KillResult
+	switch {
+	case daemon:
+		result, err = operations.StopDaemon(ctx, route)
+	case all:
+		result, err = operations.KillAll(ctx, route)
+	default:
+		result, err = operations.Kill(ctx, route, name)
 	}
-	defer func() { _ = transport.Close() }()
-	connection := sessionwire.NewClientConnection(transport)
-
-	scope := protocol.KillSession
-	if all {
-		scope = protocol.KillAll
-	} else if daemon {
-		scope = protocol.KillDaemon
-	}
-	requestID, err := sendKillRequest(ctx, connection, protocol.Kill{Name: name, Scope: scope})
 	if err != nil {
-		return fmt.Errorf("vev: requesting kill: %w", err)
+		return err
 	}
-	if err := receiveKillResult(ctx, connection, requestID); err != nil {
-		return fmt.Errorf("vev: reading kill reply: %w", err)
-	}
-	// Only an explicit daemon stop ends the daemon; kill-all purges sessions and
-	// leaves it running, so it must not wait for an ownership transfer.
-	if daemon {
-		waitCtx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
-		defer cancel()
-		owner, waitErr := waitForLifecycleAvailability(waitCtx, ipc.SocketDir(), defaultBackoff)
-		if waitErr != nil {
-			return forceStopDaemonFallback(ctx, fmt.Errorf("vev: waiting for daemon ownership transfer: %w", waitErr))
-		}
-		if releaseErr := owner.Release(); releaseErr != nil {
-			return fmt.Errorf("vev: releasing daemon ownership probe: %w", releaseErr)
-		}
+	if err := brokerKillResultError(result); err != nil {
+		return err
 	}
 	printKillSuccess(name, all, daemon)
 	return nil

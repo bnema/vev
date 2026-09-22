@@ -46,6 +46,18 @@ message ExactTarget {
   string session_name = 2;
 }
 
+// SessionAttachTarget is exact identity local to the receiving daemon.
+message SessionAttachTarget {
+  string session_id = 1;
+  LifecycleID lifecycle_id = 2;
+  string session_name = 3;
+  string tab_id = 4;
+  optional int32 tab_index = 5;
+  string tab_raw_name = 6;
+  uint32 tab_expected_count = 7;
+  bool stopped = 8;
+}
+
 // RGB is one terminal color triple (renderer.RGB).
 message RGB {
   uint32 r = 1;

@@ -29,9 +29,11 @@ func (u *UI) bindForeground(ctx context.Context, input *terminalInputPump, consu
 
 // releaseForeground retires exactly the binding installed for generation. It
 // is called when the supervisor begins finalizing the attachment, before the
-// pump claim can return to the picker. Detached is the honest publication while
-// no session owns input; it also gives observers a committed status that cannot
-// be mistaken for an actionable attachment.
+// pump claim can return to the picker. It publishes nothing itself: the
+// supervisor owns the presentation fence, and its return to Picker runs after
+// this teardown (join, revoke, stream close) has drained the last in-flight
+// transaction, so no unattached presentation is ever committed while a session
+// frame is still being written.
 func (u *UI) releaseForeground(generation uint64) {
 	u.mu.Lock()
 	if generation != u.generation {
@@ -47,7 +49,6 @@ func (u *UI) releaseForeground(generation uint64) {
 	}
 	u.signalLocked()
 	u.mu.Unlock()
-	u.status(ports.UIStatusDetached)
 }
 
 func (u *UI) accept(id, generation uint64) bool {

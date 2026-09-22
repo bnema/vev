@@ -104,12 +104,16 @@ func TestP54LocalRefusalIsNotReportedAsDestinationFailure(t *testing.T) {
 	require.Empty(t, harness.service.openedRequests(), "a refused selection never dials a destination")
 }
 
-func TestP54ResolveInitialUsesRealCatalogueCreation(t *testing.T) {
+// TestP54ResolveInitialUsesRealInitialNavigationResolve proves the closed union
+// resolves the no-argument ephemeral creation through a real catalogue: the
+// resolution uses the same rules as the interactive picker and applies no
+// privileged initial semantics.
+func TestP54ResolveInitialUsesRealInitialNavigationResolve(t *testing.T) {
 	clock := newSupervisorTestClock()
 	catalogue, _ := pickerTestCatalogue(t)
 	require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{pickerTestLocalObservation(clock.Now())}}))
-	controller := &pickerController{catalogue: catalogue}
-	request, err := controller.ResolveInitial(InitialNavigationCreateEphemeral, pickerTestBase())
+	navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
+	request, err := navigation.Resolve(catalogue.Snapshot())
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerAdmissionCreateEphemeral, request.Admission)
 	require.True(t, request.Local)
@@ -119,26 +123,26 @@ func TestP54ResolveInitialUsesRealCatalogueCreation(t *testing.T) {
 
 func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	picker := newAttachTestPicker()
-	navigation := InitialNavigationCreateEphemeral
+	navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	clock := newSupervisorTestClock()
 	reader := newAttachTestReader()
 	terminal := &attachTestTerminal{in: reader}
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	service.publish(3, 1)
+	service.publishSnapshot(localDaemonSnapshot(3, 1))
 	stream := newSessionTestStream()
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil }), Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: &navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil }), Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Eventually(t, func() bool { return len(service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
 	request := service.openedRequests()[0]
 	require.Equal(t, ports.BrokerAdmissionCreateEphemeral, request.Admission)
 	require.Equal(t, sessionTestRequest(true).Local, request.Local)
-	require.Equal(t, 1, picker.resolveCount())
+	require.Zero(t, picker.resolveCount(), "initial navigation resolves through the union, never through the picker")
 	stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
 	require.Eventually(t, func() bool { return sup.State().Presentation == PresentPicker }, 5*time.Second, time.Millisecond)
 	cancel()
@@ -152,9 +156,9 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 	reader := newAttachTestReader()
 	terminal := &attachTestTerminal{in: reader}
 	picker := newAttachTestPicker()
-	navigation := InitialNavigationCreateEphemeral
+	navigation := InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
 	first := newSupervisorTestService(ports.BrokerConnectionID{1})
-	first.publish(1, 1)
+	first.publishSnapshot(localDaemonSnapshot(1, 1))
 	second := newSupervisorTestService(ports.BrokerConnectionID{2})
 	stream := newSessionTestStream()
 	first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
@@ -166,7 +170,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 		}
 		return second, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: &navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Equal(t, 1, connector.awaitStart(t))
@@ -186,7 +190,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 			timer.fire()
 		}
 	}
-	second.publish(2, 1)
+	second.publishSnapshot(localDaemonSnapshot(2, 1))
 	require.Eventually(t, func() bool { return sup.State().Connectivity == ConnectivityReady }, 5*time.Second, time.Millisecond)
 	require.Empty(t, second.openedRequests(), "one-shot navigation must not replay on the replacement generation")
 	cancel()

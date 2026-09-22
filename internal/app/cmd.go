@@ -16,6 +16,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
+	clientusecase "github.com/bnema/vev/internal/usecase/client"
 	commandusecase "github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/daemon"
 )
@@ -152,18 +153,20 @@ func (e *commandOutcomeUnknown) Unwrap() error { return e.detail }
 func (*commandOutcomeUnknown) Is(target error) bool { return target == errCommandOutcomeUnknown }
 
 type cmdDeps struct {
-	stdout io.Writer
-	getenv func(string) string
-	dial   func(context.Context, string) (wire.Transport, error)
-	ensure func(context.Context, string) (wire.Transport, error)
-	clock  ports.Clock
+	stdout  io.Writer
+	getenv  func(string) string
+	connect func(context.Context) (ports.BrokerService, error)
+	dial    func(context.Context, string) (wire.Transport, error)
+	ensure  func(context.Context, string) (wire.Transport, error)
+	clock   ports.Clock
 }
 
 func runCmd(ctx context.Context, invocation cmdInvocation) error {
 	return runCmdWithDeps(ctx, invocation, cmdDeps{
-		stdout: os.Stdout,
-		getenv: os.Getenv,
-		dial:   realDial,
+		stdout:  os.Stdout,
+		getenv:  os.Getenv,
+		connect: connectProductionBroker,
+		dial:    realDial,
 		ensure: func(ctx context.Context, dir string) (wire.Transport, error) {
 			return ensureDaemonWithLifecycle(ctx, dir, realDial, realSpawn, defaultBackoff)
 		},
@@ -200,11 +203,28 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		return usagef("too many command arguments")
 	}
 
-	dial := deps.dial
-	if invocation.slug == "remote-catalog" && deps.ensure != nil {
-		dial = deps.ensure
+	if deps.connect != nil {
+		service, err := deps.connect(ctx)
+		if err != nil {
+			return &exitCoded{code: 3, err: fmt.Errorf("%w: %w", errDaemonUnreachable, err)}
+		}
+		defer func() { _ = service.Close() }()
+		commandClock := deps.clock
+		if commandClock == nil {
+			commandClock = clock.New()
+		}
+		operations, err := clientusecase.NewBrokerOperations(service, commandClock)
+		if err != nil {
+			return err
+		}
+		result, err := operations.Command(ctx, localBrokerOperationRoute(service.Snapshot()), request)
+		if err != nil {
+			return err
+		}
+		return renderCommandResult(deps.stdout, result)
 	}
-	transport, err := dial(ctx, ipc.SocketDir())
+
+	transport, err := deps.dial(ctx, ipc.SocketDir())
 	if err != nil {
 		return &exitCoded{code: 3, err: fmt.Errorf("%w: %w", errDaemonUnreachable, err)}
 	}
@@ -279,6 +299,35 @@ func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps)
 		}
 		if !strings.HasSuffix(result.Output, "\n") {
 			_, err = fmt.Fprintln(deps.stdout)
+			return err
+		}
+	}
+	return nil
+}
+
+func renderCommandResult(stdout io.Writer, result protocol.CommandResult) error {
+	if result.Outcome == protocol.CommandOutcomeUnknown {
+		text := result.Text
+		if text == "" {
+			text = "daemon did not report a final outcome"
+		}
+		return &exitCoded{code: 3, err: &commandOutcomeUnknown{detail: errors.New(text)}}
+	}
+	if result.Outcome != protocol.CommandSucceeded {
+		if result.Text == "" {
+			result.Text = "command failed"
+		}
+		if result.Code == protocol.ErrInvalidCommandArgs {
+			return &exitCoded{code: 2, err: errors.New(result.Text)}
+		}
+		return errors.New(result.Text)
+	}
+	if result.Output != "" {
+		if _, err := io.WriteString(stdout, result.Output); err != nil {
+			return err
+		}
+		if !strings.HasSuffix(result.Output, "\n") {
+			_, err := fmt.Fprintln(stdout)
 			return err
 		}
 	}

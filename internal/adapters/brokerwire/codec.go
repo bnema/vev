@@ -499,6 +499,7 @@ func openStreamToWire(m OpenStream) (*wire.OpenStream, error) {
 		Connection: m.Connection, Stream: m.Stream,
 		Endpoint: m.Endpoint, Registration: m.Registration,
 		Target: m.Target, Env: m.Env, Policy: m.Policy,
+		StartMode: m.StartMode,
 	}
 	if err := request.Validate(); err != nil {
 		// Distinguish bound refusals from semantic refusals.
@@ -530,6 +531,10 @@ func openStreamToWire(m OpenStream) (*wire.OpenStream, error) {
 	if err != nil {
 		return nil, err
 	}
+	startMode, err := startModeToWire(m.StartMode)
+	if err != nil {
+		return nil, err
+	}
 	out := &wire.OpenStream{
 		Ref:     refToWire(m.Epoch, m.Connection, m.Stream),
 		Purpose: purpose, Local: m.Local, Endpoint: m.Endpoint,
@@ -538,7 +543,7 @@ func openStreamToWire(m OpenStream) (*wire.OpenStream, error) {
 		// The admission taxonomy mirrors the port values (0 none, 1 exact,
 		// 2 create named, 3 create ephemeral); the name travels only for the
 		// create-named variant.
-		Admission: admission, Name: m.Name,
+		Admission: admission, Name: m.Name, StartMode: startMode,
 	}
 	if !m.Local {
 		out.Registration = registrationToWire(m.Registration)
@@ -584,6 +589,32 @@ func admissionFromWire(value uint32) (ports.BrokerStreamAdmission, error) {
 	}
 }
 
+// startModeToWire maps the closed daemon-start taxonomy onto its wire code.
+// The zero value is refused rather than encoded, so a peer never has to guess
+// whether an absent mode authorized a spawn.
+func startModeToWire(mode ports.BrokerDaemonStartMode) (uint32, error) {
+	switch mode {
+	case ports.BrokerDaemonExistingOnly:
+		return 1, nil
+	case ports.BrokerDaemonStartIfNeeded:
+		return 2, nil
+	default:
+		return 0, errConvertRange
+	}
+}
+
+// startModeFromWire maps a wire daemon-start code onto the closed taxonomy.
+func startModeFromWire(value uint32) (ports.BrokerDaemonStartMode, error) {
+	switch value {
+	case 1:
+		return ports.BrokerDaemonExistingOnly, nil
+	case 2:
+		return ports.BrokerDaemonStartIfNeeded, nil
+	default:
+		return 0, errConvertRange
+	}
+}
+
 func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 	var out OpenStream
 	if message == nil {
@@ -605,6 +636,10 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 		return OpenStream{}, ErrInvalidMessage
 	}
 	admission, err := admissionFromWire(message.GetAdmission())
+	if err != nil {
+		return OpenStream{}, ErrInvalidMessage
+	}
+	startMode, err := startModeFromWire(message.GetStartMode())
 	if err != nil {
 		return OpenStream{}, ErrInvalidMessage
 	}
@@ -647,6 +682,7 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 		Local:        local,
 		Endpoint:     endpoint,
 		Registration: registration, Target: target, Env: env, Policy: policy,
+		StartMode: startMode,
 	}
 	request := ports.BrokerOpenStreamRequest{
 		Epoch: candidate.Epoch, Purpose: candidate.Purpose,
@@ -654,6 +690,7 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 		Connection: candidate.Connection, Stream: candidate.Stream,
 		Endpoint: candidate.Endpoint, Registration: candidate.Registration,
 		Target: candidate.Target, Env: candidate.Env, Policy: candidate.Policy,
+		StartMode: candidate.StartMode,
 	}
 	if err := request.Validate(); err != nil {
 		return OpenStream{}, ErrInvalidMessage

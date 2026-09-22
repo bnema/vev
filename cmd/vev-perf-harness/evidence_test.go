@@ -34,7 +34,7 @@ func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(shim)
-	for _, want := range []string{"_stdio", m.TracePath, m.ProcessID} {
+	for _, want := range []string{"_broker-mux-stdio", m.TracePath, m.ProcessID} {
 		if !strings.Contains(text, want) {
 			t.Errorf("seam does not retain %q:\n%s", want, text)
 		}

@@ -102,8 +102,13 @@ func TestHarnessCanonicalLocalRolesAreIsolatedAcrossRepetitions(t *testing.T) {
 				}
 			}
 		}
-		if _, err := os.Stat(filepath.Join(runDir, "runtime", "vev", "daemon.sock")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("run %d left daemon socket for the next repetition: %v", run, err)
+		for _, socket := range []string{
+			filepath.Join(runDir, "runtime", "vev", "broker", "broker.sock"),
+			filepath.Join(runDir, "runtime", "vev", "daemonmux.sock"),
+		} {
+			if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("run %d left production socket %q for the next repetition: %v", run, socket, err)
+			}
 		}
 	}
 }
@@ -276,10 +281,10 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 			if _, err := h.runOne(options{out: dir, warmup: time.Second, duration: minimumDuration, repetitions: minimumRepetitions}, manifest{}, s, 1, raw); err != nil {
 				t.Fatal(err)
 			}
-			if len(l.mappings) != 3 || l.mappings[1].Role != tc.peer || l.mappings[2].Role != "client" {
+			if len(l.mappings) != 3 || l.mappings[0].Role != tc.peer || l.mappings[1].Role != "daemon" || l.mappings[2].Role != "client" {
 				t.Fatalf("dependency launch order=%+v", l.mappings)
 			}
-			if l.commands[1].Args[0] != tc.peerCommand || l.commands[2].Args[0] != "attach" {
+			if l.commands[0].Args[0] != tc.peerCommand || l.commands[2].Args[0] != "attach" {
 				t.Fatalf("commands do not connect client through declared peer: %+v", l.commands)
 			}
 			for i, p := range l.process {

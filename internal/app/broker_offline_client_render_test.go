@@ -152,7 +152,7 @@ func TestOfflineClientRenderRefusesNonPickerPresentations(t *testing.T) {
 	picker := offlineRenderPicker(t)
 
 	observed := make(chan client.State, 8)
-	render := offlineClientRender(terminal, picker, func(state client.State) {
+	render := brokerClientRender(terminal, picker, func(state client.State) {
 		select {
 		case observed <- state:
 		default:
@@ -192,7 +192,7 @@ func TestOfflineClientRenderFenceIsPickerPresentation(t *testing.T) {
 	for _, state := range states {
 		t.Run(state.Presentation.String(), func(t *testing.T) {
 			terminal := newOfflineRenderTerminal(small)
-			render := offlineClientRender(terminal, offlineRenderPicker(t), nil)
+			render := brokerClientRender(terminal, offlineRenderPicker(t), nil)
 
 			render(state)
 
@@ -218,7 +218,7 @@ func TestOfflineClientRenderPaintsPickerResize(t *testing.T) {
 
 	terminal := newOfflineRenderTerminal(small)
 	picker := offlineRenderPicker(t)
-	render := offlineClientRender(terminal, picker, nil)
+	render := brokerClientRender(terminal, picker, nil)
 
 	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
 	initial, flushes := terminal.written()
@@ -233,4 +233,69 @@ func TestOfflineClientRenderPaintsPickerResize(t *testing.T) {
 	require.Greater(t, len(resized), len(initial), "the picker resize repaint writes the frame at the new geometry")
 	require.Contains(t, strings.TrimPrefix(resized, initial), "offline-render-session", "the appended repaint is the picker frame at the new size")
 	require.Equal(t, 2, flushes)
+}
+
+// transactionRecordingTerminal is a composition terminal that also records the
+// UI output transactions the picker paint commits, so a test can prove the
+// picker frame and its published context are one unattached state.
+type transactionRecordingTerminal struct {
+	*offlineRenderTerminal
+	mu           sync.Mutex
+	contexts     []ports.UIContext
+	beginDepth   int
+	endSuccesses []bool
+}
+
+func newTransactionRecordingTerminal(geometry domain.Geometry) *transactionRecordingTerminal {
+	return &transactionRecordingTerminal{offlineRenderTerminal: newOfflineRenderTerminal(geometry)}
+}
+
+func (t *transactionRecordingTerminal) BeginOutput(context ports.UIContext) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.contexts = append(t.contexts, context)
+	t.beginDepth++
+}
+
+func (t *transactionRecordingTerminal) EndOutput(success bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.beginDepth--
+	t.endSuccesses = append(t.endSuccesses, success)
+}
+
+func (t *transactionRecordingTerminal) PublishContext(context ports.UIContext) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.contexts = append(t.contexts, context)
+	return nil
+}
+
+func (t *transactionRecordingTerminal) published() []ports.UIContext {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]ports.UIContext(nil), t.contexts...)
+}
+
+// TestOfflineClientPickerPaintCommitsPickerTransaction pins that the picker frame
+// is committed through the terminal's UI output transaction under the Picker
+// presentation: the published context carries the run's handle and status with
+// no session identity and no actionable generation, and the transaction
+// succeeds only after the frame was written and flushed.
+func TestOfflineClientPickerPaintCommitsPickerTransaction(t *testing.T) {
+	terminal := newTransactionRecordingTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	render := brokerClientRender(terminal, offlineRenderPicker(t), nil)
+
+	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
+	written, _ := terminal.written()
+	require.NotEmpty(t, written, "the picker paint writes the frame")
+	published := terminal.published()
+	require.NotEmpty(t, published, "the picker paint commits a context through the UI transaction")
+	for _, context := range published {
+		require.Equal(t, ports.UIStatusPicker, context.Status)
+		require.Zero(t, context.Generation, "a Picker context never carries an actionable generation")
+		require.Equal(t, ports.UIContext{Status: ports.UIStatusPicker}, context, "a Picker context carries no session metadata")
+	}
+	require.Equal(t, 0, terminal.beginDepth, "the transaction is balanced")
+	require.Equal(t, []bool{true}, terminal.endSuccesses, "the frame committed after write and flush")
 }

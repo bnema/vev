@@ -16,7 +16,7 @@ package daemonmux
 //
 // The client verifies the accepted response against the independently resolved
 // endpoint it dialed: the response identity must exactly equal
-// ports.BrokerResolvedEndpoint.Identity, the accepted policy must exactly equal
+// ports.BrokerDialTarget.ExpectedIdentity.Identity, the accepted policy must exactly equal
 // the endpoint policy, the incarnation must be nonzero, and the effective
 // ceilings must never exceed what the client offered. The response is the
 // server's authority, never a value the client supplied and got echoed back.
@@ -97,6 +97,13 @@ type ClientHandshakeResult struct {
 type ServerHandshakeResult struct {
 	Ceilings MuxCeilings
 	Binding  ServerBinding
+	// Policy is the exact immutable authority member admitted for this peer.
+	Policy ports.BrokerPolicy
+	// Origin is the provisioned locality of the admitted member, carried from
+	// the same provisioned entry Policy was resolved from. A downstream listener
+	// stamps it on every admitted session connection so a daemon use case can
+	// enforce the local/remote locality bound without re-deriving it.
+	Origin ports.SessionConnectionOrigin
 }
 
 // RunClientHandshake performs the broker side of the daemonmux physical
@@ -108,7 +115,7 @@ type ServerHandshakeResult struct {
 // authority mismatch. The caller's ctx (or its deadline) bounds both the send
 // and the receive. Every failure closes carrier; success leaves it open and
 // does not start a pump.
-func RunClientHandshake(ctx context.Context, carrier FramedCarrier, endpoint ports.BrokerResolvedEndpoint, offered MuxCeilings) (ClientHandshakeResult, error) {
+func RunClientHandshake(ctx context.Context, carrier FramedCarrier, endpoint ports.BrokerDialTarget, offered MuxCeilings) (ClientHandshakeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -168,11 +175,14 @@ func RunClientHandshake(ctx context.Context, carrier FramedCarrier, endpoint por
 // incarnation is nonzero, and the effective ceilings never exceed the offer.
 // A non-acceptance is refused too, so a caller can never treat a refusal as an
 // accepted empty response.
-func validateClientResponse(response MuxPreambleResponse, endpoint ports.BrokerResolvedEndpoint, offered MuxCeilings) error {
+func validateClientResponse(response MuxPreambleResponse, endpoint ports.BrokerDialTarget, offered MuxCeilings) error {
 	if !response.Accepted {
 		return ErrHandshakeRejected
 	}
-	if response.Identity != endpoint.Identity {
+	if endpoint.ExpectedIdentity.Bound && response.Identity != endpoint.ExpectedIdentity.Identity {
+		return ErrHandshakeRejected
+	}
+	if err := response.Identity.Validate(); err != nil {
 		return ErrHandshakeRejected
 	}
 	if !response.Policy.Compatible(endpoint.Policy) {
@@ -222,7 +232,8 @@ func RunServerHandshake(ctx context.Context, carrier FramedCarrier, binding Serv
 		closeFailedHandshake(carrier)
 		return ServerHandshakeResult{}, &HandshakeRefusal{Code: code}
 	}
-	if !binding.Accepts(request.Policy) {
+	accepted, ok := binding.Accepted(request.Policy)
+	if !ok {
 		code := uint32(RejectionLimitRefused)
 		_ = sendHandshakeRefusal(ctx, carrier, offered, code)
 		closeFailedHandshake(carrier)
@@ -230,7 +241,7 @@ func RunServerHandshake(ctx context.Context, carrier FramedCarrier, binding Serv
 	}
 
 	effective := EffectiveMuxCeilings(offered, request.Ceilings)
-	response, err := EncodePreambleResponse(true, effective, binding.Policy(), binding.Identity(), binding.Incarnation(), 0)
+	response, err := EncodePreambleResponse(true, effective, accepted.Policy, binding.Identity(), binding.Incarnation(), 0)
 	if err != nil {
 		closeFailedHandshake(carrier)
 		return ServerHandshakeResult{}, ErrHandshakeConfig
@@ -244,7 +255,7 @@ func RunServerHandshake(ctx context.Context, carrier FramedCarrier, binding Serv
 		closeFailedHandshake(carrier)
 		return ServerHandshakeResult{}, err
 	}
-	return ServerHandshakeResult{Ceilings: effective, Binding: binding}, nil
+	return ServerHandshakeResult{Ceilings: effective, Binding: binding, Policy: accepted.Policy, Origin: accepted.Origin}, nil
 }
 
 // decodePreambleRequestWithCode is the server's strict request decode paired

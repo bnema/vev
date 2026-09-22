@@ -125,7 +125,7 @@ func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T
 		LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
 	}
 	resume := helloResumeCapable(protocol.IntentResume, "work", token)
-	resume.RemoteTarget = &target
+	resume.SessionTarget = ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target))
 	resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 	_, _, err = d.route(resume, &closeTrackingTransport{})
 	var protocolErr *protoErr
@@ -154,7 +154,7 @@ func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
 		LifecycleID: sess.incarnation, SessionName: sess.name, LiveTabID: "missing-tab",
 	}
 	resume := helloResumeCapable(protocol.IntentResume, "work", token)
-	resume.RemoteTarget = &target
+	resume.SessionTarget = ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target))
 	resume.EnvironmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 	_, _, err = d.route(resume, &closeTrackingTransport{})
 	var protocolErr *protoErr

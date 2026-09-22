@@ -273,7 +273,7 @@ func openToWire(m Open) (*wire.MuxOpen, error) {
 		Epoch: m.Ref.Epoch, Purpose: m.Purpose, Admission: m.Admission, Name: m.Name, Local: m.Local,
 		Connection: m.Ref.Connection, Stream: m.Ref.Client,
 		Endpoint: m.Endpoint, Registration: m.Registration,
-		Target: m.Target, Env: m.Env, Policy: m.Policy,
+		Target: m.Target, Env: m.Env, Policy: m.Policy, StartMode: m.StartMode,
 	}
 	if err := request.Validate(); err != nil {
 		// Distinguish bound refusals from semantic refusals.
@@ -294,11 +294,19 @@ func openToWire(m Open) (*wire.MuxOpen, error) {
 	if err != nil {
 		return nil, err
 	}
+	startMode, err := startModeToWire(m.StartMode)
+	if err != nil {
+		return nil, err
+	}
 	out := &wire.MuxOpen{
 		Ref:     refToWire(m.Ref),
 		Purpose: purpose, Local: m.Local, Endpoint: m.Endpoint,
 		Env:    append([]string(nil), m.Env...),
 		Policy: policyToWire(m.Policy),
+		// The daemon-start authorization always travels, including for
+		// observation and control streams, so the daemon-side transport can
+		// never infer a spawn from an absent field.
+		StartMode: startMode,
 	}
 	if !m.Local {
 		out.Registration = registrationToWire(m.Registration)
@@ -334,6 +342,10 @@ func openFromWire(message *wire.MuxOpen) (Open, error) {
 	}
 	name := message.GetName()
 	if purpose != ports.BrokerStreamAttachment && (admission != 0 || name != "") {
+		return Open{}, ErrInvalidMessage
+	}
+	startMode, err := startModeFromWire(message.GetStartMode())
+	if err != nil {
 		return Open{}, ErrInvalidMessage
 	}
 	local := message.GetLocal()
@@ -374,12 +386,14 @@ func openFromWire(message *wire.MuxOpen) (Open, error) {
 	candidate := Open{
 		Ref: ref, Purpose: purpose, Admission: admission, Name: name, Local: local, Endpoint: endpoint,
 		Registration: registration, Target: target, Env: env, Policy: policy,
+		StartMode: startMode,
 	}
 	request := ports.BrokerOpenStreamRequest{
 		Epoch: candidate.Ref.Epoch, Purpose: candidate.Purpose, Admission: candidate.Admission, Name: candidate.Name, Local: candidate.Local,
 		Connection: candidate.Ref.Connection, Stream: candidate.Ref.Client,
 		Endpoint: candidate.Endpoint, Registration: candidate.Registration,
 		Target: candidate.Target, Env: candidate.Env, Policy: candidate.Policy,
+		StartMode: candidate.StartMode,
 	}
 	if err := request.Validate(); err != nil {
 		return Open{}, ErrInvalidMessage

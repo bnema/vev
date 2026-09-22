@@ -14,10 +14,10 @@ import (
 // missing tab, broken record, or stopped-record race is a no-such-target error,
 // never an invitation to attach a same-name replacement.
 func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.Hello, tr ports.ServerConnection) (*session, *attachedClient, error) {
-	if h.RemoteTarget == nil {
+	if h.SessionTarget == nil {
 		return nil, nil, errors.New("daemon: missing remote target")
 	}
-	target := *h.RemoteTarget
+	target := *h.SessionTarget
 	if err := target.Validate(); err != nil {
 		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "invalid remote target"}
 	}
@@ -48,10 +48,6 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.He
 		if live.incarnation != target.LifecycleID {
 			d.mu.Unlock()
 			return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "remote session lifecycle has changed"}
-		}
-		if target.Stopped && target.LiveTabID != "" {
-			d.mu.Unlock()
-			return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "stopped target has a live tab selector"}
 		}
 		if _, ok := remoteTargetTabIndexLocked(live, target); !ok {
 			d.mu.Unlock()
@@ -96,7 +92,7 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.He
 	return sess, ac, err
 }
 
-func (d *Daemon) resumeRemoteInactiveSessionLocked(target domain.RemoteSessionTarget, cwd string, geometry domain.Geometry, env []string, expected inactiveSession) (*session, error) {
+func (d *Daemon) resumeRemoteInactiveSessionLocked(target protocol.SessionAttachTarget, cwd string, geometry domain.Geometry, env []string, expected inactiveSession) (*session, error) {
 	validate := func(current inactiveSession, _ domain.CatalogueRecord, authoritativeExists bool) bool {
 		if !target.Stopped || d.persistEnabled && !authoritativeExists {
 			return false
@@ -163,7 +159,7 @@ func (d *Daemon) routeAttachStopVerdict(attachErr error) (error, bool) {
 // remoteTargetMatchesSessionLocked validates the exact lifecycle and tab
 // selector while the daemon registry lock is held. Callers use this before
 // changing resume ownership so a stale target cannot partially claim a session.
-func (d *Daemon) remoteTargetMatchesSessionLocked(sess *session, target domain.RemoteSessionTarget) bool {
+func (d *Daemon) remoteTargetMatchesSessionLocked(sess *session, target protocol.SessionAttachTarget) bool {
 	if sess == nil || d.sessions[sess.id] != sess {
 		return false
 	}
@@ -203,14 +199,14 @@ func stoppedTabMetadata(stopped inactiveSession) []domain.TabSelectorTab {
 	return metadata
 }
 
-func remoteTargetTabIndexInactive(inactive inactiveSession, target domain.RemoteSessionTarget) (int, bool) {
+func remoteTargetTabIndexInactive(inactive inactiveSession, target protocol.SessionAttachTarget) (int, bool) {
 	return target.ResolveTab(stoppedTabMetadata(inactive))
 }
 
 // remoteTargetTabIndexLocked resolves the selector against the live session's
 // current ordered tabs. Caller holds d.mu; this function takes only the
 // session/tab locks needed for a coherent metadata snapshot.
-func remoteTargetTabIndexLocked(sess *session, target domain.RemoteSessionTarget) (int, bool) {
+func remoteTargetTabIndexLocked(sess *session, target protocol.SessionAttachTarget) (int, bool) {
 	if sess == nil {
 		return 0, false
 	}
@@ -227,4 +223,8 @@ func remoteTargetTabIndexLocked(sess *session, target domain.RemoteSessionTarget
 		tab.mu.Unlock()
 	}
 	return target.ResolveTab(metadata)
+}
+
+func ptrSessionAttachTarget(target protocol.SessionAttachTarget) *protocol.SessionAttachTarget {
+	return &target
 }

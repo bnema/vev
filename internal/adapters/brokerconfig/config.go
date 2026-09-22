@@ -294,6 +294,31 @@ func Load(layout Layout) (*Config, error) {
 // LoadPath parses the broker configuration at an explicit application-owned
 // path while retaining the route and reserved-path validation from layout.
 func LoadPath(layout Layout, path string) (*Config, error) {
+	return loadPath(layout, path, nil)
+}
+
+// LoadProduction reads broker.json while deriving local daemon authority from
+// daemon-owned state. The production file must not carry a local identity.
+func LoadProduction(layout Layout, path string, identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, socketPath string) (*Config, error) {
+	// An absent identity is valid before the local daemon's first start. A
+	// present identity remains strict and becomes the expected handshake fence.
+	if identity != "" {
+		if err := identity.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
+	route, err := newUnixRoute(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	local := &LocalBinding{Identity: identity, DisplayOrigin: LocalDisplayOrigin, Policy: policy, Route: route}
+	return loadPath(layout, path, local)
+}
+
+func loadPath(layout Layout, path string, authoritativeLocal *LocalBinding) (*Config, error) {
 	raw, err := readConfig(path)
 	if err != nil {
 		return nil, err
@@ -351,9 +376,15 @@ func LoadPath(layout Layout, path string) (*Config, error) {
 		}
 		config.order = append(config.order, registration.Registration.Endpoint)
 	}
-	local, err := parseLocal(document.Local)
-	if err != nil {
-		return nil, fmt.Errorf("brokerconfig: %s: local: %w", ConfigFileName, err)
+	if authoritativeLocal != nil && document.Local != nil {
+		return nil, fmt.Errorf("brokerconfig: %s: production local authority must not be configured", ConfigFileName)
+	}
+	local := authoritativeLocal
+	if local == nil {
+		local, err = parseLocal(document.Local)
+		if err != nil {
+			return nil, fmt.Errorf("brokerconfig: %s: local: %w", ConfigFileName, err)
+		}
 	}
 	if local != nil {
 		if err := rejectRouteOverlap(local.Route.Path(), layout.reserved); err != nil {

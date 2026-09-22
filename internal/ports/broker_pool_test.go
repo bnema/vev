@@ -33,7 +33,7 @@ func TestBrokerPolicyTokens(t *testing.T) {
 	}
 }
 
-func TestBrokerResolvedEndpointValidation(t *testing.T) {
+func TestBrokerDialTargetValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, address string
 		valid         bool
@@ -43,16 +43,16 @@ func TestBrokerResolvedEndpointValidation(t *testing.T) {
 		{"utf8", "\xff", false}, {"control", "route\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := BrokerResolvedEndpoint{Identity: "daemon", Policy: testBrokerPolicy(), Address: tc.address}
-			require.Equal(t, tc.valid, e.Validate() == nil)
+			target := BrokerDialTarget{Fence: BrokerEndpointFence{Local: true}, Policy: testBrokerPolicy(), Address: tc.address, StartMode: BrokerDaemonExistingOnly, ExpectedIdentity: BrokerExpectedIdentity{Identity: "daemon", Bound: true}}
+			require.Equal(t, tc.valid, target.Validate() == nil)
 		})
 	}
-	e := BrokerResolvedEndpoint{Identity: "daemon", Policy: testBrokerPolicy(), Address: "route"}
-	e.Identity = ""
-	require.Error(t, e.Validate())
-	e.Identity = "daemon"
-	e.Policy.Trust = ""
-	require.Error(t, e.Validate())
+	target := BrokerDialTarget{Fence: BrokerEndpointFence{Local: true}, Policy: testBrokerPolicy(), Address: "route", StartMode: BrokerDaemonExistingOnly, ExpectedIdentity: BrokerExpectedIdentity{Identity: "daemon", Bound: true}}
+	target.ExpectedIdentity.Identity = ""
+	require.Error(t, target.Validate())
+	target.ExpectedIdentity.Identity = "daemon"
+	target.Policy.Trust = ""
+	require.Error(t, target.Validate())
 }
 
 func TestBrokerStreamLostErrorChain(t *testing.T) {
@@ -92,7 +92,7 @@ func TestBrokerRequestLocalRemoteFencing(t *testing.T) {
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: BrokerStreamControl, Policy: testBrokerPolicy()}
+			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: BrokerStreamControl, Policy: testBrokerPolicy(), StartMode: BrokerDaemonStartIfNeeded}
 			tc.mutate(&r)
 			require.Equal(t, tc.valid, r.Validate() == nil)
 		})

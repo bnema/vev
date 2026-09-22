@@ -34,6 +34,14 @@ type serverConnection struct {
 	preambleErr  error
 	deadline     time.Time
 
+	// admission is the provisioned admission metadata the accepting side
+	// stamped, or the zero value with hasAdmission=false for a connection built
+	// by a legacy constructor that carried no admission. It is never mutated
+	// after construction and is exposed only through SessionAdmission, which
+	// returns a deep copy.
+	admission    ports.SessionAdmission
+	hasAdmission bool
+
 	// preambleDone closes exactly once when the handshake has run, whether it
 	// succeeded or failed. It backs the handshake completion seam a mux listener
 	// exposes to the daemon; the absolute deadline is never restarted.
@@ -45,14 +53,18 @@ type serverConnection struct {
 	hooks         []func()
 }
 
-var _ ports.ServerConnection = (*serverConnection)(nil)
+var (
+	_ ports.ServerConnection         = (*serverConnection)(nil)
+	_ ports.SessionAdmissionProvider = (*serverConnection)(nil)
+)
 
 // NewServerConnection wraps one raw connection incarnation exactly once. The
 // server preamble runs on the first ReceiveClient, bounded by the handshake
 // deadline started here; the daemon's transport watcher closes the link on
 // timeout, which unblocks the preamble read. Prefer
 // NewServerConnectionWithDeadline when the caller already owns the absolute
-// deadline, as the daemon-side mux listener does at Open admission.
+// deadline, as the daemon-side mux listener does at Open admission. The
+// returned connection carries no admission metadata.
 func NewServerConnection(raw wire.Transport) ports.ServerConnection {
 	return NewServerConnectionWithDeadline(raw, time.Now().Add(protocol.HandshakeTimeout))
 }
@@ -63,15 +75,65 @@ func NewServerConnection(raw wire.Transport) ports.ServerConnection {
 // so a stream delayed in an accept queue spends that one budget instead of
 // starting a second one. The preamble still runs lazily on the first
 // ReceiveClient; a deadline already in the past fails it immediately. A zero
-// deadline falls back to a fresh protocol.HandshakeTimeout from now.
+// deadline falls back to a fresh protocol.HandshakeTimeout from now. The
+// returned connection carries no admission metadata.
 func NewServerConnectionWithDeadline(raw wire.Transport, deadline time.Time) ports.ServerConnection {
+	return newServerConnection(raw, deadline, ports.SessionAdmission{}, false)
+}
+
+// NewServerConnectionWithAdmission wraps one raw connection incarnation exactly
+// once with an absolute local handshake deadline and the provisioned admission
+// metadata its accepting side stamped (the exact accepted policy and origin,
+// plus the peer's declared purpose, admission variant, name, target, and
+// bounded environment). The admission is stored as a deep copy and exposed only
+// through SessionAdmission, which returns a fresh copy so a consumer can never
+// mutate admitted authority. An entirely zero admission is reported as ok=false,
+// exactly as the legacy constructors do, so a caller cannot accidentally
+// publish an unvalidated admission.
+func NewServerConnectionWithAdmission(raw wire.Transport, deadline time.Time, admission ports.SessionAdmission) ports.ServerConnection {
+	return newServerConnection(raw, deadline, admission, !admissionAbsent(admission))
+}
+
+// admissionAbsent reports whether an admission is entirely unset. It is the
+// presence test for NewServerConnectionWithAdmission: an admission that names no
+// origin, policy, purpose, or payload is indistinguishable from the legacy
+// constructors' absent metadata and is reported as absent rather than trusted.
+func admissionAbsent(admission ports.SessionAdmission) bool {
+	return admission.Origin == 0 && admission.Policy == (ports.BrokerPolicy{}) &&
+		admission.Purpose == 0 && admission.Admission == 0 && admission.Name == "" &&
+		admission.Target == (protocol.ExactSessionTarget{}) && len(admission.Env) == 0
+}
+
+// newServerConnection is the shared constructor: it clones the admission and
+// records whether it is present, so every exported constructor funnels through
+// one place that fixes the deadline and allocates the completion signal.
+func newServerConnection(raw wire.Transport, deadline time.Time, admission ports.SessionAdmission, hasAdmission bool) ports.ServerConnection {
 	if raw == nil {
 		return nil
 	}
 	if deadline.IsZero() {
 		deadline = time.Now().Add(protocol.HandshakeTimeout)
 	}
-	return &serverConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: deadline, preambleDone: make(chan struct{})}
+	return &serverConnection{
+		raw:          raw,
+		ceilings:     defaultProtoCeilings(),
+		deadline:     deadline,
+		admission:    admission.Clone(),
+		hasAdmission: hasAdmission,
+		preambleDone: make(chan struct{}),
+	}
+}
+
+// SessionAdmission returns a deep copy of the provisioned admission metadata
+// stamped on this connection, implementing ports.SessionAdmissionProvider. It
+// reports ok=false for a connection built by a constructor that carried no
+// admission, so a consumer distinguishes an absent admission from an admitted
+// one instead of trusting a zero value.
+func (c *serverConnection) SessionAdmission() (ports.SessionAdmission, bool) {
+	if c == nil || !c.hasAdmission {
+		return ports.SessionAdmission{}, false
+	}
+	return c.admission.Clone(), true
 }
 
 // HandshakeDeadline returns the absolute local deadline of the session

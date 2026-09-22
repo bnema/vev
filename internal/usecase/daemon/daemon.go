@@ -1550,9 +1550,9 @@ func (e *protoErr) Error() string { return e.text }
 // cleanup so obsolete workers never delay the new handshake.
 func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domain.Size, h protocol.Hello) (*attachedClient, error) {
 	initialTabIndex := -1
-	if h.RemoteTarget != nil {
+	if h.SessionTarget != nil {
 		var ok bool
-		initialTabIndex, ok = remoteTargetTabIndexLocked(sess, *h.RemoteTarget)
+		initialTabIndex, ok = remoteTargetTabIndexLocked(sess, *h.SessionTarget)
 		if !ok {
 			if tr != nil {
 				_ = tr.Close()
@@ -1733,6 +1733,22 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 	if !sz.Valid() {
 		return nil, nil, &protoErr{protocol.ErrInternal, "invalid terminal size"}
 	}
+	// The accepting side's provisioned admission, when present, is the authority
+	// this Hello is validated against before any restore, creation, resume
+	// claim, ownership change, or environment mutation. A connection without
+	// that seam keeps its legacy validation unchanged and gains no admission
+	// exception, so a forged Hello can never widen what it is allowed to do.
+	admission, admitted := sessionHelloAdmission(tr)
+	if admitted {
+		if err := validateSessionHelloAdmission(h, admission); err != nil {
+			return nil, nil, err
+		}
+		if admission.Admission == ports.BrokerAdmissionExact && h.ResumeToken != 0 {
+			if err := d.validateResumeAdmittedTarget(h.ResumeToken, admission.Target); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	if h.Intent == protocol.IntentResume && h.ResumeToken == 0 {
 		return nil, nil, &protoErr{protocol.ErrNoSuchSession, "resume token is required"}
 	}
@@ -1743,7 +1759,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 	// create/restore: it reserves purge admission before dispatch, so a Hello
 	// arriving during a KillAll waits on the gate exactly as a local route does
 	// instead of being rejected outright.
-	if h.RemoteTarget != nil && h.ResumeToken == 0 {
+	if h.SessionTarget != nil && h.ResumeToken == 0 {
 		if err := d.acquirePurgeAdmission(ctx); err != nil {
 			return nil, nil, err
 		}
@@ -1798,7 +1814,11 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 			return nil, nil, err
 		}
 	}
-	if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned && h.RemoteTarget == nil &&
+	// A daemon-owned ephemeral Hello without an exact remote target is a legacy
+	// shape the daemon refuses. An authenticated remote admission that names the
+	// creation is the one exception, and it is granted only under a validated
+	// remote admission; a connection without one never gains it.
+	if !admitted && h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned && h.SessionTarget == nil &&
 		h.Intent == protocol.IntentEphemeral {
 		return nil, nil, &protoErr{protocol.ErrNoSuchTarget, "daemon-owned environment requires an exact remote target"}
 	}
@@ -1832,7 +1852,16 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 	switch h.Intent {
 	case protocol.IntentEphemeral:
 		name := d.allocEphemeralNameLocked()
-		sess, err := d.createSessionLockedWithMode(name, true, h.Cwd, h.Geometry(), h.Env)
+		// A daemon-owned creation (an authenticated remote admission) uses the
+		// daemon's own environment and home rather than any client value; a
+		// client-owned creation (local) uses the admitted client environment and
+		// working directory. The Hello fields are already validated to match the
+		// admission, so this mirrors the named-creation ownership rule below.
+		cwd, env := h.Cwd, h.Env
+		if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned {
+			cwd, env = d.dirOrHome(""), copyEnvironment(d.baseEnv)
+		}
+		sess, err := d.createSessionLockedWithMode(name, true, cwd, h.Geometry(), env)
 		if err != nil {
 			d.mu.Unlock()
 			return nil, nil, err

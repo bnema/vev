@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -337,19 +336,9 @@ func TestCLIProcessCloseEscalationOutcome(t *testing.T) {
 	}
 }
 
-func TestCLIProcessWaitReadyRequiresDaemonSocket(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "daemon.sock")
-	var lc net.ListenConfig
-	listener, err := lc.Listen(context.Background(), "unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := listener.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	if err := (&cliProcess{readyPath: path, waitErr: make(chan error, 1)}).WaitReady(); err != nil {
+func TestCLIProcessWaitReadyRunsJSONProbe(t *testing.T) {
+	command := exec.Command("sh", "-c", `printf '%s\n' '{"schema":"vev.broker-ready/v1","status":"ready"}'`)
+	if err := (&cliProcess{readyCommand: command, waitErr: make(chan error, 1)}).WaitReady(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -612,7 +601,7 @@ func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
 		role string
 		want []string
 	}{
-		{"daemon", []string{"--daemon"}},
+		{"daemon", []string{"_broker-production-serve"}},
 		{"client", []string{"new", "perf-s-001"}},
 		{"ssh_stdio_peer", []string{"_stdio"}},
 	} {

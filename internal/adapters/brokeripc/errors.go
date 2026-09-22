@@ -131,8 +131,17 @@ func errorDetail(err error) brokerwire.ErrorDetail {
 	case errors.Is(err, context.Canceled):
 		return brokerwire.ErrorDetail{Code: ports.BrokerErrorCancelled}
 	default:
-		return brokerwire.ErrorDetail{Code: ports.BrokerErrorUnavailable}
+		return brokerwire.ErrorDetail{Code: ports.BrokerErrorUnavailable, Text: boundedBrokerErrorText(err)}
 	}
+}
+
+func boundedBrokerErrorText(err error) string {
+	const max = 256
+	text := err.Error()
+	if len(text) > max {
+		text = text[:max]
+	}
+	return text
 }
 
 // failureFromDetail converts one received detail back into the typed local

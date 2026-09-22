@@ -23,7 +23,7 @@ func TestRegistryRestoresAuthoritativeMembership(t *testing.T) {
 				current.Generation++
 			}
 			if mode != "removed" {
-				hosts.Hosts = []ports.BrokerHostRecord{{Registration: current, Pinned: true, Policy: poolPolicy()}}
+				hosts.Hosts = []ports.BrokerHostRecord{{Registration: current, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), current.Endpoint)}}
 			}
 			if mode == "never observed" {
 				snapshot = ports.BrokerSnapshot{}
@@ -56,13 +56,13 @@ func TestRegistryRejectsAuthorityAndLoadFailures(t *testing.T) {
 	loadErr := errors.New("snapshot load failed")
 	authorityErr := errors.New("authority load failed")
 	invalidAuthority := map[string]ports.BrokerHosts{
-		"missing revision": {Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy()}}},
+		"missing revision": {Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}}},
 		"duplicate endpoint": {Revision: 1, Hosts: []ports.BrokerHostRecord{
-			{Registration: reg, Pinned: true, Policy: poolPolicy()},
-			{Registration: reg, Learned: true, Policy: poolPolicy()},
+			{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)},
+			{Registration: reg, Learned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)},
 		}},
-		"unanchored record": {Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: reg, Policy: poolPolicy()}}},
-		"zero policy":       {Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true}}},
+		"unanchored record": {Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: reg, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}}},
+		"zero policy":       {Revision: 1, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Route: canonicalRoute(poolPolicy(), reg.Endpoint)}}},
 	}
 	for name, hosts := range invalidAuthority {
 		t.Run(name, func(t *testing.T) {
@@ -101,7 +101,7 @@ func TestRegistryRestoreIsReadOnlyAndPublicationLocal(t *testing.T) {
 	store.EXPECT().Load().Return(ports.BrokerSnapshot{Epoch: 5, Revision: 4096, Daemons: []ports.BrokerDaemonObservation{{
 		Endpoint: reg.Endpoint, Registration: reg, Availability: domain.RemoteAvailabilityReachable, InventoryKnown: true,
 	}}}, nil).Once()
-	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 99, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy()}}}, nil).Once()
+	store.EXPECT().LoadHosts().Return(ports.BrokerHosts{Revision: 99, Hosts: []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), reg.Endpoint)}}}, nil).Once()
 
 	r, err := NewRegistry(6, store, newTestProbe(1), clock, nil)
 	require.NoError(t, err)

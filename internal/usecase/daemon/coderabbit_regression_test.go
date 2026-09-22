@@ -308,13 +308,13 @@ func TestResumeStoppedSessionRejectsReplacementDuringCatalogueRead(t *testing.T)
 	require.Equal(t, replacement.IncarnationID, d.inactive[record.Name].incarnation)
 }
 
-func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) {
+func TestSessionAttachTargetRejectsInactiveLifecycleReplacementDuringCatalogueRead(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, newQuietPTY()), stubClock{})
 	record := durableRecoveryRecord(1)
 	record.Name = "stopped"
 	record.Committed = nil
-	record.TabRecords = nil
-	record.TabNames = nil
+	record.TabNames = []string{"main"}
+	record.TabRecords = []domain.CatalogueTabRecord{{StableID: "tab-1", Name: "main"}}
 	catalogue := &blockingResumeCatalogue{
 		durableRecoveryCatalogue: newDurableRecoveryCatalogue([]domain.CatalogueRecord{record}),
 		entered:                  make(chan struct{}),
@@ -325,16 +325,16 @@ func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) 
 	d.recovery = recoveryusecase.NewCoordinator(catalogue, noOpSnapshotRepository{}, nil)
 	d.inactive[record.Name] = inactiveSessionFromRecord(record, protocol.SessionDown, nil)
 
-	target := domain.RemoteSessionTarget{
-		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: record.IncarnationID,
-		SessionName: record.Name, Stopped: true,
+	target := protocol.SessionAttachTarget{
+		LifecycleID: record.IncarnationID, SessionName: record.Name,
+		TabID: "tab-1", TabIndex: protocol.NoTabIndex, Stopped: true,
 	}
 	transport, _ := newCapturingTransport(t)
 	result := make(chan error, 1)
 	go func() {
 		_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
 			Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name,
-			Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
+			Size: domain.Size{Cols: 80, Rows: 24}, SessionTarget: ptrSessionAttachTarget(target),
 			EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 		}, transport)
 		result <- err
@@ -361,7 +361,7 @@ func TestRemoteInactiveRouteRejectsReplacementDuringCatalogueRead(t *testing.T) 
 	require.Equal(t, replacement.IncarnationID, d.inactive[record.Name].incarnation)
 }
 
-func TestRemoteInactiveRouteRejectsTabAuthorityChangeDuringCatalogueRead(t *testing.T) {
+func TestSessionAttachTargetRejectsTabAuthorityChangeDuringCatalogueRead(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		record    domain.CatalogueRecord
@@ -424,7 +424,7 @@ func TestRemoteInactiveRouteRejectsTabAuthorityChangeDuringCatalogueRead(t *test
 			go func() {
 				_, _, err := d.routeWithContext(context.Background(), protocol.Hello{
 					Version: protocol.Version, Intent: protocol.IntentAttach, Name: record.Name,
-					Size: domain.Size{Cols: 80, Rows: 24}, RemoteTarget: &target,
+					Size: domain.Size{Cols: 80, Rows: 24}, SessionTarget: ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(target)),
 					EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 				}, transport)
 				result <- err

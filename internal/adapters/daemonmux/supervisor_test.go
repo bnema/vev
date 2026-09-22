@@ -7,15 +7,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
 
 // connectRaw builds one broker PhysicalConnection over an already established
 // raw carriage whose daemon end was handed to a supervisor.
-func connectRaw(t *testing.T, raw RawFramedTransport, endpoint ports.BrokerResolvedEndpoint) ports.BrokerPhysicalConnection {
+func connectRaw(t *testing.T, raw RawFramedTransport, endpoint ports.BrokerDialTarget) ports.BrokerPhysicalConnection {
 	t.Helper()
-	connector, err := NewEndpointConnector(func(context.Context, string) (RawFramedTransport, error) {
+	connector, err := NewEndpointConnector(func(context.Context, ports.BrokerDialTarget) (RawFramedTransport, error) {
 		return raw, nil
 	}, DefaultMuxCeilings())
 	require.NoError(t, err)
@@ -28,7 +29,7 @@ func connectRaw(t *testing.T, raw RawFramedTransport, endpoint ports.BrokerResol
 
 // awaitHandshakeBridge performs the broker side of the daemonmux physical
 // preamble over raw and returns the negotiated carrier, ready for a pump.
-func awaitHandshakeBridge(t *testing.T, raw RawFramedTransport, endpoint ports.BrokerResolvedEndpoint) (FramedCarrier, ClientHandshakeResult) {
+func awaitHandshakeBridge(t *testing.T, raw RawFramedTransport, endpoint ports.BrokerDialTarget) (FramedCarrier, ClientHandshakeResult) {
 	t.Helper()
 	bridge, err := NewPreambleCarrier(raw)
 	require.NoError(t, err)
@@ -115,6 +116,161 @@ func TestServerSupervisorEnforcesAcceptedPolicyBeforeAdmission(t *testing.T) {
 	message, err := connection.ReceiveServer()
 	require.NoError(t, err)
 	require.Equal(t, protocol.Pong{}, message)
+}
+
+// TestServerSupervisorDeliversFirstHelloDataFrame proves the complete first
+// application-frame path without timing probes: LogicalConnection.SendClient
+// writes Hello through sessionwire, the physical pump emits Data, the
+// supervisor-owned daemon pump dispatches it, and the accepted logical server
+// connection's sessionwire ReceiveClient decodes that same Hello. This guards
+// the Opened-to-first-Data boundary where losing a wakeup or using the wrong
+// direction/physical ID would otherwise leave the daemon blocked forever.
+func TestServerSupervisorDeliversFirstHelloDataFrame(t *testing.T) {
+	binding := mustServerBinding(t)
+	aggregate := NewAggregateListener()
+	supervisor, err := NewServerSupervisor(aggregate, binding, DefaultMuxCeilings(), 1)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = supervisor.Close()
+		_ = aggregate.Close()
+	})
+
+	clientRaw, serverRaw := rawCarriagePair(t)
+	adopted := make(chan error, 1)
+	go func() { adopted <- supervisor.Adopt(context.Background(), serverRaw) }()
+	physical := connectRaw(t, clientRaw, muxEndpoint(binding.Identity(), binding.Policy(), "raw://first-hello"))
+	require.NoError(t, <-adopted)
+
+	accepted := make(chan ports.ServerConnection, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		connection, err := aggregate.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- connection
+	}()
+
+	logical, err := physical.OpenStream(context.Background(), muxOpenRequest(1, binding.Policy()))
+	require.NoError(t, err)
+	var server ports.ServerConnection
+	select {
+	case server = <-accepted:
+	case err := <-acceptErr:
+		require.NoError(t, err)
+	case <-time.After(p3cTestDeadline):
+		t.Fatal("supervisor did not dispatch the admitted logical stream")
+	}
+
+	hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentEphemeral, Size: domain.Size{Cols: 80, Rows: 24}, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned}
+	sent := make(chan error, 1)
+	received := make(chan protocol.ClientMessage, 1)
+	receiveErr := make(chan error, 1)
+	go func() { sent <- logical.SendClient(hello) }()
+	go func() {
+		message, err := server.ReceiveClient()
+		if err != nil {
+			receiveErr <- err
+			return
+		}
+		received <- message
+	}()
+	select {
+	case message := <-received:
+		require.Equal(t, hello, message)
+	case err := <-receiveErr:
+		require.NoError(t, err)
+	case <-time.After(p3cTestDeadline):
+		t.Fatal("first Hello Data frame did not reach sessionwire ReceiveClient")
+	}
+	require.NoError(t, <-sent)
+}
+
+// TestServerSupervisorStampsAcceptedOriginThroughAggregate proves the accepted
+// physical origin the supervisor resolved from the binding's provisioned member
+// reaches the daemon end-to-end: the aggregate hands back the same typed
+// connection the child listener produced, and its admission provider reports the
+// exact accepted policy and origin. It guards the wrapper chain so a later
+// wrapper can never strip a child's admission metadata.
+func TestServerSupervisorStampsAcceptedOriginThroughAggregate(t *testing.T) {
+	binding := mustServerBinding(t)
+	aggregate := NewAggregateListener()
+	supervisor, err := NewServerSupervisor(aggregate, binding, DefaultMuxCeilings(), 1)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = supervisor.Close()
+		_ = aggregate.Close()
+	})
+
+	clientRaw, serverRaw := rawCarriagePair(t)
+	adopted := make(chan error, 1)
+	go func() { adopted <- supervisor.Adopt(context.Background(), serverRaw) }()
+	physical := connectRaw(t, clientRaw, muxEndpoint(binding.Identity(), binding.Policy(), "raw://origin"))
+	require.NoError(t, <-adopted)
+
+	accepted := make(chan ports.ServerConnection, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		connection, err := aggregate.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- connection
+	}()
+
+	logical, err := physical.OpenStream(context.Background(), muxOpenRequest(1, binding.Policy()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = logical.Close() })
+
+	var server ports.ServerConnection
+	select {
+	case server = <-accepted:
+	case err := <-acceptErr:
+		require.NoError(t, err)
+	case <-time.After(p3cTestDeadline):
+		t.Fatal("supervisor did not dispatch the admitted logical stream")
+	}
+
+	provider, ok := server.(ports.SessionAdmissionProvider)
+	require.True(t, ok, "the accepted connection preserves the admission provider through the aggregate")
+	admission, ok := provider.SessionAdmission()
+	require.True(t, ok)
+	require.Equal(t, ports.SessionOriginLocal, admission.Origin)
+	require.Equal(t, binding.Policy(), admission.Policy)
+	require.Equal(t, ports.BrokerStreamControl, admission.Purpose)
+	require.NoError(t, admission.Validate())
+}
+
+// TestServerSupervisorRefusesLiarRegistration proves the supervisor's accepted
+// origin reaches the listener's admission check: a client that lies about its
+// locality - a local registration on a local carriage - is refused on its own
+// stream and never delivered to the daemon.
+func TestServerSupervisorRefusesLiarRegistration(t *testing.T) {
+	binding := mustServerBinding(t)
+	server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+	server.serve()
+
+	clientRaw, serverRaw := rawCarriagePair(t)
+	server.adopt(context.Background(), serverRaw)
+	carrier, result := awaitHandshakeBridge(t, clientRaw, muxEndpoint(binding.Identity(), binding.Policy(), "raw://liar"))
+	require.NoError(t, server.awaitAdoption(t))
+
+	pump, err := NewPump(carrier, DirectionServer, result.Ceilings)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pump.Close() })
+	pump.Start(context.Background())
+	logical, err := NewLogicalConnector(pump)
+	require.NoError(t, err)
+
+	// A remote-shaped Open (a local carriage with a registration) contradicts
+	// the accepted local origin: the listener refuses it rather than stamping a
+	// provenance it did not provision.
+	liar := p3cRemoteRequest(ports.BrokerConnectionID{1}, "dev@host:22", 1, binding.Policy())
+	_, err = logical.Open(context.Background(), liar)
+	require.Error(t, err)
+	require.Zero(t, server.acceptedCount(), "a locality-contradicting open never reaches the accept stream")
 }
 
 // TestServerSupervisorServerLossIsolated proves one lost physical child never

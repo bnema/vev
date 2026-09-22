@@ -17,7 +17,7 @@ func waitPoolEmpty(t *testing.T, p *Pool) {
 
 func TestPoolIdleEvictionAndReconnect(t *testing.T) {
 	var calls atomic.Int32
-	p, clock := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	p, clock := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		calls.Add(1)
 		return &fakePhysical{endpoint: e, done: make(chan struct{})}, nil
 	})
@@ -49,7 +49,7 @@ func TestPoolRetiringKeyUntilCloseCompletes(t *testing.T) {
 	var calls atomic.Int32
 	var first *retiringPhysical
 	allow := make(chan struct{})
-	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		f := &fakePhysical{endpoint: e, done: make(chan struct{})}
 		if calls.Add(1) == 1 {
 			first = &retiringPhysical{fakePhysical: f, closing: make(chan struct{}), allowClose: allow}
@@ -85,7 +85,7 @@ func TestPoolRetiringKeyUntilCloseCompletes(t *testing.T) {
 
 func TestPoolFailedConnectRetry(t *testing.T) {
 	var calls atomic.Int32
-	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		if calls.Add(1) == 1 {
 			return nil, context.DeadlineExceeded
 		}

@@ -46,6 +46,39 @@ func testPolicy() ports.BrokerPolicy {
 	}
 }
 
+// openRequest builds one valid control-purpose open request for exactly stream,
+// with this connection's start-if-needed authorization. After the cutover the
+// calling service allocates every identity with NextStreamID, so a test that
+// names a stream always states it explicitly.
+func openRequest(stream ports.BrokerStreamID) ports.BrokerOpenStreamRequest {
+	return ports.BrokerOpenStreamRequest{
+		Purpose:   ports.BrokerStreamControl,
+		Local:     true,
+		Stream:    stream,
+		Policy:    testPolicy(),
+		StartMode: ports.BrokerDaemonStartIfNeeded,
+	}
+}
+
+// attachmentRequest builds one valid attachment request for exactly stream with
+// the given admission variant and creation name.
+func attachmentRequest(stream ports.BrokerStreamID, admission ports.BrokerStreamAdmission, name string) ports.BrokerOpenStreamRequest {
+	request := openRequest(stream)
+	request.Purpose = ports.BrokerStreamAttachment
+	request.Admission = admission
+	request.Name = name
+	return request
+}
+
+// nextStreamID reads one fresh identity from the service's only allocator,
+// exactly as the composed supervisor and broker operations do.
+func nextStreamID(t *testing.T, service ports.BrokerService) ports.BrokerStreamID {
+	t.Helper()
+	stream, err := service.NextStreamID()
+	require.NoError(t, err)
+	return stream
+}
+
 // membershipProbeEndpoint is the endpoint every liveness probe adds through the
 // real membership delegation path.
 const membershipProbeEndpoint = "probe@host:22"
@@ -367,9 +400,20 @@ type fakeCore struct {
 	addResult     *domain.RemoteRegistration
 	updateResult  *domain.RemoteRegistration
 	removeRemoved bool
+
+	nextStream ports.BrokerStreamID
 }
 
 func (c *fakeCore) ConnectionID() ports.BrokerConnectionID { return c.id }
+
+// NextStreamID is the admitted core connection's only stream allocator, exactly
+// like the production service: the listener delegates it unchanged.
+func (c *fakeCore) NextStreamID() (ports.BrokerStreamID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextStream++
+	return c.nextStream, nil
+}
 
 func (c *fakeCore) Done() <-chan struct{} { return c.done }
 

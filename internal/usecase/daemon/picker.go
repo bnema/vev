@@ -208,20 +208,7 @@ func (d *Daemon) localPickerViewProjections(cur *session, ac *attachedClient) ([
 }
 
 func (d *Daemon) pickerViewProjections(cur *session, ac *attachedClient) ([]pickerSessionView, []pickerSessionView, pickerSourceFilter) {
-	// The hybrid projection reuses the prepared local projection for its
-	// local rows and interleaves the current foreign remote rows between the
-	// live and stopped groups.
-	local := d.localPickerViews(cur, ac)
-	foreign := d.foreignPickerViews(local.now)
-	recent := make([]pickerSessionView, 0, len(local.recentLive)+len(foreign.recent)+len(local.recentStopped))
-	recent = append(recent, local.recentLive...)
-	recent = append(recent, foreign.recent...)
-	recent = append(recent, local.recentStopped...)
-	grouped := make([]pickerSessionView, 0, len(local.groupedLive)+len(foreign.grouped)+len(local.groupedStopped))
-	grouped = append(grouped, local.groupedLive...)
-	grouped = append(grouped, foreign.grouped...)
-	grouped = append(grouped, withLocalStoppedSection(local.groupedStopped, len(local.groupedLive) == 0 && !foreign.blockLocalStopped)...)
-	return recent, grouped, local.current
+	return d.localPickerViewProjections(cur, ac)
 }
 
 // withLocalStoppedSection marks the first stopped row as the LOCAL section
@@ -536,10 +523,9 @@ func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, t
 		return failUnavailable()
 	}
 	handoff := protocol.AttachTarget{
-		Endpoint:          remoteTarget.Endpoint,
 		Session:           remoteTarget.SessionName,
 		Intent:            protocol.IntentAttach,
-		RemoteTarget:      &remoteTarget,
+		SessionTarget:     ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(remoteTarget)),
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
 	}
 	if protocol.ValidateAttachTarget(handoff) != nil {

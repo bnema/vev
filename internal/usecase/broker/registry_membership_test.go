@@ -116,7 +116,7 @@ func policyWithTrust(trust string) ports.BrokerPolicy {
 }
 
 func pinnedRecord(reg domain.RemoteRegistration, policy ports.BrokerPolicy) ports.BrokerHostRecord {
-	return ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: policy}
+	return ports.BrokerHostRecord{Registration: reg, Pinned: true, Policy: policy, Route: canonicalRoute(policy, reg.Endpoint)}
 }
 
 // admittedAttempt is one in-flight probe attempt a test installs directly, so a
@@ -321,7 +321,7 @@ func TestRegistryImmutableMembershipRefusesEveryMutation(t *testing.T) {
 // and that even that no-op CAS-verifies durable authority.
 func TestRegistryMutableAddPinsDuplicatePreservingIdentity(t *testing.T) {
 	seq := &incarnationSequencer{}
-	store := newMembershipStore(ports.BrokerHostRecord{Registration: registration(t, "alpha.test", 1), Learned: true, Policy: poolPolicy()})
+	store := newMembershipStore(ports.BrokerHostRecord{Registration: registration(t, "alpha.test", 1), Learned: true, Policy: poolPolicy(), Route: canonicalRoute(poolPolicy(), "alpha.test")})
 	registry, _ := newMutableRegistry(t, store, newManualClock(time.Unix(100, 0)), seq.generate)
 	reg := registration(t, "alpha.test", 1)
 

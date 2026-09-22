@@ -19,15 +19,12 @@ var transitionSpinnerFrames = [...]rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴'
 
 func transitionMessage(target protocol.AttachTarget) string {
 	origin := target.Endpoint
-	if target.RemoteTarget != nil && target.RemoteTarget.DisplayOrigin != "" {
-		origin = target.RemoteTarget.DisplayOrigin
-	}
 	label := target.Session
 	if origin != "" {
 		label = domain.RemoteSessionDisplay(target.Session, origin)
 	}
 	verb := "Switching to "
-	if target.RemoteTarget != nil && target.RemoteTarget.Stopped {
+	if target.SessionTarget != nil && target.SessionTarget.Stopped {
 		verb = "Starting "
 	}
 	return verb + label + "…"
@@ -39,8 +36,8 @@ func drawTransitionToast(out io.Writer, size domain.Size, frame int, message str
 }
 
 // transitionUI owns the client-local handoff presentation. Every method is
-// called by the Runner or active attach loop, preserving the terminal's single
-// writer rule while network operations expose timer/resize events.
+// called by the active attach loop, preserving the terminal's single writer
+// rule while network operations expose timer/resize events.
 type transitionUI struct {
 	term       ports.Terminal
 	clock      ports.Clock

@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/lifecycle"
 	"github.com/bnema/vev/internal/protocol/wire"
 	wiremocks "github.com/bnema/vev/internal/protocol/wire/mocks"
 )
@@ -25,9 +24,6 @@ const (
 	spawnTestLauncherFileEnv = "VEV_SPAWN_TEST_LAUNCHER_FILE"
 	spawnTestReleaseFileEnv  = "VEV_SPAWN_TEST_RELEASE_FILE"
 	spawnTestTraceFileEnv    = "VEV_SPAWN_TEST_TRACE_FILE"
-	// spawnTestLockDirEnv makes the --daemon helper hold lifecycle ownership so
-	// force-stop tests can exercise real process-ownership verification.
-	spawnTestLockDirEnv = "VEV_SPAWN_TEST_LOCK_DIR"
 )
 
 func TestMain(m *testing.M) {
@@ -38,7 +34,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) >= 2 && os.Getenv(brokerHelperEnv) == "1" {
 		switch os.Args[1] {
 		case brokerServeCommand, brokerLauncherCommand, brokerStatusCommand,
-			brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand:
+			brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand,
+			brokerReadyCommand,
+			productionBrokerServeCommand, productionBrokerLauncherCommand:
 			recordBrokerHelperProcess(os.Args[1])
 			if os.Args[1] == brokerLauncherCommand {
 				if record := os.Getenv(brokerLauncherBlockRecordEnv); record != "" {
@@ -88,11 +86,6 @@ func TestMain(m *testing.M) {
 			}
 			if err := writeProcessRecord(path); err != nil {
 				os.Exit(2)
-			}
-			if lockDir := os.Getenv(spawnTestLockDirEnv); lockDir != "" {
-				if _, err := lifecycle.TryAcquire(lockDir); err != nil {
-					os.Exit(2)
-				}
 			}
 			for {
 				time.Sleep(time.Hour)

@@ -20,7 +20,7 @@ func TestTransitionMessageDescribesSwitchAndStoppedRestore(t *testing.T) {
 		Endpoint: "remote", DisplayOrigin: "remote", LifecycleID: domain.SessionLifecycleID{1},
 		SessionName: "work", Stopped: true, StoppedTab: domain.NewStableTabSelector("tab-1"),
 	}
-	stopped := protocol.AttachTarget{Endpoint: "remote", Session: "work", RemoteTarget: &stoppedTarget}
+	stopped := protocol.AttachTarget{Endpoint: "remote", Session: "work", SessionTarget: &protocol.SessionAttachTarget{LifecycleID: stoppedTarget.LifecycleID, SessionName: stoppedTarget.SessionName, TabIndex: protocol.NoTabIndex, Stopped: true}}
 
 	require.Equal(t, "Switching to work@remote…", transitionMessage(live))
 	require.Equal(t, "Starting work@remote…", transitionMessage(stopped))

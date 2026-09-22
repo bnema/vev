@@ -7,6 +7,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestProductionBrokerHiddenCommandsRejectSandboxOptions(t *testing.T) {
+	serve, err := parseArgs([]string{productionBrokerServeCommand})
+	require.NoError(t, err)
+	require.Equal(t, kindProductionBrokerServe, serve.kind)
+	require.True(t, serve.brokerServe.production)
+
+	launcher, err := parseArgs([]string{productionBrokerLauncherCommand})
+	require.NoError(t, err)
+	require.Equal(t, kindProductionBrokerLauncher, launcher.kind)
+
+	for _, name := range []string{productionBrokerServeCommand, productionBrokerLauncherCommand} {
+		_, err = parseArgs([]string{name, "--offline-root", t.TempDir()})
+		require.Error(t, err)
+	}
+}
+
 func TestProductionBrokerLayoutUsesDedicatedRuntimeStateAndConfig(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

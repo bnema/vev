@@ -301,14 +301,25 @@ type SupervisorConfig struct {
 	// each attachment Hello. The use case deliberately does not inspect the
 	// process environment; omitted fields retain their protocol zero values.
 	AttachmentEnvironment AttachmentEnvironment
+	SessionEnvironment    SessionEnvironment
 	// LifecycleActions carries explicit attachment lifecycle requests. A nil
 	// channel disables external lifecycle actions. The actions are typed so
 	// detach-to-picker can never be confused with detach-and-exit.
 	LifecycleActions <-chan AttachmentLifecycleAction
-	// InitialNavigation optionally requests one broker-native navigation after
-	// the first committed catalogue publication. It is used by no-argument
-	// composition to create an ephemeral session without a special attach path.
-	InitialNavigation *InitialNavigation
+	// InitialNavigation is the closed, one-shot navigation intent performed
+	// after the first committed catalogue publication. Its zero value is
+	// InitialNavigationPicker, which opens nothing, so a configuration that
+	// omits it is safe. No-argument composition sets the ephemeral local
+	// creation explicitly. The supervisor copies the value; it never shares a
+	// mutable pointer with the composition.
+	InitialNavigation InitialNavigation
+	// ResolveInitialNavigation optionally translates a composition-owned CLI
+	// target (an attach name or a remote endpoint) into an exact navigation
+	// identity. It is a translation of a target into identity, not an owner of
+	// navigation: it performs no I/O and is consulted at most once, against a
+	// defensive copy of the first committed publication of the adopted
+	// connection. When set, InitialNavigation must be exactly zero.
+	ResolveInitialNavigation InitialNavigationResolver
 }
 
 // AttachmentEnvironment is the composition seam for client environment data
@@ -318,14 +329,6 @@ type AttachmentEnvironment struct {
 	Cwd       string
 	TrueColor bool
 }
-
-// InitialNavigation is a one-shot client navigation intent.
-type InitialNavigation uint8
-
-const (
-	// InitialNavigationCreateEphemeral creates a broker-routed ephemeral session.
-	InitialNavigationCreateEphemeral InitialNavigation = iota + 1
-)
 
 // AttachmentLifecycleAction is an explicit process/attachment decision.
 type AttachmentLifecycleActionKind uint8
@@ -353,13 +356,17 @@ type Supervisor struct {
 	// runs through (Plan 001 P5.3b). The supervisor owns it for the whole run
 	// and retains close authority over each stream it admits.
 	attachments *attachmentHost
-	// nextStream is the strictly increasing logical stream ID allocator for
-	// the current broker connection. Failed admitted opens consume their ID,
-	// exactly as the pool contract requires.
-	nextStream atomic.Uint64
 	// nextAttachment identifies one attachment run within the connection
-	// attempt generation.
+	// attempt generation. Logical stream IDs are allocated by the broker
+	// service, the single allocator on its own connection, so the supervisor
+	// keeps no allocator of its own.
 	nextAttachment atomic.Uint64
+	// navigation is the supervisor's private copy of the composition's intent,
+	// consumed exactly once. navigationConsumed is set before the intent is
+	// resolved, so a refusal, a cancellation, a timeout, or a reconnection can
+	// never re-arm it.
+	navigation         InitialNavigation
+	navigationConsumed bool
 	// clientID is the stable client identity carried in every Hello this
 	// supervisor sends, across reconnects and attachments.
 	clientID [16]byte
@@ -369,6 +376,10 @@ type Supervisor struct {
 // parked on the picker with no connection. It does not touch the terminal; Run
 // enters raw mode.
 func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
+	if err := cfg.SessionEnvironment.Validate(); err != nil {
+		return nil, fmt.Errorf("client: invalid session environment: %w", err)
+	}
+	cfg.SessionEnvironment = cfg.SessionEnvironment.Clone()
 	if supervisorNil(cfg.Connector) {
 		return nil, errors.New("vev: supervisor requires a broker connector")
 	}
@@ -389,10 +400,18 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	if cfg.Jitter == nil {
 		cfg.Jitter = rand.Float64
 	}
+	if cfg.ResolveInitialNavigation != nil {
+		if cfg.InitialNavigation != (InitialNavigation{}) {
+			return nil, errors.New("vev: supervisor accepts either an initial navigation or a resolver, not both")
+		}
+	} else if err := cfg.InitialNavigation.Validate(); err != nil {
+		return nil, fmt.Errorf("vev: supervisor initial navigation: %w", err)
+	}
 	supervisor := &Supervisor{
-		cfg:      cfg,
-		state:    State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
-		clientID: newClientID(),
+		cfg:        cfg,
+		state:      State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
+		clientID:   newClientID(),
+		navigation: cfg.InitialNavigation,
 	}
 	// The host is the supervisor's existing foreground grant. It owns no raw
 	// mode and starts no reader: the supervisor keeps its one terminal input
@@ -532,14 +551,10 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 			s.state.ReadyLost = false
 			s.mu.Unlock()
 		}
-		if s.cfg.InitialNavigation != nil {
-			navigation := *s.cfg.InitialNavigation
-			s.cfg.InitialNavigation = nil
-			if terminated, termErr := s.runInitialNavigation(ctx, input, service, navigation); terminated {
-				retire()
-				s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
-				return termErr
-			}
+		if terminated, termErr := s.runInitialNavigation(ctx, input, service); terminated {
+			retire()
+			s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
+			return termErr
 		}
 
 		// Ready phase: fold publications, admit committed attachments one at a
@@ -935,13 +950,42 @@ func (s *Supervisor) notify(err error) {
 // transition applies one reducer event under the supervisor mutex and renders
 // the resulting state outside it, so a renderer that reads State back never
 // deadlocks.
+//
+// A presentation change also publishes the new presentation through the UI
+// owner inside the same fence, so a capture observes the presentation the
+// supervisor actually entered instead of an older attachment context. The
+// publication is deliberately limited to the unattached presentations the
+// supervisor owns: Picker and Connecting carry the run's handle and status with
+// every session field zeroed, while Attached is published by the admitted
+// attachment foreground only, after its first frame was written, flushed, and
+// committed, carrying the real action generation. Terminating closes the UI
+// service and publishes nothing.
 func (s *Supervisor) transition(event supervisorEvent) {
 	s.mu.Lock()
+	previous := s.state.Presentation
 	s.state = reduceSupervisor(s.state, event)
 	state := s.state
 	s.mu.Unlock()
+	if state.Presentation != previous {
+		s.publishPresentation(state.Presentation)
+	}
 	if s.cfg.Render != nil {
 		s.cfg.Render(state)
+	}
+}
+
+// publishPresentation publishes one supervisor-owned presentation through the
+// optional UI owner. Attached and terminating are refused: Attached belongs to
+// the admitted attachment foreground, and terminating ends the service.
+func (s *Supervisor) publishPresentation(presentation Presentation) {
+	if s == nil || s.cfg.UI == nil {
+		return
+	}
+	switch presentation {
+	case PresentPicker:
+		_ = s.cfg.UI.publishPresentation(ports.UIStatusPicker)
+	case PresentConnecting:
+		_ = s.cfg.UI.publishPresentation(ports.UIStatusConnecting)
 	}
 }
 

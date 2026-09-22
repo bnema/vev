@@ -301,6 +301,107 @@ func (x *ExactTarget) GetSessionName() string {
 	return ""
 }
 
+// SessionAttachTarget is exact identity local to the receiving daemon.
+type SessionAttachTarget struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	SessionId        string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	LifecycleId      *LifecycleID           `protobuf:"bytes,2,opt,name=lifecycle_id,json=lifecycleId,proto3" json:"lifecycle_id,omitempty"`
+	SessionName      string                 `protobuf:"bytes,3,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	TabId            string                 `protobuf:"bytes,4,opt,name=tab_id,json=tabId,proto3" json:"tab_id,omitempty"`
+	TabIndex         *int32                 `protobuf:"varint,5,opt,name=tab_index,json=tabIndex,proto3,oneof" json:"tab_index,omitempty"`
+	TabRawName       string                 `protobuf:"bytes,6,opt,name=tab_raw_name,json=tabRawName,proto3" json:"tab_raw_name,omitempty"`
+	TabExpectedCount uint32                 `protobuf:"varint,7,opt,name=tab_expected_count,json=tabExpectedCount,proto3" json:"tab_expected_count,omitempty"`
+	Stopped          bool                   `protobuf:"varint,8,opt,name=stopped,proto3" json:"stopped,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *SessionAttachTarget) Reset() {
+	*x = SessionAttachTarget{}
+	mi := &file_common_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionAttachTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionAttachTarget) ProtoMessage() {}
+
+func (x *SessionAttachTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionAttachTarget.ProtoReflect.Descriptor instead.
+func (*SessionAttachTarget) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SessionAttachTarget) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionAttachTarget) GetLifecycleId() *LifecycleID {
+	if x != nil {
+		return x.LifecycleId
+	}
+	return nil
+}
+
+func (x *SessionAttachTarget) GetSessionName() string {
+	if x != nil {
+		return x.SessionName
+	}
+	return ""
+}
+
+func (x *SessionAttachTarget) GetTabId() string {
+	if x != nil {
+		return x.TabId
+	}
+	return ""
+}
+
+func (x *SessionAttachTarget) GetTabIndex() int32 {
+	if x != nil && x.TabIndex != nil {
+		return *x.TabIndex
+	}
+	return 0
+}
+
+func (x *SessionAttachTarget) GetTabRawName() string {
+	if x != nil {
+		return x.TabRawName
+	}
+	return ""
+}
+
+func (x *SessionAttachTarget) GetTabExpectedCount() uint32 {
+	if x != nil {
+		return x.TabExpectedCount
+	}
+	return 0
+}
+
+func (x *SessionAttachTarget) GetStopped() bool {
+	if x != nil {
+		return x.Stopped
+	}
+	return false
+}
+
 // RGB is one terminal color triple (renderer.RGB).
 type RGB struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -313,7 +414,7 @@ type RGB struct {
 
 func (x *RGB) Reset() {
 	*x = RGB{}
-	mi := &file_common_proto_msgTypes[4]
+	mi := &file_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -325,7 +426,7 @@ func (x *RGB) String() string {
 func (*RGB) ProtoMessage() {}
 
 func (x *RGB) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[4]
+	mi := &file_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -338,7 +439,7 @@ func (x *RGB) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RGB.ProtoReflect.Descriptor instead.
 func (*RGB) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{4}
+	return file_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RGB) GetR() uint32 {
@@ -387,7 +488,7 @@ type CellStyle struct {
 
 func (x *CellStyle) Reset() {
 	*x = CellStyle{}
-	mi := &file_common_proto_msgTypes[5]
+	mi := &file_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -399,7 +500,7 @@ func (x *CellStyle) String() string {
 func (*CellStyle) ProtoMessage() {}
 
 func (x *CellStyle) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[5]
+	mi := &file_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -412,7 +513,7 @@ func (x *CellStyle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CellStyle.ProtoReflect.Descriptor instead.
 func (*CellStyle) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{5}
+	return file_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CellStyle) GetBold() bool {
@@ -533,7 +634,7 @@ type PreviewCell struct {
 
 func (x *PreviewCell) Reset() {
 	*x = PreviewCell{}
-	mi := &file_common_proto_msgTypes[6]
+	mi := &file_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -545,7 +646,7 @@ func (x *PreviewCell) String() string {
 func (*PreviewCell) ProtoMessage() {}
 
 func (x *PreviewCell) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[6]
+	mi := &file_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -558,7 +659,7 @@ func (x *PreviewCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreviewCell.ProtoReflect.Descriptor instead.
 func (*PreviewCell) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{6}
+	return file_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PreviewCell) GetRuneValue() uint32 {
@@ -595,7 +696,7 @@ type RemoteRegistration struct {
 
 func (x *RemoteRegistration) Reset() {
 	*x = RemoteRegistration{}
-	mi := &file_common_proto_msgTypes[7]
+	mi := &file_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -607,7 +708,7 @@ func (x *RemoteRegistration) String() string {
 func (*RemoteRegistration) ProtoMessage() {}
 
 func (x *RemoteRegistration) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[7]
+	mi := &file_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -620,7 +721,7 @@ func (x *RemoteRegistration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteRegistration.ProtoReflect.Descriptor instead.
 func (*RemoteRegistration) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{7}
+	return file_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RemoteRegistration) GetEndpoint() string {
@@ -668,7 +769,20 @@ const file_common_proto_rawDesc = "" +
 	"\astopped\x18\a \x01(\bR\astopped\"m\n" +
 	"\vExactTarget\x12;\n" +
 	"\flifecycle_id\x18\x01 \x01(\v2\x18.vev.wire.v1.LifecycleIDR\vlifecycleId\x12!\n" +
-	"\fsession_name\x18\x02 \x01(\tR\vsessionName\"/\n" +
+	"\fsession_name\x18\x02 \x01(\tR\vsessionName\"\xc5\x02\n" +
+	"\x13SessionAttachTarget\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12;\n" +
+	"\flifecycle_id\x18\x02 \x01(\v2\x18.vev.wire.v1.LifecycleIDR\vlifecycleId\x12!\n" +
+	"\fsession_name\x18\x03 \x01(\tR\vsessionName\x12\x15\n" +
+	"\x06tab_id\x18\x04 \x01(\tR\x05tabId\x12 \n" +
+	"\ttab_index\x18\x05 \x01(\x05H\x00R\btabIndex\x88\x01\x01\x12 \n" +
+	"\ftab_raw_name\x18\x06 \x01(\tR\n" +
+	"tabRawName\x12,\n" +
+	"\x12tab_expected_count\x18\a \x01(\rR\x10tabExpectedCount\x12\x18\n" +
+	"\astopped\x18\b \x01(\bR\astoppedB\f\n" +
+	"\n" +
+	"_tab_index\"/\n" +
 	"\x03RGB\x12\f\n" +
 	"\x01r\x18\x01 \x01(\rR\x01r\x12\f\n" +
 	"\x01g\x18\x02 \x01(\rR\x01g\x12\f\n" +
@@ -718,30 +832,32 @@ func file_common_proto_rawDescGZIP() []byte {
 	return file_common_proto_rawDescData
 }
 
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_common_proto_goTypes = []any{
-	(*LifecycleID)(nil),        // 0: vev.wire.v1.LifecycleID
-	(*TabSelector)(nil),        // 1: vev.wire.v1.TabSelector
-	(*RemoteTarget)(nil),       // 2: vev.wire.v1.RemoteTarget
-	(*ExactTarget)(nil),        // 3: vev.wire.v1.ExactTarget
-	(*RGB)(nil),                // 4: vev.wire.v1.RGB
-	(*CellStyle)(nil),          // 5: vev.wire.v1.CellStyle
-	(*PreviewCell)(nil),        // 6: vev.wire.v1.PreviewCell
-	(*RemoteRegistration)(nil), // 7: vev.wire.v1.RemoteRegistration
+	(*LifecycleID)(nil),         // 0: vev.wire.v1.LifecycleID
+	(*TabSelector)(nil),         // 1: vev.wire.v1.TabSelector
+	(*RemoteTarget)(nil),        // 2: vev.wire.v1.RemoteTarget
+	(*ExactTarget)(nil),         // 3: vev.wire.v1.ExactTarget
+	(*SessionAttachTarget)(nil), // 4: vev.wire.v1.SessionAttachTarget
+	(*RGB)(nil),                 // 5: vev.wire.v1.RGB
+	(*CellStyle)(nil),           // 6: vev.wire.v1.CellStyle
+	(*PreviewCell)(nil),         // 7: vev.wire.v1.PreviewCell
+	(*RemoteRegistration)(nil),  // 8: vev.wire.v1.RemoteRegistration
 }
 var file_common_proto_depIdxs = []int32{
 	0, // 0: vev.wire.v1.RemoteTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
 	1, // 1: vev.wire.v1.RemoteTarget.stopped_tab:type_name -> vev.wire.v1.TabSelector
 	0, // 2: vev.wire.v1.ExactTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	4, // 3: vev.wire.v1.CellStyle.foreground_rgb:type_name -> vev.wire.v1.RGB
-	4, // 4: vev.wire.v1.CellStyle.background_rgb:type_name -> vev.wire.v1.RGB
-	4, // 5: vev.wire.v1.CellStyle.underline_color_rgb:type_name -> vev.wire.v1.RGB
-	5, // 6: vev.wire.v1.PreviewCell.style:type_name -> vev.wire.v1.CellStyle
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	0, // 3: vev.wire.v1.SessionAttachTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	5, // 4: vev.wire.v1.CellStyle.foreground_rgb:type_name -> vev.wire.v1.RGB
+	5, // 5: vev.wire.v1.CellStyle.background_rgb:type_name -> vev.wire.v1.RGB
+	5, // 6: vev.wire.v1.CellStyle.underline_color_rgb:type_name -> vev.wire.v1.RGB
+	6, // 7: vev.wire.v1.PreviewCell.style:type_name -> vev.wire.v1.CellStyle
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -749,13 +865,14 @@ func file_common_proto_init() {
 	if File_common_proto != nil {
 		return
 	}
+	file_common_proto_msgTypes[4].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

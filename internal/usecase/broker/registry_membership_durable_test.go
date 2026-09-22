@@ -75,7 +75,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 		authority, err := store.LoadHosts()
 		require.NoError(t, err)
 		require.Equal(t, registry.authority, authority)
-		require.Equal(t, []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: first}}, authority.Hosts)
+		require.Equal(t, []ports.BrokerHostRecord{{Registration: reg, Pinned: true, Policy: first, Route: canonicalRoute(first, reg.Endpoint)}}, authority.Hosts)
 		registry.settle()
 	})
 
@@ -84,7 +84,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 		registry := newDurableMutableRegistry(t, 2, store)
 		defer registry.settle()
 		require.Equal(t, revision, registry.authority.Revision)
-		require.Equal(t, []ports.BrokerHostRecord{{Registration: added, Pinned: true, Policy: first}}, registry.authority.Hosts)
+		require.Equal(t, []ports.BrokerHostRecord{{Registration: added, Pinned: true, Policy: first, Route: canonicalRoute(first, added.Endpoint)}}, registry.authority.Hosts)
 		host, ok := registry.Snapshot().Find(endpoint)
 		require.True(t, ok)
 		require.Equal(t, added, host.Registration)
@@ -102,7 +102,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 		authority, err := store.LoadHosts()
 		require.NoError(t, err)
 		require.Equal(t, registry.authority, authority)
-		require.Equal(t, []ports.BrokerHostRecord{{Registration: updated, Pinned: true, Policy: changed}}, authority.Hosts)
+		require.Equal(t, []ports.BrokerHostRecord{{Registration: updated, Pinned: true, Policy: changed, Route: canonicalRoute(changed, updated.Endpoint)}}, authority.Hosts)
 		registry.settle()
 	})
 
@@ -111,7 +111,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 		registry := newDurableMutableRegistry(t, 3, store)
 		defer registry.settle()
 		require.Equal(t, revision, registry.authority.Revision)
-		require.Equal(t, []ports.BrokerHostRecord{{Registration: updated, Pinned: true, Policy: changed}}, registry.authority.Hosts)
+		require.Equal(t, []ports.BrokerHostRecord{{Registration: updated, Pinned: true, Policy: changed, Route: canonicalRoute(changed, updated.Endpoint)}}, registry.authority.Hosts)
 
 		removed, err := registry.RemoveHost(context.Background(), updated)
 		require.NoError(t, err)
@@ -155,7 +155,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 		registry := newDurableMutableRegistry(t, 5, store)
 		defer registry.settle()
 		require.Equal(t, revision, registry.authority.Revision)
-		require.Equal(t, []ports.BrokerHostRecord{{Registration: readded, Pinned: true, Policy: changed}}, registry.authority.Hosts)
+		require.Equal(t, []ports.BrokerHostRecord{{Registration: readded, Pinned: true, Policy: changed, Route: canonicalRoute(changed, readded.Endpoint)}}, registry.authority.Hosts)
 		host, ok := registry.Snapshot().Find(endpoint)
 		require.True(t, ok)
 		require.Equal(t, readded, host.Registration)
@@ -173,6 +173,7 @@ func TestRegistryMutableMembershipDurableRestart(t *testing.T) {
 func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	valid := ports.BrokerHostRecord{Registration: registration(t, "user@arch:22", 1), Pinned: true, Policy: poolPolicy()}
+	valid.Route = canonicalRoute(valid.Policy, valid.Registration.Endpoint)
 	store := openDurableStore(t, dir, nil)
 	require.NoError(t, store.ReplaceHosts(1, []ports.BrokerHostRecord{valid}))
 
@@ -188,6 +189,7 @@ func TestRegistryReplaceHostsRefusesUnpublishableMembershipBeforeCAS(t *testing.
 	require.Len(t, before.Daemons, 1)
 
 	poisoned := ports.BrokerHostRecord{Registration: registration(t, "user@\u202e", 2), Pinned: true, Policy: poolPolicy()}
+	poisoned.Route = canonicalRoute(poisoned.Policy, poisoned.Registration.Endpoint)
 	require.NoError(t, domain.ValidateRemoteHostTarget(poisoned.Registration.Endpoint), "the routing validator accepts the target")
 	require.Empty(t, hostDisplayOrigin(poisoned.Registration.Endpoint), "only the derived hint is empty after sanitizing")
 

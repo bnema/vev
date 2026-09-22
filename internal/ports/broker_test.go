@@ -398,6 +398,7 @@ func TestBrokerOpenStreamRequestValidate(t *testing.T) {
 			Target:       testBrokerTarget(),
 			Env:          []string{"TERM=xterm-256color"},
 			Policy:       testBrokerPolicy(),
+			StartMode:    BrokerDaemonStartIfNeeded,
 		}
 	}
 	if err := valid().Validate(); err != nil {
@@ -448,6 +449,9 @@ func TestBrokerOpenStreamRequestValidate(t *testing.T) {
 			r.Env = []string{"TERM=\xff"}
 		}},
 		{name: "invalid policy", mutate: func(r *BrokerOpenStreamRequest) { r.Policy = BrokerPolicy{} }},
+		{name: "zero start mode", mutate: func(r *BrokerOpenStreamRequest) { r.StartMode = 0 }},
+		{name: "unknown start mode", mutate: func(r *BrokerOpenStreamRequest) { r.StartMode = BrokerDaemonStartMode(9) }},
+		{name: "attachment existing only", mutate: func(r *BrokerOpenStreamRequest) { r.StartMode = BrokerDaemonExistingOnly }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -590,7 +594,8 @@ func TestBrokerInterfacesArePorts(t *testing.T) {
 	// adapters can implement them without importing use cases.
 	for name, iface := range map[string]reflect.Type{
 		"BrokerService":            reflect.TypeOf((*BrokerService)(nil)).Elem(),
-		"BrokerEndpointResolver":   reflect.TypeOf((*BrokerEndpointResolver)(nil)).Elem(),
+		"BrokerRouteAuthority":     reflect.TypeOf((*BrokerRouteAuthority)(nil)).Elem(),
+		"BrokerIdentityBinder":     reflect.TypeOf((*BrokerIdentityBinder)(nil)).Elem(),
 		"BrokerLogicalConnection":  reflect.TypeOf((*BrokerLogicalConnection)(nil)).Elem(),
 		"BrokerSnapshotStore":      reflect.TypeOf((*BrokerSnapshotStore)(nil)).Elem(),
 		"BrokerHostProbe":          reflect.TypeOf((*BrokerHostProbe)(nil)).Elem(),
@@ -691,23 +696,29 @@ func TestBrokerStreamPurposeShapes(t *testing.T) {
 		createName string
 		target     bool
 		env        bool
+		startMode  BrokerDaemonStartMode
 		valid      bool
 	}{
-		{"attachment exact", BrokerStreamAttachment, BrokerAdmissionExact, "", true, true, true},
-		{"attachment missing target", BrokerStreamAttachment, BrokerAdmissionExact, "", false, false, false},
-		{"attachment missing admission", BrokerStreamAttachment, 0, "", true, false, false},
-		{"attachment named creation", BrokerStreamAttachment, BrokerAdmissionCreateNamed, "work", false, true, true},
-		{"attachment ephemeral creation", BrokerStreamAttachment, BrokerAdmissionCreateEphemeral, "", false, true, true},
-		{"control", BrokerStreamControl, 0, "", false, false, true},
-		{"observation", BrokerStreamObservation, 0, "", false, false, true},
-		{"control target", BrokerStreamControl, 0, "", true, false, false},
-		{"control admission", BrokerStreamControl, BrokerAdmissionExact, "", false, false, false},
-		{"observation env", BrokerStreamObservation, 0, "", false, true, false},
-		{"observation admission", BrokerStreamObservation, BrokerAdmissionCreateEphemeral, "", false, false, false},
-		{"unknown", 0, 0, "", false, false, false},
+		{"attachment exact", BrokerStreamAttachment, BrokerAdmissionExact, "", true, true, BrokerDaemonStartIfNeeded, true},
+		{"attachment missing target", BrokerStreamAttachment, BrokerAdmissionExact, "", false, false, BrokerDaemonStartIfNeeded, false},
+		{"attachment missing admission", BrokerStreamAttachment, 0, "", true, false, BrokerDaemonStartIfNeeded, false},
+		{"attachment named creation", BrokerStreamAttachment, BrokerAdmissionCreateNamed, "work", false, true, BrokerDaemonStartIfNeeded, true},
+		{"attachment ephemeral creation", BrokerStreamAttachment, BrokerAdmissionCreateEphemeral, "", false, true, BrokerDaemonStartIfNeeded, true},
+		{"attachment existing only", BrokerStreamAttachment, BrokerAdmissionCreateEphemeral, "", false, true, BrokerDaemonExistingOnly, false},
+		{"attachment zero start mode", BrokerStreamAttachment, BrokerAdmissionCreateEphemeral, "", false, true, 0, false},
+		{"control", BrokerStreamControl, 0, "", false, false, BrokerDaemonStartIfNeeded, true},
+		{"control existing only", BrokerStreamControl, 0, "", false, false, BrokerDaemonExistingOnly, true},
+		{"observation", BrokerStreamObservation, 0, "", false, false, BrokerDaemonExistingOnly, true},
+		{"observation start if needed", BrokerStreamObservation, 0, "", false, false, BrokerDaemonStartIfNeeded, false},
+		{"observation zero start mode", BrokerStreamObservation, 0, "", false, false, 0, false},
+		{"control target", BrokerStreamControl, 0, "", true, false, BrokerDaemonStartIfNeeded, false},
+		{"control admission", BrokerStreamControl, BrokerAdmissionExact, "", false, false, BrokerDaemonStartIfNeeded, false},
+		{"observation env", BrokerStreamObservation, 0, "", false, true, BrokerDaemonExistingOnly, false},
+		{"observation admission", BrokerStreamObservation, BrokerAdmissionCreateEphemeral, "", false, false, BrokerDaemonExistingOnly, false},
+		{"unknown", 0, 0, "", false, false, BrokerDaemonStartIfNeeded, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: tc.purpose, Admission: tc.admission, Name: tc.createName, Policy: testBrokerPolicy()}
+			r := BrokerOpenStreamRequest{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Local: true, Purpose: tc.purpose, Admission: tc.admission, Name: tc.createName, Policy: testBrokerPolicy(), StartMode: tc.startMode}
 			if tc.target {
 				r.Target = testBrokerTarget()
 			}

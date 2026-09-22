@@ -110,12 +110,17 @@ func migrate(o Options) (recovery, error) {
 	if r.Cache, err = source(o.LegacyCache); err != nil {
 		return r, err
 	}
-	r.State.Manifest = manifest{Version: 1, Sources: []manifestSource{
+	r.State.Manifest = manifest{Version: 1, ImportVersion: 1, ImportCompleted: true, Sources: []manifestSource{
 		{Label: manifestMembership, Present: o.LegacyHosts != "", SHA256: digest(r.Hosts)},
 		{Label: manifestObservations, Present: o.LegacyCache != "", SHA256: digest(r.Cache)},
 	}}
 	r.State.Hosts = ports.BrokerHosts{Revision: 1}
-	if o.LegacyHosts != "" {
+	if o.InitialImportProvided {
+		r.State.Hosts.Hosts = ports.CloneBrokerHostRecords(o.InitialHosts)
+		if err := ports.ValidateBrokerHostRecords(r.State.Hosts.Hosts); err != nil && len(r.State.Hosts.Hosts) != 0 {
+			return r, fmt.Errorf("brokerstore: initial import: %w", err)
+		}
+	} else if o.LegacyHosts != "" {
 		r.State.Hosts.Hosts, err = decodeHosts(r.Hosts, o.Policies)
 		if err != nil {
 			return r, err
@@ -273,7 +278,11 @@ func decodeHosts(raw []byte, policies map[string]ports.BrokerPolicy) ([]ports.Br
 				return nil, err
 			}
 			indices[record.Endpoint] = len(out)
-			out = append(out, ports.BrokerHostRecord{Registration: reg, Pinned: group == 0, Learned: group == 1, Policy: policy})
+			route, err := ports.BrokerRouteForTransport(policy.Transport, reg.Endpoint)
+			if err != nil {
+				return nil, fmt.Errorf("brokerstore: upgrade route for %q: %w", record.Endpoint, err)
+			}
+			out = append(out, ports.BrokerHostRecord{Registration: reg, Pinned: group == 0, Learned: group == 1, Policy: policy, Route: route})
 		}
 	}
 	return out, nil

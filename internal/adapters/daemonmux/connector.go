@@ -49,11 +49,18 @@ import (
 var ErrConnectorConfig = errors.New("daemonmux: invalid endpoint connector configuration")
 
 // RawCarrierDialer establishes one already authenticated raw framed carriage
-// for an opaque endpoint address. It returns a carriage the daemonmux
+// for one resolved dial target. It returns a carriage the daemonmux
 // FramedCarrierBridge can adapt; it returns promptly once ctx is done. The
 // carriage's authentication and transport selection live entirely outside this
 // package, so the connector carries no dial policy of its own.
-type RawCarrierDialer func(ctx context.Context, address string) (RawFramedTransport, error)
+//
+// The whole target travels, not only its opaque address: the resolved start
+// authorization, policy, and endpoint fence are exactly what a carriage owner
+// needs to decide whether the transport may start the target daemon. They are
+// passed as one value so a dial can never observe an address that belongs to a
+// different authorization than the one the connector validated and will verify
+// in the physical preamble.
+type RawCarrierDialer func(ctx context.Context, target ports.BrokerDialTarget) (RawFramedTransport, error)
 
 // EndpointConnector implements ports.BrokerEndpointConnector over daemonmux. It
 // owns no carriage state itself: every Connect produces one independent
@@ -83,12 +90,15 @@ func NewEndpointConnector(dial RawCarrierDialer, ceilings MuxCeilings) (*Endpoin
 
 // Connect dials the resolved endpoint, completes the daemonmux physical
 // preamble against the endpoint's authoritative identity and policy, and
-// returns a live ports.BrokerPhysicalConnection. The caller's ctx (or its
-// deadline) bounds dial and handshake together; every failure closes the
-// carriage, so no half-open physical connection survives. A successful
-// connection is detached from ctx: cancelling or expiring ctx afterwards never
-// stops the pooled physical connection, which Close alone owns.
-func (c *EndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerResolvedEndpoint) (ports.BrokerPhysicalConnection, error) {
+// returns a live ports.BrokerPhysicalConnection. The resolved target is handed
+// to the dial function whole, after validation, so the carriage owner sees the
+// exact start authorization and fence the connector is about to verify. The
+// caller's ctx (or its deadline) bounds dial and handshake together; every
+// failure closes the carriage, so no half-open physical connection survives. A
+// successful connection is detached from ctx: cancelling or expiring ctx
+// afterwards never stops the pooled physical connection, which Close alone
+// owns.
+func (c *EndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 	if c == nil || c.dial == nil {
 		return nil, ErrConnectorConfig
 	}
@@ -99,7 +109,7 @@ func (c *EndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerRe
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
 	}
 
-	raw, err := c.dial(ctx, endpoint.Address)
+	raw, err := c.dial(ctx, endpoint)
 	if err != nil {
 		if raw != nil {
 			_ = raw.Close()
@@ -125,7 +135,7 @@ func (c *EndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerRe
 	// The endpoint stays authoritative: re-verify the accepted authority even
 	// though the handshake already checked it, so a future handshake change can
 	// never weaken what the connector publishes.
-	if result.Identity != endpoint.Identity || !result.Policy.Compatible(endpoint.Policy) || result.Incarnation.Validate() != nil {
+	if (endpoint.ExpectedIdentity.Bound && result.Identity != endpoint.ExpectedIdentity.Identity) || !result.Policy.Compatible(endpoint.Policy) || result.Incarnation.Validate() != nil {
 		_ = bridge.Close()
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible}
 	}

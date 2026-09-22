@@ -27,6 +27,7 @@ func TestOpenMessageCarriesAttachmentAdmission(t *testing.T) {
 		Connection: ports.BrokerConnectionID{1},
 		Stream:     ports.BrokerStreamID(1),
 		Policy:     logicalTestPolicy(),
+		StartMode:  ports.BrokerDaemonStartIfNeeded,
 	}
 	target := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "alpha"}
 

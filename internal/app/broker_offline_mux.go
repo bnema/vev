@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/quic"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
@@ -30,9 +31,9 @@ import (
 // QUIC bootstrap that pins a freshly minted ephemeral certificate. This file
 // owns both halves.
 //
-// The broker side is a transport-selecting daemonmux.EndpointConnector. It
-// receives only the opaque address the immutable resolver published, looks the
-// route up in the configuration it was composed with, and dials that route. It
+// The broker side is a transport-selecting daemonmux.EndpointConnector. In
+// production it rechecks remote targets against committed registry records;
+// sandbox fixtures retain their immutable configured routes and trust inputs. It
 // never authenticates the carriage itself: the daemonmux physical preamble
 // verifies the daemon identity, incarnation, and policy the resolver already
 // pinned. One caller-supplied setup context bounds bootstrap, pinned dial, and
@@ -49,10 +50,11 @@ import (
 //     server, admits exactly one authenticated carriage, and bridges it to the
 //     same private Unix daemonmux carriage.
 //
-// A helper only ever bridges to the configured private Unix daemonmux
-// endpoint. It never starts a broker, an observer, or an ordinary daemon, never
-// dials the production daemon socket, and never fabricates a daemon
-// incarnation: the daemon on the other side of the carriage owns that value.
+// Each helper also accepts --production instead of --offline-root. That scope
+// derives the private carriage from this user's production runtime. Helpers
+// never start a broker or observer. Only an explicit if-needed authorization
+// permits the shared daemon starter; existing-only observation never spawns.
+// The daemon on the other side owns its identity and incarnation.
 // The one-time QUIC token and nonce are minted per physical connection, travel
 // only inside the SSH channel and the encrypted stream, and never reach an
 // address, a log, or an error. SSH host-key verification, noninteractive
@@ -93,20 +95,43 @@ const brokerMuxQUICDialTimeout = 15 * time.Second
 // setup shutdown past this delay; the direct child is still killed and reaped.
 const brokerMuxWaitDelay = 2 * time.Second
 
+// brokerDaemonStartArg is the closed helper flag that carries one daemon-start
+// authorization across the SSH process boundary. It is added by the broker to
+// the provisioned remote argv and parsed strictly by the helper; the value is
+// brokerDaemonStartArgvFlag's exact spelling, so the two sides can never drift.
+const brokerDaemonStartArg = "--daemon-start"
+
 // brokerMuxOptions is the parsed hidden mux helper invocation.
 type brokerMuxOptions struct {
+	production  bool
 	offlineRoot string
+	// startMode is the daemon-start authorization the broker propagated. An
+	// absent flag is the safe default: the helper observes only what is already
+	// running and never starts a daemon, a broker, or a recursive helper.
+	startMode ports.BrokerDaemonStartMode
 }
 
-// parseBrokerMuxArgs strictly parses `<hidden> --offline-root ABS`. Unknown or
-// duplicate flags, a missing value, and positionals are refused, exactly like
-// the foreground sandbox entry point.
+// parseBrokerMuxArgs strictly parses `<hidden> (--offline-root ABS | --production)
+// [--daemon-start existing-only|if-needed]`. Unknown or duplicate flags, a
+// missing or unknown value, and positionals are refused, exactly like the
+// foreground sandbox entry point. An absent --daemon-start defaults to
+// existing-only, and an unrecognized value is never mapped onto a permissive
+// authorization.
 func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, error) {
-	options := brokerMuxOptions{}
-	rootSet := false
+	options := brokerMuxOptions{startMode: ports.BrokerDaemonExistingOnly}
+	rootSet, startSet := false, false
 	for index := 0; index < len(args); {
 		switch args[index] {
+		case "--production":
+			if options.production || rootSet {
+				return command{}, usagef("`%s` received duplicate or conflicting scope", name)
+			}
+			options.production = true
+			index++
 		case "--offline-root":
+			if options.production {
+				return command{}, usagef("`%s` received conflicting scope", name)
+			}
 			if rootSet {
 				return command{}, usagef("`%s` received duplicate --offline-root", name)
 			}
@@ -116,6 +141,20 @@ func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, erro
 			options.offlineRoot = args[index+1]
 			rootSet = true
 			index += 2
+		case brokerDaemonStartArg:
+			if startSet {
+				return command{}, usagef("`%s` received duplicate %s", name, brokerDaemonStartArg)
+			}
+			if index+1 >= len(args) {
+				return command{}, usagef("`%s` requires a value", brokerDaemonStartArg)
+			}
+			mode, err := parseBrokerDaemonStartArgvFlag(args[index+1])
+			if err != nil {
+				return command{}, usagef("`%s`: %s", name, err)
+			}
+			options.startMode = mode
+			startSet = true
+			index += 2
 		default:
 			if strings.HasPrefix(args[index], "-") {
 				return command{}, usagef("unknown flag %q for `%s`", args[index], name)
@@ -123,8 +162,8 @@ func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, erro
 			return command{}, usagef("`%s` does not accept positional arguments", name)
 		}
 	}
-	if !rootSet {
-		return command{}, usagef("`%s` requires --offline-root", name)
+	if !rootSet && !options.production {
+		return command{}, usagef("`%s` requires --offline-root or --production", name)
 	}
 	return command{kind: kind, brokerMux: options}, nil
 }
@@ -141,51 +180,134 @@ func loadMuxHelperConfig(offlineRoot string) (*brokerconfig.Config, error) {
 }
 
 // brokerMuxConnector builds the transport-selecting daemonmux endpoint
-// connector over one immutable configuration. The dial function receives only
-// the opaque address the resolver published and refuses any address the
-// configuration did not produce, so a request can never select a transport or
-// an address of its own.
+// connector over one immutable configuration. The dial function receives the
+// whole resolved target the pool will authenticate against and refuses any
+// address the configuration did not produce, so a request can never select a
+// transport, an address, or a start authorization of its own. It re-checks that
+// the route's provisioned authority still matches the resolved policy and fence
+// before dialing, so the transport is only ever reached under the authority the
+// resolver published.
 func brokerMuxConnector(config *brokerconfig.Config, log *slog.Logger) (*daemonmux.EndpointConnector, error) {
 	if config == nil {
 		return nil, errors.New("vev: broker mux connector requires a configuration")
 	}
-	dial := func(ctx context.Context, address string) (daemonmux.RawFramedTransport, error) {
-		route, ok := config.RouteByAddress(address)
+	dial := func(ctx context.Context, target ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
+		route, ok := config.RouteByAddress(target.Address)
 		if !ok {
 			return nil, fmt.Errorf("vev: broker mux: unknown route address")
 		}
-		return dialBrokerRoute(ctx, route, log)
+		if err := brokerRouteAuthorityMatches(config, target); err != nil {
+			return nil, err
+		}
+		return dialBrokerRoute(ctx, route, target, log)
 	}
 	return daemonmux.NewEndpointConnector(dial, daemonmux.DefaultMuxCeilings())
 }
 
-// dialBrokerRoute dials one provisioned route as an already-authenticated raw
-// framed carriage. Authentication, identity, and policy remain the daemonmux
-// connector's concern; this function only selects the transport.
-func dialBrokerRoute(ctx context.Context, route brokerconfig.Route, log *slog.Logger) (daemonmux.RawFramedTransport, error) {
+// brokerDynamicMuxConnector keeps the configured local carriage, but remote
+// targets must still match committed registry authority at dial time.
+func brokerDynamicMuxConnector(config *brokerconfig.Config, routes *brokerRoutes, log *slog.Logger) (*daemonmux.EndpointConnector, error) {
+	return daemonmux.NewEndpointConnector(func(ctx context.Context, target ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
+		if !target.Fence.Local {
+			route, err := routes.remoteRoute(ctx, target)
+			if err != nil {
+				return nil, err
+			}
+			return dialBrokerRoute(ctx, route, target, log)
+		}
+		if err := brokerRouteAuthorityMatches(config, target); err != nil {
+			return nil, err
+		}
+		route, ok := config.RouteByAddress(target.Address)
+		if !ok {
+			return nil, errors.New("vev: unknown local route")
+		}
+		return dialBrokerRoute(ctx, route, target, log)
+	}, daemonmux.DefaultMuxCeilings())
+}
+
+// brokerRouteAuthorityMatches re-verifies that the route the opaque address
+// selected is still the one the resolved target's authority names: the same
+// fence, and a policy the provisioned entry accepts. The pool and the daemonmux
+// preamble already check this; re-checking here keeps the dial decision and the
+// authentication decision on one authority instead of two that could drift.
+func brokerRouteAuthorityMatches(config *brokerconfig.Config, target ports.BrokerDialTarget) error {
+	if target.Fence.Local {
+		binding, ok := config.LocalBinding()
+		if !ok || binding.Route.Address() != target.Address || !binding.Policy.Compatible(target.Policy) {
+			return ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("vev: broker mux: local route authority does not match the resolved target")}
+		}
+		return nil
+	}
+	for _, endpoint := range config.Endpoints() {
+		registration, ok := config.Registration(endpoint)
+		if !ok || registration.Route.Address() != target.Address {
+			continue
+		}
+		if registration.Registration.Equal(target.Fence.Registration) && registration.Policy.Compatible(target.Policy) {
+			return nil
+		}
+	}
+	return ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("vev: broker mux: route authority does not match the resolved target")}
+}
+
+// dialBrokerRoute dials one provisioned route under one resolved target as an
+// already-authenticated raw framed carriage. Authentication, identity, and
+// policy remain the daemonmux connector's concern; this function selects the
+// transport and forwards the whole target, so a mux stdio/QUIC helper receives
+// the start authorization before it decides anything about the remote daemon.
+//
+// A Unix route is dialed directly by this process. The configuration's own
+// local binding route is the machine daemon the broker may start, so it goes
+// through the broker-owned local daemon start; every other Unix route is a
+// provisioned endpoint carriage that the broker only ever dials.
+func dialBrokerRoute(ctx context.Context, route brokerconfig.Route, target ports.BrokerDialTarget, log *slog.Logger) (daemonmux.RawFramedTransport, error) {
 	switch route.Kind() {
 	case brokerconfig.RouteUnix:
+		if target.Fence.Local {
+			// The broker-owned local fence is the machine daemon this process may
+			// start; it goes through the shared daemon start so the authorization
+			// reaches the election. Every other Unix carriage is only dialed.
+			return dialBrokerLocalDaemon(ctx, route.Path(), target)
+		}
 		return ipc.DialMuxContext(ctx, route.Path())
 	case brokerconfig.RouteSSHStdio:
-		return sshstdio.DialMuxContext(ctx, sshMuxCommandSpec(route), log)
+		spec, err := sshMuxCommandSpec(route, target.StartMode)
+		if err != nil {
+			return nil, err
+		}
+		return sshstdio.DialMuxContext(ctx, spec, log)
 	case brokerconfig.RouteSSHQUIC:
-		return dialBrokerQUICRoute(ctx, route, log)
+		return dialBrokerQUICRoute(ctx, route, target.StartMode, log)
 	default:
 		return nil, fmt.Errorf("vev: broker mux: unsupported route kind %q", route.Kind())
 	}
 }
 
-// sshMuxCommandSpec builds the local ssh argv for one provisioned route. It
-// reuses the mux carriage's own command construction (the option terminator,
-// the POSIX-quoted remote argv, and `-T` for no remote PTY) and splices in only
-// the explicit trust inputs the operator provisioned. It never disables
-// host-key verification, never forces a non-interactive auth bypass, and never
-// requests a PTY.
-func sshMuxCommandSpec(route brokerconfig.Route) sshstdio.CommandSpec {
-	spec := sshstdio.BuildCommandForMux(route.Target(), route.Argv()...)
+// sshMuxCommandSpec builds the local ssh argv for one provisioned route and one
+// start authorization. It reuses the mux carriage's own command construction
+// (the option terminator, the POSIX-quoted remote argv, and `-T` for no remote
+// PTY), splices in only the explicit trust inputs the operator provisioned, and
+// appends the closed `--daemon-start existing-only|if-needed` word so the remote
+// helper reads the authorization the broker propagated instead of defaulting.
+// It never disables host-key verification, never forces a non-interactive auth
+// bypass, and never requests a PTY.
+func sshMuxCommandSpec(route brokerconfig.Route, mode ports.BrokerDaemonStartMode) (sshstdio.CommandSpec, error) {
+	flag, err := brokerDaemonStartArgvFlag(mode)
+	if err != nil {
+		return sshstdio.CommandSpec{}, err
+	}
+	argv := route.Argv()
+	for _, word := range argv {
+		if word == brokerDaemonStartArg {
+			return sshstdio.CommandSpec{}, fmt.Errorf("vev: broker mux route provisions its own %s", brokerDaemonStartArg)
+		}
+	}
+	argv = append(argv, brokerDaemonStartArg, flag)
+	spec := sshstdio.BuildCommandForMux(route.Target(), argv...)
 	options := sshTrustOptions(route)
 	if len(options) == 0 || len(spec.Args) < 2 {
-		return spec
+		return spec, nil
 	}
 	// BuildCommandForMux returns ["-T", "--", target, remote]; insert options
 	// after `-T` so they stay ssh options and the option terminator still
@@ -194,7 +316,7 @@ func sshMuxCommandSpec(route brokerconfig.Route) sshstdio.CommandSpec {
 	args = append(args, spec.Args[0])
 	args = append(args, options...)
 	args = append(args, spec.Args[1:]...)
-	return sshstdio.CommandSpec{Path: spec.Path, Args: args}
+	return sshstdio.CommandSpec{Path: spec.Path, Args: args}, nil
 }
 
 // sshTrustOptions renders the provisioned trust inputs as ssh options. A
@@ -229,8 +351,11 @@ func sshTrustOptions(route brokerconfig.Route) []string {
 // within the bound and can never pin pool setup. The captured stderr sink is
 // read only after that kill and reap, and the sink is itself synchronized, so
 // the os/exec copy goroutine can never race the diagnostic.
-func dialBrokerQUICRoute(ctx context.Context, route brokerconfig.Route, log *slog.Logger) (wire.BoundedTransport, error) {
-	spec := sshMuxCommandSpec(route)
+func dialBrokerQUICRoute(ctx context.Context, route brokerconfig.Route, mode ports.BrokerDaemonStartMode, log *slog.Logger) (wire.BoundedTransport, error) {
+	spec, err := sshMuxCommandSpec(route, mode)
+	if err != nil {
+		return nil, err
+	}
 	stderr := sshstdio.NewDiagnosticSink(0)
 	cmd := exec.CommandContext(ctx, spec.Path, spec.Args...)
 	cmd.Stderr = stderr
@@ -377,21 +502,19 @@ func brokerQUICUnavailable(action string, err error) error {
 }
 
 // runBrokerMuxStdioCommand bridges the process' own stdio to the single
-// provisioned private Unix daemonmux carriage.
+// provisioned private Unix daemonmux carriage, under the daemon-start
+// authorization the broker propagated.
 func runBrokerMuxStdioCommand(ctx context.Context, options brokerMuxOptions) error {
-	config, err := loadMuxHelperConfig(options.offlineRoot)
-	if err != nil {
-		return err
-	}
-	route, err := config.LocalMuxRoute()
-	if err != nil {
-		return err
-	}
-	raw, err := ipc.DialMuxContext(ctx, route.Path())
+	raw, err := dialBrokerMuxHelper(ctx, options)
 	if err != nil {
 		return fmt.Errorf("vev: broker mux stdio: dial daemonmux carriage: %w", err)
 	}
-	return bridgeMuxTransports(ctx, sshstdio.NewStdioTransport(), raw)
+	bounded, ok := raw.(wire.BoundedTransport)
+	if !ok {
+		_ = raw.Close()
+		return errors.New("vev: broker mux stdio: carriage is not a bounded transport")
+	}
+	return bridgeMuxTransports(ctx, sshstdio.NewStdioTransport(), bounded)
 }
 
 // runBrokerMuxQUICBootstrapCommand starts one detached `_broker-mux-quic-proxy`,
@@ -401,8 +524,10 @@ func runBrokerMuxStdioCommand(ctx context.Context, options brokerMuxOptions) err
 func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOptions) error {
 	// Validate the sandbox before spawning anything, so a bad root or config
 	// fails without a readiness line and without a child.
-	if _, err := loadMuxHelperConfig(options.offlineRoot); err != nil {
-		return err
+	if !options.production {
+		if _, err := loadMuxHelperConfig(options.offlineRoot); err != nil {
+			return err
+		}
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -420,7 +545,19 @@ func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOpti
 	}
 	defer func() { _ = devNull.Close() }()
 
-	cmd := exec.CommandContext(ctx, exe, brokerMuxQUICProxyCommand, "--offline-root", options.offlineRoot)
+	args := []string{brokerMuxQUICProxyCommand}
+	if options.production {
+		args = append(args, "--production")
+	} else {
+		args = append(args, "--offline-root", options.offlineRoot)
+	}
+	flag, err := brokerDaemonStartArgvFlag(options.startMode)
+	if err != nil {
+		_ = writer.Close()
+		return err
+	}
+	args = append(args, brokerDaemonStartArg, flag)
+	cmd := exec.CommandContext(ctx, exe, args...)
 	// The proxy writes its readiness through the pipe and its diagnostics
 	// through stderr; stdio is otherwise detached so the SSH bootstrap channel
 	// can close while the detached proxy owns the carriage.
@@ -464,14 +601,6 @@ func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOpti
 // expiry, or on setup failure, so it can never outlive its advertised
 // credential or serve a second physical connection.
 func runBrokerMuxQUICProxyCommand(ctx context.Context, options brokerMuxOptions) error {
-	config, err := loadMuxHelperConfig(options.offlineRoot)
-	if err != nil {
-		return err
-	}
-	route, err := config.LocalMuxRoute()
-	if err != nil {
-		return err
-	}
 	server, readiness, err := quic.NewServer()
 	if err != nil {
 		return err
@@ -489,11 +618,37 @@ func runBrokerMuxQUICProxyCommand(ctx context.Context, options brokerMuxOptions)
 		return err
 	}
 	defer func() { _ = transport.Close() }()
-	raw, err := ipc.DialMuxContext(ctx, route.Path())
+	raw, err := dialBrokerMuxHelper(ctx, options)
 	if err != nil {
 		return fmt.Errorf("vev: broker mux quic proxy: dial daemonmux carriage: %w", err)
 	}
-	return bridgeMuxTransports(ctx, transport, raw)
+	bounded, ok := raw.(wire.BoundedTransport)
+	if !ok {
+		_ = raw.Close()
+		return errors.New("vev: broker mux quic proxy: carriage is not a bounded transport")
+	}
+	return bridgeMuxTransports(ctx, transport, bounded)
+}
+
+// dialBrokerMuxHelper is a remote-side broker carriage helper, not a client
+// daemon dial. Production authority is derived locally, never from SSH argv.
+func dialBrokerMuxHelper(ctx context.Context, options brokerMuxOptions) (daemonmux.RawFramedTransport, error) {
+	if !options.production {
+		config, err := loadMuxHelperConfig(options.offlineRoot)
+		if err != nil {
+			return nil, err
+		}
+		return dialMuxHelperCarriage(ctx, config, options.startMode)
+	}
+	route, err := brokerconfig.RouteFromSpec(ports.BrokerRouteSpec{Kind: ports.BrokerRouteUnix, Path: daemonmux.SocketPath(ipc.SocketDir())})
+	if err != nil {
+		return nil, err
+	}
+	target := ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: localDaemonPolicy(), Address: route.Address(), StartMode: options.startMode}
+	if err := target.Validate(); err != nil {
+		return nil, err
+	}
+	return dialBrokerLocalDaemon(ctx, route.Path(), target)
 }
 
 // bridgeMuxTransports copies raw frames both ways until either carriage ends or

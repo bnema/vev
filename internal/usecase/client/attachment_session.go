@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -57,12 +58,13 @@ func (e *AttachmentIdentityError) Error() string {
 // The request is the exact request the supervisor opened the stream with; the
 // rest is client-local presentation data the worker mirrors into Hello.
 type sessionAttachmentConfig struct {
-	Request   ports.BrokerOpenStreamRequest
-	ClientID  [16]byte
-	Geometry  domain.Geometry
-	TermEnv   string
-	Cwd       string
-	TrueColor bool
+	Request            ports.BrokerOpenStreamRequest
+	ClientID           [16]byte
+	Geometry           domain.Geometry
+	TermEnv            string
+	Cwd                string
+	TrueColor          bool
+	SessionEnvironment SessionEnvironment
 	// BeforeAttached runs after the initial frame commits but before attached
 	// presentation becomes observable. A failure keeps the run unattached.
 	BeforeAttached func() error
@@ -76,8 +78,16 @@ type sessionAttachmentWorker struct {
 }
 
 // newSessionAttachmentWorker builds the real typed-session attachment worker.
-func newSessionAttachmentWorker(cfg sessionAttachmentConfig) *sessionAttachmentWorker {
-	return &sessionAttachmentWorker{cfg: cfg}
+func newSessionAttachmentWorker(cfg sessionAttachmentConfig) (*sessionAttachmentWorker, error) {
+	if err := cfg.SessionEnvironment.Validate(); err != nil {
+		return nil, fmt.Errorf("client: invalid session environment: %w", err)
+	}
+	if !slices.Equal(cfg.Request.Env, cfg.SessionEnvironment.Env) {
+		return nil, errors.New("client: session environment does not match request environment")
+	}
+	cfg.Request.Env = append([]string(nil), cfg.Request.Env...)
+	cfg.SessionEnvironment = cfg.SessionEnvironment.Clone()
+	return &sessionAttachmentWorker{cfg: cfg}, nil
 }
 
 // serverReceive is one server message or the terminal receive error.
@@ -178,8 +188,16 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 				return state, &event
 			}
 			state = next
-			if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusTransitioning), typed.Data); err != nil {
+			// The frame transaction is the pre-attach publication: it commits the first
+			// session bytes with the Connecting presentation and, through the foreground
+			// shape rule, a public generation of zero. Attached is published only after
+			// that write, flush, and commit succeeded.
+			if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusConnecting), typed.Data); err != nil {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing initial output: %w", err)}
+				return state, &event
+			}
+			if err := w.send(ctx, fg, stream, protocol.Ack{Epoch: state.epoch, State: state.state}); err != nil {
+				event := w.settle(ctx, fg, stream, token, err)
 				return state, &event
 			}
 			// Attachment is the committed publication. Complete the deadline
@@ -195,6 +213,15 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 			// run ends as a failure.
 			if !fg.MarkAttached() {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: errAttachmentForegroundRevoked}
+				return state, &event
+			}
+			// The attached presentation is published last, once the committed frame and
+			// the attached marker are in place. It carries the real action generation
+			// with the same validated session identity and published boundary, and it
+			// writes no bytes: the screen it commits is exactly the frame that just
+			// drained.
+			if err := fg.PublishAttached(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached)); err != nil {
+				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing attached presentation: %w", err)}
 				return state, &event
 			}
 			return state, nil
@@ -250,6 +277,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				outputResetRequested = false
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
+				}
+				if err := w.send(ctx, fg, stream, protocol.Ack{Epoch: state.epoch, State: state.state}); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
 				}
 			case protocol.UIViewUpdate:
 				next, accepted, needsReset := state.nextView(typed)
@@ -420,6 +450,19 @@ func (w *sessionAttachmentWorker) sendHello(ctx context.Context, fg AttachmentFo
 func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) protocol.Hello {
 	request := w.cfg.Request
 	geometry := w.cfg.Geometry.NormalizePixels()
+	var environmentPolicy protocol.EnvironmentPolicy
+	var cwd string
+	var env []string
+	switch w.cfg.SessionEnvironment.Provenance {
+	case SessionEnvironmentLocalCLI, SessionEnvironmentLocalPicker:
+		environmentPolicy = protocol.EnvironmentPolicyClientOwned
+		cwd = w.cfg.SessionEnvironment.Cwd
+		env = append([]string(nil), request.Env...)
+	case SessionEnvironmentRemote:
+		environmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+	default:
+		environmentPolicy = protocol.EnvironmentPolicyDaemonOwned
+	}
 	hello := protocol.Hello{
 		Version:           protocol.Version,
 		Intent:            protocol.IntentAttach,
@@ -428,11 +471,11 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		PixelWidth:        geometry.PixelWidth,
 		PixelHeight:       geometry.PixelHeight,
 		TermEnv:           w.cfg.TermEnv,
-		Cwd:               w.cfg.Cwd,
+		Cwd:               cwd,
 		TrueColor:         w.cfg.TrueColor,
 		MaxOutputInFlight: requestedOutputWindow(stream),
-		Env:               append([]string(nil), request.Env...),
-		EnvironmentPolicy: request.Policy.EnvironmentPolicy,
+		Env:               env,
+		EnvironmentPolicy: environmentPolicy,
 		Remote:            !request.Local,
 	}
 	switch request.Admission {
@@ -440,6 +483,11 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		target := request.Target
 		hello.Intent = protocol.IntentAttach
 		hello.ExactTarget = &target
+		// protocol.ValidateHello requires Name to equal the exact target's
+		// session name, and the daemon's exact-target routing compares it too, so
+		// the name is carried rather than left empty. It is copied from the
+		// request's own validated target, never invented.
+		hello.Name = target.SessionName
 	case ports.BrokerAdmissionCreateNamed:
 		hello.Intent = protocol.IntentNew
 		hello.Name = request.Name
@@ -449,9 +497,9 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 	return hello
 }
 
-// send sends one client message while the run is still live. The send runs on
-// its own goroutine so a cancellation or finalize wakes the worker without
-// waiting for the stream's Close, which is the supervisor's close authority.
+// send sends one client message while the run is still live. If cancellation
+// wins a blocked send, closing the stream interrupts the carriage and the
+// worker joins the send before returning, so no per-send goroutine is leaked.
 func (w *sessionAttachmentWorker) send(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, message protocol.ClientMessage) error {
 	sent := make(chan error, 1)
 	go func() { sent <- stream.SendClient(message) }()
@@ -459,8 +507,12 @@ func (w *sessionAttachmentWorker) send(ctx context.Context, fg AttachmentForegro
 	case err := <-sent:
 		return err
 	case <-ctx.Done():
+		_ = stream.Close()
+		<-sent
 		return ctx.Err()
 	case <-fg.Done():
+		_ = stream.Close()
+		<-sent
 		return errAttachmentForegroundRevoked
 	}
 }

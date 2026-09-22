@@ -4,7 +4,8 @@ package app
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/rand"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,13 +25,15 @@ import (
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/adapters/uiterm"
 	"github.com/bnema/vev/internal/adapters/webterm"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/daemon"
+	"github.com/bnema/vev/internal/usecase/recovery"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -45,9 +48,34 @@ type offlineClientFixture struct {
 	cancel        context.CancelFunc
 	prodRuntime   string
 	prodState     string
+	// catalogue is the daemon's durable session catalogue when the fixture was
+	// started with persistence; nil otherwise.
+	catalogue *persist.Persister
 }
 
 func startOfflineClientFixture(t *testing.T) offlineClientFixture {
+	t.Helper()
+	// The default sandbox shell prints one marker and then parks on read, so a
+	// client proves it reached a session without depending on shell echo of
+	// injected input.
+	return startOfflineClientFixtureWithShell(t, "/bin/sh", []string{"-c", "sleep 0.1; printf offline-ready; trap : TERM; while :; do read line || exit; done"})
+}
+
+// startOfflineClientFixtureWithShell starts the same private broker sandbox with
+// an explicitly supplied daemon shell, so a browser test can drive real session
+// content and real session actions (echo and command output) through the
+// ordinary client path instead of a parked shell.
+func startOfflineClientFixtureWithShell(t *testing.T, shell string, shellArgs []string) offlineClientFixture {
+	t.Helper()
+	return startPersistentOfflineClientFixture(t, shell, shellArgs, false)
+}
+
+// startPersistentOfflineClientFixture starts the same private broker sandbox but
+// additionally binds the daemon to real session persistence under the sandbox
+// state directory. It exists so a test can prove which lifecycle state the
+// daemon actually persists: a named session appears in the durable catalogue,
+// while an ephemeral one is never written.
+func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs []string, persistEnabled bool) offlineClientFixture {
 	t.Helper()
 	root, prodRuntime, prodState := isolateSandboxEnv(t)
 	require.NoError(t, os.MkdirAll(root, 0o700))
@@ -96,7 +124,22 @@ func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 	}()
 	streamSeen := make(chan struct{}, 16)
 	counting := &countingServerListener{ServerListener: aggregate, seen: streamSeen}
-	d := daemon.New(pty.NewFactory(), clock.New(), discardLog(), daemon.WithShell("/bin/sh", []string{"-c", "sleep 0.1; printf offline-ready; trap : TERM; while :; do read line || exit; done"}))
+	daemonOpts := []daemon.Option{daemon.WithShell(shell, shellArgs)}
+	var fixtureCatalogue *persist.Persister
+	if persistEnabled {
+		stateDir := filepath.Join(root, "state")
+		opened, err := persist.OpenOrCreate(stateDir)
+		require.NoError(t, err)
+		repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
+		coordinator := recovery.NewCoordinator(opened.Catalogue, repository, rand.Reader)
+		daemonOpts = append(daemonOpts,
+			daemon.WithCatalogue(opened.Catalogue, opened.Records),
+			daemon.WithSnapshotRepository(repository),
+			daemon.WithRecoveryCoordinator(coordinator),
+		)
+		fixtureCatalogue = opened.Catalogue
+	}
+	d := daemon.New(pty.NewFactory(), clock.New(), discardLog(), daemonOpts...)
 	go func() { _ = d.Serve(ctx, counting) }()
 
 	// The client picker and registry must share wall-clock freshness semantics:
@@ -112,6 +155,28 @@ func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 	case <-time.After(brokerTestWait):
 		t.Fatal("offline broker did not become ready")
 	}
+	// The sandbox broker becomes socket-ready before its first local daemon
+	// observation is committed. Product clients start from a committed local
+	// authority; wait for the fixture to provide the same contract so one-shot
+	// initial navigation is not consumed against an artificial empty catalogue.
+	probe, err := brokeripc.NewConnector(socket, brokeripc.Config{}).Connect(ctx)
+	require.NoError(t, err)
+	subscription, err := probe.Subscribe()
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		for _, observation := range probe.Snapshot().Daemons {
+			if observation.Local {
+				return true
+			}
+		}
+		select {
+		case <-subscription.Changed():
+		default:
+		}
+		return false
+	}, brokerTestWait, 5*time.Millisecond, "offline broker never committed its local daemon authority")
+	subscription.Close()
+	require.NoError(t, probe.Close())
 	t.Cleanup(func() {
 		cancel()
 		_ = rawListener.Close()
@@ -137,7 +202,12 @@ func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 		defer physicalMu.Unlock()
 		return len(physicalConnections)
 	}
-	return offlineClientFixture{root: root, socket: socket, streams: streamSeen, physical: physicalSeen, physicalCount: physicalCount, policy: policy, losePhysical: losePhysical, cancel: cancel, prodRuntime: prodRuntime, prodState: prodState}
+	return offlineClientFixture{
+		root: root, socket: socket, streams: streamSeen, physical: physicalSeen,
+		physicalCount: physicalCount, policy: policy, losePhysical: losePhysical,
+		cancel: cancel, prodRuntime: prodRuntime, prodState: prodState,
+		catalogue: fixtureCatalogue,
+	}
 }
 
 type countingServerListener struct {
@@ -234,28 +304,68 @@ func mustConnectivityOwner(t *testing.T, kind string) connectivityOwner {
 	return owner
 }
 
+// TestOfflineEphemeralSessionIsNotPersistedViaBroker proves the daemon-owned
+// broker fixture persists a named session but never an ephemeral one: the
+// durable catalogue holds exactly the named record after both lifecycles, so
+// the ephemeral session survives only while its daemon does.
+func TestOfflineEphemeralSessionIsNotPersistedViaBroker(t *testing.T) {
+	fixture := startPersistentOfflineClientFixture(t, "/bin/sh",
+		[]string{"-c", "sleep 0.1; printf ephemeral-ready; trap : TERM; while :; do read line || exit; done"}, true)
+	require.NotNil(t, fixture.catalogue, "the persistent fixture must expose its durable catalogue")
+	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
+	defer cancel()
+
+	service, err := brokeripc.NewConnector(fixture.socket, brokeripc.Config{}).Connect(ctx)
+	require.NoError(t, err)
+	defer service.Close()
+
+	create := func(name string, admission ports.BrokerStreamAdmission, intent uint8) {
+		t.Helper()
+		streamID, err := service.NextStreamID()
+		require.NoError(t, err)
+		request := ports.BrokerOpenStreamRequest{
+			Purpose: ports.BrokerStreamAttachment, Stream: streamID, Local: true,
+			Policy: fixture.policy, Admission: admission, Name: name,
+			StartMode: ports.BrokerDaemonStartIfNeeded,
+		}
+		stream, err := service.OpenStream(ctx, request)
+		require.NoError(t, err)
+		require.NoError(t, stream.SendClient(protocol.Hello{
+			Version: protocol.Version, Intent: intent, Name: name,
+			Size: domain.Size{Cols: 80, Rows: 24}, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+		}))
+		receiveOfflineWelcome(t, stream)
+		require.NoError(t, stream.Close())
+	}
+
+	create("persisted", ports.BrokerAdmissionCreateNamed, protocol.IntentNew)
+	create("", ports.BrokerAdmissionCreateEphemeral, protocol.IntentEphemeral)
+
+	// The daemon persists on its own cadence; the durable catalogue must settle
+	// to exactly the named record and never gain the ephemeral one.
+	require.Eventually(t, func() bool {
+		records, err := fixture.catalogue.Records()
+		require.NoError(t, err)
+		return len(records) == 1 && records[0].Name == "persisted"
+	}, brokerTestWait, brokerTestPollTick, "the durable catalogue must hold exactly the named session")
+
+	records, err := fixture.catalogue.Records()
+	require.NoError(t, err)
+	for _, record := range records {
+		require.NotEmpty(t, record.Name, "an ephemeral session must never be persisted")
+	}
+}
+
 func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, "")
 	require.NoError(t, err)
 	done := make(chan error, 1)
-	failures := make(chan error, 1)
 	go func() {
-		done <- runOfflineClient(ctx, fixture.socket, terminal, nil, discardLog(), nil, func(err error) {
-			select {
-			case failures <- err:
-			default:
-			}
-		})
+		done <- runOfflineClient(ctx, fixture.socket, terminal, nil, discardLog(), nil, nil)
 	}()
-	select {
-	case <-fixture.streams:
-	case err := <-failures:
-		t.Fatalf("offline client stream open failed: %v (%#v)", err, err)
-	case <-time.After(brokerTestWait):
-		t.Fatal("client did not reach a session through a broker logical stream")
-	}
+	awaitLogicalStream(t, fixture.streams)
 	awaitUITerminalMarker(t, terminal, "offline-ready")
 	cancel()
 	select {
@@ -266,52 +376,11 @@ func TestOfflineClientTerminalReachesSessionThroughBrokerIPC(t *testing.T) {
 	}
 }
 
-func TestOfflineClientUIDriverReachesSessionThroughBrokerIPC(t *testing.T) {
-	fixture := startOfflineClientFixture(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, "")
-	require.NoError(t, err)
-	ui := client.NewUI(terminal, clock.New())
-	serverEnd, clientEnd := io.Pipe()
-	writerReader, writerEnd := io.Pipe()
-	stream := &stdioStream{reader: serverEnd, writer: writerEnd}
-	done := make(chan error, 1)
-	go func() { done <- runOfflineUIDriver(ctx, fixture.socket, terminal, ui, discardLog(), stream) }()
-	awaitLogicalStream(t, fixture.streams)
-	decoder := json.NewDecoder(writerReader)
-	readyResult := make(chan map[string]any, 1)
-	readyError := make(chan error, 1)
-	go func() {
-		var ready map[string]any
-		if err := decoder.Decode(&ready); err != nil {
-			readyError <- err
-			return
-		}
-		readyResult <- ready
-	}()
-	select {
-	case ready := <-readyResult:
-		result, ok := ready["result"].(map[string]any)
-		require.True(t, ok)
-		require.Equal(t, true, result["control"], "autonomous supervisor binds UI actions")
-		require.Equal(t, string(ports.UIStatusReconnecting), result["status"], "ready precedes the attachment publication")
-		require.Equal(t, float64(0), result["generation"], "ready has no actionable generation before attachment publication")
-	case err := <-readyError:
-		t.Fatalf("decode UI-driver ready: %v", err)
-	case <-time.After(brokerTestWait):
-		t.Fatal("offline UI driver did not publish ready")
-	}
-	awaitUITerminalMarker(t, terminal, "offline-ready")
-	_ = clientEnd.Close()
-	_ = writerReader.Close()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(brokerTestWait):
-		t.Fatal("offline UI driver did not stop")
-	}
-}
+// The sandbox UI-driver harness is exercised by
+// TestUIDriverSandboxHarnessUsesItsOwnConnector, TestUIDriverSandboxHarnessPickerOpensNothing,
+// TestUIDriverClientKeepsSharedDaemonOnEOF, and the shared
+// runUIDriverClient tests in ui_driver_client_test.go; the harness is the same
+// runUIDriverClient call production uses, so it is not re-tested here.
 
 func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	fixture := startOfflineClientFixture(t)
@@ -324,7 +393,9 @@ func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	connections := make([]ports.BrokerLogicalConnection, 3)
 	welcomes := make([]protocol.Welcome, 3)
 	for i := range connections {
-		request := ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamAttachment, Local: true, Policy: fixture.policy}
+		streamID, err := service.NextStreamID()
+		require.NoError(t, err)
+		request := ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamAttachment, Stream: streamID, Local: true, Policy: fixture.policy, StartMode: ports.BrokerDaemonStartIfNeeded}
 		if i == 0 {
 			request.Admission, request.Name = ports.BrokerAdmissionCreateNamed, "shared"
 		} else {
@@ -387,8 +458,7 @@ func TestOfflineBrokerSharedTransportKeepsAttachmentsIndependent(t *testing.T) {
 	}
 
 	require.NoError(t, connections[0].SendClient(protocol.Detach{}))
-	receiveOfflineDetached(t, connections[0])
-	require.NoError(t, connections[0].Close())
+	require.NoError(t, receiveOfflineEOF(t, connections[0]), "detach must end its logical stream with orderly EOF")
 	for i := 1; i < len(connections); i++ {
 		requestID := uint64(20 + i)
 		require.NoError(t, connections[i].SendClient(protocol.CommandRequest{Version: protocol.Version, RequestID: requestID, Attached: true, Slug: "next-tab"}))
@@ -410,7 +480,9 @@ func TestOfflineBrokerPhysicalLossSettlesEverySharedStream(t *testing.T) {
 	var target protocol.ExactSessionTarget
 	connections := make([]ports.BrokerLogicalConnection, 3)
 	for i := range connections {
-		request := ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamAttachment, Local: true, Policy: fixture.policy}
+		streamID, err := service.NextStreamID()
+		require.NoError(t, err)
+		request := ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamAttachment, Stream: streamID, Local: true, Policy: fixture.policy, StartMode: ports.BrokerDaemonStartIfNeeded}
 		if i == 0 {
 			request.Admission, request.Name = ports.BrokerAdmissionCreateNamed, "loss"
 		} else {
@@ -469,12 +541,27 @@ func receiveOfflineCommandResult(t *testing.T, connection ports.BrokerLogicalCon
 	return message.(protocol.CommandResult)
 }
 
-func receiveOfflineDetached(t *testing.T, connection ports.BrokerLogicalConnection) {
+func receiveOfflineEOF(t *testing.T, connection ports.BrokerLogicalConnection) error {
 	t.Helper()
-	receiveOfflineMessage(t, connection, "Detached", func(message protocol.ServerMessage) bool {
-		_, ok := message.(protocol.Detached)
-		return ok
-	})
+	result := make(chan error, 1)
+	go func() {
+		for {
+			_, err := connection.ReceiveServer()
+			if err != nil {
+				result <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-result:
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	case <-time.After(brokerTestWait):
+		return errors.New("timed out waiting for orderly EOF")
+	}
 }
 
 func receiveOfflineMessage(t *testing.T, connection ports.BrokerLogicalConnection, want string, match func(protocol.ServerMessage) bool) protocol.ServerMessage {

@@ -258,9 +258,9 @@ func TestAdmissionErrorMapping(t *testing.T) {
 	require.ErrorIs(t, admissionError(brokerwire.ErrFutureStream), ports.BrokerAdmissionInvalid)
 }
 
-// TestScopeRequestFillsIdentity proves an absent identity is filled from the
-// connection, a foreign one is refused as stale, and stream identities advance
-// strictly.
+// TestScopeRequestFillsIdentity proves an absent epoch/connection identity is
+// filled from the connection, a foreign one is refused as stale, and a request
+// without a stream identity is refused as invalid rather than allocated here.
 func TestScopeRequestFillsIdentity(t *testing.T) {
 	c := &client{
 		scope:     brokerwire.Scope{Epoch: 4, Connection: ports.BrokerConnectionID{4}},
@@ -271,28 +271,33 @@ func TestScopeRequestFillsIdentity(t *testing.T) {
 		cfg:       Config{}.withDefaults(),
 		transport: nil,
 	}
-	scoped, err := c.scopeRequest(ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()})
+	scoped, err := c.scopeRequest(openRequest(1))
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerEpoch(4), scoped.Epoch)
 	require.Equal(t, ports.BrokerConnectionID{4}, scoped.Connection)
 	require.Equal(t, ports.BrokerStreamID(1), scoped.Stream)
 
 	_, err = c.scopeRequest(ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(),
+		Purpose: ports.BrokerStreamControl, Local: true, Stream: 1, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
 		Connection: ports.BrokerConnectionID{0x11},
 	})
 	require.ErrorIs(t, err, ports.BrokerAdmissionStale)
 
 	_, err = c.scopeRequest(ports.BrokerOpenStreamRequest{
-		Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), Epoch: 99,
+		Purpose: ports.BrokerStreamControl, Local: true, Stream: 1, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded, Epoch: 99,
 	})
 	require.ErrorIs(t, err, ErrScopeMismatch)
 
-	scoped, err = c.scopeRequest(ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Stream: 5, Policy: testPolicy()})
+	scoped, err = c.scopeRequest(openRequest(5))
 	require.NoError(t, err)
 	require.Equal(t, ports.BrokerStreamID(5), scoped.Stream)
-	_, err = c.scopeRequest(ports.BrokerOpenStreamRequest{Purpose: ports.BrokerStreamControl, Local: true, Stream: 5, Policy: testPolicy()})
-	require.ErrorIs(t, err, ports.BrokerAdmissionStale)
+
+	// The adapter never invents a stream identity: an incomplete request is
+	// refused, and the calling service is the only allocator.
+	_, err = c.scopeRequest(ports.BrokerOpenStreamRequest{
+		Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
+	})
+	require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
 }
 
 // TestSocketPaths proves the endpoint name is distinct from the daemon socket

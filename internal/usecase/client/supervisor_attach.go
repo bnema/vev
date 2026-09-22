@@ -236,16 +236,50 @@ type attachmentSettlement struct {
 
 // resolveCommittedStreamRequest turns exactly one committed catalogue key into
 // the exact broker stream request the user committed. The stream ID is
-// allocated strictly increasing per connection and is consumed even when
-// resolution refuses, matching the pool's never-reused ID contract.
-func (s *Supervisor) resolveInitialStreamRequest(service ports.BrokerService, navigation InitialNavigation) (ports.BrokerOpenStreamRequest, error) {
-	return s.cfg.Picker.ResolveInitial(navigation, pickerResolveBase{Connection: service.ConnectionID(), Stream: ports.BrokerStreamID(s.nextStream.Add(1))})
+// allocated by the broker service — the single allocator on its own connection
+// — and is consumed even when resolution refuses, matching the never-reused
+// contract.
+func (s *Supervisor) resolveInitialStreamRequest(service ports.BrokerService, snapshot ports.BrokerSnapshot, navigation InitialNavigation) (ports.BrokerOpenStreamRequest, error) {
+	// The intent is resolved against the very snapshot the resolver saw, so the
+	// authority the resolver translated its target into and the authority the
+	// request is resolved from can never diverge.
+	request, err := navigation.Resolve(snapshot.Clone())
+	if err != nil {
+		return ports.BrokerOpenStreamRequest{}, classifyInitialNavigationFailure(err)
+	}
+	stream, err := service.NextStreamID()
+	if err != nil {
+		return ports.BrokerOpenStreamRequest{}, err
+	}
+	// The gabarit deliberately leaves the connection and stream identity zero:
+	// the supervisor, not the resolver and not the intention, owns them, and the
+	// environment is never read from the broker process.
+	request.Connection = service.ConnectionID()
+	request.Stream = stream
+	return request, nil
+}
+
+// classifyInitialNavigationFailure turns a resolver or validation failure into
+// the bounded selection-unavailable notice a composition can display. A typed
+// catalogue refusal keeps its own classification; anything else is reported as
+// a bounded no-selection refusal rather than as a destination failure, because
+// no destination was ever dialed.
+func classifyInitialNavigationFailure(err error) error {
+	var catalogueErr pickerCatalogueError
+	if errors.As(err, &catalogueErr) {
+		return err
+	}
+	return pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation could not be resolved"}
 }
 
 func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, key string) (ports.BrokerOpenStreamRequest, error) {
+	stream, err := service.NextStreamID()
+	if err != nil {
+		return ports.BrokerOpenStreamRequest{}, err
+	}
 	base := pickerResolveBase{
 		Connection: service.ConnectionID(),
-		Stream:     ports.BrokerStreamID(s.nextStream.Add(1)),
+		Stream:     stream,
 	}
 	return s.cfg.Picker.ResolveKey(key, base)
 }
@@ -253,7 +287,7 @@ func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, 
 // newAttachmentWorker builds the real typed-session worker for one admitted
 // request. The worker receives no endpoint, route, or raw-mode authority: it
 // only drives the typed session protocol on the stream the supervisor opened.
-func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, beforeAttached func() error) (AttachmentWorker, error) {
+func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, beforeAttached func() error, sessionEnv SessionEnvironment) (AttachmentWorker, error) {
 	geometry, ok := s.attachments.latestGeometry()
 	if !ok {
 		var err error
@@ -263,15 +297,64 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 		}
 	}
 	environment := s.cfg.AttachmentEnvironment
-	return newSessionAttachmentWorker(sessionAttachmentConfig{
-		Request:        request,
-		ClientID:       s.clientID,
-		Geometry:       geometry,
-		TermEnv:        environment.TermEnv,
-		Cwd:            environment.Cwd,
-		TrueColor:      environment.TrueColor,
-		BeforeAttached: beforeAttached,
-	}), nil
+	worker, err := newSessionAttachmentWorker(sessionAttachmentConfig{
+		Request:            request,
+		ClientID:           s.clientID,
+		Geometry:           geometry,
+		TermEnv:            environment.TermEnv,
+		Cwd:                environment.Cwd,
+		TrueColor:          environment.TrueColor,
+		SessionEnvironment: sessionEnv,
+		BeforeAttached:     beforeAttached,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return worker, nil
+}
+
+// takeInitialNavigation consumes the one-shot intent exactly once. Consumption
+// is recorded before the resolver runs and before any stream is opened, so a
+// refusal, a cancellation, a timeout, or a reconnection can never re-arm it: a
+// later ready cycle observes the intent already consumed. Before the first
+// committed publication this method is never reached, so a reconnection that
+// precedes readiness cannot consume the intent either.
+//
+// The resolver runs on a defensive copy of the committed publication and is
+// consulted at most once for the whole run. A resolved picker is a success
+// without an operation.
+func (s *Supervisor) takeInitialNavigation(snapshot ports.BrokerSnapshot) (InitialNavigation, bool, error) {
+	// The resolver is a translation of a CLI target into identity, so it is only
+	// consulted against a snapshot that satisfies its own contract. A malformed
+	// publication consumes the intent and reports a bounded refusal instead of
+	// handing an unvalidated authority to the resolver or the request.
+	if err := snapshot.Validate(); err != nil {
+		return InitialNavigation{}, true, fmt.Errorf("vev: initial navigation snapshot: %w", err)
+	}
+	s.mu.Lock()
+	if s.navigationConsumed {
+		s.mu.Unlock()
+		return InitialNavigation{}, false, nil
+	}
+	s.navigationConsumed = true
+	navigation := s.navigation
+	resolver := s.cfg.ResolveInitialNavigation
+	s.mu.Unlock()
+
+	if resolver != nil {
+		resolved, err := resolver(snapshot.Clone())
+		if err != nil {
+			return InitialNavigation{}, true, err
+		}
+		navigation = resolved
+	}
+	if navigation.Kind == InitialNavigationPicker {
+		return InitialNavigation{}, true, nil
+	}
+	if err := navigation.Validate(); err != nil {
+		return InitialNavigation{}, true, err
+	}
+	return navigation, true, nil
 }
 
 // runCommittedAttachment admits one committed selection end to end: resolve,
@@ -280,13 +363,30 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 // the picker. It reports terminated=true only when the run itself must end
 // (process cancellation or terminal EOF); every attachment outcome returns to
 // the picker in the same process.
-func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, navigation InitialNavigation) (bool, error) {
-	request, err := s.resolveInitialStreamRequest(service, navigation)
+func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) (bool, error) {
+	// The intent is consumed against the first committed publication of the
+	// adopted connection; the resolver and the request resolution share that one
+	// read.
+	snapshot := service.Snapshot()
+	navigation, consumed, err := s.takeInitialNavigation(snapshot)
+	if !consumed {
+		return false, nil
+	}
+	if err != nil {
+		s.reportAttachmentFailure(classifyInitialNavigationFailure(err))
+		return false, nil
+	}
+	if navigation.Kind == InitialNavigationPicker {
+		// Picker is a success without an operation: no stream is opened, and the
+		// intent stays consumed so a later reconnect cannot replay it.
+		return false, nil
+	}
+	request, err := s.resolveInitialStreamRequest(service, snapshot, navigation)
 	if err != nil {
 		s.reportAttachmentFailure(err)
 		return false, nil
 	}
-	return s.runResolvedAttachment(ctx, input, service, request)
+	return s.runResolvedAttachment(ctx, input, service, request, SessionEnvironmentLocalCLI)
 }
 
 func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, key string) (bool, error) {
@@ -300,10 +400,10 @@ func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminal
 		s.reportAttachmentFailure(err)
 		return false, nil
 	}
-	return s.runResolvedAttachment(ctx, input, service, request)
+	return s.runResolvedAttachment(ctx, input, service, request, SessionEnvironmentLocalPicker)
 }
 
-func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest) (bool, error) {
+func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest, localProvenance SessionEnvironmentProvenance) (bool, error) {
 	picker := s.cfg.Picker
 	if picker == nil {
 		return false, nil
@@ -317,6 +417,20 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
+
+	sessionEnv := s.cfg.SessionEnvironment.Clone()
+	if request.Local {
+		sessionEnv.Provenance = localProvenance
+	} else {
+		sessionEnv.Provenance = SessionEnvironmentRemote
+		sessionEnv.Env = nil
+		sessionEnv.Cwd = ""
+	}
+	if err := sessionEnv.Validate(); err != nil {
+		s.reportAttachmentFailure(err)
+		return false, nil
+	}
+	request.Env = append([]string(nil), sessionEnv.Env...)
 
 	stream, err := service.OpenStream(deadline.Context(), request)
 	if err != nil {
@@ -341,7 +455,7 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			return errAttachmentDeadline
 		}
 		return nil
-	})
+	}, sessionEnv)
 	if err != nil {
 		_ = stream.Close()
 		s.reportAttachmentFailure(err)
