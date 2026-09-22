@@ -49,6 +49,11 @@ type overlayRuntime struct {
 	pickerIntent          protocol.PickerIntent
 	pickerMoveSource      moveSourceLocator
 	pickerRequestID       uint64
+	// pickerOpenedAt is the daemon-clock instant the current interaction was
+	// offered. Raw input that still arrives after pickerAcquisitionGrace
+	// proves the client never took the interaction, so it is released instead
+	// of swallowing input forever.
+	pickerOpenedAt time.Time
 	// pickerNavigationOffers numbers the fire-and-forget navigation offers
 	// that ask the client to open its own session picker over this live
 	// attachment. They open no daemon interaction, so they never touch

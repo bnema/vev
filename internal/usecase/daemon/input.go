@@ -29,7 +29,7 @@ func (d *Daemon) handleSequencedInputForAttachment(effect *attachmentEffect, _ u
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.initOverlays()
-	if ac.overlays.pickerClientActive() {
+	if d.pickerSwallowsInput(ac, nil) {
 		// The client-owned picker owns the input: raw keys and mouse events
 		// must not reach the session while it is open. Only its typed
 		// selection and close messages act, on the control path.
@@ -49,9 +49,9 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 func (d *Daemon) handleInputForAttachment(effect *attachmentEffect, data []byte) {
 	ac := effect.ac
 	ac.initOverlays()
-	if ac.overlays.pickerClientActive() {
+	if d.pickerSwallowsInput(ac, effect) {
 		// Same rule as handleInput: the client-owned picker consumes user
-		// input, mouse included, until it closes.
+		// input, mouse included, until it closes or is released unacquired.
 		return
 	}
 	ac.mouseScan.Scan(data,

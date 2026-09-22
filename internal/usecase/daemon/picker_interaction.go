@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
@@ -20,6 +21,45 @@ import (
 const servingPickerSourceID = protocol.PickerServingSourceID
 
 var errClientOwnedNavigation = errors.New("session navigation is client-owned")
+
+// pickerAcquisitionGrace bounds how long raw input from the client may still
+// arrive after a move-picker offer and be dropped as bytes that were already
+// in flight before the client saw the offer. A client that presents the picker
+// consumes every key locally, so raw input after this grace proves the client
+// never took the interaction.
+const pickerAcquisitionGrace = 2 * time.Second
+
+// pickerSwallowsInput reports whether raw input must be dropped because an
+// open client-owned picker interaction owns it. It is the fail-safe that keeps
+// input from being swallowed without a live offer: once the acquisition grace
+// elapsed, raw input releases the interaction (confirming the close to the
+// client when an effect is available and forcing an authoritative repaint) and
+// the input is routed normally. Callers must not hold pickerMu.
+func (d *Daemon) pickerSwallowsInput(ac *attachedClient, effect *attachmentEffect) bool {
+	if ac == nil || ac.overlays == nil {
+		return false
+	}
+	ac.overlays.pickerMu.Lock()
+	open := ac.overlays.pickerOpen
+	interaction := ac.overlays.pickerInteraction
+	openedAt := ac.overlays.pickerOpenedAt
+	ac.overlays.pickerMu.Unlock()
+	if !open {
+		return false
+	}
+	if d.daemonNow().Sub(openedAt) < pickerAcquisitionGrace {
+		return true
+	}
+	if d.log != nil {
+		d.log.Warn("releasing picker interaction the client never acquired", "interaction", interaction)
+	}
+	if d.closePickerForAttachment(ac, effect, interaction) {
+		if sess := ac.currentAttachmentSession(); sess != nil {
+			d.invalidateRender(sess, ac, true, "picker_interaction.go:unacquired-release")
+		}
+	}
+	return false
+}
 
 // offerClientNavigationPicker asks the client to open its own session picker
 // over this live attachment. The daemon opens no interaction: navigation rows
@@ -130,6 +170,7 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 	ac.overlays.pickerIntent = intent
 	ac.overlays.pickerMoveSource = source
 	ac.overlays.pickerRequestID = requestID
+	ac.overlays.pickerOpenedAt = d.daemonNow()
 	ac.overlays.pickerRevisions = make(map[string]uint64)
 	ac.overlays.pickerKeys = nil
 	ac.overlays.pickerSourcePublished = false
