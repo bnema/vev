@@ -86,6 +86,11 @@ message ClientNotice {
 // OutputResetRequest restarts the output chain. Empty marker.
 message OutputResetRequest {}
 
+// SelectTab shows one exact tab of the attached session on this attachment.
+message SelectTab {
+  string tab_id = 1;
+}
+
 // UIFence orders UI operations by action.
 message UIFence {
   uint64 action_id = 1;

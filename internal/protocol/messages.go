@@ -19,6 +19,7 @@ func (ImagePush) clientMessage()                      {}
 func (ClientNotice) clientMessage()                   {}
 func (CommandRequest) clientMessage()                 {}
 func (OutputResetRequest) clientMessage()             {}
+func (SelectTab) clientMessage()                      {}
 func (RemotePreviewRequest) clientMessage()           {}
 func (RouteAttentionSubscription) clientMessage()     {}
 func (SamePeerSwitchRequest) clientMessage()          {}

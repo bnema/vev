@@ -34,6 +34,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "notice", want: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}},
 		{name: "command", want: protocol.CommandRequest{Version: protocol.Version, RequestID: 7, Slug: "list-sessions"}},
 		{name: "reset", want: protocol.OutputResetRequest{}},
+		{name: "select tab", want: protocol.SelectTab{TabID: "tab-2"}},
 		{name: "preview", want: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}},
 		{name: "attention", want: protocol.RouteAttentionSubscription{}},
 		{name: "same peer", want: protocol.SamePeerSwitchRequest{RequestID: 3, Target: exact}},

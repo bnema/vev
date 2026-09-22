@@ -50,6 +50,7 @@ func TestProtoClientRoundTrips(t *testing.T) {
 		protocol.CommandRequest{Version: protocol.Version, RequestID: 1, Slug: "list-sessions"},
 		protocol.OutputResetRequest{},
 		protocol.UIFence{ActionID: 7},
+		protocol.SelectTab{TabID: "tab-2"},
 		protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1},
 		protocol.RouteAttentionSubscription{},
 		protocol.SamePeerSwitchRequest{RequestID: 1, Target: protocol.ExactSessionTarget{LifecycleID: target.LifecycleID, SessionName: target.SessionName}},
@@ -248,6 +249,47 @@ func TestProtoScanNegatives(t *testing.T) {
 	require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, duplicate))
 	envelope := &wire.ClientEnvelope{}
 	require.NoError(t, proto.Unmarshal(duplicate, envelope))
+}
+
+// TestProtoSelectTabWire pins the SelectTab payload byte for byte and refuses
+// a malformed tab identity, a truncated prefix, and trailing garbage.
+func TestProtoSelectTabWire(t *testing.T) {
+	envelope, err := encodeProtoClient(protocol.SelectTab{TabID: "t1"})
+	require.NoError(t, err)
+	raw, err := proto.Marshal(envelope)
+	require.NoError(t, err)
+	// field 31 (length-delimited) -> SelectTab{field 1 = "t1"}.
+	require.Equal(t, []byte{0xFA, 0x01, 0x04, 0x0A, 0x02, 't', '1'}, raw)
+
+	tests := []struct {
+		name    string
+		raw     []byte
+		wantErr bool
+	}{
+		{name: "exact", raw: raw},
+		{name: "truncated prefix", raw: raw[:len(raw)-1], wantErr: true},
+		{name: "trailing garbage", raw: append(append([]byte(nil), raw...), 0xFF), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := wire.ScanEnvelope(&wire.ClientEnvelope{}, tt.raw)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			decoded := &wire.ClientEnvelope{}
+			require.NoError(t, proto.Unmarshal(tt.raw, decoded))
+			got, err := decodeProtoClient(decoded)
+			require.NoError(t, err)
+			require.Equal(t, protocol.SelectTab{TabID: "t1"}, got)
+		})
+	}
+
+	_, err = encodeProtoClient(protocol.SelectTab{})
+	require.Error(t, err, "an empty tab identity is never encoded")
+	_, err = decodeProtoClient(&wire.ClientEnvelope{Payload: &wire.ClientEnvelope_SelectTab{SelectTab: &wire.SelectTab{}}})
+	require.Error(t, err, "an empty tab identity is never decoded")
 }
 
 func protoMessageName(message any) string {

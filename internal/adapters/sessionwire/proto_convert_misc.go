@@ -325,6 +325,24 @@ func uiFenceFromWire(message *wire.UIFence) (protocol.UIFence, error) {
 	return protocol.UIFence{ActionID: message.GetActionId()}, nil
 }
 
+func selectTabToWire(message protocol.SelectTab) (*wire.SelectTab, error) {
+	if err := message.Validate(); err != nil {
+		return nil, err
+	}
+	return &wire.SelectTab{TabId: string(message.TabID)}, nil
+}
+
+func selectTabFromWire(message *wire.SelectTab) (protocol.SelectTab, error) {
+	if message == nil {
+		return protocol.SelectTab{}, errProtoConvertRange
+	}
+	selected := protocol.SelectTab{TabID: domain.TabStableID(message.GetTabId())}
+	if err := selected.Validate(); err != nil {
+		return protocol.SelectTab{}, err
+	}
+	return selected, nil
+}
+
 func uiReceiptToWire(message protocol.UIReceipt) (*wire.UIReceipt, error) {
 	if err := message.Validate(); err != nil {
 		return nil, err

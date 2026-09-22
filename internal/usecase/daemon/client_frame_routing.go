@@ -167,6 +167,8 @@ func (d *Daemon) handleActiveAttachmentClientMessage(capability attachmentCapabi
 		d.resetOutput(effect)
 	case protocol.SamePeerSwitchRequest:
 		d.switchSamePeerForAttachment(effect, message)
+	case protocol.SelectTab:
+		d.selectTabForAttachment(effect, message)
 	case protocol.RecentRouteSnapshot:
 		replayIdentity := effect.ac.setRouteSnapshot(message)
 		d.pokeAttentionTicker()

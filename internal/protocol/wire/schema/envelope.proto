@@ -96,6 +96,7 @@ message ClientEnvelope {
     PickerPreviewRequest picker_preview_request = 27;
     SuspendAttachment suspend_attachment = 29;
     ActivateAttachment activate_attachment = 30;
+    SelectTab select_tab = 31;
   }
 }
 

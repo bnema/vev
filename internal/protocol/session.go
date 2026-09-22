@@ -16,7 +16,7 @@ import (
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 58
+const Version uint16 = 59
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -343,6 +343,19 @@ type SessionInfo struct {
 
 type Sessions struct{ Sessions []SessionInfo }
 type OutputResetRequest struct{}
+
+// SelectTab asks the daemon to show one exact tab of the attached session on
+// this attachment's own view. It is the client picker's in-place tab switch:
+// the attachment and its stream stay live, and a tab that no longer exists is
+// refused without changing the view.
+type SelectTab struct {
+	TabID domain.TabStableID
+}
+
+// Validate requires a well-formed stable tab identity.
+func (m SelectTab) Validate() error {
+	return domain.ValidateTabStableID(m.TabID)
+}
 
 func validEnvironmentPolicy(policy EnvironmentPolicy) bool {
 	return policy == EnvironmentPolicyClientOwned || policy == EnvironmentPolicyDaemonOwned
