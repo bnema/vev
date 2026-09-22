@@ -940,13 +940,21 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	if observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMark("client", ports.RuntimeTransportDiagnostic, 0, true))
 	}
+	terminal := terminalForAttach()
+	intent, preconnected, err := resolveAttachCreationIntent(ctx, intent, name, remoteTarget, terminal)
+	if err != nil {
+		return err
+	}
 	navigation, resolver, err := terminalBrokerNavigation(intent, name, remoteTarget)
 	if err != nil {
+		if preconnected != nil {
+			_ = preconnected.Close()
+		}
 		return err
 	}
 	callbacks := terminalBrokerCallbacks()
 	return runBrokerClient(ctx, brokerClientConfig{
-		Connector: newProductionBrokerConnector(), Terminal: terminalForAttach(), Clock: clk,
+		Connector: withPreconnected(newProductionBrokerConnector(), preconnected), Terminal: terminal, Clock: clk,
 		InitialNavigation: navigation, ResolveInitialNavigation: resolver,
 		AttachmentEnvironment: terminalAttachmentEnvironment(), SessionEnvironment: terminalSessionEnvironment(),
 		OnState: callbacks.OnState, OnLifecycle: callbacks.OnLifecycle, OnFailure: callbacks.OnFailure,

@@ -471,16 +471,24 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 		fmt.Fprintln(os.Stderr, socketPath)
 		defer func() { _ = endpoint.Close() }()
 	}
+	terminal := observedTerminal{Terminal: physical, UIOutputTransaction: mirror}
+	intent, preconnected, err := resolveAttachCreationIntent(ctx, intent, name, remoteTarget, terminal)
+	if err != nil {
+		return err
+	}
 	navigation, resolver, err := terminalBrokerNavigation(intent, name, remoteTarget)
 	if err != nil {
+		if preconnected != nil {
+			_ = preconnected.Close()
+		}
 		return err
 	}
 	sessionEnv := terminalSessionEnvironment()
 	attachmentEnv := terminalAttachmentEnvironment()
 	attachmentEnv.Cwd = sessionEnv.Cwd
 	return runBrokerClient(ctx, brokerClientConfig{
-		Connector:                newProductionBrokerConnector(),
-		Terminal:                 observedTerminal{Terminal: physical, UIOutputTransaction: mirror},
+		Connector:                withPreconnected(newProductionBrokerConnector(), preconnected),
+		Terminal:                 terminal,
 		Clock:                    clk,
 		UI:                       ui,
 		InitialNavigation:        navigation,
