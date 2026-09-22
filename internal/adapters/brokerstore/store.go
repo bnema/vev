@@ -322,6 +322,15 @@ func (s *Store) Store(snapshot ports.BrokerSnapshot) error {
 		snapshot.Daemons[i].Checking = false
 		snapshot.Daemons[i].LastFailure.Err = nil
 		snapshot.Daemons[i].Policy = ports.BrokerPolicy{}
+		// Attention is transient observation state, not durable identity: a
+		// bell recorded the instant before a broker restart must never
+		// resurrect on reload, so every tab's Attention is zeroed before the
+		// durable shape is validated and written.
+		for j := range snapshot.Daemons[i].Sessions {
+			for k := range snapshot.Daemons[i].Sessions[j].Tabs {
+				snapshot.Daemons[i].Sessions[j].Tabs[k].Attention = false
+			}
+		}
 	}
 	if err := validateDurableSnapshot(snapshot); err != nil {
 		return err

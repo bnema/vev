@@ -10,10 +10,12 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/stretchr/testify/require"
 )
 
@@ -573,6 +575,84 @@ func TestDurableSnapshotDropsProcessLocalTombstones(t *testing.T) {
 	reopened, err := s.Load()
 	require.NoError(t, err)
 	require.Empty(t, reopened.Removed)
+}
+
+// TestStoreZeroesTabAttentionOnPersist pins C3: a tab's Attention (bell) is
+// transient observation state, not durable identity, so it is zeroed before
+// every durable write. Without this, a bell recorded the instant before a
+// broker restart would resurrect on reload even though nothing is still
+// ringing. This ports the intent of main's
+// internal/adapters/remote/catalog_cache_test.go:71, which pins the same rule
+// for the legacy remote monitor's cache (there, dynamic tab fields including
+// Attention never reach the stored JSON at all).
+func TestStoreZeroesTabAttentionOnPersist(t *testing.T) {
+	tests := []struct {
+		name string
+		tabs []catalogue.RemoteCatalogTab
+	}{
+		{name: "single tab with attention", tabs: []catalogue.RemoteCatalogTab{
+			{ID: "t1", Index: 0, Attention: true},
+		}},
+		{name: "mixed attention across tabs", tabs: []catalogue.RemoteCatalogTab{
+			{ID: "t1", Index: 0, Attention: true},
+			{ID: "t2", Index: 1},
+			{ID: "t3", Index: 2, Attention: true},
+		}},
+		{name: "no attention stays false", tabs: []catalogue.RemoteCatalogTab{
+			{ID: "t1", Index: 0},
+			{ID: "t2", Index: 1},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := options(t)
+			s, err := Open(o)
+			require.NoError(t, err)
+			h, err := s.LoadHosts()
+			require.NoError(t, err)
+			require.Len(t, h.Hosts, 1)
+			reg := h.Hosts[0].Registration
+
+			snap, err := s.Load()
+			require.NoError(t, err)
+			snap.Epoch = 9
+			snap.Revision = 1
+			daemon := observation(reg.Endpoint, reg)
+			daemon.InventoryKnown = true
+			daemon.LastSuccess = time.Unix(1, 0)
+			daemon.Sessions = []catalogue.RemoteCatalogSession{{
+				LifecycleID: domain.SessionLifecycleID{1},
+				Name:        "work",
+				State:       catalogue.RemoteCatalogSessionUp,
+				Tabs:        tt.tabs,
+			}}
+			snap.Daemons = []ports.BrokerDaemonObservation{daemon}
+			require.NoError(t, s.Store(snap))
+
+			stored, err := s.Load()
+			require.NoError(t, err)
+			require.Len(t, stored.Daemons, 1)
+			require.Len(t, stored.Daemons[0].Sessions, 1)
+			require.Len(t, stored.Daemons[0].Sessions[0].Tabs, len(tt.tabs))
+			for _, tab := range stored.Daemons[0].Sessions[0].Tabs {
+				require.False(t, tab.Attention, "tab %q must never persist a live bell", tab.ID)
+			}
+			require.NoError(t, s.Close())
+
+			// The zeroing is durable, not just an in-memory view: a fresh Open
+			// reading the same file back must never resurrect the bell either.
+			s, err = Open(o)
+			require.NoError(t, err)
+			defer s.Close()
+			reopened, err := s.Load()
+			require.NoError(t, err)
+			require.Len(t, reopened.Daemons, 1)
+			require.Len(t, reopened.Daemons[0].Sessions, 1)
+			for _, tab := range reopened.Daemons[0].Sessions[0].Tabs {
+				require.False(t, tab.Attention)
+			}
+		})
+	}
 }
 
 func TestFencingAndCommitFaults(t *testing.T) {
