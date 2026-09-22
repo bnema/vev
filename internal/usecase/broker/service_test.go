@@ -12,6 +12,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,6 +133,12 @@ func registrySubscriptionCount(r *Registry) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.subs)
+}
+
+func registryDemandCount(r *Registry) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.demand
 }
 
 func TestAuthorityAdmissionRollback(t *testing.T) {
@@ -298,6 +305,59 @@ func TestServiceOpenStreamScopeFencing(t *testing.T) {
 	}
 }
 
+// TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose pins the "Extra"
+// fix from Phase C2: OpenStream marks a local re-probe pending as soon as a
+// local control/attachment stream opens, not only once it ends, so a session
+// created or claimed over this very stream can appear in `ls --all`/the
+// picker while the client stays attached, instead of waiting for detach. Both
+// transitions are proven against the registry's actual scheduling with no
+// clock advance at all, exactly like
+// TestRegistryLocalPendingReprobeHonorsExplicitReconcileOnly proves the
+// registry-side half of the mechanism.
+func TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose(t *testing.T) {
+	reachable := func() localProbeAnswer {
+		return localProbeAnswer{snapshot: ports.BrokerDaemonObservation{
+			Identity: "local-daemon", Incarnation: ports.BrokerDaemonIncarnation{9},
+			ProtocolVersion: protocol.Version, Availability: domain.RemoteAvailabilityReachable,
+		}}
+	}
+
+	clock := newManualClock(time.Unix(100, 0))
+	store := newTestStore()
+	local := newScriptedLocalProbe(3)
+	registry, err := NewRegistryWithConfig(1, store, nil, clock, nil, RegistryConfig{
+		Local: &LocalObservation{DisplayOrigin: "local", Policy: poolPolicy(), Probe: local},
+	})
+	require.NoError(t, err)
+	registry.jitter = identityJitter
+	authority, _, _, _ := composeTestAuthority(t, 1, registry, immediateConnector, clock)
+
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	// The registry's first dispatch (Run start) already probes the local
+	// daemon because it has never been observed: settle it so NextDue lands
+	// far in the future (defaultFreshFor, no live demand yet), and only an
+	// explicit reconcile can explain any further attempt.
+	call := receiveLocalCall(t, local)
+	call.result <- reachable()
+	waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
+
+	// Opening a local control stream must itself mark a re-probe pending.
+	stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+	require.NoError(t, err)
+	opened := receiveLocalCall(t, local)
+	opened.result <- reachable()
+	waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
+
+	// Closing the stream marks a second re-probe pending, exactly as it did
+	// for stream completion before this fix.
+	require.NoError(t, stream.Close())
+	closed := receiveLocalCall(t, local)
+	closed.result <- reachable()
+}
+
 func TestServiceNextStreamIDAllocation(t *testing.T) {
 	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
 	service, err := authority.AdmitClient(context.Background())
@@ -412,6 +472,40 @@ func TestServiceSubscriptionCleanup(t *testing.T) {
 	require.Zero(t, registrySubscriptionCount(registry), "Close must release tracked subscriptions")
 	_, err = service.Subscribe()
 	requireBrokerClosed(t, err)
+}
+
+// TestServiceSubscribeDrivesRegistryDemand pins the C2 wiring: opening a
+// service-level subscription (an attached client keeps one open the whole
+// time it watches the snapshot) increments the registry's demand count, and
+// closing it decrements it back. This exercises the actual service.go call
+// sites (Subscribe / serviceSubscription.Close), not Registry.SetDemand
+// directly, and proves the count is balanced across concurrent subscriptions
+// and idempotent Close.
+func TestServiceSubscribeDrivesRegistryDemand(t *testing.T) {
+	authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	require.Zero(t, registryDemandCount(registry))
+
+	sub, err := service.Subscribe()
+	require.NoError(t, err)
+	require.Equal(t, 1, registryDemandCount(registry))
+
+	other, err := service.Subscribe()
+	require.NoError(t, err)
+	require.Equal(t, 2, registryDemandCount(registry), "a second live subscription must add a second unit of demand")
+
+	sub.Close()
+	require.Equal(t, 1, registryDemandCount(registry), "one closed subscription must leave the other's demand live")
+
+	other.Close()
+	require.Zero(t, registryDemandCount(registry))
+
+	// Close is idempotent: a repeated close must never double-release demand.
+	other.Close()
+	require.Zero(t, registryDemandCount(registry))
 }
 
 func TestServiceSnapshotDelegates(t *testing.T) {

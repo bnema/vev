@@ -160,7 +160,7 @@ func (r *Registry) applyLocal(result probeResult) {
 		observed.Checking = false
 		observed.LastAttempt = result.at
 		observed.LastSuccess = result.at
-		observed.NextDue = result.at.Add(r.jitter(r.freshFor, localProbeKey, result.attempt))
+		observed.NextDue = result.at.Add(r.jitter(r.freshForLocked(true), localProbeKey, result.attempt))
 		observed.ConsecutiveFailures = 0
 		observed.LastFailure = domain.RemoteFailure{}
 		observed.FailureEpisode = current.FailureEpisode

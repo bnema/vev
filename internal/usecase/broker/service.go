@@ -216,7 +216,11 @@ func (s *Service) Snapshot() ports.BrokerSnapshot { return s.registry.Snapshot()
 
 // Subscribe delegates to the registry and tracks the returned subscription so
 // Close releases every subscription this connection still owns. A closed
-// connection refuses new subscriptions.
+// connection refuses new subscriptions. Opening a subscription also records
+// one unit of registry demand (Registry.SetDemand(true)): while a client
+// keeps watching the snapshot, the registry re-probes on the faster demand
+// cadence instead of the passive default. serviceSubscription.Close balances
+// it with SetDemand(false).
 func (s *Service) Subscribe() (ports.BrokerSubscription, error) {
 	s.mu.Lock()
 	if s.closed {
@@ -225,6 +229,7 @@ func (s *Service) Subscribe() (ports.BrokerSubscription, error) {
 	}
 	sub := &serviceSubscription{service: s, inner: s.registry.Subscribe()}
 	s.subs[sub] = struct{}{}
+	s.registry.SetDemand(true)
 	s.mu.Unlock()
 	return sub, nil
 }
@@ -259,6 +264,18 @@ func (s *Service) OpenStream(ctx context.Context, request ports.BrokerOpenStream
 		release()
 		return nil, err
 	}
+	// A local control or attachment stream is a natural signal that the local
+	// daemon's own catalogue may be about to change (a session request is
+	// being issued, or an attachment claim is being taken): mark a local
+	// re-probe pending as soon as the stream opens, not only once it ends, so
+	// a session created by this very attach appears in `ls --all`/other
+	// pickers promptly, even while the client stays attached. An observation
+	// stream never triggers this: it is the probe traffic itself, and
+	// re-arming from it would starve the schedule instead of catching up to
+	// it.
+	if request.Local && (request.Purpose == ports.BrokerStreamControl || request.Purpose == ports.BrokerStreamAttachment) {
+		s.registry.RequestProbe("")
+	}
 	// Detach the connection-scoped context link once the pool reports the
 	// stream terminal, so a long-lived connection never accumulates one link
 	// per opened stream. Nothing here ends the stream: setup completion and the
@@ -266,14 +283,10 @@ func (s *Service) OpenStream(ctx context.Context, request ports.BrokerOpenStream
 	go func() {
 		<-stream.Done()
 		release()
-		// A completed local control or attachment stream is the natural signal
-		// that the local daemon's own catalogue may have just changed (a session
-		// was created, killed, or its attachment state flipped): mark a local
-		// re-probe pending so the next dispatch observes it ahead of the
-		// freshness window instead of leaving `ls --all`/the picker stale for up
-		// to the retry/fresh interval. An observation stream never triggers this:
-		// it is the probe traffic itself, and re-arming from it would starve the
-		// schedule instead of catching up to it.
+		// The stream ending is the same signal again (a session was created,
+		// killed, or its attachment state flipped over the stream's lifetime):
+		// request one more local re-probe so a change made just before detach
+		// is not left stale for up to the retry/fresh interval.
 		if request.Local && (request.Purpose == ports.BrokerStreamControl || request.Purpose == ports.BrokerStreamAttachment) {
 			s.registry.RequestProbe("")
 		}
@@ -450,6 +463,7 @@ func (s *serviceSubscription) Close() {
 		s.inner.Close()
 		s.service.mu.Lock()
 		delete(s.service.subs, s)
+		s.service.registry.SetDemand(false)
 		s.service.mu.Unlock()
 	})
 }

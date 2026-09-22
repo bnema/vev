@@ -29,6 +29,14 @@ const (
 	defaultFreshFor   = 15 * time.Second
 	defaultRetryBase  = 5 * time.Second
 	defaultRetryLimit = time.Minute
+	// defaultDemandFreshForLocal and defaultDemandFreshForRemote are the
+	// built-in demand cadences RegistryConfig falls back to when
+	// DemandFreshForLocal/DemandFreshForRemote is left zero. They apply only
+	// while at least one client subscription is live (see Registry.SetDemand);
+	// otherwise defaultFreshFor governs every re-probe schedule exactly as
+	// before.
+	defaultDemandFreshForLocal  = 1 * time.Second
+	defaultDemandFreshForRemote = 2 * time.Second
 )
 
 // Run lifecycle states. A registry runs exactly once: runIdle is the zero
@@ -67,6 +75,14 @@ type RegistryConfig struct {
 	// of every remote, and never persists it. Local is refused together with
 	// ObservationDisabled: a read-only registry owns no local producer.
 	Local *LocalObservation
+	// DemandFreshForLocal and DemandFreshForRemote are the re-probe cadences
+	// apply/applyLocal schedule into NextDue while Registry.SetDemand reports
+	// at least one live client subscription. A zero value falls back to
+	// defaultDemandFreshForLocal (about 1s) or defaultDemandFreshForRemote
+	// (about 2s). With no live subscription, NextDue keeps the passive
+	// defaultFreshFor (15s) exactly as before this field existed.
+	DemandFreshForLocal  time.Duration
+	DemandFreshForRemote time.Duration
 }
 
 // Registry owns configured hosts and their immutable observation projection.
@@ -144,6 +160,16 @@ type Registry struct {
 	retryBase time.Duration
 	retryMax  time.Duration
 	jitter    func(base time.Duration, endpoint string, attempt uint64) time.Duration
+
+	// demandFreshForLocal and demandFreshForRemote are the resolved (non-zero)
+	// demand cadences; see RegistryConfig.DemandFreshForLocal/Remote.
+	demandFreshForLocal  time.Duration
+	demandFreshForRemote time.Duration
+	// demand counts live client subscriptions: Registry.SetDemand(true) is one
+	// subscription opening and SetDemand(false) is one closing. Guarded by mu.
+	// While demand > 0, apply and applyLocal schedule NextDue on the faster
+	// demand cadence instead of the passive freshFor.
+	demand int
 }
 
 // NewRegistry restores a validated durable snapshot under a fresh broker epoch.
@@ -186,6 +212,14 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 	if generator == nil {
 		generator = func() (id [16]byte, err error) { _, err = rand.Read(id[:]); return id, err }
 	}
+	demandFreshForLocal := cfg.DemandFreshForLocal
+	if demandFreshForLocal <= 0 {
+		demandFreshForLocal = defaultDemandFreshForLocal
+	}
+	demandFreshForRemote := cfg.DemandFreshForRemote
+	if demandFreshForRemote <= 0 {
+		demandFreshForRemote = defaultDemandFreshForRemote
+	}
 	r := &Registry{
 		epoch: epoch, probe: probe, clock: clock, log: log,
 		observationDisabled: cfg.ObservationDisabled,
@@ -194,7 +228,9 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 		pending: make(map[string]bool), tombstones: make(map[string]ports.BrokerHostTombstone),
 		subs: make(map[*subscription]struct{}), wake: make(chan struct{}, 1),
 		freshFor: defaultFreshFor, retryBase: defaultRetryBase, retryMax: defaultRetryLimit,
-		jitter: jittered,
+		jitter:               jittered,
+		demandFreshForLocal:  demandFreshForLocal,
+		demandFreshForRemote: demandFreshForRemote,
 	}
 	if cfg.ObservationDisabled && cfg.Local != nil {
 		return nil, errors.New("broker: observation-disabled registry cannot observe the local daemon")
@@ -862,6 +898,41 @@ func (r *Registry) RequestProbe(endpoint string) {
 	r.hint()
 }
 
+// SetDemand records one live client subscription opening (active=true) or
+// closing (active=false). internal/usecase/broker/service.go calls it from
+// Service.Subscribe and serviceSubscription.Close, so the demand count tracks
+// exactly the connections a client is actively watching. While the count is
+// above zero, apply and applyLocal schedule NextDue on the faster demand
+// cadence (demandFreshForLocal/demandFreshForRemote) instead of the passive
+// defaultFreshFor. The transition takes effect for the next observation to
+// complete; hint wakes the run loop so a registry idling on its timer
+// re-evaluates promptly rather than waiting out the current cadence. A
+// disabled registry never observes, so demand is still counted (Close must
+// stay balanced) but never changes any schedule.
+func (r *Registry) SetDemand(active bool) {
+	r.mu.Lock()
+	if active {
+		r.demand++
+	} else if r.demand > 0 {
+		r.demand--
+	}
+	r.mu.Unlock()
+	r.hint()
+}
+
+// freshForLocked returns the re-probe cadence to stamp into NextDue: the
+// faster demand cadence while a client subscription is live, otherwise the
+// passive default. Callers must hold r.mu.
+func (r *Registry) freshForLocked(local bool) time.Duration {
+	if r.demand <= 0 {
+		return r.freshFor
+	}
+	if local {
+		return r.demandFreshForLocal
+	}
+	return r.demandFreshForRemote
+}
+
 func (r *Registry) hint() {
 	select {
 	case r.wake <- struct{}{}:
@@ -1044,7 +1115,7 @@ func (r *Registry) apply(result probeResult) {
 		observed.Checking = false
 		observed.LastAttempt = result.at
 		observed.LastSuccess = result.at
-		observed.NextDue = result.at.Add(r.jitter(r.freshFor, result.endpoint, result.attempt))
+		observed.NextDue = result.at.Add(r.jitter(r.freshForLocked(false), result.endpoint, result.attempt))
 		observed.ConsecutiveFailures = 0
 		observed.LastFailure = domain.RemoteFailure{}
 		observed.FailureEpisode = current.FailureEpisode
