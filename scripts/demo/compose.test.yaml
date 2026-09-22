@@ -1,0 +1,38 @@
+# Two SSH remotes for manual testing from the host terminal.
+# Driven by scripts/demo/test-remotes.sh; not used by sandbox-run.sh.
+#
+# sshd is published on loopback only. QUIC is not published: the remote QUIC
+# proxy listens on a random UDP port per bootstrap and the client dials the
+# SSH target name, so hosts are registered with VEV_REMOTE_TRANSPORT=stdio.
+# The project name is derived from VEV_ENV/VEV_TEST_ENV so distinct sandbox
+# environments (see scripts/demo/test-remotes.sh) never share one compose
+# project's containers or network.
+name: vev-remotes-${VEV_TEST_ENV:-test}
+
+services:
+  remote-a:
+    image: vev-sandbox:${VEV_TEST_TAG:-test}
+    hostname: remote-a
+    user: root
+    entrypoint: ["/usr/bin/sshd", "-D", "-e"]
+    networks: [remotes]
+    ports:
+      - "127.0.0.1:${VEV_TEST_SSH_PORT_A:-2222}:22/tcp"
+    tmpfs:
+      - /run
+      - /tmp
+
+  remote-b:
+    image: vev-sandbox:${VEV_TEST_TAG:-test}
+    hostname: remote-b
+    user: root
+    entrypoint: ["/usr/bin/sshd", "-D", "-e"]
+    networks: [remotes]
+    ports:
+      - "127.0.0.1:${VEV_TEST_SSH_PORT_B:-2223}:22/tcp"
+    tmpfs:
+      - /run
+      - /tmp
+
+networks:
+  remotes: {}

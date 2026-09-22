@@ -9,3 +9,4 @@ docs/superpowers/
 .worktrees/
 scripts/demo/out/
 /.worktrees/
+/build/
