@@ -415,8 +415,10 @@ func clampPreviewDimension(value int, maxValue uint16) uint16 {
 // client-picker frame is a local presentation overlay, not daemon output,
 // so its bytes never enter the output ACK window.
 type pickerRenderer struct {
-	renderer *ansirenderer.Renderer
-	size     domain.Size
+	renderer     *ansirenderer.Renderer
+	profile      ansirenderer.ColorProfile
+	renderStyles []picker.RenderStyles
+	size         domain.Size
 	// prevBounds is the box drawn last: when it moves or resizes, its previous
 	// cells are blanked together with the new ones, and the rest of the screen
 	// stays untouched.
@@ -426,8 +428,8 @@ type pickerRenderer struct {
 	primed bool
 }
 
-func newPickerRenderer() *pickerRenderer {
-	return &pickerRenderer{}
+func newPickerRenderer(profile ansirenderer.ColorProfile) *pickerRenderer {
+	return &pickerRenderer{profile: profile}
 }
 
 // render composes the loop model into terminal bytes for one display
@@ -447,7 +449,7 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 		return nil
 	}
 	if r.renderer == nil || r.size != size {
-		r.renderer = ansirenderer.New(ansirenderer.Capabilities{})
+		r.renderer = ansirenderer.NewWithColorProfile(ansirenderer.Capabilities{}, r.profile)
 		r.size = size
 		// Keep prevBounds across a resize. The new renderer is primed with an
 		// empty shadow below, so damaging the old rectangle explicitly clears
@@ -469,7 +471,7 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	border := renderer.DefaultStyle()
 	border.Attrs |= renderer.AttrDim
 	picker.Modal.CompositePresentation(base, presentation, border, renderer.DefaultStyle())
-	inner := loop.model.Render(picker.Size(presentation.Inner), preview)
+	inner := loop.model.Render(picker.Size(presentation.Inner), preview, r.renderStyles...)
 	copyFrameRect(base, presentation.Inner, inner)
 
 	// Only the box is written: the session stays on screen around it. A box

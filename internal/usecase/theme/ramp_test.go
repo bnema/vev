@@ -153,18 +153,24 @@ func TestResolveBuildsCompleteStylesFromOneAccent(t *testing.T) {
 	require.True(t, resolved.Styles.PickerSelection.Bold)
 }
 
-func TestResolveIndexedAndPaletteOffNeverUseAccentBackground(t *testing.T) {
+func TestResolveANSI256AndPaletteOffSurfaces(t *testing.T) {
 	theme := rampTheme(false)
 	theme.TrueColor = false
 	theme.Palette[2] = renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}
 	theme.PaletteKnown = 1 << 2
 	indexed := Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2})
-	require.True(t, indexed.Accent.IndexedOnly)
-	require.False(t, indexed.Styles.SurfaceActive.HasBackgroundRGB)
-	require.Equal(t, 2, indexed.Styles.BorderActive.Foreground)
-	require.False(t, indexed.Styles.BorderActive.HasBackgroundRGB)
-	require.Equal(t, 2, indexed.Styles.BorderWarn.Foreground)
-	require.False(t, indexed.Styles.BorderWarn.HasBackgroundRGB)
+	require.False(t, indexed.Accent.IndexedOnly)
+	for name, style := range map[string]renderer.Style{
+		"active tab":       indexed.Styles.TabActive,
+		"active title":     indexed.Styles.TabActiveTitle,
+		"picker selection": indexed.Styles.PickerSelection,
+		"search selection": indexed.Styles.SearchSelection,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.True(t, style.HasBackgroundRGB)
+			require.Equal(t, indexed.Styles.SurfaceActive.BackgroundRGB, style.BackgroundRGB)
+		})
+	}
 
 	theme.TrueColor = true
 	theme.UsePalette = false

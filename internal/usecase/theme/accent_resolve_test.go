@@ -128,13 +128,13 @@ func TestResolveAccentAuto(t *testing.T) {
 			want:  Accent{RGB: teal, Slot: 2, Known: true, IndexedOnly: true},
 		},
 		{
-			name: "non truecolor yields indexed fallback only",
+			name: "known colors remain semantic without truecolor output",
 			theme: func() Theme {
 				t := paletteTheme(map[int]renderer.RGB{2: teal, 10: teal})
 				t.TrueColor = false
 				return t
 			}(),
-			want: Accent{RGB: teal, Slot: 2, Known: true, IndexedOnly: true},
+			want: Accent{RGB: teal, Slot: 2, Known: true},
 		},
 		{
 			name:  "missing background cannot infer",
@@ -205,10 +205,10 @@ func TestResolveAccentExplicitSlot(t *testing.T) {
 			want:   Accent{},
 		},
 		{
-			name:   "explicit known slot is indexed only without truecolor prerequisites",
+			name:   "explicit known slot remains semantic without truecolor output",
 			theme:  func() Theme { t := paletteTheme(map[int]renderer.RGB{3: teal}); t.TrueColor = false; return t }(),
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 3},
-			want:   Accent{RGB: teal, Slot: 3, Known: true, IndexedOnly: true},
+			want:   Accent{RGB: teal, Slot: 3, Known: true},
 		},
 		{
 			name:   "palette off ignores explicit slot",
