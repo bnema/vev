@@ -1,115 +1,60 @@
 package sessionwire
 
+// RemotePreviewRequest/RemotePreview converters delegate their field-by-field
+// logic to internal/adapters/protoconv, the canonical implementation shared
+// with brokerwire. sessionwire's policy is to collapse every failure -
+// whether a narrowing range failure or a semantic validation failure - into
+// one fixed sentinel per direction (protocol.ErrInvalidRemotePreviewRequest
+// or protocol.ErrInvalidRemotePreview), except that remotePreviewToWire
+// still distinguishes protoconv's own ErrOutOfRange (encoded as
+// errProtoConvertRange) from a protocol validation failure (passed through
+// unchanged), matching this file's pre-extraction behavior exactly.
+
 import (
-	"github.com/bnema/vev/internal/domain"
+	"errors"
+
+	"github.com/bnema/vev/internal/adapters/protoconv"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func remotePreviewRequestToWire(message protocol.RemotePreviewRequest) (*wire.RemotePreviewRequest, error) {
-	if err := protocol.ValidateRemotePreviewRequest(message); err != nil {
-		return nil, err
-	}
-	width := uint32(message.Width)
-	height := uint32(message.Height)
-	version := uint32(message.Version)
-	remote, err := remoteTargetToWire(&message.Target)
+	out, err := protoconv.RemotePreviewRequestToWire(message)
 	if err != nil {
 		return nil, err
 	}
-	return &wire.RemotePreviewRequest{Version: uint32(version), Target: remote, Width: width, Height: height}, nil
+	return out, nil
 }
 
 func remotePreviewRequestFromWire(message *wire.RemotePreviewRequest) (protocol.RemotePreviewRequest, error) {
-	var request protocol.RemotePreviewRequest
 	if message == nil {
-		return request, protocol.ErrInvalidRemotePreviewRequest
+		return protocol.RemotePreviewRequest{}, protocol.ErrInvalidRemotePreviewRequest
 	}
-	version, err := mustUint16(message.GetVersion())
+	request, err := protoconv.RemotePreviewRequestFromWire(message)
 	if err != nil {
 		return protocol.RemotePreviewRequest{}, protocol.ErrInvalidRemotePreviewRequest
-	}
-	request.Version = version
-	remote, err := remoteTargetFromWire(message.GetTarget())
-	if err != nil || remote == nil {
-		return protocol.RemotePreviewRequest{}, protocol.ErrInvalidRemotePreviewRequest
-	}
-	request.Target = *remote
-	width, err := mustUint16(message.GetWidth())
-	if err != nil {
-		return protocol.RemotePreviewRequest{}, protocol.ErrInvalidRemotePreviewRequest
-	}
-	height, err := mustUint16(message.GetHeight())
-	if err != nil {
-		return protocol.RemotePreviewRequest{}, protocol.ErrInvalidRemotePreviewRequest
-	}
-	request.Width = width
-	request.Height = height
-	if err := protocol.ValidateRemotePreviewRequest(request); err != nil {
-		return protocol.RemotePreviewRequest{}, err
 	}
 	return request, nil
 }
 
 func remotePreviewToWire(message protocol.RemotePreview) (*wire.RemotePreview, error) {
-	if err := protocol.ValidateRemotePreview(message); err != nil {
-		return nil, err
-	}
-	lifecycle := lifecycleToWire(message.LifecycleID)
-	cells, err := previewCellsToWire(message.Cells)
+	out, err := protoconv.RemotePreviewToWire(message)
 	if err != nil {
+		if errors.Is(err, protoconv.ErrOutOfRange) {
+			return nil, errProtoConvertRange
+		}
 		return nil, err
 	}
-	return &wire.RemotePreview{
-		Version:     uint32(message.Version),
-		Status:      uint32(message.Status),
-		LifecycleId: lifecycle,
-		TabId:       string(message.TabID),
-		Revision:    message.Revision,
-		Width:       uint32(message.Width),
-		Height:      uint32(message.Height),
-		Cells:       cells,
-	}, nil
+	return out, nil
 }
 
 func remotePreviewFromWire(message *wire.RemotePreview) (protocol.RemotePreview, error) {
-	var preview protocol.RemotePreview
 	if message == nil {
-		return preview, protocol.ErrInvalidRemotePreview
-	}
-	version, err := mustUint16(message.GetVersion())
-	if err != nil {
 		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
 	}
-	preview.Version = version
-	preview.Status, err = enum8[protocol.RemotePreviewStatus](message.GetStatus())
+	preview, err := protoconv.RemotePreviewFromWire(message)
 	if err != nil {
 		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
-	}
-	lifecycle, err := lifecycleFromWire(message.GetLifecycleId())
-	if err != nil {
-		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
-	}
-	preview.LifecycleID = lifecycle
-	preview.TabID = domain.TabStableID(message.GetTabId())
-	preview.Revision = message.GetRevision()
-	previewWidth, err := mustUint16(message.GetWidth())
-	if err != nil {
-		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
-	}
-	previewHeight, err := mustUint16(message.GetHeight())
-	if err != nil {
-		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
-	}
-	preview.Width = previewWidth
-	preview.Height = previewHeight
-	cells, err := previewCellsFromWire(message.GetCells())
-	if err != nil {
-		return protocol.RemotePreview{}, protocol.ErrInvalidRemotePreview
-	}
-	preview.Cells = cells
-	if err := protocol.ValidateRemotePreview(preview); err != nil {
-		return protocol.RemotePreview{}, err
 	}
 	return preview, nil
 }
