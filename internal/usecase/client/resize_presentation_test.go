@@ -597,7 +597,8 @@ func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *tes
 	// not have driven a connecting repaint at the new geometry.
 	deliverReadyStream(t, stream)
 	awaitAttachedState(t, harness.sup)
-	written := harness.terminal.written()
+	// The attached worker's palette query draws nothing; strip it.
+	written := strings.ReplaceAll(harness.terminal.written(), paletteColorBatch, "")
 	at := strings.Index(written, "\x1b[Hready")
 	require.GreaterOrEqual(t, at, 0, "the admitted foreground committed its initial publication")
 	require.Equal(t, "\x1b[Hready", written[at:],

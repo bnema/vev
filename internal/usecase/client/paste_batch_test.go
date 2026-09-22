@@ -44,3 +44,10 @@ func TestPasteCoalescerBatchBoundaryDoesNotTerminateHumanPaste(t *testing.T) {
 	require.False(t, coalescer.Idle())
 	require.False(t, coalescer.EndBatch())
 }
+
+// Idle reports that the coalescer holds no paste or undecided prefix bytes.
+func (c *pasteCoalescer) Idle() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && !c.buffering && len(c.pending) == 0 && len(c.buf) == 0
+}

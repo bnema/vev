@@ -307,6 +307,7 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 		SessionEnvironment: sessionEnv,
 		BeforeAttached:     beforeAttached,
 		Clock:              s.cfg.Clock,
+		Theme:              &s.theme,
 	})
 	if err != nil {
 		return nil, err

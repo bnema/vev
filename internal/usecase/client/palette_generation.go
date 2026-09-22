@@ -1,7 +1,7 @@
 package client
 
 import (
-	"sync/atomic"
+	"sync"
 	"time"
 
 	renderer "github.com/bnema/vev-vt"
@@ -54,28 +54,43 @@ const (
 	paletteEventBackground
 	paletteEventPalette
 	paletteEventScheme
-	paletteEventUIBatchEnd
 )
 
 type paletteGenerationEvent struct {
-	id           paletteGenerationID
-	kind         paletteGenerationEventKind
-	rgb          renderer.RGB
-	slot         uint8
-	light        bool
-	batchApplied chan struct{}
-	pending      *atomic.Int64
+	id    paletteGenerationID
+	kind  paletteGenerationEventKind
+	rgb   renderer.RGB
+	slot  uint8
+	light bool
 }
 
-func (e paletteGenerationEvent) applied() {
-	if e.pending != nil {
-		e.pending.Add(-1)
+// terminalThemeState retains the latest terminal-reported colors across
+// attachments so a replacement attachment can restore the daemon theme
+// without relying on another OSC response. The supervisor owns one per run.
+type terminalThemeState struct {
+	mu    sync.Mutex
+	theme protocol.Theme
+}
+
+func (s *terminalThemeState) update(update func(*protocol.Theme)) protocol.Theme {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	update(&s.theme)
+	return s.theme
+}
+
+// paletteSlot narrows a scanner palette slot to an ANSI slot, rejecting
+// anything outside 0..15 before the int is converted.
+func paletteSlot(slot int) (uint8, bool) {
+	if slot < 0 || slot > 15 {
+		return 0, false
 	}
+	return uint8(slot), true
 }
 
-// paletteGenerationAction is deliberately declarative. The attach loop is
-// the sole terminal writer and protocol sender; timer bridges only enqueue a
-// generation-tagged event back to that loop.
+// paletteGenerationAction is deliberately declarative. The attached loop is
+// the sole terminal writer and protocol sender; timers only wake that loop
+// with a generation-tagged event.
 type paletteGenerationActionKind uint8
 
 const (
@@ -244,24 +259,6 @@ func (c *paletteGenerationCoordinator) finalize() []paletteGenerationAction {
 	}
 }
 
-func (c *paletteGenerationCoordinator) marker(id paletteGenerationID) []paletteGenerationAction {
-	return c.handle(paletteGenerationEvent{id: id, kind: paletteEventMarker})
-}
-
-func (c *paletteGenerationCoordinator) foreground(id paletteGenerationID, rgb renderer.RGB) {
-	c.handle(paletteGenerationEvent{id: id, kind: paletteEventForeground, rgb: rgb})
-}
-
-func (c *paletteGenerationCoordinator) background(id paletteGenerationID, rgb renderer.RGB) {
-	c.handle(paletteGenerationEvent{id: id, kind: paletteEventBackground, rgb: rgb})
-}
-
-func (c *paletteGenerationCoordinator) palette(id paletteGenerationID, slot uint8, rgb renderer.RGB) {
-	c.handle(paletteGenerationEvent{id: id, kind: paletteEventPalette, slot: slot, rgb: rgb})
-}
-
-func (c *paletteGenerationCoordinator) finalizedTheme() protocol.Theme { return c.finalized }
-
 // paletteMarkerScanner consumes only complete DECRQM 2031 replies and retains
 // possible prefixes across reads, forwarding all ordinary input exactly once.
 type paletteMarkerScanner struct{ pending []byte }
@@ -316,15 +313,6 @@ func (s *paletteMarkerScanner) flush(onBytes func([]byte)) {
 	}
 	onBytes(s.pending)
 	s.pending = nil
-}
-
-// takePending transfers only an undecided DECRQM prefix to a replacement
-// scanner. Callers use it during cancellation after all other callbacks from
-// the source read have been committed, preventing both loss and replay.
-func (s *paletteMarkerScanner) takePending() []byte {
-	pending := append([]byte(nil), s.pending...)
-	s.pending = nil
-	return pending
 }
 
 func (s *paletteMarkerScanner) hasPendingPrefix() bool { return len(s.pending) != 0 }

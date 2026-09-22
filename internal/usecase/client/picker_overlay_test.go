@@ -310,10 +310,23 @@ func TestMovePickerOfferIsPresentedAndAnswered(t *testing.T) {
 			name: "a lone escape cancels once its window elapses",
 			keys: []string{"\x1b"},
 			check: func(t *testing.T, harness *attachTestHarness, stream *sessionTestStream) {
+				// The input path first withholds the Escape as a possible
+				// DECRQM reply prefix; its ambiguity window hands it on.
+				var marker *supervisorTestTimer
+				require.Eventually(t, func() bool {
+					for _, timer := range harness.clock.snapshotTimers() {
+						if timer.delay == paletteMarkerAmbiguityDeadline && !timer.stopped() {
+							marker = timer
+							return true
+						}
+					}
+					return false
+				}, 5*time.Second, time.Millisecond, "the marker ambiguity window was never armed")
+				marker.fire()
 				var escape *supervisorTestTimer
 				require.Eventually(t, func() bool {
 					for _, timer := range harness.clock.snapshotTimers() {
-						if timer.delay == pickerEscapeDeadline && !timer.stopped() {
+						if timer.delay == pickerEscapeDeadline && timer != marker && !timer.stopped() {
 							escape = timer
 							return true
 						}

@@ -849,6 +849,47 @@ func (f *attachmentForeground) overlayOutput(uiContext ports.UIContext, data []b
 	return f.write(uiContext, data, true)
 }
 
+// attachmentQueryForeground is the optional terminal-query seam of the real
+// foreground. Scripted foregrounds may omit it; the worker then skips palette
+// detection but still strips terminal replies from input.
+type attachmentQueryForeground interface {
+	writeTerminalQuery(data []byte) error
+}
+
+var _ attachmentQueryForeground = (*attachmentForeground)(nil)
+
+// writeTerminalQuery writes and flushes terminal query bytes (palette probes)
+// under the output lease. They draw nothing, so neither an overlay nor the UI
+// observation channel is involved.
+func (f *attachmentForeground) writeTerminalQuery(data []byte) error {
+	if f == nil {
+		return errAttachmentForegroundRevoked
+	}
+	var err error
+	ok := f.lease.send(func() bool {
+		if !f.authority.actionAuthorized(f) {
+			return false
+		}
+		if supervisorNil(f.term) || supervisorNil(f.term.Out()) {
+			err = ports.ErrUIUnavailable
+			return true
+		}
+		var n int
+		n, err = f.term.Out().Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		if err == nil {
+			err = f.term.Flush()
+		}
+		return true
+	})
+	if !ok {
+		return errAttachmentForegroundRevoked
+	}
+	return err
+}
+
 // attachmentRun is one in-flight worker generation owned by the supervisor.
 type attachmentRun struct {
 	host   *attachmentHost

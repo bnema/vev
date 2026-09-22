@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -894,7 +895,8 @@ func TestSupervisorAttachmentLocalRemoteParity(t *testing.T) {
 			require.False(t, picker.owns(), "the picker released input for the attachment")
 			deliverReadyStream(t, admitted)
 			awaitAttachedState(t, harness.sup)
-			require.Equal(t, "\x1b[Hready", harness.terminal.written())
+			// The attached worker's palette query draws nothing; strip it.
+			require.Equal(t, "\x1b[Hready", strings.ReplaceAll(harness.terminal.written(), paletteColorBatch, ""))
 			// Two transactions commit on this attachment: the initial frame under the
 			// pre-attach Connecting presentation, then the committed Attached
 			// presentation with no bytes of its own.

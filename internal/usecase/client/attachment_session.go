@@ -68,9 +68,14 @@ type sessionAttachmentConfig struct {
 	// BeforeAttached runs after the initial frame commits but before attached
 	// presentation becomes observable. A failure keeps the run unattached.
 	BeforeAttached func() error
-	// Clock bounds the move picker's lone-escape window. A nil clock uses the
-	// system clock.
+	// Clock bounds the move picker's lone-escape window and the terminal input
+	// timers (DECRQM ambiguity, paste framing, palette deadlines). A nil clock
+	// uses the system clock.
 	Clock ports.Clock
+	// Theme retains terminal-reported colors across attachments. When set,
+	// the worker queries the terminal palette and sends protocol.Theme; when
+	// nil, replies are still stripped from input but no query is written.
+	Theme *terminalThemeState
 }
 
 // sessionAttachmentWorker implements AttachmentWorker for one broker logical
@@ -287,9 +292,29 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	}
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.TrueColor)}
 	defer picker.stopEscape()
-	var inputSeq uint64
+	input := newAttachmentInput(w, fg, stream, picker)
+	defer input.close()
+	if err := input.start(ctx); err != nil {
+		return w.settle(ctx, fg, stream, token, err)
+	}
 	for {
 		select {
+		case <-input.wake:
+			if err := input.flush(ctx); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case <-input.markerC():
+			if err := input.markerExpired(ctx, state); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case <-input.drain.c():
+			if err := input.drainFired(ctx); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case <-input.completion.c():
+			if err := input.completionFired(ctx); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-repaint:
 			// An overlay released the terminal: the picker box is still on screen
 			// and suppressed frames were never written, so ask the daemon for an
@@ -363,7 +388,24 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				fg.PreserveInput(event.input.Data)
 				return w.settle(ctx, fg, stream, token, event.input.Err)
 			}
+			if event.input != nil && event.input.actionID == 0 {
+				// A physical read: replies are stripped and ordinary bytes
+				// reach the overlay or the session inside read.
+				if err := input.read(ctx, state, event.input.Data); err != nil {
+					// Part of the read may already be delivered or held, so
+					// it is committed rather than replayed.
+					fg.AckInput()
+					return w.settle(ctx, fg, stream, token, err)
+				}
+				fg.AckInput()
+				continue
+			}
 			if event.input != nil {
+				// A driver batch: bytes held for disambiguation go first.
+				if err := input.flushHeld(ctx, state); err != nil {
+					fg.PreserveInput(event.input.Data)
+					return w.settle(ctx, fg, stream, token, err)
+				}
 				consumed, err := picker.consumeInput(ctx, state, *event.input)
 				if err != nil {
 					fg.PreserveInput(event.input.Data)
@@ -381,8 +423,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					}
 					continue
 				}
-				inputSeq++
-				event.message = protocol.Input{InputSeq: inputSeq, ActionID: event.input.actionID, Data: append([]byte(nil), event.input.Data...)}
+				event.message = protocol.Input{InputSeq: input.nextSeq(), ActionID: event.input.actionID, Data: append([]byte(nil), event.input.Data...)}
 			}
 			if resize, ok := event.message.(protocol.Resize); ok {
 				if err := picker.resize(ctx, state, resize.Size); err != nil {

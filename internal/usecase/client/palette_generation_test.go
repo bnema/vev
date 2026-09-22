@@ -246,3 +246,22 @@ func TestPaletteGenerationLateOSCDoesNotMutateFinalizedAccumulator(t *testing.T)
 func TestPaletteGenerationDeadlineIsFixedCapabilityFallback(t *testing.T) {
 	require.Equal(t, 200*time.Millisecond, paletteGenerationDeadline)
 }
+
+// Test-only shorthands for feeding one generation's events.
+func (c *paletteGenerationCoordinator) marker(id paletteGenerationID) []paletteGenerationAction {
+	return c.handle(paletteGenerationEvent{id: id, kind: paletteEventMarker})
+}
+
+func (c *paletteGenerationCoordinator) foreground(id paletteGenerationID, rgb renderer.RGB) {
+	c.handle(paletteGenerationEvent{id: id, kind: paletteEventForeground, rgb: rgb})
+}
+
+func (c *paletteGenerationCoordinator) background(id paletteGenerationID, rgb renderer.RGB) {
+	c.handle(paletteGenerationEvent{id: id, kind: paletteEventBackground, rgb: rgb})
+}
+
+func (c *paletteGenerationCoordinator) palette(id paletteGenerationID, slot uint8, rgb renderer.RGB) {
+	c.handle(paletteGenerationEvent{id: id, kind: paletteEventPalette, slot: slot, rgb: rgb})
+}
+
+func (c *paletteGenerationCoordinator) finalizedTheme() protocol.Theme { return c.finalized }

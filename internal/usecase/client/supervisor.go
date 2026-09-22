@@ -399,6 +399,9 @@ type Supervisor struct {
 	// clientID is the stable client identity carried in every Hello this
 	// supervisor sends, across reconnects and attachments.
 	clientID [16]byte
+	// theme retains the terminal-reported colors across attachments, so a
+	// replacement attachment restores them before its own palette query ends.
+	theme terminalThemeState
 	// readySub is the adopted connection's subscription while the ready phase
 	// runs, so the picker overlay over a live attachment keeps folding broker
 	// publications. It is only touched from the run goroutine.
