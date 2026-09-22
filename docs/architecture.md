@@ -38,8 +38,8 @@ Every result retains the request ID for strict correlation. Version negotiation 
   broker codec over `wire.ScanEnvelope`, the broker preamble (roles 3/4,
   exact `protocol.Version`, 1 MiB..16 MiB / 1..64 KiB ceilings, 4 KiB
   byte-length bound), multipart snapshot assembly, per-connection operation
-  and stream trackers, and the bounded admission lock. It is not activated
-  by production composition until P3.2.
+  and stream trackers, and the bounded admission lock. Production clients
+  use this codec through the broker IPC adapter.
 - `internal/adapters/brokeripc`: the Plan 001 P3.3 private local broker
   endpoint. It implements `ports.BrokerListener` (accepting same-user clients
   and running one brokerwire session per accepted connection) and
@@ -49,8 +49,8 @@ Every result retains the request ID for strict correlation. Version negotiation 
   same-user `SO_PEERCRED` admission, race-safe stale-socket recovery,
   foreign-path refusal) and the shared `streamframe` framing. It owns the
   bounded per-connection queues, the snapshot publisher, the per-stream typed
-  bridge over `sessionwire`, and deterministic disconnect cleanup. Like P3.1 and
-  P3.2 it is not activated by production composition.
+  bridge over `sessionwire`, and deterministic disconnect cleanup. Production
+  clients connect through this endpoint.
 - `internal/adapters/quic`: one-stream QUIC carriage (TLS 1.3, epoch ALPN,
   exact SHA-256 pin, single bidirectional stream, bounded admission) plus
   the short-lived SSH bootstrap (ephemeral certificate, 32-byte token,
@@ -98,13 +98,13 @@ Interactive observation is a separate opt-in composition. `term.Terminal` remain
 
 A client publishes exactly one of three presentations at a time. `picker` is the local picker: the client is usable and describable without a broker and without a daemon. `connecting` is an attachment attempt that has not committed its first frame. `attached` is a committed attachment, and only it carries the validated session identity, the committed output boundary, and the real actionable generation; `picker` and `connecting` carry the run's stable service handle and their status with every session field zeroed, so a capture can never present session metadata as an attachment and no caller can fence an input action against a generation no attachment committed. The former `detached`, `reconnecting`, and `transitioning` values are removed without alias: a reconnect is `connecting`, a detach returns to `picker`, and terminating closes the UI service instead of becoming a fourth persistent presentation. The presentation is published inside the terminal's UI output transaction by its owner: the supervisor publishes `connecting` before the attachment foreground is granted and `picker` after the run drained and revoked, while the admitted foreground publishes `attached` only after its first frame was written, flushed, and committed.
 
-Session navigation is an autonomous client presentation, not an attachment interaction. While attached, Alt+Space opens the daemon command palette; `SSP` / `session-picker` ends the current attachment with `Detached{Reason: ReasonDetachToPicker}`. The session stays headless. The attachment worker maps this to `AttachmentDetachToPicker` settlement; the supervisor drains and revokes the foreground before giving its input lease and terminal writer to the local picker. Search, sorting, cursor movement, selection, and broker-backed attachment opening are client-owned. No picker bytes or navigation selections are sent to the serving daemon.
+Session navigation is client-owned. While attached, Alt+Space opens the daemon command palette; `SSP` / `session-picker` opens the client picker as an overlay over the live attachment. Cancel returns to the same attachment without reconnecting. Committing a different destination switches attachments through `connecting`; attachment loss or explicit detach leaves the picker as the standalone presentation. Search, sorting, cursor movement, selection, and broker-backed attachment opening are client-owned. Daemon move-destination offers still use the attached worker's separate move picker.
 
-The selected row owns one client-scoped live preview subscription through `ports.BrokerService`. The broker opens sequential observation streams over its existing local or remote physical pool, sends bounded `RemotePreviewRequest` values, and publishes the newest fenced result. Cursor movement and resize replace the subscription with a strictly newer generation; broker loss, commit, picker close, and client exit cancel it. The client accepts a publication only when broker epoch, connection, generation, target, and dimensions still match, so a late capture cannot repaint another selection. Preview cells remain bounded, memory-only, and are never persisted or logged.
+The selected row owns one client-scoped live preview subscription through `ports.BrokerService`. The broker opens one long-lived observation stream over its local or remote physical pool; the daemon pushes changed `RemotePreview` frames at a broker-selected interval (33 ms local, 125 ms remote). Cursor changes are debounced for 80 ms, and the client retains eight recent previews so a selection can remain visible while refreshing. Broker loss, commit, picker close, and client exit cancel the watch. The client checks epoch, connection, generation, target, and dimensions before painting; previews remain bounded, memory-only, and are never persisted.
 
-There is no forwarding or compatibility path through `PickerOffer`. The daemon does not dispatch `client picker request` or `picker control request`, cannot open a navigation interaction, and cannot resolve a `PickerActionNavigate` or `PickerActionKill` interaction selection.
+The daemon does not own the session picker or resolve cross-daemon navigation; it can offer a move-destination picker to the attached client and receives its typed selection or close reply.
 
-Pane/tab move destination pickers are not forwarded through session navigation. The existing daemon interaction remains temporarily available only to the daemon command palette; it captures and revalidates the move source and accepts only move intents. The autonomous attachment worker does not consume that interaction. Explicit scripted move commands remain available. The command palette itself remains daemon-owned and is separate from session-picker presentation.
+Pane/tab move destination pickers are separate from session navigation. The daemon captures and revalidates the move source; the attached worker displays the offer and sends the selected move target back. The command palette remains daemon-owned.
 
 ### Resize repaint fence
 
@@ -112,7 +112,7 @@ A terminal resize reaches the client as one coalesced invalidation owned by the 
 
 ### Attention and notifications
 
-Attention remains a daemon fact. The autonomous picker renders catalogue facts obtained through the broker; it does not subscribe to an attachment's legacy picker interaction. Legacy move-destination interactions retain their own attention refresh machinery.
+Attention remains a daemon fact. The broker publishes it from fresh observations but strips it from durable snapshots. The client's route ledger forwards attention order to the serving daemon for status-bar bells and cross-daemon jump-to-attention; the picker displays session and tab bells. The serving daemon uses that same route snapshot to display remote palette destinations, without monitoring other daemons.
 
 ## Broker-owned hosts and daemon composition
 
