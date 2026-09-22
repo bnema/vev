@@ -59,6 +59,7 @@ type localRouteProbe struct {
 	policy       ports.BrokerPolicy
 	loadIdentity localIdentityLoader
 	connector    ports.BrokerEndpointConnector
+	shared       pooledPhysicals
 }
 
 var _ broker.LocalProbe = (*localRouteProbe)(nil)
@@ -152,6 +153,16 @@ func (p *localRouteProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObs
 	if err := endpoint.Validate(); err != nil {
 		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, fmt.Errorf("vev: broker local probe: %w", err)
 	}
+	request, err := p.request()
+	if err != nil {
+		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
+	}
+	if observation, handled, err := p.shared.observe(ctx, identity, p.policy, request); handled {
+		if err != nil {
+			return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
+		}
+		return observation, nil
+	}
 	physical, err := p.connector.Connect(ctx, endpoint)
 	if err != nil {
 		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
@@ -162,10 +173,6 @@ func (p *localRouteProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObs
 	// never weaken what the probe publishes.
 	if physical.Identity() != endpoint.ExpectedIdentity.Identity || !physical.Policy().Compatible(endpoint.Policy) {
 		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, errors.New("vev: broker local probe authenticated binding mismatch")
-	}
-	request, err := p.request()
-	if err != nil {
-		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
 	}
 	observation, err := observeDaemonCatalogue(ctx, physical, request)
 	if err != nil {

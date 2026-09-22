@@ -433,6 +433,15 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err != nil {
 		return err
 	}
+	// Observation borrows pooled transports rather than dialing its own.
+	if concreteRemoteProbe != nil {
+		concreteRemoteProbe.shared.share(pool)
+	}
+	if registryConfig.Local != nil {
+		if local, ok := registryConfig.Local.Probe.(*localRouteProbe); ok {
+			local.shared.share(pool)
+		}
+	}
 	if err := supervisor.RegisterCloseable("pool", pool); err != nil {
 		return err
 	}

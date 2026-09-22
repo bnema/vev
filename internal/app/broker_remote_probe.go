@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -34,6 +35,44 @@ type brokerRemoteProbe struct {
 	binder    ports.BrokerIdentityBinder
 	connector ports.BrokerEndpointConnector
 	hosts     ports.BrokerHostAuthorityReader
+	shared    pooledPhysicals
+}
+
+// sharedPhysicals lends the pooled transport of an attached or warm daemon.
+type sharedPhysicals interface {
+	SharedPhysical(ports.BrokerDaemonIdentity, ports.BrokerPolicy) (ports.BrokerPhysicalConnection, bool)
+}
+
+// pooledPhysicals lets an observation probe borrow the broker pool's physical
+// transport instead of dialing (and, for a remote, bootstrapping SSH/QUIC)
+// again: the broker exists to share connections. The pool is published after
+// composition because it binds identities through the registry that runs the
+// probes. A probe dials only when nothing is pooled, or when the borrowed
+// transport retired under it.
+type pooledPhysicals struct{ pool atomic.Value }
+
+func (s *pooledPhysicals) share(pool sharedPhysicals) { s.pool.Store(pool) }
+
+// observe reports handled=false when the probe must dial its own transport.
+func (s *pooledPhysicals) observe(ctx context.Context, identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, request ports.BrokerOpenStreamRequest) (ports.BrokerDaemonObservation, bool, error) {
+	pool, _ := s.pool.Load().(sharedPhysicals)
+	if pool == nil || identity == "" {
+		return ports.BrokerDaemonObservation{}, false, nil
+	}
+	physical, ok := pool.SharedPhysical(identity, policy)
+	if !ok {
+		return ports.BrokerDaemonObservation{}, false, nil
+	}
+	observation, err := observeDaemonCatalogue(ctx, physical, request)
+	if err == nil || ctx.Err() != nil {
+		return observation, true, err
+	}
+	select {
+	case <-physical.Done():
+		return ports.BrokerDaemonObservation{}, false, nil
+	default:
+		return observation, true, err
+	}
 }
 
 var _ ports.BrokerHostProbe = (*brokerRemoteProbe)(nil)
@@ -49,6 +88,14 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 	endpoint, err := p.routes.ResolveDialTarget(ctx, request)
 	if err != nil {
 		return ports.BrokerDaemonObservation{}, err
+	}
+	// Borrow the pooled transport of an attached or warm daemon instead of
+	// bootstrapping SSH/QUIC again. A borrowed transport that retires mid-probe
+	// falls back to a fresh dial.
+	if endpoint.ExpectedIdentity.Bound {
+		if observation, handled, err := p.shared.observe(ctx, endpoint.ExpectedIdentity.Identity, endpoint.Policy, request); handled {
+			return observation, err
+		}
 	}
 	physical, err := p.connector.Connect(ctx, endpoint)
 	if err != nil {

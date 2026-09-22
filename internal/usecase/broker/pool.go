@@ -428,6 +428,34 @@ retire:
 	p.mu.Unlock()
 }
 
+// SharedPhysical returns the published physical transport the pool holds for
+// one authenticated identity and exact policy, active or warm, without
+// reserving it. Observation borrows it to avoid a second bootstrap; the
+// borrower must not close it and must tolerate its retirement at any time.
+// Borrowing never refreshes warm order or the idle deadline.
+func (p *Pool) SharedPhysical(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy) (ports.BrokerPhysicalConnection, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.entries[poolKey{identity: identity, policy: policy}]
+	if p.closed || e == nil || e.retiring || e.redirect != nil {
+		return nil, false
+	}
+	select {
+	case <-e.ready:
+	default:
+		return nil, false
+	}
+	if e.err != nil || nilDependency(e.physical) {
+		return nil, false
+	}
+	select {
+	case <-e.physical.Done():
+		return nil, false
+	default:
+	}
+	return e.physical, true
+}
+
 // Close cancels pending operations, closes transports, and joins all owned
 // workers. Bounded completion depends on the explicit cancellation/Close port
 // contract; callers must not supply adapters that ignore it.
