@@ -198,13 +198,15 @@ func TestPoolAdoptProbePhysical(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		warm int
+		idle time.Duration
 		want bool
 	}{
 		{name: "warm probe is reused", warm: 2, want: true},
+		{name: "warm probe has idle deadline", warm: 2, idle: time.Minute, want: true},
 		{name: "warm disabled refuses probe", warm: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newWarmHarness(t, tt.warm, 0)
+			h := newWarmHarness(t, tt.warm, tt.idle)
 			physical := &fakePhysical{endpoint: ports.BrokerDialTarget{Policy: poolPolicy(), ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: "alpha", Bound: true}}, done: make(chan struct{})}
 			require.Equal(t, tt.want, h.pool.AdoptPhysical(physical, poolPolicy()))
 			if !tt.want {
@@ -217,7 +219,11 @@ func TestPoolAdoptProbePhysical(t *testing.T) {
 			h.visit(t, "alpha")
 			require.Empty(t, h.physicals("alpha"), "attach must not redial after a first probe")
 			require.False(t, h.pool.AdoptPhysical(&fakePhysical{endpoint: physical.endpoint, done: make(chan struct{})}, poolPolicy()), "duplicate probe cannot replace the attachment")
-			require.NoError(t, h.pool.Close())
+			if tt.idle > 0 {
+				h.reap(t, physical, tt.idle)
+			} else {
+				require.NoError(t, h.pool.Close())
+			}
 			require.True(t, closed(physical))
 		})
 	}

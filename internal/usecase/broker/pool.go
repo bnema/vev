@@ -551,7 +551,7 @@ func (p *Pool) watchAdopted(e *poolEntry) {
 			continue
 		case <-expiry:
 			p.mu.Lock()
-			if e.refs == 0 {
+			if e.refs == 0 && e.idleOrder != 0 {
 				e.retiring = true
 				p.mu.Unlock()
 				goto retire
