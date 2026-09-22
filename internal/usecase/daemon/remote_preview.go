@@ -5,42 +5,32 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
 
-func (d *Daemon) handleRemotePreview(tr ports.ServerConnection, request protocol.RemotePreviewRequest) error {
-	defer func() { _ = tr.Close() }()
-	preview, err := d.captureRemotePreview(request)
-	if err != nil {
-		status := protocol.RemotePreviewUnavailable
-		if errors.Is(err, errRemotePreviewNoSuchTarget) {
-			status = protocol.RemotePreviewNoSuchTarget
-		}
-		preview = protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: status}
-	}
-	return d.sendRemotePreview(tr, preview)
-}
-
-func (d *Daemon) sendRemotePreview(tr ports.ServerConnection, preview protocol.RemotePreview) error {
-	if protocol.ValidateRemotePreview(preview) != nil {
-		preview = protocol.RemotePreview{Version: protocol.RemotePreviewSchemaVersion, Status: protocol.RemotePreviewMalformed}
-	}
-	return d.boundedControlSend(tr, preview)
-}
-
 var errRemotePreviewNoSuchTarget = errors.New("daemon: remote preview target does not exist")
 
+// remotePreviewSession resolves the exact live session lifecycle a preview
+// names, or nil once that lifecycle is gone.
+func (d *Daemon) remotePreviewSession(name string, lifecycle domain.SessionLifecycleID) *session {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	sess := d.findByNameLocked(name)
+	if sess == nil || sess.incarnation != lifecycle {
+		return nil
+	}
+	return sess
+}
+
+// captureRemotePreview crops the focused pane of the exact target tab. It
+// never touches VT damage or attachment render state.
 func (d *Daemon) captureRemotePreview(request protocol.RemotePreviewRequest) (protocol.RemotePreview, error) {
 	target := request.Target
-	d.mu.Lock()
-	sess := d.findByNameLocked(target.SessionName)
-	if sess == nil || sess.incarnation != target.LifecycleID {
-		d.mu.Unlock()
+	sess := d.remotePreviewSession(target.SessionName, target.LifecycleID)
+	if sess == nil {
 		return protocol.RemotePreview{}, errRemotePreviewNoSuchTarget
 	}
 	index, ok := remoteTargetTabIndexLocked(sess, protocol.SessionAttachTargetFromRemote(target))
-	d.mu.Unlock()
 	if !ok {
 		return protocol.RemotePreview{}, errRemotePreviewNoSuchTarget
 	}

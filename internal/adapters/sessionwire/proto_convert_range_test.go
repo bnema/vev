@@ -237,14 +237,6 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			},
 			wantErr: protocol.ErrInvalidRemotePreview,
 		},
-		{
-			name: "picker preview status",
-			run: func(t *testing.T) error {
-				_, err := pickerPreviewFromWire(&wire.PickerPreview{Version: uint32(protocol.PickerPreviewSchemaVersion), Width: 1, Height: 1, Status: 257})
-				return err
-			},
-			wantErr: protocol.ErrInvalidPickerPreview,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

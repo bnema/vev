@@ -473,7 +473,7 @@ func clientVariantKind(payload []byte) protocol.DecodeMessageKind {
 		return protocol.DecodeMessageKill
 	case 12:
 		return protocol.DecodeMessageCommand
-	case 14:
+	case 32:
 		return protocol.DecodeMessageRemotePreview
 	case 21:
 		return protocol.DecodeMessageNavigationInventory
@@ -506,7 +506,7 @@ func clientFailureFor(envelope *wire.ClientEnvelope, err error) *protocol.Decode
 		}
 	case *wire.ClientEnvelope_Kill:
 		failure.Kind = protocol.DecodeMessageKill
-	case *wire.ClientEnvelope_RemotePreviewRequest:
+	case *wire.ClientEnvelope_RemotePreviewWatch:
 		failure.Kind = protocol.DecodeMessageRemotePreview
 	case *wire.ClientEnvelope_NavigationInventoryRequest:
 		failure.Kind = protocol.DecodeMessageNavigationInventory

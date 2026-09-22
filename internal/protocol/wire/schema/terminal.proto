@@ -113,12 +113,21 @@ message UIViewUpdate {
   ViewContext context = 3;
 }
 
-// RemotePreviewRequest asks for a bounded remote viewport.
+// RemotePreviewRequest names a bounded exact-target viewport.
 message RemotePreviewRequest {
   uint32 version = 1;
   RemoteTarget target = 2;
   uint32 width = 3;
   uint32 height = 4;
+}
+
+// RemotePreviewWatch is a client first message: the server answers with a
+// stream of RemotePreview frames, at most one per min_interval_ms, until the
+// client closes the connection.
+message RemotePreviewWatch {
+  RemotePreviewRequest request = 1;
+  // Whole milliseconds inside [16, 1000].
+  uint32 min_interval_ms = 2;
 }
 
 // RemotePreview is a bounded row-major styled-cell viewport.
@@ -130,30 +139,6 @@ message RemotePreview {
   LifecycleID lifecycle_id = 3;
   string tab_id = 4;
   uint64 revision = 5;
-  uint32 width = 6;
-  uint32 height = 7;
-  repeated PreviewCell cells = 8;
-}
-
-// PickerPreviewRequest asks for one picker's row viewport.
-message PickerPreviewRequest {
-  uint32 version = 1;
-  uint64 interaction_id = 2;
-  string source_id = 3;
-  string key = 4;
-  uint32 width = 5;
-  uint32 height = 6;
-}
-
-// PickerPreview is the row viewport of one picker row.
-message PickerPreview {
-  uint32 version = 1;
-  uint64 interaction_id = 2;
-  string source_id = 3;
-  string key = 4;
-  // Closed status taxonomy: 0 = ok, 1 = no such target, 2 = unavailable,
-  // 3 = too large.
-  uint32 status = 5;
   uint32 width = 6;
   uint32 height = 7;
   repeated PreviewCell cells = 8;

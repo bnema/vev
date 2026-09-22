@@ -344,7 +344,6 @@ type ClientEnvelope struct {
 	//	*ClientEnvelope_ClientNotice
 	//	*ClientEnvelope_CommandRequest
 	//	*ClientEnvelope_OutputResetRequest
-	//	*ClientEnvelope_RemotePreviewRequest
 	//	*ClientEnvelope_RouteAttentionSubscription
 	//	*ClientEnvelope_SamePeerSwitchRequest
 	//	*ClientEnvelope_RecentRouteSnapshot
@@ -356,10 +355,10 @@ type ClientEnvelope struct {
 	//	*ClientEnvelope_NavigationInventoryFailure
 	//	*ClientEnvelope_PickerClose
 	//	*ClientEnvelope_PickerSelection
-	//	*ClientEnvelope_PickerPreviewRequest
 	//	*ClientEnvelope_SuspendAttachment
 	//	*ClientEnvelope_ActivateAttachment
 	//	*ClientEnvelope_SelectTab
+	//	*ClientEnvelope_RemotePreviewWatch
 	Payload       isClientEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -519,15 +518,6 @@ func (x *ClientEnvelope) GetOutputResetRequest() *OutputResetRequest {
 	return nil
 }
 
-func (x *ClientEnvelope) GetRemotePreviewRequest() *RemotePreviewRequest {
-	if x != nil {
-		if x, ok := x.Payload.(*ClientEnvelope_RemotePreviewRequest); ok {
-			return x.RemotePreviewRequest
-		}
-	}
-	return nil
-}
-
 func (x *ClientEnvelope) GetRouteAttentionSubscription() *RouteAttentionSubscription {
 	if x != nil {
 		if x, ok := x.Payload.(*ClientEnvelope_RouteAttentionSubscription); ok {
@@ -627,15 +617,6 @@ func (x *ClientEnvelope) GetPickerSelection() *PickerSelection {
 	return nil
 }
 
-func (x *ClientEnvelope) GetPickerPreviewRequest() *PickerPreviewRequest {
-	if x != nil {
-		if x, ok := x.Payload.(*ClientEnvelope_PickerPreviewRequest); ok {
-			return x.PickerPreviewRequest
-		}
-	}
-	return nil
-}
-
 func (x *ClientEnvelope) GetSuspendAttachment() *SuspendAttachment {
 	if x != nil {
 		if x, ok := x.Payload.(*ClientEnvelope_SuspendAttachment); ok {
@@ -658,6 +639,15 @@ func (x *ClientEnvelope) GetSelectTab() *SelectTab {
 	if x != nil {
 		if x, ok := x.Payload.(*ClientEnvelope_SelectTab); ok {
 			return x.SelectTab
+		}
+	}
+	return nil
+}
+
+func (x *ClientEnvelope) GetRemotePreviewWatch() *RemotePreviewWatch {
+	if x != nil {
+		if x, ok := x.Payload.(*ClientEnvelope_RemotePreviewWatch); ok {
+			return x.RemotePreviewWatch
 		}
 	}
 	return nil
@@ -719,10 +709,6 @@ type ClientEnvelope_OutputResetRequest struct {
 	OutputResetRequest *OutputResetRequest `protobuf:"bytes,13,opt,name=output_reset_request,json=outputResetRequest,proto3,oneof"`
 }
 
-type ClientEnvelope_RemotePreviewRequest struct {
-	RemotePreviewRequest *RemotePreviewRequest `protobuf:"bytes,14,opt,name=remote_preview_request,json=remotePreviewRequest,proto3,oneof"`
-}
-
 type ClientEnvelope_RouteAttentionSubscription struct {
 	RouteAttentionSubscription *RouteAttentionSubscription `protobuf:"bytes,15,opt,name=route_attention_subscription,json=routeAttentionSubscription,proto3,oneof"`
 }
@@ -767,10 +753,6 @@ type ClientEnvelope_PickerSelection struct {
 	PickerSelection *PickerSelection `protobuf:"bytes,26,opt,name=picker_selection,json=pickerSelection,proto3,oneof"`
 }
 
-type ClientEnvelope_PickerPreviewRequest struct {
-	PickerPreviewRequest *PickerPreviewRequest `protobuf:"bytes,27,opt,name=picker_preview_request,json=pickerPreviewRequest,proto3,oneof"`
-}
-
 type ClientEnvelope_SuspendAttachment struct {
 	SuspendAttachment *SuspendAttachment `protobuf:"bytes,29,opt,name=suspend_attachment,json=suspendAttachment,proto3,oneof"`
 }
@@ -781,6 +763,10 @@ type ClientEnvelope_ActivateAttachment struct {
 
 type ClientEnvelope_SelectTab struct {
 	SelectTab *SelectTab `protobuf:"bytes,31,opt,name=select_tab,json=selectTab,proto3,oneof"`
+}
+
+type ClientEnvelope_RemotePreviewWatch struct {
+	RemotePreviewWatch *RemotePreviewWatch `protobuf:"bytes,32,opt,name=remote_preview_watch,json=remotePreviewWatch,proto3,oneof"`
 }
 
 func (*ClientEnvelope_Hello) isClientEnvelope_Payload() {}
@@ -809,8 +795,6 @@ func (*ClientEnvelope_CommandRequest) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_OutputResetRequest) isClientEnvelope_Payload() {}
 
-func (*ClientEnvelope_RemotePreviewRequest) isClientEnvelope_Payload() {}
-
 func (*ClientEnvelope_RouteAttentionSubscription) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_SamePeerSwitchRequest) isClientEnvelope_Payload() {}
@@ -833,13 +817,13 @@ func (*ClientEnvelope_PickerClose) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_PickerSelection) isClientEnvelope_Payload() {}
 
-func (*ClientEnvelope_PickerPreviewRequest) isClientEnvelope_Payload() {}
-
 func (*ClientEnvelope_SuspendAttachment) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_ActivateAttachment) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_SelectTab) isClientEnvelope_Payload() {}
+
+func (*ClientEnvelope_RemotePreviewWatch) isClientEnvelope_Payload() {}
 
 // ServerEnvelope is the closed server-to-client union. Exactly one variant
 // must be set per envelope.
@@ -873,7 +857,6 @@ type ServerEnvelope struct {
 	//	*ServerEnvelope_PickerClosed
 	//	*ServerEnvelope_PickerResult
 	//	*ServerEnvelope_PickerFailure
-	//	*ServerEnvelope_PickerPreview
 	//	*ServerEnvelope_AttachmentSuspended
 	//	*ServerEnvelope_AttachmentActivated
 	//	*ServerEnvelope_KillResult
@@ -1153,15 +1136,6 @@ func (x *ServerEnvelope) GetPickerFailure() *PickerFailure {
 	return nil
 }
 
-func (x *ServerEnvelope) GetPickerPreview() *PickerPreview {
-	if x != nil {
-		if x, ok := x.Payload.(*ServerEnvelope_PickerPreview); ok {
-			return x.PickerPreview
-		}
-	}
-	return nil
-}
-
 func (x *ServerEnvelope) GetAttachmentSuspended() *AttachmentSuspended {
 	if x != nil {
 		if x, ok := x.Payload.(*ServerEnvelope_AttachmentSuspended); ok {
@@ -1297,10 +1271,6 @@ type ServerEnvelope_PickerFailure struct {
 	PickerFailure *PickerFailure `protobuf:"bytes,26,opt,name=picker_failure,json=pickerFailure,proto3,oneof"`
 }
 
-type ServerEnvelope_PickerPreview struct {
-	PickerPreview *PickerPreview `protobuf:"bytes,27,opt,name=picker_preview,json=pickerPreview,proto3,oneof"`
-}
-
 type ServerEnvelope_AttachmentSuspended struct {
 	AttachmentSuspended *AttachmentSuspended `protobuf:"bytes,31,opt,name=attachment_suspended,json=attachmentSuspended,proto3,oneof"`
 }
@@ -1365,8 +1335,6 @@ func (*ServerEnvelope_PickerResult) isServerEnvelope_Payload() {}
 
 func (*ServerEnvelope_PickerFailure) isServerEnvelope_Payload() {}
 
-func (*ServerEnvelope_PickerPreview) isServerEnvelope_Payload() {}
-
 func (*ServerEnvelope_AttachmentSuspended) isServerEnvelope_Payload() {}
 
 func (*ServerEnvelope_AttachmentActivated) isServerEnvelope_Payload() {}
@@ -1399,7 +1367,7 @@ const file_envelope_proto_rawDesc = "" +
 	"\x11output_data_limit\x18\x06 \x01(\x04R\x0foutputDataLimit\x12'\n" +
 	"\x0fcapability_bits\x18\a \x01(\rR\x0ecapabilityBits\x12\x1a\n" +
 	"\baccepted\x18\b \x01(\bR\baccepted\x12@\n" +
-	"\trejection\x18\t \x01(\v2\".vev.wire.v1.PreambleRejectionCodeR\trejection\"\xc0\x10\n" +
+	"\trejection\x18\t \x01(\v2\".vev.wire.v1.PreambleRejectionCodeR\trejection\"\xeb\x0f\n" +
 	"\x0eClientEnvelope\x12*\n" +
 	"\x05hello\x18\x01 \x01(\v2\x12.vev.wire.v1.HelloH\x00R\x05hello\x12*\n" +
 	"\x05input\x18\x02 \x01(\v2\x12.vev.wire.v1.InputH\x00R\x05input\x12-\n" +
@@ -1415,8 +1383,7 @@ const file_envelope_proto_rawDesc = "" +
 	" \x01(\v2\x16.vev.wire.v1.ImagePushH\x00R\timagePush\x12@\n" +
 	"\rclient_notice\x18\v \x01(\v2\x19.vev.wire.v1.ClientNoticeH\x00R\fclientNotice\x12F\n" +
 	"\x0fcommand_request\x18\f \x01(\v2\x1b.vev.wire.v1.CommandRequestH\x00R\x0ecommandRequest\x12S\n" +
-	"\x14output_reset_request\x18\r \x01(\v2\x1f.vev.wire.v1.OutputResetRequestH\x00R\x12outputResetRequest\x12Y\n" +
-	"\x16remote_preview_request\x18\x0e \x01(\v2!.vev.wire.v1.RemotePreviewRequestH\x00R\x14remotePreviewRequest\x12k\n" +
+	"\x14output_reset_request\x18\r \x01(\v2\x1f.vev.wire.v1.OutputResetRequestH\x00R\x12outputResetRequest\x12k\n" +
 	"\x1croute_attention_subscription\x18\x0f \x01(\v2'.vev.wire.v1.RouteAttentionSubscriptionH\x00R\x1arouteAttentionSubscription\x12]\n" +
 	"\x18same_peer_switch_request\x18\x10 \x01(\v2\".vev.wire.v1.SamePeerSwitchRequestH\x00R\x15samePeerSwitchRequest\x12V\n" +
 	"\x15recent_route_snapshot\x18\x11 \x01(\v2 .vev.wire.v1.RecentRouteSnapshotH\x00R\x13recentRouteSnapshot\x12_\n" +
@@ -1427,13 +1394,13 @@ const file_envelope_proto_rawDesc = "" +
 	" navigation_inventory_publication\x18\x16 \x01(\v2+.vev.wire.v1.NavigationInventoryPublicationH\x00R\x1enavigationInventoryPublication\x12k\n" +
 	"\x1cnavigation_inventory_failure\x18\x17 \x01(\v2'.vev.wire.v1.NavigationInventoryFailureH\x00R\x1anavigationInventoryFailure\x12=\n" +
 	"\fpicker_close\x18\x19 \x01(\v2\x18.vev.wire.v1.PickerCloseH\x00R\vpickerClose\x12I\n" +
-	"\x10picker_selection\x18\x1a \x01(\v2\x1c.vev.wire.v1.PickerSelectionH\x00R\x0fpickerSelection\x12Y\n" +
-	"\x16picker_preview_request\x18\x1b \x01(\v2!.vev.wire.v1.PickerPreviewRequestH\x00R\x14pickerPreviewRequest\x12O\n" +
+	"\x10picker_selection\x18\x1a \x01(\v2\x1c.vev.wire.v1.PickerSelectionH\x00R\x0fpickerSelection\x12O\n" +
 	"\x12suspend_attachment\x18\x1d \x01(\v2\x1e.vev.wire.v1.SuspendAttachmentH\x00R\x11suspendAttachment\x12R\n" +
 	"\x13activate_attachment\x18\x1e \x01(\v2\x1f.vev.wire.v1.ActivateAttachmentH\x00R\x12activateAttachment\x127\n" +
 	"\n" +
-	"select_tab\x18\x1f \x01(\v2\x16.vev.wire.v1.SelectTabH\x00R\tselectTabB\t\n" +
-	"\apayload\"\xcc\x11\n" +
+	"select_tab\x18\x1f \x01(\v2\x16.vev.wire.v1.SelectTabH\x00R\tselectTab\x12S\n" +
+	"\x14remote_preview_watch\x18  \x01(\v2\x1f.vev.wire.v1.RemotePreviewWatchH\x00R\x12remotePreviewWatchB\t\n" +
+	"\apayloadJ\x04\b\x0e\x10\x0fJ\x04\b\x1b\x10\x1c\"\x8d\x11\n" +
 	"\x0eServerEnvelope\x120\n" +
 	"\awelcome\x18\x01 \x01(\v2\x14.vev.wire.v1.WelcomeH\x00R\awelcome\x12-\n" +
 	"\x05error\x18\x02 \x01(\v2\x15.vev.wire.v1.ErrorMsgH\x00R\x05error\x12-\n" +
@@ -1462,13 +1429,12 @@ const file_envelope_proto_rawDesc = "" +
 	"\x0fpicker_snapshot\x18\x17 \x01(\v2\x1b.vev.wire.v1.PickerSnapshotH\x00R\x0epickerSnapshot\x12@\n" +
 	"\rpicker_closed\x18\x18 \x01(\v2\x19.vev.wire.v1.PickerClosedH\x00R\fpickerClosed\x12@\n" +
 	"\rpicker_result\x18\x19 \x01(\v2\x19.vev.wire.v1.PickerResultH\x00R\fpickerResult\x12C\n" +
-	"\x0epicker_failure\x18\x1a \x01(\v2\x1a.vev.wire.v1.PickerFailureH\x00R\rpickerFailure\x12C\n" +
-	"\x0epicker_preview\x18\x1b \x01(\v2\x1a.vev.wire.v1.PickerPreviewH\x00R\rpickerPreview\x12U\n" +
+	"\x0epicker_failure\x18\x1a \x01(\v2\x1a.vev.wire.v1.PickerFailureH\x00R\rpickerFailure\x12U\n" +
 	"\x14attachment_suspended\x18\x1f \x01(\v2 .vev.wire.v1.AttachmentSuspendedH\x00R\x13attachmentSuspended\x12U\n" +
 	"\x14attachment_activated\x18  \x01(\v2 .vev.wire.v1.AttachmentActivatedH\x00R\x13attachmentActivated\x12:\n" +
 	"\vkill_result\x18! \x01(\v2\x17.vev.wire.v1.KillResultH\x00R\n" +
 	"killResultB\t\n" +
-	"\apayloadJ\x04\b\x1d\x10\x1eJ\x04\b\x1e\x10\x1fB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
+	"\apayloadJ\x04\b\x1b\x10\x1cJ\x04\b\x1d\x10\x1eJ\x04\b\x1e\x10\x1fB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
 	file_envelope_proto_rawDescOnce sync.Once
@@ -1503,51 +1469,49 @@ var file_envelope_proto_goTypes = []any{
 	(*ClientNotice)(nil),                   // 16: vev.wire.v1.ClientNotice
 	(*CommandRequest)(nil),                 // 17: vev.wire.v1.CommandRequest
 	(*OutputResetRequest)(nil),             // 18: vev.wire.v1.OutputResetRequest
-	(*RemotePreviewRequest)(nil),           // 19: vev.wire.v1.RemotePreviewRequest
-	(*RouteAttentionSubscription)(nil),     // 20: vev.wire.v1.RouteAttentionSubscription
-	(*SamePeerSwitchRequest)(nil),          // 21: vev.wire.v1.SamePeerSwitchRequest
-	(*RecentRouteSnapshot)(nil),            // 22: vev.wire.v1.RecentRouteSnapshot
-	(*RouteNavigationFailure)(nil),         // 23: vev.wire.v1.RouteNavigationFailure
-	(*SessionCreationFailure)(nil),         // 24: vev.wire.v1.SessionCreationFailure
-	(*UIFence)(nil),                        // 25: vev.wire.v1.UIFence
-	(*NavigationInventoryRequest)(nil),     // 26: vev.wire.v1.NavigationInventoryRequest
-	(*NavigationInventoryPublication)(nil), // 27: vev.wire.v1.NavigationInventoryPublication
-	(*NavigationInventoryFailure)(nil),     // 28: vev.wire.v1.NavigationInventoryFailure
-	(*PickerClose)(nil),                    // 29: vev.wire.v1.PickerClose
-	(*PickerSelection)(nil),                // 30: vev.wire.v1.PickerSelection
-	(*PickerPreviewRequest)(nil),           // 31: vev.wire.v1.PickerPreviewRequest
-	(*SuspendAttachment)(nil),              // 32: vev.wire.v1.SuspendAttachment
-	(*ActivateAttachment)(nil),             // 33: vev.wire.v1.ActivateAttachment
-	(*SelectTab)(nil),                      // 34: vev.wire.v1.SelectTab
-	(*Welcome)(nil),                        // 35: vev.wire.v1.Welcome
-	(*ErrorMsg)(nil),                       // 36: vev.wire.v1.ErrorMsg
-	(*Output)(nil),                         // 37: vev.wire.v1.Output
-	(*Detached)(nil),                       // 38: vev.wire.v1.Detached
-	(*Pong)(nil),                           // 39: vev.wire.v1.Pong
-	(*Sessions)(nil),                       // 40: vev.wire.v1.Sessions
-	(*CommandResult)(nil),                  // 41: vev.wire.v1.CommandResult
-	(*AttachTarget)(nil),                   // 42: vev.wire.v1.AttachTarget
-	(*RemotePreview)(nil),                  // 43: vev.wire.v1.RemotePreview
-	(*CommittedRouteIdentity)(nil),         // 44: vev.wire.v1.CommittedRouteIdentity
-	(*RouteNavigationAction)(nil),          // 45: vev.wire.v1.RouteNavigationAction
-	(*RouteCreateSessionAction)(nil),       // 46: vev.wire.v1.RouteCreateSessionAction
-	(*RoutePosition)(nil),                  // 47: vev.wire.v1.RoutePosition
-	(*RouteRetired)(nil),                   // 48: vev.wire.v1.RouteRetired
-	(*SamePeerSwitchFailure)(nil),          // 49: vev.wire.v1.SamePeerSwitchFailure
-	(*UIReceipt)(nil),                      // 50: vev.wire.v1.UIReceipt
-	(*UIViewUpdate)(nil),                   // 51: vev.wire.v1.UIViewUpdate
-	(*NavigationInventoryResponse)(nil),    // 52: vev.wire.v1.NavigationInventoryResponse
-	(*NavigationInventoryDemand)(nil),      // 53: vev.wire.v1.NavigationInventoryDemand
-	(*NavigationInventorySelection)(nil),   // 54: vev.wire.v1.NavigationInventorySelection
-	(*PickerOffer)(nil),                    // 55: vev.wire.v1.PickerOffer
-	(*PickerSnapshot)(nil),                 // 56: vev.wire.v1.PickerSnapshot
-	(*PickerClosed)(nil),                   // 57: vev.wire.v1.PickerClosed
-	(*PickerResult)(nil),                   // 58: vev.wire.v1.PickerResult
-	(*PickerFailure)(nil),                  // 59: vev.wire.v1.PickerFailure
-	(*PickerPreview)(nil),                  // 60: vev.wire.v1.PickerPreview
-	(*AttachmentSuspended)(nil),            // 61: vev.wire.v1.AttachmentSuspended
-	(*AttachmentActivated)(nil),            // 62: vev.wire.v1.AttachmentActivated
-	(*KillResult)(nil),                     // 63: vev.wire.v1.KillResult
+	(*RouteAttentionSubscription)(nil),     // 19: vev.wire.v1.RouteAttentionSubscription
+	(*SamePeerSwitchRequest)(nil),          // 20: vev.wire.v1.SamePeerSwitchRequest
+	(*RecentRouteSnapshot)(nil),            // 21: vev.wire.v1.RecentRouteSnapshot
+	(*RouteNavigationFailure)(nil),         // 22: vev.wire.v1.RouteNavigationFailure
+	(*SessionCreationFailure)(nil),         // 23: vev.wire.v1.SessionCreationFailure
+	(*UIFence)(nil),                        // 24: vev.wire.v1.UIFence
+	(*NavigationInventoryRequest)(nil),     // 25: vev.wire.v1.NavigationInventoryRequest
+	(*NavigationInventoryPublication)(nil), // 26: vev.wire.v1.NavigationInventoryPublication
+	(*NavigationInventoryFailure)(nil),     // 27: vev.wire.v1.NavigationInventoryFailure
+	(*PickerClose)(nil),                    // 28: vev.wire.v1.PickerClose
+	(*PickerSelection)(nil),                // 29: vev.wire.v1.PickerSelection
+	(*SuspendAttachment)(nil),              // 30: vev.wire.v1.SuspendAttachment
+	(*ActivateAttachment)(nil),             // 31: vev.wire.v1.ActivateAttachment
+	(*SelectTab)(nil),                      // 32: vev.wire.v1.SelectTab
+	(*RemotePreviewWatch)(nil),             // 33: vev.wire.v1.RemotePreviewWatch
+	(*Welcome)(nil),                        // 34: vev.wire.v1.Welcome
+	(*ErrorMsg)(nil),                       // 35: vev.wire.v1.ErrorMsg
+	(*Output)(nil),                         // 36: vev.wire.v1.Output
+	(*Detached)(nil),                       // 37: vev.wire.v1.Detached
+	(*Pong)(nil),                           // 38: vev.wire.v1.Pong
+	(*Sessions)(nil),                       // 39: vev.wire.v1.Sessions
+	(*CommandResult)(nil),                  // 40: vev.wire.v1.CommandResult
+	(*AttachTarget)(nil),                   // 41: vev.wire.v1.AttachTarget
+	(*RemotePreview)(nil),                  // 42: vev.wire.v1.RemotePreview
+	(*CommittedRouteIdentity)(nil),         // 43: vev.wire.v1.CommittedRouteIdentity
+	(*RouteNavigationAction)(nil),          // 44: vev.wire.v1.RouteNavigationAction
+	(*RouteCreateSessionAction)(nil),       // 45: vev.wire.v1.RouteCreateSessionAction
+	(*RoutePosition)(nil),                  // 46: vev.wire.v1.RoutePosition
+	(*RouteRetired)(nil),                   // 47: vev.wire.v1.RouteRetired
+	(*SamePeerSwitchFailure)(nil),          // 48: vev.wire.v1.SamePeerSwitchFailure
+	(*UIReceipt)(nil),                      // 49: vev.wire.v1.UIReceipt
+	(*UIViewUpdate)(nil),                   // 50: vev.wire.v1.UIViewUpdate
+	(*NavigationInventoryResponse)(nil),    // 51: vev.wire.v1.NavigationInventoryResponse
+	(*NavigationInventoryDemand)(nil),      // 52: vev.wire.v1.NavigationInventoryDemand
+	(*NavigationInventorySelection)(nil),   // 53: vev.wire.v1.NavigationInventorySelection
+	(*PickerOffer)(nil),                    // 54: vev.wire.v1.PickerOffer
+	(*PickerSnapshot)(nil),                 // 55: vev.wire.v1.PickerSnapshot
+	(*PickerClosed)(nil),                   // 56: vev.wire.v1.PickerClosed
+	(*PickerResult)(nil),                   // 57: vev.wire.v1.PickerResult
+	(*PickerFailure)(nil),                  // 58: vev.wire.v1.PickerFailure
+	(*AttachmentSuspended)(nil),            // 59: vev.wire.v1.AttachmentSuspended
+	(*AttachmentActivated)(nil),            // 60: vev.wire.v1.AttachmentActivated
+	(*KillResult)(nil),                     // 61: vev.wire.v1.KillResult
 }
 var file_envelope_proto_depIdxs = []int32{
 	0,  // 0: vev.wire.v1.PreambleRequest.role:type_name -> vev.wire.v1.PreambleRole
@@ -1566,57 +1530,55 @@ var file_envelope_proto_depIdxs = []int32{
 	16, // 13: vev.wire.v1.ClientEnvelope.client_notice:type_name -> vev.wire.v1.ClientNotice
 	17, // 14: vev.wire.v1.ClientEnvelope.command_request:type_name -> vev.wire.v1.CommandRequest
 	18, // 15: vev.wire.v1.ClientEnvelope.output_reset_request:type_name -> vev.wire.v1.OutputResetRequest
-	19, // 16: vev.wire.v1.ClientEnvelope.remote_preview_request:type_name -> vev.wire.v1.RemotePreviewRequest
-	20, // 17: vev.wire.v1.ClientEnvelope.route_attention_subscription:type_name -> vev.wire.v1.RouteAttentionSubscription
-	21, // 18: vev.wire.v1.ClientEnvelope.same_peer_switch_request:type_name -> vev.wire.v1.SamePeerSwitchRequest
-	22, // 19: vev.wire.v1.ClientEnvelope.recent_route_snapshot:type_name -> vev.wire.v1.RecentRouteSnapshot
-	23, // 20: vev.wire.v1.ClientEnvelope.route_navigation_failure:type_name -> vev.wire.v1.RouteNavigationFailure
-	24, // 21: vev.wire.v1.ClientEnvelope.session_creation_failure:type_name -> vev.wire.v1.SessionCreationFailure
-	25, // 22: vev.wire.v1.ClientEnvelope.ui_fence:type_name -> vev.wire.v1.UIFence
-	26, // 23: vev.wire.v1.ClientEnvelope.navigation_inventory_request:type_name -> vev.wire.v1.NavigationInventoryRequest
-	27, // 24: vev.wire.v1.ClientEnvelope.navigation_inventory_publication:type_name -> vev.wire.v1.NavigationInventoryPublication
-	28, // 25: vev.wire.v1.ClientEnvelope.navigation_inventory_failure:type_name -> vev.wire.v1.NavigationInventoryFailure
-	29, // 26: vev.wire.v1.ClientEnvelope.picker_close:type_name -> vev.wire.v1.PickerClose
-	30, // 27: vev.wire.v1.ClientEnvelope.picker_selection:type_name -> vev.wire.v1.PickerSelection
-	31, // 28: vev.wire.v1.ClientEnvelope.picker_preview_request:type_name -> vev.wire.v1.PickerPreviewRequest
-	32, // 29: vev.wire.v1.ClientEnvelope.suspend_attachment:type_name -> vev.wire.v1.SuspendAttachment
-	33, // 30: vev.wire.v1.ClientEnvelope.activate_attachment:type_name -> vev.wire.v1.ActivateAttachment
-	34, // 31: vev.wire.v1.ClientEnvelope.select_tab:type_name -> vev.wire.v1.SelectTab
-	35, // 32: vev.wire.v1.ServerEnvelope.welcome:type_name -> vev.wire.v1.Welcome
-	36, // 33: vev.wire.v1.ServerEnvelope.error:type_name -> vev.wire.v1.ErrorMsg
-	37, // 34: vev.wire.v1.ServerEnvelope.output:type_name -> vev.wire.v1.Output
-	38, // 35: vev.wire.v1.ServerEnvelope.detached:type_name -> vev.wire.v1.Detached
-	39, // 36: vev.wire.v1.ServerEnvelope.pong:type_name -> vev.wire.v1.Pong
-	40, // 37: vev.wire.v1.ServerEnvelope.sessions:type_name -> vev.wire.v1.Sessions
-	41, // 38: vev.wire.v1.ServerEnvelope.command_result:type_name -> vev.wire.v1.CommandResult
-	42, // 39: vev.wire.v1.ServerEnvelope.attach_target:type_name -> vev.wire.v1.AttachTarget
-	43, // 40: vev.wire.v1.ServerEnvelope.remote_preview:type_name -> vev.wire.v1.RemotePreview
-	44, // 41: vev.wire.v1.ServerEnvelope.committed_route_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	45, // 42: vev.wire.v1.ServerEnvelope.route_navigation_action:type_name -> vev.wire.v1.RouteNavigationAction
-	46, // 43: vev.wire.v1.ServerEnvelope.route_create_session_action:type_name -> vev.wire.v1.RouteCreateSessionAction
-	23, // 44: vev.wire.v1.ServerEnvelope.route_navigation_failure:type_name -> vev.wire.v1.RouteNavigationFailure
-	47, // 45: vev.wire.v1.ServerEnvelope.route_position:type_name -> vev.wire.v1.RoutePosition
-	48, // 46: vev.wire.v1.ServerEnvelope.route_retired:type_name -> vev.wire.v1.RouteRetired
-	49, // 47: vev.wire.v1.ServerEnvelope.same_peer_switch_failure:type_name -> vev.wire.v1.SamePeerSwitchFailure
-	50, // 48: vev.wire.v1.ServerEnvelope.ui_receipt:type_name -> vev.wire.v1.UIReceipt
-	51, // 49: vev.wire.v1.ServerEnvelope.ui_view_update:type_name -> vev.wire.v1.UIViewUpdate
-	52, // 50: vev.wire.v1.ServerEnvelope.navigation_inventory_response:type_name -> vev.wire.v1.NavigationInventoryResponse
-	53, // 51: vev.wire.v1.ServerEnvelope.navigation_inventory_demand:type_name -> vev.wire.v1.NavigationInventoryDemand
-	54, // 52: vev.wire.v1.ServerEnvelope.navigation_inventory_selection:type_name -> vev.wire.v1.NavigationInventorySelection
-	55, // 53: vev.wire.v1.ServerEnvelope.picker_offer:type_name -> vev.wire.v1.PickerOffer
-	56, // 54: vev.wire.v1.ServerEnvelope.picker_snapshot:type_name -> vev.wire.v1.PickerSnapshot
-	57, // 55: vev.wire.v1.ServerEnvelope.picker_closed:type_name -> vev.wire.v1.PickerClosed
-	58, // 56: vev.wire.v1.ServerEnvelope.picker_result:type_name -> vev.wire.v1.PickerResult
-	59, // 57: vev.wire.v1.ServerEnvelope.picker_failure:type_name -> vev.wire.v1.PickerFailure
-	60, // 58: vev.wire.v1.ServerEnvelope.picker_preview:type_name -> vev.wire.v1.PickerPreview
-	61, // 59: vev.wire.v1.ServerEnvelope.attachment_suspended:type_name -> vev.wire.v1.AttachmentSuspended
-	62, // 60: vev.wire.v1.ServerEnvelope.attachment_activated:type_name -> vev.wire.v1.AttachmentActivated
-	63, // 61: vev.wire.v1.ServerEnvelope.kill_result:type_name -> vev.wire.v1.KillResult
-	62, // [62:62] is the sub-list for method output_type
-	62, // [62:62] is the sub-list for method input_type
-	62, // [62:62] is the sub-list for extension type_name
-	62, // [62:62] is the sub-list for extension extendee
-	0,  // [0:62] is the sub-list for field type_name
+	19, // 16: vev.wire.v1.ClientEnvelope.route_attention_subscription:type_name -> vev.wire.v1.RouteAttentionSubscription
+	20, // 17: vev.wire.v1.ClientEnvelope.same_peer_switch_request:type_name -> vev.wire.v1.SamePeerSwitchRequest
+	21, // 18: vev.wire.v1.ClientEnvelope.recent_route_snapshot:type_name -> vev.wire.v1.RecentRouteSnapshot
+	22, // 19: vev.wire.v1.ClientEnvelope.route_navigation_failure:type_name -> vev.wire.v1.RouteNavigationFailure
+	23, // 20: vev.wire.v1.ClientEnvelope.session_creation_failure:type_name -> vev.wire.v1.SessionCreationFailure
+	24, // 21: vev.wire.v1.ClientEnvelope.ui_fence:type_name -> vev.wire.v1.UIFence
+	25, // 22: vev.wire.v1.ClientEnvelope.navigation_inventory_request:type_name -> vev.wire.v1.NavigationInventoryRequest
+	26, // 23: vev.wire.v1.ClientEnvelope.navigation_inventory_publication:type_name -> vev.wire.v1.NavigationInventoryPublication
+	27, // 24: vev.wire.v1.ClientEnvelope.navigation_inventory_failure:type_name -> vev.wire.v1.NavigationInventoryFailure
+	28, // 25: vev.wire.v1.ClientEnvelope.picker_close:type_name -> vev.wire.v1.PickerClose
+	29, // 26: vev.wire.v1.ClientEnvelope.picker_selection:type_name -> vev.wire.v1.PickerSelection
+	30, // 27: vev.wire.v1.ClientEnvelope.suspend_attachment:type_name -> vev.wire.v1.SuspendAttachment
+	31, // 28: vev.wire.v1.ClientEnvelope.activate_attachment:type_name -> vev.wire.v1.ActivateAttachment
+	32, // 29: vev.wire.v1.ClientEnvelope.select_tab:type_name -> vev.wire.v1.SelectTab
+	33, // 30: vev.wire.v1.ClientEnvelope.remote_preview_watch:type_name -> vev.wire.v1.RemotePreviewWatch
+	34, // 31: vev.wire.v1.ServerEnvelope.welcome:type_name -> vev.wire.v1.Welcome
+	35, // 32: vev.wire.v1.ServerEnvelope.error:type_name -> vev.wire.v1.ErrorMsg
+	36, // 33: vev.wire.v1.ServerEnvelope.output:type_name -> vev.wire.v1.Output
+	37, // 34: vev.wire.v1.ServerEnvelope.detached:type_name -> vev.wire.v1.Detached
+	38, // 35: vev.wire.v1.ServerEnvelope.pong:type_name -> vev.wire.v1.Pong
+	39, // 36: vev.wire.v1.ServerEnvelope.sessions:type_name -> vev.wire.v1.Sessions
+	40, // 37: vev.wire.v1.ServerEnvelope.command_result:type_name -> vev.wire.v1.CommandResult
+	41, // 38: vev.wire.v1.ServerEnvelope.attach_target:type_name -> vev.wire.v1.AttachTarget
+	42, // 39: vev.wire.v1.ServerEnvelope.remote_preview:type_name -> vev.wire.v1.RemotePreview
+	43, // 40: vev.wire.v1.ServerEnvelope.committed_route_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
+	44, // 41: vev.wire.v1.ServerEnvelope.route_navigation_action:type_name -> vev.wire.v1.RouteNavigationAction
+	45, // 42: vev.wire.v1.ServerEnvelope.route_create_session_action:type_name -> vev.wire.v1.RouteCreateSessionAction
+	22, // 43: vev.wire.v1.ServerEnvelope.route_navigation_failure:type_name -> vev.wire.v1.RouteNavigationFailure
+	46, // 44: vev.wire.v1.ServerEnvelope.route_position:type_name -> vev.wire.v1.RoutePosition
+	47, // 45: vev.wire.v1.ServerEnvelope.route_retired:type_name -> vev.wire.v1.RouteRetired
+	48, // 46: vev.wire.v1.ServerEnvelope.same_peer_switch_failure:type_name -> vev.wire.v1.SamePeerSwitchFailure
+	49, // 47: vev.wire.v1.ServerEnvelope.ui_receipt:type_name -> vev.wire.v1.UIReceipt
+	50, // 48: vev.wire.v1.ServerEnvelope.ui_view_update:type_name -> vev.wire.v1.UIViewUpdate
+	51, // 49: vev.wire.v1.ServerEnvelope.navigation_inventory_response:type_name -> vev.wire.v1.NavigationInventoryResponse
+	52, // 50: vev.wire.v1.ServerEnvelope.navigation_inventory_demand:type_name -> vev.wire.v1.NavigationInventoryDemand
+	53, // 51: vev.wire.v1.ServerEnvelope.navigation_inventory_selection:type_name -> vev.wire.v1.NavigationInventorySelection
+	54, // 52: vev.wire.v1.ServerEnvelope.picker_offer:type_name -> vev.wire.v1.PickerOffer
+	55, // 53: vev.wire.v1.ServerEnvelope.picker_snapshot:type_name -> vev.wire.v1.PickerSnapshot
+	56, // 54: vev.wire.v1.ServerEnvelope.picker_closed:type_name -> vev.wire.v1.PickerClosed
+	57, // 55: vev.wire.v1.ServerEnvelope.picker_result:type_name -> vev.wire.v1.PickerResult
+	58, // 56: vev.wire.v1.ServerEnvelope.picker_failure:type_name -> vev.wire.v1.PickerFailure
+	59, // 57: vev.wire.v1.ServerEnvelope.attachment_suspended:type_name -> vev.wire.v1.AttachmentSuspended
+	60, // 58: vev.wire.v1.ServerEnvelope.attachment_activated:type_name -> vev.wire.v1.AttachmentActivated
+	61, // 59: vev.wire.v1.ServerEnvelope.kill_result:type_name -> vev.wire.v1.KillResult
+	60, // [60:60] is the sub-list for method output_type
+	60, // [60:60] is the sub-list for method input_type
+	60, // [60:60] is the sub-list for extension type_name
+	60, // [60:60] is the sub-list for extension extendee
+	0,  // [0:60] is the sub-list for field type_name
 }
 
 func init() { file_envelope_proto_init() }
@@ -1643,7 +1605,6 @@ func file_envelope_proto_init() {
 		(*ClientEnvelope_ClientNotice)(nil),
 		(*ClientEnvelope_CommandRequest)(nil),
 		(*ClientEnvelope_OutputResetRequest)(nil),
-		(*ClientEnvelope_RemotePreviewRequest)(nil),
 		(*ClientEnvelope_RouteAttentionSubscription)(nil),
 		(*ClientEnvelope_SamePeerSwitchRequest)(nil),
 		(*ClientEnvelope_RecentRouteSnapshot)(nil),
@@ -1655,10 +1616,10 @@ func file_envelope_proto_init() {
 		(*ClientEnvelope_NavigationInventoryFailure)(nil),
 		(*ClientEnvelope_PickerClose)(nil),
 		(*ClientEnvelope_PickerSelection)(nil),
-		(*ClientEnvelope_PickerPreviewRequest)(nil),
 		(*ClientEnvelope_SuspendAttachment)(nil),
 		(*ClientEnvelope_ActivateAttachment)(nil),
 		(*ClientEnvelope_SelectTab)(nil),
+		(*ClientEnvelope_RemotePreviewWatch)(nil),
 	}
 	file_envelope_proto_msgTypes[5].OneofWrappers = []any{
 		(*ServerEnvelope_Welcome)(nil),
@@ -1687,7 +1648,6 @@ func file_envelope_proto_init() {
 		(*ServerEnvelope_PickerClosed)(nil),
 		(*ServerEnvelope_PickerResult)(nil),
 		(*ServerEnvelope_PickerFailure)(nil),
-		(*ServerEnvelope_PickerPreview)(nil),
 		(*ServerEnvelope_AttachmentSuspended)(nil),
 		(*ServerEnvelope_AttachmentActivated)(nil),
 		(*ServerEnvelope_KillResult)(nil),

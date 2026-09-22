@@ -2,7 +2,6 @@ package client
 
 import (
 	"fmt"
-	"time"
 
 	renderer "github.com/bnema/vev-vt"
 	ansirenderer "github.com/bnema/vev-vt/ansi"
@@ -322,81 +321,6 @@ func (l *pickerLoop) cursorKey() string {
 		return ""
 	}
 	return identity.key
-}
-
-// pickerPreviewDebounce bounds how long the cursor may rest before the client
-// asks the serving daemon for that row's preview. The daemon keeps publishing
-// the row afterwards, so this only throttles cursor movement.
-const pickerPreviewDebounce = 80 * time.Millisecond
-
-// pickerPreviewClient owns the client half of the row preview: the row the
-// modal displays, the row whose request is on the wire, and the viewport the
-// daemon last published for it. The client never captures a viewport itself.
-type pickerPreviewClient struct {
-	interaction uint64
-	sent        string
-	frame       picker.Preview
-}
-
-// resetFor drops the preview state of one retired interaction. A released
-// interaction never shows the previous row's viewport again.
-func (p *pickerPreviewClient) resetFor() {
-	if p == nil {
-		return
-	}
-	*p = pickerPreviewClient{}
-}
-
-// needsRequest reports whether the displayed row still needs a request: a new
-// interaction, a moved cursor, or a row the daemon has not been asked for yet.
-func (p *pickerPreviewClient) needsRequest(interaction uint64, key string) bool {
-	if p == nil || key == "" || interaction == 0 {
-		return false
-	}
-	return p.interaction != interaction || p.sent != key
-}
-
-// requestFor builds the request for one displayed row. The client asks for
-// exactly the viewport it can display, bounded by the preview protocol.
-func (p *pickerPreviewClient) requestFor(interaction uint64, key string, size domain.Size) (protocol.PickerPreviewRequest, bool) {
-	request := protocol.PickerPreviewRequest{
-		Version: protocol.PickerPreviewSchemaVersion, InteractionID: interaction,
-		SourceID: protocol.PickerServingSourceID, Key: key,
-		Width:  clampPreviewDimension(size.Cols, protocol.PickerPreviewMaxWidth),
-		Height: clampPreviewDimension(size.Rows, protocol.PickerPreviewMaxHeight),
-	}
-	if protocol.ValidatePickerPreviewRequest(request) != nil {
-		return protocol.PickerPreviewRequest{}, false
-	}
-	return request, true
-}
-
-// markSent records the row whose request crossed the wire. The next debounce
-// fires only when the cursor moved again.
-func (p *pickerPreviewClient) markSent(interaction uint64, key string) {
-	if p == nil {
-		return
-	}
-	p.interaction, p.sent = interaction, key
-}
-
-// accept applies one published preview and reports whether it describes the
-// displayed row. A late answer for a previous row leaves the current viewport
-// untouched, and a status-only answer clears it.
-func (p *pickerPreviewClient) accept(preview protocol.PickerPreview, interaction uint64, key string) bool {
-	if p == nil || key == "" || preview.InteractionID != interaction || preview.Key != key {
-		return false
-	}
-	if preview.Status != protocol.PickerPreviewOK {
-		p.frame = emptyPickerPreview()
-		return true
-	}
-	rows := preview.FrameRows()
-	if rows == nil {
-		return false
-	}
-	p.frame = picker.Preview{Rows: rows, Width: int(preview.Width), Height: int(preview.Height)}
-	return true
 }
 
 // clampPreviewDimension bounds one requested viewport dimension.

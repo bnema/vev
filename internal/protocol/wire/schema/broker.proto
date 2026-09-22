@@ -360,18 +360,29 @@ message Shutdown {
   string text = 3;
 }
 
+// PreviewRoute names the daemon a preview observes. The broker allocates the
+// observation stream itself; endpoint and registration are present only for a
+// remote route, and policy is always present.
+message PreviewRoute {
+  bool local = 1;
+  string endpoint = 2;
+  RemoteRegistration registration = 3;
+  BrokerWirePolicy policy = 4;
+}
+
 // StartPreview starts or replaces one connection-scoped live preview.
 // scope carries the broker epoch plus client connection; generation is the
-// connection-scoped preview authority. route is the exact observation
-// stream authority and preview is the bounded viewport request sent to the
-// daemon. Route/request dimensions are retained by client subscription
-// state; repeated authority is scope/generation plus the preview target
-// identity response.
+// connection-scoped preview authority. route names the observed daemon and
+// preview is the bounded viewport request sent to it. Repeated authority is
+// scope/generation plus the preview target identity response.
 message StartPreview {
+  // 3 was the client-allocated OpenStream route.
+  reserved 3;
+
   BrokerScope scope = 1;
   uint64 generation = 2;
-  OpenStream route = 3;
   RemotePreviewRequest preview = 4;
+  PreviewRoute route = 5;
 }
 
 // CancelPreview cancels one connection-scoped live preview.

@@ -166,13 +166,13 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 			return nil, ErrInvalidMessage
 		}
 		return encodeProtoClient(*m)
-	case protocol.RemotePreviewRequest:
-		converted, err := remotePreviewRequestToWire(m)
+	case protocol.RemotePreviewWatch:
+		converted, err := remotePreviewWatchToWire(m)
 		if err != nil {
 			return nil, err
 		}
-		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_RemotePreviewRequest{RemotePreviewRequest: converted}}, nil
-	case *protocol.RemotePreviewRequest:
+		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_RemotePreviewWatch{RemotePreviewWatch: converted}}, nil
+	case *protocol.RemotePreviewWatch:
 		if m == nil {
 			return nil, ErrInvalidMessage
 		}
@@ -250,17 +250,6 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 		}
 		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_PickerSelection{PickerSelection: converted}}, nil
 	case *protocol.PickerSelection:
-		if m == nil {
-			return nil, ErrInvalidMessage
-		}
-		return encodeProtoClient(*m)
-	case protocol.PickerPreviewRequest:
-		converted, err := pickerPreviewRequestToWire(m)
-		if err != nil {
-			return nil, err
-		}
-		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_PickerPreviewRequest{PickerPreviewRequest: converted}}, nil
-	case *protocol.PickerPreviewRequest:
 		if m == nil {
 			return nil, ErrInvalidMessage
 		}
@@ -608,17 +597,6 @@ func encodeProtoServer(message protocol.ServerMessage) (*wire.ServerEnvelope, er
 			return nil, ErrInvalidMessage
 		}
 		return encodeProtoServer(*m)
-	case protocol.PickerPreview:
-		converted, err := pickerPreviewToWire(m)
-		if err != nil {
-			return nil, err
-		}
-		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_PickerPreview{PickerPreview: converted}}, nil
-	case *protocol.PickerPreview:
-		if m == nil {
-			return nil, ErrInvalidMessage
-		}
-		return encodeProtoServer(*m)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -665,8 +643,8 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 		return uiFenceFromWire(payload.UiFence)
 	case *wire.ClientEnvelope_SelectTab:
 		return selectTabFromWire(payload.SelectTab)
-	case *wire.ClientEnvelope_RemotePreviewRequest:
-		return remotePreviewRequestFromWire(payload.RemotePreviewRequest)
+	case *wire.ClientEnvelope_RemotePreviewWatch:
+		return remotePreviewWatchFromWire(payload.RemotePreviewWatch)
 	case *wire.ClientEnvelope_RouteAttentionSubscription:
 		return attentionSubscriptionFromWire(payload.RouteAttentionSubscription)
 	case *wire.ClientEnvelope_SamePeerSwitchRequest:
@@ -687,8 +665,6 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 		return pickerCloseFromWire(payload.PickerClose)
 	case *wire.ClientEnvelope_PickerSelection:
 		return pickerSelectionFromWire(payload.PickerSelection)
-	case *wire.ClientEnvelope_PickerPreviewRequest:
-		return pickerPreviewRequestFromWire(payload.PickerPreviewRequest)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -759,8 +735,6 @@ func decodeProtoServer(envelope *wire.ServerEnvelope) (protocol.ServerMessage, e
 		return pickerResultFromWire(payload.PickerResult)
 	case *wire.ServerEnvelope_PickerFailure:
 		return pickerFailureFromWire(payload.PickerFailure)
-	case *wire.ServerEnvelope_PickerPreview:
-		return pickerPreviewFromWire(payload.PickerPreview)
 	default:
 		return nil, ErrWrongDirection
 	}

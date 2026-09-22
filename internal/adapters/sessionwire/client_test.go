@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -35,7 +36,7 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "UI fence", message: protocol.UIFence{ActionID: 7}},
 		{name: "UI fence pointer", message: &protocol.UIFence{ActionID: 7}},
 		{name: "select tab", message: protocol.SelectTab{TabID: "tab-2"}},
-		{name: "preview", message: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}},
+		{name: "preview", message: protocol.RemotePreviewWatch{Request: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}, MinInterval: 33 * time.Millisecond}},
 		{name: "attention", message: protocol.RouteAttentionSubscription{}},
 		{name: "same peer", message: protocol.SamePeerSwitchRequest{RequestID: 1, Target: exact}},
 		{name: "snapshot", message: protocol.RecentRouteSnapshot{}},

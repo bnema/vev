@@ -3,7 +3,6 @@ package sessionwire
 import (
 	"testing"
 
-	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
@@ -36,25 +35,9 @@ func pickerWireSelection() protocol.PickerSelection {
 	}
 }
 
-func pickerWirePreviewRequest() protocol.PickerPreviewRequest {
-	return protocol.PickerPreviewRequest{
-		Version: protocol.PickerPreviewSchemaVersion, InteractionID: 7, SourceID: "serving",
-		Key: "ab12/work#tab-1", Width: 80, Height: 24,
-	}
-}
-
-func pickerWirePreview() protocol.PickerPreview {
-	return protocol.PickerPreview{
-		Version: protocol.PickerPreviewSchemaVersion, InteractionID: 7, SourceID: "serving",
-		Key: "ab12/work#tab-1", Status: protocol.PickerPreviewOK, Width: 2, Height: 1,
-		Cells: []renderer.Cell{{Rune: 'o'}, {Rune: 'k'}},
-	}
-}
-
 func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 	closeMessage := protocol.PickerClose{InteractionID: 7, RequestID: 3}
 	selection := pickerWireSelection()
-	previewRequest := pickerWirePreviewRequest()
 	tests := []struct {
 		name    string
 		message protocol.ClientMessage
@@ -63,8 +46,6 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 		{name: "close pointer", message: &closeMessage},
 		{name: "selection", message: selection},
 		{name: "selection pointer", message: &selection},
-		{name: "preview request", message: previewRequest},
-		{name: "preview request pointer", message: &previewRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,8 +57,6 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 			case *protocol.PickerClose:
 				require.Equal(t, *message, got)
 			case *protocol.PickerSelection:
-				require.Equal(t, *message, got)
-			case *protocol.PickerPreviewRequest:
 				require.Equal(t, *message, got)
 			default:
 				require.Equal(t, tt.message, got)
@@ -91,7 +70,6 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 	closed := protocol.PickerClosed{InteractionID: 7, BarrierEpoch: 3, BarrierState: 9}
 	result := protocol.PickerResult{CauseActionID: 9, InteractionID: 7, SourceID: "serving", Key: "ab12/work", Action: protocol.PickerActionKill}
 	failure := protocol.PickerFailure{CauseActionID: 9, InteractionID: 7, SourceID: "serving", Key: "ab12/work", Action: protocol.PickerActionNavigate, Code: protocol.PickerRetiredTarget}
-	preview := pickerWirePreview()
 	tests := []struct {
 		name    string
 		message protocol.ServerMessage
@@ -104,8 +82,6 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 		{name: "result pointer", message: &result},
 		{name: "failure", message: failure},
 		{name: "failure pointer", message: &failure},
-		{name: "preview", message: preview},
-		{name: "preview pointer", message: &preview},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,8 +98,6 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 			case *protocol.PickerResult:
 				require.Equal(t, *message, got)
 			case *protocol.PickerFailure:
-				require.Equal(t, *message, got)
-			case *protocol.PickerPreview:
 				require.Equal(t, *message, got)
 			default:
 				require.Equal(t, tt.message, got)
@@ -158,7 +132,6 @@ func TestPickerMessagesDecodeInCorrectDirection(t *testing.T) {
 	clientMessages := []protocol.ClientMessage{
 		protocol.PickerClose{InteractionID: 1},
 		selection,
-		pickerWirePreviewRequest(),
 	}
 	serverMessages := []protocol.ServerMessage{
 		offer,
@@ -166,7 +139,6 @@ func TestPickerMessagesDecodeInCorrectDirection(t *testing.T) {
 		protocol.PickerClosed{InteractionID: 1},
 		protocol.PickerResult{InteractionID: 1, SourceID: "serving", Key: "a/b", Action: protocol.PickerActionKill},
 		protocol.PickerFailure{InteractionID: 1, Action: protocol.PickerActionKill, Code: protocol.PickerUnknownKey},
-		pickerWirePreview(),
 	}
 	// Cross-direction decodability is structural, not directional: field
 	// numbers collide across envelopes, so a client payload may parse as

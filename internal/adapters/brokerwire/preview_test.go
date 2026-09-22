@@ -2,15 +2,15 @@ package brokerwire
 
 // Preview contract tests (broker preview slice 1).
 //
-// StartPreview carries tags 112 with scope, generation, an exact
-// observation route, and the terminal preview request; CancelPreview
+// StartPreview carries tags 112 with scope, generation, the observed
+// daemon route (never a stream identity), and the terminal preview request; CancelPreview
 // carries tag 113 with scope and generation. PreviewPublication carries
 // tag 210 with scope, generation, and exactly one of preview/error via
 // its result oneof. These tests pin the stateless codec's half of that
 // contract: frozen tags, byte round trips, the strict oneof presence
 // rule, exact authority preservation, range-strict narrowing, and the
-// ports preview validation parity (non-observation routes and
-// scope-mismatched routes refused).
+// ports preview validation parity (routes that do not own the target
+// refused).
 
 import (
 	"testing"
@@ -42,19 +42,23 @@ func testPreviewRequest() protocol.RemotePreviewRequest {
 	}
 }
 
-func testPreviewRoute(connection ports.BrokerConnectionID) OpenStream {
-	return OpenStream{
-		Epoch: 7, Connection: connection, Stream: 9,
-		Purpose: ports.BrokerStreamObservation, Local: true,
-		Policy: testPolicy(), StartMode: ports.BrokerDaemonExistingOnly,
-	}
+func testPreviewRoute() ports.BrokerPreviewRoute {
+	return ports.BrokerPreviewRoute{Endpoint: "dev@host:22", Registration: testRegistration(), Policy: testPolicy()}
 }
 
 func testStartPreview(connection ports.BrokerConnectionID) StartPreview {
 	return StartPreview{
 		Epoch: 7, Connection: connection, Generation: 3,
-		Route: testPreviewRoute(connection), Preview: testPreviewRequest(),
+		Route: testPreviewRoute(), Preview: testPreviewRequest(),
 	}
+}
+
+func testLocalStartPreview(connection ports.BrokerConnectionID) StartPreview {
+	m := testStartPreview(connection)
+	m.Route = ports.BrokerPreviewRoute{Local: true, Policy: testPolicy()}
+	m.Preview.Target.Endpoint = ports.BrokerPreviewLocalEndpoint
+	m.Preview.Target.DisplayOrigin = ports.BrokerPreviewLocalEndpoint
+	return m
 }
 
 func testRemotePreview() protocol.RemotePreview {
@@ -104,6 +108,7 @@ func TestPreviewByteRoundTrip(t *testing.T) {
 		message ClientMessage
 	}{
 		{"start_preview", testStartPreview(connection)},
+		{"start_preview_local", testLocalStartPreview(connection)},
 		{"cancel_preview", CancelPreview{Epoch: 7, Connection: connection, Generation: 5}},
 	}
 	for _, tc := range clients {
@@ -143,31 +148,42 @@ func TestPreviewByteRoundTrip(t *testing.T) {
 }
 
 // TestPreviewRequestValidationParity proves the codec refuses exactly what
-// ports.BrokerPreviewRequest.Validate refuses: a non-observation route, a
-// route bound to another scope, a zero generation, and an invalid preview
-// request. Scope-generation authority repeats on the route and the request.
+// ports.BrokerPreviewRequest.Validate refuses: a route that does not own the
+// target, a remote route without matching registration, a zero generation,
+// and an invalid preview request.
 func TestPreviewRequestValidationParity(t *testing.T) {
 	connection := testConnectionID(0x64)
 	base := testStartPreview(connection)
+	local := testLocalStartPreview(connection)
 	cases := map[string]func() StartPreview{
-		"attachment route": func() StartPreview {
+		"local route for remote target": func() StartPreview {
 			m := base
-			m.Route.Purpose = ports.BrokerStreamAttachment
-			m.Route.Admission = ports.BrokerAdmissionExact
-			m.Route.Endpoint = "dev@host:22"
+			m.Route = ports.BrokerPreviewRoute{Local: true, Policy: testPolicy()}
+			return m
+		},
+		"remote route for local target": func() StartPreview {
+			m := local
+			m.Route = testPreviewRoute()
+			return m
+		},
+		"local route carries registration": func() StartPreview {
+			m := local
 			m.Route.Registration = testRegistration()
-			m.Route.Target = testTarget()
-			m.Route.StartMode = ports.BrokerDaemonStartIfNeeded
 			return m
 		},
-		"route epoch mismatch": func() StartPreview {
+		"remote route without registration": func() StartPreview {
 			m := base
-			m.Route.Epoch++
+			m.Route.Registration = domain.RemoteRegistration{}
 			return m
 		},
-		"route connection mismatch": func() StartPreview {
+		"remote route endpoint mismatch": func() StartPreview {
 			m := base
-			m.Route.Connection = testConnectionID(0x99)
+			m.Route.Endpoint = "other@host:22"
+			return m
+		},
+		"target on another host": func() StartPreview {
+			m := base
+			m.Preview.Target.Endpoint = "other@host:22"
 			return m
 		},
 		"zero generation": func() StartPreview {
@@ -191,23 +207,31 @@ func TestPreviewRequestValidationParity(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// The candidate must already fail the ports gate, so the codec
 			// refusal is parity, not invention.
-			require.Error(t, previewRouteRequest(mutate()).Validate())
+			require.Error(t, previewRequest(mutate()).Validate())
 			_, err := EncodeClient(mutate(), testEnvelopeCeiling, testChunkCeiling)
 			require.ErrorIs(t, err, ErrInvalidMessage)
 		})
 	}
 
-	t.Run("mutated route purpose refused on decode", func(t *testing.T) {
-		raw := mustEncodeClient(t, base)
-		envelope := &wire.BrokerClientEnvelope{}
-		require.NoError(t, wire.ScanEnvelope(envelope, raw))
-		require.NoError(t, proto.Unmarshal(raw, envelope))
-		envelope.GetStartPreview().GetRoute().Purpose = 1
-		mutated, err := proto.Marshal(envelope)
-		require.NoError(t, err)
-		_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
-		require.ErrorIs(t, err, ErrInvalidMessage)
-	})
+	decodeCases := map[string]func(*wire.PreviewRoute){
+		"missing route":               func(r *wire.PreviewRoute) { *r = wire.PreviewRoute{} },
+		"missing policy":              func(r *wire.PreviewRoute) { r.Policy = nil },
+		"local with registration":     func(r *wire.PreviewRoute) { r.Local = true },
+		"remote without registration": func(r *wire.PreviewRoute) { r.Registration = nil },
+	}
+	for name, mutate := range decodeCases {
+		t.Run("decode "+name, func(t *testing.T) {
+			raw := mustEncodeClient(t, base)
+			envelope := &wire.BrokerClientEnvelope{}
+			require.NoError(t, wire.ScanEnvelope(envelope, raw))
+			require.NoError(t, proto.Unmarshal(raw, envelope))
+			mutate(envelope.GetStartPreview().GetRoute())
+			mutated, err := proto.Marshal(envelope)
+			require.NoError(t, err)
+			_, err = DecodeClient(mutated, testEnvelopeCeiling, testChunkCeiling)
+			require.Error(t, err)
+		})
+	}
 }
 
 // TestPreviewPublicationResultPresence proves exactly one of preview/error

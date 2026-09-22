@@ -163,15 +163,14 @@ type CloseStream struct {
 func (CloseStream) brokerClientMessage() {}
 
 // StartPreview starts or replaces one connection-scoped live preview.
-// Generation is the connection-scoped preview authority; Route is the exact
-// observation stream authority and Preview is the bounded viewport request
-// sent to the daemon. Route/request dimensions are retained by client
-// subscription state.
+// Generation is the connection-scoped preview authority; Route names the
+// observed daemon (the broker allocates the stream) and Preview is the bounded
+// viewport request sent to it.
 type StartPreview struct {
 	Epoch      ports.BrokerEpoch
 	Connection ports.BrokerConnectionID
 	Generation ports.BrokerPreviewGeneration
-	Route      OpenStream
+	Route      ports.BrokerPreviewRoute
 	Preview    protocol.RemotePreviewRequest
 }
 

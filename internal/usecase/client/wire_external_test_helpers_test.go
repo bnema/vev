@@ -92,8 +92,8 @@ func clientMessageName(t *testing.T, envelope wire.Envelope) string {
 		return "OutputResetRequest"
 	case protocol.UIFence:
 		return "UIFence"
-	case protocol.RemotePreviewRequest:
-		return "RemotePreviewRequest"
+	case protocol.RemotePreviewWatch:
+		return "RemotePreviewWatch"
 	case protocol.RouteAttentionSubscription:
 		return "RouteAttentionSubscription"
 	case protocol.SamePeerSwitchRequest:
@@ -114,8 +114,6 @@ func clientMessageName(t *testing.T, envelope wire.Envelope) string {
 		return "PickerClose"
 	case protocol.PickerSelection:
 		return "PickerSelection"
-	case protocol.PickerPreviewRequest:
-		return "PickerPreviewRequest"
 	default:
 		return ""
 	}
@@ -183,8 +181,6 @@ func serverMessageNameForTest(payload []byte) string {
 		return "PickerResult"
 	case protocol.PickerFailure:
 		return "PickerFailure"
-	case protocol.PickerPreview:
-		return "PickerPreview"
 	default:
 		return ""
 	}

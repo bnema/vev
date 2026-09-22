@@ -716,26 +716,54 @@ func (g BrokerPreviewGeneration) Validate() error {
 	return nil
 }
 
+// BrokerPreviewRoute names the daemon one preview observes. The broker
+// allocates the observation stream itself, so the route carries no stream
+// identity: the local flag or the exact remote registration, plus the policy
+// the observed daemon connection must be compatible with.
+type BrokerPreviewRoute struct {
+	Local        bool
+	Endpoint     string
+	Registration domain.RemoteRegistration
+	Policy       BrokerPolicy
+}
+
+func (r BrokerPreviewRoute) Validate() error {
+	if r.Local {
+		if r.Endpoint != "" || r.Registration != (domain.RemoteRegistration{}) {
+			return errors.New("ports: local preview route carries remote authority")
+		}
+		return nil
+	}
+	if err := r.Registration.Validate(); err != nil {
+		return err
+	}
+	if r.Endpoint != r.Registration.Endpoint {
+		return errors.New("ports: preview route endpoint registration mismatch")
+	}
+	return nil
+}
+
+// BrokerPreviewLocalEndpoint is the canonical preview target endpoint of the
+// local daemon.
+const BrokerPreviewLocalEndpoint = "local"
+
 // BrokerPreviewRequest starts or replaces one connection-scoped live preview.
-// Route is an exact observation stream authority; Preview carries the exact
-// session/tab target and bounded viewport dimensions sent to the daemon.
+// Route names the observed daemon; Preview carries the exact session/tab
+// target and bounded viewport dimensions sent to it.
 type BrokerPreviewRequest struct {
 	Epoch      BrokerEpoch
 	Connection BrokerConnectionID
 	Generation BrokerPreviewGeneration
-	Route      BrokerOpenStreamRequest
+	Route      BrokerPreviewRoute
 	Preview    protocol.RemotePreviewRequest
 }
 
 func (r BrokerPreviewRequest) Validate() error {
-	if r.Epoch == 0 || r.Route.Epoch != r.Epoch {
-		return errors.New("ports: broker preview epoch mismatch")
+	if r.Epoch == 0 {
+		return errors.New("ports: broker preview has no epoch")
 	}
 	if err := r.Connection.Validate(); err != nil {
 		return err
-	}
-	if r.Route.Connection != r.Connection {
-		return errors.New("ports: broker preview connection mismatch")
 	}
 	if err := r.Generation.Validate(); err != nil {
 		return err
@@ -743,11 +771,12 @@ func (r BrokerPreviewRequest) Validate() error {
 	if err := r.Route.Validate(); err != nil {
 		return fmt.Errorf("ports: broker preview route: %w", err)
 	}
-	if r.Route.Purpose != BrokerStreamObservation {
-		return errors.New("ports: broker preview route is not an observation")
-	}
 	if err := protocol.ValidateRemotePreviewRequest(r.Preview); err != nil {
 		return fmt.Errorf("ports: broker preview request: %w", err)
+	}
+	if r.Route.Local != (r.Preview.Target.Endpoint == BrokerPreviewLocalEndpoint) ||
+		(!r.Route.Local && r.Preview.Target.Endpoint != r.Route.Endpoint) {
+		return errors.New("ports: broker preview route does not own the target")
 	}
 	return nil
 }

@@ -178,13 +178,8 @@ func brokerClientSamples() map[string]*BrokerClientEnvelope {
 		"close_stream": {Payload: &BrokerClientEnvelope_CloseStream{CloseStream: &CloseStream{Ref: brokerRef()}}},
 		"start_preview": {Payload: &BrokerClientEnvelope_StartPreview{StartPreview: &StartPreview{
 			Scope: brokerScope(), Generation: 3,
-			Route: &OpenStream{
-				Ref: brokerRef(), Purpose: 3,
-				Policy:    brokerPolicy(),
-				StartMode: 1, Local: true,
-				// Note: route validation per ports requires observation+existing-only;
-				// the scanner sample only needs structural coverage, so keep
-				// purpose/observation fields populated.
+			Route: &PreviewRoute{
+				Endpoint: "dev@host:22", Registration: brokerRegistration(), Policy: brokerPolicy(),
 			},
 			Preview: &RemotePreviewRequest{
 				Version: 1,

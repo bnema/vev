@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -59,18 +58,6 @@ type overlayRuntime struct {
 	// attachment. They open no daemon interaction, so they never touch
 	// pickerInteraction.
 	pickerNavigationOffers uint64
-	// pickerPreview* track the row the client asked to preview. The generation
-	// supersedes an in-flight capture and names the render subscription, so a
-	// delayed preview can never replace the row the user is displaying.
-	// pickerPreviewSession pins the recorded subscription to the coordinator
-	// that owns it (the target session, or the viewer for a remote row), so
-	// teardown removes the exact target subscription. pickerPreviewCancel stops
-	// the selected remote row's active-freshness worker; it is nil for local
-	// rows, which keep using render-wake subscriptions.
-	pickerPreviewGeneration uint64
-	pickerPreviewKey        string
-	pickerPreviewSession    *session
-	pickerPreviewCancel     context.CancelFunc
 
 	paletteMu            sync.Mutex
 	palette              *palette.Model

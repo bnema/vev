@@ -381,6 +381,5 @@ func detachFrozenAttachmentLocked(sess *session, ac *attachedClient) bool {
 	sess.unregisterAttachmentLocked(ac)
 	ac.setSession(nil)
 	ac.invalidateFrozenAttachmentCapability()
-	cancelPickerPreviewWorker(ac)
 	return true
 }

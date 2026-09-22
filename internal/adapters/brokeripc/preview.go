@@ -10,7 +10,7 @@ import (
 
 func (s *serverSession) startPreview(m brokerwire.StartPreview) error {
 	request := ports.BrokerPreviewRequest{Epoch: m.Epoch, Connection: m.Connection, Generation: m.Generation,
-		Route: ports.BrokerOpenStreamRequest{Epoch: m.Route.Epoch, Connection: m.Route.Connection, Stream: m.Route.Stream, Purpose: m.Route.Purpose, Admission: m.Route.Admission, Name: m.Route.Name, Local: m.Route.Local, Endpoint: m.Route.Endpoint, Registration: m.Route.Registration, Target: m.Route.Target, Env: m.Route.Env, Policy: m.Route.Policy, StartMode: m.Route.StartMode}, Preview: m.Preview}
+		Route: m.Route, Preview: m.Preview}
 	s.subMu.Lock()
 	if m.Generation <= s.previewGeneration {
 		s.subMu.Unlock()

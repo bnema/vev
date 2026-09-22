@@ -102,17 +102,17 @@ func (p *Picker) SetCurrent(current pickerCurrent) {
 	}
 }
 
-// SetOwnsInput updates picker input ownership at an attachment boundary.
-func (p *Picker) PreviewRequest(connection ports.BrokerConnectionID, stream ports.BrokerStreamID, size domain.Size) (ports.BrokerOpenStreamRequest, protocol.RemotePreviewRequest, bool) {
+// PreviewRequest names the selected row's preview route and viewport.
+func (p *Picker) PreviewRequest(size domain.Size) (ports.BrokerPreviewRoute, protocol.RemotePreviewRequest, bool) {
 	if p == nil || p.controller == nil {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return ports.BrokerPreviewRoute{}, protocol.RemotePreviewRequest{}, false
 	}
-	return p.controller.PreviewRequest(connection, stream, size)
+	return p.controller.PreviewRequest(size)
 }
 
-func (p *Picker) SetPreview(preview protocol.RemotePreview) {
+func (p *Picker) SetPreview(preview protocol.RemotePreview, state previewState) {
 	if p != nil && p.controller != nil {
-		p.controller.SetPreview(preview)
+		p.controller.SetPreview(preview, state)
 	}
 }
 
@@ -122,6 +122,7 @@ func (p *Picker) ClearPreview() {
 	}
 }
 
+// SetOwnsInput updates picker input ownership at an attachment boundary.
 func (p *Picker) SetOwnsInput(owns bool) {
 	if p == nil || p.controller == nil {
 		return

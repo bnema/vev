@@ -894,7 +894,7 @@ func (x *UIViewUpdate) GetContext() *ViewContext {
 	return nil
 }
 
-// RemotePreviewRequest asks for a bounded remote viewport.
+// RemotePreviewRequest names a bounded exact-target viewport.
 type RemotePreviewRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
@@ -963,6 +963,62 @@ func (x *RemotePreviewRequest) GetHeight() uint32 {
 	return 0
 }
 
+// RemotePreviewWatch is a client first message: the server answers with a
+// stream of RemotePreview frames, at most one per min_interval_ms, until the
+// client closes the connection.
+type RemotePreviewWatch struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Request *RemotePreviewRequest  `protobuf:"bytes,1,opt,name=request,proto3" json:"request,omitempty"`
+	// Whole milliseconds inside [16, 1000].
+	MinIntervalMs uint32 `protobuf:"varint,2,opt,name=min_interval_ms,json=minIntervalMs,proto3" json:"min_interval_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemotePreviewWatch) Reset() {
+	*x = RemotePreviewWatch{}
+	mi := &file_terminal_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemotePreviewWatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemotePreviewWatch) ProtoMessage() {}
+
+func (x *RemotePreviewWatch) ProtoReflect() protoreflect.Message {
+	mi := &file_terminal_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemotePreviewWatch.ProtoReflect.Descriptor instead.
+func (*RemotePreviewWatch) Descriptor() ([]byte, []int) {
+	return file_terminal_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *RemotePreviewWatch) GetRequest() *RemotePreviewRequest {
+	if x != nil {
+		return x.Request
+	}
+	return nil
+}
+
+func (x *RemotePreviewWatch) GetMinIntervalMs() uint32 {
+	if x != nil {
+		return x.MinIntervalMs
+	}
+	return 0
+}
+
 // RemotePreview is a bounded row-major styled-cell viewport.
 type RemotePreview struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
@@ -982,7 +1038,7 @@ type RemotePreview struct {
 
 func (x *RemotePreview) Reset() {
 	*x = RemotePreview{}
-	mi := &file_terminal_proto_msgTypes[14]
+	mi := &file_terminal_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -994,7 +1050,7 @@ func (x *RemotePreview) String() string {
 func (*RemotePreview) ProtoMessage() {}
 
 func (x *RemotePreview) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[14]
+	mi := &file_terminal_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1007,7 +1063,7 @@ func (x *RemotePreview) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemotePreview.ProtoReflect.Descriptor instead.
 func (*RemotePreview) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{14}
+	return file_terminal_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *RemotePreview) GetVersion() uint32 {
@@ -1060,194 +1116,6 @@ func (x *RemotePreview) GetHeight() uint32 {
 }
 
 func (x *RemotePreview) GetCells() []*PreviewCell {
-	if x != nil {
-		return x.Cells
-	}
-	return nil
-}
-
-// PickerPreviewRequest asks for one picker's row viewport.
-type PickerPreviewRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	InteractionId uint64                 `protobuf:"varint,2,opt,name=interaction_id,json=interactionId,proto3" json:"interaction_id,omitempty"`
-	SourceId      string                 `protobuf:"bytes,3,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	Key           string                 `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
-	Width         uint32                 `protobuf:"varint,5,opt,name=width,proto3" json:"width,omitempty"`
-	Height        uint32                 `protobuf:"varint,6,opt,name=height,proto3" json:"height,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PickerPreviewRequest) Reset() {
-	*x = PickerPreviewRequest{}
-	mi := &file_terminal_proto_msgTypes[15]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PickerPreviewRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PickerPreviewRequest) ProtoMessage() {}
-
-func (x *PickerPreviewRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[15]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PickerPreviewRequest.ProtoReflect.Descriptor instead.
-func (*PickerPreviewRequest) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *PickerPreviewRequest) GetVersion() uint32 {
-	if x != nil {
-		return x.Version
-	}
-	return 0
-}
-
-func (x *PickerPreviewRequest) GetInteractionId() uint64 {
-	if x != nil {
-		return x.InteractionId
-	}
-	return 0
-}
-
-func (x *PickerPreviewRequest) GetSourceId() string {
-	if x != nil {
-		return x.SourceId
-	}
-	return ""
-}
-
-func (x *PickerPreviewRequest) GetKey() string {
-	if x != nil {
-		return x.Key
-	}
-	return ""
-}
-
-func (x *PickerPreviewRequest) GetWidth() uint32 {
-	if x != nil {
-		return x.Width
-	}
-	return 0
-}
-
-func (x *PickerPreviewRequest) GetHeight() uint32 {
-	if x != nil {
-		return x.Height
-	}
-	return 0
-}
-
-// PickerPreview is the row viewport of one picker row.
-type PickerPreview struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	InteractionId uint64                 `protobuf:"varint,2,opt,name=interaction_id,json=interactionId,proto3" json:"interaction_id,omitempty"`
-	SourceId      string                 `protobuf:"bytes,3,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	Key           string                 `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
-	// Closed status taxonomy: 0 = ok, 1 = no such target, 2 = unavailable,
-	// 3 = too large.
-	Status        uint32         `protobuf:"varint,5,opt,name=status,proto3" json:"status,omitempty"`
-	Width         uint32         `protobuf:"varint,6,opt,name=width,proto3" json:"width,omitempty"`
-	Height        uint32         `protobuf:"varint,7,opt,name=height,proto3" json:"height,omitempty"`
-	Cells         []*PreviewCell `protobuf:"bytes,8,rep,name=cells,proto3" json:"cells,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PickerPreview) Reset() {
-	*x = PickerPreview{}
-	mi := &file_terminal_proto_msgTypes[16]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PickerPreview) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PickerPreview) ProtoMessage() {}
-
-func (x *PickerPreview) ProtoReflect() protoreflect.Message {
-	mi := &file_terminal_proto_msgTypes[16]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PickerPreview.ProtoReflect.Descriptor instead.
-func (*PickerPreview) Descriptor() ([]byte, []int) {
-	return file_terminal_proto_rawDescGZIP(), []int{16}
-}
-
-func (x *PickerPreview) GetVersion() uint32 {
-	if x != nil {
-		return x.Version
-	}
-	return 0
-}
-
-func (x *PickerPreview) GetInteractionId() uint64 {
-	if x != nil {
-		return x.InteractionId
-	}
-	return 0
-}
-
-func (x *PickerPreview) GetSourceId() string {
-	if x != nil {
-		return x.SourceId
-	}
-	return ""
-}
-
-func (x *PickerPreview) GetKey() string {
-	if x != nil {
-		return x.Key
-	}
-	return ""
-}
-
-func (x *PickerPreview) GetStatus() uint32 {
-	if x != nil {
-		return x.Status
-	}
-	return 0
-}
-
-func (x *PickerPreview) GetWidth() uint32 {
-	if x != nil {
-		return x.Width
-	}
-	return 0
-}
-
-func (x *PickerPreview) GetHeight() uint32 {
-	if x != nil {
-		return x.Height
-	}
-	return 0
-}
-
-func (x *PickerPreview) GetCells() []*PreviewCell {
 	if x != nil {
 		return x.Cells
 	}
@@ -1331,29 +1199,16 @@ const file_terminal_proto_rawDesc = "" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x121\n" +
 	"\x06target\x18\x02 \x01(\v2\x19.vev.wire.v1.RemoteTargetR\x06target\x12\x14\n" +
 	"\x05width\x18\x03 \x01(\rR\x05width\x12\x16\n" +
-	"\x06height\x18\x04 \x01(\rR\x06height\"\x8f\x02\n" +
+	"\x06height\x18\x04 \x01(\rR\x06height\"y\n" +
+	"\x12RemotePreviewWatch\x12;\n" +
+	"\arequest\x18\x01 \x01(\v2!.vev.wire.v1.RemotePreviewRequestR\arequest\x12&\n" +
+	"\x0fmin_interval_ms\x18\x02 \x01(\rR\rminIntervalMs\"\x8f\x02\n" +
 	"\rRemotePreview\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\rR\x06status\x12;\n" +
 	"\flifecycle_id\x18\x03 \x01(\v2\x18.vev.wire.v1.LifecycleIDR\vlifecycleId\x12\x15\n" +
 	"\x06tab_id\x18\x04 \x01(\tR\x05tabId\x12\x1a\n" +
 	"\brevision\x18\x05 \x01(\x04R\brevision\x12\x14\n" +
-	"\x05width\x18\x06 \x01(\rR\x05width\x12\x16\n" +
-	"\x06height\x18\a \x01(\rR\x06height\x12.\n" +
-	"\x05cells\x18\b \x03(\v2\x18.vev.wire.v1.PreviewCellR\x05cells\"\xb4\x01\n" +
-	"\x14PickerPreviewRequest\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\rR\aversion\x12%\n" +
-	"\x0einteraction_id\x18\x02 \x01(\x04R\rinteractionId\x12\x1b\n" +
-	"\tsource_id\x18\x03 \x01(\tR\bsourceId\x12\x10\n" +
-	"\x03key\x18\x04 \x01(\tR\x03key\x12\x14\n" +
-	"\x05width\x18\x05 \x01(\rR\x05width\x12\x16\n" +
-	"\x06height\x18\x06 \x01(\rR\x06height\"\xf5\x01\n" +
-	"\rPickerPreview\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\rR\aversion\x12%\n" +
-	"\x0einteraction_id\x18\x02 \x01(\x04R\rinteractionId\x12\x1b\n" +
-	"\tsource_id\x18\x03 \x01(\tR\bsourceId\x12\x10\n" +
-	"\x03key\x18\x04 \x01(\tR\x03key\x12\x16\n" +
-	"\x06status\x18\x05 \x01(\rR\x06status\x12\x14\n" +
 	"\x05width\x18\x06 \x01(\rR\x05width\x12\x16\n" +
 	"\x06height\x18\a \x01(\rR\x06height\x12.\n" +
 	"\x05cells\x18\b \x03(\v2\x18.vev.wire.v1.PreviewCellR\x05cellsB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
@@ -1370,7 +1225,7 @@ func file_terminal_proto_rawDescGZIP() []byte {
 	return file_terminal_proto_rawDescData
 }
 
-var file_terminal_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_terminal_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_terminal_proto_goTypes = []any{
 	(*ViewContext)(nil),            // 0: vev.wire.v1.ViewContext
 	(*Output)(nil),                 // 1: vev.wire.v1.Output
@@ -1386,26 +1241,25 @@ var file_terminal_proto_goTypes = []any{
 	(*UIReceipt)(nil),              // 11: vev.wire.v1.UIReceipt
 	(*UIViewUpdate)(nil),           // 12: vev.wire.v1.UIViewUpdate
 	(*RemotePreviewRequest)(nil),   // 13: vev.wire.v1.RemotePreviewRequest
-	(*RemotePreview)(nil),          // 14: vev.wire.v1.RemotePreview
-	(*PickerPreviewRequest)(nil),   // 15: vev.wire.v1.PickerPreviewRequest
-	(*PickerPreview)(nil),          // 16: vev.wire.v1.PickerPreview
-	(*CommittedRouteIdentity)(nil), // 17: vev.wire.v1.CommittedRouteIdentity
-	(*RGB)(nil),                    // 18: vev.wire.v1.RGB
-	(*RemoteTarget)(nil),           // 19: vev.wire.v1.RemoteTarget
-	(*LifecycleID)(nil),            // 20: vev.wire.v1.LifecycleID
-	(*PreviewCell)(nil),            // 21: vev.wire.v1.PreviewCell
+	(*RemotePreviewWatch)(nil),     // 14: vev.wire.v1.RemotePreviewWatch
+	(*RemotePreview)(nil),          // 15: vev.wire.v1.RemotePreview
+	(*CommittedRouteIdentity)(nil), // 16: vev.wire.v1.CommittedRouteIdentity
+	(*RGB)(nil),                    // 17: vev.wire.v1.RGB
+	(*RemoteTarget)(nil),           // 18: vev.wire.v1.RemoteTarget
+	(*LifecycleID)(nil),            // 19: vev.wire.v1.LifecycleID
+	(*PreviewCell)(nil),            // 20: vev.wire.v1.PreviewCell
 }
 var file_terminal_proto_depIdxs = []int32{
-	17, // 0: vev.wire.v1.ViewContext.route:type_name -> vev.wire.v1.CommittedRouteIdentity
+	16, // 0: vev.wire.v1.ViewContext.route:type_name -> vev.wire.v1.CommittedRouteIdentity
 	0,  // 1: vev.wire.v1.Output.context:type_name -> vev.wire.v1.ViewContext
-	18, // 2: vev.wire.v1.Theme.foreground:type_name -> vev.wire.v1.RGB
-	18, // 3: vev.wire.v1.Theme.background:type_name -> vev.wire.v1.RGB
-	18, // 4: vev.wire.v1.Theme.palette:type_name -> vev.wire.v1.RGB
+	17, // 2: vev.wire.v1.Theme.foreground:type_name -> vev.wire.v1.RGB
+	17, // 3: vev.wire.v1.Theme.background:type_name -> vev.wire.v1.RGB
+	17, // 4: vev.wire.v1.Theme.palette:type_name -> vev.wire.v1.RGB
 	0,  // 5: vev.wire.v1.UIViewUpdate.context:type_name -> vev.wire.v1.ViewContext
-	19, // 6: vev.wire.v1.RemotePreviewRequest.target:type_name -> vev.wire.v1.RemoteTarget
-	20, // 7: vev.wire.v1.RemotePreview.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	21, // 8: vev.wire.v1.RemotePreview.cells:type_name -> vev.wire.v1.PreviewCell
-	21, // 9: vev.wire.v1.PickerPreview.cells:type_name -> vev.wire.v1.PreviewCell
+	18, // 6: vev.wire.v1.RemotePreviewRequest.target:type_name -> vev.wire.v1.RemoteTarget
+	13, // 7: vev.wire.v1.RemotePreviewWatch.request:type_name -> vev.wire.v1.RemotePreviewRequest
+	19, // 8: vev.wire.v1.RemotePreview.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	20, // 9: vev.wire.v1.RemotePreview.cells:type_name -> vev.wire.v1.PreviewCell
 	10, // [10:10] is the sub-list for method output_type
 	10, // [10:10] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
@@ -1426,7 +1280,7 @@ func file_terminal_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_terminal_proto_rawDesc), len(file_terminal_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

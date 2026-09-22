@@ -553,7 +553,7 @@ func (c *client) SubscribePreview(request ports.BrokerPreviewRequest) (ports.Bro
 	sub := newClientPreviewSubscription(c, request)
 	c.preview, c.previewGeneration = sub, request.Generation
 	c.mu.Unlock()
-	if err := c.sendAsync(brokerwire.StartPreview{Epoch: request.Epoch, Connection: request.Connection, Generation: request.Generation, Route: brokerwire.OpenStream{Epoch: request.Route.Epoch, Connection: request.Route.Connection, Stream: request.Route.Stream, Purpose: request.Route.Purpose, Admission: request.Route.Admission, Name: request.Route.Name, Local: request.Route.Local, Endpoint: request.Route.Endpoint, Registration: request.Route.Registration, Target: request.Route.Target, Env: request.Route.Env, Policy: request.Route.Policy, StartMode: request.Route.StartMode}, Preview: request.Preview}); err != nil {
+	if err := c.sendAsync(brokerwire.StartPreview{Epoch: request.Epoch, Connection: request.Connection, Generation: request.Generation, Route: request.Route, Preview: request.Preview}); err != nil {
 		// The generation was already consumed as the connection's current
 		// preview generation, so the previous subscription is superseded even
 		// though this frame never left. Retire both and leave the connection

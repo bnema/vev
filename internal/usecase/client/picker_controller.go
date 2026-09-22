@@ -384,71 +384,73 @@ func (p *pickerController) Render(size domain.Size) []byte {
 	return p.renderer.render(p.loop, size, p.preview)
 }
 
-func (p *pickerController) SetPreview(preview protocol.RemotePreview) {
+// SetPreview displays one preview frame in the given state. A frame is shown
+// only in the fresh and stale states; stale dims it. The other states show a
+// short dim label instead, so the preview pane is never silently blank.
+func (p *pickerController) SetPreview(preview protocol.RemotePreview, state previewState) {
 	if p == nil {
 		return
 	}
+	view := previewView(preview, state)
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	rows := preview.FrameRows()
-	if preview.Status != protocol.RemotePreviewOK || rows == nil {
-		p.preview = pickerusecase.Preview{}
-		return
-	}
-	p.preview = pickerusecase.Preview{Rows: rows, Width: int(preview.Width), Height: int(preview.Height)}
+	p.preview = view
+	p.mu.Unlock()
 }
 
 // PreviewRequest derives preview authority from the exact catalogue ref behind
-// the selected row. Only live exact sessions with an authoritative active tab
-// are previewable; create rows and stopped sessions are deliberately refused.
-func (p *pickerController) PreviewRequest(connection ports.BrokerConnectionID, stream ports.BrokerStreamID, size domain.Size) (ports.BrokerOpenStreamRequest, protocol.RemotePreviewRequest, bool) {
+// the selected row. Only live exact sessions are previewable; a tab row
+// previews its own tab and a session row the active one. Create rows and
+// stopped sessions are deliberately refused.
+func (p *pickerController) PreviewRequest(size domain.Size) (ports.BrokerPreviewRoute, protocol.RemotePreviewRequest, bool) {
+	refuse := func() (ports.BrokerPreviewRoute, protocol.RemotePreviewRequest, bool) {
+		return ports.BrokerPreviewRoute{}, protocol.RemotePreviewRequest{}, false
+	}
 	key, ok := p.CursorKey()
 	if !ok || p.catalogue == nil {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
 	}
 	ref, ok := p.catalogue.Ref(key)
 	if !ok || ref.kind != pickerSelectionExact {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
 	}
-	route, err := p.catalogue.ResolveRef(ref, pickerResolveBase{Connection: connection, Stream: stream})
+	// Resolving with a provisional stream reuses every refusal the commit path
+	// applies (epoch, replaced registration, incompatibility, gone session);
+	// the broker allocates the real observation stream itself.
+	resolved, err := p.catalogue.ResolveRef(ref, pickerResolveBase{Connection: ports.BrokerConnectionID{1}, Stream: 1})
 	if err != nil {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
 	}
 	p.catalogue.mu.Lock()
 	authority := p.catalogue.authorityForRefLocked(ref)
 	p.catalogue.mu.Unlock()
 	if !authority.found {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
 	}
 	session, ok := pickerFindSession(authority.observation.Sessions, ref.lifecycle)
 	if !ok || session.State != catalogue.RemoteCatalogSessionUp {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
 	}
-	// A tab row previews its own tab; a session row previews the active one.
 	previewTab := domain.TabStableID(session.ActiveTabID)
 	if ref.tab.present {
 		previewTab = ref.tab.id
 	}
 	if previewTab == "" {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
+	}
+	route := ports.BrokerPreviewRoute{Local: resolved.Local, Policy: resolved.Policy}
+	endpoint := ports.BrokerPreviewLocalEndpoint
+	if !resolved.Local {
+		route.Endpoint, route.Registration = resolved.Endpoint, resolved.Registration
+		endpoint = resolved.Endpoint
 	}
 	viewport := pickerPreviewSize(size)
-	endpoint := authority.observation.Endpoint
-	if authority.observation.Local {
-		// RemoteSessionTarget still requires a non-empty route identity for the
-		// local daemon; "local" is the broker's canonical local authority.
-		endpoint = "local"
-	}
 	target := domain.RemoteSessionTarget{Endpoint: endpoint, DisplayOrigin: authority.observation.DisplayOrigin, LifecycleID: session.LifecycleID, SessionName: session.Name, LiveTabID: previewTab}
+	if target.DisplayOrigin == "" {
+		target.DisplayOrigin = pickerOriginLabel(authority.observation)
+	}
 	preview := protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: clampPreviewDimension(viewport.Cols, protocol.RemotePreviewMaxWidth), Height: clampPreviewDimension(viewport.Rows, protocol.RemotePreviewMaxHeight)}
-	route.Purpose = ports.BrokerStreamObservation
-	route.Admission = 0
-	route.Name = ""
-	route.Target = protocol.ExactSessionTarget{}
-	route.Env = nil
-	route.StartMode = ports.BrokerDaemonExistingOnly
 	if route.Validate() != nil || protocol.ValidateRemotePreviewRequest(preview) != nil {
-		return ports.BrokerOpenStreamRequest{}, protocol.RemotePreviewRequest{}, false
+		return refuse()
 	}
 	return route, preview, true
 }

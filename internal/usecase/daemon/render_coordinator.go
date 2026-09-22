@@ -51,9 +51,9 @@ type renderCoordinator struct {
 	// batch perpetually reset its own timer.
 	outputPressure int
 
-	// previewWakes tracks picker subscriptions by viewer, so one inactive session
-	// cannot replace another viewer's live preview.
-	previewWakes map[*attachedClient]previewSubscription
+	// previewWakes tracks preview subscriptions by observer, so one watcher
+	// cannot replace another's live preview.
+	previewWakes map[previewObserver]previewSubscription
 
 	// attachments and leases are coordinator-owned lifecycle snapshots. Shared
 	// render work is not tied to any one attachment; leases only fence callbacks
@@ -595,15 +595,21 @@ func (c *renderCoordinator) noteSyncPaneRemoved(p *pane) {
 	stopDetachedTimer(worker)
 }
 
+// previewObserver identifies one preview subscription by pointer identity.
+// The coordinator never calls into it; it only keys the subscription, so any
+// pointer owned by the watcher (for example its watch state) qualifies.
+type previewObserver any
+
 type previewSubscription struct {
 	generation uint64
 	fn         func(renderWake)
 }
 
-// subscribePreviewFor installs the dynamic picker observer owned by viewer.
-// A newer picker generation wins, so a delayed subscription cannot replace it.
-func (c *renderCoordinator) subscribePreviewFor(viewer *attachedClient, generation uint64, fn func(renderWake)) bool {
-	if viewer == nil || fn == nil {
+// subscribePreviewFor installs the preview observer's wake callback. fn runs
+// without coordinator locks on every coalesced wake and must never block. A
+// newer generation wins, so a delayed subscription cannot replace it.
+func (c *renderCoordinator) subscribePreviewFor(observer previewObserver, generation uint64, fn func(renderWake)) bool {
+	if observer == nil || fn == nil {
 		return false
 	}
 	c.mu.Lock()
@@ -611,22 +617,22 @@ func (c *renderCoordinator) subscribePreviewFor(viewer *attachedClient, generati
 	if c.torndown {
 		return false
 	}
-	if current, ok := c.previewWakes[viewer]; ok && current.generation > generation {
+	if current, ok := c.previewWakes[observer]; ok && current.generation > generation {
 		return false
 	}
 	if c.previewWakes == nil {
-		c.previewWakes = make(map[*attachedClient]previewSubscription)
+		c.previewWakes = make(map[previewObserver]previewSubscription)
 	}
-	c.previewWakes[viewer] = previewSubscription{generation: generation, fn: fn}
+	c.previewWakes[observer] = previewSubscription{generation: generation, fn: fn}
 	return true
 }
 
-// teardownPreviewFor removes viewer's observer only when it still belongs to
-// generation. A delayed teardown cannot clear a newer subscription.
-func (c *renderCoordinator) teardownPreviewFor(viewer *attachedClient, generation uint64) {
+// teardownPreviewFor removes observer's subscription only when it still
+// belongs to generation. A delayed teardown cannot clear a newer subscription.
+func (c *renderCoordinator) teardownPreviewFor(observer previewObserver, generation uint64) {
 	c.mu.Lock()
-	if current, ok := c.previewWakes[viewer]; ok && current.generation == generation {
-		delete(c.previewWakes, viewer)
+	if current, ok := c.previewWakes[observer]; ok && current.generation == generation {
+		delete(c.previewWakes, observer)
 	}
 	c.mu.Unlock()
 }
@@ -763,7 +769,10 @@ func (c *renderCoordinator) wakeCurrent(w renderWake) bool {
 }
 
 type renderLifecycleCleanup struct {
-	tokens           []*timerToken
+	tokens []*timerToken
+	// previews wake every torn-down preview observer once, so a watcher
+	// revalidates its target instead of waiting for its revalidation timer.
+	previews         []func(renderWake)
 	observer         ports.RuntimeObserver
 	queueCorrelation ports.RuntimeCorrelation
 	queueMarked      bool
@@ -773,6 +782,9 @@ type renderLifecycleCleanup struct {
 func (cleanup renderLifecycleCleanup) finish() {
 	for _, token := range cleanup.tokens {
 		stopDetachedTimer(token)
+	}
+	for _, fn := range cleanup.previews {
+		fn(renderWake{})
 	}
 	if cleanup.queueMarked && cleanup.observer != nil {
 		cleanup.observer.ObserveRuntime(ports.NewRuntimeMarkWithCorrelation("daemon", cleanup.queueCorrelation, ports.RuntimeQueueDequeued, 0, false))
@@ -865,6 +877,10 @@ func (c *renderCoordinator) beginSessionTeardown() renderLifecycleCleanup {
 	}
 	c.leases = nil
 	c.attachments = nil
+	previews := make([]func(renderWake), 0, len(c.previewWakes))
+	for _, subscription := range c.previewWakes {
+		previews = append(previews, subscription.fn)
+	}
 	c.previewWakes = nil
 	c.pending = false
 	_, resizeTimer := c.resizeLane.replaceLocked()
@@ -884,6 +900,7 @@ func (c *renderCoordinator) beginSessionTeardown() renderLifecycleCleanup {
 	c.mu.Unlock()
 	return renderLifecycleCleanup{
 		tokens:           append([]*timerToken{timer, resizeTimer, retryTimer}, workers...),
+		previews:         previews,
 		observer:         observer,
 		queueCorrelation: queueCorrelation,
 		queueMarked:      queueMarked,

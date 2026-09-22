@@ -67,6 +67,9 @@ message PreambleResponse {
 // must be set per envelope; sessionwire rejects empty, duplicate, and
 // wrong-direction payloads before generated unmarshal.
 message ClientEnvelope {
+  // 14 was the one-shot remote_preview_request; 27 was picker_preview_request.
+  reserved 14, 27;
+
   oneof payload {
     Hello hello = 1;
     Input input = 2;
@@ -81,7 +84,6 @@ message ClientEnvelope {
     ClientNotice client_notice = 11;
     CommandRequest command_request = 12;
     OutputResetRequest output_reset_request = 13;
-    RemotePreviewRequest remote_preview_request = 14;
     RouteAttentionSubscription route_attention_subscription = 15;
     SamePeerSwitchRequest same_peer_switch_request = 16;
     RecentRouteSnapshot recent_route_snapshot = 17;
@@ -93,18 +95,19 @@ message ClientEnvelope {
     NavigationInventoryFailure navigation_inventory_failure = 23;
     PickerClose picker_close = 25;
     PickerSelection picker_selection = 26;
-    PickerPreviewRequest picker_preview_request = 27;
     SuspendAttachment suspend_attachment = 29;
     ActivateAttachment activate_attachment = 30;
     SelectTab select_tab = 31;
+    RemotePreviewWatch remote_preview_watch = 32;
   }
 }
 
 // ServerEnvelope is the closed server-to-client union. Exactly one variant
 // must be set per envelope.
 message ServerEnvelope {
-  // 29 and 30 mirror the client-direction attachment request tags.
-  reserved 29, 30;
+  // 29 and 30 mirror the client-direction attachment request tags; 27 was
+  // picker_preview.
+  reserved 27, 29, 30;
 
   oneof payload {
     Welcome welcome = 1;
@@ -133,7 +136,6 @@ message ServerEnvelope {
     PickerClosed picker_closed = 24;
     PickerResult picker_result = 25;
     PickerFailure picker_failure = 26;
-    PickerPreview picker_preview = 27;
     AttachmentSuspended attachment_suspended = 31;
     AttachmentActivated attachment_activated = 32;
     KillResult kill_result = 33;

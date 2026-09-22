@@ -459,6 +459,7 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 		state:      State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
 		clientID:   newClientID(),
 		navigation: cfg.InitialNavigation,
+		preview:    previewManager{clock: cfg.Clock},
 	}
 	// The host is the supervisor's existing foreground grant. It owns no raw
 	// mode and starts no reader: the supervisor keeps its one terminal input

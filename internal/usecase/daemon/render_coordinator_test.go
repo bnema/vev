@@ -933,13 +933,17 @@ func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
 	cases := []struct {
 		name       string
 		transition func(*renderCoordinator, *attachedClient, *attachedClient)
+		// teardownWake is the single revalidation wake a session teardown
+		// gives every preview observer, so a watcher notices the dead target
+		// without waiting for its revalidation timer.
+		teardownWake bool
 	}{
-		{"target detach", func(rc *renderCoordinator, target, _ *attachedClient) { rc.noteDetach(target) }},
-		{"target detach and attach", func(rc *renderCoordinator, target, replacement *attachedClient) {
+		{name: "target detach", transition: func(rc *renderCoordinator, target, _ *attachedClient) { rc.noteDetach(target) }},
+		{name: "target detach and attach", transition: func(rc *renderCoordinator, target, replacement *attachedClient) {
 			rc.noteDetach(target)
 			rc.attach(replacement)
 		}},
-		{"target teardown", func(rc *renderCoordinator, _ *attachedClient, _ *attachedClient) { rc.beginSessionTeardown().finish() }},
+		{name: "target teardown", transition: func(rc *renderCoordinator, _ *attachedClient, _ *attachedClient) { rc.beginSessionTeardown().finish() }, teardownWake: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -952,11 +956,57 @@ func TestRenderCoordinatorPreviewLifecycleDropsStaleTargetWakes(t *testing.T) {
 			require.Len(t, stale, 1)
 
 			tc.transition(h.rc, target, replacement)
+			if tc.teardownWake {
+				require.Equal(t, renderWake{}, awaitWake(t, h.previews))
+				require.False(t, h.rc.hasPreviewSubscribers(), "teardown drops every preview subscription")
+			}
 			stale[0].ch <- time.Time{}
 			requireNoWake(t, h.wakes)
 			requireNoWake(t, h.previews)
 		})
 	}
+}
+
+// TestRenderCoordinatorPreviewObserverGenerations pins the observer-keyed
+// subscription table: a newer generation replaces, an older one never does,
+// and teardown only removes the exact generation it names.
+func TestRenderCoordinatorPreviewObserverGenerations(t *testing.T) {
+	type step struct {
+		subscribe bool
+		gen       uint64
+		wantOK    bool
+	}
+	cases := []struct {
+		name        string
+		steps       []step
+		wantPresent bool
+	}{
+		{name: "subscribe", steps: []step{{subscribe: true, gen: 1, wantOK: true}}, wantPresent: true},
+		{name: "newer generation replaces", steps: []step{{subscribe: true, gen: 1, wantOK: true}, {subscribe: true, gen: 2, wantOK: true}}, wantPresent: true},
+		{name: "older generation refused", steps: []step{{subscribe: true, gen: 2, wantOK: true}, {subscribe: true, gen: 1}}, wantPresent: true},
+		{name: "exact teardown removes", steps: []step{{subscribe: true, gen: 1, wantOK: true}, {gen: 1}}, wantPresent: false},
+		{name: "stale teardown keeps newer", steps: []step{{subscribe: true, gen: 2, wantOK: true}, {gen: 1}}, wantPresent: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCoordinatorHarness(t)
+			observer := &remotePreviewWatch{wake: make(chan struct{}, 1)}
+			for _, s := range tc.steps {
+				if s.subscribe {
+					require.Equal(t, s.wantOK, h.rc.subscribePreviewFor(observer, s.gen, observer.notify))
+				} else {
+					h.rc.teardownPreviewFor(observer, s.gen)
+				}
+			}
+			require.Equal(t, tc.wantPresent, h.rc.hasPreviewSubscribers())
+		})
+	}
+	t.Run("torn down coordinator refuses", func(t *testing.T) {
+		h := newCoordinatorHarness(t)
+		h.rc.beginSessionTeardown().finish()
+		observer := &remotePreviewWatch{wake: make(chan struct{}, 1)}
+		require.False(t, h.rc.subscribePreviewFor(observer, 1, observer.notify))
+	})
 }
 
 func TestRenderCoordinatorPreviewSubscriptionsAreIndependent(t *testing.T) {

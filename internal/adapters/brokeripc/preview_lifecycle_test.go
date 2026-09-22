@@ -24,24 +24,18 @@ func previewTarget() domain.RemoteSessionTarget {
 }
 
 // previewRequest builds one valid generation-N preview request for a client:
-// an exact observation route carrying the caller's own allocated stream plus
-// the exact session/tab target and bounded viewport sent to the daemon. The
-// endpoint epoch is assigned at accept, so the test takes it explicitly.
+// the local daemon route plus the exact session/tab target and bounded
+// viewport sent to it. The broker allocates the observation stream itself, so
+// the request names none. The endpoint epoch is assigned at accept, so the
+// test takes it explicitly.
 func previewRequest(t *testing.T, epoch ports.BrokerEpoch, client ports.BrokerService, generation ports.BrokerPreviewGeneration) ports.BrokerPreviewRequest {
 	t.Helper()
-	stream := nextStreamID(t, client)
-	target := previewTarget()
-	route := openRequest(stream)
-	route.Epoch = epoch
-	route.Connection = client.ConnectionID()
-	route.Purpose = ports.BrokerStreamObservation
-	route.StartMode = ports.BrokerDaemonExistingOnly
 	request := ports.BrokerPreviewRequest{
-		Epoch:      route.Epoch,
-		Connection: route.Connection,
+		Epoch:      epoch,
+		Connection: client.ConnectionID(),
 		Generation: generation,
-		Route:      route,
-		Preview:    protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 80, Height: 24},
+		Route:      ports.BrokerPreviewRoute{Local: true, Policy: openRequest(1).Policy},
+		Preview:    protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: previewTarget(), Width: 80, Height: 24},
 	}
 	require.NoError(t, request.Validate())
 	return request

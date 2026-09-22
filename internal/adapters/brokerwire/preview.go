@@ -14,9 +14,8 @@ package brokerwire
 // terminal wire shapes owned by the session conversation; the broker
 // conversation carries them as nested messages under its own envelope
 // tags. Repeated authority is scope/generation plus the preview target
-// identity response; route/request dimensions are retained by client
-// subscription state and re-checked here through the ports preview
-// contract.
+// identity response; the route names the observed daemon only, and the
+// broker allocates the observation stream itself.
 //
 // The field-by-field RemotePreviewRequest/RemotePreview conversion logic
 // lives in internal/adapters/protoconv, the canonical implementation shared
@@ -89,77 +88,68 @@ func remotePreviewFromWire(message *wire.RemotePreview) (protocol.RemotePreview,
 	return preview, nil
 }
 
-// previewRouteRequest mirrors one StartPreview route as the ports stream
-// request the preview contract gates, so encode and decode refuse exactly
-// what ports.BrokerPreviewRequest.Validate refuses.
-func previewRouteRequest(m StartPreview) ports.BrokerPreviewRequest {
-	return ports.BrokerPreviewRequest{
-		Epoch:      m.Epoch,
-		Connection: m.Connection,
-		Generation: m.Generation,
-		Route: ports.BrokerOpenStreamRequest{
-			Epoch: m.Route.Epoch, Purpose: m.Route.Purpose,
-			Admission: m.Route.Admission, Name: m.Route.Name, Local: m.Route.Local,
-			Connection: m.Route.Connection, Stream: m.Route.Stream,
-			Endpoint: m.Route.Endpoint, Registration: m.Route.Registration,
-			Target: m.Route.Target, Env: m.Route.Env, Policy: m.Route.Policy,
-			StartMode: m.Route.StartMode,
-		},
-		Preview: m.Preview,
+// previewRequest mirrors one StartPreview as the ports request the preview
+// contract gates, so encode and decode refuse exactly what
+// ports.BrokerPreviewRequest.Validate refuses.
+func previewRequest(m StartPreview) ports.BrokerPreviewRequest {
+	return ports.BrokerPreviewRequest{Epoch: m.Epoch, Connection: m.Connection, Generation: m.Generation, Route: m.Route, Preview: m.Preview}
+}
+
+func previewRouteToWire(route ports.BrokerPreviewRoute) *wire.PreviewRoute {
+	out := &wire.PreviewRoute{Local: route.Local, Endpoint: route.Endpoint, Policy: policyToWire(route.Policy)}
+	if !route.Local {
+		out.Registration = registrationToWire(route.Registration)
 	}
+	return out
+}
+
+func previewRouteFromWire(message *wire.PreviewRoute) (ports.BrokerPreviewRoute, error) {
+	if message == nil {
+		return ports.BrokerPreviewRoute{}, ErrInvalidMessage
+	}
+	policy, err := policyFromWire(message.GetPolicy())
+	if err != nil {
+		return ports.BrokerPreviewRoute{}, ErrInvalidMessage
+	}
+	route := ports.BrokerPreviewRoute{Local: message.GetLocal(), Endpoint: message.GetEndpoint(), Policy: policy}
+	if route.Local {
+		if message.GetRegistration() != nil {
+			return ports.BrokerPreviewRoute{}, ErrInvalidMessage
+		}
+	} else if route.Registration, err = registrationFromWire(message.GetRegistration()); err != nil {
+		return ports.BrokerPreviewRoute{}, ErrInvalidMessage
+	}
+	if route.Validate() != nil {
+		return ports.BrokerPreviewRoute{}, ErrInvalidMessage
+	}
+	return route, nil
 }
 
 func startPreviewToWire(m StartPreview) (*wire.StartPreview, error) {
-	if m.Epoch == 0 {
-		return nil, ErrInvalidMessage
-	}
-	if err := m.Connection.Validate(); err != nil {
-		return nil, ErrInvalidMessage
-	}
-	if err := m.Generation.Validate(); err != nil {
-		return nil, ErrInvalidMessage
-	}
-	// Authority repeats on the route: a route bound to another scope or a
-	// non-observation purpose is refused before it travels.
-	if m.Route.Epoch != m.Epoch || m.Route.Connection != m.Connection {
-		return nil, ErrInvalidMessage
-	}
-	if m.Route.Purpose != ports.BrokerStreamObservation {
-		return nil, ErrInvalidMessage
-	}
-	route, err := openStreamToWire(m.Route)
-	if err != nil {
-		return nil, err
-	}
 	preview, err := remotePreviewRequestToWire(m.Preview)
 	if err != nil {
 		return nil, err
 	}
-	if err := previewRouteRequest(m).Validate(); err != nil {
+	if err := previewRequest(m).Validate(); err != nil {
 		return nil, ErrInvalidMessage
 	}
 	return &wire.StartPreview{
 		Scope:      scopeToWire(m.Epoch, m.Connection),
 		Generation: uint64(m.Generation),
-		Route:      route,
+		Route:      previewRouteToWire(m.Route),
 		Preview:    preview,
 	}, nil
 }
 
 func startPreviewFromWire(message *wire.StartPreview) (StartPreview, error) {
-	var out StartPreview
 	if message == nil {
-		return out, ErrInvalidMessage
+		return StartPreview{}, ErrInvalidMessage
 	}
 	epoch, connection, err := scopeFromWire(message.GetScope())
 	if err != nil {
 		return StartPreview{}, ErrInvalidMessage
 	}
-	generation := ports.BrokerPreviewGeneration(message.GetGeneration())
-	if err := generation.Validate(); err != nil {
-		return StartPreview{}, ErrInvalidMessage
-	}
-	route, err := openStreamFromWire(message.GetRoute())
+	route, err := previewRouteFromWire(message.GetRoute())
 	if err != nil {
 		return StartPreview{}, err
 	}
@@ -167,8 +157,8 @@ func startPreviewFromWire(message *wire.StartPreview) (StartPreview, error) {
 	if err != nil {
 		return StartPreview{}, err
 	}
-	candidate := StartPreview{Epoch: epoch, Connection: connection, Generation: generation, Route: route, Preview: preview}
-	if err := previewRouteRequest(candidate).Validate(); err != nil {
+	candidate := StartPreview{Epoch: epoch, Connection: connection, Generation: ports.BrokerPreviewGeneration(message.GetGeneration()), Route: route, Preview: preview}
+	if err := previewRequest(candidate).Validate(); err != nil {
 		return StartPreview{}, ErrInvalidMessage
 	}
 	return candidate, nil

@@ -20,7 +20,7 @@ func (ClientNotice) clientMessage()                   {}
 func (CommandRequest) clientMessage()                 {}
 func (OutputResetRequest) clientMessage()             {}
 func (SelectTab) clientMessage()                      {}
-func (RemotePreviewRequest) clientMessage()           {}
+func (RemotePreviewWatch) clientMessage()             {}
 func (RouteAttentionSubscription) clientMessage()     {}
 func (SamePeerSwitchRequest) clientMessage()          {}
 func (RecentRouteSnapshot) clientMessage()            {}
@@ -32,7 +32,6 @@ func (NavigationInventoryPublication) clientMessage() {}
 func (NavigationInventoryFailure) clientMessage()     {}
 func (PickerClose) clientMessage()                    {}
 func (PickerSelection) clientMessage()                {}
-func (PickerPreviewRequest) clientMessage()           {}
 
 func (Welcome) serverMessage()                      {}
 func (ErrorMsg) serverMessage()                     {}
@@ -61,4 +60,3 @@ func (PickerSnapshot) serverMessage()               {}
 func (PickerClosed) serverMessage()                 {}
 func (PickerResult) serverMessage()                 {}
 func (PickerFailure) serverMessage()                {}
-func (PickerPreview) serverMessage()                {}

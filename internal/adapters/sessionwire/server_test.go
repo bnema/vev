@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -35,7 +36,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "command", want: protocol.CommandRequest{Version: protocol.Version, RequestID: 7, Slug: "list-sessions"}},
 		{name: "reset", want: protocol.OutputResetRequest{}},
 		{name: "select tab", want: protocol.SelectTab{TabID: "tab-2"}},
-		{name: "preview", want: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}},
+		{name: "preview", want: protocol.RemotePreviewWatch{Request: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}, MinInterval: 33 * time.Millisecond}},
 		{name: "attention", want: protocol.RouteAttentionSubscription{}},
 		{name: "same peer", want: protocol.SamePeerSwitchRequest{RequestID: 3, Target: exact}},
 		{name: "snapshot", want: protocol.RecentRouteSnapshot{}},

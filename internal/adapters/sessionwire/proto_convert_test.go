@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"reflect"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -51,7 +52,7 @@ func TestProtoClientRoundTrips(t *testing.T) {
 		protocol.OutputResetRequest{},
 		protocol.UIFence{ActionID: 7},
 		protocol.SelectTab{TabID: "tab-2"},
-		protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1},
+		protocol.RemotePreviewWatch{Request: protocol.RemotePreviewRequest{Version: protocol.RemotePreviewSchemaVersion, Target: target, Width: 1, Height: 1}, MinInterval: 33 * time.Millisecond},
 		protocol.RouteAttentionSubscription{},
 		protocol.SamePeerSwitchRequest{RequestID: 1, Target: protocol.ExactSessionTarget{LifecycleID: target.LifecycleID, SessionName: target.SessionName}},
 		protocol.RecentRouteSnapshot{},
@@ -62,7 +63,6 @@ func TestProtoClientRoundTrips(t *testing.T) {
 		protocol.NavigationInventoryFailure{CauseActionID: 1, InteractionGeneration: 1, SourceKey: "local", EntryKey: "a", Code: protocol.NavigationInventoryStaleIdentity},
 		protocol.PickerClose{InteractionID: 1},
 		protocol.PickerSelection{InteractionID: 1, SourceID: "serving", SourceRevision: 1, Key: "k", Action: protocol.PickerActionNavigate},
-		protocol.PickerPreviewRequest{Version: protocol.PickerPreviewSchemaVersion, InteractionID: 1, SourceID: "serving", Key: "k", Width: 1, Height: 1},
 	}
 	for _, message := range messages {
 		t.Run(protoMessageName(message), func(t *testing.T) {
@@ -114,7 +114,6 @@ func TestProtoServerRoundTrips(t *testing.T) {
 		protocol.PickerClosed{InteractionID: 1},
 		protocol.PickerResult{InteractionID: 1, SourceID: "serving", Key: "k", Action: protocol.PickerActionNavigate},
 		protocol.PickerFailure{InteractionID: 1, Action: protocol.PickerActionNavigate, Code: protocol.PickerStaleRevision},
-		protocol.PickerPreview{Version: protocol.PickerPreviewSchemaVersion, InteractionID: 1, SourceID: "serving", Key: "k", Status: protocol.PickerPreviewUnavailable},
 	}
 	for _, message := range messages {
 		t.Run(protoMessageName(message), func(t *testing.T) {

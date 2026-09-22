@@ -9,7 +9,6 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -57,8 +56,7 @@ type pickerForeignViews struct {
 
 // localPickerViews is the prepared local-only picker projection (Plan 001
 // P4.3). It captures live and stopped local rows, orders them exactly like the
-// hybrid projection does when no foreign source is present, and never reads
-// the remote directory.
+// hybrid projection did when no foreign source was present.
 func (d *Daemon) localPickerViews(cur *session, ac *attachedClient) pickerLocalViews {
 	if cur != nil && ac != nil {
 		cur.repairAttachmentView(ac)
@@ -131,68 +129,6 @@ func stoppedPickerRows(stopped []inactiveSession) []pickerSessionView {
 	return rows
 }
 
-// foreignPickerViews projects the current remote directory for the picker. It
-// reads the remote directory; a nil directory yields no rows and cannot
-// suppress the local stopped section label. The daemon-side monitor stays
-// intentionally active in this state (coordinated P7 removal set).
-func (d *Daemon) foreignPickerViews(now time.Time) pickerForeignViews {
-	hosts, monitored, initialized := d.currentRemoteDirectory()
-	catalogRows := 0
-	for _, host := range hosts {
-		catalogRows += len(host.Sessions)
-		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
-			catalogRows++
-		}
-	}
-	checking := monitored && !initialized
-	recent := make([]pickerSessionView, 0, catalogRows)
-	for _, host := range hosts {
-		for _, session := range host.Sessions {
-			key := domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}
-			if key.Validate() == nil {
-				recent = append(recent, remotePickerView(key, session, host, now))
-			}
-		}
-		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
-			recent = append(recent, remotePickerHostView(host, now))
-		}
-	}
-	if checking {
-		recent = append(recent, remotePickerCheckingView())
-	}
-
-	grouped := make([]pickerSessionView, 0, catalogRows)
-	for _, host := range hosts {
-		publishedForHost := 0
-		for _, session := range host.Sessions {
-			key := domain.RemoteSessionKey{Host: host.Endpoint, Name: session.Name}
-			if key.Validate() != nil {
-				continue
-			}
-			view := remotePickerView(key, session, host, now)
-			view.HideRemoteOrigin = true
-			if publishedForHost == 0 {
-				view.Section = "REMOTE  " + host.Endpoint
-			}
-			grouped = append(grouped, view)
-			publishedForHost++
-		}
-		if len(host.Sessions) == 0 && host.Availability != domain.RemoteAvailabilityReachable {
-			view := remotePickerHostView(host, now)
-			view.Section = "REMOTE  " + host.Endpoint
-			grouped = append(grouped, view)
-		}
-	}
-	// A nil directory means remote monitoring is not installed at all:
-	// only an installed-but-unpublished monitor reads as "checking".
-	if checking {
-		view := remotePickerCheckingView()
-		view.Section = "REMOTE"
-		grouped = append(grouped, view)
-	}
-	return pickerForeignViews{recent: recent, grouped: grouped, blockLocalStopped: catalogRows > 0 || checking}
-}
-
 // localPickerViewProjections is the complete remote-free picker projection.
 // It appends the local stopped rows directly and applies the LOCAL section
 // label when no live row opened the group.
@@ -222,46 +158,6 @@ func withLocalStoppedSection(stopped []pickerSessionView, local bool) []pickerSe
 
 func attentionSuffix(label string) string {
 	return label + " " + string(ui.AttentionGlyph)
-}
-
-func (d *Daemon) notifyRemotePickerUnavailable(sess *session, target picker.Target) {
-	reason := target.UnavailableReason
-	if reason == "" {
-		reason = domain.RemoteReasonIdentityChanged
-	}
-	message := "Remote session unavailable"
-	if target.RemoteTarget != nil {
-		message += ": " + domain.RemoteSessionDisplay(target.RemoteTarget.SessionName, target.RemoteTarget.DisplayOrigin)
-	} else if target.RemoteHost != "" {
-		message += ": " + target.RemoteHost
-	}
-	message += " — " + remotePickerReasonText(reason)
-	d.notify(sess, domain.NoticeWarn, domain.NoticeSessionUnavailable, message, nil)
-}
-
-func remotePickerReasonText(reason string) string {
-	switch reason {
-	case domain.RemoteReasonCatalogStale:
-		return "catalog stale"
-	case domain.RemoteReasonHostUnreachable:
-		return "host unreachable"
-	case domain.RemoteReasonVersionMismatch:
-		return "version mismatch"
-	case domain.RemoteReasonSessionStopped:
-		return "session stopped"
-	case domain.RemoteReasonSessionBroken:
-		return "session broken"
-	case domain.RemoteReasonMalformed:
-		return "catalog malformed"
-	case domain.RemoteReasonAuthFailure:
-		return "authentication failed"
-	case domain.RemoteReasonRefreshing:
-		return "refreshing"
-	case domain.RemoteReasonIdentityChanged:
-		return "session identity changed"
-	default:
-		return "unavailable"
-	}
 }
 
 func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
@@ -421,7 +317,9 @@ func (d *Daemon) switchToTargetForAttachment(effect *attachmentEffect, target pi
 		return nil
 	}
 	if target.RemoteTarget != nil || target.RemoteKey != nil {
-		return d.sendRemoteAttachTargetForAttachment(effect, target, guard, action)
+		// Other daemons are client routes (Plan 003 E3): the daemon never
+		// hands out a remote destination.
+		return errAttachmentTransition
 	}
 	return d.sendLocalAttachTargetForAttachment(effect, target, guard, action)
 }
@@ -501,71 +399,6 @@ func (d *Daemon) sendLocalAttachTargetForAttachment(effect *attachmentEffect, ta
 	effect.bindActionEnd(d, "detach")
 	effect.End()
 	return nil
-}
-
-// sendRemoteAttachTargetForAttachment validates the catalog row and hands the
-// endpoint to the thin client. The daemon owns no remote session shadow: after
-// the target is sent, the local attachment is detached and the client opens a
-// fresh connection to the owning daemon.
-func (d *Daemon) sendRemoteAttachTargetForAttachment(effect *attachmentEffect, target picker.Target, guard sessionHandoffGuard, _ string) error {
-	failUnavailable := func() error {
-		if effect.current() {
-			d.notifyRemotePickerUnavailable(effect.sess, target)
-		}
-		return errAttachmentTransition
-	}
-	if target.RemoteTarget == nil || target.RemoteKey == nil {
-		return failUnavailable()
-	}
-	remoteTarget := *target.RemoteTarget
-	key := *target.RemoteKey
-	if err := remoteTarget.Validate(); err != nil || key.Validate() != nil || target.Session != key.ID() || key.Host != remoteTarget.Endpoint || key.Name != remoteTarget.SessionName || key.LifecycleID != remoteTarget.LifecycleID || !d.remoteCatalogTargetReady(remoteTarget) {
-		return failUnavailable()
-	}
-	handoff := protocol.AttachTarget{
-		Session:           remoteTarget.SessionName,
-		Intent:            protocol.IntentAttach,
-		SessionTarget:     ptrSessionAttachTarget(protocol.SessionAttachTargetFromRemote(remoteTarget)),
-		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
-	}
-	if protocol.ValidateAttachTarget(handoff) != nil {
-		return failUnavailable()
-	}
-	if err := effect.sendControl(handoff); err != nil {
-		return domain.UserErr(domain.NoticeSessionUnavailable, "couldn't attach to remote session", err)
-	}
-	d.clientGoneForAttachment(effect, false)
-	return nil
-}
-
-// remoteCatalogTargetReady validates an exact remote destination against
-// the latest known inventory at any age. Freshness is presentation
-// information, not attach authority: valid cached targets are attempted and
-// rejected precisely at the destination, never declared nonexistent by age.
-func (d *Daemon) remoteCatalogTargetReady(target domain.RemoteSessionTarget) bool {
-	if d == nil || target.Validate() != nil {
-		return false
-	}
-	host, ok := d.remoteDirectorySnapshot().Find(target.Endpoint)
-	if !ok || !host.InventoryKnown {
-		return false
-	}
-	for _, session := range host.Sessions {
-		if session.Name != target.SessionName || session.LifecycleID != target.LifecycleID {
-			continue
-		}
-		if target.Stopped != remoteSessionStateStopped(session.State) || session.State == catalogue.RemoteCatalogSessionBroken {
-			return false
-		}
-		tabs := catalogue.CatalogTabs(session)
-		metadata := make([]domain.TabSelectorTab, 0, len(tabs))
-		for _, tab := range tabs {
-			metadata = append(metadata, domain.TabSelectorTab{ID: domain.TabStableID(tab.ID), Name: tab.Name})
-		}
-		_, ok := target.ResolveTab(metadata)
-		return ok
-	}
-	return false
 }
 
 // switchToTargetGuarded is retained for daemon-internal and headless callers.
