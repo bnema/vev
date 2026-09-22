@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -179,12 +180,20 @@ func (l *unixListener) Addr() string {
 
 // SocketDir returns the directory vev's daemon should place its socket in:
 // $XDG_RUNTIME_DIR/vev if set, else /run/user/<uid>/vev if that directory
-// exists, else /tmp/vev-<uid>.
+// exists, else /tmp/vev-<uid>. An XDG root too long for the longest
+// production endpoint (broker/broker.sock) uses a deterministic, per-user
+// private directory in /tmp instead. Hash the complete root so isolated
+// environments never fall back to the ordinary user's daemon. Listeners and
+// lifecycle locks still validate ownership and mode; no symlink is introduced.
 func SocketDir() string {
 	uid := os.Getuid()
 
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
-		return filepath.Join(xdg, "vev")
+		dir := filepath.Join(xdg, "vev")
+		if len(filepath.Join(dir, "broker", "broker.sock")) > muxSocketPathMax {
+			return fmt.Sprintf("/tmp/vev-%d-%x", uid, sha256.Sum256([]byte(dir)))
+		}
+		return dir
 	}
 
 	runUser := fmt.Sprintf("/run/user/%d", uid)

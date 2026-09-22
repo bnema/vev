@@ -267,6 +267,12 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	var configPath string
 	var err error
 	if options.production {
+		if err := ensureProductionBrokerConfig(); err != nil {
+			return err
+		}
+		if err := safedir.EnsurePrivate(ipc.SocketDir()); err != nil {
+			return fmt.Errorf("vev: secure broker runtime parent: %w", err)
+		}
 		layout = productionBrokerLayout()
 		configPath = productionBrokerConfigPath()
 	} else {

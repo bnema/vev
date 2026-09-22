@@ -181,3 +181,30 @@ func TestSocketDirFallsBackWithoutXDGRuntimeDir(t *testing.T) {
 		t.Fatalf("SocketDir() = %q, want %q", got, want)
 	}
 }
+
+func TestSocketDirLongXDGRoot(t *testing.T) {
+	// Production broker uses the longest suffix; the daemon mux must resolve
+	// through the same short directory, not the user's ordinary live runtime.
+	for _, length := range []int{103, 104, 250} {
+		t.Run(strconv.Itoa(length), func(t *testing.T) {
+			root := "/" + strings.Repeat("x", length-len("/vev/broker/broker.sock")-1)
+			t.Setenv("XDG_RUNTIME_DIR", root)
+			dir := SocketDir()
+			if length == 103 && dir != filepath.Join(root, "vev") {
+				t.Fatal("portable path should not move")
+			}
+			for _, suffix := range []string{"broker/broker.sock", "daemonmux.sock", "daemon.sock"} {
+				if err := validateMuxSocketPath(filepath.Join(dir, suffix)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if SocketDir() != dir {
+				t.Fatal("runtime mapping is not stable")
+			}
+			t.Setenv("XDG_RUNTIME_DIR", root+"y")
+			if SocketDir() == dir {
+				t.Fatal("distinct environments share a runtime")
+			}
+		})
+	}
+}

@@ -211,15 +211,17 @@ type client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	closed     bool
-	err        error
-	sub        *clientSubscription
-	generation brokerwire.SubscriptionGeneration
-	nextStream ports.BrokerStreamID
-	snapshot   ports.BrokerSnapshot
-	pending    map[ports.BrokerOperationID]chan operationResult
-	kinds      map[ports.BrokerOperationID]brokerwire.RegisterMutationKind
+	mu                sync.Mutex
+	closed            bool
+	err               error
+	sub               *clientSubscription
+	generation        brokerwire.SubscriptionGeneration
+	preview           *clientPreviewSubscription
+	previewGeneration ports.BrokerPreviewGeneration
+	nextStream        ports.BrokerStreamID
+	snapshot          ports.BrokerSnapshot
+	pending           map[ports.BrokerOperationID]chan operationResult
+	kinds             map[ports.BrokerOperationID]brokerwire.RegisterMutationKind
 	// The connection's own stream tracker is the anti-replay authority for
 	// this connection: it admits every identity at most once inside the bounded
 	// window, whether the open is afterwards accepted or refused.
@@ -268,6 +270,26 @@ func (c *client) dispatch(message brokerwire.ServerMessage) error {
 		if committed {
 			c.publish(snapshot)
 		}
+		return nil
+	case brokerwire.PreviewPublication:
+		if !c.scopeMatches(m.Epoch, m.Connection) {
+			return errors.Join(ErrScopeMismatch, ErrProtocol)
+		}
+		c.mu.Lock()
+		sub := c.preview
+		active := sub != nil && c.previewGeneration == m.Generation
+		c.mu.Unlock()
+		if !active {
+			return nil
+		}
+		publication := ports.BrokerPreviewPublication{Epoch: m.Epoch, Connection: m.Connection, Generation: m.Generation, Target: sub.request.Preview.Target, Width: sub.request.Preview.Width, Height: sub.request.Preview.Height, Preview: m.Preview}
+		if m.HasError {
+			publication.Err = failureFromDetail(m.Error)
+		}
+		if err := publication.Validate(); err != nil {
+			return errors.Join(ErrMalformedFrame, err)
+		}
+		sub.publish(publication)
 		return nil
 	case brokerwire.OperationResult:
 		if !c.scopeMatches(m.Epoch, m.Connection) {
@@ -510,6 +532,47 @@ func (c *client) Subscribe() (ports.BrokerSubscription, error) {
 // before any frame travels, so a duplicate and an identity evicted past the
 // window are both refused, while a concurrent lower identity that was allocated
 // first is still admitted.
+func (c *client) SubscribePreview(request ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	if err := request.Validate(); err != nil {
+		return nil, errors.Join(ports.BrokerAdmissionInvalid, err)
+	}
+	if request.Epoch != c.scope.Epoch || request.Connection != c.scope.Connection {
+		return nil, ports.BrokerAdmissionStale
+	}
+	c.mu.Lock()
+	if c.closed {
+		err := c.terminalErrorLocked()
+		c.mu.Unlock()
+		return nil, err
+	}
+	if request.Generation <= c.previewGeneration {
+		c.mu.Unlock()
+		return nil, ports.BrokerAdmissionStale
+	}
+	previous := c.preview
+	sub := newClientPreviewSubscription(c, request)
+	c.preview, c.previewGeneration = sub, request.Generation
+	c.mu.Unlock()
+	if err := c.sendAsync(brokerwire.StartPreview{Epoch: request.Epoch, Connection: request.Connection, Generation: request.Generation, Route: brokerwire.OpenStream{Epoch: request.Route.Epoch, Connection: request.Route.Connection, Stream: request.Route.Stream, Purpose: request.Route.Purpose, Admission: request.Route.Admission, Name: request.Route.Name, Local: request.Route.Local, Endpoint: request.Route.Endpoint, Registration: request.Route.Registration, Target: request.Route.Target, Env: request.Route.Env, Policy: request.Route.Policy, StartMode: request.Route.StartMode}, Preview: request.Preview}); err != nil {
+		// The generation was already consumed as the connection's current
+		// preview generation, so the previous subscription is superseded even
+		// though this frame never left. Retire both and leave the connection
+		// with no current preview, mirroring Subscribe's send-error path.
+		c.mu.Lock()
+		if c.preview == sub {
+			c.preview = nil
+		}
+		c.mu.Unlock()
+		sub.Close()
+		previous.Close()
+		return nil, err
+	}
+	if previous != nil {
+		previous.Close()
+	}
+	return sub, nil
+}
+
 func (c *client) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	scoped, err := c.scopeRequest(request)
 	if err != nil {
@@ -884,6 +947,8 @@ func (c *client) closeWith(cause error) {
 		terminal := c.terminalErrorLocked()
 		sub := c.sub
 		c.sub = nil
+		preview := c.preview
+		c.preview = nil
 		streams := make([]*clientStream, 0, len(c.streams))
 		for _, st := range c.streams {
 			streams = append(streams, st)
@@ -895,6 +960,9 @@ func (c *client) closeWith(cause error) {
 		}
 		if sub != nil {
 			sub.Close()
+		}
+		if preview != nil {
+			preview.Close()
 		}
 		close(c.done)
 	})

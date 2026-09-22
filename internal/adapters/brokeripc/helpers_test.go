@@ -423,6 +423,37 @@ func (c *fakeCore) Snapshot() ports.BrokerSnapshot { return c.hub.current() }
 
 func (c *fakeCore) Subscribe() (ports.BrokerSubscription, error) { return c.hub.subscribe(), nil }
 
+// fakePreviewSubscription is one server-side preview subscription whose
+// Changed channel a test drives explicitly.
+type fakePreviewSubscription struct {
+	changed chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	closed  bool
+}
+
+func newFakePreviewSubscription() *fakePreviewSubscription {
+	return &fakePreviewSubscription{changed: make(chan struct{}, 1)}
+}
+
+func (s *fakePreviewSubscription) Changed() <-chan struct{} { return s.changed }
+
+func (s *fakePreviewSubscription) Latest() ports.BrokerPreviewPublication {
+	return ports.BrokerPreviewPublication{}
+}
+
+func (s *fakePreviewSubscription) Close() {
+	s.once.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+	})
+}
+
+func (c *fakeCore) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return newFakePreviewSubscription(), nil
+}
+
 func (c *fakeCore) OpenStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

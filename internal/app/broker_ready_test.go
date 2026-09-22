@@ -160,6 +160,11 @@ func (s *readyScriptedService) Subscribe() (ports.BrokerSubscription, error) {
 	return sub, nil
 }
 
+func (s *readyScriptedService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	s.record("SubscribePreview")
+	return nil, errors.New("ready scripted service does not support preview")
+}
+
 func (s *readyScriptedService) OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.record("OpenStream")
 	return nil, ports.BrokerAdmissionClosed

@@ -39,6 +39,7 @@ type Authority struct {
 	registry   *Registry
 	pool       *Pool
 	supervisor *Supervisor
+	clock      ports.Clock
 }
 
 var _ ports.BrokerAuthority = (*Authority)(nil)
@@ -52,14 +53,21 @@ var _ ports.BrokerAuthority = (*Authority)(nil)
 // neither starts nor settles Run: serving connections without a live Run leaks
 // the writer and never flushes the newest staged publication, and a registry
 // that was never run leaves its durable writer undrained.
-func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, supervisor *Supervisor) (*Authority, error) {
+func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, supervisor *Supervisor, clocks ...ports.Clock) (*Authority, error) {
 	if epoch == 0 || nilDependency(registry) || nilDependency(pool) || nilDependency(supervisor) {
 		return nil, errors.New("broker: invalid authority dependencies")
 	}
 	if registry.epoch != epoch || pool.epoch != epoch {
 		return nil, errors.New("broker: authority epoch mismatch")
 	}
-	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor}, nil
+	clk := registry.clock
+	if len(clocks) > 0 {
+		clk = clocks[0]
+	}
+	if nilDependency(clk) {
+		return nil, errors.New("broker: invalid authority clock")
+	}
+	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor, clock: clk}, nil
 }
 
 // AdmitClient admits exactly one accepted client connection. The supervisor
@@ -86,7 +94,7 @@ func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error
 		lease.Release()
 		return nil, err
 	}
-	return newService(a.epoch, id, a.registry, a.pool, a.supervisor, lease), nil
+	return newService(a.epoch, id, a.registry, a.pool, a.supervisor, lease, a.clock), nil
 }
 
 // Service is one admitted client connection: the core's service for exactly one
@@ -98,6 +106,7 @@ type Service struct {
 	pool       *Pool
 	supervisor *Supervisor
 	lease      *Lease
+	clock      ports.Clock
 
 	// ctx owns everything this connection started: in-flight setup opens and
 	// live streams. It is derived from the supervisor root, never from the
@@ -105,9 +114,11 @@ type Service struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	closed bool
-	subs   map[*serviceSubscription]struct{}
+	mu                sync.Mutex
+	closed            bool
+	subs              map[*serviceSubscription]struct{}
+	preview           *servicePreviewSubscription
+	previewGeneration ports.BrokerPreviewGeneration
 	// nextStream is this connection's strictly increasing, never-zero logical
 	// stream ID allocator. It is the only allocator on this connection: the
 	// supervisor and the broker operations each read one identity here and carry
@@ -133,10 +144,10 @@ type Service struct {
 
 var _ ports.BrokerService = (*Service)(nil)
 
-func newService(epoch ports.BrokerEpoch, id ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease) *Service {
+func newService(epoch ports.BrokerEpoch, id ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease, clock ports.Clock) *Service {
 	ctx, cancel := context.WithCancel(supervisor.RootContext())
 	s := &Service{
-		epoch: epoch, id: id, registry: registry, pool: pool, supervisor: supervisor, lease: lease,
+		epoch: epoch, id: id, registry: registry, pool: pool, supervisor: supervisor, lease: lease, clock: clock,
 		ctx: ctx, cancel: cancel, subs: make(map[*serviceSubscription]struct{}),
 		done: make(chan struct{}),
 	}
@@ -364,9 +375,13 @@ func (s *Service) Close() error {
 		for sub := range s.subs {
 			subs = append(subs, sub)
 		}
+		preview := s.preview
 		s.mu.Unlock()
 
 		s.cancel()
+		if preview != nil {
+			preview.Close()
+		}
 		s.wg.Wait()
 		for _, sub := range subs {
 			sub.Close()

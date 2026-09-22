@@ -165,6 +165,10 @@ func (s *terminalCompositionService) Subscribe() (ports.BrokerSubscription, erro
 	return terminalCompositionSubscription{changed: s.changed}, nil
 }
 
+func (s *terminalCompositionService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return nil, errors.New("terminal composition service does not support preview")
+}
+
 func (s *terminalCompositionService) OpenStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	if s.closed {

@@ -704,6 +704,104 @@ type BrokerSubscription interface {
 	Close()
 }
 
+// BrokerPreviewGeneration identifies one selected-row preview authority within
+// a client connection. It is strictly monotone for that connection and never
+// crosses broker epochs.
+type BrokerPreviewGeneration uint64
+
+func (g BrokerPreviewGeneration) Validate() error {
+	if g == 0 {
+		return errors.New("ports: broker preview generation is zero")
+	}
+	return nil
+}
+
+// BrokerPreviewRequest starts or replaces one connection-scoped live preview.
+// Route is an exact observation stream authority; Preview carries the exact
+// session/tab target and bounded viewport dimensions sent to the daemon.
+type BrokerPreviewRequest struct {
+	Epoch      BrokerEpoch
+	Connection BrokerConnectionID
+	Generation BrokerPreviewGeneration
+	Route      BrokerOpenStreamRequest
+	Preview    protocol.RemotePreviewRequest
+}
+
+func (r BrokerPreviewRequest) Validate() error {
+	if r.Epoch == 0 || r.Route.Epoch != r.Epoch {
+		return errors.New("ports: broker preview epoch mismatch")
+	}
+	if err := r.Connection.Validate(); err != nil {
+		return err
+	}
+	if r.Route.Connection != r.Connection {
+		return errors.New("ports: broker preview connection mismatch")
+	}
+	if err := r.Generation.Validate(); err != nil {
+		return err
+	}
+	if err := r.Route.Validate(); err != nil {
+		return fmt.Errorf("ports: broker preview route: %w", err)
+	}
+	if r.Route.Purpose != BrokerStreamObservation {
+		return errors.New("ports: broker preview route is not an observation")
+	}
+	if err := protocol.ValidateRemotePreviewRequest(r.Preview); err != nil {
+		return fmt.Errorf("ports: broker preview request: %w", err)
+	}
+	return nil
+}
+
+// BrokerPreviewPublication is the newest result for one preview subscription.
+// Every authority field is repeated so a client can reject a late completion.
+type BrokerPreviewPublication struct {
+	Epoch      BrokerEpoch
+	Connection BrokerConnectionID
+	Generation BrokerPreviewGeneration
+	Target     domain.RemoteSessionTarget
+	Width      uint16
+	Height     uint16
+	Preview    protocol.RemotePreview
+	Err        error
+}
+
+func (p BrokerPreviewPublication) Validate() error {
+	if p.Epoch == 0 {
+		return errors.New("ports: broker preview publication has no epoch")
+	}
+	if err := p.Connection.Validate(); err != nil {
+		return err
+	}
+	if err := p.Generation.Validate(); err != nil {
+		return err
+	}
+	if p.Target.Validate() != nil || p.Target.Stopped {
+		return errors.New("ports: broker preview publication has invalid target")
+	}
+	if p.Width == 0 || p.Height == 0 || int(p.Width) > protocol.RemotePreviewMaxWidth || int(p.Height) > protocol.RemotePreviewMaxHeight {
+		return errors.New("ports: broker preview publication has invalid dimensions")
+	}
+	if p.Err != nil {
+		if p.Preview.Version != 0 || p.Preview.Status != 0 || p.Preview.LifecycleID != (domain.SessionLifecycleID{}) || p.Preview.TabID != "" || p.Preview.Revision != 0 || p.Preview.Width != 0 || p.Preview.Height != 0 || len(p.Preview.Cells) != 0 {
+			return errors.New("ports: failed broker preview publication carries a preview")
+		}
+		return nil
+	}
+	if err := protocol.ValidateRemotePreview(p.Preview); err != nil {
+		return fmt.Errorf("ports: broker preview publication: %w", err)
+	}
+	return nil
+}
+
+// BrokerPreviewSubscription owns one client-scoped selected-row preview. Changed
+// is capacity one; callers re-read Latest after every wake. Close cancels any
+// in-flight logical observation and is idempotent.
+type BrokerPreviewSubscription interface {
+	Changed() <-chan struct{}
+	Latest() BrokerPreviewPublication
+	Close()
+}
+
 // BrokerService is the client-facing broker façade. All clients reach
 // local and remote daemons through it, including the local daemon.
 // Snapshot access performs no I/O; request methods are non-blocking
@@ -728,6 +826,7 @@ type BrokerService interface {
 	Err() error
 	Snapshot() BrokerSnapshot
 	Subscribe() (BrokerSubscription, error)
+	SubscribePreview(request BrokerPreviewRequest) (BrokerPreviewSubscription, error)
 	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
 	CloseStream(connection BrokerConnectionID, stream BrokerStreamID) error
 	// AddHost durably adds or pins endpoint under policy and returns its authority.

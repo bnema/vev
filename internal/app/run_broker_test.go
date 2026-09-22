@@ -149,6 +149,10 @@ func (s *seamBrokerService) Subscribe() (ports.BrokerSubscription, error) {
 	return nil, errors.New("the seam broker service does not support subscriptions")
 }
 
+func (s *seamBrokerService) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return nil, errors.New("the seam broker service does not support preview")
+}
+
 func (s *seamBrokerService) OpenStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 	s.mu.Lock()
 	s.opens = append(s.opens, request)

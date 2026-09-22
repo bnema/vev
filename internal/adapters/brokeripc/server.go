@@ -482,8 +482,11 @@ type serverSession struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	subMu sync.Mutex
-	pub   *publisher
+	subMu             sync.Mutex
+	pub               *publisher
+	preview           ports.BrokerPreviewSubscription
+	previewGeneration ports.BrokerPreviewGeneration
+	previewForward    *previewForwarder
 
 	streamsMu sync.Mutex
 	streams   map[ports.BrokerStreamID]*serverStream
@@ -749,6 +752,22 @@ func (s *serverSession) dispatch(message brokerwire.ClientMessage) error {
 		}
 		s.closeStreamByPeer(m.Stream)
 		return nil
+	case brokerwire.StartPreview:
+		if !s.scopeMatches(m.Epoch, m.Connection) {
+			return s.refuseScope()
+		}
+		return s.startPreview(m)
+	case brokerwire.CancelPreview:
+		if !s.scopeMatches(m.Epoch, m.Connection) {
+			return s.refuseScope()
+		}
+		s.subMu.Lock()
+		if s.preview != nil && m.Generation == s.previewGeneration {
+			s.preview.Close()
+			s.preview = nil
+		}
+		s.subMu.Unlock()
+		return nil
 	default:
 		return errors.Join(ErrProtocol, fmt.Errorf("brokeripc: unexpected client message %T", message))
 	}
@@ -839,6 +858,16 @@ func (s *serverSession) abort(err error) {
 func (s *serverSession) shutdown() {
 	s.cancel()
 	s.stopPublisher()
+	s.subMu.Lock()
+	if s.previewForward != nil {
+		s.previewForward.stop()
+		s.previewForward = nil
+	}
+	if s.preview != nil {
+		s.preview.Close()
+		s.preview = nil
+	}
+	s.subMu.Unlock()
 	_ = s.transport.Close()
 	s.closeStreams()
 	_ = s.conn.BeginClose()
@@ -936,6 +965,9 @@ func (s *serverSession) Snapshot() ports.BrokerSnapshot { return s.core.Snapshot
 // protocol's Subscribe is driven by the connection's reader, which publishes
 // the broker core's newest snapshot for the client's generation.
 func (s *serverSession) Subscribe() (ports.BrokerSubscription, error) { return s.core.Subscribe() }
+func (s *serverSession) SubscribePreview(request ports.BrokerPreviewRequest) (ports.BrokerPreviewSubscription, error) {
+	return s.core.SubscribePreview(request)
+}
 
 // OpenStream delegates one scope-checked stream request to the admitted core
 // service. The connection's own reader drives the same core through

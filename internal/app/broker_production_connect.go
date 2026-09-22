@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/brokeripc"
+	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/pkg/safedir"
 )
 
 const productionBrokerStartupTimeout = 10 * time.Second
@@ -15,6 +17,14 @@ const productionBrokerStartupTimeout = 10 * time.Second
 // Process election and idle lifetime remain owned by the existing broker
 // launcher and broker.Supervisor; callers receive only the semantic façade.
 func connectProductionBroker(ctx context.Context) (ports.BrokerService, error) {
+	if err := ensureProductionBrokerConfig(); err != nil {
+		return nil, err
+	}
+	// Validate the shared parent before creating broker-owned descendants,
+	// especially when a long XDG root maps directly into /tmp.
+	if err := safedir.EnsurePrivate(ipc.SocketDir()); err != nil {
+		return nil, fmt.Errorf("vev: secure broker runtime parent: %w", err)
+	}
 	layout := productionBrokerLayout()
 	request := brokerStatusRequest{
 		layout: layout, socketPath: brokeripc.SocketPath(layout.Runtime),
