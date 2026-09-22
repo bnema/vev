@@ -412,6 +412,11 @@ type Supervisor struct {
 	pendingSwap *pickerAttachmentTarget
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
+	// routes is the client route ledger published to the serving daemon;
+	// routesSent is the attachment that received its latest snapshot. Both are
+	// only touched from the run goroutine.
+	routes     *routeLedger
+	routesSent AttachmentToken
 }
 
 // NewSupervisor validates the required dependencies and returns a supervisor

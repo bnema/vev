@@ -291,10 +291,15 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	overlay := attachmentOverlay(fg)
 	var repaint <-chan struct{}
 	var tabSelections <-chan domain.TabStableID
+	var routeUpdates <-chan protocol.RecentRouteSnapshot
+	var navigationReplies <-chan protocol.ClientMessage
 	if overlay != nil {
 		repaint = overlay.overlayRepaint()
 		tabSelections = overlay.tabSelections()
+		routeUpdates = overlay.routeSnapshots()
+		navigationReplies = overlay.navigationReplies()
 	}
+	var samePeerRequests uint64
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.TrueColor)}
 	defer picker.stopEscape()
 	input := newAttachmentInput(w, fg, stream, picker)
@@ -332,6 +337,16 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			// The picker overlay committed another tab of this session: switch
 			// the attachment's view in place instead of reconnecting.
 			if err := w.send(ctx, fg, stream, protocol.SelectTab{TabID: tab}); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case snapshot := <-routeUpdates:
+			// The supervisor's route ledger changed: the serving daemon renders
+			// the status-bar MRU, bells, and palette routes from it.
+			if err := w.send(ctx, fg, stream, snapshot); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+		case reply := <-navigationReplies:
+			if err := w.send(ctx, fg, stream, reply); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
 		case <-picker.escape():
@@ -387,6 +402,29 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 			case protocol.PickerClosed:
 				picker.closed(typed.InteractionID)
+			case protocol.AttachTarget:
+				if typed.SamePeer && typed.ExactTarget != nil {
+					// An endpoint-empty offer on this very connection: confirm
+					// it and the daemon moves this attachment in place.
+					samePeerRequests++
+					request := protocol.SamePeerSwitchRequest{RequestID: samePeerRequests, Target: *typed.ExactTarget, PreferredTabID: typed.PreferredTabID}
+					if request.Validate() != nil {
+						continue
+					}
+					if err := w.send(ctx, fg, stream, request); err != nil {
+						return w.settle(ctx, fg, stream, token, err)
+					}
+					continue
+				}
+				if overlay != nil {
+					overlay.requestNavigation(typed)
+				}
+			case protocol.RouteNavigationAction, protocol.RouteCreateSessionAction:
+				// The daemon asks the client to navigate: the supervisor
+				// resolves it through the broker catalogue.
+				if overlay != nil {
+					overlay.requestNavigation(typed)
+				}
 			case protocol.ErrorMsg:
 				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
 			case protocol.Detached:

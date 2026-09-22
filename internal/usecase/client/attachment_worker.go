@@ -400,6 +400,11 @@ type attachmentHost struct {
 	// internalActions carries supervisor-originated lifecycle decisions for the
 	// current foreground, such as the detach that precedes an attachment swap.
 	internalActions chan AttachmentLifecycleAction
+	// routeDemand wakes the supervisor to publish routes when the committed
+	// session changes; navigations carries the daemon's navigation requests
+	// (Plan 003 C4/C5). Only the supervisor consumes them.
+	routeDemand chan struct{}
+	navigations chan protocol.ServerMessage
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -439,6 +444,8 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		presentationUpdate: make(chan struct{}, 1),
 		navigationRequests: make(chan struct{}, 1),
 		internalActions:    make(chan AttachmentLifecycleAction, 1),
+		routeDemand:        make(chan struct{}, 1),
+		navigations:        make(chan protocol.ServerMessage, 1),
 	}
 }
 
@@ -610,6 +617,8 @@ func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.Broke
 		onAttached: h.onAttach,
 		repaint:    make(chan struct{}, 1),
 		tabSelect:  make(chan domain.TabStableID, 1),
+		routes:     make(chan protocol.RecentRouteSnapshot, 1),
+		replies:    make(chan protocol.ClientMessage, attachmentReplyCapacity),
 	}
 }
 
@@ -620,6 +629,8 @@ func (h *attachmentHost) drainForegroundSignals() {
 		select {
 		case <-h.navigationRequests:
 		case <-h.internalActions:
+		case <-h.routeDemand:
+		case <-h.navigations:
 		default:
 			return
 		}
@@ -754,6 +765,9 @@ type attachmentOverlayForeground interface {
 	overlayOutput(uiContext ports.UIContext, data []byte) error
 	noteCommitted(target protocol.ExactSessionTarget, tab domain.TabStableID)
 	tabSelections() <-chan domain.TabStableID
+	routeSnapshots() <-chan protocol.RecentRouteSnapshot
+	navigationReplies() <-chan protocol.ClientMessage
+	requestNavigation(message protocol.ServerMessage)
 }
 
 var _ attachmentOverlayForeground = (*attachmentForeground)(nil)
@@ -870,10 +884,14 @@ func (f *attachmentForeground) noteCommitted(target protocol.ExactSessionTarget,
 		return
 	}
 	f.overlayMu.Lock()
+	changed := !f.committedKnown || f.committed != target
 	f.committed = target
 	f.committedTab = tab
 	f.committedKnown = true
 	f.overlayMu.Unlock()
+	if changed {
+		f.demandRoutes()
+	}
 }
 
 // tabSelections carries the supervisor's in-place tab switches to the worker.
@@ -1074,6 +1092,10 @@ type attachmentForeground struct {
 	repaint chan struct{}
 	// tabSelect carries one pending in-place tab switch to the worker.
 	tabSelect chan domain.TabStableID
+	// routes carries the newest client route snapshot to the worker; replies
+	// carries the supervisor's navigation failures (Plan 003 C4/C5).
+	routes  chan protocol.RecentRouteSnapshot
+	replies chan protocol.ClientMessage
 }
 
 // Token is the generation/attempt identity of this grant.

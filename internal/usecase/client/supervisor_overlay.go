@@ -39,14 +39,6 @@ type attachmentPickerOverlay struct {
 
 func (o *attachmentPickerOverlay) picker() pickerHost { return o.sup.cfg.Picker }
 
-// changed is the broker publication wake while the overlay is presented.
-func (o *attachmentPickerOverlay) changed() <-chan struct{} {
-	if !o.active || supervisorNil(o.sup.readySub) {
-		return nil
-	}
-	return o.sup.readySub.Changed()
-}
-
 func (o *attachmentPickerOverlay) previewChanged() <-chan struct{} {
 	if !o.active {
 		return nil

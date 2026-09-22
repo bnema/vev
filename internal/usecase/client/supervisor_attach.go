@@ -436,6 +436,9 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		s.invalidatePickerPresentation()
 		// Back on the plain picker there is no attachment to start on.
 		s.setPickerCurrent(pickerCurrent{})
+		// Publications folded into routes while attached never reached the
+		// picker catalogue.
+		picker.ApplySnapshot(service.Snapshot())
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
@@ -555,8 +558,17 @@ settlement:
 			break settlement
 		case <-s.attachments.NavigationRequests():
 			overlay.enter()
-		case <-overlay.changed():
-			overlay.applyPublication()
+		case <-s.brokerChanged():
+			if overlay.active {
+				overlay.applyPublication()
+			}
+			s.publishRoutes(service, run, request)
+		case <-s.attachments.RouteDemands():
+			s.publishRoutes(service, run, request)
+		case message := <-s.attachments.Navigations():
+			if !overlay.swapping {
+				s.settleDaemonNavigation(service, overlay, message)
+			}
 		case <-overlay.previewChanged():
 			overlay.publishPreview()
 		case <-overlay.ops():
@@ -587,6 +599,9 @@ settlement:
 
 	// The attachment settled, so its foreground (and overlay slot) is gone.
 	overlay.drop()
+	if !terminated && !brokerLost {
+		s.takeSettledNavigation(service, run.token, request)
+	}
 	if terminated {
 		s.pendingSwap = nil
 		return true, termErr
