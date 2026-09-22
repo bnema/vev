@@ -1,10 +1,7 @@
 package sessionwire
 
 import (
-	"math"
 	"testing"
-
-	"google.golang.org/protobuf/proto"
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/protocol"
@@ -54,40 +51,20 @@ func pickerWirePreview() protocol.PickerPreview {
 	}
 }
 
-func pickerWireControlRequest() protocol.PickerControlRequest {
-	return protocol.PickerControlRequest{
-		Version: protocol.Version, RequestID: 4, Operation: protocol.PickerControlResolve,
-		SourceRevision: 2, SourceID: "serving", Key: "ab12/work#tab-1",
-	}
-}
-
-func pickerWireControlResponse() protocol.PickerControlResponse {
-	snapshot := protocol.NormalizePickerSnapshot(pickerWireSnapshot())
-	return protocol.PickerControlResponse{
-		RequestID: 4, Operation: protocol.PickerControlSnapshot, Status: protocol.PickerSourceOK, Snapshot: &snapshot,
-	}
-}
-
 func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
-	begin := protocol.PickerBegin{RequestID: 3, Intent: protocol.PickerIntentNavigation}
 	closeMessage := protocol.PickerClose{InteractionID: 7, RequestID: 3}
 	selection := pickerWireSelection()
 	previewRequest := pickerWirePreviewRequest()
-	controlRequest := pickerWireControlRequest()
 	tests := []struct {
 		name    string
 		message protocol.ClientMessage
 	}{
-		{name: "begin", message: begin},
-		{name: "begin pointer", message: &begin},
 		{name: "close", message: closeMessage},
 		{name: "close pointer", message: &closeMessage},
 		{name: "selection", message: selection},
 		{name: "selection pointer", message: &selection},
 		{name: "preview request", message: previewRequest},
 		{name: "preview request pointer", message: &previewRequest},
-		{name: "control request", message: controlRequest},
-		{name: "control request pointer", message: &controlRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,15 +73,11 @@ func TestPickerClientMessagesEncodeWithTypes(t *testing.T) {
 			got, err := DecodeClientEnvelope(mustSingleAppPayload(t, raw))
 			require.NoError(t, err)
 			switch message := tt.message.(type) {
-			case *protocol.PickerBegin:
-				require.Equal(t, *message, got)
 			case *protocol.PickerClose:
 				require.Equal(t, *message, got)
 			case *protocol.PickerSelection:
 				require.Equal(t, *message, got)
 			case *protocol.PickerPreviewRequest:
-				require.Equal(t, *message, got)
-			case *protocol.PickerControlRequest:
 				require.Equal(t, *message, got)
 			default:
 				require.Equal(t, tt.message, got)
@@ -178,105 +151,14 @@ func TestPickerSnapshotNormalizesIntoProjections(t *testing.T) {
 	}
 }
 
-func TestPickerControlMessagesRoundTripThroughConnections(t *testing.T) {
-	request := pickerWireControlRequest()
-	response := pickerWireControlResponse()
-	snapshot := pickerWireSnapshot()
-	wanted := protocol.PickerControlResponse{
-		RequestID: response.RequestID, Operation: response.Operation, Status: response.Status,
-		Snapshot: &protocol.PickerSnapshot{
-			InteractionID: snapshot.InteractionID, SourceID: snapshot.SourceID,
-			SourceRevision: snapshot.SourceRevision, Status: snapshot.Status,
-			Lines: snapshot.Lines, Cursor: snapshot.Cursor,
-			Recent: snapshot.Recent, Grouped: snapshot.Grouped,
-		},
-	}
-
-	for _, tc := range []struct {
-		name    string
-		message protocol.ClientMessage
-	}{
-		{name: "request", message: request},
-		{name: "request pointer", message: &request},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			clientRaw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
-			require.NoError(t, NewClientConnection(clientRaw).SendClient(tc.message))
-			serverRaw := &scriptedTransport{recv: mustServerPreambleQueue(t, mustSingleAppPayload(t, clientRaw))}
-			got, err := NewServerConnection(serverRaw).ReceiveClient()
-			require.NoError(t, err)
-			require.Equal(t, request, got)
-		})
-	}
-
-	for _, tc := range []struct {
-		name    string
-		message protocol.ServerMessage
-	}{
-		{name: "response", message: response},
-		{name: "response pointer", message: &response},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			serverRaw := &scriptedTransport{}
-			require.NoError(t, NewServerConnection(serverRaw).SendServer(tc.message))
-			require.Equal(t, 1, serverRaw.sentLen())
-			clientRaw := &scriptedTransport{recv: mustClientPreambleQueue(t, serverRaw.sentPayload(0))}
-			got, err := NewClientConnection(clientRaw).ReceiveServer()
-			require.NoError(t, err)
-			require.Equal(t, wanted, got)
-		})
-	}
-}
-
-func TestPickerControlRequestMalformedPreHandshakeClassification(t *testing.T) {
-	converted, err := pickerControlRequestToWire(pickerWireControlRequest())
-	require.NoError(t, err)
-	valid, err := proto.Marshal(&wire.ClientEnvelope{
-		Payload: &wire.ClientEnvelope_PickerControlRequest{PickerControlRequest: converted},
-	})
-	require.NoError(t, err)
-	tests := []struct {
-		name    string
-		payload []byte
-		version uint16
-	}{
-		{name: "truncated version", payload: valid[:1]},
-		{name: "oversized version", payload: pickerControlRequestWithVersion(t, math.MaxUint16+1)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			raw := &scriptedTransport{recv: mustServerPreambleQueue(t, tt.payload)}
-			_, err := NewServerConnection(raw).ReceiveClient()
-			var failure *protocol.DecodeFailure
-			require.ErrorAs(t, err, &failure)
-			require.Equal(t, protocol.DecodeMalformed, failure.Category)
-			require.Equal(t, tt.version, failure.Version)
-		})
-	}
-}
-
-func pickerControlRequestWithVersion(t *testing.T, version uint32) []byte {
-	t.Helper()
-	converted, err := pickerControlRequestToWire(pickerWireControlRequest())
-	require.NoError(t, err)
-	converted.Version = version
-	raw, err := proto.Marshal(&wire.ClientEnvelope{
-		Payload: &wire.ClientEnvelope_PickerControlRequest{PickerControlRequest: converted},
-	})
-	require.NoError(t, err)
-	return raw
-}
-
 func TestPickerMessagesDecodeInCorrectDirection(t *testing.T) {
 	offer := pickerWireOffer()
 	snapshot := pickerWireSnapshot()
 	selection := pickerWireSelection()
 	clientMessages := []protocol.ClientMessage{
-		protocol.PickerBegin{RequestID: 1, Intent: protocol.PickerIntentNavigation},
 		protocol.PickerClose{InteractionID: 1},
 		selection,
 		pickerWirePreviewRequest(),
-		pickerWireControlRequest(),
 	}
 	serverMessages := []protocol.ServerMessage{
 		offer,
@@ -285,7 +167,6 @@ func TestPickerMessagesDecodeInCorrectDirection(t *testing.T) {
 		protocol.PickerResult{InteractionID: 1, SourceID: "serving", Key: "a/b", Action: protocol.PickerActionKill},
 		protocol.PickerFailure{InteractionID: 1, Action: protocol.PickerActionKill, Code: protocol.PickerUnknownKey},
 		pickerWirePreview(),
-		pickerWireControlResponse(),
 	}
 	// Cross-direction decodability is structural, not directional: field
 	// numbers collide across envelopes, so a client payload may parse as
@@ -313,15 +194,6 @@ func TestPickerMessagesDecodeInCorrectDirection(t *testing.T) {
 			require.Equal(t, snapshot.Cursor, decoded.Cursor)
 			require.Equal(t, snapshot.Recent, decoded.Recent)
 			require.Equal(t, snapshot.Grouped, decoded.Grouped)
-			continue
-		}
-		if response, ok := message.(protocol.PickerControlResponse); ok {
-			decoded, ok := got.(protocol.PickerControlResponse)
-			require.True(t, ok, "got %T", got)
-			require.Equal(t, response.RequestID, decoded.RequestID)
-			require.Equal(t, response.Operation, decoded.Operation)
-			require.Equal(t, response.Status, decoded.Status)
-			require.NotNil(t, decoded.Snapshot)
 			continue
 		}
 		require.Equal(t, message, got)

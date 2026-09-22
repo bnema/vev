@@ -45,28 +45,6 @@ func pickerOfferFromWire(message *wire.PickerOffer) (protocol.PickerOffer, error
 	return offer, nil
 }
 
-func pickerBeginToWire(message protocol.PickerBegin) (*wire.PickerBegin, error) {
-	if err := protocol.ValidatePickerBegin(message); err != nil {
-		return nil, err
-	}
-	return &wire.PickerBegin{RequestId: message.RequestID, Intent: uint32(message.Intent)}, nil
-}
-
-func pickerBeginFromWire(message *wire.PickerBegin) (protocol.PickerBegin, error) {
-	if message == nil {
-		return protocol.PickerBegin{}, protocol.ErrInvalidNavigation
-	}
-	intent, err := enum8[protocol.PickerIntent](message.GetIntent())
-	if err != nil {
-		return protocol.PickerBegin{}, err
-	}
-	begin := protocol.PickerBegin{RequestID: message.GetRequestId(), Intent: intent}
-	if err := protocol.ValidatePickerBegin(begin); err != nil {
-		return protocol.PickerBegin{}, err
-	}
-	return begin, nil
-}
-
 func pickerCloseToWire(message protocol.PickerClose) (*wire.PickerClose, error) {
 	if err := protocol.ValidatePickerClose(message); err != nil {
 		return nil, err
@@ -217,82 +195,4 @@ func pickerFailureFromWire(message *wire.PickerFailure) (protocol.PickerFailure,
 		return protocol.PickerFailure{}, err
 	}
 	return failure, nil
-}
-
-func pickerControlResponseToWire(message protocol.PickerControlResponse) (*wire.PickerControlResponse, error) {
-	if err := protocol.ValidatePickerControlResponse(message); err != nil {
-		return nil, err
-	}
-	out := &wire.PickerControlResponse{RequestId: message.RequestID, Operation: uint32(message.Operation), Status: uint32(message.Status)}
-	if message.Snapshot != nil {
-		snapshot, err := pickerSnapshotToWire(*message.Snapshot)
-		if err != nil {
-			return nil, err
-		}
-		out.Snapshot = snapshot
-	}
-	if message.Resolved != nil {
-		resolved, err := attachTargetToWire(*message.Resolved)
-		if err != nil {
-			return nil, err
-		}
-		out.Resolved = resolved
-	}
-	for _, observation := range message.Observations {
-		observation := observation
-		target := exactTargetToWire(&observation.Target)
-		out.Observations = append(out.Observations, &wire.PickerRouteObservation{Target: target, Presence: uint32(observation.Presence), Attention: observation.Attention})
-	}
-	return out, nil
-}
-
-func pickerControlResponseFromWire(message *wire.PickerControlResponse) (protocol.PickerControlResponse, error) {
-	var response protocol.PickerControlResponse
-	if message == nil {
-		return response, protocol.ErrInvalidNavigation
-	}
-	response.RequestID = message.GetRequestId()
-	operation, err := enum8[protocol.PickerControlOperation](message.GetOperation())
-	if err != nil {
-		return protocol.PickerControlResponse{}, protocol.ErrInvalidNavigation
-	}
-	response.Operation = operation
-	status, err := enum8[protocol.PickerSourceStatus](message.GetStatus())
-	if err != nil {
-		return protocol.PickerControlResponse{}, protocol.ErrInvalidNavigation
-	}
-	response.Status = status
-	if message.GetSnapshot() != nil {
-		snapshot, err := pickerSnapshotFromWire(message.GetSnapshot())
-		if err != nil {
-			return protocol.PickerControlResponse{}, err
-		}
-		response.Snapshot = &snapshot
-	}
-	if message.GetResolved() != nil {
-		resolved, err := attachTargetFromWire(message.GetResolved())
-		if err != nil {
-			return protocol.PickerControlResponse{}, err
-		}
-		response.Resolved = &resolved
-	}
-	for _, observation := range message.GetObservations() {
-		target, err := exactTargetFromWire(observation.GetTarget())
-		if err != nil || target == nil {
-			return protocol.PickerControlResponse{}, protocol.ErrInvalidNavigation
-		}
-		presence, err := enum8[protocol.PickerRoutePresence](observation.GetPresence())
-		if err != nil {
-			return protocol.PickerControlResponse{}, protocol.ErrInvalidNavigation
-		}
-		response.Observations = append(response.Observations, protocol.PickerRouteObservation{
-			Target:    *target,
-			Presence:  presence,
-			Attention: observation.GetAttention(),
-		})
-	}
-	if err := protocol.ValidatePickerControlResponse(response); err != nil {
-		return protocol.PickerControlResponse{}, err
-	}
-	return response, nil
 }

@@ -358,8 +358,10 @@ func TestBrokerClientVariants(t *testing.T) {
 		{"client_stream_data", ClientStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")}, 109},
 		{"close_stream", CloseStream{Epoch: 7, Connection: connection, Stream: 3}, 110},
 		{"update_host_policy", UpdateHostPolicy{Epoch: 7, Connection: connection, Operation: operation, Registration: testRegistration(), Policy: testPolicy()}, 111},
+		{"start_preview", testStartPreview(connection), 112},
+		{"cancel_preview", CancelPreview{Epoch: 7, Connection: connection, Generation: 3}, 113},
 	}
-	require.Len(t, messages, 11)
+	require.Len(t, messages, 13)
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := mustEncodeClient(t, tc.message)
@@ -602,6 +604,8 @@ func TestBrokerServerVariants(t *testing.T) {
 		{"progress", Progress{Epoch: 7, Connection: connection, Stream: 3, Phase: BrokerProgressProbing, Text: "probing"}, 207},
 		{"broker_error", BrokerErrorMessage{Epoch: 7, Connection: connection, Error: testErrorDetail()}, 208},
 		{"shutdown", Shutdown{Epoch: 7, Connection: connection, Reason: ShutdownTerminating, Text: "stopping"}, 209},
+		{"preview_publication", testPreviewPublication(connection), 210},
+		{"preview_publication_error", PreviewPublication{Epoch: 7, Connection: connection, Generation: 5, Error: testErrorDetail(), HasError: true}, 210},
 	}
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {

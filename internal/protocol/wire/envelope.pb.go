@@ -354,11 +354,9 @@ type ClientEnvelope struct {
 	//	*ClientEnvelope_NavigationInventoryRequest
 	//	*ClientEnvelope_NavigationInventoryPublication
 	//	*ClientEnvelope_NavigationInventoryFailure
-	//	*ClientEnvelope_PickerBegin
 	//	*ClientEnvelope_PickerClose
 	//	*ClientEnvelope_PickerSelection
 	//	*ClientEnvelope_PickerPreviewRequest
-	//	*ClientEnvelope_PickerControlRequest
 	//	*ClientEnvelope_SuspendAttachment
 	//	*ClientEnvelope_ActivateAttachment
 	Payload       isClientEnvelope_Payload `protobuf_oneof:"payload"`
@@ -610,15 +608,6 @@ func (x *ClientEnvelope) GetNavigationInventoryFailure() *NavigationInventoryFai
 	return nil
 }
 
-func (x *ClientEnvelope) GetPickerBegin() *PickerBegin {
-	if x != nil {
-		if x, ok := x.Payload.(*ClientEnvelope_PickerBegin); ok {
-			return x.PickerBegin
-		}
-	}
-	return nil
-}
-
 func (x *ClientEnvelope) GetPickerClose() *PickerClose {
 	if x != nil {
 		if x, ok := x.Payload.(*ClientEnvelope_PickerClose); ok {
@@ -641,15 +630,6 @@ func (x *ClientEnvelope) GetPickerPreviewRequest() *PickerPreviewRequest {
 	if x != nil {
 		if x, ok := x.Payload.(*ClientEnvelope_PickerPreviewRequest); ok {
 			return x.PickerPreviewRequest
-		}
-	}
-	return nil
-}
-
-func (x *ClientEnvelope) GetPickerControlRequest() *PickerControlRequest {
-	if x != nil {
-		if x, ok := x.Payload.(*ClientEnvelope_PickerControlRequest); ok {
-			return x.PickerControlRequest
 		}
 	}
 	return nil
@@ -769,10 +749,6 @@ type ClientEnvelope_NavigationInventoryFailure struct {
 	NavigationInventoryFailure *NavigationInventoryFailure `protobuf:"bytes,23,opt,name=navigation_inventory_failure,json=navigationInventoryFailure,proto3,oneof"`
 }
 
-type ClientEnvelope_PickerBegin struct {
-	PickerBegin *PickerBegin `protobuf:"bytes,24,opt,name=picker_begin,json=pickerBegin,proto3,oneof"`
-}
-
 type ClientEnvelope_PickerClose struct {
 	PickerClose *PickerClose `protobuf:"bytes,25,opt,name=picker_close,json=pickerClose,proto3,oneof"`
 }
@@ -783,10 +759,6 @@ type ClientEnvelope_PickerSelection struct {
 
 type ClientEnvelope_PickerPreviewRequest struct {
 	PickerPreviewRequest *PickerPreviewRequest `protobuf:"bytes,27,opt,name=picker_preview_request,json=pickerPreviewRequest,proto3,oneof"`
-}
-
-type ClientEnvelope_PickerControlRequest struct {
-	PickerControlRequest *PickerControlRequest `protobuf:"bytes,28,opt,name=picker_control_request,json=pickerControlRequest,proto3,oneof"`
 }
 
 type ClientEnvelope_SuspendAttachment struct {
@@ -843,15 +815,11 @@ func (*ClientEnvelope_NavigationInventoryPublication) isClientEnvelope_Payload()
 
 func (*ClientEnvelope_NavigationInventoryFailure) isClientEnvelope_Payload() {}
 
-func (*ClientEnvelope_PickerBegin) isClientEnvelope_Payload() {}
-
 func (*ClientEnvelope_PickerClose) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_PickerSelection) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_PickerPreviewRequest) isClientEnvelope_Payload() {}
-
-func (*ClientEnvelope_PickerControlRequest) isClientEnvelope_Payload() {}
 
 func (*ClientEnvelope_SuspendAttachment) isClientEnvelope_Payload() {}
 
@@ -890,7 +858,6 @@ type ServerEnvelope struct {
 	//	*ServerEnvelope_PickerResult
 	//	*ServerEnvelope_PickerFailure
 	//	*ServerEnvelope_PickerPreview
-	//	*ServerEnvelope_PickerControlResponse
 	//	*ServerEnvelope_AttachmentSuspended
 	//	*ServerEnvelope_AttachmentActivated
 	//	*ServerEnvelope_KillResult
@@ -1179,15 +1146,6 @@ func (x *ServerEnvelope) GetPickerPreview() *PickerPreview {
 	return nil
 }
 
-func (x *ServerEnvelope) GetPickerControlResponse() *PickerControlResponse {
-	if x != nil {
-		if x, ok := x.Payload.(*ServerEnvelope_PickerControlResponse); ok {
-			return x.PickerControlResponse
-		}
-	}
-	return nil
-}
-
 func (x *ServerEnvelope) GetAttachmentSuspended() *AttachmentSuspended {
 	if x != nil {
 		if x, ok := x.Payload.(*ServerEnvelope_AttachmentSuspended); ok {
@@ -1327,10 +1285,6 @@ type ServerEnvelope_PickerPreview struct {
 	PickerPreview *PickerPreview `protobuf:"bytes,27,opt,name=picker_preview,json=pickerPreview,proto3,oneof"`
 }
 
-type ServerEnvelope_PickerControlResponse struct {
-	PickerControlResponse *PickerControlResponse `protobuf:"bytes,28,opt,name=picker_control_response,json=pickerControlResponse,proto3,oneof"`
-}
-
 type ServerEnvelope_AttachmentSuspended struct {
 	AttachmentSuspended *AttachmentSuspended `protobuf:"bytes,31,opt,name=attachment_suspended,json=attachmentSuspended,proto3,oneof"`
 }
@@ -1397,8 +1351,6 @@ func (*ServerEnvelope_PickerFailure) isServerEnvelope_Payload() {}
 
 func (*ServerEnvelope_PickerPreview) isServerEnvelope_Payload() {}
 
-func (*ServerEnvelope_PickerControlResponse) isServerEnvelope_Payload() {}
-
 func (*ServerEnvelope_AttachmentSuspended) isServerEnvelope_Payload() {}
 
 func (*ServerEnvelope_AttachmentActivated) isServerEnvelope_Payload() {}
@@ -1431,7 +1383,7 @@ const file_envelope_proto_rawDesc = "" +
 	"\x11output_data_limit\x18\x06 \x01(\x04R\x0foutputDataLimit\x12'\n" +
 	"\x0fcapability_bits\x18\a \x01(\rR\x0ecapabilityBits\x12\x1a\n" +
 	"\baccepted\x18\b \x01(\bR\baccepted\x12@\n" +
-	"\trejection\x18\t \x01(\v2\".vev.wire.v1.PreambleRejectionCodeR\trejection\"\xa1\x11\n" +
+	"\trejection\x18\t \x01(\v2\".vev.wire.v1.PreambleRejectionCodeR\trejection\"\x87\x10\n" +
 	"\x0eClientEnvelope\x12*\n" +
 	"\x05hello\x18\x01 \x01(\v2\x12.vev.wire.v1.HelloH\x00R\x05hello\x12*\n" +
 	"\x05input\x18\x02 \x01(\v2\x12.vev.wire.v1.InputH\x00R\x05input\x12-\n" +
@@ -1458,14 +1410,12 @@ const file_envelope_proto_rawDesc = "" +
 	"\x1cnavigation_inventory_request\x18\x15 \x01(\v2'.vev.wire.v1.NavigationInventoryRequestH\x00R\x1anavigationInventoryRequest\x12w\n" +
 	" navigation_inventory_publication\x18\x16 \x01(\v2+.vev.wire.v1.NavigationInventoryPublicationH\x00R\x1enavigationInventoryPublication\x12k\n" +
 	"\x1cnavigation_inventory_failure\x18\x17 \x01(\v2'.vev.wire.v1.NavigationInventoryFailureH\x00R\x1anavigationInventoryFailure\x12=\n" +
-	"\fpicker_begin\x18\x18 \x01(\v2\x18.vev.wire.v1.PickerBeginH\x00R\vpickerBegin\x12=\n" +
 	"\fpicker_close\x18\x19 \x01(\v2\x18.vev.wire.v1.PickerCloseH\x00R\vpickerClose\x12I\n" +
 	"\x10picker_selection\x18\x1a \x01(\v2\x1c.vev.wire.v1.PickerSelectionH\x00R\x0fpickerSelection\x12Y\n" +
-	"\x16picker_preview_request\x18\x1b \x01(\v2!.vev.wire.v1.PickerPreviewRequestH\x00R\x14pickerPreviewRequest\x12Y\n" +
-	"\x16picker_control_request\x18\x1c \x01(\v2!.vev.wire.v1.PickerControlRequestH\x00R\x14pickerControlRequest\x12O\n" +
+	"\x16picker_preview_request\x18\x1b \x01(\v2!.vev.wire.v1.PickerPreviewRequestH\x00R\x14pickerPreviewRequest\x12O\n" +
 	"\x12suspend_attachment\x18\x1d \x01(\v2\x1e.vev.wire.v1.SuspendAttachmentH\x00R\x11suspendAttachment\x12R\n" +
 	"\x13activate_attachment\x18\x1e \x01(\v2\x1f.vev.wire.v1.ActivateAttachmentH\x00R\x12activateAttachmentB\t\n" +
-	"\apayload\"\xaa\x12\n" +
+	"\apayload\"\xcc\x11\n" +
 	"\x0eServerEnvelope\x120\n" +
 	"\awelcome\x18\x01 \x01(\v2\x14.vev.wire.v1.WelcomeH\x00R\awelcome\x12-\n" +
 	"\x05error\x18\x02 \x01(\v2\x15.vev.wire.v1.ErrorMsgH\x00R\x05error\x12-\n" +
@@ -1495,8 +1445,7 @@ const file_envelope_proto_rawDesc = "" +
 	"\rpicker_closed\x18\x18 \x01(\v2\x19.vev.wire.v1.PickerClosedH\x00R\fpickerClosed\x12@\n" +
 	"\rpicker_result\x18\x19 \x01(\v2\x19.vev.wire.v1.PickerResultH\x00R\fpickerResult\x12C\n" +
 	"\x0epicker_failure\x18\x1a \x01(\v2\x1a.vev.wire.v1.PickerFailureH\x00R\rpickerFailure\x12C\n" +
-	"\x0epicker_preview\x18\x1b \x01(\v2\x1a.vev.wire.v1.PickerPreviewH\x00R\rpickerPreview\x12\\\n" +
-	"\x17picker_control_response\x18\x1c \x01(\v2\".vev.wire.v1.PickerControlResponseH\x00R\x15pickerControlResponse\x12U\n" +
+	"\x0epicker_preview\x18\x1b \x01(\v2\x1a.vev.wire.v1.PickerPreviewH\x00R\rpickerPreview\x12U\n" +
 	"\x14attachment_suspended\x18\x1f \x01(\v2 .vev.wire.v1.AttachmentSuspendedH\x00R\x13attachmentSuspended\x12U\n" +
 	"\x14attachment_activated\x18  \x01(\v2 .vev.wire.v1.AttachmentActivatedH\x00R\x13attachmentActivated\x12:\n" +
 	"\vkill_result\x18! \x01(\v2\x17.vev.wire.v1.KillResultH\x00R\n" +
@@ -1546,43 +1495,40 @@ var file_envelope_proto_goTypes = []any{
 	(*NavigationInventoryRequest)(nil),     // 26: vev.wire.v1.NavigationInventoryRequest
 	(*NavigationInventoryPublication)(nil), // 27: vev.wire.v1.NavigationInventoryPublication
 	(*NavigationInventoryFailure)(nil),     // 28: vev.wire.v1.NavigationInventoryFailure
-	(*PickerBegin)(nil),                    // 29: vev.wire.v1.PickerBegin
-	(*PickerClose)(nil),                    // 30: vev.wire.v1.PickerClose
-	(*PickerSelection)(nil),                // 31: vev.wire.v1.PickerSelection
-	(*PickerPreviewRequest)(nil),           // 32: vev.wire.v1.PickerPreviewRequest
-	(*PickerControlRequest)(nil),           // 33: vev.wire.v1.PickerControlRequest
-	(*SuspendAttachment)(nil),              // 34: vev.wire.v1.SuspendAttachment
-	(*ActivateAttachment)(nil),             // 35: vev.wire.v1.ActivateAttachment
-	(*Welcome)(nil),                        // 36: vev.wire.v1.Welcome
-	(*ErrorMsg)(nil),                       // 37: vev.wire.v1.ErrorMsg
-	(*Output)(nil),                         // 38: vev.wire.v1.Output
-	(*Detached)(nil),                       // 39: vev.wire.v1.Detached
-	(*Pong)(nil),                           // 40: vev.wire.v1.Pong
-	(*Sessions)(nil),                       // 41: vev.wire.v1.Sessions
-	(*CommandResult)(nil),                  // 42: vev.wire.v1.CommandResult
-	(*AttachTarget)(nil),                   // 43: vev.wire.v1.AttachTarget
-	(*RemotePreview)(nil),                  // 44: vev.wire.v1.RemotePreview
-	(*CommittedRouteIdentity)(nil),         // 45: vev.wire.v1.CommittedRouteIdentity
-	(*RouteNavigationAction)(nil),          // 46: vev.wire.v1.RouteNavigationAction
-	(*RouteCreateSessionAction)(nil),       // 47: vev.wire.v1.RouteCreateSessionAction
-	(*RoutePosition)(nil),                  // 48: vev.wire.v1.RoutePosition
-	(*RouteRetired)(nil),                   // 49: vev.wire.v1.RouteRetired
-	(*SamePeerSwitchFailure)(nil),          // 50: vev.wire.v1.SamePeerSwitchFailure
-	(*UIReceipt)(nil),                      // 51: vev.wire.v1.UIReceipt
-	(*UIViewUpdate)(nil),                   // 52: vev.wire.v1.UIViewUpdate
-	(*NavigationInventoryResponse)(nil),    // 53: vev.wire.v1.NavigationInventoryResponse
-	(*NavigationInventoryDemand)(nil),      // 54: vev.wire.v1.NavigationInventoryDemand
-	(*NavigationInventorySelection)(nil),   // 55: vev.wire.v1.NavigationInventorySelection
-	(*PickerOffer)(nil),                    // 56: vev.wire.v1.PickerOffer
-	(*PickerSnapshot)(nil),                 // 57: vev.wire.v1.PickerSnapshot
-	(*PickerClosed)(nil),                   // 58: vev.wire.v1.PickerClosed
-	(*PickerResult)(nil),                   // 59: vev.wire.v1.PickerResult
-	(*PickerFailure)(nil),                  // 60: vev.wire.v1.PickerFailure
-	(*PickerPreview)(nil),                  // 61: vev.wire.v1.PickerPreview
-	(*PickerControlResponse)(nil),          // 62: vev.wire.v1.PickerControlResponse
-	(*AttachmentSuspended)(nil),            // 63: vev.wire.v1.AttachmentSuspended
-	(*AttachmentActivated)(nil),            // 64: vev.wire.v1.AttachmentActivated
-	(*KillResult)(nil),                     // 65: vev.wire.v1.KillResult
+	(*PickerClose)(nil),                    // 29: vev.wire.v1.PickerClose
+	(*PickerSelection)(nil),                // 30: vev.wire.v1.PickerSelection
+	(*PickerPreviewRequest)(nil),           // 31: vev.wire.v1.PickerPreviewRequest
+	(*SuspendAttachment)(nil),              // 32: vev.wire.v1.SuspendAttachment
+	(*ActivateAttachment)(nil),             // 33: vev.wire.v1.ActivateAttachment
+	(*Welcome)(nil),                        // 34: vev.wire.v1.Welcome
+	(*ErrorMsg)(nil),                       // 35: vev.wire.v1.ErrorMsg
+	(*Output)(nil),                         // 36: vev.wire.v1.Output
+	(*Detached)(nil),                       // 37: vev.wire.v1.Detached
+	(*Pong)(nil),                           // 38: vev.wire.v1.Pong
+	(*Sessions)(nil),                       // 39: vev.wire.v1.Sessions
+	(*CommandResult)(nil),                  // 40: vev.wire.v1.CommandResult
+	(*AttachTarget)(nil),                   // 41: vev.wire.v1.AttachTarget
+	(*RemotePreview)(nil),                  // 42: vev.wire.v1.RemotePreview
+	(*CommittedRouteIdentity)(nil),         // 43: vev.wire.v1.CommittedRouteIdentity
+	(*RouteNavigationAction)(nil),          // 44: vev.wire.v1.RouteNavigationAction
+	(*RouteCreateSessionAction)(nil),       // 45: vev.wire.v1.RouteCreateSessionAction
+	(*RoutePosition)(nil),                  // 46: vev.wire.v1.RoutePosition
+	(*RouteRetired)(nil),                   // 47: vev.wire.v1.RouteRetired
+	(*SamePeerSwitchFailure)(nil),          // 48: vev.wire.v1.SamePeerSwitchFailure
+	(*UIReceipt)(nil),                      // 49: vev.wire.v1.UIReceipt
+	(*UIViewUpdate)(nil),                   // 50: vev.wire.v1.UIViewUpdate
+	(*NavigationInventoryResponse)(nil),    // 51: vev.wire.v1.NavigationInventoryResponse
+	(*NavigationInventoryDemand)(nil),      // 52: vev.wire.v1.NavigationInventoryDemand
+	(*NavigationInventorySelection)(nil),   // 53: vev.wire.v1.NavigationInventorySelection
+	(*PickerOffer)(nil),                    // 54: vev.wire.v1.PickerOffer
+	(*PickerSnapshot)(nil),                 // 55: vev.wire.v1.PickerSnapshot
+	(*PickerClosed)(nil),                   // 56: vev.wire.v1.PickerClosed
+	(*PickerResult)(nil),                   // 57: vev.wire.v1.PickerResult
+	(*PickerFailure)(nil),                  // 58: vev.wire.v1.PickerFailure
+	(*PickerPreview)(nil),                  // 59: vev.wire.v1.PickerPreview
+	(*AttachmentSuspended)(nil),            // 60: vev.wire.v1.AttachmentSuspended
+	(*AttachmentActivated)(nil),            // 61: vev.wire.v1.AttachmentActivated
+	(*KillResult)(nil),                     // 62: vev.wire.v1.KillResult
 }
 var file_envelope_proto_depIdxs = []int32{
 	0,  // 0: vev.wire.v1.PreambleRequest.role:type_name -> vev.wire.v1.PreambleRole
@@ -1611,49 +1557,46 @@ var file_envelope_proto_depIdxs = []int32{
 	26, // 23: vev.wire.v1.ClientEnvelope.navigation_inventory_request:type_name -> vev.wire.v1.NavigationInventoryRequest
 	27, // 24: vev.wire.v1.ClientEnvelope.navigation_inventory_publication:type_name -> vev.wire.v1.NavigationInventoryPublication
 	28, // 25: vev.wire.v1.ClientEnvelope.navigation_inventory_failure:type_name -> vev.wire.v1.NavigationInventoryFailure
-	29, // 26: vev.wire.v1.ClientEnvelope.picker_begin:type_name -> vev.wire.v1.PickerBegin
-	30, // 27: vev.wire.v1.ClientEnvelope.picker_close:type_name -> vev.wire.v1.PickerClose
-	31, // 28: vev.wire.v1.ClientEnvelope.picker_selection:type_name -> vev.wire.v1.PickerSelection
-	32, // 29: vev.wire.v1.ClientEnvelope.picker_preview_request:type_name -> vev.wire.v1.PickerPreviewRequest
-	33, // 30: vev.wire.v1.ClientEnvelope.picker_control_request:type_name -> vev.wire.v1.PickerControlRequest
-	34, // 31: vev.wire.v1.ClientEnvelope.suspend_attachment:type_name -> vev.wire.v1.SuspendAttachment
-	35, // 32: vev.wire.v1.ClientEnvelope.activate_attachment:type_name -> vev.wire.v1.ActivateAttachment
-	36, // 33: vev.wire.v1.ServerEnvelope.welcome:type_name -> vev.wire.v1.Welcome
-	37, // 34: vev.wire.v1.ServerEnvelope.error:type_name -> vev.wire.v1.ErrorMsg
-	38, // 35: vev.wire.v1.ServerEnvelope.output:type_name -> vev.wire.v1.Output
-	39, // 36: vev.wire.v1.ServerEnvelope.detached:type_name -> vev.wire.v1.Detached
-	40, // 37: vev.wire.v1.ServerEnvelope.pong:type_name -> vev.wire.v1.Pong
-	41, // 38: vev.wire.v1.ServerEnvelope.sessions:type_name -> vev.wire.v1.Sessions
-	42, // 39: vev.wire.v1.ServerEnvelope.command_result:type_name -> vev.wire.v1.CommandResult
-	43, // 40: vev.wire.v1.ServerEnvelope.attach_target:type_name -> vev.wire.v1.AttachTarget
-	44, // 41: vev.wire.v1.ServerEnvelope.remote_preview:type_name -> vev.wire.v1.RemotePreview
-	45, // 42: vev.wire.v1.ServerEnvelope.committed_route_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	46, // 43: vev.wire.v1.ServerEnvelope.route_navigation_action:type_name -> vev.wire.v1.RouteNavigationAction
-	47, // 44: vev.wire.v1.ServerEnvelope.route_create_session_action:type_name -> vev.wire.v1.RouteCreateSessionAction
-	23, // 45: vev.wire.v1.ServerEnvelope.route_navigation_failure:type_name -> vev.wire.v1.RouteNavigationFailure
-	48, // 46: vev.wire.v1.ServerEnvelope.route_position:type_name -> vev.wire.v1.RoutePosition
-	49, // 47: vev.wire.v1.ServerEnvelope.route_retired:type_name -> vev.wire.v1.RouteRetired
-	50, // 48: vev.wire.v1.ServerEnvelope.same_peer_switch_failure:type_name -> vev.wire.v1.SamePeerSwitchFailure
-	51, // 49: vev.wire.v1.ServerEnvelope.ui_receipt:type_name -> vev.wire.v1.UIReceipt
-	52, // 50: vev.wire.v1.ServerEnvelope.ui_view_update:type_name -> vev.wire.v1.UIViewUpdate
-	53, // 51: vev.wire.v1.ServerEnvelope.navigation_inventory_response:type_name -> vev.wire.v1.NavigationInventoryResponse
-	54, // 52: vev.wire.v1.ServerEnvelope.navigation_inventory_demand:type_name -> vev.wire.v1.NavigationInventoryDemand
-	55, // 53: vev.wire.v1.ServerEnvelope.navigation_inventory_selection:type_name -> vev.wire.v1.NavigationInventorySelection
-	56, // 54: vev.wire.v1.ServerEnvelope.picker_offer:type_name -> vev.wire.v1.PickerOffer
-	57, // 55: vev.wire.v1.ServerEnvelope.picker_snapshot:type_name -> vev.wire.v1.PickerSnapshot
-	58, // 56: vev.wire.v1.ServerEnvelope.picker_closed:type_name -> vev.wire.v1.PickerClosed
-	59, // 57: vev.wire.v1.ServerEnvelope.picker_result:type_name -> vev.wire.v1.PickerResult
-	60, // 58: vev.wire.v1.ServerEnvelope.picker_failure:type_name -> vev.wire.v1.PickerFailure
-	61, // 59: vev.wire.v1.ServerEnvelope.picker_preview:type_name -> vev.wire.v1.PickerPreview
-	62, // 60: vev.wire.v1.ServerEnvelope.picker_control_response:type_name -> vev.wire.v1.PickerControlResponse
-	63, // 61: vev.wire.v1.ServerEnvelope.attachment_suspended:type_name -> vev.wire.v1.AttachmentSuspended
-	64, // 62: vev.wire.v1.ServerEnvelope.attachment_activated:type_name -> vev.wire.v1.AttachmentActivated
-	65, // 63: vev.wire.v1.ServerEnvelope.kill_result:type_name -> vev.wire.v1.KillResult
-	64, // [64:64] is the sub-list for method output_type
-	64, // [64:64] is the sub-list for method input_type
-	64, // [64:64] is the sub-list for extension type_name
-	64, // [64:64] is the sub-list for extension extendee
-	0,  // [0:64] is the sub-list for field type_name
+	29, // 26: vev.wire.v1.ClientEnvelope.picker_close:type_name -> vev.wire.v1.PickerClose
+	30, // 27: vev.wire.v1.ClientEnvelope.picker_selection:type_name -> vev.wire.v1.PickerSelection
+	31, // 28: vev.wire.v1.ClientEnvelope.picker_preview_request:type_name -> vev.wire.v1.PickerPreviewRequest
+	32, // 29: vev.wire.v1.ClientEnvelope.suspend_attachment:type_name -> vev.wire.v1.SuspendAttachment
+	33, // 30: vev.wire.v1.ClientEnvelope.activate_attachment:type_name -> vev.wire.v1.ActivateAttachment
+	34, // 31: vev.wire.v1.ServerEnvelope.welcome:type_name -> vev.wire.v1.Welcome
+	35, // 32: vev.wire.v1.ServerEnvelope.error:type_name -> vev.wire.v1.ErrorMsg
+	36, // 33: vev.wire.v1.ServerEnvelope.output:type_name -> vev.wire.v1.Output
+	37, // 34: vev.wire.v1.ServerEnvelope.detached:type_name -> vev.wire.v1.Detached
+	38, // 35: vev.wire.v1.ServerEnvelope.pong:type_name -> vev.wire.v1.Pong
+	39, // 36: vev.wire.v1.ServerEnvelope.sessions:type_name -> vev.wire.v1.Sessions
+	40, // 37: vev.wire.v1.ServerEnvelope.command_result:type_name -> vev.wire.v1.CommandResult
+	41, // 38: vev.wire.v1.ServerEnvelope.attach_target:type_name -> vev.wire.v1.AttachTarget
+	42, // 39: vev.wire.v1.ServerEnvelope.remote_preview:type_name -> vev.wire.v1.RemotePreview
+	43, // 40: vev.wire.v1.ServerEnvelope.committed_route_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
+	44, // 41: vev.wire.v1.ServerEnvelope.route_navigation_action:type_name -> vev.wire.v1.RouteNavigationAction
+	45, // 42: vev.wire.v1.ServerEnvelope.route_create_session_action:type_name -> vev.wire.v1.RouteCreateSessionAction
+	23, // 43: vev.wire.v1.ServerEnvelope.route_navigation_failure:type_name -> vev.wire.v1.RouteNavigationFailure
+	46, // 44: vev.wire.v1.ServerEnvelope.route_position:type_name -> vev.wire.v1.RoutePosition
+	47, // 45: vev.wire.v1.ServerEnvelope.route_retired:type_name -> vev.wire.v1.RouteRetired
+	48, // 46: vev.wire.v1.ServerEnvelope.same_peer_switch_failure:type_name -> vev.wire.v1.SamePeerSwitchFailure
+	49, // 47: vev.wire.v1.ServerEnvelope.ui_receipt:type_name -> vev.wire.v1.UIReceipt
+	50, // 48: vev.wire.v1.ServerEnvelope.ui_view_update:type_name -> vev.wire.v1.UIViewUpdate
+	51, // 49: vev.wire.v1.ServerEnvelope.navigation_inventory_response:type_name -> vev.wire.v1.NavigationInventoryResponse
+	52, // 50: vev.wire.v1.ServerEnvelope.navigation_inventory_demand:type_name -> vev.wire.v1.NavigationInventoryDemand
+	53, // 51: vev.wire.v1.ServerEnvelope.navigation_inventory_selection:type_name -> vev.wire.v1.NavigationInventorySelection
+	54, // 52: vev.wire.v1.ServerEnvelope.picker_offer:type_name -> vev.wire.v1.PickerOffer
+	55, // 53: vev.wire.v1.ServerEnvelope.picker_snapshot:type_name -> vev.wire.v1.PickerSnapshot
+	56, // 54: vev.wire.v1.ServerEnvelope.picker_closed:type_name -> vev.wire.v1.PickerClosed
+	57, // 55: vev.wire.v1.ServerEnvelope.picker_result:type_name -> vev.wire.v1.PickerResult
+	58, // 56: vev.wire.v1.ServerEnvelope.picker_failure:type_name -> vev.wire.v1.PickerFailure
+	59, // 57: vev.wire.v1.ServerEnvelope.picker_preview:type_name -> vev.wire.v1.PickerPreview
+	60, // 58: vev.wire.v1.ServerEnvelope.attachment_suspended:type_name -> vev.wire.v1.AttachmentSuspended
+	61, // 59: vev.wire.v1.ServerEnvelope.attachment_activated:type_name -> vev.wire.v1.AttachmentActivated
+	62, // 60: vev.wire.v1.ServerEnvelope.kill_result:type_name -> vev.wire.v1.KillResult
+	61, // [61:61] is the sub-list for method output_type
+	61, // [61:61] is the sub-list for method input_type
+	61, // [61:61] is the sub-list for extension type_name
+	61, // [61:61] is the sub-list for extension extendee
+	0,  // [0:61] is the sub-list for field type_name
 }
 
 func init() { file_envelope_proto_init() }
@@ -1690,11 +1633,9 @@ func file_envelope_proto_init() {
 		(*ClientEnvelope_NavigationInventoryRequest)(nil),
 		(*ClientEnvelope_NavigationInventoryPublication)(nil),
 		(*ClientEnvelope_NavigationInventoryFailure)(nil),
-		(*ClientEnvelope_PickerBegin)(nil),
 		(*ClientEnvelope_PickerClose)(nil),
 		(*ClientEnvelope_PickerSelection)(nil),
 		(*ClientEnvelope_PickerPreviewRequest)(nil),
-		(*ClientEnvelope_PickerControlRequest)(nil),
 		(*ClientEnvelope_SuspendAttachment)(nil),
 		(*ClientEnvelope_ActivateAttachment)(nil),
 	}
@@ -1726,7 +1667,6 @@ func file_envelope_proto_init() {
 		(*ServerEnvelope_PickerResult)(nil),
 		(*ServerEnvelope_PickerFailure)(nil),
 		(*ServerEnvelope_PickerPreview)(nil),
-		(*ServerEnvelope_PickerControlResponse)(nil),
 		(*ServerEnvelope_AttachmentSuspended)(nil),
 		(*ServerEnvelope_AttachmentActivated)(nil),
 		(*ServerEnvelope_KillResult)(nil),

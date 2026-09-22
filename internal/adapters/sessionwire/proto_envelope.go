@@ -221,17 +221,6 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 			return nil, ErrInvalidMessage
 		}
 		return encodeProtoClient(*m)
-	case protocol.PickerBegin:
-		converted, err := pickerBeginToWire(m)
-		if err != nil {
-			return nil, err
-		}
-		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_PickerBegin{PickerBegin: converted}}, nil
-	case *protocol.PickerBegin:
-		if m == nil {
-			return nil, ErrInvalidMessage
-		}
-		return encodeProtoClient(*m)
 	case protocol.PickerClose:
 		converted, err := pickerCloseToWire(m)
 		if err != nil {
@@ -250,17 +239,6 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 		}
 		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_PickerSelection{PickerSelection: converted}}, nil
 	case *protocol.PickerSelection:
-		if m == nil {
-			return nil, ErrInvalidMessage
-		}
-		return encodeProtoClient(*m)
-	case protocol.PickerControlRequest:
-		converted, err := pickerControlRequestToWire(m)
-		if err != nil {
-			return nil, err
-		}
-		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_PickerControlRequest{PickerControlRequest: converted}}, nil
-	case *protocol.PickerControlRequest:
 		if m == nil {
 			return nil, ErrInvalidMessage
 		}
@@ -630,17 +608,6 @@ func encodeProtoServer(message protocol.ServerMessage) (*wire.ServerEnvelope, er
 			return nil, ErrInvalidMessage
 		}
 		return encodeProtoServer(*m)
-	case protocol.PickerControlResponse:
-		converted, err := pickerControlResponseToWire(m)
-		if err != nil {
-			return nil, err
-		}
-		return &wire.ServerEnvelope{Payload: &wire.ServerEnvelope_PickerControlResponse{PickerControlResponse: converted}}, nil
-	case *protocol.PickerControlResponse:
-		if m == nil {
-			return nil, ErrInvalidMessage
-		}
-		return encodeProtoServer(*m)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -703,16 +670,12 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 		return inventoryPublicationFromWire(payload.NavigationInventoryPublication)
 	case *wire.ClientEnvelope_NavigationInventoryFailure:
 		return inventoryFailureFromWire(payload.NavigationInventoryFailure)
-	case *wire.ClientEnvelope_PickerBegin:
-		return pickerBeginFromWire(payload.PickerBegin)
 	case *wire.ClientEnvelope_PickerClose:
 		return pickerCloseFromWire(payload.PickerClose)
 	case *wire.ClientEnvelope_PickerSelection:
 		return pickerSelectionFromWire(payload.PickerSelection)
 	case *wire.ClientEnvelope_PickerPreviewRequest:
 		return pickerPreviewRequestFromWire(payload.PickerPreviewRequest)
-	case *wire.ClientEnvelope_PickerControlRequest:
-		return pickerControlRequestFromWire(payload.PickerControlRequest)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -785,8 +748,6 @@ func decodeProtoServer(envelope *wire.ServerEnvelope) (protocol.ServerMessage, e
 		return pickerFailureFromWire(payload.PickerFailure)
 	case *wire.ServerEnvelope_PickerPreview:
 		return pickerPreviewFromWire(payload.PickerPreview)
-	case *wire.ServerEnvelope_PickerControlResponse:
-		return pickerControlResponseFromWire(payload.PickerControlResponse)
 	default:
 		return nil, ErrWrongDirection
 	}

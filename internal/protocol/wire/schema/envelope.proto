@@ -91,11 +91,9 @@ message ClientEnvelope {
     NavigationInventoryRequest navigation_inventory_request = 21;
     NavigationInventoryPublication navigation_inventory_publication = 22;
     NavigationInventoryFailure navigation_inventory_failure = 23;
-    PickerBegin picker_begin = 24;
     PickerClose picker_close = 25;
     PickerSelection picker_selection = 26;
     PickerPreviewRequest picker_preview_request = 27;
-    PickerControlRequest picker_control_request = 28;
     SuspendAttachment suspend_attachment = 29;
     ActivateAttachment activate_attachment = 30;
   }
@@ -135,7 +133,6 @@ message ServerEnvelope {
     PickerResult picker_result = 25;
     PickerFailure picker_failure = 26;
     PickerPreview picker_preview = 27;
-    PickerControlResponse picker_control_response = 28;
     AttachmentSuspended attachment_suspended = 31;
     AttachmentActivated attachment_activated = 32;
     KillResult kill_result = 33;

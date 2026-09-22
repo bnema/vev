@@ -20,6 +20,7 @@ var brokerClientTags = map[string]protoreflect.FieldNumber{
 	"register": 101, "subscribe": 102, "resync": 103, "unsubscribe": 104,
 	"add_host": 105, "remove_host": 106, "reconcile": 107, "open_stream": 108,
 	"client_stream_data": 109, "close_stream": 110, "update_host_policy": 111,
+	"start_preview": 112, "cancel_preview": 113,
 }
 
 // brokerServerTags is the frozen server tag inventory.
@@ -27,6 +28,7 @@ var brokerServerTags = map[string]protoreflect.FieldNumber{
 	"registered": 201, "snapshot_part": 202, "operation_result": 203,
 	"stream_opened": 204, "server_stream_data": 205, "stream_closed": 206,
 	"progress": 207, "broker_error_message": 208, "shutdown": 209,
+	"preview_publication": 210,
 }
 
 func oneofTags(t *testing.T, message proto.Message) map[string]protoreflect.FieldNumber {
@@ -174,6 +176,29 @@ func brokerClientSamples() map[string]*BrokerClientEnvelope {
 			Ref: brokerRef(), Data: bytes.Repeat([]byte{0x66}, 24),
 		}}},
 		"close_stream": {Payload: &BrokerClientEnvelope_CloseStream{CloseStream: &CloseStream{Ref: brokerRef()}}},
+		"start_preview": {Payload: &BrokerClientEnvelope_StartPreview{StartPreview: &StartPreview{
+			Scope: brokerScope(), Generation: 3,
+			Route: &OpenStream{
+				Ref: brokerRef(), Purpose: 3,
+				Policy:    brokerPolicy(),
+				StartMode: 1, Local: true,
+				// Note: route validation per ports requires observation+existing-only;
+				// the scanner sample only needs structural coverage, so keep
+				// purpose/observation fields populated.
+			},
+			Preview: &RemotePreviewRequest{
+				Version: 1,
+				Target: &RemoteTarget{
+					Endpoint: "dev@host:22", DisplayOrigin: "dev@host",
+					LifecycleId: &LifecycleID{Value: bytes.Repeat([]byte{0x55}, 16)},
+					SessionName: "work", LiveTabId: "tab-1",
+				},
+				Width: 80, Height: 24,
+			},
+		}}},
+		"cancel_preview": {Payload: &BrokerClientEnvelope_CancelPreview{CancelPreview: &CancelPreview{
+			Scope: brokerScope(), Generation: 3,
+		}}},
 	}
 }
 
@@ -216,6 +241,10 @@ func brokerServerSamples() map[string]*BrokerServerEnvelope {
 		}}},
 		"shutdown": {Payload: &BrokerServerEnvelope_Shutdown{Shutdown: &Shutdown{
 			Scope: brokerScope(), Reason: 1, Text: "idle exit",
+		}}},
+		"preview_publication": {Payload: &BrokerServerEnvelope_PreviewPublication{PreviewPublication: &PreviewPublication{
+			Scope: brokerScope(), Generation: 3,
+			Result: &PreviewPublication_Error{Error: &BrokerErrorDetail{Code: 1, Text: "unavailable"}},
 		}}},
 	}
 }

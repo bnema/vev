@@ -607,256 +607,11 @@ func (x *NavigationInventoryFailure) GetCode() uint32 {
 	return 0
 }
 
-// PickerRouteObservation is one exact-target probe answer.
-type PickerRouteObservation struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	Target *ExactTarget           `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
-	// Closed presence taxonomy: 1 = present, 2 = absent, 3 = unknown.
-	Presence      uint32 `protobuf:"varint,2,opt,name=presence,proto3" json:"presence,omitempty"`
-	Attention     bool   `protobuf:"varint,3,opt,name=attention,proto3" json:"attention,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PickerRouteObservation) Reset() {
-	*x = PickerRouteObservation{}
-	mi := &file_navigation_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PickerRouteObservation) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PickerRouteObservation) ProtoMessage() {}
-
-func (x *PickerRouteObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_navigation_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PickerRouteObservation.ProtoReflect.Descriptor instead.
-func (*PickerRouteObservation) Descriptor() ([]byte, []int) {
-	return file_navigation_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *PickerRouteObservation) GetTarget() *ExactTarget {
-	if x != nil {
-		return x.Target
-	}
-	return nil
-}
-
-func (x *PickerRouteObservation) GetPresence() uint32 {
-	if x != nil {
-		return x.Presence
-	}
-	return 0
-}
-
-func (x *PickerRouteObservation) GetAttention() bool {
-	if x != nil {
-		return x.Attention
-	}
-	return false
-}
-
-// PickerControlRequest queries the client's local picker authority.
-// Operation payloads are exclusive: snapshot/resolve carry source/key
-// identity, observe carries one bounded target list.
-type PickerControlRequest struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	Version   uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	RequestId uint64                 `protobuf:"varint,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	// Closed operation taxonomy: 1 = snapshot, 2 = resolve, 3 = observe.
-	Operation      uint32         `protobuf:"varint,3,opt,name=operation,proto3" json:"operation,omitempty"`
-	SourceRevision uint64         `protobuf:"varint,4,opt,name=source_revision,json=sourceRevision,proto3" json:"source_revision,omitempty"`
-	SourceId       string         `protobuf:"bytes,5,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	Key            string         `protobuf:"bytes,6,opt,name=key,proto3" json:"key,omitempty"`
-	Targets        []*ExactTarget `protobuf:"bytes,7,rep,name=targets,proto3" json:"targets,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
-}
-
-func (x *PickerControlRequest) Reset() {
-	*x = PickerControlRequest{}
-	mi := &file_navigation_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PickerControlRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PickerControlRequest) ProtoMessage() {}
-
-func (x *PickerControlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_navigation_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PickerControlRequest.ProtoReflect.Descriptor instead.
-func (*PickerControlRequest) Descriptor() ([]byte, []int) {
-	return file_navigation_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *PickerControlRequest) GetVersion() uint32 {
-	if x != nil {
-		return x.Version
-	}
-	return 0
-}
-
-func (x *PickerControlRequest) GetRequestId() uint64 {
-	if x != nil {
-		return x.RequestId
-	}
-	return 0
-}
-
-func (x *PickerControlRequest) GetOperation() uint32 {
-	if x != nil {
-		return x.Operation
-	}
-	return 0
-}
-
-func (x *PickerControlRequest) GetSourceRevision() uint64 {
-	if x != nil {
-		return x.SourceRevision
-	}
-	return 0
-}
-
-func (x *PickerControlRequest) GetSourceId() string {
-	if x != nil {
-		return x.SourceId
-	}
-	return ""
-}
-
-func (x *PickerControlRequest) GetKey() string {
-	if x != nil {
-		return x.Key
-	}
-	return ""
-}
-
-func (x *PickerControlRequest) GetTargets() []*ExactTarget {
-	if x != nil {
-		return x.Targets
-	}
-	return nil
-}
-
-// PickerControlResponse returns one snapshot, one revalidated target, or
-// the observation list. Failed statuses carry no payload.
-type PickerControlResponse struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	RequestId uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	Operation uint32                 `protobuf:"varint,2,opt,name=operation,proto3" json:"operation,omitempty"`
-	// Closed source-status taxonomy: 1 = ok, 2 = unavailable, 3 = too large.
-	Status        uint32                    `protobuf:"varint,3,opt,name=status,proto3" json:"status,omitempty"`
-	Snapshot      *PickerSnapshot           `protobuf:"bytes,4,opt,name=snapshot,proto3" json:"snapshot,omitempty"` // optional pointer
-	Resolved      *AttachTarget             `protobuf:"bytes,5,opt,name=resolved,proto3" json:"resolved,omitempty"` // optional pointer
-	Observations  []*PickerRouteObservation `protobuf:"bytes,6,rep,name=observations,proto3" json:"observations,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PickerControlResponse) Reset() {
-	*x = PickerControlResponse{}
-	mi := &file_navigation_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PickerControlResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PickerControlResponse) ProtoMessage() {}
-
-func (x *PickerControlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_navigation_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PickerControlResponse.ProtoReflect.Descriptor instead.
-func (*PickerControlResponse) Descriptor() ([]byte, []int) {
-	return file_navigation_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *PickerControlResponse) GetRequestId() uint64 {
-	if x != nil {
-		return x.RequestId
-	}
-	return 0
-}
-
-func (x *PickerControlResponse) GetOperation() uint32 {
-	if x != nil {
-		return x.Operation
-	}
-	return 0
-}
-
-func (x *PickerControlResponse) GetStatus() uint32 {
-	if x != nil {
-		return x.Status
-	}
-	return 0
-}
-
-func (x *PickerControlResponse) GetSnapshot() *PickerSnapshot {
-	if x != nil {
-		return x.Snapshot
-	}
-	return nil
-}
-
-func (x *PickerControlResponse) GetResolved() *AttachTarget {
-	if x != nil {
-		return x.Resolved
-	}
-	return nil
-}
-
-func (x *PickerControlResponse) GetObservations() []*PickerRouteObservation {
-	if x != nil {
-		return x.Observations
-	}
-	return nil
-}
-
 var File_navigation_proto protoreflect.FileDescriptor
 
 const file_navigation_proto_rawDesc = "" +
 	"\n" +
-	"\x10navigation.proto\x12\vvev.wire.v1\x1a\fcommon.proto\x1a\fpicker.proto\x1a\rsession.proto\"\xb5\x01\n" +
+	"\x10navigation.proto\x12\vvev.wire.v1\x1a\fcommon.proto\x1a\rsession.proto\"\xb5\x01\n" +
 	"\x0eInventoryEntry\x12\x1d\n" +
 	"\n" +
 	"source_key\x18\x01 \x01(\tR\tsourceKey\x12\x1b\n" +
@@ -906,28 +661,7 @@ const file_navigation_proto_rawDesc = "" +
 	"\n" +
 	"source_key\x18\x03 \x01(\tR\tsourceKey\x12\x1b\n" +
 	"\tentry_key\x18\x04 \x01(\tR\bentryKey\x12\x12\n" +
-	"\x04code\x18\x05 \x01(\rR\x04code\"\x84\x01\n" +
-	"\x16PickerRouteObservation\x120\n" +
-	"\x06target\x18\x01 \x01(\v2\x18.vev.wire.v1.ExactTargetR\x06target\x12\x1a\n" +
-	"\bpresence\x18\x02 \x01(\rR\bpresence\x12\x1c\n" +
-	"\tattention\x18\x03 \x01(\bR\tattention\"\xf9\x01\n" +
-	"\x14PickerControlRequest\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\rR\aversion\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x02 \x01(\x04R\trequestId\x12\x1c\n" +
-	"\toperation\x18\x03 \x01(\rR\toperation\x12'\n" +
-	"\x0fsource_revision\x18\x04 \x01(\x04R\x0esourceRevision\x12\x1b\n" +
-	"\tsource_id\x18\x05 \x01(\tR\bsourceId\x12\x10\n" +
-	"\x03key\x18\x06 \x01(\tR\x03key\x122\n" +
-	"\atargets\x18\a \x03(\v2\x18.vev.wire.v1.ExactTargetR\atargets\"\xa5\x02\n" +
-	"\x15PickerControlResponse\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x1c\n" +
-	"\toperation\x18\x02 \x01(\rR\toperation\x12\x16\n" +
-	"\x06status\x18\x03 \x01(\rR\x06status\x127\n" +
-	"\bsnapshot\x18\x04 \x01(\v2\x1b.vev.wire.v1.PickerSnapshotR\bsnapshot\x125\n" +
-	"\bresolved\x18\x05 \x01(\v2\x19.vev.wire.v1.AttachTargetR\bresolved\x12G\n" +
-	"\fobservations\x18\x06 \x03(\v2#.vev.wire.v1.PickerRouteObservationR\fobservationsB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
+	"\x04code\x18\x05 \x01(\rR\x04codeB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
 	file_navigation_proto_rawDescOnce sync.Once
@@ -941,7 +675,7 @@ func file_navigation_proto_rawDescGZIP() []byte {
 	return file_navigation_proto_rawDescData
 }
 
-var file_navigation_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_navigation_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_navigation_proto_goTypes = []any{
 	(*InventoryEntry)(nil),                 // 0: vev.wire.v1.InventoryEntry
 	(*InventorySourceGroup)(nil),           // 1: vev.wire.v1.InventorySourceGroup
@@ -951,30 +685,20 @@ var file_navigation_proto_goTypes = []any{
 	(*NavigationInventoryPublication)(nil), // 5: vev.wire.v1.NavigationInventoryPublication
 	(*NavigationInventorySelection)(nil),   // 6: vev.wire.v1.NavigationInventorySelection
 	(*NavigationInventoryFailure)(nil),     // 7: vev.wire.v1.NavigationInventoryFailure
-	(*PickerRouteObservation)(nil),         // 8: vev.wire.v1.PickerRouteObservation
-	(*PickerControlRequest)(nil),           // 9: vev.wire.v1.PickerControlRequest
-	(*PickerControlResponse)(nil),          // 10: vev.wire.v1.PickerControlResponse
-	(*RemoteRegistration)(nil),             // 11: vev.wire.v1.RemoteRegistration
-	(*AttachTarget)(nil),                   // 12: vev.wire.v1.AttachTarget
-	(*ExactTarget)(nil),                    // 13: vev.wire.v1.ExactTarget
-	(*PickerSnapshot)(nil),                 // 14: vev.wire.v1.PickerSnapshot
+	(*RemoteRegistration)(nil),             // 8: vev.wire.v1.RemoteRegistration
+	(*AttachTarget)(nil),                   // 9: vev.wire.v1.AttachTarget
 }
 var file_navigation_proto_depIdxs = []int32{
-	0,  // 0: vev.wire.v1.InventorySourceGroup.entries:type_name -> vev.wire.v1.InventoryEntry
-	11, // 1: vev.wire.v1.NavigationInventoryRequest.registration:type_name -> vev.wire.v1.RemoteRegistration
-	1,  // 2: vev.wire.v1.NavigationInventoryResponse.groups:type_name -> vev.wire.v1.InventorySourceGroup
-	12, // 3: vev.wire.v1.NavigationInventoryResponse.resolved:type_name -> vev.wire.v1.AttachTarget
-	1,  // 4: vev.wire.v1.NavigationInventoryPublication.groups:type_name -> vev.wire.v1.InventorySourceGroup
-	13, // 5: vev.wire.v1.PickerRouteObservation.target:type_name -> vev.wire.v1.ExactTarget
-	13, // 6: vev.wire.v1.PickerControlRequest.targets:type_name -> vev.wire.v1.ExactTarget
-	14, // 7: vev.wire.v1.PickerControlResponse.snapshot:type_name -> vev.wire.v1.PickerSnapshot
-	12, // 8: vev.wire.v1.PickerControlResponse.resolved:type_name -> vev.wire.v1.AttachTarget
-	8,  // 9: vev.wire.v1.PickerControlResponse.observations:type_name -> vev.wire.v1.PickerRouteObservation
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	0, // 0: vev.wire.v1.InventorySourceGroup.entries:type_name -> vev.wire.v1.InventoryEntry
+	8, // 1: vev.wire.v1.NavigationInventoryRequest.registration:type_name -> vev.wire.v1.RemoteRegistration
+	1, // 2: vev.wire.v1.NavigationInventoryResponse.groups:type_name -> vev.wire.v1.InventorySourceGroup
+	9, // 3: vev.wire.v1.NavigationInventoryResponse.resolved:type_name -> vev.wire.v1.AttachTarget
+	1, // 4: vev.wire.v1.NavigationInventoryPublication.groups:type_name -> vev.wire.v1.InventorySourceGroup
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_navigation_proto_init() }
@@ -983,7 +707,6 @@ func file_navigation_proto_init() {
 		return
 	}
 	file_common_proto_init()
-	file_picker_proto_init()
 	file_session_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -991,7 +714,7 @@ func file_navigation_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_navigation_proto_rawDesc), len(file_navigation_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

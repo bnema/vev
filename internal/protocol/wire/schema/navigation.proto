@@ -4,7 +4,6 @@ syntax = "proto3";
 package vev.wire.v1;
 
 import "common.proto";
-import "picker.proto";
 import "session.proto";
 
 option go_package = "github.com/bnema/vev/internal/protocol/wire";
@@ -82,38 +81,4 @@ message NavigationInventoryFailure {
   // 3 = incompatible, 4 = invalid target, 5 = navigation failed,
   // 6 = restore failed.
   uint32 code = 5;
-}
-
-// PickerRouteObservation is one exact-target probe answer.
-message PickerRouteObservation {
-  ExactTarget target = 1;
-  // Closed presence taxonomy: 1 = present, 2 = absent, 3 = unknown.
-  uint32 presence = 2;
-  bool attention = 3;
-}
-
-// PickerControlRequest queries the client's local picker authority.
-// Operation payloads are exclusive: snapshot/resolve carry source/key
-// identity, observe carries one bounded target list.
-message PickerControlRequest {
-  uint32 version = 1;
-  uint64 request_id = 2;
-  // Closed operation taxonomy: 1 = snapshot, 2 = resolve, 3 = observe.
-  uint32 operation = 3;
-  uint64 source_revision = 4;
-  string source_id = 5;
-  string key = 6;
-  repeated ExactTarget targets = 7;
-}
-
-// PickerControlResponse returns one snapshot, one revalidated target, or
-// the observation list. Failed statuses carry no payload.
-message PickerControlResponse {
-  uint64 request_id = 1;
-  uint32 operation = 2;
-  // Closed source-status taxonomy: 1 = ok, 2 = unavailable, 3 = too large.
-  uint32 status = 3;
-  PickerSnapshot snapshot = 4; // optional pointer
-  AttachTarget resolved = 5; // optional pointer
-  repeated PickerRouteObservation observations = 6;
 }

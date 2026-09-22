@@ -59,11 +59,9 @@ func TestProtoClientRoundTrips(t *testing.T) {
 		protocol.NavigationInventoryRequest{Version: protocol.Version, RequestID: 1, Operation: protocol.NavigationInventorySnapshot},
 		protocol.NavigationInventoryPublication{InteractionGeneration: 1, PublicationGeneration: 1},
 		protocol.NavigationInventoryFailure{CauseActionID: 1, InteractionGeneration: 1, SourceKey: "local", EntryKey: "a", Code: protocol.NavigationInventoryStaleIdentity},
-		protocol.PickerBegin{RequestID: 1, Intent: protocol.PickerIntentNavigation},
 		protocol.PickerClose{InteractionID: 1},
 		protocol.PickerSelection{InteractionID: 1, SourceID: "serving", SourceRevision: 1, Key: "k", Action: protocol.PickerActionNavigate},
 		protocol.PickerPreviewRequest{Version: protocol.PickerPreviewSchemaVersion, InteractionID: 1, SourceID: "serving", Key: "k", Width: 1, Height: 1},
-		protocol.PickerControlRequest{Version: protocol.Version, RequestID: 1, Operation: protocol.PickerControlSnapshot},
 	}
 	for _, message := range messages {
 		t.Run(protoMessageName(message), func(t *testing.T) {
@@ -116,7 +114,6 @@ func TestProtoServerRoundTrips(t *testing.T) {
 		protocol.PickerResult{InteractionID: 1, SourceID: "serving", Key: "k", Action: protocol.PickerActionNavigate},
 		protocol.PickerFailure{InteractionID: 1, Action: protocol.PickerActionNavigate, Code: protocol.PickerStaleRevision},
 		protocol.PickerPreview{Version: protocol.PickerPreviewSchemaVersion, InteractionID: 1, SourceID: "serving", Key: "k", Status: protocol.PickerPreviewUnavailable},
-		protocol.PickerControlResponse{RequestID: 1, Operation: protocol.PickerControlSnapshot, Status: protocol.PickerSourceUnavailable},
 	}
 	for _, message := range messages {
 		t.Run(protoMessageName(message), func(t *testing.T) {

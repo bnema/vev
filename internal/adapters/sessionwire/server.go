@@ -515,10 +515,6 @@ func clientFailureFor(envelope *wire.ClientEnvelope, err error) *protocol.Decode
 			failure.RequestID = payload.NavigationInventoryRequest.GetRequestId()
 			failure.HasRequestID = true
 		}
-	case *wire.ClientEnvelope_PickerControlRequest:
-		if payload, ok := envelope.Payload.(*wire.ClientEnvelope_PickerControlRequest); ok && payload.PickerControlRequest != nil {
-			failure.Version = uint16(payload.PickerControlRequest.GetVersion())
-		}
 	}
 	return failure
 }

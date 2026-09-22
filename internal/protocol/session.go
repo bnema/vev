@@ -93,6 +93,8 @@ const (
 	ReasonSessionKilled  uint8 = 1
 	ReasonServerShutdown uint8 = 2
 	ReasonReplaced       uint8 = 3
+	// ReasonDetachToPicker transfers terminal ownership to the client picker.
+	ReasonDetachToPicker uint8 = 4
 )
 
 // Hello is sent by the client immediately after connecting.
@@ -364,7 +366,7 @@ func validClientNoticeAction(action uint8) bool {
 
 func validDetachedReason(reason uint8) bool {
 	switch reason {
-	case ReasonDetach, ReasonSessionKilled, ReasonServerShutdown, ReasonReplaced:
+	case ReasonDetach, ReasonSessionKilled, ReasonServerShutdown, ReasonReplaced, ReasonDetachToPicker:
 		return true
 	default:
 		return false

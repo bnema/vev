@@ -162,6 +162,30 @@ type CloseStream struct {
 
 func (CloseStream) brokerClientMessage() {}
 
+// StartPreview starts or replaces one connection-scoped live preview.
+// Generation is the connection-scoped preview authority; Route is the exact
+// observation stream authority and Preview is the bounded viewport request
+// sent to the daemon. Route/request dimensions are retained by client
+// subscription state.
+type StartPreview struct {
+	Epoch      ports.BrokerEpoch
+	Connection ports.BrokerConnectionID
+	Generation ports.BrokerPreviewGeneration
+	Route      OpenStream
+	Preview    protocol.RemotePreviewRequest
+}
+
+func (StartPreview) brokerClientMessage() {}
+
+// CancelPreview cancels one connection-scoped live preview.
+type CancelPreview struct {
+	Epoch      ports.BrokerEpoch
+	Connection ports.BrokerConnectionID
+	Generation ports.BrokerPreviewGeneration
+}
+
+func (CancelPreview) brokerClientMessage() {}
+
 // Registered confirms one accepted client connection and its assigned scope.
 type Registered struct {
 	Epoch      ports.BrokerEpoch
@@ -451,6 +475,22 @@ type BrokerErrorMessage struct {
 }
 
 func (BrokerErrorMessage) brokerServerMessage() {}
+
+// PreviewPublication is the newest result for one preview subscription.
+// Every authority field is repeated so a client can reject a late
+// completion. Exactly one of preview/error travels via the wire result
+// oneof: a failed publication carries HasError with a typed ErrorDetail
+// and no Preview; a successful one carries Preview and no error.
+type PreviewPublication struct {
+	Epoch      ports.BrokerEpoch
+	Connection ports.BrokerConnectionID
+	Generation ports.BrokerPreviewGeneration
+	Preview    protocol.RemotePreview
+	Error      ErrorDetail
+	HasError   bool
+}
+
+func (PreviewPublication) brokerServerMessage() {}
 
 // MaxBrokerAdmissionCode is the highest admission-refusal code carried on
 // ErrorDetail. The taxonomy is closed: 0 is none, 1 limit, 2 closed, 3 stale

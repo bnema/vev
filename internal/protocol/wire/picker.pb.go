@@ -461,59 +461,6 @@ func (x *PickerOffer) GetTitle() string {
 	return ""
 }
 
-// PickerBegin asks the daemon to open one interaction.
-type PickerBegin struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RequestId     uint64                 `protobuf:"varint,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	Intent        uint32                 `protobuf:"varint,2,opt,name=intent,proto3" json:"intent,omitempty"` // same taxonomy as PickerOffer.intent
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PickerBegin) Reset() {
-	*x = PickerBegin{}
-	mi := &file_picker_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PickerBegin) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PickerBegin) ProtoMessage() {}
-
-func (x *PickerBegin) ProtoReflect() protoreflect.Message {
-	mi := &file_picker_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PickerBegin.ProtoReflect.Descriptor instead.
-func (*PickerBegin) Descriptor() ([]byte, []int) {
-	return file_picker_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *PickerBegin) GetRequestId() uint64 {
-	if x != nil {
-		return x.RequestId
-	}
-	return 0
-}
-
-func (x *PickerBegin) GetIntent() uint32 {
-	if x != nil {
-		return x.Intent
-	}
-	return 0
-}
-
 // PickerSelection commits the opaque row key at a revision.
 type PickerSelection struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -531,7 +478,7 @@ type PickerSelection struct {
 
 func (x *PickerSelection) Reset() {
 	*x = PickerSelection{}
-	mi := &file_picker_proto_msgTypes[6]
+	mi := &file_picker_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -543,7 +490,7 @@ func (x *PickerSelection) String() string {
 func (*PickerSelection) ProtoMessage() {}
 
 func (x *PickerSelection) ProtoReflect() protoreflect.Message {
-	mi := &file_picker_proto_msgTypes[6]
+	mi := &file_picker_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -556,7 +503,7 @@ func (x *PickerSelection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PickerSelection.ProtoReflect.Descriptor instead.
 func (*PickerSelection) Descriptor() ([]byte, []int) {
-	return file_picker_proto_rawDescGZIP(), []int{6}
+	return file_picker_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PickerSelection) GetCauseActionId() uint64 {
@@ -623,7 +570,7 @@ type PickerResult struct {
 
 func (x *PickerResult) Reset() {
 	*x = PickerResult{}
-	mi := &file_picker_proto_msgTypes[7]
+	mi := &file_picker_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -635,7 +582,7 @@ func (x *PickerResult) String() string {
 func (*PickerResult) ProtoMessage() {}
 
 func (x *PickerResult) ProtoReflect() protoreflect.Message {
-	mi := &file_picker_proto_msgTypes[7]
+	mi := &file_picker_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -648,7 +595,7 @@ func (x *PickerResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PickerResult.ProtoReflect.Descriptor instead.
 func (*PickerResult) Descriptor() ([]byte, []int) {
-	return file_picker_proto_rawDescGZIP(), []int{7}
+	return file_picker_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PickerResult) GetCauseActionId() uint64 {
@@ -712,7 +659,7 @@ type PickerFailure struct {
 
 func (x *PickerFailure) Reset() {
 	*x = PickerFailure{}
-	mi := &file_picker_proto_msgTypes[8]
+	mi := &file_picker_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -724,7 +671,7 @@ func (x *PickerFailure) String() string {
 func (*PickerFailure) ProtoMessage() {}
 
 func (x *PickerFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_picker_proto_msgTypes[8]
+	mi := &file_picker_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -737,7 +684,7 @@ func (x *PickerFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PickerFailure.ProtoReflect.Descriptor instead.
 func (*PickerFailure) Descriptor() ([]byte, []int) {
-	return file_picker_proto_rawDescGZIP(), []int{8}
+	return file_picker_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *PickerFailure) GetCauseActionId() uint64 {
@@ -800,7 +747,7 @@ type PickerClose struct {
 
 func (x *PickerClose) Reset() {
 	*x = PickerClose{}
-	mi := &file_picker_proto_msgTypes[9]
+	mi := &file_picker_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -812,7 +759,7 @@ func (x *PickerClose) String() string {
 func (*PickerClose) ProtoMessage() {}
 
 func (x *PickerClose) ProtoReflect() protoreflect.Message {
-	mi := &file_picker_proto_msgTypes[9]
+	mi := &file_picker_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -825,7 +772,7 @@ func (x *PickerClose) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PickerClose.ProtoReflect.Descriptor instead.
 func (*PickerClose) Descriptor() ([]byte, []int) {
-	return file_picker_proto_rawDescGZIP(), []int{9}
+	return file_picker_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PickerClose) GetInteractionId() uint64 {
@@ -854,7 +801,7 @@ type PickerClosed struct {
 
 func (x *PickerClosed) Reset() {
 	*x = PickerClosed{}
-	mi := &file_picker_proto_msgTypes[10]
+	mi := &file_picker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -866,7 +813,7 @@ func (x *PickerClosed) String() string {
 func (*PickerClosed) ProtoMessage() {}
 
 func (x *PickerClosed) ProtoReflect() protoreflect.Message {
-	mi := &file_picker_proto_msgTypes[10]
+	mi := &file_picker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -879,7 +826,7 @@ func (x *PickerClosed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PickerClosed.ProtoReflect.Descriptor instead.
 func (*PickerClosed) Descriptor() ([]byte, []int) {
-	return file_picker_proto_rawDescGZIP(), []int{10}
+	return file_picker_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PickerClosed) GetInteractionId() uint64 {
@@ -947,11 +894,7 @@ const file_picker_proto_rawDesc = "" +
 	"\rbarrier_state\x18\x06 \x01(\x04R\fbarrierState\x12\x1d\n" +
 	"\n" +
 	"size_epoch\x18\a \x01(\x04R\tsizeEpoch\x12\x14\n" +
-	"\x05title\x18\b \x01(\tR\x05title\"D\n" +
-	"\vPickerBegin\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\x04R\trequestId\x12\x16\n" +
-	"\x06intent\x18\x02 \x01(\rR\x06intent\"\xef\x01\n" +
+	"\x05title\x18\b \x01(\tR\x05title\"\xef\x01\n" +
 	"\x0fPickerSelection\x12&\n" +
 	"\x0fcause_action_id\x18\x01 \x01(\x04R\rcauseActionId\x12\x1d\n" +
 	"\n" +
@@ -999,19 +942,18 @@ func file_picker_proto_rawDescGZIP() []byte {
 	return file_picker_proto_rawDescData
 }
 
-var file_picker_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_picker_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_picker_proto_goTypes = []any{
 	(*PickerLine)(nil),       // 0: vev.wire.v1.PickerLine
 	(*PickerCursor)(nil),     // 1: vev.wire.v1.PickerCursor
 	(*PickerProjection)(nil), // 2: vev.wire.v1.PickerProjection
 	(*PickerSnapshot)(nil),   // 3: vev.wire.v1.PickerSnapshot
 	(*PickerOffer)(nil),      // 4: vev.wire.v1.PickerOffer
-	(*PickerBegin)(nil),      // 5: vev.wire.v1.PickerBegin
-	(*PickerSelection)(nil),  // 6: vev.wire.v1.PickerSelection
-	(*PickerResult)(nil),     // 7: vev.wire.v1.PickerResult
-	(*PickerFailure)(nil),    // 8: vev.wire.v1.PickerFailure
-	(*PickerClose)(nil),      // 9: vev.wire.v1.PickerClose
-	(*PickerClosed)(nil),     // 10: vev.wire.v1.PickerClosed
+	(*PickerSelection)(nil),  // 5: vev.wire.v1.PickerSelection
+	(*PickerResult)(nil),     // 6: vev.wire.v1.PickerResult
+	(*PickerFailure)(nil),    // 7: vev.wire.v1.PickerFailure
+	(*PickerClose)(nil),      // 8: vev.wire.v1.PickerClose
+	(*PickerClosed)(nil),     // 9: vev.wire.v1.PickerClosed
 }
 var file_picker_proto_depIdxs = []int32{
 	0, // 0: vev.wire.v1.PickerProjection.lines:type_name -> vev.wire.v1.PickerLine
@@ -1036,7 +978,7 @@ func file_picker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_picker_proto_rawDesc), len(file_picker_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -230,14 +230,6 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			wantErr: errProtoConvertRange,
 		},
 		{
-			name: "picker control request operation",
-			run: func(t *testing.T) error {
-				_, err := pickerControlRequestFromWire(&wire.PickerControlRequest{Operation: 257})
-				return err
-			},
-			wantErr: protocol.ErrInvalidNavigation,
-		},
-		{
 			name: "remote preview status",
 			run: func(t *testing.T) error {
 				_, err := remotePreviewFromWire(&wire.RemotePreview{Status: 257})

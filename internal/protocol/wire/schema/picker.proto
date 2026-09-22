@@ -61,12 +61,6 @@ message PickerOffer {
   string title = 8;
 }
 
-// PickerBegin asks the daemon to open one interaction.
-message PickerBegin {
-  uint64 request_id = 1;
-  uint32 intent = 2; // same taxonomy as PickerOffer.intent
-}
-
 // PickerSelection commits the opaque row key at a revision.
 message PickerSelection {
   uint64 cause_action_id = 1;

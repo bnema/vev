@@ -237,6 +237,28 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Br
 			return nil, ErrInvalidMessage
 		}
 		return encodeClientEnvelope(*m, maxChunkBytes)
+	case StartPreview:
+		converted, err := startPreviewToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_StartPreview{StartPreview: converted}}, nil
+	case *StartPreview:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeClientEnvelope(*m, maxChunkBytes)
+	case CancelPreview:
+		converted, err := cancelPreviewToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_CancelPreview{CancelPreview: converted}}, nil
+	case *CancelPreview:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeClientEnvelope(*m, maxChunkBytes)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -279,6 +301,10 @@ func decodeClientEnvelope(envelope *wire.BrokerClientEnvelope, maxChunkBytes uin
 			return nil, ErrInvalidMessage
 		}
 		return CloseStream{Epoch: epoch, Connection: connection, Stream: stream}, nil
+	case *wire.BrokerClientEnvelope_StartPreview:
+		return startPreviewFromWire(payload.StartPreview)
+	case *wire.BrokerClientEnvelope_CancelPreview:
+		return cancelPreviewFromWire(payload.CancelPreview)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -867,6 +893,17 @@ func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.Br
 			return nil, ErrInvalidMessage
 		}
 		return encodeServerEnvelope(*m, maxChunkBytes)
+	case PreviewPublication:
+		converted, err := previewPublicationToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.BrokerServerEnvelope{Payload: &wire.BrokerServerEnvelope_PreviewPublication{PreviewPublication: converted}}, nil
+	case *PreviewPublication:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeServerEnvelope(*m, maxChunkBytes)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -920,6 +957,8 @@ func decodeServerEnvelope(envelope *wire.BrokerServerEnvelope, maxChunkBytes uin
 		return BrokerErrorMessage{Epoch: epoch, Connection: connection, Error: detail}, nil
 	case *wire.BrokerServerEnvelope_Shutdown:
 		return shutdownFromWire(payload.Shutdown)
+	case *wire.BrokerServerEnvelope_PreviewPublication:
+		return previewPublicationFromWire(payload.PreviewPublication)
 	default:
 		return nil, ErrWrongDirection
 	}

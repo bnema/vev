@@ -39,8 +39,8 @@ func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
 		"route_navigation_failure": true, "session_creation_failure": true,
 		"ui_fence": true, "navigation_inventory_request": true,
 		"navigation_inventory_publication": true, "navigation_inventory_failure": true,
-		"picker_begin": true, "picker_close": true, "picker_selection": true,
-		"picker_preview_request": true, "picker_control_request": true,
+		"picker_close": true, "picker_selection": true,
+		"picker_preview_request": true,
 	}
 	serverSemantic := map[string]bool{
 		"attachment_suspended": true, "attachment_activated": true,
@@ -51,9 +51,9 @@ func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
 		"route_navigation_failure": true, "route_position": true, "route_retired": true,
 		"same_peer_switch_failure": true, "ui_receipt": true, "ui_view_update": true,
 		"navigation_inventory_response": true, "navigation_inventory_demand": true,
-		"navigation_inventory_selection": true, "picker_offer": true,
-		"picker_snapshot": true, "picker_closed": true, "picker_result": true,
-		"picker_failure": true, "picker_preview": true, "picker_control_response": true,
+		"navigation_inventory_selection": true,
+		"picker_offer":                   true, "picker_snapshot": true, "picker_closed": true,
+		"picker_result": true, "picker_failure": true, "picker_preview": true,
 		"kill_result": true,
 	}
 

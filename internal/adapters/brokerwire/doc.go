@@ -1,7 +1,7 @@
 // Package brokerwire adapts typed broker messages to Protobuf envelopes.
 //
 // The broker is a separate conversation from the session protocol: client
-// tags 101-111 and server tags 201-209 are disjoint from every session tag,
+// tags 101-113 and server tags 201-210 are disjoint from every session tag,
 // and each direction is its own closed oneof union. Every connection starts
 // with the bounded broker preamble (roles 3/4); magic, epoch, exact
 // protocol version, and negotiated limits are validated before application

@@ -1,7 +1,7 @@
 // Broker wire schema: the client/server broker conversations.
 //
 // The broker is an independently versioned conversation from the session
-// protocol: client tags 101-111 and server tags 201-209 are disjoint from
+// protocol: client tags 101-113 and server tags 201-210 are disjoint from
 // every session tag, and each direction is its own closed oneof union.
 // Scope (broker epoch plus client connection) is carried explicitly on
 // every payload so stream IDs and events never cross a scope. Semantic
@@ -12,6 +12,7 @@ syntax = "proto3";
 package vev.wire.v1;
 
 import "common.proto";
+import "terminal.proto";
 
 option go_package = "github.com/bnema/vev/internal/protocol/wire";
 
@@ -86,6 +87,8 @@ message BrokerClientEnvelope {
     ClientStreamData client_stream_data = 109;
     CloseStream close_stream = 110;
     UpdateHostPolicy update_host_policy = 111;
+    StartPreview start_preview = 112;
+    CancelPreview cancel_preview = 113;
   }
 }
 
@@ -102,6 +105,7 @@ message BrokerServerEnvelope {
     Progress progress = 207;
     BrokerErrorMessage broker_error_message = 208;
     Shutdown shutdown = 209;
+    PreviewPublication preview_publication = 210;
   }
 }
 
@@ -354,6 +358,37 @@ message Shutdown {
   // Closed reason taxonomy; 0 is the zero value.
   uint32 reason = 2;
   string text = 3;
+}
+
+// StartPreview starts or replaces one connection-scoped live preview.
+// scope carries the broker epoch plus client connection; generation is the
+// connection-scoped preview authority. route is the exact observation
+// stream authority and preview is the bounded viewport request sent to the
+// daemon. Route/request dimensions are retained by client subscription
+// state; repeated authority is scope/generation plus the preview target
+// identity response.
+message StartPreview {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+  OpenStream route = 3;
+  RemotePreviewRequest preview = 4;
+}
+
+// CancelPreview cancels one connection-scoped live preview.
+message CancelPreview {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+}
+
+// PreviewPublication is the newest result for one preview subscription.
+// Exactly one of preview/error is set via the result oneof.
+message PreviewPublication {
+  BrokerScope scope = 1;
+  uint64 generation = 2;
+  oneof result {
+    RemotePreview preview = 3;
+    BrokerErrorDetail error = 4;
+  }
 }
 
 // BrokerCatalogSession mirrors catalogue.RemoteCatalogSession exactly: the
