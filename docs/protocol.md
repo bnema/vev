@@ -17,8 +17,7 @@ Client → server: `Hello`, `Input`, `Resize`, `Detach`, `Ping`, `List`,
 `RecentRouteSnapshot`, `RouteNavigationFailure`,
 `SessionCreationFailure`, `UIFence`, `NavigationInventoryRequest`,
 `NavigationInventoryPublication`, `NavigationInventoryFailure`,
-`PickerBegin`, `PickerClose`, `PickerSelection`, `PickerPreviewRequest`,
-`PickerControlRequest`.
+`PickerClose`, `PickerSelection`, `PickerPreviewRequest`.
 
 Server → client: `Welcome`, `ErrorMsg`, `Output`, `Detached`, `Pong`,
 `Sessions`, `CommandResult`, `AttachTarget`, `RemotePreview`,
@@ -28,7 +27,7 @@ Server → client: `Welcome`, `ErrorMsg`, `Output`, `Detached`, `Pong`,
 `NavigationInventoryResponse`, `NavigationInventoryDemand`,
 `NavigationInventorySelection`, `PickerOffer`, `PickerSnapshot`,
 `PickerClosed`, `PickerResult`, `PickerFailure`, `PickerPreview`,
-`PickerControlResponse`, `KillResult`.
+`KillResult`.
 
 `RouteNavigationFailure` is the one payload that appears in both unions.
 `sessionwire` conversion switches (`decodeProtoClient`/`decodeProtoServer`,
@@ -68,7 +67,7 @@ negotiated ceiling.
 
 First frame routing (`daemon.go:handleConn`): `Hello` → full attach;
 `List`, `CommandRequest`, `RemotePreviewRequest`,
-`NavigationInventoryRequest`, `PickerControlRequest`, `Kill` are one-shot
+`NavigationInventoryRequest`, `Kill` are one-shot
 control connections answered and closed. Anything else, including any
 malformed first frame, gets a typed compatibility response and no session
 mutation:
@@ -84,9 +83,9 @@ mutation:
 | other / unknown | `ErrorMsg{ErrInternal, "expected hello"}` | no |
 
 Live checks after decode: `Hello.Version`, `CommandRequest.Version`,
-`NavigationInventoryRequest.Version`, `PickerControlRequest.Version`,
-and `RemotePreviewRequest.Version` (independent catalogue-era schema
-version `1`) must equal the negotiated constant or the request fails
+`NavigationInventoryRequest.Version`, and `RemotePreviewRequest.Version`
+(independent catalogue-era schema version `1`) must equal the negotiated
+constant or the request fails
 with the version-mismatch response above. There is no multi-version
 negotiation: equality is mandatory.
 

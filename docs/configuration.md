@@ -126,6 +126,8 @@ rm -rf .dev/dev
 
 The selected absolute root is retained by the detached daemon and inherited vev processes even when their working directory changes. A name isolates configuration, runtime files, durable sessions, hosts, snapshots, and logs from normal XDG locations and from other names. Invocations using the same name intentionally share a daemon and files; use separate names for side-by-side binaries.
 
+If the runtime path would exceed the portable Unix-socket limit (103 bytes, including `vev/broker/broker.sock`), sockets and lifecycle locks instead use `/tmp/vev-<uid>-<sha256>`; the hash identifies the complete original runtime directory. Configuration and durable state remain under `.dev/<name>/`. All roles resolve the same private runtime directory, and distinct roots remain isolated. Short paths keep their existing location. Stop processes using an older binary before switching versions if their runtime location changes; do not delete a live runtime directory or its lock files.
+
 This feature isolates vev-owned data only. It does not sandbox pane processes or provide OS, filesystem, or network isolation.
 
 ## Remote hosts
