@@ -175,7 +175,7 @@ mutation, so a racing close can never admit work after shutdown. The codec
 itself stays stateless over `wire.ScanEnvelope`. No socket, framing pump,
 or P3.2 transport is introduced here.
 
-## Broker pool core (Plan 001 P2.2, not activated)
+## Broker connection pool
 
 `internal/usecase/broker.Pool` owns bounded physical keys and logical stream
 reservations, but no session data or traffic queues. Local and registered remote
@@ -200,16 +200,20 @@ and are canceled when their final reservation leaves. Acquisition coalescing
 keys on the exact policy plus the explicit `BrokerDaemonStartMode`, so an
 existing-only request is never shared with a dial that may start the target;
 after authentication the canonical key is identity plus exact policy alone.
-Physical retirement keeps its key occupied until Close finishes. Fake-clock idle
-eviction and shutdown close transports outside the bookkeeping lock.
+Physical retirement keeps its key occupied until Close finishes. The pool keeps
+at most eight idle physical transports warm by default, including connections
+established by a first successful probe. `warmTransports: 0` disables warm
+reuse; `warmIdleTimeout` defaults to `off` and may set an idle deadline.
+Broker shutdown always closes warm transports. Fake-clock idle eviction and
+shutdown close transports outside the bookkeeping lock.
 
 Logical and physical ports expose terminal signals independent of message reads.
 A stream terminal failure releases only its reservation; physical failure fans
 out separately scoped typed loss errors. The pool owns neither framing nor
-fairness: future transport adapters must implement independently bounded queues
-and prompt cancellation/Close. Shutdown joins owned operations and relies on
-that explicit port contract. No production composition or real multiplexing is
-introduced here, and existing production connectivity ownership is unchanged.
+fairness: transport adapters implement independently bounded queues and
+prompt cancellation/Close. Shutdown joins owned operations and relies on
+that explicit port contract. Production clients use this pool for local and
+remote logical streams.
 
 Physical `Done` is authoritative: adapters publish stable `Err` and
 `FailureKind`, then close physical `Done` before terminating affected logical
