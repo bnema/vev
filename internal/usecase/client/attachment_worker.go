@@ -392,6 +392,14 @@ type attachmentHost struct {
 	geometryCancel     context.CancelFunc
 	geometryDone       chan struct{}
 	ownerBoundary      bool
+
+	// navigationRequests carries a coalesced request from the attached worker
+	// to compose the client's session picker over the live attachment (the
+	// daemon's navigation PickerOffer). Only the supervisor consumes it.
+	navigationRequests chan struct{}
+	// internalActions carries supervisor-originated lifecycle decisions for the
+	// current foreground, such as the detach that precedes an attachment swap.
+	internalActions chan AttachmentLifecycleAction
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -429,6 +437,8 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		geometryValid:      initialGeometryValid,
 		geometryUpdate:     make(chan struct{}, 1),
 		presentationUpdate: make(chan struct{}, 1),
+		navigationRequests: make(chan struct{}, 1),
+		internalActions:    make(chan AttachmentLifecycleAction, 1),
 	}
 }
 
@@ -460,6 +470,9 @@ func (h *attachmentHost) Begin(ctx context.Context, token AttachmentToken, worke
 		cancel()
 		return nil, false
 	}
+	// A request or action left behind by a previous foreground never applies
+	// to this one.
+	h.drainForegroundSignals()
 	if h.actionUI != nil {
 		fg.uiGeneration = h.actionUI.bindForeground(workerCtx, fg.input, fg.consumer)
 	}
@@ -595,7 +608,245 @@ func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.Broke
 		done:       make(chan struct{}),
 		decided:    true,
 		onAttached: h.onAttach,
+		repaint:    make(chan struct{}, 1),
 	}
+}
+
+// drainForegroundSignals drops any navigation request or internal lifecycle
+// action that belonged to an earlier foreground.
+func (h *attachmentHost) drainForegroundSignals() {
+	for {
+		select {
+		case <-h.navigationRequests:
+		case <-h.internalActions:
+		default:
+			return
+		}
+	}
+}
+
+// NavigationRequests wakes the supervisor when the attached worker asked for
+// the client picker over the live attachment.
+func (h *attachmentHost) NavigationRequests() <-chan struct{} {
+	if h == nil {
+		return nil
+	}
+	return h.navigationRequests
+}
+
+// beginNavigationOverlay composes the supervisor-owned picker over the current
+// foreground: from its return, attachment output is applied and acknowledged
+// but never written, and every authorized input delivery is handed to sink. It
+// reports false when no active foreground can host the overlay.
+func (h *attachmentHost) beginNavigationOverlay(sink pickerInputConsumer) bool {
+	if h == nil || sink == nil {
+		return false
+	}
+	fg := h.authority.foreground()
+	if fg == nil {
+		return false
+	}
+	return fg.setOverlay(attachmentOverlayNavigation, sink)
+}
+
+// endNavigationOverlay returns the terminal to the current foreground and asks
+// its worker for an authoritative repaint over the picker box.
+func (h *attachmentHost) endNavigationOverlay() {
+	if h == nil {
+		return
+	}
+	if fg := h.authority.foreground(); fg != nil {
+		fg.clearOverlay(attachmentOverlayNavigation)
+	}
+}
+
+// committedTarget reports the session the current foreground last committed
+// output for, so the supervisor can tell a commit to the attached session from
+// a commit elsewhere.
+func (h *attachmentHost) committedTarget() (protocol.ExactSessionTarget, bool) {
+	if h == nil {
+		return protocol.ExactSessionTarget{}, false
+	}
+	fg := h.authority.foreground()
+	if fg == nil {
+		return protocol.ExactSessionTarget{}, false
+	}
+	fg.overlayMu.Lock()
+	defer fg.overlayMu.Unlock()
+	return fg.committed, fg.committedKnown
+}
+
+// committedTargetOrZero is committedTarget with an unknown target as zero.
+func (h *attachmentHost) committedTargetOrZero() protocol.ExactSessionTarget {
+	target, ok := h.committedTarget()
+	if !ok {
+		return protocol.ExactSessionTarget{}
+	}
+	return target
+}
+
+// requestDetach asks the current foreground's worker to detach explicitly, so
+// the daemon observes a clean Detach before the supervisor swaps attachments.
+func (h *attachmentHost) requestDetach(token AttachmentToken) {
+	if h == nil {
+		return
+	}
+	select {
+	case h.internalActions <- AttachmentLifecycleAction{Token: token, Kind: AttachmentDetachToPicker}:
+	default:
+	}
+}
+
+// attachmentOverlayKind names the client-composed overlay that owns the
+// terminal over a live attachment.
+type attachmentOverlayKind uint8
+
+const (
+	attachmentOverlayNone attachmentOverlayKind = iota
+	// attachmentOverlayNavigation is the supervisor-owned session picker.
+	attachmentOverlayNavigation
+	// attachmentOverlayMove is the worker-owned move-destination picker the
+	// serving daemon offered.
+	attachmentOverlayMove
+)
+
+// attachmentOverlayForeground is the optional overlay seam of the real
+// foreground. A worker reaches it by assertion so scripted foregrounds may
+// omit it; without it, overlays are simply never presented.
+type attachmentOverlayForeground interface {
+	requestNavigationPicker()
+	setOverlay(kind attachmentOverlayKind, sink pickerInputConsumer) bool
+	clearOverlay(kind attachmentOverlayKind)
+	overlayKind() attachmentOverlayKind
+	divertInput(data []byte) bool
+	overlayRepaint() <-chan struct{}
+	overlayOutput(uiContext ports.UIContext, data []byte) error
+	noteCommitted(target protocol.ExactSessionTarget)
+}
+
+var _ attachmentOverlayForeground = (*attachmentForeground)(nil)
+
+// requestNavigationPicker records the daemon's navigation offer for the
+// supervisor. The request is coalesced; the supervisor decides whether the
+// current presentation can host the overlay.
+func (f *attachmentForeground) requestNavigationPicker() {
+	if f == nil || f.host == nil || !f.authority.actionAuthorized(f) {
+		return
+	}
+	select {
+	case f.host.navigationRequests <- struct{}{}:
+	default:
+	}
+}
+
+// setOverlay installs kind under the output lease, so no attachment frame is
+// mid-write when the overlay takes the terminal. An occupied slot refuses a
+// different overlay.
+func (f *attachmentForeground) setOverlay(kind attachmentOverlayKind, sink pickerInputConsumer) bool {
+	if f == nil || kind == attachmentOverlayNone {
+		return false
+	}
+	installed := false
+	f.lease.send(func() bool {
+		if !f.authority.actionAuthorized(f) {
+			return false
+		}
+		f.overlayMu.Lock()
+		defer f.overlayMu.Unlock()
+		if f.overlay != attachmentOverlayNone && f.overlay != kind {
+			return true
+		}
+		f.overlay = kind
+		f.overlaySink = sink
+		installed = true
+		return true
+	})
+	return installed
+}
+
+// clearOverlay releases kind under the output lease and asks the worker for an
+// authoritative repaint: the terminal still shows the picker box and any
+// attachment frames it suppressed were never written.
+func (f *attachmentForeground) clearOverlay(kind attachmentOverlayKind) {
+	if f == nil {
+		return
+	}
+	cleared := false
+	f.lease.send(func() bool {
+		f.overlayMu.Lock()
+		defer f.overlayMu.Unlock()
+		if f.overlay != kind {
+			return true
+		}
+		f.overlay = attachmentOverlayNone
+		f.overlaySink = nil
+		cleared = true
+		return true
+	})
+	if !cleared {
+		// The lease stops at finalization; the overlay dies with the grant.
+		f.overlayMu.Lock()
+		if f.overlay == kind {
+			f.overlay = attachmentOverlayNone
+			f.overlaySink = nil
+		}
+		f.overlayMu.Unlock()
+		return
+	}
+	select {
+	case f.repaint <- struct{}{}:
+	default:
+	}
+}
+
+func (f *attachmentForeground) overlayKind() attachmentOverlayKind {
+	if f == nil {
+		return attachmentOverlayNone
+	}
+	f.overlayMu.Lock()
+	defer f.overlayMu.Unlock()
+	return f.overlay
+}
+
+// divertInput hands one authorized delivery to the supervisor-owned overlay.
+// It reports false when no navigation overlay owns input, so the worker keeps
+// its session path.
+func (f *attachmentForeground) divertInput(data []byte) bool {
+	if f == nil {
+		return false
+	}
+	f.overlayMu.Lock()
+	sink := f.overlaySink
+	kind := f.overlay
+	f.overlayMu.Unlock()
+	if kind != attachmentOverlayNavigation || sink == nil {
+		return false
+	}
+	sink.ConsumeTerminalRead(data)
+	return true
+}
+
+func (f *attachmentForeground) overlayRepaint() <-chan struct{} {
+	if f == nil {
+		return nil
+	}
+	return f.repaint
+}
+
+func (f *attachmentForeground) noteCommitted(target protocol.ExactSessionTarget) {
+	if f == nil {
+		return
+	}
+	f.overlayMu.Lock()
+	f.committed = target
+	f.committedKnown = true
+	f.overlayMu.Unlock()
+}
+
+// overlayOutput writes one overlay frame through the same lease and UI
+// transaction as attachment output, bypassing only the overlay suppression.
+func (f *attachmentForeground) overlayOutput(uiContext ports.UIContext, data []byte) error {
+	return f.write(uiContext, data, true)
 }
 
 // attachmentRun is one in-flight worker generation owned by the supervisor.
@@ -726,6 +977,18 @@ type attachmentForeground struct {
 	geometrySeq uint64
 	attached    atomic.Bool
 	onAttached  func(AttachmentToken)
+
+	// overlayMu guards the overlay slot and the committed target. The slot is
+	// changed only inside the output lease, so an overlay never takes the
+	// terminal while an attachment frame is mid-write.
+	overlayMu      sync.Mutex
+	overlay        attachmentOverlayKind
+	overlaySink    pickerInputConsumer
+	committed      protocol.ExactSessionTarget
+	committedKnown bool
+	// repaint wakes the worker to request an authoritative repaint once an
+	// overlay released the terminal.
+	repaint chan struct{}
 }
 
 // Token is the generation/attempt identity of this grant.
@@ -904,12 +1167,21 @@ func (f *attachmentForeground) Lifecycle(ctx context.Context) (AttachmentLifecyc
 		if !f.authority.actionAuthorized(f) {
 			return 0, false
 		}
+		var internal <-chan AttachmentLifecycleAction
+		if f.host != nil {
+			internal = f.host.internalActions
+		}
 		select {
 		case action, ok := <-f.actions:
 			if !ok || !f.authority.actionAuthorized(f) {
 				return 0, false
 			}
 			if action.Token != f.token {
+				continue
+			}
+			return action.Kind, action.Kind == AttachmentDetachToPicker || action.Kind == AttachmentDetachAndExit
+		case action := <-internal:
+			if action.Token != f.token || !f.authority.actionAuthorized(f) {
 				continue
 			}
 			return action.Kind, action.Kind == AttachmentDetachToPicker || action.Kind == AttachmentDetachAndExit
@@ -973,6 +1245,15 @@ func (f *attachmentForeground) Resize(ctx context.Context) (domain.Geometry, boo
 // flush, and EndOutput(true) commit the frame; any failed or short write or
 // failed flush leaves EndOutput(false).
 func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) error {
+	return f.write(uiContext, data, false)
+}
+
+// write is the shared output transaction. While an overlay owns the terminal an
+// attachment frame (overlay=false) is accepted without being written or
+// published: the caller still applies and acknowledges it, and the overlay's
+// release requests an authoritative repaint. Overlay frames bypass only that
+// suppression.
+func (f *attachmentForeground) write(uiContext ports.UIContext, data []byte, overlay bool) error {
 	if f == nil {
 		return errAttachmentForegroundRevoked
 	}
@@ -980,6 +1261,9 @@ func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) er
 	ok := f.lease.send(func() bool {
 		if !f.authority.actionAuthorized(f) {
 			return false
+		}
+		if !overlay && f.overlayKind() != attachmentOverlayNone {
+			return true
 		}
 		if supervisorNil(f.term) {
 			outputErr = ports.ErrUIUnavailable

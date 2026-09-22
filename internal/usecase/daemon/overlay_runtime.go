@@ -49,6 +49,11 @@ type overlayRuntime struct {
 	pickerIntent          protocol.PickerIntent
 	pickerMoveSource      moveSourceLocator
 	pickerRequestID       uint64
+	// pickerNavigationOffers numbers the fire-and-forget navigation offers
+	// that ask the client to open its own session picker over this live
+	// attachment. They open no daemon interaction, so they never touch
+	// pickerInteraction.
+	pickerNavigationOffers uint64
 	// pickerPreview* track the row the client asked to preview. The generation
 	// supersedes an in-flight capture and names the render subscription, so a
 	// delayed preview can never replace the row the user is displaying.

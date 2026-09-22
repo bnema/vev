@@ -11,13 +11,38 @@ import (
 )
 
 // This file retains the serving-daemon move-destination interaction. It must
-// never admit a navigation intent: session-picker ends the attachment and the
-// client supervisor owns all subsequent navigation and terminal input.
+// never admit a navigation interaction: session-picker only offers the client
+// its own picker over the live attachment (offerClientNavigationPicker), and
+// the client supervisor owns all navigation and terminal input while it is
+// open.
 
 // servingPickerSourceID names the source the serving daemon itself owns.
 const servingPickerSourceID = protocol.PickerServingSourceID
 
 var errClientOwnedNavigation = errors.New("session navigation is client-owned")
+
+// offerClientNavigationPicker asks the client to open its own session picker
+// over this live attachment. The daemon opens no interaction: navigation rows
+// come from the client's broker catalogue, the client picker consumes the
+// input it owns locally, and the attachment stays attached so cancelling the
+// picker returns to it without reconnecting.
+func (d *Daemon) offerClientNavigationPicker(ac *attachedClient, effect *attachmentEffect) error {
+	if ac == nil || ac.overlays == nil || effect == nil || !effect.current() {
+		return errAttachmentTransition
+	}
+	ac.overlays.pickerMu.Lock()
+	ac.overlays.pickerNavigationOffers++
+	if ac.overlays.pickerNavigationOffers == 0 {
+		ac.overlays.pickerNavigationOffers = 1
+	}
+	offerID := ac.overlays.pickerNavigationOffers
+	ac.overlays.pickerMu.Unlock()
+	offer := protocol.PickerOffer{InteractionID: offerID, Intent: protocol.PickerIntentNavigation, Title: picker.SortRecent.Title()}
+	if err := protocol.ValidatePickerOffer(offer); err != nil {
+		return err
+	}
+	return effect.sendControl(offer)
+}
 
 // pickerDuplicateRows reports the first repeated row key with a readable
 // identity for both rows. A refused snapshot otherwise says only that a key

@@ -22,7 +22,9 @@ import (
 // invariants or consume a pending user decision before the supervisor handles
 // it.
 //
-// Painting is allowed only while PickerPresentation reports true. In
+// Painting is allowed only while PickerPresentation reports true: the plain
+// picker, or the picker overlay over a live attachment whose output the
+// attachment foreground suppresses while the overlay is open. In
 // particular, PresentConnecting is not safe: once the attachment foreground is
 // admitted it owns the same terminal writer before MarkAttached or the initial
 // publication. Nothing serializes picker painting with that foreground.
@@ -42,7 +44,7 @@ var _ pickerHost = (*Picker)(nil)
 // admitted foreground can write while the public presentation is still
 // PresentConnecting.
 func PickerPresentation(state State) bool {
-	return state.Presentation == PresentPicker
+	return state.Presentation == PresentPicker || state.Presentation == PresentAttachedPicker
 }
 
 // NewPicker composes one client-owned picker. A nil clock uses the system
@@ -100,6 +102,20 @@ func (p *Picker) SetOwnsInput(owns bool) {
 		return
 	}
 	p.controller.SetOwnsInput(owns)
+}
+
+// offerNotice shows one bounded client-local notice on the picker.
+func (p *Picker) offerNotice(id, message string) {
+	if p != nil && p.controller != nil {
+		p.controller.offerNotice(id, message)
+	}
+}
+
+// invalidatePresentation forces the next frame to redraw the whole box.
+func (p *Picker) invalidatePresentation() {
+	if p != nil && p.controller != nil {
+		p.controller.invalidatePresentation()
+	}
 }
 
 // OpsReady returns the supervisor's coalescing operation wake channel.

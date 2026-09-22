@@ -499,6 +499,20 @@ func (r *pickerRenderer) reset() {
 	r.prevBounds = nil
 }
 
+// invalidate forgets everything the renderer believes is on screen. The next
+// render re-primes an empty shadow and writes the whole box again: someone
+// else (an attachment's output or its authoritative repaint) owned the
+// terminal since the last picker frame, so a diff against the old shadow would
+// leave parts of the box missing.
+func (r *pickerRenderer) invalidate() {
+	if r == nil {
+		return
+	}
+	r.renderer = nil
+	r.primed = false
+	r.prevBounds = nil
+}
+
 // damageRect is the damage one rectangle of a composed frame produces.
 func damageRect(rect domain.Rect) ansirenderer.Damage {
 	return ansirenderer.Damage{
@@ -591,6 +605,10 @@ type pickerOp struct {
 	commit bool
 	kill   bool
 	close  bool
+	// exit marks the explicit exit key (Ctrl+C). It always travels with close:
+	// over a live attachment it cancels back to that attachment like any close,
+	// and only a picker with no attachment to return to ends the process on it.
+	exit bool
 }
 
 // pickerDriverOp is one ui-driver operation applied to an open loop. Keys
@@ -668,8 +686,8 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (op pickerOp, 
 			}
 		case "Ctrl+C":
 			// The overlay exits on Ctrl-C in both modes; the byte
-			// itself never reaches the query.
-			return pickerOp{close: true}, changed
+			// itself never reaches the query. It is the explicit exit key.
+			return pickerOp{close: true, exit: true}, changed
 		default:
 			if len(key) == 1 {
 				insertLit(rune(key[0]))
@@ -734,7 +752,7 @@ func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (op pickerOp, chan
 		eventOp, eventChanged := pickerDriverOp(loop, []string{event.key}, "")
 		changed = changed || eventChanged
 		if eventOp.close {
-			return pickerOp{close: true}, changed
+			return pickerOp{close: true, exit: eventOp.exit}, changed
 		}
 		op.commit = op.commit || eventOp.commit
 		op.kill = op.kill || eventOp.kill

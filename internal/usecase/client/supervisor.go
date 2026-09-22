@@ -70,6 +70,12 @@ const (
 	// PresentTerminating is the terminal state: raw mode is being restored and
 	// the process is leaving.
 	PresentTerminating
+	// PresentAttachedPicker composes the client picker over a live attachment
+	// (ADR 001 Amendment 1). The logical attachment stays attached: its output
+	// is applied and acknowledged but not written while the picker owns the
+	// terminal and its input. Cancel returns to the same attachment without
+	// reconnecting.
+	PresentAttachedPicker
 )
 
 func (p Presentation) String() string {
@@ -82,6 +88,8 @@ func (p Presentation) String() string {
 		return "attached"
 	case PresentTerminating:
 		return "terminating"
+	case PresentAttachedPicker:
+		return "attached_picker"
 	default:
 		return "unknown"
 	}
@@ -173,6 +181,11 @@ const (
 	// supervisorTerminal ends the process: terminal EOF, process cancellation,
 	// or a terminal broker failure.
 	supervisorTerminal
+	// supervisorOverlayOpened composes the picker over the live attachment.
+	supervisorOverlayOpened
+	// supervisorOverlayClosed returns from the picker overlay to the same live
+	// attachment.
+	supervisorOverlayClosed
 )
 
 type supervisorEvent struct {
@@ -221,6 +234,17 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 	case supervisorNonRetryable:
 		state.Connectivity = ConnectivityDisconnected
 		state.Err = event.err
+	case supervisorOverlayOpened:
+		// Only a committed attachment can host the overlay: a connecting
+		// foreground has not proven its first frame yet.
+		if state.Presentation == PresentAttached {
+			state.Presentation = PresentAttachedPicker
+			state.Err = nil
+		}
+	case supervisorOverlayClosed:
+		if state.Presentation == PresentAttachedPicker {
+			state.Presentation = PresentAttached
+		}
 	case supervisorTerminal:
 		state.Presentation = PresentTerminating
 		state.Connectivity = ConnectivityDisconnected
@@ -375,6 +399,14 @@ type Supervisor struct {
 	// clientID is the stable client identity carried in every Hello this
 	// supervisor sends, across reconnects and attachments.
 	clientID [16]byte
+	// readySub is the adopted connection's subscription while the ready phase
+	// runs, so the picker overlay over a live attachment keeps folding broker
+	// publications. It is only touched from the run goroutine.
+	readySub ports.BrokerSubscription
+	// pendingSwap is the request the picker overlay committed to another
+	// target while an attachment was live. It is only touched from the run
+	// goroutine and consumed by runResolvedAttachment.
+	pendingSwap *ports.BrokerOpenStreamRequest
 }
 
 // NewSupervisor validates the required dependencies and returns a supervisor
@@ -474,6 +506,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	)
 	retire := func() {
 		s.preview.close(s.cfg.Picker)
+		s.readySub = nil
 		if sub != nil {
 			sub.Close()
 			sub = nil
@@ -542,6 +575,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 
 		service, sub = result.service, result.sub
+		s.readySub = sub
 		if s.cfg.Picker != nil {
 			// Render the first committed publication immediately, before waiting
 			// for the next one; the picker never shows a stale empty catalogue
@@ -796,8 +830,17 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 				continue
 			}
 			if op.close {
-				s.preview.close(s.cfg.Picker)
-				return readyOutcome{terminated: true}
+				if op.exit {
+					// Ctrl+C is the explicit exit. With no attachment to
+					// return to, it is the only close that ends the process.
+					s.preview.close(s.cfg.Picker)
+					return readyOutcome{terminated: true}
+				}
+				// Escape and q cancel; with no attachment there is nothing to
+				// cancel back to, so the picker stays and says how to leave.
+				s.offerPickerNotice("picker-exit-hint", "no session attached: press Ctrl+C to quit")
+				s.renderCurrent()
+				continue
 			}
 			if op.commit && key != "" {
 				s.preview.close(s.cfg.Picker)
@@ -834,13 +877,42 @@ func (s *Supervisor) pickerOps() <-chan struct{} {
 	return s.cfg.Picker.OpsReady()
 }
 
-// takePickerClose honors exit while offline without losing a racing commit.
+// takePickerClose honors the explicit exit while offline without losing a
+// racing commit. A plain cancel (Escape, q) has no attachment to return to and
+// never ends the process.
 func (s *Supervisor) takePickerClose() bool {
 	op, key := s.cfg.Picker.TakeOp()
 	if op.commit && key != "" {
 		s.pendingPickerKey = key
 	}
-	return op.close
+	if op.close && !op.exit {
+		s.offerPickerNotice("picker-exit-hint", "no session attached: press Ctrl+C to quit")
+		s.renderCurrent()
+	}
+	return op.close && op.exit
+}
+
+// pickerPresentationHost is the optional presentation surface of the real
+// picker. Scripted pickers may omit it.
+type pickerPresentationHost interface {
+	offerNotice(id, message string)
+	invalidatePresentation()
+}
+
+// offerPickerNotice shows one bounded client-local notice when the picker
+// supports it.
+func (s *Supervisor) offerPickerNotice(id, message string) {
+	if host, ok := s.cfg.Picker.(pickerPresentationHost); ok {
+		host.offerNotice(id, message)
+	}
+}
+
+// invalidatePickerPresentation forces the next picker frame to redraw the
+// whole box after another owner wrote the terminal.
+func (s *Supervisor) invalidatePickerPresentation() {
+	if host, ok := s.cfg.Picker.(pickerPresentationHost); ok {
+		host.invalidatePresentation()
+	}
 }
 
 // awaitTermination parks the supervisor on the picker after a non-retryable

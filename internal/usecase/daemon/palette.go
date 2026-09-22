@@ -1206,12 +1206,11 @@ func (e paletteExec) OpenSessionPicker() error {
 		defer fresh.End()
 		effect = fresh
 	}
-	// End the attachment; the client supervisor, not an interaction on this
-	// connection, owns the next picker presentation and its input.
-	if !e.d.clientGoneForAttachmentReason(effect, true, protocol.ReasonDetachToPicker) {
-		return errAttachmentTransition
-	}
-	return nil
+	// Keep the attachment live: the client supervisor composes its own picker
+	// over this attachment and owns its input until the user commits or
+	// cancels. Detach-to-picker is reserved for attachment loss, session end,
+	// and explicit detach.
+	return e.d.offerClientNavigationPicker(e.ac, effect)
 }
 
 func (e paletteExec) OpenNotifications() error {

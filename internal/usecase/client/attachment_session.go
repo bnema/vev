@@ -68,6 +68,9 @@ type sessionAttachmentConfig struct {
 	// BeforeAttached runs after the initial frame commits but before attached
 	// presentation becomes observable. A failure keeps the run unattached.
 	BeforeAttached func() error
+	// Clock bounds the move picker's lone-escape window. A nil clock uses the
+	// system clock.
+	Clock ports.Clock
 }
 
 // sessionAttachmentWorker implements AttachmentWorker for one broker logical
@@ -87,6 +90,9 @@ func newSessionAttachmentWorker(cfg sessionAttachmentConfig) (*sessionAttachment
 	}
 	cfg.Request.Env = append([]string(nil), cfg.Request.Env...)
 	cfg.SessionEnvironment = cfg.SessionEnvironment.Clone()
+	if supervisorNil(cfg.Clock) {
+		cfg.Clock = systemClock{}
+	}
 	return &sessionAttachmentWorker{cfg: cfg}, nil
 }
 
@@ -188,6 +194,7 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 				return state, &event
 			}
 			state = next
+			attachmentNoteCommitted(fg, state.context.Route.Target)
 			// The frame transaction is the pre-attach publication: it commits the first
 			// session bytes with the Connecting presentation and, through the foreground
 			// shape rule, a public generation of zero. Attached is published only after
@@ -246,6 +253,18 @@ type attachmentClientEvent struct {
 	action  AttachmentLifecycleActionKind
 }
 
+// attachmentOverlay returns the optional overlay seam of fg, or nil.
+func attachmentOverlay(fg AttachmentForeground) attachmentOverlayForeground {
+	overlay, _ := fg.(attachmentOverlayForeground)
+	return overlay
+}
+
+func attachmentNoteCommitted(fg AttachmentForeground, target protocol.ExactSessionTarget) {
+	if overlay := attachmentOverlay(fg); overlay != nil {
+		overlay.noteCommitted(target)
+	}
+}
+
 var (
 	errDetachToPicker = errors.New("client: detach to picker")
 	errDetachAndExit  = errors.New("client: detach and exit")
@@ -261,8 +280,30 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	go pumpAttachmentGeometry(pumpCtx, fg, outgoing)
 	go pumpAttachmentLifecycle(pumpCtx, fg, outgoing)
 	outputResetRequested := false
+	overlay := attachmentOverlay(fg)
+	var repaint <-chan struct{}
+	if overlay != nil {
+		repaint = overlay.overlayRepaint()
+	}
+	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay()}
+	defer picker.stopEscape()
+	var inputSeq uint64
 	for {
 		select {
+		case <-repaint:
+			// An overlay released the terminal: the picker box is still on screen
+			// and suppressed frames were never written, so ask the daemon for an
+			// authoritative full repaint.
+			if err := w.send(ctx, fg, stream, protocol.OutputResetRequest{}); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+			outputResetRequested = true
+		case <-picker.escape():
+			picker.escapeFired()
+			op, changed := picker.move.flush()
+			if err := picker.applyOp(ctx, state, op, changed); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case result := <-incoming:
 			if result.err != nil {
 				return w.settle(ctx, fg, stream, token, result.err)
@@ -275,6 +316,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 				state = next
 				outputResetRequested = false
+				attachmentNoteCommitted(fg, state.context.Route.Target)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
 				}
@@ -298,6 +340,16 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 			case protocol.UIReceipt:
 				attachmentUIReceipt(fg, typed)
+			case protocol.PickerOffer:
+				if err := picker.offer(ctx, typed); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
+			case protocol.PickerSnapshot:
+				if err := picker.snapshot(ctx, state, typed); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
+			case protocol.PickerClosed:
+				picker.closed(typed.InteractionID)
 			case protocol.ErrorMsg:
 				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
 			case protocol.Detached:
@@ -310,6 +362,32 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if event.input != nil && event.input.Err != nil {
 				fg.PreserveInput(event.input.Data)
 				return w.settle(ctx, fg, stream, token, event.input.Err)
+			}
+			if event.input != nil {
+				consumed, err := picker.consumeInput(ctx, state, *event.input)
+				if err != nil {
+					fg.PreserveInput(event.input.Data)
+					return w.settle(ctx, fg, stream, token, err)
+				}
+				if consumed {
+					// The overlay owned these bytes: nothing reaches the session.
+					// A driver action still fences through the daemon so it
+					// completes after the overlay applied it.
+					fg.AckInput()
+					if event.input.actionID != 0 {
+						if err := w.send(ctx, fg, stream, protocol.UIFence{ActionID: event.input.actionID}); err != nil {
+							return w.settle(ctx, fg, stream, token, err)
+						}
+					}
+					continue
+				}
+				inputSeq++
+				event.message = protocol.Input{InputSeq: inputSeq, ActionID: event.input.actionID, Data: append([]byte(nil), event.input.Data...)}
+			}
+			if resize, ok := event.message.(protocol.Resize); ok {
+				if err := picker.resize(ctx, state, resize.Size); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
 			}
 			if err := w.send(ctx, fg, stream, event.message); err != nil {
 				if event.input != nil {
@@ -364,8 +442,10 @@ func attachmentUIReceipt(fg AttachmentForeground, receipt protocol.UIReceipt) {
 	}
 }
 
+// pumpAttachmentInput forwards each authorized delivery to the attached loop.
+// The loop decides whether an overlay owns it or it becomes session Input, and
+// sequences only the deliveries that actually reach the session.
 func pumpAttachmentInput(ctx context.Context, fg AttachmentForeground, out chan<- attachmentClientEvent) {
-	var sequence uint64
 	for {
 		event, ok := fg.Input(ctx)
 		if !ok {
@@ -379,10 +459,9 @@ func pumpAttachmentInput(ctx context.Context, fg AttachmentForeground, out chan<
 			}
 			return
 		}
-		sequence++
 		copyEvent := event
 		select {
-		case out <- attachmentClientEvent{message: protocol.Input{InputSeq: sequence, ActionID: event.actionID, Data: append([]byte(nil), event.Data...)}, input: &copyEvent}:
+		case out <- attachmentClientEvent{input: &copyEvent}:
 		case <-ctx.Done():
 			fg.PreserveInput(event.Data)
 			return

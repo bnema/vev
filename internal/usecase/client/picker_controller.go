@@ -104,6 +104,9 @@ type pickerController struct {
 	// decision, so TakeOp can hand a driver the exact committed row.
 	lastCommitKey string
 	preview       pickerusecase.Preview
+	// flushStop cancels the armed lone-escape flush. It is non-nil exactly
+	// while one flush is armed for the currently withheld prefix.
+	flushStop chan struct{}
 }
 
 // newPickerController builds a picker over an empty catalogue. The picker owns
@@ -265,8 +268,67 @@ func (p *pickerController) FlushPending() {
 	if outcome.interaction != pickerGeneration || outcome.generation != pickerGeneration {
 		return
 	}
-	op, _ := applyPickerBatch(p.loop, outcome.events)
+	op, changed := applyPickerBatch(p.loop, outcome.events)
 	p.recordOpLocked(op)
+	if changed {
+		select {
+		case p.opsReady <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// armFlushLocked bounds a withheld escape or UTF-8 prefix with the picker's
+// disambiguation window on the controller clock, so a lone Escape keypress
+// resolves without waiting for another key. A later read disarms it first.
+// Callers hold p.mu.
+func (p *pickerController) armFlushLocked() {
+	if p.flushStop != nil || !p.consumer.hasPending() {
+		return
+	}
+	timer := p.clock.NewTimer(pickerEscapeDeadline)
+	if supervisorNil(timer) {
+		return
+	}
+	stop := make(chan struct{})
+	p.flushStop = stop
+	go func() {
+		select {
+		case <-timer.C():
+		case <-stop:
+			stopSupervisorTimer(timer)
+			return
+		}
+		p.mu.Lock()
+		if p.flushStop != stop {
+			p.mu.Unlock()
+			return
+		}
+		p.flushStop = nil
+		p.mu.Unlock()
+		p.FlushPending()
+	}()
+}
+
+// disarmFlushLocked cancels an armed flush: the next read resolves the
+// withheld prefix itself. Callers hold p.mu.
+func (p *pickerController) disarmFlushLocked() {
+	if p.flushStop == nil {
+		return
+	}
+	close(p.flushStop)
+	p.flushStop = nil
+}
+
+// invalidatePresentation makes the next Render redraw the whole box, because
+// another owner wrote the terminal since the last picker frame.
+func (p *pickerController) invalidatePresentation() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.renderer.invalidate()
+	p.mu.Unlock()
 }
 
 // OwnsInput reports whether the picker currently owns terminal input.
@@ -485,10 +547,12 @@ func (p *pickerController) handleRead(data []byte) bool {
 	if len(data) != 0 {
 		data = append([]byte(nil), data...)
 	}
+	p.disarmFlushLocked()
 	outcome, consumed := p.consumer.consume(terminalReadResult{data: data})
 	if !consumed {
 		return false
 	}
+	defer p.armFlushLocked()
 	if outcome.interaction != pickerGeneration || outcome.generation != pickerGeneration {
 		return true
 	}
@@ -497,7 +561,7 @@ func (p *pickerController) handleRead(data []byte) bool {
 		// Use decoded events so a pasted Ctrl-C is not mistaken for an exit.
 		for _, event := range outcome.events {
 			if event.kind == pickerEventKey && event.key == "Ctrl+C" {
-				p.recordOpLocked(pickerOp{close: true})
+				p.recordOpLocked(pickerOp{close: true, exit: true})
 			}
 		}
 		return true
@@ -569,5 +633,6 @@ func mergePickerOps(a, b pickerOp) pickerOp {
 		commit: a.commit || b.commit,
 		kill:   a.kill || b.kill,
 		close:  a.close || b.close,
+		exit:   a.exit || b.exit,
 	}
 }

@@ -306,6 +306,7 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 		TrueColor:          environment.TrueColor,
 		SessionEnvironment: sessionEnv,
 		BeforeAttached:     beforeAttached,
+		Clock:              s.cfg.Clock,
 	})
 	if err != nil {
 		return nil, err
@@ -411,9 +412,37 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 	picker.SetOwnsInput(false)
 	input.releasePicker()
 	defer func() {
+		// Whoever owned the terminal since the last picker frame, the next
+		// frame must draw the whole box again.
+		s.invalidatePickerPresentation()
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
+	for {
+		terminated, termErr, swap := s.attachOnce(ctx, input, service, request, localProvenance)
+		if terminated || swap == nil {
+			return terminated, termErr
+		}
+		// A commit from the picker overlay to another target: the previous
+		// attachment detached cleanly, and the swap goes through Connecting
+		// exactly like any committed selection.
+		request, localProvenance = *swap, SessionEnvironmentLocalPicker
+	}
+}
+
+// attachOnce runs one resolved attachment end to end. A non-nil swap names the
+// next request the picker overlay committed while this attachment was live.
+func (s *Supervisor) attachOnce(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest, localProvenance SessionEnvironmentProvenance) (bool, error, *ports.BrokerOpenStreamRequest) {
+	terminated, termErr := s.attachResolved(ctx, input, service, request, localProvenance)
+	swap := s.pendingSwap
+	s.pendingSwap = nil
+	if terminated {
+		return terminated, termErr, nil
+	}
+	return false, nil, swap
+}
+
+func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, request ports.BrokerOpenStreamRequest, localProvenance SessionEnvironmentProvenance) (bool, error) {
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
@@ -471,19 +500,22 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return false, nil
 	}
-	return s.settleAttachment(ctx, input, service, deadline, run)
+	return s.settleAttachment(ctx, input, service, deadline, run, request)
 }
 
 // settleAttachment joins one admitted attachment while watching the parent
 // context, terminal EOF, and broker-connection loss. The deadline is the only
 // other stop: when it fires before the worker settled, the attachment ends as
 // a typed timeout without claiming attachment.
-func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, deadline *attachmentDeadline, run *attachmentRun) (bool, error) {
+func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest) (bool, error) {
 	settled := make(chan attachmentSettlement, 1)
 	go func() {
 		event, adopted := run.Wait(deadline.Context())
 		settled <- attachmentSettlement{event: event, adopted: adopted}
 	}()
+
+	overlay := &attachmentPickerOverlay{sup: s, run: run, service: service, request: request}
+	defer overlay.drop()
 
 	var result attachmentSettlement
 	var brokerLost bool
@@ -493,11 +525,22 @@ settlement:
 	for {
 		// Begin has admitted the foreground, which can write before MarkAttached
 		// and before the initial publication. Keep presentation invalidation
-		// buffered for the next picker state; consuming it here could overlay
-		// session output with a second terminal writer.
+		// buffered for the next picker state unless the picker overlay owns the
+		// terminal; consuming it otherwise could overlay session output with a
+		// second terminal writer.
 		select {
 		case result = <-settled:
 			break settlement
+		case <-s.attachments.NavigationRequests():
+			overlay.enter()
+		case <-overlay.changed():
+			overlay.applyPublication()
+		case <-overlay.previewChanged():
+			overlay.publishPreview()
+		case <-overlay.ops():
+			overlay.takeOp()
+		case <-overlay.invalidation():
+			overlay.resize()
 		case <-service.Done():
 			brokerLost = true
 			// The broker connection is gone; the supervisor cancels the run and
@@ -518,8 +561,20 @@ settlement:
 		}
 	}
 
+	// The attachment settled, so its foreground (and overlay slot) is gone.
+	overlay.drop()
 	if terminated {
+		s.pendingSwap = nil
 		return true, termErr
+	}
+	if s.pendingSwap != nil {
+		if !brokerLost {
+			// The overlay committed another target and this attachment
+			// detached for it: go straight to Connecting for the swap, never
+			// through the plain picker.
+			return false, nil
+		}
+		s.pendingSwap = nil
 	}
 	if deadline.TimedOut() && !result.adopted {
 		timeout := attachmentTimeoutError(errAttachmentDeadline)
