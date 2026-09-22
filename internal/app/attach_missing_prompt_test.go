@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/term"
@@ -449,32 +450,24 @@ func openAttachPtySlave(t *testing.T) *os.File {
 func TestPreconnectedBrokerConnectorReusesThenFallsBack(t *testing.T) {
 	first := portsmocks.NewMockBrokerService(t)
 	second := portsmocks.NewMockBrokerService(t)
-	fallbackCalls := 0
-	fallback := brokerConnectorFunc(func(context.Context) (ports.BrokerService, error) {
-		fallbackCalls++
-		return second, nil
-	})
+	fallback := portsmocks.NewMockBrokerConnector(t)
+	fallback.EXPECT().Connect(mock.Anything).Return(second, nil).Once()
 	connector := withPreconnected(fallback, first)
 
 	got, err := connector.Connect(context.Background())
 	require.NoError(t, err)
 	require.Same(t, first, got, "the first Connect reuses the preflight's own connection")
-	require.Zero(t, fallbackCalls)
 
 	got, err = connector.Connect(context.Background())
 	require.NoError(t, err)
 	require.Same(t, second, got, "a later Connect reconnects through the fallback")
-	require.Equal(t, 1, fallbackCalls)
 }
 
 func TestWithPreconnectedNilPassesThroughUnchanged(t *testing.T) {
-	fallback := brokerConnectorFunc(func(context.Context) (ports.BrokerService, error) { return nil, nil })
+	fallback := portsmocks.NewMockBrokerConnector(t)
+	fallback.EXPECT().Connect(mock.Anything).Return(nil, nil).Once()
 	got := withPreconnected(fallback, nil)
 	service, err := got.Connect(context.Background())
 	require.NoError(t, err)
 	require.Nil(t, service)
 }
-
-type brokerConnectorFunc func(context.Context) (ports.BrokerService, error)
-
-func (f brokerConnectorFunc) Connect(ctx context.Context) (ports.BrokerService, error) { return f(ctx) }
