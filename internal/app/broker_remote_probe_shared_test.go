@@ -20,6 +20,10 @@ func (f sharedPhysicalsFunc) SharedPhysical(identity ports.BrokerDaemonIdentity,
 	return f(identity, policy)
 }
 
+func (sharedPhysicalsFunc) AdoptPhysical(ports.BrokerPhysicalConnection, ports.BrokerPolicy) bool {
+	return false
+}
+
 // TestBrokerRemoteProbeBorrowsWarmTransport proves observation reuses the
 // broker pool's attached or warm transport instead of bootstrapping SSH/QUIC
 // again, and redials only when the borrowed transport has retired.

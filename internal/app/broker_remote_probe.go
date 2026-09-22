@@ -41,6 +41,7 @@ type brokerRemoteProbe struct {
 // sharedPhysicals lends the pooled transport of an attached or warm daemon.
 type sharedPhysicals interface {
 	SharedPhysical(ports.BrokerDaemonIdentity, ports.BrokerPolicy) (ports.BrokerPhysicalConnection, bool)
+	AdoptPhysical(ports.BrokerPhysicalConnection, ports.BrokerPolicy) bool
 }
 
 // pooledPhysicals lets an observation probe borrow the broker pool's physical
@@ -52,6 +53,11 @@ type sharedPhysicals interface {
 type pooledPhysicals struct{ pool atomic.Value }
 
 func (s *pooledPhysicals) share(pool sharedPhysicals) { s.pool.Store(pool) }
+
+func (s *pooledPhysicals) adopt(physical ports.BrokerPhysicalConnection, policy ports.BrokerPolicy) bool {
+	pool, _ := s.pool.Load().(sharedPhysicals)
+	return pool != nil && pool.AdoptPhysical(physical, policy)
+}
 
 // observe reports handled=false when the probe must dial its own transport.
 func (s *pooledPhysicals) observe(ctx context.Context, identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, request ports.BrokerOpenStreamRequest) (ports.BrokerDaemonObservation, bool, error) {
@@ -101,7 +107,12 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 	if err != nil {
 		return ports.BrokerDaemonObservation{}, err
 	}
-	defer physical.Close()
+	adopted := false
+	defer func() {
+		if !adopted {
+			_ = physical.Close()
+		}
+	}()
 	if (endpoint.ExpectedIdentity.Bound && physical.Identity() != endpoint.ExpectedIdentity.Identity) || physical.Policy() != endpoint.Policy {
 		return ports.BrokerDaemonObservation{}, errors.New("vev: remote probe authenticated binding mismatch")
 	}
@@ -109,7 +120,11 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 	if err != nil || identity != physical.Identity() {
 		return ports.BrokerDaemonObservation{}, errors.New("vev: remote probe could not commit authenticated binding")
 	}
-	return observeDaemonCatalogue(ctx, physical, request)
+	observation, err := observeDaemonCatalogue(ctx, physical, request)
+	if err == nil && ctx.Err() == nil {
+		adopted = p.shared.adopt(physical, endpoint.Policy)
+	}
+	return observation, err
 }
 
 // observeDaemonCatalogue observes one already authenticated daemon over its

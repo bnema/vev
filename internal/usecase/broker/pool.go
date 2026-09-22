@@ -489,6 +489,89 @@ func (p *Pool) idleLocked(e *poolEntry) []context.CancelFunc {
 	return evicted
 }
 
+// AdoptPhysical publishes a probe-authenticated transport as a warm entry.
+// The caller retains ownership when adoption fails and must close it. A
+// concurrently opened pooled transport wins: probes must not replace it.
+func (p *Pool) AdoptPhysical(physical ports.BrokerPhysicalConnection, policy ports.BrokerPolicy) bool {
+	if nilDependency(physical) || physical.Identity().Validate() != nil ||
+		physical.Incarnation().Validate() != nil || !physical.Policy().Compatible(policy) || p.limits.Warm == 0 {
+		return false
+	}
+	select {
+	case <-physical.Done():
+		return false
+	default:
+	}
+	key := poolKey{identity: physical.Identity(), policy: policy}
+	p.mu.Lock()
+	if p.closed || len(p.entries)+len(p.pending) >= p.limits.Physical || p.entries[key] != nil {
+		p.mu.Unlock()
+		return false
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	e := &poolEntry{key: key, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), physical: physical}
+	close(e.ready)
+	p.entries[key] = e
+	evicted := p.idleLocked(e)
+	p.wg.Add(1)
+	p.mu.Unlock()
+	for _, evict := range evicted {
+		evict()
+	}
+	go p.watchAdopted(e)
+	return true
+}
+
+func (p *Pool) watchAdopted(e *poolEntry) {
+	defer p.wg.Done()
+	physical := e.physical
+	var timer ports.Timer
+	if p.limits.Idle > 0 {
+		timer = p.clock.NewTimer(p.limits.Idle)
+		defer stopPoolTimer(timer)
+	}
+	for {
+		p.mu.Lock()
+		idle := e.refs == 0
+		p.mu.Unlock()
+		var expiry <-chan time.Time
+		if timer != nil {
+			stopPoolTimer(timer)
+			if idle {
+				timer.Reset(p.limits.Idle)
+				expiry = timer.C()
+			}
+		}
+		select {
+		case <-e.ctx.Done():
+			goto retire
+		case <-physical.Done():
+			goto retire
+		case <-e.wake:
+			continue
+		case <-expiry:
+			p.mu.Lock()
+			if e.refs == 0 {
+				e.retiring = true
+				p.mu.Unlock()
+				goto retire
+			}
+			p.mu.Unlock()
+		}
+	}
+retire:
+	p.mu.Lock()
+	e.retiring = true
+	p.mu.Unlock()
+	e.cancel()
+	_ = physical.Close()
+	p.mu.Lock()
+	if p.entries[e.key] == e {
+		delete(p.entries, e.key)
+	}
+	p.mu.Unlock()
+}
+
 // SharedPhysical returns the published physical transport the pool holds for
 // one authenticated identity and exact policy, active or warm, without
 // reserving it. Observation borrows it to avoid a second bootstrap; the
