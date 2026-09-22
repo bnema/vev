@@ -1305,7 +1305,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 		return admitted, nil
 	})
 
-	controller := newPickerController(clock, pickerTestFreshness)
+	controller := newPickerController(clock, pickerTestFreshness, true)
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,

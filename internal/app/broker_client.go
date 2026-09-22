@@ -218,7 +218,7 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 	if sessionEnv.Cwd != "" {
 		attachmentEnv.Cwd = sessionEnv.Cwd
 	}
-	picker := client.NewPicker(clk, 0)
+	picker := client.NewPicker(clk, 0, attachmentEnv.TrueColor)
 	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
 		Connector:                cfg.Connector,

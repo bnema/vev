@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -39,8 +38,8 @@ type movePickerOverlay struct {
 	presenting bool
 }
 
-func newMovePickerOverlay() *movePickerOverlay {
-	return &movePickerOverlay{renderer: newPickerRenderer(ansirenderer.ColorProfileTrueColor)}
+func newMovePickerOverlay(trueColor bool) *movePickerOverlay {
+	return &movePickerOverlay{renderer: newPickerRenderer(pickerColorProfile(trueColor))}
 }
 
 // offer opens the namespace a move offer names. A superseding offer retires

@@ -19,7 +19,7 @@ import (
 // so it could never resolve a selection into an attachment.
 func TestCompositionOutsideThePackageCanBuildThePicker(t *testing.T) {
 	geometry := domain.Size{Cols: 80, Rows: 24}
-	picker := client.NewPicker(nil, 0)
+	picker := client.NewPicker(nil, 0, true)
 	require.NotNil(t, picker)
 
 	// The exact assignment an app composition performs.

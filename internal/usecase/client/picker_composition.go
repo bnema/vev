@@ -48,9 +48,11 @@ func PickerPresentation(state State) bool {
 }
 
 // NewPicker composes one client-owned picker. A nil clock uses the system
-// clock, and a zero freshness uses the catalogue default.
-func NewPicker(clock ports.Clock, freshness time.Duration) *Picker {
-	return &Picker{controller: newPickerController(clock, freshness)}
+// clock, and a zero freshness uses the catalogue default. trueColor is the
+// terminal's detected color capability (AttachmentEnvironment.TrueColor); the
+// picker renders indexed colors without it.
+func NewPicker(clock ports.Clock, freshness time.Duration, trueColor bool) *Picker {
+	return &Picker{controller: newPickerController(clock, freshness, trueColor)}
 }
 
 // ApplySnapshot forwards a broker publication to the supervisor-owned picker.

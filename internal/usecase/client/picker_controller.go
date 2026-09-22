@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -112,14 +111,14 @@ type pickerController struct {
 // newPickerController builds a picker over an empty catalogue. The picker owns
 // input from the start: P5.2b presents it for the whole picker presentation and
 // has no session pipeline to defer to.
-func newPickerController(clock ports.Clock, freshness time.Duration) *pickerController {
+func newPickerController(clock ports.Clock, freshness time.Duration, trueColor bool) *pickerController {
 	if supervisorNil(clock) {
 		clock = systemClock{}
 	}
 	controller := &pickerController{
 		clock:     clock,
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
-		renderer:  newPickerRenderer(ansirenderer.ColorProfileTrueColor),
+		renderer:  newPickerRenderer(pickerColorProfile(trueColor)),
 		ownsInput: true,
 		opsReady:  make(chan struct{}, 1),
 	}

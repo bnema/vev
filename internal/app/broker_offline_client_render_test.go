@@ -104,7 +104,7 @@ func (w *offlineRenderTerminalWriter) Write(data []byte) (int, error) {
 // daemon with a single session, so Render produces a real frame at any size.
 func offlineRenderPicker(t *testing.T) *client.Picker {
 	t.Helper()
-	picker := client.NewPicker(nil, 0)
+	picker := client.NewPicker(nil, 0, true)
 	picker.ApplySnapshot(ports.BrokerSnapshot{
 		Epoch:    1,
 		Revision: 1,

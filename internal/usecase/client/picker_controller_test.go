@@ -115,7 +115,7 @@ func pickerTestSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision, 
 func pickerTestController(t *testing.T) (*pickerController, *supervisorTestClock) {
 	t.Helper()
 	clock := newSupervisorTestClock()
-	return newPickerController(clock, pickerTestFreshness), clock
+	return newPickerController(clock, pickerTestFreshness, true), clock
 }
 
 func pickerRowKeyByLabel(t *testing.T, controller *pickerController, label string) string {
@@ -423,7 +423,7 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha", "beta"))
 		return service, nil
 	})
-	controller := newPickerController(clock, pickerTestFreshness)
+	controller := newPickerController(clock, pickerTestFreshness, true)
 	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Picker: controller})
 
 	runErr := make(chan error, 1)
@@ -468,7 +468,7 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
 		return service, nil
 	})
-	controller := newPickerController(clock, pickerTestFreshness)
+	controller := newPickerController(clock, pickerTestFreshness, true)
 	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Picker: controller})
 
 	runErr := make(chan error, 1)

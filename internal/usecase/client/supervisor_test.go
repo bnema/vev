@@ -687,7 +687,7 @@ func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
 		}),
 		Terminal: newSupervisorTestTerminal(reader),
 		Clock:    clock,
-		Picker:   newPickerController(clock, pickerTestFreshness),
+		Picker:   newPickerController(clock, pickerTestFreshness, true),
 		Render: func(state State) {
 			renders <- state
 		},
@@ -1466,7 +1466,7 @@ func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 			})
 			s := mustSupervisor(t, SupervisorConfig{
 				Connector: connector, Terminal: terminal, Clock: clock,
-				Picker: NewPicker(clock, 0),
+				Picker: NewPicker(clock, 0, true),
 				Notify: func(State, error) { reached <- struct{}{} },
 			})
 			ctx, cancel := context.WithCancel(context.Background())

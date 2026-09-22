@@ -432,6 +432,16 @@ func newPickerRenderer(profile ansirenderer.ColorProfile) *pickerRenderer {
 	return &pickerRenderer{profile: profile}
 }
 
+// pickerColorProfile maps the terminal's detected color capability to the
+// picker renderer profile. A terminal without truecolor gets indexed colors,
+// so RGB surfaces are quantized instead of dropped (#280).
+func pickerColorProfile(trueColor bool) ansirenderer.ColorProfile {
+	if trueColor {
+		return ansirenderer.ColorProfileTrueColor
+	}
+	return ansirenderer.ColorProfileANSI256
+}
+
 // render composes the loop model into terminal bytes for one display
 // refresh. Previews arrive as source data (picker_preview.go) and are attached
 // to the model by the caller; a full redraw every refresh keeps the shadow

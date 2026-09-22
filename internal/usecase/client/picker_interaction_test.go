@@ -61,6 +61,48 @@ func TestPickerRendererPreservesANSI256ProfileAcrossResize(t *testing.T) {
 	require.Regexp(t, `(?:38|48);2;`, string(truecolor.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview())))
 }
 
+// TestPickerRenderersFollowTerminalColorProfile guards #280 on the broker
+// client: both the session picker and the move picker render with the
+// terminal's detected color profile, so an ANSI-256 terminal never receives
+// RGB SGR sequences from a picker box.
+func TestPickerRenderersFollowTerminalColorProfile(t *testing.T) {
+	loop := pickerLoopFixture(t)
+	styles := picker.RenderStyles{
+		Selection: rgbPickerStyle(), SelectionName: rgbPickerStyle(), SelectionMuted: rgbPickerStyle(),
+		Name: rgbPickerStyle(), Detail: rgbPickerStyle(), Background: rgbPickerStyle(), Base: rgbPickerStyle(),
+		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Status: rgbPickerStyle(),
+		SearchMatch: rgbPickerStyle(), SelectionMatch: rgbPickerStyle(),
+	}
+	renderers := map[string]func(trueColor bool) *pickerRenderer{
+		"session picker": func(trueColor bool) *pickerRenderer {
+			return NewPicker(nil, 0, trueColor).controller.renderer
+		},
+		"move picker": func(trueColor bool) *pickerRenderer {
+			return newMovePickerOverlay(trueColor).renderer
+		},
+	}
+	for name, build := range renderers {
+		for _, tc := range []struct {
+			trueColor bool
+			profile   ansirenderer.ColorProfile
+			want      string
+			forbidden string
+		}{
+			{trueColor: false, profile: ansirenderer.ColorProfileANSI256, want: `(?:38|48);5;`, forbidden: `(?:38|48|58);2;`},
+			{trueColor: true, profile: ansirenderer.ColorProfileTrueColor, want: `(?:38|48);2;`, forbidden: `(?:38|48);5;`},
+		} {
+			t.Run(fmt.Sprintf("%s/truecolor=%v", name, tc.trueColor), func(t *testing.T) {
+				r := build(tc.trueColor)
+				require.Equal(t, tc.profile, r.profile)
+				r.renderStyles = []picker.RenderStyles{styles}
+				output := string(r.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
+				require.Regexp(t, tc.want, output)
+				require.NotRegexp(t, tc.forbidden, output)
+			})
+		}
+	}
+}
+
 func rgbPickerStyle() renderer.Style {
 	style := renderer.DefaultStyle()
 	style.HasForegroundRGB = true
