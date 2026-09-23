@@ -303,7 +303,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		p.pty, p.output, p.chunks, p.done = master, &capturedTerminalOutput{file: output}, make(chan []byte, 32), make(chan struct{})
 		// Stop workload generation through the attached shell before any signal.
 		// A normal shell exit makes the daemon detach the client; the client then
-		// closes and waits for its ssh transport, allowing a traced _stdio
+		// closes and waits for its ssh transport, allowing a traced broker mux stdio
 		// descendant to flush end marks and exit. Process-group signals are reserved
 		// for timeout escalation because they would kill the descendant concurrently.
 		p.gracefulShutdown = func() { _, _ = master.Write([]byte("exit\n")) }
@@ -379,7 +379,7 @@ func (l *cliLauncher) releaseRuntime(runDir string) error {
 
 // preparePeer installs a per-run ssh command seam. The ordinary public client
 // still executes its documented remote attach command; its ssh child invokes
-// only the parsed public _stdio entrypoint. This makes the peer
+// only the broker mux stdio helper. This makes the peer
 // carrying client traffic the declared, exclusively traced role rather than a
 // separately launched but unused process.
 func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedProcess, error) {
@@ -410,8 +410,8 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, fail(err)
 	}
-	if len(role.Args) != 1 || role.Args[0] != "_stdio" {
-		return nil, fail(fmt.Errorf("unsupported public peer command %q", role.Args))
+	if len(role.Args) != 2 || role.Args[0] != "_broker-mux-stdio" || role.Args[1] != "--production" {
+		return nil, fail(fmt.Errorf("unsupported broker mux peer command %q", role.Args))
 	}
 	route := peerRoute{mapping: m, command: role, runtimeDir: filepath.Join(runDir, "peer-runtime"), stateDir: filepath.Join(runDir, "peer-state")}
 	if err := safedir.EnsurePrivate(route.runtimeDir); err != nil {
@@ -421,7 +421,7 @@ func (l *cliLauncher) preparePeer(m processMapping, role roleCommand) (launchedP
 		return nil, fail(err)
 	}
 	shim := filepath.Join(runDir, "ssh")
-	// The SSH command seam forwards the public _stdio entrypoint with the
+	// The SSH command seam forwards the broker mux stdio helper with the
 	// peer's unique trace identity, so the peer carrying client traffic is the
 	// declared, exclusively traced role.
 	body := fmt.Sprintf(`#!/bin/sh
@@ -770,7 +770,7 @@ func (p *cliProcess) Close() error {
 			waitForExit()
 		}
 		// 3. Client role: stop the shell normally. Session teardown detaches the
-		// client, which closes and waits for ssh/_stdio before it exits.
+		// client, which closes and waits for ssh/broker mux stdio before it exits.
 		if p.gracefulShutdown != nil && !reaped() {
 			p.gracefulShutdown()
 			waitForExit()
@@ -882,7 +882,7 @@ func (p *cliProcess) forceProcessGroupCleanup() {
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		// The client is a session/process-group leader; forced cleanup must
-		// include its ssh seam/_stdio descendants.
+		// include its ssh seam/broker mux stdio descendants.
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
 	}
 }

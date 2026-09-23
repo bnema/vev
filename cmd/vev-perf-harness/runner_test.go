@@ -254,7 +254,7 @@ func TestHarnessRoutesEveryRemoteFixtureThroughItsDeclaredPeer(t *testing.T) {
 			if !equalStrings(client.Args, []string{"attach", "harness@127.0.0.1"}) {
 				t.Fatalf("client did not use ephemeral public remote attach: %q", client.Args)
 			}
-			if !equalStrings(peer.Args, []string{"_stdio"}) {
+			if !equalStrings(peer.Args, []string{"_broker-mux-stdio", "--production"}) {
 				t.Fatalf("ssh peer command=%q", peer.Args)
 			}
 		})
@@ -265,7 +265,7 @@ func TestHarnessFakeRunnerRoutesClientToPeerAndCleansEveryRole(t *testing.T) {
 	for _, tc := range []struct {
 		name, transport, peer, peerCommand string
 	}{
-		{"ssh", "ssh_stdio", "ssh_stdio_peer", "_stdio"},
+		{"ssh", "ssh_stdio", "ssh_stdio_peer", "_broker-mux-stdio"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

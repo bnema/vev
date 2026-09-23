@@ -25,7 +25,7 @@ func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
 	if err := os.WriteFile(m.TracePath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p, err := l.preparePeer(m, roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}})
+	p, err := l.preparePeer(m, roleCommand{Args: []string{"_broker-mux-stdio", "--production"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestCLITransportSeamOwnsExclusivePeerTraceAndCleanup(t *testing.T) {
 		}
 	}
 	if strings.Contains(text, "VEV_PERF_UDP_") {
-		t.Fatalf("ignored vev UDP environment was used instead of the _stdio seam: %s", text)
+		t.Fatalf("ignored vev UDP environment was used instead of the broker mux stdio seam: %s", text)
 	}
 	// Close must be a no-op for a peer with no owned background process.
 	if err := p.Close(); err != nil {

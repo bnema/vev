@@ -137,7 +137,7 @@ func TestClientTracePairsAfterPTYHangup(t *testing.T) {
 
 // TestClientGracefulShutdownDrainsTracedStdioDescendant proves the launcher's
 // normal client stop exits the attached shell before sending any signal. The
-// client then closes and waits for its ssh transport, giving the traced _stdio
+// client then closes and waits for its ssh transport, giving the traced broker mux stdio
 // descendant time to serialize its blocked receive's end mark and exit before
 // the client is reaped.
 func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
@@ -185,8 +185,8 @@ func TestClientGracefulShutdownDrainsTracedStdioDescendant(t *testing.T) {
 		case "daemon":
 			command = routeRoleArgs(s, pm, transport{})
 		case "ssh_stdio_peer":
-			// The transport-neutral _stdio mode requests an ephemeral session.
-			command = roleCommand{Args: []string{"_stdio"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}}
+			// The broker mux stdio helper carries the remote daemon connection.
+			command = roleCommand{Args: []string{"_broker-mux-stdio", "--production"}, Transport: transport{ID: "ssh_stdio", Kind: "ssh_stdio"}}
 		case "client":
 			command = roleCommand{Args: []string{"attach", "harness@127.0.0.1"}}
 		}

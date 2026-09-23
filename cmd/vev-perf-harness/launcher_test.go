@@ -415,7 +415,7 @@ func TestPreparePeerReleasesOwnedRuntimeOnPreparationFailure(t *testing.T) {
 		Role:      "ssh_stdio_peer",
 		TracePath: filepath.Join(runDir, "peer.jsonl"),
 	}, roleCommand{Args: []string{"invalid"}})
-	if err == nil || !strings.Contains(err.Error(), "unsupported public peer command") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported broker mux peer command") {
 		t.Fatalf("preparePeer error = %v", err)
 	}
 	if runtimeDir := launcher.runtimes[runDir]; runtimeDir != "" {
@@ -603,7 +603,7 @@ func TestHarnessUsesPublicRoleCommandsAndPTYWorkloads(t *testing.T) {
 	}{
 		{"daemon", []string{"_broker-production-serve"}},
 		{"client", []string{"new", "perf-s-001"}},
-		{"ssh_stdio_peer", []string{"_stdio"}},
+		{"ssh_stdio_peer", []string{"_broker-mux-stdio", "--production"}},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
 			got := roleArgs(scenario{ID: "s", Transport: "local"}, processMapping{Role: tc.role, Run: 1})
