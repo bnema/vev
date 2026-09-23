@@ -446,7 +446,8 @@ func remoteNamedCreateResolver(endpoint, name string) client.InitialNavigationRe
 
 // remoteAttachOrCreateResolver resolves one remote session name to an exact
 // attach when the endpoint's committed observation carries it, and to a named
-// creation fenced to the same registration otherwise. An endpoint the broker
+// creation fenced to the same registration once the observed inventory proves
+// it absent. Before the host's first inventory it asks to be resolved again. An endpoint the broker
 // does not carry is refused rather than dialed.
 func remoteAttachOrCreateResolver(endpoint, name string) client.InitialNavigationResolver {
 	attach := remoteExactAttachResolver(endpoint, name)
@@ -458,6 +459,11 @@ func remoteAttachOrCreateResolver(endpoint, name string) client.InitialNavigatio
 		}
 		if _, exists := brokerObservationExactTarget(observation, name); exists {
 			return attach(snapshot)
+		}
+		if !observation.InventoryKnown {
+			// Absence is only known once the host's inventory was observed;
+			// creating before that would collide with a live remote name.
+			return client.InitialNavigation{}, client.ErrInitialNavigationNotObserved
 		}
 		return create(snapshot)
 	}

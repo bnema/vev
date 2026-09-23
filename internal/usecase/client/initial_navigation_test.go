@@ -500,3 +500,87 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 }
+
+// TestInitialNavigationWaitsForTargetObservation pins that a resolver whose
+// target daemon is not observed yet keeps the intent armed: it resolves again
+// on the next committed publication, and only the bounded observation budget
+// turns the wait into a selection-unavailable refusal.
+func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
+	tests := []struct {
+		name string
+		// observedAt is the first revision the resolver can decide on; zero
+		// means the target is never observed.
+		observedAt ports.BrokerRevision
+		wantOpen   bool
+	}{
+		{name: "a later publication resolves the armed intent", observedAt: 2, wantOpen: true},
+		{name: "the observation budget refuses once", observedAt: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clock := newSupervisorTestClock()
+			reader := newAttachTestReader()
+			terminal := &attachTestTerminal{in: reader}
+			picker := newAttachTestPicker()
+			service := newSupervisorTestService(ports.BrokerConnectionID{1})
+			service.publishSnapshot(localDaemonSnapshot(3, 1))
+			var opened atomic.Int64
+			service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				opened.Add(1)
+				return newSessionTestStream(), nil
+			})
+			notices := make(chan LifecycleNotice, 4)
+			var calls atomic.Int64
+			sup := mustSupervisor(t, SupervisorConfig{
+				Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil }),
+				Terminal:  terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker,
+				NotifyLifecycle: func(notice LifecycleNotice) { notices <- notice },
+				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
+					calls.Add(1)
+					if tt.observedAt == 0 || snapshot.Revision < tt.observedAt {
+						return InitialNavigation{}, ErrInitialNavigationNotObserved
+					}
+					return InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}, nil
+				},
+			})
+			done := make(chan error, 1)
+			go func() { done <- sup.Run(ctx) }()
+
+			require.Eventually(t, func() bool { return calls.Load() == 1 }, 5*time.Second, time.Millisecond)
+			var budget *supervisorTestTimer
+			require.Eventually(t, func() bool {
+				clock.mu.Lock()
+				defer clock.mu.Unlock()
+				for _, timer := range clock.timers {
+					if timer.delay == initialNavigationObservationBudget {
+						budget = timer
+						return true
+					}
+				}
+				return false
+			}, 5*time.Second, time.Millisecond, "the wait is bounded by the observation budget")
+			require.Zero(t, opened.Load(), "an unobserved target never dials")
+
+			if tt.wantOpen {
+				service.publishSnapshot(localDaemonSnapshot(3, 2))
+				require.Eventually(t, func() bool { return opened.Load() == 1 }, 5*time.Second, time.Millisecond)
+				require.Equal(t, int64(2), calls.Load(), "the armed intent resolves once per publication")
+			} else {
+				budget.fire()
+				select {
+				case notice := <-notices:
+					require.Equal(t, LifecycleNoticeSelectionUnavailable, notice.Kind)
+				case <-time.After(5 * time.Second):
+					t.Fatal("the budget never refused the unobserved target")
+				}
+				require.Zero(t, opened.Load())
+				service.publishSnapshot(localDaemonSnapshot(3, 2))
+				require.Never(t, func() bool { return calls.Load() > 1 }, 100*time.Millisecond, 5*time.Millisecond, "a refused intent is never re-armed")
+			}
+			cancel()
+			require.ErrorIs(t, <-done, context.Canceled)
+		})
+	}
+}

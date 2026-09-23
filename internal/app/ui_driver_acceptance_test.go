@@ -212,6 +212,15 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 	require.Equal(t, "work", named.Name)
 	require.True(t, named.Destination.Local)
 
+	unobserved := ports.BrokerSnapshot{
+		Epoch:    terminalCompositionEpoch,
+		Revision: 1,
+		Daemons: []ports.BrokerDaemonObservation{{
+			Endpoint:      "user@example.com",
+			DisplayOrigin: "user@example.com",
+			Registration:  terminalCompositionRegistration("user@example.com"),
+		}},
+	}
 	remoteSnapshot := func(sessions ...string) ports.BrokerSnapshot {
 		return ports.BrokerSnapshot{
 			Epoch:    terminalCompositionEpoch,
@@ -231,7 +240,9 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 		snapshot ports.BrokerSnapshot
 		wantKind client.InitialNavigationKind
 		wantName string
+		wantErr  error
 	}{
+		{name: "remote named before first inventory waits", options: uiDriverOptions{remote: "user@example.com", session: "work"}, snapshot: unobserved, wantErr: client.ErrInitialNavigationNotObserved},
 		{name: "remote ephemeral", options: uiDriverOptions{remote: "user@example.com"}, snapshot: remoteSnapshot("work"), wantKind: client.InitialNavigationCreateEphemeral},
 		{name: "remote named existing attaches exact lifecycle", options: uiDriverOptions{remote: "user@example.com", session: "work"}, snapshot: remoteSnapshot("other", "work"), wantKind: client.InitialNavigationAttachExact, wantName: "work"},
 		{name: "remote named missing creates", options: uiDriverOptions{remote: "user@example.com", session: "fresh"}, snapshot: remoteSnapshot("work"), wantKind: client.InitialNavigationCreateNamed, wantName: "fresh"},
@@ -245,6 +256,10 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 			require.NotNil(t, resolver, "a remote target resolves against the committed publication")
 
 			resolved, resolveErr := resolver(tt.snapshot)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, resolveErr, tt.wantErr)
+				return
+			}
 			require.NoError(t, resolveErr)
 			require.NoError(t, resolved.Validate())
 			require.False(t, resolved.Destination.Local)

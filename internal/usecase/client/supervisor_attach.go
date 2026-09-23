@@ -364,6 +364,14 @@ func (s *Supervisor) takeInitialNavigation(snapshot ports.BrokerSnapshot) (Initi
 
 	if resolver != nil {
 		resolved, err := resolver(snapshot.Clone())
+		if errors.Is(err, ErrInitialNavigationNotObserved) {
+			// Not a refusal: the target's daemon has not been observed yet.
+			// The intent stays armed for a later publication.
+			s.mu.Lock()
+			s.navigationConsumed = false
+			s.mu.Unlock()
+			return InitialNavigation{}, false, err
+		}
 		if err != nil {
 			return InitialNavigation{}, true, err
 		}
@@ -378,6 +386,49 @@ func (s *Supervisor) takeInitialNavigation(snapshot ports.BrokerSnapshot) (Initi
 	return navigation, true, nil
 }
 
+// ErrInitialNavigationNotObserved is returned by an InitialNavigationResolver
+// whose decision depends on a daemon inventory the committed publication does
+// not carry yet (for example attach-or-create before the host's first
+// observation). The supervisor keeps the intent armed and resolves it again on
+// later publications, bounded by initialNavigationObservationBudget.
+var ErrInitialNavigationNotObserved = errors.New("vev: initial navigation target is not observed yet")
+
+// initialNavigationObservationBudget bounds how long an initial navigation
+// waits for its target's first observation; it stays inside the 15-second
+// handshake budget.
+const initialNavigationObservationBudget = 10 * time.Second
+
+// awaitInitialNavigationObservation re-resolves the armed initial navigation
+// on each committed publication until the resolver can decide, the budget
+// expires (a bounded refusal), or the run ends.
+func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) (InitialNavigation, bool, error, bool, error) {
+	timer := s.cfg.Clock.NewTimer(initialNavigationObservationBudget)
+	defer timer.Stop()
+	for {
+		select {
+		case <-s.brokerChanged():
+			navigation, consumed, err := s.takeInitialNavigation(service.Snapshot())
+			if errors.Is(err, ErrInitialNavigationNotObserved) {
+				continue
+			}
+			return navigation, consumed, err, false, nil
+		case <-timer.C():
+			s.mu.Lock()
+			s.navigationConsumed = true
+			s.mu.Unlock()
+			return InitialNavigation{}, true, ErrInitialNavigationNotObserved, false, nil
+		case <-service.Done():
+			// The ready loop observes the loss; the intent stays armed for the
+			// next adopted connection.
+			return InitialNavigation{}, false, nil, false, nil
+		case <-ctx.Done():
+			return InitialNavigation{}, false, nil, true, ctx.Err()
+		case err := <-input.EOF():
+			return InitialNavigation{}, false, nil, true, terminalReadCause(err)
+		}
+	}
+}
+
 // runCommittedAttachment admits one committed selection end to end: resolve,
 // open the exact stream under the one absolute deadline, run the real
 // attachment worker through the supervisor's foreground grant, and return to
@@ -390,6 +441,14 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 	// read.
 	snapshot := service.Snapshot()
 	navigation, consumed, err := s.takeInitialNavigation(snapshot)
+	if errors.Is(err, ErrInitialNavigationNotObserved) {
+		var terminated bool
+		var termErr error
+		navigation, consumed, err, terminated, termErr = s.awaitInitialNavigationObservation(ctx, input, service)
+		if terminated {
+			return true, termErr
+		}
+	}
 	if !consumed {
 		return false, nil
 	}
