@@ -408,7 +408,7 @@ func (r *Registry) restore(snapshot ports.BrokerSnapshot) error {
 	if snapshot.Epoch == r.epoch {
 		return errors.New("broker: persisted snapshot epoch matches the new registry epoch")
 	}
-	if err := validateRestoredSnapshot(snapshot); err != nil {
+	if err := ports.ValidateDurableSnapshot(snapshot); err != nil {
 		return err
 	}
 	for _, daemon := range snapshot.Daemons {
@@ -417,67 +417,6 @@ func (r *Registry) restore(snapshot ports.BrokerSnapshot) error {
 		r.hosts[daemon.Endpoint] = daemon
 	}
 	return nil
-}
-
-// validateRestoredSnapshot applies the durable shape rules to a snapshot read
-// back from a store: every observation must be a remote, non-local projection
-// of an exact valid registration whose endpoint matches, with a closed
-// availability/failure range and a catalogue-valid inventory. Policy and
-// display authority are deliberately not checked here because the durable
-// format omits policy and projectMembership stamps both from membership, so a
-// restored observation is always remote-only and always carries authority once
-// membership is projected.
-func validateRestoredSnapshot(snapshot ports.BrokerSnapshot) error {
-	if snapshot.Revision == 0 {
-		return errors.New("broker: persisted snapshot has no revision")
-	}
-	if len(snapshot.Daemons) > ports.BrokerMaxDaemonsPerSnapshot {
-		return errors.New("broker: persisted snapshot has too many daemons")
-	}
-	seen := make(map[string]struct{}, len(snapshot.Daemons))
-	for _, daemon := range snapshot.Daemons {
-		if err := validateDurableObservation(daemon); err != nil {
-			return err
-		}
-		if _, duplicate := seen[daemon.Endpoint]; duplicate {
-			return fmt.Errorf("broker: persisted snapshot has duplicate host %q", daemon.Endpoint)
-		}
-		seen[daemon.Endpoint] = struct{}{}
-	}
-	if len(snapshot.Removed) > ports.BrokerMaxTombstones {
-		return errors.New("broker: persisted snapshot has too many tombstones")
-	}
-	for _, tombstone := range snapshot.Removed {
-		if err := tombstone.Validate(); err != nil {
-			return err
-		}
-		if _, live := seen[tombstone.Endpoint]; live {
-			return fmt.Errorf("broker: persisted snapshot carries live host %q as tombstone", tombstone.Endpoint)
-		}
-	}
-	return nil
-}
-
-// validateDurableObservation reports whether one observation satisfies the
-// durable shape shared with the offline store: remote-only, an exact valid
-// registration matching its endpoint, and the ports durable projection rules.
-func validateDurableObservation(daemon ports.BrokerDaemonObservation) error {
-	if daemon.Local {
-		return errors.New("broker: persisted local daemon observation")
-	}
-	if err := domain.ValidateRemoteHostTarget(daemon.Endpoint); err != nil {
-		return fmt.Errorf("broker: persisted observation: %w", err)
-	}
-	if err := daemon.Registration.Validate(); err != nil {
-		return fmt.Errorf("broker: persisted observation: %w", err)
-	}
-	if daemon.Endpoint != daemon.Registration.Endpoint {
-		return errors.New("broker: persisted observation endpoint does not match registration")
-	}
-	if len(daemon.Sessions) > 0 && !daemon.InventoryKnown {
-		return errors.New("broker: persisted observation carries sessions without known inventory")
-	}
-	return ports.ValidateDurableHostProjection(daemon)
 }
 
 // Snapshot returns a defensive immutable copy without I/O.

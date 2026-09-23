@@ -272,3 +272,41 @@ func ValidateDurableObservation(daemon BrokerDaemonObservation) error {
 	}
 	return ValidateDurableHostProjection(daemon)
 }
+
+// ValidateDurableSnapshot checks the shared durable snapshot shape.
+func ValidateDurableSnapshot(snapshot BrokerSnapshot) error {
+	if snapshot.Epoch == 0 {
+		if snapshot.Revision != 0 || len(snapshot.Daemons) != 0 || len(snapshot.Removed) != 0 {
+			return errors.New("invalid empty snapshot")
+		}
+		return nil
+	}
+	if snapshot.Revision == 0 {
+		return errors.New("snapshot has no revision")
+	}
+	if len(snapshot.Daemons) > BrokerMaxDaemonsPerSnapshot {
+		return errors.New("snapshot has too many daemons")
+	}
+	seen := make(map[string]struct{}, len(snapshot.Daemons))
+	for _, daemon := range snapshot.Daemons {
+		if err := ValidateDurableObservation(daemon); err != nil {
+			return err
+		}
+		if _, duplicate := seen[daemon.Endpoint]; duplicate {
+			return errors.New("snapshot has duplicate host")
+		}
+		seen[daemon.Endpoint] = struct{}{}
+	}
+	if len(snapshot.Removed) > BrokerMaxTombstones {
+		return errors.New("snapshot has too many tombstones")
+	}
+	for _, tombstone := range snapshot.Removed {
+		if err := tombstone.Validate(); err != nil {
+			return err
+		}
+		if _, live := seen[tombstone.Endpoint]; live {
+			return errors.New("snapshot carries a live host as tombstone")
+		}
+	}
+	return nil
+}

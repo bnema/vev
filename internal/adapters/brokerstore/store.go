@@ -359,7 +359,7 @@ func (s *Store) Store(snapshot ports.BrokerSnapshot) error {
 			}
 		}
 	}
-	if err := validateDurableSnapshot(snapshot); err != nil {
+	if err := ports.ValidateDurableSnapshot(snapshot); err != nil {
 		return err
 	}
 	if s.writeEpoch != 0 && s.writeEpoch != snapshot.Epoch {
@@ -435,7 +435,7 @@ func validate(st state) error {
 		}
 		return nil
 	}
-	if err := validateDurableSnapshot(st.Snapshot); err != nil {
+	if err := ports.ValidateDurableSnapshot(st.Snapshot); err != nil {
 		return invalid("%v", err)
 	}
 	for _, daemon := range st.Snapshot.Daemons {
@@ -447,43 +447,6 @@ func validate(st state) error {
 		}
 		if !found || daemon.Checking || daemon.LastFailure.Err != nil {
 			return invalid("non-authoritative snapshot")
-		}
-	}
-	return nil
-}
-
-func validateDurableSnapshot(snapshot ports.BrokerSnapshot) error {
-	if snapshot.Epoch == 0 {
-		if snapshot.Revision != 0 || len(snapshot.Daemons) != 0 || len(snapshot.Removed) != 0 {
-			return errors.New("invalid empty snapshot")
-		}
-		return nil
-	}
-	if snapshot.Revision == 0 {
-		return errors.New("snapshot has no revision")
-	}
-	if len(snapshot.Daemons) > ports.BrokerMaxDaemonsPerSnapshot {
-		return errors.New("snapshot has too many daemons")
-	}
-	seen := make(map[string]struct{}, len(snapshot.Daemons))
-	for _, daemon := range snapshot.Daemons {
-		if err := ports.ValidateDurableObservation(daemon); err != nil {
-			return err
-		}
-		if _, duplicate := seen[daemon.Endpoint]; duplicate {
-			return errors.New("snapshot has duplicate host")
-		}
-		seen[daemon.Endpoint] = struct{}{}
-	}
-	if len(snapshot.Removed) > ports.BrokerMaxTombstones {
-		return errors.New("snapshot has too many tombstones")
-	}
-	for _, tombstone := range snapshot.Removed {
-		if err := tombstone.Validate(); err != nil {
-			return err
-		}
-		if _, live := seen[tombstone.Endpoint]; live {
-			return errors.New("snapshot carries a live host as tombstone")
 		}
 	}
 	return nil
