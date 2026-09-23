@@ -299,8 +299,11 @@ func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 60, Rows: 8}, Preview{})
 	require.Equal(t, 60, frame.Width)
 	require.Equal(t, 8, frame.Height)
-	require.NotRegexp(t, `\bup\s*$`, strings.TrimRight(rowText(frame.Row(0)), " "), "live sessions carry no badge")
-	require.Regexp(t, `down\s*$`, strings.TrimRight(rowText(frame.Row(1)), " "))
+	for row, want := range map[int]int{0: 71, 1: 244} {
+		text := []rune(strings.TrimRight(rowText(frame.Row(row)), " "))
+		require.Equal(t, '●', text[len(text)-1])
+		require.Equal(t, want, frame.At(len(text)-1, row).Style.Foreground, "row %d dot color", row)
+	}
 }
 
 func TestRenderShowsNoDaemonBadgeAndCreateHint(t *testing.T) {
@@ -310,7 +313,7 @@ func TestRenderShowsNoDaemonBadgeAndCreateHint(t *testing.T) {
 		Dim: true, Focusable: true, Actions: protocol.PickerCanNavigate,
 	}}, Config{Intent: protocol.PickerIntentNavigation})
 	frame := m.Render(domain.Size{Cols: 80, Rows: 8}, Preview{})
-	require.Contains(t, rowText(frame.Row(0)), "none")
+	require.Contains(t, rowText(frame.Row(0)), "●")
 	require.Contains(t, rowText(frame.Row(7)), "no daemon")
 	require.Contains(t, rowText(frame.Row(7)), "Enter to create a session")
 	require.NotContains(t, rowText(frame.Row(7)), "Enter unavailable")

@@ -539,25 +539,37 @@ func (s SortMode) Title() string {
 	return " Sessions · recent "
 }
 
-func lineStatusBadge(status protocol.PickerLineStatus) string {
+// statusDot is the one-cell state marker. Every state uses the same dot and
+// a fixed xterm-256 color, so it reads the same in any terminal and theme:
+// green up, gray stopped, red down or error, yellow stale, magenta version
+// mismatch, blue no daemon.
+const statusDot = "●"
+
+// lineStatusColor is the xterm-256 index for a status, or -1 for none.
+func lineStatusColor(status protocol.PickerLineStatus) int {
 	switch status {
 	case protocol.PickerLineStatusUp:
-		return "up"
+		return 71 // green
 	case protocol.PickerLineStatusStopped:
-		return "down"
-	case protocol.PickerLineStatusDown:
-		return "off"
+		return 244 // gray
+	case protocol.PickerLineStatusDown, protocol.PickerLineStatusError:
+		return 167 // red
 	case protocol.PickerLineStatusStale:
-		return "stale"
+		return 179 // yellow
 	case protocol.PickerLineStatusVersion:
-		return "ver"
-	case protocol.PickerLineStatusError:
-		return "err"
+		return 170 // magenta
 	case protocol.PickerLineStatusNoDaemon:
-		return "none"
+		return 67 // blue
 	default:
+		return -1
+	}
+}
+
+func lineStatusBadge(status protocol.PickerLineStatus) string {
+	if lineStatusColor(status) < 0 {
 		return ""
 	}
+	return statusDot
 }
 
 // renderList draws each visible row as up to three segments: a name segment
@@ -608,7 +620,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			treeX = ui.DrawText(frame, rect.X, rect.Y+y, clipX, r.tree, treeStyle)
 		}
 		badge := ""
-		if r.rendersAsHeader() && !(r.kind() == protocol.PickerLineSession && r.line.Status == protocol.PickerLineStatusUp) {
+		if r.rendersAsHeader() {
 			badge = lineStatusBadge(r.line.Status)
 		}
 		contentClipX := clipX
@@ -645,7 +657,10 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			}
 			if badge != "" {
 				badgeX := max(rect.X, clipX-badgeWidth)
-				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, detailStyle)
+				badgeStyle := base
+				badgeStyle.Foreground = lineStatusColor(r.line.Status)
+				badgeStyle.HasForegroundRGB = false
+				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, badgeStyle)
 			}
 			continue
 		}

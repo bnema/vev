@@ -930,7 +930,8 @@ func pickerSessionDetail(session catalogue.RemoteCatalogSession) string {
 		count = strconv.Itoa(n)
 	}
 	if session.Attached {
-		return strings.TrimSpace("● " + count)
+		// "*" marks the attached session; ● is reserved for the status dot.
+		return strings.TrimSpace("* " + count)
 	}
 	return count
 }
