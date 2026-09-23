@@ -8,7 +8,12 @@ host named remote reaching the remote container. No host session is touched.
 import json
 import subprocess
 import sys
+import time
 import uuid
+
+
+class InputBusy(AssertionError):
+    pass
 
 
 class Driver:
@@ -43,6 +48,19 @@ class Driver:
                 return context["generation"]
 
     def call(self, operation, **fields):
+        # input_busy is an unaccepted refusal while the input owner still
+        # delivers an earlier terminal read; resending it is safe and bounded.
+        # Accepted actions and every other error are never retried.
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                return self._call_once(operation, **fields)
+            except InputBusy:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    def _call_once(self, operation, **fields):
         self.request_id += 1
         request = dict(version=1, id=self.request_id, op=operation,
                        attachment=self.attachment, **fields)
@@ -51,6 +69,9 @@ class Driver:
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
         response = json.loads(self.process.stdout.readline())
+        error = response.get("error")
+        if isinstance(error, dict) and error.get("code") == "input_busy" and not error.get("accepted"):
+            raise InputBusy(response)
         assert "error" not in response, response
         result = response["result"]
         self.generation = result.get("context", {}).get("generation", self.generation)
