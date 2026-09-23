@@ -201,22 +201,6 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			wantErr: errProtoConvertRange,
 		},
 		{
-			name: "preview cell rune",
-			run: func(t *testing.T) error {
-				_, err := previewCellFromWire(&wire.PreviewCell{RuneValue: 0x110000})
-				return err
-			},
-			wantErr: errProtoConvertRange,
-		},
-		{
-			name: "underline style narrowing",
-			run: func(t *testing.T) error {
-				_, err := cellStyleFromWire(&wire.CellStyle{UnderlineStyle: 256})
-				return err
-			},
-			wantErr: errProtoConvertRange,
-		},
-		{
 			name:    "picker line kind",
 			run:     func(t *testing.T) error { _, err := pickerLineFromWire(&wire.PickerLine{Kind: 256}); return err },
 			wantErr: protocol.ErrInvalidNavigation,

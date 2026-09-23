@@ -41,7 +41,7 @@ var _ ports.ClientConnection = (*clientConnection)(nil)
 
 // NewClientConnection wraps one raw client connection incarnation. The
 // preamble runs lazily on first use, bounded by the handshake deadline
-// started here; prefer NewClientDialer, which runs it inside Dial.
+// started here.
 func NewClientConnection(raw wire.Transport) ports.ClientConnection {
 	if raw == nil {
 		return nil
@@ -185,44 +185,6 @@ func (c *clientConnection) Capabilities() protocol.ConnectionCapabilities {
 func (c *clientConnection) LinkState() ports.LinkState         { return rawLinkState(c.raw) }
 func (c *clientConnection) LinkEvents() <-chan ports.LinkEvent { return rawLinkEvents(c.raw) }
 func (c *clientConnection) Close() error                       { return c.raw.Close() }
-
-type clientDialer struct{ raw wire.Dialer }
-
-var _ ports.ClientDialer = (*clientDialer)(nil)
-
-// NewClientDialer wraps every dialed raw connection in a stable typed adapter.
-func NewClientDialer(raw wire.Dialer) ports.ClientDialer {
-	if raw == nil {
-		return nil
-	}
-	return &clientDialer{raw: raw}
-}
-
-func (d *clientDialer) Dial(ctx context.Context) (ports.ClientConnection, error) {
-	raw, err := d.raw.Dial(ctx)
-	if err != nil {
-		return nil, err
-	}
-	connection := &clientConnection{raw: raw, ceilings: defaultProtoCeilings(), deadline: time.Now().Add(protocol.HandshakeTimeout), preambleDone: make(chan struct{})}
-	if err := connection.ensurePreambleWith(ctx); err != nil {
-		_ = raw.Close()
-		return nil, err
-	}
-	return connection, nil
-}
-
-func (c *clientConnection) ensurePreambleWith(ctx context.Context) error {
-	c.preambleOnce.Do(func() {
-		ctx, cancel := context.WithDeadline(ctx, c.deadline)
-		defer cancel()
-		next, err := runProtoClientPreamble(ctx, c.raw, c.limits())
-		c.publishLimits(next)
-		c.preambleErr = err
-		c.finishPreamble()
-	})
-	c.runHandshakeHooks()
-	return c.preambleErr
-}
 
 // DecodeServerEnvelope unwraps one scanned server envelope payload into
 // its semantic message for hidden one-shot carriages.

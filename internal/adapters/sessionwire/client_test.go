@@ -1,8 +1,6 @@
 package sessionwire
 
 import (
-	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -139,29 +137,4 @@ func TestClientConnectionClassifiesFailuresAndPreservesCapabilities(t *testing.T
 		require.Equal(t, ports.LinkStateDegraded, connection.LinkState())
 		require.Equal(t, (<-chan ports.LinkEvent)(events), connection.LinkEvents())
 	})
-}
-
-func TestClientDialerWrapsEachConnectionAndPreservesErrors(t *testing.T) {
-	dialErr := errors.New("dial failed")
-	dialer := NewClientDialer(&scriptedDialer{err: dialErr})
-	_, err := dialer.Dial(context.Background())
-	require.ErrorIs(t, err, dialErr)
-
-	raw := &scriptedTransport{recv: []wire.Envelope{mustPreambleResponse(t)}}
-	dialer = NewClientDialer(&scriptedDialer{transport: raw})
-	connection, err := dialer.Dial(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, connection.SendClient(protocol.Ping{}))
-	got, err := DecodeClientEnvelope(mustSingleAppPayload(t, raw))
-	require.NoError(t, err)
-	require.Equal(t, protocol.Ping{}, got)
-}
-
-type scriptedDialer struct {
-	transport wire.Transport
-	err       error
-}
-
-func (d *scriptedDialer) Dial(context.Context) (wire.Transport, error) {
-	return d.transport, d.err
 }

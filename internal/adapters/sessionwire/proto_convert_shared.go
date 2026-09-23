@@ -63,36 +63,6 @@ func lifecycleFromWire(message *wire.LifecycleID) (domain.SessionLifecycleID, er
 	return id, nil
 }
 
-func tabSelectorToWire(selector domain.TabSelector) *wire.TabSelector {
-	return protoconv.TabSelectorToWire(selector)
-}
-
-func tabSelectorFromWire(message *wire.TabSelector) (domain.TabSelector, error) {
-	selector, err := protoconv.TabSelectorFromWire(message)
-	if err != nil {
-		return domain.TabSelector{}, errProtoConvertRange
-	}
-	return selector, nil
-}
-
-func remoteTargetToWire(target *domain.RemoteSessionTarget) (*wire.RemoteTarget, error) {
-	if target == nil {
-		return nil, nil
-	}
-	return protoconv.RemoteTargetToWire(*target), nil
-}
-
-func remoteTargetFromWire(message *wire.RemoteTarget) (*domain.RemoteSessionTarget, error) {
-	if message == nil {
-		return nil, nil
-	}
-	target, err := protoconv.RemoteTargetFromWire(message)
-	if err != nil {
-		return nil, errProtoConvertRange
-	}
-	return &target, nil
-}
-
 func exactTargetToWire(target *protocol.ExactSessionTarget) *wire.ExactTarget {
 	if target == nil {
 		return nil
@@ -121,50 +91,6 @@ func rgbFromWire(message *wire.RGB) (renderer.RGB, error) {
 		return renderer.RGB{}, errProtoConvertRange
 	}
 	return color, nil
-}
-
-func cellStyleToWire(style renderer.Style) *wire.CellStyle {
-	return protoconv.CellStyleToWire(style)
-}
-
-func cellStyleFromWire(message *wire.CellStyle) (renderer.Style, error) {
-	style, err := protoconv.CellStyleFromWire(message)
-	if err != nil {
-		return renderer.Style{}, errProtoConvertRange
-	}
-	return style, nil
-}
-
-func previewCellToWire(cell renderer.Cell) (*wire.PreviewCell, error) {
-	out, err := protoconv.PreviewCellToWire(cell)
-	if err != nil {
-		return nil, errProtoConvertRange
-	}
-	return out, nil
-}
-
-func previewCellFromWire(message *wire.PreviewCell) (renderer.Cell, error) {
-	cell, err := protoconv.PreviewCellFromWire(message)
-	if err != nil {
-		return renderer.Cell{}, errProtoConvertRange
-	}
-	return cell, nil
-}
-
-func previewCellsToWire(cells []renderer.Cell) ([]*wire.PreviewCell, error) {
-	out, err := protoconv.PreviewCellsToWire(cells)
-	if err != nil {
-		return nil, errProtoConvertRange
-	}
-	return out, nil
-}
-
-func previewCellsFromWire(cells []*wire.PreviewCell) ([]renderer.Cell, error) {
-	out, err := protoconv.PreviewCellsFromWire(cells)
-	if err != nil {
-		return nil, errProtoConvertRange
-	}
-	return out, nil
 }
 
 func registrationToWire(registration domain.RemoteRegistration) *wire.RemoteRegistration {
