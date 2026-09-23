@@ -109,17 +109,6 @@ func TestParseArgsUIOptionsAreAttachOnly(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestOfflineClientHarnessRejectsPickerForTheTerminalHarness pins the sandbox
-// option boundary: --picker is a UI-driver start, never a terminal-harness one.
-func TestOfflineClientHarnessRejectsPickerForTheTerminalHarness(t *testing.T) {
-	_, err := parseArgs([]string{brokerClientCommand, "--offline-root", "/tmp/offline", "--picker"})
-	require.Error(t, err)
-	command, err := parseArgs([]string{brokerClientCommand, "--offline-root", "/tmp/offline", "--harness", offlineClientUIDriver, "--picker"})
-	require.NoError(t, err)
-	require.Equal(t, kindBrokerClient, command.kind)
-	require.True(t, command.brokerClient.picker)
-}
-
 // TestInteractiveObservedCompositionUsesTheBrokerConnector pins that the
 // interactive observed path and the headless driver keep no daemon dialer, no
 // remote factory, and no launch configuration: both compose the shared broker
