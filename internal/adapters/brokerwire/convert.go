@@ -149,10 +149,6 @@ func validateBrokerDisplayText(v string, max int) error {
 	return mapOptionalBrokerError(protoconv.BrokerDisplayText(v, max))
 }
 
-func validateBrokerEnvEntry(v string) error {
-	return mapOptionalBrokerError(protoconv.BrokerEnvEntry(v))
-}
-
 func mapOptionalBrokerError(err error) error {
 	if err == nil {
 		return nil

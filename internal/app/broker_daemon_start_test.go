@@ -79,19 +79,6 @@ func (s *scriptedDaemonStarter) starter(backoff backoffConfig) brokerDaemonStart
 	}
 }
 
-// releaseDaemonOwnership drops the lifecycle ownership the scripted daemon held,
-// as stopping it would.
-func (s *scriptedDaemonStarter) releaseDaemonOwnership(t *testing.T) {
-	t.Helper()
-	s.mu.Lock()
-	owner := s.daemonOwner
-	s.daemonOwner = nil
-	s.mu.Unlock()
-	if owner != nil {
-		require.NoError(t, owner.Release())
-	}
-}
-
 func (s *scriptedDaemonStarter) dial(_ context.Context, carriage string) (daemonmux.RawFramedTransport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -3,13 +3,11 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -258,43 +256,6 @@ func waitForProcessGroupGone(pgid int, timeout time.Duration) error {
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("process group %d remained after client shutdown", pgid)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// waitForInflightReceive polls a process trace until it holds an unpaired
-// adapter_receive_start (more starts than ends). It tolerates a partially
-// written trailing line while the traced process appends concurrently.
-func waitForInflightReceive(path string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		starts, ends := 0, 0
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			var r traceRecord
-			if json.Unmarshal([]byte(line), &r) != nil {
-				continue // a concurrently appended, not-yet-complete final line
-			}
-			switch r.Kind {
-			case "adapter_receive_start":
-				starts++
-			case "adapter_receive_end":
-				ends++
-			}
-		}
-		if starts > ends {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("adapter_receive starts=%d ends=%d, want an in-flight start", starts, ends)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -76,9 +76,6 @@ func (f *uiDriverBrokerFixture) Connector() ports.BrokerConnector {
 	return brokeripc.NewConnector(f.broker.socket, brokeripc.Config{})
 }
 
-// Socket is the fixture broker's private IPC socket path.
-func (f *uiDriverBrokerFixture) Socket() string { return f.broker.socket }
-
 // Streams reports one event per logical stream the fixture broker admitted.
 func (f *uiDriverBrokerFixture) Streams() <-chan struct{} { return f.broker.streams }
 
@@ -263,15 +260,6 @@ func (r *uiDriverFixtureRun) awaitAttachedSnapshot(t *testing.T, attachment, ses
 	}
 	require.Contains(t, offlineSnapshotText(snapshot), text)
 	return snapshot
-}
-
-// sessionName returns the session name of the run's committed publication, or ""
-// while no session is presented.
-func (r *uiDriverFixtureRun) sessionName(t *testing.T, attachment string) string {
-	t.Helper()
-	snapshot, err := r.ui.Capture(attachment)
-	require.NoError(t, err)
-	return snapshot.Context.Route.Target.SessionName
 }
 
 // keys sends one key batch at the given generation and returns its action status.

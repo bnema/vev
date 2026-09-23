@@ -41,15 +41,6 @@ func mustClientEnvelope(message protocol.ClientMessage) wire.Envelope {
 	return wire.Envelope{Payload: raw}
 }
 
-// decodeServerEnvelope unwraps a received envelope into its semantic server
-// message, failing the test on a malformed payload.
-func decodeServerEnvelope(t *testing.T, envelope wire.Envelope) protocol.ServerMessage {
-	t.Helper()
-	message, err := sessionwire.DecodeServerEnvelope(envelope.Payload)
-	require.NoError(t, err)
-	return message
-}
-
 // mustPreambleResponse builds the canned server preamble acceptance the
 // typed client connection expects before application traffic.
 func mustPreambleResponse() wire.Envelope {

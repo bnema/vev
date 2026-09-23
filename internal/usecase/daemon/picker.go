@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
@@ -19,16 +18,6 @@ import (
 var pickerModal = picker.Modal
 
 const remotePickerPreviewDebounce = 80 * time.Millisecond
-
-// pickerViews projects the shared daemon inventory for the picker. It keeps
-// current/ephemeral rows, tabs, grouping, and move eligibility; lifecycle and
-// remote facts come from the common capture. Section lines are published
-// whenever the source has more than one origin group, so the presenting
-// client can order each run locally without inventing group labels.
-func (d *Daemon) pickerViews(cur *session, ac *attachedClient) ([]pickerSessionView, pickerSourceFilter) {
-	_, grouped, current := d.pickerViewProjections(cur, ac)
-	return grouped, current
-}
 
 // pickerLocalViews is the remote-free picker projection. The hybrid
 // projection interleaves foreign rows between the live and stopped rows, so
@@ -166,24 +155,6 @@ func remotePickerPreviewSize(size domain.Size) (uint16, uint16) {
 		return 0, 0
 	}
 	return uint16(min(width, protocol.RemotePreviewMaxWidth)), uint16(min(height, protocol.RemotePreviewMaxHeight))
-}
-
-func staticRemotePickerPreview(width, height uint16, message string) picker.Preview {
-	if width == 0 || height == 0 {
-		return picker.Preview{}
-	}
-	rows := [][]renderer.Cell{make([]renderer.Cell, int(width))}
-	style := renderer.DefaultStyle()
-	for x := range rows[0] {
-		rows[0][x] = renderer.Cell{Rune: ' ', Style: style}
-	}
-	for x, r := range []rune(message) {
-		if x >= int(width) {
-			break
-		}
-		rows[0][x] = renderer.Cell{Rune: r, Style: style}
-	}
-	return picker.Preview{Rows: rows, Width: int(width), Height: len(rows)}
 }
 
 // pickerRouteTargetsEqual compares the exact route identity of two picker

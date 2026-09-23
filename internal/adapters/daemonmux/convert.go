@@ -31,15 +31,6 @@ func muxEnum8[T ~uint8](value uint32) (T, error) {
 	return v, nil
 }
 
-// muxEnum16 maps shared narrowing failures to the local range sentinel.
-func muxEnum16[T ~uint16](value uint32) (T, error) {
-	v, err := protoconv.Uint16[T](value)
-	if err != nil {
-		return 0, errConvertRange
-	}
-	return v, nil
-}
-
 func startModeToWire(mode ports.BrokerDaemonStartMode) (uint32, error) {
 	v, err := protoconv.BrokerStartModeToWire(mode)
 	if err != nil {
@@ -156,8 +147,6 @@ func mapBrokerConversionError(err error) error {
 func validateDisplayText(v string, max int) error {
 	return mapOptionalBrokerError(protoconv.BrokerDisplayText(v, max))
 }
-
-func validateEnvEntry(v string) error { return mapOptionalBrokerError(protoconv.BrokerEnvEntry(v)) }
 
 func mapOptionalBrokerError(err error) error {
 	if err == nil {

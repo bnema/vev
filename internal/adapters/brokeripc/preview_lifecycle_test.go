@@ -41,19 +41,6 @@ func previewRequest(t *testing.T, epoch ports.BrokerEpoch, client ports.BrokerSe
 	return request
 }
 
-// awaitPreviewChanged waits for one preview Changed wake under an explicit
-// bound, so a subscription that never publishes is a bounded test failure.
-func awaitPreviewChanged(t *testing.T, sub ports.BrokerPreviewSubscription) ports.BrokerPreviewPublication {
-	t.Helper()
-	select {
-	case <-sub.Changed():
-		return sub.Latest()
-	case <-time.After(5 * time.Second):
-		t.Fatal("the preview subscription did not publish within the bound")
-		return ports.BrokerPreviewPublication{}
-	}
-}
-
 // serverPreviewGeneration returns the server session's current preview
 // generation: it observes the same replacement bookkeeping startPreview
 // maintains, so a test can prove which generation the server holds current.

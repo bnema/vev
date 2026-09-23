@@ -23,12 +23,6 @@ func (f poolResolver) ResolveDialTarget(c context.Context, r ports.BrokerOpenStr
 	return f(c, r)
 }
 
-type poolBinder func(context.Context, ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error)
-
-func (f poolBinder) BindAuthenticatedIdentity(c context.Context, r ports.BrokerIdentityBindingRequest) (ports.BrokerDaemonIdentity, error) {
-	return f(c, r)
-}
-
 type poolConnector func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error)
 
 func (f poolConnector) Connect(c context.Context, r ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
