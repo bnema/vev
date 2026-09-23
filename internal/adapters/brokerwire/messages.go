@@ -35,7 +35,7 @@ type ClientMessage interface{ brokerClientMessage() }
 type ServerMessage interface{ brokerServerMessage() }
 
 // Register opens one client connection to the broker.
-type Register struct{}
+type Register struct{ Build string }
 
 func (Register) brokerClientMessage() {}
 
@@ -192,6 +192,8 @@ func (CancelPreview) brokerClientMessage() {}
 type Registered struct {
 	Epoch      ports.BrokerEpoch
 	Connection ports.BrokerConnectionID
+	Build      string
+	Retiring   bool
 }
 
 func (Registered) brokerServerMessage() {}

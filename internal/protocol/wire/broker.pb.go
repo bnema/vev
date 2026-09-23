@@ -846,6 +846,7 @@ func (*BrokerServerEnvelope_PreviewPublication) isBrokerServerEnvelope_Payload()
 // Register opens one client connection to the broker.
 type Register struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Build         string                 `protobuf:"bytes,1,opt,name=build,proto3" json:"build,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -878,6 +879,13 @@ func (x *Register) ProtoReflect() protoreflect.Message {
 // Deprecated: Use Register.ProtoReflect.Descriptor instead.
 func (*Register) Descriptor() ([]byte, []int) {
 	return file_broker_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Register) GetBuild() string {
+	if x != nil {
+		return x.Build
+	}
+	return ""
 }
 
 // Subscribe asks for snapshot and lifecycle publications for one scope.
@@ -1557,6 +1565,8 @@ func (x *CloseStream) GetRef() *BrokerStreamRef {
 type Registered struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Scope         *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	Build         string                 `protobuf:"bytes,2,opt,name=build,proto3" json:"build,omitempty"`
+	Retiring      bool                   `protobuf:"varint,3,opt,name=retiring,proto3" json:"retiring,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1596,6 +1606,20 @@ func (x *Registered) GetScope() *BrokerScope {
 		return x.Scope
 	}
 	return nil
+}
+
+func (x *Registered) GetBuild() string {
+	if x != nil {
+		return x.Build
+	}
+	return ""
+}
+
+func (x *Registered) GetRetiring() bool {
+	if x != nil {
+		return x.Retiring
+	}
+	return false
 }
 
 // SnapshotPart is one fragment of a snapshot publication. Parts of one
@@ -3186,9 +3210,9 @@ const file_broker_proto_rawDesc = "" +
 	"\x14broker_error_message\x18\xd0\x01 \x01(\v2\x1f.vev.wire.v1.BrokerErrorMessageH\x00R\x12brokerErrorMessage\x124\n" +
 	"\bshutdown\x18\xd1\x01 \x01(\v2\x15.vev.wire.v1.ShutdownH\x00R\bshutdown\x12S\n" +
 	"\x13preview_publication\x18\xd2\x01 \x01(\v2\x1f.vev.wire.v1.PreviewPublicationH\x00R\x12previewPublicationB\t\n" +
-	"\apayload\"\n" +
-	"\n" +
-	"\bRegister\"u\n" +
+	"\apayload\" \n" +
+	"\bRegister\x12\x14\n" +
+	"\x05build\x18\x01 \x01(\tR\x05build\"u\n" +
 	"\tSubscribe\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x1e\n" +
 	"\n" +
@@ -3242,10 +3266,12 @@ const file_broker_proto_rawDesc = "" +
 	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\"=\n" +
 	"\vCloseStream\x12.\n" +
-	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\"<\n" +
+	"\x03ref\x18\x01 \x01(\v2\x1c.vev.wire.v1.BrokerStreamRefR\x03ref\"n\n" +
 	"\n" +
 	"Registered\x12.\n" +
-	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\"\xab\x03\n" +
+	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x14\n" +
+	"\x05build\x18\x02 \x01(\tR\x05build\x12\x1a\n" +
+	"\bretiring\x18\x03 \x01(\bR\bretiring\"\xab\x03\n" +
 	"\fSnapshotPart\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x1e\n" +
 	"\n" +

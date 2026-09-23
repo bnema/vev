@@ -110,7 +110,9 @@ message BrokerServerEnvelope {
 }
 
 // Register opens one client connection to the broker.
-message Register {}
+message Register {
+  string build = 1;
+}
 
 // Subscribe asks for snapshot and lifecycle publications for one scope.
 message Subscribe {
@@ -220,6 +222,8 @@ message CloseStream {
 // Registered confirms one accepted client connection and its assigned scope.
 message Registered {
   BrokerScope scope = 1;
+  string build = 2;
+  bool retiring = 3;
 }
 
 // SnapshotPart is one fragment of a snapshot publication. Parts of one

@@ -1258,3 +1258,58 @@ func FuzzDecodeServer(f *testing.F) {
 		_, _ = DecodeServer(payload, testEnvelopeCeiling, testChunkCeiling)
 	})
 }
+
+func TestBuildRegistrationCodec(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		build    string
+		retiring bool
+	}{
+		{"empty", "", false}, {"matching", "release+abc", false}, {"retiring", "release+def", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := Register{Build: tc.build}
+			raw := mustEncodeClient(t, request)
+			decoded, err := DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			require.Equal(t, request, decoded)
+			want := []byte{0xaa, 0x06, 0x00}
+			if tc.build != "" {
+				want = append([]byte{0xaa, 0x06, byte(len(tc.build) + 2), 0x0a, byte(len(tc.build))}, []byte(tc.build)...)
+			}
+			require.Equal(t, want, raw)
+			response := Registered{Epoch: 7, Connection: testConnectionID(1), Build: tc.build, Retiring: tc.retiring}
+			raw = mustEncodeServer(t, response)
+			decodedServer, err := DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling)
+			require.NoError(t, err)
+			require.Equal(t, response, decodedServer)
+			envelope := &wire.BrokerServerEnvelope{}
+			require.NoError(t, proto.Unmarshal(raw, envelope))
+			require.Equal(t, tc.build, envelope.GetRegistered().GetBuild())
+			require.Equal(t, tc.retiring, envelope.GetRegistered().GetRetiring())
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		server bool
+	}{{"client", false}, {"server", true}} {
+		t.Run("oversize-"+tc.name, func(t *testing.T) {
+			build := strings.Repeat("x", 129)
+			if tc.server {
+				_, err := EncodeServer(Registered{Epoch: 7, Connection: testConnectionID(1), Build: build}, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+				raw, err := proto.Marshal(&wire.BrokerServerEnvelope{Payload: &wire.BrokerServerEnvelope_Registered{Registered: &wire.Registered{Scope: scopeToWire(7, testConnectionID(1)), Build: build}}})
+				require.NoError(t, err)
+				_, err = DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+			} else {
+				_, err := EncodeClient(Register{Build: build}, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+				raw, err := proto.Marshal(&wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_Register{Register: &wire.Register{Build: build}}})
+				require.NoError(t, err)
+				_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+			}
+		})
+	}
+}

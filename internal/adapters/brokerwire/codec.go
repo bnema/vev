@@ -102,7 +102,10 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Br
 	}
 	switch m := message.(type) {
 	case Register:
-		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_Register{Register: &wire.Register{}}}, nil
+		if len(m.Build) > 128 {
+			return nil, ErrInvalidMessage
+		}
+		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_Register{Register: &wire.Register{Build: m.Build}}}, nil
 	case *Register:
 		if m == nil {
 			return nil, ErrInvalidMessage
@@ -273,7 +276,10 @@ func decodeClientEnvelope(envelope *wire.BrokerClientEnvelope, maxChunkBytes uin
 		if payload.Register == nil {
 			return nil, ErrInvalidMessage
 		}
-		return Register{}, nil
+		if len(payload.Register.GetBuild()) > 128 {
+			return nil, ErrInvalidMessage
+		}
+		return Register{Build: payload.Register.GetBuild()}, nil
 	case *wire.BrokerClientEnvelope_Subscribe:
 		return subscribeFromWire(payload.Subscribe)
 	case *wire.BrokerClientEnvelope_Resync:
@@ -777,6 +783,9 @@ func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.Br
 	}
 	switch m := message.(type) {
 	case Registered:
+		if len(m.Build) > 128 {
+			return nil, ErrInvalidMessage
+		}
 		if m.Epoch == 0 {
 			return nil, ErrInvalidMessage
 		}
@@ -784,7 +793,7 @@ func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.Br
 			return nil, ErrInvalidMessage
 		}
 		return &wire.BrokerServerEnvelope{Payload: &wire.BrokerServerEnvelope_Registered{Registered: &wire.Registered{
-			Scope: scopeToWire(m.Epoch, m.Connection),
+			Scope: scopeToWire(m.Epoch, m.Connection), Build: m.Build, Retiring: m.Retiring,
 		}}}, nil
 	case *Registered:
 		if m == nil {
@@ -922,7 +931,10 @@ func decodeServerEnvelope(envelope *wire.BrokerServerEnvelope, maxChunkBytes uin
 		if err != nil {
 			return nil, ErrInvalidMessage
 		}
-		return Registered{Epoch: epoch, Connection: connection}, nil
+		if len(payload.Registered.GetBuild()) > 128 {
+			return nil, ErrInvalidMessage
+		}
+		return Registered{Epoch: epoch, Connection: connection, Build: payload.Registered.GetBuild(), Retiring: payload.Registered.GetRetiring()}, nil
 	case *wire.BrokerServerEnvelope_SnapshotPart:
 		return snapshotPartFromWire(payload.SnapshotPart)
 	case *wire.BrokerServerEnvelope_OperationResult:
