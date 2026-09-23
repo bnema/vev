@@ -10,8 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -46,10 +44,7 @@ import (
 // until a signal or its parent context ends it, or until the broker idles out,
 // and then shuts down in a fixed order.
 
-const (
-	brokerServeCommand           = "_broker-serve"
-	productionBrokerServeCommand = "_broker-production-serve"
-)
+const productionBrokerServeCommand = "_broker-production-serve"
 
 // brokerServePoolLimits bound the offline broker pool. They are explicit, not
 // derived from the environment, and small enough that a stalled peer is
@@ -73,70 +68,17 @@ func brokerPoolLimits(config *brokerconfig.Config) broker.PoolLimits {
 
 // brokerServeOptions is the parsed hidden invocation.
 type brokerServeOptions struct {
-	offlineRoot string
-	production  bool
 	// idleGrace is zero when the operator did not override it; the supervisor
 	// then applies its own 5m default.
 	idleGrace time.Duration
 }
 
-// parseBrokerServeArgs strictly parses `_broker-serve --offline-root ABS
-// [--idle-grace DURATION]`. Unknown flags, duplicate flags, positionals, a
-// missing value, and a non-positive or unparsable duration are refused; the
-// path itself is validated later against the filesystem.
+// parseProductionBrokerServeArgs parses the argument-free hidden serve entry.
 func parseProductionBrokerServeArgs(args []string) (command, error) {
 	if len(args) != 0 {
 		return command{}, usagef("`%s` does not accept arguments", productionBrokerServeCommand)
 	}
-	return command{kind: kindProductionBrokerServe, brokerServe: brokerServeOptions{production: true}}, nil
-}
-
-func parseBrokerServeArgs(args []string) (command, error) {
-	if len(args) == 0 {
-		return command{}, usagef("`%s` requires --offline-root", brokerServeCommand)
-	}
-	options := brokerServeOptions{}
-	var rootSet, graceSet bool
-	for index := 0; index < len(args); {
-		switch args[index] {
-		case "--offline-root":
-			if rootSet {
-				return command{}, usagef("`%s` received duplicate --offline-root", brokerServeCommand)
-			}
-			if index+1 >= len(args) || args[index+1] == "" {
-				return command{}, usagef("`--offline-root` requires a path")
-			}
-			options.offlineRoot = args[index+1]
-			rootSet = true
-			index += 2
-		case "--idle-grace":
-			if graceSet {
-				return command{}, usagef("`%s` received duplicate --idle-grace", brokerServeCommand)
-			}
-			if index+1 >= len(args) {
-				return command{}, usagef("`--idle-grace` requires a duration")
-			}
-			grace, err := time.ParseDuration(args[index+1])
-			if err != nil {
-				return command{}, usagef("`--idle-grace` %q is not a duration", args[index+1])
-			}
-			if grace <= 0 {
-				return command{}, usagef("`--idle-grace` must be positive")
-			}
-			options.idleGrace = grace
-			graceSet = true
-			index += 2
-		default:
-			if strings.HasPrefix(args[index], "-") {
-				return command{}, usagef("unknown flag %q for `%s`", args[index], brokerServeCommand)
-			}
-			return command{}, usagef("`%s` does not accept positional arguments", brokerServeCommand)
-		}
-	}
-	if !rootSet {
-		return command{}, usagef("`%s` requires --offline-root", brokerServeCommand)
-	}
-	return command{kind: kindBrokerServe, brokerServe: options}, nil
+	return command{kind: kindProductionBrokerServe, brokerServe: brokerServeOptions{}}, nil
 }
 
 // brokerServeDeps are the composition seams. Production supplies the real
@@ -194,16 +136,12 @@ func defaultBrokerServeDeps() brokerServeDeps {
 func runBrokerServeCommand(ctx context.Context, options brokerServeOptions) (retErr error) {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	var observerCloser io.Closer
-	if options.production {
-		observer, closer, err := newPerformanceTrace(clock.New())
-		if err != nil {
-			return fmt.Errorf("vev: performance trace: %w", err)
-		}
-		observerCloser = closer
-		if observer != nil {
-			observer.ObserveRuntime(ports.NewRuntimeMark("broker", ports.RuntimeTransportDiagnostic, 0, true))
-		}
+	observer, observerCloser, err := newPerformanceTrace(clock.New())
+	if err != nil {
+		return fmt.Errorf("vev: performance trace: %w", err)
+	}
+	if observer != nil {
+		observer.ObserveRuntime(ports.NewRuntimeMark("broker", ports.RuntimeTransportDiagnostic, 0, true))
 	}
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
@@ -233,12 +171,6 @@ func newBrokerEpoch() (ports.BrokerEpoch, error) {
 		epoch = 1
 	}
 	return epoch, nil
-}
-
-// offlineLayout resolves the hidden offline sandbox layout for one operator
-// root, refusing any root that overlaps the production runtime or state paths.
-func offlineLayout(offlineRoot string) (brokerconfig.Layout, error) {
-	return brokerconfig.ResolveLayout(offlineRoot, []string{ipc.SocketDir(), platform.StateDir()})
 }
 
 // effectiveIdleGrace resolves the sandbox idle grace from an explicit flag and
@@ -274,50 +206,32 @@ func effectiveIdleGrace(config *brokerconfig.Config, explicit time.Duration) (ti
 func runBrokerServe(ctx context.Context, options brokerServeOptions, deps brokerServeDeps) (retErr error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var layout brokerconfig.Layout
-	var configPath string
-	var err error
-	if options.production {
-		if err := ensureProductionBrokerConfig(); err != nil {
-			return err
-		}
-		if err := safedir.EnsurePrivate(ipc.SocketDir()); err != nil {
-			return fmt.Errorf("vev: secure broker runtime parent: %w", err)
-		}
-		layout = productionBrokerLayout()
-		configPath = productionBrokerConfigPath()
-	} else {
-		layout, err = offlineLayout(options.offlineRoot)
-		if err != nil {
-			return err
-		}
-		configPath = filepath.Join(layout.Root, brokerconfig.ConfigFileName)
+	if err := ensureProductionBrokerConfig(); err != nil {
+		return err
 	}
+	if err := safedir.EnsurePrivate(ipc.SocketDir()); err != nil {
+		return fmt.Errorf("vev: secure broker runtime parent: %w", err)
+	}
+	layout := productionBrokerLayout()
+	configPath := productionBrokerConfigPath()
 	for _, dir := range []string{layout.Root, layout.Runtime, layout.State, layout.Log} {
 		if err := safedir.EnsurePrivate(dir); err != nil {
 			return fmt.Errorf("vev: secure broker sandbox directory %s: %w", dir, err)
 		}
 	}
-	// ResolveLayout validates the root textually and stops at the first
-	// component that does not exist yet; now that EnsurePrivate has created the
-	// sandbox paths, re-walk every component so a component swapped for a
-	// symlink in that window fails closed instead of being followed.
+	// Re-walk every component now that EnsurePrivate created them, so a
+	// component swapped for a symlink in that window fails closed.
 	if err := layout.VerifyCreated(); err != nil {
-		return fmt.Errorf("vev: verify broker sandbox paths: %w", err)
+		return fmt.Errorf("vev: verify broker paths: %w", err)
 	}
-	var config *brokerconfig.Config
-	if options.production {
-		// The broker is allowed to precede the daemon. Identity is therefore an
-		// optional existing authority here; acquisition binds it after an
-		// authenticated StartIfNeeded connection when the daemon is first born.
-		identity, loadErr := daemonidentity.Load(platform.StateDir())
-		if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
-			return fmt.Errorf("vev: load daemon authority: %w", loadErr)
-		}
-		config, err = brokerconfig.LoadProduction(layout, configPath, identity, localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
-	} else {
-		config, err = brokerconfig.LoadPath(layout, configPath)
+	// The broker is allowed to precede the daemon. Identity is therefore an
+	// optional existing authority here; acquisition binds it after an
+	// authenticated StartIfNeeded connection when the daemon is first born.
+	identity, err := daemonidentity.Load(platform.StateDir())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("vev: load daemon authority: %w", err)
 	}
+	config, err := brokerconfig.LoadProduction(layout, configPath, identity, localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	if err != nil {
 		return err
 	}
@@ -337,15 +251,13 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	}
 	defer func() { retErr = errors.Join(retErr, logCloser.Close()) }()
 
-	if options.production {
-		// The durable route schema intentionally delegates SSH trust to OpenSSH.
-		// Refuse route overrides that OpenSSH configuration must represent instead of dropping
-		// security inputs during production import.
-		for _, endpoint := range config.Endpoints() {
-			registration, _ := config.Registration(endpoint)
-			if registration.Route.KnownHostsFile() != "" || registration.Route.ConnectTimeout() != 0 {
-				return errors.New("vev: production broker routes require SSH trust and timeouts in OpenSSH configuration")
-			}
+	// The durable route schema delegates SSH trust to OpenSSH. Refuse route
+	// overrides that OpenSSH configuration must represent instead of dropping
+	// security inputs during import.
+	for _, endpoint := range config.Endpoints() {
+		registration, _ := config.Registration(endpoint)
+		if registration.Route.KnownHostsFile() != "" || registration.Route.ConnectTimeout() != 0 {
+			return errors.New("vev: broker routes require SSH trust and timeouts in OpenSSH configuration")
 		}
 	}
 	initialHosts, err := configuredBrokerHosts(config)
@@ -388,53 +300,32 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	}
 	defer startupLease.Release()
 
-	// The sandbox retains its explicit route/trust fixture contract. Production
-	// imports membership once, then uses only durable remote authority.
-	dynamicRoutes := &brokerRoutes{local: config.Resolver()}
-	var resolver ports.BrokerRouteAuthority = config.Resolver()
-	connector, err := brokerMuxConnector(config, log)
-	if options.production {
-		resolver = dynamicRoutes
-		connector, err = brokerDynamicMuxConnector(config, dynamicRoutes, log)
-	}
+	// Membership is imported once, then only durable remote authority is used.
+	resolver := &brokerRoutes{local: config.Resolver()}
+	connector, err := brokerDynamicMuxConnector(config, resolver, log)
 	if err != nil {
 		return err
 	}
-	var localIdentityLoaders []localIdentityLoader
-	if options.production {
-		localIdentityLoaders = append(localIdentityLoaders, func() (ports.BrokerDaemonIdentity, error) {
-			identity, loadErr := daemonidentity.Load(platform.StateDir())
-			if errors.Is(loadErr, os.ErrNotExist) {
-				return "", nil
-			}
-			return identity, loadErr
-		})
-	}
-	registryConfig, err := offlineRegistryConfig(config, epoch, connector, localIdentityLoaders...)
-	if err != nil {
-		return err
-	}
-	var remoteProbe ports.BrokerHostProbe
-	var concreteRemoteProbe *brokerRemoteProbe
-	if options.production || len(config.Endpoints()) != 0 {
-		concreteRemoteProbe = &brokerRemoteProbe{
-			epoch: epoch, routes: resolver, connector: connector,
+	loadLocalIdentity := func() (ports.BrokerDaemonIdentity, error) {
+		identity, loadErr := daemonidentity.Load(platform.StateDir())
+		if errors.Is(loadErr, os.ErrNotExist) {
+			return "", nil
 		}
-		remoteProbe = concreteRemoteProbe
+		return identity, loadErr
 	}
+	registryConfig, err := offlineRegistryConfig(config, epoch, connector, loadLocalIdentity)
+	if err != nil {
+		return err
+	}
+	remoteProbe := &brokerRemoteProbe{epoch: epoch, routes: resolver, connector: connector}
 	registry, err := broker.NewRegistryWithConfig(epoch, store, remoteProbe, clk, log, registryConfig)
 	if err != nil {
 		return err
 	}
-	dynamicRoutes.hosts = registry
-	binder := ports.BrokerIdentityBinder(registry)
-	if options.production {
-		binder = productionIdentityBinder{delegate: registry, stateDir: platform.StateDir(), policy: localDaemonPolicy()}
-	}
-	if concreteRemoteProbe != nil {
-		concreteRemoteProbe.binder = binder
-		concreteRemoteProbe.hosts = registry
-	}
+	resolver.hosts = registry
+	binder := productionIdentityBinder{delegate: registry, stateDir: platform.StateDir(), policy: localDaemonPolicy()}
+	remoteProbe.binder = binder
+	remoteProbe.hosts = registry
 	// RegisterRunner starts immediately: finish the cyclic composition before
 	// publishing it to any goroutine. Shutdown remains listener -> pool -> registry.
 	if err := supervisor.RegisterRunner("registry", registry); err != nil {
@@ -445,9 +336,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 		return err
 	}
 	// Observation borrows pooled transports rather than dialing its own.
-	if concreteRemoteProbe != nil {
-		concreteRemoteProbe.shared.share(pool)
-	}
+	remoteProbe.shared.share(pool)
 	if registryConfig.Local != nil {
 		if local, ok := registryConfig.Local.Probe.(*localRouteProbe); ok {
 			local.shared.share(pool)
@@ -476,7 +365,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	go drainBrokerAccept(listener, log, started, drained, failed)
 	<-started
 	startupLease.Release()
-	log.Info("broker_ready", "socket", socketPath, "endpoints", len(config.Endpoints()), "production", options.production)
+	log.Info("broker_ready", "socket", socketPath, "endpoints", len(config.Endpoints()))
 	if deps.onReady != nil {
 		deps.onReady(socketPath)
 	}
@@ -495,7 +384,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	closeErr := supervisor.Close()
 	supervisorClosed = true
 	<-drained
-	log.Info("broker_stopped", "production", options.production)
+	log.Info("broker_stopped")
 	return closeErr
 }
 

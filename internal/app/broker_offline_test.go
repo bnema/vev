@@ -86,14 +86,6 @@ func sandboxRegistrationDocument(route any) map[string]any {
 	}
 }
 
-// writeSandboxConfig marshals one document into root/config.json owner-only.
-func writeSandboxConfig(t *testing.T, root string, document any) {
-	t.Helper()
-	raw, err := json.Marshal(document)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(root, brokerconfig.ConfigFileName), raw, 0o600))
-}
-
 // isolateSandboxEnv redirects production XDG roots into private temporary
 // directories and returns one fresh offline root beside them, so the sandbox
 // can never touch the real runtime or state paths.
@@ -107,17 +99,6 @@ func isolateSandboxEnv(t *testing.T) (root, prodRuntime, prodState string) {
 	t.Setenv("XDG_STATE_HOME", prodState)
 	root = filepath.Join(shortTempDir(t, "vevs"), "sandbox")
 	return root, prodRuntime, prodState
-}
-
-// requireProductionUntouched asserts no production runtime or state entry was
-// created.
-func requireProductionUntouched(t *testing.T, prodRuntime, prodState string) {
-	t.Helper()
-	for _, dir := range []string{prodRuntime, prodState} {
-		entries, err := os.ReadDir(dir)
-		require.NoError(t, err)
-		require.Empty(t, entries, "production directory %s was touched", dir)
-	}
 }
 
 // testBrokerServeDeps builds sandbox deps with a deterministic clock and a
@@ -219,7 +200,7 @@ func TestProductionBrokerServeRejectsUnsafeRoot(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	require.NoError(t, os.MkdirAll(layout.Root, 0o755))
 	deps, _ := testBrokerServeDeps(newSandboxClock())
-	err := runBrokerServe(context.Background(), brokerServeOptions{production: true}, deps)
+	err := runBrokerServe(context.Background(), brokerServeOptions{}, deps)
 	require.ErrorContains(t, err, "0755")
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
 }
@@ -234,7 +215,7 @@ func TestBrokerServeRoundTrip(t *testing.T) {
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+	done := runSandbox(ctx, brokerServeOptions{}, deps)
 
 	socketPath := awaitSandboxReady(t, ready, done)
 
@@ -340,7 +321,7 @@ func TestBrokerServeIdleShutdownOnEmptyConfig(t *testing.T) {
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+	done := runSandbox(ctx, brokerServeOptions{}, deps)
 
 	socketPath := awaitSandboxReady(t, ready, done)
 	waitForSandboxShutdown(t, clk, done)
@@ -365,7 +346,7 @@ func TestBrokerServeCancelCleanup(t *testing.T) {
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+	done := runSandbox(ctx, brokerServeOptions{}, deps)
 
 	socketPath := awaitSandboxReady(t, ready, done)
 	awaitSandboxCancel(t, cancel, done)
@@ -407,7 +388,7 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+	done := runSandbox(ctx, brokerServeOptions{}, deps)
 
 	awaitSandboxReady(t, ready, done)
 	select {
@@ -428,12 +409,12 @@ func TestBrokerServeRefusesDuplicateOwnership(t *testing.T) {
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+	done := runSandbox(ctx, brokerServeOptions{}, deps)
 	socketPath := awaitSandboxReady(t, ready, done)
 
 	// A second foreground owner fails fast on the lifetime lock.
 	secondDeps, _ := testBrokerServeDeps(newSandboxClock())
-	err := runBrokerServe(context.Background(), brokerServeOptions{production: true}, secondDeps)
+	err := runBrokerServe(context.Background(), brokerServeOptions{}, secondDeps)
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
 	// A duplicate listener on the live socket is refused as well.

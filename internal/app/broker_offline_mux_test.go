@@ -249,9 +249,9 @@ func TestParseBrokerMuxArgs(t *testing.T) {
 		wantErr string
 		want    brokerMuxOptions
 	}{
-		{name: "valid", args: []string{"--production"}, want: brokerMuxOptions{production: true, startMode: ports.BrokerDaemonExistingOnly}},
-		{name: "explicit existing-only", args: []string{"--production", brokerDaemonStartArg, "existing-only"}, want: brokerMuxOptions{production: true, startMode: ports.BrokerDaemonExistingOnly}},
-		{name: "explicit if-needed", args: []string{"--production", brokerDaemonStartArg, "if-needed"}, want: brokerMuxOptions{production: true, startMode: ports.BrokerDaemonStartIfNeeded}},
+		{name: "valid", args: []string{"--production"}, want: brokerMuxOptions{startMode: ports.BrokerDaemonExistingOnly}},
+		{name: "explicit existing-only", args: []string{"--production", brokerDaemonStartArg, "existing-only"}, want: brokerMuxOptions{startMode: ports.BrokerDaemonExistingOnly}},
+		{name: "explicit if-needed", args: []string{"--production", brokerDaemonStartArg, "if-needed"}, want: brokerMuxOptions{startMode: ports.BrokerDaemonStartIfNeeded}},
 		{name: "unknown flag", args: []string{"--production", "--idle-grace", "1m"}, wantErr: "unknown flag"},
 		{name: "positional", args: []string{"--production", "extra"}, wantErr: "positional"},
 		{name: "missing daemon-start value", args: []string{"--production", brokerDaemonStartArg}, wantErr: "requires a value"},
@@ -287,7 +287,6 @@ func TestBrokerMuxHelpersHiddenFromPublicHelp(t *testing.T) {
 		command, err := parseArgs([]string{tt.name, "--production"})
 		require.NoError(t, err)
 		require.Equal(t, tt.kind, command.kind)
-		require.True(t, command.brokerMux.production)
 	}
 	// Ordinary commands are untouched by the new hidden entries.
 	attach, err := parseArgs(nil)
@@ -410,23 +409,6 @@ func TestBrokerMuxHelperReturnsTypedNoDaemonExit(t *testing.T) {
 	var coded *exitCoded
 	require.ErrorAs(t, err, &coded)
 	require.Equal(t, sshstdio.MuxExitNoDaemon, coded.code)
-}
-
-// TestBrokerMuxConnectorRejectsUnknownAddress proves the transport selector
-// refuses any address the immutable configuration did not produce.
-func TestBrokerMuxConnectorRejectsUnknownAddress(t *testing.T) {
-	emptyProductionBrokerLayout(t, "")
-	layout := writeMuxRoot(t, map[string]any{"kind": "unix", "path": "/tmp/unused-mux.sock"})
-	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), "", localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
-	require.NoError(t, err)
-	connector, err := brokerMuxConnector(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	require.NoError(t, err)
-
-	_, err = connector.Connect(context.Background(), ports.BrokerDialTarget{Fence: ports.BrokerEndpointFence{Local: true}, Policy: brokerTestPolicy(), Address: "offline-route-00000000000000000000000000000000", StartMode: ports.BrokerDaemonStartIfNeeded, ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: brokerTestIdentity, Bound: true}})
-	require.Error(t, err)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-	require.Equal(t, ports.BrokerErrorUnavailable, typed.Code)
 }
 
 // TestBrokerServeSSHStdioRouteRoundTrip drives the full broker path over an SSH
@@ -659,7 +641,7 @@ func startMuxBrokerServe(t *testing.T) (string, func()) {
 	t.Helper()
 	deps, ready := testBrokerServeDeps(newSandboxClock())
 	ctx, cancel := context.WithCancel(context.Background())
-	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+	done := runSandbox(ctx, brokerServeOptions{}, deps)
 	socketPath := awaitSandboxReady(t, ready, done)
 	var once bool
 	stop := func() {

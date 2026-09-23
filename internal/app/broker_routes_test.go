@@ -116,7 +116,6 @@ func TestCanonicalBrokerRoutesSelectProductionHelpers(t *testing.T) {
 			require.NoError(t, err)
 			cmd, err := parseArgs(spec.Argv[1:])
 			require.NoError(t, err)
-			require.True(t, cmd.brokerMux.production)
 			require.Equal(t, ports.BrokerDaemonExistingOnly, cmd.brokerMux.startMode)
 			for _, args := range [][]string{{"--production", "--production"}, {"--production", "--offline-root", "/tmp/root"}, {"--offline-root", "/tmp/root", "--production"}} {
 				_, err = parseBrokerMuxArgs(spec.Argv[1], cmd.kind, args)
@@ -140,7 +139,7 @@ func TestProductionBrokerFirstHostAdd(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		deps, ready := testBrokerServeDeps(newSandboxClock())
 		ctx, cancel := context.WithCancel(context.Background())
-		done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
+		done := runSandbox(ctx, brokerServeOptions{}, deps)
 		socket := awaitSandboxReady(t, ready, done)
 		service, err := brokeripc.NewConnector(socket, brokeripc.Config{}).Connect(ctx)
 		require.NoError(t, err)
@@ -192,7 +191,7 @@ func TestProductionMuxHelperExistingOnlyNeverSpawns(t *testing.T) {
 		},
 		spawn: func() error { spawns++; return nil },
 	}
-	_, err := dialBrokerMuxHelper(context.Background(), brokerMuxOptions{production: true, startMode: ports.BrokerDaemonExistingOnly})
+	_, err := dialBrokerMuxHelper(context.Background(), brokerMuxOptions{startMode: ports.BrokerDaemonExistingOnly})
 	require.ErrorIs(t, err, os.ErrNotExist)
 	require.Equal(t, 1, dials)
 	require.Zero(t, spawns)

@@ -6,14 +6,13 @@ package app
 // (TestMain intercepts the hidden broker commands when brokerHelperEnv is set),
 // so argument parsing, endpoint classification, the real broker IPC setup, the
 // readiness evaluation, the JSON document, and the process exit code are all
-// exercised exactly as an operator would observe them. A real `_broker-serve`
-// composes the offline broker over one isolated root, and the probe reads it
+// exercised exactly as an operator would observe them. A real production broker serve
+// composes the broker over isolated XDG directories, and the probe reads it
 // over a real AF_UNIX carriage.
 
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -29,36 +28,25 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 )
 
-// readySubprocessSandbox isolates one real offline root and records every
+// readySubprocessSandbox isolates real production XDG directories and records every
 // spawned broker helper, exactly like the status subprocess sandbox.
 type readySubprocessSandbox struct {
-	t           *testing.T
-	root        string
-	layout      brokerconfig.Layout
-	recordDir   string
-	prodRuntime string
-	prodState   string
-	broker      *exec.Cmd
+	t         *testing.T
+	layout    brokerconfig.Layout
+	recordDir string
+	broker    *exec.Cmd
 }
 
-// newReadySubprocessSandbox writes one marker-valid empty sandbox and arranges
+// newReadySubprocessSandbox provisions one empty production config and arranges
 // cleanup of every recorded broker process.
 func newReadySubprocessSandbox(t *testing.T) *readySubprocessSandbox {
 	t.Helper()
-	prodRuntime, prodState := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", prodRuntime)
-	t.Setenv("XDG_STATE_HOME", prodState)
-	root := filepath.Join(shortTempDir(t, "vevr"), "s")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxEmptyDocument("3s"))
+	layout := emptyProductionBrokerLayout(t, "3s")
 	recordDir := filepath.Join(shortTempDir(t, "vevw"), "r")
 	require.NoError(t, os.MkdirAll(recordDir, 0o700))
 	t.Setenv(brokerHelperEnv, "1")
 	t.Setenv(brokerHelperRecordDirEnv, recordDir)
-	layout, err := offlineLayout(root)
-	require.NoError(t, err)
-
-	sandbox := &readySubprocessSandbox{t: t, root: root, layout: layout, recordDir: recordDir, prodRuntime: prodRuntime, prodState: prodState}
+	sandbox := &readySubprocessSandbox{t: t, layout: layout, recordDir: recordDir}
 	t.Cleanup(sandbox.cleanup)
 	return sandbox
 }
@@ -72,14 +60,14 @@ func (s *readySubprocessSandbox) socketPath() string {
 // returns its stdout, stderr, and exit code.
 func (s *readySubprocessSandbox) ready(timeout string, extra ...string) (string, string, int) {
 	s.t.Helper()
-	args := append([]string{brokerReadyCommand, "--offline-root", s.root, "--timeout", timeout}, extra...)
+	args := append([]string{brokerReadyCommand, "--timeout", timeout}, extra...)
 	return runBrokerCommand(s.t, args...)
 }
 
 // startBroker runs one foreground `_broker-serve` helper in the background.
 func (s *readySubprocessSandbox) startBroker() {
 	s.t.Helper()
-	command := exec.Command(os.Args[0], brokerServeCommand, "--offline-root", s.root)
+	command := exec.Command(os.Args[0], productionBrokerServeCommand)
 	command.Env = os.Environ()
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
@@ -114,7 +102,7 @@ func (s *readySubprocessSandbox) cleanup() {
 			<-done
 		}
 	}
-	for _, pid := range recordedPIDsIn(s.t, s.recordDir, brokerServeCommand) {
+	for _, pid := range recordedPIDsIn(s.t, s.recordDir, productionBrokerServeCommand) {
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			continue
 		}
@@ -150,15 +138,9 @@ func decodeReadyReport(t *testing.T, raw string) readyDoc {
 // provisioned local route is absent, so it is never falsely reported ready.
 func TestBrokerReadySubprocessReadsARealBrokerAuthority(t *testing.T) {
 	sandbox := newReadySubprocessSandbox(t)
-	// One provisioned local binding whose route nothing listens on: the broker
-	// publishes its local entry as configured authority, so `local-authority` is
+	// One provisioned local binding whose daemon is not started: the broker
+	// publishes its local entry as derived authority, so `local-authority` is
 	// observable while the catalogue is not.
-	require.NoError(t, os.WriteFile(filepath.Join(sandbox.root, brokerconfig.ConfigFileName),
-		[]byte(fmt.Sprintf(`{"marker":%q,"registrations":[],"local":{"identity":"subprocess-local","displayOrigin":"local","route":%q,"policy":{"protocolVersion":%d,"catalogSchemaVersion":3,"environmentPolicy":"client-owned","transport":"unix-mux","trust":"same-user","launch":"explicit","isolation":"per-user"}}}`,
-			brokerconfig.Marker, filepath.Join(sandbox.root, "absent-mux.sock"), readyTestPolicy().ProtocolVersion)), 0o600))
-	layout, err := offlineLayout(sandbox.root)
-	require.NoError(t, err)
-	sandbox.layout = layout
 
 	sandbox.startBroker()
 	require.True(t, sandbox.waitForBrokerSocket(15*time.Second), "the broker must bind its endpoint")
@@ -180,7 +162,6 @@ func TestBrokerReadySubprocessReadsARealBrokerAuthority(t *testing.T) {
 	require.Equal(t, []string{"local-catalogue"}, catalogue.Pending)
 	require.NotEqual(t, "ready", catalogue.Status, "an unobserved catalogue is never reported ready")
 
-	requireProductionUntouched(t, sandbox.prodRuntime, sandbox.prodState)
 }
 
 // TestBrokerReadySubprocessStaleSocketIsNeverReady proves a socket file left by
@@ -204,8 +185,7 @@ func TestBrokerReadySubprocessStaleSocketIsNeverReady(t *testing.T) {
 	info, err := os.Lstat(sandbox.socketPath())
 	require.NoError(t, err)
 	require.NotZero(t, info.Mode()&os.ModeSocket)
-	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, brokerServeCommand))
-	requireProductionUntouched(t, sandbox.prodRuntime, sandbox.prodState)
+	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, productionBrokerServeCommand))
 }
 
 // TestBrokerReadySubprocessBlockedHandshakeIsNeverReady proves a live endpoint
@@ -226,8 +206,7 @@ func TestBrokerReadySubprocessBlockedHandshakeIsNeverReady(t *testing.T) {
 	require.Less(t, time.Since(start), 10*time.Second)
 
 	// A stalled-but-live endpoint is never respawned over.
-	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, brokerServeCommand))
-	requireProductionUntouched(t, sandbox.prodRuntime, sandbox.prodState)
+	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, productionBrokerServeCommand))
 }
 
 // TestBrokerReadySubprocessNonSocketPathIsTerminal proves a path that exists but
@@ -262,7 +241,7 @@ func TestBrokerReadySubprocessNonSocketPathIsTerminal(t *testing.T) {
 			report := decodeReadyReport(t, stdout)
 			require.Equal(t, "terminal", report.Status)
 			require.Equal(t, "security", report.Reason)
-			require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, brokerServeCommand))
+			require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, productionBrokerServeCommand))
 		})
 	}
 }
@@ -284,7 +263,7 @@ func TestBrokerReadySubprocessPermissionRefusalIsTerminal(t *testing.T) {
 	report := decodeReadyReport(t, stdout)
 	require.Equal(t, "terminal", report.Status)
 	require.Equal(t, "security", report.Reason)
-	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, brokerServeCommand))
+	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, productionBrokerServeCommand))
 }
 
 // TestBrokerReadySubprocessAbsentSocketTimesOut proves a missing endpoint is
@@ -299,7 +278,7 @@ func TestBrokerReadySubprocessAbsentSocketTimesOut(t *testing.T) {
 	report := decodeReadyReport(t, stdout)
 	require.Equal(t, "timeout", report.Status)
 	require.Equal(t, "deadline", report.Reason)
-	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, brokerServeCommand), "the readiness probe never ensures or spawns")
+	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, productionBrokerServeCommand), "the readiness probe never ensures or spawns")
 }
 
 // TestBrokerReadySubprocessNonBrokerEndpointIsTerminal proves a live endpoint
@@ -317,8 +296,7 @@ func TestBrokerReadySubprocessNonBrokerEndpointIsTerminal(t *testing.T) {
 	report := decodeReadyReport(t, stdout)
 	require.Equal(t, "terminal", report.Status)
 	require.Equal(t, "protocol", report.Reason)
-	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, brokerServeCommand))
-	requireProductionUntouched(t, sandbox.prodRuntime, sandbox.prodState)
+	require.Empty(t, recordedPIDsIn(t, sandbox.recordDir, productionBrokerServeCommand))
 }
 
 // answerWithForeignBytes serves one connection per accept with a bounded

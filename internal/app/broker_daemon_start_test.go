@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -212,30 +211,6 @@ func startableLocalTarget(t *testing.T, carriage string, mode ports.BrokerDaemon
 	}
 	require.NoError(t, target.Validate())
 	return target
-}
-
-// writePrivateSandboxConfig writes one marker-valid sandbox whose single local
-// binding is the supplied private carriage under the supplied policy.
-func writePrivateSandboxConfig(t *testing.T, root, carriage string, policy ports.BrokerPolicy) {
-	t.Helper()
-	writeSandboxConfig(t, root, map[string]any{
-		"marker":        brokerconfig.Marker,
-		"registrations": []any{},
-		"local": map[string]any{
-			"identity":      brokerLocalTestIdentity,
-			"displayOrigin": "local",
-			"route":         carriage,
-			"policy": map[string]any{
-				"protocolVersion":      policy.ProtocolVersion,
-				"catalogSchemaVersion": policy.CatalogSchemaVersion,
-				"environmentPolicy":    "client-owned",
-				"transport":            policy.Transport,
-				"trust":                policy.Trust,
-				"launch":               policy.Launch,
-				"isolation":            policy.Isolation,
-			},
-		},
-	})
 }
 
 // TestDaemonStartExistingOnlyNeverSpawns proves an existing-only acquisition is
@@ -635,105 +610,6 @@ func TestDaemonStartRefusesInvalidTarget(t *testing.T) {
 	require.Zero(t, spawns)
 }
 
-// helperSandboxConfigForCarriage provisions one sandbox whose single
-// registration bridges the supplied private Unix carriage under the supplied
-// policy, and returns its loaded configuration. A remote-side mux helper owns
-// exactly this shape: the provisioning is the helper's own authority.
-func helperSandboxConfigForCarriage(t *testing.T, carriage string, policy ports.BrokerPolicy) *brokerconfig.Config {
-	t.Helper()
-	root := filepath.Dir(carriage)
-	writeSandboxConfig(t, root, map[string]any{
-		"marker": brokerconfig.Marker,
-		"registrations": []any{map[string]any{
-			"endpoint":    brokerTestEndpoint,
-			"incarnation": "0102030405060708090a0b0c0d0e0f10",
-			"generation":  1,
-			"identity":    brokerTestIdentity,
-			"route":       carriage,
-			"policy": map[string]any{
-				"protocolVersion":      policy.ProtocolVersion,
-				"catalogSchemaVersion": policy.CatalogSchemaVersion,
-				"environmentPolicy":    "client-owned",
-				"transport":            policy.Transport,
-				"trust":                policy.Trust,
-				"launch":               policy.Launch,
-				"isolation":            policy.Isolation,
-			},
-		}},
-	})
-	config, err := brokerconfig.Load(mustOfflineLayout(t, root))
-	require.NoError(t, err)
-	return config
-}
-
-// TestMuxHelperCarriageStartAuthorization proves the remote-side helper applies
-// the propagated authorization against its own provisioned authority: an
-// existing-only request is one carriage dial, a start-if-needed request is gated
-// by the helper's own policy, and an unknown mode is refused outright.
-func TestMuxHelperCarriageStartAuthorization(t *testing.T) {
-	isolateSandboxEnv(t)
-	dir, carriage := testDaemonCarriage(t)
-	config := helperSandboxConfigForCarriage(t, carriage, brokerTestPolicy())
-
-	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
-
-	_, err := dialMuxHelperCarriage(context.Background(), config, ports.BrokerDaemonExistingOnly)
-	require.ErrorIs(t, err, os.ErrNotExist)
-	dials, spawns := scripted.counters()
-	require.Equal(t, 1, dials, "existing-only is exactly one carriage dial")
-	require.Zero(t, spawns)
-
-	// The provisioned policy does not name the launch authority, so a
-	// start-if-needed request is refused before any dial and never spawns: the
-	// helper's own authority is static, so the refusal is decided up front.
-	_, err = dialMuxHelperCarriage(context.Background(), config, ports.BrokerDaemonStartIfNeeded)
-	require.Error(t, err)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-	require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
-	dials, spawns = scripted.counters()
-	require.Equal(t, 1, dials, "a policy refusal is decided before any dial")
-	require.Zero(t, spawns, "a non-launching helper policy must never spawn")
-	require.NoFileExists(t, filepath.Join(dir, spawnLockName))
-
-	// An unknown mode and a missing configuration are never defaulted.
-	_, err = dialMuxHelperCarriage(context.Background(), config, ports.BrokerDaemonStartMode(9))
-	require.Error(t, err)
-	_, err = dialMuxHelperCarriage(context.Background(), nil, ports.BrokerDaemonExistingOnly)
-	require.Error(t, err)
-	dials, spawns = scripted.counters()
-	require.Equal(t, 1, dials, "a refused mode never reaches a dial")
-	require.Zero(t, spawns)
-}
-
-// TestMuxHelperCarriageStartsUnderItsOwnLaunchAuthority proves the helper starts
-// the daemon only when its own provisioned policy authorizes launching, and that
-// it starts the daemon published on its own machine rather than another broker.
-func TestMuxHelperCarriageStartsUnderItsOwnLaunchAuthority(t *testing.T) {
-	isolateSandboxEnv(t)
-	_, carriage := testDaemonCarriage(t)
-	config := helperSandboxConfigForCarriage(t, carriage, brokerTestPolicyForLaunch())
-
-	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
-
-	raw, err := dialMuxHelperCarriage(context.Background(), config, ports.BrokerDaemonStartIfNeeded)
-	require.NoError(t, err)
-	require.NotNil(t, raw)
-	_, spawns := scripted.counters()
-	require.Equal(t, 1, spawns)
-}
-
-// brokerTestPolicyForLaunch is the sandbox policy with the launch authority the
-// broker's own production local daemon names, so a helper test can exercise the
-// authorized start path without provisioning production layout.
-func brokerTestPolicyForLaunch() ports.BrokerPolicy {
-	policy := brokerTestPolicy()
-	policy.Launch = brokerLaunchAuthority
-	return policy
-}
-
 // TestDaemonStartArgvFlagRoundTrips proves the helper argument spelling is one
 // closed value both sides agree on, and that an unknown value is refused in
 // either direction.
@@ -761,97 +637,13 @@ func TestDaemonStartArgvFlagRoundTrips(t *testing.T) {
 	}
 }
 
-// testLocalSandboxConfigForCarriage provisions one sandbox whose single local
-// binding is the supplied private carriage, and returns its loaded
-// configuration and binding.
+// testLocalSandboxConfigForCarriage derives local authority from production state.
 func testLocalSandboxConfigForCarriage(t *testing.T, carriage string) (*brokerconfig.Config, brokerconfig.LocalBinding) {
 	t.Helper()
-	root := filepath.Dir(carriage)
-	writePrivateSandboxConfig(t, root, carriage, brokerTestPolicy())
-	layout := mustOfflineLayout(t, root)
-	config, err := brokerconfig.Load(layout)
+	layout := emptyProductionBrokerLayout(t, "")
+	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), brokerLocalTestIdentity, brokerTestPolicy(), carriage)
 	require.NoError(t, err)
 	binding, ok := config.LocalBinding()
 	require.True(t, ok)
 	return config, binding
-}
-
-func mustOfflineLayout(t *testing.T, root string) brokerconfig.Layout {
-	t.Helper()
-	layout, err := offlineLayout(root)
-	require.NoError(t, err)
-	return layout
-}
-
-func mustLocalMuxAddress(t *testing.T, config *brokerconfig.Config) string {
-	t.Helper()
-	route, err := config.LocalMuxRoute()
-	require.NoError(t, err)
-	return route.Address()
-}
-
-// TestBrokerMuxConnectorObservationNeverSpawns proves the composed broker
-// connector dials the broker-owned local carriage for an observation under the
-// existing-only authorization and spawns nothing, so observing a stopped local
-// daemon stays a reported failure rather than a start.
-func TestBrokerMuxConnectorObservationNeverSpawns(t *testing.T) {
-	isolateSandboxEnv(t)
-	_, carriage := testDaemonCarriage(t)
-	config, binding := testLocalSandboxConfigForCarriage(t, carriage)
-
-	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
-
-	connector, err := brokerMuxConnector(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	require.NoError(t, err)
-	target, err := config.Resolver().ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
-		Purpose:   ports.BrokerStreamObservation,
-		Local:     true,
-		Stream:    1,
-		Policy:    binding.Policy,
-		StartMode: ports.BrokerDaemonExistingOnly,
-	})
-	require.NoError(t, err)
-
-	_, err = connector.Connect(context.Background(), target)
-	require.ErrorIs(t, err, os.ErrNotExist)
-	dials, spawns := scripted.counters()
-	require.Equal(t, 1, dials, "the observation dials its local carriage once")
-	require.Zero(t, spawns, "an observation must never start a daemon")
-}
-
-// TestBrokerMuxConnectorRefusesMismatchedAuthority proves the transport never
-// dials under an authority the configuration did not provision: a target whose
-// policy or address no longer matches the route is refused before any dial.
-func TestBrokerMuxConnectorRefusesMismatchedAuthority(t *testing.T) {
-	isolateSandboxEnv(t)
-	_, carriage := testDaemonCarriage(t)
-	config, _ := testLocalSandboxConfigForCarriage(t, carriage)
-
-	scripted := &scriptedDaemonStarter{carriage: carriage}
-	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
-
-	connector, err := brokerMuxConnector(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	require.NoError(t, err)
-
-	target := startableLocalTarget(t, carriage, ports.BrokerDaemonExistingOnly)
-	// The address is provisioned, but the policy is not.
-	target.Policy.Launch = "other-launch"
-	require.NoError(t, target.Validate())
-	_, err = connector.Connect(context.Background(), target)
-	require.Error(t, err)
-	var typed ports.BrokerError
-	require.ErrorAs(t, err, &typed)
-	require.Equal(t, ports.BrokerErrorConflictingPolicy, typed.Code)
-
-	// An address the configuration never produced is refused too.
-	unknown := target
-	unknown.Address = "0000000000000000000000000000000000000000000000000000000000000000"
-	require.NoError(t, unknown.Validate())
-	_, err = connector.Connect(context.Background(), unknown)
-	require.Error(t, err)
-
-	dials, spawns := scripted.counters()
-	require.Zero(t, dials, "an unmatched authority must never reach a dial")
-	require.Zero(t, spawns)
 }

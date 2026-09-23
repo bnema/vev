@@ -65,10 +65,6 @@ const (
 	kindWebDaemon
 	kindWebRenew
 	kindWebServe
-	kindBrokerServe
-	kindBrokerClient
-	kindBrokerLauncher
-	kindBrokerStatus
 	kindBrokerMuxStdio
 	kindBrokerMuxQUICBootstrap
 	kindBrokerMuxQUICProxy
@@ -82,29 +78,26 @@ const (
 // command is the parsed CLI invocation: what to do, plus the attach intent
 // and session name where relevant.
 type command struct {
-	kind           cmdKind
-	intent         uint8
-	name           string
-	remoteTarget   string
-	listHost       string
-	listAll        bool
-	hostAction     string
-	hostTarget     string
-	killAll        bool
-	killDaemon     bool
-	killBroker     bool
-	cmd            cmdInvocation
-	brokerServe    brokerServeOptions
-	brokerClient   brokerClientOptions
-	brokerLauncher brokerLauncherOptions
-	brokerStatus   brokerStatusOptions
-	brokerMux      brokerMuxOptions
-	brokerReady    brokerReadyOptions
-	uiDriver       uiDriverOptions
-	uiObserve      bool
-	uiControl      bool
-	uiSocket       string
-	web            webOptions
+	kind         cmdKind
+	intent       uint8
+	name         string
+	remoteTarget string
+	listHost     string
+	listAll      bool
+	hostAction   string
+	hostTarget   string
+	killAll      bool
+	killDaemon   bool
+	killBroker   bool
+	cmd          cmdInvocation
+	brokerServe  brokerServeOptions
+	brokerMux    brokerMuxOptions
+	brokerReady  brokerReadyOptions
+	uiDriver     uiDriverOptions
+	uiObserve    bool
+	uiControl    bool
+	uiSocket     string
+	web          webOptions
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -238,18 +231,10 @@ parsedUIFlags:
 		return command{kind: kindDaemon}, nil
 	case "--daemon-launcher":
 		return command{kind: kindDaemonLauncher}, nil
-	case brokerServeCommand:
-		return parseBrokerServeArgs(args[1:])
 	case productionBrokerServeCommand:
 		return parseProductionBrokerServeArgs(args[1:])
-	case brokerClientCommand:
-		return parseBrokerClientArgs(args[1:])
-	case brokerLauncherCommand:
-		return parseBrokerLauncherArgs(args[1:])
 	case productionBrokerLauncherCommand:
 		return parseProductionBrokerLauncherArgs(args[1:])
-	case brokerStatusCommand:
-		return parseBrokerStatusArgs(args[1:])
 	case brokerReadyCommand:
 		options, err := parseBrokerReadyArgs(args[1:])
 		return command{kind: kindBrokerReady, brokerReady: options}, err
@@ -375,14 +360,6 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runDaemon()
 	case kindDaemonLauncher:
 		return runDaemonLauncher()
-	case kindBrokerServe:
-		return runBrokerServeCommand(ctx, cmd.brokerServe)
-	case kindBrokerClient:
-		return runBrokerClientCommand(ctx, cmd.brokerClient)
-	case kindBrokerLauncher:
-		return runBrokerLauncherCommand(ctx, cmd.brokerLauncher)
-	case kindBrokerStatus:
-		return runBrokerStatusCommand(ctx, cmd.brokerStatus)
 	case kindBrokerMuxStdio:
 		return runBrokerMuxStdioCommand(ctx, cmd.brokerMux)
 	case kindBrokerMuxQUICBootstrap:

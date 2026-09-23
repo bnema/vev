@@ -30,12 +30,11 @@ func TestMain(m *testing.M) {
 	// runs.
 	if len(os.Args) >= 2 && os.Getenv(brokerHelperEnv) == "1" {
 		switch os.Args[1] {
-		case brokerServeCommand, brokerLauncherCommand, brokerStatusCommand,
-			brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand,
+		case brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand,
 			brokerReadyCommand,
 			productionBrokerServeCommand, productionBrokerLauncherCommand, "--daemon":
 			recordBrokerHelperProcess(os.Args[1])
-			if os.Args[1] == brokerLauncherCommand || os.Args[1] == productionBrokerLauncherCommand {
+			if os.Args[1] == productionBrokerLauncherCommand {
 				if record := os.Getenv(brokerLauncherBlockRecordEnv); record != "" {
 					blockBrokerLauncherHelper(record, os.Getenv(brokerLauncherBlockReleaseEnv))
 				}

@@ -138,7 +138,7 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	// a manual clock rooted at Unix zero would correctly make the observation
 	// stale to the real client clock before initial navigation resolves.
 	deps, ready := testBrokerServeDeps(clock.New())
-	brokerDone := runSandbox(ctx, brokerServeOptions{production: true, idleGrace: time.Hour}, deps)
+	brokerDone := runSandbox(ctx, brokerServeOptions{idleGrace: time.Hour}, deps)
 	var socket string
 	select {
 	case socket = <-ready:

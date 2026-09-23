@@ -277,10 +277,8 @@ func (s *readyDialScript) createdServices() []*readyScriptedService {
 // offline root, so no production path is ever inspected.
 func readyTestOptions(t *testing.T, requirement string, timeout time.Duration) brokerReadyOptions {
 	t.Helper()
-	root, _, _ := isolateSandboxEnv(t)
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxEmptyDocument(""))
-	options, err := parseBrokerReadyArgs([]string{"--offline-root", root, "--require", requirement, "--timeout", timeout.String()})
+	emptyProductionBrokerLayout(t, "")
+	options, err := parseBrokerReadyArgs([]string{"--require", requirement, "--timeout", timeout.String()})
 	require.NoError(t, err)
 	return options
 }
@@ -326,8 +324,8 @@ func TestParseBrokerReadyArgs(t *testing.T) {
 		},
 		{
 			name: "catalogue with an explicit observation age",
-			args: []string{"--require", "local-catalogue", "--max-observation-age", "2s", "--timeout", "3s", "--offline-root", "/srv/broker"},
-			want: brokerReadyOptions{offlineRoot: "/srv/broker", require: "local-catalogue", timeout: 3 * time.Second, maxAge: 2 * time.Second},
+			args: []string{"--require", "local-catalogue", "--max-observation-age", "2s", "--timeout", "3s"},
+			want: brokerReadyOptions{require: "local-catalogue", timeout: 3 * time.Second, maxAge: 2 * time.Second},
 		},
 		{name: "missing require", args: nil, wantErr: "`--require` must be local-authority or local-catalogue"},
 		{name: "unknown require", args: []string{"--require", "remote-catalogue"}, wantErr: "`--require` must be local-authority or local-catalogue"},
@@ -344,8 +342,6 @@ func TestParseBrokerReadyArgs(t *testing.T) {
 			args:    []string{"--require", "local-authority", "--max-observation-age", "2s"},
 			wantErr: "`--max-observation-age` is only valid for local-catalogue",
 		},
-		{name: "relative offline root", args: []string{"--require", "local-authority", "--offline-root", "relative/root"}, wantErr: "`--offline-root` must be an absolute clean path"},
-		{name: "unclean offline root", args: []string{"--require", "local-authority", "--offline-root", "/srv/../srv/broker"}, wantErr: "`--offline-root` must be an absolute clean path"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

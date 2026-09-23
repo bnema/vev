@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
@@ -286,78 +285,4 @@ func parseBrokerDaemonStartArgvFlag(value string) (ports.BrokerDaemonStartMode, 
 	default:
 		return 0, fmt.Errorf("vev: unknown daemon start mode %q (want existing-only or if-needed)", value)
 	}
-}
-
-// helperCarriageTarget resolves the dial target for the private daemonmux
-// carriage a remote-side mux helper bridges to, strictly from that helper's own
-// broker-owned configuration. A helper owns no request and no client authority:
-// the target is the one provisioned entry whose route is exactly the carriage
-// being bridged, so the helper can only ever narrow what its own configuration
-// already permits.
-//
-// The provisioned local binding wins when it names the carriage, because the
-// local binding is the broker's own daemon authority. Otherwise the single
-// registration that provisions this carriage supplies the fence, identity, and
-// policy. A configuration that provisions neither yields no target, and a
-// start-if-needed request is then refused rather than widened.
-func helperCarriageTarget(config *brokerconfig.Config, route brokerconfig.Route) (ports.BrokerDialTarget, error) {
-	if binding, ok := config.LocalBinding(); ok && binding.Route.Address() == route.Address() {
-		return ports.BrokerDialTarget{
-			Fence:            ports.BrokerEndpointFence{Local: true},
-			Address:          binding.Route.Address(),
-			Policy:           binding.Policy,
-			ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: binding.Identity, Bound: binding.Identity != ""},
-		}, nil
-	}
-	for _, endpoint := range config.Endpoints() {
-		registration, ok := config.Registration(endpoint)
-		if !ok || registration.Route.Address() != route.Address() {
-			continue
-		}
-		return ports.BrokerDialTarget{
-			Fence:            ports.BrokerEndpointFence{Registration: registration.Registration},
-			Address:          registration.Route.Address(),
-			Policy:           registration.Policy,
-			ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: registration.Identity, Bound: registration.Identity != ""},
-		}, nil
-	}
-	return ports.BrokerDialTarget{}, localDaemonStartRefused("the helper configuration provisions no daemon authority for its mux carriage")
-}
-
-// dialMuxHelperCarriage dials the private daemonmux carriage one remote-side mux
-// helper bridges to, under the start authorization the broker propagated. The
-// helper applies the same local election the broker does, from its own
-// broker-owned configuration, and it never starts a broker, an observer, or a
-// recursive helper: an existing-only mode is one carriage dial, and a
-// start-if-needed mode is the shared daemon start gated by the helper's own
-// provisioned policy and identity.
-func dialMuxHelperCarriage(ctx context.Context, config *brokerconfig.Config, mode ports.BrokerDaemonStartMode) (daemonmux.RawFramedTransport, error) {
-	if config == nil {
-		return nil, errors.New("vev: broker mux helper requires a configuration")
-	}
-	if err := mode.Validate(); err != nil {
-		return nil, err
-	}
-	route, err := config.LocalMuxRoute()
-	if err != nil {
-		return nil, err
-	}
-	target, err := helperCarriageTarget(config, route)
-	if err != nil {
-		return nil, err
-	}
-	target.StartMode = mode
-	if err := target.Validate(); err != nil {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
-	}
-	// Only a policy that names the launch token may start the daemon. A carriage
-	// provisioned under a non-launching policy refuses the start outright. The
-	// existing-only mode never reaches this check: dialBrokerDaemonCarriage
-	// returns its single dial's result immediately.
-	if mode == ports.BrokerDaemonStartIfNeeded {
-		if err := daemonStartRefusal(target); err != nil {
-			return nil, err
-		}
-	}
-	return dialBrokerDaemonCarriage(ctx, route.Path(), target)
 }

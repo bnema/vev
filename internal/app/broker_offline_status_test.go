@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,17 +118,6 @@ func (r *statusRecorder) setProbe(deps *brokerStatusDeps, probe func(attempt int
 	}
 }
 
-// decodeOneReport remains shared with the subprocess broker tests until those
-// are converted to the production launcher.
-func decodeOneReport(t *testing.T, raw string) brokerStatusReport {
-	t.Helper()
-	trimmed := strings.TrimSpace(raw)
-	require.Equal(t, 1, strings.Count(trimmed, "\n")+1)
-	var report brokerStatusReport
-	require.NoError(t, json.Unmarshal([]byte(trimmed), &report))
-	return report
-}
-
 func TestEffectiveIdleGrace(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "90s")
 	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), "", localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
@@ -170,7 +158,7 @@ func TestBrokerServeRefusesConflictingIdleGrace(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	deps, _ := testBrokerServeDeps(newSandboxClock())
-	err := runBrokerServe(ctx, brokerServeOptions{production: true, idleGrace: time.Minute}, deps)
+	err := runBrokerServe(ctx, brokerServeOptions{idleGrace: time.Minute}, deps)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "conflicts with the provisioned idle grace")
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"), "a refused serve must not take the lifetime lock")
@@ -310,7 +298,7 @@ func TestBrokerEnsureProductionConfigFailure(t *testing.T) {
 	layout := emptyProductionBrokerLayout(t, "")
 	require.NoError(t, os.WriteFile(productionBrokerConfigPath(), []byte("not json"), 0o600))
 	deps, _ := testBrokerServeDeps(newSandboxClock())
-	err := runBrokerServe(context.Background(), brokerServeOptions{production: true}, deps)
+	err := runBrokerServe(context.Background(), brokerServeOptions{}, deps)
 	require.Error(t, err)
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
 }

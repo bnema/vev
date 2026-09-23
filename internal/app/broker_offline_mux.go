@@ -101,46 +101,36 @@ const brokerMuxWaitDelay = 2 * time.Second
 // brokerDaemonStartArgvFlag's exact spelling, so the two sides can never drift.
 const brokerDaemonStartArg = "--daemon-start"
 
+// brokerScopeArg is the scope flag carried by every durable remote route argv
+// (see ports.BrokerRouteForTransport). Stored routes keep it verbatim.
+const brokerScopeArg = "--production"
+
 // brokerMuxOptions is the parsed hidden mux helper invocation.
 type brokerMuxOptions struct {
-	production  bool
-	offlineRoot string
 	// startMode is the daemon-start authorization the broker propagated. An
 	// absent flag is the safe default: the helper observes only what is already
 	// running and never starts a daemon, a broker, or a recursive helper.
 	startMode ports.BrokerDaemonStartMode
 }
 
-// parseBrokerMuxArgs strictly parses `<hidden> (--offline-root ABS | --production)
-// [--daemon-start existing-only|if-needed]`. Unknown or duplicate flags, a
-// missing or unknown value, and positionals are refused, exactly like the
-// foreground sandbox entry point. An absent --daemon-start defaults to
+// parseBrokerMuxArgs strictly parses `<hidden> [--daemon-start
+// existing-only|if-needed]`. Unknown or duplicate flags, a missing or unknown
+// value, and positionals are refused. An absent --daemon-start defaults to
 // existing-only, and an unrecognized value is never mapped onto a permissive
 // authorization.
 func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, error) {
 	options := brokerMuxOptions{startMode: ports.BrokerDaemonExistingOnly}
-	rootSet, startSet := false, false
+	scopeSet, startSet := false, false
 	for index := 0; index < len(args); {
 		switch args[index] {
-		case "--production":
-			if options.production || rootSet {
-				return command{}, usagef("`%s` received duplicate or conflicting scope", name)
+		case brokerScopeArg:
+			// The scope flag is part of every durable remote route argv, so it
+			// stays accepted; the helper always serves the per-user scope.
+			if scopeSet {
+				return command{}, usagef("`%s` received duplicate %s", name, brokerScopeArg)
 			}
-			options.production = true
+			scopeSet = true
 			index++
-		case "--offline-root":
-			if options.production {
-				return command{}, usagef("`%s` received conflicting scope", name)
-			}
-			if rootSet {
-				return command{}, usagef("`%s` received duplicate --offline-root", name)
-			}
-			if index+1 >= len(args) || args[index+1] == "" {
-				return command{}, usagef("`--offline-root` requires a path")
-			}
-			options.offlineRoot = args[index+1]
-			rootSet = true
-			index += 2
 		case brokerDaemonStartArg:
 			if startSet {
 				return command{}, usagef("`%s` received duplicate %s", name, brokerDaemonStartArg)
@@ -162,46 +152,7 @@ func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, erro
 			return command{}, usagef("`%s` does not accept positional arguments", name)
 		}
 	}
-	if !rootSet && !options.production {
-		return command{}, usagef("`%s` requires --offline-root or --production", name)
-	}
 	return command{kind: kind, brokerMux: options}, nil
-}
-
-// loadMuxHelperConfig validates one offline root and loads its strict sandbox
-// configuration. A helper never creates sandbox directories: the root and the
-// config marker must already exist, so a helper can never provision state.
-func loadMuxHelperConfig(offlineRoot string) (*brokerconfig.Config, error) {
-	layout, err := offlineLayout(offlineRoot)
-	if err != nil {
-		return nil, err
-	}
-	return brokerconfig.Load(layout)
-}
-
-// brokerMuxConnector builds the transport-selecting daemonmux endpoint
-// connector over one immutable configuration. The dial function receives the
-// whole resolved target the pool will authenticate against and refuses any
-// address the configuration did not produce, so a request can never select a
-// transport, an address, or a start authorization of its own. It re-checks that
-// the route's provisioned authority still matches the resolved policy and fence
-// before dialing, so the transport is only ever reached under the authority the
-// resolver published.
-func brokerMuxConnector(config *brokerconfig.Config, log *slog.Logger) (*daemonmux.EndpointConnector, error) {
-	if config == nil {
-		return nil, errors.New("vev: broker mux connector requires a configuration")
-	}
-	dial := func(ctx context.Context, target ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
-		route, ok := config.RouteByAddress(target.Address)
-		if !ok {
-			return nil, fmt.Errorf("vev: broker mux: unknown route address")
-		}
-		if err := brokerRouteAuthorityMatches(config, target); err != nil {
-			return nil, err
-		}
-		return dialBrokerRoute(ctx, route, target, log)
-	}
-	return daemonmux.NewEndpointConnector(dial, daemonmux.DefaultMuxCeilings())
 }
 
 // brokerDynamicMuxConnector keeps the configured local carriage, but remote
@@ -530,13 +481,6 @@ func runBrokerMuxStdioCommand(ctx context.Context, options brokerMuxOptions) err
 // proxy owns the carriage lifetime in its own session and survives this short-
 // lived bootstrap, exactly like the ordinary QUIC bootstrap.
 func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOptions) error {
-	// Validate the sandbox before spawning anything, so a bad root or config
-	// fails without a readiness line and without a child.
-	if !options.production {
-		if _, err := loadMuxHelperConfig(options.offlineRoot); err != nil {
-			return err
-		}
-	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -553,12 +497,7 @@ func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOpti
 	}
 	defer func() { _ = devNull.Close() }()
 
-	args := []string{brokerMuxQUICProxyCommand}
-	if options.production {
-		args = append(args, "--production")
-	} else {
-		args = append(args, "--offline-root", options.offlineRoot)
-	}
+	args := []string{brokerMuxQUICProxyCommand, brokerScopeArg}
 	flag, err := brokerDaemonStartArgvFlag(options.startMode)
 	if err != nil {
 		_ = writer.Close()
@@ -652,13 +591,6 @@ func runBrokerMuxQUICProxyCommand(ctx context.Context, options brokerMuxOptions)
 // dialBrokerMuxHelper is a remote-side broker carriage helper, not a client
 // daemon dial. Production authority is derived locally, never from SSH argv.
 func dialBrokerMuxHelper(ctx context.Context, options brokerMuxOptions) (daemonmux.RawFramedTransport, error) {
-	if !options.production {
-		config, err := loadMuxHelperConfig(options.offlineRoot)
-		if err != nil {
-			return nil, err
-		}
-		return dialMuxHelperCarriage(ctx, config, options.startMode)
-	}
 	route, err := brokerconfig.RouteFromSpec(ports.BrokerRouteSpec{Kind: ports.BrokerRouteUnix, Path: daemonmux.SocketPath(ipc.SocketDir())})
 	if err != nil {
 		return nil, err

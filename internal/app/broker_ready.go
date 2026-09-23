@@ -9,11 +9,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
@@ -24,10 +22,9 @@ import (
 const brokerReadyCommand = "_broker-ready"
 
 type brokerReadyOptions struct {
-	offlineRoot string
-	require     string
-	timeout     time.Duration
-	maxAge      time.Duration
+	require string
+	timeout time.Duration
+	maxAge  time.Duration
 }
 
 type brokerReadyResult struct {
@@ -62,8 +59,6 @@ func parseBrokerReadyArgs(args []string) (brokerReadyOptions, error) {
 		}
 		seen[name] = true
 		switch name {
-		case "--offline-root":
-			o.offlineRoot = value
 		case "--require":
 			o.require = value
 		case "--timeout":
@@ -88,9 +83,6 @@ func parseBrokerReadyArgs(args []string) (brokerReadyOptions, error) {
 	if o.require != "local-catalogue" && seen["--max-observation-age"] {
 		return o, usagef("`--max-observation-age` is only valid for local-catalogue")
 	}
-	if o.offlineRoot != "" && (!filepath.IsAbs(o.offlineRoot) || filepath.Clean(o.offlineRoot) != o.offlineRoot) {
-		return o, usagef("`--offline-root` must be an absolute clean path")
-	}
 	return o, nil
 }
 
@@ -102,13 +94,6 @@ func runBrokerReady(ctx context.Context, o brokerReadyOptions, out io.Writer) er
 	deadline, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
 	path := brokeripc.SocketPath(productionBrokerLayout().Runtime)
-	if o.offlineRoot != "" {
-		layout, err := brokerconfig.ResolveLayout(o.offlineRoot, []string{productionBrokerLayout().Runtime, productionBrokerLayout().State})
-		if err != nil {
-			return writeReady(out, o, "terminal", "config", nil, 4)
-		}
-		path = brokeripc.SocketPath(layout.Runtime)
-	}
 	backoff := 5 * time.Millisecond
 	for {
 		if err := deadline.Err(); err != nil {

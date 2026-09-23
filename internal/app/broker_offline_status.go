@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,9 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -57,14 +54,9 @@ import (
 // absolute overall deadline expires. A live-but-incompatible endpoint and a
 // stalled handshake are diagnosed without spawning.
 
-const (
-	// brokerLauncherCommand is the hidden intermediate that starts one detached
-	// `_broker-serve` and exits.
-	brokerLauncherCommand           = "_broker-launcher"
-	productionBrokerLauncherCommand = "_broker-production-launcher"
-	// brokerStatusCommand is the hidden broker status probe.
-	brokerStatusCommand = "_broker-status"
-)
+// productionBrokerLauncherCommand is the hidden intermediate that starts one
+// detached broker serve process and exits.
+const productionBrokerLauncherCommand = "_broker-production-launcher"
 
 // Bounds for the detached connect-or-spawn path. Every wait is bounded by the
 // one absolute overall deadline, and the first dial is bounded on its own so a
@@ -74,7 +66,6 @@ const (
 	brokerStatusProbeBudget    = 2 * time.Second
 	brokerStatusInitialBackoff = 5 * time.Millisecond
 	brokerStatusMaxBackoff     = 50 * time.Millisecond
-	brokerStatusMaxReportBytes = 4 << 10
 )
 
 var (
@@ -91,19 +82,6 @@ var (
 	// before the overall deadline.
 	errBrokerNotReady = errors.New("vev: broker did not become ready")
 )
-
-// brokerLauncherOptions is the parsed `_broker-launcher` invocation.
-type brokerLauncherOptions struct {
-	offlineRoot string
-	idleGrace   time.Duration
-}
-
-// brokerStatusOptions is the parsed `_broker-status` invocation.
-type brokerStatusOptions struct {
-	offlineRoot string
-	ensure      bool
-	timeout     time.Duration
-}
 
 // brokerStatusReport is the bounded JSON status document. It carries exactly
 // the ready/offline state, the broker endpoint, and the broker's epoch,
@@ -154,14 +132,14 @@ func defaultBrokerStatusDeps() brokerStatusDeps {
 			}
 			return false, owner.Release()
 		},
-		spawn:  spawnBrokerLauncher,
+		spawn: func(ctx context.Context, _ string, _ time.Duration, _ bool) error {
+			return spawnProductionBrokerLauncher(ctx)
+		},
 		stdout: os.Stdout,
 	}
 }
 
-// parseBrokerLauncherArgs strictly parses
-// `_broker-launcher --offline-root ABS [--idle-grace DURATION]`. Unknown flags,
-// duplicate flags, positionals, and non-positive durations are refused.
+// parseProductionBrokerLauncherArgs parses the argument-free hidden launcher entry.
 func parseProductionBrokerLauncherArgs(args []string) (command, error) {
 	if len(args) != 0 {
 		return command{}, usagef("`%s` does not accept arguments", productionBrokerLauncherCommand)
@@ -169,139 +147,9 @@ func parseProductionBrokerLauncherArgs(args []string) (command, error) {
 	return command{kind: kindProductionBrokerLauncher}, nil
 }
 
-func parseBrokerLauncherArgs(args []string) (command, error) {
-	var options brokerLauncherOptions
-	var seenRoot, seenGrace bool
-	for index := 0; index < len(args); index++ {
-		switch args[index] {
-		case "--offline-root":
-			if seenRoot {
-				return command{}, usagef("`%s` received duplicate --offline-root", brokerLauncherCommand)
-			}
-			if index+1 >= len(args) || args[index+1] == "" {
-				return command{}, usagef("`--offline-root` requires a path")
-			}
-			options.offlineRoot = args[index+1]
-			seenRoot = true
-			index++
-		case "--idle-grace":
-			if seenGrace {
-				return command{}, usagef("`%s` received duplicate --idle-grace", brokerLauncherCommand)
-			}
-			if index+1 >= len(args) || args[index+1] == "" {
-				return command{}, usagef("`--idle-grace` requires a duration")
-			}
-			grace, err := time.ParseDuration(args[index+1])
-			if err != nil {
-				return command{}, usagef("`--idle-grace` %q is not a duration", args[index+1])
-			}
-			if grace <= 0 {
-				return command{}, usagef("`--idle-grace` must be positive")
-			}
-			options.idleGrace = grace
-			seenGrace = true
-			index++
-		default:
-			if strings.HasPrefix(args[index], "-") {
-				return command{}, usagef("unknown flag %q for `%s`", args[index], brokerLauncherCommand)
-			}
-			return command{}, usagef("`%s` does not accept positional arguments", brokerLauncherCommand)
-		}
-	}
-	if options.offlineRoot == "" {
-		return command{}, usagef("`%s` requires --offline-root", brokerLauncherCommand)
-	}
-	return command{kind: kindBrokerLauncher, brokerLauncher: options}, nil
-}
-
-// parseBrokerStatusArgs strictly parses
-// `_broker-status --offline-root ABS [--ensure] [--timeout DURATION]`. Unknown
-// flags, duplicate flags, positionals, and non-positive timeouts are refused.
-func parseBrokerStatusArgs(args []string) (command, error) {
-	options := brokerStatusOptions{timeout: brokerStatusDefaultTimeout}
-	var seenRoot, seenEnsure, seenTimeout bool
-	for index := 0; index < len(args); index++ {
-		switch args[index] {
-		case "--offline-root":
-			if seenRoot {
-				return command{}, usagef("`%s` received duplicate --offline-root", brokerStatusCommand)
-			}
-			if index+1 >= len(args) || args[index+1] == "" {
-				return command{}, usagef("`--offline-root` requires a path")
-			}
-			options.offlineRoot = args[index+1]
-			seenRoot = true
-			index++
-		case "--ensure":
-			if seenEnsure {
-				return command{}, usagef("`%s` received duplicate --ensure", brokerStatusCommand)
-			}
-			options.ensure = true
-			seenEnsure = true
-		case "--timeout":
-			if seenTimeout {
-				return command{}, usagef("`%s` received duplicate --timeout", brokerStatusCommand)
-			}
-			if index+1 >= len(args) || args[index+1] == "" {
-				return command{}, usagef("`--timeout` requires a duration")
-			}
-			timeout, err := time.ParseDuration(args[index+1])
-			if err != nil {
-				return command{}, usagef("`--timeout` %q is not a duration", args[index+1])
-			}
-			if timeout <= 0 {
-				return command{}, usagef("`--timeout` must be positive")
-			}
-			options.timeout = timeout
-			seenTimeout = true
-			index++
-		default:
-			if strings.HasPrefix(args[index], "-") {
-				return command{}, usagef("unknown flag %q for `%s`", args[index], brokerStatusCommand)
-			}
-			return command{}, usagef("`%s` does not accept positional arguments", brokerStatusCommand)
-		}
-	}
-	if options.offlineRoot == "" {
-		return command{}, usagef("`%s` requires --offline-root", brokerStatusCommand)
-	}
-	return command{kind: kindBrokerStatus, brokerStatus: options}, nil
-}
-
-// runBrokerLauncherCommand runs the hidden launcher. It changes no ordinary
-// command and never runs in production flows.
+// runProductionBrokerLauncherCommand starts one detached broker serve process.
 func runProductionBrokerLauncherCommand(context.Context) error {
 	return startDetachedBrokerServe([]string{productionBrokerServeCommand}, filepath.Join(productionBrokerLayout().Log, "vev-broker-crash.log"))
-}
-
-func runBrokerLauncherCommand(_ context.Context, options brokerLauncherOptions) error {
-	return runBrokerLauncher(options)
-}
-
-// runBrokerLauncher validates the sandbox configuration, diagnoses an explicit
-// idle grace that conflicts with the provisioned one, then starts one detached
-// `_broker-serve` in a new session and returns.
-func runBrokerLauncher(options brokerLauncherOptions) error {
-	layout, err := offlineLayout(options.offlineRoot)
-	if err != nil {
-		return err
-	}
-	if err := safedir.EnsurePrivate(layout.Root); err != nil {
-		return fmt.Errorf("vev: secure broker sandbox root: %w", err)
-	}
-	config, err := brokerconfig.Load(layout)
-	if err != nil {
-		return err
-	}
-	grace, err := effectiveIdleGrace(config, options.idleGrace)
-	if err != nil {
-		return err
-	}
-	args := []string{brokerServeCommand, "--offline-root", options.offlineRoot}
-	if grace > 0 {
-		args = append(args, "--idle-grace", grace.String())
-	}
-	return startDetachedBrokerServe(args, filepath.Join(layout.Log, "vev-broker-crash.log"))
 }
 
 // startDetachedBrokerServe starts one `_broker-serve` in a new session and
@@ -358,14 +206,6 @@ func spawnProductionBrokerLauncher(ctx context.Context) error {
 	return runBrokerLauncherProcess(ctx, []string{productionBrokerLauncherCommand})
 }
 
-func spawnBrokerLauncher(ctx context.Context, root string, grace time.Duration, graceSet bool) error {
-	args := []string{brokerLauncherCommand, "--offline-root", root}
-	if graceSet {
-		args = append(args, "--idle-grace", grace.String())
-	}
-	return runBrokerLauncherProcess(ctx, args)
-}
-
 func runBrokerLauncherProcess(ctx context.Context, args []string) error {
 	exePath, err := selfExePath()
 	if err != nil {
@@ -391,87 +231,6 @@ func runBrokerLauncherProcess(ctx context.Context, args []string) error {
 		return fmt.Errorf("vev: launching broker: %w", err)
 	}
 	return nil
-}
-
-// runBrokerStatusCommand runs the hidden status probe, bounded by a signal-aware
-// parent context.
-func runBrokerStatusCommand(ctx context.Context, options brokerStatusOptions) error {
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return runBrokerStatus(ctx, options, defaultBrokerStatusDeps())
-}
-
-// runBrokerStatus renders the broker status as one bounded JSON document.
-//
-// Without --ensure it is dial-only: it performs one probe bounded by
-// --timeout and always succeeds, reporting ready or offline, so the JSON is the
-// sole result and a caller never has to interpret an exit code to read a state.
-// The timeout is the single absolute probe bound; it is never silently replaced
-// by the ensure probe budget, so a caller can tighten it (or rely on the
-// default) and observe the same bound. With --ensure it uses one absolute
-// overall deadline; on success it prints the ready report and
-// returns nil, and on any layout, configuration, or startup failure it still
-// prints the offline report but returns a code-3 error so the caller always
-// observes one offline JSON document and a distinct exit code.
-func runBrokerStatus(ctx context.Context, options brokerStatusOptions, deps brokerStatusDeps) error {
-	layout, err := offlineLayout(options.offlineRoot)
-	if err != nil {
-		if options.ensure {
-			return ensureOfflineFailure(deps.stdout, brokerStatusReport{Status: "offline"}, err)
-		}
-		return err
-	}
-	socketPath := brokeripc.SocketPath(layout.Runtime)
-	offline := brokerStatusReport{Status: "offline", Endpoint: socketPath}
-
-	if !options.ensure {
-		probeCtx, cancel := context.WithTimeout(ctx, options.timeout)
-		defer cancel()
-		report, err := deps.probe(probeCtx, socketPath)
-		if err != nil {
-			// Dial-only renders the observable state: absence and an
-			// incompatible live endpoint both read as offline.
-			return writeBrokerStatusReport(deps.stdout, offline)
-		}
-		return writeBrokerStatusReport(deps.stdout, report)
-	}
-
-	// Validate and secure the sandbox root exactly as the launcher does before
-	// the spawn directory is created or any lock is taken, so status --ensure can
-	// never operate on paths the launcher would refuse.
-	if err := safedir.EnsurePrivate(layout.Root); err != nil {
-		return ensureOfflineFailure(deps.stdout, offline, fmt.Errorf("vev: secure broker sandbox root: %w", err))
-	}
-	config, err := brokerconfig.Load(layout)
-	if err != nil {
-		return ensureOfflineFailure(deps.stdout, offline, err)
-	}
-	grace, graceSet := config.IdleGrace()
-
-	deadline := deps.now().Add(options.timeout)
-	report, err := ensureBrokerReady(ctx, brokerStatusRequest{
-		layout:     layout,
-		socketPath: socketPath,
-		deadline:   deadline,
-		timeout:    options.timeout,
-		root:       options.offlineRoot,
-		grace:      grace,
-		graceSet:   graceSet,
-	}, deps)
-	if err != nil {
-		return ensureOfflineFailure(deps.stdout, offline, err)
-	}
-	return writeBrokerStatusReport(deps.stdout, report)
-}
-
-// ensureOfflineFailure renders one offline report and returns the ensure failure
-// wrapped in exit code 3, so a layout, configuration, or startup failure always
-// leaves the caller with the offline JSON document and a distinct exit code.
-func ensureOfflineFailure(stdout io.Writer, offline brokerStatusReport, err error) error {
-	if writeErr := writeBrokerStatusReport(stdout, offline); writeErr != nil {
-		return errors.Join(err, writeErr)
-	}
-	return &exitCoded{code: 3, err: err}
 }
 
 // brokerStatusRequest carries one ensure run's fixed inputs.
@@ -709,19 +468,4 @@ func absentError(socketPath string) error {
 // incompatibleError wraps one live-but-incompatible diagnosis.
 func incompatibleError(socketPath string, cause error) error {
 	return fmt.Errorf("%w: %s: %w", errBrokerIncompatible, socketPath, cause)
-}
-
-// writeBrokerStatusReport writes exactly one bounded JSON document.
-func writeBrokerStatusReport(w io.Writer, report brokerStatusReport) error {
-	data, err := json.Marshal(report)
-	if err != nil {
-		return fmt.Errorf("vev: encode broker status: %w", err)
-	}
-	if len(data) > brokerStatusMaxReportBytes {
-		return errors.New("vev: broker status report exceeds the bound")
-	}
-	if _, err := w.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("vev: write broker status: %w", err)
-	}
-	return nil
 }
