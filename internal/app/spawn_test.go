@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 			brokerReadyCommand,
 			productionBrokerServeCommand, productionBrokerLauncherCommand, "--daemon":
 			recordBrokerHelperProcess(os.Args[1])
-			if os.Args[1] == brokerLauncherCommand {
+			if os.Args[1] == brokerLauncherCommand || os.Args[1] == productionBrokerLauncherCommand {
 				if record := os.Getenv(brokerLauncherBlockRecordEnv); record != "" {
 					blockBrokerLauncherHelper(record, os.Getenv(brokerLauncherBlockReleaseEnv))
 				}

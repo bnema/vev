@@ -77,33 +77,36 @@ func shortTempDir(t *testing.T, prefix string) string {
 // brokerSubprocessSandbox isolates one real offline root and records every
 // spawned helper process.
 type brokerSubprocessSandbox struct {
-	t           *testing.T
-	root        string
-	layout      brokerconfig.Layout
-	recordDir   string
-	prodRuntime string
-	prodState   string
+	t         *testing.T
+	layout    brokerconfig.Layout
+	recordDir string
 }
 
 // newBrokerSubprocessSandbox isolates XDG roots, writes one marker-valid empty
 // sandbox, and arranges cleanup of every recorded broker and launcher process.
 func newBrokerSubprocessSandbox(t *testing.T, idleGrace string) *brokerSubprocessSandbox {
 	t.Helper()
-	prodRuntime, prodState := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", prodRuntime)
-	t.Setenv("XDG_STATE_HOME", prodState)
-	root := filepath.Join(shortTempDir(t, "vevb"), "s")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxEmptyDocument(idleGrace))
+	layout := emptyProductionBrokerLayout(t, idleGrace)
 	recordDir := filepath.Join(shortTempDir(t, "vevr"), "r")
 	require.NoError(t, os.MkdirAll(recordDir, 0o700))
 	t.Setenv(brokerHelperEnv, "1")
 	t.Setenv(brokerHelperRecordDirEnv, recordDir)
-	layout, err := offlineLayout(root)
-	require.NoError(t, err)
-	sandbox := &brokerSubprocessSandbox{t: t, root: root, layout: layout, recordDir: recordDir, prodRuntime: prodRuntime, prodState: prodState}
+	sandbox := &brokerSubprocessSandbox{t: t, layout: layout, recordDir: recordDir}
 	t.Cleanup(sandbox.cleanup)
 	return sandbox
+}
+
+// ensure uses the production connect-or-spawn entry point and observes the
+// registered epoch after the broker publishes its initial snapshot.
+func (s *brokerSubprocessSandbox) ensure(timeout time.Duration) (brokerStatusReport, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	service, err := connectProductionBroker(ctx)
+	if err != nil {
+		return brokerStatusReport{}, err
+	}
+	defer service.Close()
+	return probeBrokerStatus(ctx, s.socketPath())
 }
 
 // runBrokerCommand executes one helper through the test binary.
@@ -123,13 +126,6 @@ func runBrokerCommand(t *testing.T, args ...string) (stdout, stderr string, code
 		code = exitErr.ExitCode()
 	}
 	return out.String(), errb.String(), code
-}
-
-// status runs `_broker-status` for this sandbox with the supplied extra flags.
-func (s *brokerSubprocessSandbox) status(extra ...string) (stdout, stderr string, code int) {
-	s.t.Helper()
-	args := append([]string{brokerStatusCommand, "--offline-root", s.root}, extra...)
-	return runBrokerCommand(s.t, args...)
 }
 
 // socketPath is the broker endpoint inside the sandbox runtime directory.
@@ -193,7 +189,7 @@ func (s *brokerSubprocessSandbox) waitForSocketGone(timeout time.Duration) bool 
 // cleanup terminates every recorded broker and launcher so no test leaks an
 // orphan process.
 func (s *brokerSubprocessSandbox) cleanup() {
-	for _, role := range []string{brokerServeCommand, brokerLauncherCommand} {
+	for _, role := range []string{productionBrokerServeCommand, productionBrokerLauncherCommand} {
 		for _, pid := range s.recorded(role) {
 			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 				continue
@@ -209,10 +205,9 @@ func (s *brokerSubprocessSandbox) cleanup() {
 func TestBrokerStatusSubprocessElectsExactlyOneBroker(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "5s")
 	const racers = 4
-
 	type outcome struct {
-		stdout, stderr string
-		code           int
+		report brokerStatusReport
+		err    error
 	}
 	results := make([]outcome, racers)
 	var wg sync.WaitGroup
@@ -220,24 +215,20 @@ func TestBrokerStatusSubprocessElectsExactlyOneBroker(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			stdout, stderr, code := runBrokerCommand(t, brokerStatusCommand, "--offline-root", sandbox.root, "--ensure", "--timeout", "20s")
-			results[index] = outcome{stdout: stdout, stderr: stderr, code: code}
+			results[index].report, results[index].err = sandbox.ensure(20 * time.Second)
 		}(i)
 	}
 	wg.Wait()
-
 	epochs := make(map[uint64]struct{}, racers)
-	for i, result := range results {
-		require.Equalf(t, 0, result.code, "racer %d exited %d: %s", i, result.code, result.stderr)
-		report := decodeOneReport(t, result.stdout)
-		require.Equal(t, "ready", report.Status)
-		require.Equal(t, sandbox.socketPath(), report.Endpoint)
-		epochs[uint64(report.Epoch)] = struct{}{}
+	for _, result := range results {
+		require.NoError(t, result.err)
+		require.Equal(t, "ready", result.report.Status)
+		require.Equal(t, sandbox.socketPath(), result.report.Endpoint)
+		epochs[uint64(result.report.Epoch)] = struct{}{}
 	}
-	require.Len(t, epochs, 1, "every racer must observe the same broker epoch")
-	require.Len(t, sandbox.recorded(brokerServeCommand), 1, "exactly one broker process must ever be spawned")
-	require.Len(t, sandbox.live(brokerServeCommand), 1, "exactly one broker process must be live")
-	requireProductionUntouched(t, sandbox.prodRuntime, sandbox.prodState)
+	require.Len(t, epochs, 1)
+	require.Len(t, sandbox.recorded(productionBrokerServeCommand), 1)
+	require.Len(t, sandbox.live(productionBrokerServeCommand), 1)
 }
 
 // TestBrokerStatusSubprocessIdleExitRestartsWithNewEpoch lets the broker idle
@@ -246,25 +237,23 @@ func TestBrokerStatusSubprocessElectsExactlyOneBroker(t *testing.T) {
 func TestBrokerStatusSubprocessIdleExitRestartsWithNewEpoch(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "2s")
 
-	stdout, stderr, code := sandbox.status("--ensure", "--timeout", "20s")
-	require.Equal(t, 0, code, stderr)
-	first := decodeOneReport(t, stdout)
+	first, err := sandbox.ensure(20 * time.Second)
+	require.NoError(t, err)
 	require.Equal(t, "ready", first.Status)
 	require.Positive(t, first.Epoch)
 
 	require.True(t, sandbox.waitForSocketGone(15*time.Second), "the idle broker must shut itself down")
-	for _, pid := range sandbox.recorded(brokerServeCommand) {
+	for _, pid := range sandbox.recorded(productionBrokerServeCommand) {
 		require.NoError(t, waitForProcessExit(pid, 10*time.Second), "the idle broker must exit")
 	}
-	require.Empty(t, sandbox.live(brokerServeCommand), "the idle broker must exit")
+	require.Empty(t, sandbox.live(productionBrokerServeCommand), "the idle broker must exit")
 
-	stdout, stderr, code = sandbox.status("--ensure", "--timeout", "20s")
-	require.Equal(t, 0, code, stderr)
-	second := decodeOneReport(t, stdout)
+	second, err := sandbox.ensure(20 * time.Second)
+	require.NoError(t, err)
 	require.Equal(t, "ready", second.Status)
 	require.NotEqual(t, first.Epoch, second.Epoch, "an on-demand restart must sample a new epoch")
-	require.Len(t, sandbox.recorded(brokerServeCommand), 2, "one broker per ensure is expected")
-	require.Len(t, sandbox.live(brokerServeCommand), 1, "only the restarted broker may remain")
+	require.Len(t, sandbox.recorded(productionBrokerServeCommand), 2, "one broker per ensure is expected")
+	require.Len(t, sandbox.live(productionBrokerServeCommand), 1, "only the restarted broker may remain")
 }
 
 // TestBrokerStatusSubprocessRecoversStaleSocket proves a stale socket left by a
@@ -274,11 +263,10 @@ func TestBrokerStatusSubprocessRecoversStaleSocket(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sandbox.layout.Runtime, 0o700))
 	bindStaleUnixSocket(t, sandbox.socketPath())
 
-	stdout, stderr, code := sandbox.status("--ensure", "--timeout", "20s")
-	require.Equal(t, 0, code, stderr)
-	report := decodeOneReport(t, stdout)
+	report, err := sandbox.ensure(20 * time.Second)
+	require.NoError(t, err)
 	require.Equal(t, "ready", report.Status)
-	require.Len(t, sandbox.live(brokerServeCommand), 1)
+	require.Len(t, sandbox.live(productionBrokerServeCommand), 1)
 }
 
 // TestBrokerStatusSubprocessWaitsForLiveSpawnerThenRecovers holds the
@@ -290,18 +278,17 @@ func TestBrokerStatusSubprocessWaitsForLiveSpawnerThenRecovers(t *testing.T) {
 	spawner, err := lifecycle.TryAcquire(sandbox.layout.Spawn)
 	require.NoError(t, err)
 
-	stdout, _, code := sandbox.status("--ensure", "--timeout", "500ms")
-	require.Equal(t, 3, code)
-	require.Equal(t, "offline", decodeOneReport(t, stdout).Status)
-	require.Empty(t, sandbox.recorded(brokerServeCommand), "a waiter must not spawn while another spawner is live")
+	_, err = sandbox.ensure(500 * time.Millisecond)
+	require.Error(t, err)
+	require.Empty(t, sandbox.recorded(productionBrokerServeCommand), "a waiter must not spawn while another spawner is live")
 
 	// The kernel releases the spawner's descriptor when it dies; releasing here
 	// is exactly that event.
 	require.NoError(t, spawner.Release())
-	stdout, stderr, code := sandbox.status("--ensure", "--timeout", "20s")
-	require.Equal(t, 0, code, stderr)
-	require.Equal(t, "ready", decodeOneReport(t, stdout).Status)
-	require.Len(t, sandbox.live(brokerServeCommand), 1)
+	report, err := sandbox.ensure(20 * time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "ready", report.Status)
+	require.Len(t, sandbox.live(productionBrokerServeCommand), 1)
 }
 
 // TestBrokerStatusSubprocessSilentEndpointFailsWithoutSpawning proves a live
@@ -316,12 +303,10 @@ func TestBrokerStatusSubprocessSilentEndpointFailsWithoutSpawning(t *testing.T) 
 	// The timeout must exceed the probe budget so the stall is classified as a
 	// live-but-incompatible endpoint instead of exhausting the overall deadline.
 	start := time.Now()
-	stdout, stderr, code := sandbox.status("--ensure", "--timeout", "5s")
-	require.Equal(t, 3, code)
-	require.Equal(t, "offline", decodeOneReport(t, stdout).Status)
-	require.Contains(t, stderr, "live but incompatible", "a silent live endpoint must be classified incompatible")
+	_, err := sandbox.ensure(5 * time.Second)
+	require.ErrorContains(t, err, "live but incompatible")
 	require.Less(t, time.Since(start), 5*time.Second, "the probe budget must classify a silent endpoint before the overall deadline")
-	require.Empty(t, sandbox.recorded(brokerServeCommand), "a live-but-silent endpoint must not be respawned over")
+	require.Empty(t, sandbox.recorded(productionBrokerServeCommand), "a live-but-silent endpoint must not be respawned over")
 }
 
 // TestBrokerLauncherSpawnWaitIsBoundedByContext proves a controlled blocking
@@ -340,7 +325,7 @@ func TestBrokerLauncherSpawnWaitIsBoundedByContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- spawnBrokerLauncher(ctx, t.TempDir(), 0, false) }()
+	go func() { result <- spawnProductionBrokerLauncher(ctx) }()
 
 	pid := waitForProcessRecord(t, record)
 	select {
@@ -362,31 +347,23 @@ func TestBrokerLauncherSpawnWaitIsBoundedByContext(t *testing.T) {
 // TestBrokerStatusSubprocessLauncherDiagnosesConflicts proves an explicit
 // launcher grace that conflicts with the provisioned one is refused before any
 // process is spawned, and that a missing configuration fails the launcher.
+// A production launcher accepts no idle override; malformed broker.json is
+// diagnosed by the detached serve before it can claim the lifetime lock.
 func TestBrokerStatusSubprocessLauncherDiagnosesConflicts(t *testing.T) {
-	t.Run("conflicting idle grace", func(t *testing.T) {
+	t.Run("unsupported idle override", func(t *testing.T) {
 		sandbox := newBrokerSubprocessSandbox(t, "90s")
-		stdout, stderr, code := runBrokerCommand(t, brokerLauncherCommand, "--offline-root", sandbox.root, "--idle-grace", "1m")
-		require.NotEqual(t, 0, code)
-		require.Contains(t, stderr, "conflicts with the provisioned idle grace")
-		require.Empty(t, strings.TrimSpace(stdout))
-		require.Empty(t, sandbox.recorded(brokerServeCommand))
+		_, stderr, code := runBrokerCommand(t, productionBrokerLauncherCommand, "--idle-grace", "1m")
+		require.NotZero(t, code)
+		require.Contains(t, stderr, "does not accept arguments")
+		require.Empty(t, sandbox.recorded(productionBrokerServeCommand))
 	})
-
-	t.Run("missing configuration", func(t *testing.T) {
-		prodRuntime, prodState := t.TempDir(), t.TempDir()
-		t.Setenv("XDG_RUNTIME_DIR", prodRuntime)
-		t.Setenv("XDG_STATE_HOME", prodState)
-		recordDir := filepath.Join(t.TempDir(), "records")
-		require.NoError(t, os.MkdirAll(recordDir, 0o700))
-		t.Setenv(brokerHelperEnv, "1")
-		t.Setenv(brokerHelperRecordDirEnv, recordDir)
-		root := filepath.Join(shortTempDir(t, "vevx"), "s")
-		require.NoError(t, os.MkdirAll(root, 0o700))
-
-		_, stderr, code := runBrokerCommand(t, brokerLauncherCommand, "--offline-root", root)
-		require.NotEqual(t, 0, code)
-		require.NotEmpty(t, strings.TrimSpace(stderr))
-		require.Empty(t, recordedPIDsIn(t, recordDir, brokerServeCommand))
+	t.Run("invalid production configuration", func(t *testing.T) {
+		sandbox := newBrokerSubprocessSandbox(t, "")
+		require.NoError(t, os.WriteFile(productionBrokerConfigPath(), []byte("not json"), 0o600))
+		_, stderr, code := runBrokerCommand(t, productionBrokerServeCommand)
+		require.NotZero(t, code)
+		require.Contains(t, stderr, brokerconfig.ConfigFileName)
+		require.NoFileExists(t, filepath.Join(sandbox.layout.Runtime, "lifecycle.lock"))
 	})
 }
 
@@ -395,27 +372,26 @@ func TestBrokerStatusSubprocessLauncherDiagnosesConflicts(t *testing.T) {
 func TestBrokerStatusSubprocessNoOrphanProcess(t *testing.T) {
 	sandbox := newBrokerSubprocessSandbox(t, "5s")
 
-	stdout, stderr, code := sandbox.status("--ensure", "--timeout", "20s")
-	require.Equal(t, 0, code, stderr)
-	require.Equal(t, "ready", decodeOneReport(t, stdout).Status)
+	report, err := sandbox.ensure(20 * time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "ready", report.Status)
 
-	require.NotEmpty(t, sandbox.recorded(brokerLauncherCommand))
-	for _, pid := range sandbox.recorded(brokerLauncherCommand) {
+	require.NotEmpty(t, sandbox.recorded(productionBrokerLauncherCommand))
+	for _, pid := range sandbox.recorded(productionBrokerLauncherCommand) {
 		require.NoError(t, waitForProcessExit(pid, 5*time.Second), "the short-lived launcher must exit")
 	}
-	require.Len(t, sandbox.live(brokerServeCommand), 1)
+	require.Len(t, sandbox.live(productionBrokerServeCommand), 1)
 
-	_, err := lifecycle.TryAcquire(sandbox.layout.Runtime)
+	_, err = lifecycle.TryAcquire(sandbox.layout.Runtime)
 	require.ErrorIs(t, err, lifecycle.ErrBusy, "the live broker must own the lifetime lock")
 
-	sandbox.terminate(brokerServeCommand, syscall.SIGTERM)
-	require.Empty(t, sandbox.live(brokerLauncherCommand), "no launcher may be left behind")
-	require.Empty(t, sandbox.live(brokerServeCommand), "no broker may be left behind")
+	sandbox.terminate(productionBrokerServeCommand, syscall.SIGTERM)
+	require.Empty(t, sandbox.live(productionBrokerLauncherCommand), "no launcher may be left behind")
+	require.Empty(t, sandbox.live(productionBrokerServeCommand), "no broker may be left behind")
 	require.True(t, sandbox.waitForSocketGone(5*time.Second), "an orderly broker shutdown must unlink its socket")
 	owner, err := lifecycle.TryAcquire(sandbox.layout.Runtime)
 	require.NoError(t, err, "the terminated broker must release the lifetime lock")
 	require.NoError(t, owner.Release())
-	requireProductionUntouched(t, sandbox.prodRuntime, sandbox.prodState)
 }
 
 // recordedPIDsIn reads one role's PID record from an arbitrary directory.
