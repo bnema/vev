@@ -1661,7 +1661,7 @@ func TestRegistryDemandCapsFailureBackoff(t *testing.T) {
 		host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 			return !host.Checking && host.ConsecutiveFailures == failure
 		})
-		require.LessOrEqual(t, host.NextDue.Sub(clock.Now()), defaultDemandFreshForRemote, "demanded retry gap must never exceed the freshness interval")
+		require.LessOrEqual(t, host.NextDue.Sub(clock.Now()), demandRetryMax, "demanded retry gap must never exceed the demand retry cap")
 		clock.Advance(host.NextDue.Sub(clock.Now()))
 		registry.RequestProbe(reg.Endpoint)
 	}
@@ -1683,13 +1683,11 @@ func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {
 	startRegistry(t, registry)
 
 	probeErr := errors.New("offline")
-	// A watched host retries on its two-second demand cadence even as the
-	// underlying exponential failure count increases.
+	// A watched host backs off from its two-second demand cadence, doubling
+	// per failure up to the demand retry cap.
 	want := []time.Duration{
-		defaultDemandFreshForRemote, defaultDemandFreshForRemote,
-		defaultDemandFreshForRemote, defaultDemandFreshForRemote,
-		defaultDemandFreshForRemote, defaultDemandFreshForRemote,
-		defaultDemandFreshForRemote,
+		2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
+		demandRetryMax, demandRetryMax, demandRetryMax,
 	}
 	for index, delay := range want {
 		call := receiveCall(t, probe)

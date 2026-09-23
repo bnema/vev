@@ -32,6 +32,10 @@ const (
 	// while at least one client subscription is live (see Registry.SetDemand).
 	defaultDemandFreshForLocal  = 1 * time.Second
 	defaultDemandFreshForRemote = 2 * time.Second
+	// demandRetryMax caps the failure backoff while a client watches: retries
+	// start at the demand cadence and double up to this bound, so an
+	// unreachable or refusing host is not redialed every two seconds.
+	demandRetryMax = 30 * time.Second
 	// defaultProbeTimeout bounds one observation attempt end to end: dial,
 	// SSH/QUIC bootstrap, daemonmux preamble, and the catalogue exchange. It
 	// sits below the passive retry cap so a peer that never answers costs one
@@ -1103,8 +1107,8 @@ func (r *Registry) apply(result probeResult) {
 	current.ConsecutiveFailures++
 	current.LastFailure = domain.RemoteFailure{Kind: kind, Err: result.err}
 	delay := r.retryDelay(current.ConsecutiveFailures)
-	if r.demand > 0 && delay > r.demandFreshForRemote {
-		delay = r.demandFreshForRemote
+	if r.demand > 0 {
+		delay = demandRetryDelay(r.demandFreshForRemote, current.ConsecutiveFailures)
 	}
 	current.NextDue = result.at.Add(r.jitter(delay, result.endpoint, result.attempt))
 	r.log.Debug("broker_probe_failed", "endpoint", result.endpoint, "kind", kind, "failures", current.ConsecutiveFailures, "err", result.err, "cause", errors.Unwrap(result.err))
@@ -1157,6 +1161,16 @@ func availabilityFor(kind domain.RemoteFailureKind) domain.RemoteAvailability {
 	default:
 		return domain.RemoteAvailabilityUnreachable
 	}
+}
+
+// demandRetryDelay is the watched-host failure backoff: the demand cadence
+// doubled per consecutive failure, capped at demandRetryMax.
+func demandRetryDelay(base time.Duration, failures uint) time.Duration {
+	delay := base
+	for i := uint(1); i < failures && delay < demandRetryMax; i++ {
+		delay *= 2
+	}
+	return min(delay, demandRetryMax)
 }
 
 // retryDelay is the capped exponential retry cadence for a failure streak.
