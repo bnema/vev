@@ -299,7 +299,7 @@ func TestParseBrokerClientArgsAndProductionDispatchIsolation(t *testing.T) {
 
 func mustConnectivityOwner(t *testing.T, kind string) connectivityOwner {
 	t.Helper()
-	owner, ok := connectivityOwnerFor(kind)
+	owner, ok := testConnectivityOwnerFor(kind)
 	require.True(t, ok)
 	return owner
 }

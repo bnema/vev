@@ -14,6 +14,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testConnectivityOwnerFor looks up the matrix owner for a cmdKind identifier
+// directly against connectivityMatrix, the same declarative fixture every
+// other pinning test in this file ranges over.
+func testConnectivityOwnerFor(kind string) (connectivityOwner, bool) {
+	for _, entry := range connectivityMatrix {
+		if entry.Kind == kind {
+			return entry.Owner, true
+		}
+	}
+	return 0, false
+}
+
 // TestConnectivityMatrixCoversEveryCommandKind pins P1.2: every cmdKind
 // constant declared in run.go has exactly one matrix row. A new CLI entry
 // point without a row fails here before any transport work can ignore it.
@@ -53,10 +65,10 @@ func TestConnectivityMatrixCoversEveryCommandKind(t *testing.T) {
 	require.Empty(t, missing, "matrix is missing cmdKind rows")
 	require.Empty(t, extra, "matrix references unknown cmdKind rows")
 
-	owner, ok := connectivityOwnerFor("kindAttach")
+	owner, ok := testConnectivityOwnerFor("kindAttach")
 	require.True(t, ok, "matrix lookup must resolve known kinds")
 	require.Equal(t, connectivityBrokerOnly, owner)
-	_, ok = connectivityOwnerFor("kindDoesNotExist")
+	_, ok = testConnectivityOwnerFor("kindDoesNotExist")
 	require.False(t, ok, "matrix lookup must reject unknown kinds")
 }
 
@@ -220,7 +232,7 @@ func TestConnectivityMatrixSingleHostStoreWriterSet(t *testing.T) {
 func TestConnectivityMatrixReadyProbeIsLocalDialOnly(t *testing.T) {
 	t.Parallel()
 
-	owner, ok := connectivityOwnerFor("kindBrokerReady")
+	owner, ok := testConnectivityOwnerFor("kindBrokerReady")
 	require.True(t, ok, "the readiness probe must have a matrix row")
 	require.Equal(t, connectivityLocalOnly, owner, "the readiness probe is dial-only local infrastructure")
 	for _, entry := range connectivityMatrix {

@@ -17,6 +17,15 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
+// testBrokerClientRender builds the same *brokerClientPresentation the
+// production terminal composition renders through (see runBrokerClient's
+// presentation construction), so tests exercise the real Render method
+// instead of a test-only indirection.
+func testBrokerClientRender(terminal ports.Terminal, picker *client.Picker, onState func(client.State)) func(client.State) {
+	presentation := &brokerClientPresentation{terminal: terminal, picker: picker, onState: onState}
+	return presentation.Render
+}
+
 // The resize presentation fence at the composition seam. The supervisor asks
 // its renderer to repaint whenever a resize invalidation reaches a serialized
 // picker wait, and the production offline composition paints only while the
@@ -152,7 +161,7 @@ func TestOfflineClientRenderRefusesNonPickerPresentations(t *testing.T) {
 	picker := offlineRenderPicker(t)
 
 	observed := make(chan client.State, 8)
-	render := brokerClientRender(terminal, picker, func(state client.State) {
+	render := testBrokerClientRender(terminal, picker, func(state client.State) {
 		select {
 		case observed <- state:
 		default:
@@ -192,7 +201,7 @@ func TestOfflineClientRenderFenceIsPickerPresentation(t *testing.T) {
 	for _, state := range states {
 		t.Run(state.Presentation.String(), func(t *testing.T) {
 			terminal := newOfflineRenderTerminal(small)
-			render := brokerClientRender(terminal, offlineRenderPicker(t), nil)
+			render := testBrokerClientRender(terminal, offlineRenderPicker(t), nil)
 
 			render(state)
 
@@ -218,7 +227,7 @@ func TestOfflineClientRenderPaintsPickerResize(t *testing.T) {
 
 	terminal := newOfflineRenderTerminal(small)
 	picker := offlineRenderPicker(t)
-	render := brokerClientRender(terminal, picker, nil)
+	render := testBrokerClientRender(terminal, picker, nil)
 
 	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
 	initial, flushes := terminal.written()
@@ -284,7 +293,7 @@ func (t *transactionRecordingTerminal) published() []ports.UIContext {
 // succeeds only after the frame was written and flushed.
 func TestOfflineClientPickerPaintCommitsPickerTransaction(t *testing.T) {
 	terminal := newTransactionRecordingTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
-	render := brokerClientRender(terminal, offlineRenderPicker(t), nil)
+	render := testBrokerClientRender(terminal, offlineRenderPicker(t), nil)
 
 	render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
 	written, _ := terminal.written()

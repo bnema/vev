@@ -531,13 +531,6 @@ func (c *productionBrokerConnector) Connect(ctx context.Context) (ports.BrokerSe
 	return c.connect(ctx)
 }
 
-// brokerClientRender adapts the shared presentation to the plain render callback
-// the composition tests exercise directly.
-func brokerClientRender(terminal ports.Terminal, picker *client.Picker, onState func(client.State)) func(client.State) {
-	presentation := &brokerClientPresentation{terminal: terminal, picker: picker, onState: onState}
-	return presentation.Render
-}
-
 // terminalBrokerSeams are the optional observation callbacks of one terminal
 // run. Production supplies none: runBrokerClient reports a failure on the
 // terminal itself through the same writer the picker paints with. The terminal

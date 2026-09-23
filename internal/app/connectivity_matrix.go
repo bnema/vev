@@ -265,13 +265,3 @@ var connectivityMatrix = []connectivityEntry{
 		Notes: "Mints one ephemeral authenticated QUIC server, admits exactly one carriage, and bridges it to the single provisioned private Unix daemonmux carriage. It never dials the production daemon socket, never fabricates a daemon incarnation, and starts the daemon behind that carriage only under the propagated --daemon-start if-needed authorization and its own provisioned launch policy.",
 	},
 }
-
-// connectivityOwnerFor returns the matrix owner for a cmdKind identifier.
-func connectivityOwnerFor(kind string) (connectivityOwner, bool) {
-	for _, entry := range connectivityMatrix {
-		if entry.Kind == kind {
-			return entry.Owner, true
-		}
-	}
-	return 0, false
-}

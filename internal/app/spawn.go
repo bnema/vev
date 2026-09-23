@@ -190,13 +190,6 @@ func ensureTargetWithLifecycle[T any](ctx context.Context, lockDir string, dial 
 	return ensureTarget(ctx, lockDir, dial, spawn, cfg)
 }
 
-// ensureDaemon returns a transport to a running daemon, spawning one if
-// necessary after ensureDaemonWithLifecycle has established lifecycle
-// availability. Tests also exercise this lower-level spawn election directly.
-func ensureDaemon(ctx context.Context, dir string, dial dialFunc, spawn spawnFunc, cfg backoffConfig) (wire.Transport, error) {
-	return ensureTarget(ctx, dir, func(ctx context.Context) (wire.Transport, error) { return dial(ctx, dir) }, spawn, cfg)
-}
-
 // ensureTarget is the shared spawn election: it dials once, then takes the
 // spawn lock in lockDir, and only the elected winner spawns. Every dialer —
 // the session transport and the daemonmux carriage — therefore observes the
@@ -263,12 +256,6 @@ func acquireSpawnLock(dir string) (release func(), acquired bool, err error) {
 
 	// A live peer is spawning; wait for it via retry-dial.
 	return func() {}, false, nil
-}
-
-// retryDial dials repeatedly with exponential backoff until the daemon
-// answers, the context is cancelled, or the total budget is exhausted.
-func retryDial(ctx context.Context, dir string, dial dialFunc, cfg backoffConfig) (wire.Transport, error) {
-	return retryTarget(ctx, dir, func(ctx context.Context) (wire.Transport, error) { return dial(ctx, dir) }, cfg)
 }
 
 // retryTarget is the shared bounded redial: it repeats the same dial with
@@ -341,36 +328,6 @@ func withoutPerformanceTraceEnv(env []string) []string {
 		filtered = append(filtered, entry)
 	}
 	return filtered
-}
-
-// spawnDaemonWithEnvironment launches an explicitly selected daemon binary
-// with the complete environment owned by a launch configuration. It retains
-// the same double-fork boundary as realSpawn without invoking a shell or
-// inheriting ambient variables.
-func spawnDaemonWithEnvironment(executable string, environment []string) error {
-	if executable == "" {
-		return errors.New("vev: missing launch executable")
-	}
-	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("opening %s: %w", os.DevNull, err)
-	}
-	defer func() { _ = devNull.Close() }()
-
-	var stderr bytes.Buffer
-	cmd := exec.Command(executable, "--daemon-launcher")
-	cmd.Env = append([]string(nil), environment...)
-	cmd.Dir = platform.DirOrHome("")
-	cmd.Stdin = devNull
-	cmd.Stdout = devNull
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if detail := bytes.TrimSpace(stderr.Bytes()); len(detail) > 0 {
-			return fmt.Errorf("%w: %s", err, detail)
-		}
-		return err
-	}
-	return nil
 }
 
 // runDaemonLauncher is the intermediate half of the double-fork. It starts

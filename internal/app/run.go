@@ -648,10 +648,6 @@ type lifecycleOwnership interface {
 	Release() error
 }
 
-func joinLifecycleReleaseError(retErr *error, owner lifecycleOwnership) {
-	*retErr = errors.Join(*retErr, owner.Release())
-}
-
 type lifecycleStartupDeps struct {
 	ensurePrivate func(string) error
 	acquire       func(context.Context, string, time.Duration) (lifecycleOwnership, error)
@@ -982,78 +978,7 @@ const daemonStopTimeout = 2 * time.Second
 var (
 	errDaemonNotRunning   = errors.New("vev: no daemon running")
 	errKillOutcomeUnknown = errors.New("vev: kill outcome unknown")
-	// errKillNotSent reports a Kill that was never placed on the wire because
-	// its caller was already canceled. The outcome is definite: the daemon
-	// cannot have acted, so it must not be reported as an unknown outcome.
-	errKillNotSent = errors.New("vev: kill request not sent")
 )
-
-func newControlRequestID() (uint64, error) {
-	var raw [8]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return 0, err
-	}
-	id := uint64(0)
-	for _, b := range raw {
-		id = id<<8 | uint64(b)
-	}
-	if id == 0 {
-		id = 1
-	}
-	return id, nil
-}
-
-// sendKillRequest allocates a unique nonzero RequestID and sends one Kill
-// request, returning the ID its matching KillResult must carry. A caller
-// already canceled before the send returns errKillNotSent (a definite
-// not-sent outcome) instead of sending a request whose reply could no longer be
-// awaited; the request is never replayed.
-func sendKillRequest(ctx context.Context, connection ports.ClientConnection, request protocol.Kill) (uint64, error) {
-	requestID, err := newControlRequestID()
-	if err != nil {
-		return 0, fmt.Errorf("preparing request: %w", err)
-	}
-	request.RequestID = requestID
-	if err := ctx.Err(); err != nil {
-		return 0, fmt.Errorf("%w: %w", errKillNotSent, err)
-	}
-	if err := connection.SendClient(request); err != nil {
-		return 0, err
-	}
-	return requestID, nil
-}
-
-// receiveKillResult consumes exactly one correlated KillResult from a control
-// connection. A definite failed result becomes a plain error; a close,
-// cancellation, or an uncorrelated reply becomes errKillOutcomeUnknown, so a
-// caller never treats a lost result as success and never replays the kill.
-func receiveKillResult(ctx context.Context, connection ports.ClientConnection, requestID uint64) error {
-	// Cancellation after the request was sent closes the exact connection so a
-	// blocked receive unwinds; the lost reply stays outcome-unknown rather than
-	// becoming a silent success or a blind retry.
-	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
-	defer stop()
-
-	reply, err := connection.ReceiveServer()
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("%w: awaiting explicit result: %v", errKillOutcomeUnknown, ctxErr)
-		}
-		return fmt.Errorf("%w: awaiting explicit result: %v", errKillOutcomeUnknown, err)
-	}
-	result, ok := reply.(protocol.KillResult)
-	if !ok || result.RequestID != requestID {
-		return fmt.Errorf("%w: unexpected reply %T", errKillOutcomeUnknown, reply)
-	}
-	switch result.Outcome {
-	case protocol.KillSucceeded:
-		return nil
-	case protocol.KillFailed:
-		return fmt.Errorf("vev: %s", result.Text)
-	default:
-		return fmt.Errorf("%w: %s", errKillOutcomeUnknown, result.Text)
-	}
-}
 
 func createDetachedLocalSession(ctx context.Context, name string) error {
 	service, err := connectBroker(ctx)
