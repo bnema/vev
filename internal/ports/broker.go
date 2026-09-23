@@ -336,20 +336,6 @@ func (s BrokerSnapshot) Supersedes(other BrokerSnapshot) bool {
 	return s.Revision > other.Revision
 }
 
-// BrokerCompletionIsStale reports whether a probe or operation completion
-// must be rejected: a different broker epoch, or a registration that no
-// longer exactly matches current authority (endpoint, incarnation, and
-// generation must all match).
-func BrokerCompletionIsStale(currentRegistration domain.RemoteRegistration, currentEpoch BrokerEpoch, completionRegistration domain.RemoteRegistration, completionEpoch BrokerEpoch) bool {
-	if currentEpoch == 0 || completionEpoch == 0 {
-		return true
-	}
-	if currentEpoch != completionEpoch {
-		return true
-	}
-	return !currentRegistration.Equal(completionRegistration)
-}
-
 // BrokerStreamAdmission is the closed attachment-admission taxonomy
 // (Plan 001 P5.3a, contract-only until the admission slice wires it):
 // an attachment stream names exactly how the daemon must admit it.

@@ -20,22 +20,6 @@ const (
 	RemoteJobCacheStore
 )
 
-// String returns the stable lowercase token for a job kind.
-func (k RemoteJobKind) String() string {
-	switch k {
-	case RemoteJobRegistryRead:
-		return "registry_read"
-	case RemoteJobCacheLoad:
-		return "cache_load"
-	case RemoteJobCatalogObserve:
-		return "catalog_observe"
-	case RemoteJobCacheStore:
-		return "cache_store"
-	default:
-		return "unknown"
-	}
-}
-
 // RemoteJob is one admitted unit of remote work. Registration and Generation
 // fence the job: results bound to a superseded registration never apply.
 // Deadline bounds catalogue observation; Entries carries cache-store payload.

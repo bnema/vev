@@ -326,31 +326,6 @@ func TestBrokerTombstoneFencing(t *testing.T) {
 	}
 }
 
-func TestBrokerCompletionStaleRejection(t *testing.T) {
-	current := testBrokerRegistration("user@arch", 4, 2)
-	tests := []struct {
-		name         string
-		currentEpoch BrokerEpoch
-		completion   domain.RemoteRegistration
-		completionEp BrokerEpoch
-		wantStale    bool
-	}{
-		{name: "exact match applies", currentEpoch: 3, completion: current, completionEp: 3, wantStale: false},
-		{name: "epoch change stale", currentEpoch: 4, completion: current, completionEp: 3, wantStale: true},
-		{name: "generation bump stalls old", currentEpoch: 3, completion: testBrokerRegistration("user@arch", 4, 1), completionEp: 3, wantStale: true},
-		{name: "re-add incarnation stalls old", currentEpoch: 3, completion: testBrokerRegistration("user@arch", 5, 1), completionEp: 3, wantStale: true},
-		{name: "zero epoch stale", currentEpoch: 0, completion: current, completionEp: 3, wantStale: true},
-		{name: "zero completion epoch stale", currentEpoch: 3, completion: current, completionEp: 0, wantStale: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := BrokerCompletionIsStale(current, tt.currentEpoch, tt.completion, tt.completionEp); got != tt.wantStale {
-				t.Fatalf("BrokerCompletionIsStale() = %t, want %t", got, tt.wantStale)
-			}
-		})
-	}
-}
-
 func TestBrokerPolicyCompatibility(t *testing.T) {
 	base := testBrokerPolicy()
 	if err := base.Validate(); err != nil {
