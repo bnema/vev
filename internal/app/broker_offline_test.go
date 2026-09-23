@@ -478,7 +478,13 @@ func newBrokerMuxFixture(t *testing.T, policy ports.BrokerPolicy) *brokerMuxFixt
 	t.Helper()
 	routeDir := t.TempDir()
 	require.NoError(t, os.Chmod(routeDir, 0o700))
-	route := filepath.Join(routeDir, "mux.sock")
+	return newBrokerMuxFixtureAt(t, policy, filepath.Join(routeDir, "mux.sock"))
+}
+
+// newBrokerMuxFixtureAt binds at a caller-chosen production daemonmux path.
+func newBrokerMuxFixtureAt(t *testing.T, policy ports.BrokerPolicy, route string) *brokerMuxFixture {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(route), 0o700))
 	listener, err := ipc.ListenMux(route)
 	require.NoError(t, err)
 
