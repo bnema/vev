@@ -11,6 +11,7 @@ package app
 // is an exit-3 unknown outcome that is never read as success.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -204,8 +205,13 @@ var _ ports.BrokerService = (*seamBrokerService)(nil)
 func withSeamBroker(t *testing.T, service ports.BrokerService) {
 	t.Helper()
 	previous := connectBroker
+	previousStop := connectDaemonStopBroker
 	connectBroker = func(context.Context) (ports.BrokerService, error) { return service, nil }
-	t.Cleanup(func() { connectBroker = previous })
+	connectDaemonStopBroker = connectBroker
+	t.Cleanup(func() {
+		connectBroker = previous
+		connectDaemonStopBroker = previousStop
+	})
 }
 
 func seamKillResult(requestID uint64, outcome protocol.KillOutcome, code uint16, text string) protocol.KillResult {
@@ -215,6 +221,43 @@ func seamKillResult(requestID uint64, outcome protocol.KillOutcome, code uint16,
 // TestRunListRendersBrokerSessionsWithoutADaemon pins that runList reads the
 // live session list through BrokerOperations over the per-user broker and
 // renders it, so a local list never reads durable state or dials a daemon.
+func TestRunBrokerSnapshotListReportsNoDaemon(t *testing.T) {
+	remote := ports.BrokerDaemonObservation{
+		Endpoint: "demo@host.test", DisplayOrigin: "demo@host.test",
+		Registration: domain.RemoteRegistration{Endpoint: "demo@host.test", Incarnation: [16]byte{1}, Generation: 1},
+		Policy:       seamBrokerTestPolicy(), Availability: domain.RemoteAvailabilityNoDaemon,
+		Sessions: []catalogue.RemoteCatalogSession{},
+	}
+	snapshot := ports.BrokerSnapshot{Epoch: seamBrokerTestEpoch, Revision: 1, Daemons: []ports.BrokerDaemonObservation{remote}}
+
+	var all bytes.Buffer
+	require.NoError(t, runBrokerSnapshotList(command{listAll: true}, snapshot, &all))
+	require.Contains(t, all.String(), "demo@host.test: no vev daemon")
+	require.Contains(t, all.String(), "Enter in the picker to create a session")
+	require.NotContains(t, all.String(), "no sessions")
+
+	var host bytes.Buffer
+	require.NoError(t, runBrokerSnapshotList(command{listHost: "demo@host.test"}, snapshot, &host))
+	require.Contains(t, host.String(), "no vev daemon")
+}
+
+func TestRunBrokerSnapshotListAllShowsNoDaemonAlongsideSessions(t *testing.T) {
+	remote := ports.BrokerDaemonObservation{
+		Endpoint: "demo@host.test", DisplayOrigin: "demo@host.test",
+		Registration: domain.RemoteRegistration{Endpoint: "demo@host.test", Incarnation: [16]byte{1}, Generation: 1},
+		Policy:       seamBrokerTestPolicy(), Availability: domain.RemoteAvailabilityNoDaemon,
+		Sessions: []catalogue.RemoteCatalogSession{},
+	}
+	local := seamBrokerTestSnapshot().Daemons[0]
+	local.InventoryKnown = true
+	local.Sessions = []catalogue.RemoteCatalogSession{{LifecycleID: domain.SessionLifecycleID{1}, Name: "work", State: catalogue.RemoteCatalogSessionUp, Tabs: []catalogue.RemoteCatalogTab{}}}
+	snapshot := ports.BrokerSnapshot{Epoch: seamBrokerTestEpoch, Revision: 1, Daemons: []ports.BrokerDaemonObservation{local, remote}}
+	var output bytes.Buffer
+	require.NoError(t, runBrokerSnapshotList(command{listAll: true}, snapshot, &output))
+	require.Contains(t, output.String(), "demo@host.test: no vev daemon")
+	require.Contains(t, output.String(), "work")
+}
+
 func TestRunListRendersBrokerSessionsWithoutADaemon(t *testing.T) {
 	stream := newSeamBrokerStream(protocol.Sessions{Sessions: []protocol.SessionInfo{
 		{Name: "work", State: protocol.SessionUp, Tabs: 2, Attached: true},

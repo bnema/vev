@@ -534,6 +534,7 @@ func TestParseArgs(t *testing.T) {
 		wantHostTgt  string
 		wantAll      bool
 		wantDaemon   bool
+		wantBroker   bool
 		wantErr      bool
 		nonUsageErr  bool
 	}{
@@ -578,6 +579,8 @@ func TestParseArgs(t *testing.T) {
 		{name: "kill dashed name via terminator", args: []string{"kill", "--", "--all"}, wantKind: kindKill, wantName: "--all"},
 		{name: "kill all", args: []string{"kill", "--all"}, wantKind: kindKill, wantAll: true},
 		{name: "kill daemon", args: []string{"kill", "--daemon"}, wantKind: kindKill, wantDaemon: true},
+		{name: "kill broker", args: []string{"kill", "--broker"}, wantKind: kindKill, wantBroker: true},
+		{name: "kill broker rejects extra arg", args: []string{"kill", "--broker", "extra"}, wantErr: true},
 		{name: "kill without name", args: []string{"kill"}, wantErr: true},
 		{name: "kill terminator without name", args: []string{"kill", "--"}, wantErr: true},
 		{name: "kill all rejects extra arg", args: []string{"kill", "--all", "extra"}, wantErr: true},
@@ -653,6 +656,9 @@ func TestParseArgs(t *testing.T) {
 			}
 			if got.killDaemon != tt.wantDaemon {
 				t.Errorf("killDaemon = %v, want %v", got.killDaemon, tt.wantDaemon)
+			}
+			if got.killBroker != tt.wantBroker {
+				t.Errorf("killBroker = %v, want %v", got.killBroker, tt.wantBroker)
 			}
 		})
 	}

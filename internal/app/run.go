@@ -99,6 +99,7 @@ type command struct {
 	hostTarget     string
 	killAll        bool
 	killDaemon     bool
+	killBroker     bool
 	cmd            cmdInvocation
 	brokerServe    brokerServeOptions
 	brokerClient   brokerClientOptions
@@ -140,6 +141,7 @@ usage:
   vev kill <name>     kill a session
   vev kill --all      kill all sessions (the daemon keeps running)
   vev kill --daemon   stop the active vev daemon
+  vev kill --broker   stop the active vev broker
   vev cmd <command>   run a control command (vev cmd --help)
   vev --ui-observe    expose passive observation for this interactive client
                       (optional: --ui-socket PATH)
@@ -346,7 +348,7 @@ parsedUIFlags:
 		return command{kind: kindCmd, cmd: invocation}, nil
 	case "kill":
 		if len(args) < 2 || args[1] == "" {
-			return command{}, usagef("`kill` requires a session name, --all, or --daemon")
+			return command{}, usagef("`kill` requires a session name, --all, --daemon, or --broker")
 		}
 		if args[1] == "--" {
 			if len(args) != 3 || args[2] == "" {
@@ -355,13 +357,15 @@ parsedUIFlags:
 			return command{kind: kindKill, name: args[2]}, nil
 		}
 		if len(args) > 2 {
-			return command{}, usagef("`kill` accepts exactly one session name, --all, or --daemon")
+			return command{}, usagef("`kill` accepts exactly one session name, --all, --daemon, or --broker")
 		}
 		switch args[1] {
 		case "--all":
 			return command{kind: kindKill, killAll: true}, nil
 		case "--daemon":
 			return command{kind: kindKill, killDaemon: true}, nil
+		case "--broker":
+			return command{kind: kindKill, killBroker: true}, nil
 		default:
 			return command{kind: kindKill, name: args[1]}, nil
 		}
@@ -428,6 +432,9 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindHost:
 		return runHostCommand(ctx, cmd, defaultRemoteHostDeps())
 	case kindKill:
+		if cmd.killBroker {
+			return runKillBroker(ctx)
+		}
 		return runKill(ctx, cmd.name, cmd.killAll, cmd.killDaemon)
 	case kindCmd:
 		return runCmd(ctx, cmd.cmd)
@@ -491,6 +498,7 @@ func parseHostArgs(args []string) (command, error) {
 // Composition-root factory seams keep observer propagation testable without
 // opening real transports.
 var connectBroker = connectProductionBroker
+var connectDaemonStopBroker = connectExistingBroker
 
 var newPerformanceTrace = performanceTrace
 
@@ -920,7 +928,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	_, logCloser, err := configureLogging(logging.Client, false)
+	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
@@ -950,7 +958,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	}
 	callbacks := terminalBrokerCallbacks()
 	return runBrokerClient(ctx, brokerClientConfig{
-		Connector: withPreconnected(newProductionBrokerConnector(), preconnected), Terminal: terminal, Clock: clk,
+		Logger: log, Connector: withPreconnected(newProductionBrokerConnector(), preconnected), Terminal: terminal, Clock: clk,
 		InitialNavigation: navigation, ResolveInitialNavigation: resolver,
 		AttachmentEnvironment: terminalAttachmentEnvironment(), SessionEnvironment: terminalSessionEnvironment(),
 		OnState: callbacks.OnState, OnLifecycle: callbacks.OnLifecycle, OnFailure: callbacks.OnFailure,
@@ -1021,8 +1029,11 @@ func runUIRemoteCleanup(ctx context.Context) error {
 func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
 	defer cancel()
-	service, err := connectBroker(ctx)
+	service, err := connectDaemonStopBroker(ctx)
 	if err != nil {
+		if errors.Is(err, errBrokerAbsent) {
+			return errDaemonNotRunning
+		}
 		return unreachableBrokerError(err)
 	}
 	defer func() { _ = service.Close() }()
@@ -1353,8 +1364,16 @@ func unreadableCatalogueError(stateDir string) error {
 		"    rm -rf %s", persist.ErrCatalogueUnreadable, stateDir, stateDir)
 }
 
-// runKill executes all kill operations through the per-user broker.
+// runKill uses the existing broker for daemon shutdown and connect-or-spawn
+// for session mutations.
 func runKill(ctx context.Context, name string, all, daemon bool) error {
+	if daemon {
+		err := requestDaemonStop(ctx)
+		if err == nil {
+			printKillSuccess(name, all, daemon)
+		}
+		return err
+	}
 	service, err := connectBroker(ctx)
 	if err != nil {
 		return unreachableBrokerError(err)
@@ -1367,8 +1386,6 @@ func runKill(ctx context.Context, name string, all, daemon bool) error {
 	route := localBrokerOperationRoute(service.Snapshot())
 	var result protocol.KillResult
 	switch {
-	case daemon:
-		result, err = operations.StopDaemon(ctx, route)
 	case all:
 		result, err = operations.KillAll(ctx, route)
 	default:

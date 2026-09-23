@@ -13,6 +13,23 @@ import (
 
 const productionBrokerStartupTimeout = 10 * time.Second
 
+// connectExistingBroker dials without ensuring or spawning a broker.
+func connectExistingBroker(ctx context.Context) (ports.BrokerService, error) {
+	path := brokeripc.SocketPath(productionBrokerLayout().Runtime)
+	service, err := brokeripc.NewConnector(path, brokeripc.Config{}).Connect(ctx)
+	if err != nil {
+		if backendAbsent(err) {
+			return nil, absentError(path)
+		}
+		return nil, err
+	}
+	if err := awaitBrokerPublication(ctx, service); err != nil {
+		_ = service.Close()
+		return nil, err
+	}
+	return service, nil
+}
+
 // connectProductionBroker connects to the sole per-user production broker.
 // Process election and idle lifetime remain owned by the existing broker
 // launcher and broker.Supervisor; callers receive only the semantic façade.
