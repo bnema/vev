@@ -2,12 +2,16 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"text/tabwriter"
+	"time"
 
+	"github.com/bnema/vev/internal/adapters/brokerconfig"
+	"github.com/bnema/vev/internal/adapters/brokerstore"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -21,17 +25,21 @@ const (
 )
 
 type remoteHostDeps struct {
-	connect func(context.Context) (ports.BrokerService, error)
-	stdout  io.Writer
+	connect         func(context.Context) (ports.BrokerService, error)
+	connectExisting func(context.Context) (ports.BrokerService, error)
+	stdout          io.Writer
 }
 
 func defaultRemoteHostDeps() remoteHostDeps {
-	return remoteHostDeps{connect: connectProductionBroker, stdout: os.Stdout}
+	return remoteHostDeps{connect: connectProductionBroker, connectExisting: connectExistingBroker, stdout: os.Stdout}
 }
 
 func (d remoteHostDeps) withDefaults() remoteHostDeps {
 	if d.connect == nil {
 		d.connect = connectProductionBroker
+	}
+	if d.connectExisting == nil {
+		d.connectExisting = connectExistingBroker
 	}
 	if d.stdout == nil {
 		d.stdout = os.Stdout
@@ -41,8 +49,15 @@ func (d remoteHostDeps) withDefaults() remoteHostDeps {
 
 func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error {
 	deps = deps.withDefaults()
-	service, err := deps.connect(ctx)
+	connect := deps.connect
+	if cmd.hostAction == hostActionList {
+		connect = deps.connectExisting
+	}
+	service, err := connect(ctx)
 	if err != nil {
+		if cmd.hostAction == hostActionList && errors.Is(err, errBrokerAbsent) {
+			return listDisconnectedHosts(deps.stdout)
+		}
 		return err
 	}
 	defer func() { _ = service.Close() }()
@@ -86,6 +101,42 @@ func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error
 	}
 }
 
+// listDisconnectedHosts reads configured endpoints without dialing any remote.
+func listDisconnectedHosts(w io.Writer) error {
+	state := productionBrokerLayout().State
+	hosts, err := brokerstore.ReadHosts(state)
+	var endpoints []string
+	if errors.Is(err, os.ErrNotExist) {
+		// Before the first broker run, the config is the only membership.
+		config, configErr := brokerconfig.LoadPath(productionBrokerLayout(), productionBrokerConfigPath())
+		if errors.Is(configErr, os.ErrNotExist) {
+			_, err = fmt.Fprintln(w, "no hosts")
+			return err
+		}
+		if configErr != nil {
+			return configErr
+		}
+		endpoints = config.Endpoints()
+	} else if err != nil {
+		return err
+	} else {
+		for _, host := range hosts.Hosts {
+			endpoints = append(endpoints, host.Registration.Endpoint)
+		}
+		sort.Strings(endpoints)
+	}
+	if len(endpoints) == 0 {
+		_, err = fmt.Fprintln(w, "no hosts")
+		return err
+	}
+	for _, endpoint := range endpoints {
+		if _, err := fmt.Fprintf(w, "%s: not connected (no broker running)\n", endpoint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func printBrokerHosts(w io.Writer, snapshot ports.BrokerSnapshot) error {
 	if err := snapshot.Validate(); err != nil {
 		return fmt.Errorf("vev: reading broker catalogue: %w", err)
@@ -104,10 +155,10 @@ func printBrokerHosts(w io.Writer, snapshot ports.BrokerSnapshot) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TARGET\tSOURCE\tSTATUS")
 	for _, endpoint := range endpoints {
-		status := "configured"
+		status := "not connected"
 		for _, daemon := range snapshot.Daemons {
-			if !daemon.Local && daemon.Endpoint == endpoint && daemon.Availability == domain.RemoteAvailabilityNoDaemon {
-				status = "no daemon"
+			if !daemon.Local && daemon.Endpoint == endpoint {
+				status, _ = observedHostStatus(daemon, time.Now())
 				break
 			}
 		}
@@ -117,6 +168,10 @@ func printBrokerHosts(w io.Writer, snapshot ports.BrokerSnapshot) error {
 }
 
 func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io.Writer) error {
+	return renderBrokerSnapshotList(cmd, snapshot, stdout, time.Now())
+}
+
+func renderBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io.Writer, now time.Time) error {
 	if err := snapshot.Validate(); err != nil {
 		return fmt.Errorf("vev: reading broker catalogue: %w", err)
 	}
@@ -128,8 +183,15 @@ func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io
 			continue
 		}
 		found = true
-		if !daemon.Local && daemon.Availability == domain.RemoteAvailabilityNoDaemon {
-			statuses = append(statuses, fmt.Sprintf("%s: no vev daemon — Enter in the picker to create a session", daemon.Endpoint))
+		status, showSessions := observedHostStatus(daemon, now)
+		if daemon.Local {
+			showSessions = daemon.Availability == domain.RemoteAvailabilityReachable
+		}
+		if !daemon.Local && status != "reachable" {
+			statuses = append(statuses, fmt.Sprintf("%s: %s", daemon.Endpoint, status))
+		}
+		if !showSessions {
+			continue
 		}
 		for i, session := range catalogSessionsAsInfo(daemon.Endpoint, daemon.Sessions) {
 			if daemon.Local {
@@ -151,6 +213,29 @@ func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io
 	}
 	printSessions(stdout, sessions)
 	return nil
+}
+
+// observedHostStatus never treats cached inventory as proof of current reachability.
+func observedHostStatus(daemon ports.BrokerDaemonObservation, now time.Time) (string, bool) {
+	if daemon.Availability == domain.RemoteAvailabilityNoDaemon {
+		return "no vev daemon — Enter in the picker to create a session", false
+	}
+	if daemon.Availability == domain.RemoteAvailabilityUnknown {
+		return "not yet observed", false
+	}
+	if daemon.Availability == domain.RemoteAvailabilityIncompatible {
+		return "incompatible (identity changed? use vev host rm/add)", false
+	}
+	if daemon.Availability != domain.RemoteAvailabilityReachable {
+		return "down (" + daemon.Availability.String() + ")", false
+	}
+	if daemon.LastSuccess.IsZero() || now.Sub(daemon.LastSuccess) > 15*time.Second {
+		if daemon.LastSuccess.IsZero() {
+			return "stale (last observation unknown)", false
+		}
+		return fmt.Sprintf("stale (%s since last observation)", now.Sub(daemon.LastSuccess).Round(time.Second)), false
+	}
+	return "reachable", true
 }
 
 func catalogSessionsAsInfo(host string, sessions []catalogue.RemoteCatalogSession) []protocol.SessionInfo {

@@ -1303,10 +1303,12 @@ func copyTransport(ctx context.Context, src, dst wire.Transport) error {
 	}
 }
 
-// runList obtains local live data or a multi-host catalogue snapshot through
-// the per-user broker. It never dials a daemon directly.
+// runList reads existing state without starting either background process.
 func runList(ctx context.Context, cmd command) error {
-	service, err := connectBroker(ctx)
+	service, err := connectListBroker(ctx)
+	if errors.Is(err, errBrokerAbsent) {
+		return runListWithoutBroker(ctx, cmd, os.Stdout)
+	}
 	if err != nil {
 		return unreachableBrokerError(err)
 	}
@@ -1320,9 +1322,52 @@ func runList(ctx context.Context, cmd command) error {
 	}
 	sessions, err := operations.List(ctx, localBrokerOperationRoute(service.Snapshot()))
 	if err != nil {
+		var brokerErr ports.BrokerError
+		if errors.As(err, &brokerErr) && brokerErr.Code == ports.BrokerErrorNoDaemon {
+			printSessions(os.Stdout, nil)
+			return nil
+		}
 		return err
 	}
 	printSessions(os.Stdout, sessions)
+	return nil
+}
+
+var connectListBroker = connectExistingBroker
+var dialListDaemon = ipc.DialContext
+
+func runListWithoutBroker(ctx context.Context, cmd command, out io.Writer) error {
+	if cmd.listHost != "" {
+		_, err := fmt.Fprintf(out, "%s: not connected (no broker running)\n", cmd.listHost)
+		return err
+	}
+	transport, err := dialListDaemon(ctx, ipc.SocketDir())
+	if err != nil {
+		if !backendAbsent(err) {
+			return fmt.Errorf("vev: list local sessions: %w", err)
+		}
+	} else {
+		connection := sessionwire.NewClientConnection(transport)
+		defer func() { _ = connection.Close() }()
+		if err := connection.SendClient(protocol.List{}); err != nil {
+			return fmt.Errorf("vev: request local sessions: %w", err)
+		}
+		reply, err := connection.ReceiveServer()
+		if err != nil {
+			return fmt.Errorf("vev: read local sessions: %w", err)
+		}
+		sessions, ok := reply.(protocol.Sessions)
+		if !ok {
+			return fmt.Errorf("vev: unexpected local list reply %T", reply)
+		}
+		printSessions(out, sessions.Sessions)
+	}
+	if err != nil {
+		printSessions(out, nil)
+	}
+	if cmd.listAll {
+		return listDisconnectedHosts(out)
+	}
 	return nil
 }
 

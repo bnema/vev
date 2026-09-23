@@ -205,11 +205,14 @@ var _ ports.BrokerService = (*seamBrokerService)(nil)
 func withSeamBroker(t *testing.T, service ports.BrokerService) {
 	t.Helper()
 	previous := connectBroker
+	previousList := connectListBroker
 	previousStop := connectDaemonStopBroker
 	connectBroker = func(context.Context) (ports.BrokerService, error) { return service, nil }
+	connectListBroker = connectBroker
 	connectDaemonStopBroker = connectBroker
 	t.Cleanup(func() {
 		connectBroker = previous
+		connectListBroker = previousList
 		connectDaemonStopBroker = previousStop
 	})
 }
@@ -276,8 +279,8 @@ func TestRunListRendersBrokerSessionsWithoutADaemon(t *testing.T) {
 	require.Len(t, opens, 1)
 	require.Equal(t, ports.BrokerStreamControl, opens[0].Purpose)
 	require.True(t, opens[0].Local)
-	require.Equal(t, ports.BrokerDaemonStartIfNeeded, opens[0].StartMode,
-		"a local listing may start a stopped daemon to read its records")
+	require.Equal(t, ports.BrokerDaemonExistingOnly, opens[0].StartMode,
+		"a listing must not start a stopped daemon")
 }
 
 // TestRunKillExplicitOutcomesTable pins the runKill outcome contract: an

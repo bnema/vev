@@ -250,6 +250,9 @@ func TestDaemonStartExistingOnlyNeverSpawns(t *testing.T) {
 	target := startableLocalTarget(t, carriage, ports.BrokerDaemonExistingOnly)
 	raw, err := dialBrokerLocalDaemon(context.Background(), carriage, target)
 	require.ErrorIs(t, err, os.ErrNotExist)
+	var brokerErr ports.BrokerError
+	require.ErrorAs(t, err, &brokerErr)
+	require.Equal(t, ports.BrokerErrorNoDaemon, brokerErr.Code)
 	require.Nil(t, raw)
 
 	dials, spawns := scripted.counters()

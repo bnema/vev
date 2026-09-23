@@ -156,6 +156,9 @@ func dialBrokerDaemonCarriage(ctx context.Context, carriage string, target ports
 	if target.StartMode == ports.BrokerDaemonExistingOnly {
 		// An existing-only acquisition is one dial: no lifecycle probe, no spawn
 		// lock, no process, and no fallback of any kind.
+		if daemonCarriageAbsence(err) {
+			return nil, ports.BrokerError{Code: ports.BrokerErrorNoDaemon, Cause: err}
+		}
 		return nil, err
 	}
 	// A refusal that spawning could never repair is reported unchanged: a

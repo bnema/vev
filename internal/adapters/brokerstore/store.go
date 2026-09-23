@@ -117,6 +117,23 @@ type Store struct {
 
 var _ ports.BrokerHostStore = (*Store)(nil)
 
+// ReadHosts reads committed membership without taking the writer lock or
+// creating any files. Advisory snapshots are deliberately ignored.
+func ReadHosts(dir string) (ports.BrokerHosts, error) {
+	raw, err := readBounded(filepath.Join(dir, "state.json"))
+	if err != nil {
+		return ports.BrokerHosts{}, err
+	}
+	var st state
+	if err := strict(raw, &st); err != nil {
+		return ports.BrokerHosts{}, invalid("state.json: %v", err)
+	}
+	if err := validate(st); err != nil {
+		return ports.BrokerHosts{}, err
+	}
+	return ports.BrokerHosts{Revision: st.Hosts.Revision, Hosts: ports.CloneBrokerHostRecords(st.Hosts.Hosts)}, nil
+}
+
 // Open returns only after validated unified state is durable. The
 // recovery record is written first and retained forever as the rollback copy;
 // restart reuses its generated identities instead of migrating a second time.

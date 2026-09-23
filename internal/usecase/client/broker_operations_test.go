@@ -480,7 +480,7 @@ func TestBrokerOperationsListUsesOneControlStream(t *testing.T) {
 	require.Empty(t, request.Name)
 	require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
 	require.Empty(t, request.Env)
-	require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+	require.Equal(t, ports.BrokerDaemonExistingOnly, request.StartMode)
 	require.True(t, request.Local)
 	require.Equal(t, service.ConnectionID(), request.Connection)
 	require.NotZero(t, request.Stream)

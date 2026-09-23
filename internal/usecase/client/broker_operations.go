@@ -123,7 +123,7 @@ func NewBrokerOperations(service ports.BrokerService, clock ports.Clock) (*Broke
 // unreachable: a refused or lost listing is an ordinary error. A new explicit
 // list is always safe, so the implementation never retries on its own.
 func (o *BrokerOperations) List(ctx context.Context, route BrokerOperationRoute) ([]protocol.SessionInfo, error) {
-	reply, err := o.exchange(ctx, route, ports.BrokerDaemonStartIfNeeded, protocol.List{})
+	reply, err := o.exchange(ctx, route, ports.BrokerDaemonExistingOnly, protocol.List{})
 	if err != nil {
 		if errors.Is(err, errBrokerOperationLost) {
 			return nil, fmt.Errorf("vev: reading session list: %w", err)
