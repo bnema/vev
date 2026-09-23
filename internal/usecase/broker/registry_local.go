@@ -87,7 +87,7 @@ func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, resul
 	if r.local == nil || r.localAttempt != nil {
 		return false
 	}
-	if !r.localPending && !r.localHost.NextDue.IsZero() && now.Before(r.localHost.NextDue) {
+	if !r.localPending && (r.demand == 0 || !r.localHost.NextDue.IsZero() && now.Before(r.localHost.NextDue)) {
 		return false
 	}
 	r.localPending = false

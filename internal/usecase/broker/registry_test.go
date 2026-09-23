@@ -573,10 +573,11 @@ func newTestRegistry(t *testing.T, epoch ports.BrokerEpoch, store ports.BrokerHo
 
 func startRegistry(t *testing.T, r *Registry) context.CancelFunc {
 	t.Helper()
+	r.SetDemand(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
+	t.Cleanup(func() { cancel(); <-done; r.SetDemand(false) })
 	return cancel
 }
 
@@ -1060,22 +1061,21 @@ func TestRegistrySchedulesFreshObservationAfterSuccess(t *testing.T) {
 	})
 	require.Equal(t, start, host.LastAttempt)
 	require.Equal(t, start, host.LastSuccess)
-	require.Equal(t, start.Add(defaultFreshFor), host.NextDue)
+	require.Equal(t, start.Add(defaultDemandFreshForRemote), host.NextDue)
 	require.Zero(t, host.ConsecutiveFailures)
 	require.Zero(t, host.FailureEpisode)
 
 	// A fresh host is not observed again before its scheduled deadline.
-	clock.Advance(defaultFreshFor - time.Nanosecond)
+	clock.Advance(defaultDemandFreshForRemote - time.Nanosecond)
 	requireNoProbeWithin(t, probe, probeGrace)
 	clock.Advance(time.Nanosecond)
 	next := receiveCall(t, probe)
 	require.True(t, next.registration.Equal(reg))
 }
 
-// TestRegistryAppliesSubscriptionDemandFreshness pins C2: apply/applyLocal
+// TestRegistryAppliesSubscriptionDemandFreshness checks that apply/applyLocal
 // schedule NextDue on RegistryConfig's demand cadence while Registry.SetDemand
-// reports a live client subscription, and keep the passive defaultFreshFor
-// once demand drops back to zero. It exercises both the remote and the local
+// reports a live client subscription. It exercises both the remote and the local
 // observation paths on the same registry, since service.go's Subscribe/Close
 // wiring feeds one shared demand counter for both.
 func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
@@ -1089,9 +1089,7 @@ func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
 		demand    bool
 		wantAfter time.Duration
 	}{
-		{name: "remote no demand keeps default", local: false, demand: false, wantAfter: defaultFreshFor},
 		{name: "remote demand uses faster cadence", local: false, demand: true, wantAfter: demandRemote},
-		{name: "local no demand keeps default", local: true, demand: false, wantAfter: defaultFreshFor},
 		{name: "local demand uses faster cadence", local: true, demand: true, wantAfter: demandLocal},
 	}
 
@@ -1141,10 +1139,8 @@ func TestRegistryAppliesSubscriptionDemandFreshness(t *testing.T) {
 	}
 }
 
-// TestRegistrySetDemandIsCountedNotBoolean pins that SetDemand is a balanced
-// counter: two openings require two closings before the schedule reverts to
-// the passive default, exactly as two concurrent client subscriptions would
-// drive it through service.go.
+// TestRegistrySetDemandIsCountedNotBoolean checks that subscriptions balance:
+// observation stops after the last closes and resumes immediately on reopen.
 func TestRegistrySetDemandIsCountedNotBoolean(t *testing.T) {
 	start := time.Unix(100, 0)
 	clock := newManualClock(start)
@@ -1167,17 +1163,18 @@ func TestRegistrySetDemandIsCountedNotBoolean(t *testing.T) {
 	})
 	require.Equal(t, start.Add(500*time.Millisecond), host.NextDue, "one remaining demand unit must still use the faster cadence")
 
-	// The second, and last, subscription closes: demand drops back to zero.
+	// The last subscription closes: no scheduled observation runs for nobody.
 	registry.SetDemand(false)
-
-	clock.Advance(500 * time.Millisecond)
-	secondSuccess := start.Add(500 * time.Millisecond)
+	registry.SetDemand(false) // balance the fixture's first subscription
+	clock.Advance(time.Hour)
+	requireNoProbeWithin(t, probe, probeGrace)
+	registry.SetDemand(true)
 	next := receiveCall(t, probe)
 	next.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
 	host = waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
-		return !host.Checking && host.LastSuccess.Equal(secondSuccess)
+		return !host.Checking && host.LastSuccess.Equal(clock.Now())
 	})
-	require.Equal(t, secondSuccess.Add(defaultFreshFor), host.NextDue, "no live demand must revert to the passive default cadence")
+	require.Equal(t, clock.Now().Add(500*time.Millisecond), host.NextDue)
 }
 
 func TestRegistryDemandOverridesFreshSchedule(t *testing.T) {
@@ -1224,7 +1221,7 @@ func TestRegistryCoalescesConcurrentDemand(t *testing.T) {
 	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return host.Availability == domain.RemoteAvailabilityReachable && host.LastSuccess.Equal(start)
 	})
-	require.Equal(t, start.Add(defaultFreshFor), host.NextDue)
+	require.Equal(t, start.Add(defaultDemandFreshForRemote), host.NextDue)
 
 	// The single coalesced follow-up is admitted once the first completes.
 	followUp := receiveCall(t, probe)
@@ -1396,8 +1393,8 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 				require.Equal(t, uint64(1), host.FailureEpisode)
 				// No observation succeeded yet, so there is no last success.
 				require.True(t, host.LastSuccess.IsZero())
-				// Every non-reachable outcome retries on the capped cadence.
-				require.Equal(t, start.Add(defaultRetryBase), host.NextDue)
+				// A watched host retries on the demand cadence.
+				require.Equal(t, start.Add(defaultDemandFreshForRemote), host.NextDue)
 			}
 			if tt.wantErr != nil {
 				require.ErrorIs(t, host.LastFailure, tt.wantErr)
@@ -1464,7 +1461,7 @@ func TestRegistryClassifiesOversizedProbeProjectionAsInvalidResponse(t *testing.
 	// replaces it.
 	require.Len(t, host.Sessions, 1)
 	require.Equal(t, "work", host.Sessions[0].Name)
-	require.Equal(t, clock.Now().Add(defaultRetryBase), host.NextDue)
+	require.Equal(t, clock.Now().Add(defaultDemandFreshForRemote), host.NextDue)
 }
 
 func TestRegistryAcceptsProbeProjectionAtSessionBound(t *testing.T) {
@@ -1686,16 +1683,13 @@ func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {
 	startRegistry(t, registry)
 
 	probeErr := errors.New("offline")
-	// The retry cadence matches the legacy remotes monitor: a 5s base doubling
-	// to a 60s cap.
+	// A watched host retries on its two-second demand cadence even as the
+	// underlying exponential failure count increases.
 	want := []time.Duration{
-		5 * time.Second,
-		10 * time.Second,
-		20 * time.Second,
-		40 * time.Second,
-		time.Minute, // 80s capped at defaultRetryLimit
-		time.Minute,
-		time.Minute,
+		defaultDemandFreshForRemote, defaultDemandFreshForRemote,
+		defaultDemandFreshForRemote, defaultDemandFreshForRemote,
+		defaultDemandFreshForRemote, defaultDemandFreshForRemote,
+		defaultDemandFreshForRemote,
 	}
 	for index, delay := range want {
 		call := receiveCall(t, probe)
@@ -1734,9 +1728,9 @@ func TestRegistryJitterAppliesToRetryAndHealthyRefresh(t *testing.T) {
 	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
 		return !host.Checking && host.Availability == domain.RemoteAvailabilityUnreachable
 	})
-	require.Equal(t, start.Add(defaultRetryBase/2), host.NextDue)
+	require.Equal(t, start.Add(defaultDemandFreshForRemote/2), host.NextDue)
 
-	clock.Advance(defaultRetryBase / 2)
+	clock.Advance(defaultDemandFreshForRemote / 2)
 	next := receiveCall(t, probe)
 	successAt := clock.Now()
 	next.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
@@ -1745,7 +1739,7 @@ func TestRegistryJitterAppliesToRetryAndHealthyRefresh(t *testing.T) {
 	})
 	// The healthy refresh is jittered too: a fleet of hosts never converges
 	// on one instant.
-	require.Equal(t, successAt.Add(defaultFreshFor/2), host.NextDue)
+	require.Equal(t, successAt.Add(defaultDemandFreshForRemote/2), host.NextDue)
 }
 
 func TestRegistryJitterIsDeterministicAndBounded(t *testing.T) {
@@ -1840,6 +1834,7 @@ func TestRegistryFencesRetiredAttemptsAcrossRemovalAndIdenticalReAdd(t *testing.
 	results := make(chan probeResult, 1)
 	dispatch := func() { registry.dispatch(ctx, clock.Now(), results) }
 
+	registry.RequestProbe(reg.Endpoint)
 	dispatch()
 	retiredCall := receiveCall(t, probe)
 	require.True(t, retiredCall.registration.Equal(reg))
@@ -1864,6 +1859,7 @@ func TestRegistryFencesRetiredAttemptsAcrossRemovalAndIdenticalReAdd(t *testing.
 	// the attempt token can fence the retired completion.
 	require.NoError(t, registry.setHosts(hostRecords(reg)))
 	require.Empty(t, registry.Snapshot().Removed)
+	registry.RequestProbe(reg.Endpoint)
 	dispatch()
 	freshCall := receiveCall(t, probe)
 	require.True(t, freshCall.registration.Equal(reg))
@@ -1932,6 +1928,7 @@ func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); registry.Run(ctx) }()
+	registry.RequestProbe(first.Endpoint)
 
 	// Drop the initial attempt's start signal so each lockstep round below
 	// consumes the start of its own replacement attempt.
@@ -1953,6 +1950,7 @@ func TestRegistryChurnKeepsOneActiveProbePerEndpoint(t *testing.T) {
 			next = second
 		}
 		require.NoError(t, registry.setHosts(hostRecords(next)))
+		registry.RequestProbe(next.Endpoint)
 		select {
 		case <-probe.startedSig:
 		case <-time.After(time.Second):
@@ -2276,6 +2274,7 @@ func TestRegistryBoundsSlowSubscribersAndStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); registry.Run(ctx) }()
+	registry.RequestProbe(reg.Endpoint)
 	receiveCall(t, probe)
 	cancel()
 	select {
@@ -2308,6 +2307,7 @@ func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); registry.Run(ctx) }()
+	registry.RequestProbe(reg.Endpoint)
 
 	call := receiveCall(t, probe)
 	require.True(t, waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {

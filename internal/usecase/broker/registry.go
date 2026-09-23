@@ -20,11 +20,8 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Observation cadence. The broker deliberately mirrors the legacy remotes
-// monitor cadence (internal/usecase/remotes) so a fleet observed through
-// either path refreshes on the same schedule. The duplication is temporary:
-// the registry is intended to replace that monitor, and these constants move
-// to a single owner once the old monitor is removed.
+// Observation cadence. No client means no scheduled observations; the
+// fifteen-second interval only applies to an absent daemon under demand.
 const (
 	defaultFreshFor   = 15 * time.Second
 	defaultRetryBase  = 5 * time.Second
@@ -32,9 +29,7 @@ const (
 	// defaultDemandFreshForLocal and defaultDemandFreshForRemote are the
 	// built-in demand cadences RegistryConfig falls back to when
 	// DemandFreshForLocal/DemandFreshForRemote is left zero. They apply only
-	// while at least one client subscription is live (see Registry.SetDemand);
-	// otherwise defaultFreshFor governs every re-probe schedule exactly as
-	// before.
+	// while at least one client subscription is live (see Registry.SetDemand).
 	defaultDemandFreshForLocal  = 1 * time.Second
 	defaultDemandFreshForRemote = 2 * time.Second
 	// defaultProbeTimeout bounds one observation attempt end to end: dial,
@@ -89,8 +84,7 @@ type RegistryConfig struct {
 	// apply/applyLocal schedule into NextDue while Registry.SetDemand reports
 	// at least one live client subscription. A zero value falls back to
 	// defaultDemandFreshForLocal (about 1s) or defaultDemandFreshForRemote
-	// (about 2s). With no live subscription, NextDue keeps the passive
-	// defaultFreshFor (15s) exactly as before this field existed.
+	// (about 2s). With no live subscription, no scheduled probe runs.
 	DemandFreshForLocal  time.Duration
 	DemandFreshForRemote time.Duration
 	// ProbeTimeout bounds every local and remote observation attempt on the
@@ -185,8 +179,7 @@ type Registry struct {
 	probeTimeout time.Duration
 	// demand counts live client subscriptions: Registry.SetDemand(true) is one
 	// subscription opening and SetDemand(false) is one closing. Guarded by mu.
-	// While demand > 0, apply and applyLocal schedule NextDue on the faster
-	// demand cadence instead of the passive freshFor.
+	// While demand > 0, apply and applyLocal schedule subsequent probes.
 	demand int
 }
 
@@ -862,17 +855,20 @@ func (r *Registry) RequestProbe(endpoint string) {
 // SetDemand records one live client subscription opening (active=true) or
 // closing (active=false). internal/usecase/broker/service.go calls it from
 // Service.Subscribe and serviceSubscription.Close, so the demand count tracks
-// exactly the connections a client is actively watching. While the count is
-// above zero, apply and applyLocal schedule NextDue on the faster demand
-// cadence (demandFreshForLocal/demandFreshForRemote) instead of the passive
-// defaultFreshFor. The transition takes effect for the next observation to
-// complete; hint wakes the run loop so a registry idling on its timer
-// re-evaluates promptly rather than waiting out the current cadence. A
-// disabled registry never observes, so demand is still counted (Close must
-// stay balanced) but never changes any schedule.
+// exactly the connections a client is actively watching. The first
+// subscription requests one immediate observation per host; while demand
+// stays positive, the demand cadence schedules later observations. With no
+// subscription, only explicit RequestProbe calls dispatch. A disabled registry
+// still counts subscriptions but never observes.
 func (r *Registry) SetDemand(active bool) {
 	r.mu.Lock()
 	if active {
+		if r.demand == 0 {
+			r.localPending = r.local != nil
+			for endpoint := range r.hosts {
+				r.pending[endpoint] = true
+			}
+		}
 		r.demand++
 	} else if r.demand > 0 {
 		r.demand--
@@ -881,9 +877,8 @@ func (r *Registry) SetDemand(active bool) {
 	r.hint()
 }
 
-// freshForLocked returns the re-probe cadence to stamp into NextDue: the
-// faster demand cadence while a client subscription is live, otherwise the
-// passive default. Callers must hold r.mu.
+// freshForLocked returns the demand cadence while subscribed. An absent
+// daemon uses the longer freshFor interval instead. Callers must hold r.mu.
 func (r *Registry) freshForLocked(local bool) time.Duration {
 	if r.demand <= 0 {
 		return r.freshFor
@@ -1002,12 +997,16 @@ type probeResult struct {
 
 func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- probeResult) {
 	r.mu.Lock()
+	if r.demand == 0 && len(r.pending) == 0 && !r.localPending {
+		r.mu.Unlock()
+		return
+	}
 	started := false
 	for endpoint, host := range r.hosts {
 		if _, inflight := r.inflight[endpoint]; inflight {
 			continue
 		}
-		if !r.pending[endpoint] && !host.NextDue.IsZero() && now.Before(host.NextDue) {
+		if !r.pending[endpoint] && (r.demand == 0 || !host.NextDue.IsZero() && now.Before(host.NextDue)) {
 			continue
 		}
 		delete(r.pending, endpoint)
@@ -1257,6 +1256,12 @@ func jittered(base time.Duration, endpoint string, attempt uint64) time.Duration
 func (r *Registry) nextDelay(now time.Time) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.demand == 0 {
+		if r.localPending || len(r.pending) > 0 {
+			return 0
+		}
+		return time.Hour
+	}
 	var earliest time.Time
 	if r.local != nil && r.localAttempt == nil {
 		if r.localHost.NextDue.IsZero() {

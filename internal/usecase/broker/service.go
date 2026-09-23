@@ -227,9 +227,8 @@ func (s *Service) Snapshot() ports.BrokerSnapshot { return s.registry.Snapshot()
 // Close releases every subscription this connection still owns. A closed
 // connection refuses new subscriptions. Opening a subscription also records
 // one unit of registry demand (Registry.SetDemand(true)): while a client
-// keeps watching the snapshot, the registry re-probes on the faster demand
-// cadence instead of the passive default. serviceSubscription.Close balances
-// it with SetDemand(false).
+// watches the snapshot, the registry observes on the demand cadence. Without
+// a subscriber it performs no scheduled observations. Close balances demand.
 func (s *Service) Subscribe() (ports.BrokerSubscription, error) {
 	s.mu.Lock()
 	if s.closed {

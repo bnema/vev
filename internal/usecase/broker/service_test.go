@@ -336,10 +336,9 @@ func TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-	// The registry's first dispatch (Run start) already probes the local
-	// daemon because it has never been observed: settle it so NextDue lands
-	// far in the future (defaultFreshFor, no live demand yet), and only an
-	// explicit reconcile can explain any further attempt.
+	// Explicitly request the initial observation; admission alone does not
+	// subscribe to snapshots and must not cause background polling.
+	registry.RequestProbe("")
 	call := receiveLocalCall(t, local)
 	call.result <- reachable()
 	waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
@@ -739,6 +738,7 @@ func TestServiceRequestReconcileDelegatesToRegistry(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
+	registry.RequestProbe(registration.Endpoint)
 	var initial probeCall
 	require.Eventually(t, func() bool {
 		select {
