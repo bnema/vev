@@ -72,6 +72,7 @@ func recentRouteEntryToWire(entry protocol.RecentRouteEntry) (*wire.RecentRouteE
 		Attention:    entry.Attention,
 		Reachability: uint32(entry.Reachability),
 		AttentionSeq: entry.AttentionSeq,
+		Visited:      entry.Visited,
 	}, nil
 }
 
@@ -115,6 +116,7 @@ func recentRouteEntryFromWire(message *wire.RecentRouteEntry) (protocol.RecentRo
 		return protocol.RecentRouteEntry{}, err
 	}
 	entry.AttentionSeq = message.GetAttentionSeq()
+	entry.Visited = message.GetVisited()
 	return entry, nil
 }
 

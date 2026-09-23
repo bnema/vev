@@ -990,7 +990,7 @@ func TestBarStateForContextualRecentUsesClientSnapshot(t *testing.T) {
 
 	snapshot := protocol.RecentRouteSnapshot{
 		Generation: 1,
-		Entries:    []protocol.RecentRouteEntry{{Key: 2, Generation: 1, Target: testRouteTarget("captured", 2), Name: "captured", Kind: protocol.RouteKindLocal, Attention: true}},
+		Entries:    []protocol.RecentRouteEntry{{Key: 2, Generation: 1, Target: testRouteTarget("captured", 2), Name: "captured", Kind: protocol.RouteKindLocal, Attention: true, Visited: true}},
 	}
 	hints := palette.ContextualHints{
 		Kind:         command.ContextHintRecentSessions,

@@ -90,7 +90,7 @@ func TestRecentSessionHintsAndRankedRenderingShareCanonicalLabels(t *testing.T) 
 	snapshot := protocol.RecentRouteSnapshot{
 		Generation: 1,
 		Entries: []protocol.RecentRouteEntry{
-			{Key: 1, Generation: 1, Target: testRouteTarget("logs", 1), Name: "logs", Kind: protocol.RouteKindLocal, Attention: true},
+			{Key: 1, Generation: 1, Target: testRouteTarget("logs", 1), Name: "logs", Kind: protocol.RouteKindLocal, Attention: true, Visited: true},
 			testRouteEntry(2, 1, "logs", 2, protocol.RouteKindLocal),
 		},
 	}

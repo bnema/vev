@@ -282,6 +282,7 @@ func (d *Daemon) refreshPalette(ac *attachedClient) {
 }
 
 func recentRouteHints(snapshot protocol.RecentRouteSnapshot, args []string) palette.ContextualHints {
+	snapshot = visitedRouteSnapshot(snapshot)
 	formatted := formatRecentRouteSnapshot(snapshot)
 	names := make([]string, len(formatted))
 	for i, entry := range formatted {
@@ -1123,10 +1124,11 @@ func (e paletteExec) YankLastNotification() error {
 }
 
 func (e paletteExec) JumpRecentSession(rank int) error {
-	if e.routeSnapshot.Generation == 0 || rank < 1 || rank > len(e.routeSnapshot.Entries) {
+	visited := visitedRouteSnapshot(e.routeSnapshot)
+	if visited.Generation == 0 || rank < 1 || rank > len(visited.Entries) {
 		return command.ErrInvalidArguments
 	}
-	entry := e.routeSnapshot.Entries[rank-1]
+	entry := visited.Entries[rank-1]
 	return e.NavigateRecentRoute(protocol.RouteNavigationAction{
 		SnapshotGeneration: e.routeSnapshot.Generation,
 		Key:                entry.Key,

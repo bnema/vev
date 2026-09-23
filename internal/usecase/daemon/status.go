@@ -237,7 +237,7 @@ func rankedRecentForHintsWithSnapshot(hints *palette.ContextualHints, snapshot p
 	}
 	var formatted []recentRouteDisplay
 	if snapshot.Generation != 0 {
-		formatted = formatRecentRouteSnapshot(snapshot)
+		formatted = formatRecentRouteSnapshot(visitedRouteSnapshot(snapshot))
 	}
 	entries := make([]rankedRecent, 0, len(hints.Recent))
 	for i, hint := range hints.Recent {
@@ -296,7 +296,7 @@ func (d *Daemon) barStateForAttachmentPaletteHintsFor(cur *session, ac *attached
 	if ranked != nil {
 		state.rankedRecent = ranked
 	} else if routeSnapshot.Generation != 0 {
-		state.mru = formatRecentRouteSnapshot(routeSnapshot)
+		state.mru = formatRecentRouteSnapshot(visitedRouteSnapshot(routeSnapshot))
 	}
 	return state
 }

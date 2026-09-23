@@ -162,6 +162,9 @@ message RecentRouteEntry {
   uint32 reachability = 9;
   // Client-assigned attention onset order; zero without attention.
   uint64 attention_seq = 10;
+  // True once this client attached to the route; the status-bar history
+  // shows only visited routes.
+  bool visited = 11;
 }
 
 // RouteHost is one creation destination other than the serving daemon.

@@ -318,6 +318,9 @@ type RecentRouteEntry struct {
 	// AttentionSeq orders attention onsets across every daemon the client
 	// observes: a smaller value is older. It is zero without attention.
 	AttentionSeq uint64
+	// Visited reports that this client attached to the route. The status-bar
+	// history and jump-recent ranks show only visited routes.
+	Visited bool
 }
 
 // RouteHost is one daemon the client can create a session on, other than

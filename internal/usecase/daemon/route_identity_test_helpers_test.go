@@ -12,6 +12,6 @@ func testRouteTarget(name string, marker byte) protocol.ExactSessionTarget {
 func testRouteEntry(key, generation uint64, name string, marker byte, kind protocol.RouteKind) protocol.RecentRouteEntry {
 	return protocol.RecentRouteEntry{
 		Key: key, Generation: generation, Target: testRouteTarget(name, marker),
-		Name: name, Kind: kind,
+		Name: name, Kind: kind, Visited: true,
 	}
 }

@@ -35,6 +35,24 @@ func recentRoutePresentationsFromSnapshot(snapshot protocol.RecentRouteSnapshot)
 	return out
 }
 
+// visitedRouteSnapshot keeps only the routes this client attached to. The
+// status-bar history and jump-recent ranks start from the current session and
+// grow as the client visits others; the palette and attention keep the full
+// snapshot.
+func visitedRouteSnapshot(snapshot protocol.RecentRouteSnapshot) protocol.RecentRouteSnapshot {
+	if snapshot.Entries == nil {
+		return snapshot
+	}
+	visited := make([]protocol.RecentRouteEntry, 0, len(snapshot.Entries))
+	for _, entry := range snapshot.Entries {
+		if entry.Visited {
+			visited = append(visited, entry)
+		}
+	}
+	snapshot.Entries = visited
+	return snapshot
+}
+
 func formatRecentRouteSnapshot(snapshot protocol.RecentRouteSnapshot) []recentRouteDisplay {
 	return formatRecentRoutePresentations(recentRoutePresentationsFromSnapshot(snapshot))
 }

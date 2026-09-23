@@ -13,7 +13,7 @@ func TestAttachmentStatusUsesClientRouteSnapshot(t *testing.T) {
 		Generation: 2,
 		Active:     protocol.RouteRef{Key: 3, Generation: 2},
 		Entries: []protocol.RecentRouteEntry{
-			{Key: 2, Generation: 1, Target: testRouteTarget("logs", 2), Name: "logs", HostLabel: "user@edge", Kind: protocol.RouteKindRemote},
+			{Key: 2, Generation: 1, Target: testRouteTarget("logs", 2), Name: "logs", HostLabel: "user@edge", Kind: protocol.RouteKindRemote, Visited: true},
 			testRouteEntry(1, 1, "work", 1, protocol.RouteKindLocal),
 		},
 	})
@@ -30,7 +30,7 @@ func TestAttachmentStatusUsesClientPublishedAttention(t *testing.T) {
 		Generation: 2,
 		Active:     protocol.RouteRef{Key: 3, Generation: 2},
 		Entries: []protocol.RecentRouteEntry{{
-			Key: 2, Generation: 1, Target: testRouteTarget("local", 9), Name: "local", Kind: protocol.RouteKindLocal, Attention: true,
+			Key: 2, Generation: 1, Target: testRouteTarget("local", 9), Name: "local", Kind: protocol.RouteKindLocal, Attention: true, Visited: true,
 		}},
 	})
 
@@ -104,7 +104,7 @@ func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
 	snapshot := protocol.RecentRouteSnapshot{
 		Generation: 8,
 		Entries: []protocol.RecentRouteEntry{{
-			Key: 11, Generation: 7, Target: testRouteTarget("logs", 11), Name: "logs", HostLabel: "edge", Kind: protocol.RouteKindRemote,
+			Key: 11, Generation: 7, Target: testRouteTarget("logs", 11), Name: "logs", HostLabel: "edge", Kind: protocol.RouteKindRemote, Visited: true,
 		}},
 	}
 
@@ -115,4 +115,32 @@ func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
 	require.Equal(t, uint64(8), hints.Recent[0].SnapshotGeneration)
 	require.Equal(t, uint64(11), hints.Recent[0].Key)
 	require.Equal(t, uint64(7), hints.Recent[0].Generation)
+}
+
+func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
+	unvisited := testRouteEntry(4, 1, "other", 4, protocol.RouteKindLocal)
+	unvisited.Visited = false
+	tests := []struct {
+		name    string
+		entries []protocol.RecentRouteEntry
+		want    []string
+	}{
+		{name: "fresh client shows no history", entries: []protocol.RecentRouteEntry{unvisited}, want: nil},
+		{name: "visited routes keep their order", entries: []protocol.RecentRouteEntry{testRouteEntry(2, 1, "work", 2, protocol.RouteKindLocal), unvisited, testRouteEntry(3, 1, "logs", 3, protocol.RouteKindLocal)}, want: []string{"work", "logs"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, ac, _ := newManualSessionWithPTYs(t, nil)
+			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 2, Entries: tt.entries})
+
+			state := d.barStateForAttachmentPaletteHintsFor(sess, ac, "", nil, protocol.RecentRouteSnapshot{})
+
+			var names []string
+			for _, entry := range state.mru {
+				names = append(names, entry.name)
+			}
+			require.Equal(t, tt.want, names)
+			require.Equal(t, len(tt.want), len(recentRouteHints(ac.routeSnapshotCopy(), nil).Recent))
+		})
+	}
 }

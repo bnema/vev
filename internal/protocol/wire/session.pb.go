@@ -1234,7 +1234,10 @@ type RecentRouteEntry struct {
 	// Closed reachability taxonomy: 0 = unknown, 1 = reachable, 2 = unavailable.
 	Reachability uint32 `protobuf:"varint,9,opt,name=reachability,proto3" json:"reachability,omitempty"`
 	// Client-assigned attention onset order; zero without attention.
-	AttentionSeq  uint64 `protobuf:"varint,10,opt,name=attention_seq,json=attentionSeq,proto3" json:"attention_seq,omitempty"`
+	AttentionSeq uint64 `protobuf:"varint,10,opt,name=attention_seq,json=attentionSeq,proto3" json:"attention_seq,omitempty"`
+	// True once this client attached to the route; the status-bar history
+	// shows only visited routes.
+	Visited       bool `protobuf:"varint,11,opt,name=visited,proto3" json:"visited,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1337,6 +1340,13 @@ func (x *RecentRouteEntry) GetAttentionSeq() uint64 {
 		return x.AttentionSeq
 	}
 	return 0
+}
+
+func (x *RecentRouteEntry) GetVisited() bool {
+	if x != nil {
+		return x.Visited
+	}
+	return false
 }
 
 // RouteHost is one creation destination other than the serving daemon.
@@ -2357,7 +2367,7 @@ const file_session_proto_rawDesc = "" +
 	"\n" +
 	"source_key\x18\x03 \x01(\tR\tsourceKey\"Y\n" +
 	"\x1aRouteAttentionSubscription\x12;\n" +
-	"\atargets\x18\x01 \x03(\v2!.vev.wire.v1.RouteAttentionTargetR\atargets\"\xc2\x02\n" +
+	"\atargets\x18\x01 \x03(\v2!.vev.wire.v1.RouteAttentionTargetR\atargets\"\xdc\x02\n" +
 	"\x10RecentRouteEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
 	"\n" +
@@ -2372,7 +2382,8 @@ const file_session_proto_rawDesc = "" +
 	"\tattention\x18\b \x01(\bR\tattention\x12\"\n" +
 	"\freachability\x18\t \x01(\rR\freachability\x12#\n" +
 	"\rattention_seq\x18\n" +
-	" \x01(\x04R\fattentionSeq\"g\n" +
+	" \x01(\x04R\fattentionSeq\x12\x18\n" +
+	"\avisited\x18\v \x01(\bR\avisited\"g\n" +
 	"\tRouteHost\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
 	"\n" +

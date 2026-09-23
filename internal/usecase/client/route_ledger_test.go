@@ -147,6 +147,14 @@ func TestRouteLedgerActivePreviousAndHome(t *testing.T) {
 			previous, ok := ledger.resolve(snapshot.Previous)
 			require.True(t, ok)
 			require.Equal(t, tt.wantPrevious, previous.target.SessionName)
+			require.True(t, snapshot.ActiveEntry.Visited)
+			var visited []string
+			for _, entry := range snapshot.Entries {
+				if entry.Visited {
+					visited = append(visited, entry.Name)
+				}
+			}
+			require.Equal(t, []string{tt.wantPrevious}, visited, "only attached routes are visited")
 			kinds := make([]protocol.RouteKind, 0, len(snapshot.Hosts))
 			for _, host := range snapshot.Hosts {
 				kinds = append(kinds, host.Kind)

@@ -201,6 +201,7 @@ func (l *routeLedger) build(snapshot ports.BrokerSnapshot, active routeActive) (
 		entry := routeActiveEntry(candidates, activeID, active, activeObservation)
 		entry.Key, entry.Generation = l.keyFor(activeID), 1
 		entry.AttentionSeq = l.attention[activeID]
+		entry.Visited = true
 		if validateRouteEntryShape(entry) == nil {
 			next.ActiveEntry = entry
 			next.Active = protocol.RouteRef{Key: entry.Key, Generation: entry.Generation}
@@ -220,6 +221,7 @@ func (l *routeLedger) build(snapshot ports.BrokerSnapshot, active routeActive) (
 		entry := candidate.entry
 		entry.Key, entry.Generation = l.keyFor(candidate.id), 1
 		entry.AttentionSeq = l.attention[candidate.id]
+		entry.Visited = l.attached[candidate.id] != 0
 		ref := protocol.RouteRef{Key: entry.Key, Generation: entry.Generation}
 		if next.Previous.IsZero() && l.attached[candidate.id] != 0 {
 			next.Previous = ref
