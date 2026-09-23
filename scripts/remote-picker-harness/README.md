@@ -70,9 +70,14 @@ exhaustive transport or geometry matrix. For a focused run, set
 above (for example `warm-reuse@quic warm-reuse@stdio`); the containers, keys
 and artifacts still come from the same setup.
 
-Known gap: `client-picker-navigate` fails independently of this matrix. After
-entering the search and the exact target name, the client-owned picker commits
-the current session instead of the searched target. It fails in isolation and
-at any log level; it predates the named-direct refactor, which previously
-aborted the full run before this scenario was reached. The named-direct, warm
-reuse and hybrid scenarios above are green.
+Remote scenarios wait for the fixture session to reach the broker's
+committed publication (`vev ls remote` in the client container) before they
+search the palette: the broker owns remote observation and re-probes each host
+on its own cadence. A driver request refused with `input_busy` (not accepted)
+is resent for up to three seconds; accepted actions are never retried.
+
+`client-picker-navigate` opens the client-owned picker over the live
+attachment with `SSP`, searches the target session by name, and commits it.
+Every step must settle as `processed`: the opener on its daemon receipt, the
+search keys at the client's event-loop boundary, and the commit on the
+destination's first committed publication.

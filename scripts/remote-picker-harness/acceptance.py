@@ -38,8 +38,9 @@ DAEMON_LOG = "vev-daemon.log"
 STDIO_LOG = "vev-stdio.log"
 # The broker logs one broker_remote_dial per remote physical bootstrap.
 BROKER_LOG = "broker/log/vev-daemon.log"
-REMOTE_CACHE_FILE = "remote-catalog-cache.json"
+REMOTE_HOST = "remote"
 INVENTORY_TIMEOUT_S = 45
+INPUT_BUSY_RETRY_S = 3
 ARTIFACTS_DIR = os.environ.get("VEV_ACCEPTANCE_ARTIFACTS_DIR", "").strip()
 # The warm-reuse scenario requires client debug events. Every driver gets
 # debug logging unless a scenario explicitly overrides it.
@@ -47,7 +48,9 @@ DRIVER_BASE_ENV = {"VEV_LOG": "debug"}
 
 
 class DriverError(Exception):
-    pass
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class Driver:
@@ -118,10 +121,30 @@ class Driver:
             except json.JSONDecodeError as exc:
                 raise DriverError(f"invalid driver JSON while reading {what}: {exc}") from exc
             if "error" in envelope:
-                raise DriverError(f"driver error while reading {what}: {envelope['error']}")
+                error = envelope["error"]
+                raise DriverError(f"driver error while reading {what}: {error}",
+                                  code=error.get("code") if isinstance(error, dict) else None)
             return envelope["result"]
 
     def call(self, operation, **fields):
+        """Send one request; retry only an input admission the owner refused.
+
+        ``input_busy`` is returned with ``accepted: false`` while the input
+        owner is still delivering an earlier terminal read (for example a
+        reply to a query the new attachment's first frame emitted). Nothing
+        was admitted, so resending is the documented client behavior; every
+        other error, and every accepted action, is reported unchanged.
+        """
+        deadline = time.monotonic() + INPUT_BUSY_RETRY_S
+        while True:
+            try:
+                return self._call_once(operation, **fields)
+            except DriverError as exc:
+                if exc.code != "input_busy" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    def _call_once(self, operation, **fields):
         self.request_id += 1
         request = dict(version=1, id=self.request_id, op=operation,
                        attachment=self.attachment, **fields)
@@ -255,16 +278,18 @@ def write_artifact(name, payload):
 
 
 def await_remote_inventory(container, session, timeout_s=INVENTORY_TIMEOUT_S, interval_s=0.5):
-    """Wait until the local daemon publishes ``session`` for its remote host.
+    """Wait until the broker publishes ``session`` for its remote host.
 
-    The remote monitor observes each host on a ~15s healthy cadence, so a
-    freshly created remote session is invisible to the palette until the next
-    observation. Wait on the daemon's persisted catalog cache (rewritten right
-    after a successful observation) rather than guessing a timeout, so the
-    following navigation is deterministic and near-immediate in isolation.
+    The broker owns remote observation: it re-probes each configured host on
+    its own healthy cadence, and every attached client derives its palette
+    and picker rows from the broker's committed publication. A freshly created
+    remote session is invisible until the next observation, so wait on that
+    publication itself (``vev ls HOST`` reads the broker snapshot) rather than
+    guessing a timeout. The following palette search then asserts the row
+    independently.
     """
-    script = (f'f="{STATE_LOG_DIR}/{REMOTE_CACHE_FILE}"; '
-              f'grep -qF "{session}" "$f" 2>/dev/null')
+    display = f"{session}@{REMOTE_HOST}"
+    script = f'vev ls {REMOTE_HOST} 2>/dev/null | grep -qF "{display} "'
     deadline = time.monotonic() + timeout_s
     while True:
         try:
@@ -274,7 +299,7 @@ def await_remote_inventory(container, session, timeout_s=INVENTORY_TIMEOUT_S, in
             pass
         if time.monotonic() >= deadline:
             raise DriverError(
-                f"remote session {session} never reached the local inventory "
+                f"remote session {session} never reached the broker publication "
                 f"within {timeout_s}s")
         time.sleep(interval_s)
 
