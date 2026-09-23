@@ -143,22 +143,19 @@ func runBrokerReady(ctx context.Context, o brokerReadyOptions, out io.Writer) er
 			}
 			continue
 		}
-		result, reconnect := observeBrokerReady(deadline, o, service)
+		result := observeBrokerReady(deadline, o, service)
 		_ = service.Close()
 		if result != nil {
 			return emitReady(out, *result)
 		}
-		if !reconnect {
-			continue
-		}
 	}
 }
 
-func observeBrokerReady(ctx context.Context, o brokerReadyOptions, service ports.BrokerService) (*brokerReadyResult, bool) {
+func observeBrokerReady(ctx context.Context, o brokerReadyOptions, service ports.BrokerService) *brokerReadyResult {
 	sub, err := service.Subscribe()
 	if err != nil {
 		r := readyResult(o, "terminal", "protocol", nil)
-		return &r, false
+		return &r
 	}
 	defer sub.Close()
 	for {
@@ -166,7 +163,7 @@ func observeBrokerReady(ctx context.Context, o brokerReadyOptions, service ports
 		if snapshot.Epoch != 0 {
 			if snapshot.Validate() != nil {
 				r := readyResult(o, "terminal", "protocol", nil)
-				return &r, false
+				return &r
 			}
 			locals := make([]ports.BrokerDaemonObservation, 0, 1)
 			for _, d := range snapshot.Daemons {
@@ -176,20 +173,20 @@ func observeBrokerReady(ctx context.Context, o brokerReadyOptions, service ports
 			}
 			if len(locals) > 1 {
 				r := readyResult(o, "terminal", "protocol", nil)
-				return &r, false
+				return &r
 			}
 			if len(locals) == 1 {
 				r := evaluateReady(o, snapshot, locals[0])
 				if r.Status == "ready" || r.Status == "terminal" {
-					return &r, false
+					return &r
 				}
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return nil
 		case <-service.Done():
-			return nil, true
+			return nil
 		case <-sub.Changed():
 		}
 	}

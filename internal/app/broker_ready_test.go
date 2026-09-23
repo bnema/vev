@@ -590,9 +590,7 @@ func TestBrokerReadyObservationTable(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), readyTestObserveMax)
 			defer cancel()
 
-			result, reconnect := observeBrokerReady(ctx, brokerReadyOptions{require: tt.require, timeout: time.Second, maxAge: time.Second}, service)
-
-			require.False(t, reconnect, "a terminal or satisfied observation never reconnects")
+			result := observeBrokerReady(ctx, brokerReadyOptions{require: tt.require, timeout: time.Second, maxAge: time.Second}, service)
 			require.Empty(t, service.mutationNames(), "readiness must never open a stream, reconcile, or mutate membership")
 			if tt.subErr != nil {
 				require.Zero(t, service.subscriptionCloses(), "a refused subscription is never closed as if it existed")
