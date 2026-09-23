@@ -50,10 +50,15 @@ type Config struct {
 	// connection as a read-only reader: it receives publications but never
 	// counts as observation demand, so a CLI read never triggers a probe.
 	PassiveSubscribe bool
+	Build            string
+	OnRetire         func()
 }
 
 // withDefaults fills every unset bound with its package default.
 func (c Config) withDefaults() Config {
+	if c.Build == "" {
+		c.Build = defaultBuildIdentity()
+	}
 	if c.MaxClients <= 0 {
 		c.MaxClients = DefaultMaxClients
 	}

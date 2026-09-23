@@ -120,6 +120,7 @@ type listener struct {
 
 	mu         sync.Mutex
 	closed     bool
+	retiring   bool
 	sessions   map[*serverSession]struct{}
 	pending    map[wire.BoundedTransport]struct{}
 	lastRefuse error
@@ -168,6 +169,7 @@ func (l *listener) acceptLoop() {
 			l.failAccept(err)
 			return
 		}
+		l.trackPending(transport)
 		l.wg.Add(1)
 		go func() {
 			defer l.wg.Done()
@@ -214,7 +216,6 @@ func (l *listener) confirmRefusal(err error) {
 // and publishes the running session. Slot ownership transfers to the session on
 // success.
 func (l *listener) admit(transport wire.BoundedTransport, release func()) {
-	l.trackPending(transport)
 	session, err := l.startSession(transport, release)
 	l.untrackPending(transport)
 	if err != nil {
@@ -351,8 +352,10 @@ func (l *listener) startSession(transport wire.BoundedTransport, release func())
 	// The session deregisters itself once it reaches its terminal state, so a
 	// long-lived listener never accumulates retired connections.
 	session.onShutdown = func() { l.forgetSession(session) }
+	session.retire = func() bool { return l.tryRetire(session) }
+	session.closeListenerMux = func() { _ = l.mux.Close() }
 	l.mu.Lock()
-	if l.closed {
+	if l.closed || l.retiring {
 		l.mu.Unlock()
 		// The run loop was never started, so Close (which waits on the run
 		// loop's done channel) would wait forever. Tear the unstarted session
@@ -431,6 +434,19 @@ func (l *listener) forgetSession(session *serverSession) {
 	l.mu.Unlock()
 }
 
+func (l *listener) tryRetire(session *serverSession) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed || l.retiring || len(l.pending) != 0 || len(l.sessions) != 1 {
+		return false
+	}
+	if _, ok := l.sessions[session]; !ok {
+		return false
+	}
+	l.retiring = true
+	return true
+}
+
 func (l *listener) isClosed() bool {
 	if l == nil {
 		return true
@@ -447,14 +463,16 @@ func (l *listener) isClosed() bool {
 // state machine, the outbound frame path, one snapshot publisher, and the
 // bridged logical streams for exactly one client.
 type serverSession struct {
-	epoch     ports.BrokerEpoch
-	scope     brokerwire.Scope
-	conn      *brokerwire.Connection
-	core      ports.BrokerService
-	transport wire.BoundedTransport
-	ceilings  brokerwire.Ceilings
-	cfg       Config
-	release   func()
+	epoch            ports.BrokerEpoch
+	scope            brokerwire.Scope
+	conn             *brokerwire.Connection
+	core             ports.BrokerService
+	transport        wire.BoundedTransport
+	ceilings         brokerwire.Ceilings
+	cfg              Config
+	release          func()
+	retire           func() bool
+	closeListenerMux func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -656,7 +674,17 @@ func (s *serverSession) dispatch(message brokerwire.ClientMessage) error {
 		// the pre-Register guard before answering, so this healthy connection is
 		// no longer bounded by the setup deadline.
 		s.stopRegistration()
-		return s.send(brokerwire.Registered{Epoch: s.epoch, Connection: s.scope.Connection})
+		retired := m.Build != s.cfg.Build && s.retire != nil && s.retire()
+		err := s.send(brokerwire.Registered{Epoch: s.epoch, Connection: s.scope.Connection, Build: s.cfg.Build, Retiring: retired})
+		if retired {
+			go func() {
+				s.closeListenerMux()
+				if s.cfg.OnRetire != nil {
+					s.cfg.OnRetire()
+				}
+			}()
+		}
+		return err
 	case brokerwire.Subscribe:
 		if !s.scopeMatches(m.Epoch, m.Connection) {
 			return s.refuseScope()

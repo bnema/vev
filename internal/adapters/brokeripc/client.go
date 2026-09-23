@@ -90,7 +90,7 @@ func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier)
 		_ = transport.Close()
 		return nil, err
 	}
-	scope, err := register(setup, transport, ceilings)
+	scope, staleBuild, err := register(setup, transport, ceilings, cfg.Build)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
@@ -114,17 +114,18 @@ func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier)
 	}
 	ctx, cancelSession := context.WithCancel(context.Background())
 	c := &client{
-		transport: transport,
-		ceilings:  ceilings,
-		scope:     scope,
-		conn:      conn,
-		cfg:       cfg,
-		ctx:       ctx,
-		cancel:    cancelSession,
-		pending:   make(map[ports.BrokerOperationID]chan operationResult),
-		kinds:     make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
-		streams:   make(map[ports.BrokerStreamID]*clientStream),
-		done:      make(chan struct{}),
+		transport:  transport,
+		ceilings:   ceilings,
+		scope:      scope,
+		staleBuild: staleBuild,
+		conn:       conn,
+		cfg:        cfg,
+		ctx:        ctx,
+		cancel:     cancelSession,
+		pending:    make(map[ports.BrokerOperationID]chan operationResult),
+		kinds:      make(map[ports.BrokerOperationID]brokerwire.RegisterMutationKind),
+		streams:    make(map[ports.BrokerStreamID]*clientStream),
+		done:       make(chan struct{}),
 	}
 	go c.run()
 	return c, nil
@@ -138,58 +139,66 @@ func dial(ctx context.Context, path string, cfg Config, verify ipc.PeerVerifier)
 // interrupted by closing the carriage, and the exchange worker is joined before
 // returning, so no setup goroutine is abandoned on the carriage. A Registered
 // observed after ctx expired is not a success.
-func register(ctx context.Context, transport wire.BoundedTransport, ceilings brokerwire.Ceilings) (brokerwire.Scope, error) {
+func register(ctx context.Context, transport wire.BoundedTransport, ceilings brokerwire.Ceilings, build string) (brokerwire.Scope, string, error) {
 	type result struct {
-		scope brokerwire.Scope
-		err   error
+		scope      brokerwire.Scope
+		staleBuild string
+		err        error
 	}
 	done := make(chan result, 1)
 	go func() {
-		scope, err := exchangeRegister(transport, ceilings)
-		done <- result{scope: scope, err: err}
+		scope, staleBuild, err := exchangeRegister(transport, ceilings, build)
+		done <- result{scope: scope, staleBuild: staleBuild, err: err}
 	}()
 	select {
 	case <-ctx.Done():
 		_ = transport.Close()
 		<-done
-		return brokerwire.Scope{}, ctx.Err()
+		return brokerwire.Scope{}, "", ctx.Err()
 	case outcome := <-done:
 		if outcome.err == nil {
 			if err := ctx.Err(); err != nil {
-				return brokerwire.Scope{}, err
+				return brokerwire.Scope{}, "", err
 			}
 		}
-		return outcome.scope, outcome.err
+		return outcome.scope, outcome.staleBuild, outcome.err
 	}
 }
 
 // exchangeRegister runs one Register/Registered round trip on the carriage. It
 // is synchronous: the caller bounds it by closing the carriage on ctx expiry.
-func exchangeRegister(transport wire.BoundedTransport, ceilings brokerwire.Ceilings) (brokerwire.Scope, error) {
-	payload, err := brokerwire.EncodeClient(brokerwire.Register{}, ceilings.MaxReceiveEnvelopeBytes, ceilings.StreamChunkLimit)
+func exchangeRegister(transport wire.BoundedTransport, ceilings brokerwire.Ceilings, build string) (brokerwire.Scope, string, error) {
+	payload, err := brokerwire.EncodeClient(brokerwire.Register{Build: build}, ceilings.MaxReceiveEnvelopeBytes, ceilings.StreamChunkLimit)
 	if err != nil {
-		return brokerwire.Scope{}, err
+		return brokerwire.Scope{}, "", err
 	}
 	if err := transport.Send(wire.Envelope{Payload: payload}); err != nil {
-		return brokerwire.Scope{}, transportFailure(err)
+		return brokerwire.Scope{}, "", transportFailure(err)
 	}
 	envelope, err := transport.RecvBounded(ceilings.MaxReceiveEnvelopeBytes)
 	if err != nil {
-		return brokerwire.Scope{}, transportFailure(err)
+		return brokerwire.Scope{}, "", transportFailure(err)
 	}
 	message, err := brokerwire.DecodeServer(envelope.Payload, ceilings.MaxReceiveEnvelopeBytes, ceilings.StreamChunkLimit)
 	if err != nil {
-		return brokerwire.Scope{}, errors.Join(ErrMalformedFrame, err)
+		return brokerwire.Scope{}, "", errors.Join(ErrMalformedFrame, err)
 	}
 	registered, ok := message.(brokerwire.Registered)
 	if !ok {
-		return brokerwire.Scope{}, errors.Join(ErrProtocol, errors.New("brokeripc: broker did not answer Register with Registered"))
+		return brokerwire.Scope{}, "", errors.Join(ErrProtocol, errors.New("brokeripc: broker did not answer Register with Registered"))
 	}
 	scope := brokerwire.Scope{Epoch: registered.Epoch, Connection: registered.Connection}
 	if err := scope.Validate(); err != nil {
-		return brokerwire.Scope{}, errors.Join(ErrProtocol, err)
+		return brokerwire.Scope{}, "", errors.Join(ErrProtocol, err)
 	}
-	return scope, nil
+	if registered.Retiring {
+		_ = transport.Close()
+		return brokerwire.Scope{}, "", ErrBrokerRetired
+	}
+	if registered.Build != build {
+		return scope, registered.Build, nil
+	}
+	return scope, "", nil
 }
 
 // operationResult is one reply to a mutating operation.
@@ -202,11 +211,12 @@ type operationResult struct {
 
 // client implements ports.BrokerService over one broker IPC connection.
 type client struct {
-	transport wire.BoundedTransport
-	ceilings  brokerwire.Ceilings
-	scope     brokerwire.Scope
-	conn      *brokerwire.Connection
-	cfg       Config
+	transport  wire.BoundedTransport
+	ceilings   brokerwire.Ceilings
+	scope      brokerwire.Scope
+	staleBuild string
+	conn       *brokerwire.Connection
+	cfg        Config
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -1041,4 +1051,13 @@ func (s *clientSubscription) notify() {
 	case s.changed <- struct{}{}:
 	default:
 	}
+}
+
+// StaleBuild reports the identity of a connected broker from another build.
+func StaleBuild(service ports.BrokerService) (string, bool) {
+	c, ok := service.(*client)
+	if !ok || c == nil || c.staleBuild == "" {
+		return "", false
+	}
+	return c.staleBuild, true
 }

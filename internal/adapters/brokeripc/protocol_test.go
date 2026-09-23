@@ -53,7 +53,7 @@ func (r *rawCarriage) recv(t *testing.T) brokerwire.ServerMessage {
 // register completes the registration exchange and returns the assigned scope.
 func (r *rawCarriage) register(t *testing.T) brokerwire.Scope {
 	t.Helper()
-	r.send(t, brokerwire.Register{})
+	r.send(t, brokerwire.Register{Build: defaultBuildIdentity()})
 	message := r.recv(t)
 	registered, ok := message.(brokerwire.Registered)
 	require.True(t, ok, "the first server frame after Register must be Registered")

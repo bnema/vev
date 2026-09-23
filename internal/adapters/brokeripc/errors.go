@@ -15,7 +15,8 @@ import (
 // them.
 var (
 	// ErrConfig reports an invalid listener or dialer configuration.
-	ErrConfig = errors.New("brokeripc: invalid configuration")
+	ErrConfig        = errors.New("brokeripc: invalid configuration")
+	ErrBrokerRetired = errors.New("brokeripc: stale broker is retiring for a newer build")
 	// ErrListenerClosed reports Accept on a closed listener.
 	ErrListenerClosed = errors.New("brokeripc: listener is closed")
 	// ErrSessionClosed reports session work presented after the session reached
