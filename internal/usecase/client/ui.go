@@ -38,6 +38,12 @@ type UI struct {
 	dispatched      map[uint64]bool
 	completion      map[uint64]chan struct{}
 	handoff         *uiActionHandoff
+	// suppressed is the newest attached context the foreground applied but
+	// did not write because the client picker overlay owned the terminal.
+	suppressed ports.UIContext
+	// overlayAction is the admitted action whose input the client picker
+	// overlay consumed; the supervisor settles it at its event-loop boundary.
+	overlayAction uint64
 }
 
 type uiActionHandoff struct {

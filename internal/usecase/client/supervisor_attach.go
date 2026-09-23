@@ -509,7 +509,16 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		}
 		// A commit from the picker overlay to another target: the previous
 		// attachment detached cleanly, and the swap goes through Connecting
-		// exactly like any committed selection.
+		// exactly like any committed selection. The stream identity is
+		// allocated now, not at commit: streams opened while the source was
+		// live (route publications) may have moved the connection's
+		// anti-replay window past an identity reserved earlier.
+		stream, err := service.NextStreamID()
+		if err != nil {
+			s.reportAttachmentFailure(err)
+			return false, nil
+		}
+		swap.request.Stream = stream
 		target, localProvenance = *swap, SessionEnvironmentLocalPicker
 	}
 }
@@ -633,6 +642,8 @@ settlement:
 			overlay.publishPreview()
 		case <-overlay.ops():
 			overlay.takeOp()
+		case consumed := <-s.attachments.OverlayActions():
+			overlay.settleAction(consumed)
 		case <-overlay.invalidation():
 			overlay.resize()
 		case outcome := <-s.kills.results():

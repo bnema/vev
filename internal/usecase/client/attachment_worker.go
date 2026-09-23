@@ -393,6 +393,9 @@ type attachmentHost struct {
 	// (Plan 003 C4/C5). Only the supervisor consumes them.
 	routeDemand chan struct{}
 	navigations chan protocol.ServerMessage
+	// overlayActions carries driver actions the client picker overlay
+	// consumed to the supervisor, which settles them.
+	overlayActions chan overlayActionConsumed
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -434,6 +437,7 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		internalActions:    make(chan AttachmentLifecycleAction, 1),
 		routeDemand:        make(chan struct{}, 1),
 		navigations:        make(chan protocol.ServerMessage, 1),
+		overlayActions:     make(chan overlayActionConsumed, 1),
 	}
 }
 
@@ -619,6 +623,7 @@ func (h *attachmentHost) drainForegroundSignals() {
 		case <-h.internalActions:
 		case <-h.routeDemand:
 		case <-h.navigations:
+		case <-h.overlayActions:
 		default:
 			return
 		}
@@ -748,7 +753,7 @@ type attachmentOverlayForeground interface {
 	setOverlay(kind attachmentOverlayKind, sink pickerInputConsumer) bool
 	clearOverlay(kind attachmentOverlayKind)
 	overlayKind() attachmentOverlayKind
-	divertInput(data []byte) bool
+	divertInput(data []byte, actionID uint64) bool
 	overlayRepaint() <-chan struct{}
 	overlayOutput(uiContext ports.UIContext, data []byte) error
 	noteCommitted(target protocol.ExactSessionTarget, tab domain.TabStableID)
@@ -844,8 +849,11 @@ func (f *attachmentForeground) overlayKind() attachmentOverlayKind {
 
 // divertInput hands one authorized delivery to the supervisor-owned overlay.
 // It reports false when no navigation overlay owns input, so the worker keeps
-// its session path.
-func (f *attachmentForeground) divertInput(data []byte) bool {
+// its session path. A driver action consumed here never reaches the daemon, so
+// it is marked before the picker sees the bytes and handed to the supervisor
+// afterwards, which settles it at its own event-loop boundary (or follows it
+// across the swap a commit starts).
+func (f *attachmentForeground) divertInput(data []byte, actionID uint64) bool {
 	if f == nil {
 		return false
 	}
@@ -856,8 +864,48 @@ func (f *attachmentForeground) divertInput(data []byte) bool {
 	if kind != attachmentOverlayNavigation || sink == nil {
 		return false
 	}
+	tracked := actionID != 0 && f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil
+	if tracked {
+		f.host.actionUI.markOverlayInput(f.uiGeneration, actionID)
+	}
 	sink.ConsumeTerminalRead(data)
+	if tracked {
+		f.host.offerOverlayAction(overlayActionConsumed{generation: f.uiGeneration, actionID: actionID})
+	}
 	return true
+}
+
+// overlayActionConsumed names one driver action the client picker overlay
+// consumed on the given UI generation.
+type overlayActionConsumed struct {
+	generation uint64
+	actionID   uint64
+}
+
+// offerOverlayAction hands the latest overlay-consumed action to the
+// supervisor. Automation admits one action at a time and the worker is the only
+// producer, so replacing an unread stale entry never drops a live one.
+func (h *attachmentHost) offerOverlayAction(consumed overlayActionConsumed) {
+	for {
+		select {
+		case h.overlayActions <- consumed:
+			return
+		default:
+		}
+		select {
+		case <-h.overlayActions:
+		default:
+		}
+	}
+}
+
+// OverlayActions wakes the supervisor for each driver action the picker
+// overlay consumed.
+func (h *attachmentHost) OverlayActions() <-chan overlayActionConsumed {
+	if h == nil {
+		return nil
+	}
+	return h.overlayActions
 }
 
 func (f *attachmentForeground) overlayRepaint() <-chan struct{} {
@@ -1380,6 +1428,11 @@ func (f *attachmentForeground) write(uiContext ports.UIContext, data []byte, ove
 			return false
 		}
 		if !overlay && f.overlayKind() != attachmentOverlayNone {
+			// Applied, not written: remember its committed boundary so a
+			// daemon receipt fenced on it still settles its action.
+			if f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
+				f.host.actionUI.suppressedOutput(f.uiGeneration, f.presentationContext(uiContext))
+			}
 			return true
 		}
 		if supervisorNil(f.term) {

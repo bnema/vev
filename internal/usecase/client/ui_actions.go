@@ -17,6 +17,7 @@ func (u *UI) bindForeground(ctx context.Context, input *terminalInputPump, consu
 	u.consumer = consumer
 	u.foreground = ctx
 	u.boundary = ports.UIActionResult{}
+	u.suppressed = ports.UIContext{}
 	if u.handoff != nil && u.handoff.destinationGeneration == 0 {
 		u.handoff.destinationGeneration = u.generation
 	} else if u.pending != 0 {
@@ -138,6 +139,9 @@ func (u *UI) finishLocked(id uint64, status ports.UIActionStatus, boundary ports
 	if u.pending == id {
 		u.pending = 0
 	}
+	if u.overlayAction == id {
+		u.overlayAction = 0
+	}
 	u.signalLocked()
 }
 
@@ -154,6 +158,7 @@ func (u *UI) published(generation uint64) {
 		return
 	}
 	u.boundary = ports.UIActionResult{Revision: snapshot.Revision, Context: snapshot.Context}
+	u.suppressed = ports.UIContext{}
 	if u.handoff != nil && u.handoff.destinationGeneration == generation && snapshot.Context.Status == ports.UIStatusAttached {
 		u.handoff.boundary = u.boundary
 		if u.dispatched[u.handoff.actionID] {
@@ -178,10 +183,100 @@ func (u *UI) receipt(generation uint64, receipt protocol.UIReceipt) {
 		return
 	}
 	boundary := u.boundary
-	if boundary.Context.OutputEpoch != receipt.Epoch || boundary.Context.OutputState != receipt.State || boundary.Context.ViewPublication != receipt.ViewPublication || boundary.Revision == 0 {
+	if boundary.Revision == 0 {
 		return
 	}
-	u.finishLocked(receipt.ActionID, ports.UIActionProcessed, boundary)
+	if receiptMatches(boundary.Context, receipt) {
+		u.finishLocked(receipt.ActionID, ports.UIActionProcessed, boundary)
+		return
+	}
+	// The client picker overlay suppressed the output that reached this
+	// boundary: it was applied, not written. Its committed context is the
+	// boundary, and the last written revision keeps later waits eligible.
+	if u.suppressed.Generation == generation && receiptMatches(u.suppressed, receipt) {
+		u.finishLocked(receipt.ActionID, ports.UIActionProcessed, ports.UIActionResult{Revision: boundary.Revision, Context: u.suppressed})
+	}
+}
+
+func receiptMatches(context ports.UIContext, receipt protocol.UIReceipt) bool {
+	return context.OutputEpoch == receipt.Epoch && context.OutputState == receipt.State && context.ViewPublication == receipt.ViewPublication
+}
+
+// suppressedOutput records the committed context of attachment output the
+// client picker overlay applied without writing, so a daemon receipt fenced
+// on it still settles its action.
+func (u *UI) suppressedOutput(generation uint64, context ports.UIContext) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if generation == 0 || generation != u.generation || context.Generation != generation || context.Status != ports.UIStatusAttached {
+		return
+	}
+	u.suppressed = context
+}
+
+// OverlayContext is the attached context a composition publishes while the
+// client picker is composed over the live attachment. The attachment is still
+// the actionable generation, so the picker frame keeps its session identity and
+// generation instead of an unattached Picker presentation. It reports false when
+// no attached boundary of the current foreground exists.
+func (u *UI) OverlayContext() (ports.UIContext, bool) {
+	if u == nil {
+		return ports.UIContext{}, false
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	context := u.boundary.Context
+	if u.suppressed.Generation != 0 {
+		context = u.suppressed
+	}
+	if u.input == nil || context.Generation == 0 || context.Generation != u.generation || context.Status != ports.UIStatusAttached {
+		return ports.UIContext{}, false
+	}
+	return context, true
+}
+
+// markOverlayInput records that the admitted action id is about to be consumed
+// by the client picker overlay. It runs before the picker sees the bytes, so a
+// commit the read decides can always find the action to follow.
+func (u *UI) markOverlayInput(generation, id uint64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if id == 0 || generation != u.generation || u.pending != id {
+		return
+	}
+	u.overlayAction = id
+}
+
+// followOverlay retains the overlay-consumed action across the attachment swap
+// a picker commit started, so it settles on the destination's first committed
+// publication.
+func (u *UI) followOverlay(generation uint64) {
+	u.mu.Lock()
+	id := u.overlayAction
+	u.mu.Unlock()
+	if id != 0 {
+		u.follow(generation, id)
+	}
+}
+
+// settleOverlay completes one overlay-consumed action at the supervisor's
+// event-loop boundary: the picker applied its input and repainted. A followed
+// action is left to the destination publication.
+func (u *UI) settleOverlay(generation, id uint64) {
+	snapshot, err := u.state.Snapshot()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if id == 0 || u.overlayAction != id || u.pending != id || generation != u.generation {
+		return
+	}
+	if u.handoff != nil && u.handoff.actionID == id {
+		return
+	}
+	boundary := u.boundary
+	if err == nil && snapshot.Context.Generation == generation && snapshot.Context.Status == ports.UIStatusAttached {
+		boundary = ports.UIActionResult{Revision: snapshot.Revision, Context: snapshot.Context}
+	}
+	u.finishLocked(id, ports.UIActionProcessed, boundary)
 }
 
 func (u *UI) Action(ctx context.Context, request ports.UIActionRequest) (ports.UIActionResult, error) {

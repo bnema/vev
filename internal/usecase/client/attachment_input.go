@@ -281,7 +281,7 @@ func (in *attachmentInput) route(ctx context.Context, state outputApplyState, da
 	if len(data) == 0 {
 		return nil
 	}
-	consumed, err := in.picker.consumeInput(ctx, state, AttachmentInputEvent{Data: data})
+	consumed, _, err := in.picker.consumeInput(ctx, state, AttachmentInputEvent{Data: data})
 	if err != nil || consumed {
 		return err
 	}

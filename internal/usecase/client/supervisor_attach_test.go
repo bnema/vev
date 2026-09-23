@@ -268,6 +268,12 @@ type attachTestPicker struct {
 	resolveErr error
 	request    ports.BrokerOpenStreamRequest
 	resolved   int
+	// consumeOp, when set, is the decision the next consumed read records,
+	// exactly like the controller deciding a commit from an Enter keypress.
+	consumeOp      pickerOp
+	consumeRequest ports.BrokerOpenStreamRequest
+	// resolvedStream is the stream identity the last resolution reserved.
+	resolvedStream ports.BrokerStreamID
 }
 
 func newAttachTestPicker() *attachTestPicker {
@@ -283,7 +289,22 @@ func (p *attachTestPicker) ConsumeTerminalRead([]byte) bool {
 		return false
 	}
 	p.consumed++
+	if p.consumeOp != (pickerOp{}) {
+		p.op, p.key, p.request = p.consumeOp, "row", p.consumeRequest
+		p.consumeOp = pickerOp{}
+		select {
+		case p.opsReady <- struct{}{}:
+		default:
+		}
+	}
 	return true
+}
+
+// decideOnConsume scripts the decision the next consumed read records.
+func (p *attachTestPicker) decideOnConsume(op pickerOp, request ports.BrokerOpenStreamRequest) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.consumeOp, p.consumeRequest = op, request
 }
 
 func (p *attachTestPicker) TakeOp() (pickerOp, string) {
@@ -304,6 +325,7 @@ func (p *attachTestPicker) ResolveKey(key string, base pickerResolveBase) (ports
 	request := p.request
 	request.Connection = base.Connection
 	request.Stream = base.Stream
+	p.resolvedStream = base.Stream
 	return request, nil
 }
 
@@ -331,6 +353,12 @@ func (p *attachTestPicker) owns() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ownsInput
+}
+
+func (p *attachTestPicker) lastResolvedStream() ports.BrokerStreamID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.resolvedStream
 }
 
 func (p *attachTestPicker) consumedCount() int {

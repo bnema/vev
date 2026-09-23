@@ -155,6 +155,11 @@ func (o *attachmentPickerOverlay) takeOp() {
 			o.exit()
 			return
 		}
+		// The driver action that committed follows the swap and settles on
+		// the destination's first committed publication.
+		if s.cfg.UI != nil && o.run != nil && o.run.fg != nil {
+			s.cfg.UI.followOverlay(o.run.fg.uiGeneration)
+		}
 		s.pendingSwap = &pickerAttachmentTarget{request: request, tab: tab}
 		o.swapping = true
 		s.preview.close(o.picker())
@@ -165,6 +170,20 @@ func (o *attachmentPickerOverlay) takeOp() {
 	default:
 		s.refreshPreview(o.service)
 		s.renderCurrent()
+	}
+}
+
+// settleAction completes one driver action the overlay consumed. The read's
+// decision was recorded before the worker handed the action over, so any
+// pending decision is carried out first: a commit elsewhere follows the action
+// across the swap, and everything else settles it at this boundary after the
+// picker repainted.
+func (o *attachmentPickerOverlay) settleAction(consumed overlayActionConsumed) {
+	if o.active && !o.swapping {
+		o.takeOp()
+	}
+	if o.sup.cfg.UI != nil {
+		o.sup.cfg.UI.settleOverlay(consumed.generation, consumed.actionID)
 	}
 }
 

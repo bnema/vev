@@ -207,6 +207,136 @@ func TestPickerOverlayCommitElsewhereSwapsAttachment(t *testing.T) {
 	}
 }
 
+// TestPickerOverlaySettlesUIActions pins UI-driver settlement across the
+// client picker overlay: the action that opened it settles on the daemon
+// receipt fenced on output the overlay applied without writing, an action the
+// picker consumes settles at the supervisor boundary without a daemon fence,
+// and a picker commit elsewhere follows the swap and settles on the
+// destination's first committed publication.
+func TestPickerOverlaySettlesUIActions(t *testing.T) {
+	alpha := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "alpha"}
+	beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+	type actionOutcome struct {
+		result ports.UIActionResult
+		err    error
+	}
+	tests := []struct {
+		name string
+		// overlayFirst opens the overlay before the action is admitted.
+		overlayFirst bool
+		keys         []string
+		// commit scripts a picker commit elsewhere for the consumed read.
+		commit     bool
+		wantTarget protocol.ExactSessionTarget
+		wantFence  bool
+	}{
+		{name: "the opening action settles on its suppressed receipt", keys: []string{"Enter"}, wantTarget: alpha, wantFence: true},
+		{name: "a picker-consumed action settles without a daemon fence", overlayFirst: true, keys: []string{"j"}, wantTarget: alpha},
+		{name: "a picker commit elsewhere settles on the destination", overlayFirst: true, keys: []string{"Enter"}, commit: true, wantTarget: beta},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			picker := newAttachTestPicker()
+			var ui *UI
+			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+				cfg.UI = ui
+			})
+			stream := attachLiveSession(t, harness, picker)
+			attached := sessionTestOutput(2, "\x1b[Hattached")
+			attached.Full, attached.Base, attached.New = false, 1, 2
+			stream.deliver(attached)
+			var snapshot ports.UISnapshot
+			require.Eventually(t, func() bool {
+				var err error
+				snapshot, err = ui.Capture(ui.Handle())
+				return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication == 2
+			}, 5*time.Second, time.Millisecond)
+			if tt.overlayFirst {
+				stream.deliver(navigationOffer(1))
+				awaitPresentation(t, harness.sup, PresentAttachedPicker)
+				// The composition paints the overlay with the live attachment's
+				// context, so the attachment stays the actionable generation.
+				overlayContext, ok := ui.OverlayContext()
+				require.True(t, ok)
+				require.Equal(t, ports.UIStatusAttached, overlayContext.Status)
+				require.Equal(t, snapshot.Context.Generation, overlayContext.Generation)
+				require.Equal(t, alpha, overlayContext.Route.Target)
+			}
+			var mu sync.Mutex
+			second := newSessionTestStream()
+			if tt.commit {
+				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+					return second, nil
+				})
+				other := sessionTestRequest(true)
+				other.Target = beta
+				picker.decideOnConsume(pickerOp{commit: true}, other)
+			}
+			fences := countSent[protocol.UIFence](stream)
+			consumed := picker.consumedCount()
+
+			done := make(chan actionOutcome, 1)
+			go func() {
+				result, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Keys: tt.keys})
+				done <- actionOutcome{result: result, err: err}
+			}()
+
+			if !tt.overlayFirst {
+				// The Enter reaches the daemon, whose command offers the picker;
+				// the palette-close output then arrives under the overlay.
+				fence := awaitSent(t, stream, "UIFence", isSent[protocol.UIFence]).(protocol.UIFence)
+				stream.deliver(navigationOffer(1))
+				awaitPresentation(t, harness.sup, PresentAttachedPicker)
+				hidden := sessionTestOutput(3, "\x1b[Hhidden")
+				hidden.Full, hidden.Base, hidden.New = false, 2, 3
+				stream.deliver(hidden)
+				require.Eventually(t, func() bool {
+					ui.mu.Lock()
+					defer ui.mu.Unlock()
+					return ui.suppressed.ViewPublication == 3
+				}, 5*time.Second, time.Millisecond, "the suppressed output was never applied")
+				stream.deliver(protocol.UIReceipt{ActionID: fence.ActionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
+			}
+			if tt.commit {
+				awaitSent(t, stream, "Detach", isSent[protocol.Detach])
+				awaitStreamHello(t, &mu, &second)
+				second.deliver(protocol.Welcome{SessionName: "beta"})
+				output := sessionTestOutput(1, "\x1b[Hbeta")
+				output.Context.Route.Target = beta
+				second.deliver(output)
+			}
+
+			var outcome actionOutcome
+			select {
+			case outcome = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the UI action never settled across the picker overlay")
+			}
+			require.NoError(t, outcome.err)
+			require.Equal(t, ports.UIActionProcessed, outcome.result.Status)
+			require.Equal(t, ports.UIStatusAttached, outcome.result.Context.Status)
+			require.Equal(t, tt.wantTarget, outcome.result.Context.Route.Target)
+			require.NotContains(t, harness.terminal.written(), "hidden", "suppressed output is never written over the picker")
+			if tt.overlayFirst {
+				require.Equal(t, consumed+1, picker.consumedCount(), "the picker consumed the action's input")
+			}
+			if !tt.wantFence {
+				require.Equal(t, fences, countSent[protocol.UIFence](stream), "a picker-consumed action never fences through the daemon")
+				require.Zero(t, countSent[protocol.Input](stream), "picker input never reaches the session")
+			}
+			if tt.commit {
+				require.Greater(t, outcome.result.Context.Generation, snapshot.Context.Generation, "the swap commits a new generation")
+				opened := harness.service.openedRequests()
+				require.Len(t, opened, 2)
+				require.Equal(t, beta, opened[1].Target)
+				require.Greater(t, opened[1].Stream, picker.lastResolvedStream(),
+					"the swap opens a stream identity allocated at open time, not the one reserved at commit")
+			}
+		})
+	}
+}
+
 // TestPickerCloseWithoutAttachment pins the unattached decision: with nothing
 // to return to, Escape and q keep the picker (and the process) alive; only the
 // explicit Ctrl+C exit ends the run.

@@ -148,8 +148,15 @@ func (p *brokerClientPresentation) Render(state client.State) {
 	}
 	transaction, _ := p.terminal.(ports.UIOutputTransaction)
 	context := p.pickerContext()
-	if state.Presentation == client.PresentConnecting {
+	switch state.Presentation {
+	case client.PresentConnecting:
 		context.Status = ports.UIStatusConnecting
+	case client.PresentAttachedPicker:
+		// The picker is composed over a live attachment: the attachment stays
+		// the actionable generation, so the frame keeps its attached context.
+		if attached, ok := p.ui.OverlayContext(); ok {
+			context = attached
+		}
 	}
 	if transaction != nil {
 		transaction.BeginOutput(context)

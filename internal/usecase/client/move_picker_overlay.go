@@ -223,21 +223,23 @@ func (p *attachmentMovePicker) release() {
 }
 
 // consumeInput offers one authorized delivery to the overlay that owns input.
-// It reports true when the bytes were consumed and must not reach the session.
-func (p *attachmentMovePicker) consumeInput(ctx context.Context, state outputApplyState, input AttachmentInputEvent) (bool, error) {
+// It reports consumed when the bytes must not reach the session, and
+// supervised when the supervisor-owned navigation picker consumed them: its
+// action is then settled by the supervisor, never fenced through the daemon.
+func (p *attachmentMovePicker) consumeInput(ctx context.Context, state outputApplyState, input AttachmentInputEvent) (consumed, supervised bool, err error) {
 	if p.move.presenting {
 		p.stopEscape()
 		op, changed := p.move.input(input.Data, input.actionID)
 		if err := p.applyOp(ctx, state, op, changed); err != nil {
-			return true, err
+			return true, false, err
 		}
 		p.armEscape()
-		return true, nil
+		return true, false, nil
 	}
-	if p.overlay != nil && p.overlay.divertInput(input.Data) {
-		return true, nil
+	if p.overlay != nil && p.overlay.divertInput(input.Data, input.actionID) {
+		return true, true, nil
 	}
-	return false, nil
+	return false, false, nil
 }
 
 // applyOp carries out one decoded decision: close sends the typed close and

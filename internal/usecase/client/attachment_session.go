@@ -480,17 +480,18 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					fg.PreserveInput(event.input.Data)
 					return w.settle(ctx, fg, stream, token, err)
 				}
-				consumed, err := picker.consumeInput(ctx, state, *event.input)
+				consumed, supervised, err := picker.consumeInput(ctx, state, *event.input)
 				if err != nil {
 					fg.PreserveInput(event.input.Data)
 					return w.settle(ctx, fg, stream, token, err)
 				}
 				if consumed {
 					// The overlay owned these bytes: nothing reaches the session.
-					// A driver action still fences through the daemon so it
-					// completes after the overlay applied it.
+					// A move-picker action still fences through the daemon so it
+					// completes after the overlay applied it; the supervisor
+					// settles a navigation-picker action itself.
 					fg.AckInput()
-					if event.input.actionID != 0 {
+					if event.input.actionID != 0 && !supervised {
 						if err := w.send(ctx, fg, stream, protocol.UIFence{ActionID: event.input.actionID}); err != nil {
 							return w.settle(ctx, fg, stream, token, err)
 						}
