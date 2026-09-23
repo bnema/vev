@@ -76,6 +76,15 @@ func Listen(dir string, opts ...Option) (wire.Listener, error) {
 // changed, the bind is retried (and typically reports the racing owner live)
 // instead of removing it.
 func listenUnixStaleSafe(sockPath string) (*net.UnixListener, error) {
+	// A socket file exists before its owner calls listen(2), and a dial in
+	// that gap is refused exactly like a dial to a dead socket. Serialize
+	// bind and stale recovery on a sibling lock so no contender can mistake
+	// another's half-bound socket for a stale one and unlink it.
+	unlock, err := lockSocketPath(sockPath)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	for attempt := 0; attempt < staleRecoveryAttempts; attempt++ {
 		ln, err := bindUnix(sockPath)
 		if err == nil {
@@ -124,6 +133,24 @@ func listenUnixStaleSafe(sockPath string) (*net.UnixListener, error) {
 
 	// Every attempt observed a live owner (or a racing owner kept winning).
 	return nil, ErrDaemonRunning
+}
+
+// lockSocketPath takes an exclusive flock on sockPath + ".lock" and returns
+// its release. The lock file is owner-only and never removed, so every
+// contender locks the same inode.
+func lockSocketPath(sockPath string) (func(), error) {
+	file, err := os.OpenFile(sockPath+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: opening socket lock for %s: %w", sockPath, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("ipc: locking socket %s: %w", sockPath, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 // bindUnix binds and listens on sockPath.
