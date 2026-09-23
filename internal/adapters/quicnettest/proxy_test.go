@@ -54,6 +54,12 @@ func serveUDP(t *testing.T, echo bool) (*net.UDPConn, <-chan datagram) {
 		t.Fatalf("listen udp server: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	// Flows burst hundreds of MTU-sized datagrams. The default receive buffer
+	// (about 200 KiB) holds too few of them when a loaded machine delays the
+	// reader, and the kernel then drops datagrams the test is still counting.
+	if err := conn.SetReadBuffer(4 << 20); err != nil {
+		t.Fatalf("size udp server buffer: %v", err)
+	}
 	packets := make(chan datagram, 4096)
 	go func() {
 		buf := make([]byte, 2048)

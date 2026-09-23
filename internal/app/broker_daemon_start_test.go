@@ -429,6 +429,13 @@ func TestDaemonStartConcurrentRequestsShareOneElection(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, acquired, "the test must hold the spawn lock")
 	t.Cleanup(release)
+	// The daemon being started takes lifecycle ownership at once and keeps it
+	// for its whole run, as the real daemon does. Without it, a caller that
+	// dialed just before the daemon was published could win the spawn lock
+	// once it is released and elect itself.
+	daemonOwner, err := daemonLifecycleProbe.TryAcquire(filepath.Dir(carriage))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = daemonOwner.Release() })
 
 	// The target is resolved once: require.* is not goroutine-safe, and the
 	// resolved target is immutable and shared by every caller.

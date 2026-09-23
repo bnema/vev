@@ -635,7 +635,9 @@ func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
 		t.Fatalf("broker loss ended the browser run: %v", tab.readerErr())
 	default:
 	}
-	require.GreaterOrEqual(t, calls.Load(), int32(2), "a lost connection must be retried, never fatal")
+	// A repaint can land before the first reconnect attempt, so wait for it.
+	require.Eventually(t, func() bool { return calls.Load() >= 2 }, brokerTestWait, 5*time.Millisecond,
+		"a lost connection must be retried, never fatal")
 }
 
 // TestWebCompositionUsesTheBrokerConnector pins the production composition

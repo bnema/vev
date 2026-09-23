@@ -259,7 +259,14 @@ func createStaleMuxSocket(t *testing.T, path string) os.FileInfo {
 // recovered race-safely and the carriage binds and serves.
 func TestListenMuxStaleSocketRecovered(t *testing.T) {
 	path := muxTestPath(t)
-	stale := createStaleMuxSocket(t, path)
+	createStaleMuxSocket(t, path)
+	// Mark the stale file: a filesystem such as ext4 may hand the freed inode
+	// number straight to the recovered socket, so inode identity alone cannot
+	// prove the file was replaced.
+	marked := time.Unix(1, 0)
+	if err := os.Chtimes(path, marked, marked); err != nil {
+		t.Fatalf("mark stale socket: %v", err)
+	}
 
 	mustListenMux(t, path)
 
@@ -267,8 +274,8 @@ func TestListenMuxStaleSocketRecovered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat recovered socket: %v", err)
 	}
-	if os.SameFile(stale, recovered) {
-		t.Fatal("stale socket inode was not replaced by the recovered listener")
+	if recovered.ModTime().Equal(marked) {
+		t.Fatal("stale socket was not replaced by the recovered listener")
 	}
 
 	// The recovered carriage serves a same-user connection.
