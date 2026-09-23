@@ -13,16 +13,14 @@ import (
 // drawClientToast draws a client-local toast without changing terminal state.
 // The attach main loop owns both this write and the later daemon-frame
 // reconciliation; input pumps must only publish a request for it.
-func drawClientToast(out io.Writer, size domain.Size, message string) (domain.Rect, error) {
-	bounds := reconnectToastBoundsFor(size, message)
+// The anchor places it: transitions stay centered, notices sit top-right so
+// they never cover the picker list.
+func drawClientToast(out io.Writer, size domain.Size, message string, anchor domain.Anchor) (domain.Rect, error) {
+	bounds := ui.ToastBounds(size, ui.Toast{Message: message, Anchor: anchor})
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return domain.Rect{}, nil
 	}
 	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
-}
-
-func reconnectToastBoundsFor(size domain.Size, message string) domain.Rect {
-	return ui.ToastBounds(size, ui.Toast{Message: message, Anchor: domain.AnchorCenter})
 }
 
 func reconnectToastLinesFor(bounds domain.Rect, message string) []string {

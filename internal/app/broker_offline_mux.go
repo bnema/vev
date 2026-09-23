@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/quic"
 	"github.com/bnema/vev/internal/adapters/sshstdio"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -354,7 +355,7 @@ func dialBrokerQUICRoute(ctx context.Context, route brokerconfig.Route, mode por
 	if err != nil {
 		reapBootstrap()
 		logBrokerBootstrapStderr(log, stderr)
-		return nil, brokerQUICUnavailable("read bootstrap readiness", err)
+		return nil, brokerQUICUnavailable("read bootstrap readiness", classifyBootstrapFailure(stderr, err))
 	}
 	// The bootstrap channel served its purpose: the detached remote proxy owns
 	// the carriage lifetime. Reap the short-lived local child without killing
@@ -363,7 +364,7 @@ func dialBrokerQUICRoute(ctx context.Context, route brokerconfig.Route, mode por
 	if waitErr := cmd.Wait(); waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 		reaped = true
 		logBrokerBootstrapStderr(log, stderr)
-		return nil, brokerQUICUnavailable("reap bootstrap", waitErr)
+		return nil, brokerQUICUnavailable("reap bootstrap", classifyBootstrapFailure(stderr, waitErr))
 	}
 	reaped = true
 
@@ -419,6 +420,19 @@ func logBrokerBootstrapStderr(log *slog.Logger, sink *sshstdio.DiagnosticSink) {
 		return
 	}
 	log.Warn("broker_mux_bootstrap_stderr", "diagnostic", diagnostic)
+}
+
+// classifyBootstrapFailure wraps err in a typed remote failure when the
+// captured ssh stderr names a recognizable cause (authentication, host key,
+// timeout), so the picker explains the failure. The raw text stays in the log.
+func classifyBootstrapFailure(sink *sshstdio.DiagnosticSink, err error) error {
+	if sink == nil {
+		return err
+	}
+	if kind := sshstdio.ClassifyStderr(sink.String()); kind != domain.RemoteFailureNone {
+		return domain.RemoteFailure{Kind: kind, Err: err}
+	}
+	return err
 }
 
 // reapBootstrapProcess kills one bootstrap child and starts a bounded join of

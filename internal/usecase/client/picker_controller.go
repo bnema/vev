@@ -491,7 +491,7 @@ func (p *pickerController) RenderNotice(size domain.Size) []byte {
 		return nil
 	}
 	var buffer bytes.Buffer
-	if _, err := drawClientToast(&buffer, size, newest.Message); err != nil {
+	if _, err := drawClientToast(&buffer, size, newest.Message, domain.AnchorTopRight); err != nil {
 		return nil
 	}
 	return buffer.Bytes()
@@ -724,7 +724,7 @@ func (p *pickerController) offerDiagnosticsLocked() {
 		p.notices.Show(p.clock.Now(), ui.Toast{
 			ID:       "picker-host:" + failure.key,
 			Message:  failure.message,
-			Anchor:   domain.AnchorCenter,
+			Anchor:   domain.AnchorTopRight,
 			Duration: pickerNoticeLifetime,
 		})
 	}
@@ -740,7 +740,7 @@ func (p *pickerController) offerNotice(id, message string) {
 		return
 	}
 	p.mu.Lock()
-	p.notices.Show(p.clock.Now(), ui.Toast{ID: id, Message: message, Anchor: domain.AnchorCenter, Duration: pickerNoticeLifetime})
+	p.notices.Show(p.clock.Now(), ui.Toast{ID: id, Message: message, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
 	p.mu.Unlock()
 }
 

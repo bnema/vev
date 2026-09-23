@@ -1125,7 +1125,12 @@ func (r *Registry) apply(result probeResult) {
 func observationOutcome(result probeResult) (domain.RemoteFailureKind, domain.RemoteAvailability, bool) {
 	if result.err != nil {
 		kind := domain.RemoteFailureTransport
-		if errors.Is(result.err, context.DeadlineExceeded) {
+		var typed domain.RemoteFailure
+		switch {
+		case errors.As(result.err, &typed) && typed.Kind != domain.RemoteFailureNone:
+			// The dialer classified the failure (for example SSH authentication).
+			kind = typed.Kind
+		case errors.Is(result.err, context.DeadlineExceeded):
 			kind = domain.RemoteFailureTimeout
 		}
 		return kind, availabilityFor(kind), true
