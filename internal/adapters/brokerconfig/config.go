@@ -567,7 +567,18 @@ func (c *Config) Resolver() *Resolver {
 	if c == nil {
 		return &Resolver{byEndpoint: map[string]Registration{}}
 	}
-	return &Resolver{byEndpoint: c.byEndpoint, local: c.local}
+	byEndpoint := make(map[string]Registration, len(c.byEndpoint))
+	for endpoint, registration := range c.byEndpoint {
+		registration.Route.argv = append([]string(nil), registration.Route.argv...)
+		byEndpoint[endpoint] = registration
+	}
+	var local *LocalBinding
+	if c.local != nil {
+		copy := *c.local
+		copy.Route.argv = append([]string(nil), copy.Route.argv...)
+		local = &copy
+	}
+	return &Resolver{byEndpoint: byEndpoint, local: local}
 }
 
 // configDocument is the strict on-disk shape. Unknown fields are refused by the

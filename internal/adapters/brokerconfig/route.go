@@ -131,6 +131,20 @@ func (r Route) IsLocal() bool { return r.local }
 // Validate re-checks one already-parsed route. Parsed routes are validated
 // once, so this is the seam a caller uses to fence a zero or hand-built value.
 func (r Route) Validate() error {
+	if err := r.validateFields(); err != nil {
+		return err
+	}
+	if r.address != r.digest() {
+		return errors.New("route address does not match its contents")
+	}
+	if r.local != (r.kind == RouteUnix) {
+		return errors.New("route locality does not match its kind")
+	}
+	return nil
+}
+
+// validateFields runs before constructors derive the opaque address.
+func (r Route) validateFields() error {
 	switch r.kind {
 	case RouteUnix:
 		if err := validateRoute(r.path); err != nil {
@@ -332,7 +346,7 @@ func RouteFromSpec(spec ports.BrokerRouteSpec) (Route, error) {
 
 func newUnixRoute(path string) (Route, error) {
 	route := Route{kind: RouteUnix, path: path, local: true}
-	if err := route.Validate(); err != nil {
+	if err := route.validateFields(); err != nil {
 		return Route{}, err
 	}
 	route.address = route.digest()
@@ -346,7 +360,7 @@ func newSSHRoute(kind RouteKind, target string, argv []string, trust TrustInputs
 		argv:   append([]string(nil), argv...),
 		trust:  trust,
 	}
-	if err := route.Validate(); err != nil {
+	if err := route.validateFields(); err != nil {
 		return Route{}, err
 	}
 	route.address = route.digest()

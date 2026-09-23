@@ -704,3 +704,47 @@ func TestLoadWarmTransports(t *testing.T) {
 	require.Equal(t, DefaultWarmTransports, none.WarmTransports())
 	require.Zero(t, none.WarmIdleTimeout())
 }
+
+func TestRouteValidateDerivedAuthority(t *testing.T) {
+	unix, err := newUnixRoute("/tmp/vev-brokerconfig-test/mux.sock")
+	require.NoError(t, err)
+	ssh, err := newSSHRoute(RouteSSHStdio, "host", []string{"vev"}, TrustInputs{})
+	require.NoError(t, err)
+	tests := []struct {
+		name  string
+		route Route
+		valid bool
+	}{
+		{"unix", unix, true},
+		{"ssh", ssh, true},
+		{"missing address", Route{kind: RouteUnix, path: unix.path, local: true}, false},
+		{"wrong address", Route{kind: RouteUnix, path: unix.path, local: true, address: ssh.address}, false},
+		{"unix not local", Route{kind: RouteUnix, path: unix.path, address: unix.address}, false},
+		{"ssh local", Route{kind: ssh.kind, target: ssh.target, argv: ssh.argv, address: ssh.address, local: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.route.Validate()
+			if tt.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestResolverDoesNotAliasConfiguration(t *testing.T) {
+	config, err := loadDocument(t, documentWithLocal(t, localTestDocument()), nil)
+	require.NoError(t, err)
+	resolver := config.Resolver()
+	original := config.Resolver()
+	registration := resolver.byEndpoint[testEndpoint]
+	registration.Route.argv = []string{"changed"}
+	resolver.byEndpoint[testEndpoint] = registration
+	delete(resolver.byEndpoint, testEndpoint)
+	require.Equal(t, original.byEndpoint[testEndpoint], config.Resolver().byEndpoint[testEndpoint])
+	require.NotNil(t, resolver.local)
+	resolver.local.Identity = "changed"
+	require.Equal(t, original.local.Identity, config.Resolver().local.Identity)
+}
