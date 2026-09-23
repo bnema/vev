@@ -94,36 +94,3 @@ func (d *Daemon) commitMovePickerSelection(intent protocol.PickerIntent, source 
 		return errMovePaneInvalid
 	}
 }
-
-func (d *Daemon) previewTarget(target picker.Target, intent protocol.PickerIntent) (*session, *tab) {
-	d.mu.Lock()
-	sess := d.sessions[target.Session]
-	if sess == nil {
-		d.mu.Unlock()
-		return nil, nil
-	}
-	sess.mu.Lock()
-	d.mu.Unlock()
-	defer sess.mu.Unlock()
-	if sess.incarnation != target.Incarnation || !targetMatchesLifecycle(target, sess.name, sess.createdAt, sess.incarnation) {
-		return nil, nil
-	}
-	if intent == protocol.PickerIntentMoveTab {
-		if len(sess.tabs) == 0 {
-			return nil, nil
-		}
-		return sess, sess.tabs[0]
-	}
-	if target.TabID != "" {
-		for _, tb := range sess.tabs {
-			if domain.TabStableID(tb.stableID) == target.TabID {
-				return sess, tb
-			}
-		}
-		return nil, nil
-	}
-	if target.TabIndex < 0 || target.TabIndex >= len(sess.tabs) {
-		return nil, nil
-	}
-	return sess, sess.tabs[target.TabIndex]
-}

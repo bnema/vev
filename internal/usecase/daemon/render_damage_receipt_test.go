@@ -45,12 +45,7 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	p.screen.Write([]byte("preview-safe"))
 	p.mu.Unlock()
 
-	preview := snapshotPickerPreview(sess.tabs[0])
-	require.NotEmpty(t, preview.Rows)
-	require.Empty(t, ac.renderScratch.receipts, "picker preview must not create primary damage receipts")
-	p.mu.Lock()
-	require.NotEmpty(t, p.screen.Damage(), "picker preview must not acknowledge VT damage")
-	p.mu.Unlock()
+	require.Empty(t, ac.renderScratch.receipts, "no receipt exists before any capture runs")
 
 	ac.sendMu.Lock()
 	state, ok := captureRenderState(sess, ac, renderCaptureRequest{

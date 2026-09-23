@@ -308,7 +308,7 @@ func TestComposeCapturedFloatingFrameClipsRetainedGeometryAfterFailedShrink(t *t
 	require.False(t, applyFloatingResizePlanForTest(d, floatingPane, requested))
 	require.Equal(t, retained, floatingPane.popupGeometry, "failed resize must retain the committed geometry")
 	floatingPane.mu.Lock()
-	captured := capturePaneRenderStateLocked(floatingPane, retained.Inner)
+	captured := capturePaneRenderStateLockedInto(floatingPane, retained.Inner, capturedPaneRenderState{})
 	floatingPane.mu.Unlock()
 
 	var frame renderer.Frame
@@ -892,7 +892,7 @@ func TestFailedFloatingResizeKeepsCommittedRenderAndInputGeometry(t *testing.T) 
 	require.Equal(t, oldGeometry, inputGeometry)
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, oldGeometry.Inner)
+	captured := capturePaneRenderStateLockedInto(p, oldGeometry.Inner, capturedPaneRenderState{})
 	p.mu.Unlock()
 	base := renderer.NewFrame(newContent.Width, newContent.Height+2)
 	frame, _ := composeCapturedFloatingFrame(floatingComposeInput{

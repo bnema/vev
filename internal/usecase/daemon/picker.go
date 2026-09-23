@@ -9,7 +9,6 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -761,75 +760,4 @@ func (d *Daemon) killPickerTarget(target picker.Target) error {
 		return d.killSession(targetSess, protocol.ReasonSessionKilled, true)
 	}
 	return nil
-}
-
-func snapshotPickerPreview(tb *tab) picker.Preview {
-	if tb == nil {
-		return picker.Preview{}
-	}
-	tb.mu.Lock()
-	layoutSnap := solveTabLayoutLocked(tb)
-	if !layoutSnap.ok {
-		p := tb.focusedPane()
-		if p == nil {
-			tb.mu.Unlock()
-			return picker.Preview{}
-		}
-		p.mu.Lock()
-		preview := pickerPreviewFromLockedPane(p)
-		p.mu.Unlock()
-		tb.mu.Unlock()
-		return preview
-	}
-	state := capturedRenderState{layout: capturedTabLayout{
-		area: layoutSnap.area, focus: layoutSnap.focus,
-		placements:  append([]layout.Placement(nil), layoutSnap.placements...),
-		dividers:    append([]layout.Divider(nil), layoutSnap.dividers...),
-		fingerprint: layoutSnap.fingerprint, valid: true,
-	}}
-	for _, placement := range layoutSnap.placements {
-		p := tb.panes[placement.ID]
-		if p == nil {
-			continue
-		}
-		visible := placement.Content
-		if placement.Collapsed {
-			visible = domain.Rect{}
-		}
-		p.mu.Lock()
-		captured := capturePaneRenderStateLocked(p, visible)
-		p.mu.Unlock()
-		captured.placement = placement
-		captured.focused = placement.ID == layoutSnap.focus
-		state.panes = append(state.panes, captured)
-	}
-	tb.mu.Unlock()
-	return pickerPreviewFromCapturedRender(state)
-}
-
-func pickerPreviewFromCapturedRender(state capturedRenderState) picker.Preview {
-	composed := composeFrame(state, composeCacheInput{}, composeCacheInput{}).frame
-	if composed.Height < 2 {
-		return pickerPreviewFromFrame(composed)
-	}
-	rows := make([][]renderer.Cell, composed.Height-2)
-	for y := range rows {
-		rows[y] = append([]renderer.Cell(nil), composed.Row(y+1)...)
-	}
-	return picker.Preview{Rows: rows, Width: composed.Width, Height: len(rows)}
-}
-
-func pickerPreviewFromLockedPane(p *pane) picker.Preview {
-	return pickerPreviewFromFrame(p.screen)
-}
-
-func pickerPreviewFromFrame(frame renderer.CellSource) picker.Preview {
-	rows := make([][]renderer.Cell, frame.Rows())
-	for y := range rows {
-		rows[y] = make([]renderer.Cell, frame.Columns())
-		for x := range rows[y] {
-			rows[y][x] = frame.Cell(x, y)
-		}
-	}
-	return picker.Preview{Rows: rows, Width: frame.Columns(), Height: frame.Rows()}
 }

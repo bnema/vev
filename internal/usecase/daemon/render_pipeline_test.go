@@ -70,7 +70,7 @@ func TestCapturePaneRenderStateOwnsVisibleFrameWithoutConsumingDamage(t *testing
 	p.screen.Write([]byte("old"))
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, domain.Rect{Width: 3, Height: 1})
+	captured := capturePaneRenderStateLockedInto(p, domain.Rect{Width: 3, Height: 1}, capturedPaneRenderState{})
 	p.mu.Unlock()
 
 	require.Equal(t, 3, captured.frame.Width)
@@ -88,7 +88,7 @@ func TestCapturePaneRenderStateIsAlwaysNonDestructive(t *testing.T) {
 	p.screen.Write([]byte("preview"))
 
 	p.mu.Lock()
-	_ = capturePaneRenderStateLocked(p, domain.Rect{Width: 8, Height: 2})
+	_ = capturePaneRenderStateLockedInto(p, domain.Rect{Width: 8, Height: 2}, capturedPaneRenderState{})
 	p.mu.Unlock()
 
 	require.NotEmpty(t, p.screen.Damage())
@@ -101,7 +101,7 @@ func TestCapturePaneRenderStateMalformedDamageFallsBackToFullRedraw(t *testing.T
 	p.screen.Damage()[0] = renderer.Damage{Kind: renderer.DamageText, X: -1, Y: 0, Width: 4, Height: 1}
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, domain.Rect{Width: 8, Height: 2})
+	captured := capturePaneRenderStateLockedInto(p, domain.Rect{Width: 8, Height: 2}, capturedPaneRenderState{})
 	p.mu.Unlock()
 
 	require.Equal(t, []renderer.Damage{renderer.FullRedraw()}, captured.damage)
@@ -113,7 +113,7 @@ func TestCapturePaneRenderStateCollapsedRetainsDamage(t *testing.T) {
 	p.screen.Write([]byte("hidden"))
 
 	p.mu.Lock()
-	captured := capturePaneRenderStateLocked(p, domain.Rect{})
+	captured := capturePaneRenderStateLockedInto(p, domain.Rect{}, capturedPaneRenderState{})
 	p.mu.Unlock()
 
 	require.Zero(t, captured.frame.Width)

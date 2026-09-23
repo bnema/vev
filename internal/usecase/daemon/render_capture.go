@@ -179,13 +179,9 @@ func writePaneScreenLocked(p *pane, data []byte) {
 	}
 }
 
-// capturePaneRenderStateLocked copies only the visible rectangle required by
-// composition. It never copies scrollback/history and never lets the mutable
-// VT frame's Cells or row-offset slices escape pane.mu.
-func capturePaneRenderStateLocked(p *pane, visible domain.Rect) capturedPaneRenderState {
-	return capturePaneRenderStateLockedInto(p, visible, capturedPaneRenderState{})
-}
-
+// capturePaneRenderStateLockedInto copies only the visible rectangle required
+// by composition into out. It never copies scrollback/history and never lets
+// the mutable VT frame's Cells or row-offset slices escape pane.mu.
 func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out capturedPaneRenderState) capturedPaneRenderState {
 	out.id, out.stableID, out.title, out.titleGeneration = p.id, domain.PaneStableID(p.stableID), p.displayTitleLocked(), p.title.generation
 	// GraphicsSnapshot never allocates graphics state for a text-only screen and

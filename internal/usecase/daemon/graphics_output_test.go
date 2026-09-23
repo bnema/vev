@@ -204,9 +204,9 @@ func TestPaneGraphicsCoordinateGeometrySurvivesAttachmentResize(t *testing.T) {
 	p.mu.Lock()
 	setScreenGeometry(p.screen, oldGeometry)
 	writePaneScreenLocked(p, fixture)
-	first := capturePaneRenderStateLocked(p, domain.Rect{Width: 80, Height: 24})
+	first := capturePaneRenderStateLockedInto(p, domain.Rect{Width: 80, Height: 24}, capturedPaneRenderState{})
 	setScreenGeometry(p.screen, newGeometry)
-	second := capturePaneRenderStateLocked(p, domain.Rect{Width: 80, Height: 24})
+	second := capturePaneRenderStateLockedInto(p, domain.Rect{Width: 80, Height: 24}, capturedPaneRenderState{})
 	p.mu.Unlock()
 
 	require.Equal(t, oldGeometry, first.graphicsGeometry)

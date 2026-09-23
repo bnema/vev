@@ -77,10 +77,6 @@ func localPaletteSessionIdentity(lifecycle domain.SessionLifecycleID) paletteSes
 	return paletteSessionIdentity{kind: protocol.RouteKindLocal, endpoint: "local", lifecycle: lifecycle}
 }
 
-func remotePaletteSessionIdentity(endpoint string, lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
-	return paletteSessionIdentity{kind: protocol.RouteKindRemote, endpoint: endpoint, lifecycle: lifecycle}
-}
-
 func paletteRemoteDisplayOrigin(hostLabel string) string {
 	origin := domain.RemoteDisplayOrigin(hostLabel)
 	if origin == "" {

@@ -224,7 +224,3 @@ func remoteTargetTabIndexLocked(sess *session, target protocol.SessionAttachTarg
 	}
 	return target.ResolveTab(metadata)
 }
-
-func ptrSessionAttachTarget(target protocol.SessionAttachTarget) *protocol.SessionAttachTarget {
-	return &target
-}
