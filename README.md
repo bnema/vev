@@ -35,7 +35,8 @@ vev attach user@host[:session]   attach to a remote daemon
 vev ls [<host>|--all]            list sessions
 vev host add|rm <host>           manage remote hosts
 vev host list                    list remote hosts
-vev kill <name>|--all            kill sessions
+vev kill <name>|--sessions       kill one or every session
+vev kill --all                   stop every vev process (named sessions return)
 vev --web-daemon                 start the private browser terminal
 vev --ui-driver [options]        drive a headless attachment over JSONL
 vev --ui-observe ...              expose passive observation for an attach

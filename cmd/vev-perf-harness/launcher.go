@@ -335,7 +335,7 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		p.shutdown = func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			shutdown := exec.CommandContext(ctx, bin, "kill", "--daemon")
+			shutdown := exec.CommandContext(ctx, bin, "_daemon-stop")
 			shutdown.Env = withoutEnv(cmd.Env, "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN")
 			return shutdown.Run()
 		}

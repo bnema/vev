@@ -227,9 +227,9 @@ cmd_down() {
     for host in "${hosts[@]}"; do
       vev_env timeout 15 "$vev_bin" host rm "$host" >/dev/null 2>&1 || true
     done
-    vev_env timeout 10 "$vev_bin" kill --daemon >/dev/null 2>&1 || true
+    vev_env timeout 10 "$vev_bin" _daemon-stop >/dev/null 2>&1 || true
   fi
-  # vev has no broker stop command: TERM the sandbox broker and any leftover
+  # `kill --all` would stop every vev of this user: TERM the sandbox broker and any leftover
   # sandbox roles, then KILL whatever ignores it.
   local pids
   pids=$(vev_pids | paste -sd' ')

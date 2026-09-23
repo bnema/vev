@@ -62,6 +62,7 @@ const (
 	kindDaemonLauncher
 	kindUIDriver
 	kindUIRemoteCleanup
+	kindDaemonStop
 	kindWebDaemon
 	kindWebRenew
 	kindWebServe
@@ -248,6 +249,11 @@ parsedUIFlags:
 			return command{}, usagef("`%s` does not accept arguments", uiRemoteCleanupCommand)
 		}
 		return command{kind: kindUIRemoteCleanup}, nil
+	case daemonStopCommand:
+		if len(args) != 1 {
+			return command{}, usagef("`%s` does not accept arguments", daemonStopCommand)
+		}
+		return command{kind: kindDaemonStop}, nil
 	case "new":
 		if len(args) < 2 || args[1] == "" {
 			return command{}, usagef("`new` requires a session name")
@@ -372,6 +378,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runProductionBrokerLauncherCommand(ctx)
 	case kindBrokerReady:
 		return runBrokerReady(ctx, cmd.brokerReady, os.Stdout)
+	case kindDaemonStop:
+		return requestDaemonStop(ctx)
 	case kindUIRemoteCleanup:
 		return runUIRemoteCleanup(ctx)
 	case kindUIDriver:
@@ -917,6 +925,10 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 const (
 	envRemoteTransport     = "VEV_REMOTE_TRANSPORT"
 	uiRemoteCleanupCommand = "_ui-cleanup"
+	// daemonStopCommand is the hidden, environment-scoped graceful stop of
+	// this environment's daemon, for harnesses and scripts. Users run
+	// `kill --all` instead.
+	daemonStopCommand = "_daemon-stop"
 )
 
 func remoteTransportModeFromEnv(value string) (string, error) {

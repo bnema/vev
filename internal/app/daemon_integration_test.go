@@ -703,7 +703,7 @@ func TestIntegration_EphemeralSurvivesDetachAndReattaches(t *testing.T) {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not stop after kill --daemon")
+		t.Fatal("daemon did not stop after a daemon stop request")
 	}
 }
 
@@ -726,7 +726,7 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not stop after kill --daemon")
+		t.Fatal("daemon did not stop after a daemon stop request")
 	}
 
 	_, served2 := startDaemonInDir(t, dir, daemon.WithShell("/bin/sh", []string{"-c", "sleep 30"}))
@@ -738,7 +738,7 @@ func TestIntegration_EphemeralNotListedAfterDaemonRestart(t *testing.T) {
 	case err := <-served2:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("restarted daemon did not stop after kill --daemon")
+		t.Fatal("restarted daemon did not stop after a daemon stop request")
 	}
 }
 
@@ -795,7 +795,7 @@ func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("restarted daemon did not stop after kill --daemon")
+		t.Fatal("restarted daemon did not stop after a daemon stop request")
 	}
 
 	served = start()
@@ -899,7 +899,7 @@ func TestIntegration_NamedSessionLastRemovalKeepsDaemonServing(t *testing.T) {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not stop after kill --daemon")
+		t.Fatal("daemon did not stop after a daemon stop request")
 	}
 }
 
@@ -964,7 +964,7 @@ func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not stop after kill --daemon")
+		t.Fatal("daemon did not stop after a daemon stop request")
 	}
 }
 
@@ -1687,12 +1687,12 @@ func (*integrationTransport) Close() error                 { return nil }
 func (*integrationTransport) LocalAddr() net.Addr          { return nil }
 func (*integrationTransport) RemoteAddr() net.Addr         { return nil }
 
-// TestIntegration_KillAllPurgesSessionsAndKeepsDaemon is the P4.2 app-level
-// contract: `kill --all` removes every live and stopped session but leaves the
+// TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon is the P4.2 app-level
+// contract: `kill --sessions` removes every live and stopped session but leaves the
 // daemon serving, and the same process accepts fresh named and ephemeral
 // sessions that start PTYs, forward input, and open a tab through the ordinary
 // command palette. Only the distinct explicit daemon stop ends it.
-func TestIntegration_KillAllPurgesSessionsAndKeepsDaemon(t *testing.T) {
+func TestIntegration_KillSessionsPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, served := startDaemon(t, daemon.WithShell("/bin/cat", nil))
 
@@ -1748,6 +1748,6 @@ func TestIntegration_KillAllPurgesSessionsAndKeepsDaemon(t *testing.T) {
 	case err := <-served:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("daemon did not stop after kill --daemon")
+		t.Fatal("daemon did not stop after a daemon stop request")
 	}
 }
