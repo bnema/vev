@@ -21,9 +21,8 @@ func TestCatalogue(t *testing.T) {
 	t.Run("apply-rename-replace", testCatalogueApplyRenameReplace)
 	t.Run("metadata-update-preserves-authority", testCatalogueMetadataUpdatePreservesAuthority)
 	t.Run("metadata-update-is-deferred", testCatalogueMetadataUpdateIsDeferred)
-	t.Run("read-only-malformed", testCatalogueLoadReadOnlyRejectsMalformedValue)
-	t.Run("read-only-fresh-install", testCatalogueLoadReadOnlyFreshInstallHasNoSessions)
-	t.Run("read-only-ignores-stray-tmp", testCatalogueLoadReadOnlyIgnoresStrayTmp)
+	t.Run("open-rejects-malformed", testCatalogueOpenRejectsMalformedValue)
+	t.Run("open-ignores-stray-tmp", testCatalogueOpenIgnoresStrayTmp)
 }
 
 func testCatalogueRecordRoundTrip(t *testing.T) {
@@ -263,27 +262,17 @@ func testCatalogueMetadataUpdateIsDeferred(t *testing.T) {
 	require.NotEqual(t, afterSync, afterIdentity, "identity writes must sync before returning")
 }
 
-func testCatalogueLoadReadOnlyRejectsMalformedValue(t *testing.T) {
+func testCatalogueOpenRejectsMalformedValue(t *testing.T) {
 	dir := privateDir(t)
 	store, err := kv.Open(filepath.Join(dir, filename))
 	require.NoError(t, err)
 	require.NoError(t, store.Set([]byte("work"), []byte("malformed")))
 	require.NoError(t, store.Close())
-	_, err = LoadCatalogueReadOnly(dir)
+	_, err = Open(dir)
 	require.Error(t, err)
 }
 
-// testCatalogueLoadReadOnlyFreshInstallHasNoSessions covers `vev ls` on a
-// machine with no daemon and no catalogue. This must yield an empty catalogue,
-// not an error.
-func testCatalogueLoadReadOnlyFreshInstallHasNoSessions(t *testing.T) {
-	dir := privateDir(t)
-	records, err := LoadCatalogueReadOnly(dir)
-	require.NoError(t, err)
-	require.Empty(t, records)
-}
-
-func testCatalogueLoadReadOnlyIgnoresStrayTmp(t *testing.T) {
+func testCatalogueOpenIgnoresStrayTmp(t *testing.T) {
 	dir := privateDir(t)
 	p, _, err := openCurrentCatalogue(dir, true)
 	require.NoError(t, err)
@@ -292,8 +281,9 @@ func testCatalogueLoadReadOnlyIgnoresStrayTmp(t *testing.T) {
 	require.NoError(t, p.Close())
 	require.NoError(t, os.WriteFile(StorePath(dir)+".tmp", []byte("partial rewrite"), 0o600))
 
-	records, err := LoadCatalogueReadOnly(dir)
+	reopened, records, err := openCurrentCatalogue(dir, false)
 	require.NoError(t, err)
+	require.NoError(t, reopened.Close())
 	require.Equal(t, []domain.CatalogueRecord{want}, records)
 	tmp, err := os.ReadFile(StorePath(dir) + ".tmp")
 	require.NoError(t, err)

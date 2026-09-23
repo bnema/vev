@@ -44,18 +44,3 @@ func UniqueRemoteHostTargets(values []string) []string {
 	}
 	return out
 }
-
-// UniqueRemoteRegistrations returns a de-duplicated copy preserving first
-// occurrence order by endpoint.
-func UniqueRemoteRegistrations(values []RemoteRegistration) []RemoteRegistration {
-	seen := make(map[string]struct{}, len(values))
-	out := make([]RemoteRegistration, 0, len(values))
-	for _, value := range values {
-		if _, ok := seen[value.Endpoint]; ok {
-			continue
-		}
-		seen[value.Endpoint] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}

@@ -127,25 +127,6 @@ func openCurrentCatalogue(dir string, createProvenEmpty bool) (*Persister, []dom
 	return p, records, nil
 }
 
-func LoadReadOnly(dir string) ([]domain.CatalogueRecord, error) { return LoadCatalogueReadOnly(dir) }
-
-// LoadCatalogueReadOnly loads the catalogue without retaining a store handle.
-// A fresh install with no main catalogue is not an error. Stray temporary
-// files are ignored, while malformed main files fail closed.
-func LoadCatalogueReadOnly(dir string) ([]domain.CatalogueRecord, error) {
-	p, records, err := openCurrentCatalogue(dir, false)
-	if err != nil {
-		if errors.Is(err, errPersistenceUnavailable) {
-			return []domain.CatalogueRecord{}, nil
-		}
-		return nil, fmt.Errorf("%w: %s: %w", ErrCatalogueUnreadable, StorePath(dir), err)
-	}
-	if err := p.Close(); err != nil {
-		return nil, err
-	}
-	return records, nil
-}
-
 func (p *Persister) Save(record domain.CatalogueRecord) error { return p.Replace(record.Name, record) }
 func (p *Persister) Create(record domain.CatalogueRecord) error {
 	if p == nil {
