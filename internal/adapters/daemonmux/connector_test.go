@@ -2,7 +2,12 @@ package daemonmux
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"os/exec"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +17,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -21,6 +27,49 @@ import (
 // generous wall time: the only timing under test is a real carriage loss or an
 // admission handshake, never a handshake budget.
 const p3cTestDeadline = 5 * time.Second
+
+func TestDialErrorClassifiesMissingDaemonSeparately(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses the POSIX shell")
+	}
+	exitError := func(t *testing.T, code int) error {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code))
+		err := cmd.Run()
+		var exit *exec.ExitError
+		require.ErrorAs(t, err, &exit)
+		return errors.Join(sshstdio.ErrMuxSSHExit, exit)
+	}
+
+	tests := []struct {
+		name string
+		err  error
+		want ports.BrokerErrorCode
+	}{
+		{name: "reserved helper status means no daemon", err: exitError(t, sshstdio.MuxExitNoDaemon), want: ports.BrokerErrorNoDaemon},
+		{name: "ssh transport status remains unavailable", err: exitError(t, 255), want: ports.BrokerErrorUnavailable},
+		{name: "other helper status remains unavailable", err: exitError(t, 127), want: ports.BrokerErrorUnavailable},
+		{name: "zero exit after carriage end remains unavailable", err: errors.Join(sshstdio.ErrMuxSSHExit, io.EOF), want: ports.BrokerErrorUnavailable},
+		{name: "other mux failure remains unavailable", err: errors.New("socket timeout"), want: ports.BrokerErrorUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, classify := range []struct {
+				name string
+				fn   func(error) error
+			}{
+				{name: "dial", fn: dialError},
+				{name: "handshake", fn: handshakeError},
+			} {
+				t.Run(classify.name, func(t *testing.T) {
+					var brokerErr ports.BrokerError
+					require.ErrorAs(t, classify.fn(tt.err), &brokerErr)
+					require.Equal(t, tt.want, brokerErr.Code)
+				})
+			}
+		})
+	}
+}
 
 // rawCarriagePair returns two independent real raw framed transports joined by
 // an in-memory duplex pipe. Each end frames through the shared streamframe

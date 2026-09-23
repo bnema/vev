@@ -37,8 +37,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"sync"
 
+	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
@@ -180,11 +182,24 @@ func dialError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
+	if missingRemoteDaemon(err) {
+		return ports.BrokerError{Code: ports.BrokerErrorNoDaemon, Cause: err}
+	}
 	var typed ports.BrokerError
 	if errors.As(err, &typed) && typed.Validate() == nil {
 		return err
 	}
 	return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Cause: err}
+}
+
+// missingRemoteDaemon only accepts the reserved helper exit after SSH has
+// started; SSH's own failures (including exit 255) remain unavailable.
+func missingRemoteDaemon(err error) bool {
+	if !errors.Is(err, sshstdio.ErrMuxSSHExit) {
+		return false
+	}
+	var exit *exec.ExitError
+	return errors.As(err, &exit) && exit.ExitCode() == sshstdio.MuxExitNoDaemon
 }
 
 // handshakeError classifies one handshake failure: cancellation and deadline
@@ -196,6 +211,9 @@ func handshakeError(err error) error {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
+	}
+	if missingRemoteDaemon(err) {
+		return ports.BrokerError{Code: ports.BrokerErrorNoDaemon, Cause: err}
 	}
 	var refusal *HandshakeRefusal
 	if errors.As(err, &refusal) {
