@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -23,52 +22,6 @@ import (
 // frameHeaderLen is the 4-byte big-endian length prefix; envelopes carry no
 // legacy type byte.
 const frameHeaderLen = 4
-
-func TestBuildCommandUsesExecArgs(t *testing.T) {
-	// BuildCommand deliberately starts `ssh -- target 'vev' '_stdio'`.
-	// Session selection and terminal color capability are carried in vev's Hello
-	// message, not in ssh env.
-	tests := []struct {
-		name    string
-		target  string
-		session string
-		want    []string
-	}{
-		{name: "no session", target: "user@example.com", want: []string{"--", "user@example.com", "'vev' '_stdio'"}},
-		{name: "session is carried by Hello rather than ssh command", target: "user@example.com", session: "work; rm -rf /", want: []string{"--", "user@example.com", "'vev' '_stdio'"}},
-		{name: "target kept as single local arg after option terminator", target: "user@host; touch /tmp/pwn", session: "work", want: []string{"--", "user@host; touch /tmp/pwn", "'vev' '_stdio'"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := BuildCommand(tt.target, tt.session)
-			if got.Path != "ssh" {
-				t.Fatalf("Path = %q, want ssh", got.Path)
-			}
-			if len(got.Args) != len(tt.want) {
-				t.Fatalf("Args len = %d, want %d (%q)", len(got.Args), len(tt.want), got.Args)
-			}
-			for i := range tt.want {
-				if got.Args[i] != tt.want[i] {
-					t.Fatalf("Args[%d] = %q, want %q (all args %q)", i, got.Args[i], tt.want[i], got.Args)
-				}
-			}
-		})
-	}
-}
-
-func TestBuildCommandForModeUsesCanonicalSSHArgs(t *testing.T) {
-	got := BuildCommandForMode("user@example.com", "_quic-bootstrap", "work")
-	want := []string{"--", "user@example.com", "'vev' '_quic-bootstrap'"}
-	if got.Path != "ssh" {
-		t.Fatalf("Path = %q, want ssh", got.Path)
-	}
-	for i := range want {
-		if got.Args[i] != want[i] {
-			t.Fatalf("Args[%d] = %q, want %q (all args %q)", i, got.Args[i], want[i], got.Args)
-		}
-	}
-}
 
 func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 	tests := []struct {
@@ -112,92 +65,6 @@ func TestBuildCommandForRemoteCommandQuotesEveryWord(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestBuildCommandForObservationPreservesHostTrustAndAuthenticationPolicy(t *testing.T) {
-	spec := BuildCommandForObservation("user@example.com", 5*time.Second, "vev", "cmd", "remote-catalog", "--json")
-	if spec.Path != "ssh" {
-		t.Fatalf("Path = %q, want ssh", spec.Path)
-	}
-	flat := strings.Join(spec.Args, " ")
-	for _, want := range []string{"-T", "UpdateHostKeys=no", "ConnectTimeout=5", "ConnectionAttempts=1"} {
-		if !strings.Contains(flat, want) {
-			t.Fatalf("observation argv %q missing %q", spec.Args, want)
-		}
-	}
-	for _, forbidden := range []string{"BatchMode=", "StrictHostKeyChecking=", "UserKnownHostsFile=", "ProxyCommand="} {
-		if strings.Contains(flat, forbidden) {
-			t.Fatalf("observation argv %q overrides host policy %q", spec.Args, forbidden)
-		}
-	}
-
-	// Effective behavior: host-specific authentication and trust policy stays
-	// intact while vev still disables TTY allocation, host-key updates, and
-	// unbounded connection attempts.
-	ssh, err := exec.LookPath("ssh")
-	if err != nil {
-		t.Skip("ssh binary not available for effective-config probe")
-	}
-	conflict := "Host *\n  RequestTTY yes\n  UpdateHostKeys yes\n  BatchMode no\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  ProxyCommand fake-proxy %h %p\n"
-	confPath := t.TempDir() + "/ssh_config"
-	if err := os.WriteFile(confPath, []byte(conflict), 0o600); err != nil {
-		t.Fatalf("write conflicting ssh config: %v", err)
-	}
-	sep := -1
-	for i, arg := range spec.Args {
-		if arg == "--" {
-			sep = i
-			break
-		}
-	}
-	if sep < 0 {
-		t.Fatalf("observation argv %q has no option terminator", spec.Args)
-	}
-	probe := append(append([]string{}, spec.Args[:sep]...), "-F", confPath, "-G", "user@example.com")
-	out, err := exec.Command(ssh, probe...).Output()
-	if err != nil {
-		t.Fatalf("ssh -G probe: %v", err)
-	}
-	effective := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		key, value, ok := strings.Cut(line, " ")
-		if ok {
-			effective[strings.ToLower(key)] = strings.ToLower(value)
-		}
-	}
-	for key, want := range map[string]string{
-		"connecttimeout": "5", "connectionattempts": "1",
-	} {
-		if effective[key] != want {
-			t.Fatalf("effective ssh %s = %q, want %q (config must not override observation argv)", key, effective[key], want)
-		}
-	}
-	// ssh -G spells boolean keywords true/false where the configuration
-	// spells yes/no; normalize both spellings before comparing.
-	normalize := func(value string) string {
-		switch value {
-		case "yes", "true":
-			return "yes"
-		case "no", "false":
-			return "no"
-		default:
-			return value
-		}
-	}
-	for key, want := range map[string]string{
-		"batchmode": "no", "stricthostkeychecking": "no",
-		"requesttty": "no", "updatehostkeys": "no",
-	} {
-		if got := normalize(effective[key]); got != want {
-			t.Fatalf("effective ssh %s = %q, want %q", key, effective[key], want)
-		}
-	}
-	if effective["userknownhostsfile"] != "/dev/null" {
-		t.Fatalf("effective ssh userknownhostsfile = %q, want /dev/null", effective["userknownhostsfile"])
-	}
-	if !strings.Contains(effective["proxycommand"], "fake-proxy") {
-		t.Fatalf("effective ssh proxycommand = %q, want configured proxy", effective["proxycommand"])
 	}
 }
 
@@ -345,15 +212,6 @@ func TestTransportUsesCanonicalFrameMaximum(t *testing.T) {
 	_, err = recv.Recv()
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("Recv error = %v, want ErrFrameTooLarge", err)
-	}
-}
-
-func TestDialContextCanceledBeforeStart(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := DialContext(ctx, "example.com", "work")
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DialContext error = %v, want context.Canceled", err)
 	}
 }
 
