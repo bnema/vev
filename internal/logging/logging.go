@@ -16,6 +16,7 @@ type Component string
 
 const (
 	Daemon Component = "daemon"
+	Broker Component = "broker"
 	Client Component = "client"
 	Stdio  Component = "stdio"
 )

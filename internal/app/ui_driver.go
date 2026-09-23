@@ -230,7 +230,7 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
 	if err != nil {
 		return err
 	}
-	_, logCloser, err := configureLogging(logging.Client, false)
+	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
@@ -245,6 +245,7 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
 	attachmentEnv := terminalAttachmentEnvironment()
 	attachmentEnv.Cwd = sessionEnv.Cwd
 	return runUIDriverClient(ctx, brokerClientConfig{
+		Logger:                   log,
 		Connector:                newProductionBrokerConnector(),
 		Terminal:                 terminal,
 		Clock:                    clk,
@@ -434,7 +435,7 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 	}
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	_, logCloser, err := configureLogging(logging.Client, false)
+	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {
 		return err
 	}
@@ -499,6 +500,7 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 	attachmentEnv := terminalAttachmentEnvironment()
 	attachmentEnv.Cwd = sessionEnv.Cwd
 	return runBrokerClient(ctx, brokerClientConfig{
+		Logger:                   log,
 		Connector:                withPreconnected(newProductionBrokerConnector(), preconnected),
 		Terminal:                 terminal,
 		Clock:                    clk,

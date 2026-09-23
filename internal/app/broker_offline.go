@@ -56,7 +56,7 @@ const (
 // refused rather than absorbed.
 var brokerServePoolLimits = broker.PoolLimits{
 	Physical:         64,
-	Clients:          brokeripc.DefaultMaxClients,
+	Clients:          2 * brokeripc.DefaultMaxClients,
 	Streams:          256,
 	StreamsPerClient: 64,
 	Warm:             brokerconfig.DefaultWarmTransports,
@@ -216,7 +216,7 @@ func runBrokerServeCommand(ctx context.Context, options brokerServeOptions) (ret
 func sandboxLogging(dir string) (*slog.Logger, io.Closer, error) {
 	return logging.Setup(logging.Config{
 		Dir:       dir,
-		Component: logging.Daemon,
+		Component: logging.Broker,
 		Level:     logging.EnvLevel(),
 		MaxBytes:  logging.DefaultMaxBytes,
 	})

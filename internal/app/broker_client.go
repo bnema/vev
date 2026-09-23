@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ import (
 // to the process clock); the remaining fields are optional and keep the
 // supervisor defaults when they are left zero.
 type brokerClientConfig struct {
+	Logger    *slog.Logger
 	Connector ports.BrokerConnector
 	Terminal  ports.Terminal
 	Clock     ports.Clock
@@ -277,6 +279,7 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 	picker := client.NewPicker(clk, 0, attachmentEnv.TrueColor)
 	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState, clock: clk}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
+		Logger:                   cfg.Logger,
 		Connector:                cfg.Connector,
 		Terminal:                 cfg.Terminal,
 		Clock:                    clk,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"reflect"
 	"sync"
@@ -290,6 +291,8 @@ type SpinnerPresentation interface {
 }
 
 type SupervisorConfig struct {
+	// Logger receives bounded client lifecycle diagnostics. Optional.
+	Logger *slog.Logger
 	// Connector establishes the broker connection. Required.
 	Connector ports.BrokerConnector
 	// Terminal is the controlling terminal the supervisor owns. Required.
@@ -382,7 +385,8 @@ type AttachmentLifecycleAction struct {
 // Supervisor owns one autonomous client process: raw mode, one terminal input
 // lifetime, and the broker-connectivity lifecycle.
 type Supervisor struct {
-	cfg SupervisorConfig
+	cfg    SupervisorConfig
+	logger *slog.Logger
 
 	// pendingPickerKey retains a commit observed while connecting. It is
 	// revalidated against the adopted service just like a ready-phase commit.
@@ -465,8 +469,13 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	} else if err := cfg.InitialNavigation.Validate(); err != nil {
 		return nil, fmt.Errorf("vev: supervisor initial navigation: %w", err)
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	supervisor := &Supervisor{
 		cfg:        cfg,
+		logger:     logger,
 		state:      State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected},
 		clientID:   newClientID(),
 		navigation: cfg.InitialNavigation,
@@ -732,9 +741,12 @@ func (s *Supervisor) retryFailure(ctx context.Context, input *terminalInputLifet
 // and normalized to a typed unavailable failure so the run loop never observes
 // an untyped cause.
 func (s *Supervisor) connectAttempt(ctx context.Context, generation uint64) supervisorAttempt {
+	s.logger.Debug("client_broker_connect_begin", "generation", generation)
 	service, err := s.cfg.Connector.Connect(ctx)
 	if err != nil {
-		return supervisorAttempt{generation: generation, err: normalizeUnavailable(err)}
+		failure := normalizeUnavailable(err)
+		s.logger.Warn("client_broker_connect_failed", "generation", generation, "code", brokerErrorCode(failure), "error", failure, "cause", errors.Unwrap(failure))
+		return supervisorAttempt{generation: generation, err: failure}
 	}
 	if supervisorNil(service) {
 		return supervisorAttempt{generation: generation, err: ports.BrokerError{
@@ -745,7 +757,9 @@ func (s *Supervisor) connectAttempt(ctx context.Context, generation uint64) supe
 	sub, err := service.Subscribe()
 	if err != nil {
 		_ = service.Close()
-		return supervisorAttempt{generation: generation, err: normalizeUnavailable(err)}
+		failure := normalizeUnavailable(err)
+		s.logger.Warn("client_broker_subscribe_failed", "generation", generation, "code", brokerErrorCode(failure), "error", failure, "cause", errors.Unwrap(failure))
+		return supervisorAttempt{generation: generation, err: failure}
 	}
 	if supervisorNil(sub) {
 		// A service that reports no subscription cannot ever become Ready, so it
@@ -766,6 +780,7 @@ func (s *Supervisor) connectAttempt(ctx context.Context, generation uint64) supe
 			continue
 		case <-service.Done():
 			cause := normalizeUnavailable(service.Err())
+			s.logger.Warn("client_broker_initial_publication_lost", "generation", generation, "code", brokerErrorCode(cause), "error", cause, "cause", errors.Unwrap(cause))
 			sub.Close()
 			_ = service.Close()
 			return supervisorAttempt{generation: generation, err: cause}
@@ -1086,6 +1101,14 @@ func supervisorRetryable(err error) bool {
 // policy) still selects the non-retryable path; every untyped failure, including
 // a nil cause, becomes an unavailable BrokerError that preserves the original
 // error as its local-only Cause.
+func brokerErrorCode(err error) string {
+	var typed ports.BrokerError
+	if errors.As(err, &typed) {
+		return typed.Code.String()
+	}
+	return "unknown"
+}
+
 func normalizeUnavailable(err error) error {
 	if err == nil {
 		return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker connection lost"}
@@ -1094,17 +1117,27 @@ func normalizeUnavailable(err error) error {
 	if errors.As(err, &typed) {
 		return err
 	}
+	var admission ports.BrokerAdmissionError
+	if errors.As(err, &admission) {
+		return err
+	}
 	return ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker connection lost", Cause: err}
 }
 
 // notify surfaces a connectivity failure through the optional notifier.
 func (s *Supervisor) notifyLifecycle(kind LifecycleNoticeKind) {
+	if s != nil {
+		s.logger.Debug("client_lifecycle_notice", "kind", kind)
+	}
 	if s != nil && s.cfg.NotifyLifecycle != nil {
 		s.cfg.NotifyLifecycle(LifecycleNotice{Kind: kind})
 	}
 }
 
 func (s *Supervisor) notify(err error) {
+	if err != nil {
+		s.logger.Warn("client_connectivity_failure", "state", s.State().Connectivity.String(), "code", brokerErrorCode(err), "error", err, "cause", errors.Unwrap(err))
+	}
 	if s.cfg.Notify == nil || err == nil {
 		return
 	}
@@ -1130,6 +1163,9 @@ func (s *Supervisor) transition(event supervisorEvent) {
 	s.state = reduceSupervisor(s.state, event)
 	state := s.state
 	s.mu.Unlock()
+	if state.Presentation != previous || event.kind == supervisorBeginAttempt || event.kind == supervisorTransientFailure || event.kind == supervisorBrokerLoss {
+		s.logger.Debug("client_state_transition", "from", previous.String(), "to", state.Presentation.String(), "connectivity", state.Connectivity.String(), "attempt", state.Attempt, "generation", state.Generation, "error", event.err, "cause", errors.Unwrap(event.err))
+	}
 	if state.Presentation != previous {
 		s.publishPresentation(state.Presentation)
 	}
