@@ -91,6 +91,21 @@ def scenario(container, endpoint=None):
         print(f"PASS ui endpoint={endpoint or 'local'} session={name} lifecycle={context['session']['lifecycle_id']}")
     finally:
         driver.close()
+    return name
+
+
+def await_remote_listing(container, endpoint, name, timeout=10.0):
+    """Poll `vev ls ENDPOINT` until the broker's observation lists NAME."""
+    deadline = time.monotonic() + timeout
+    listing = ""
+    while True:
+        listing = run("docker", "exec", container, "vev", "ls", endpoint, timeout=15, check=False).stdout
+        if any(line.split()[:1] == [f"{name}@{endpoint}"] for line in listing.splitlines()):
+            print(f"PASS ls endpoint={endpoint} session={name}")
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"`vev ls {endpoint}` never listed {name} within {timeout}s:\n{listing}")
+        time.sleep(0.5)
 
 
 def main():
@@ -104,8 +119,9 @@ def main():
         catalog = run("docker", "exec", client, "vev", "ls", endpoint, timeout=30)
         print(f"PASS cli endpoint={endpoint} catalog_lines={len(catalog.stdout.splitlines())}")
     scenario(client)
-    scenario(client, "remote-a")
-    scenario(client, "remote-b")
+    created = {endpoint: scenario(client, endpoint) for endpoint in ("remote-a", "remote-b")}
+    for endpoint, name in created.items():
+        await_remote_listing(client, endpoint, name)
 
 
 if __name__ == "__main__":
