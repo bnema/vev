@@ -1110,7 +1110,9 @@ func (r *Registry) apply(result probeResult) {
 	if !failed && availability == domain.RemoteAvailabilityNoDaemon {
 		current.Availability = availability
 		current.LastSuccess = result.at
-		current.NextDue = result.at.Add(r.jitter(r.freshForLocked(false), result.endpoint, result.attempt))
+		// An absent daemon is stable: demand does not require a fresh SSH
+		// handshake every two seconds just to confirm it is still absent.
+		current.NextDue = result.at.Add(r.jitter(r.freshFor, result.endpoint, result.attempt))
 		current.ConsecutiveFailures = 0
 		current.LastFailure = domain.RemoteFailure{}
 		current.Identity = ""
