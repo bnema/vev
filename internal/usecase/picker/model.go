@@ -174,7 +174,7 @@ func (m *Model) Intent() protocol.PickerIntent {
 // SortMode reports the local ordering mode.
 func (m *Model) SortMode() SortMode {
 	if m == nil {
-		return SortRecent
+		return SortGrouped
 	}
 	return m.sort
 }
@@ -235,12 +235,16 @@ func (m *Model) keysAboveCursor() []string {
 
 // selectFirstKey moves the cursor to the first key still present, if any.
 func (m *Model) selectFirstKey(keys []string) {
+	index := make(map[string]int, len(m.rows))
+	for idx, candidate := range m.rows {
+		if m.eligible(idx) {
+			index[candidate.key()] = idx
+		}
+	}
 	for _, key := range keys {
-		for idx, candidate := range m.rows {
-			if m.eligible(idx) && candidate.key() == key {
-				m.selected = idx
-				return
-			}
+		if idx, ok := index[key]; ok {
+			m.selected = idx
+			return
 		}
 	}
 }
@@ -572,11 +576,11 @@ func lineStatusBadge(status protocol.PickerLineStatus) string {
 	return statusDot
 }
 
-// renderList draws each visible row as up to three segments: a name segment
-// (bold when styles came from a truecolor theme), a base-styled attention
-// marker right after the name, and a muted detail segment — or a base-styled
-// status badge for header rows. A tight width ellipsizes the detail segment
-// before eating into the name.
+// renderList draws each visible row: a dimmed tree prefix, the name (bold on
+// unselected live session and host headers), the attention marker, then for
+// headers a right-aligned muted detail (tab count, "*" when attached) and a
+// status dot in a fixed xterm-256 color. A tight width truncates the detail
+// before the name.
 func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles RenderStyles) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
@@ -617,7 +621,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if r.tree != "" {
 			treeStyle := base
 			treeStyle.Attrs |= renderer.AttrDim
-			treeX = ui.DrawText(frame, rect.X, rect.Y+y, clipX, r.tree, treeStyle)
+			treeX = ui.DrawText(frame, rect.X, rect.Y+y, max(rect.X, clipX-2), r.tree, treeStyle)
 		}
 		badge := ""
 		if r.rendersAsHeader() {
@@ -658,6 +662,8 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			if badge != "" {
 				badgeX := max(rect.X, clipX-badgeWidth)
 				badgeStyle := base
+				// The dot keeps its own color even on the inverse selected row.
+				badgeStyle.Inverse = false
 				badgeStyle.Foreground = lineStatusColor(r.line.Status)
 				badgeStyle.HasForegroundRGB = false
 				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, badgeStyle)

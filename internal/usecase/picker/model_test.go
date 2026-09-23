@@ -302,8 +302,11 @@ func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
 	for row, want := range map[int]int{0: 71, 1: 244} {
 		text := []rune(strings.TrimRight(rowText(frame.Row(row)), " "))
 		require.Equal(t, '●', text[len(text)-1])
-		require.Equal(t, want, frame.At(len(text)-1, row).Style.Foreground, "row %d dot color", row)
+		dot := frame.At(len(text)-1, row).Style
+		require.Equal(t, want, dot.Foreground, "row %d dot color", row)
+		require.False(t, dot.Inverse, "row %d dot is never inverted, even when selected", row)
 	}
+	require.True(t, frame.At(0, 0).Style.Inverse, "row 0 is the selected row")
 }
 
 func TestRenderShowsNoDaemonBadgeAndCreateHint(t *testing.T) {
@@ -487,4 +490,22 @@ func TestTreePrefixesBranchSessionsAndTabs(t *testing.T) {
 	cell := frame.At(0, 1)
 	require.Equal(t, '├', cell.Rune)
 	require.NotZero(t, cell.Style.Attrs&renderer.AttrDim, "tree lines are dimmed")
+}
+
+func TestReplaceLinesPreviousRowRespectsSearch(t *testing.T) {
+	m := New([]protocol.PickerLine{navLine("a", "alpha"), navLine("b", "beta"), navLine("c", "alps")}, Config{Cursor: protocol.PickerCursor{Key: "c", Index: -1}})
+	m.EnterSearch()
+	for _, r := range "al" {
+		m.InsertSearch(r)
+	}
+	m.Down() // alpha -> alps: beta is hidden by the query
+	selected, ok := m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "c", selected.Key)
+
+	m.ReplaceLines([]protocol.PickerLine{navLine("a", "alpha"), navLine("b", "beta")}, protocol.PickerCursor{Index: -1})
+
+	selected, ok = m.Selected()
+	require.True(t, ok)
+	require.Equal(t, "a", selected.Key, "the hidden row above is skipped for the nearest matching one")
 }

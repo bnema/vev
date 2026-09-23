@@ -908,7 +908,9 @@ func pickerHostDetail(observation ports.BrokerDaemonObservation) string {
 	if !observation.InventoryKnown {
 		return "…"
 	}
-	return strconv.Itoa(len(observation.Sessions))
+	// A host row is only published when it has no sessions: the status dot
+	// already says why, so no count is shown.
+	return ""
 }
 
 func pickerSessionStatus(session catalogue.RemoteCatalogSession) protocol.PickerLineStatus {
