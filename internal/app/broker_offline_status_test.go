@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/brokeripc"
+	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 )
@@ -31,16 +31,30 @@ func sandboxEmptyDocument(idleGrace string) map[string]any {
 	return document
 }
 
-// emptySandboxRoot writes one marker-valid sandbox root and returns its layout.
-func emptySandboxRoot(t *testing.T, idleGrace string) brokerconfig.Layout {
+// emptyProductionBrokerLayout provisions the real broker config in private XDG
+// directories; each test receives an independent runtime, state, and config.
+func emptyProductionBrokerLayout(t *testing.T, idleGrace string) brokerconfig.Layout {
 	t.Helper()
-	isolateSandboxEnv(t)
-	root := filepath.Join(shortTempDir(t, "vevu"), "s")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxEmptyDocument(idleGrace))
-	layout, err := offlineLayout(root)
-	require.NoError(t, err)
-	return layout
+	t.Setenv("VEV_ENV", "")
+	t.Setenv("VEV_ENV_ROOT", "")
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t, "vb"))
+	t.Setenv("XDG_STATE_HOME", shortTempDir(t, "vb"))
+	t.Setenv("XDG_CONFIG_HOME", shortTempDir(t, "vb"))
+	require.NoError(t, ensureProductionBrokerConfig())
+	if idleGrace != "" {
+		raw, err := json.Marshal(sandboxEmptyDocument(idleGrace))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(productionBrokerConfigPath(), raw, 0o600))
+	}
+	return productionBrokerLayout()
+}
+
+// productionStatusRequest provides the inputs used by production connect-or-spawn.
+func productionStatusRequest(layout brokerconfig.Layout, timeout time.Duration) brokerStatusRequest {
+	return brokerStatusRequest{
+		layout: layout, socketPath: brokeripc.SocketPath(layout.Runtime),
+		deadline: time.Now().Add(timeout), timeout: timeout,
+	}
 }
 
 // fakeStatusLock records releases for one held election.
@@ -63,8 +77,7 @@ func readyReport(socketPath string) brokerStatusReport {
 func testStatusDeps(t *testing.T) (brokerStatusDeps, *statusRecorder) {
 	t.Helper()
 	rec := &statusRecorder{
-		now:    time.Now(),
-		stdout: &bytes.Buffer{},
+		now: time.Now(),
 	}
 	deps := brokerStatusDeps{
 		now: func() time.Time { return rec.now },
@@ -83,7 +96,6 @@ func testStatusDeps(t *testing.T) (brokerStatusDeps, *statusRecorder) {
 			rec.spawns.Add(1)
 			return nil
 		},
-		stdout: rec.stdout,
 	}
 	rec.setProbe(&deps, func(_ int, socketPath string) (brokerStatusReport, error) {
 		return brokerStatusReport{}, absentError(socketPath)
@@ -98,7 +110,6 @@ type statusRecorder struct {
 	spawns    atomic.Int32
 	elections atomic.Int32
 	locks     []*fakeStatusLock
-	stdout    *bytes.Buffer
 }
 
 // setProbe installs one scripted probe that sees its 1-based attempt number.
@@ -108,119 +119,23 @@ func (r *statusRecorder) setProbe(deps *brokerStatusDeps, probe func(attempt int
 	}
 }
 
-func (r *statusRecorder) report(t *testing.T) brokerStatusReport {
-	t.Helper()
-	var report brokerStatusReport
-	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(r.stdout.String())), &report))
-	return report
-}
-
-// decodeOneReport asserts stdout holds exactly one JSON document and decodes it.
+// decodeOneReport remains shared with the subprocess broker tests until those
+// are converted to the production launcher.
 func decodeOneReport(t *testing.T, raw string) brokerStatusReport {
 	t.Helper()
 	trimmed := strings.TrimSpace(raw)
-	require.Equal(t, 1, strings.Count(trimmed, "\n")+1, "stdout must hold exactly one report line")
+	require.Equal(t, 1, strings.Count(trimmed, "\n")+1)
 	var report brokerStatusReport
 	require.NoError(t, json.Unmarshal([]byte(trimmed), &report))
 	return report
 }
 
-func TestParseBrokerLauncherArgs(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		want    brokerLauncherOptions
-		wantErr string
-	}{
-		{name: "root only", args: []string{"--offline-root", "/srv/sandbox"}, want: brokerLauncherOptions{offlineRoot: "/srv/sandbox"}},
-		{
-			name: "root and grace",
-			args: []string{"--offline-root", "/srv/sandbox", "--idle-grace", "90s"},
-			want: brokerLauncherOptions{offlineRoot: "/srv/sandbox", idleGrace: 90 * time.Second},
-		},
-		{name: "missing root", args: nil, wantErr: "requires --offline-root"},
-		{name: "missing root value", args: []string{"--offline-root"}, wantErr: "requires a path"},
-		{name: "duplicate root", args: []string{"--offline-root", "/a", "--offline-root", "/b"}, wantErr: "duplicate --offline-root"},
-		{name: "duplicate grace", args: []string{"--offline-root", "/a", "--idle-grace", "1s", "--idle-grace", "2s"}, wantErr: "duplicate --idle-grace"},
-		{name: "zero grace", args: []string{"--offline-root", "/a", "--idle-grace", "0s"}, wantErr: "must be positive"},
-		{name: "invalid grace", args: []string{"--offline-root", "/a", "--idle-grace", "soon"}, wantErr: "not a duration"},
-		{name: "ensure is not a launcher flag", args: []string{"--offline-root", "/a", "--ensure"}, wantErr: "unknown flag"},
-		{name: "positional", args: []string{"--offline-root", "/a", "extra"}, wantErr: "positional"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			command, err := parseBrokerLauncherArgs(tt.args)
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				require.Contains(t, err.Error(), tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, kindBrokerLauncher, command.kind)
-			require.Equal(t, tt.want, command.brokerLauncher)
-		})
-	}
-}
-
-func TestParseBrokerStatusArgs(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		want    brokerStatusOptions
-		wantErr string
-	}{
-		{
-			name: "root only defaults the timeout",
-			args: []string{"--offline-root", "/srv/sandbox"},
-			want: brokerStatusOptions{offlineRoot: "/srv/sandbox", timeout: brokerStatusDefaultTimeout},
-		},
-		{
-			name: "ensure and timeout",
-			args: []string{"--offline-root", "/a", "--ensure", "--timeout", "250ms"},
-			want: brokerStatusOptions{offlineRoot: "/a", ensure: true, timeout: 250 * time.Millisecond},
-		},
-		{name: "missing root", args: []string{"--ensure"}, wantErr: "requires --offline-root"},
-		{name: "duplicate root", args: []string{"--offline-root", "/a", "--offline-root", "/b"}, wantErr: "duplicate --offline-root"},
-		{name: "duplicate ensure", args: []string{"--offline-root", "/a", "--ensure", "--ensure"}, wantErr: "duplicate --ensure"},
-		{name: "duplicate timeout", args: []string{"--offline-root", "/a", "--timeout", "1s", "--timeout", "2s"}, wantErr: "duplicate --timeout"},
-		{name: "missing timeout value", args: []string{"--offline-root", "/a", "--timeout"}, wantErr: "requires a duration"},
-		{name: "zero timeout", args: []string{"--offline-root", "/a", "--timeout", "0s"}, wantErr: "must be positive"},
-		{name: "invalid timeout", args: []string{"--offline-root", "/a", "--timeout", "soon"}, wantErr: "not a duration"},
-		{name: "idle grace is not a status flag", args: []string{"--offline-root", "/a", "--idle-grace", "1s"}, wantErr: "unknown flag"},
-		{name: "positional", args: []string{"--offline-root", "/a", "extra"}, wantErr: "positional"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			command, err := parseBrokerStatusArgs(tt.args)
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				require.Contains(t, err.Error(), tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, kindBrokerStatus, command.kind)
-			require.Equal(t, tt.want, command.brokerStatus)
-		})
-	}
-}
-
-func TestBrokerLauncherAndStatusAreHiddenFromPublicHelp(t *testing.T) {
-	require.NotContains(t, usageText, brokerLauncherCommand)
-	require.NotContains(t, usageText, brokerStatusCommand)
-	_, err := parseArgs([]string{brokerLauncherCommand, "--offline-root", "/srv/sandbox"})
-	require.NoError(t, err)
-	_, err = parseArgs([]string{brokerStatusCommand, "--offline-root", "/srv/sandbox", "--ensure"})
-	require.NoError(t, err)
-	_, err = parseArgs([]string{"--help"})
-	require.NoError(t, err)
-}
-
 func TestEffectiveIdleGrace(t *testing.T) {
-	layout := emptySandboxRoot(t, "90s")
-	config, err := brokerconfig.Load(layout)
+	layout := emptyProductionBrokerLayout(t, "90s")
+	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), "", localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	require.NoError(t, err)
-	unprovisioned := emptySandboxRoot(t, "")
-	plain, err := brokerconfig.Load(unprovisioned)
+	unprovisioned := emptyProductionBrokerLayout(t, "")
+	plain, err := brokerconfig.LoadProduction(unprovisioned, productionBrokerConfigPath(), "", localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -251,71 +166,27 @@ func TestEffectiveIdleGrace(t *testing.T) {
 }
 
 func TestBrokerServeRefusesConflictingIdleGrace(t *testing.T) {
-	layout := emptySandboxRoot(t, "90s")
+	layout := emptyProductionBrokerLayout(t, "90s")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	deps, _ := testBrokerServeDeps(newSandboxClock())
-	err := runBrokerServe(ctx, brokerServeOptions{offlineRoot: layout.Root, idleGrace: time.Minute}, deps)
+	err := runBrokerServe(ctx, brokerServeOptions{production: true, idleGrace: time.Minute}, deps)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "conflicts with the provisioned idle grace")
 	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"), "a refused serve must not take the lifetime lock")
 }
 
 func TestBrokerLauncherRefusesConflictingIdleGraceBeforeSpawning(t *testing.T) {
-	layout := emptySandboxRoot(t, "90s")
-	err := runBrokerLauncher(brokerLauncherOptions{offlineRoot: layout.Root, idleGrace: time.Minute})
+	layout := emptyProductionBrokerLayout(t, "90s")
+	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), "", localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
+	require.NoError(t, err)
+	_, err = effectiveIdleGrace(config, time.Minute)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "conflicts with the provisioned idle grace")
 }
 
-func TestBrokerStatusDialOnlyReportsOfflineWithoutCreatingAnything(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
-	deps := defaultBrokerStatusDeps()
-	var out bytes.Buffer
-	deps.stdout = &out
-
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, timeout: time.Second}, deps))
-	report := decodeOneReport(t, out.String())
-	require.Equal(t, "offline", report.Status)
-	require.Equal(t, brokeripc.SocketPath(layout.Runtime), report.Endpoint)
-	require.Zero(t, report.Epoch)
-	require.Zero(t, report.Revision)
-	require.Zero(t, report.HostCount)
-
-	require.NoDirExists(t, layout.Runtime, "dial-only status must not create the runtime directory")
-	require.NoDirExists(t, layout.Spawn, "dial-only status must not create the spawn directory")
-}
-
-func TestBrokerStatusDialOnlyReadyAgainstLiveSandbox(t *testing.T) {
-	root, prodRuntime, prodState := isolateSandboxEnv(t)
-	fixture := newBrokerMuxFixture(t, brokerTestPolicy())
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxRegistrationDocument(fixture.route))
-
-	clk := newSandboxClock()
-	serveDeps, ready := testBrokerServeDeps(clk)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, serveDeps)
-	awaitSandboxReady(t, ready, done)
-
-	deps := defaultBrokerStatusDeps()
-	var out bytes.Buffer
-	deps.stdout = &out
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: root, timeout: time.Second}, deps))
-	report := decodeOneReport(t, out.String())
-	require.Equal(t, "ready", report.Status)
-	require.Positive(t, report.Epoch)
-	require.Positive(t, report.Revision)
-	// Provisioned endpoints seed durable broker membership before serving.
-	require.Equal(t, 1, report.HostCount)
-
-	awaitSandboxCancel(t, cancel, done)
-	requireProductionUntouched(t, prodRuntime, prodState)
-}
-
 func TestBrokerStatusEnsureSpawnsOnceThenReportsReady(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	deps, rec := testStatusDeps(t)
 	rec.setProbe(&deps, func(_ int, socketPath string) (brokerStatusReport, error) {
 		if rec.spawns.Load() > 0 {
@@ -323,17 +194,18 @@ func TestBrokerStatusEnsureSpawnsOnceThenReportsReady(t *testing.T) {
 		}
 		return brokerStatusReport{}, absentError(socketPath)
 	})
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps))
+	report, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
+	require.NoError(t, err)
 
 	require.Equal(t, int32(1), rec.spawns.Load(), "exactly one spawn is expected")
 	require.Equal(t, int32(1), rec.elections.Load(), "exactly one election is expected")
 	require.Len(t, rec.locks, 1)
 	require.Equal(t, int32(1), rec.locks[0].releases.Load(), "the election must be released after readiness")
-	require.Equal(t, "ready", rec.report(t).Status)
+	require.Equal(t, "ready", report.Status)
 }
 
 func TestBrokerStatusEnsureWaitsForAnotherSpawner(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	var readyAfter int32 = 4
 	deps, rec := testStatusDeps(t)
 	rec.setProbe(&deps, func(attempt int, socketPath string) (brokerStatusReport, error) {
@@ -346,15 +218,16 @@ func TestBrokerStatusEnsureWaitsForAnotherSpawner(t *testing.T) {
 		rec.elections.Add(1)
 		return nil, lifecycle.ErrBusy
 	}
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps))
+	report, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
+	require.NoError(t, err)
 
 	require.Zero(t, rec.spawns.Load(), "a waiter must never spawn while another caller is elected")
 	require.Positive(t, rec.elections.Load())
-	require.Equal(t, "ready", rec.report(t).Status)
+	require.Equal(t, "ready", report.Status)
 }
 
 func TestBrokerStatusEnsureDefersToLifetimeOwnerBeforeSpawning(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	var ownerCalls int32
 	deps, rec := testStatusDeps(t)
 	rec.setProbe(&deps, func(_ int, socketPath string) (brokerStatusReport, error) {
@@ -369,13 +242,14 @@ func TestBrokerStatusEnsureDefersToLifetimeOwnerBeforeSpawning(t *testing.T) {
 		}
 		return false, nil
 	}
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps))
+	_, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
+	require.NoError(t, err)
 	require.Equal(t, int32(1), rec.spawns.Load(), "a live lifetime owner must suppress the spawn until it is gone")
-	require.Equal(t, int32(1), rec.elections.Load(), "the election is taken only after the live owner releases the sandbox")
+	require.Equal(t, int32(1), rec.elections.Load(), "the election is taken only after the live owner releases the broker")
 }
 
 func TestBrokerStatusEnsureRecoversAfterSpawnerDeath(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	var electionAttempts int32
 	deps, rec := testStatusDeps(t)
 	rec.setProbe(&deps, func(_ int, socketPath string) (brokerStatusReport, error) {
@@ -394,210 +268,96 @@ func TestBrokerStatusEnsureRecoversAfterSpawnerDeath(t *testing.T) {
 		rec.locks = append(rec.locks, lock)
 		return lock, nil
 	}
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps))
+	report, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
+	require.NoError(t, err)
 	require.Equal(t, int32(1), rec.spawns.Load(), "a waiter must take over once the elected spawner dies")
-	require.Equal(t, "ready", rec.report(t).Status)
+	require.Equal(t, "ready", report.Status)
 }
 
 func TestBrokerStatusEnsureIncompatibleEndpointFailsWithoutSpawning(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	deps, rec := testStatusDeps(t)
 	rec.setProbe(&deps, func(_ int, socketPath string) (brokerStatusReport, error) {
 		return brokerStatusReport{}, incompatibleError(socketPath, errors.New("foreign endpoint"))
 	})
-	err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps)
+	_, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
 	require.ErrorIs(t, err, errBrokerIncompatible)
 	require.Zero(t, rec.spawns.Load())
 	require.Zero(t, rec.elections.Load())
-	report := rec.report(t)
-	require.Equal(t, "offline", report.Status)
-	require.Equal(t, 3, exitCode(err))
 }
 
 func TestBrokerStatusEnsureBoundedTimeoutReportsOffline(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	deps, rec := testStatusDeps(t)
-	err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: 50 * time.Millisecond}, deps)
+	_, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, 50*time.Millisecond), deps)
 	require.ErrorIs(t, err, errBrokerNotReady)
-	require.Equal(t, 3, exitCode(err))
 	require.Equal(t, int32(1), rec.spawns.Load())
-	require.Equal(t, "offline", rec.report(t).Status)
 }
 
 func TestBrokerStatusEnsureSpawnFailureIsReported(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	spawnErr := errors.New("launcher exec failed")
-	deps, rec := testStatusDeps(t)
+	deps, _ := testStatusDeps(t)
 	deps.spawn = func(context.Context, string, time.Duration, bool) error {
-		rec.spawns.Add(1)
 		return spawnErr
 	}
-	err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps)
+	_, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
 	require.ErrorIs(t, err, spawnErr)
-	require.Equal(t, 3, exitCode(err))
-	require.Equal(t, "offline", rec.report(t).Status)
 }
 
-func TestBrokerStatusEnsureRejectsUnsafeRoot(t *testing.T) {
-	isolateSandboxEnv(t)
-	tests := []struct {
-		name string
-		root string
-	}{
-		{name: "relative root", root: "relative"},
-		{name: "production overlap", root: ipc.SocketDir()},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			deps, rec := testStatusDeps(t)
-			err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: tt.root, ensure: true, timeout: time.Second}, deps)
-			require.Error(t, err)
-			require.Equal(t, 3, exitCode(err), "a layout failure must still exit 3")
-			require.Equal(t, "offline", rec.report(t).Status, "a layout failure must still emit one offline report")
-			require.Zero(t, rec.spawns.Load())
-		})
-	}
-}
-
-// TestBrokerStatusEnsureConfigFailureReportsOffline proves a malformed or
-// missing configuration still leaves the caller with one offline JSON document
-// and a code-3 failure instead of a bare error.
-func TestBrokerStatusEnsureConfigFailureReportsOffline(t *testing.T) {
-	isolateSandboxEnv(t)
-	root := filepath.Join(shortTempDir(t, "vevm"), "s")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	deps, rec := testStatusDeps(t)
-	err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: root, ensure: true, timeout: time.Second}, deps)
+// A corrupt production broker.json is rejected before broker ownership.
+func TestBrokerEnsureProductionConfigFailure(t *testing.T) {
+	layout := emptyProductionBrokerLayout(t, "")
+	require.NoError(t, os.WriteFile(productionBrokerConfigPath(), []byte("not json"), 0o600))
+	deps, _ := testBrokerServeDeps(newSandboxClock())
+	err := runBrokerServe(context.Background(), brokerServeOptions{production: true}, deps)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), brokerconfig.ConfigFileName)
-	require.Equal(t, 3, exitCode(err))
-	require.Equal(t, "offline", rec.report(t).Status)
-	require.Zero(t, rec.spawns.Load())
+	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
 }
 
-// TestBrokerStatusEnsureSecuresRootBeforeSpawning proves the ensure path
-// validates and secures the sandbox root exactly as the launcher does, before
-// the spawn directory is created or any election lock is taken.
+// TestBrokerStatusEnsureSecuresRootBeforeSpawning rejects an insecure
+// production spawn directory before electing a launcher.
 func TestBrokerStatusEnsureSecuresRootBeforeSpawning(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
-	require.NoError(t, os.Chmod(layout.Root, 0o755))
+	layout := emptyProductionBrokerLayout(t, "")
+	require.NoError(t, os.MkdirAll(layout.Runtime, 0o700))
+	require.NoError(t, os.MkdirAll(layout.Spawn, 0o700))
+	require.NoError(t, os.Chmod(layout.Spawn, 0o755))
 	deps, rec := testStatusDeps(t)
-	err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps)
+	_, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, time.Second), deps)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "0755")
-	require.Equal(t, 3, exitCode(err))
-	require.Equal(t, "offline", rec.report(t).Status)
 	require.Zero(t, rec.spawns.Load())
 	require.Zero(t, rec.elections.Load())
-	require.NoFileExists(t, filepath.Join(layout.Runtime, brokerconfig.SpawnDirName), "an insecure root must be refused before the spawn directory is created")
+	require.NoFileExists(t, filepath.Join(layout.Spawn, "lifecycle.lock"), "an insecure spawn directory must be refused before election")
 }
 
 // TestBrokerStatusEnsureDeadlineBoundsSpawnWait proves the overall ensure
 // deadline bounds a launcher spawn that never returns, so a blocking launcher
-// cannot wedge the status command.
+// cannot wedge connect-or-spawn.
 func TestBrokerStatusEnsureDeadlineBoundsSpawnWait(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
-	deps, rec := testStatusDeps(t)
+	layout := emptyProductionBrokerLayout(t, "")
+	deps, _ := testStatusDeps(t)
 	deps.spawn = func(ctx context.Context, _ string, _ time.Duration, _ bool) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	start := time.Now()
-	err := runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: 200 * time.Millisecond}, deps)
+	_, err := ensureBrokerReady(context.Background(), productionStatusRequest(layout, 200*time.Millisecond), deps)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, 3, exitCode(err))
 	require.Less(t, time.Since(start), 5*time.Second, "the overall deadline must bound the launcher spawn wait")
-	require.Equal(t, "offline", rec.report(t).Status)
-}
-
-// TestBrokerStatusDialOnlyAppliesTimeout proves the dial-only probe is bounded
-// by --timeout as one absolute bound and is never silently replaced by the
-// ensure probe budget.
-func TestBrokerStatusDialOnlyAppliesTimeout(t *testing.T) {
-	tests := []struct {
-		name    string
-		timeout time.Duration
-	}{
-		{name: "short timeout is the probe bound", timeout: 250 * time.Millisecond},
-		{name: "default timeout is the probe bound", timeout: brokerStatusDefaultTimeout},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			layout := emptySandboxRoot(t, "")
-			deps, _ := testStatusDeps(t)
-			var observed time.Duration
-			sawDeadline := false
-			deps.probe = func(ctx context.Context, socketPath string) (brokerStatusReport, error) {
-				deadline, ok := ctx.Deadline()
-				sawDeadline = ok
-				if ok {
-					observed = time.Until(deadline)
-				}
-				return brokerStatusReport{}, absentError(socketPath)
-			}
-			require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, timeout: tt.timeout}, deps))
-			require.True(t, sawDeadline, "dial-only must bound the probe with the timeout context")
-			require.InDelta(t, tt.timeout.Seconds(), observed.Seconds(), 0.5)
-		})
-	}
-}
-
-// TestBrokerStatusDialOnlyBoundedByTimeout proves a live-but-silent endpoint is
-// bounded by --timeout rather than the ensure probe budget.
-func TestBrokerStatusDialOnlyBoundedByTimeout(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
-	require.NoError(t, os.MkdirAll(layout.Runtime, 0o700))
-	_ = bindUnixSocket(t, brokeripc.SocketPath(layout.Runtime))
-	deps := defaultBrokerStatusDeps()
-	var out bytes.Buffer
-	deps.stdout = &out
-	start := time.Now()
-	require.NoError(t, runBrokerStatus(context.Background(), brokerStatusOptions{offlineRoot: layout.Root, timeout: 300 * time.Millisecond}, deps))
-	require.Less(t, time.Since(start), time.Second, "the dial-only probe must be bounded by --timeout, not the ensure budget")
-	require.Equal(t, "offline", decodeOneReport(t, out.String()).Status)
 }
 
 func TestBrokerStatusEnsureHonorsCancellation(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	deps, _ := testStatusDeps(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := runBrokerStatus(ctx, brokerStatusOptions{offlineRoot: layout.Root, ensure: true, timeout: time.Second}, deps)
+	_, err := ensureBrokerReady(ctx, productionStatusRequest(layout, time.Second), deps)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestBrokerStatusReportIsBoundedJSON(t *testing.T) {
-	var out bytes.Buffer
-	require.NoError(t, writeBrokerStatusReport(&out, brokerStatusReport{
-		Status: "ready", Endpoint: brokeripc.SocketPath("/tmp/sandbox/runtime"), Epoch: 3, Revision: 9, HostCount: 4,
-	}))
-	var fields map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out.String())), &fields))
-	require.Equal(t, []string{"endpoint", "epoch", "host_count", "revision", "status"}, sortedKeys(fields))
-	require.LessOrEqual(t, out.Len(), brokerStatusMaxReportBytes)
-}
-
-// sortedKeys returns the sorted keys of one JSON object.
-func sortedKeys(fields map[string]json.RawMessage) []string {
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
-	}
-	slicesSort(keys)
-	return keys
-}
-
-// slicesSort is a tiny insertion sort so the test file needs no extra import.
-func slicesSort(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
-}
-
 func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)
 
 	t.Run("missing endpoint is absence", func(t *testing.T) {
@@ -637,7 +397,7 @@ func TestProbeBrokerStatusClassifiesAbsenceAndIncompatibility(t *testing.T) {
 }
 
 func TestProbeBrokerStatusSilentRegistrationIsBounded(t *testing.T) {
-	layout := emptySandboxRoot(t, "")
+	layout := emptyProductionBrokerLayout(t, "")
 	socketPath := brokeripc.SocketPath(layout.Runtime)
 	require.NoError(t, os.MkdirAll(layout.Runtime, 0o700))
 	// A listener that never reads or answers: the dial succeeds and the broker
@@ -673,12 +433,4 @@ func bindStaleUnixSocket(t *testing.T, path string) {
 	}
 	require.NoError(t, listener.Close())
 	require.FileExists(t, path)
-}
-
-// Ensure the helper fixture contract used elsewhere stays coherent.
-func TestStatusFixtureDocument(t *testing.T) {
-	document := sandboxEmptyDocument("1s")
-	require.Equal(t, brokerconfig.Marker, document["marker"])
-	require.Equal(t, "1s", document["idleGrace"])
-	require.Empty(t, sandboxEmptyDocument("")["idleGrace"])
 }
