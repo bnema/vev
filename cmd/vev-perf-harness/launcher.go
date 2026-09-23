@@ -221,7 +221,9 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	}
 	p := &cliProcess{cmd: cmd, waitErr: make(chan error, 1), serverOutput: &synchronizedBuffer{}}
 	if m.Role == "daemon" {
-		p.startCommand = exec.Command(bin, "ls")
+		// ls is read-only and cannot start an absent daemon. Start the daemon
+		// explicitly before requiring its observed local catalogue.
+		p.startCommand = exec.Command(bin, "--daemon-launcher")
 		p.startCommand.Env = cmd.Env
 		p.readyCommand = exec.Command(bin, "_broker-ready", "--require", "local-catalogue", "--timeout", "10s")
 		p.readyCommand.Env = cmd.Env
@@ -516,10 +518,11 @@ func (p *cliProcess) copyTerminal() {
 // stdout, stderr and owner-process death are retained in any failure.
 func (p *cliProcess) WaitReady() error {
 	if p.startCommand != nil {
-		// The first control stream is only a start authorization. The daemon may
-		// close that stream while publishing its first catalogue, so readiness is
-		// decided exclusively by the semantic probe below.
-		_, _ = p.startCommand.CombinedOutput()
+		// Starting the daemon is separate from readiness: only the semantic
+		// catalogue probe below can establish that it is serving.
+		if output, err := p.startCommand.CombinedOutput(); err != nil {
+			return fmt.Errorf("start daemon for broker readiness: %w (output=%q)", err, output)
+		}
 	}
 	if p.readyCommand == nil {
 		return errors.New("broker readiness command is empty")

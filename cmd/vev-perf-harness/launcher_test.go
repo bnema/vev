@@ -337,9 +337,33 @@ func TestCLIProcessCloseEscalationOutcome(t *testing.T) {
 }
 
 func TestCLIProcessWaitReadyRunsJSONProbe(t *testing.T) {
-	command := exec.Command("sh", "-c", `printf '%s\n' '{"schema":"vev.broker-ready/v1","status":"ready"}'`)
-	if err := (&cliProcess{readyCommand: command, waitErr: make(chan error, 1)}).WaitReady(); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name      string
+		start     string
+		wantErr   string
+		wantProbe bool
+	}{
+		{name: "daemon started", start: "exit 0", wantProbe: true},
+		{name: "daemon start failed", start: "exit 7", wantErr: "start daemon for broker readiness: exit status 7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "probe")
+			probe := exec.Command("sh", "-c", `printf '%s\n' '{"schema":"vev.broker-ready/v1","status":"ready"}'; touch "$1"`, "sh", marker)
+			p := &cliProcess{startCommand: exec.Command("sh", "-c", tt.start), readyCommand: probe, waitErr: make(chan error, 1)}
+			err := p.WaitReady()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("WaitReady() = %v, want %q", err, tt.wantErr)
+			}
+			_, statErr := os.Stat(marker)
+			if (statErr == nil) != tt.wantProbe {
+				t.Fatalf("readiness probe ran = %t, want %t (stat: %v)", statErr == nil, tt.wantProbe, statErr)
+			}
+		})
 	}
 }
 
