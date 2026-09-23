@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -337,12 +338,12 @@ func TestUIDriverClientKeepsSharedDaemonOnEOF(t *testing.T) {
 	second.EOF(t)
 }
 
-// TestUIDriverFixtureKeepsProductionUntouched pins the fixture isolation: the
-// driver fixture uses its own private roots and never creates a production
-// runtime or state entry.
-func TestUIDriverFixtureKeepsProductionUntouched(t *testing.T) {
+// TestUIDriverFixtureUsesIsolatedProductionBroker pins the fixture isolation:
+// the driver reaches the broker within its private production XDG roots.
+func TestUIDriverFixtureUsesIsolatedProductionBroker(t *testing.T) {
 	fixture := startUIDriverBrokerFixture(t)
-	requireProductionUntouched(t, fixture.prodRuntime, fixture.prodState)
+	require.DirExists(t, filepath.Join(fixture.prodRuntime, "vev", "broker"))
+	require.FileExists(t, filepath.Join(fixture.prodState, "vev", "broker", "state", "state.json"))
 	connector := fixture.Connector()
 	require.NotNil(t, connector)
 	service, err := connector.Connect(t.Context())

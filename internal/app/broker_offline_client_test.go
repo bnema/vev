@@ -19,9 +19,9 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/clock"
+	"github.com/bnema/vev/internal/adapters/daemonidentity"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
@@ -30,6 +30,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/webterm"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
+	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/daemon"
@@ -55,13 +56,13 @@ type offlineClientFixture struct {
 
 func startOfflineClientFixture(t *testing.T) offlineClientFixture {
 	t.Helper()
-	// The default sandbox shell prints one marker and then parks on read, so a
+	// The default isolated production fixture shell prints one marker and then parks on read, so a
 	// client proves it reached a session without depending on shell echo of
 	// injected input.
 	return startOfflineClientFixtureWithShell(t, "/bin/sh", []string{"-c", "sleep 0.1; printf offline-ready; trap : TERM; while :; do read line || exit; done"})
 }
 
-// startOfflineClientFixtureWithShell starts the same private broker sandbox with
+// startOfflineClientFixtureWithShell starts the same isolated production broker with
 // an explicitly supplied daemon shell, so a browser test can drive real session
 // content and real session actions (echo and command output) through the
 // ordinary client path instead of a parked shell.
@@ -70,38 +71,29 @@ func startOfflineClientFixtureWithShell(t *testing.T, shell string, shellArgs []
 	return startPersistentOfflineClientFixture(t, shell, shellArgs, false)
 }
 
-// startPersistentOfflineClientFixture starts the same private broker sandbox but
-// additionally binds the daemon to real session persistence under the sandbox
+// startPersistentOfflineClientFixture starts the same isolated production broker but
+// additionally binds the daemon to real session persistence under the production daemon
 // state directory. It exists so a test can prove which lifecycle state the
 // daemon actually persists: a named session appears in the durable catalogue,
 // while an ephemeral one is never written.
 func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs []string, persistEnabled bool) offlineClientFixture {
 	t.Helper()
-	root, prodRuntime, prodState := isolateSandboxEnv(t)
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	route := filepath.Join(root, "local-mux.sock")
-	policy := brokerTestPolicy()
-	writeSandboxConfig(t, root, map[string]any{
-		"marker": brokerconfig.Marker, "registrations": []any{},
-		"local": map[string]any{
-			"identity": brokerLocalTestIdentity, "displayOrigin": "local", "route": route,
-			"policy": map[string]any{"protocolVersion": policy.ProtocolVersion, "catalogSchemaVersion": policy.CatalogSchemaVersion, "environmentPolicy": "client-owned", "transport": policy.Transport, "trust": policy.Trust, "launch": policy.Launch, "isolation": policy.Isolation},
-		},
-	})
-	layout, err := offlineLayout(root)
+	layout := emptyProductionBrokerLayout(t, "")
+	root := layout.Root
+	prodRuntime, prodState := os.Getenv("XDG_RUNTIME_DIR"), os.Getenv("XDG_STATE_HOME")
+	identity, err := daemonidentity.LoadOrCreate(platform.StateDir())
 	require.NoError(t, err)
-	for _, dir := range []string{layout.Root, layout.Runtime, layout.State, layout.Log} {
-		require.NoError(t, safedir.EnsurePrivate(dir))
-	}
-	require.NoError(t, layout.VerifyCreated())
-
+	require.NoError(t, ensureProductionBrokerConfig())
+	route := daemonmux.SocketPath(ipc.SocketDir())
+	policy := localDaemonPolicy()
+	require.NoError(t, safedir.EnsurePrivate(ipc.SocketDir()))
 	rawListener, err := ipc.ListenMux(route)
 	require.NoError(t, err)
 	physicalSeen := make(chan struct{}, 8)
 	var physicalMu sync.Mutex
 	var physicalConnections []io.Closer
 	aggregate := daemonmux.NewAggregateListener()
-	binding, err := daemonmux.NewServerBinding(brokerLocalTestIdentity, ports.BrokerDaemonIncarnation{1}, policy)
+	binding, err := daemonmux.NewServerBinding(identity, ports.BrokerDaemonIncarnation{1}, policy)
 	require.NoError(t, err)
 	mux, err := daemonmux.NewServerSupervisor(aggregate, binding, daemonmux.DefaultMuxCeilings(), 8)
 	require.NoError(t, err)
@@ -127,7 +119,7 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	daemonOpts := []daemon.Option{daemon.WithShell(shell, shellArgs)}
 	var fixtureCatalogue *persist.Persister
 	if persistEnabled {
-		stateDir := filepath.Join(root, "state")
+		stateDir := platform.StateDir()
 		opened, err := persist.OpenOrCreate(stateDir)
 		require.NoError(t, err)
 		repository := snapshot.NewRepository(filepath.Join(stateDir, "snapshots"))
@@ -146,16 +138,16 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 	// a manual clock rooted at Unix zero would correctly make the observation
 	// stale to the real client clock before initial navigation resolves.
 	deps, ready := testBrokerServeDeps(clock.New())
-	brokerDone := runSandbox(ctx, brokerServeOptions{offlineRoot: root, idleGrace: time.Hour}, deps)
+	brokerDone := runSandbox(ctx, brokerServeOptions{production: true, idleGrace: time.Hour}, deps)
 	var socket string
 	select {
 	case socket = <-ready:
 	case serveErr := <-brokerDone:
-		t.Fatalf("offline broker exited before readiness: %v", serveErr)
+		t.Fatalf("production broker exited before readiness: %v", serveErr)
 	case <-time.After(brokerTestWait):
-		t.Fatal("offline broker did not become ready")
+		t.Fatal("production broker did not become ready")
 	}
-	// The sandbox broker becomes socket-ready before its first local daemon
+	// The production broker becomes socket-ready before its first local daemon
 	// observation is committed. Product clients start from a committed local
 	// authority; wait for the fixture to provide the same contract so one-shot
 	// initial navigation is not consumed against an artificial empty catalogue.
@@ -174,7 +166,7 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 		default:
 		}
 		return false
-	}, brokerTestWait, 5*time.Millisecond, "offline broker never committed its local daemon authority")
+	}, brokerTestWait, 5*time.Millisecond, "production broker never committed its local daemon authority")
 	subscription.Close()
 	require.NoError(t, probe.Close())
 	t.Cleanup(func() {
@@ -185,9 +177,8 @@ func startPersistentOfflineClientFixture(t *testing.T, shell string, shellArgs [
 		select {
 		case <-brokerDone:
 		case <-time.After(brokerTestWait):
-			t.Error("offline broker did not stop")
+			t.Error("production broker did not stop")
 		}
-		requireProductionUntouched(t, prodRuntime, prodState)
 	})
 	losePhysical := func() {
 		physicalMu.Lock()
@@ -259,49 +250,6 @@ func awaitUITerminalMarker(t *testing.T, terminal *uiterm.Terminal, marker strin
 			t.Fatalf("terminal never rendered session marker %q", marker)
 		}
 	}
-}
-
-func TestParseBrokerClientArgsAndProductionDispatchIsolation(t *testing.T) {
-	parsed, err := parseArgs([]string{brokerClientCommand, "--offline-root", "/tmp/offline", "--harness", offlineClientUIDriver})
-	require.NoError(t, err)
-	require.Equal(t, kindBrokerClient, parsed.kind)
-	require.Equal(t, connectivityLocalOnly, mustConnectivityOwner(t, "kindBrokerClient"))
-
-	ordinary := []struct {
-		args []string
-		kind cmdKind
-	}{{nil, kindAttach}, {[]string{"list"}, kindList}, {[]string{"--ui-driver"}, kindUIDriver}, {[]string{"--web-daemon"}, kindWebDaemon}}
-	for _, test := range ordinary {
-		command, parseErr := parseArgs(test.args)
-		require.NoError(t, parseErr)
-		require.Equal(t, test.kind, command.kind)
-		require.NotEqual(t, kindBrokerClient, command.kind)
-	}
-
-	rejections := []struct {
-		name string
-		args []string
-	}{
-		{name: "missing root", args: []string{brokerClientCommand}},
-		{name: "missing root value", args: []string{brokerClientCommand, "--offline-root"}},
-		{name: "duplicate root", args: []string{brokerClientCommand, "--offline-root", "/tmp/a", "--offline-root", "/tmp/b"}},
-		{name: "unknown flag", args: []string{brokerClientCommand, "--offline-root", "/tmp/a", "--unknown"}},
-		{name: "positional", args: []string{brokerClientCommand, "--offline-root", "/tmp/a", "extra"}},
-		{name: "bad harness", args: []string{brokerClientCommand, "--offline-root", "/tmp/a", "--harness", "other"}},
-	}
-	for _, test := range rejections {
-		t.Run(test.name, func(t *testing.T) {
-			_, parseErr := parseArgs(test.args)
-			require.Error(t, parseErr)
-		})
-	}
-}
-
-func mustConnectivityOwner(t *testing.T, kind string) connectivityOwner {
-	t.Helper()
-	owner, ok := testConnectivityOwnerFor(kind)
-	require.True(t, ok)
-	return owner
 }
 
 // TestOfflineEphemeralSessionIsNotPersistedViaBroker proves the daemon-owned
