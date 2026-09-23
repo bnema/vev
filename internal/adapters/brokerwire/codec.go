@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/bnema/vev/internal/adapters/protoconv"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -601,30 +602,21 @@ func admissionFromWire(value uint32) (ports.BrokerStreamAdmission, error) {
 	}
 }
 
-// startModeToWire maps the closed daemon-start taxonomy onto its wire code.
-// The zero value is refused rather than encoded, so a peer never has to guess
-// whether an absent mode authorized a spawn.
+// Start-mode conversion retains the brokerwire range sentinel at the boundary.
 func startModeToWire(mode ports.BrokerDaemonStartMode) (uint32, error) {
-	switch mode {
-	case ports.BrokerDaemonExistingOnly:
-		return 1, nil
-	case ports.BrokerDaemonStartIfNeeded:
-		return 2, nil
-	default:
+	value, err := protoconv.BrokerStartModeToWire(mode)
+	if err != nil {
 		return 0, errConvertRange
 	}
+	return value, nil
 }
 
-// startModeFromWire maps a wire daemon-start code onto the closed taxonomy.
 func startModeFromWire(value uint32) (ports.BrokerDaemonStartMode, error) {
-	switch value {
-	case 1:
-		return ports.BrokerDaemonExistingOnly, nil
-	case 2:
-		return ports.BrokerDaemonStartIfNeeded, nil
-	default:
+	mode, err := protoconv.BrokerStartModeFromWire(value)
+	if err != nil {
 		return 0, errConvertRange
 	}
+	return mode, nil
 }
 
 func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {

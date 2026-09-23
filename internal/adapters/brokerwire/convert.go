@@ -12,10 +12,8 @@ package brokerwire
 
 import (
 	"math"
-	"strings"
-	"unicode"
-	"unicode/utf8"
 
+	"github.com/bnema/vev/internal/adapters/protoconv"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -23,22 +21,22 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// brokerEnum8 narrows one wire uint32 into an 8-bit semantic enum. Values
-// whose high bits would otherwise truncate into a valid enum range are
-// refused before any cast.
+// brokerEnum8 maps shared narrowing failures to the local range sentinel.
 func brokerEnum8[T ~uint8](value uint32) (T, error) {
-	if value > math.MaxUint8 {
+	v, err := protoconv.Uint8[T](value)
+	if err != nil {
 		return 0, errConvertRange
 	}
-	return T(value), nil
+	return v, nil
 }
 
-// brokerEnum16 narrows one wire uint32 into a 16-bit semantic value.
+// brokerEnum16 maps shared narrowing failures to the local range sentinel.
 func brokerEnum16[T ~uint16](value uint32) (T, error) {
-	if value > math.MaxUint16 {
+	v, err := protoconv.Uint16[T](value)
+	if err != nil {
 		return 0, errConvertRange
 	}
-	return T(value), nil
+	return v, nil
 }
 
 func scopeToWire(epoch ports.BrokerEpoch, connection ports.BrokerConnectionID) *wire.BrokerScope {
@@ -101,138 +99,65 @@ func operationFromWire(raw []byte) (ports.BrokerOperationID, error) {
 	return id, nil
 }
 
-func registrationToWire(registration domain.RemoteRegistration) *wire.RemoteRegistration {
-	incarnation := append([]byte(nil), registration.Incarnation[:]...)
-	return &wire.RemoteRegistration{
-		Endpoint:    registration.Endpoint,
-		Incarnation: incarnation,
-		Generation:  uint64(registration.Generation),
-	}
+func registrationToWire(v domain.RemoteRegistration) *wire.RemoteRegistration {
+	return protoconv.BrokerRegistrationToWire(v)
 }
-
-func registrationFromWire(message *wire.RemoteRegistration) (domain.RemoteRegistration, error) {
-	var registration domain.RemoteRegistration
-	if message == nil {
-		return registration, errConvertRange
-	}
-	registration.Endpoint = message.GetEndpoint()
-	if err := domain.ValidateRemoteHostTarget(registration.Endpoint); err != nil {
+func registrationFromWire(v *wire.RemoteRegistration) (domain.RemoteRegistration, error) {
+	out, err := protoconv.BrokerRegistrationFromWire(v)
+	if err != nil {
 		return domain.RemoteRegistration{}, errConvertRange
 	}
-	raw := message.GetIncarnation()
-	if len(raw) != len(registration.Incarnation) {
-		return domain.RemoteRegistration{}, errConvertRange
-	}
-	copy(registration.Incarnation[:], raw)
-	registration.Generation = domain.RemoteGeneration(message.GetGeneration())
-	if err := registration.Validate(); err != nil {
-		return domain.RemoteRegistration{}, errConvertRange
-	}
-	return registration, nil
+	return out, nil
 }
 
-func exactTargetToWire(target protocol.ExactSessionTarget) *wire.ExactTarget {
-	lifecycle := append([]byte(nil), target.LifecycleID[:]...)
-	return &wire.ExactTarget{
-		LifecycleId: &wire.LifecycleID{Value: lifecycle},
-		SessionName: target.SessionName,
-	}
+func exactTargetToWire(v protocol.ExactSessionTarget) *wire.ExactTarget {
+	return protoconv.BrokerExactTargetToWire(v)
 }
 
-func exactTargetFromWire(message *wire.ExactTarget) (protocol.ExactSessionTarget, error) {
-	var target protocol.ExactSessionTarget
-	if message == nil {
-		return target, errConvertRange
-	}
-	lifecycle := message.GetLifecycleId()
-	if lifecycle == nil || len(lifecycle.GetValue()) != len(target.LifecycleID) {
+func exactTargetFromWire(v *wire.ExactTarget) (protocol.ExactSessionTarget, error) {
+	out, err := protoconv.BrokerExactTargetFromWire(v)
+	if err != nil {
 		return protocol.ExactSessionTarget{}, errConvertRange
 	}
-	copy(target.LifecycleID[:], lifecycle.GetValue())
-	target.SessionName = message.GetSessionName()
-	if err := target.Validate(); err != nil {
-		return protocol.ExactSessionTarget{}, errConvertRange
-	}
-	return target, nil
+	return out, nil
 }
 
-// validateBrokerEnvEntry enforces the per-request environment contract:
-// valid UTF-8, no control/bidi characters, bounded bytes. The broker never
-// merges these into its own process environment.
-func validateBrokerEnvEntry(entry string) error {
-	if len(entry) > ports.BrokerMaxEnvEntryBytes {
-		return ErrTooLarge
+func policyToWire(v ports.BrokerPolicy) *wire.BrokerWirePolicy {
+	return protoconv.BrokerPolicyToWire(v)
+}
+
+func policyFromWire(v *wire.BrokerWirePolicy) (ports.BrokerPolicy, error) {
+	out, err := protoconv.BrokerPolicyFromWire(v)
+	if err != nil {
+		return ports.BrokerPolicy{}, mapBrokerConversionError(err)
 	}
-	if !utf8.ValidString(entry) {
+	return out, nil
+}
+
+func mapBrokerConversionError(err error) error {
+	switch err {
+	case protoconv.ErrOutOfRange:
+		return errConvertRange
+	case protoconv.ErrTooLarge:
+		return ErrTooLarge
+	default:
 		return ErrInvalidMessage
 	}
-	for _, r := range entry {
-		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || r == '\u2028' || r == '\u2029' {
-			return ErrInvalidMessage
-		}
-	}
-	return nil
 }
 
-func policyToWire(policy ports.BrokerPolicy) *wire.BrokerWirePolicy {
-	return &wire.BrokerWirePolicy{
-		ProtocolVersion:   uint32(policy.ProtocolVersion),
-		CatalogueVersion:  uint32(policy.CatalogSchemaVersion),
-		EnvironmentPolicy: uint32(policy.EnvironmentPolicy),
-		Transport:         policy.Transport,
-		Trust:             policy.Trust,
-		Launch:            policy.Launch,
-		Isolation:         policy.Isolation,
-	}
+func validateBrokerDisplayText(v string, max int) error {
+	return mapOptionalBrokerError(protoconv.BrokerDisplayText(v, max))
 }
 
-func policyFromWire(message *wire.BrokerWirePolicy) (ports.BrokerPolicy, error) {
-	var policy ports.BrokerPolicy
-	if message == nil {
-		return policy, errConvertRange
-	}
-	protocolVersion, err := brokerEnum16[uint16](message.GetProtocolVersion())
-	if err != nil {
-		return ports.BrokerPolicy{}, err
-	}
-	catalogueVersion, err := brokerEnum16[uint16](message.GetCatalogueVersion())
-	if err != nil {
-		return ports.BrokerPolicy{}, err
-	}
-	env, err := brokerEnum8[protocol.EnvironmentPolicy](message.GetEnvironmentPolicy())
-	if err != nil {
-		return ports.BrokerPolicy{}, err
-	}
-	policy = ports.BrokerPolicy{
-		ProtocolVersion:      protocolVersion,
-		CatalogSchemaVersion: catalogueVersion,
-		EnvironmentPolicy:    env,
-		Transport:            message.GetTransport(),
-		Trust:                message.GetTrust(),
-		Launch:               message.GetLaunch(),
-		Isolation:            message.GetIsolation(),
-	}
-	if err := policy.Validate(); err != nil {
-		return ports.BrokerPolicy{}, ErrInvalidMessage
-	}
-	return policy, nil
+func validateBrokerEnvEntry(v string) error {
+	return mapOptionalBrokerError(protoconv.BrokerEnvEntry(v))
 }
 
-// validateBrokerDisplayText enforces bounded, presentation-safe text:
-// valid UTF-8, no control/bidi/line-separator characters, within maxBytes.
-func validateBrokerDisplayText(value string, maxBytes int) error {
-	if len(value) > maxBytes {
-		return ErrTooLarge
+func mapOptionalBrokerError(err error) error {
+	if err == nil {
+		return nil
 	}
-	if !utf8.ValidString(value) {
-		return ErrInvalidMessage
-	}
-	for _, r := range value {
-		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || r == '\u2028' || r == '\u2029' {
-			return ErrInvalidMessage
-		}
-	}
-	return nil
+	return mapBrokerConversionError(err)
 }
 
 // validateBrokerEndpoint enforces the SSH target contract shared by
@@ -465,19 +390,7 @@ func validateSnapshotDaemonFields(daemon ports.BrokerDaemonObservation) error {
 	return nil
 }
 
-// checkEnvEntries enforces the per-request environment bound: at most
-// BrokerMaxEnvEntries entries, each valid and bounded.
+// checkEnvEntries keeps the local error taxonomy at the adapter boundary.
 func checkEnvEntries(env []string) error {
-	if len(env) > ports.BrokerMaxEnvEntries {
-		return ErrTooLarge
-	}
-	for _, entry := range env {
-		if err := validateBrokerEnvEntry(entry); err != nil {
-			return err
-		}
-		if !strings.Contains(entry, "=") {
-			return ErrInvalidMessage
-		}
-	}
-	return nil
+	return mapOptionalBrokerError(protoconv.BrokerEnvEntries(env))
 }
