@@ -1,6 +1,6 @@
 package brokerwire
 
-// Broker preamble (P3.1).
+// Broker preamble.
 //
 // The first client frame on a broker connection is always PreambleRequest;
 // the first server frame is always PreambleResponse. The broker reuses the
@@ -8,7 +8,7 @@ package brokerwire
 // client, 4 names the broker server. Magic must equal wire.PreambleMagic,
 // epoch must equal wire.ProtocolEpoch, and version must exactly equal
 // protocol.Version. Capability bits must be zero: the broker negotiates no
-// optional capabilities in P3.1.
+// optional capabilities here.
 //
 // The preamble negotiates immutable per-connection ceilings once: the
 // advertised envelope ceiling (1 MiB..16 MiB) rides in
@@ -20,7 +20,7 @@ package brokerwire
 // preamble, 7 limit refused. Code 6 is reserved for the connection
 // dispatcher: out-of-order application frames are a framing-order failure
 // that this stateless codec never observes. Nonzero capability bits have no
-// dedicated code in P3.1 and are refused as code 7 (limit refused), since
+// dedicated code and are refused as code 7 (limit refused), since
 // the broker negotiates no optional capabilities.
 
 import (
@@ -53,7 +53,7 @@ const (
 	// owns framing-order detection. The stateless codec never emits it.
 	RejectionOutOfOrder uint32 = 6
 	// RejectionLimitRefused reports an unnegotiable limit advertisement. It
-	// also covers nonzero capability bits: P3.1 negotiates no optional
+	// also covers nonzero capability bits: the protocol negotiates no optional
 	// capabilities, so any capability bit is an unnegotiable advertisement.
 	RejectionLimitRefused uint32 = 7
 )
@@ -172,7 +172,7 @@ func DecodePreambleResponse(message *wire.PreambleResponse) (BrokerPreambleRespo
 // RejectionCodeFor maps a preamble validation failure to its precise
 // refusal code. Limit, magic, epoch, version, and role failures each carry
 // their own code; nonzero capability bits are refused as
-// RejectionLimitRefused because P3.1 negotiates no capabilities; unknown
+// RejectionLimitRefused because the protocol negotiates no capabilities; unknown
 // scan failures are limit refusals. Code 6 is never returned here: the
 // dispatcher owns out-of-order framing.
 func RejectionCodeFor(request *wire.PreambleRequest, err error) uint32 {
@@ -193,7 +193,7 @@ func RejectionCodeFor(request *wire.PreambleRequest, err error) uint32 {
 			return RejectionWrongRole
 		}
 		if request.GetCapabilityBits() != 0 {
-			// No capability is negotiable in P3.1, so any bit is a refused
+			// No capability is negotiable here, so any bit is a refused
 			// limit advertisement (code 7), documented explicitly.
 			return RejectionLimitRefused
 		}

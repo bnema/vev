@@ -1,4 +1,4 @@
-// Private daemonmux Unix carriage (P3.2d).
+// Private daemonmux Unix carriage.
 //
 // This file exposes the explicit, mux-specific raw Unix carriage that the
 // daemonmux multiplexer (internal/adapters/daemonmux) runs over. It is

@@ -15,7 +15,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// outputCompressionThreshold mirrors the legacy codec: small snapshots stay
+// outputCompressionThreshold preserves the small-snapshot compression threshold: small snapshots stay
 // on the canonical raw path.
 const protoOutputCompressionThreshold = 1024
 

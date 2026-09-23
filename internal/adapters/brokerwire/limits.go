@@ -1,6 +1,6 @@
 package brokerwire
 
-// Stateless bound refusals (P3.1).
+// Stateless bound refusals.
 //
 // The broker preamble negotiates one immutable pair of ceilings per
 // connection: MaxReceiveEnvelopeBytes bounds every envelope this side
@@ -56,7 +56,7 @@ type Ceilings struct {
 }
 
 // brokerCeilings is the in-package alias for Ceilings. It exists only so
-// P3.1's tests keep their short spelling; production code uses Ceilings.
+// The codec tests keep their short spelling; production code uses Ceilings.
 type brokerCeilings = Ceilings
 
 // defaultBrokerCeilings advertises the local broker receive policy: the

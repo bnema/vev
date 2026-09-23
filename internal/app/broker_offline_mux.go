@@ -23,7 +23,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// Broker mux remote helper composition (Plan 001 P3.4 slice E).
+// Broker mux remote helper composition.
 //
 // The offline broker reaches a remote daemon's private daemonmux carriage
 // through one of three explicitly provisioned routes: a local Unix mux socket,

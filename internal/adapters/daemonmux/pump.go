@@ -1,4 +1,4 @@
-// Physical pump over an abstract framed carrier (P3.2).
+// Physical pump over an abstract framed carrier.
 //
 // Pump is the in-memory physical half of one daemonmux connection. It
 // composes the stateless directional codec (codec.go), the StreamEngine

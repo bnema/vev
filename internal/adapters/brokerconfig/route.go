@@ -18,7 +18,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Bounded route variants (Plan 001 P3.4 slice E).
+// Bounded route variants.
 //
 // A registration's route is the transport the offline broker dials for that
 // endpoint. It is an explicit, bounded tagged union, never a caller-supplied

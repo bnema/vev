@@ -47,7 +47,7 @@ func (d *Daemon) snapshotNavigationInventory(requestID uint64) protocol.Navigati
 }
 
 // localNavigationInventorySnapshot is the prepared local-only navigation
-// projection (Plan 001 P4.3): exactly one local source group, built from the
+// projection: exactly one local source group, built from the
 // daemon's own capture.
 func (d *Daemon) localNavigationInventorySnapshot(requestID uint64) protocol.NavigationInventoryResponse {
 	inv := d.captureLocalSessionInventory(viewOptions{}, false)
@@ -166,7 +166,7 @@ func (d *Daemon) resolveNavigationInventory(request protocol.NavigationInventory
 }
 
 // localNavigationResolve is the prepared local-only navigation resolver
-// (Plan 001 P4.3). It rejects a structured foreign source key or registration
+// It rejects a structured foreign source key or registration
 // before any lookup, so a local resolve can never be satisfied by a remote
 // endpoint or a foreign registration even when a local session shares the
 // row's name. Matching is by the opaque lifecycle-qualified key only: a stale

@@ -10,7 +10,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Move-destination picker over a live attachment (Plan 003 A2).
+// Move-destination picker over a live attachment.
 //
 // The serving daemon still owns move semantics: it captures the source when
 // MFP/MAT runs, publishes the destination rows in a PickerSnapshot, resolves

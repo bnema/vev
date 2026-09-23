@@ -14,7 +14,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Broker-owned daemon start (Plan 001 P7, UI-driver slice 1).
+// Broker-owned daemon start.
 //
 // The broker is the only component that decides whether a target daemon may be
 // started. Its resolved dial target already carries the closed start

@@ -12,8 +12,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Client control operations over independent broker streams (Plan 001 P7,
-// worker 3).
+// Client control operations over independent broker streams.
 //
 // List, Command, Kill, KillAll, and StopDaemon are client use-case operations
 // that borrow a BrokerService and open one typed, independently cancellable

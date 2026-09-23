@@ -14,7 +14,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Attachment worker mechanisms (Plan 001 P5.1b, offline and unactivated).
+// Attachment worker mechanisms.
 //
 // This file defines the attachment mechanisms owned by the autonomous
 // supervisor. It reuses the terminal input pump (terminalInputPump) and
@@ -390,7 +390,7 @@ type attachmentHost struct {
 	internalActions chan AttachmentLifecycleAction
 	// routeDemand wakes the supervisor to publish routes when the committed
 	// session changes; navigations carries the daemon's navigation requests
-	// (Plan 003 C4/C5). Only the supervisor consumes them.
+	// Only the supervisor consumes these route and navigation channels.
 	routeDemand chan struct{}
 	navigations chan protocol.ServerMessage
 	// overlayActions carries driver actions the client picker overlay
@@ -1129,7 +1129,7 @@ type attachmentForeground struct {
 	// tabSelect carries one pending in-place tab switch to the worker.
 	tabSelect chan domain.TabStableID
 	// routes carries the newest client route snapshot to the worker; replies
-	// carries the supervisor's navigation failures (Plan 003 C4/C5).
+	// carries the supervisor's navigation failures.
 	routes  chan protocol.RecentRouteSnapshot
 	replies chan protocol.ClientMessage
 }
@@ -1221,7 +1221,7 @@ func (f *attachmentForeground) finish() {
 	f.finishedOnce.Do(func() {
 		// Autonomous supervisor foregrounds have a host-lifetime geometry
 		// collector. At that owner-class boundary, no attachment byte may reach
-		// the picker. Isolated legacy worker replacement remains lossless.
+		// the picker. Attachment-to-attachment replacement instead delivers pending input.
 		if f.input != nil && f.host != nil && f.host.ownerBoundary {
 			f.input.dropOwned(f.consumer)
 		}

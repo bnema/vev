@@ -1335,7 +1335,7 @@ func (r *Registry) publishLocked(persist bool) {
 		return
 	}
 	// Remote daemons are published in registration order. The broker's own
-	// machine daemon, when a producer is configured (Plan 001 P5.3a), is the
+	// machine daemon, when a producer is configured, is the
 	// prepended entry at index zero; without a producer the registry produces no
 	// local observation and never invents one.
 	daemons := make([]ports.BrokerDaemonObservation, 0, len(r.hosts)+1)

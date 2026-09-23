@@ -14,9 +14,9 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// Broker IPC client (P3.3).
+// Broker IPC client.
 //
-// Dial connects to one per-user broker endpoint through the P3.2 private IPC
+// Dial connects to one per-user broker endpoint through the private IPC
 // carriage (same-user kernel peer credentials on dial), completes the broker
 // preamble, sends exactly one Register, adopts the scope the listener assigned
 // in the Registered answer, and then runs one reader for the connection. The

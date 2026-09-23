@@ -1,6 +1,6 @@
 package brokerwire
 
-// Directional envelope adaptation (P3.1).
+// Directional envelope adaptation.
 //
 // EncodeClient wraps one adapter-local client value in its directional
 // BrokerClientEnvelope; DecodeClient unwraps and validates. EncodeServer
@@ -12,7 +12,7 @@ package brokerwire
 // environment/policy, chunks, and snapshot parts.
 //
 // The codecs are stateless: no connection state, multipart assembler,
-// operation tracker, stream lifecycle, socket, framing pump, or P3.2
+// operation tracker, stream lifecycle, socket, framing pump, or
 // transport lives here. Envelope sizes ride under the caller's negotiated
 // ceiling; stream chunks ride under the negotiated chunk ceiling.
 

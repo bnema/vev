@@ -12,7 +12,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Committed attachment orchestration (Plan 001 P5.3b, offline and unactivated).
+// Committed attachment orchestration.
 //
 // After the picker resolves a committed selection to one exact
 // ports.BrokerOpenStreamRequest, the supervisor opens that logical stream on

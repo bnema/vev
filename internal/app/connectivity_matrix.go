@@ -1,9 +1,9 @@
 package app
 
-// Connectivity migration matrix (Plan 001 P1.2).
+// Connectivity migration matrix.
 //
-// Every CLI entry point has exactly one owner. After the P7 cutover, all
-// ordinary user-facing operations reach daemons through the per-user
+// Every CLI entry point has exactly one owner. Ordinary user-facing
+// operations reach daemons through the per-user
 // connection broker; narrowly scoped daemon-facing transport helpers stay
 // infrastructure and never become alternate client façades.
 //

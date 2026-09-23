@@ -1,5 +1,5 @@
 // Package brokerconfig owns the strict, isolated offline broker sandbox
-// configuration (Plan 001 P3.4 slice C).
+// configuration.
 //
 // It is deliberately not production composition: nothing in internal/app or
 // main consults it for ordinary daemon operation. It resolves one caller-
@@ -236,7 +236,7 @@ type Registration struct {
 }
 
 // LocalBinding is the broker-owned binding for the broker's own machine
-// daemon (Plan 001 P5.3a). Unlike a remote Registration it carries no
+// daemon. Unlike a remote Registration it carries no
 // registration: the local daemon is not a configured host, so a local stream
 // request is fenced only against this binding's identity, policy, and route.
 // The identity and policy are authoritative here and are the exact source of
@@ -260,7 +260,7 @@ type LocalBinding struct {
 }
 
 // pooledIdentity is the exact (authenticated identity, policy) pair the broker
-// pool keys one physical transport by. The pool deliberately ignores the opaque
+// pool keys one physical transport by the exact identity and policy pair. The pool deliberately ignores the opaque
 // route address, so two registrations that share a pair share one pooled
 // transport and must therefore agree on the single route that transport dials.
 type pooledIdentity struct {

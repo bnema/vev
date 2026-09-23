@@ -1,4 +1,4 @@
-// In-memory stream state and admission (P3.2).
+// In-memory stream state and admission.
 //
 // StreamEngine owns the admission and lifecycle of the logical streams
 // multiplexed over one physical daemon connection. It performs no I/O and

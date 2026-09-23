@@ -8,9 +8,9 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Snapshot publication (P3.3).
+// Snapshot publication.
 //
-// A broker publication travels as the exact multipart transfer the P3.1
+// A broker publication travels as the exact multipart transfer the brokerwire
 // assembler accepts: Begin(index 0, element counts), then every daemon part in
 // daemon-index order immediately followed by that daemon's session parts in
 // session-index order, then the tombstones, then End at the final index. The

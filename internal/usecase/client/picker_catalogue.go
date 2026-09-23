@@ -15,12 +15,12 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Client-owned picker catalogue (Plan 001 P5.2b, offline and unactivated).
+// Client-owned picker catalogue.
 //
 // The autonomous supervisor owns the broker connection and the single terminal
 // input lifetime; this file owns the catalogue the picker presents, projected
 // from the broker's own observations rather than from a serving-daemon
-// catalogue. It is the P5.2b replacement source for the daemon-served
+// catalogue. It projects broker observations instead of the daemon-served
 // protocol.PickerSnapshot: rows are derived from ports.BrokerSnapshot, the
 // opaque keys stay client-local, and a selection resolves to an exact
 // ports.BrokerOpenStreamRequest instead of a daemon-side key handoff.
@@ -572,7 +572,7 @@ func resolvePickerRequest(epoch ports.BrokerEpoch, authority pickerResolveAuthor
 }
 
 // resolvePickerTarget is resolvePickerRequest plus the exact tab a tab row
-// names. refuseFailing is the picker's instant refusal (Plan 003 B4): a
+// names. refuseFailing is the picker's instant refusal: a
 // remote host the broker observed failing (unreachable, authentication, or an
 // invalid response) refuses with a notice instead of a slow attempt that
 // would fail the same way. An explicit CLI target keeps the attempt.

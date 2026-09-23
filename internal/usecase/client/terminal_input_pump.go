@@ -244,7 +244,7 @@ func (p *terminalInputPump) preserveResidual(consumer uint64, data []byte) {
 // boundary. Picker-queued bytes are dropped before attachment claim, and
 // attachment-queued bytes are dropped before picker claim. No delivery,
 // pending read, or preserved residual may cross between those owner classes.
-// revoke remains lossless for legacy attachment-to-attachment replacement.
+// revoke remains lossless for attachment-to-attachment replacement.
 func (p *terminalInputPump) dropOwned(consumer uint64) {
 	p.mu.Lock()
 	if p.consumer != consumer {

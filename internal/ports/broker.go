@@ -13,7 +13,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Broker semantic contracts (Plan 001 P1.3).
+// Broker semantic contracts.
 //
 // The broker is the machine-wide owner of connectivity: configured hosts,
 // daemon reachability and catalogue snapshots, pooled physical transports,
@@ -234,7 +234,7 @@ func (t BrokerHostTombstone) Fences(candidate domain.RemoteRegistration) bool {
 }
 
 // BrokerSnapshot is an immutable, fully defensive broker publication.
-// Daemons carries the broker-native daemon observations (Plan 001 P5.2a):
+// Daemons carries the broker-native daemon observations:
 // the local daemon entry first when present, then remote hosts in
 // registration order. Removed carries the bounded tombstone set that fences
 // stale authority. Nested slices are never mutated after publication.
@@ -336,8 +336,7 @@ func (s BrokerSnapshot) Supersedes(other BrokerSnapshot) bool {
 	return s.Revision > other.Revision
 }
 
-// BrokerStreamAdmission is the closed attachment-admission taxonomy
-// (Plan 001 P5.3a, contract-only until the admission slice wires it):
+// BrokerStreamAdmission is the closed attachment-admission taxonomy:
 // an attachment stream names exactly how the daemon must admit it.
 // Control and observation streams carry no admission.
 type BrokerStreamAdmission uint8
@@ -862,7 +861,7 @@ type BrokerService interface {
 // stays daemon-owned and is never moved here. Load is called once while the
 // broker is constructed; Store runs on the broker's serialized writer
 // goroutine. Store must return promptly and must never block indefinitely:
-// this seam deliberately carries no cancellation context in P2.1, and broker
+// this seam deliberately carries no cancellation context, and broker
 // shutdown waits for the in-flight write to finish, so a Store that blocks
 // without bound blocks shutdown. Implementations must bound their own write
 // time and return an error rather than wait forever.

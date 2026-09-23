@@ -17,7 +17,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
-// brokerClientCommand is the hidden P5.4b client entry point. It is deliberately
+// brokerClientCommand is the hidden client entry point. It is deliberately
 // separate from every ordinary attach, UI-driver, and web command: only an
 // explicitly supplied offline root can select the broker sandbox.
 const brokerClientCommand = "_broker-client"

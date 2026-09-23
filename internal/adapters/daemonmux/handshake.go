@@ -1,6 +1,6 @@
 package daemonmux
 
-// Physical preamble handshake (P3.2a).
+// Physical preamble handshake.
 //
 // The daemonmux connection begins with exactly one physical preamble exchange
 // over the private FramedCarrier, before any application envelope. The client

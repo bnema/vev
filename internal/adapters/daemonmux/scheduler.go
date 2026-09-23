@@ -1,4 +1,4 @@
-// Outbound fair scheduling (P3.2).
+// Outbound fair scheduling.
 //
 // Scheduler is the outbound companion of the StreamEngine on one physical
 // daemonmux connection. It owns one bounded, independently cancellable FIFO

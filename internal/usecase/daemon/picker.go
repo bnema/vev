@@ -53,9 +53,9 @@ type pickerForeignViews struct {
 	blockLocalStopped bool
 }
 
-// localPickerViews is the prepared local-only picker projection (Plan 001
-// P4.3). It captures live and stopped local rows, orders them exactly like the
-// hybrid projection did when no foreign source was present.
+// localPickerViews is the prepared local-only picker projection. It captures
+// live and stopped local rows, ordering them as the hybrid projection does
+// when no foreign source is present.
 func (d *Daemon) localPickerViews(cur *session, ac *attachedClient) pickerLocalViews {
 	if cur != nil && ac != nil {
 		cur.repairAttachmentView(ac)
@@ -316,7 +316,7 @@ func (d *Daemon) switchToTargetForAttachment(effect *attachmentEffect, target pi
 		return nil
 	}
 	if target.RemoteTarget != nil || target.RemoteKey != nil {
-		// Other daemons are client routes (Plan 003 E3): the daemon never
+		// Other daemons are client routes: the daemon never
 		// hands out a remote destination.
 		return errAttachmentTransition
 	}

@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Offline broker composition (Plan 001 P3.4 slice B).
+// Offline broker composition.
 //
 // Authority admits one accepted client connection to the broker core and
 // returns the connection-scoped ports.BrokerService for exactly that

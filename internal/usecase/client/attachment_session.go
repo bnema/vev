@@ -12,7 +12,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Real attachment worker (Plan 001 P5.3b, offline and unactivated).
+// Real attachment worker.
 //
 // sessionAttachmentWorker drives the existing typed session protocol on the
 // broker logical stream the supervisor opened for one resolved request. It

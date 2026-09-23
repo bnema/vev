@@ -1,6 +1,6 @@
 package brokerwire
 
-// Shared semantic converters (P3.1).
+// Shared semantic converters.
 //
 // Conversion mirrors the port, domain, and catalogue types losslessly and
 // validates every narrowing numeric cast before it happens. Wire uint32

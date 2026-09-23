@@ -1,4 +1,4 @@
-// Raw-carrier bridge (P3.2b).
+// Raw-carrier bridge.
 //
 // One daemonmux physical connection rides an existing raw framed transport:
 // IPC, QUIC, or SSH stdio, each of which already owns vev's shared 4-byte

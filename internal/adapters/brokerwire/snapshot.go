@@ -1,4 +1,4 @@
-// Stateful multipart snapshot assembly (P3.1).
+// Stateful multipart snapshot assembly.
 //
 // SnapshotAssembler stages one multipart SnapshotPart publication and
 // publishes it atomically only after full validation. It builds on the
@@ -44,7 +44,7 @@
 // transfer is in flight. Scope fencing is exact: every part must carry the
 // assembler's epoch and connection.
 //
-// There is no I/O, socket, pump, or P3.2 transport here. The owning
+// There is no I/O, socket, pump, or transport here. The owning
 // Connection discards staging on generation advance, unsubscribe, or close.
 package brokerwire
 

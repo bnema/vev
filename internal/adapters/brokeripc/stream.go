@@ -11,7 +11,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Logical stream bridging (P3.3).
+// Logical stream bridging.
 //
 // One brokerwire logical stream carries the typed session protocol between a
 // client and the daemon behind the broker. The broker terminates both hops: the

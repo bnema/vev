@@ -1,6 +1,6 @@
 package sessionwire
 
-// Directional envelope adaptation (P2.2/P3.1, wired at the P3.3 cutover).
+// Directional envelope adaptation.
 //
 // encodeProtoClient/encodeProtoServer wrap one semantic message in its
 // directional envelope; decodeProtoClient/decodeProtoServer unwrap and

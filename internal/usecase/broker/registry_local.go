@@ -12,7 +12,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Broker-owned local observation (Plan 001 P5.3a, P7.4b).
+// Broker-owned local observation.
 //
 // The broker's own machine daemon is not a configured host: it has no
 // endpoint, no registration, and no durable membership. It is observed through

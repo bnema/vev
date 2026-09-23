@@ -113,7 +113,7 @@ func routeEntryForRef(snapshot protocol.RecentRouteSnapshot, ref protocol.RouteR
 
 // createSessionDestinationResults lists where CNS may create a session: the
 // serving daemon itself, and every other daemon the client published as a
-// route host (Plan 003 E3). Only the serving daemon creates in place; every
+// route host. Only the serving daemon creates in place; every
 // other destination is created by the client through its broker.
 func createSessionDestinationResults(snapshot protocol.RecentRouteSnapshot, currentLifecycle domain.SessionLifecycleID) []palette.Result {
 	results := make([]palette.Result, 0, len(snapshot.Hosts)+1)
@@ -175,7 +175,7 @@ func paletteRouteRepresentsDaemonSession(entry protocol.RecentRouteEntry, daemon
 // paletteResults projects the daemon's own inventory plus the client's route
 // snapshot for the palette. It keeps quick-switch exclusions, compact labels,
 // commands, and history behavior; other daemons' sessions and hosts come only
-// from the client routes (Plan 003 E3), and committing one navigates through
+// from the client routes, and committing one navigates through
 // the client.
 func (d *Daemon) paletteResults(current *session, commands []command.Command, routeSnapshot protocol.RecentRouteSnapshot) []palette.Result {
 	inv := d.captureSessionInventory(viewOptions{}, false)

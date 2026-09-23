@@ -7,7 +7,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Routes and daemon navigation while attached (Plan 003 C4, C5, E3).
+// Routes and daemon navigation while attached.
 //
 // The supervisor publishes the client route ledger to the serving daemon after
 // the committed initial publication, whenever the attached session changes,

@@ -1650,7 +1650,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 	// The accepting side's provisioned admission, when present, is the authority
 	// this Hello is validated against before any restore, creation, resume
 	// claim, ownership change, or environment mutation. A connection without
-	// that seam keeps its legacy validation unchanged and gains no admission
+	// that seam receives the standard Hello validation and gains no admission
 	// exception, so a forged Hello can never widen what it is allowed to do.
 	admission, admitted := sessionHelloAdmission(tr)
 	if admitted {
@@ -1728,8 +1728,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 			return nil, nil, err
 		}
 	}
-	// A daemon-owned ephemeral Hello without an exact remote target is a legacy
-	// shape the daemon refuses. An authenticated remote admission that names the
+	// A daemon-owned ephemeral Hello without an exact remote target is refused by the daemon. An authenticated remote admission that names the
 	// creation is the one exception, and it is granted only under a validated
 	// remote admission; a connection without one never gains it.
 	if !admitted && h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned && h.SessionTarget == nil &&

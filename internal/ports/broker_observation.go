@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Broker-native daemon observation (Plan 001 P5.2a).
+// Broker-native daemon observation.
 //
 // BrokerDaemonObservation is the broker's own projection of one daemon, local
 // or remote, and the only one: no daemon monitors another. It keeps

@@ -1,4 +1,4 @@
-// Server supervisor over accepted raw physical carriers (P3.2c).
+// Server supervisor over accepted raw physical carriers.
 //
 // ServerSupervisor is the daemon-side owner of accepted daemonmux physical
 // connections. A daemon accept loop hands it one authenticated raw framed

@@ -1,4 +1,4 @@
-// Typed logical connections over one physical Pump (P3.2).
+// Typed logical connections over one physical Pump.
 //
 // A LogicalConnection is one independently cancellable typed session stream
 // multiplexed over one physical daemonmux Pump. It implements

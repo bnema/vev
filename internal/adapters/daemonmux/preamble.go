@@ -1,6 +1,6 @@
 package daemonmux
 
-// Daemonmux physical preamble (P3.2).
+// Daemonmux physical preamble.
 //
 // The first daemonmux client frame on a physical connection is always
 // MuxPreambleRequest; the first daemon frame is always MuxPreambleResponse.
@@ -80,7 +80,7 @@ const (
 	RejectionOutOfOrder uint32 = 6
 	// RejectionLimitRefused reports an unnegotiable advertisement. It also
 	// covers nonzero capability bits and a policy the daemon does not
-	// accept: P3.2 negotiates neither capabilities nor a merged policy
+	// accept: the protocol negotiates neither capabilities nor a merged policy
 	// server, so either is an unnegotiable advertisement.
 	RejectionLimitRefused uint32 = 7
 )
@@ -350,7 +350,7 @@ func DecodePreambleResponseBytes(payload []byte) (MuxPreambleResponse, error) {
 // RejectionCodeFor maps a preamble validation failure to its precise refusal
 // code. Limit, magic, epoch, version, role, and policy failures each carry
 // their own code; nonzero capability bits are refused as
-// RejectionLimitRefused because P3.2 negotiates no capabilities; unknown scan
+// RejectionLimitRefused because the protocol negotiates no capabilities; unknown scan
 // failures are limit refusals. A duplicate inside one frame
 // (wire.ErrScanDuplicate) maps to RejectionDuplicate with the in-frame meaning
 // described above, never the dispatcher's cross-frame duplicate. Code 6 is
@@ -373,7 +373,7 @@ func RejectionCodeFor(request *wire.MuxPreambleRequest, err error) uint32 {
 			return RejectionWrongRole
 		}
 		if request.GetCapabilityBits() != 0 {
-			// No capability is negotiable in P3.2, so any bit is a refused
+			// No capability is negotiable here, so any bit is a refused
 			// limit advertisement (code 7), documented explicitly.
 			return RejectionLimitRefused
 		}

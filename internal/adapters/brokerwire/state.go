@@ -1,4 +1,4 @@
-// Per-connection broker state (P3.1).
+// Per-connection broker state.
 //
 // Connection walks one exact lifecycle: New is entered when the listener
 // assigns the connection scope, one locally validated preamble moves it to
@@ -16,7 +16,7 @@
 // commits. Operation and stream state is scoped to exactly this connection
 // and epoch.
 //
-// There is no I/O, socket, pump, or P3.2 transport here.
+// There is no I/O, socket, pump, or transport here.
 package brokerwire
 
 import (

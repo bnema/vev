@@ -50,7 +50,7 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 // jumpAttention switches to the oldest pending attention target: a tab of the
 // attached session first, then another session of this daemon, then the
 // oldest bell among the client's routes on any other daemon, which the client
-// navigates to (Plan 003 C5). Returning nil never implies a switch happened —
+// navigates to. Returning nil never implies a switch happened —
 // it also covers "no target exists", which is routine and not an error. Only
 // a failure to reach a target that does exist is a genuine error.
 func (d *Daemon) jumpAttention(sess *session, ac *attachedClient) error {

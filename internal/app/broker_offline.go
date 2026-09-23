@@ -30,11 +30,11 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-// Offline broker foreground composition (Plan 001 P3.4 slice C).
+// Offline broker foreground composition.
 //
 // `_broker-serve` is a hidden, isolated sandbox command. It takes one strict
 // offline root, derives only sandbox runtime, state, and log paths from it, and
-// composes the P3.4 broker core and P3.3 local IPC listener over the immutable
+// composes the broker core and local IPC listener over the immutable
 // config marker. It never reads or writes production runtime, state, or config
 // and never changes an ordinary command, path, or factory.
 //
@@ -337,8 +337,8 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 
 	if options.production {
 		// The durable route schema intentionally delegates SSH trust to OpenSSH.
-		// Refuse nonrepresentable legacy overrides rather than silently dropping
-		// security inputs during the one-time production import.
+		// Refuse route overrides that OpenSSH configuration must represent instead of dropping
+		// security inputs during production import.
 		for _, endpoint := range config.Endpoints() {
 			registration, _ := config.Registration(endpoint)
 			if registration.Route.KnownHostsFile() != "" || registration.Route.ConnectTimeout() != 0 {

@@ -11,7 +11,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Picker projections (Plan 003 B2/B3/C1), ported from the daemon-built picker
+// Picker projections, ported from the daemon-built picker
 // on main (picker.go, picker_lines.go).
 //
 // The catalogue publishes two projections of the same rows, keys, and

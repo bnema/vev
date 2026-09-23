@@ -12,7 +12,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/broker"
 )
 
-// Broker-owned local observation composition (Plan 001 P5.3a, P7.4b).
+// Broker-owned local observation composition.
 //
 // The offline broker observes its own machine daemon through the same daemonmux
 // carriage a local logical stream is dialed over. The probe completes the

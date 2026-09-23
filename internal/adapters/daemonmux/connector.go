@@ -1,4 +1,4 @@
-// Broker endpoint connector and physical connection (P3.2c).
+// Broker endpoint connector and physical connection.
 //
 // EndpointConnector is the broker-side bridge between the transport-neutral
 // ports.BrokerEndpointConnector contract and the daemonmux multiplexer. It owns

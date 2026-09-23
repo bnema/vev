@@ -10,7 +10,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Client-owned route ledger (Plan 003 C4/E3).
+// Client-owned route ledger.
 //
 // The serving daemon renders the status-bar MRU, the other-session bells, the
 // jump-recent hints, and the palette's remote, recent-route, and

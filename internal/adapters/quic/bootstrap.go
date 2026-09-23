@@ -20,7 +20,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// Bootstrap normative bounds (P6.2): ephemeral listener/certificate,
+// Bootstrap normative bounds: ephemeral listener/certificate,
 // 32-byte token, nonce, ≤4 KiB readiness, ≤15-second expiry, exact
 // SHA-256 pin, one bounded auth record, atomic one-time consumption,
 // ≤4 unauthenticated peers, 3-second auth deadline, exactly one

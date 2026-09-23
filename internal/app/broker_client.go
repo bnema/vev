@@ -20,7 +20,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
-// Common broker client composition (Plan 001 P7.4a).
+// Common broker client composition.
 //
 // runBrokerClient is the single terminal composition every frontend promotes:
 // the sandbox terminal harness, the sandbox UI-driver harness, and the ordinary

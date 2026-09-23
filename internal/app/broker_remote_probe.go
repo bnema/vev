@@ -15,7 +15,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
-// Remote daemon observation composition (Plan 001 P7.4b).
+// Remote daemon observation composition.
 //
 // brokerRemoteProbe observes one configured daemon over the broker-owned
 // multiplexed carriage. It opens an observation stream, never an attachment,

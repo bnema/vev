@@ -141,7 +141,7 @@ func clientQUICConfig(config Config) *quicgo.Config {
 
 // serverTLSConfig presents cert and requires TLS 1.3 with the epoch ALPN.
 // Client certificates are not used: authentication is the SHA-256 pin
-// checked by the dialer plus the bootstrap token consumed by P6.2.
+// checked by the dialer plus the bootstrap token consumed during authentication.
 func serverTLSConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},

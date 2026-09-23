@@ -1,6 +1,6 @@
 package daemonmux
 
-// Directional envelope adaptation (P3.2).
+// Directional envelope adaptation.
 //
 // EncodeClient wraps one adapter-local client value in its directional
 // MuxClientEnvelope; DecodeClient unwraps and validates. EncodeServer and

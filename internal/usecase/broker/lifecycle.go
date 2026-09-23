@@ -10,7 +10,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Lifecycle supervisor (Plan 001 P2.4, not activated).
+// Lifecycle supervisor.
 //
 // The supervisor is the single owner of the broker's idle lifetime. Exactly two
 // kinds of work can pin the broker open:

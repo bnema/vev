@@ -19,9 +19,9 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// Broker IPC listener and per-connection session (P3.3).
+// Broker IPC listener and per-connection session.
 //
-// The listener owns one per-user AF_UNIX endpoint through the P3.2 private IPC
+// The listener owns one per-user AF_UNIX endpoint through the private IPC
 // carriage: owner-only directory and 0600 socket, same-user kernel peer
 // credentials on accept, race-safe stale-socket recovery, foreign-path refusal,
 // and idempotent Close that unlinks only the socket inode it created. It caps
@@ -49,7 +49,7 @@ import (
 // authority is the ports.BrokerAuthority admission seam: the listener calls
 // AdmitClient once per accepted connection under the handshake budget and binds
 // the returned service to exactly that connection. That service's ConnectionID
-// is the identity the session stamps on every frame; the P3.4 broker use case
+// is the identity the session stamps on every frame; the broker use case
 // supplies the implementation, and this adapter consumes it without
 // constructing a broker itself. See ports.BrokerAuthority for the
 // admission-context contract.

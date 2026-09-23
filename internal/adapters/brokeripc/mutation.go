@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Snapshot publication and mutating operations (P3.3, server side).
+// Snapshot publication and mutating operations.
 //
 // A Subscribe frame starts one publisher goroutine for exactly that connection
 // and generation. The publisher waits on the admitted core service's coalescing

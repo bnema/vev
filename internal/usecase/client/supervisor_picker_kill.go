@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Picker kill (Plan 003 B1).
+// Picker kill.
 //
 // `x` on a local session row kills it through the broker operations seam: one
 // independent, bounded control stream to the owning daemon, never the

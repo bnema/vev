@@ -54,7 +54,7 @@ func (o SessionConnectionOrigin) Validate() error {
 }
 
 // SessionAdmission is the closed admission metadata of one admitted session
-// connection (Plan 001 P5.3a): the provisioned carriage shape that accepted it,
+// connection: the provisioned carriage shape that accepted it,
 // the exact accepted policy, the declared stream purpose, and - for attachment
 // purposes only - the closed admission variant, its validated creation name,
 // its exact session target, and its bounded per-request environment.

@@ -1,4 +1,4 @@
-// Typed server-side listener over one physical Pump (P3.2).
+// Typed server-side listener over one physical Pump.
 //
 // Listener is the daemon half of one physical daemonmux connection. The pump's
 // reader admits each incoming MuxOpen; the listener turns every admitted stream

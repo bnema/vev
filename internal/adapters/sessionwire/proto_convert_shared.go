@@ -1,4 +1,4 @@
-// Protobuf semantic converters (P2.2, wired at the P3.3 cutover).
+// Protobuf semantic converters.
 //
 // This file owns every semantic protocol value <-> generated wire envelope
 // conversion used by client.go/server.go dispatch. The actual field-by-field

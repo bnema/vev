@@ -1,4 +1,4 @@
-// Private daemonmux QUIC carriage (P3.2e).
+// Private daemonmux QUIC carriage.
 //
 // This file exposes the explicit, mux-specific raw QUIC carriage the daemonmux
 // multiplexer (internal/adapters/daemonmux) runs over. It introduces no

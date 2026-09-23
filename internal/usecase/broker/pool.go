@@ -80,7 +80,7 @@ type poolEntry struct {
 	idleOrder uint64
 }
 
-// Pool is transport independent and is not production-composed in P2.2.
+// Pool is transport independent; the broker service composes it.
 // mu protects bookkeeping only; no port I/O or Close runs under it.
 type Pool struct {
 	mu        sync.Mutex

@@ -2,8 +2,8 @@ package client
 
 import "github.com/bnema/vev/internal/protocol"
 
-// Route publication and daemon navigation seams of the attached foreground
-// (Plan 003 C4/C5). The worker owns the stream, so the supervisor reaches the
+// Route publication and daemon navigation seams of the attached foreground.
+// The worker owns the stream, so the supervisor reaches the
 // daemon only through these bounded channels: the newest route snapshot
 // replaces an unsent one, and navigation failures are dropped rather than
 // blocking when the worker is gone. In the other direction the worker hands

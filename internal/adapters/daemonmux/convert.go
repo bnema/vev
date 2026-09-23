@@ -1,6 +1,6 @@
 package daemonmux
 
-// Shared semantic converters (P3.2).
+// Shared semantic converters.
 //
 // Conversion mirrors the port, domain, and protocol types losslessly and
 // validates every narrowing numeric cast before it happens. Wire uint32

@@ -14,7 +14,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
-// Client-owned picker controller (Plan 001 P5.2b, offline and unactivated).
+// Client-owned picker controller.
 //
 // This file is the narrow seam between the autonomous supervisor and the
 // client-owned catalogue. The supervisor owns raw mode, the single terminal
@@ -41,7 +41,7 @@ import (
 // supervisor applies each broker publication and hands it every terminal read
 // from its single input lifetime; the picker decides ownership.
 //
-// The commit seam (Plan 001 P5.3b) is what lets the supervisor turn a user
+// The commit seam is what lets the supervisor turn a user
 // commit into one exact broker stream without ever reading the presentation
 // model itself: the picker records the decision and the key it committed
 // atomically, the supervisor wakes on OpsReady, and ResolveKey revalidates
@@ -116,7 +116,7 @@ type pickerController struct {
 }
 
 // newPickerController builds a picker over an empty catalogue. The picker owns
-// input from the start: P5.2b presents it for the whole picker presentation and
+// input from the start: the controller presents it for the whole picker presentation and
 // has no session pipeline to defer to.
 func newPickerController(clock ports.Clock, freshness time.Duration, trueColor bool) *pickerController {
 	if supervisorNil(clock) {
@@ -143,7 +143,7 @@ func (p *pickerController) Catalogue() *pickerCatalogue {
 }
 
 // SetOwnsInput toggles input ownership. It is the future attach slice's release
-// boundary; P5.2b keeps it owned for the whole run.
+// boundary; the controller keeps it owned for the whole run.
 func (p *pickerController) SetOwnsInput(owns bool) {
 	if p == nil {
 		return

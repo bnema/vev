@@ -30,7 +30,7 @@ type localSessionInventory struct {
 // sessionInventory is the daemon-owned common capture consumed by the
 // palette, picker, and catalog export projections. The daemon observes only
 // its own sessions: other daemons reach the palette through the client's
-// route snapshot (Plan 003 E3).
+// route snapshot.
 type sessionInventory struct {
 	localSessionInventory
 }

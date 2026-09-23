@@ -6,9 +6,9 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Picker overlay over a live attachment (ADR 001 Amendment 1, Plan 003 A1).
+// Picker overlay over a live attachment.
 //
-// The daemon's session-picker command no longer ends the attachment: it sends
+// The daemon's session-picker command keeps the attachment live: it sends
 // a navigation PickerOffer and the attached worker asks the supervisor for the
 // client picker. The supervisor then composes the same client-owned picker it
 // presents with no attachment over the live one:

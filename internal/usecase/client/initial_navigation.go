@@ -9,7 +9,7 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Closed, one-shot initial navigation (Plan 001 P7 client cutover).
+// Closed, one-shot initial navigation.
 //
 // InitialNavigation is the comparable, closed description of the single broker
 // navigation a client performs after its first committed catalogue publication.

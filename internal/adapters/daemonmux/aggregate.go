@@ -1,4 +1,4 @@
-// Aggregate listener over multiple physical listeners (P3.2).
+// Aggregate listener over multiple physical listeners.
 //
 // AggregateListener is the daemon's global ports.ServerListener over several
 // physical daemonmux connections. The daemon's shared accept loop must not stop

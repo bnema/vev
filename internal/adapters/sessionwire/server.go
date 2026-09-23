@@ -88,7 +88,7 @@ func NewServerConnectionWithDeadline(raw wire.Transport, deadline time.Time) por
 // bounded environment). The admission is stored as a deep copy and exposed only
 // through SessionAdmission, which returns a fresh copy so a consumer can never
 // mutate admitted authority. An entirely zero admission is reported as ok=false,
-// exactly as the legacy constructors do, so a caller cannot accidentally
+// as absent, so a caller cannot accidentally
 // publish an unvalidated admission.
 func NewServerConnectionWithAdmission(raw wire.Transport, deadline time.Time, admission ports.SessionAdmission) ports.ServerConnection {
 	return newServerConnection(raw, deadline, admission, !admissionAbsent(admission))
@@ -96,8 +96,7 @@ func NewServerConnectionWithAdmission(raw wire.Transport, deadline time.Time, ad
 
 // admissionAbsent reports whether an admission is entirely unset. It is the
 // presence test for NewServerConnectionWithAdmission: an admission that names no
-// origin, policy, purpose, or payload is indistinguishable from the legacy
-// constructors' absent metadata and is reported as absent rather than trusted.
+// origin, policy, purpose, or payload is indistinguishable from absent metadata and is reported as absent rather than trusted.
 func admissionAbsent(admission ports.SessionAdmission) bool {
 	return admission.Origin == 0 && admission.Policy == (ports.BrokerPolicy{}) &&
 		admission.Purpose == 0 && admission.Admission == 0 && admission.Name == "" &&

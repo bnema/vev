@@ -11,7 +11,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
-// Broker preamble exchange (P3.3).
+// Broker preamble exchange.
 //
 // The first client frame on a broker connection is always the broker
 // PreambleRequest (role 3) and the first server frame is always the broker

@@ -1,4 +1,4 @@
-// SSH stdio daemonmux carriage (P3.2e parity).
+// SSH stdio daemonmux carriage.
 //
 // This file exposes the mux-specific SSH stdio carriage the daemonmux
 // multiplexer (internal/adapters/daemonmux) runs over. It is deliberately

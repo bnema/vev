@@ -1,6 +1,6 @@
 package daemonmux
 
-// Stateless bound refusals (P3.2).
+// Stateless bound refusals.
 //
 // One physical daemon connection negotiates one immutable set of ceilings
 // exactly once, in the daemonmux physical preamble: a receive envelope

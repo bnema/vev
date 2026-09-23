@@ -15,16 +15,14 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Autonomous client supervisor (Plan 001 P5.1a, offline and unactivated).
+// Autonomous client supervisor.
 //
-// The supervisor is the attachment-free, terminal-owning owner of one
+// The supervisor is the terminal-owning owner of one
 // autonomous client process. It enters raw mode once, before it ever reaches
 // for the broker, and owns a single terminal input lifetime for the whole run.
 // While the broker connection is down it renders the picker and keeps
-// reconnecting; it never attaches a session and never interprets terminal
-// input. Only the picker presentation and the broker-connectivity lifecycle are
-// exercised by this slice: PresentConnecting and PresentAttached are defined so
-// the attach slices can drive them later, but nothing here enters them.
+// reconnecting. One terminal input pump serves both picker and attachment;
+// the supervisor coordinates their lifetimes without decoding session output.
 //
 // Connectivity is one attempt at a time. An attempt connects, subscribes, and
 // waits for the first committed publication before it is Ready; readiness
@@ -61,18 +59,17 @@ const (
 type Presentation uint8
 
 const (
-	// PresentPicker shows the session picker. P5.1a exercises only this state.
+	// PresentPicker shows the session picker.
 	PresentPicker Presentation = iota + 1
-	// PresentConnecting shows the attach transition. Reserved for the attach
-	// slice; the P5.1a driver never enters it.
+	// PresentConnecting shows the attach transition while connecting.
 	PresentConnecting
-	// PresentAttached shows a live attachment. Reserved for the attach slice.
+	// PresentAttached shows a live attachment.
 	PresentAttached
 	// PresentTerminating is the terminal state: raw mode is being restored and
 	// the process is leaving.
 	PresentTerminating
-	// PresentAttachedPicker composes the client picker over a live attachment
-	// (ADR 001 Amendment 1). The logical attachment stays attached: its output
+	// PresentAttachedPicker composes the client picker over a live attachment.
+	// The logical attachment stays attached: its output
 	// is applied and acknowledged but not written while the picker owns the
 	// terminal and its input. Cancel returns to the same attachment without
 	// reconnecting.
@@ -170,8 +167,8 @@ const (
 	// stream: the picker released input and the supervisor is presenting the
 	// connecting state until the initial publication is committed.
 	supervisorAttachBegin
-	// supervisorAttached marks a committed initial publication (Plan 001
-	// P5.3b): the worker proved the full output frame was written, flushed,
+	// supervisorAttached marks a committed initial publication: the worker
+	// proved the full output frame was written, flushed,
 	// and UI-committed. Welcome alone never produces it.
 	supervisorAttached
 	// supervisorAttachEnded returns a settled attachment to the picker without
@@ -329,11 +326,11 @@ type SupervisorConfig struct {
 	// is bound only after it owns the pump claim; no UI preserves the prior
 	// publication-only behavior with no admitted automation.
 	UI *UI
-	// Picker is the client-owned picker (Plan 001 P5.2b). When set, the
+	// Picker is the client-owned picker. When set, the
 	// supervisor folds every broker publication into it and hands it every
 	// terminal read from the same single input lifetime used for EOF detection,
 	// so the picker never starts a second reader. When nil the supervisor drops
-	// terminal input exactly as P5.1a does. Optional.
+	// terminal input through the same pump. Optional.
 	Picker pickerHost
 	// AttachmentEnvironment is composition-owned process context copied into
 	// each attachment Hello. The use case deliberately does not inspect the
@@ -397,7 +394,7 @@ type Supervisor struct {
 	state State
 
 	// attachments is the single foreground host every committed attachment
-	// runs through (Plan 001 P5.3b). The supervisor owns it for the whole run
+	// runs through. The supervisor owns it for the whole run
 	// and retains close authority over each stream it admits.
 	attachments *attachmentHost
 	// nextAttachment identifies one attachment run within the connection
@@ -1245,9 +1242,9 @@ func (s *Supervisor) renderResizeInvalidation() {
 // started once and never replaced: a bare io.Reader cannot be interrupted, so
 // the goroutine may outlive Run when stdin never reaches EOF, exactly like the
 // attach client's input pump. It never closes caller-owned input. When a picker
-// consumer is supplied (Plan 001 P5.2b) each read is handed to it from this one
+// consumer is supplied each read is handed to it from this one
 // reader, so the picker never starts a second reader; without a consumer the
-// bytes are discarded exactly as P5.1a does.
+// bytes are discarded when no consumer is supplied.
 type terminalInputLifetime struct {
 	eof      chan error
 	once     sync.Once

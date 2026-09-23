@@ -18,8 +18,8 @@ const admissionCwdMaxBytes = 65535
 // sessionHelloAdmission reads the provisioned admission metadata the accepting
 // side stamped onto an admitted connection, through the optional structural
 // provider seam. A connection built without that seam - a direct package
-// caller, a legacy sessionwire constructor, or a raw test transport - reports
-// present=false, and the daemon then follows its legacy validation unchanged.
+// caller, a sessionwire constructor without admission, or a raw test transport - reports
+// present=false, and the daemon applies the standard Hello validation.
 // The provider hands back a defensive copy, so the admission the daemon
 // validates can never be mutated through the connection.
 func sessionHelloAdmission(tr ports.ServerConnection) (ports.SessionAdmission, bool) {

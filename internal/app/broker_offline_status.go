@@ -25,7 +25,7 @@ import (
 	"github.com/bnema/vev/pkg/safedir"
 )
 
-// Detached connect-or-spawn and status (Plan 001 P3.4 slice D).
+// Detached connect-or-spawn and status.
 //
 // `_broker-launcher` is the intermediate half of a double fork: it starts one
 // hidden `_broker-serve` in a new session and exits immediately, exactly like
