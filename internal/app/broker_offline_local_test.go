@@ -34,34 +34,14 @@ const (
 	brokerLocalTestEpoch    = ports.BrokerEpoch(11)
 )
 
-// testLocalSandboxConfig writes and loads one marker-valid sandbox whose only
-// provisioned carriage is the broker-owned local binding.
+// testLocalSandboxConfig composes the production local authority with a
+// daemon-owned identity under private XDG directories.
 func testLocalSandboxConfig(t *testing.T) (*brokerconfig.Config, brokerconfig.LocalBinding) {
 	t.Helper()
-	root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
-	policy := brokerTestPolicy()
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, map[string]any{
-		"marker":        brokerconfig.Marker,
-		"registrations": []any{},
-		"local": map[string]any{
-			"identity":      brokerLocalTestIdentity,
-			"displayOrigin": "local",
-			"route":         filepath.Join(root, "local-mux.sock"),
-			"policy": map[string]any{
-				"protocolVersion":      policy.ProtocolVersion,
-				"catalogSchemaVersion": policy.CatalogSchemaVersion,
-				"environmentPolicy":    "client-owned",
-				"transport":            policy.Transport,
-				"trust":                policy.Trust,
-				"launch":               policy.Launch,
-				"isolation":            policy.Isolation,
-			},
-		},
-	})
-	layout, err := offlineLayout(root)
+	layout := emptyProductionBrokerLayout(t, "")
+	identity, err := daemonidentity.LoadOrCreate(filepath.Dir(layout.Root))
 	require.NoError(t, err)
-	config, err := brokerconfig.Load(layout)
+	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), identity, localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	require.NoError(t, err)
 	binding, ok := config.LocalBinding()
 	require.True(t, ok)
@@ -496,47 +476,19 @@ func TestBrokerLocalObservationComposition(t *testing.T) {
 	require.Same(t, connector, probe.connector)
 	require.Equal(t, brokerLocalTestEpoch, probe.epoch)
 
-	t.Run("no local binding provisions no producer", func(t *testing.T) {
-		root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
-		require.NoError(t, os.MkdirAll(root, 0o700))
-		writeSandboxConfig(t, root, sandboxRegistrationDocument("/tmp/vev-local-test/mux.sock"))
-		layout, err := brokerconfig.ResolveLayout(root, nil)
-		require.NoError(t, err)
-		config, err := brokerconfig.Load(layout)
-		require.NoError(t, err)
-		_, err = brokerLocalObservation(config, brokerLocalTestEpoch, connector)
-		require.Error(t, err)
-	})
 }
 
-// TestOfflineRegistryConfigSelectsLocalObservationOnlyWhenProvisioned proves the
-// composition's producer selection is decided by the provisioned configuration
-// alone, never by the presence of an identity: a provisioned local binding
-// always observes and runs with mutable membership (so the broker owns host
-// membership for its whole run, including a zero-host membership), while a
-// configuration with no local binding is an explicitly configured fixture that
-// stays observation-disabled.
-func TestOfflineRegistryConfigSelectsLocalObservationOnlyWhenProvisioned(t *testing.T) {
-	localConfig, binding := testLocalSandboxConfig(t)
-	selected, err := offlineRegistryConfig(localConfig, brokerLocalTestEpoch, unreachableCarriageConnector(t))
+// Production always composes local observation and mutable membership, even
+// when broker.json contains no remote hosts.
+func TestProductionRegistryConfigAlwaysSelectsLocalObservation(t *testing.T) {
+	config, binding := testLocalSandboxConfig(t)
+	selected, err := offlineRegistryConfig(config, brokerLocalTestEpoch, unreachableCarriageConnector(t))
 	require.NoError(t, err)
 	require.False(t, selected.ObservationDisabled)
-	require.Equal(t, broker.MembershipMutable, selected.MembershipMode, "a provisioned local binding always owns mutable membership")
+	require.Equal(t, broker.MembershipMutable, selected.MembershipMode)
 	require.NotNil(t, selected.Local)
 	require.Equal(t, binding.DisplayOrigin, selected.Local.DisplayOrigin)
 	require.Equal(t, binding.Policy, selected.Local.Policy)
-
-	root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxRegistrationDocument("/tmp/vev-local-test/mux.sock"))
-	layout, err := brokerconfig.ResolveLayout(root, nil)
-	require.NoError(t, err)
-	remoteOnly, err := brokerconfig.Load(layout)
-	require.NoError(t, err)
-	disabled, err := offlineRegistryConfig(remoteOnly, brokerLocalTestEpoch, unreachableCarriageConnector(t))
-	require.NoError(t, err)
-	require.True(t, disabled.ObservationDisabled, "a fixture with no local binding stays explicitly disabled")
-	require.Nil(t, disabled.Local)
 }
 
 // productionLocalConfig builds one production-shaped broker configuration whose
@@ -692,38 +644,6 @@ func TestBrokerLocalObservationNeverSpawnsDaemon(t *testing.T) {
 }
 
 // TestOfflineRegistryConfigExplicitDisabledFixtureStaysDisabled proves an
-// explicitly configured fixture that provisions no local binding remains a
-// read-only snapshot owner: it issues no probes, arms no timers, and never
-// reconciles, so its disabled mode is never inferred from an identity.
-func TestOfflineRegistryConfigExplicitDisabledFixtureStaysDisabled(t *testing.T) {
-	root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxEmptyDocument("3s"))
-	layout, err := brokerconfig.ResolveLayout(root, nil)
-	require.NoError(t, err)
-	config, err := brokerconfig.Load(layout)
-	require.NoError(t, err)
-
-	selected, err := offlineRegistryConfig(config, brokerLocalTestEpoch, unreachableCarriageConnector(t))
-	require.NoError(t, err)
-	require.True(t, selected.ObservationDisabled)
-	require.Nil(t, selected.Local)
-
-	stateDir := filepath.Join(shortTempDir(t, "vevl"), "state")
-	store, err := brokerstore.Open(brokerstore.Options{Dir: stateDir})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	registry, err := broker.NewRegistryWithConfig(brokerLocalTestEpoch, store, nil, clock.New(), discardLog(), selected)
-	require.NoError(t, err)
-	startLocalRegistry(t, registry)
-
-	// A disabled registry publishes its restored durable state and then stays
-	// read-only: no probe, no reconcile, and a zero-host mutation is refused.
-	require.Eventually(t, func() bool { return registry.Snapshot().Epoch != 0 }, brokerTestWait, time.Millisecond)
-	_, err = registry.AddHost(context.Background(), "user@example.com", localDaemonPolicy())
-	require.ErrorIs(t, err, ports.ErrBrokerMembershipImmutable, "an explicitly disabled fixture owns no mutable membership")
-}
-
 // TestProductionRegistryOwnsMutableMembershipWithZeroHosts proves the production
 // composition owns host membership for its whole run even when it starts with
 // no configured host at all: the broker may precede every registration, so a

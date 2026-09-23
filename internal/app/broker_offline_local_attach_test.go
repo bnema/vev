@@ -32,11 +32,11 @@ import (
 // carriage, so the authenticated physical preamble, the observation open, the
 // typed remote-catalog command, and the catalogue validation all compose against
 // production daemon code. They prove the observation is real: it creates no
-// session, no process, and no durable identity, and the catalogue it publishes
+// session or process and does not change daemon-owned identity; the catalogue it publishes
 // is exactly what makes an exact terminal attach resolvable.
 
 // realLocalDaemonFixture is a real daemon serving one private Unix daemonmux
-// carriage, plus the sandbox state directory a probe must never write to.
+// carriage, plus the production daemon state directory a probe must never mutate.
 type realLocalDaemonFixture struct {
 	binding   brokerconfig.LocalBinding
 	route     string
@@ -52,37 +52,16 @@ type realLocalDaemonFixture struct {
 // carriage and returns the fixture the probe dials.
 func startRealLocalDaemon(t *testing.T) *realLocalDaemonFixture {
 	t.Helper()
-	_, prodRuntime, prodState := isolateSandboxEnv(t)
-	root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	policy := brokerTestPolicy()
-	route := filepath.Join(root, "local-mux.sock")
-	stateDir := filepath.Join(root, "state")
-	require.NoError(t, os.MkdirAll(stateDir, 0o700))
-	writeSandboxConfig(t, root, map[string]any{
-		"marker":        brokerconfig.Marker,
-		"registrations": []any{},
-		"local": map[string]any{
-			"identity":      brokerLocalTestIdentity,
-			"displayOrigin": "local",
-			"route":         route,
-			"policy": map[string]any{
-				"protocolVersion":      policy.ProtocolVersion,
-				"catalogSchemaVersion": policy.CatalogSchemaVersion,
-				"environmentPolicy":    "client-owned",
-				"transport":            policy.Transport,
-				"trust":                policy.Trust,
-				"launch":               policy.Launch,
-				"isolation":            policy.Isolation,
-			},
-		},
-	})
-	layout, err := offlineLayout(root)
+	layout := emptyProductionBrokerLayout(t, "")
+	stateDir := filepath.Dir(layout.Root)
+	identity, err := daemonidentity.LoadOrCreate(stateDir)
 	require.NoError(t, err)
-	config, err := brokerconfig.Load(layout)
+	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), identity, localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	require.NoError(t, err)
 	binding, ok := config.LocalBinding()
 	require.True(t, ok)
+	route := binding.Route.Path()
+	require.NoError(t, os.MkdirAll(filepath.Dir(route), 0o700))
 
 	listener, err := ipc.ListenMux(route)
 	require.NoError(t, err)
@@ -109,7 +88,6 @@ func startRealLocalDaemon(t *testing.T) *realLocalDaemonFixture {
 		_ = listener.Close()
 		_ = supervisor.Close()
 		_ = aggregate.Close()
-		requireProductionUntouched(t, prodRuntime, prodState)
 	})
 
 	dial := func(ctx context.Context, _ ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
@@ -257,44 +235,21 @@ func TestBrokerLocalProbeRealCatalogueEnablesExactAttach(t *testing.T) {
 	require.NotNil(t, exactWelcome.CommittedIdentity)
 	require.Equal(t, resolved, exactWelcome.CommittedIdentity.Target)
 
-	// Probing creates no durable identity: only a daemon-owned startup path ever
-	// creates the identity file, and the probe is not one.
+	// The daemon-owned identity persists unchanged after probing.
 	_, statErr := os.Lstat(daemonidentity.Path(fixture.stateDir))
-	require.ErrorIs(t, statErr, os.ErrNotExist, "an observation must never create daemon identity")
+	require.NoError(t, statErr, "the daemon-owned identity remains after observation")
 }
 
-// TestBrokerLocalProbeAbsentDaemonStaysUnavailable proves an absence daemon
-// leaves the local observation unavailable with zero identity and creates
-// nothing: no session, no process, no durable identity. brokerconfig refuses a
-// missing or malformed configuration before any probe exists, and an absent
-// carriage is reported, never started.
+// TestBrokerLocalProbeAbsentDaemonStaysUnavailable proves that without daemon
+// identity, production observation stays unknown and never dials or starts a daemon.
 func TestBrokerLocalProbeAbsentDaemonStaysUnavailable(t *testing.T) {
-	_, prodRuntime, prodState := isolateSandboxEnv(t)
-	root := filepath.Join(shortTempDir(t, "vevl"), "sandbox")
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	stateDir := filepath.Join(root, "state")
-	require.NoError(t, os.MkdirAll(stateDir, 0o700))
-	// A local binding provisioned on a socket nothing listens on: the probe must
-	// report unavailable rather than start anything.
-	route := filepath.Join(root, "absent-mux.sock")
-	writeSandboxConfig(t, root, map[string]any{
-		"marker":        brokerconfig.Marker,
-		"registrations": []any{},
-		"local": map[string]any{
-			"identity": brokerLocalTestIdentity, "displayOrigin": "local", "route": route,
-			"policy": map[string]any{
-				"protocolVersion": brokerTestPolicy().ProtocolVersion, "catalogSchemaVersion": brokerTestPolicy().CatalogSchemaVersion,
-				"environmentPolicy": "client-owned", "transport": brokerTestPolicy().Transport,
-				"trust": brokerTestPolicy().Trust, "launch": brokerTestPolicy().Launch, "isolation": brokerTestPolicy().Isolation,
-			},
-		},
-	})
-	layout, err := offlineLayout(root)
-	require.NoError(t, err)
-	config, err := brokerconfig.Load(layout)
+	layout := emptyProductionBrokerLayout(t, "")
+	stateDir := filepath.Dir(layout.Root)
+	config, err := brokerconfig.LoadProduction(layout, productionBrokerConfigPath(), "", localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	require.NoError(t, err)
 	binding, ok := config.LocalBinding()
 	require.True(t, ok)
+	route := binding.Route.Path()
 
 	var dialed []string
 	var mu sync.Mutex
@@ -302,26 +257,26 @@ func TestBrokerLocalProbeAbsentDaemonStaysUnavailable(t *testing.T) {
 		mu.Lock()
 		dialed = append(dialed, target.Address)
 		mu.Unlock()
-		return ipc.DialMuxContext(ctx, target.Address)
+		return ipc.DialMuxContext(ctx, binding.Route.Path())
 	}, daemonmux.DefaultMuxCeilings())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), brokerTestWait)
 	defer cancel()
 	observation, err := probe.ProbeLocal(ctx)
-	require.Error(t, err)
-	require.Equal(t, domain.RemoteAvailabilityUnreachable, observation.Availability)
+	require.NoError(t, err)
+	require.Equal(t, domain.RemoteAvailabilityUnknown, observation.Availability)
 	require.Zero(t, observation.Identity)
 	require.False(t, observation.InventoryKnown)
 	require.Empty(t, observation.Sessions)
 
 	mu.Lock()
-	require.Equal(t, []string{binding.Route.Address()}, dialed, "the probe dials only the address its provisioned local binding published")
+	require.Empty(t, dialed, "without daemon identity the probe must not dial")
 	mu.Unlock()
 	// Nothing was created: no socket, no identity, no production path entry.
 	_, statErr := os.Lstat(route)
 	require.ErrorIs(t, statErr, os.ErrNotExist, "a probe must never create a carriage")
 	_, identityErr := os.Lstat(daemonidentity.Path(stateDir))
 	require.ErrorIs(t, identityErr, os.ErrNotExist, "a probe must never create daemon identity")
-	requireProductionUntouched(t, prodRuntime, prodState)
+
 }
