@@ -252,3 +252,23 @@ func ValidateDurableHostProjection(obs BrokerDaemonObservation) error {
 		Sessions:    obs.Sessions,
 	}})
 }
+
+// ValidateDurableObservation checks the shared remote-only durable observation shape.
+func ValidateDurableObservation(daemon BrokerDaemonObservation) error {
+	if daemon.Local {
+		return errors.New("local daemon observation is never durable")
+	}
+	if err := domain.ValidateRemoteHostTarget(daemon.Endpoint); err != nil {
+		return err
+	}
+	if err := daemon.Registration.Validate(); err != nil {
+		return err
+	}
+	if daemon.Endpoint != daemon.Registration.Endpoint {
+		return errors.New("observation endpoint does not match registration")
+	}
+	if len(daemon.Sessions) > 0 && !daemon.InventoryKnown {
+		return errors.New("observation carries sessions without known inventory")
+	}
+	return ValidateDurableHostProjection(daemon)
+}

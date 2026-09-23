@@ -17,7 +17,6 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/pkg/safedir"
 )
@@ -89,11 +88,22 @@ func (m manifest) source(label manifestSourceLabel) (manifestSource, bool) {
 // Policies must explicitly cover every imported endpoint. Fault is a test seam
 // called after each durable-write boundary; an error poisons this open handle.
 type Options struct {
-	Dir, LegacyHosts, LegacyCache string
-	Policies                      map[string]ports.BrokerPolicy
-	InitialHosts                  []ports.BrokerHostRecord
-	InitialImportProvided         bool
-	Fault                         func(string) error
+	Dir                   string
+	InitialHosts          []ports.BrokerHostRecord
+	InitialImportProvided bool
+	Fault                 func(string) error
+}
+
+// migrate records the caller-provided initial membership without importing legacy files.
+func migrate(o Options) (recovery, error) {
+	r := recovery{State: state{Manifest: manifest{Version: 1, ImportVersion: 1, ImportCompleted: true, Sources: []manifestSource{{Label: manifestMembership, SHA256: digest(nil)}, {Label: manifestObservations, SHA256: digest(nil)}}}, Hosts: ports.BrokerHosts{Revision: 1}}}
+	if o.InitialImportProvided {
+		r.State.Hosts.Hosts = ports.CloneBrokerHostRecords(o.InitialHosts)
+		if err := ports.ValidateBrokerHostRecords(r.State.Hosts.Hosts); err != nil && len(r.State.Hosts.Hosts) != 0 {
+			return r, fmt.Errorf("brokerstore: initial import: %w", err)
+		}
+	}
+	return r, validate(r.State)
 }
 
 type state struct {
@@ -442,15 +452,6 @@ func validate(st state) error {
 	return nil
 }
 
-// validateDurableSnapshot reports whether a snapshot satisfies the durable
-// shape: an empty placeholder stays empty, and a populated snapshot carries
-// only non-local daemon observations bound to an exact valid registration with
-// a closed availability/failure range and a catalogue-valid inventory. Policy
-// and display authority are deliberately excluded: the durable format omits
-// policy (membership is the single policy authority and the loader re-stamps
-// it) and display hints are derived presentation state, never durable
-// authority. Transient checking and live failure causes are sanitized away by
-// the callers before this rule runs.
 func validateDurableSnapshot(snapshot ports.BrokerSnapshot) error {
 	if snapshot.Epoch == 0 {
 		if snapshot.Revision != 0 || len(snapshot.Daemons) != 0 || len(snapshot.Removed) != 0 {
@@ -466,7 +467,7 @@ func validateDurableSnapshot(snapshot ports.BrokerSnapshot) error {
 	}
 	seen := make(map[string]struct{}, len(snapshot.Daemons))
 	for _, daemon := range snapshot.Daemons {
-		if err := validateDurableObservation(daemon); err != nil {
+		if err := ports.ValidateDurableObservation(daemon); err != nil {
 			return err
 		}
 		if _, duplicate := seen[daemon.Endpoint]; duplicate {
@@ -488,28 +489,6 @@ func validateDurableSnapshot(snapshot ports.BrokerSnapshot) error {
 	return nil
 }
 
-// validateDurableObservation reports whether one daemon observation may be
-// durable: it is remote-only (a local daemon observation is never durable), it
-// carries an exact valid registration matching its endpoint, and it satisfies
-// the ports durable projection rules shared with the registry.
-func validateDurableObservation(daemon ports.BrokerDaemonObservation) error {
-	if daemon.Local {
-		return errors.New("local daemon observation is never durable")
-	}
-	if err := domain.ValidateRemoteHostTarget(daemon.Endpoint); err != nil {
-		return err
-	}
-	if err := daemon.Registration.Validate(); err != nil {
-		return err
-	}
-	if daemon.Endpoint != daemon.Registration.Endpoint {
-		return errors.New("observation endpoint does not match registration")
-	}
-	if len(daemon.Sessions) > 0 && !daemon.InventoryKnown {
-		return errors.New("observation carries sessions without known inventory")
-	}
-	return ports.ValidateDurableHostProjection(daemon)
-}
 func (s *Store) commit(next state) error {
 	if err := validate(next); err != nil {
 		return err

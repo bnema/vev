@@ -27,7 +27,6 @@ func TestInitialImportEmptyCompletesAndNeverReimports(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "broker")
 	o := options(t)
 	o.Dir = dir
-	o.LegacyCache = ""
 	o.InitialHosts = nil
 	o.InitialImportProvided = true
 
@@ -81,7 +80,7 @@ func TestRecoveryRetainsRoutes(t *testing.T) {
 
 	// Drop the committed state so the recovery record is the only source.
 	require.NoError(t, os.Remove(filepath.Join(o.Dir, "state.json")))
-	o.LegacyHosts, o.LegacyCache, o.Policies = "", "", nil
+	o.InitialHosts = nil
 	reopened, err := Open(o)
 	require.NoError(t, err)
 	defer reopened.Close()
@@ -122,30 +121,6 @@ func TestCorruptRouteStateFailsClosed(t *testing.T) {
 // upgrade is closed over the approved remote vocabulary: a legacy policy naming
 // a unix or unknown transport is refused before any state is committed, so a
 // legacy local route can never become broker membership.
-func TestLegacyRemoteUnixAndUnknownTransportRefused(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		transport string
-	}{
-		{name: "unix", transport: "unix"},
-		{name: "tcp", transport: "tcp"},
-		{name: "ssh", transport: "ssh"},
-		{name: "empty", transport: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			o := options(t)
-			policy := testPolicy()
-			policy.Transport = tc.transport
-			o.Policies = map[string]ports.BrokerPolicy{"user@arch": policy}
-			store, err := Open(o)
-			require.Error(t, err)
-			require.Nil(t, store)
-			_, err = os.Stat(filepath.Join(o.Dir, "state.json"))
-			require.True(t, os.IsNotExist(err), "a refused legacy transport never commits state")
-		})
-	}
-}
-
 // TestRouteUpgradeIsAtomicAcrossReopen proves the pre-route upgrade is a durable
 // migration: a state written without routes is upgraded exactly once, a fault at
 // any upgrade boundary never leaves an unreadable state behind, and reopening

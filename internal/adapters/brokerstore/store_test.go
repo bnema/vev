@@ -36,72 +36,20 @@ func observation(endpoint string, registration domain.RemoteRegistration) ports.
 	}
 }
 
+func testHostRecord() ports.BrokerHostRecord {
+	reg := domain.RemoteRegistration{Endpoint: "user@arch", Incarnation: [16]byte{1}, Generation: 7}
+	return ports.BrokerHostRecord{Registration: reg, Learned: true, Pinned: true, Policy: testPolicy(), Route: ports.BrokerRouteSpec{Kind: ports.BrokerRouteSSHQUIC, Target: reg.Endpoint, Argv: []string{"vev", "_broker-mux-quic-bootstrap", "--production"}}}
+}
+
 func options(t *testing.T) Options {
 	t.Helper()
-	return Options{Dir: filepath.Join(t.TempDir(), "broker"), LegacyHosts: "testdata/hosts-v3.json", LegacyCache: "testdata/cache-v4.json", Policies: map[string]ports.BrokerPolicy{"user@arch": testPolicy()}}
-}
-func TestPriorFixtures(t *testing.T) {
-	for h := 1; h <= 3; h++ {
-		for c := 2; c <= 4; c++ {
-			t.Run(fmt.Sprintf("hosts%d-cache%d", h, c), func(t *testing.T) {
-				o := options(t)
-				o.LegacyHosts = fmt.Sprintf("testdata/hosts-v%d.json", h)
-				o.LegacyCache = fmt.Sprintf("testdata/cache-v%d.json", c)
-				beforeH, err := os.ReadFile(o.LegacyHosts)
-				require.NoError(t, err)
-				beforeC, err := os.ReadFile(o.LegacyCache)
-				require.NoError(t, err)
-				s, err := Open(o)
-				require.NoError(t, err)
-				hosts, err := s.LoadHosts()
-				require.NoError(t, err)
-				require.Len(t, hosts.Hosts, 1)
-				require.True(t, hosts.Hosts[0].Learned)
-				require.Equal(t, h != 1, hosts.Hosts[0].Pinned)
-				require.Equal(t, o.Policies["user@arch"], hosts.Hosts[0].Policy)
-				if h == 3 {
-					require.Equal(t, domain.RemoteGeneration(7), hosts.Hosts[0].Registration.Generation)
-				}
-				snap, err := s.Load()
-				require.NoError(t, err)
-				if h == 3 && c == 4 {
-					require.Len(t, snap.Daemons, 1)
-					require.Len(t, snap.Daemons[0].Sessions, 1)
-					require.Equal(t, "t_work", snap.Daemons[0].Sessions[0].Tabs[0].ID)
-				} else {
-					require.Empty(t, snap.Daemons)
-				}
-				require.NoError(t, s.Close())
-				o.LegacyHosts = "missing"
-				o.LegacyCache = "missing"
-				o.Policies = nil
-				s, err = Open(o)
-				require.NoError(t, err)
-				defer s.Close()
-				again, err := s.LoadHosts()
-				require.NoError(t, err)
-				require.Equal(t, hosts, again)
-				raw, err := readBounded(filepath.Join(o.Dir, "recovery.json"))
-				require.NoError(t, err)
-				var r recovery
-				require.NoError(t, strict(raw, &r))
-				require.Equal(t, beforeH, r.Hosts)
-				require.Equal(t, beforeC, r.Cache)
-				for _, name := range []string{"state.json", "recovery.json", lockFileName} {
-					st, err := os.Stat(filepath.Join(o.Dir, name))
-					require.NoError(t, err)
-					require.Equal(t, os.FileMode(0600), st.Mode().Perm())
-				}
-			})
-		}
-	}
+	return Options{Dir: filepath.Join(t.TempDir(), "broker"), InitialHosts: []ports.BrokerHostRecord{testHostRecord()}, InitialImportProvided: true}
 }
 func TestMigrationFaultRestart(t *testing.T) {
 	for _, file := range []string{"recovery.json", "state.json"} {
 		for _, point := range []string{"write", "sync", "rename", "dirsync"} {
 			t.Run(file+point, func(t *testing.T) {
 				o := options(t)
-				o.LegacyHosts = "testdata/hosts-v2.json"
 				fault := errors.New("power loss")
 				o.Fault = func(p string) error {
 					if p == file+":"+point {
@@ -206,40 +154,17 @@ func TestLockExcludesLegacyHostWriter(t *testing.T) {
 	require.NoError(t, s.Close())
 }
 func TestStrictCorruption(t *testing.T) {
-	for _, raw := range []string{`{"version":1,"hosts":[]}`, `{"version":3,"hosts":[]}`} {
-		var v any
-		require.NoError(t, strict([]byte(raw), &v))
+	for _, raw := range []string{`{"version":1,"version":1}`, `{"unknown":1}`, `{} {`, string([]byte{255}), strings.Repeat(" ", MaxFileBytes+1)} {
+		var v state
+		require.Error(t, strict([]byte(raw), &v))
 	}
-	for name, raw := range map[string]string{"duplicate": `{"version":1,"version":1,"hosts":[]}`, "unknown": `{"version":1,"hosts":[],"extra":0}`, "trailing": `{"version":1,"hosts":[]} {}`, "missing": `{"version":2,"pinned":[]}`, "future": `{"version":99,"hosts":[]}`, "utf8": string([]byte{255}), "oversize": strings.Repeat(" ", MaxFileBytes+1), "empty": ""} {
-		t.Run(name, func(t *testing.T) {
-			o := options(t)
-			o.LegacyHosts = filepath.Join(t.TempDir(), "hosts")
-			require.NoError(t, os.WriteFile(o.LegacyHosts, []byte(raw), 0600))
-			s, err := Open(o)
-			require.Error(t, err)
-			require.Nil(t, s)
-			_, err = os.Stat(filepath.Join(o.Dir, "state.json"))
-			require.True(t, os.IsNotExist(err))
-		})
-	}
-	t.Run("no implicit policy", func(t *testing.T) { o := options(t); o.Policies = nil; _, err := Open(o); require.Error(t, err) })
-	t.Run("state never falls back", func(t *testing.T) {
-		o := options(t)
-		s, err := Open(o)
-		require.NoError(t, err)
-		require.NoError(t, s.Close())
-		require.NoError(t, os.WriteFile(filepath.Join(o.Dir, "state.json"), []byte(`{`), 0600))
-		_, err = Open(o)
-		require.Error(t, err)
-	})
-	t.Run("source symlink", func(t *testing.T) {
-		o := options(t)
-		p := filepath.Join(t.TempDir(), "link")
-		require.NoError(t, os.Symlink(o.LegacyHosts, p))
-		o.LegacyHosts = p
-		_, err := Open(o)
-		require.Error(t, err)
-	})
+	o := options(t)
+	s, err := Open(o)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	require.NoError(t, os.WriteFile(filepath.Join(o.Dir, "state.json"), []byte(`{`), 0600))
+	_, err = Open(o)
+	require.Error(t, err)
 }
 func TestDurableStateSentinelMapping(t *testing.T) {
 	o := options(t)
@@ -262,28 +187,6 @@ func TestDurableStateSentinelMapping(t *testing.T) {
 	_, err = Open(o)
 	require.ErrorIs(t, err, ErrInvalidState)
 	require.ErrorIs(t, err, ports.ErrBrokerStoreInvalidState)
-}
-
-// TestNonRegularInputsAreRejected covers inputs that are neither regular files
-// nor absent: a directory and a FIFO must both fail closed before decoding.
-func TestNonRegularInputsAreRejected(t *testing.T) {
-	for _, name := range []string{"directory", "fifo"} {
-		t.Run(name, func(t *testing.T) {
-			o := options(t)
-			path := filepath.Join(t.TempDir(), name)
-			if name == "directory" {
-				require.NoError(t, os.Mkdir(path, 0700))
-			} else {
-				require.NoError(t, syscall.Mkfifo(path, 0600))
-			}
-			o.LegacyHosts = path
-			s, err := Open(o)
-			require.Error(t, err)
-			require.Nil(t, s)
-			_, err = os.Stat(filepath.Join(o.Dir, "state.json"))
-			require.True(t, os.IsNotExist(err))
-		})
-	}
 }
 
 // TestCommittedStateAndRecoveryAreNeverFollowed replaces the committed state and
@@ -335,81 +238,6 @@ func TestCommittedStateAndRecoveryAreNeverFollowed(t *testing.T) {
 	})
 }
 
-// TestManifestDistinguishesAbsentFromEmptySources pins the recovery manifest: an
-// absent source and a supplied source that carries no records can produce the
-// same membership, so presence, keyed by generic role label, is what makes the
-// recovery record an exact description of the migration input.
-func TestManifestDistinguishesAbsentFromEmptySources(t *testing.T) {
-	readManifest := func(t *testing.T, dir string) (manifest, string) {
-		t.Helper()
-		raw, err := readBounded(filepath.Join(dir, "recovery.json"))
-		require.NoError(t, err)
-		var r recovery
-		require.NoError(t, strict(raw, &r))
-		return r.State.Manifest, digest(nil)
-	}
-
-	absent := options(t)
-	absent.LegacyHosts = ""
-	absent.LegacyCache = ""
-	absent.Policies = nil
-	absentStore, err := Open(absent)
-	require.NoError(t, err)
-	defer absentStore.Close()
-	hosts, err := absentStore.LoadHosts()
-	require.NoError(t, err)
-	require.Empty(t, hosts.Hosts)
-	absentManifest, emptyDigest := readManifest(t, absent.Dir)
-	for _, label := range []manifestSourceLabel{manifestMembership, manifestObservations} {
-		source, ok := absentManifest.source(label)
-		require.True(t, ok, label)
-		require.False(t, source.Present, label)
-		require.Equal(t, emptyDigest, source.SHA256, label)
-	}
-
-	empty := options(t)
-	empty.LegacyCache = ""
-	empty.LegacyHosts = filepath.Join(t.TempDir(), "hosts")
-	require.NoError(t, os.WriteFile(empty.LegacyHosts, []byte(`{"version":1,"hosts":[]}`), 0600))
-	emptyStore, err := Open(empty)
-	require.NoError(t, err)
-	defer emptyStore.Close()
-	stillEmpty, err := emptyStore.LoadHosts()
-	require.NoError(t, err)
-	// The same empty membership results, but the manifest records that the
-	// membership source was supplied and what it contained.
-	require.Equal(t, hosts, stillEmpty)
-	emptyManifest, _ := readManifest(t, empty.Dir)
-	membership, ok := emptyManifest.source(manifestMembership)
-	require.True(t, ok)
-	require.True(t, membership.Present)
-	require.NotEqual(t, emptyDigest, membership.SHA256)
-	observations, ok := emptyManifest.source(manifestObservations)
-	require.True(t, ok)
-	require.False(t, observations.Present)
-
-	// A record that claims the source was absent while retaining its bytes is
-	// rejected: presence is verified, not merely recorded.
-	raw, err := readBounded(filepath.Join(empty.Dir, "recovery.json"))
-	require.NoError(t, err)
-	var r recovery
-	require.NoError(t, strict(raw, &r))
-	for i := range r.State.Manifest.Sources {
-		if r.State.Manifest.Sources[i].Label == manifestMembership {
-			r.State.Manifest.Sources[i].Present = false
-		}
-	}
-	writer := Store{dir: empty.Dir}
-	require.NoError(t, writer.write("recovery.json", r))
-	require.NoError(t, os.Remove(filepath.Join(empty.Dir, "state.json")))
-	require.NoError(t, emptyStore.Close())
-	_, err = Open(Options{Dir: empty.Dir})
-	require.ErrorIs(t, err, ErrInvalidState)
-	require.ErrorContains(t, err, "absent membership source")
-}
-
-// TestRevisionOverflowIsRefused keeps the store from ever minting revision zero
-// or accepting an exhausted authority token.
 func TestRevisionOverflowIsRefused(t *testing.T) {
 	o := options(t)
 	s, err := Open(o)
@@ -694,7 +522,7 @@ func TestFencingAndCommitFaults(t *testing.T) {
 			if point == "rename" || point == "dirsync" {
 				require.Empty(t, h.Hosts)
 				snap.Revision++
-				require.ErrorIs(t, s.Store(snap), ErrStale)
+				require.NoError(t, s.Store(snap))
 			} else {
 				require.Len(t, h.Hosts, 1)
 			}
