@@ -25,6 +25,12 @@ import (
 // dialable within the retry budget, despite a spawn attempt.
 var ErrDaemonUnreachable = errors.New("vev: daemon did not become reachable")
 
+// ErrLifecycleHeldByOther reports that another process kept the daemon
+// lifecycle lock for the whole start budget without publishing the carriage:
+// typically an older vev daemon that predates the broker. Spawning cannot
+// recover this; the user has to stop that process.
+var ErrLifecycleHeldByOther = errors.New("vev: another vev daemon holds the lifecycle lock but does not answer; stop the old daemon (for example `pkill -f -- '--daemon'`) and retry")
+
 // spawnLockName is the mkdir-based lock directory guarding daemon spawn, so
 // concurrent first-clients elect a single spawner instead of racing to
 // re-exec multiple daemons.
@@ -116,6 +122,7 @@ func waitForTargetOrLifecycle[T any](ctx context.Context, lockDir string, dial f
 		target T
 		owner  lifecycleOwnership
 	}
+	busy := false
 	result, err := retryAttempts(ctx, cfg, func() (targetOrLifecycle, bool, error) {
 		if target, err := dial(ctx); err == nil {
 			return targetOrLifecycle{target: target}, true, nil
@@ -127,8 +134,14 @@ func waitForTargetOrLifecycle[T any](ctx context.Context, lockDir string, dial f
 		if !errors.Is(err, lifecycle.ErrBusy) {
 			return targetOrLifecycle{}, false, err
 		}
+		busy = true
 		return targetOrLifecycle{}, false, nil
 	})
+	if busy && errors.Is(err, ErrDaemonUnreachable) {
+		// The lock stayed held and the target never answered for the whole
+		// budget: a live owner that is not the daemon this binary expects.
+		err = fmt.Errorf("%w (%w)", ErrLifecycleHeldByOther, err)
+	}
 	return result.target, result.owner, err
 }
 
