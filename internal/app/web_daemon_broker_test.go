@@ -21,7 +21,9 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/webterm"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/stretchr/testify/mock"
 )
 
 // Browser gateway broker composition tests (Plan 001 P7.4d).
@@ -49,35 +51,6 @@ const (
 )
 
 var webGatewayReadyPID = regexp.MustCompile(`READY-(\d+)`)
-
-// webConnectorFunc adapts one function to the broker connector port, so a test
-// can script successive attempts without a broker process.
-type webConnectorFunc func(context.Context) (ports.BrokerService, error)
-
-func (f webConnectorFunc) Connect(ctx context.Context) (ports.BrokerService, error) { return f(ctx) }
-
-// webScriptedConnector serves one scripted broker service and then fails every
-// later attempt, so a broker loss cannot silently reconnect into the scripted
-// publication.
-type webScriptedConnector struct {
-	mu      sync.Mutex
-	service ports.BrokerService
-	err     error
-	calls   int
-}
-
-func (c *webScriptedConnector) Connect(context.Context) (ports.BrokerService, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls++
-	if c.calls == 1 && c.service != nil {
-		return c.service, nil
-	}
-	if c.err == nil {
-		c.err = errors.New("broker is gone")
-	}
-	return nil, c.err
-}
 
 // webFrame is one gateway websocket frame: the transactional VT update plus the
 // mouse-tracking flag.
@@ -603,10 +576,10 @@ func TestWebGatewayTabClosingIsIsolated(t *testing.T) {
 // keeps serving frames.
 func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
 	service := newTerminalCompositionService(ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1})
+	connector := portsmocks.NewMockBrokerConnector(t)
+	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	fixture := startWebGatewayFixtureOver(t, offlineClientFixture{}, func() ports.BrokerConnector {
-		return webConnectorFunc(func(context.Context) (ports.BrokerService, error) {
-			return service, nil
-		})
+		return connector
 	})
 
 	tab := fixture.openTab(t)
@@ -633,7 +606,14 @@ func TestWebGatewayTabStaysPickerWhenDestinationIsRefused(t *testing.T) {
 // and keeps serving frames while it retries.
 func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
 	service := newTerminalCompositionService(terminalCompositionSnapshot([]string{"work"}, nil))
-	connector := &webScriptedConnector{service: service}
+	connector := portsmocks.NewMockBrokerConnector(t)
+	var calls atomic.Int32
+	connector.EXPECT().Connect(mock.Anything).RunAndReturn(func(context.Context) (ports.BrokerService, error) {
+		if calls.Add(1) == 1 {
+			return service, nil
+		}
+		return nil, errors.New("broker is gone")
+	}).Maybe()
 	fixture := startWebGatewayFixtureOver(t, offlineClientFixture{}, func() ports.BrokerConnector { return connector })
 
 	tab := fixture.openTab(t)
@@ -655,14 +635,7 @@ func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
 		t.Fatalf("broker loss ended the browser run: %v", tab.readerErr())
 	default:
 	}
-	require.GreaterOrEqual(t, connector.attempts(), 2, "a lost connection must be retried, never fatal")
-}
-
-// attempts reports how many connect attempts the scripted connector observed.
-func (c *webScriptedConnector) attempts() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.calls
+	require.GreaterOrEqual(t, calls.Load(), int32(2), "a lost connection must be retried, never fatal")
 }
 
 // TestWebCompositionUsesTheBrokerConnector pins the production composition

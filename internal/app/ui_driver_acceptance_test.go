@@ -11,14 +11,14 @@ import (
 	"github.com/bnema/vev/internal/adapters/uiterm"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-// scriptedBrokerConnector adapts one scripted broker service to the connector
-// port, so a driver test can run the whole JSONL composition over a deterministic
-// committed publication without a broker process.
+// scriptedBrokerConnector is also used by broker_client_test.go, outside this change's scope.
 type scriptedBrokerConnector struct{ service *terminalCompositionService }
 
 func (c scriptedBrokerConnector) Connect(context.Context) (ports.BrokerService, error) {
@@ -46,9 +46,11 @@ func startScriptedUIDriverRun(t *testing.T, service *terminalCompositionService,
 			t.Error("the scripted UI driver did not stop")
 		}
 	})
+	connector := portsmocks.NewMockBrokerConnector(t)
+	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	go func() {
 		run.done <- runUIDriverClient(ctx, brokerClientConfig{
-			Connector:                scriptedBrokerConnector{service: service},
+			Connector:                connector,
 			Terminal:                 terminal,
 			Clock:                    clock.New(),
 			UI:                       ui,
