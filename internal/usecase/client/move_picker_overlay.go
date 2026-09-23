@@ -8,6 +8,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
 )
 
 // Move-destination picker over a live attachment.
@@ -67,7 +68,9 @@ func (m *movePickerOverlay) admit(snapshot protocol.PickerSnapshot) bool {
 		return false
 	}
 	if m.loop == nil {
-		m.loop = pickerLoopFromSnapshot(snapshot, m.intent, defaultPickerSort())
+		// Moves always open most-recent first so the likely destination is on
+		// top; the session picker's remembered sort does not apply here.
+		m.loop = pickerLoopFromSnapshot(snapshot, m.intent, pickerusecase.SortRecent)
 		m.consumer.setOwned(snapshot.InteractionID, movePickerInputGeneration)
 		return true
 	}
