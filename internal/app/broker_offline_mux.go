@@ -622,7 +622,15 @@ func runBrokerMuxQUICProxyCommand(ctx context.Context, options brokerMuxOptions)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = transport.Close() }()
+	// The proxy owns its process: QUIC's orderly Close only FINs the stream and
+	// defers the connection close, so returning (and exiting) right away would
+	// drop both and leave the broker's preamble read parked until the QUIC idle
+	// timeout. Waiting for the bounded teardown delivers the FIN, so a refused
+	// existing-only dial (no daemon running) fails the broker's attempt at once.
+	defer func() {
+		_ = transport.Close()
+		_ = waitGracefulTeardown(transport)
+	}()
 	raw, err := dialBrokerMuxHelper(ctx, options)
 	if err != nil {
 		return fmt.Errorf("vev: broker mux quic proxy: dial daemonmux carriage: %w", err)
