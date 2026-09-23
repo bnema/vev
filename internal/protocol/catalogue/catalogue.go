@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -78,8 +77,7 @@ type RemoteCatalogSession struct {
 	Reason      string                    `json:"reason,omitempty"`
 }
 
-func CatalogTabs(session RemoteCatalogSession) []RemoteCatalogTab { return slices.Clone(session.Tabs) }
-func CatalogTabCount(session RemoteCatalogSession) int            { return len(session.Tabs) }
+func CatalogTabCount(session RemoteCatalogSession) int { return len(session.Tabs) }
 
 func SaturateUint16(n int) uint16 {
 	if n <= 0 {

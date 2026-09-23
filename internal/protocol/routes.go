@@ -1,8 +1,6 @@
 package protocol
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"unicode"
@@ -14,32 +12,6 @@ import (
 // ErrInvalidRouteWire preserves the public error classification used by
 // strict route codecs while route values live in the semantic protocol.
 var ErrInvalidRouteWire = errors.New("invalid route wire message")
-
-// RouteOrigin identifies how a client reached a daemon. The origin is client
-// composition metadata, not an authority granted to the daemon.
-type RouteOrigin uint8
-
-const (
-	RouteOriginLocal RouteOrigin = iota + 1
-	RouteOriginRemote
-	RouteOriginDiscovery
-)
-
-func (o RouteOrigin) valid() bool {
-	switch o {
-	case RouteOriginLocal, RouteOriginRemote, RouteOriginDiscovery:
-		return true
-	default:
-		return false
-	}
-}
-
-func (o RouteOrigin) Validate() error {
-	if !o.valid() {
-		return errors.New("invalid route origin")
-	}
-	return nil
-}
 
 // RouteKind identifies the kind of target represented by one display entry.
 type RouteKind uint8
@@ -285,12 +257,6 @@ func (r RouteRetired) Validate() error {
 		return fmt.Errorf("%w: invalid retired route target: %v", ErrInvalidRouteWire, err)
 	}
 	return nil
-}
-
-// RemoteInventorySourceKey identifies a configured endpoint without disclosing it.
-func RemoteInventorySourceKey(endpoint string) string {
-	sum := sha256.Sum256([]byte("vev-inventory-remote\x00" + endpoint))
-	return NavigationInventoryRemoteSourcePrefix + hex.EncodeToString(sum[:12])
 }
 
 // RouteAttentionSubscription is the bounded, client-owned mapping a daemon

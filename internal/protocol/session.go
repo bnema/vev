@@ -529,10 +529,3 @@ func ValidateAttachTarget(m AttachTarget) error {
 	}
 	return nil
 }
-
-func validateRemoteTarget(target domain.RemoteSessionTarget) error {
-	if len(target.Endpoint) > math.MaxUint16 || len(target.DisplayOrigin) > math.MaxUint16 || len(target.SessionName) > math.MaxUint16 || len(target.LiveTabID) > math.MaxUint16 || len(target.StoppedTab.RawName) > math.MaxUint16 {
-		return errors.New("remote target string too long")
-	}
-	return target.Validate()
-}
