@@ -4,7 +4,7 @@
 // multiplexer (internal/adapters/daemonmux) runs over. It is deliberately
 // separate from the ordinary Dial/DialContext pair: DialMuxContext starts an
 // explicit, caller-supplied command specification and never builds or reuses
-// the `vev _stdio` session command, so a mux carriage can never become a
+// an implicit legacy session command, so a mux carriage can never become a
 // second navigation path to a session. Session selection stays owned by the
 // typed Hello handshake over the ordinary carriage; the two endpoints cannot be
 // confused because the mux dial takes the whole command from its caller.
@@ -90,7 +90,7 @@ func BuildCommandForMux(target string, command ...string) CommandSpec {
 // DialMuxContext starts spec as one explicit remote command over a local ssh
 // child process and returns its stdin/stdout as the raw bounded carriage the
 // daemonmux multiplexer runs over. spec is executed verbatim as argv, never
-// through a shell, and is never the `vev _stdio` session command: the caller
+// through a shell, and never selects a session itself: the caller
 // supplies the whole command.
 //
 // ctx (or its deadline) bounds subprocess start. The returned carriage is

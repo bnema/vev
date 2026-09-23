@@ -113,14 +113,11 @@ var connectivityMatrix = []connectivityEntry{
 		Notes:    "Cutover complete: runKill and requestDaemonStop reach the per-user broker through the private connectBroker seam (run.go) and drive BrokerOperations.Kill/KillAll/StopDaemon. Daemon-stop uses ExistingOnly, so it can never start what it is stopping; kill-all purges sessions and leaves the daemon running. The offline persisted-mutation path and the direct force-stop fallback are removed, so no request is ever bypassed with a direct process signal.",
 	},
 	{
-		Kind:    "kindCmd",
-		Summary: "scriptable command requests, incl. remote-catalog",
-		Owner:   connectivityBrokerOnly,
-		DirectDialDebt: []string{
-			"realDial command path (cmd.go)",
-			"ensureDaemonWithLifecycle remote-catalog path (cmd.go)",
-		},
-		Notes: "Command tracker semantics unchanged; only the carriage moves behind the broker.",
+		Kind:     "kindCmd",
+		Summary:  "scriptable command requests, incl. remote-catalog",
+		Owner:    connectivityBrokerOnly,
+		Migrated: true,
+		Notes:    "Command requests use broker operations in production; the injected direct dial seam remains for focused legacy tracker tests.",
 	},
 	{
 		Kind:     "kindUIDriver",
@@ -161,24 +158,6 @@ var connectivityMatrix = []connectivityEntry{
 		Summary: "short-lived daemon spawn launcher",
 		Owner:   connectivityTransportInfra,
 		Notes:   "Process mechanics only; never a connectivity façade.",
-	},
-	{
-		Kind:    "kindStdio",
-		Summary: "_stdio SSH-side carriage proxy",
-		Owner:   connectivityTransportInfra,
-		Notes:   "Terminates SSH stdio transport on the far side; never resolves navigation or owns sessions.",
-	},
-	{
-		Kind:    "kindQUICBootstrap",
-		Summary: "_quic-bootstrap SSH-side bootstrap",
-		Owner:   connectivityTransportInfra,
-		Notes:   "One-time authenticated bootstrap; terminates transport, never navigation authority.",
-	},
-	{
-		Kind:    "kindQUICProxy",
-		Summary: "_quic-proxy carriage-neutral bridge",
-		Owner:   connectivityTransportInfra,
-		Notes:   "Blind proxy may forward raw envelopes; exposes no bytes to use cases and owns no sessions.",
 	},
 	{
 		Kind:    "kindWebRenew",

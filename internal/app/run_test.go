@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,9 +15,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/daemonmux"
-	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
-	"github.com/bnema/vev/internal/adapters/quic"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
@@ -343,104 +340,6 @@ func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {
 	})
 }
 
-// scriptRecv makes a transport yield frames in order, then wait for done
-// before returning EOF. The shared done channel coordinates proxy readers
-// without relying on scheduling or sleeps.
-func TestProxyTransportsCopiesBothDirections(t *testing.T) {
-	left, right := net.Pipe()
-	defer func() { _ = left.Close() }()
-	defer func() { _ = right.Close() }()
-	client := ipc.NewTransport(left)
-	daemon := ipc.NewTransport(right)
-	done := make(chan error, 1)
-	go func() { done <- proxyTransports(context.Background(), client, daemon, nil) }()
-	payload := []byte("proxy stays carriage-neutral")
-	require.NoError(t, client.Send(wire.Envelope{Payload: payload}))
-	got, err := daemon.Recv()
-	require.NoError(t, err)
-	require.Equal(t, payload, got.Payload)
-	_ = client.Close()
-	_ = daemon.Close()
-}
-
-// TestQUICProxyLifecycleDeliversFinalEnvelope exercises the production proxy
-// bridge instead of a bare same-process Transport.Close. It verifies that a
-// client already reading, as production clients are, receives the daemon's
-// final synchronous envelope while the proxy tears both carriages down.
-func TestQUICProxyLifecycleDeliversFinalEnvelope(t *testing.T) {
-	cert, fingerprint, err := quic.GenerateEphemeralCert()
-	require.NoError(t, err)
-	listener, err := quic.ListenConfig("127.0.0.1:0", cert, quic.Config{}, 4)
-	require.NoError(t, err)
-	defer func() { _ = listener.Close() }()
-
-	accepted := make(chan wire.Transport, 1)
-	go func() {
-		if transport, err := listener.Accept(); err == nil {
-			accepted <- transport
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	client, err := quic.DialConfig(listener.Addr(), "vev-bootstrap", fingerprint, quic.Config{}, 5*time.Second).Dial(ctx)
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
-
-	var proxySide wire.Transport
-	select {
-	case proxySide = <-accepted:
-	case <-time.After(10 * time.Second):
-		t.Fatal("listener did not accept")
-	}
-
-	daemonPipe, peerPipe := net.Pipe()
-	daemon := ipc.NewTransport(daemonPipe)
-	peer := ipc.NewTransport(peerPipe)
-	defer func() { _ = peer.Close() }()
-
-	proxyDone := make(chan error, 1)
-	go func() { proxyDone <- proxyTransports(ctx, proxySide, daemon, nil) }()
-
-	final := []byte("final envelope survives the proxy lifecycle")
-	require.NoError(t, peer.Send(wire.Envelope{Payload: final}))
-	_ = peer.Close()
-
-	// Receive while the proxy performs its bounded graceful teardown. Waiting
-	// for teardown first lets QUIC's eventual CONNECTION_CLOSE discard unread
-	// stream data, a property the adapter does not promise to prevent.
-	type recvResult struct {
-		envelope wire.Envelope
-		err      error
-	}
-	received := make(chan recvResult, 1)
-	go func() {
-		envelope, err := client.Recv()
-		received <- recvResult{envelope: envelope, err: err}
-	}()
-	var got wire.Envelope
-	select {
-	case result := <-received:
-		require.NoError(t, result.err, "a reading client must receive the final envelope during proxy teardown")
-		got = result.envelope
-	case <-ctx.Done():
-		t.Fatal("timed out receiving the final envelope during proxy teardown")
-	}
-	require.Equal(t, final, got.Payload)
-
-	select {
-	case <-proxyDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("proxy did not stop after the daemon side closed")
-	}
-
-	// Verify the bounded teardown phase completed after the proxy closed its
-	// QUIC carriage; runQUICProxy performs the same wait before process exit.
-	require.NoError(t, waitGracefulTeardown(proxySide))
-	_, err = client.Recv()
-	require.ErrorIs(t, err, io.EOF)
-}
-
 func TestDevelopmentTempDirOption(t *testing.T) {
 	absoluteBase := filepath.Join(t.TempDir(), ".dev")
 	creatorErr := errors.New("cannot secure directory")
@@ -587,13 +486,9 @@ func TestParseArgs(t *testing.T) {
 		{name: "kill daemon rejects extra arg", args: []string{"kill", "--daemon", "extra"}, wantErr: true},
 		{name: "kill extra arg", args: []string{"kill", "work", "extra"}, wantErr: true},
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
-		{name: "stdio", args: []string{"_stdio"}, wantKind: kindStdio},
-		{name: "stdio rejects session", args: []string{"_stdio", "work"}, wantErr: true},
-		{name: "stdio rejects extra args", args: []string{"_stdio", "work", "extra"}, wantErr: true},
-		{name: "quic bootstrap", args: []string{"_quic-bootstrap"}, wantKind: kindQUICBootstrap},
-		{name: "quic bootstrap rejects session", args: []string{"_quic-bootstrap", "work"}, wantErr: true},
-		{name: "quic proxy", args: []string{"_quic-proxy"}, wantKind: kindQUICProxy},
-		{name: "quic proxy rejects session", args: []string{"_quic-proxy", "work"}, wantErr: true},
+		{name: "removed stdio", args: []string{"_stdio"}, wantErr: true},
+		{name: "removed quic bootstrap", args: []string{"_quic-bootstrap"}, wantErr: true},
+		{name: "removed quic proxy", args: []string{"_quic-proxy"}, wantErr: true},
 		{name: "removed udp bootstrap", args: []string{"_udp-bootstrap"}, wantErr: true},
 		{name: "removed udp proxy", args: []string{"_udp-proxy"}, wantErr: true},
 		{name: "removed udp proxy rejects session", args: []string{"_udp-proxy", "work"}, wantErr: true},

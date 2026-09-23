@@ -222,7 +222,7 @@ than `KillResult` and `CommandResult`.
 | Encoding buffer | bounded per-connection framing buffers owned by `streamframe` | `adapters/streamframe` |
 | Output states in flight | 8 (`MaxOutputWindow`) preferred for QUIC/IPC/SSH | daemon, negotiated down |
 | QUIC unauthenticated peers | 4 connections, 3 s auth deadline, one bidirectional stream each; extra/unidirectional streams rejected | `adapters/quic` |
-| QUIC bootstrap | 32-byte token + 16-byte nonce (base64), ≤4 KiB readiness (schema v1, host-independent port, SHA-256 pin, ≤15 s expiry), one bounded (512 B) auth record, atomic one-time consumption, token erasure on close | `adapters/quic` bootstrap, `app/_quic-bootstrap` + `_quic-proxy` |
+| QUIC bootstrap | 32-byte token + 16-byte nonce (base64), ≤4 KiB readiness (schema v1, host-independent port, SHA-256 pin, ≤15 s expiry), one bounded (512 B) auth record, atomic one-time consumption, token erasure on close | `adapters/quic` bootstrap, `app/_broker-mux-quic-bootstrap` + `_broker-mux-quic-proxy` |
 | Handshake, dial → first committed publication | 15 s, single absolute deadline propagated unchanged, never reset | both ends |
 | Command result | 10 s per request | `daemon/command_tracker.go` |
 | `RemotePreview` viewport | 256×128 cells, 1 MiB | `protocol/preview.go` |
@@ -241,17 +241,17 @@ fields before generated unmarshal.
 No session bytes are accepted before authentication and version
 acceptance. Local carriage requires the preamble + `Hello`/`Welcome`
 inside the 15-second budget; a failed handshake closes the exact
-connection. Direct remote carriage is QUIC (`internal/adapters/quic`,
+connection. Broker-owned remote carriage uses QUIC (`internal/adapters/quic`,
 TLS 1.3, ALPN `vev/1`, exact SHA-256 pin, one bidirectional stream,
 no 0-RTT); `VEV_REMOTE_TRANSPORT=stdio` selects SSH stdio instead.
-Each remote attach starts one short-lived `_quic-bootstrap` over SSH
-which spawns a detached `_quic-proxy` (ephemeral listener +
+For the QUIC route the broker starts one short-lived `_broker-mux-quic-bootstrap --production` over SSH
+which spawns a detached `_broker-mux-quic-proxy` (ephemeral listener +
 certificate, 32-byte token, ≤4 KiB readiness with host-independent
 port/pin/expiry), prints the single readiness line, and exits. The
-client resolves the SSH target host, composes `host:port`, pins the
+broker resolves the SSH target host, composes `host:port`, pins the
 certificate, and sends one bounded auth record before any preamble.
 The token is consumed atomically on first use; concurrent, replayed,
-or expired auth fails closed without IPC access, and the proxy exits
+or expired auth fails closed without private daemonmux access, and the proxy exits
 after session termination, expiry, or setup failure with token
 material erased.
 

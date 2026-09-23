@@ -76,7 +76,7 @@ docker exec --user root "$remote_container" sh -c 'rm -f /etc/ssh/ssh_host_* /ho
 docker cp "$context_dir/host" "$remote_container:/etc/ssh/ssh_host_ed25519_key"
 docker cp "$context_dir/host.pub" "$remote_container:/etc/ssh/ssh_host_ed25519_key.pub"
 docker cp "$context_dir/client.pub" "$remote_container:/home/demo/.ssh/authorized_keys"
-# Accept the debug level the client forwards so remote _stdio/_quic-proxy and
+# Accept the debug level the client forwards so remote _broker-mux-stdio/_broker-mux-quic-proxy and
 # the daemon they spawn log at debug too.
 docker exec --user root "$remote_container" sh -c 'printf "\nAcceptEnv VEV_LOG\n" >> /etc/ssh/sshd_config; chmod 600 /etc/ssh/ssh_host_ed25519_key /home/demo/.ssh/authorized_keys; chown demo:demo /home/demo/.ssh/authorized_keys; /usr/sbin/sshd'
 docker cp "$context_dir/client" "$local_container:/home/demo/.ssh/id_ed25519"

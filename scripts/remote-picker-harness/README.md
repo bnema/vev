@@ -30,7 +30,7 @@ container. The client needs a pinned `remote` SSH alias and
 their clients; the container owner handles session cleanup.
 
 Client and daemon debug logging is on (`VEV_LOG=debug`); the remote accepts
-`VEV_LOG` over SSH so `_stdio`/`_quic-proxy` and the daemon they spawn log at
+`VEV_LOG` over SSH so `_broker-mux-stdio`/`_broker-mux-quic-proxy` and the daemon they spawn log at
 debug too. After every run, sanitized per-run logs and scenario evidence are
 copied out of the containers to `/tmp/vev-acceptance-artifacts-*` (override
 with `VEV_ACCEPTANCE_ARTIFACTS_DIR`). Only structured vev state logs and

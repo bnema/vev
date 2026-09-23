@@ -459,7 +459,7 @@ func (t *Transport) Close() error {
 
 // WaitGracefulTeardown blocks until the deferred hard connection close that
 // follows an orderly Close has run: the graceful window elapsed or the peer
-// closed first. A process-owning caller (the _quic-proxy) waits after Close so
+// closed first. A process-owning caller (the broker mux QUIC proxy) waits after Close so
 // the final synchronous envelope is not discarded by process exit; ctx bounds
 // the wait. It returns ctx.Err() when the wait is cut short, and blocks until
 // ctx expires when Close was never called.

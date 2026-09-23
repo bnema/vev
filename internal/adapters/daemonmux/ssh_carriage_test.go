@@ -173,7 +173,7 @@ func sshMuxSilenceStdout() {
 
 // sshMuxHelperCommand builds an explicit command specification that re-executes
 // this test binary in one helper mode. The command is never the session
-// `_stdio` command: the mux carriage takes its whole command from the caller.
+// `_broker-mux-stdio` command: the mux carriage takes its whole command from the caller.
 func sshMuxHelperCommand(mode string, extra ...string) sshstdio.CommandSpec {
 	args := append([]string{"-test.run=^TestSSHMuxHelperProcess$", sshMuxHelperMarker, mode}, extra...)
 	return sshstdio.CommandSpec{Path: os.Args[0], Args: args}

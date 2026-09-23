@@ -5,7 +5,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -16,7 +15,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -35,11 +33,9 @@ import (
 	"github.com/bnema/vev/internal/adapters/noticefile"
 	"github.com/bnema/vev/internal/adapters/observability"
 	"github.com/bnema/vev/internal/adapters/pty"
-	"github.com/bnema/vev/internal/adapters/quic"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/shellcmd"
 	snapshotadapter "github.com/bnema/vev/internal/adapters/snapshot"
-	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/persist"
@@ -64,9 +60,6 @@ const (
 	kindCmd
 	kindDaemon
 	kindDaemonLauncher
-	kindStdio
-	kindQUICBootstrap
-	kindQUICProxy
 	kindUIDriver
 	kindUIRemoteCleanup
 	kindWebDaemon
@@ -266,21 +259,6 @@ parsedUIFlags:
 		return parseBrokerMuxArgs(brokerMuxQUICBootstrapCommand, kindBrokerMuxQUICBootstrap, args[1:])
 	case brokerMuxQUICProxyCommand:
 		return parseBrokerMuxArgs(brokerMuxQUICProxyCommand, kindBrokerMuxQUICProxy, args[1:])
-	case "_stdio":
-		if len(args) != 1 {
-			return command{}, usagef("`_stdio` does not accept a session name")
-		}
-		return command{kind: kindStdio}, nil
-	case "_quic-bootstrap":
-		if len(args) != 1 {
-			return command{}, usagef("`_quic-bootstrap` does not accept a session name")
-		}
-		return command{kind: kindQUICBootstrap}, nil
-	case "_quic-proxy":
-		if len(args) != 1 {
-			return command{}, usagef("`_quic-proxy` does not accept a session name")
-		}
-		return command{kind: kindQUICProxy}, nil
 	case uiRemoteCleanupCommand:
 		if len(args) != 1 {
 			return command{}, usagef("`%s` does not accept arguments", uiRemoteCleanupCommand)
@@ -417,12 +395,6 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runProductionBrokerLauncherCommand(ctx)
 	case kindBrokerReady:
 		return runBrokerReady(ctx, cmd.brokerReady, os.Stdout)
-	case kindStdio:
-		return runStdio(ctx)
-	case kindQUICBootstrap:
-		return runQUICBootstrap(ctx)
-	case kindQUICProxy:
-		return runQUICProxy(ctx)
 	case kindUIRemoteCleanup:
 		return runUIRemoteCleanup(ctx)
 	case kindUIDriver:
@@ -1069,162 +1041,8 @@ func brokerKillResultError(result protocol.KillResult) error {
 	}
 }
 
-// runStdio is the hidden remote-side mode used by `ssh host vev _stdio`: it
-// connects to the per-user daemon (auto-spawning it if needed) and proxies the
-// framed protocol between process stdio and the daemon socket.
-func runStdio(ctx context.Context) (retErr error) {
-	log, logCloser, err := configureLogging(logging.Stdio, false)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = logCloser.Close() }()
-	log.Debug("stdio proxy starting")
-
-	clk := clock.New()
-	observer, observerCloser, err := newPerformanceTrace(clk)
-	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
-	}
-	if observerCloser != nil {
-		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
-	}
-	transport, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (wire.Transport, error) {
-		return ipc.DialContext(ctx, dir, ipc.WithRuntimeObserver(observer))
-	}, realSpawn, defaultBackoff)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = transport.Close() }()
-
-	// sshstdio.Close owns and closes writers that implement io.Closer so a
-	// blocked Send can unwind. Keep process-global stdin/stdout outside that
-	// ownership boundary: sshstdio recognizes process stdin as a shared
-	// cancellable pump, while output is an owned pipe drained by a forwarding
-	// goroutine.
-	stdin, stdout := os.Stdin, os.Stdout
-	stdoutReader, stdoutWriter := io.Pipe()
-	forwardDone := make(chan struct{})
-	go func() {
-		defer close(forwardDone)
-		if _, err := io.Copy(stdout, stdoutReader); err != nil {
-			_ = stdoutReader.CloseWithError(err)
-		}
-	}()
-	defer func() {
-		_ = stdoutWriter.Close()
-		<-forwardDone
-		_ = stdoutReader.Close()
-	}()
-	stdio := sshstdio.NewTransport(stdin, stdoutWriter, nil, sshstdio.WithRuntimeObserver(observer))
-	return proxyTransports(ctx, stdio, transport, log)
-}
-
-// runQUICBootstrap starts a detached QUIC proxy, forwards its single
-// readiness line, and exits so the SSH channel closes without owning
-// the session lifetime. The detached proxy serves exactly one
-// authenticated stream, then exits deterministically.
-func runQUICBootstrap(ctx context.Context) error {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = r.Close() }()
-
-	exe, err := os.Executable()
-	if err != nil {
-		_ = w.Close()
-		return err
-	}
-	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err != nil {
-		_ = w.Close()
-		return err
-	}
-	defer func() { _ = devNull.Close() }()
-
-	cmd := exec.CommandContext(ctx, exe, "_quic-proxy")
-	// The proxy writes diagnostics through configureLogging; stdio is
-	// detached here so the bootstrap SSH channel can close. The proxy
-	// owns the session lifetime in its own session (Setsid) and is
-	// released: the bootstrap child exits after forwarding readiness.
-	cmd.Stdin = devNull
-	cmd.Stdout = w
-	cmd.Stderr = devNull
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		_ = w.Close()
-		return err
-	}
-	_ = w.Close()
-
-	readyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	lineCh := make(chan string, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		line, err := bufio.NewReader(r).ReadString('\n')
-		if err != nil {
-			errCh <- err
-			return
-		}
-		lineCh <- line
-	}()
-	select {
-	case line := <-lineCh:
-		if err := cmd.Process.Release(); err != nil {
-			return err
-		}
-		_, err := fmt.Fprint(os.Stdout, line)
-		return err
-	case err := <-errCh:
-		_ = cmd.Wait()
-		return err
-	case <-readyCtx.Done():
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("vev: quic bootstrap readiness: %w", readyCtx.Err())
-	}
-}
-
-// runQUICProxy is the detached long-lived remote-side QUIC proxy: one
-// ephemeral listener/certificate, one atomic token, private IPC only
-// after the first authenticated stream. It exits after session
-// termination, token expiry, or setup failure.
-func runQUICProxy(ctx context.Context) (retErr error) {
-	log, logCloser, err := configureLogging(logging.Stdio, false)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = logCloser.Close() }()
-	log.Debug("quic proxy starting")
-	server, readiness, err := quic.NewServer()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = server.Close() }()
-	raw, err := quic.EncodeReadiness(readiness)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(os.Stdout, "%s\n", raw); err != nil {
-		return err
-	}
-	// Serve exactly one authenticated session, then exit
-	// deterministically. Accept fails closed on token expiry, so the
-	// proxy cannot outlive its advertised credential.
-	transport, err := server.Accept(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = transport.Close()
-		_ = waitGracefulTeardown(transport)
-	}()
-	return proxyQUICBootstrap(ctx, transport)
-}
-
 // gracefulTeardownWaiter is implemented by carriages (QUIC) whose Close defers
-// a bounded connection close past its return. The _quic-proxy owns its
+// a bounded connection close past its return. The broker mux QUIC proxy owns its
 // process, so it must wait for that close before returning: exiting first
 // would discard the final synchronous envelope Close already handed to the
 // stream.
@@ -1245,62 +1063,6 @@ func waitGracefulTeardown(transport wire.Transport) error {
 	ctx, cancel := context.WithTimeout(context.Background(), proxyTeardownTimeout)
 	defer cancel()
 	return waiter.WaitGracefulTeardown(ctx)
-}
-
-// proxyQUICBootstrap bridges the single authenticated QUIC stream to the
-// local daemon over private IPC. The daemon side is wrapped as a typed
-// server connection by the daemon's own accept path; here the bridge
-// copies raw envelopes both ways until either side closes. No session
-// bytes flow before auth: Accept returned only the authenticated stream.
-func proxyQUICBootstrap(ctx context.Context, transport wire.Transport) error {
-	daemonTr, err := ensureDaemonWithLifecycle(ctx, ipc.SocketDir(), func(ctx context.Context, dir string) (wire.Transport, error) {
-		return ipc.DialContext(ctx, dir)
-	}, realSpawn, defaultBackoff)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = daemonTr.Close() }()
-	return proxyTransports(ctx, transport, daemonTr, slog.Default())
-}
-
-// proxyTransports copies raw envelopes both ways until either side
-// closes. It is carriage-neutral (IPC, SSH, QUIC): the only datagram
-// special case (hello output-window clamping) lived in the removed
-// datagram proxy, not here.
-func proxyTransports(ctx context.Context, a, b wire.Transport, _ *slog.Logger) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	// Own both carriages: closing them releases the copy goroutines'
-	// blocked Recv calls (with serialized end marks) instead of
-	// abandoning them mid-Recv when the first direction fails.
-	defer func() { _ = a.Close() }()
-	defer func() { _ = b.Close() }()
-	errCh := make(chan error, 2)
-	go func() { errCh <- copyTransport(ctx, a, b) }()
-	go func() { errCh <- copyTransport(ctx, b, a) }()
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func copyTransport(ctx context.Context, src, dst wire.Transport) error {
-	for {
-		envelope, err := src.Recv()
-		if err != nil {
-			return err
-		}
-		if err := dst.Send(envelope); err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-	}
 }
 
 // runList reads existing state without starting either background process.
