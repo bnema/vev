@@ -49,6 +49,31 @@ func (u *UI) follow(generation, actionID uint64) bool {
 	return true
 }
 
+// arriveInPlace marks the destination of a followed same-peer switch as
+// committed on the unchanged foreground generation. The switch keeps the
+// attachment, so no new foreground binding names the destination: the worker
+// calls this just before publishing the destination's first output, and that
+// publication settles the action.
+func (u *UI) arriveInPlace(generation uint64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.handoff == nil || generation != u.generation || u.handoff.sourceGeneration != generation || u.handoff.destinationGeneration != 0 {
+		return
+	}
+	u.handoff.destinationGeneration = generation
+}
+
+// failInPlace fails a followed same-peer switch the daemon refused: the source
+// attachment is unchanged and the destination never commits.
+func (u *UI) failInPlace(generation uint64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.handoff == nil || generation != u.generation || u.handoff.sourceGeneration != generation || u.handoff.destinationGeneration != 0 {
+		return
+	}
+	u.finishLocked(u.handoff.actionID, ports.UIActionNavigationFailed, ports.UIActionResult{})
+}
+
 // releaseForeground retires exactly the binding installed for generation.
 // The supervisor owns the presentation fence after the foreground drains.
 func (u *UI) releaseForeground(generation uint64) {

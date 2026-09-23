@@ -262,3 +262,131 @@ func TestSupervisorRouteSnapshotExcludesServingHost(t *testing.T) {
 	require.Equal(t, "example", published.ActiveEntry.HostLabel)
 	require.True(t, published.Home.IsZero(), "only a local attachment is home")
 }
+
+// TestSupervisorSamePeerSwitchSettlesUIAction pins the driver action that
+// causes a daemon same-peer switch (palette "Switch to session" on the serving
+// daemon): the attachment is kept, so the action must follow the offer and
+// settle on the destination's first committed output — never on a source
+// publication or a source-boundary receipt — and a refused switch fails it.
+func TestSupervisorSamePeerSwitchSettlesUIAction(t *testing.T) {
+	beta := protocol.ExactSessionTarget{LifecycleID: pickerTestLifecycle(2), SessionName: "beta"}
+	tests := []struct {
+		name string
+		// settle delivers the daemon's answer to the confirmed switch.
+		settle func(*sessionTestStream, protocol.SamePeerSwitchRequest)
+		// sourceReceipt delivers a daemon receipt on the source boundary; the
+		// daemon may also lose the source fence and never answer it.
+		sourceReceipt bool
+		wantErr       ports.UIErrorCode
+	}{
+		{
+			name: "destination output completes the action without a daemon receipt",
+			settle: func(stream *sessionTestStream, _ protocol.SamePeerSwitchRequest) {
+				destination := sessionTestOutput(4, "\x1b[Hbeta")
+				destination.Epoch = 2
+				destination.Context.Route.Target = beta
+				stream.deliver(destination)
+			},
+		},
+		{
+			name:          "a source-boundary receipt waits for the destination output",
+			sourceReceipt: true,
+			settle: func(stream *sessionTestStream, _ protocol.SamePeerSwitchRequest) {
+				destination := sessionTestOutput(4, "\x1b[Hbeta")
+				destination.Epoch = 2
+				destination.Context.Route.Target = beta
+				stream.deliver(destination)
+			},
+		},
+		{
+			name:          "a refused switch fails the action",
+			sourceReceipt: true,
+			settle: func(stream *sessionTestStream, request protocol.SamePeerSwitchRequest) {
+				stream.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+			},
+			wantErr: ports.UIErrNavigationFailed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			picker := newAttachTestPicker()
+			var ui *UI
+			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
+				cfg.UI = ui
+			})
+			stream := attachLiveSession(t, harness, picker)
+			attached := sessionTestOutput(2, "\x1b[Hattached")
+			attached.Full, attached.Base, attached.New = false, 1, 2
+			stream.deliver(attached)
+			var snapshot ports.UISnapshot
+			require.Eventually(t, func() bool {
+				var err error
+				snapshot, err = ui.Capture(ui.Handle())
+				return err == nil && snapshot.Context.Status == ports.UIStatusAttached && snapshot.Context.ViewPublication == 2
+			}, 5*time.Second, time.Millisecond)
+
+			type actionOutcome struct {
+				result ports.UIActionResult
+				err    error
+			}
+			done := make(chan actionOutcome, 1)
+			go func() {
+				result, err := ui.Action(t.Context(), ports.UIActionRequest{Attachment: ui.Handle(), Generation: snapshot.Context.Generation, Keys: []string{"Enter"}})
+				done <- actionOutcome{result: result, err: err}
+			}()
+			var actionID uint64
+			require.Eventually(t, func() bool {
+				for _, message := range stream.messages() {
+					if fence, ok := message.(protocol.UIFence); ok && fence.ActionID != 0 {
+						actionID = fence.ActionID
+						return true
+					}
+				}
+				return false
+			}, 5*time.Second, time.Millisecond, "the action never reached the daemon")
+
+			target := beta
+			stream.deliver(protocol.AttachTarget{Session: "beta", Intent: protocol.IntentAttach, ExactTarget: &target, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true, CauseActionID: actionID})
+			request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+
+			// A source publication and a receipt on the source boundary arrive
+			// before the destination: neither may settle the navigating action.
+			source := sessionTestOutput(3, "\x1b[Hsource")
+			source.Full, source.Base, source.New = false, 2, 3
+			stream.deliver(source)
+			if tt.sourceReceipt {
+				stream.deliver(protocol.UIReceipt{ActionID: actionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
+			}
+			require.Eventually(t, func() bool {
+				ui.mu.Lock()
+				defer ui.mu.Unlock()
+				return ui.boundary.Context.ViewPublication == 3
+			}, 5*time.Second, time.Millisecond, "the source publication was never committed")
+			select {
+			case outcome := <-done:
+				t.Fatalf("the action settled before the destination: %+v %v", outcome.result, outcome.err)
+			default:
+			}
+
+			tt.settle(stream, request)
+			var outcome actionOutcome
+			select {
+			case outcome = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the same-peer switch never settled the UI action")
+			}
+			if tt.wantErr != "" {
+				var uiErr *ports.UIError
+				require.ErrorAs(t, outcome.err, &uiErr)
+				require.Equal(t, tt.wantErr, uiErr.Code)
+				require.Equal(t, actionID, uiErr.ActionID)
+				return
+			}
+			require.NoError(t, outcome.err)
+			require.Equal(t, ports.UIActionProcessed, outcome.result.Status)
+			require.Equal(t, beta, outcome.result.Context.Route.Target)
+			require.Equal(t, snapshot.Context.Generation, outcome.result.Context.Generation, "an in-place switch keeps the actionable generation")
+		})
+	}
+}

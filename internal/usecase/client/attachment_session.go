@@ -302,6 +302,8 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		navigationReplies = overlay.navigationReplies()
 	}
 	var samePeerRequests uint64
+	var samePeerSwitch *samePeerSwitchPending
+	samePeerUI := attachmentSamePeerUI(fg)
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.TrueColor)}
 	defer picker.stopEscape()
 	input := newAttachmentInput(ctx, w, fg, stream, picker)
@@ -369,6 +371,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 				state = next
 				outputResetRequested = false
+				if samePeerSwitch != nil && state.context.Route.Target == samePeerSwitch.target {
+					// The in-place destination committed: its publication
+					// settles the action that caused the switch.
+					samePeerSwitch = nil
+					if samePeerUI != nil {
+						samePeerUI.uiSamePeerArrived()
+					}
+				}
 				attachmentNoteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
@@ -413,6 +423,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					if request.Validate() != nil {
 						continue
 					}
+					if samePeerUI != nil {
+						samePeerUI.uiFollowSamePeer(typed.CauseActionID)
+					}
+					samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target}
 					if err := w.send(ctx, fg, stream, request); err != nil {
 						return w.settle(ctx, fg, stream, token, err)
 					}
@@ -420,6 +434,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 				if overlay != nil {
 					overlay.requestNavigation(typed)
+				}
+			case protocol.SamePeerSwitchFailure:
+				// The daemon refused the confirmed switch and kept the source.
+				if samePeerSwitch != nil && typed.RequestID == samePeerSwitch.requestID {
+					samePeerSwitch = nil
+					if samePeerUI != nil {
+						samePeerUI.uiSamePeerFailed()
+					}
 				}
 			case protocol.RouteNavigationAction, protocol.RouteCreateSessionAction:
 				// The daemon asks the client to navigate: the supervisor
@@ -533,6 +555,27 @@ func attachmentUIReceipt(fg AttachmentForeground, receipt protocol.UIReceipt) {
 	if ui, ok := fg.(attachmentUIForeground); ok {
 		ui.uiReceipt(receipt)
 	}
+}
+
+// attachmentSamePeerForeground is the optional UI seam of an in-place
+// same-peer switch: the attachment survives, so the driver action that caused
+// the offer settles on the destination's first committed output.
+type attachmentSamePeerForeground interface {
+	uiFollowSamePeer(actionID uint64)
+	uiSamePeerArrived()
+	uiSamePeerFailed()
+}
+
+func attachmentSamePeerUI(fg AttachmentForeground) attachmentSamePeerForeground {
+	ui, _ := fg.(attachmentSamePeerForeground)
+	return ui
+}
+
+// samePeerSwitchPending is the one confirmed same-peer switch awaiting its
+// destination output or the daemon's refusal.
+type samePeerSwitchPending struct {
+	requestID uint64
+	target    protocol.ExactSessionTarget
 }
 
 // pumpAttachmentInput forwards each authorized delivery to the attached loop.

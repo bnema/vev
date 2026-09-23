@@ -1109,6 +1109,28 @@ func (f *attachmentForeground) uiReceipt(receipt protocol.UIReceipt) {
 	}
 }
 
+// uiFollowSamePeer keeps the driver action that caused a same-peer offer
+// pending until the in-place destination commits.
+func (f *attachmentForeground) uiFollowSamePeer(actionID uint64) {
+	if actionID != 0 && f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
+		f.host.actionUI.follow(f.uiGeneration, actionID)
+	}
+}
+
+// uiSamePeerArrived runs before the destination's first output is published.
+func (f *attachmentForeground) uiSamePeerArrived() {
+	if f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
+		f.host.actionUI.arriveInPlace(f.uiGeneration)
+	}
+}
+
+// uiSamePeerFailed fails the followed action of a refused same-peer switch.
+func (f *attachmentForeground) uiSamePeerFailed() {
+	if f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
+		f.host.actionUI.failInPlace(f.uiGeneration)
+	}
+}
+
 // Stream is the supervisor-admitted logical stream this worker owns.
 func (f *attachmentForeground) Stream() ports.BrokerLogicalConnection { return f.stream }
 
