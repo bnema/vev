@@ -19,6 +19,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"github.com/bnema/vev/internal/platform"
 )
 
 const (
@@ -37,14 +38,14 @@ type vevProcess struct {
 }
 
 // killAllScope selects which processes `kill --all` may stop: this user's
-// processes of the installed binary that run in the same vev runtime
-// directory, so VEV_ENV and XDG-sandboxed runs never touch each other.
+// processes of the installed binary that use the same vev socket directory,
+// so VEV_ENV and XDG-sandboxed runs never touch each other.
 type killAllScope struct {
-	procRoot   string
-	exe        string
-	uid        int
-	self       int
-	runtimeDir string // XDG_RUNTIME_DIR as vev resolved it; "" when unset
+	procRoot  string
+	exe       string
+	uid       int
+	self      int
+	socketDir string // ipc.SocketDir of the caller
 }
 
 // killAllReport is what one `kill --all` did.
@@ -68,29 +69,46 @@ func runKillAll(ctx context.Context, out io.Writer) error {
 		return fmt.Errorf("vev: resolve executable: %w", err)
 	}
 	scope := killAllScope{
-		procRoot:   "/proc",
-		exe:        installedPath(exe),
-		uid:        os.Getuid(),
-		self:       os.Getpid(),
-		runtimeDir: os.Getenv("XDG_RUNTIME_DIR"),
+		procRoot:  "/proc",
+		exe:       installedPath(exe),
+		uid:       os.Getuid(),
+		self:      os.Getpid(),
+		socketDir: ipc.SocketDir(),
 	}
-	report := stopEverything(ctx, scope, killAllStopTimeout, ipc.SocketDir())
+	report := stopEverything(ctx, scope, killAllStopTimeout)
 	printKillAllReport(out, report)
 	return errors.Join(report.errs...)
 }
 
-// stopEverything runs scan-and-stop rounds until a scan finds nothing, then removes
-// dead sockets.
-func stopEverything(ctx context.Context, scope killAllScope, timeout time.Duration, socketDir string) killAllReport {
+// stopEverything runs scan-and-stop rounds until a scan finds nothing, then
+// removes dead sockets. A process that already failed to die is not retried.
+func stopEverything(ctx context.Context, scope killAllScope, timeout time.Duration) killAllReport {
 	var report killAllReport
-	for round := 0; round < killAllRounds; round++ {
+	failed := map[int]bool{}
+	scan := func() ([]vevProcess, error) {
 		procs, err := findVevProcesses(scope)
+		live := procs[:0]
+		for _, p := range procs {
+			if !failed[p.pid] {
+				live = append(live, p)
+			}
+		}
+		return live, err
+	}
+	for round := 0; ; round++ {
+		procs, err := scan()
 		if err != nil {
 			report.errs = append(report.errs, err)
 			return report
 		}
 		if len(procs) == 0 {
-			report.removed = removeDeadSockets(socketDir)
+			if len(failed) == 0 {
+				report.removed = removeDeadSockets(scope.socketDir)
+			}
+			return report
+		}
+		if round == killAllRounds {
+			report.errs = append(report.errs, fmt.Errorf("vev: %d vev processes kept starting again; run `vev kill --all` once more", len(procs)))
 			return report
 		}
 		// Clients first, so none of them can start a broker or daemon from
@@ -104,17 +122,15 @@ func stopEverything(ctx context.Context, scope killAllScope, timeout time.Durati
 			}
 		}
 		for _, wave := range [][]vevProcess{clients, services} {
-			stopWave(ctx, wave, timeout, &report)
+			for _, p := range stopWave(ctx, wave, timeout, &report) {
+				failed[p.pid] = true
+			}
 		}
 		if ctx.Err() != nil {
 			report.errs = append(report.errs, ctx.Err())
 			return report
 		}
 	}
-	if left, err := findVevProcesses(scope); err == nil && len(left) > 0 {
-		report.errs = append(report.errs, fmt.Errorf("vev: %d vev processes kept starting again; run `vev kill --all` once more", len(left)))
-	}
-	return report
 }
 
 // installedPath is the on-disk path an executable was started from, without
@@ -148,8 +164,7 @@ func findVevProcesses(scope killAllScope) ([]vevProcess, error) {
 		if err != nil || installedPath(target) != scope.exe {
 			continue
 		}
-		environ, err := os.ReadFile(filepath.Join(dir, "environ"))
-		if err != nil || environValue(environ, "XDG_RUNTIME_DIR") != scope.runtimeDir {
+		if processSocketDir(dir, scope.uid) != scope.socketDir {
 			continue // another VEV_ENV or sandbox
 		}
 		cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
@@ -161,15 +176,23 @@ func findVevProcesses(scope killAllScope) ([]vevProcess, error) {
 	return procs, nil
 }
 
-// environValue returns key's value in a NUL-separated environment, or "".
-func environValue(environ []byte, key string) string {
-	prefix := key + "="
+// processSocketDir resolves the vev socket directory of the process in
+// procDir from its initial environment and working directory, the same way
+// vev itself does after VEV_ENV activation. It returns "" when unreadable.
+func processSocketDir(procDir string, uid int) string {
+	environ, err := os.ReadFile(filepath.Join(procDir, "environ"))
+	if err != nil {
+		return ""
+	}
+	env := map[string]string{}
 	for _, entry := range strings.Split(string(environ), "\x00") {
-		if value, ok := strings.CutPrefix(entry, prefix); ok {
-			return value
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			env[key] = value
 		}
 	}
-	return ""
+	cwd, _ := os.Readlink(filepath.Join(procDir, "cwd"))
+	runtime := platform.RuntimeDirFor(func(key string) string { return env[key] }, cwd)
+	return ipc.SocketDirFor(runtime, uid)
 }
 
 // processRole names a vev process from its NUL-separated command line.
@@ -194,8 +217,8 @@ func processRole(cmdline []byte) string {
 
 // stopWave sends SIGTERM to every process, waits up to timeout for all of them
 // to exit, then sends SIGKILL to the ones still running. One stuck process
-// never stops the rest of the wave.
-func stopWave(ctx context.Context, procs []vevProcess, timeout time.Duration, report *killAllReport) {
+// never stops the rest of the wave; the ones that survive are returned.
+func stopWave(ctx context.Context, procs []vevProcess, timeout time.Duration, report *killAllReport) (survivors []vevProcess) {
 	for _, p := range procs {
 		_ = syscall.Kill(p.pid, syscall.SIGTERM)
 	}
@@ -208,11 +231,13 @@ func stopWave(ctx context.Context, procs []vevProcess, timeout time.Duration, re
 		_ = syscall.Kill(p.pid, syscall.SIGKILL)
 		if err := waitProcessExit(context.WithoutCancel(ctx), p.pid, time.Second); err != nil {
 			report.errs = append(report.errs, fmt.Errorf("vev: %s (pid %d) did not stop: %w", p.role, p.pid, err))
+			survivors = append(survivors, p)
 			continue
 		}
 		report.stopped = append(report.stopped, p)
 		report.forced = append(report.forced, p)
 	}
+	return survivors
 }
 
 // removeDeadSockets deletes vev sockets nobody listens on any more, so the

@@ -78,6 +78,21 @@ func asciiAlphaNumeric(value byte) bool {
 	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
 }
 
+// RuntimeDirFor returns the XDG_RUNTIME_DIR a vev process with environment
+// getenv and working directory cwd uses once VEV_ENV is activated. It lets a
+// caller resolve another process' runtime from its initial environment.
+func RuntimeDirFor(getenv func(string) string, cwd string) string {
+	name := getenv("VEV_ENV")
+	if name == "" || !validDevelopmentEnvironmentName(name) {
+		return getenv("XDG_RUNTIME_DIR")
+	}
+	base := getenv(devEnvironmentRootEnv)
+	if base == "" {
+		base = filepath.Join(cwd, ".dev")
+	}
+	return filepath.Join(base, name, "runtime")
+}
+
 // DevelopmentEnvironmentTempDir returns the private temporary-file directory
 // for an activated development environment. Ordinary invocations use the
 // existing os.TempDir fallback in the daemon.

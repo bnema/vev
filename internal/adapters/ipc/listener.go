@@ -181,9 +181,12 @@ func (l *unixListener) Addr() string {
 // environments never fall back to the ordinary user's daemon. Listeners and
 // lifecycle locks still validate ownership and mode; no symlink is introduced.
 func SocketDir() string {
-	uid := os.Getuid()
+	return SocketDirFor(os.Getenv("XDG_RUNTIME_DIR"), os.Getuid())
+}
 
-	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
+// SocketDirFor is SocketDir for a given XDG_RUNTIME_DIR value and uid.
+func SocketDirFor(xdg string, uid int) string {
+	if xdg != "" {
 		dir := filepath.Join(xdg, "vev")
 		if len(filepath.Join(dir, "broker", "broker.sock")) > muxSocketPathMax {
 			return fmt.Sprintf("/tmp/vev-%d-%x", uid, sha256.Sum256([]byte(dir)))

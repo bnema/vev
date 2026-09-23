@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"github.com/bnema/vev/internal/platform"
 )
 
 func TestWaitProcessExit(t *testing.T) {
@@ -77,42 +80,70 @@ func TestProcessRole(t *testing.T) {
 }
 
 // TestFindVevProcesses runs against a fake /proc: only this user's processes
-// of the installed binary (also once replaced on disk) in the same runtime
-// directory are found, never self.
+// of the installed binary (also once replaced on disk) that resolve to the
+// caller's socket directory are found, never self.
 func TestFindVevProcesses(t *testing.T) {
 	root := t.TempDir()
 	const exe = "/opt/bin/vev"
-	const runtime = "XDG_RUNTIME_DIR=/run/user/1000"
 	uid := os.Getuid()
-	add := func(pid, target, cmdline, environ string) {
+	userRun := "XDG_RUNTIME_DIR=/run/user/1000\x00"
+	add := func(pid, target, cmdline, environ, cwd string) {
 		dir := filepath.Join(root, pid)
 		require.NoError(t, os.Mkdir(dir, 0o755))
 		require.NoError(t, os.Symlink(target, filepath.Join(dir, "exe")))
+		require.NoError(t, os.Symlink(cwd, filepath.Join(dir, "cwd")))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "environ"), []byte(environ), 0o644))
 	}
-	add("10", exe, "vev\x00", "HOME=/h\x00"+runtime+"\x00")
-	add("11", exe+" (deleted)", "/proc/self/exe\x00--daemon\x00", runtime+"\x00")
-	add("12", "/usr/bin/emacs", "emacs\x00--daemon\x00", runtime+"\x00")
-	add("13", "/tmp/vev-test-bin", "/tmp/vev-test-bin\x00--daemon\x00", runtime+"\x00")
-	add("14", exe, "vev\x00", runtime+"\x00") // self
-	add("15", exe, "/proc/self/exe\x00--daemon\x00", "XDG_RUNTIME_DIR=/repo/.dev/test/runtime\x00")
+	add("10", exe, "vev\x00", "HOME=/h\x00"+userRun, "/h")
+	add("11", exe+" (deleted)", "/proc/self/exe\x00--daemon\x00", userRun, "/h")
+	add("12", "/usr/bin/emacs", "emacs\x00--daemon\x00", userRun, "/h")
+	add("13", "/tmp/vev-test-bin", "/tmp/vev-test-bin\x00--daemon\x00", userRun, "/h")
+	add("14", exe, "vev\x00", userRun, "/h") // self
+	// A VEV_ENV=dev client keeps the user's XDG value in its initial
+	// environment; its children carry the rewritten one.
+	add("15", exe, "vev\x00", "VEV_ENV=dev\x00"+userRun, "/repo")
+	add("16", exe, "/proc/self/exe\x00--daemon\x00", "VEV_ENV=dev\x00VEV_ENV_ROOT=/repo/.dev\x00XDG_RUNTIME_DIR=/repo/.dev/dev/runtime\x00", "/")
 	require.NoError(t, os.Mkdir(filepath.Join(root, "self"), 0o755))
 
-	scope := killAllScope{procRoot: root, exe: exe, uid: uid, self: 14, runtimeDir: "/run/user/1000"}
+	scope := killAllScope{procRoot: root, exe: exe, uid: uid, self: 14, socketDir: "/run/user/1000/vev"}
 	got, err := findVevProcesses(scope)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []vevProcess{{pid: 10, role: "client"}, {pid: 11, role: "daemon"}}, got)
 
-	scope.runtimeDir = "/repo/.dev/test/runtime"
+	scope.socketDir = "/repo/.dev/dev/runtime/vev"
 	dev, err := findVevProcesses(scope)
 	require.NoError(t, err)
-	require.Equal(t, []vevProcess{{pid: 15, role: "daemon"}}, dev, "a VEV_ENV run only sees its own environment")
+	require.ElementsMatch(t, []vevProcess{{pid: 15, role: "client"}, {pid: 16, role: "daemon"}}, dev, "a VEV_ENV run sees its own client and children")
 
 	scope.uid = uid + 1
+	scope.socketDir = "/run/user/1000/vev"
 	none, err := findVevProcesses(scope)
 	require.NoError(t, err)
 	require.Empty(t, none, "another user's processes are never matched")
+}
+
+func TestRuntimeDirResolutionMatchesVev(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		cwd  string
+		want string
+	}{
+		{name: "plain", env: map[string]string{"XDG_RUNTIME_DIR": "/run/user/1000"}, want: "/run/user/1000"},
+		{name: "dev env from cwd", env: map[string]string{"VEV_ENV": "dev", "XDG_RUNTIME_DIR": "/run/user/1000"}, cwd: "/repo", want: "/repo/.dev/dev/runtime"},
+		{name: "dev env with root", env: map[string]string{"VEV_ENV": "t", "VEV_ENV_ROOT": "/r"}, cwd: "/elsewhere", want: "/r/t/runtime"},
+		{name: "invalid env name is ignored", env: map[string]string{"VEV_ENV": "../x", "XDG_RUNTIME_DIR": "/run/user/1000"}, want: "/run/user/1000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, platform.RuntimeDirFor(func(k string) string { return tt.env[k] }, tt.cwd))
+		})
+	}
+	if info, err := os.Stat(fmt.Sprintf("/run/user/%d", os.Getuid())); err == nil && info.IsDir() {
+		require.Equal(t, ipc.SocketDirFor(fmt.Sprintf("/run/user/%d", os.Getuid()), os.Getuid()), ipc.SocketDirFor("", os.Getuid()),
+			"unset XDG_RUNTIME_DIR and /run/user/UID resolve to the same socket directory")
+	}
 }
 
 // startIgnoringTerm starts a shell that ignores SIGTERM and reports once the
@@ -139,7 +170,7 @@ func TestStopWaveEscalatesToSigkillAndKeepsGoing(t *testing.T) {
 	go func() { _ = polite.Wait() }()
 
 	var report killAllReport
-	stopWave(context.Background(), []vevProcess{{pid: stubborn.Process.Pid, role: "daemon"}, {pid: polite.Process.Pid, role: "client"}}, 100*time.Millisecond, &report)
+	_ = stopWave(context.Background(), []vevProcess{{pid: stubborn.Process.Pid, role: "daemon"}, {pid: polite.Process.Pid, role: "client"}}, 100*time.Millisecond, &report)
 
 	state := <-done
 	status, ok := state.Sys().(syscall.WaitStatus)
