@@ -201,18 +201,6 @@ func (s *ServerSupervisor) Adopt(ctx context.Context, raw RawFramedTransport) er
 	return nil
 }
 
-// Children reports how many physical connections the supervisor currently
-// owns. It is a diagnostic accessor; a lost child disappears once its reaper
-// has closed it.
-func (s *ServerSupervisor) Children() int {
-	if s == nil {
-		return 0
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.children)
-}
-
 // Close stops accepting physical carriage and tears every owned child down:
 // it deregisters and closes each child - listener, pump, and carrier together -
 // and joins every reaper. Close is idempotent and concurrent-safe. It leaves

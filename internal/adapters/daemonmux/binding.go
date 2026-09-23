@@ -67,24 +67,6 @@ func NewServerBinding(identity ports.BrokerDaemonIdentity, incarnation ports.Bro
 func (b ServerBinding) Identity() ports.BrokerDaemonIdentity       { return b.identity }
 func (b ServerBinding) Incarnation() ports.BrokerDaemonIncarnation { return b.incarnation }
 
-// Policy returns the sole entry's policy for legacy single-policy callers. It
-// returns the zero value for a multi-entry authority; admission never uses it.
-func (b ServerBinding) Policy() ports.BrokerPolicy {
-	if len(b.entries) == 1 {
-		return b.entries[0].Policy
-	}
-	return ports.BrokerPolicy{}
-}
-
-// Origin returns the sole entry's locality for legacy single-policy callers. It
-// returns the unknown origin for a multi-entry authority.
-func (b ServerBinding) Origin() ports.SessionConnectionOrigin {
-	if len(b.entries) == 1 {
-		return b.entries[0].Origin
-	}
-	return ports.SessionOriginUnknown
-}
-
 func (b ServerBinding) Validate() error {
 	if b.identity.Validate() != nil || b.incarnation.Validate() != nil || len(b.entries) == 0 {
 		return ErrInvalidBinding
@@ -115,9 +97,4 @@ func (b ServerBinding) Accepted(policy ports.BrokerPolicy) (ServerPolicyAdmissio
 		}
 	}
 	return ServerPolicyAdmission{}, false
-}
-
-func (b ServerBinding) Accepts(policy ports.BrokerPolicy) bool {
-	_, ok := b.Accepted(policy)
-	return ok
 }

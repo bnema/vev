@@ -17,11 +17,6 @@ import (
 // its socket directory.
 const socketFileName = "daemon.sock"
 
-// SocketPath returns the daemon socket path inside runtimeDir.
-func SocketPath(runtimeDir string) string {
-	return filepath.Join(runtimeDir, socketFileName)
-}
-
 // ErrDaemonRunning is returned by Listen when the socket path is already
 // bound by a live daemon (a dial-probe against it succeeded).
 var ErrDaemonRunning = errors.New("ipc: a daemon is already listening on this socket")

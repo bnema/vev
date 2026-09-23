@@ -328,29 +328,6 @@ func ValidatePreambleResponseAgainstOffer(response MuxPreambleResponse, offered 
 	return nil
 }
 
-// DecodePreambleRequestBytes strictly decodes one serialized daemonmux client
-// preamble. The 4 KiB bound is enforced before allocation, wire.ScanEnvelope
-// is the shared strict scanner that rejects unknown fields, duplicate singular
-// or oneof fields, trailing bytes, truncation, and empty payloads before
-// generated unmarshal, proto.UnmarshalOptions{DiscardUnknown: false} runs next,
-// and DecodePreambleRequest applies the semantic checks. A carriage failure
-// returns the precise wire sentinel (wire.ErrScanUnknown, wire.ErrScanDuplicate,
-// wire.ErrScanTrailing, wire.ErrScanTruncated, ...); an oversize payload or a
-// semantic failure returns ErrPreambleRejected.
-func DecodePreambleRequestBytes(payload []byte) (MuxPreambleRequest, error) {
-	if err := CheckPreambleSize(payload); err != nil {
-		return MuxPreambleRequest{}, err
-	}
-	message := &wire.MuxPreambleRequest{}
-	if err := wire.ScanEnvelope(message, payload); err != nil {
-		return MuxPreambleRequest{}, err
-	}
-	if err := (proto.UnmarshalOptions{DiscardUnknown: false}.Unmarshal(payload, message)); err != nil {
-		return MuxPreambleRequest{}, err
-	}
-	return DecodePreambleRequest(message)
-}
-
 // DecodePreambleResponseBytes strictly decodes one serialized daemonmux server
 // preamble under the same 4 KiB bound, strict scan, generated unmarshal, and
 // semantic decode as DecodePreambleRequestBytes. Carriage failures return the

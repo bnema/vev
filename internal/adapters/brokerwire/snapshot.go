@@ -90,13 +90,6 @@ var (
 // to prove the bound without allocating 80 MiB; production uses defaults.
 type SnapshotOption func(*SnapshotAssembler)
 
-// WithMaxStagedBytes overrides the staged estimate ceiling.
-func WithMaxStagedBytes(n uint64) SnapshotOption {
-	return func(a *SnapshotAssembler) {
-		a.maxStagedBytes = n
-	}
-}
-
 // WithGeneration pins the subscription generation this assembler belongs to,
 // so a part of any other generation is fenced from the first one. The zero
 // default adopts the generation from the first Begin.

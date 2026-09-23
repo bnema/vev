@@ -185,23 +185,6 @@ type admittedStream struct {
 	settled   bool
 }
 
-// NewListener returns a listener over one daemon-side pump under the package
-// policy: the accepted absolute handshake deadline budget is
-// protocol.HandshakeTimeout, and the accept queue is bounded by
-// MaxAcceptQueue. accepted is the provisioned carriage shape the physical
-// handshake admitted: its exact policy and its locality origin. Every admitted
-// session connection is stamped with it. The pump must decode broker-to-daemon
-// frames (Inbound == DirectionClient) and emit daemon-to-broker frames, as the
-// daemon side of a pooled physical connection does; a nil, engine-less, or
-// broker-side pump, or an invalid accepted entry, is refused. The pump must not
-// have started: the listener registers the pump's admission observer, and a
-// pump that already started refuses the registration with
-// ErrAdmissionObserverLate (wrapped in ErrListenerConfig), because an observer
-// registered after Start could miss an already-admitted Open.
-func NewListener(pump *Pump, accepted ServerPolicyAdmission) (*Listener, error) {
-	return newListener(pump, protocol.HandshakeTimeout, MaxAcceptQueue, clock.New(), accepted)
-}
-
 // newListener builds a listener from explicit policy. budget is the handshake
 // deadline budget each stream receives at admission, limit is the accept-queue
 // bound, clock supplies the admission time and the deadline timer, and accepted

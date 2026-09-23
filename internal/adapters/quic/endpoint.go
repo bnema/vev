@@ -47,12 +47,6 @@ type dialOptions struct {
 	observer ports.SerializedRuntimeObserver
 }
 
-// WithRuntimeObserver enables process-local adapter marks on the dialed
-// transport. A nil observer leaves observation disabled.
-func WithRuntimeObserver(observer ports.SerializedRuntimeObserver) Option {
-	return func(opts *dialOptions) { opts.observer = observer }
-}
-
 // DialConfig carries the dial parameters. Fingerprint is the exact
 // SHA-256 of the server certificate (32 bytes). Timeout bounds the whole
 // dial: address resolution, every candidate connection, stream open, and

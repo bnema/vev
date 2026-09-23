@@ -258,16 +258,6 @@ type Scheduler struct {
 	quantum           int64
 }
 
-// NewScheduler returns an empty outbound scheduler under the default
-// MuxCeilings. When engine is non-nil the scheduler enqueues a frame only for
-// an opening or open stream the engine has admitted; when it is nil, the
-// caller owns admission and any nonzero physical identity is accepted. The
-// engine does not need to share the scheduler's ceilings: the scheduler's
-// envelope, chunk, and aggregate budgets come from its own copy.
-func NewScheduler(engine *StreamEngine) *Scheduler {
-	return newScheduler(engine, DefaultMuxCeilings())
-}
-
 // NewSchedulerWithCeilings returns an empty outbound scheduler whose envelope,
 // chunk, and aggregate budgets enforce the given negotiated MuxCeilings. The
 // value is validated and copied, so the ceilings a scheduler enforces are

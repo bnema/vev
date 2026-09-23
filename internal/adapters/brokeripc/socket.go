@@ -23,8 +23,3 @@ func SocketPath(runtimeDir string) string {
 // well, so both endpoints share one owner-only directory while keeping
 // distinct socket names.
 func SocketDir() string { return ipc.SocketDir() }
-
-// DefaultSocketPath returns the broker endpoint path in the per-user runtime
-// directory. Callers that need a private temporary endpoint supply their own
-// parent directory to SocketPath instead.
-func DefaultSocketPath() string { return SocketPath(SocketDir()) }

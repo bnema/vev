@@ -234,14 +234,6 @@ type StreamEngine struct {
 	policy     ports.BrokerPolicy
 }
 
-// NewStreamEngine returns an open engine bound to one physical connection
-// under the default MuxCeilings: the full envelope ceiling, the maximum
-// chunk, the maximum stream count (pending-plus-live), and the maximum
-// aggregate buffered bytes.
-func NewStreamEngine() *StreamEngine {
-	return newStreamEngine(DefaultMuxCeilings())
-}
-
 // NewStreamEngineWithCeilings returns an open engine bound to one physical
 // connection whose admission, chunk, and aggregate budgets enforce the given
 // negotiated MuxCeilings. The value is validated and copied, so the ceilings

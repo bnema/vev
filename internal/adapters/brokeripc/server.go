@@ -210,13 +210,6 @@ func (l *listener) confirmRefusal(err error) {
 	l.mu.Unlock()
 }
 
-// refusal reports the most recent refused or failed admission.
-func (l *listener) refusal() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.lastRefuse
-}
-
 // admit completes the preamble and broker admission for one accepted carriage
 // and publishes the running session. Slot ownership transfers to the session on
 // success.
@@ -264,14 +257,6 @@ func (l *listener) closePending() {
 	for _, transport := range pending {
 		_ = transport.Close()
 	}
-}
-
-// inFlight reports how many accepted carriages are still completing preamble or
-// admission.
-func (l *listener) inFlight() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.pending)
 }
 
 // classifyAdmissionFailure maps one preamble or authority failure. Once the
@@ -444,13 +429,6 @@ func (l *listener) forgetSession(session *serverSession) {
 	l.mu.Lock()
 	delete(l.sessions, session)
 	l.mu.Unlock()
-}
-
-// liveSessions reports how many admitted sessions are still live.
-func (l *listener) liveSessions() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.sessions)
 }
 
 func (l *listener) isClosed() bool {
