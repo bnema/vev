@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -688,7 +689,11 @@ func TestTerminalCompositionPublishesRealSessionOutput(t *testing.T) {
 	// The initial publication is committed before the attached marker, so its
 	// recorded boundary status is the pre-attachment Connecting presentation.
 	require.Contains(t, run.terminal.publishes(), ports.UIStatusConnecting)
-	require.Contains(t, run.terminal.publishes(), ports.UIStatusAttached)
+	// The attached presentation is published just after the attached state, on
+	// the attachment goroutine, so wait for it instead of racing it.
+	require.Eventually(t, func() bool {
+		return slices.Contains(run.terminal.publishes(), ports.UIStatusAttached)
+	}, brokerTestWait, 5*time.Millisecond)
 	_, _, restores := run.terminalCounts()
 	require.Zero(t, restores)
 }
