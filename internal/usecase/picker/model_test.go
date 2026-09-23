@@ -435,3 +435,27 @@ func rowText(row []renderer.Cell) string {
 	}
 	return string(out)
 }
+
+func TestReplaceLinesSelectsThePreviousRowWhenTheCursorRowLeaves(t *testing.T) {
+	all := []protocol.PickerLine{navLine("a", "a"), navLine("b", "b"), navLine("c", "c"), navLine("d", "d")}
+	tests := []struct {
+		name   string
+		cursor string
+		next   []protocol.PickerLine
+		want   string
+	}{
+		{name: "middle row killed", cursor: "c", next: []protocol.PickerLine{all[0], all[1], all[3]}, want: "b"},
+		{name: "last row killed", cursor: "d", next: all[:3], want: "c"},
+		{name: "first row killed falls to the nearest", cursor: "a", next: all[1:], want: "b"},
+		{name: "unchanged row keeps the cursor", cursor: "c", next: all, want: "c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(all, Config{Cursor: protocol.PickerCursor{Key: tt.cursor, Index: -1}})
+			m.ReplaceLines(tt.next, protocol.PickerCursor{Index: -1})
+			selected, ok := m.Selected()
+			require.True(t, ok)
+			require.Equal(t, tt.want, selected.Key)
+		})
+	}
+}

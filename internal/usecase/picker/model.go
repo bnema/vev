@@ -204,11 +204,43 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 		return
 	}
 	key, hadKey := m.cursorKey()
+	above := m.keysAboveCursor()
 	m.lines = append(m.lines[:0], lines...)
 	if !hadKey {
 		key, hadKey = cursor.Key, cursor.Key != ""
 	}
 	m.rebuild(key, hadKey, cursor.Index)
+	if hadKey {
+		if current, ok := m.cursorKey(); !ok || current != key {
+			// The selected row left the publication (for example it was
+			// killed): rest on the nearest surviving row above it instead of
+			// jumping back to the top.
+			m.selectFirstKey(above)
+		}
+	}
+}
+
+// keysAboveCursor lists the eligible row keys above the cursor, nearest first.
+func (m *Model) keysAboveCursor() []string {
+	var keys []string
+	for i := m.selected - 1; i >= 0; i-- {
+		if m.eligible(i) {
+			keys = append(keys, m.rows[i].key())
+		}
+	}
+	return keys
+}
+
+// selectFirstKey moves the cursor to the first key still present, if any.
+func (m *Model) selectFirstKey(keys []string) {
+	for _, key := range keys {
+		for idx, candidate := range m.rows {
+			if m.eligible(idx) && candidate.key() == key {
+				m.selected = idx
+				return
+			}
+		}
+	}
 }
 
 // ReplaceProjection atomically changes the daemon-authored projection and its
