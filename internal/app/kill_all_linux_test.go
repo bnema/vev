@@ -123,6 +123,28 @@ func TestFindVevProcesses(t *testing.T) {
 	require.Empty(t, none, "another user's processes are never matched")
 }
 
+// TestProcessSocketDirPrefersSymlinkedPWD pins that a VEV_ENV client started
+// in a repo reached through a symlink resolves to the same path vev used.
+func TestProcessSocketDirPrefersSymlinkedPWD(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	require.NoError(t, os.Mkdir(real, 0o755))
+	link := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	proc := filepath.Join(base, "proc", "20")
+	require.NoError(t, os.MkdirAll(proc, 0o755))
+	require.NoError(t, os.Symlink(real, filepath.Join(proc, "cwd")))
+	require.NoError(t, os.WriteFile(filepath.Join(proc, "environ"), []byte("VEV_ENV=dev\x00PWD="+link+"\x00"), 0o644))
+
+	uid := os.Getuid()
+	require.Equal(t, ipc.SocketDirFor(filepath.Join(link, ".dev", "dev", "runtime"), uid), processSocketDir(proc, uid))
+
+	// A stale PWD that names another directory is ignored.
+	require.NoError(t, os.WriteFile(filepath.Join(proc, "environ"), []byte("VEV_ENV=dev\x00PWD="+base+"\x00"), 0o644))
+	require.Equal(t, ipc.SocketDirFor(filepath.Join(real, ".dev", "dev", "runtime"), uid), processSocketDir(proc, uid))
+}
+
 func TestRuntimeDirResolutionMatchesVev(t *testing.T) {
 	tests := []struct {
 		name string

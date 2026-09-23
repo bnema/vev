@@ -191,6 +191,15 @@ func processSocketDir(procDir string, uid int) string {
 		}
 	}
 	cwd, _ := os.Readlink(filepath.Join(procDir, "cwd"))
+	// Like os.Getwd, prefer $PWD when it names the same directory, so a repo
+	// opened through a symlink resolves to the path vev itself used.
+	if pwd := env["PWD"]; filepath.IsAbs(pwd) {
+		pwdInfo, pwdErr := os.Stat(pwd)
+		cwdInfo, cwdErr := os.Stat(filepath.Join(procDir, "cwd"))
+		if pwdErr == nil && cwdErr == nil && os.SameFile(pwdInfo, cwdInfo) {
+			cwd = pwd
+		}
+	}
 	runtime := platform.RuntimeDirFor(func(key string) string { return env[key] }, cwd)
 	return ipc.SocketDirFor(runtime, uid)
 }
