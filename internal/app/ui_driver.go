@@ -198,11 +198,21 @@ func uiDriverNavigation(options uiDriverOptions) (client.InitialNavigation, clie
 	if options.picker {
 		return client.InitialNavigation{}, nil, nil
 	}
+	if options.remote != "" && options.session != "" {
+		// `--remote HOST --session NAME` is attach-or-create: an existing
+		// remote session is attached by its exact lifecycle, an absent one is
+		// created. Creating unconditionally would collide with the remote
+		// daemon's live name and be refused.
+		if err := domain.ValidateRemoteHostTarget(options.remote); err != nil {
+			return client.InitialNavigation{}, nil, err
+		}
+		if err := domain.ValidateSessionName(options.session); err != nil {
+			return client.InitialNavigation{}, nil, err
+		}
+		return client.InitialNavigation{}, remoteAttachOrCreateResolver(options.remote, options.session), nil
+	}
 	intent := protocol.IntentEphemeral
-	switch {
-	case options.remote == "" && options.session != "":
-		intent = protocol.IntentNew
-	case options.remote != "" && options.session != "":
+	if options.session != "" {
 		intent = protocol.IntentNew
 	}
 	return terminalBrokerNavigation(intent, options.session, options.remote)

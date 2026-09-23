@@ -212,40 +212,52 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 	require.Equal(t, "work", named.Name)
 	require.True(t, named.Destination.Local)
 
-	for _, options := range []uiDriverOptions{
-		{remote: "user@example.com"},
-		{remote: "user@example.com", session: "work"},
-	} {
-		name := "remote ephemeral"
-		if options.session != "" {
-			name = "remote named creation"
+	remoteSnapshot := func(sessions ...string) ports.BrokerSnapshot {
+		return ports.BrokerSnapshot{
+			Epoch:    terminalCompositionEpoch,
+			Revision: 1,
+			Daemons: []ports.BrokerDaemonObservation{{
+				Endpoint:       "user@example.com",
+				DisplayOrigin:  "user@example.com",
+				Registration:   terminalCompositionRegistration("user@example.com"),
+				InventoryKnown: true,
+				Sessions:       terminalCompositionSessions(sessions),
+			}},
 		}
-		t.Run(name, func(t *testing.T) {
-			navigation, resolver, err := uiDriverNavigation(options)
+	}
+	tests := []struct {
+		name     string
+		options  uiDriverOptions
+		snapshot ports.BrokerSnapshot
+		wantKind client.InitialNavigationKind
+		wantName string
+	}{
+		{name: "remote ephemeral", options: uiDriverOptions{remote: "user@example.com"}, snapshot: remoteSnapshot("work"), wantKind: client.InitialNavigationCreateEphemeral},
+		{name: "remote named existing attaches exact lifecycle", options: uiDriverOptions{remote: "user@example.com", session: "work"}, snapshot: remoteSnapshot("other", "work"), wantKind: client.InitialNavigationAttachExact, wantName: "work"},
+		{name: "remote named missing creates", options: uiDriverOptions{remote: "user@example.com", session: "fresh"}, snapshot: remoteSnapshot("work"), wantKind: client.InitialNavigationCreateNamed, wantName: "fresh"},
+		{name: "remote named on empty inventory creates", options: uiDriverOptions{remote: "user@example.com", session: "fresh"}, snapshot: remoteSnapshot(), wantKind: client.InitialNavigationCreateNamed, wantName: "fresh"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			navigation, resolver, err := uiDriverNavigation(tt.options)
 			require.NoError(t, err)
 			require.Equal(t, client.InitialNavigation{}, navigation, "a remote target is never decided before the connection")
 			require.NotNil(t, resolver, "a remote target resolves against the committed publication")
 
-			snapshot := ports.BrokerSnapshot{
-				Epoch:    terminalCompositionEpoch,
-				Revision: 1,
-				Daemons: []ports.BrokerDaemonObservation{{
-					Endpoint:      "user@example.com",
-					DisplayOrigin: "user@example.com",
-					Registration:  terminalCompositionRegistration("user@example.com"),
-					Sessions:      terminalCompositionSessions([]string{"work"}),
-				}},
-			}
-			resolved, resolveErr := resolver(snapshot)
+			resolved, resolveErr := resolver(tt.snapshot)
 			require.NoError(t, resolveErr)
 			require.NoError(t, resolved.Validate())
 			require.False(t, resolved.Destination.Local)
-			if options.session == "" {
-				require.Equal(t, client.InitialNavigationCreateEphemeral, resolved.Kind)
-				return
+			require.Equal(t, tt.snapshot.Daemons[0].Registration, resolved.Destination.Registration)
+			require.Equal(t, tt.wantKind, resolved.Kind)
+			switch tt.wantKind {
+			case client.InitialNavigationAttachExact:
+				want, ok := brokerObservationExactTarget(tt.snapshot.Daemons[0], tt.wantName)
+				require.True(t, ok)
+				require.Equal(t, want, resolved.Target, "an existing name attaches its exact lifecycle, never a same-name creation")
+			case client.InitialNavigationCreateNamed:
+				require.Equal(t, tt.wantName, resolved.Name)
 			}
-			require.Equal(t, client.InitialNavigationCreateNamed, resolved.Kind)
-			require.Equal(t, "work", resolved.Name)
 		})
 	}
 

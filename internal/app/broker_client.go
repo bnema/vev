@@ -444,6 +444,25 @@ func remoteNamedCreateResolver(endpoint, name string) client.InitialNavigationRe
 	}
 }
 
+// remoteAttachOrCreateResolver resolves one remote session name to an exact
+// attach when the endpoint's committed observation carries it, and to a named
+// creation fenced to the same registration otherwise. An endpoint the broker
+// does not carry is refused rather than dialed.
+func remoteAttachOrCreateResolver(endpoint, name string) client.InitialNavigationResolver {
+	attach := remoteExactAttachResolver(endpoint, name)
+	create := remoteNamedCreateResolver(endpoint, name)
+	return func(snapshot ports.BrokerSnapshot) (client.InitialNavigation, error) {
+		observation, ok := snapshot.Find(endpoint)
+		if !ok {
+			return client.InitialNavigation{}, fmt.Errorf("%w: %q is not a configured broker host", errTerminalNavigationUnresolved, endpoint)
+		}
+		if _, exists := brokerObservationExactTarget(observation, name); exists {
+			return attach(snapshot)
+		}
+		return create(snapshot)
+	}
+}
+
 // remoteEphemeralCreateResolver resolves `attach user@host` (no session) into a
 // remote ephemeral creation fenced to the endpoint's committed registration and
 // the epoch of the snapshot that resolved it.
