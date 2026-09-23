@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/stretchr/testify/require"
@@ -103,15 +102,6 @@ func TestFuzzyRanksExactSessionNameAheadOfPrefix(t *testing.T) {
 			},
 			wantFirst: "Resume session vev@arch",
 			offset:    15,
-		},
-		{
-			name: "remote catalog session",
-			results: []Result{
-				NewRemoteSessionResult(domain.RemoteSessionKey{Host: "arch", Name: "vev-vt", DisplayOrigin: "arch"}, domain.RemoteSessionTarget{}, ""),
-				NewRemoteSessionResult(domain.RemoteSessionKey{Host: "arch", Name: "vev", DisplayOrigin: "arch"}, domain.RemoteSessionTarget{}, ""),
-			},
-			wantFirst: "Switch to session vev@arch",
-			offset:    18,
 		},
 		{
 			name: "recent route",

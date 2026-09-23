@@ -140,19 +140,11 @@ func TestCNSDestinationRefreshDoesNotPromoteCommandSelection(t *testing.T) {
 	require.False(t, ok, "entering multi-destination mode requires fresh navigation")
 }
 
-func TestReplaceResultsPreservesExactRemoteSelection(t *testing.T) {
-	result := func(endpoint string, lifecycle byte) Result {
-		key := domain.RemoteSessionKey{
-			Host: endpoint, Name: "vev", LifecycleID: domain.SessionLifecycleID{lifecycle}, DisplayOrigin: "arch",
-		}
-		target := domain.RemoteSessionTarget{
-			Endpoint: endpoint, DisplayOrigin: "arch", LifecycleID: key.LifecycleID,
-			SessionName: "vev", LiveTabID: "tab-vev",
-		}
-		return NewRemoteSessionResult(key, target, "")
-	}
-	first := result("user@arch", 1)
-	selected := result("admin@arch", 2)
+// TestReplaceResultsPreservesExactSelection proves ReplaceResults tracks the
+// selected result by its exact target through a reorder, not by its position.
+func TestReplaceResultsPreservesExactSelection(t *testing.T) {
+	first := NewActiveSessionResultWithDisplayOrigin(testExactTarget("vev", 1), time.Time{}, "user@arch")
+	selected := NewActiveSessionResultWithDisplayOrigin(testExactTarget("vev", 2), time.Time{}, "admin@arch")
 	m := New([]Result{first, selected})
 	m.Down()
 
@@ -160,9 +152,9 @@ func TestReplaceResultsPreservesExactRemoteSelection(t *testing.T) {
 
 	got, ok := m.Selected()
 	require.True(t, ok)
-	target, ok := got.RemoteSessionTarget()
+	target, ok := got.SessionTarget()
 	require.True(t, ok)
-	require.Equal(t, "admin@arch", target.Endpoint)
+	require.Equal(t, domain.SessionLifecycleID{2}, target.LifecycleID)
 }
 
 func TestModelInsertBackspaceAndSelectionClamp(t *testing.T) {

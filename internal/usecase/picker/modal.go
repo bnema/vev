@@ -28,11 +28,3 @@ func PreviewRect(terminal domain.Size) domain.Rect {
 func Size(rect domain.Rect) domain.Size {
 	return domain.Size{Cols: rect.Width, Rows: rect.Height}
 }
-
-// PreviewSize returns the preview viewport for one terminal size: the preview
-// pane inside the shared modal geometry. A zero size means this terminal has
-// no room for a preview. The serving daemon and the presenting client both
-// derive it from PreviewRect, so the captured viewport always fits its pane.
-func PreviewSize(terminal domain.Size) domain.Size {
-	return Size(PreviewRect(terminal))
-}

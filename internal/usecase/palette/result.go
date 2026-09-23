@@ -138,16 +138,6 @@ func newSessionPayload(target protocol.ExactSessionTarget, createdAt time.Time, 
 	return sessionPayload{display: SessionDisplay(target.SessionName, displayOrigin), createdAt: createdAt, target: target}
 }
 
-// NewRemoteSessionResult creates an immutable catalog-backed remote target.
-func NewRemoteSessionResult(key domain.RemoteSessionKey, target domain.RemoteSessionTarget, unavailableReason string) Result {
-	return Result{
-		kind: ResultKindRemoteSession,
-		remoteSession: remoteSessionPayload{
-			key: key, target: target, unavailableReason: unavailableReason,
-		},
-	}
-}
-
 // NewImportedSessionResult creates an immutable inventory-relayed row.
 // Labels are never parsed back into selection authority: Enter resolves
 // through the opaque source/entry keys.
