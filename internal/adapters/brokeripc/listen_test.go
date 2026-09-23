@@ -27,7 +27,7 @@ type gatedAuthority struct {
 	once    sync.Once
 }
 
-func (a *gatedAuthority) AdmitClient(ctx context.Context) (ports.BrokerService, error) {
+func (a *gatedAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
 	a.once.Do(func() { close(a.entered) })
 	<-a.gate
 	return a.inner.AdmitClient(ctx)
@@ -41,7 +41,7 @@ type ctxAuthority struct {
 	once    sync.Once
 }
 
-func (a *ctxAuthority) AdmitClient(ctx context.Context) (ports.BrokerService, error) {
+func (a *ctxAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
 	a.once.Do(func() { close(a.entered) })
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -429,7 +429,7 @@ func TestStalledHandshakeDoesNotBlockOtherClients(t *testing.T) {
 func TestConcurrentDialAndClose(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 8, HandshakeTimeout: 2 * time.Second})
 
-	sessions := make(chan ports.BrokerService, 8)
+	sessions := make(chan ports.BrokerCoreService, 8)
 	go func() {
 		defer close(sessions)
 		for i := 0; i < cap(sessions); i++ {

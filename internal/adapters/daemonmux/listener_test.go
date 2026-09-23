@@ -285,8 +285,9 @@ func servePongs(conn ports.ServerConnection) error {
 }
 
 // listenerRoundTrip proves one typed exchange on a logical connection.
-func listenerRoundTrip(t *testing.T, conn ports.ClientConnection) {
+func listenerRoundTrip(t *testing.T, stream ports.BrokerEnvelopeStream) {
 	t.Helper()
+	conn := asTyped(stream)
 	require.NoError(t, conn.SendClient(protocol.Ping{}))
 	message, err := conn.ReceiveServer()
 	require.NoError(t, err)

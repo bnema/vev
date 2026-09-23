@@ -148,10 +148,10 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	require.NoError(t, server.awaitAdoption(t))
 
 	// Two independent typed admissions over the one physical carriage.
-	first, err := physical.OpenStream(context.Background(), muxOpenRequest(1, policy))
+	first, err := openTyped(physical, context.Background(), muxOpenRequest(1, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
-	second, err := physical.OpenStream(context.Background(), muxOpenRequest(2, policy))
+	second, err := openTyped(physical, context.Background(), muxOpenRequest(2, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 	server.awaitAccepted(t, 2)
@@ -172,7 +172,7 @@ func TestUnixCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			connections[i], openErrs[i] = physical.OpenStream(context.Background(), muxOpenRequest(uint64(3+i), policy))
+			connections[i], openErrs[i] = openTyped(physical, context.Background(), muxOpenRequest(uint64(3+i), policy))
 		}(i)
 	}
 	wg.Wait()

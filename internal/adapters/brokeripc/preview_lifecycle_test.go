@@ -57,7 +57,7 @@ func awaitPreviewChanged(t *testing.T, sub ports.BrokerPreviewSubscription) port
 // serverPreviewGeneration returns the server session's current preview
 // generation: it observes the same replacement bookkeeping startPreview
 // maintains, so a test can prove which generation the server holds current.
-func serverPreviewGeneration(session ports.BrokerService) ports.BrokerPreviewGeneration {
+func serverPreviewGeneration(session ports.BrokerCoreService) ports.BrokerPreviewGeneration {
 	server, ok := session.(*serverSession)
 	if !ok {
 		return 0
@@ -68,7 +68,7 @@ func serverPreviewGeneration(session ports.BrokerService) ports.BrokerPreviewGen
 }
 
 // serverPreviewOf returns the server session's current preview subscription.
-func serverPreviewOf(session ports.BrokerService) ports.BrokerPreviewSubscription {
+func serverPreviewOf(session ports.BrokerCoreService) ports.BrokerPreviewSubscription {
 	server, ok := session.(*serverSession)
 	if !ok {
 		return nil

@@ -318,13 +318,13 @@ func (a *daemonAcceptor) closePeers() {
 	}
 }
 
-func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) *LogicalConnection {
+func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) typedLogical {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	connection, err := connector.Open(ctx, controlRequest(stream))
 	require.NoError(t, err)
-	return connection
+	return typedLogical{typedStream: asTyped(connection), LogicalConnection: connection}
 }
 
 // watchRegistered reports whether the pump still holds an inbound watch entry
@@ -406,7 +406,7 @@ func TestLogicalTwoConnections(t *testing.T) {
 		acceptor.start(PhysicalStreamID(i), deadline)
 	}
 
-	connections := make([]*LogicalConnection, 0, count)
+	connections := make([]typedLogical, 0, count)
 	for i := 1; i <= count; i++ {
 		connection := openWithDeadline(t, connector, i)
 		require.NoError(t, connection.SendClient(protocol.Ping{}), "connection %d", i)
@@ -487,11 +487,12 @@ func TestLogicalHundredConnectionsConcurrentAdmission(t *testing.T) {
 		traffic.Add(1)
 		go func(index int) {
 			defer traffic.Done()
-			if err := connections[index].SendClient(protocol.Ping{}); err != nil {
+			typed := asTyped(connections[index])
+			if err := typed.SendClient(protocol.Ping{}); err != nil {
 				trafficErrs[index] = err
 				return
 			}
-			message, err := connections[index].ReceiveServer()
+			message, err := typed.ReceiveServer()
 			if err != nil {
 				trafficErrs[index] = err
 				return
@@ -802,7 +803,7 @@ func TestLogicalPhysicalLossFanout(t *testing.T) {
 	for i := 1; i <= count; i++ {
 		acceptor.start(PhysicalStreamID(i), deadline)
 	}
-	connections := make([]*LogicalConnection, 0, count)
+	connections := make([]typedLogical, 0, count)
 	for i := 1; i <= count; i++ {
 		connection := openWithDeadline(t, connector, i)
 		require.NoError(t, connection.SendClient(protocol.Ping{}))
@@ -832,55 +833,6 @@ func TestLogicalPhysicalLossFanout(t *testing.T) {
 	require.Equal(t, domain.RemoteFailureTransport, brokerPump.FailureKind())
 }
 
-// TestLogicalHandshakeDeadlinePlumbing proves the accepted absolute 15 s
-// handshake deadline and the completion hook are exposed without restarting a
-// deadline.
-func TestLogicalHandshakeDeadlinePlumbing(t *testing.T) {
-	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
-	connector := mustConnector(t, brokerPump)
-	deadline := time.Now().Add(15 * time.Second)
-
-	acceptor := newDaemonAcceptor(daemonPump, 1)
-	acceptor.start(1, deadline)
-
-	connection := openWithDeadline(t, connector, 1)
-	require.NoError(t, acceptor.wait(1, deadline))
-
-	accepted := connection.HandshakeDeadline()
-	require.False(t, accepted.IsZero())
-	require.WithinDuration(t, time.Now().Add(protocol.HandshakeTimeout), accepted, 5*time.Second)
-	require.Equal(t, accepted, connection.HandshakeDeadline(), "deadline is stable")
-
-	completed := make(chan struct{}, 2)
-	connection.OnHandshakeComplete(func() { completed <- struct{}{} })
-	select {
-	case <-completed:
-		t.Fatal("completion hook fired before the handshake ran")
-	default:
-	}
-
-	require.NoError(t, connection.SendClient(protocol.Ping{}))
-	message, err := connection.ReceiveServer()
-	require.NoError(t, err)
-	require.Equal(t, protocol.Pong{}, message)
-
-	select {
-	case <-completed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("completion hook did not fire after the handshake")
-	}
-
-	// Registering after completion runs immediately.
-	late := make(chan struct{}, 1)
-	connection.OnHandshakeComplete(func() { late <- struct{}{} })
-	select {
-	case <-late:
-	case <-time.After(5 * time.Second):
-		t.Fatal("late completion hook did not run")
-	}
-}
-
-// TestLogicalNoGoroutineLeak proves opening, using, and closing logical
 // connections leaves no goroutine behind.
 func TestLogicalNoGoroutineLeak(t *testing.T) {
 	before := runtime.NumGoroutine()
@@ -894,7 +846,7 @@ func TestLogicalNoGoroutineLeak(t *testing.T) {
 	for i := 1; i <= count; i++ {
 		acceptor.start(PhysicalStreamID(i), deadline)
 	}
-	connections := make([]*LogicalConnection, 0, count)
+	connections := make([]typedLogical, 0, count)
 	for i := 1; i <= count; i++ {
 		connection := openWithDeadline(t, connector, i)
 		require.NoError(t, connection.SendClient(protocol.Ping{}))

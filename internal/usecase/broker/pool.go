@@ -160,7 +160,7 @@ func (p *Pool) CloseStream(id ports.BrokerConnectionID, stream ports.BrokerStrea
 	return nil
 }
 
-func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	if req.Epoch != p.epoch {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorStaleEpoch}
 	}
@@ -324,7 +324,7 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		_ = raw.Close()
 		return nil, terminal
 	}
-	stream := &pooledStream{BrokerLogicalConnection: raw, done: make(chan struct{}), release: release}
+	stream := &pooledStream{BrokerEnvelopeStream: raw, done: make(chan struct{}), release: release}
 	success = true
 	go func() {
 		var terminal error
@@ -610,7 +610,7 @@ func (p *Pool) Close() error {
 }
 
 type pooledStream struct {
-	ports.BrokerLogicalConnection
+	ports.BrokerEnvelopeStream
 	once     sync.Once
 	done     chan struct{}
 	err      error
@@ -629,7 +629,7 @@ func (s *pooledStream) Err() error {
 }
 func (s *pooledStream) Close() error { s.finish(nil); return s.closeErr }
 func (s *pooledStream) finish(err error) {
-	s.once.Do(func() { s.err = err; s.closeErr = s.BrokerLogicalConnection.Close(); s.release(); close(s.done) })
+	s.once.Do(func() { s.err = err; s.closeErr = s.BrokerEnvelopeStream.Close(); s.release(); close(s.done) })
 }
 
 // One goroutine owns this timer. Drain a buffered expiry before every reset,

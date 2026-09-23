@@ -823,7 +823,7 @@ type BrokerPreviewSubscription interface {
 // local and remote daemons through it, including the local daemon.
 // Snapshot access performs no I/O; request methods are non-blocking
 // coalesced hints except where the context explicitly bounds them.
-type BrokerService interface {
+type BrokerSession interface {
 	// ConnectionID returns the ID assigned when this client connection was
 	// accepted. Clients carry it on stream operations to fence stale requests.
 	ConnectionID() BrokerConnectionID
@@ -844,7 +844,6 @@ type BrokerService interface {
 	Snapshot() BrokerSnapshot
 	Subscribe() (BrokerSubscription, error)
 	SubscribePreview(request BrokerPreviewRequest) (BrokerPreviewSubscription, error)
-	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
 	CloseStream(connection BrokerConnectionID, stream BrokerStreamID) error
 	// AddHost durably adds or pins endpoint under policy and returns its authority.
 	AddHost(ctx context.Context, endpoint string, policy BrokerPolicy) (domain.RemoteRegistration, error)
@@ -854,6 +853,32 @@ type BrokerService interface {
 	UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy BrokerPolicy) (domain.RemoteRegistration, error)
 	RequestReconcile(endpoint string)
 	Close() error
+}
+
+// BrokerService is the typed client-side broker connection.
+type BrokerService interface {
+	BrokerSession
+	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
+}
+
+// BrokerEnvelopeStream carries opaque complete session envelopes across the core.
+type BrokerEnvelopeStream interface {
+	SendEnvelope([]byte) error
+	RecvEnvelope() ([]byte, error)
+	Done() <-chan struct{}
+	Err() error
+	Close() error
+}
+
+// BrokerCoreService is one admitted connection on the broker side.
+type BrokerCoreService interface {
+	BrokerSession
+	OpenEnvelopeStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerEnvelopeStream, error)
+}
+
+// SessionCodec adapts a raw core stream for broker-owned typed operations.
+type SessionCodec interface {
+	Client(BrokerEnvelopeStream) ClientConnection
 }
 
 // BrokerSnapshotStore persists the durable broker snapshot independently
@@ -910,7 +935,7 @@ type BrokerPhysicalConnection interface {
 	Identity() BrokerDaemonIdentity
 	Incarnation() BrokerDaemonIncarnation
 	Policy() BrokerPolicy
-	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
+	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerEnvelopeStream, error)
 	Close() error
 }
 
@@ -961,7 +986,7 @@ type BrokerConnector interface {
 // parked in admission immediately. The admitted service gets its own
 // connection-lived context and must not derive from this one.
 type BrokerAuthority interface {
-	AdmitClient(ctx context.Context) (BrokerService, error)
+	AdmitClient(ctx context.Context) (BrokerCoreService, error)
 }
 
 // BrokerListener accepts client connections to the per-user broker
@@ -972,7 +997,7 @@ type BrokerAuthority interface {
 // Implementations own the owner-only directory/socket, peer credential
 // checks, bounded clients and queues, and cancellation-safe accept loops.
 type BrokerListener interface {
-	Accept() (BrokerService, error)
+	Accept() (BrokerCoreService, error)
 	Close() error
 	Addr() string
 }

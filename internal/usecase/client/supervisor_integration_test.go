@@ -65,7 +65,7 @@ func (c *integrationCore) SubscribePreview(ports.BrokerPreviewRequest) (ports.Br
 	return nil, errors.New("integration core does not support preview")
 }
 
-func (c *integrationCore) OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (c *integrationCore) OpenEnvelopeStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	return nil, errors.New("integration core does not support streams")
 }
 
@@ -110,7 +110,7 @@ type integrationAuthority struct {
 
 var _ ports.BrokerAuthority = (*integrationAuthority)(nil)
 
-func (a *integrationAuthority) AdmitClient(ctx context.Context) (ports.BrokerService, error) {
+func (a *integrationAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

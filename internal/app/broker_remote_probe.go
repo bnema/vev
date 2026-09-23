@@ -36,6 +36,7 @@ type brokerRemoteProbe struct {
 	connector ports.BrokerEndpointConnector
 	hosts     ports.BrokerHostAuthorityReader
 	shared    pooledPhysicals
+	codec     ports.SessionCodec
 }
 
 // sharedPhysicals lends the pooled transport of an attached or warm daemon.
@@ -60,7 +61,7 @@ func (s *pooledPhysicals) adopt(physical ports.BrokerPhysicalConnection, policy 
 }
 
 // observe reports handled=false when the probe must dial its own transport.
-func (s *pooledPhysicals) observe(ctx context.Context, identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, request ports.BrokerOpenStreamRequest) (ports.BrokerDaemonObservation, bool, error) {
+func (s *pooledPhysicals) observe(ctx context.Context, identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, request ports.BrokerOpenStreamRequest, codec ports.SessionCodec) (ports.BrokerDaemonObservation, bool, error) {
 	pool, _ := s.pool.Load().(sharedPhysicals)
 	if pool == nil || identity == "" {
 		return ports.BrokerDaemonObservation{}, false, nil
@@ -69,7 +70,7 @@ func (s *pooledPhysicals) observe(ctx context.Context, identity ports.BrokerDaem
 	if !ok {
 		return ports.BrokerDaemonObservation{}, false, nil
 	}
-	observation, err := observeDaemonCatalogue(ctx, physical, request)
+	observation, err := observeDaemonCatalogue(ctx, physical, request, codec)
 	if err == nil || ctx.Err() != nil {
 		return observation, true, err
 	}
@@ -99,7 +100,7 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 	// bootstrapping SSH/QUIC again. A borrowed transport that retires mid-probe
 	// falls back to a fresh dial.
 	if endpoint.ExpectedIdentity.Bound {
-		if observation, handled, err := p.shared.observe(ctx, endpoint.ExpectedIdentity.Identity, endpoint.Policy, request); handled {
+		if observation, handled, err := p.shared.observe(ctx, endpoint.ExpectedIdentity.Identity, endpoint.Policy, request, p.codec); handled {
 			return observation, err
 		}
 	}
@@ -127,7 +128,7 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 	if err != nil || identity != physical.Identity() {
 		return ports.BrokerDaemonObservation{}, errors.New("vev: remote probe could not commit authenticated binding")
 	}
-	observation, err := observeDaemonCatalogue(ctx, physical, request)
+	observation, err := observeDaemonCatalogue(ctx, physical, request, p.codec)
 	if err == nil && ctx.Err() == nil {
 		adopted = p.shared.adopt(physical, endpoint.Policy)
 	}
@@ -147,8 +148,8 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 // catalogue, and a catalogue outside the exact current schema all fail closed:
 // the caller receives an error and no observation it could publish, so a probe
 // never invents inventory it did not observe.
-func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalConnection, request ports.BrokerOpenStreamRequest) (ports.BrokerDaemonObservation, error) {
-	if physical == nil || request.Purpose != ports.BrokerStreamObservation {
+func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalConnection, request ports.BrokerOpenStreamRequest, codec ports.SessionCodec) (ports.BrokerDaemonObservation, error) {
+	if physical == nil || codec == nil || request.Purpose != ports.BrokerStreamObservation {
 		return ports.BrokerDaemonObservation{}, errors.New("vev: invalid daemon observation request")
 	}
 	logical, err := physical.OpenStream(ctx, request)
@@ -167,7 +168,7 @@ func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalCo
 	if err != nil {
 		return ports.BrokerDaemonObservation{}, err
 	}
-	reply, err := exchangeObservationCommand(ctx, logical, protocol.CommandRequest{RequestID: commandID, Version: protocol.Version, Slug: "remote-catalog", JSON: true})
+	reply, err := exchangeObservationCommand(ctx, codec.Client(logical), logical, protocol.CommandRequest{RequestID: commandID, Version: protocol.Version, Slug: "remote-catalog", JSON: true})
 	if err != nil {
 		return ports.BrokerDaemonObservation{}, err
 	}
@@ -201,7 +202,7 @@ func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalCo
 // joined before returning, so an observation always returns promptly once its
 // attempt is retired instead of parking the daemon's reader (or a probe
 // attempt) on a daemon that answers nothing.
-func exchangeObservationCommand(ctx context.Context, logical ports.BrokerLogicalConnection, command protocol.CommandRequest) (protocol.ServerMessage, error) {
+func exchangeObservationCommand(ctx context.Context, typed ports.ClientConnection, logical ports.BrokerEnvelopeStream, command protocol.CommandRequest) (protocol.ServerMessage, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -211,11 +212,11 @@ func exchangeObservationCommand(ctx context.Context, logical ports.BrokerLogical
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		if err := logical.SendClient(command); err != nil {
+		if err := typed.SendClient(command); err != nil {
 			done <- outcome{err: err}
 			return
 		}
-		message, err := logical.ReceiveServer()
+		message, err := typed.ReceiveServer()
 		done <- outcome{message: message, err: err}
 	}()
 	select {

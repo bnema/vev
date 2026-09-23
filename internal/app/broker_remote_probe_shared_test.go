@@ -56,6 +56,7 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 				connector.EXPECT().Connect(mock.Anything, mock.Anything).Return(nil, dialErr).Times(tt.wantDials)
 			}
 			physical := portsmocks.NewMockBrokerPhysicalConnection(t)
+			codec := portsmocks.NewMockSessionCodec(t)
 			done := make(chan struct{})
 			if tt.retired {
 				close(done)
@@ -67,13 +68,15 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 						physical.EXPECT().Done().Return(done)
 					}
 				} else {
-					logical := portsmocks.NewMockBrokerLogicalConnection(t)
+					logical := portsmocks.NewMockBrokerEnvelopeStream(t)
+					typed := portsmocks.NewMockClientConnection(t)
+					codec.EXPECT().Client(logical).Return(typed)
 					var sent protocol.CommandRequest
-					logical.EXPECT().SendClient(mock.Anything).RunAndReturn(func(message protocol.ClientMessage) error {
+					typed.EXPECT().SendClient(mock.Anything).RunAndReturn(func(message protocol.ClientMessage) error {
 						sent = message.(protocol.CommandRequest)
 						return nil
 					})
-					logical.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
+					typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
 						return protocol.CommandResult{RequestID: sent.RequestID, Outcome: protocol.CommandSucceeded, Output: testLocalCatalogue(t)}, nil
 					})
 					logical.EXPECT().Close().Return(nil)
@@ -84,7 +87,7 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 			}
 			probe := &brokerRemoteProbe{
 				epoch: 7, routes: routes, binder: portsmocks.NewMockBrokerIdentityBinder(t), connector: connector,
-				hosts: &routeTestHosts{record: record, found: true},
+				hosts: &routeTestHosts{record: record, found: true}, codec: codec,
 			}
 			// Use the real pool for borrowing. Stateful pool retirement is
 			// covered with a fake physical in broker's worker tests.
@@ -145,6 +148,7 @@ func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 			// No Connect expectation: any redial fails the mock.
 			connector := portsmocks.NewMockBrokerEndpointConnector(t)
 			physical := portsmocks.NewMockBrokerPhysicalConnection(t)
+			codec := portsmocks.NewMockSessionCodec(t)
 			healthy := make(chan struct{})
 			physical.EXPECT().Policy().Return(policy).Maybe()
 			physical.EXPECT().Identity().Return(identity).Maybe()
@@ -158,17 +162,19 @@ func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 			// worker only signals, the test goroutine cancels and asserts.
 			waiting := make(chan struct{}, 1)
 			if tt.silentOpen {
-				physical.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				physical.EXPECT().OpenStream(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 					waiting <- struct{}{}
 					<-ctx.Done()
 					return nil, ctx.Err()
 				})
 			} else {
-				logical := portsmocks.NewMockBrokerLogicalConnection(t)
+				logical := portsmocks.NewMockBrokerEnvelopeStream(t)
+				typed := portsmocks.NewMockClientConnection(t)
+				codec.EXPECT().Client(logical).Return(typed)
 				closed := make(chan struct{})
 				var once sync.Once
-				logical.EXPECT().SendClient(mock.Anything).Return(nil)
-				logical.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
+				typed.EXPECT().SendClient(mock.Anything).Return(nil)
+				typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
 					waiting <- struct{}{}
 					<-closed
 					return nil, errors.New("stream closed")
@@ -178,7 +184,7 @@ func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 			}
 			probe := &brokerRemoteProbe{
 				epoch: 7, routes: routes, binder: portsmocks.NewMockBrokerIdentityBinder(t), connector: connector,
-				hosts: &routeTestHosts{record: record, found: true},
+				hosts: &routeTestHosts{record: record, found: true}, codec: codec,
 			}
 			pool, err := broker.NewPool(7, routes, probe.binder, connector, clock.New(), broker.PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
 			require.NoError(t, err)

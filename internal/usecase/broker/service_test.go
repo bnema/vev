@@ -43,7 +43,7 @@ func composeTestAuthority(t testing.TB, epoch ports.BrokerEpoch, registry *Regis
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pool.Close()) })
 	supervisor, idleClock := newTestSupervisor(t, time.Hour)
-	authority, err := NewAuthority(epoch, registry, pool, supervisor)
+	authority, err := NewAuthority(epoch, registry, pool, supervisor, testSessionCodec{})
 	require.NoError(t, err)
 	// The caller owns Registry.Run (see NewAuthority): start the single run and
 	// cancel it at cleanup, so the registry's durable writer is drained and its
@@ -195,7 +195,7 @@ func TestAuthorityAdmissionContextNotRetained(t *testing.T) {
 	require.NoError(t, registry.setHosts(hostRecords(registration(t, "user@host:22", 1))))
 	require.Len(t, service.Snapshot().Daemons, 1)
 
-	stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+	stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
 }
@@ -210,7 +210,7 @@ func TestAuthorityValidation(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(mutableRemote.settle)
 	require.NoError(t, mutableRemote.setHosts(hostRecords(registration(t, "user@host:22", 1))))
-	_, err = NewAuthority(1, mutableRemote, pool, supervisor)
+	_, err = NewAuthority(1, mutableRemote, pool, supervisor, testSessionCodec{})
 	require.NoError(t, err, "a mutable remote registry must be served")
 
 	// A local-only observer is served: its entry is configured authority rather
@@ -223,7 +223,7 @@ func TestAuthorityValidation(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	t.Cleanup(localOnly.settle)
-	_, err = NewAuthority(1, localOnly, pool, supervisor)
+	_, err = NewAuthority(1, localOnly, pool, supervisor, testSessionCodec{})
 	require.NoError(t, err, "a local-only observer must be served")
 
 	// Construction still rejects remote observation without a probe: a registry
@@ -235,17 +235,17 @@ func TestAuthorityValidation(t *testing.T) {
 	disabled, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	t.Cleanup(disabled.settle)
-	_, err = NewAuthority(2, disabled, pool, supervisor)
+	_, err = NewAuthority(2, disabled, pool, supervisor, testSessionCodec{})
 	require.Error(t, err, "an epoch mismatch must be refused")
 
-	_, err = NewAuthority(1, nil, pool, supervisor)
+	_, err = NewAuthority(1, nil, pool, supervisor, testSessionCodec{})
 	require.Error(t, err, "a missing registry must be refused")
-	_, err = NewAuthority(1, disabled, nil, supervisor)
+	_, err = NewAuthority(1, disabled, nil, supervisor, testSessionCodec{})
 	require.Error(t, err, "a missing pool must be refused")
-	_, err = NewAuthority(1, disabled, pool, nil)
+	_, err = NewAuthority(1, disabled, pool, nil, testSessionCodec{})
 	require.Error(t, err, "a missing supervisor must be refused")
 
-	_, err = NewAuthority(1, disabled, pool, supervisor)
+	_, err = NewAuthority(1, disabled, pool, supervisor, testSessionCodec{})
 	require.NoError(t, err)
 }
 
@@ -289,7 +289,7 @@ func TestServiceOpenStreamScopeFencing(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-			stream, err := service.OpenStream(context.Background(), tc.build(service.ConnectionID()))
+			stream, err := service.OpenEnvelopeStream(context.Background(), tc.build(service.ConnectionID()))
 			switch {
 			case tc.wantStale:
 				require.ErrorIs(t, err, ports.BrokerAdmissionStale)
@@ -344,7 +344,7 @@ func TestServiceOpenStreamRequestsLocalReprobeOnOpenAndClose(t *testing.T) {
 	waitLocal(t, registry, func(o ports.BrokerDaemonObservation) bool { return !o.Checking })
 
 	// Opening a local control stream must itself mark a re-probe pending.
-	stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+	stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 	require.NoError(t, err)
 	opened := receiveLocalCall(t, local)
 	opened.result <- reachable()
@@ -421,11 +421,11 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 		require.NoError(t, err)
 		request := poolRequest(service.ConnectionID(), 0)
 		request.Stream = stream
-		opened, err := service.OpenStream(context.Background(), request)
+		opened, err := service.OpenEnvelopeStream(context.Background(), request)
 		require.NoError(t, err)
 		require.NoError(t, opened.Close())
 		// Replaying the exact identity is refused as stale.
-		_, err = service.OpenStream(context.Background(), request)
+		_, err = service.OpenEnvelopeStream(context.Background(), request)
 		require.ErrorIs(t, err, ports.BrokerAdmissionStale)
 	})
 }
@@ -448,7 +448,7 @@ func TestServiceOpenStreamAdmissionValidatesCallerInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			request := poolRequest(service.ConnectionID(), 1)
 			tc.mutate(&request)
-			_, err := service.OpenStream(context.Background(), request)
+			_, err := service.OpenEnvelopeStream(context.Background(), request)
 			require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
 		})
 	}
@@ -461,7 +461,7 @@ func TestServiceCloseStreamScopeFencing(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 	id := service.ConnectionID()
 
-	stream, err := service.OpenStream(context.Background(), poolRequest(id, 1))
+	stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(id, 1))
 	require.NoError(t, err)
 
 	// A wrong-scope close must not retire this connection's stream.
@@ -610,12 +610,12 @@ func TestServiceOperationLeaseLifetime(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
 	type opened struct {
-		stream ports.BrokerLogicalConnection
+		stream ports.BrokerEnvelopeStream
 		err    error
 	}
 	result := make(chan opened, 1)
 	go func() {
-		stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+		stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 		result <- opened{stream: stream, err: err}
 	}()
 	<-entered
@@ -656,7 +656,7 @@ func TestServiceCloseOpenRace(t *testing.T) {
 
 			result := make(chan error, 1)
 			go func() {
-				_, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+				_, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 				result <- err
 			}()
 			<-entered
@@ -683,7 +683,7 @@ func TestServiceCloseIsIdempotentAndConcurrent(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.Subscribe()
 	require.NoError(t, err)
-	stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+	stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 	require.NoError(t, err)
 
 	const closers = 8
@@ -708,7 +708,7 @@ func TestServiceCloseIsIdempotentAndConcurrent(t *testing.T) {
 	require.Zero(t, clients)
 	await(t, stream.Done())
 
-	_, err = service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 2))
+	_, err = service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 2))
 	requireBrokerClosed(t, err)
 }
 
@@ -747,7 +747,7 @@ func TestServiceShutdownTerminatesOwnedWork(t *testing.T) {
 	service, err := authority.AdmitClient(context.Background())
 	require.NoError(t, err)
 
-	stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), 1))
+	stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), 1))
 	require.NoError(t, err)
 
 	// Broker shutdown cancels the connection root: owned streams end even before
@@ -1156,7 +1156,7 @@ func TestRegistryObservationDisabledDrainsWriter(t *testing.T) {
 }
 
 func TestServiceConfigValidation(t *testing.T) {
-	valid := serviceConfig{epoch: 1, id: ports.BrokerConnectionID{1}, previewID: ports.BrokerConnectionID{2}, registry: &Registry{}, pool: &Pool{}, supervisor: &Supervisor{}, lease: &Lease{}, clock: newManualClock(time.Unix(0, 0))}
+	valid := serviceConfig{epoch: 1, id: ports.BrokerConnectionID{1}, previewID: ports.BrokerConnectionID{2}, registry: &Registry{}, pool: &Pool{}, supervisor: &Supervisor{}, lease: &Lease{}, clock: newManualClock(time.Unix(0, 0)), codec: testSessionCodec{}}
 	tests := []struct {
 		name   string
 		mutate func(*serviceConfig)
@@ -1170,6 +1170,7 @@ func TestServiceConfigValidation(t *testing.T) {
 		{"nil supervisor", func(c *serviceConfig) { c.supervisor = nil }},
 		{"nil lease", func(c *serviceConfig) { c.lease = nil }},
 		{"nil clock", func(c *serviceConfig) { c.clock = nil }},
+		{"nil codec", func(c *serviceConfig) { c.codec = nil }},
 	}
 	require.NoError(t, valid.validate())
 	for _, tt := range tests {
@@ -1179,4 +1180,14 @@ func TestServiceConfigValidation(t *testing.T) {
 			require.Error(t, config.validate())
 		})
 	}
+}
+
+// testSessionCodec is used only for scripted preview streams; raw traffic is never decoded.
+type testSessionCodec struct{}
+
+func (testSessionCodec) Client(stream ports.BrokerEnvelopeStream) ports.ClientConnection {
+	if pooled, ok := stream.(*pooledStream); ok {
+		stream = pooled.BrokerEnvelopeStream
+	}
+	return stream.(*previewWatchConn)
 }

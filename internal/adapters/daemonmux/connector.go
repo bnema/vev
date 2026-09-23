@@ -305,7 +305,7 @@ func (c *PhysicalConnection) Policy() ports.BrokerPolicy {
 // the LogicalConnector. A policy that differs in any field is refused as a
 // conflicting policy without touching the carriage, so a physical connection
 // can never multiplex a stream under a policy it did not negotiate.
-func (c *PhysicalConnection) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (c *PhysicalConnection) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	if c == nil || c.logical == nil {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: ErrLogicalConfig}
 	}

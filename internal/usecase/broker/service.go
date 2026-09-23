@@ -12,7 +12,7 @@ import (
 // Offline broker composition.
 //
 // Authority admits one accepted client connection to the broker core and
-// returns the connection-scoped ports.BrokerService for exactly that
+// returns the connection-scoped ports.BrokerCoreService for exactly that
 // connection. It is the structural implementation of ports.BrokerAuthority,
 // the admission seam the broker IPC listener (internal/adapters/brokeripc)
 // consumes and which this use case must not import: admission obtains one
@@ -40,6 +40,7 @@ type Authority struct {
 	pool       *Pool
 	supervisor *Supervisor
 	clock      ports.Clock
+	codec      ports.SessionCodec
 }
 
 var _ ports.BrokerAuthority = (*Authority)(nil)
@@ -53,7 +54,7 @@ var _ ports.BrokerAuthority = (*Authority)(nil)
 // neither starts nor settles Run: serving connections without a live Run leaks
 // the writer and never flushes the newest staged publication, and a registry
 // that was never run leaves its durable writer undrained.
-func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, supervisor *Supervisor, clocks ...ports.Clock) (*Authority, error) {
+func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, supervisor *Supervisor, codec ports.SessionCodec, clocks ...ports.Clock) (*Authority, error) {
 	if epoch == 0 || nilDependency(registry) || nilDependency(pool) || nilDependency(supervisor) {
 		return nil, errors.New("broker: invalid authority dependencies")
 	}
@@ -64,10 +65,10 @@ func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, super
 	if len(clocks) > 0 {
 		clk = clocks[0]
 	}
-	if nilDependency(clk) {
+	if nilDependency(clk) || nilDependency(codec) {
 		return nil, errors.New("broker: invalid authority clock")
 	}
-	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor, clock: clk}, nil
+	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor, clock: clk, codec: codec}, nil
 }
 
 // AdmitClient admits exactly one accepted client connection. The supervisor
@@ -76,7 +77,7 @@ func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, super
 // commits both or neither. ctx bounds admission only and is never retained: the
 // returned service derives its own connection-lived context from the supervisor
 // root, so a caller's setup deadline cannot disturb an admitted connection.
-func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error) {
+func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -103,12 +104,12 @@ func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error
 	}
 	return newService(serviceConfig{
 		epoch: a.epoch, id: id, previewID: previewID, registry: a.registry,
-		pool: a.pool, supervisor: a.supervisor, lease: lease, clock: a.clock,
+		pool: a.pool, supervisor: a.supervisor, lease: lease, clock: a.clock, codec: a.codec,
 	}), nil
 }
 
 // Service is one admitted client connection: the core's service for exactly one
-// pool connection identity and broker epoch. It implements ports.BrokerService.
+// pool connection identity and broker epoch. It implements ports.BrokerCoreService.
 type Service struct {
 	epoch      ports.BrokerEpoch
 	id         ports.BrokerConnectionID
@@ -118,6 +119,7 @@ type Service struct {
 	supervisor *Supervisor
 	lease      *Lease
 	clock      ports.Clock
+	codec      ports.SessionCodec
 
 	// ctx owns everything this connection started: in-flight setup opens and
 	// live streams. It is derived from the supervisor root, never from the
@@ -154,7 +156,7 @@ type Service struct {
 	termErr  error
 }
 
-var _ ports.BrokerService = (*Service)(nil)
+var _ ports.BrokerCoreService = (*Service)(nil)
 
 type serviceConfig struct {
 	epoch         ports.BrokerEpoch
@@ -164,11 +166,12 @@ type serviceConfig struct {
 	supervisor    *Supervisor
 	lease         *Lease
 	clock         ports.Clock
+	codec         ports.SessionCodec
 }
 
 func (c serviceConfig) validate() error {
 	if c.epoch == 0 || c.id == (ports.BrokerConnectionID{}) || c.previewID == (ports.BrokerConnectionID{}) || c.id == c.previewID ||
-		nilDependency(c.registry) || nilDependency(c.pool) || nilDependency(c.supervisor) || nilDependency(c.lease) || nilDependency(c.clock) {
+		nilDependency(c.registry) || nilDependency(c.pool) || nilDependency(c.supervisor) || nilDependency(c.lease) || nilDependency(c.clock) || nilDependency(c.codec) {
 		return errors.New("broker: invalid service dependencies")
 	}
 	return nil
@@ -180,7 +183,7 @@ func newService(c serviceConfig) *Service {
 	}
 	ctx, cancel := context.WithCancel(c.supervisor.RootContext())
 	s := &Service{
-		epoch: c.epoch, id: c.id, previewID: c.previewID, registry: c.registry, pool: c.pool, supervisor: c.supervisor, lease: c.lease, clock: c.clock,
+		epoch: c.epoch, id: c.id, previewID: c.previewID, registry: c.registry, pool: c.pool, supervisor: c.supervisor, lease: c.lease, clock: c.clock, codec: c.codec,
 		ctx: ctx, cancel: cancel, subs: make(map[*serviceSubscription]struct{}),
 		done: make(chan struct{}),
 	}
@@ -284,7 +287,7 @@ func (s *Service) subscribe(demand bool) (ports.BrokerSubscription, error) {
 // the pool sees it, and one operation lease pins the broker only while setup is
 // in flight: a stream that opens successfully outlives its setup lease, and
 // Close or broker shutdown still aborts anything that has not finished.
-func (s *Service) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (s *Service) OpenEnvelopeStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	if err := s.scope(&request); err != nil {
 		return nil, err
 	}

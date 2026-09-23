@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/pty"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -134,9 +135,18 @@ func (f *realLocalDaemonFixture) openStream(t *testing.T, request ports.BrokerOp
 	}
 	stream, err := physical.OpenStream(ctx, request)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = stream.Close() })
-	return stream
+	typed := brokerLogicalView{ClientConnection: sessionwire.BrokerCodec{}.Client(stream), BrokerEnvelopeStream: stream}
+	t.Cleanup(func() { _ = typed.Close() })
+	return typed
 }
+
+// brokerLogicalView is the typed client view of one raw logical stream.
+type brokerLogicalView struct {
+	ports.ClientConnection
+	ports.BrokerEnvelopeStream
+}
+
+func (v brokerLogicalView) Close() error { return v.ClientConnection.Close() }
 
 // awaitWelcome receives server messages until the typed Welcome arrives.
 func awaitWelcome(t *testing.T, stream ports.BrokerLogicalConnection) protocol.Welcome {

@@ -9,16 +9,14 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 // Logical stream bridging.
 //
-// One brokerwire logical stream carries the typed session protocol between a
-// client and the daemon behind the broker. The broker terminates both hops: the
-// client's session connection is built by sessionwire over the stream's private
-// bounded byte pipe, and the admitted broker core hands back its own typed
-// connection to the daemon. Two relay goroutines carry typed messages between
-// them, so no session byte is ever reinterpreted here.
+// One brokerwire logical stream carries the session protocol between client
+// and daemon. The broker relays complete opaque envelope payloads through
+// bounded framed carriages; neither preamble nor session message is decoded.
 //
 // Identity and cancellation stay per stream: a stream the core loses, a stream
 // whose local consumer stalled, and a stream the peer closed each settle alone,
@@ -29,10 +27,9 @@ import (
 type serverStream struct {
 	session  *serverSession
 	id       ports.BrokerStreamID
-	core     ports.BrokerLogicalConnection
+	core     ports.BrokerEnvelopeStream
 	pipe     *streamPipe
 	carriage *carriage
-	wire     ports.ServerConnection
 
 	mu     sync.Mutex
 	closed bool
@@ -40,17 +37,13 @@ type serverStream struct {
 }
 
 // newServerStream builds one bridged stream over the admitted core connection.
-func newServerStream(s *serverSession, id ports.BrokerStreamID, core ports.BrokerLogicalConnection) (*serverStream, error) {
+func newServerStream(s *serverSession, id ports.BrokerStreamID, core ports.BrokerEnvelopeStream) (*serverStream, error) {
 	if s == nil || core == nil || id == 0 {
 		return nil, ErrConfig
 	}
 	st := &serverStream{session: s, id: id, core: core, done: make(chan struct{})}
 	st.pipe = newStreamPipe(s.cfg.StreamInboundChunks, s.cfg.StreamInboundBytes, st.sendChunk)
 	st.carriage = newCarriage(st.pipe)
-	st.wire = sessionwire.NewServerConnection(st.carriage)
-	if st.wire == nil {
-		return nil, ErrConfig
-	}
 	return st, nil
 }
 
@@ -85,34 +78,36 @@ func (st *serverStream) start() {
 	go st.watchCore()
 }
 
-// relayClient carries client-to-daemon messages from the wire session
-// connection to the admitted core connection.
+// relayClient carries complete client envelopes without decoding.
 func (st *serverStream) relayClient() {
 	defer st.session.wg.Done()
 	for {
-		message, err := st.wire.ReceiveClient()
+		envelope, err := st.carriage.RecvBounded(wire.AbsoluteEnvelopeLimit)
 		if err != nil {
 			st.fail(cancelOrCause(st.session.ctx, streamFailure(err)))
 			return
 		}
-		if err := st.core.SendClient(message); err != nil {
-			st.fail(err)
+		if err := st.core.SendEnvelope(envelope.Payload); err != nil {
+			st.fail(coreFailure(st.core, err))
 			return
 		}
 	}
 }
 
-// relayServer carries daemon-to-client messages from the admitted core
-// connection to the wire session connection.
+// relayServer carries complete daemon envelopes without decoding.
 func (st *serverStream) relayServer() {
 	defer st.session.wg.Done()
 	for {
-		message, err := st.core.ReceiveServer()
+		payload, err := st.core.RecvEnvelope()
 		if err != nil {
 			st.fail(coreFailure(st.core, err))
 			return
 		}
-		if err := st.wire.SendServer(message); err != nil {
+		if len(payload) == 0 || len(payload) > wire.AbsoluteEnvelopeLimit {
+			st.fail(ErrProtocol)
+			return
+		}
+		if err := st.carriage.Send(wire.Envelope{Payload: payload}); err != nil {
 			st.fail(streamFailure(err))
 			return
 		}
@@ -121,10 +116,10 @@ func (st *serverStream) relayServer() {
 
 // watchCore publishes the core connection's terminal outcome even when no read
 // is in flight. It settles the stream itself only for a failure: an orderly
-// core end (Err()==nil) is left to relayServer, whose own core.ReceiveServer()
+// core end (Err()==nil) is left to relayServer, whose own core.RecvEnvelope()
 // call observes the same terminal outcome right after forwarding any reply
 // that was already in flight, and settles the stream from there. Settling here
-// on every Done would race relayServer's in-flight wire.SendServer and could
+// on every Done would race relayServer's in-flight carriage.Send and could
 // close the carriage while a received reply is still being written out to the
 // client, discarding it.
 func (st *serverStream) watchCore() {
@@ -147,8 +142,7 @@ func (st *serverStream) fail(err error) {
 }
 
 // close releases the stream exactly once: the pipe unblocks a stalled reader,
-// the wire session connection releases the carriage, and the core connection is
-// closed. It reports whether this call was the one that settled the stream.
+// the carriage joins its writer, and the core connection closes.
 func (st *serverStream) close(cause error) bool {
 	if st == nil {
 		return false
@@ -161,7 +155,7 @@ func (st *serverStream) close(cause error) bool {
 	st.closed = true
 	st.mu.Unlock()
 	st.pipe.closeWith(cause)
-	_ = st.wire.Close()
+	_ = st.carriage.Close()
 	_ = st.core.Close()
 	close(st.done)
 	return true
@@ -178,7 +172,7 @@ func streamFailure(err error) error {
 
 // coreFailure classifies one core connection outcome. The core's typed terminal
 // error wins; an orderly end is a peer close.
-func coreFailure(core ports.BrokerLogicalConnection, err error) error {
+func coreFailure(core ports.BrokerEnvelopeStream, err error) error {
 	if err == nil && core != nil {
 		err = core.Err()
 	}
@@ -221,7 +215,7 @@ func (s *serverSession) startStream(m brokerwire.OpenStream) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		core, err := s.core.OpenStream(s.ctx, request)
+		core, err := s.core.OpenEnvelopeStream(s.ctx, request)
 		if err != nil {
 			_, _ = s.conn.CloseStream(m.Stream)
 			if sendErr := s.refuseStream(m.Stream, err); sendErr != nil {

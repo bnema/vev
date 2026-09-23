@@ -195,10 +195,10 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 	require.NoError(t, daemon.awaitAdoption(t))
 
 	// Two independent typed admissions over the one physical carriage.
-	first, err := physical.OpenStream(context.Background(), muxOpenRequest(1, policy))
+	first, err := openTyped(physical, context.Background(), muxOpenRequest(1, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
-	second, err := physical.OpenStream(context.Background(), muxOpenRequest(2, policy))
+	second, err := openTyped(physical, context.Background(), muxOpenRequest(2, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 	daemon.awaitQUICAccepted(t, 2)
@@ -219,7 +219,7 @@ func TestQUICCarriageSupervisorTwoThenHundredTypedAdmissions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			connections[i], openErrs[i] = physical.OpenStream(context.Background(), muxOpenRequest(uint64(3+i), policy))
+			connections[i], openErrs[i] = openTyped(physical, context.Background(), muxOpenRequest(uint64(3+i), policy))
 		}(i)
 	}
 	wg.Wait()
@@ -375,11 +375,11 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 
 	lost := make([]ports.BrokerLogicalConnection, 3)
 	for i := range lost {
-		lost[i], err = physicalA.OpenStream(context.Background(), muxOpenRequest(uint64(i+1), policy))
+		lost[i], err = openTyped(physicalA, context.Background(), muxOpenRequest(uint64(i+1), policy))
 		require.NoError(t, err, "stream %d", i+1)
 		t.Cleanup(func() { _ = lost[i].Close() })
 	}
-	survivor, err := physicalB.OpenStream(context.Background(), muxOpenRequest(1, policy))
+	survivor, err := openTyped(physicalB, context.Background(), muxOpenRequest(1, policy))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = survivor.Close() })
 	daemon.awaitQUICAccepted(t, 4)
@@ -429,7 +429,7 @@ func TestQUICCarriagePhysicalFailureFansOutAndIsIsolated(t *testing.T) {
 		"the lost QUIC physical child was never reaped")
 
 	// The lost physical refuses a fresh stream.
-	_, err = physicalA.OpenStream(context.Background(), muxOpenRequest(9, policy))
+	_, err = openTyped(physicalA, context.Background(), muxOpenRequest(9, policy))
 	require.Error(t, err)
 }
 
@@ -455,7 +455,7 @@ func TestQUICCarriageSetupContextDetachedFromPhysicalLifetime(t *testing.T) {
 
 	cancel()
 	require.False(t, channelClosed(physical.Done()))
-	logical, err := physical.OpenStream(context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = logical.Close() })
 	daemon.awaitQUICAccepted(t, 1)

@@ -110,7 +110,7 @@ func TestSessionCloseStreamFillsConnectionScope(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	opened, err := session.OpenStream(ctx, openRequest(1))
+	opened, err := session.OpenEnvelopeStream(ctx, openRequest(1))
 	require.NoError(t, err)
 	require.NotNil(t, opened)
 

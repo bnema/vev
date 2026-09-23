@@ -281,7 +281,7 @@ func (l *listener) classifyAdmissionFailure(err error) error {
 // credential, or an unsupported build) or a client that fails the preamble or
 // admission is isolated: that peer is dropped and the listener keeps serving.
 // The most recent refusal is available to diagnostics through refusal.
-func (l *listener) Accept() (ports.BrokerService, error) {
+func (l *listener) Accept() (ports.BrokerCoreService, error) {
 	if l == nil {
 		return nil, ErrListenerClosed
 	}
@@ -466,7 +466,7 @@ type serverSession struct {
 	epoch            ports.BrokerEpoch
 	scope            brokerwire.Scope
 	conn             *brokerwire.Connection
-	core             ports.BrokerService
+	core             ports.BrokerCoreService
 	transport        wire.BoundedTransport
 	ceilings         brokerwire.Ceilings
 	cfg              Config
@@ -513,7 +513,7 @@ type serverSession struct {
 	done     chan struct{}
 }
 
-var _ ports.BrokerService = (*serverSession)(nil)
+var _ ports.BrokerCoreService = (*serverSession)(nil)
 
 // registrationDeadline returns the absolute instant by which an accepted client
 // must send its Register: the accept-time handshake deadline that already
@@ -535,7 +535,7 @@ func registrationDeadline(ctx context.Context) time.Time {
 // registerDeadline is the absolute instant by which the client's Register must
 // arrive (the accept-time handshake deadline); the zero time disables the bound
 // and exists only for direct construction outside the listener.
-func newServerSession(epoch ports.BrokerEpoch, transport wire.BoundedTransport, ceilings brokerwire.Ceilings, core ports.BrokerService, cfg Config, release func(), registerDeadline time.Time) (*serverSession, error) {
+func newServerSession(epoch ports.BrokerEpoch, transport wire.BoundedTransport, ceilings brokerwire.Ceilings, core ports.BrokerCoreService, cfg Config, release func(), registerDeadline time.Time) (*serverSession, error) {
 	if epoch == 0 || transport == nil || core == nil {
 		return nil, ErrConfig
 	}
@@ -983,14 +983,14 @@ func (s *serverSession) SubscribePreview(request ports.BrokerPreviewRequest) (po
 // allocated (NextStreamID) and is transmitted unchanged: this listener never
 // re-allocates a wire identity, whether the request arrives over the wire or
 // through this in-process delegate.
-func (s *serverSession) OpenStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (s *serverSession) OpenEnvelopeStream(ctx context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	if err := s.checkRequestScope(request.Epoch, request.Connection); err != nil {
 		return nil, err
 	}
 	scoped := request
 	scoped.Epoch = s.epoch
 	scoped.Connection = s.scope.Connection
-	return s.core.OpenStream(ctx, scoped)
+	return s.core.OpenEnvelopeStream(ctx, scoped)
 }
 
 // CloseStream retires one scope-checked stream. An absent connection identity is

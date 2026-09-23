@@ -28,7 +28,7 @@ func TestPoolAdapterFailures(t *testing.T) {
 					if stage == "connector" {
 						return nil, tc.err
 					}
-					return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+					return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 						return nil, tc.err
 					}}, nil
 				})
@@ -52,7 +52,7 @@ func TestPoolRejectedPaths(t *testing.T) {
 	for _, name := range []string{"closed", "epoch", "invalid endpoint", "nil raw", "retiring"} {
 		t.Run(name, func(t *testing.T) {
 			p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-				return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 					return nil, nil
 				}}, nil
 			})
@@ -125,7 +125,7 @@ func TestPoolPostOpenPhysicalLoss(t *testing.T) {
 	raw := newFakeLogical()
 	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 		f := &fakePhysical{endpoint: e, done: make(chan struct{})}
-		f.open = func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		f.open = func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 			_ = f.Close()
 			return raw, nil
 		}
@@ -209,7 +209,7 @@ func (l *closeErrorLogical) Close() error { _ = l.fakeLogical.Close(); return l.
 func TestPooledStreamPreservesCloseError(t *testing.T) {
 	cause := errors.New("close failed")
 	calls := 0
-	s := &pooledStream{BrokerLogicalConnection: &closeErrorLogical{newFakeLogical(), cause}, done: make(chan struct{}), release: func() { calls++ }}
+	s := &pooledStream{BrokerEnvelopeStream: &closeErrorLogical{newFakeLogical(), cause}, done: make(chan struct{}), release: func() { calls++ }}
 	require.ErrorIs(t, s.Close(), cause)
 	require.ErrorIs(t, s.Close(), cause)
 	require.Equal(t, 1, calls)

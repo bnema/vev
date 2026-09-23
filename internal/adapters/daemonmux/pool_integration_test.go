@@ -75,12 +75,12 @@ func TestPoolSharesCompatibleAliasesOverOnePhysical(t *testing.T) {
 	client, err := pool.RegisterClient()
 	require.NoError(t, err)
 
-	first, err := pool.OpenStream(context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
+	first, err := openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
 	require.NoError(t, err)
 	require.NotNil(t, first)
 	t.Cleanup(func() { _ = first.Close() })
 
-	second, err := pool.OpenStream(context.Background(), p3cRemoteRequest(client, "aliasB@host:22", 2, policy))
+	second, err := openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasB@host:22", 2, policy))
 	require.NoError(t, err)
 	require.NotNil(t, second)
 	t.Cleanup(func() { _ = second.Close() })
@@ -114,7 +114,7 @@ func TestPoolRefusesConflictingPolicyWithoutDial(t *testing.T) {
 
 	client, err := pool.RegisterClient()
 	require.NoError(t, err)
-	_, err = pool.OpenStream(context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, alternatePolicy(binding.Policy())))
+	_, err = openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, alternatePolicy(binding.Policy())))
 	require.Error(t, err)
 	var typed ports.BrokerError
 	require.ErrorAs(t, err, &typed)
@@ -142,7 +142,7 @@ func TestPoolSurfacesPhysicalLossPerStream(t *testing.T) {
 
 	client, err := pool.RegisterClient()
 	require.NoError(t, err)
-	stream, err := pool.OpenStream(context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
+	stream, err := openTyped(pool, context.Background(), p3cRemoteRequest(client, "aliasA@host:22", 1, policy))
 	require.NoError(t, err)
 	server.awaitAccepted(t, 1)
 

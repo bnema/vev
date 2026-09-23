@@ -36,16 +36,16 @@ func (f poolConnector) Connect(c context.Context, r ports.BrokerDialTarget) (por
 }
 
 type fakeLogical struct {
-	ports.ClientConnection
 	done chan struct{}
 	once sync.Once
 }
 
-func newFakeLogical() *fakeLogical                             { return &fakeLogical{done: make(chan struct{})} }
-func (f *fakeLogical) Done() <-chan struct{}                   { return f.done }
-func (f *fakeLogical) Err() error                              { return nil }
-func (f *fakeLogical) Close() error                            { f.once.Do(func() { close(f.done) }); return nil }
-func (f *fakeLogical) SendClient(protocol.ClientMessage) error { <-f.done; return errors.New("closed") }
+func newFakeLogical() *fakeLogical                   { return &fakeLogical{done: make(chan struct{})} }
+func (f *fakeLogical) Done() <-chan struct{}         { return f.done }
+func (f *fakeLogical) Err() error                    { return nil }
+func (f *fakeLogical) Close() error                  { f.once.Do(func() { close(f.done) }); return nil }
+func (f *fakeLogical) SendEnvelope([]byte) error     { <-f.done; return errors.New("closed") }
+func (f *fakeLogical) RecvEnvelope() ([]byte, error) { <-f.done; return nil, errors.New("closed") }
 
 type fakePhysical struct {
 	endpoint ports.BrokerDialTarget
@@ -54,7 +54,7 @@ type fakePhysical struct {
 	identity ports.BrokerDaemonIdentity
 	done     chan struct{}
 	once     sync.Once
-	open     func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error)
+	open     func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error)
 }
 
 func (f *fakePhysical) Identity() ports.BrokerDaemonIdentity {
@@ -71,7 +71,7 @@ func (f *fakePhysical) FailureKind() domain.RemoteFailureKind { return domain.Re
 func (f *fakePhysical) Done() <-chan struct{}                 { return f.done }
 func (f *fakePhysical) Err() error                            { return errors.New("physical loss") }
 func (f *fakePhysical) Close() error                          { f.once.Do(func() { close(f.done) }); return nil }
-func (f *fakePhysical) OpenStream(c context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (f *fakePhysical) OpenStream(c context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	if f.open != nil {
 		return f.open(c, r)
 	}
@@ -140,7 +140,7 @@ func TestPoolOpenFailureWithTypedNilConnection(t *testing.T) {
 		return &fakePhysical{
 			endpoint: e,
 			done:     make(chan struct{}),
-			open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+			open: func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 				var absent *fakeLogical
 				return absent, errors.New("open failed")
 			},
@@ -164,7 +164,7 @@ func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 		physical = &fakePhysical{endpoint: e, done: make(chan struct{})}
 		return physical, nil
 	})
-	streams := make([]ports.BrokerLogicalConnection, 100)
+	streams := make([]ports.BrokerEnvelopeStream, 100)
 	var wg sync.WaitGroup
 	for i := range streams {
 		id, err := p.RegisterClient()
@@ -183,7 +183,7 @@ func TestPoolHundredStreamsLossAndIsolation(t *testing.T) {
 	wg.Wait()
 	require.EqualValues(t, 1, calls.Load())
 	blocked := make(chan struct{})
-	go func() { _ = streams[0].SendClient(nil); close(blocked) }()
+	go func() { _ = streams[0].SendEnvelope(nil); close(blocked) }()
 	require.NoError(t, streams[0].Close())
 	await(t, blocked)
 	select {
@@ -336,7 +336,7 @@ func TestPoolCoalescedCancellation(t *testing.T) {
 	result := make(chan error, 1)
 	go func() { _, err := p.OpenStream(ctx, poolRequest(id1, 1)); result <- err }()
 	await(t, entered)
-	result2 := make(chan ports.BrokerLogicalConnection, 1)
+	result2 := make(chan ports.BrokerEnvelopeStream, 1)
 	go func() {
 		s, err := p.OpenStream(context.Background(), poolRequest(id2, 1))
 		if err != nil {
@@ -475,7 +475,7 @@ func TestPoolAliasesAndPolicyPartition(t *testing.T) {
 func TestPoolPendingOpenCancellationDoesNotHoldLock(t *testing.T) {
 	entered := make(chan struct{})
 	p, _ := setupPool(t, func(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
-		return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(ctx context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(ctx context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 			if r.Stream == 1 {
 				close(entered)
 				<-ctx.Done()

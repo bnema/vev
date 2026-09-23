@@ -1,12 +1,8 @@
-// Typed logical connections over one physical Pump.
+// Logical connections over one physical Pump.
 //
-// A LogicalConnection is one independently cancellable typed session stream
-// multiplexed over one physical daemonmux Pump. It implements
-// ports.BrokerLogicalConnection by embedding the typed ports.ClientConnection
-// that sessionwire builds on top of the mux stream, so the typed session
-// protocol (4-byte framed Protobuf envelopes, the session preamble, and every
-// semantic conversion) is reused verbatim: daemonmux never reinterprets a
-// session message.
+// A LogicalConnection carries complete raw session envelopes across the broker,
+// without decoding them. Typed preview and observation are adapted by their
+// consumers, never by this mux connection.
 //
 // The carriage between the two is a private, ordered, bounded byte stream
 // (muxStreamPipe). Its read side pulls already-queued chunks from the pump
@@ -24,10 +20,6 @@
 // resets exactly that stream (one mux Reset) and leaves every sibling and the
 // physical connection untouched. Done, Err, and a physical-loss
 // ports.BrokerStreamLost are published once and stay stable afterwards.
-//
-// The narrow HandshakePlumbing seam exposes the accepted absolute 15 s
-// handshake deadline and a completion hook from the wrapped session
-// connection without changing ports or the daemon.
 package daemonmux
 
 import (
@@ -35,13 +27,10 @@ import (
 	"errors"
 	"io"
 	"sync"
-	"time"
 
-	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/streamframe"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
 
@@ -241,13 +230,9 @@ func discardQueuedInbound(pump *Pump, physical PhysicalStreamID) {
 	}
 }
 
-// LogicalConnection is one typed client-side logical stream over a physical
-// Pump. It implements ports.BrokerLogicalConnection: the embedded typed
-// ports.ClientConnection carries the session protocol, while Close, Done, and
-// Err add the stream lifecycle. It is safe for concurrent use.
+// LogicalConnection is one client-side logical stream over a physical Pump.
+// It implements the raw envelope port; Close, Done and Err manage its lifetime.
 type LogicalConnection struct {
-	ports.ClientConnection
-
 	pump   *Pump
 	ref    StreamRef
 	pipe   *muxStreamPipe
@@ -258,22 +243,16 @@ type LogicalConnection struct {
 	// keeps its exact cause even after the record is evicted.
 	cause *terminalState
 
-	terminal *terminalState
-	// plumbing is the wrapped session connection's handshake seam, resolved
-	// once at construction; nil when the wrapped connection lacks it.
-	plumbing HandshakePlumbing
-	// deadline is the exact absolute handshake deadline of the wrapped session
-	// connection, resolved once at construction.
-	deadline  time.Time
+	terminal  *terminalState
 	watchDone chan struct{}
 	closeOnce sync.Once
 	closeErr  error
 }
 
-var _ ports.BrokerLogicalConnection = (*LogicalConnection)(nil)
+var _ ports.BrokerEnvelopeStream = (*LogicalConnection)(nil)
 
-// newLogicalConnection builds the typed session channel over one confirmed
-// open stream and starts the terminal watcher. It never blocks. cause is the
+// newLogicalConnection builds the framed carriage over one confirmed open
+// stream and starts the terminal watcher. It never blocks. cause is the
 // stream's retained terminal authority, captured at open so the connection
 // reports its exact outcome independent of the engine's bounded record.
 func newLogicalConnection(pump *Pump, ref StreamRef, streamDone <-chan struct{}, cause *terminalState) *LogicalConnection {
@@ -281,21 +260,14 @@ func newLogicalConnection(pump *Pump, ref StreamRef, streamDone <-chan struct{},
 	pipe := newMuxStreamPipe(pump, ref.Physical, limit, streamDone)
 	raw := newMuxTransport(pipe)
 	connection := &LogicalConnection{
-		ClientConnection: sessionwire.NewClientConnection(raw),
-		pump:             pump,
-		ref:              ref,
-		pipe:             pipe,
-		raw:              raw,
-		stream:           streamDone,
-		cause:            cause,
-		terminal:         newTerminalState(),
-		watchDone:        make(chan struct{}),
-	}
-	if plumbing, ok := connection.ClientConnection.(HandshakePlumbing); ok {
-		connection.plumbing = plumbing
-		connection.deadline = plumbing.HandshakeDeadline()
-	} else {
-		connection.deadline = time.Now().Add(protocol.HandshakeTimeout)
+		pump:      pump,
+		ref:       ref,
+		pipe:      pipe,
+		raw:       raw,
+		stream:    streamDone,
+		cause:     cause,
+		terminal:  newTerminalState(),
+		watchDone: make(chan struct{}),
 	}
 	go connection.watch()
 	return connection
@@ -303,25 +275,6 @@ func newLogicalConnection(pump *Pump, ref StreamRef, streamDone <-chan struct{},
 
 // Ref returns the complete stream reference recorded at admission.
 func (c *LogicalConnection) Ref() StreamRef { return c.ref }
-
-// HandshakeDeadline returns the accepted absolute local deadline of the
-// session handshake, plumbing the exact 15 s deadline the wrapped session
-// connection started with. It is resolved once at construction and stable for
-// the connection's lifetime.
-func (c *LogicalConnection) HandshakeDeadline() time.Time { return c.deadline }
-
-// OnHandshakeComplete registers fn to run exactly once when the session
-// handshake completes, plumbing the wrapped session connection's completion
-// hook. Registering after completion runs fn immediately.
-func (c *LogicalConnection) OnHandshakeComplete(fn func()) {
-	if c.plumbing != nil {
-		c.plumbing.OnHandshakeComplete(fn)
-		return
-	}
-	if fn != nil {
-		fn()
-	}
-}
 
 // Done returns the logical terminal channel independent of reads. It closes
 // exactly once, before Err becomes stable.
@@ -335,39 +288,26 @@ func (c *LogicalConnection) Err() error { return c.terminal.Err() }
 // FailureKind classifies Err. It is None while open and for an orderly Close.
 func (c *LogicalConnection) FailureKind() domain.RemoteFailureKind { return c.terminal.FailureKind() }
 
-// SendClient sends one typed client message over the logical stream. It
-// classifies a terminal transport failure and otherwise returns the session
-// error verbatim.
-func (c *LogicalConnection) SendClient(message protocol.ClientMessage) error {
+func (c *LogicalConnection) SendEnvelope(payload []byte) error {
 	if c.settled() {
 		return c.terminalError()
 	}
-	if err := c.ClientConnection.SendClient(message); err != nil {
-		if c.settled() {
-			return c.terminalError()
-		}
-		return err
+	if len(payload) > wire.AbsoluteEnvelopeLimit {
+		return streamframe.ErrTooLarge
 	}
-	return nil
+	return c.raw.Send(wire.Envelope{Payload: payload})
 }
 
-// ReceiveServer receives one typed server message. An orderly end of the inner
-// stream returns io.EOF; any other inner-stream error is treated as a
-// malformed session frame: exactly this stream is reset towards the peer, its
-// terminal outcome is published, and the error is returned.
-func (c *LogicalConnection) ReceiveServer() (protocol.ServerMessage, error) {
-	if c.settled() {
-		return nil, c.terminalError()
+func (c *LogicalConnection) RecvEnvelope() ([]byte, error) {
+	envelope, err := c.raw.Recv()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			c.syncFromEngine()
+			return nil, c.terminalError()
+		}
+		return nil, c.abortMalformed(err)
 	}
-	message, err := c.ClientConnection.ReceiveServer()
-	if err == nil {
-		return message, nil
-	}
-	if errors.Is(err, io.EOF) {
-		c.syncFromEngine()
-		return nil, c.terminalError()
-	}
-	return nil, c.abortMalformed(err)
+	return envelope.Payload, nil
 }
 
 // Close independently closes the logical stream: it discards the inbound
@@ -660,8 +600,7 @@ func (s *muxStreamPipe) Close() error {
 }
 
 // muxTransport adapts the ordered byte stream to wire.Transport: streamframe
-// owns the 4-byte length framing, and sessionwire owns the typed conversion on
-// top. Closing it closes the byte stream and joins streamframe's writer.
+// owns the 4-byte length framing, and sessionwire owns any typed conversion at the consuming endpoint. Closing it closes the byte stream and joins streamframe's writer.
 type muxTransport struct {
 	pipe   *muxStreamPipe
 	framer *streamframe.Framer

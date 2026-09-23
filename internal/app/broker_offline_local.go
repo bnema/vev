@@ -7,6 +7,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/broker"
@@ -60,6 +61,7 @@ type localRouteProbe struct {
 	loadIdentity localIdentityLoader
 	connector    ports.BrokerEndpointConnector
 	shared       pooledPhysicals
+	codec        ports.SessionCodec
 }
 
 var _ broker.LocalProbe = (*localRouteProbe)(nil)
@@ -87,7 +89,7 @@ func newDynamicLocalRouteProbe(route brokerconfig.Route, policy ports.BrokerPoli
 	if err := policy.Validate(); err != nil {
 		return nil, fmt.Errorf("vev: broker local probe: %w", err)
 	}
-	return &localRouteProbe{epoch: epoch, route: route, policy: policy, loadIdentity: loadIdentity, connector: connector}, nil
+	return &localRouteProbe{epoch: epoch, route: route, policy: policy, loadIdentity: loadIdentity, connector: connector, codec: sessionwire.BrokerCodec{}}, nil
 }
 
 // ProbeLocal observes the local daemon by authenticating the daemonmux physical
@@ -127,7 +129,7 @@ func (p *localRouteProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObs
 	if err != nil {
 		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
 	}
-	if observation, handled, err := p.shared.observe(ctx, identity, p.policy, request); handled {
+	if observation, handled, err := p.shared.observe(ctx, identity, p.policy, request, p.codec); handled {
 		if err != nil {
 			return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
 		}
@@ -144,7 +146,7 @@ func (p *localRouteProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObs
 	if physical.Identity() != endpoint.ExpectedIdentity.Identity || !physical.Policy().Compatible(endpoint.Policy) {
 		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, errors.New("vev: broker local probe authenticated binding mismatch")
 	}
-	observation, err := observeDaemonCatalogue(ctx, physical, request)
+	observation, err := observeDaemonCatalogue(ctx, physical, request, p.codec)
 	if err != nil {
 		return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}, err
 	}

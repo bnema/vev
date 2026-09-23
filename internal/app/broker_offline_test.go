@@ -142,9 +142,9 @@ func awaitSandboxCancel(t *testing.T, cancel context.CancelFunc, done <-chan err
 // fixed terminal error, so a test can drive the accept drain without a carriage.
 type fatalListener struct{ err error }
 
-func (l fatalListener) Accept() (ports.BrokerService, error) { return nil, l.err }
-func (l fatalListener) Close() error                         { return nil }
-func (l fatalListener) Addr() string                         { return "fatal" }
+func (l fatalListener) Accept() (ports.BrokerCoreService, error) { return nil, l.err }
+func (l fatalListener) Close() error                             { return nil }
+func (l fatalListener) Addr() string                             { return "fatal" }
 
 // TestDrainBrokerAcceptClassifiesTerminalFailure proves the drain treats a
 // listener close as an orderly end with no log and no failure signal, while any
@@ -367,7 +367,7 @@ type wedgedListener struct {
 	closed atomic.Bool
 }
 
-func (l *wedgedListener) Accept() (ports.BrokerService, error) { return nil, l.err }
+func (l *wedgedListener) Accept() (ports.BrokerCoreService, error) { return nil, l.err }
 func (l *wedgedListener) Close() error {
 	l.closed.Store(true)
 	return nil

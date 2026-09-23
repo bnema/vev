@@ -1,6 +1,7 @@
 package brokeripc
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -72,7 +74,7 @@ func attachmentRequest(stream ports.BrokerStreamID, admission ports.BrokerStream
 
 // nextStreamID reads one fresh identity from the service's only allocator,
 // exactly as the composed supervisor and broker operations do.
-func nextStreamID(t *testing.T, service ports.BrokerService) ports.BrokerStreamID {
+func nextStreamID(t *testing.T, service ports.BrokerSession) ports.BrokerStreamID {
 	t.Helper()
 	stream, err := service.NextStreamID()
 	require.NoError(t, err)
@@ -87,14 +89,14 @@ const membershipProbeEndpoint = "probe@host:22"
 // membership round trip after a stream-local or subscriber-local event: the
 // probe adds one host through the same delegated path a real caller uses and
 // asserts the registration comes back for exactly the requested endpoint.
-func requireConnectionDelegates(t *testing.T, service ports.BrokerService) {
+func requireConnectionDelegates(t *testing.T, service ports.BrokerSession) {
 	t.Helper()
 	require.NoError(t, connectionDelegates(context.Background(), service))
 }
 
 // connectionDelegates is the error-returning form of requireConnectionDelegates,
 // safe to call from a test goroutine where FailNow is not.
-func connectionDelegates(ctx context.Context, service ports.BrokerService) error {
+func connectionDelegates(ctx context.Context, service ports.BrokerSession) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	registration, err := service.AddHost(ctx, membershipProbeEndpoint, testPolicy())
@@ -284,22 +286,38 @@ func (s *fakeSubscription) notify() {
 type fakeLogicalConn struct {
 	fromClient chan protocol.ClientMessage
 	toClient   chan protocol.ServerMessage
-	done       chan struct{}
-	once       sync.Once
-	mu         sync.Mutex
-	err        error
-	closed     bool
+	// preamble carries the canned session preamble acceptance: the raw relay
+	// forwards the client's preamble request like any other envelope.
+	preamble chan []byte
+	done     chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	err      error
+	closed   bool
 }
 
 func newFakeLogicalConn() *fakeLogicalConn {
 	return &fakeLogicalConn{
 		fromClient: make(chan protocol.ClientMessage, 64),
 		toClient:   make(chan protocol.ServerMessage, 64),
+		preamble:   make(chan []byte, 1),
 		done:       make(chan struct{}),
 	}
 }
 
-func (c *fakeLogicalConn) SendClient(message protocol.ClientMessage) error {
+func (c *fakeLogicalConn) SendEnvelope(payload []byte) error {
+	if request, err := sessionwire.EncodePreambleRequestForTest(); err == nil && bytes.Equal(payload, request) {
+		response, err := sessionwire.EncodePreambleResponseForTest()
+		if err != nil {
+			return err
+		}
+		c.preamble <- response
+		return nil
+	}
+	message, err := sessionwire.DecodeClientEnvelope(payload)
+	if err != nil {
+		return err
+	}
 	select {
 	case c.fromClient <- message:
 		return nil
@@ -308,20 +326,24 @@ func (c *fakeLogicalConn) SendClient(message protocol.ClientMessage) error {
 	}
 }
 
-func (c *fakeLogicalConn) ReceiveServer() (protocol.ServerMessage, error) {
+func (c *fakeLogicalConn) RecvEnvelope() ([]byte, error) {
 	// A message already queued when Close ran must still be observed first: a
 	// real carriage never reports the connection done before a message the peer
 	// sent ahead of an orderly close has been delivered. Draining non-blocking
 	// before the select keeps that ordering deterministic instead of racing a
 	// buffered send against an already-closed done channel.
 	select {
+	case response := <-c.preamble:
+		return response, nil
 	case message := <-c.toClient:
-		return message, nil
+		return sessionwire.EncodeServerMessage(message)
 	default:
 	}
 	select {
+	case response := <-c.preamble:
+		return response, nil
 	case message := <-c.toClient:
-		return message, nil
+		return sessionwire.EncodeServerMessage(message)
 	case <-c.done:
 		if err := c.Err(); err != nil {
 			return nil, err
@@ -487,7 +509,7 @@ func (c *fakeCore) SubscribePreview(ports.BrokerPreviewRequest) (ports.BrokerPre
 	return newFakePreviewSubscription(), nil
 }
 
-func (c *fakeCore) OpenStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+func (c *fakeCore) OpenEnvelopeStream(_ context.Context, request ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.openErr != nil {
@@ -721,7 +743,7 @@ func newFakeAuthority(epoch ports.BrokerEpoch, snapshot ports.BrokerSnapshot) *f
 	return &fakeAuthority{hub: newSnapshotHub(snapshot), epoch: epoch}
 }
 
-func (a *fakeAuthority) AdmitClient(ctx context.Context) (ports.BrokerService, error) {
+func (a *fakeAuthority) AdmitClient(ctx context.Context) (ports.BrokerCoreService, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -770,10 +792,10 @@ func startEndpoint(t *testing.T, cfg Config) *endpoint {
 }
 
 // accept returns the next admitted session.
-func (e *endpoint) accept() ports.BrokerService {
+func (e *endpoint) accept() ports.BrokerCoreService {
 	e.t.Helper()
 	type result struct {
-		service ports.BrokerService
+		service ports.BrokerCoreService
 		err     error
 	}
 	out := make(chan result, 1)
@@ -807,7 +829,7 @@ func (e *endpoint) dialWith(cfg Config) ports.BrokerService {
 }
 
 // pair dials one client and accepts its session.
-func (e *endpoint) pair() (ports.BrokerService, ports.BrokerService) {
+func (e *endpoint) pair() (ports.BrokerService, ports.BrokerCoreService) {
 	e.t.Helper()
 	client := e.dial()
 	session := e.accept()

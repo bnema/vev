@@ -58,6 +58,8 @@ func (c *previewWatchConn) Capabilities() protocol.ConnectionCapabilities {
 }
 func (c *previewWatchConn) LinkState() ports.LinkState         { return ports.LinkStateConnected }
 func (c *previewWatchConn) LinkEvents() <-chan ports.LinkEvent { return nil }
+func (c *previewWatchConn) SendEnvelope([]byte) error          { return nil }
+func (c *previewWatchConn) RecvEnvelope() ([]byte, error)      { <-c.done; return nil, errors.New("closed") }
 func (c *previewWatchConn) Done() <-chan struct{}              { return c.done }
 func (c *previewWatchConn) Err() error                         { return nil }
 func (c *previewWatchConn) Close() error {
@@ -80,7 +82,7 @@ type previewTestConnector struct {
 
 func (c *previewTestConnector) Connect(_ context.Context, e ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
 	if c.scripted == nil {
-		c.scripted = &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		c.scripted = &fakePhysical{endpoint: e, done: make(chan struct{}), open: func(_ context.Context, r ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error) {
 			conn := newPreviewWatchConn(r.Stream)
 			c.opened <- conn
 			return conn, nil
@@ -96,7 +98,7 @@ func previewTarget(lifecycle byte, tab string) domain.RemoteSessionTarget {
 	}
 }
 
-func previewRequestFor(service ports.BrokerService, generation ports.BrokerPreviewGeneration, target domain.RemoteSessionTarget) ports.BrokerPreviewRequest {
+func previewRequestFor(service ports.BrokerCoreService, generation ports.BrokerPreviewGeneration, target domain.RemoteSessionTarget) ports.BrokerPreviewRequest {
 	return ports.BrokerPreviewRequest{
 		Epoch: 1, Connection: service.ConnectionID(), Generation: generation,
 		Route:   ports.BrokerPreviewRoute{Local: true, Policy: poolPolicy()},
@@ -110,7 +112,7 @@ func previewAnswer(lifecycle byte, tab string, width, height int) protocol.Remot
 
 type previewFixture struct {
 	t         *testing.T
-	service   ports.BrokerService
+	service   ports.BrokerCoreService
 	sub       ports.BrokerPreviewSubscription
 	connector *previewTestConnector
 	clock     *manualClock
@@ -125,6 +127,7 @@ func newPreviewFixture(t *testing.T, target domain.RemoteSessionTarget) *preview
 	registry, err := NewRegistryWithConfig(1, newTestStore(), nil, clock, nil, RegistryConfig{ObservationDisabled: true})
 	require.NoError(t, err)
 	authority, _, _, _ := composeTestAuthority(t, 1, registry, connector.Connect, clock)
+	authority.codec = testSessionCodec{}
 	service, err := authority.AdmitClient(context.Background())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
@@ -197,7 +200,7 @@ func TestServicePreviewStreamIDsDoNotConsumeClientIDs(t *testing.T) {
 				id, err := service.NextStreamID()
 				require.NoError(t, err)
 				require.Equal(t, want, id)
-				stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
+				stream, err := service.OpenEnvelopeStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
 				require.NoError(t, err)
 				t.Cleanup(func() { require.NoError(t, stream.Close()) })
 			}

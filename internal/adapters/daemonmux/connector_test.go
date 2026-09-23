@@ -292,7 +292,7 @@ func TestEndpointConnectorExposesAuthorityAndPolicyGuard(t *testing.T) {
 	require.Equal(t, domain.RemoteFailureNone, physical.FailureKind())
 
 	// A mismatched request policy is refused before the wire is touched.
-	_, err = physical.OpenStream(context.Background(), muxOpenRequest(1, alternatePolicy(binding.Policy())))
+	_, err = openTyped(physical, context.Background(), muxOpenRequest(1, alternatePolicy(binding.Policy())))
 	require.Error(t, err)
 	var typed ports.BrokerError
 	require.ErrorAs(t, err, &typed)
@@ -300,7 +300,7 @@ func TestEndpointConnectorExposesAuthorityAndPolicyGuard(t *testing.T) {
 	require.Zero(t, server.acceptedCount(), "a policy-mismatched open is never admitted")
 
 	// The matching open is admitted and usable over the real carriage.
-	logical, err := physical.OpenStream(context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	server.awaitAccepted(t, 1)
 	require.NoError(t, logical.SendClient(protocol.Ping{}))
@@ -334,7 +334,7 @@ func TestEndpointConnectorDetachesSetupContext(t *testing.T) {
 	cancel()
 	// The setup context ended; the pooled connection must still work.
 	require.False(t, channelClosed(physical.Done()))
-	logical, err := physical.OpenStream(context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	server.awaitAccepted(t, 1)
 	require.NoError(t, logical.SendClient(protocol.Ping{}))
@@ -360,7 +360,7 @@ func TestPhysicalDoneBeforeLogicalLoss(t *testing.T) {
 	t.Cleanup(func() { _ = physical.Close() })
 	require.NoError(t, server.awaitAdoption(t))
 
-	logical, err := physical.OpenStream(context.Background(), muxOpenRequest(1, binding.Policy()))
+	logical, err := openTyped(physical, context.Background(), muxOpenRequest(1, binding.Policy()))
 	require.NoError(t, err)
 	server.awaitAccepted(t, 1)
 	require.False(t, channelClosed(physical.Done()))

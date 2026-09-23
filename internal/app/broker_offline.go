@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
@@ -317,7 +318,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err != nil {
 		return err
 	}
-	remoteProbe := &brokerRemoteProbe{epoch: epoch, routes: resolver, connector: connector}
+	remoteProbe := &brokerRemoteProbe{epoch: epoch, routes: resolver, connector: connector, codec: sessionwire.BrokerCodec{}}
 	registry, err := broker.NewRegistryWithConfig(epoch, store, remoteProbe, clk, log, registryConfig)
 	if err != nil {
 		return err
@@ -345,7 +346,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err := supervisor.RegisterCloseable("pool", pool); err != nil {
 		return err
 	}
-	authority, err := broker.NewAuthority(epoch, registry, pool, supervisor)
+	authority, err := broker.NewAuthority(epoch, registry, pool, supervisor, sessionwire.BrokerCodec{})
 	if err != nil {
 		return err
 	}

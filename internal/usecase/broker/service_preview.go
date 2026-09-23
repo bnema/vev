@@ -199,7 +199,7 @@ func (p *servicePreviewSubscription) watch() (reopen, delivered bool) {
 		interval = previewLocalInterval
 	}
 	route, err := p.service.previewStreamRequest(p.request.Route)
-	var stream ports.BrokerLogicalConnection
+	var stream ports.BrokerEnvelopeStream
 	if err == nil {
 		stream, err = p.service.pool.OpenStream(p.ctx, route)
 	}
@@ -209,7 +209,8 @@ func (p *servicePreviewSubscription) watch() (reopen, delivered bool) {
 	defer func() { _ = stream.Close() }()
 	stop := context.AfterFunc(p.ctx, func() { _ = stream.Close() })
 	defer stop()
-	if err := stream.SendClient(protocol.RemotePreviewWatch{Request: p.request.Preview, MinInterval: interval}); err != nil {
+	typed := p.service.codec.Client(stream)
+	if err := typed.SendClient(protocol.RemotePreviewWatch{Request: p.request.Preview, MinInterval: interval}); err != nil {
 		return p.fail(err), false
 	}
 
@@ -232,7 +233,7 @@ func (p *servicePreviewSubscription) watch() (reopen, delivered bool) {
 	defer func() { markFirst(); <-deadlineDone }()
 
 	for {
-		message, err := stream.ReceiveServer()
+		message, err := typed.ReceiveServer()
 		if err != nil {
 			return p.fail(err), delivered
 		}
