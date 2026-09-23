@@ -268,6 +268,9 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 				var pending client.InitialNavigationNotObserved
 				require.ErrorAs(t, resolveErr, &pending)
 				require.Equal(t, "user@example.com", pending.Endpoint, "the wait names the endpoint to reconcile")
+				require.Equal(t, client.InitialNavigationCreateNamed, pending.Fallback.Kind, "an unobservable host still falls back to creation")
+				require.Equal(t, tt.options.session, pending.Fallback.Name)
+				require.NoError(t, pending.Fallback.Validate())
 				return
 			}
 			require.NoError(t, resolveErr)

@@ -455,7 +455,8 @@ func remoteNamedCreateResolver(endpoint, name string) client.InitialNavigationRe
 // attach when the endpoint's committed observation carries it, and to a named
 // creation fenced to the same registration once an inventory observed at or
 // after requestedAt proves it absent. Before such an observation it asks the
-// supervisor to request one and resolve again. An endpoint the broker does not
+// supervisor to request one and resolve again, with the creation as the
+// fallback should the host stay unobserved. An endpoint the broker does not
 // carry is refused rather than dialed.
 func remoteAttachOrCreateResolver(endpoint, name string, requestedAt time.Time) client.InitialNavigationResolver {
 	attach := remoteExactAttachResolver(endpoint, name)
@@ -469,7 +470,13 @@ func remoteAttachOrCreateResolver(endpoint, name string, requestedAt time.Time) 
 			return attach(snapshot)
 		}
 		if !observation.InventoryKnown || observation.LastSuccess.Before(requestedAt) {
-			return client.InitialNavigation{}, client.InitialNavigationNotObserved{Endpoint: endpoint}
+			// Should the host stay unobserved, creating is still the only
+			// resolvable intent; the remote daemon refuses a live name.
+			fallback, err := create(snapshot)
+			if err != nil {
+				fallback = client.InitialNavigation{}
+			}
+			return client.InitialNavigation{}, client.InitialNavigationNotObserved{Endpoint: endpoint, Fallback: fallback}
 		}
 		return create(snapshot)
 	}

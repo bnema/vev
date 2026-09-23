@@ -512,10 +512,13 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 		// observedAt is the first revision the resolver can decide on; zero
 		// means the target is never observed.
 		observedAt ports.BrokerRevision
-		wantOpen   bool
+		// fallback is offered with the pending resolution.
+		fallback bool
+		wantOpen bool
 	}{
 		{name: "a later publication resolves the armed intent", observedAt: 2, wantOpen: true},
 		{name: "the observation budget refuses once", observedAt: 0},
+		{name: "the observation budget takes the resolver's fallback", observedAt: 0, fallback: true, wantOpen: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -541,7 +544,11 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
 					calls.Add(1)
 					if tt.observedAt == 0 || snapshot.Revision < tt.observedAt {
-						return InitialNavigation{}, InitialNavigationNotObserved{Endpoint: "user@host"}
+						pending := InitialNavigationNotObserved{Endpoint: "user@host"}
+						if tt.fallback {
+							pending.Fallback = InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}
+						}
+						return InitialNavigation{}, pending
 					}
 					// The target exists only in the later publication: the stream
 					// request must resolve against the snapshot that decided.
@@ -570,7 +577,12 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 			service.mu.Unlock()
 			require.Equal(t, []string{"user@host"}, reconciles, "the wait asks the broker for one fresh observation")
 
-			if tt.wantOpen {
+			if tt.fallback {
+				budget.fire()
+				require.Eventually(t, func() bool { return opened.Load() == 1 }, 5*time.Second, time.Millisecond)
+				require.Equal(t, protocol.ExactSessionTarget{}, service.openedRequests()[0].Target, "the fallback creation opens, not an exact attach")
+				require.Equal(t, int64(1), calls.Load())
+			} else if tt.wantOpen {
 				service.publishSnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
 					pickerTestLocalObservation(time.Unix(1000, 0), pickerTestSession("late", 5, catalogue_Up)),
 				}})

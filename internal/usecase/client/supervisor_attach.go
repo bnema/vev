@@ -396,8 +396,13 @@ var ErrInitialNavigationNotObserved = errors.New("vev: initial navigation target
 // InitialNavigationNotObserved is the resolver's ErrInitialNavigationNotObserved
 // naming the configured endpoint whose fresh observation it needs; the
 // supervisor asks the broker to reconcile that endpoint once per wait.
+// Fallback, when it is not the picker, is the navigation to take if the budget
+// expires before the endpoint is observed (a remote host whose observation
+// fails can still serve a stream); the destination daemon stays the final
+// authority over it.
 type InitialNavigationNotObserved struct {
 	Endpoint string
+	Fallback InitialNavigation
 }
 
 func (e InitialNavigationNotObserved) Error() string {
@@ -426,10 +431,10 @@ type initialNavigationTake struct {
 
 // awaitInitialNavigationObservation re-resolves the armed initial navigation
 // on each committed publication until the resolver can decide, the budget
-// expires (a bounded refusal), or the run ends. The returned snapshot is the
-// publication the decision was made on, so the stream request resolves against
-// the same authority.
-func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) initialNavigationTake {
+// expires (the resolver's fallback, or a bounded refusal without one), or the
+// run ends. The returned snapshot is the publication the decision was made on,
+// so the stream request resolves against the same authority.
+func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, pending InitialNavigationNotObserved) initialNavigationTake {
 	timer := s.cfg.Clock.NewTimer(initialNavigationObservationBudget)
 	defer timer.Stop()
 	for {
@@ -438,6 +443,7 @@ func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, inpu
 			snapshot := service.Snapshot()
 			navigation, consumed, err := s.takeInitialNavigation(snapshot)
 			if errors.Is(err, ErrInitialNavigationNotObserved) {
+				_ = errors.As(err, &pending)
 				continue
 			}
 			return initialNavigationTake{snapshot: snapshot, navigation: navigation, consumed: consumed, err: err}
@@ -445,6 +451,9 @@ func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, inpu
 			s.mu.Lock()
 			s.navigationConsumed = true
 			s.mu.Unlock()
+			if pending.Fallback.Kind != InitialNavigationPicker {
+				return initialNavigationTake{snapshot: service.Snapshot(), navigation: pending.Fallback, consumed: true}
+			}
 			return initialNavigationTake{consumed: true, err: ErrInitialNavigationNotObserved}
 		case <-service.Done():
 			// The ready loop observes the loss; the intent stays armed for the
@@ -475,7 +484,7 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 		if errors.As(err, &pending) && pending.Endpoint != "" {
 			service.RequestReconcile(pending.Endpoint)
 		}
-		take := s.awaitInitialNavigationObservation(ctx, input, service)
+		take := s.awaitInitialNavigationObservation(ctx, input, service, pending)
 		if take.terminated {
 			return true, take.termErr
 		}
