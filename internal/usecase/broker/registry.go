@@ -37,7 +37,17 @@ const (
 	// before.
 	defaultDemandFreshForLocal  = 1 * time.Second
 	defaultDemandFreshForRemote = 2 * time.Second
+	// defaultProbeTimeout bounds one observation attempt end to end: dial,
+	// SSH/QUIC bootstrap, daemonmux preamble, and the catalogue exchange. It
+	// sits below the passive retry cap so a peer that never answers costs one
+	// bounded attempt instead of pinning the endpoint's single in-flight slot.
+	defaultProbeTimeout = 20 * time.Second
 )
+
+// errProbeTimeout is the failure an attempt reports when its ports.Clock
+// deadline fires before the probe returns. It wraps context.DeadlineExceeded
+// so observationOutcome classifies it as a typed timeout.
+var errProbeTimeout = fmt.Errorf("broker: observation exceeded its deadline: %w", context.DeadlineExceeded)
 
 // Run lifecycle states. A registry runs exactly once: runIdle is the zero
 // value, runActive marks the single admitted run, and runStopped permanently
@@ -83,6 +93,11 @@ type RegistryConfig struct {
 	// defaultFreshFor (15s) exactly as before this field existed.
 	DemandFreshForLocal  time.Duration
 	DemandFreshForRemote time.Duration
+	// ProbeTimeout bounds every local and remote observation attempt on the
+	// registry's ports.Clock. When it fires the attempt is released and
+	// recorded as a timeout failure even if the probe never returns. A zero
+	// value selects defaultProbeTimeout.
+	ProbeTimeout time.Duration
 }
 
 // Registry owns configured hosts and their immutable observation projection.
@@ -165,6 +180,9 @@ type Registry struct {
 	// demand cadences; see RegistryConfig.DemandFreshForLocal/Remote.
 	demandFreshForLocal  time.Duration
 	demandFreshForRemote time.Duration
+	// probeTimeout is the resolved (non-zero) per-attempt deadline; see
+	// RegistryConfig.ProbeTimeout.
+	probeTimeout time.Duration
 	// demand counts live client subscriptions: Registry.SetDemand(true) is one
 	// subscription opening and SetDemand(false) is one closing. Guarded by mu.
 	// While demand > 0, apply and applyLocal schedule NextDue on the faster
@@ -207,6 +225,10 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 	if demandFreshForRemote <= 0 {
 		demandFreshForRemote = defaultDemandFreshForRemote
 	}
+	probeTimeout := cfg.ProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = defaultProbeTimeout
+	}
 	r := &Registry{
 		epoch: epoch, probe: probe, clock: clock, log: log,
 		observationDisabled: cfg.ObservationDisabled,
@@ -218,6 +240,7 @@ func NewRegistryWithConfig(epoch ports.BrokerEpoch, store ports.BrokerHostStore,
 		jitter:               jittered,
 		demandFreshForLocal:  demandFreshForLocal,
 		demandFreshForRemote: demandFreshForRemote,
+		probeTimeout:         probeTimeout,
 	}
 	if cfg.ObservationDisabled && cfg.Local != nil {
 		return nil, errors.New("broker: observation-disabled registry cannot observe the local daemon")
@@ -997,8 +1020,14 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 		host.LastAttempt = now
 		r.hosts[endpoint] = host
 		registration := host.Registration
+		// The deadline is armed here, under r.mu and at dispatch time, so the
+		// attempt's bound starts with the attempt rather than whenever its
+		// goroutine is scheduled.
+		deadline := r.clock.NewTimer(r.probeTimeout)
 		go func(endpoint string, registration domain.RemoteRegistration, attempt uint64, probeCtx context.Context) {
-			snapshot, err := r.probe.Probe(probeCtx, registration)
+			snapshot, err := observeBounded(probeCtx, deadline, func(ctx context.Context) (ports.BrokerDaemonObservation, error) {
+				return r.probe.Probe(ctx, registration)
+			})
 			result := probeResult{endpoint: endpoint, registration: registration, attempt: attempt, snapshot: snapshot, err: err, at: r.clock.Now()}
 			select {
 			case results <- result:
@@ -1019,6 +1048,39 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 		r.publishLocked(false)
 	}
 	r.mu.Unlock()
+}
+
+// observeBounded runs one observation under its attempt deadline. retire is the
+// attempt's retirement context: a replaced, removed, or settled attempt returns
+// at once and its completion is fenced by the caller. The probe itself runs on
+// a context derived from retire that the deadline also cancels, so a
+// ctx-honoring probe unwinds its dial, handshake, or exchange when either
+// fires. The attempt never waits for the probe past its deadline: a probe that
+// ignores cancellation is abandoned (its late result is discarded) and the
+// attempt still reports errProbeTimeout, so the endpoint's single in-flight
+// slot is always released.
+func observeBounded(retire context.Context, deadline ports.Timer, observe func(context.Context) (ports.BrokerDaemonObservation, error)) (ports.BrokerDaemonObservation, error) {
+	defer deadline.Stop()
+	probeCtx, cancel := context.WithCancelCause(retire)
+	defer cancel(nil)
+	type outcome struct {
+		snapshot ports.BrokerDaemonObservation
+		err      error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		snapshot, err := observe(probeCtx)
+		done <- outcome{snapshot: snapshot, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.snapshot, result.err
+	case <-deadline.C():
+		cancel(errProbeTimeout)
+		return ports.BrokerDaemonObservation{}, errProbeTimeout
+	case <-retire.Done():
+		return ports.BrokerDaemonObservation{}, retire.Err()
+	}
 }
 
 func (r *Registry) apply(result probeResult) {
@@ -1085,6 +1147,7 @@ func (r *Registry) apply(result probeResult) {
 	current.ConsecutiveFailures++
 	current.LastFailure = domain.RemoteFailure{Kind: kind, Err: result.err}
 	current.NextDue = result.at.Add(r.jitter(r.retryDelay(current.ConsecutiveFailures), result.endpoint, result.attempt))
+	r.log.Debug("broker_probe_failed", "endpoint", result.endpoint, "kind", kind, "failures", current.ConsecutiveFailures, "err", result.err)
 	r.hosts[result.endpoint] = current
 	r.publishLocked(true)
 }

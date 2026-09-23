@@ -97,8 +97,9 @@ func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, resul
 	r.localAttempt = &probeAttempt{token: attempt, cancel: cancel}
 	r.localHost.Checking = true
 	r.localHost.LastAttempt = now
+	deadline := r.clock.NewTimer(r.probeTimeout)
 	go func(attempt uint64, probeCtx context.Context) {
-		snapshot, err := r.local.Probe.ProbeLocal(probeCtx)
+		snapshot, err := observeBounded(probeCtx, deadline, r.local.Probe.ProbeLocal)
 		result := probeResult{local: true, attempt: attempt, snapshot: snapshot, err: err, at: r.clock.Now()}
 		select {
 		case results <- result:
