@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/ipc"
@@ -194,22 +195,23 @@ func runUIDriver(ctx context.Context, options uiDriverOptions) error {
 // name creates, a bare local invocation creates ephemerally, and a remote
 // target is only ever the registration and lifecycle a broker publication
 // carries.
-func uiDriverNavigation(options uiDriverOptions) (client.InitialNavigation, client.InitialNavigationResolver, error) {
+func uiDriverNavigation(options uiDriverOptions, requestedAt time.Time) (client.InitialNavigation, client.InitialNavigationResolver, error) {
 	if options.picker {
 		return client.InitialNavigation{}, nil, nil
 	}
 	if options.remote != "" && options.session != "" {
 		// `--remote HOST --session NAME` is attach-or-create: an existing
 		// remote session is attached by its exact lifecycle, an absent one is
-		// created. Creating unconditionally would collide with the remote
-		// daemon's live name and be refused.
+		// created. Absence is only trusted from an observation newer than
+		// this invocation; creating on an older inventory would collide with
+		// a live remote name and be refused.
 		if err := domain.ValidateRemoteHostTarget(options.remote); err != nil {
 			return client.InitialNavigation{}, nil, err
 		}
 		if err := domain.ValidateSessionName(options.session); err != nil {
 			return client.InitialNavigation{}, nil, err
 		}
-		return client.InitialNavigation{}, remoteAttachOrCreateResolver(options.remote, options.session), nil
+		return client.InitialNavigation{}, remoteAttachOrCreateResolver(options.remote, options.session, requestedAt), nil
 	}
 	intent := protocol.IntentEphemeral
 	if options.session != "" {
@@ -223,7 +225,8 @@ func uiDriverNavigation(options uiDriverOptions) (client.InitialNavigation, clie
 // context, and the one-shot initial navigation the CLI intent names. It never
 // provisions, reconfigures, or destroys an endpoint, and it owns no daemon.
 func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
-	navigation, resolver, err := uiDriverNavigation(options)
+	clk := clock.New()
+	navigation, resolver, err := uiDriverNavigation(options, clk.Now())
 	if err != nil {
 		return err
 	}
@@ -232,7 +235,6 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
 		return err
 	}
 	defer func() { _ = logCloser.Close() }()
-	clk := clock.New()
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: options.cols, Rows: options.rows}}, "")
 	if err != nil {
 		return fmt.Errorf("vev: create headless terminal: %w", err)

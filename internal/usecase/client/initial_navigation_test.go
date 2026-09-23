@@ -506,6 +506,7 @@ func TestInitialNavigationResolverFailureIsSelectionUnavailable(t *testing.T) {
 // on the next committed publication, and only the bounded observation budget
 // turns the wait into a selection-unavailable refusal.
 func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
+	late := protocol.ExactSessionTarget{LifecycleID: pickerTestLifecycle(5), SessionName: "late"}
 	tests := []struct {
 		name string
 		// observedAt is the first revision the resolver can decide on; zero
@@ -540,9 +541,11 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 				ResolveInitialNavigation: func(snapshot ports.BrokerSnapshot) (InitialNavigation, error) {
 					calls.Add(1)
 					if tt.observedAt == 0 || snapshot.Revision < tt.observedAt {
-						return InitialNavigation{}, ErrInitialNavigationNotObserved
+						return InitialNavigation{}, InitialNavigationNotObserved{Endpoint: "user@host"}
 					}
-					return InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}}, nil
+					// The target exists only in the later publication: the stream
+					// request must resolve against the snapshot that decided.
+					return InitialNavigation{Kind: InitialNavigationAttachExact, Epoch: snapshot.Epoch, Destination: ports.BrokerEndpointFence{Local: true}, Target: late}, nil
 				},
 			})
 			done := make(chan error, 1)
@@ -562,10 +565,17 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 				return false
 			}, 5*time.Second, time.Millisecond, "the wait is bounded by the observation budget")
 			require.Zero(t, opened.Load(), "an unobserved target never dials")
+			service.mu.Lock()
+			reconciles := append([]string(nil), service.reconciles...)
+			service.mu.Unlock()
+			require.Equal(t, []string{"user@host"}, reconciles, "the wait asks the broker for one fresh observation")
 
 			if tt.wantOpen {
-				service.publishSnapshot(localDaemonSnapshot(3, 2))
+				service.publishSnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{
+					pickerTestLocalObservation(time.Unix(1000, 0), pickerTestSession("late", 5, catalogue_Up)),
+				}})
 				require.Eventually(t, func() bool { return opened.Load() == 1 }, 5*time.Second, time.Millisecond)
+				require.Equal(t, late, service.openedRequests()[0].Target)
 				require.Equal(t, int64(2), calls.Load(), "the armed intent resolves once per publication")
 			} else {
 				budget.fire()

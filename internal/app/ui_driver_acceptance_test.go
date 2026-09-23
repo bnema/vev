@@ -193,25 +193,26 @@ func TestUIDriverDetachReturnsToPickerWithoutRecreating(t *testing.T) {
 // committed publication (never an invented identity). The driver keeps no
 // navigation vocabulary of its own.
 func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
-	picker, resolver, err := uiDriverNavigation(uiDriverOptions{picker: true})
+	picker, resolver, err := uiDriverNavigation(uiDriverOptions{picker: true}, time.Time{})
 	require.NoError(t, err)
 	require.Nil(t, resolver)
 	require.Equal(t, client.InitialNavigation{}, picker)
 	require.NoError(t, picker.Validate(), "the picker intent is the safe zero value")
 
-	local, resolver, err := uiDriverNavigation(uiDriverOptions{})
+	local, resolver, err := uiDriverNavigation(uiDriverOptions{}, time.Time{})
 	require.NoError(t, err)
 	require.Nil(t, resolver)
 	require.Equal(t, client.InitialNavigationCreateEphemeral, local.Kind)
 	require.True(t, local.Destination.Local)
 
-	named, resolver, err := uiDriverNavigation(uiDriverOptions{session: "work"})
+	named, resolver, err := uiDriverNavigation(uiDriverOptions{session: "work"}, time.Time{})
 	require.NoError(t, err)
 	require.Nil(t, resolver)
 	require.Equal(t, client.InitialNavigationCreateNamed, named.Kind)
 	require.Equal(t, "work", named.Name)
 	require.True(t, named.Destination.Local)
 
+	requestedAt := time.Unix(2000, 0)
 	unobserved := ports.BrokerSnapshot{
 		Epoch:    terminalCompositionEpoch,
 		Revision: 1,
@@ -221,7 +222,7 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 			Registration:  terminalCompositionRegistration("user@example.com"),
 		}},
 	}
-	remoteSnapshot := func(sessions ...string) ports.BrokerSnapshot {
+	observedAt := func(at time.Time, sessions ...string) ports.BrokerSnapshot {
 		return ports.BrokerSnapshot{
 			Epoch:    terminalCompositionEpoch,
 			Revision: 1,
@@ -230,9 +231,13 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 				DisplayOrigin:  "user@example.com",
 				Registration:   terminalCompositionRegistration("user@example.com"),
 				InventoryKnown: true,
+				LastSuccess:    at,
 				Sessions:       terminalCompositionSessions(sessions),
 			}},
 		}
+	}
+	remoteSnapshot := func(sessions ...string) ports.BrokerSnapshot {
+		return observedAt(requestedAt.Add(time.Second), sessions...)
 	}
 	tests := []struct {
 		name     string
@@ -243,6 +248,8 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 		wantErr  error
 	}{
 		{name: "remote named before first inventory waits", options: uiDriverOptions{remote: "user@example.com", session: "work"}, snapshot: unobserved, wantErr: client.ErrInitialNavigationNotObserved},
+		{name: "absence in an inventory older than the invocation waits", options: uiDriverOptions{remote: "user@example.com", session: "fresh"}, snapshot: observedAt(requestedAt.Add(-time.Second), "work"), wantErr: client.ErrInitialNavigationNotObserved},
+		{name: "presence in an older inventory attaches", options: uiDriverOptions{remote: "user@example.com", session: "work"}, snapshot: observedAt(requestedAt.Add(-time.Second), "work"), wantKind: client.InitialNavigationAttachExact, wantName: "work"},
 		{name: "remote ephemeral", options: uiDriverOptions{remote: "user@example.com"}, snapshot: remoteSnapshot("work"), wantKind: client.InitialNavigationCreateEphemeral},
 		{name: "remote named existing attaches exact lifecycle", options: uiDriverOptions{remote: "user@example.com", session: "work"}, snapshot: remoteSnapshot("other", "work"), wantKind: client.InitialNavigationAttachExact, wantName: "work"},
 		{name: "remote named missing creates", options: uiDriverOptions{remote: "user@example.com", session: "fresh"}, snapshot: remoteSnapshot("work"), wantKind: client.InitialNavigationCreateNamed, wantName: "fresh"},
@@ -250,7 +257,7 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			navigation, resolver, err := uiDriverNavigation(tt.options)
+			navigation, resolver, err := uiDriverNavigation(tt.options, requestedAt)
 			require.NoError(t, err)
 			require.Equal(t, client.InitialNavigation{}, navigation, "a remote target is never decided before the connection")
 			require.NotNil(t, resolver, "a remote target resolves against the committed publication")
@@ -258,6 +265,9 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 			resolved, resolveErr := resolver(tt.snapshot)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, resolveErr, tt.wantErr)
+				var pending client.InitialNavigationNotObserved
+				require.ErrorAs(t, resolveErr, &pending)
+				require.Equal(t, "user@example.com", pending.Endpoint, "the wait names the endpoint to reconcile")
 				return
 			}
 			require.NoError(t, resolveErr)
@@ -278,7 +288,7 @@ func TestUIDriverNavigationReusesTheSharedTerminalTranslation(t *testing.T) {
 
 	// A target the committed publication does not carry is refused, never
 	// created implicitly.
-	_, resolver, err = uiDriverNavigation(uiDriverOptions{remote: "user@elsewhere.test"})
+	_, resolver, err = uiDriverNavigation(uiDriverOptions{remote: "user@elsewhere.test"}, requestedAt)
 	require.NoError(t, err)
 	_, err = resolver(ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1})
 	require.Error(t, err)

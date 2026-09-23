@@ -393,38 +393,67 @@ func (s *Supervisor) takeInitialNavigation(snapshot ports.BrokerSnapshot) (Initi
 // later publications, bounded by initialNavigationObservationBudget.
 var ErrInitialNavigationNotObserved = errors.New("vev: initial navigation target is not observed yet")
 
+// InitialNavigationNotObserved is the resolver's ErrInitialNavigationNotObserved
+// naming the configured endpoint whose fresh observation it needs; the
+// supervisor asks the broker to reconcile that endpoint once per wait.
+type InitialNavigationNotObserved struct {
+	Endpoint string
+}
+
+func (e InitialNavigationNotObserved) Error() string {
+	return ErrInitialNavigationNotObserved.Error() + ": " + e.Endpoint
+}
+
+func (e InitialNavigationNotObserved) Is(target error) bool {
+	return target == ErrInitialNavigationNotObserved
+}
+
 // initialNavigationObservationBudget bounds how long an initial navigation
 // waits for its target's first observation; it stays inside the 15-second
 // handshake budget.
 const initialNavigationObservationBudget = 10 * time.Second
 
+// initialNavigationTake is one consumption attempt of the armed initial
+// navigation against the committed publication that decided it.
+type initialNavigationTake struct {
+	snapshot   ports.BrokerSnapshot
+	navigation InitialNavigation
+	consumed   bool
+	err        error
+	terminated bool
+	termErr    error
+}
+
 // awaitInitialNavigationObservation re-resolves the armed initial navigation
 // on each committed publication until the resolver can decide, the budget
-// expires (a bounded refusal), or the run ends.
-func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) (InitialNavigation, bool, error, bool, error) {
+// expires (a bounded refusal), or the run ends. The returned snapshot is the
+// publication the decision was made on, so the stream request resolves against
+// the same authority.
+func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) initialNavigationTake {
 	timer := s.cfg.Clock.NewTimer(initialNavigationObservationBudget)
 	defer timer.Stop()
 	for {
 		select {
 		case <-s.brokerChanged():
-			navigation, consumed, err := s.takeInitialNavigation(service.Snapshot())
+			snapshot := service.Snapshot()
+			navigation, consumed, err := s.takeInitialNavigation(snapshot)
 			if errors.Is(err, ErrInitialNavigationNotObserved) {
 				continue
 			}
-			return navigation, consumed, err, false, nil
+			return initialNavigationTake{snapshot: snapshot, navigation: navigation, consumed: consumed, err: err}
 		case <-timer.C():
 			s.mu.Lock()
 			s.navigationConsumed = true
 			s.mu.Unlock()
-			return InitialNavigation{}, true, ErrInitialNavigationNotObserved, false, nil
+			return initialNavigationTake{consumed: true, err: ErrInitialNavigationNotObserved}
 		case <-service.Done():
 			// The ready loop observes the loss; the intent stays armed for the
 			// next adopted connection.
-			return InitialNavigation{}, false, nil, false, nil
+			return initialNavigationTake{}
 		case <-ctx.Done():
-			return InitialNavigation{}, false, nil, true, ctx.Err()
+			return initialNavigationTake{terminated: true, termErr: ctx.Err()}
 		case err := <-input.EOF():
-			return InitialNavigation{}, false, nil, true, terminalReadCause(err)
+			return initialNavigationTake{terminated: true, termErr: terminalReadCause(err)}
 		}
 	}
 }
@@ -442,12 +471,15 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 	snapshot := service.Snapshot()
 	navigation, consumed, err := s.takeInitialNavigation(snapshot)
 	if errors.Is(err, ErrInitialNavigationNotObserved) {
-		var terminated bool
-		var termErr error
-		navigation, consumed, err, terminated, termErr = s.awaitInitialNavigationObservation(ctx, input, service)
-		if terminated {
-			return true, termErr
+		var pending InitialNavigationNotObserved
+		if errors.As(err, &pending) && pending.Endpoint != "" {
+			service.RequestReconcile(pending.Endpoint)
 		}
+		take := s.awaitInitialNavigationObservation(ctx, input, service)
+		if take.terminated {
+			return true, take.termErr
+		}
+		snapshot, navigation, consumed, err = take.snapshot, take.navigation, take.consumed, take.err
 	}
 	if !consumed {
 		return false, nil
