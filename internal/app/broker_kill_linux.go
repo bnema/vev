@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 )
@@ -50,6 +51,33 @@ func runKillBroker(ctx context.Context) error {
 	if err := syscall.Kill(int(peer.Pid), syscall.SIGTERM); err != nil {
 		return fmt.Errorf("vev: stop broker: %w", err)
 	}
+	// Report success only once the process is gone, so a command that follows
+	// immediately never reaches the draining broker.
+	if err := waitProcessExit(ctx, int(peer.Pid), brokerStopTimeout); err != nil {
+		return fmt.Errorf("vev: stop broker (pid %d): %w", peer.Pid, err)
+	}
 	fmt.Println("stopped broker")
 	return nil
+}
+
+// brokerStopTimeout bounds how long kill --broker waits for an orderly exit.
+const brokerStopTimeout = 5 * time.Second
+
+// waitProcessExit polls until pid no longer exists. The broker is reparented
+// at launch, so it is never this process' zombie child.
+func waitProcessExit(ctx context.Context, pid int, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("still running after %s: %w", timeout, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
