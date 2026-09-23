@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -906,9 +906,9 @@ func pickerObservationReason(observation ports.BrokerDaemonObservation, fresh bo
 
 func pickerHostDetail(observation ports.BrokerDaemonObservation) string {
 	if !observation.InventoryKnown {
-		return "catalogue pending"
+		return "…"
 	}
-	return fmt.Sprintf("%d sessions", len(observation.Sessions))
+	return strconv.Itoa(len(observation.Sessions))
 }
 
 func pickerSessionStatus(session catalogue.RemoteCatalogSession) protocol.PickerLineStatus {
@@ -925,17 +925,14 @@ func pickerSessionStatus(session catalogue.RemoteCatalogSession) protocol.Picker
 }
 
 func pickerSessionDetail(session catalogue.RemoteCatalogSession) string {
-	parts := make([]string, 0, 2)
+	count := ""
+	if n := len(session.Tabs); n > 0 {
+		count = strconv.Itoa(n)
+	}
 	if session.Attached {
-		parts = append(parts, "attached")
+		return strings.TrimSpace("● " + count)
 	}
-	switch count := len(session.Tabs); {
-	case count == 1:
-		parts = append(parts, "1 tab")
-	case count > 1:
-		parts = append(parts, fmt.Sprintf("%d tabs", count))
-	}
-	return strings.Join(parts, " · ")
+	return count
 }
 
 // pickerCatalogueCursor hints the first actionable row, then the first

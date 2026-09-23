@@ -102,8 +102,8 @@ type pickerController struct {
 	// reopen for the lifetime of the client process.
 	sort      pickerusecase.SortMode
 	ownsInput bool
-	opsReady    chan struct{}
-	lastOp      pickerOp
+	opsReady  chan struct{}
+	lastOp    pickerOp
 	// lastCommitKey is the catalogue key captured with the pending commit
 	// decision, so TakeOp can hand a driver the exact committed row.
 	lastCommitKey string

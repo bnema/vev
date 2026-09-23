@@ -542,19 +542,19 @@ func (s SortMode) Title() string {
 func lineStatusBadge(status protocol.PickerLineStatus) string {
 	switch status {
 	case protocol.PickerLineStatusUp:
-		return "[up]"
+		return "up"
 	case protocol.PickerLineStatusStopped:
-		return "[stopped]"
+		return "down"
 	case protocol.PickerLineStatusDown:
-		return "[down]"
+		return "off"
 	case protocol.PickerLineStatusStale:
-		return "[stale]"
+		return "stale"
 	case protocol.PickerLineStatusVersion:
-		return "[version]"
+		return "ver"
 	case protocol.PickerLineStatusError:
-		return "[error]"
+		return "err"
 	case protocol.PickerLineStatusNoDaemon:
-		return "[no daemon]"
+		return "none"
 	default:
 		return ""
 	}
@@ -635,15 +635,17 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				// A session header rings when any of its tabs does.
 				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, " "+string(ui.AttentionGlyph), base)
 			}
-			if r.line.Detail != "" && x < contentClipX {
-				x = ui.DrawText(frame, x, rect.Y+y, contentClipX, " ", detailStyle)
+			// The short detail (tab count, attached marker) is right-aligned
+			// before the badge, muted but not dimmed so it stays readable.
+			if r.line.Detail != "" && x < contentClipX-1 {
+				detail := ui.TruncateText(r.line.Detail, contentClipX-x-1)
+				detailX := max(x+1, contentClipX-textCellWidth(detail))
+				detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
+				drawMatchedText(frame, detailX, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			}
-			detail := ui.TruncateText(r.line.Detail, contentClipX-x)
-			detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
-			drawMatchedText(frame, x, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			if badge != "" {
 				badgeX := max(rect.X, clipX-badgeWidth)
-				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, base)
+				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, detailStyle)
 			}
 			continue
 		}
