@@ -1,3 +1,5 @@
+//go:build linux
+
 package app
 
 // Attach-missing create prompt (Plan 003 E4).

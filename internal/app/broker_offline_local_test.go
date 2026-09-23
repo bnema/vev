@@ -1,3 +1,5 @@
+//go:build linux
+
 package app
 
 import (
@@ -27,11 +29,6 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/broker"
-)
-
-const (
-	brokerLocalTestIdentity = "offline-local-daemon"
-	brokerLocalTestEpoch    = ports.BrokerEpoch(11)
 )
 
 // testLocalSandboxConfig composes the production local authority with a
@@ -79,19 +76,6 @@ func unreachableCarriageConnector(t *testing.T) ports.BrokerEndpointConnector {
 	return testLocalConnector(t, func(context.Context, ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
 		return nil, errors.New("no carriage")
 	})
-}
-
-// testLocalCatalogue builds one exact-schema catalogue carrying the supplied
-// sessions, marshalled exactly as the daemon's remote-catalog command does.
-func testLocalCatalogue(t *testing.T, sessions ...catalogue.RemoteCatalogSession) string {
-	t.Helper()
-	encoded, err := json.Marshal(catalogue.RemoteCatalog{
-		ProtocolVersion: protocol.Version,
-		SchemaVersion:   catalogue.RemoteCatalogSchemaVersion,
-		Sessions:        sessions,
-	})
-	require.NoError(t, err)
-	return string(encoded) + "\n"
 }
 
 // testLocalUpSession builds one exact, attachable catalogue session with an
