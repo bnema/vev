@@ -241,6 +241,51 @@ func TestPoolCloseRetiresWarmTransports(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestPoolLocalOpenDoesNotWaitForProbeAdoption(t *testing.T) {
+	h := newWarmHarness(t, 2, time.Minute)
+	h.visit(t, "local-daemon")
+
+	probe := &fakePhysical{
+		endpoint: ports.BrokerDialTarget{Policy: poolPolicy()},
+		identity: "remote-daemon",
+		done:     make(chan struct{}),
+	}
+	start := make(chan struct{})
+	adopted := make(chan bool, 1)
+	opened := make(chan error, 1)
+	go func() {
+		<-start
+		adopted <- h.pool.AdoptPhysical(probe, poolPolicy())
+	}()
+	go func() {
+		<-start
+		h.mu.Lock()
+		h.target = "local-daemon"
+		h.stream++
+		stream := h.stream
+		h.mu.Unlock()
+		logical, err := h.pool.OpenStream(context.Background(), poolRequest(h.client, stream))
+		if err == nil {
+			err = logical.Close()
+		}
+		opened <- err
+	}()
+	close(start)
+
+	select {
+	case err := <-opened:
+		require.NoError(t, err, "local OpenStream must progress while another goroutine adopts a remote probe transport")
+	case <-time.After(3 * time.Second):
+		t.Fatal("local OpenStream blocked while probe adoption was in progress")
+	}
+	select {
+	case ok := <-adopted:
+		require.True(t, ok, "the authenticated remote physical should be adopted")
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe transport adoption did not complete")
+	}
+}
+
 func TestPoolSharedPhysical(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -512,6 +512,9 @@ func brokerQUICUnavailable(action string, err error) error {
 func runBrokerMuxStdioCommand(ctx context.Context, options brokerMuxOptions) error {
 	raw, err := dialBrokerMuxHelper(ctx, options)
 	if err != nil {
+		if daemonCarriageAbsence(err) {
+			return &exitCoded{code: sshstdio.MuxExitNoDaemon, err: err}
+		}
 		return fmt.Errorf("vev: broker mux stdio: dial daemonmux carriage: %w", err)
 	}
 	bounded, ok := raw.(wire.BoundedTransport)
@@ -633,6 +636,9 @@ func runBrokerMuxQUICProxyCommand(ctx context.Context, options brokerMuxOptions)
 	}()
 	raw, err := dialBrokerMuxHelper(ctx, options)
 	if err != nil {
+		if daemonCarriageAbsence(err) {
+			return &exitCoded{code: sshstdio.MuxExitNoDaemon, err: err}
+		}
 		return fmt.Errorf("vev: broker mux quic proxy: dial daemonmux carriage: %w", err)
 	}
 	bounded, ok := raw.(wire.BoundedTransport)

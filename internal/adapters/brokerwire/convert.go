@@ -456,7 +456,7 @@ func validateSnapshotDaemonFields(daemon ports.BrokerDaemonObservation) error {
 		return errConvertRange
 	}
 	if daemon.Availability < domain.RemoteAvailabilityUnknown ||
-		daemon.Availability > domain.RemoteAvailabilityInvalidResponse {
+		daemon.Availability > domain.RemoteAvailabilityNoDaemon {
 		return ErrInvalidMessage
 	}
 	if daemon.LastFailure.Kind > domain.RemoteFailureInvalidResponse {

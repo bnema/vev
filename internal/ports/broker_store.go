@@ -228,7 +228,7 @@ func ValidateDurableHostProjection(obs BrokerDaemonObservation) error {
 	if obs.Local {
 		return errors.New("ports: local daemon observation is never durable")
 	}
-	if obs.Availability < domain.RemoteAvailabilityUnknown || obs.Availability > domain.RemoteAvailabilityInvalidResponse {
+	if obs.Availability < domain.RemoteAvailabilityUnknown || obs.Availability > domain.RemoteAvailabilityNoDaemon {
 		return errors.New("ports: broker host availability is out of range")
 	}
 	if obs.LastFailure.Kind > domain.RemoteFailureInvalidResponse {

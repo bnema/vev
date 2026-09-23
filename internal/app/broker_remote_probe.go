@@ -105,6 +105,13 @@ func (p *brokerRemoteProbe) Probe(ctx context.Context, registration domain.Remot
 	}
 	physical, err := p.connector.Connect(ctx, endpoint)
 	if err != nil {
+		var brokerErr ports.BrokerError
+		if errors.As(err, &brokerErr) && brokerErr.Code == ports.BrokerErrorNoDaemon {
+			// This typed dial-time result means the SSH helper ran on the remote
+			// machine but its local daemon carriage was absent. Do not infer this
+			// from a later stream loss on an already authenticated connection.
+			return ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityNoDaemon}, nil
+		}
 		return ports.BrokerDaemonObservation{}, err
 	}
 	adopted := false
@@ -146,6 +153,10 @@ func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalCo
 	}
 	logical, err := physical.OpenStream(ctx, request)
 	if err != nil {
+		// A connection that completed the authenticated physical handshake had
+		// a daemon. Losing its logical stream is a transport failure, not proof
+		// that the daemon is absent; preserve the failure so pooled callers can
+		// discard a dead connection and retry with a fresh dial.
 		return ports.BrokerDaemonObservation{}, err
 	}
 	if logical == nil {

@@ -404,6 +404,8 @@ func pickerStatusFor(view pickerSessionView, stopped bool) protocol.PickerLineSt
 	remote := pickerViewIsRemote(view)
 	if remote {
 		switch view.RemoteReason {
+		case domain.RemoteReasonNoDaemon:
+			return protocol.PickerLineStatusNoDaemon
 		case domain.RemoteReasonHostUnreachable:
 			return protocol.PickerLineStatusDown
 		case domain.RemoteReasonVersionMismatch:

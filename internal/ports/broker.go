@@ -570,6 +570,7 @@ const (
 	BrokerErrorFatalTerminal
 	BrokerErrorHostConflict
 	BrokerErrorMembershipImmutable
+	BrokerErrorNoDaemon
 )
 
 func (c BrokerErrorCode) String() string {
@@ -598,6 +599,8 @@ func (c BrokerErrorCode) String() string {
 		return "host_conflict"
 	case BrokerErrorMembershipImmutable:
 		return "membership_immutable"
+	case BrokerErrorNoDaemon:
+		return "no_daemon"
 	default:
 		return "unknown"
 	}
@@ -609,7 +612,7 @@ func (c BrokerErrorCode) Validate() error {
 		BrokerErrorCancelled, BrokerErrorOutcomeUnknown, BrokerErrorAttachmentLost,
 		BrokerErrorStaleEpoch, BrokerErrorConflictingPolicy,
 		BrokerErrorExplicitExit, BrokerErrorFatalTerminal,
-		BrokerErrorHostConflict, BrokerErrorMembershipImmutable:
+		BrokerErrorHostConflict, BrokerErrorMembershipImmutable, BrokerErrorNoDaemon:
 		return nil
 	default:
 		return errors.New("ports: invalid broker error code")

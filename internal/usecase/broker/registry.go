@@ -1107,6 +1107,22 @@ func (r *Registry) apply(result probeResult) {
 	current.LastAttempt = result.at
 
 	kind, availability, failed := observationOutcome(result)
+	if !failed && availability == domain.RemoteAvailabilityNoDaemon {
+		current.Availability = availability
+		current.LastSuccess = result.at
+		current.NextDue = result.at.Add(r.jitter(r.freshForLocked(false), result.endpoint, result.attempt))
+		current.ConsecutiveFailures = 0
+		current.LastFailure = domain.RemoteFailure{}
+		current.Identity = ""
+		current.Incarnation = ports.BrokerDaemonIncarnation{}
+		current.ProtocolVersion = 0
+		current.Capabilities = 0
+		current.InventoryKnown = false
+		current.Sessions = nil
+		r.hosts[result.endpoint] = current
+		r.publishLocked(true)
+		return
+	}
 	if !failed {
 		// Configured authority comes only from the registry's own projection:
 		// a probe result supplies observed state, never endpoint, registration,
@@ -1146,8 +1162,12 @@ func (r *Registry) apply(result probeResult) {
 	}
 	current.ConsecutiveFailures++
 	current.LastFailure = domain.RemoteFailure{Kind: kind, Err: result.err}
-	current.NextDue = result.at.Add(r.jitter(r.retryDelay(current.ConsecutiveFailures), result.endpoint, result.attempt))
-	r.log.Debug("broker_probe_failed", "endpoint", result.endpoint, "kind", kind, "failures", current.ConsecutiveFailures, "err", result.err)
+	delay := r.retryDelay(current.ConsecutiveFailures)
+	if r.demand > 0 && delay > r.demandFreshForRemote {
+		delay = r.demandFreshForRemote
+	}
+	current.NextDue = result.at.Add(r.jitter(delay, result.endpoint, result.attempt))
+	r.log.Debug("broker_probe_failed", "endpoint", result.endpoint, "kind", kind, "failures", current.ConsecutiveFailures, "err", result.err, "cause", errors.Unwrap(result.err))
 	r.hosts[result.endpoint] = current
 	r.publishLocked(true)
 }
@@ -1169,6 +1189,8 @@ func observationOutcome(result probeResult) (domain.RemoteFailureKind, domain.Re
 	switch result.snapshot.Availability {
 	case domain.RemoteAvailabilityReachable:
 		return domain.RemoteFailureNone, domain.RemoteAvailabilityReachable, false
+	case domain.RemoteAvailabilityNoDaemon:
+		return domain.RemoteFailureNone, domain.RemoteAvailabilityNoDaemon, false
 	case domain.RemoteAvailabilityIncompatible:
 		return domain.RemoteFailureIncompatible, domain.RemoteAvailabilityIncompatible, true
 	case domain.RemoteAvailabilityAuthFailed:

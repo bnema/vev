@@ -1321,6 +1321,12 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 			wantKind:         domain.RemoteFailureInvalidResponse,
 		},
 		{
+			name:             "no daemon after a prior success",
+			answer:           probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityNoDaemon}},
+			wantAvailability: domain.RemoteAvailabilityNoDaemon,
+			wantKind:         domain.RemoteFailureNone,
+		},
+		{
 			name:             "transport error",
 			answer:           probeAnswer{err: dialErr},
 			wantAvailability: domain.RemoteAvailabilityUnreachable,
@@ -1344,20 +1350,55 @@ func TestRegistryNonReachableOutcomesUseTypedFailureBackoff(t *testing.T) {
 			reg := registration(t, "example.test", 1)
 			require.NoError(t, registry.setHosts(hostRecords(reg)))
 			startRegistry(t, registry)
+			if tt.wantAvailability == domain.RemoteAvailabilityNoDaemon {
+				reachable := probeAnswer{snapshot: ports.BrokerDaemonObservation{
+					Availability: domain.RemoteAvailabilityReachable, Identity: ports.BrokerDaemonIdentity("remote-daemon"),
+					Incarnation: ports.BrokerDaemonIncarnation{1}, ProtocolVersion: protocol.Version,
+					InventoryKnown: true, Sessions: []catalogue.RemoteCatalogSession{hostSession("old")},
+				}}
+				call := receiveCall(t, probe)
+				call.result <- reachable
+				waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+					return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable && host.Identity == ports.BrokerDaemonIdentity("remote-daemon")
+				})
+				clock.Advance(5 * time.Second)
+				registry.RequestProbe(reg.Endpoint)
+				call = receiveCall(t, probe)
+				call.result <- reachable
+				waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+					return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
+				})
+				clock.Advance(20 * time.Second)
+				registry.RequestProbe(reg.Endpoint)
+			}
 
 			call := receiveCall(t, probe)
 			call.result <- tt.answer
 			host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
-				return !host.Checking && host.ConsecutiveFailures == 1
+				return !host.Checking && (host.ConsecutiveFailures == 1 || tt.wantAvailability == domain.RemoteAvailabilityNoDaemon && host.Availability == domain.RemoteAvailabilityNoDaemon)
 			})
 			require.Equal(t, tt.wantAvailability, host.Availability)
 			require.Equal(t, tt.wantKind, host.LastFailure.Kind)
-			require.Equal(t, uint(1), host.ConsecutiveFailures)
-			require.Equal(t, uint64(1), host.FailureEpisode)
-			// No observation succeeded yet, so there is no last success.
-			require.True(t, host.LastSuccess.IsZero())
-			// Every non-reachable outcome retries on the capped cadence.
-			require.Equal(t, start.Add(defaultRetryBase), host.NextDue)
+			if tt.wantAvailability == domain.RemoteAvailabilityNoDaemon {
+				require.Zero(t, host.ConsecutiveFailures)
+				require.Zero(t, host.FailureEpisode)
+				require.Equal(t, start.Add(25*time.Second), host.LastSuccess)
+				require.Equal(t, start.Add(40*time.Second), host.NextDue)
+				require.Empty(t, host.Identity)
+				require.True(t, host.Incarnation.IsZero())
+				require.Zero(t, host.ProtocolVersion)
+				require.Zero(t, host.Capabilities)
+				require.False(t, host.InventoryKnown)
+				require.Empty(t, host.Sessions)
+				require.Equal(t, domain.RemoteFailureNone, host.LastFailure.Kind)
+			} else {
+				require.Equal(t, uint(1), host.ConsecutiveFailures)
+				require.Equal(t, uint64(1), host.FailureEpisode)
+				// No observation succeeded yet, so there is no last success.
+				require.True(t, host.LastSuccess.IsZero())
+				// Every non-reachable outcome retries on the capped cadence.
+				require.Equal(t, start.Add(defaultRetryBase), host.NextDue)
+			}
 			if tt.wantErr != nil {
 				require.ErrorIs(t, host.LastFailure, tt.wantErr)
 			} else {
@@ -1603,6 +1644,36 @@ func TestRegistryPreservesLastSuccessAndOwnsFailureEpisode(t *testing.T) {
 	require.Equal(t, uint64(1), host.FailureEpisode)
 	require.Equal(t, domain.RemoteFailureNone, host.LastFailure.Kind)
 	require.Nil(t, host.LastFailure.Err)
+}
+
+func TestRegistryDemandCapsFailureBackoff(t *testing.T) {
+	start := time.Unix(100, 0)
+	clock := newManualClock(start)
+	probe := newTestProbe(1)
+	reg := registration(t, "demand.test", 1)
+	store := newTestStore()
+	require.NoError(t, store.ReplaceHosts(1, hostRecords(reg)))
+	registry := newTestRegistry(t, 1, store, probe, clock)
+	startRegistry(t, registry)
+	registry.SetDemand(true)
+	t.Cleanup(func() { registry.SetDemand(false) })
+
+	for failure := uint(1); failure <= 9; failure++ {
+		call := receiveCall(t, probe)
+		call.result <- probeAnswer{err: errors.New("daemon not available")}
+		host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+			return !host.Checking && host.ConsecutiveFailures == failure
+		})
+		require.LessOrEqual(t, host.NextDue.Sub(clock.Now()), defaultDemandFreshForRemote, "demanded retry gap must never exceed the freshness interval")
+		clock.Advance(host.NextDue.Sub(clock.Now()))
+		registry.RequestProbe(reg.Endpoint)
+	}
+	call := receiveCall(t, probe)
+	call.result <- probeAnswer{snapshot: ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityReachable}}
+	host := waitHost(t, registry, reg.Endpoint, func(host ports.BrokerDaemonObservation) bool {
+		return !host.Checking && host.Availability == domain.RemoteAvailabilityReachable
+	})
+	require.Zero(t, host.ConsecutiveFailures)
 }
 
 func TestRegistryBackoffIsExponentialAndCapped(t *testing.T) {

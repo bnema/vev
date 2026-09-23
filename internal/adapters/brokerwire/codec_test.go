@@ -561,6 +561,18 @@ func TestBrokerSnapshotDaemonByteForByte(t *testing.T) {
 		message SnapshotPart
 	}{
 		{"observed remote daemon", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 1, Part: SnapshotDaemonPart{HostIndex: 1, Daemon: testDaemonObservation(), SessionCount: 1}}},
+		{"reachable remote without daemon", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 2, Part: SnapshotDaemonPart{HostIndex: 1, Daemon: func() ports.BrokerDaemonObservation {
+			daemon := testDaemonObservation()
+			daemon.Identity = ""
+			daemon.Incarnation = ports.BrokerDaemonIncarnation{}
+			daemon.ProtocolVersion = 0
+			daemon.Capabilities = 0
+			daemon.Availability = domain.RemoteAvailabilityNoDaemon
+			daemon.LastFailure = domain.RemoteFailure{}
+			daemon.LastSuccess = time.Time{}
+			daemon.InventoryKnown = false
+			return daemon
+		}(), SessionCount: 0}}},
 		{"local daemon", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 0, Part: SnapshotDaemonPart{HostIndex: 0, Daemon: testLocalDaemonObservation(), SessionCount: 1}}},
 		{"local session", SnapshotPart{Epoch: 7, Connection: connection, Generation: 2, Revision: 5, Index: 2, Part: SnapshotSessionPart{HostIndex: 0, SessionIndex: 0, Local: true, Session: testCatalogSession()}}},
 	}

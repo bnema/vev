@@ -265,7 +265,7 @@ func validText(value string) bool {
 
 func validReason(reason string) bool {
 	switch reason {
-	case "", domain.RemoteReasonRefreshing, domain.RemoteReasonCatalogStale, domain.RemoteReasonHostUnreachable, domain.RemoteReasonVersionMismatch, domain.RemoteReasonSessionDown, domain.RemoteReasonSessionBroken, domain.RemoteReasonIdentityChanged, domain.RemoteReasonNotFound, domain.RemoteReasonTimeout, domain.RemoteReasonMalformed:
+	case "", domain.RemoteReasonRefreshing, domain.RemoteReasonCatalogStale, domain.RemoteReasonHostUnreachable, domain.RemoteReasonVersionMismatch, domain.RemoteReasonSessionDown, domain.RemoteReasonSessionBroken, domain.RemoteReasonIdentityChanged, domain.RemoteReasonNotFound, domain.RemoteReasonTimeout, domain.RemoteReasonMalformed, domain.RemoteReasonNoDaemon:
 		return true
 	default:
 		return false

@@ -477,6 +477,8 @@ func lineStatusBadge(status protocol.PickerLineStatus) string {
 		return "[version]"
 	case protocol.PickerLineStatusError:
 		return "[error]"
+	case protocol.PickerLineStatusNoDaemon:
+		return "[no daemon]"
 	default:
 		return ""
 	}

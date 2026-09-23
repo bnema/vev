@@ -27,7 +27,8 @@ import (
 // A session with tabs is a non-focusable header; its tab rows are the
 // destinations, each resolving to its exact tab. A session without tab
 // metadata is its own destination. A host status row is published only when
-// it adds information: the host lists no session and is not reachable.
+// it adds information: the host lists no session and is either not reachable
+// or known to have no daemon.
 //
 // The cursor starts on the attachment the picker is presented over (its tab,
 // else its session), otherwise on the most recent session's active tab.
@@ -100,6 +101,10 @@ func (c *pickerCatalogue) projectLocked() {
 			}
 		}
 		if len(observation.Sessions) == 0 && observation.Availability != domain.RemoteAvailabilityReachable {
+			hostRef := pickerSelectionRef{
+				kind: pickerSelectionCreateEphemeral, epoch: c.snapshot.Epoch,
+				local: observation.Local, endpoint: observation.Endpoint, registration: observation.Registration,
+			}
 			hostRows = append(hostRows, pickerRow{line: protocol.PickerLine{
 				Key:          pickerHostRowKey(observation),
 				Kind:         protocol.PickerLineHost,
@@ -108,9 +113,16 @@ func (c *pickerCatalogue) projectLocked() {
 				Status:       pickerObservationStatus(observation, fresh),
 				StatusDetail: pickerObservationReason(observation, fresh),
 				Dim:          true,
-				// A host row stays reachable for inspection and never commits.
+				// A host row is focusable and offers creation only when no daemon
+				// exists. The endpoint registration is revalidated at commit.
 				Focusable: true,
-			}})
+				Actions: func() protocol.PickerLineActions {
+					if observation.Availability == domain.RemoteAvailabilityNoDaemon {
+						return protocol.PickerCanNavigate
+					}
+					return 0
+				}(),
+			}, ref: hostRef, hasRef: observation.Availability == domain.RemoteAvailabilityNoDaemon})
 		}
 		if observation.Local {
 			hasLocal = true
@@ -131,9 +143,17 @@ func (c *pickerCatalogue) projectLocked() {
 		localRows = append(localRows, block.rows...)
 	}
 	localRows = append(localRows, localHost...)
+	for _, row := range localHost {
+		if row.hasRef {
+			refs[row.line.Key] = row.ref
+		}
+	}
 	recent = append(recent, localRows...)
 	for _, remote := range remotes {
 		for _, row := range remote.rows {
+			if row.line.Kind == protocol.PickerLineHost && row.hasRef {
+				refs[row.line.Key] = row.ref
+			}
 			if row.line.Kind == protocol.PickerLineSession && row.line.Detail == "" {
 				row.line.Detail = "@" + remote.origin
 			} else if row.line.Kind == protocol.PickerLineSession {
@@ -430,7 +450,7 @@ func pickerResolveTab(ref pickerSelectionRef, session catalogue.RemoteCatalogSes
 // last probe could not reach it, authenticate, or read its catalogue.
 func pickerObservationFailing(observation ports.BrokerDaemonObservation) bool {
 	switch observation.Availability {
-	case domain.RemoteAvailabilityUnreachable, domain.RemoteAvailabilityAuthFailed, domain.RemoteAvailabilityInvalidResponse:
+	case domain.RemoteAvailabilityUnreachable, domain.RemoteAvailabilityAuthFailed, domain.RemoteAvailabilityInvalidResponse, domain.RemoteAvailabilityNoDaemon:
 		return true
 	default:
 		return false
@@ -468,6 +488,8 @@ func pickerReasonText(reason string) string {
 		return "catalog malformed"
 	case domain.RemoteReasonAuthFailure:
 		return "authentication failed"
+	case domain.RemoteReasonNoDaemon:
+		return "no daemon — Enter to create a session"
 	case domain.RemoteReasonRefreshing:
 		return "refreshing"
 	case domain.RemoteReasonIdentityChanged:

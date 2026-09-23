@@ -101,7 +101,7 @@ func TestValidateDurableHostProjection(t *testing.T) {
 		}, wantErr: true},
 		{name: "zero availability", mutate: func(o *BrokerDaemonObservation) { o.Availability = 0 }, wantErr: true},
 		{name: "unknown availability", mutate: func(o *BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityUnknown }},
-		{name: "availability past the closed range", mutate: func(o *BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityInvalidResponse + 1 }, wantErr: true},
+		{name: "availability past the closed range", mutate: func(o *BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityNoDaemon + 1 }, wantErr: true},
 		{name: "failure kind past the closed range", mutate: func(o *BrokerDaemonObservation) { o.LastFailure.Kind = domain.RemoteFailureInvalidResponse + 1 }, wantErr: true},
 		{name: "missing lifecycle identity", mutate: func(o *BrokerDaemonObservation) {
 			o.InventoryKnown = true

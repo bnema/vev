@@ -107,7 +107,7 @@ func (o BrokerDaemonObservation) Validate() error {
 	if err := validateObservedDaemonState(o); err != nil {
 		return err
 	}
-	if o.Availability < domain.RemoteAvailabilityUnknown || o.Availability > domain.RemoteAvailabilityInvalidResponse {
+	if o.Availability < domain.RemoteAvailabilityUnknown || o.Availability > domain.RemoteAvailabilityNoDaemon {
 		return errors.New("ports: broker daemon observation availability is out of range")
 	}
 	if o.LastFailure.Kind > domain.RemoteFailureInvalidResponse {

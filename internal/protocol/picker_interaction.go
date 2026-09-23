@@ -64,6 +64,7 @@ const (
 	PickerLineStatusStale
 	PickerLineStatusVersion
 	PickerLineStatusError
+	PickerLineStatusNoDaemon
 )
 
 // PickerLineActions is the set of actions a row admits. The presenting client
@@ -255,7 +256,7 @@ func validPickerLineKind(kind PickerLineKind) bool {
 }
 
 func validPickerLineStatus(status PickerLineStatus) bool {
-	return status <= PickerLineStatusError
+	return status <= PickerLineStatusNoDaemon
 }
 
 func validPickerLineActions(actions PickerLineActions) bool {

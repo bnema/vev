@@ -562,7 +562,22 @@ func (p *pickerController) ResolveKeyTarget(key string, base pickerResolveBase) 
 		}
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
-	request, tab, err := p.catalogue.ResolveTarget(key, base)
+	ref, ok := p.catalogue.Ref(key)
+	if !ok {
+		err := pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker row is not in the catalogue"}
+		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
+	}
+	var request ports.BrokerOpenStreamRequest
+	var tab attachmentTab
+	var err error
+	if ref.kind == pickerSelectionCreateNamed || ref.kind == pickerSelectionCreateEphemeral {
+		request, err = p.catalogue.Resolve(key, base)
+	} else if ref.kind == pickerSelectionExact {
+		request, tab, err = p.catalogue.ResolveTarget(key, base)
+	} else {
+		err = pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "this picker row is not a session destination"}
+	}
 	if err != nil {
 		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err

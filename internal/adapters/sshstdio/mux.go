@@ -57,6 +57,9 @@ const (
 	// The capture is a diagnostic aid, so an unbounded or hostile stream can
 	// never grow the buffer without limit.
 	muxStderrLimit = 4 << 10
+	// MuxExitNoDaemon is reserved for the hidden mux helper when its local
+	// daemon carriage is absent. OpenSSH uses 255 for transport/auth failures.
+	MuxExitNoDaemon = 73
 	// muxDiagnosticLimit bounds the sanitized diagnostic echoed to a logger.
 	muxDiagnosticLimit = 512
 )

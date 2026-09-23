@@ -16,6 +16,7 @@ const (
 	RemoteAvailabilityIncompatible
 	RemoteAvailabilityAuthFailed
 	RemoteAvailabilityInvalidResponse
+	RemoteAvailabilityNoDaemon
 )
 
 // String returns the stable lowercase wire/display token for an availability.
@@ -33,6 +34,8 @@ func (a RemoteAvailability) String() string {
 		return "authentication_failed"
 	case RemoteAvailabilityInvalidResponse:
 		return "invalid_response"
+	case RemoteAvailabilityNoDaemon:
+		return "no_daemon"
 	default:
 		return "unknown"
 	}
@@ -155,4 +158,5 @@ const (
 	RemoteReasonTimeout         = "timeout"
 	RemoteReasonMalformed       = "malformed"
 	RemoteReasonAuthFailure     = "auth_failure"
+	RemoteReasonNoDaemon        = "no_daemon"
 )
