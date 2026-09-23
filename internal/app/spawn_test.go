@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 		case brokerServeCommand, brokerLauncherCommand, brokerStatusCommand,
 			brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand,
 			brokerReadyCommand,
-			productionBrokerServeCommand, productionBrokerLauncherCommand:
+			productionBrokerServeCommand, productionBrokerLauncherCommand, "--daemon":
 			recordBrokerHelperProcess(os.Args[1])
 			if os.Args[1] == brokerLauncherCommand {
 				if record := os.Getenv(brokerLauncherBlockRecordEnv); record != "" {
