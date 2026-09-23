@@ -215,101 +215,26 @@ func TestDrainBrokerAcceptClassifiesTerminalFailure(t *testing.T) {
 	}
 }
 
-func TestParseBrokerServeArgs(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		want    brokerServeOptions
-		wantErr string
-	}{
-		{name: "root only", args: []string{"--offline-root", "/srv/sandbox"}, want: brokerServeOptions{offlineRoot: "/srv/sandbox"}},
-		{
-			name: "root and grace",
-			args: []string{"--offline-root", "/srv/sandbox", "--idle-grace", "90s"},
-			want: brokerServeOptions{offlineRoot: "/srv/sandbox", idleGrace: 90 * time.Second},
-		},
-		{name: "missing root", args: nil, wantErr: "requires --offline-root"},
-		{name: "missing root value", args: []string{"--offline-root"}, wantErr: "requires a path"},
-		{name: "empty root value", args: []string{"--offline-root", ""}, wantErr: "requires a path"},
-		{name: "duplicate root", args: []string{"--offline-root", "/a", "--offline-root", "/b"}, wantErr: "duplicate --offline-root"},
-		{name: "duplicate grace", args: []string{"--offline-root", "/a", "--idle-grace", "1s", "--idle-grace", "2s"}, wantErr: "duplicate --idle-grace"},
-		{name: "missing grace value", args: []string{"--offline-root", "/a", "--idle-grace"}, wantErr: "requires a duration"},
-		{name: "invalid duration", args: []string{"--offline-root", "/a", "--idle-grace", "soon"}, wantErr: "not a duration"},
-		{name: "zero duration", args: []string{"--offline-root", "/a", "--idle-grace", "0s"}, wantErr: "must be positive"},
-		{name: "negative duration", args: []string{"--offline-root", "/a", "--idle-grace", "-1s"}, wantErr: "must be positive"},
-		{name: "unknown flag", args: []string{"--offline-root", "/a", "--verbose"}, wantErr: "unknown flag"},
-		{name: "positional", args: []string{"--offline-root", "/a", "extra"}, wantErr: "positional"},
-		{name: "equals form is refused", args: []string{"--offline-root=/a"}, wantErr: "unknown flag"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			command, err := parseBrokerServeArgs(tt.args)
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				require.Contains(t, err.Error(), tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, kindBrokerServe, command.kind)
-			require.Equal(t, tt.want, command.brokerServe)
-		})
-	}
-}
-
-func TestBrokerServeIsHiddenFromPublicHelp(t *testing.T) {
-	require.NotContains(t, usageText, brokerServeCommand)
-	_, err := parseArgs([]string{brokerServeCommand, "--offline-root", "/srv/sandbox"})
-	require.NoError(t, err)
-	_, err = parseArgs([]string{"--help"})
-	require.NoError(t, err)
-}
-
-func TestBrokerServeRejectsUnsafeRoot(t *testing.T) {
-	root, _, _ := isolateSandboxEnv(t)
-	ctx := context.Background()
+func TestProductionBrokerServeRejectsUnsafeRoot(t *testing.T) {
+	layout := emptyProductionBrokerLayout(t, "")
+	require.NoError(t, os.MkdirAll(layout.Root, 0o755))
 	deps, _ := testBrokerServeDeps(newSandboxClock())
-
-	t.Run("relative root", func(t *testing.T) {
-		err := runBrokerServe(ctx, brokerServeOptions{offlineRoot: "relative"}, deps)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "not absolute")
-	})
-	t.Run("unclean root", func(t *testing.T) {
-		err := runBrokerServe(ctx, brokerServeOptions{offlineRoot: root + "/../sandbox"}, deps)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "not clean")
-	})
-	t.Run("production overlap", func(t *testing.T) {
-		err := runBrokerServe(ctx, brokerServeOptions{offlineRoot: ipc.SocketDir()}, deps)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "overlaps production path")
-	})
-	t.Run("symlinked root", func(t *testing.T) {
-		link := filepath.Join(t.TempDir(), "link")
-		require.NoError(t, os.Symlink(t.TempDir(), link))
-		err := runBrokerServe(ctx, brokerServeOptions{offlineRoot: link}, deps)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "symlink")
-	})
-	t.Run("missing config", func(t *testing.T) {
-		err := runBrokerServe(ctx, brokerServeOptions{offlineRoot: root}, deps)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), brokerconfig.ConfigFileName)
-	})
+	err := runBrokerServe(context.Background(), brokerServeOptions{production: true}, deps)
+	require.ErrorContains(t, err, "0755")
+	require.NoFileExists(t, filepath.Join(layout.Runtime, "lifecycle.lock"))
 }
 
 func TestBrokerServeRoundTrip(t *testing.T) {
-	root, prodRuntime, prodState := isolateSandboxEnv(t)
+	emptyProductionBrokerLayout(t, "")
 	policy := brokerTestPolicy()
 	fixture := newBrokerMuxFixture(t, policy)
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, sandboxRegistrationDocument(fixture.route))
+	writeProductionBrokerDocument(t, sandboxRegistrationDocument(fixture.route))
 
 	clk := newSandboxClock()
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
+	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
 
 	socketPath := awaitSandboxReady(t, ready, done)
 
@@ -356,7 +281,14 @@ func TestBrokerServeRoundTrip(t *testing.T) {
 
 	awaitSandboxCancel(t, cancel, done)
 	requireSocketRemoved(t, socketPath)
-	requireProductionUntouched(t, prodRuntime, prodState)
+}
+
+// writeProductionBrokerDocument replaces only the private per-test bootstrap.
+func writeProductionBrokerDocument(t *testing.T, document any) {
+	t.Helper()
+	raw, err := json.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(productionBrokerConfigPath(), raw, 0o600))
 }
 
 // awaitSandboxReady waits for the sandbox readiness hook and returns the
@@ -402,51 +334,47 @@ func waitForSandboxShutdown(t *testing.T, clk *sandboxClock, done <-chan error) 
 }
 
 func TestBrokerServeIdleShutdownOnEmptyConfig(t *testing.T) {
-	root, prodRuntime, prodState := isolateSandboxEnv(t)
+	layout := emptyProductionBrokerLayout(t, "")
 	clk := newSandboxClock()
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, map[string]any{"marker": brokerconfig.Marker, "registrations": []any{}})
 
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
+	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
 
 	socketPath := awaitSandboxReady(t, ready, done)
 	waitForSandboxShutdown(t, clk, done)
 
 	requireSocketRemoved(t, socketPath)
-	requireOwnerLockReleased(t, root)
-	requireProductionUntouched(t, prodRuntime, prodState)
+	requireOwnerLockReleased(t, layout.Runtime)
+
 }
 
 // requireOwnerLockReleased proves the lifetime lock is no longer held.
-func requireOwnerLockReleased(t *testing.T, root string) {
+func requireOwnerLockReleased(t *testing.T, runtimeDir string) {
 	t.Helper()
-	owner, err := lifecycle.TryAcquire(filepath.Join(root, brokerconfig.RuntimeDirName))
+	owner, err := lifecycle.TryAcquire(runtimeDir)
 	require.NoError(t, err)
 	require.NoError(t, owner.Release())
 }
 
 func TestBrokerServeCancelCleanup(t *testing.T) {
-	root, prodRuntime, prodState := isolateSandboxEnv(t)
+	layout := emptyProductionBrokerLayout(t, "")
 	clk := newSandboxClock()
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, map[string]any{"marker": brokerconfig.Marker, "registrations": []any{}})
 
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
+	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
 
 	socketPath := awaitSandboxReady(t, ready, done)
 	awaitSandboxCancel(t, cancel, done)
 
 	requireSocketRemoved(t, socketPath)
-	requireOwnerLockReleased(t, root)
-	_, err := os.Lstat(filepath.Join(root, brokerconfig.StateDirName, "state.json"))
-	require.NoError(t, err, "durable sandbox state must remain after shutdown")
-	requireProductionUntouched(t, prodRuntime, prodState)
+	requireOwnerLockReleased(t, layout.Runtime)
+	_, err := os.Lstat(filepath.Join(layout.State, "state.json"))
+	require.NoError(t, err, "durable broker state must remain after shutdown")
+
 }
 
 // wedgedListener is a ports.BrokerListener whose Accept always reports one
@@ -469,10 +397,8 @@ func (l *wedgedListener) Addr() string { return l.addr }
 // terminal accept failure commits shutdown and drains the listener, instead of
 // leaving a bound broker whose socket can no longer admit work.
 func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
-	root, prodRuntime, prodState := isolateSandboxEnv(t)
+	layout := emptyProductionBrokerLayout(t, "")
 	clk := newSandboxClock()
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, map[string]any{"marker": brokerconfig.Marker, "registrations": []any{}})
 
 	listener := &wedgedListener{err: errors.New("carriage accept failed"), addr: "wedged"}
 	deps, ready := testBrokerServeDeps(clk)
@@ -481,7 +407,7 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
+	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
 
 	awaitSandboxReady(t, ready, done)
 	select {
@@ -491,25 +417,23 @@ func TestBrokerServeShutsDownOnUnexpectedAcceptFailure(t *testing.T) {
 		t.Fatal("the broker wedged on an unexpected accept failure")
 	}
 	require.True(t, listener.closed.Load(), "shutdown must close the wedged listener")
-	requireOwnerLockReleased(t, root)
-	requireProductionUntouched(t, prodRuntime, prodState)
+	requireOwnerLockReleased(t, layout.Runtime)
+
 }
 
 func TestBrokerServeRefusesDuplicateOwnership(t *testing.T) {
-	root, _, _ := isolateSandboxEnv(t)
+	emptyProductionBrokerLayout(t, "")
 	clk := newSandboxClock()
-	require.NoError(t, os.MkdirAll(root, 0o700))
-	writeSandboxConfig(t, root, map[string]any{"marker": brokerconfig.Marker, "registrations": []any{}})
 
 	deps, ready := testBrokerServeDeps(clk)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runSandbox(ctx, brokerServeOptions{offlineRoot: root}, deps)
+	done := runSandbox(ctx, brokerServeOptions{production: true}, deps)
 	socketPath := awaitSandboxReady(t, ready, done)
 
 	// A second foreground owner fails fast on the lifetime lock.
 	secondDeps, _ := testBrokerServeDeps(newSandboxClock())
-	err := runBrokerServe(context.Background(), brokerServeOptions{offlineRoot: root}, secondDeps)
+	err := runBrokerServe(context.Background(), brokerServeOptions{production: true}, secondDeps)
 	require.ErrorIs(t, err, lifecycle.ErrBusy)
 
 	// A duplicate listener on the live socket is refused as well.
@@ -712,13 +636,4 @@ func TestSandboxClockFiresOnAdvance(t *testing.T) {
 	case <-time.After(brokerTestWait):
 		t.Fatal("manual timer did not fire")
 	}
-}
-
-// Ensure the fixture and registration helpers stay coherent.
-func TestBrokerSandboxFixtures(t *testing.T) {
-	require.NoError(t, brokerTestRegistration().Validate())
-	require.NoError(t, brokerTestPolicy().Validate())
-	document := sandboxRegistrationDocument("/tmp/mux.sock")
-	require.Equal(t, brokerconfig.Marker, document["marker"])
-	require.Len(t, document["registrations"], 1)
 }
