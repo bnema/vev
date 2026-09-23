@@ -84,19 +84,6 @@ func (c *pickerConsumer) setOwned(interaction, generation uint64) {
 	c.mu.Unlock()
 }
 
-// setDrain publishes the release window: the interaction is retired, its
-// repaint is in flight, and every batch must be consumed and dropped so a
-// picker-bound key can never reach the session.
-func (c *pickerConsumer) setDrain(interaction, generation uint64) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.state = pickerInputState{interaction: interaction, generation: generation, drain: true}
-	c.resetDecoderLocked()
-	c.mu.Unlock()
-}
-
 // clear releases input back to the session and purges the decoder state.
 func (c *pickerConsumer) clear() {
 	if c == nil {

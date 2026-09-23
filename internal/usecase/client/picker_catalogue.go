@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -124,13 +123,6 @@ func (e pickerCatalogueError) Error() string {
 		return "vev: picker selection " + e.Code.String()
 	}
 	return "vev: picker selection " + e.Code.String() + ": " + e.Text
-}
-
-// pickerCatalogueErrorIs reports whether err is a typed catalogue refusal with
-// the supplied code, so callers classify without matching message text.
-func pickerCatalogueErrorIs(err error, code pickerCatalogueErrorCode) bool {
-	var typed pickerCatalogueError
-	return errors.As(err, &typed) && typed.Code == code
 }
 
 // pickerSelectionKind names one closed admission variant a resolved selection

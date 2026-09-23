@@ -753,7 +753,7 @@ func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.
 	first := registry.stream(t, 0)
 	deliverReadyStream(t, first)
 	awaitAttachedState(t, harness.sup)
-	require.Equal(t, AttachmentToken{Generation: 1, Attempt: 1}, harness.sup.attachments.authority.currentToken())
+	require.Equal(t, AttachmentToken{Generation: 1, Attempt: 1}, authorityToken(&harness.sup.attachments.authority))
 
 	firstResize := domain.Geometry{Size: domain.Size{Cols: 101, Rows: 41}}
 	harness.terminal.resize(firstResize)
@@ -764,7 +764,7 @@ func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.
 	// exists.
 	first.deliver(protocol.Detached{})
 	awaitPickerState(t, harness.sup)
-	require.True(t, harness.sup.attachments.authority.currentToken().IsZero(), "the retired token no longer owns the foreground")
+	require.True(t, authorityToken(&harness.sup.attachments.authority).IsZero(), "the retired token no longer owns the foreground")
 
 	// A resize in the detach/reattach gap: no attachment owns the foreground, so
 	// the retired stream must not receive it, only the picker repaints, and the
@@ -787,7 +787,7 @@ func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.
 	second := registry.stream(t, 1)
 	deliverReadyStream(t, second)
 	awaitAttachedState(t, harness.sup)
-	require.Equal(t, AttachmentToken{Generation: 1, Attempt: 2}, harness.sup.attachments.authority.currentToken())
+	require.Equal(t, AttachmentToken{Generation: 1, Attempt: 2}, authorityToken(&harness.sup.attachments.authority))
 	inherited := awaitStreamResizes(t, second, 1)
 	require.Equal(t, gapResize.Size, inherited[0].Size, "the replacement inherits the latest geometry")
 

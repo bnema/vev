@@ -40,7 +40,7 @@ func TestP54LifecycleActionsAreDistinct(t *testing.T) {
 			awaitStreamHello(t, &sync.Mutex{}, &stream)
 			deliverReadyStream(t, stream)
 			awaitAttachedState(t, harness.sup)
-			actions <- AttachmentLifecycleAction{Token: harness.sup.attachments.authority.currentToken(), Kind: tc.action}
+			actions <- AttachmentLifecycleAction{Token: authorityToken(&harness.sup.attachments.authority), Kind: tc.action}
 			require.Equal(t, tc.wantNotice, (<-notices).Kind)
 			if tc.wantExit {
 				require.NoError(t, harness.waitRun(t))
@@ -257,7 +257,8 @@ func TestP54BrokerRestartDoesNotReattachOrReplayUnknownMutation(t *testing.T) {
 func TestP54ReadyMapPrunedAcrossClaims(t *testing.T) {
 	pump := newTerminalInputPump(nil)
 	for i := 0; i < 100; i++ {
-		consumer := pump.claim()
+		consumer, ok := pump.tryClaim()
+		require.True(t, ok)
 		pump.revoke(consumer)
 	}
 	pump.readyMu.Lock()
@@ -285,7 +286,8 @@ func TestP54PickerCommittedReadIsNotReplayedToAttachment(t *testing.T) {
 	}, 5*time.Second, time.Millisecond)
 	require.Equal(t, []byte("1\r"), committed)
 	lifetime.releasePicker()
-	attachment := lifetime.pump.claim()
+	attachment, claimed := lifetime.pump.tryClaim()
+	require.True(t, claimed)
 	_, ok := lifetime.pump.take(context.Background(), attachment)
 	require.False(t, ok, "committed picker read must not cross the handoff")
 	lifetime.pump.revoke(attachment)
@@ -346,7 +348,8 @@ func TestP54UndecidedAttachmentReadIsDroppedBeforePicker(t *testing.T) {
 	lifetime := startTerminalInputLifetime(reader, consumer)
 	defer lifetime.stop()
 	lifetime.releasePicker()
-	attachment := lifetime.pump.claim()
+	attachment, claimed := lifetime.pump.tryClaim()
+	require.True(t, claimed)
 	reader.push([]byte("ls\r"))
 	var delivery terminalReadResult
 	require.Eventually(t, func() bool {

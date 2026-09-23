@@ -22,7 +22,8 @@ func newUITestService(t *testing.T) (*UI, *uiterm.Terminal, *attachPaletteClock,
 	clock := newAttachPaletteClock()
 	u := NewUI(terminal, clock)
 	input := newTerminalInputPump(nil)
-	consumer := input.claim()
+	consumer, ok := input.tryClaim()
+	require.True(t, ok)
 	generation := u.bindForeground(ctx, input, consumer)
 	view := ports.UIContext{AttachmentHandle: u.Handle(), Generation: generation, Status: ports.UIStatusAttached, OutputEpoch: 1, OutputState: 1, ViewPublication: 1, TabID: "tab", FocusedPaneID: "pane"}
 	view.Route.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "fixture"}

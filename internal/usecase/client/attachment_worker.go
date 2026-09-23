@@ -214,18 +214,6 @@ type attachmentAuthority struct {
 	state   attachmentAuthorityState
 }
 
-func (a *attachmentAuthority) currentToken() AttachmentToken {
-	if a == nil {
-		return AttachmentToken{}
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.current == nil {
-		return AttachmentToken{}
-	}
-	return a.current.token
-}
-
 // grant installs fg as the sole foreground in the active state. It fails while
 // another grant is live or while the shared input pump already has a consumer,
 // which is what keeps exactly one foreground owner.

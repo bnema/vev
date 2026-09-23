@@ -50,5 +50,5 @@ func TestSessionPickerDetachRevokesForegroundBeforePicker(t *testing.T) {
 	awaitStreamHello(t, &sync.Mutex{}, &next)
 	deliverReadyStream(t, next)
 	awaitAttachedState(t, harness.sup)
-	require.NotEqual(t, foreground.Token(), harness.sup.attachments.authority.currentToken())
+	require.NotEqual(t, foreground.Token(), authorityToken(&harness.sup.attachments.authority))
 }

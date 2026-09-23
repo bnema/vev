@@ -112,21 +112,6 @@ func rgbPickerStyle() renderer.Style {
 	return style
 }
 
-func TestPickerRendererResetProtectsRepaintedSessionFromPreviousLease(t *testing.T) {
-	loop := pickerLoopFixture(t)
-	r := newPickerRenderer(ansirenderer.ColorProfileTrueColor)
-	screen := renderer.NewScreen(100, 30)
-	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
-	screen.Write(r.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))
-
-	r.reset()
-	paintScreen(screen, domain.Size{Cols: 100, Rows: 30}, 'S')
-	screen.Write(r.render(loop, domain.Size{Cols: 80, Rows: 30}, emptyPickerPreview()))
-
-	snapshot := screen.Snapshot()
-	require.Equal(t, 'S', snapshot.Row(3)[72].Rune, "new lease must not clear the previous lease's bounds")
-}
-
 func paintScreen(screen *renderer.Screen, size domain.Size, fill rune) {
 	for y := 0; y < size.Rows; y++ {
 		screen.Write([]byte(fmt.Sprintf("\x1b[%d;1H%s", y+1, strings.Repeat(string(fill), size.Cols))))

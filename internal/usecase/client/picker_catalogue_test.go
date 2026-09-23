@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -19,6 +20,14 @@ import (
 // sleeps.
 
 const pickerTestFreshness = 30 * time.Second
+
+// pickerCatalogueErrorIs reports whether err is a typed catalogue refusal with
+// the supplied code, so tests classify a resolution failure without matching
+// message text.
+func pickerCatalogueErrorIs(err error, code pickerCatalogueErrorCode) bool {
+	var typed pickerCatalogueError
+	return errors.As(err, &typed) && typed.Code == code
+}
 
 func pickerTestPolicy() ports.BrokerPolicy {
 	return ports.BrokerPolicy{

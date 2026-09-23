@@ -17,6 +17,18 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
+// authorityToken reads the foreground token an attachmentAuthority currently
+// grants, or the zero token when nothing holds the slot. It exercises the same
+// foreground() accessor the supervisor uses, so tests observe the production
+// path instead of a test-only accessor.
+func authorityToken(a *attachmentAuthority) AttachmentToken {
+	fg := a.foreground()
+	if fg == nil {
+		return AttachmentToken{}
+	}
+	return fg.Token()
+}
+
 // workerTestStream is one scripted broker logical stream. It records typed
 // client messages and unblocks ReceiveServer when the supervisor closes it,
 // exactly like a real logical stream's Close contract.
@@ -689,7 +701,8 @@ func TestAttachmentWorkerPumpClaimAndCancelRace(t *testing.T) {
 	pump.start()
 	defer pump.stop()
 	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
-	rival := pump.claim()
+	rival, claimed := pump.tryClaim()
+	require.True(t, claimed)
 	_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(), newWorkerTestStream())
 	require.False(t, ok)
 	require.Nil(t, host.authority.foreground())
@@ -879,7 +892,8 @@ func TestAttachmentWorkerBeginRefusalsRetainStream(t *testing.T) {
 	t.Run("rival consumer owns input", func(t *testing.T) {
 		pump := newTerminalInputPump(nil)
 		host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
-		rival := pump.claim()
+		rival, claimed := pump.tryClaim()
+		require.True(t, claimed)
 		defer pump.revoke(rival)
 		stream := newWorkerTestStream()
 		_, ok := host.Begin(context.Background(), AttachmentToken{1, 1}, blockingWorker(), stream)

@@ -306,23 +306,6 @@ func pickerPreviewSize(terminal domain.Size) domain.Size {
 // emptyPickerPreview is the zero preview used until the daemon publishes one.
 func emptyPickerPreview() picker.Preview { return picker.Preview{} }
 
-// cursorKey names the row the modal currently displays. The daemon revalidates
-// it against the interaction it published, so it stays opaque here.
-func (l *pickerLoop) cursorKey() string {
-	if l == nil || l.model == nil {
-		return ""
-	}
-	line, ok := l.model.Selected()
-	if !ok {
-		return ""
-	}
-	identity, ok := l.rows[line.Key]
-	if !ok {
-		return ""
-	}
-	return identity.key
-}
-
 // clampPreviewDimension bounds one requested viewport dimension.
 func clampPreviewDimension(value int, maxValue uint16) uint16 {
 	if value <= 0 {
@@ -422,15 +405,6 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	bounds := presentation.Bounds
 	r.prevBounds = &bounds
 	return data
-}
-
-// reset forgets modal damage after the daemon has restored the authoritative
-// session frame. A later picker must not clear cells from an earlier lease.
-func (r *pickerRenderer) reset() {
-	if r == nil {
-		return
-	}
-	r.prevBounds = nil
 }
 
 // invalidate forgets everything the renderer believes is on screen. The next
