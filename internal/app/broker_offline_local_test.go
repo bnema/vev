@@ -791,6 +791,7 @@ func TestBrokerLocalObservationRegistryPublishesLocalFirst(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); registry.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
+	registry.RequestProbe("")
 
 	require.Eventually(t, func() bool {
 		snapshot := registry.Snapshot()
@@ -932,10 +933,11 @@ func TestBrokerLocalProbeNilReceiverFailsClosed(t *testing.T) {
 // startLocalRegistry runs one registry for the duration of a test.
 func startLocalRegistry(t *testing.T, registry *broker.Registry) {
 	t.Helper()
+	registry.SetDemand(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); registry.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
+	t.Cleanup(func() { cancel(); <-done; registry.SetDemand(false) })
 }
 
 // waitLocalEntry waits for the published local entry (always index zero) to
