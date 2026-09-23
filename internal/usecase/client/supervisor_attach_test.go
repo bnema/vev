@@ -380,7 +380,6 @@ type attachTestHarness struct {
 	clock    *supervisorTestClock
 	terminal *attachTestTerminal
 	reader   *attachTestReader
-	picker   *attachTestPicker
 	cancel   context.CancelFunc
 	runDone  chan struct{}
 

@@ -15,16 +15,6 @@ import (
 // remote activation; the presenting client only renders. Keys are opaque and
 // resolve back to picker.Target values inside the daemon.
 
-type pickerRemoteAvailability uint8
-
-const (
-	pickerRemoteNone pickerRemoteAvailability = iota
-	pickerRemoteCached
-	pickerRemoteFresh
-	pickerRemoteStale
-	pickerRemoteVersionMismatch
-)
-
 // pickerRemoteActivation is the picker action authorized by the current remote
 // catalog snapshot. It is presentation state only; the structured remote
 // target remains the exact route and is revalidated at commit time.
@@ -54,11 +44,10 @@ type pickerSessionView struct {
 	// It is never reconstructed from Name or a rendered label.
 	RemoteTarget *domain.RemoteSessionTarget
 	// RemoteHost marks remote host status rows that have no session key.
-	RemoteHost         string
-	RemoteAvailability pickerRemoteAvailability
-	RemoteDetail       string
-	RemoteReason       string
-	RemoteActivation   pickerRemoteActivation
+	RemoteHost       string
+	RemoteDetail     string
+	RemoteReason     string
+	RemoteActivation pickerRemoteActivation
 	// CannotAcceptMoves reports whether this session cannot receive a moved tab
 	// or pane. False for ordinary local (and stopped) sessions; true for
 	// restricted remote rows.

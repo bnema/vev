@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-var errDialFailed = errors.New("dial failed")
-
 const (
 	spawnTestChildFileEnv    = "VEV_SPAWN_TEST_CHILD_FILE"
 	spawnTestLauncherFileEnv = "VEV_SPAWN_TEST_LAUNCHER_FILE"
@@ -241,9 +239,6 @@ func terminateProcessFromFile(path string) error {
 	}
 	return waitForProcessExit(pid, 2*time.Second)
 }
-
-// fastBackoff keeps the retry loop snappy for tests.
-var fastBackoff = backoffConfig{initial: time.Millisecond, max: 5 * time.Millisecond, total: 100 * time.Millisecond}
 
 func TestAcquireSpawnLockSingleWinnerUnderRace(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vev")

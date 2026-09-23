@@ -67,12 +67,6 @@ type paletteSessionIdentity struct {
 	lifecycle domain.SessionLifecycleID
 }
 
-type remotePalettePresentationIdentity struct {
-	origin    string
-	name      string
-	lifecycle domain.SessionLifecycleID
-}
-
 func localPaletteSessionIdentity(lifecycle domain.SessionLifecycleID) paletteSessionIdentity {
 	return paletteSessionIdentity{kind: protocol.RouteKindLocal, endpoint: "local", lifecycle: lifecycle}
 }

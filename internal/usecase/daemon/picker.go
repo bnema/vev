@@ -33,15 +33,6 @@ type pickerLocalViews struct {
 	groupedStopped []pickerSessionView
 }
 
-// pickerForeignViews is the projected foreign (remote-directory) portion of
-// the hybrid picker projection plus whether it suppresses the LOCAL label on a
-// preceding stopped row.
-type pickerForeignViews struct {
-	recent            []pickerSessionView
-	grouped           []pickerSessionView
-	blockLocalStopped bool
-}
-
 // localPickerViews is the prepared local-only picker projection. It captures
 // live and stopped local rows, ordering them as the hybrid projection does
 // when no foreign source is present.
