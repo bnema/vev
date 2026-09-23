@@ -27,13 +27,30 @@ func (u *UI) bindForeground(ctx context.Context, input *terminalInputPump, consu
 	return u.generation
 }
 
-// releaseForeground retires exactly the binding installed for generation. It
-// is called when the supervisor begins finalizing the attachment, before the
-// pump claim can return to the picker. It publishes nothing itself: the
-// supervisor owns the presentation fence, and its return to Picker runs after
-// this teardown (join, revoke, stream close) has drained the last in-flight
-// transaction, so no unattached presentation is ever committed while a session
-// frame is still being written.
+// follow retains the accepted input action across an exact daemon navigation.
+// It waits for the destination's first committed publication, not merely a
+// successful send on the source attachment.
+func (u *UI) follow(generation, actionID uint64) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	record, ok := u.records[actionID]
+	if !ok || actionID == 0 || generation != u.generation || record.Context.Generation != generation ||
+		(record.Status != ports.UIActionPending && record.Status != ports.UIActionProcessed) {
+		return false
+	}
+	if u.pending != 0 && u.pending != actionID {
+		u.finishLocked(u.pending, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
+	}
+	record.Status = ports.UIActionPending
+	u.records[actionID] = record
+	u.pending = actionID
+	u.handoff = &uiActionHandoff{actionID: actionID, sourceGeneration: generation}
+	u.signalLocked()
+	return true
+}
+
+// releaseForeground retires exactly the binding installed for generation.
+// The supervisor owns the presentation fence after the foreground drains.
 func (u *UI) releaseForeground(generation uint64) {
 	u.mu.Lock()
 	if generation != u.generation {
@@ -44,7 +61,7 @@ func (u *UI) releaseForeground(generation uint64) {
 	u.consumer = 0
 	u.foreground = nil
 	u.boundary = ports.UIActionResult{}
-	if u.pending != 0 {
+	if u.pending != 0 && (u.handoff == nil || u.handoff.actionID != u.pending) {
 		u.finishLocked(u.pending, ports.UIActionOutcomeUnknown, ports.UIActionResult{})
 	}
 	u.signalLocked()
@@ -112,6 +129,12 @@ func (u *UI) published(generation uint64) {
 		return
 	}
 	u.boundary = ports.UIActionResult{Revision: snapshot.Revision, Context: snapshot.Context}
+	if u.handoff != nil && u.handoff.destinationGeneration == generation && snapshot.Context.Status == ports.UIStatusAttached {
+		u.handoff.boundary = u.boundary
+		if u.dispatched[u.handoff.actionID] {
+			u.finishLocked(u.handoff.actionID, ports.UIActionProcessed, u.boundary)
+		}
+	}
 	u.signalLocked()
 }
 

@@ -71,6 +71,9 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerService, overlay
 	if !ok {
 		return
 	}
+	if actionID := navigationCauseActionID(message); actionID != 0 && s.cfg.UI != nil {
+		s.cfg.UI.follow(overlay.run.fg.uiGeneration, actionID)
+	}
 	if sameAttachmentTarget(overlay.request, s.attachments.committedTargetOrZero(), target.request) && target.tab.stopped == nil {
 		_, current, _ := s.attachments.committedView()
 		if target.tab.preferred != "" && target.tab.preferred != current {
@@ -86,6 +89,19 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerService, overlay
 	s.attachments.requestDetach(overlay.run.token)
 }
 
+func navigationCauseActionID(message protocol.ServerMessage) uint64 {
+	switch action := message.(type) {
+	case protocol.RouteNavigationAction:
+		return action.CauseActionID
+	case protocol.RouteCreateSessionAction:
+		return action.CauseActionID
+	case protocol.AttachTarget:
+		return action.CauseActionID
+	default:
+		return 0
+	}
+}
+
 // takeSettledNavigation adopts a navigation request the worker handed over
 // just before its attachment ended, such as a close-and-dial handoff whose
 // daemon detached the source right after sending it.
@@ -95,6 +111,9 @@ func (s *Supervisor) takeSettledNavigation(service ports.BrokerService, token At
 		return
 	}
 	if target, ok := s.resolveDaemonNavigation(service, token, request, message); ok {
+		if actionID := navigationCauseActionID(message); actionID != 0 && s.cfg.UI != nil {
+			s.cfg.UI.follow(s.cfg.UI.generation, actionID)
+		}
 		s.pendingSwap = &target
 	}
 }
