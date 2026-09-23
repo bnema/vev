@@ -179,7 +179,9 @@ func (d *Daemon) failHandshakeAttachment(sess *session, ac *attachedClient, tr p
 		return
 	}
 	if welcomed {
-		d.clientGone(sess, ac, tr, true)
+		// A failed handshake after Welcome is not an explicit user detach. The
+		// client must return to its picker and show the destination failure.
+		d.clientGoneWithNoticeReason(sess, ac, tr, true, true, protocol.ReasonServerShutdown)
 	} else {
 		d.clientGoneWithoutNotice(sess, ac, tr, true)
 	}

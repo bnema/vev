@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -144,6 +145,29 @@ func TestHandshakeFirstPaintCancellationDoesNotRacePaintResult(t *testing.T) {
 	close(releasePaint)
 	awaitTestCompletion(t, paintDone, "delayed first paint did not finish")
 	awaitTestCompletion(t, handshakeDone, "handshake cancellation did not finish")
+}
+
+func TestHandshakeFailureAfterWelcomeDoesNotReportExplicitDetach(t *testing.T) {
+	pty, release := newBlockingPTY(t)
+	defer release()
+	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
+	tr := &closeTrackingTransport{}
+	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "welcome-failed", Size: domain.Size{Cols: 80, Rows: 24}, TermEnv: "xterm-256color"}, tr)
+	require.NoError(t, err)
+
+	d.failHandshakeAttachment(sess, ac, tr, true)
+
+	var detached *protocol.Detached
+	for _, frame := range tr.Sends() {
+		message, decodeErr := sessionwire.DecodeServerEnvelope(frame.Payload)
+		require.NoError(t, decodeErr)
+		if value, ok := message.(protocol.Detached); ok {
+			detached = &value
+			break
+		}
+	}
+	require.NotNil(t, detached, "the client needs a lifecycle response after Welcome")
+	require.Equal(t, protocol.ReasonServerShutdown, detached.Reason, "a failed destination handshake must return to the picker")
 }
 
 func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {

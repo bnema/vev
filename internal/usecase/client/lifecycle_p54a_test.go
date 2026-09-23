@@ -59,7 +59,10 @@ func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 		settle func(*sessionTestStream)
 		notice LifecycleNoticeKind
 	}{
-		{name: "session termination", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonDetach}) }, notice: LifecycleNoticeSessionEnded},
+		// ReasonDetach (the explicit user detach) is intentionally excluded here:
+		// TestSupervisorDetachedReasonDeterminesExitOrPicker pins that it exits
+		// the client instead of returning to the picker.
+		{name: "server shutdown", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonServerShutdown}) }, notice: LifecycleNoticeSessionEnded},
 		{name: "session deletion", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled}) }, notice: LifecycleNoticeSessionEnded},
 		{name: "destination failure", settle: func(s *sessionTestStream) {
 			s.fail(ports.BrokerStreamLost{Connection: ports.BrokerConnectionID{1}, Stream: 1, Epoch: 3, Cause: domain.RemoteFailureTransport, Err: errors.New("private diagnostic")})

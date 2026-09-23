@@ -452,8 +452,13 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			case protocol.ErrorMsg:
 				return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
 			case protocol.Detached:
-				if typed.Reason == protocol.ReasonDetachToPicker {
+				switch typed.Reason {
+				case protocol.ReasonDetachToPicker:
 					return attachmentLifecycleEnd(token, AttachmentDetachToPicker)
+				case protocol.ReasonDetach:
+					// The daemon confirmed the user's explicit detach request: the
+					// client exits cleanly instead of falling back to the picker.
+					return attachmentLifecycleEnd(token, AttachmentDetachAndExit)
 				}
 				return AttachmentEvent{Token: token, Kind: AttachmentEventEnded}
 			}

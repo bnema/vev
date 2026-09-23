@@ -16,6 +16,10 @@ func (d *Daemon) clientGoneWithoutNotice(sess *session, ac *attachedClient, fail
 }
 
 func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit, notice bool) {
+	d.clientGoneWithNoticeReason(sess, ac, failed, explicit, notice, protocol.ReasonDetach)
+}
+
+func (d *Daemon) clientGoneWithNoticeReason(sess *session, ac *attachedClient, failed ports.ServerConnection, explicit, notice bool, reason uint8) {
 	if sess == nil || ac == nil {
 		return
 	}
@@ -45,7 +49,7 @@ func (d *Daemon) clientGoneWithNotice(sess *session, ac *attachedClient, failed 
 		d.clearParkingInFlightIfAbandoned(sess, ac, parkingToken)
 		return // displaced, or the link was rebound after the precheck
 	}
-	d.finishClientGone(sess, ac, failed, explicit, notice)
+	d.finishClientGoneReason(sess, ac, failed, explicit, notice, reason)
 }
 
 func (d *Daemon) clientGoneForAttachment(effect *attachmentEffect, explicit bool) bool {

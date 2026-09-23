@@ -482,6 +482,120 @@ func awaitPickerState(t *testing.T, sup *Supervisor) {
 	require.Eventually(t, func() bool { return sup.State().Presentation == PresentPicker }, 5*time.Second, time.Millisecond)
 }
 
+// TestSupervisorDetachedReasonDeterminesExitOrPicker pins the client-visible
+// consequence of every protocol.Detached reason the daemon can send while
+// attached: only the explicit user detach (ReasonDetach) ends the run and
+// exits the client cleanly. Every other daemon-driven reason returns to the
+// picker with a lifecycle notice instead of leaving the user stranded with no
+// way out short of Ctrl+C.
+func TestSupervisorDetachedReasonDeterminesExitOrPicker(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     uint8
+		wantExit   bool
+		wantNotice LifecycleNoticeKind
+	}{
+		{
+			name:       "explicit detach exits the client",
+			reason:     protocol.ReasonDetach,
+			wantExit:   true,
+			wantNotice: LifecycleNoticeDetachAndExit,
+		},
+		{
+			name:       "detach to picker stays in the client",
+			reason:     protocol.ReasonDetachToPicker,
+			wantExit:   false,
+			wantNotice: LifecycleNoticeDetachToPicker,
+		},
+		{
+			name:       "session killed returns to the picker",
+			reason:     protocol.ReasonSessionKilled,
+			wantExit:   false,
+			wantNotice: LifecycleNoticeSessionEnded,
+		},
+		{
+			name:       "server shutdown returns to the picker",
+			reason:     protocol.ReasonServerShutdown,
+			wantExit:   false,
+			wantNotice: LifecycleNoticeSessionEnded,
+		},
+		{
+			name:       "replaced returns to the picker",
+			reason:     protocol.ReasonReplaced,
+			wantExit:   false,
+			wantNotice: LifecycleNoticeSessionEnded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			picker := newAttachTestPicker()
+			notices := make(chan LifecycleNotice, 8)
+			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+			})
+			stream := attachLiveSession(t, harness, picker)
+			stream.deliver(protocol.Detached{Reason: tt.reason})
+
+			if tt.wantExit {
+				require.NoError(t, harness.waitRun(t))
+			} else {
+				awaitPickerState(t, harness.sup)
+			}
+			select {
+			case notice := <-notices:
+				require.Equal(t, tt.wantNotice, notice.Kind)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the expected lifecycle notice was never delivered")
+			}
+		})
+	}
+}
+
+// TestSupervisorPendingSwapContinuesRatherThanExiting guards the overlay
+// commit-elsewhere path (same-peer switch) against being folded into the
+// explicit-detach-and-exit outcome above: the outgoing attachment ends
+// through a local lifecycle action, never a protocol.Detached message, and a
+// pendingSwap in flight must land the supervisor on the new target instead of
+// exiting or surfacing any lifecycle notice.
+func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
+	picker := newAttachTestPicker()
+	notices := make(chan LifecycleNotice, 8)
+	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+		cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+	})
+	first := attachLiveSession(t, harness, picker)
+	first.deliver(navigationOffer(1))
+	awaitPresentation(t, harness.sup, PresentAttachedPicker)
+
+	var mu sync.Mutex
+	second := newSessionTestStream()
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return second, nil
+	})
+	other := sessionTestRequest(true)
+	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+	picker.recordOp(pickerOp{commit: true}, "row", other)
+
+	awaitSent(t, first, "Detach", isSent[protocol.Detach])
+	awaitStreamHello(t, &mu, &second)
+	second.deliver(protocol.Welcome{SessionName: "beta"})
+	output := sessionTestOutput(1, "\x1b[Hbeta")
+	output.Context.Route.Target = other.Target
+	second.deliver(output)
+	awaitAttachedState(t, harness.sup)
+
+	select {
+	case <-harness.runDone:
+		t.Fatal("a same-peer swap must not end the supervisor run")
+	default:
+	}
+	select {
+	case notice := <-notices:
+		t.Fatalf("a swap must not report a lifecycle transition: %+v", notice)
+	default:
+	}
+}
+
 // awaitStreamHello waits until the admitted stream has sent its first client
 // message, polling the guarded stream pointer rather than a stale snapshot.
 func awaitStreamHello(t *testing.T, mu *sync.Mutex, stream **sessionTestStream) {
@@ -615,7 +729,7 @@ func TestSupervisorUIActionBindingUsesSingleAttachmentPump(t *testing.T) {
 
 	// Ending the stream releases before picker reacquisition. A stale request
 	// would be admitted here if finalization forgot to retire the binding.
-	admitted.deliver(protocol.Detached{})
+	admitted.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
 	awaitPickerState(t, harness.sup)
 	ui.mu.Lock()
 	require.Nil(t, ui.input, "attachment finalization must revoke the UI pump binding")

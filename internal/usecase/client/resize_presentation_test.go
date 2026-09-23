@@ -616,7 +616,7 @@ func TestSupervisorResizeDuringAttachmentSettlementPreservesSessionOutput(t *tes
 	// the resized geometry follow the attachment. A run that never emitted the
 	// invalidation cannot reach this point, and a run that consumed it without a
 	// repaint leaves only one.
-	stream.deliver(protocol.Detached{})
+	stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
 	awaitPickerState(t, harness.sup)
 	pickerAtResize := func(sample resizeRenderSample) bool {
 		return sample.state.Presentation == PresentPicker && sample.geometry.Size == resized.Size
@@ -663,7 +663,7 @@ func TestSupervisorResizeConnectingBurstStaysCoalescedAndBuffered(t *testing.T) 
 	require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(),
 		"the coalesced burst is preserved through connecting and attached")
 
-	stream.deliver(protocol.Detached{})
+	stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
 	awaitPickerState(t, harness.sup)
 	pickerAtLatest := func(sample resizeRenderSample) bool {
 		return sample.state.Presentation == PresentPicker && sample.geometry.Size == burst[len(burst)-1].Size
@@ -731,7 +731,7 @@ func TestSupervisorAttachedResizeKeepsGeometryWakeupAndPreservesRepaint(t *testi
 	require.Equal(t, baseline, harness.recorder.count(), "an attached presentation is never painted over")
 	require.Equal(t, 1, harness.sup.attachments.pendingPresentationSignals(), "the invalidation stays buffered until the picker wait")
 
-	stream.deliver(protocol.Detached{})
+	stream.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
 	awaitPickerState(t, harness.sup)
 	require.Eventually(t, func() bool { return harness.sup.attachments.pendingPresentationSignals() == 0 }, 5*time.Second, time.Millisecond,
 		"the preserved invalidation is consumed by the picker wait")
@@ -762,7 +762,7 @@ func TestSupervisorResizeAfterDetachReachesOnlyReplacementAttachment(t *testing.
 
 	// The attachment detaches: its generation is retired before any replacement
 	// exists.
-	first.deliver(protocol.Detached{})
+	first.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled})
 	awaitPickerState(t, harness.sup)
 	require.True(t, authorityToken(&harness.sup.attachments.authority).IsZero(), "the retired token no longer owns the foreground")
 
