@@ -4,16 +4,22 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 func TestObservedHostStatus(t *testing.T) {
@@ -106,4 +112,57 @@ func TestHostListUsesExistingConnector(t *testing.T) {
 	require.NoError(t, runHostCommand(context.Background(), command{hostAction: hostActionList}, deps))
 	require.True(t, called)
 	require.Equal(t, "no hosts\n", output.String())
+}
+
+// TestStopDaemonWithoutBrokerReachesExistingDaemon pins that a stop request
+// with no broker running goes straight to an existing local daemon: the idle
+// broker exits long before the daemon, so its absence never implies that no
+// daemon runs, and nothing is started to find out.
+func TestStopDaemonWithoutBrokerReachesExistingDaemon(t *testing.T) {
+	tests := []struct {
+		name    string
+		daemon  bool
+		outcome protocol.KillOutcome
+		wantErr error
+	}{
+		{name: "running daemon stops", daemon: true, outcome: protocol.KillSucceeded},
+		{name: "absent daemon is reported, not started", daemon: false, wantErr: errDaemonNotRunning},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			received := make(chan protocol.ClientMessage, 1)
+			previous := dialListDaemon
+			t.Cleanup(func() { dialListDaemon = previous })
+			dialListDaemon = func(context.Context, string, ...ipc.Option) (wire.Transport, error) {
+				if !tt.daemon {
+					return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.ENOENT}
+				}
+				clientSide, serverSide := net.Pipe()
+				server := sessionwire.NewServerConnection(ipc.NewTransport(serverSide))
+				go func() {
+					defer func() { _ = server.Close() }()
+					message, err := server.ReceiveClient()
+					if err != nil {
+						return
+					}
+					received <- message
+					_ = server.SendServer(protocol.KillResult{RequestID: 1, Outcome: tt.outcome})
+				}()
+				return ipc.NewTransport(clientSide), nil
+			}
+
+			err := stopDaemonWithoutBroker(context.Background())
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			select {
+			case message := <-received:
+				require.Equal(t, protocol.Kill{RequestID: 1, Scope: protocol.KillDaemon}, message)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the daemon never received the stop request")
+			}
+		})
+	}
 }

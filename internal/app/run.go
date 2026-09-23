@@ -1032,7 +1032,7 @@ func requestDaemonStop(ctx context.Context) error {
 	service, err := connectDaemonStopBroker(ctx)
 	if err != nil {
 		if errors.Is(err, errBrokerAbsent) {
-			return errDaemonNotRunning
+			return stopDaemonWithoutBroker(ctx)
 		}
 		return unreachableBrokerError(err)
 	}
@@ -1336,39 +1336,70 @@ func runList(ctx context.Context, cmd command) error {
 var connectListBroker = connectExistingBroker
 var dialListDaemon = ipc.DialContext
 
+// errNoLocalDaemon reports that no local daemon socket answers; nothing was
+// started to find out.
+var errNoLocalDaemon = errors.New("vev: no local daemon")
+
+// exchangeLocalDaemon sends one request directly to an existing local daemon
+// and returns its reply. It is the broker-less path of read and stop
+// commands: the broker being absent is the normal idle state, and these
+// commands must stay true without starting it. It never spawns a daemon.
+func exchangeLocalDaemon(ctx context.Context, request protocol.ClientMessage) (protocol.ServerMessage, error) {
+	transport, err := dialListDaemon(ctx, ipc.SocketDir())
+	if err != nil {
+		if backendAbsent(err) {
+			return nil, errNoLocalDaemon
+		}
+		return nil, err
+	}
+	connection := sessionwire.NewClientConnection(transport)
+	defer func() { _ = connection.Close() }()
+	if err := connection.SendClient(request); err != nil {
+		return nil, err
+	}
+	return connection.ReceiveServer()
+}
+
 func runListWithoutBroker(ctx context.Context, cmd command, out io.Writer) error {
 	if cmd.listHost != "" {
 		_, err := fmt.Fprintf(out, "%s: not connected (no broker running)\n", cmd.listHost)
 		return err
 	}
-	transport, err := dialListDaemon(ctx, ipc.SocketDir())
-	if err != nil {
-		if !backendAbsent(err) {
-			return fmt.Errorf("vev: list local sessions: %w", err)
-		}
-	} else {
-		connection := sessionwire.NewClientConnection(transport)
-		defer func() { _ = connection.Close() }()
-		if err := connection.SendClient(protocol.List{}); err != nil {
-			return fmt.Errorf("vev: request local sessions: %w", err)
-		}
-		reply, err := connection.ReceiveServer()
-		if err != nil {
-			return fmt.Errorf("vev: read local sessions: %w", err)
-		}
+	reply, err := exchangeLocalDaemon(ctx, protocol.List{})
+	switch {
+	case errors.Is(err, errNoLocalDaemon):
+		printSessions(out, nil)
+	case err != nil:
+		return fmt.Errorf("vev: list local sessions: %w", err)
+	default:
 		sessions, ok := reply.(protocol.Sessions)
 		if !ok {
 			return fmt.Errorf("vev: unexpected local list reply %T", reply)
 		}
 		printSessions(out, sessions.Sessions)
 	}
-	if err != nil {
-		printSessions(out, nil)
-	}
 	if cmd.listAll {
 		return listDisconnectedHosts(out)
 	}
 	return nil
+}
+
+// stopDaemonWithoutBroker asks an existing local daemon to stop directly. A
+// daemon routinely outlives the idle broker, so "no broker" never means "no
+// daemon".
+func stopDaemonWithoutBroker(ctx context.Context) error {
+	reply, err := exchangeLocalDaemon(ctx, protocol.Kill{RequestID: 1, Scope: protocol.KillDaemon})
+	if errors.Is(err, errNoLocalDaemon) {
+		return errDaemonNotRunning
+	}
+	if err != nil {
+		return fmt.Errorf("vev: stop local daemon: %w", err)
+	}
+	result, ok := reply.(protocol.KillResult)
+	if !ok {
+		return fmt.Errorf("vev: unexpected daemon stop reply %T", reply)
+	}
+	return brokerKillResultError(result)
 }
 
 // printSessions renders a session table (or a friendly note when empty).
