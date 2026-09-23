@@ -29,6 +29,8 @@ collect_artifacts() {
       docker cp "$container:/home/demo/.local/state/vev/$file" \
         "$artifacts_dir/${role}-${file}" >/dev/null 2>&1 || true
     done
+    docker cp "$container:/home/demo/.local/state/vev/broker/log/vev-daemon.log" \
+      "$artifacts_dir/${role}-vev-broker.log" >/dev/null 2>&1 || true
   done
 }
 
