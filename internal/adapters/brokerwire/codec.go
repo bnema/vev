@@ -1239,7 +1239,7 @@ func snapshotDaemonFromWire(message *wire.SnapshotDaemon) (ports.BrokerDaemonObs
 	if err != nil {
 		return daemon, 0, 0, ErrInvalidMessage
 	}
-	if availability < domain.RemoteAvailabilityUnknown || availability > domain.RemoteAvailabilityInvalidResponse {
+	if availability < domain.RemoteAvailabilityUnknown || availability > domain.RemoteAvailabilityNoDaemon {
 		return daemon, 0, 0, ErrInvalidMessage
 	}
 	failureKind, err := brokerEnum8[domain.RemoteFailureKind](message.GetFailureKind())

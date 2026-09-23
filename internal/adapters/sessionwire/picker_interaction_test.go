@@ -106,6 +106,16 @@ func TestPickerServerMessagesEncodeWithTypes(t *testing.T) {
 	}
 }
 
+func TestPickerSnapshotNoDaemonStatusRoundTrips(t *testing.T) {
+	line := protocol.PickerLine{Status: protocol.PickerLineStatusNoDaemon, StatusDetail: "no daemon — Enter to create a session"}
+	encoded := pickerLineToWire(line)
+	require.Equal(t, uint32(protocol.PickerLineStatusNoDaemon), encoded.GetStatus())
+	require.Equal(t, line.StatusDetail, encoded.GetStatusDetail())
+	decoded, err := pickerLineFromWire(encoded)
+	require.NoError(t, err)
+	require.Equal(t, line, decoded)
+}
+
 func TestPickerSnapshotNormalizesIntoProjections(t *testing.T) {
 	snapshot := pickerWireSnapshot()
 	raw := &scriptedTransport{}

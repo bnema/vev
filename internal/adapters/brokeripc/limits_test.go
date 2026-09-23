@@ -223,6 +223,7 @@ func TestErrorDetailMapping(t *testing.T) {
 		admission uint32
 	}{
 		{"typed", ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "no"}, ports.BrokerErrorIncompatible, 0},
+		{"no daemon", ports.BrokerError{Code: ports.BrokerErrorNoDaemon, Text: "remote daemon is absent"}, ports.BrokerErrorNoDaemon, 0},
 		{"limit", ports.BrokerAdmissionLimit, ports.BrokerErrorUnavailable, 1},
 		{"closed", ports.BrokerAdmissionClosed, ports.BrokerErrorUnavailable, 2},
 		{"stale", ports.BrokerAdmissionStale, ports.BrokerErrorUnavailable, 3},
