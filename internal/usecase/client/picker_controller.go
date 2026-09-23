@@ -98,7 +98,10 @@ type pickerController struct {
 	renderer    *pickerRenderer
 	notices     ui.ToastManager
 	interaction uint64
-	ownsInput   bool
+	// sort is this client's picker ordering. It survives every picker
+	// reopen for the lifetime of the client process.
+	sort      pickerusecase.SortMode
+	ownsInput bool
 	opsReady    chan struct{}
 	lastOp      pickerOp
 	// lastCommitKey is the catalogue key captured with the pending commit
@@ -126,6 +129,7 @@ func newPickerController(clock ports.Clock, freshness time.Duration, trueColor b
 		clock:     clock,
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
 		renderer:  newPickerRenderer(pickerColorProfile(trueColor)),
+		sort:      defaultPickerSort(),
 		ownsInput: true,
 		opsReady:  make(chan struct{}, 1),
 	}
@@ -612,9 +616,18 @@ func (p *pickerController) SetCurrent(current pickerCurrent) {
 	if p.catalogue.Epoch() == 0 {
 		return
 	}
+	p.rememberSortLocked()
 	p.loop = nil
 	p.rebuildLocked()
 	p.renderer.invalidate()
+}
+
+// rememberSortLocked keeps the sort the user chose in the closing
+// presentation for the next one.
+func (p *pickerController) rememberSortLocked() {
+	if p.loop != nil && p.loop.model != nil {
+		p.sort = p.loop.model.SortMode()
+	}
 }
 
 // pickerRefusalNotice is the toast text for one resolution refusal.
@@ -700,7 +713,7 @@ func (p *pickerController) rebuildLocked() {
 	}
 	if p.loop == nil {
 		p.interaction++
-		p.loop = pickerLoopFromSnapshot(snapshot(), protocol.PickerIntentNavigation, defaultPickerSort())
+		p.loop = pickerLoopFromSnapshot(snapshot(), protocol.PickerIntentNavigation, p.sort)
 		return
 	}
 	p.loop.replaceLines(snapshot())

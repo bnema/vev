@@ -294,8 +294,9 @@ func (l *pickerLoop) killAction() bool {
 	return ok && line.Actions&protocol.PickerCanKill != 0
 }
 
-// defaultPickerSort is the client-local initial ordering mode.
-func defaultPickerSort() picker.SortMode { return picker.SortRecent }
+// defaultPickerSort is the client-local initial ordering mode: sessions
+// grouped under their host, local first.
+func defaultPickerSort() picker.SortMode { return picker.SortGrouped }
 
 // pickerPreviewSize is the viewport the modal can display for one terminal: the
 // preview pane inside the shared picker geometry.

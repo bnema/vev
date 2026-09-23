@@ -377,11 +377,17 @@ func TestPickerControllerSortToggleSwitchesProjection(t *testing.T) {
 		}
 		return labels
 	}
-	require.Equal(t, []string{"alpha", "remote-a", "gamma"}, order(), "recent: live, remote, stopped")
+	grouped := []string{"alpha", "gamma", "remote-a"}
+	recent := []string{"alpha", "remote-a", "gamma"}
+	require.Equal(t, grouped, order(), "default grouped: local section, then remote")
 	require.True(t, controller.ConsumeTerminalRead([]byte("s")))
-	require.Equal(t, []string{"alpha", "gamma", "remote-a"}, order(), "grouped: local section, then remote")
+	require.Equal(t, recent, order(), "recent: live, remote, stopped")
+
+	// Reopening the picker keeps this client's chosen sort.
+	controller.SetCurrent(pickerCurrent{})
+	require.Equal(t, recent, order(), "sort survives a reopen")
 	require.True(t, controller.ConsumeTerminalRead([]byte("s")))
-	require.Equal(t, []string{"alpha", "remote-a", "gamma"}, order())
+	require.Equal(t, grouped, order())
 }
 
 // TestPickerControllerRendersBellsAndRepaintsOnPublication ports main's
