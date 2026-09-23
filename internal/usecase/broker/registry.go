@@ -89,6 +89,8 @@ type RegistryConfig struct {
 	// at least one live client subscription. A zero value falls back to
 	// defaultDemandFreshForLocal (about 1s) or defaultDemandFreshForRemote
 	// (about 2s). With no live subscription, no scheduled probe runs.
+	// DemandFreshForRemote is also the first delay of a watched host's
+	// failure backoff, which doubles up to max(DemandFreshForRemote, 30s).
 	DemandFreshForLocal  time.Duration
 	DemandFreshForRemote time.Duration
 	// ProbeTimeout bounds every local and remote observation attempt on the
@@ -1175,7 +1177,7 @@ func demandRetryDelay(base time.Duration, failures uint) time.Duration {
 	for i := uint(1); i < failures && delay < demandRetryMax; i++ {
 		delay *= 2
 	}
-	return min(delay, demandRetryMax)
+	return min(delay, max(base, demandRetryMax))
 }
 
 // retryDelay is the capped exponential retry cadence for a failure streak.

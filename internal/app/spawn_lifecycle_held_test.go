@@ -13,15 +13,17 @@ import (
 )
 
 func TestWaitForTargetOrLifecycleNamesAHeldLock(t *testing.T) {
-	cfg := backoffConfig{initial: time.Millisecond, max: 2 * time.Millisecond, total: 20 * time.Millisecond}
+	cfg := backoffConfig{initial: time.Millisecond, max: 2 * time.Millisecond, total: 200 * time.Millisecond}
 	refuse := func(context.Context) (struct{}, error) { return struct{}{}, errors.New("no carriage") }
 	tests := []struct {
 		name     string
 		held     bool
+		release  bool
 		wantHeld bool
 	}{
 		{name: "lock held by a silent owner", held: true, wantHeld: true},
 		{name: "free lock is acquired", held: false, wantHeld: false},
+		{name: "lock released during the budget is acquired", held: true, release: true, wantHeld: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -30,7 +32,11 @@ func TestWaitForTargetOrLifecycleNamesAHeldLock(t *testing.T) {
 			if tt.held {
 				owner, err := lifecycle.TryAcquire(dir)
 				require.NoError(t, err)
-				t.Cleanup(func() { _ = owner.Release() })
+				if tt.release {
+					time.AfterFunc(5*time.Millisecond, func() { _ = owner.Release() })
+				} else {
+					t.Cleanup(func() { _ = owner.Release() })
+				}
 			}
 
 			_, owner, err := waitForTargetOrLifecycle(context.Background(), dir, refuse, cfg)

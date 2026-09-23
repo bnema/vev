@@ -17,7 +17,7 @@ func routeHostsTestSnapshot() protocol.RecentRouteSnapshot {
 		Generation: 3,
 		Entries: []protocol.RecentRouteEntry{{
 			Key: 1, Generation: 1, Target: target, Name: "work", HostLabel: "box",
-			Kind: protocol.RouteKindRemote, Attention: true, AttentionSeq: 5,
+			Kind: protocol.RouteKindRemote, Attention: true, AttentionSeq: 5, Visited: true,
 		}},
 		Hosts: []protocol.RouteHost{
 			{Key: 2, Generation: 1, Label: "a", Kind: protocol.RouteKindRemote},
@@ -35,6 +35,9 @@ func TestProtoRouteHostsWire(t *testing.T) {
 	seqBytes, err := proto.Marshal(&wire.RecentRouteEntry{AttentionSeq: 5})
 	require.NoError(t, err)
 	require.Equal(t, []byte{0x50, 0x05}, seqBytes)
+	visitedBytes, err := proto.Marshal(&wire.RecentRouteEntry{Visited: true})
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x58, 0x01}, visitedBytes)
 
 	snapshot := routeHostsTestSnapshot()
 	envelope, err := encodeProtoClient(snapshot)

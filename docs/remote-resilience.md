@@ -42,7 +42,9 @@ exactly. The daemon renders the latest attachment snapshot; active routes are
 metadata-only. `JRS` and cross-daemon `BCK` transitions send typed
 key/generation actions back to the client, while `BCK` to a live session on the
 current authenticated daemon uses an in-band switch. Route history is
-process-local and is not persisted or shared between clients.
+process-local and is not persisted or shared between clients. The status-bar
+history and `JRS` ranks list only routes this client has attached to, so a new
+client starts with an empty history; the palette lists every known route.
 
 A picker-selected remote target is a direct handoff with one input pump. Exact
 lifecycle/name identities are carried separately from display labels, and a

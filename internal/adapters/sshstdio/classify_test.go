@@ -20,6 +20,7 @@ func TestClassifyStderr(t *testing.T) {
 		{name: "unknown host key", stderr: "Host key verification failed.", want: domain.RemoteFailureTrust},
 		{name: "changed host key", stderr: "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!", want: domain.RemoteFailureTrust},
 		{name: "timeout", stderr: "ssh: connect to host example.test port 22: Connection timed out", want: domain.RemoteFailureTimeout},
+		{name: "remote shell permission stays generic", stderr: "bash: /usr/local/bin/vev: Permission denied", want: domain.RemoteFailureNone},
 		{name: "refused stays generic", stderr: "connect: connection refused", want: domain.RemoteFailureNone},
 		{name: "empty", stderr: "", want: domain.RemoteFailureNone},
 	}

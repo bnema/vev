@@ -16,7 +16,7 @@ func ClassifyStderr(stderr string) domain.RemoteFailureKind {
 	case strings.Contains(text, "host key verification failed"),
 		strings.Contains(text, "remote host identification has changed"):
 		return domain.RemoteFailureTrust
-	case strings.Contains(text, "permission denied"),
+	case strings.Contains(text, "permission denied ("),
 		strings.Contains(text, "unable to authenticate"),
 		strings.Contains(text, "authentication required"),
 		strings.Contains(text, "too many authentication failures"):

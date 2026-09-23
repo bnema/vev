@@ -495,7 +495,7 @@ func (p *pickerController) RenderNotice(size domain.Size) []byte {
 		return nil
 	}
 	var buffer bytes.Buffer
-	if _, err := drawClientToast(&buffer, size, newest.Message, domain.AnchorTopRight); err != nil {
+	if _, err := drawClientToast(&buffer, size, newest.Message, newest.Anchor); err != nil {
 		return nil
 	}
 	return buffer.Bytes()

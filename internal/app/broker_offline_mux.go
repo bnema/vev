@@ -430,7 +430,7 @@ func classifyBootstrapFailure(sink *sshstdio.DiagnosticSink, err error) error {
 		return err
 	}
 	if kind := sshstdio.ClassifyStderr(sink.String()); kind != domain.RemoteFailureNone {
-		return domain.RemoteFailure{Kind: kind, Err: err}
+		return fmt.Errorf("%w: %w", domain.RemoteFailure{Kind: kind}, err)
 	}
 	return err
 }
