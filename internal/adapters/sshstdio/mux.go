@@ -46,6 +46,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -166,6 +167,10 @@ func dialMuxContext(ctx context.Context, spec CommandSpec, logger *slog.Logger, 
 	}
 	stderr := newCappedDiagnostic(muxStderrLimit)
 	cmd.Stderr = stderr
+	// A grandchild (for example ssh's ProxyCommand) can outlive a killed
+	// child and hold the stderr pipe open; bound how long Wait keeps copying
+	// from it so Close never waits for that grandchild to exit.
+	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("sshstdio: mux start %s: %w", spec.Path, err)
