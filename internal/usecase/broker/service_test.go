@@ -154,12 +154,12 @@ func TestAuthorityAdmissionRollback(t *testing.T) {
 
 	// Exhaust the pool's connection bound: the second admission must release the
 	// supervisor client lease it already took.
-	pool.limits.Clients = 1
+	pool.limits.Clients = 2
 	_, err = authority.AdmitClient(context.Background())
 	require.ErrorIs(t, err, ports.BrokerAdmissionLimit)
 	clients, _, _, _ := supervisorState(supervisor)
 	require.Equal(t, 1, clients, "a refused admission must release its client lease")
-	require.Equal(t, 1, poolClientCount(pool), "a refused admission must not leave a pool client")
+	require.Equal(t, 2, poolClientCount(pool), "a refused admission must not leave a pool client")
 
 	// A cancelled admission context takes no lease and registers no client.
 	ctx, cancel := context.WithCancel(context.Background())

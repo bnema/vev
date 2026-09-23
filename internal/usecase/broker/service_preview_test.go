@@ -183,6 +183,43 @@ func awaitClosed(t *testing.T, conn *previewWatchConn) {
 	}
 }
 
+func TestServicePreviewStreamIDsDoNotConsumeClientIDs(t *testing.T) {
+	for _, previewFirst := range []bool{false, true} {
+		name := "client first"
+		if previewFirst {
+			name = "preview first"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newPreviewFixture(t, previewTarget(0x11, "tab-alpha"))
+			service := f.service.(*Service)
+			openClient := func(want ports.BrokerStreamID) {
+				t.Helper()
+				id, err := service.NextStreamID()
+				require.NoError(t, err)
+				require.Equal(t, want, id)
+				stream, err := service.OpenStream(context.Background(), poolRequest(service.ConnectionID(), uint64(id)))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, stream.Close()) })
+			}
+			if !previewFirst {
+				openClient(1)
+			}
+			for range 3 {
+				req, err := service.previewStreamRequest(ports.BrokerPreviewRoute{Local: true, Policy: poolPolicy()})
+				require.NoError(t, err)
+				stream, err := service.pool.OpenStream(context.Background(), req)
+				require.NoError(t, err)
+				require.NoError(t, stream.Close())
+			}
+			if previewFirst {
+				openClient(1)
+			} else {
+				openClient(2)
+			}
+		})
+	}
+}
+
 func TestServicePreviewKeepsOneStreamAcrossFrames(t *testing.T) {
 	target := previewTarget(0x11, "tab-alpha")
 	f := newPreviewFixture(t, target)

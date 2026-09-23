@@ -89,12 +89,19 @@ func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error
 		lease.Release()
 		return nil, err
 	}
-	if err := ctx.Err(); err != nil {
+	previewID, err := a.pool.RegisterClient()
+	if err != nil {
 		a.pool.CloseClient(id)
 		lease.Release()
 		return nil, err
 	}
-	return newService(a.epoch, id, a.registry, a.pool, a.supervisor, lease, a.clock), nil
+	if err := ctx.Err(); err != nil {
+		a.pool.CloseClient(previewID)
+		a.pool.CloseClient(id)
+		lease.Release()
+		return nil, err
+	}
+	return newService(a.epoch, id, previewID, a.registry, a.pool, a.supervisor, lease, a.clock), nil
 }
 
 // Service is one admitted client connection: the core's service for exactly one
@@ -102,6 +109,7 @@ func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error
 type Service struct {
 	epoch      ports.BrokerEpoch
 	id         ports.BrokerConnectionID
+	previewID  ports.BrokerConnectionID
 	registry   *Registry
 	pool       *Pool
 	supervisor *Supervisor
@@ -124,7 +132,8 @@ type Service struct {
 	// supervisor and the broker operations each read one identity here and carry
 	// it on OpenStream rather than relying on an implicit allocation there. An
 	// allocated identity is consumed even when the open it names is refused.
-	nextStream ports.BrokerStreamID
+	nextStream    ports.BrokerStreamID
+	previewStream ports.BrokerStreamID
 	// wg counts in-flight stream opens and membership mutations so Close drains
 	// them, and their operation leases, before releasing connection resources.
 	wg sync.WaitGroup
@@ -144,10 +153,10 @@ type Service struct {
 
 var _ ports.BrokerService = (*Service)(nil)
 
-func newService(epoch ports.BrokerEpoch, id ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease, clock ports.Clock) *Service {
+func newService(epoch ports.BrokerEpoch, id, previewID ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease, clock ports.Clock) *Service {
 	ctx, cancel := context.WithCancel(supervisor.RootContext())
 	s := &Service{
-		epoch: epoch, id: id, registry: registry, pool: pool, supervisor: supervisor, lease: lease, clock: clock,
+		epoch: epoch, id: id, previewID: previewID, registry: registry, pool: pool, supervisor: supervisor, lease: lease, clock: clock,
 		ctx: ctx, cancel: cancel, subs: make(map[*serviceSubscription]struct{}),
 		done: make(chan struct{}),
 	}
@@ -410,6 +419,7 @@ func (s *Service) Close() error {
 		for _, sub := range subs {
 			sub.Close()
 		}
+		s.pool.CloseClient(s.previewID)
 		s.pool.CloseClient(s.id)
 		s.lease.Release()
 		// The connection is locally and orderly closed: detach the broker-root

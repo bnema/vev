@@ -93,12 +93,17 @@ func previewPublication(request ports.BrokerPreviewRequest, preview protocol.Rem
 // previewStreamRequest builds the observation stream for one watch. The broker
 // allocates the stream identity, so a client never names one.
 func (s *Service) previewStreamRequest(route ports.BrokerPreviewRoute) (ports.BrokerOpenStreamRequest, error) {
-	stream, err := s.NextStreamID()
-	if err != nil {
-		return ports.BrokerOpenStreamRequest{}, err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ports.BrokerOpenStreamRequest{}, ports.BrokerAdmissionClosed
 	}
+	if s.previewStream == ^ports.BrokerStreamID(0) {
+		return ports.BrokerOpenStreamRequest{}, ports.BrokerAdmissionLimit
+	}
+	s.previewStream++
 	return ports.BrokerOpenStreamRequest{
-		Epoch: s.epoch, Connection: s.id, Stream: stream,
+		Epoch: s.epoch, Connection: s.previewID, Stream: s.previewStream,
 		Purpose: ports.BrokerStreamObservation, StartMode: ports.BrokerDaemonExistingOnly,
 		Local: route.Local, Endpoint: route.Endpoint, Registration: route.Registration, Policy: route.Policy,
 	}, nil
@@ -196,7 +201,7 @@ func (p *servicePreviewSubscription) watch() (reopen, delivered bool) {
 	route, err := p.service.previewStreamRequest(p.request.Route)
 	var stream ports.BrokerLogicalConnection
 	if err == nil {
-		stream, err = p.service.OpenStream(p.ctx, route)
+		stream, err = p.service.pool.OpenStream(p.ctx, route)
 	}
 	if err != nil {
 		return p.fail(err), false
