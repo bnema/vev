@@ -272,6 +272,8 @@ func effectiveIdleGrace(config *brokerconfig.Config, explicit time.Duration) (ti
 // supervisor open from construction until the listener and its accept drain are
 // ready, so the idle timer can never fire during setup.
 func runBrokerServe(ctx context.Context, options brokerServeOptions, deps brokerServeDeps) (retErr error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var layout brokerconfig.Layout
 	var configPath string
 	var err error
@@ -459,7 +461,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 		return err
 	}
 	socketPath := brokeripc.SocketPath(layout.Runtime)
-	listener, err := deps.listen(socketPath, epoch, authority, brokeripc.Config{})
+	listener, err := deps.listen(socketPath, epoch, authority, brokeripc.Config{OnRetire: cancel})
 	if err != nil {
 		return fmt.Errorf("vev: listen on broker sandbox socket: %w", err)
 	}

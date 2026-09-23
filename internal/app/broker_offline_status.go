@@ -530,8 +530,11 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 		if !deps.now().Before(req.deadline) {
 			return brokerStatusReport{}, fmt.Errorf("%w: endpoint %s did not answer Register within %s", errBrokerNotReady, req.socketPath, req.timeout)
 		}
+		if errors.Is(err, brokeripc.ErrBrokerRetired) {
+			return brokerStatusReport{}, err
+		}
 		if !errors.Is(err, errBrokerAbsent) {
-			return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w", req.socketPath, err)
+			return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --broker\" and retry", req.socketPath, err)
 		}
 
 		if held == nil {
@@ -548,8 +551,11 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 				if ctx.Err() != nil {
 					return brokerStatusReport{}, ctx.Err()
 				}
+				if errors.Is(err, brokeripc.ErrBrokerRetired) {
+					return brokerStatusReport{}, err
+				}
 				if !errors.Is(err, errBrokerAbsent) {
-					return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w", req.socketPath, err)
+					return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --broker\" and retry", req.socketPath, err)
 				}
 			case errors.Is(err, lifecycle.ErrBusy):
 				// Another caller is elected and spawning. Only the elected
@@ -620,6 +626,9 @@ func probeBrokerStatus(ctx context.Context, socketPath string) (brokerStatusRepo
 	}
 
 	service, err := brokeripc.Dial(ctx, socketPath, brokeripc.Config{})
+	if errors.Is(err, brokeripc.ErrBrokerRetired) {
+		return brokerStatusReport{}, err
+	}
 	if err != nil {
 		if backendAbsent(err) {
 			return brokerStatusReport{}, absentError(socketPath)
