@@ -2,8 +2,6 @@ package brokeripc
 
 import (
 	"path/filepath"
-
-	"github.com/bnema/vev/internal/adapters/ipc"
 )
 
 // SocketFileName is the fixed name of the per-user broker IPC socket inside its
@@ -16,10 +14,3 @@ const SocketFileName = "broker.sock"
 func SocketPath(runtimeDir string) string {
 	return filepath.Join(runtimeDir, SocketFileName)
 }
-
-// SocketDir returns the per-user directory the broker endpoint belongs in:
-// $XDG_RUNTIME_DIR/vev when set, else /run/user/<uid>/vev when that directory
-// exists, else /tmp/vev-<uid>. It is the daemon's per-user runtime directory as
-// well, so both endpoints share one owner-only directory while keeping
-// distinct socket names.
-func SocketDir() string { return ipc.SocketDir() }

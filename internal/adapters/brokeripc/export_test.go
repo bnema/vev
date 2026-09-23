@@ -1,5 +1,9 @@
 package brokeripc
 
+import (
+	"github.com/bnema/vev/internal/adapters/ipc"
+)
+
 // Test-only accessors (export_test.go pattern): these observe listener
 // internals that only this package's own tests need. They are kept out of
 // the production build so a live server's diagnostics or capacity never
@@ -32,3 +36,10 @@ func (l *listener) liveSessions() int {
 // convenience default runtime directory, for tests that need it without
 // composing SocketPath(SocketDir()) themselves.
 func DefaultSocketPath() string { return SocketPath(SocketDir()) }
+
+// SocketDir returns the per-user directory the broker endpoint belongs in:
+// $XDG_RUNTIME_DIR/vev when set, else /run/user/<uid>/vev when that directory
+// exists, else /tmp/vev-<uid>. It is the daemon's per-user runtime directory as
+// well, so both endpoints share one owner-only directory while keeping
+// distinct socket names.
+func SocketDir() string { return ipc.SocketDir() }

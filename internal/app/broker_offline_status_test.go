@@ -17,6 +17,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/brokeripc"
+	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/lifecycle"
 )
 
@@ -444,7 +445,7 @@ func TestBrokerStatusEnsureRejectsUnsafeRoot(t *testing.T) {
 		root string
 	}{
 		{name: "relative root", root: "relative"},
-		{name: "production overlap", root: brokeripc.SocketDir()},
+		{name: "production overlap", root: ipc.SocketDir()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
