@@ -1154,3 +1154,29 @@ func TestRegistryObservationDisabledDrainsWriter(t *testing.T) {
 	require.NotEmpty(t, store.writtenRevisions())
 	require.Zero(t, clock.activeTimers())
 }
+
+func TestServiceConfigValidation(t *testing.T) {
+	valid := serviceConfig{epoch: 1, id: ports.BrokerConnectionID{1}, previewID: ports.BrokerConnectionID{2}, registry: &Registry{}, pool: &Pool{}, supervisor: &Supervisor{}, lease: &Lease{}, clock: newManualClock(time.Unix(0, 0))}
+	tests := []struct {
+		name   string
+		mutate func(*serviceConfig)
+	}{
+		{"zero epoch", func(c *serviceConfig) { c.epoch = 0 }},
+		{"zero id", func(c *serviceConfig) { c.id = ports.BrokerConnectionID{} }},
+		{"zero preview", func(c *serviceConfig) { c.previewID = ports.BrokerConnectionID{} }},
+		{"same ids", func(c *serviceConfig) { c.previewID = c.id }},
+		{"nil registry", func(c *serviceConfig) { c.registry = nil }},
+		{"nil pool", func(c *serviceConfig) { c.pool = nil }},
+		{"nil supervisor", func(c *serviceConfig) { c.supervisor = nil }},
+		{"nil lease", func(c *serviceConfig) { c.lease = nil }},
+		{"nil clock", func(c *serviceConfig) { c.clock = nil }},
+	}
+	require.NoError(t, valid.validate())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := valid
+			tt.mutate(&config)
+			require.Error(t, config.validate())
+		})
+	}
+}

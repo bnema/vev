@@ -101,7 +101,10 @@ func (a *Authority) AdmitClient(ctx context.Context) (ports.BrokerService, error
 		lease.Release()
 		return nil, err
 	}
-	return newService(a.epoch, id, previewID, a.registry, a.pool, a.supervisor, lease, a.clock), nil
+	return newService(serviceConfig{
+		epoch: a.epoch, id: id, previewID: previewID, registry: a.registry,
+		pool: a.pool, supervisor: a.supervisor, lease: lease, clock: a.clock,
+	}), nil
 }
 
 // Service is one admitted client connection: the core's service for exactly one
@@ -153,10 +156,31 @@ type Service struct {
 
 var _ ports.BrokerService = (*Service)(nil)
 
-func newService(epoch ports.BrokerEpoch, id, previewID ports.BrokerConnectionID, registry *Registry, pool *Pool, supervisor *Supervisor, lease *Lease, clock ports.Clock) *Service {
-	ctx, cancel := context.WithCancel(supervisor.RootContext())
+type serviceConfig struct {
+	epoch         ports.BrokerEpoch
+	id, previewID ports.BrokerConnectionID
+	registry      *Registry
+	pool          *Pool
+	supervisor    *Supervisor
+	lease         *Lease
+	clock         ports.Clock
+}
+
+func (c serviceConfig) validate() error {
+	if c.epoch == 0 || c.id == (ports.BrokerConnectionID{}) || c.previewID == (ports.BrokerConnectionID{}) || c.id == c.previewID ||
+		nilDependency(c.registry) || nilDependency(c.pool) || nilDependency(c.supervisor) || nilDependency(c.lease) || nilDependency(c.clock) {
+		return errors.New("broker: invalid service dependencies")
+	}
+	return nil
+}
+
+func newService(c serviceConfig) *Service {
+	if err := c.validate(); err != nil {
+		panic(err) // Only the admitted authority constructs a service after acquiring both IDs and lease.
+	}
+	ctx, cancel := context.WithCancel(c.supervisor.RootContext())
 	s := &Service{
-		epoch: epoch, id: id, previewID: previewID, registry: registry, pool: pool, supervisor: supervisor, lease: lease, clock: clock,
+		epoch: c.epoch, id: c.id, previewID: c.previewID, registry: c.registry, pool: c.pool, supervisor: c.supervisor, lease: c.lease, clock: c.clock,
 		ctx: ctx, cancel: cancel, subs: make(map[*serviceSubscription]struct{}),
 		done: make(chan struct{}),
 	}
@@ -164,7 +188,7 @@ func newService(epoch ports.BrokerEpoch, id, previewID ports.BrokerConnectionID,
 	// loss as the terminal cause unless a local Close has already settled the
 	// connection, so a connection closed by its owner reports nil and one lost
 	// to a broker shutdown reports the typed loss.
-	s.stopRoot = context.AfterFunc(supervisor.RootContext(), func() {
+	s.stopRoot = context.AfterFunc(c.supervisor.RootContext(), func() {
 		s.terminalize(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker shutdown", Cause: context.Canceled})
 	})
 	return s
