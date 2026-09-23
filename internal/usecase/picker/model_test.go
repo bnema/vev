@@ -459,3 +459,29 @@ func TestReplaceLinesSelectsThePreviousRowWhenTheCursorRowLeaves(t *testing.T) {
 		})
 	}
 }
+
+func TestTreePrefixesBranchSessionsAndTabs(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		section("local"),
+		navLine("a", "alpha"), tabLine("a1", "one", protocol.PickerCanNavigate), tabLine("a2", "two", protocol.PickerCanNavigate),
+		navLine("b", "beta"), tabLine("b1", "one", protocol.PickerCanNavigate),
+		section("remote"),
+		navLine("c", "gamma"),
+	}, Config{})
+	got := make([]string, 0, len(m.rows))
+	for _, r := range m.rows {
+		got = append(got, r.tree+r.line.Label)
+	}
+	require.Equal(t, []string{
+		"local",
+		"├─ alpha", "│  ├─ one", "│  └─ two",
+		"└─ beta", "   └─ one",
+		"remote",
+		"└─ gamma",
+	}, got)
+
+	frame := m.Render(domain.Size{Cols: 40, Rows: 30}, Preview{})
+	cell := frame.At(0, 1)
+	require.Equal(t, '├', cell.Rune)
+	require.NotZero(t, cell.Style.Attrs&renderer.AttrDim, "tree lines are dimmed")
+}

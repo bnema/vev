@@ -131,6 +131,8 @@ type row struct {
 	// foldedContext is the owning session's name for a tab row, so searching a
 	// session name reaches the tab rows that are its destinations.
 	foldedContext string
+	// tree is the dimmed branch prefix drawn before the label ("├─ ", "│  └─ "…).
+	tree string
 }
 
 func (r row) key() string { return r.line.Key }
@@ -288,12 +290,54 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 			session = ""
 		}
 	}
+	m.assignTreePrefixes()
 	m.searchMatches = nil
 	m.matchRows = nil
 	if m.searchActive {
 		m.refreshSearch(false)
 	}
 	m.restoreSelection(key, hadKey, fallbackIndex)
+}
+
+// assignTreePrefixes gives each row its tree branch: sessions and hosts hang
+// off their section, tabs off their session. The last sibling closes its
+// branch with └─ and its children no longer continue the parent's │.
+func (m *Model) assignTreePrefixes() {
+	isHead := func(r row) bool { return r.rendersAsHeader() }
+	parentLast := true
+	for i := range m.rows {
+		r := &m.rows[i]
+		switch {
+		case r.section():
+			r.tree = ""
+		case isHead(*r):
+			last := true
+			for j := i + 1; j < len(m.rows) && !m.rows[j].section(); j++ {
+				if isHead(m.rows[j]) {
+					last = false
+					break
+				}
+			}
+			parentLast = last
+			r.tree = treeBranch(last)
+		case r.kind() == protocol.PickerLineTab:
+			last := i+1 >= len(m.rows) || m.rows[i+1].kind() != protocol.PickerLineTab
+			stem := "│  "
+			if parentLast {
+				stem = "   "
+			}
+			r.tree = stem + treeBranch(last)
+		default:
+			r.tree = ""
+		}
+	}
+}
+
+func treeBranch(last bool) string {
+	if last {
+		return "└─ "
+	}
+	return "├─ "
 }
 
 // sortRun orders one section run locally. Recency keeps the source's
@@ -552,18 +596,26 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		ui.FillRect(frame, domain.Rect{X: rect.X, Y: rect.Y + y, Width: rect.Width, Height: 1}, renderer.Cell{Rune: ' ', Style: base})
 
 		name := r.line.Label
-		if r.kind() == protocol.PickerLineTab {
-			name = "  " + name
+		if r.section() {
+			nameStyle.Bold = true
+		} else if r.rendersAsHeader() && idx != m.selected && !r.line.Stopped {
+			nameStyle.Bold = true
+		}
+		treeX := rect.X
+		if r.tree != "" {
+			treeStyle := base
+			treeStyle.Attrs |= renderer.AttrDim
+			treeX = ui.DrawText(frame, rect.X, rect.Y+y, clipX, r.tree, treeStyle)
 		}
 		badge := ""
 		if r.rendersAsHeader() && !(r.kind() == protocol.PickerLineSession && r.line.Status == protocol.PickerLineStatusUp) {
 			badge = lineStatusBadge(r.line.Status)
 		}
 		contentClipX := clipX
-		nameWidth := rect.Width
+		nameWidth := max(clipX-treeX, 0)
 		badgeWidth := textCellWidth(badge)
 		if badge != "" {
-			nameWidth = max(rect.Width-badgeWidth-1, 0)
+			nameWidth = max(clipX-treeX-badgeWidth-1, 0)
 			contentClipX = max(rect.X, clipX-badgeWidth-1)
 		}
 		originalName := name
@@ -572,12 +624,8 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if idx == m.selected {
 			nameMatchStyle = styles.SelectionMatch
 		}
-		namePositions := m.matchPositions(idx, matchName)
-		if r.kind() == protocol.PickerLineTab {
-			namePositions = shiftPositions(namePositions, 2)
-		}
-		namePositions = visibleMatchPositions(namePositions, name, name != originalName)
-		x := drawMatchedText(frame, rect.X, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
+		namePositions := visibleMatchPositions(m.matchPositions(idx, matchName), name, name != originalName)
+		x := drawMatchedText(frame, treeX, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
 
 		if r.section() {
 			continue
@@ -632,17 +680,6 @@ func visibleMatchPositions(positions []int, rendered string, truncated bool) []i
 		}
 	}
 	return visible
-}
-
-func shiftPositions(positions []int, delta int) []int {
-	if len(positions) == 0 || delta == 0 {
-		return positions
-	}
-	shifted := make([]int, len(positions))
-	for i, position := range positions {
-		shifted[i] = position + delta
-	}
-	return shifted
 }
 
 func drawMatchedText(frame renderer.Frame, x, y, clipX int, text string, base, match renderer.Style, positions []int) int {

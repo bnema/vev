@@ -929,7 +929,10 @@ func pickerSessionDetail(session catalogue.RemoteCatalogSession) string {
 	if session.Attached {
 		parts = append(parts, "attached")
 	}
-	if count := len(session.Tabs); count > 0 {
+	switch count := len(session.Tabs); {
+	case count == 1:
+		parts = append(parts, "1 tab")
+	case count > 1:
 		parts = append(parts, fmt.Sprintf("%d tabs", count))
 	}
 	return strings.Join(parts, " · ")
