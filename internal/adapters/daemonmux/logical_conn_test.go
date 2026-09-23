@@ -324,7 +324,7 @@ func openWithDeadline(t *testing.T, connector *LogicalConnector, stream int) typ
 	defer cancel()
 	connection, err := connector.Open(ctx, controlRequest(stream))
 	require.NoError(t, err)
-	return typedLogical{typedStream: asTyped(connection), LogicalConnection: connection}
+	return newTypedLogical(connection)
 }
 
 // watchRegistered reports whether the pump still holds an inbound watch entry

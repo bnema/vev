@@ -65,8 +65,11 @@ func NewAuthority(epoch ports.BrokerEpoch, registry *Registry, pool *Pool, super
 	if len(clocks) > 0 {
 		clk = clocks[0]
 	}
-	if nilDependency(clk) || nilDependency(codec) {
+	if nilDependency(clk) {
 		return nil, errors.New("broker: invalid authority clock")
+	}
+	if nilDependency(codec) {
+		return nil, errors.New("broker: authority requires a session codec")
 	}
 	return &Authority{epoch: epoch, registry: registry, pool: pool, supervisor: supervisor, clock: clk, codec: codec}, nil
 }

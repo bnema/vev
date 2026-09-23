@@ -2,7 +2,6 @@ package daemonmux
 
 import (
 	"context"
-	"sync"
 
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/ports"
@@ -19,16 +18,10 @@ var _ ports.BrokerLogicalConnection = typedStream{}
 
 func (s typedStream) Close() error { return s.ClientConnection.Close() }
 
-// typedViews keeps one session codec per raw stream: the codec owns the
-// preamble, so a second codec on the same stream would restart it.
-var typedViews sync.Map // ports.BrokerEnvelopeStream -> typedStream
-
+// asTyped builds the one typed view of stream. The codec owns the session
+// preamble, so each raw stream must get exactly one view.
 func asTyped(stream ports.BrokerEnvelopeStream) typedStream {
-	if view, ok := typedViews.Load(stream); ok {
-		return view.(typedStream)
-	}
-	view, _ := typedViews.LoadOrStore(stream, typedStream{ClientConnection: sessionwire.BrokerCodec{}.Client(stream), BrokerEnvelopeStream: stream})
-	return view.(typedStream)
+	return typedStream{ClientConnection: sessionwire.BrokerCodec{}.Client(stream), BrokerEnvelopeStream: stream}
 }
 
 // typedLogical is a typed view of one concrete logical connection.
@@ -38,6 +31,10 @@ type typedLogical struct {
 }
 
 func (c typedLogical) Close() error { return c.typedStream.Close() }
+
+func newTypedLogical(connection *LogicalConnection) typedLogical {
+	return typedLogical{typedStream: asTyped(connection), LogicalConnection: connection}
+}
 
 type envelopeOpener interface {
 	OpenStream(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerEnvelopeStream, error)

@@ -201,11 +201,11 @@ func (h *listenerHarness) open(stream int) (*LogicalConnection, error) {
 	return h.connector.Open(ctx, controlRequest(stream))
 }
 
-func (h *listenerHarness) mustOpen(stream int) *LogicalConnection {
+func (h *listenerHarness) mustOpen(stream int) typedLogical {
 	h.t.Helper()
 	connection, err := h.open(stream)
 	require.NoError(h.t, err, "open stream %d", stream)
-	return connection
+	return newTypedLogical(connection)
 }
 
 // pending reports the admitted streams waiting in the accept queue.
@@ -285,9 +285,8 @@ func servePongs(conn ports.ServerConnection) error {
 }
 
 // listenerRoundTrip proves one typed exchange on a logical connection.
-func listenerRoundTrip(t *testing.T, stream ports.BrokerEnvelopeStream) {
+func listenerRoundTrip(t *testing.T, conn ports.ClientConnection) {
 	t.Helper()
-	conn := asTyped(stream)
 	require.NoError(t, conn.SendClient(protocol.Ping{}))
 	message, err := conn.ReceiveServer()
 	require.NoError(t, err)
@@ -482,7 +481,7 @@ func TestListenerHundredTypedAdmissions(t *testing.T) {
 	}
 
 	for _, connection := range connections {
-		listenerRoundTrip(t, connection)
+		listenerRoundTrip(t, newTypedLogical(connection))
 	}
 
 	for i, connection := range connections {
@@ -592,7 +591,7 @@ func TestListenerQueueFullRefusesOnlyOffendingStream(t *testing.T) {
 	go func() { _ = servePongs(first) }()
 	select {
 	case connection := <-opened:
-		listenerRoundTrip(t, connection)
+		listenerRoundTrip(t, newTypedLogical(connection))
 	case err := <-openErrs:
 		t.Fatalf("queued stream did not open: %v", err)
 	case <-time.After(listenerTestDeadline):
@@ -709,7 +708,7 @@ func TestListenerDeadlineConsumesQueueDelay(t *testing.T) {
 	select {
 	case connection := <-opened:
 		go func() { _ = servePongs(daemonConnection) }()
-		listenerRoundTrip(t, connection)
+		listenerRoundTrip(t, newTypedLogical(connection))
 	case <-time.After(listenerTestDeadline):
 		t.Fatal("queued stream did not open")
 	}
@@ -767,7 +766,7 @@ func TestListenerMalformedStreamDoesNotStopAccept(t *testing.T) {
 func TestListenerPhysicalLossUnblocksAll(t *testing.T) {
 	h := newListenerHarness(t, listenerIdleBudget, MaxAcceptQueue)
 
-	connections := make([]*LogicalConnection, 0, 2)
+	connections := make([]typedLogical, 0, 2)
 	daemonConnections := make([]*ListenerConnection, 0, 2)
 	for i := 1; i <= 2; i++ {
 		probe := h.acceptAsync()
