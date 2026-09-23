@@ -379,7 +379,7 @@ func TestBrokerClientVariants(t *testing.T) {
 // TestBrokerOpenStreamAdmissionVariants pins the attachment-admission
 // contract: exact, create-named, and create-ephemeral round-trip, control
 // carries none, and wrong admission/purpose/name/target combinations are
-// refused exactly like ports.BrokerOpenStreamRequest.Validate.
+// refused on decode exactly like ports.BrokerOpenStreamRequest.Validate.
 func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 	connection := testConnectionID(0x11)
 	base := func() OpenStream {
@@ -475,7 +475,24 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 		}
 		for name, message := range cases {
 			t.Run(name, func(t *testing.T) {
-				_, err := EncodeClient(message, testEnvelopeCeiling, testChunkCeiling)
+				// Start mode is a closed wire enum and is refused even by the encoder.
+				if message.StartMode == 0 {
+					_, err := EncodeClient(message, testEnvelopeCeiling, testChunkCeiling)
+					require.Error(t, err)
+					return
+				}
+				raw, err := EncodeClient(message, testEnvelopeCeiling, testChunkCeiling)
+				require.NoError(t, err)
+				_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+				if name == "named with target" {
+					// The encoder omits a target on creation; test the untrusted wire directly.
+					envelope := &wire.BrokerClientEnvelope{}
+					require.NoError(t, proto.Unmarshal(raw, envelope))
+					envelope.GetOpenStream().Target = exactTargetToWire(testTarget())
+					raw, err = proto.Marshal(envelope)
+					require.NoError(t, err)
+					_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+				}
 				require.ErrorIs(t, err, ErrInvalidMessage)
 			})
 		}
@@ -861,7 +878,14 @@ func TestBrokerBounds(t *testing.T) {
 		require.ErrorIs(t, err, ErrTooLarge)
 	})
 	t.Run("control env carries no attachment state", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), Target: testTarget()}, testEnvelopeCeiling, testChunkCeiling)
+		message := OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}
+		raw := mustEncodeClient(t, message)
+		envelope := &wire.BrokerClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpenStream().Target = exactTargetToWire(testTarget())
+		raw, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 }
@@ -1077,7 +1101,9 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("invalid policy refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: ports.BrokerPolicy{}, StartMode: ports.BrokerDaemonStartIfNeeded}, testEnvelopeCeiling, testChunkCeiling)
+		raw, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: ports.BrokerPolicy{}, StartMode: ports.BrokerDaemonStartIfNeeded}, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("snapshot revision zero refused", func(t *testing.T) {
@@ -1089,7 +1115,14 @@ func TestBrokerValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("local open with registration refused", func(t *testing.T) {
-		_, err := EncodeClient(OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Local: true, Registration: testRegistration(), Target: testTarget(), Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
+		message := OpenStream{Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Local: true, Target: testTarget(), Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}
+		raw := mustEncodeClient(t, message)
+		envelope := &wire.BrokerClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpenStream().Registration = registrationToWire(testRegistration())
+		raw, err := proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("bad shutdown reason refused", func(t *testing.T) {

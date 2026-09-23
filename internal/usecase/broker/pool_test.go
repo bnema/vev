@@ -248,10 +248,6 @@ func TestPoolStreamWindowAdmission(t *testing.T) {
 	// A duplicate inside the window is stale.
 	_, err = p.OpenStream(context.Background(), poolRequest(id, 1))
 	require.ErrorIs(t, err, ports.BrokerAdmissionStale)
-	// Zero is never a valid identity.
-	_, err = p.OpenStream(context.Background(), poolRequest(id, 0))
-	require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
-
 	// Push the newest admitted identity past the window, then replay a low one.
 	high, err := p.OpenStream(context.Background(), poolRequest(id, ports.BrokerStreamWindowSize+2))
 	require.NoError(t, err)

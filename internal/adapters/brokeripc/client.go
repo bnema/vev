@@ -745,9 +745,6 @@ func (c *client) scopeRequest(request ports.BrokerOpenStreamRequest) (ports.Brok
 	if scoped.Stream == 0 {
 		return ports.BrokerOpenStreamRequest{}, errors.Join(ports.BrokerAdmissionInvalid, errors.New("brokeripc: open stream request has no stream identity"))
 	}
-	if err := scoped.Validate(); err != nil {
-		return ports.BrokerOpenStreamRequest{}, errors.Join(ports.BrokerAdmissionInvalid, err)
-	}
 	return scoped, nil
 }
 

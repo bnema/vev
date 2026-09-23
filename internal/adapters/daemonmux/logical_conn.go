@@ -97,9 +97,6 @@ func (c *LogicalConnector) Open(ctx context.Context, request ports.BrokerOpenStr
 	if c == nil || c.pump == nil {
 		return nil, ErrLogicalConfig
 	}
-	if err := request.Validate(); err != nil {
-		return nil, ErrLogicalConfig
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

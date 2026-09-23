@@ -430,6 +430,30 @@ func TestServiceNextStreamIDAllocation(t *testing.T) {
 	})
 }
 
+func TestServiceOpenStreamAdmissionValidatesCallerInput(t *testing.T) {
+	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+	service, err := authority.AdmitClient(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ports.BrokerOpenStreamRequest)
+	}{
+		{"missing stream identity", func(r *ports.BrokerOpenStreamRequest) { r.Stream = 0 }},
+		{"invalid purpose", func(r *ports.BrokerOpenStreamRequest) { r.Purpose = 0 }},
+		{"invalid policy", func(r *ports.BrokerOpenStreamRequest) { r.Policy.Transport = "" }},
+		{"observation cannot start daemon", func(r *ports.BrokerOpenStreamRequest) { r.Purpose = ports.BrokerStreamObservation }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := poolRequest(service.ConnectionID(), 1)
+			tc.mutate(&request)
+			_, err := service.OpenStream(context.Background(), request)
+			require.ErrorIs(t, err, ports.BrokerAdmissionInvalid)
+		})
+	}
+}
+
 func TestServiceCloseStreamScopeFencing(t *testing.T) {
 	authority, _, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
 	service, err := authority.AdmitClient(context.Background())

@@ -269,24 +269,6 @@ func openToWire(m Open) (*wire.MuxOpen, error) {
 	if err := m.Ref.Validate(); err != nil {
 		return nil, ErrInvalidMessage
 	}
-	request := ports.BrokerOpenStreamRequest{
-		Epoch: m.Ref.Epoch, Purpose: m.Purpose, Admission: m.Admission, Name: m.Name, Local: m.Local,
-		Connection: m.Ref.Connection, Stream: m.Ref.Client,
-		Endpoint: m.Endpoint, Registration: m.Registration,
-		Target: m.Target, Env: m.Env, Policy: m.Policy, StartMode: m.StartMode,
-	}
-	if err := request.Validate(); err != nil {
-		// Distinguish bound refusals from semantic refusals.
-		if len(m.Env) > ports.BrokerMaxEnvEntries {
-			return nil, ErrTooLarge
-		}
-		for _, entry := range m.Env {
-			if len(entry) > ports.BrokerMaxEnvEntryBytes {
-				return nil, ErrTooLarge
-			}
-		}
-		return nil, ErrInvalidMessage
-	}
 	if err := checkEnvEntries(m.Env); err != nil {
 		return nil, err
 	}
@@ -395,6 +377,7 @@ func openFromWire(message *wire.MuxOpen) (Open, error) {
 		Target: candidate.Target, Env: candidate.Env, Policy: candidate.Policy,
 		StartMode: candidate.StartMode,
 	}
+	// Decode owns validation of untrusted mux opens before daemon admission.
 	if err := request.Validate(); err != nil {
 		return Open{}, ErrInvalidMessage
 	}

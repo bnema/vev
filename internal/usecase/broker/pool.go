@@ -161,9 +161,6 @@ func (p *Pool) CloseStream(id ports.BrokerConnectionID, stream ports.BrokerStrea
 }
 
 func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-	if err := req.Validate(); err != nil {
-		return nil, errors.Join(ports.BrokerAdmissionInvalid, err)
-	}
 	if req.Epoch != p.epoch {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorStaleEpoch}
 	}

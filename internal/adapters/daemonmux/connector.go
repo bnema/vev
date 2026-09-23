@@ -309,9 +309,6 @@ func (c *PhysicalConnection) OpenStream(ctx context.Context, request ports.Broke
 	if c == nil || c.logical == nil {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: ErrLogicalConfig}
 	}
-	if err := request.Validate(); err != nil {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: errors.Join(ports.BrokerAdmissionInvalid, err)}
-	}
 	if !request.Policy.Compatible(c.policy) {
 		return nil, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy}
 	}

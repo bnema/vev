@@ -264,6 +264,10 @@ func (s *Service) OpenStream(ctx context.Context, request ports.BrokerOpenStream
 	if err := s.scope(&request); err != nil {
 		return nil, err
 	}
+	// Service admission owns validation of caller input before the pool sees it.
+	if err := request.Validate(); err != nil {
+		return nil, errors.Join(ports.BrokerAdmissionInvalid, err)
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

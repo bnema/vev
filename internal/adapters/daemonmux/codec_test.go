@@ -395,23 +395,36 @@ func TestMuxValidationNegatives(t *testing.T) {
 
 		badEndpoint := testOpen()
 		badEndpoint.Endpoint = "not a host"
-		_, err = EncodeClient(badEndpoint, testEnvelopeCeiling, testChunkCeiling)
+		raw, err := EncodeClient(badEndpoint, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		local := testOpen()
 		local.Local = true
-		_, err = EncodeClient(local, testEnvelopeCeiling, testChunkCeiling)
+		raw, err = EncodeClient(local, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		controlWithTarget := testOpen()
 		controlWithTarget.Purpose = ports.BrokerStreamControl
-		_, err = EncodeClient(controlWithTarget, testEnvelopeCeiling, testChunkCeiling)
+		raw, err = EncodeClient(controlWithTarget, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		envelope := &wire.MuxClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpen().Target = exactTargetToWire(testOpen().Target)
+		raw, err = proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		controlWithEnv := testOpen()
 		controlWithEnv.Purpose = ports.BrokerStreamControl
 		controlWithEnv.Target = protocol.ExactSessionTarget{}
-		_, err = EncodeClient(controlWithEnv, testEnvelopeCeiling, testChunkCeiling)
+		raw, err = EncodeClient(controlWithEnv, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		noEquals := testOpen()
@@ -421,12 +434,14 @@ func TestMuxValidationNegatives(t *testing.T) {
 
 		emptyPolicy := testOpen()
 		emptyPolicy.Policy = ports.BrokerPolicy{}
-		_, err = EncodeClient(emptyPolicy, testEnvelopeCeiling, testChunkCeiling)
+		raw, err = EncodeClient(emptyPolicy, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		// A local control open with no attachment state is legal.
 		valid := Open{Ref: testRef(5), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded}
-		raw, err := EncodeClient(valid, testEnvelopeCeiling, testChunkCeiling)
+		raw, err = EncodeClient(valid, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 		decoded, err := DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
@@ -722,14 +737,23 @@ func TestMuxAdmissionVariants(t *testing.T) {
 	t.Run("exact with a creation name is refused", func(t *testing.T) {
 		open := testOpen()
 		open.Name = "work"
-		_, err := EncodeClient(open, testEnvelopeCeiling, testChunkCeiling)
+		raw, err := EncodeClient(open, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("named creation with a target is refused", func(t *testing.T) {
 		named := testOpen()
 		named.Admission = ports.BrokerAdmissionCreateNamed
 		named.Name = "work"
-		_, err := EncodeClient(named, testEnvelopeCeiling, testChunkCeiling)
+		raw, err := EncodeClient(named, testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		envelope := &wire.MuxClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, envelope))
+		envelope.GetOpen().Target = exactTargetToWire(testOpen().Target)
+		raw, err = proto.Marshal(envelope)
+		require.NoError(t, err)
+		_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
 	t.Run("unknown admission code is refused", func(t *testing.T) {
@@ -799,7 +823,7 @@ func TestMuxStartModeRoundTrips(t *testing.T) {
 
 	t.Run("encoding a zero start mode is refused", func(t *testing.T) {
 		_, err := EncodeClient(Open{Ref: testRef(6), Purpose: ports.BrokerStreamControl, Local: true, Policy: testPolicy()}, testEnvelopeCeiling, testChunkCeiling)
-		require.ErrorIs(t, err, ErrInvalidMessage)
+		require.Error(t, err) // Closed wire enum; decode refusal is tested above.
 	})
 }
 

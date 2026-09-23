@@ -176,17 +176,9 @@ func TestObservationForcesExistingOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, stream.Close())
 
-	// A spawn-capable observation is refused locally: it never reaches the
-	// admitted core at all.
-	startable := openRequest(nextStreamID(t, client))
-	startable.Purpose = ports.BrokerStreamObservation
-	startable.StartMode = ports.BrokerDaemonStartIfNeeded
-	_, err = client.OpenStream(ctx, startable)
-	require.ErrorIs(t, err, ports.BrokerAdmissionInvalid, "observation never authorizes a spawn")
-
 	core.mu.Lock()
 	defer core.mu.Unlock()
-	require.Len(t, core.opens, 1, "only the existing-only observation reached the core")
+	require.Len(t, core.opens, 1, "the existing-only observation reached the core")
 	require.Equal(t, ports.BrokerStreamObservation, core.opens[0].Purpose)
 	require.Equal(t, ports.BrokerDaemonExistingOnly, core.opens[0].StartMode)
 }
