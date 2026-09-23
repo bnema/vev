@@ -230,14 +230,27 @@ func (s *Service) Snapshot() ports.BrokerSnapshot { return s.registry.Snapshot()
 // watches the snapshot, the registry observes on the demand cadence. Without
 // a subscriber it performs no scheduled observations. Close balances demand.
 func (s *Service) Subscribe() (ports.BrokerSubscription, error) {
+	return s.subscribe(true)
+}
+
+// SubscribePassive is Subscribe for a read-only snapshot reader (vev ls, vev
+// host list): it receives every publication but records no demand, so reading
+// state never triggers an observation.
+func (s *Service) SubscribePassive() (ports.BrokerSubscription, error) {
+	return s.subscribe(false)
+}
+
+func (s *Service) subscribe(demand bool) (ports.BrokerSubscription, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, ports.BrokerAdmissionClosed
 	}
-	sub := &serviceSubscription{service: s, inner: s.registry.Subscribe()}
+	sub := &serviceSubscription{service: s, inner: s.registry.Subscribe(), demand: demand}
 	s.subs[sub] = struct{}{}
-	s.registry.SetDemand(true)
+	if demand {
+		s.registry.SetDemand(true)
+	}
 	s.mu.Unlock()
 	return sub, nil
 }
@@ -462,6 +475,7 @@ func (s *Service) openContext(ctx context.Context) (context.Context, func()) {
 type serviceSubscription struct {
 	service *Service
 	inner   ports.BrokerSubscription
+	demand  bool
 	once    sync.Once
 }
 
@@ -472,7 +486,9 @@ func (s *serviceSubscription) Close() {
 		s.inner.Close()
 		s.service.mu.Lock()
 		delete(s.service.subs, s)
-		s.service.registry.SetDemand(false)
+		if s.demand {
+			s.service.registry.SetDemand(false)
+		}
 		s.service.mu.Unlock()
 	})
 }

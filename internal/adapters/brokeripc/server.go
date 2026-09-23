@@ -664,7 +664,7 @@ func (s *serverSession) dispatch(message brokerwire.ClientMessage) error {
 		if err := s.conn.Subscribe(m.Generation); err != nil {
 			return errors.Join(ErrProtocol, err)
 		}
-		return s.retargetPublisher(m.Generation)
+		return s.retargetPublisher(m.Generation, m.Passive)
 	case brokerwire.Resync:
 		if !s.scopeMatches(m.Epoch, m.Connection) {
 			return s.refuseScope()

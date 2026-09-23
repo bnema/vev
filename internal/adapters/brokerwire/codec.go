@@ -116,7 +116,7 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Br
 			return nil, ErrInvalidMessage
 		}
 		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_Subscribe{Subscribe: &wire.Subscribe{
-			Scope: scopeToWire(m.Epoch, m.Connection), Generation: m.Generation,
+			Scope: scopeToWire(m.Epoch, m.Connection), Generation: m.Generation, Passive: m.Passive,
 		}}}, nil
 	case *Subscribe:
 		if m == nil {
@@ -491,7 +491,7 @@ func subscribeFromWire(message *wire.Subscribe) (Subscribe, error) {
 	if err != nil {
 		return Subscribe{}, ErrInvalidMessage
 	}
-	return Subscribe{Epoch: epoch, Connection: connection, Generation: message.GetGeneration()}, nil
+	return Subscribe{Epoch: epoch, Connection: connection, Generation: message.GetGeneration(), Passive: message.GetPassive()}, nil
 }
 
 func resyncFromWire(message *wire.Resync) (Resync, error) {

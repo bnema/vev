@@ -44,6 +44,9 @@ type Subscribe struct {
 	Epoch      ports.BrokerEpoch
 	Connection ports.BrokerConnectionID
 	Generation SubscriptionGeneration
+	// Passive marks a read-only snapshot reader that must never count as
+	// observation demand.
+	Passive bool
 }
 
 func (Subscribe) brokerClientMessage() {}

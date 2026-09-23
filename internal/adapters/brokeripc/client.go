@@ -503,6 +503,7 @@ func (c *client) Subscribe() (ports.BrokerSubscription, error) {
 	c.mu.Unlock()
 	if err := c.sendAsync(brokerwire.Subscribe{
 		Epoch: c.scope.Epoch, Connection: c.scope.Connection, Generation: generation,
+		Passive: c.cfg.PassiveSubscribe,
 	}); err != nil {
 		// The generation was already consumed by the connection's subscription
 		// tracker, so the previous subscription's generation is no longer

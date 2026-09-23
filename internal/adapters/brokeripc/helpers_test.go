@@ -396,9 +396,11 @@ type fakeCore struct {
 	updated   []updateHostPolicyCall
 	reconcile []string
 	openErr   error
-	closed    bool
-	done      chan struct{}
-	once      sync.Once
+	// subscribes records each core subscription's reader kind (true = passive).
+	subscribes []bool
+	closed     bool
+	done       chan struct{}
+	once       sync.Once
 
 	// Membership result hooks. Their zero values keep the deterministic
 	// defaults that mirror the real registry: a fresh generation-1 registration
@@ -431,7 +433,28 @@ func (c *fakeCore) Err() error { return nil }
 
 func (c *fakeCore) Snapshot() ports.BrokerSnapshot { return c.hub.current() }
 
-func (c *fakeCore) Subscribe() (ports.BrokerSubscription, error) { return c.hub.subscribe(), nil }
+func (c *fakeCore) Subscribe() (ports.BrokerSubscription, error) {
+	return c.recordSubscribe(false), nil
+}
+
+// SubscribePassive is the optional passive-reader capability the server uses
+// for a Subscribe flagged passive.
+func (c *fakeCore) SubscribePassive() (ports.BrokerSubscription, error) {
+	return c.recordSubscribe(true), nil
+}
+
+func (c *fakeCore) recordSubscribe(passive bool) *fakeSubscription {
+	c.mu.Lock()
+	c.subscribes = append(c.subscribes, passive)
+	c.mu.Unlock()
+	return c.hub.subscribe()
+}
+
+func (c *fakeCore) subscribeKinds() []bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]bool(nil), c.subscribes...)
+}
 
 // fakePreviewSubscription is one server-side preview subscription whose
 // Changed channel a test drives explicitly.

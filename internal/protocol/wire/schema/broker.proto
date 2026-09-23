@@ -116,6 +116,10 @@ message Register {}
 message Subscribe {
   BrokerScope scope = 1;
   uint64 generation = 2;
+  // passive marks a read-only snapshot reader (vev ls, vev host list). It
+  // receives publications but never counts as observation demand, so reading
+  // state never triggers a probe.
+  bool passive = 3;
 }
 
 // Resync asks for a full snapshot publication after an epoch change or a

@@ -882,9 +882,13 @@ func (*Register) Descriptor() ([]byte, []int) {
 
 // Subscribe asks for snapshot and lifecycle publications for one scope.
 type Subscribe struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Scope         *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
-	Generation    uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Scope      *BrokerScope           `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	Generation uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	// passive marks a read-only snapshot reader (vev ls, vev host list). It
+	// receives publications but never counts as observation demand, so reading
+	// state never triggers a probe.
+	Passive       bool `protobuf:"varint,3,opt,name=passive,proto3" json:"passive,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -931,6 +935,13 @@ func (x *Subscribe) GetGeneration() uint64 {
 		return x.Generation
 	}
 	return 0
+}
+
+func (x *Subscribe) GetPassive() bool {
+	if x != nil {
+		return x.Passive
+	}
+	return false
 }
 
 // Resync asks for a full snapshot publication after an epoch change or a
@@ -3177,12 +3188,13 @@ const file_broker_proto_rawDesc = "" +
 	"\x13preview_publication\x18\xd2\x01 \x01(\v2\x1f.vev.wire.v1.PreviewPublicationH\x00R\x12previewPublicationB\t\n" +
 	"\apayload\"\n" +
 	"\n" +
-	"\bRegister\"[\n" +
+	"\bRegister\"u\n" +
 	"\tSubscribe\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x02 \x01(\x04R\n" +
-	"generation\"X\n" +
+	"generation\x12\x18\n" +
+	"\apassive\x18\x03 \x01(\bR\apassive\"X\n" +
 	"\x06Resync\x12.\n" +
 	"\x05scope\x18\x01 \x01(\v2\x18.vev.wire.v1.BrokerScopeR\x05scope\x12\x1e\n" +
 	"\n" +

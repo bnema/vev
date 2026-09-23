@@ -803,6 +803,16 @@ func TestBrokerGoldenVectors(t *testing.T) {
 	back, err := DecodeClient(rawSub, testEnvelopeCeiling, testChunkCeiling)
 	require.NoError(t, err)
 	require.Equal(t, sub, back)
+
+	// The passive reader flag survives the round trip, and an active
+	// subscription encodes without it (proto3 omits false).
+	passive := sub
+	passive.Passive = true
+	rawPassive := mustEncodeClient(t, passive)
+	back, err = DecodeClient(rawPassive, testEnvelopeCeiling, testChunkCeiling)
+	require.NoError(t, err)
+	require.Equal(t, passive, back)
+	require.Greater(t, len(rawPassive), len(rawSub))
 }
 
 // TestBrokerBounds proves stateless bound refusals.

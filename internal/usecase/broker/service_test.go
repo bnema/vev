@@ -507,6 +507,48 @@ func TestServiceSubscribeDrivesRegistryDemand(t *testing.T) {
 	require.Zero(t, registryDemandCount(registry))
 }
 
+// TestServiceSubscribeDemandByReader pins the Amendment 2 rule "reading state
+// forces nothing": a passive subscription (vev ls, vev host list) receives
+// publications but never records demand, while a watching client does.
+func TestServiceSubscribeDemandByReader(t *testing.T) {
+	tests := []struct {
+		name       string
+		passive    bool
+		wantDemand int
+	}{
+		{name: "watching client records demand", passive: false, wantDemand: 1},
+		{name: "passive reader records none", passive: true, wantDemand: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
+			admitted, err := authority.AdmitClient(context.Background())
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, admitted.Close()) })
+			service := admitted.(*Service)
+
+			subscribe := service.Subscribe
+			if tt.passive {
+				subscribe = service.SubscribePassive
+			}
+			sub, err := subscribe()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantDemand, registryDemandCount(registry))
+
+			require.NoError(t, registry.setHosts(hostRecords(registration(t, "user@host:22", 1))))
+			select {
+			case <-sub.Changed():
+			case <-time.After(time.Second):
+				t.Fatal("every subscription must observe registry publications")
+			}
+
+			sub.Close()
+			sub.Close()
+			require.Zero(t, registryDemandCount(registry), "closing must balance exactly the demand it recorded")
+		})
+	}
+}
+
 func TestServiceSnapshotDelegates(t *testing.T) {
 	authority, registry, _, _, _, _ := newTestAuthority(t, 1, nil, immediateConnector)
 	service, err := authority.AdmitClient(context.Background())

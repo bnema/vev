@@ -46,6 +46,10 @@ type Config struct {
 	// MaxPendingOperations bounds mutating operations this side is waiting for
 	// on one connection. It never exceeds the brokerwire per-connection bound.
 	MaxPendingOperations int
+	// PassiveSubscribe marks every snapshot subscription of a client
+	// connection as a read-only reader: it receives publications but never
+	// counts as observation demand, so a CLI read never triggers a probe.
+	PassiveSubscribe bool
 }
 
 // withDefaults fills every unset bound with its package default.

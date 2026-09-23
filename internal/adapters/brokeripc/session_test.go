@@ -39,7 +39,7 @@ func TestResubscribePublishesCurrentSnapshotPerGeneration(t *testing.T) {
 			generation := brokerwire.SubscriptionGeneration(index)
 			core.hub.publish(testSnapshot(epoch, ports.BrokerRevision(index)))
 			require.NoError(t, session.conn.Subscribe(generation))
-			require.NoError(t, session.retargetPublisher(generation))
+			require.NoError(t, session.retargetPublisher(generation, false))
 		}
 
 		// Each publisher owns its wake, so a later generation can never be left
@@ -79,14 +79,14 @@ func TestSupersededPublisherOwnsItsWake(t *testing.T) {
 
 	core.hub.publish(testSnapshot(epoch, 1))
 	require.NoError(t, session.conn.Subscribe(1))
-	require.NoError(t, session.retargetPublisher(1))
+	require.NoError(t, session.retargetPublisher(1, false))
 	session.subMu.Lock()
 	first := session.pub
 	session.subMu.Unlock()
 
 	core.hub.publish(testSnapshot(epoch, 2))
 	require.NoError(t, session.conn.Subscribe(2))
-	require.NoError(t, session.retargetPublisher(2))
+	require.NoError(t, session.retargetPublisher(2, false))
 	session.subMu.Lock()
 	second := session.pub
 	session.subMu.Unlock()
@@ -226,6 +226,32 @@ func TestSubscribePublishesSnapshot(t *testing.T) {
 	case <-sub.Changed():
 	case <-time.After(5 * time.Second):
 		t.Fatal("subscription was not woken by a committed publication")
+	}
+}
+
+// TestSubscribeCarriesPassiveReader proves a client configured as a passive
+// reader reaches the core's passive subscription, while a default client
+// subscribes as a watching client that records observation demand.
+func TestSubscribeCarriesPassiveReader(t *testing.T) {
+	tests := []struct {
+		name    string
+		passive bool
+	}{
+		{name: "watching client", passive: false},
+		{name: "passive reader", passive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := startEndpoint(t, Config{})
+			client := e.dialWith(Config{PassiveSubscribe: tt.passive})
+			e.accept()
+			sub, err := client.Subscribe()
+			require.NoError(t, err)
+			t.Cleanup(sub.Close)
+			core := e.authority.last()
+			require.Eventually(t, func() bool { return len(core.subscribeKinds()) == 1 }, 5*time.Second, 10*time.Millisecond)
+			require.Equal(t, []bool{tt.passive}, core.subscribeKinds())
+		})
 	}
 }
 

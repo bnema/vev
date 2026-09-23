@@ -38,12 +38,23 @@ type publisher struct {
 	wake       chan struct{}
 }
 
+// passiveSubscriber is the optional core capability behind a passive
+// Subscribe: a read-only snapshot subscription that never counts as
+// observation demand. A core without it serves every subscription as demand.
+type passiveSubscriber interface {
+	SubscribePassive() (ports.BrokerSubscription, error)
+}
+
 // retargetPublisher replaces any active publisher with one for the new
 // generation and publishes the current snapshot immediately. A failed
 // subscription ends the superseded series first, so no publisher survives to
 // publish under a generation the connection tracker already retired.
-func (s *serverSession) retargetPublisher(generation brokerwire.SubscriptionGeneration) error {
-	sub, err := s.core.Subscribe()
+func (s *serverSession) retargetPublisher(generation brokerwire.SubscriptionGeneration, passive bool) error {
+	subscribe := s.core.Subscribe
+	if reader, ok := s.core.(passiveSubscriber); passive && ok {
+		subscribe = reader.SubscribePassive
+	}
+	sub, err := subscribe()
 	if err != nil {
 		s.stopPublisher()
 		detail := errorDetail(err)
