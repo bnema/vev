@@ -303,6 +303,19 @@ func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
 	require.Contains(t, rowText(frame.Row(1)), "[stopped]")
 }
 
+func TestRenderShowsNoDaemonBadgeAndCreateHint(t *testing.T) {
+	m := New([]protocol.PickerLine{{
+		Key: "h/remote", Kind: protocol.PickerLineHost, Label: "remote", Detail: "0 sessions",
+		Status: protocol.PickerLineStatusNoDaemon, StatusDetail: "no daemon — Enter to create a session",
+		Dim: true, Focusable: true, Actions: protocol.PickerCanNavigate,
+	}}, Config{Intent: protocol.PickerIntentNavigation})
+	frame := m.Render(domain.Size{Cols: 80, Rows: 8}, Preview{})
+	require.Contains(t, rowText(frame.Row(0)), "[no daemon]")
+	require.Contains(t, rowText(frame.Row(7)), "no daemon")
+	require.Contains(t, rowText(frame.Row(7)), "Enter to create a session")
+	require.NotContains(t, rowText(frame.Row(7)), "Enter unavailable")
+}
+
 func TestRenderBlitsThePreviewIntoThePreviewRect(t *testing.T) {
 	m := New([]protocol.PickerLine{navLine("a/one", "one")}, Config{Intent: protocol.PickerIntentNavigation})
 	preview := Preview{Rows: [][]renderer.Cell{{{Rune: 'X'}}}, Width: 1, Height: 1}

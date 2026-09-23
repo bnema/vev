@@ -218,9 +218,6 @@ func seamKillResult(requestID uint64, outcome protocol.KillOutcome, code uint16,
 	return protocol.KillResult{RequestID: requestID, Outcome: outcome, Code: code, Text: text}
 }
 
-// TestRunListRendersBrokerSessionsWithoutADaemon pins that runList reads the
-// live session list through BrokerOperations over the per-user broker and
-// renders it, so a local list never reads durable state or dials a daemon.
 func TestRunBrokerSnapshotListReportsNoDaemon(t *testing.T) {
 	remote := ports.BrokerDaemonObservation{
 		Endpoint: "demo@host.test", DisplayOrigin: "demo@host.test",
@@ -258,6 +255,9 @@ func TestRunBrokerSnapshotListAllShowsNoDaemonAlongsideSessions(t *testing.T) {
 	require.Contains(t, output.String(), "work")
 }
 
+// TestRunListRendersBrokerSessionsWithoutADaemon pins that runList reads the
+// live session list through BrokerOperations over the per-user broker and
+// renders it, so a local list never reads durable state or dials a daemon.
 func TestRunListRendersBrokerSessionsWithoutADaemon(t *testing.T) {
 	stream := newSeamBrokerStream(protocol.Sessions{Sessions: []protocol.SessionInfo{
 		{Name: "work", State: protocol.SessionUp, Tabs: 2, Attached: true},

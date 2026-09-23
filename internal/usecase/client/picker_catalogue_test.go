@@ -189,6 +189,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 		wantStatus   map[string]protocol.PickerLineStatus
 		wantDim      map[string]bool
 		wantHostRow  bool
+		wantNoDaemon bool
 	}{
 		{
 			name:         "local only",
@@ -211,6 +212,25 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{"remote-a"},
 			wantActions:  map[string]protocol.PickerLineActions{"remote-a": protocol.PickerCanNavigate},
+		},
+		{
+			name: "reachable host with no daemon offers a create row", wantNoDaemon: true,
+			daemons: []ports.BrokerDaemonObservation{
+				func() ports.BrokerDaemonObservation {
+					observation := pickerTestRemoteObservation("user@arch", 1, 1, now)
+					observation.Identity = ""
+					observation.Incarnation = ports.BrokerDaemonIncarnation{}
+					observation.ProtocolVersion = 0
+					observation.Availability = domain.RemoteAvailabilityNoDaemon
+					observation.LastSuccess = time.Time{}
+					observation.InventoryKnown = false
+					return observation
+				}(),
+			},
+			wantSections: []string{"user@arch"},
+			wantSessions: []string{},
+			wantStatus:   map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusNoDaemon},
+			wantHostRow:  true,
 		},
 		{
 			name: "stale observation stays explicitly selectable",
@@ -289,8 +309,14 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			lines := catalogue.Lines()
 			require.Equal(t, tt.wantSections, pickerSectionLabels(lines))
 			require.Equal(t, tt.wantSessions, pickerSessionLabels(lines))
-			_, hasHost := pickerHostLine(lines)
+			hostLine, hasHost := pickerHostLine(lines)
 			require.Equal(t, tt.wantHostRow, hasHost, "a host status row is published only when it adds information")
+			if tt.wantNoDaemon {
+				require.Equal(t, protocol.PickerLineStatusNoDaemon, hostLine.Status)
+				require.Equal(t, protocol.PickerCanNavigate, hostLine.Actions, "Enter creates an ephemeral session on this host")
+				require.True(t, hostLine.Focusable)
+				require.Contains(t, hostLine.StatusDetail, "no_daemon")
+			}
 			for label, actions := range tt.wantActions {
 				line, ok := pickerLineByLabel(lines, label)
 				require.True(t, ok, "session %q must be projected", label)
@@ -787,6 +813,7 @@ func TestPickerCatalogueAvailabilityClassifiedBeforeCompatibility(t *testing.T) 
 		{name: "unobserved unknown is stale and refreshing", observation: unobserved(nil), fresh: false, wantStatus: protocol.PickerLineStatusStale, wantReason: domain.RemoteReasonRefreshing},
 		{name: "unreachable is down", observation: unobserved(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityUnreachable }), wantStatus: protocol.PickerLineStatusDown, wantReason: domain.RemoteReasonHostUnreachable},
 		{name: "auth failed is down", observation: unobserved(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityAuthFailed }), wantStatus: protocol.PickerLineStatusDown, wantReason: domain.RemoteReasonAuthFailure},
+		{name: "reachable without daemon is distinct and createable", observation: unobserved(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityNoDaemon }), wantStatus: protocol.PickerLineStatusNoDaemon, wantReason: domain.RemoteReasonNoDaemon},
 		{name: "invalid response is error", observation: unobserved(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityInvalidResponse }), wantStatus: protocol.PickerLineStatusError, wantReason: domain.RemoteReasonMalformed},
 		{name: "unreachable observed mismatch is down", observation: reachable(func(o *ports.BrokerDaemonObservation) {
 			o.Availability = domain.RemoteAvailabilityUnreachable
@@ -819,6 +846,9 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 		name    string
 		daemon  ports.BrokerDaemonObservation
 		wantErr pickerCatalogueErrorCode
+		hostRow bool
+		create  bool
+		exact   bool
 	}{
 		{
 			name:   "unobserved unknown stays attemptable",
@@ -859,6 +889,33 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 			}(),
 		},
 		{
+			name: "no daemon allows create admission", hostRow: true, create: true,
+			daemon: func() ports.BrokerDaemonObservation {
+				o := pickerTestRemoteObservation("user@arch", 1, 1, now)
+				o.Identity = ""
+				o.Incarnation = ports.BrokerDaemonIncarnation{}
+				o.ProtocolVersion = 0
+				o.Availability = domain.RemoteAvailabilityNoDaemon
+				o.LastSuccess = time.Time{}
+				o.InventoryKnown = false
+				return o
+			}(),
+		},
+		{
+			name: "no daemon refuses exact absent session attach", hostRow: true, exact: true,
+			daemon: func() ports.BrokerDaemonObservation {
+				o := pickerTestRemoteObservation("user@arch", 1, 1, now)
+				o.Identity = ""
+				o.Incarnation = ports.BrokerDaemonIncarnation{}
+				o.ProtocolVersion = 0
+				o.Availability = domain.RemoteAvailabilityNoDaemon
+				o.LastSuccess = time.Time{}
+				o.InventoryKnown = false
+				return o
+			}(),
+			wantErr: pickerCatalogueUnavailable,
+		},
+		{
 			name: "reachable mismatch refuses incompatible",
 			daemon: func() ports.BrokerDaemonObservation {
 				o := pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
@@ -881,14 +938,37 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			catalogue, _ := pickerTestCatalogue(t)
 			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{tt.daemon}}))
-			line, ok := pickerLineByLabel(catalogue.Lines(), "alpha")
-			require.True(t, ok)
-			request, err := catalogue.Resolve(line.Key, pickerTestBase())
-			if tt.wantErr != 0 {
+			lines := catalogue.Lines()
+			line, ok := pickerLineByLabel(lines, "alpha")
+			if tt.hostRow {
+				line, ok = pickerHostLine(lines)
+			}
+			if tt.create {
+				require.True(t, ok, "the no-daemon host row is visible")
+				ref, exists := catalogue.Ref(line.Key)
+				require.True(t, exists)
+				request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
+				require.NoError(t, err)
+				require.Equal(t, ports.BrokerAdmissionCreateEphemeral, request.Admission)
+				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+				return
+			}
+			if tt.exact {
+				ref := pickerSelectionRef{kind: pickerSelectionExact, epoch: catalogue.snapshot.Epoch, endpoint: tt.daemon.Endpoint,
+					registration: tt.daemon.Registration, lifecycle: domain.SessionLifecycleID{1}, name: "absent"}
+				_, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
 				require.Error(t, err)
 				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
 				return
 			}
+			require.True(t, ok)
+			if tt.wantErr != 0 {
+				_, err := catalogue.Resolve(line.Key, pickerTestBase())
+				require.Error(t, err)
+				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+				return
+			}
+			request, err := catalogue.Resolve(line.Key, pickerTestBase())
 			require.NoError(t, err)
 			require.NoError(t, request.Validate())
 			require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode, "an explicit attempt keeps the start authorization")

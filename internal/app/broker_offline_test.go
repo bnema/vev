@@ -101,6 +101,8 @@ func isolateSandboxEnv(t *testing.T) (root, prodRuntime, prodState string) {
 	t.Helper()
 	prodRuntime = t.TempDir()
 	prodState = t.TempDir()
+	t.Setenv("VEV_ENV", "")
+	t.Setenv("VEV_ENV_ROOT", "")
 	t.Setenv("XDG_RUNTIME_DIR", prodRuntime)
 	t.Setenv("XDG_STATE_HOME", prodState)
 	root = filepath.Join(shortTempDir(t, "vevs"), "sandbox")

@@ -22,6 +22,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/quic"
+	"github.com/bnema/vev/internal/adapters/sshstdio"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -378,6 +379,17 @@ func TestBrokerQUICPeerAddr(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tt.want, got)
 	}
+}
+
+func TestBrokerMuxHelperReturnsTypedNoDaemonExit(t *testing.T) {
+	isolateSandboxEnv(t)
+	root := writeMuxRoot(t, map[string]any{"kind": "unix", "path": filepath.Join(t.TempDir(), "missing-mux.sock")})
+	parsed, err := parseBrokerMuxArgs(brokerMuxStdioCommand, kindBrokerMuxStdio, []string{"--offline-root", root})
+	require.NoError(t, err)
+	err = runBrokerMuxStdioCommand(context.Background(), parsed.brokerMux)
+	var coded *exitCoded
+	require.ErrorAs(t, err, &coded)
+	require.Equal(t, sshstdio.MuxExitNoDaemon, coded.code)
 }
 
 // TestBrokerMuxConnectorRejectsUnknownAddress proves the transport selector

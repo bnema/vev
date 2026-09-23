@@ -596,8 +596,10 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	}
 	request.Env = append([]string(nil), sessionEnv.Env...)
 
+	s.logger.Debug("client_stream_open_begin", "local", request.Local, "endpoint", request.Endpoint, "admission", request.Admission, "generation", s.State().Generation)
 	stream, err := service.OpenStream(deadline.Context(), request)
 	if err != nil {
+		s.logger.Warn("client_stream_open_failed", "local", request.Local, "endpoint", request.Endpoint, "code", brokerErrorCode(err), "error", err, "cause", errors.Unwrap(err))
 		s.reportAttachmentFailure(deadline.cause(err))
 		return false, nil
 	}
@@ -627,6 +629,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	}
 
 	token := AttachmentToken{Generation: s.State().Generation, Attempt: s.nextAttachment.Add(1)}
+	s.logger.Debug("client_stream_opened", "local", request.Local, "endpoint", request.Endpoint, "generation", token.Generation, "attempt", token.Attempt)
 	run, ok := s.attachments.Begin(deadline.Context(), token, worker, stream)
 	if !ok {
 		// Another foreground owns the terminal, or the shared reader is
@@ -734,16 +737,19 @@ settlement:
 		return false, nil
 	}
 	if errors.Is(result.event.Err, errDetachAndExit) {
+		s.logger.Info("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", "explicit_detach")
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		s.notifyLifecycle(LifecycleNoticeDetachAndExit)
 		return true, nil
 	}
 	if errors.Is(result.event.Err, errDetachToPicker) {
+		s.logger.Info("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", "detach_to_picker")
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		s.notifyLifecycle(LifecycleNoticeDetachToPicker)
 		return false, nil
 	}
 	if result.adopted && (result.event.Kind == AttachmentEventLost || result.event.Kind == AttachmentEventFailed) {
+		s.logger.Warn("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String(), "error", result.event.Err, "cause", errors.Unwrap(result.event.Err))
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: result.event.Err})
 		s.notifyLifecycle(LifecycleNoticeDestinationFailed)
 		s.notifyAttachment(result.event.Err)
@@ -755,6 +761,7 @@ settlement:
 	// attached presentation showing.
 	s.transition(supervisorEvent{kind: supervisorAttachEnded})
 	if !brokerLost {
+		s.logger.Info("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String())
 		s.notifyLifecycle(LifecycleNoticeSessionEnded)
 	}
 	return false, nil

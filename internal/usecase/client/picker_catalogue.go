@@ -596,7 +596,13 @@ func resolvePickerTarget(epoch ports.BrokerEpoch, authority pickerResolveAuthori
 	if observation.Availability == domain.RemoteAvailabilityIncompatible || pickerObservationVersionMismatch(observation) {
 		return fail(pickerCatalogueError{Code: pickerCatalogueIncompatible, Text: "host protocol is incompatible"})
 	}
-	if refuseFailing && !ref.local && pickerObservationFailing(observation) {
+	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind == pickerSelectionExact {
+		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "remote host has no vev daemon; choose create session"})
+	}
+	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind != pickerSelectionCreateNamed && ref.kind != pickerSelectionCreateEphemeral {
+		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "no daemon exists on this host; choose create session"})
+	}
+	if refuseFailing && !ref.local && pickerObservationFailing(observation) && observation.Availability != domain.RemoteAvailabilityNoDaemon {
 		reason := pickerObservationReason(observation, false)
 		return fail(pickerCatalogueError{
 			Code:   pickerCatalogueUnavailable,
@@ -843,6 +849,8 @@ func pickerObservationStatus(observation ports.BrokerDaemonObservation, fresh bo
 		return protocol.PickerLineStatusError
 	case domain.RemoteAvailabilityIncompatible:
 		return protocol.PickerLineStatusVersion
+	case domain.RemoteAvailabilityNoDaemon:
+		return protocol.PickerLineStatusNoDaemon
 	case domain.RemoteAvailabilityReachable:
 		if pickerObservationVersionMismatch(observation) {
 			return protocol.PickerLineStatusVersion
@@ -873,6 +881,8 @@ func pickerObservationReason(observation ports.BrokerDaemonObservation, fresh bo
 		return domain.RemoteReasonMalformed
 	case domain.RemoteAvailabilityIncompatible:
 		return domain.RemoteReasonVersionMismatch
+	case domain.RemoteAvailabilityNoDaemon:
+		return domain.RemoteReasonNoDaemon
 	case domain.RemoteAvailabilityReachable:
 		if pickerObservationVersionMismatch(observation) {
 			return domain.RemoteReasonVersionMismatch

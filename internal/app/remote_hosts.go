@@ -102,9 +102,16 @@ func printBrokerHosts(w io.Writer, snapshot ports.BrokerSnapshot) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TARGET\tSOURCE")
+	_, _ = fmt.Fprintln(tw, "TARGET\tSOURCE\tSTATUS")
 	for _, endpoint := range endpoints {
-		_, _ = fmt.Fprintf(tw, "%s\tbroker\n", endpoint)
+		status := "configured"
+		for _, daemon := range snapshot.Daemons {
+			if !daemon.Local && daemon.Endpoint == endpoint && daemon.Availability == domain.RemoteAvailabilityNoDaemon {
+				status = "no daemon"
+				break
+			}
+		}
+		_, _ = fmt.Fprintf(tw, "%s\tbroker\t%s\n", endpoint, status)
 	}
 	return tw.Flush()
 }
@@ -114,12 +121,16 @@ func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io
 		return fmt.Errorf("vev: reading broker catalogue: %w", err)
 	}
 	var sessions []protocol.SessionInfo
+	var statuses []string
 	found := cmd.listHost == ""
 	for _, daemon := range snapshot.Daemons {
 		if cmd.listHost != "" && (daemon.Local || daemon.Endpoint != cmd.listHost) {
 			continue
 		}
 		found = true
+		if !daemon.Local && daemon.Availability == domain.RemoteAvailabilityNoDaemon {
+			statuses = append(statuses, fmt.Sprintf("%s: no vev daemon — Enter in the picker to create a session", daemon.Endpoint))
+		}
 		for i, session := range catalogSessionsAsInfo(daemon.Endpoint, daemon.Sessions) {
 			if daemon.Local {
 				session.Name = daemon.Sessions[i].Name
@@ -129,6 +140,14 @@ func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io
 	}
 	if !found {
 		return fmt.Errorf("vev: unknown host %q", cmd.listHost)
+	}
+	for _, status := range statuses {
+		if _, err := fmt.Fprintln(stdout, status); err != nil {
+			return err
+		}
+	}
+	if len(sessions) == 0 && len(statuses) > 0 {
+		return nil
 	}
 	printSessions(stdout, sessions)
 	return nil

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -270,7 +271,7 @@ func parseBrokerStatusArgs(args []string) (command, error) {
 // runBrokerLauncherCommand runs the hidden launcher. It changes no ordinary
 // command and never runs in production flows.
 func runProductionBrokerLauncherCommand(context.Context) error {
-	return startDetachedBrokerServe([]string{productionBrokerServeCommand})
+	return startDetachedBrokerServe([]string{productionBrokerServeCommand}, filepath.Join(productionBrokerLayout().Log, "vev-broker-crash.log"))
 }
 
 func runBrokerLauncherCommand(_ context.Context, options brokerLauncherOptions) error {
@@ -300,7 +301,7 @@ func runBrokerLauncher(options brokerLauncherOptions) error {
 	if grace > 0 {
 		args = append(args, "--idle-grace", grace.String())
 	}
-	return startDetachedBrokerServe(args)
+	return startDetachedBrokerServe(args, filepath.Join(layout.Log, "vev-broker-crash.log"))
 }
 
 // startDetachedBrokerServe starts one `_broker-serve` in a new session and
@@ -308,7 +309,7 @@ func runBrokerLauncher(options brokerLauncherOptions) error {
 // daemon launcher's double-fork boundary: no ambient variable is dropped beyond
 // the performance-trace inputs, stdio is /dev/null, and the process is
 // reparented immediately.
-func startDetachedBrokerServe(args []string) error {
+func startDetachedBrokerServe(args []string, crashPath string) error {
 	exePath, err := selfExePath()
 	if err != nil {
 		return fmt.Errorf("vev: resolving executable path: %w", err)
@@ -324,7 +325,22 @@ func startDetachedBrokerServe(args []string) error {
 	cmd.Dir = platform.DirOrHome("")
 	cmd.Stdin = devNull
 	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	if crashPath == "" {
+		cmd.Stderr = devNull
+	} else {
+		if err := safedir.EnsurePrivate(filepath.Dir(crashPath)); err != nil {
+			return fmt.Errorf("vev: secure broker crash log directory: %w", err)
+		}
+		if err := os.Rename(crashPath, crashPath+".prev"); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("vev: preserve previous broker crash log: %w", err)
+		}
+		crashLog, err := os.OpenFile(crashPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("vev: open broker crash log: %w", err)
+		}
+		defer func() { _ = crashLog.Close() }()
+		cmd.Stderr = crashLog
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("vev: starting detached broker: %w", err)
