@@ -8,7 +8,7 @@ vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle
 
 ## Bulk purge
 
-`kill --all` purges every live, stopped, and broken session while leaving the daemon running. Its admission gate is transient and each phase spends its own bounded deadline (admission drain, stopped/broken sweep, shared live teardown), so an uncooperative repository can never hold purge admission or control indefinitely. A durable delete that ignores cancellation is completed by a detached worker under the exact session name, incarnation, and creation time it captured, so it can never remove a same-name replacement; until it returns, the stopped authority still reserves the name and the purge reports a typed failure. A live unit whose teardown aborts before it owns destructive work stays registered, and its snapshot-coordinator quarantine is rolled back so it keeps checkpointing.
+`kill --sessions` purges every live, stopped, and broken session while leaving the daemon running. Its admission gate is transient and each phase spends its own bounded deadline (admission drain, stopped/broken sweep, shared live teardown), so an uncooperative repository can never hold purge admission or control indefinitely. A durable delete that ignores cancellation is completed by a detached worker under the exact session name, incarnation, and creation time it captured, so it can never remove a same-name replacement; until it returns, the stopped authority still reserves the name and the purge reports a typed failure. A live unit whose teardown aborts before it owns destructive work stays registered, and its snapshot-coordinator quarantine is rolled back so it keeps checkpointing.
 
 ## Recovery commands
 

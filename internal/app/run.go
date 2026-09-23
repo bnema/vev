@@ -87,8 +87,7 @@ type command struct {
 	hostAction   string
 	hostTarget   string
 	killAll      bool
-	killDaemon   bool
-	killBroker   bool
+	killSessions bool
 	cmd          cmdInvocation
 	brokerServe  brokerServeOptions
 	brokerMux    brokerMuxOptions
@@ -125,9 +124,9 @@ usage:
   vev host rm <host>  remove a pinned remote host
   vev host list       list known remote hosts
   vev kill <name>     kill a session
-  vev kill --all      kill all sessions (the daemon keeps running)
-  vev kill --daemon   stop the active vev daemon
-  vev kill --broker   stop the active vev broker
+  vev kill --sessions kill all sessions (vev keeps running)
+  vev kill --all      stop everything: every vev window, the broker, and the
+                      daemon (named sessions come back on the next start)
   vev cmd <command>   run a control command (vev cmd --help)
   vev --ui-observe    expose passive observation for this interactive client
                       (optional: --ui-socket PATH)
@@ -311,7 +310,7 @@ parsedUIFlags:
 		return command{kind: kindCmd, cmd: invocation}, nil
 	case "kill":
 		if len(args) < 2 || args[1] == "" {
-			return command{}, usagef("`kill` requires a session name, --all, --daemon, or --broker")
+			return command{}, usagef("`kill` requires a session name, --sessions, or --all")
 		}
 		if args[1] == "--" {
 			if len(args) != 3 || args[2] == "" {
@@ -320,16 +319,17 @@ parsedUIFlags:
 			return command{kind: kindKill, name: args[2]}, nil
 		}
 		if len(args) > 2 {
-			return command{}, usagef("`kill` accepts exactly one session name, --all, --daemon, or --broker")
+			return command{}, usagef("`kill` accepts exactly one session name, --sessions, or --all")
 		}
 		switch args[1] {
+		case "--sessions":
+			return command{kind: kindKill, killSessions: true}, nil
 		case "--all":
 			return command{kind: kindKill, killAll: true}, nil
-		case "--daemon":
-			return command{kind: kindKill, killDaemon: true}, nil
-		case "--broker":
-			return command{kind: kindKill, killBroker: true}, nil
 		default:
+			if strings.HasPrefix(args[1], "-") {
+				return command{}, usagef("unknown flag %q for `kill`; use `kill -- NAME` for a dashed session name", args[1])
+			}
 			return command{kind: kindKill, name: args[1]}, nil
 		}
 	case "-h", "--help", "help":
@@ -381,10 +381,10 @@ func dispatch(ctx context.Context, cmd command) error {
 	case kindHost:
 		return runHostCommand(ctx, cmd, defaultRemoteHostDeps())
 	case kindKill:
-		if cmd.killBroker {
-			return runKillBroker(ctx)
+		if cmd.killAll {
+			return runKillAll(ctx, os.Stdout)
 		}
-		return runKill(ctx, cmd.name, cmd.killAll, cmd.killDaemon)
+		return runKill(ctx, cmd.name, cmd.killSessions)
 	case kindCmd:
 		return runCmd(ctx, cmd.cmd)
 	case kindAttach:
@@ -1179,16 +1179,9 @@ func unreadableCatalogueError(stateDir string) error {
 		"    rm -rf %s", persist.ErrCatalogueUnreadable, stateDir, stateDir)
 }
 
-// runKill uses the existing broker for daemon shutdown and connect-or-spawn
-// for session mutations.
-func runKill(ctx context.Context, name string, all, daemon bool) error {
-	if daemon {
-		err := requestDaemonStop(ctx)
-		if err == nil {
-			printKillSuccess(name, all, daemon)
-		}
-		return err
-	}
+// runKill deletes one session or, with sessions set, every session through the
+// broker, starting it if needed.
+func runKill(ctx context.Context, name string, sessions bool) error {
 	service, err := connectBroker(ctx)
 	if err != nil {
 		return unreachableBrokerError(err)
@@ -1200,10 +1193,9 @@ func runKill(ctx context.Context, name string, all, daemon bool) error {
 	}
 	route := localBrokerOperationRoute(service.Snapshot())
 	var result protocol.KillResult
-	switch {
-	case all:
+	if sessions {
 		result, err = operations.KillAll(ctx, route)
-	default:
+	} else {
 		result, err = operations.Kill(ctx, route, name)
 	}
 	if err != nil {
@@ -1212,18 +1204,10 @@ func runKill(ctx context.Context, name string, all, daemon bool) error {
 	if err := brokerKillResultError(result); err != nil {
 		return err
 	}
-	printKillSuccess(name, all, daemon)
-	return nil
-}
-
-func printKillSuccess(name string, all, daemon bool) {
-	if daemon {
-		fmt.Println("killed daemon")
-		return
-	}
-	if all {
+	if sessions {
 		fmt.Println("killed all sessions")
-		return
+	} else {
+		fmt.Printf("killed %s\n", name)
 	}
-	fmt.Printf("killed %s\n", name)
+	return nil
 }

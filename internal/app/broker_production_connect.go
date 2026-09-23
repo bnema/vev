@@ -77,7 +77,7 @@ func connectProductionBroker(ctx context.Context) (ports.BrokerService, error) {
 		return nil, fmt.Errorf("vev: connect broker: %w", err)
 	}
 	if _, stale := brokeripc.StaleBuild(service); stale {
-		fmt.Fprintln(os.Stderr, `vev: the running broker is from another build; run "vev kill --broker" to restart it`)
+		fmt.Fprintln(os.Stderr, `vev: the running broker is from another build; run "vev kill --all" to restart it`)
 	}
 	if err := awaitBrokerPublication(ctx, service); err != nil {
 		_ = service.Close()

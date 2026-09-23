@@ -432,8 +432,7 @@ func TestParseArgs(t *testing.T) {
 		wantHostAct  string
 		wantHostTgt  string
 		wantAll      bool
-		wantDaemon   bool
-		wantBroker   bool
+		wantSessions bool
 		wantErr      bool
 		nonUsageErr  bool
 	}{
@@ -477,13 +476,13 @@ func TestParseArgs(t *testing.T) {
 		{name: "kill preserves legacy unsafe name via terminator", args: []string{"kill", "--", "my work"}, wantKind: kindKill, wantName: "my work"},
 		{name: "kill dashed name via terminator", args: []string{"kill", "--", "--all"}, wantKind: kindKill, wantName: "--all"},
 		{name: "kill all", args: []string{"kill", "--all"}, wantKind: kindKill, wantAll: true},
-		{name: "kill daemon", args: []string{"kill", "--daemon"}, wantKind: kindKill, wantDaemon: true},
-		{name: "kill broker", args: []string{"kill", "--broker"}, wantKind: kindKill, wantBroker: true},
-		{name: "kill broker rejects extra arg", args: []string{"kill", "--broker", "extra"}, wantErr: true},
+		{name: "kill sessions", args: []string{"kill", "--sessions"}, wantKind: kindKill, wantSessions: true},
+		{name: "kill sessions rejects extra arg", args: []string{"kill", "--sessions", "extra"}, wantErr: true},
+		{name: "kill removed daemon flag", args: []string{"kill", "--daemon"}, wantErr: true},
+		{name: "kill removed broker flag", args: []string{"kill", "--broker"}, wantErr: true},
 		{name: "kill without name", args: []string{"kill"}, wantErr: true},
 		{name: "kill terminator without name", args: []string{"kill", "--"}, wantErr: true},
 		{name: "kill all rejects extra arg", args: []string{"kill", "--all", "extra"}, wantErr: true},
-		{name: "kill daemon rejects extra arg", args: []string{"kill", "--daemon", "extra"}, wantErr: true},
 		{name: "kill extra arg", args: []string{"kill", "work", "extra"}, wantErr: true},
 		{name: "daemon", args: []string{"--daemon"}, wantKind: kindDaemon},
 		{name: "removed stdio", args: []string{"_stdio"}, wantErr: true},
@@ -549,11 +548,8 @@ func TestParseArgs(t *testing.T) {
 			if got.killAll != tt.wantAll {
 				t.Errorf("killAll = %v, want %v", got.killAll, tt.wantAll)
 			}
-			if got.killDaemon != tt.wantDaemon {
-				t.Errorf("killDaemon = %v, want %v", got.killDaemon, tt.wantDaemon)
-			}
-			if got.killBroker != tt.wantBroker {
-				t.Errorf("killBroker = %v, want %v", got.killBroker, tt.wantBroker)
+			if got.killSessions != tt.wantSessions {
+				t.Errorf("killSessions = %v, want %v", got.killSessions, tt.wantSessions)
 			}
 		})
 	}

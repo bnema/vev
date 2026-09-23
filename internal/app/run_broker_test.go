@@ -305,17 +305,11 @@ func TestRunKillExplicitOutcomesTable(t *testing.T) {
 			wantStdout: "killed work",
 		},
 		{
-			name:       "kill-all success",
+			name:       "kill-sessions success",
 			kill:       []string{"", "true", "false"},
 			replies:    []protocol.ServerMessage{seamKillResult(1, protocol.KillSucceeded, 0, "")},
 			wantCode:   0,
 			wantStdout: "killed all sessions",
-		},
-		{
-			name:     "daemon-stop success",
-			kill:     []string{"", "false", "true"},
-			replies:  []protocol.ServerMessage{seamKillResult(1, protocol.KillSucceeded, 0, "")},
-			wantCode: 0,
 		},
 		{
 			name:     "definite failure is a bounded exit-one failure",
@@ -353,7 +347,7 @@ func TestRunKillExplicitOutcomesTable(t *testing.T) {
 
 			var err error
 			got := captureStdout(t, func() {
-				err = runKill(context.Background(), tt.kill[0], tt.kill[1] == "true", tt.kill[2] == "true")
+				err = runKill(context.Background(), tt.kill[0], tt.kill[1] == "true")
 			})
 			require.Equal(t, tt.wantCode, ExitCode(err), "exit code for %v", tt.kill)
 			if tt.wantUnknown {
@@ -385,7 +379,7 @@ func TestRunKillUnreachableBrokerIsExitThree(t *testing.T) {
 	}
 	t.Cleanup(func() { connectBroker = previous })
 
-	err := runKill(context.Background(), "work", false, false)
+	err := runKill(context.Background(), "work", false)
 	require.Equal(t, 3, ExitCode(err))
 	require.ErrorIs(t, err, errDaemonUnreachable)
 }

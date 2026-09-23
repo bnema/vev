@@ -293,7 +293,7 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 			return brokerStatusReport{}, err
 		}
 		if !errors.Is(err, errBrokerAbsent) {
-			return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --broker\" and retry", req.socketPath, err)
+			return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --all\" and retry", req.socketPath, err)
 		}
 
 		if held == nil {
@@ -314,7 +314,7 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 					return brokerStatusReport{}, err
 				}
 				if !errors.Is(err, errBrokerAbsent) {
-					return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --broker\" and retry", req.socketPath, err)
+					return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --all\" and retry", req.socketPath, err)
 				}
 			case errors.Is(err, lifecycle.ErrBusy):
 				// Another caller is elected and spawning. Only the elected

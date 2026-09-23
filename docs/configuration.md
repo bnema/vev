@@ -120,7 +120,7 @@ Set `VEV_ENV` to a name such as `dev` to redirect all vev-owned paths into `.dev
 
 ```sh
 VEV_ENV=dev go run .
-VEV_ENV=dev go run . kill --all
+VEV_ENV=dev go run . kill --sessions
 rm -rf .dev/dev
 ```
 

@@ -28,7 +28,7 @@ var ErrDaemonUnreachable = errors.New("vev: daemon did not become reachable")
 // ErrLifecycleHeldByOther reports that another process kept the daemon
 // lifecycle lock for the whole start budget without publishing the carriage,
 // for example a vev daemon from an older build. Spawning cannot recover this.
-var ErrLifecycleHeldByOther = errors.New("vev: a vev daemon holds the lifecycle lock but did not answer within the start budget; if it is from an older build, stop it (for example `pkill -f 'vev --daemon'`) and retry")
+var ErrLifecycleHeldByOther = errors.New("vev: a vev daemon holds the lifecycle lock but did not answer within the start budget; if it is from an older build, run `vev kill --all` and retry")
 
 // spawnLockName is the mkdir-based lock directory guarding daemon spawn, so
 // concurrent first-clients elect a single spawner instead of racing to
