@@ -264,6 +264,7 @@ func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
 	}{
 		{matchName, row.foldedLabel},
 		{matchDetail, row.foldedDetail},
+		{matchContext, row.foldedContext},
 	}
 
 	var result searchMatch

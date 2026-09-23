@@ -128,6 +128,9 @@ type row struct {
 	line         protocol.PickerLine
 	foldedLabel  string
 	foldedDetail string
+	// foldedContext is the owning session's name for a tab row, so searching a
+	// session name reaches the tab rows that are its destinations.
+	foldedContext string
 }
 
 func (r row) key() string { return r.line.Key }
@@ -242,6 +245,17 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 		run = append(run, line)
 	}
 	flush()
+	session := ""
+	for i := range m.rows {
+		switch m.rows[i].line.Kind {
+		case protocol.PickerLineSession:
+			session = m.rows[i].foldedLabel
+		case protocol.PickerLineTab:
+			m.rows[i].foldedContext = session
+		default:
+			session = ""
+		}
+	}
 	m.searchMatches = nil
 	m.matchRows = nil
 	if m.searchActive {

@@ -371,6 +371,50 @@ func TestSearchMatchesLabelsAndDetails(t *testing.T) {
 	require.False(t, m.SearchActive())
 }
 
+// TestSearchSessionNameReachesItsTabRows pins that a session with tabs, whose
+// header is not itself a destination, is found by its name: the query matches
+// the tab rows that are its destinations, never another session's tabs.
+func TestSearchSessionNameReachesItsTabRows(t *testing.T) {
+	tab := func(key, label string) protocol.PickerLine {
+		return protocol.PickerLine{Key: key, Kind: protocol.PickerLineTab, Label: label, Focusable: true, Actions: protocol.PickerCanNavigate}
+	}
+	session := func(key, label string) protocol.PickerLine {
+		return protocol.PickerLine{Key: key, Kind: protocol.PickerLineSession, Label: label}
+	}
+	lines := []protocol.PickerLine{
+		session("a", "picka1234"), tab("a/1", "1"),
+		session("b", "pickb1234"), tab("b/1", "1"), tab("b/2", "logs"),
+	}
+	tests := []struct {
+		name        string
+		query       string
+		wantMatches int
+		wantKey     string
+	}{
+		{name: "exact session name", query: "pickb1234", wantMatches: 2, wantKey: "b/1"},
+		{name: "session name prefix", query: "picka", wantMatches: 1, wantKey: "a/1"},
+		{name: "tab label still matches", query: "logs", wantMatches: 1, wantKey: "b/2"},
+		{name: "no session of that name", query: "pickc", wantMatches: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(lines, Config{Intent: protocol.PickerIntentNavigation})
+			m.EnterSearch()
+			for _, r := range tt.query {
+				m.InsertSearch(r)
+			}
+			require.Equal(t, tt.wantMatches, m.MatchCount())
+			selected, ok := m.Selected()
+			if tt.wantKey == "" {
+				require.False(t, ok)
+				return
+			}
+			require.True(t, ok)
+			require.Equal(t, tt.wantKey, selected.Key)
+		})
+	}
+}
+
 func rowText(row []renderer.Cell) string {
 	out := make([]rune, 0, len(row))
 	for _, cell := range row {
