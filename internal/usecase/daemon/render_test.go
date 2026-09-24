@@ -619,7 +619,10 @@ func TestResizePreservesLiveContentAndEvictsScrollback(t *testing.T) {
 	d := New(nil, stubClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ac := &attachedClient{tr: tr, output: newOutputStateStream()}
 	ac.initOverlays()
-	sess := &session{sessionCore: sessionCore{id: "s", name: "s", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
+	// A lifecycle ID keeps the first paint valid. Without it the paint fails
+	// validation, which the daemon treats as a send error and detaches the
+	// attachment in the background, racing the second resize.
+	sess := &session{sessionCore: sessionCore{id: "s", name: "s", incarnation: newTestLifecycle(t), attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{win}}
 	ac.setSession(sess)
 
 	// Client rows are one more than the equivalent case in a single-bar

@@ -748,3 +748,18 @@ func TestResolverDoesNotAliasConfiguration(t *testing.T) {
 	resolver.local.Identity = "changed"
 	require.Equal(t, original.local.Identity, config.Resolver().local.Identity)
 }
+
+func TestRejectSymlinkedComponentsAllowsRootOwnedSystemLinks(t *testing.T) {
+	var rootLink string
+	for _, candidate := range []string{"/var", "/tmp", "/bin", "/lib", "/sbin"} {
+		info, err := os.Lstat(candidate)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 && ownedByRoot(info) {
+			rootLink = candidate
+			break
+		}
+	}
+	if rootLink == "" {
+		t.Skip("no root-owned top-level symlink on this system")
+	}
+	require.NoError(t, rejectSymlinkedComponents(filepath.Join(rootLink, "vev-missing-child")))
+}

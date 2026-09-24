@@ -65,10 +65,11 @@ func recordBrokerHelperProcess(role string) {
 // The AF_UNIX pathname limit is about 103 bytes, and t.TempDir embeds the full
 // test name; the broker socket lives several components beneath the sandbox
 // root, so a long test name would overflow the socket path. A short base keeps
-// the real subprocess tests honest.
+// the real subprocess tests honest. It uses /tmp because macOS TMPDIR is
+// already a long /var/folders path.
 func shortTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", prefix)
+	dir, err := os.MkdirTemp("/tmp", prefix)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
