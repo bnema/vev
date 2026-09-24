@@ -3,6 +3,8 @@ package brokeripc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/ports"
@@ -100,6 +102,16 @@ func errorDetail(err error) brokerwire.ErrorDetail {
 	if err == nil {
 		return brokerwire.ErrorDetail{}
 	}
+	// A physical loss keeps its failure kind and a bounded description of the
+	// transport cause, so the client can report why the attachment ended.
+	var lost ports.BrokerStreamLost
+	if errors.As(err, &lost) && lost.Validate() == nil {
+		detail := brokerwire.ErrorDetail{Code: ports.BrokerErrorAttachmentLost, FailureKind: lost.Cause, Text: lost.Cause.String()}
+		if lost.Err != nil {
+			detail.Text = boundedBrokerErrorText(fmt.Errorf("%s: %w", lost.Cause, lost.Err))
+		}
+		return detail
+	}
 	var failure ports.BrokerError
 	if errors.As(err, &failure) {
 		return brokerwire.ErrorDetail{Code: failure.Code, Text: failure.Text}
@@ -138,9 +150,9 @@ func errorDetail(err error) brokerwire.ErrorDetail {
 
 func boundedBrokerErrorText(err error) string {
 	const max = 256
-	text := err.Error()
+	text := ports.SanitizeBrokerDisplayText(err.Error())
 	if len(text) > max {
-		text = text[:max]
+		text = strings.ToValidUTF8(text[:max], "")
 	}
 	return text
 }

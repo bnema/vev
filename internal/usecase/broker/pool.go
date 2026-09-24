@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -64,11 +65,27 @@ type reservation struct {
 	cancel context.CancelFunc
 	entry  *poolEntry
 }
+
+// retire records why one entry ends and cancels it with that reason.
+func (e *poolEntry) retire(reason error) func() {
+	return func() { e.cancel(reason) }
+}
+
+// Pool entry retirement reasons. Each one is the cancellation cause of the
+// entry context, so the streams it ends and the broker log name the reason.
+var (
+	errEntryIdle      = errors.New("broker: pooled connection idle timeout")
+	errEntryEvicted   = errors.New("broker: pooled connection evicted for a newer warm connection")
+	errEntryAbandoned = errors.New("broker: pooled connection abandoned before it was ready")
+	errEntryRedirect  = errors.New("broker: pooled connection merged into an existing connection")
+	errEntryLost      = errors.New("broker: pooled physical connection lost")
+)
+
 type poolEntry struct {
 	key         poolKey
 	pending     pendingKey
 	ctx         context.Context
-	cancel      context.CancelFunc
+	cancel      context.CancelCauseFunc
 	ready, wake chan struct{}
 	physical    ports.BrokerPhysicalConnection
 	redirect    *poolEntry
@@ -200,8 +217,8 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		p.mu.Lock()
 		delete(c.streams, req.Stream)
 		p.streams--
-		var abandon context.CancelFunc
-		var evicted []context.CancelFunc
+		var abandon func()
+		var evicted []func()
 		reservedEntry := r.entry
 		if reservedEntry != nil {
 			reservedEntry.refs--
@@ -211,7 +228,7 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 					evicted = p.idleLocked(reservedEntry)
 				default:
 					reservedEntry.retiring = true
-					abandon = reservedEntry.cancel
+					abandon = reservedEntry.retire(errEntryAbandoned)
 				}
 			}
 			select {
@@ -269,7 +286,7 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 			p.mu.Unlock()
 			return nil, ports.BrokerAdmissionLimit
 		}
-		ectx, ecancel := context.WithCancel(p.ctx)
+		ectx, ecancel := context.WithCancelCause(p.ctx)
 		entry = &poolEntry{key: key, pending: pending, ctx: ectx, cancel: ecancel, ready: make(chan struct{}), wake: make(chan struct{}, 1)}
 		if resolved.ExpectedIdentity.Bound {
 			p.entries[key] = entry
@@ -332,7 +349,8 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		case <-ctx.Done():
 			terminal = ports.BrokerError{Code: ports.BrokerErrorCancelled}
 		case <-entry.ctx.Done():
-			terminal = ports.BrokerError{Code: ports.BrokerErrorAttachmentLost}
+			reason := context.Cause(entry.ctx)
+			terminal = ports.BrokerError{Code: ports.BrokerErrorAttachmentLost, Text: reason.Error(), Cause: reason}
 		case <-entry.physical.Done():
 		case <-raw.Done():
 			terminal = raw.Err()
@@ -394,7 +412,7 @@ func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 	p.mu.Unlock()
 	if redirect != nil {
 		_ = physical.Close()
-		e.cancel()
+		e.cancel(errEntryRedirect)
 		return
 	}
 	if err == nil {
@@ -421,6 +439,7 @@ func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 			case <-e.ctx.Done():
 				goto retire
 			case <-physical.Done():
+				e.cancel(errEntryLost)
 				goto retire
 			case <-e.wake:
 				continue
@@ -429,6 +448,7 @@ func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 				if e.refs == 0 {
 					e.retiring = true
 					p.mu.Unlock()
+					e.cancel(errEntryIdle)
 					goto retire
 				}
 				p.mu.Unlock()
@@ -438,9 +458,11 @@ func (p *Pool) runEntry(e *poolEntry, endpoint ports.BrokerDialTarget) {
 retire:
 	p.mu.Lock()
 	e.retiring = true
+	refs := e.refs
 	p.mu.Unlock()
-	e.cancel()
+	e.cancel(errEntryLost)
 	if physical != nil {
+		p.logRetire(e, physical, refs)
 		_ = physical.Close()
 	}
 	// Keep the key occupied until Close completes: never overlap physicals.
@@ -458,7 +480,7 @@ retire:
 // and returns the cancellations that retire warm entries beyond limits.Warm,
 // least recently idled first. The caller runs them after unlocking. An entry
 // that failed, lost a redirect race, or is already retiring is never warm.
-func (p *Pool) idleLocked(e *poolEntry) []context.CancelFunc {
+func (p *Pool) idleLocked(e *poolEntry) []func() {
 	if e.err != nil || e.redirect != nil || e.retiring || p.entries[e.key] != e {
 		return nil
 	}
@@ -470,7 +492,7 @@ func (p *Pool) idleLocked(e *poolEntry) []context.CancelFunc {
 			warm = append(warm, candidate)
 		}
 	}
-	var evicted []context.CancelFunc
+	var evicted []func()
 	for len(warm) > p.limits.Warm {
 		oldest := 0
 		for i := range warm {
@@ -480,7 +502,7 @@ func (p *Pool) idleLocked(e *poolEntry) []context.CancelFunc {
 		}
 		victim := warm[oldest]
 		victim.retiring = true
-		evicted = append(evicted, victim.cancel)
+		evicted = append(evicted, victim.retire(errEntryEvicted))
 		warm = append(warm[:oldest], warm[oldest+1:]...)
 	}
 	return evicted
@@ -505,7 +527,7 @@ func (p *Pool) AdoptPhysical(physical ports.BrokerPhysicalConnection, policy por
 		p.mu.Unlock()
 		return false
 	}
-	ctx, cancel := context.WithCancel(p.ctx)
+	ctx, cancel := context.WithCancelCause(p.ctx)
 	e := &poolEntry{key: key, ctx: ctx, cancel: cancel, ready: make(chan struct{}), wake: make(chan struct{}, 1), physical: physical}
 	close(e.ready)
 	p.entries[key] = e
@@ -543,6 +565,7 @@ func (p *Pool) watchAdopted(e *poolEntry) {
 		case <-e.ctx.Done():
 			goto retire
 		case <-physical.Done():
+			e.cancel(errEntryLost)
 			goto retire
 		case <-e.wake:
 			continue
@@ -551,6 +574,7 @@ func (p *Pool) watchAdopted(e *poolEntry) {
 			if e.refs == 0 && e.idleOrder != 0 {
 				e.retiring = true
 				p.mu.Unlock()
+				e.cancel(errEntryIdle)
 				goto retire
 			}
 			p.mu.Unlock()
@@ -559,8 +583,10 @@ func (p *Pool) watchAdopted(e *poolEntry) {
 retire:
 	p.mu.Lock()
 	e.retiring = true
+	refs := e.refs
 	p.mu.Unlock()
-	e.cancel()
+	e.cancel(errEntryLost)
+	p.logRetire(e, physical, refs)
 	_ = physical.Close()
 	p.mu.Lock()
 	if p.entries[e.key] == e {
@@ -595,6 +621,26 @@ func (p *Pool) SharedPhysical(identity ports.BrokerDaemonIdentity, policy ports.
 	default:
 	}
 	return e.physical, true
+}
+
+// logRetire records one physical connection leaving the pool: why the entry
+// ended, the transport's own failure when it died, and how many streams were
+// still using it. Pool shutdown is not logged.
+func (p *Pool) logRetire(e *poolEntry, physical ports.BrokerPhysicalConnection, refs int) {
+	if p.ctx.Err() != nil {
+		return
+	}
+	level := slog.LevelInfo
+	if refs > 0 {
+		level = slog.LevelWarn
+	}
+	args := []any{"reason", context.Cause(e.ctx), "active_streams", refs}
+	select {
+	case <-physical.Done():
+		args = append(args, "failure", physical.FailureKind().String(), "cause", physical.Err())
+	default:
+	}
+	slog.Log(context.Background(), level, "broker_pool_connection_retired", args...)
 }
 
 // Close cancels pending operations, closes transports, and joins all owned
@@ -682,7 +728,8 @@ func (p *Pool) streamTerminal(ctx context.Context, e *poolEntry, req ports.Broke
 	default:
 	}
 	if e.ctx.Err() != nil {
-		return ports.BrokerError{Code: ports.BrokerErrorAttachmentLost}
+		reason := context.Cause(e.ctx)
+		return ports.BrokerError{Code: ports.BrokerErrorAttachmentLost, Text: reason.Error(), Cause: reason}
 	}
 	return normalizePoolError(fallback)
 }

@@ -64,6 +64,7 @@ package daemonmux
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 
 	"github.com/bnema/vev/internal/domain"
@@ -813,6 +814,7 @@ func (p *Pump) applyClient(message ClientMessage) error {
 		return p.applyClient(*m)
 	case Reset:
 		disposition, err := p.engine.Reset(m)
+		p.logPeerReset(m, disposition)
 		return p.applyStreamTerminal(m.Physical, disposition, err)
 	case *Reset:
 		if m == nil {
@@ -912,6 +914,7 @@ func (p *Pump) applyServer(message ServerMessage) error {
 		return p.applyServer(*m)
 	case Reset:
 		disposition, err := p.engine.Reset(m)
+		p.logPeerReset(m, disposition)
 		return p.applyStreamTerminal(m.Physical, disposition, err)
 	case *Reset:
 		if m == nil {
@@ -945,6 +948,15 @@ func (p *Pump) applyStreamTerminal(physical PhysicalStreamID, disposition Stream
 		p.maybeSignalFlush()
 	}
 	return nil
+}
+
+// logPeerReset records one stream the peer aborted, with the reason it sent.
+// A late reset for an already settled stream is not logged.
+func (p *Pump) logPeerReset(message Reset, disposition StreamDisposition) {
+	if disposition != StreamAccepted || !message.HasError {
+		return
+	}
+	slog.Warn("daemonmux_stream_reset", "side", p.local.String(), "stream", uint64(message.Physical), "initiator", "peer", "kind", message.Error.FailureKind.String(), "code", message.Error.Code.String(), "cause", message.Error.Text)
 }
 
 // applyWindowUpdate grows one stream's send credit. A credit violation resets
@@ -998,6 +1010,7 @@ func (p *Pump) scheduleReset(physical PhysicalStreamID, cause error) {
 	}
 	detail := resetErrorDetail(cause)
 	reset := Reset{Physical: physical, Error: detail, HasError: true}
+	slog.Warn("daemonmux_stream_reset", "side", p.local.String(), "stream", uint64(physical), "initiator", "local", "kind", detail.FailureKind.String(), "cause", cause)
 	_, _ = p.engine.Reset(reset)
 	var err error
 	if p.local == DirectionServer {
@@ -1022,6 +1035,7 @@ func (p *Pump) settleFailure(kind domain.RemoteFailureKind, cause error) {
 	p.termMu.Lock()
 	if !p.settled {
 		p.settled = true
+		slog.Warn("daemonmux_physical_failed", "side", p.local.String(), "kind", kind.String(), "live_streams", p.engine.Live(), "cause", cause)
 		p.terminal.Fail(kind, cause)
 		p.engine.Fail(kind, cause)
 	}

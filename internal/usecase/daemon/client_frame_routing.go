@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"io"
 	"runtime"
 
 	"github.com/bnema/vev/internal/domain"
@@ -62,6 +63,9 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 					"has_request", failure.HasRequestID,
 				)
 				continue
+			}
+			if !errors.Is(err, io.EOF) {
+				d.log.Warn("client connection lost", "err", err)
 			}
 			for range connectionSnapshotAttempts {
 				sess, _, ok := d.currentAttachmentConnection(ac, tr)

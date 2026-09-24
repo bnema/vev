@@ -3,6 +3,7 @@ package brokeripc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -258,6 +260,41 @@ func TestErrorDetailMapping(t *testing.T) {
 
 	scoped := failureFromDetail(errorDetail(ports.BrokerAdmissionLimit))
 	require.ErrorIs(t, scoped, ports.BrokerAdmissionLimit)
+}
+
+// TestErrorDetailKeepsStreamLossCause proves a physical stream loss reaches
+// the client with its failure kind and a bounded, display-safe cause instead
+// of a bare attachment_lost.
+func TestErrorDetailKeepsStreamLossCause(t *testing.T) {
+	lost := func(err error) ports.BrokerStreamLost {
+		return ports.BrokerStreamLost{Connection: ports.BrokerConnectionID{1}, Stream: 1, Epoch: 1, Cause: domain.RemoteFailureTimeout, Err: err}
+	}
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"with cause", lost(errors.New("quic: idle timeout")), "timeout: quic: idle timeout"},
+		{"without cause", lost(nil), "timeout"},
+		{"wrapped", fmt.Errorf("attach: %w", lost(errors.New("reset"))), "timeout: reset"},
+		{"control characters removed", lost(errors.New("bad\x1b[31m\nline")), "timeout: bad[31mline"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := errorDetail(tc.err)
+			require.Equal(t, ports.BrokerErrorAttachmentLost, detail.Code)
+			require.Equal(t, domain.RemoteFailureTimeout, detail.FailureKind)
+			require.Equal(t, tc.want, detail.Text)
+			_, err := brokerwire.EncodeServer(brokerwire.StreamClosed{
+				Epoch: 1, Connection: ports.BrokerConnectionID{1}, Stream: 1, Error: detail, HasError: true,
+			}, brokerwire.MaxBrokerEnvelopeBytes, brokerwire.MaxStreamChunkBytes)
+			require.NoError(t, err)
+
+			var typed ports.BrokerError
+			require.ErrorAs(t, failureFromDetail(detail), &typed)
+			require.Equal(t, tc.want, typed.Text)
+		})
+	}
 }
 
 // TestAdmissionErrorMapping proves connection-tracker refusals map onto the
