@@ -62,7 +62,7 @@ func TestTerminal_EnterRaw_NonTTY_EmitsAltScreenAndCursorEscapes(t *testing.T) {
 	_ = outW.Close()
 	<-done
 
-	want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+	want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + focusReportEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + focusReportDisable + autowrapEnable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}
@@ -179,9 +179,9 @@ func TestTerminal_WriteFailure_AttemptsVisualResetOnFd(t *testing.T) {
 	// alt screen: a partial emission that got as far as cursorHide/mouseEnable
 	// would otherwise leave the cursor hidden and mouse reporting on.
 	const wantCleanup = cursorShow + cursorStyleDefault + mouseDisable +
-		bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+		bracketedPasteDisable + colorSchemeDisable + focusReportDisable + autowrapEnable + altScreenExit
 	const enterSequence = altScreenEnter + autowrapDisable + cursorHide +
-		mouseEnable + bracketedPasteEnable + colorSchemeEnable
+		mouseEnable + bracketedPasteEnable + colorSchemeEnable + focusReportEnable
 
 	for _, tc := range []struct {
 		name        string
@@ -280,7 +280,7 @@ func TestTerminal_EnterRaw_IsIdempotentAcrossCalls(t *testing.T) {
 
 	// Alt-screen/cursor escapes must appear exactly once for enter and exits
 	// exactly once, regardless of how many times EnterRaw/restore were called.
-	want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+	want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + focusReportEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + focusReportDisable + autowrapEnable + altScreenExit
 	if got := captured.String(); got != want {
 		t.Fatalf("captured escapes = %q, want %q", got, want)
 	}

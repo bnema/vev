@@ -1,6 +1,8 @@
 package sessionwire
 
 import (
+	"math"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -330,6 +332,24 @@ func selectTabToWire(message protocol.SelectTab) (*wire.SelectTab, error) {
 		return nil, err
 	}
 	return &wire.SelectTab{TabId: string(message.TabID)}, nil
+}
+
+func terminalFocusToWire(message protocol.TerminalFocus) (*wire.TerminalFocus, error) {
+	if err := message.Validate(); err != nil {
+		return nil, err
+	}
+	return &wire.TerminalFocus{Focus: uint32(message.Focus)}, nil
+}
+
+func terminalFocusFromWire(message *wire.TerminalFocus) (protocol.TerminalFocus, error) {
+	if message == nil || message.GetFocus() > math.MaxUint8 {
+		return protocol.TerminalFocus{}, errProtoConvertRange
+	}
+	focus := protocol.TerminalFocus{Focus: domain.TerminalFocus(message.GetFocus())}
+	if err := focus.Validate(); err != nil {
+		return protocol.TerminalFocus{}, err
+	}
+	return focus, nil
 }
 
 func selectTabFromWire(message *wire.SelectTab) (protocol.SelectTab, error) {

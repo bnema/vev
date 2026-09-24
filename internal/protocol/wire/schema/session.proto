@@ -33,6 +33,9 @@ message Hello {
   bool remote = 20;
   bool kitty_direct_graphics = 21;
   SessionAttachTarget session_target = 22; // optional pointer
+  // Terminal window focus when the attachment opens: 0 = unknown,
+  // 1 = focused, 2 = unfocused. Later changes travel as TerminalFocus.
+  uint32 terminal_focus = 23;
 }
 
 // Welcome answers an accepted attach.
