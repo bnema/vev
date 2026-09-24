@@ -176,6 +176,9 @@ const (
 	supervisorAttachEnded
 	// supervisorNonRetryable is a failure that retrying can never fix.
 	supervisorNonRetryable
+	// supervisorNavigationSettled ends a pending initial navigation's
+	// Connecting presentation when no attachment took over the terminal.
+	supervisorNavigationSettled
 	// supervisorTerminal ends the process: terminal EOF, process cancellation,
 	// or a terminal broker failure.
 	supervisorTerminal
@@ -189,6 +192,11 @@ const (
 type supervisorEvent struct {
 	kind supervisorEventKind
 	err  error
+	// navigating marks a supervisorBeginAttempt made while an initial
+	// navigation is still pending: the user asked for a session, not the
+	// picker, so the attempt presents Connecting instead of flashing the
+	// picker until the navigation settles.
+	navigating bool
 }
 
 // reduceSupervisor is the pure connectivity/presentation reducer. It is
@@ -198,6 +206,9 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 	switch event.kind {
 	case supervisorBeginAttempt:
 		state.Presentation = PresentPicker
+		if event.navigating {
+			state.Presentation = PresentConnecting
+		}
 		state.Connectivity = ConnectivityConnectingBroker
 		state.Generation++
 		state.Err = nil
@@ -230,8 +241,17 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		state.Presentation = PresentPicker
 		state.Err = event.err
 	case supervisorNonRetryable:
+		// The run stays on the picker with the visible error; a pending
+		// initial navigation can no longer present Connecting.
+		state.Presentation = PresentPicker
 		state.Connectivity = ConnectivityDisconnected
 		state.Err = event.err
+	case supervisorNavigationSettled:
+		// An initial navigation that ended without an attachment (a resolved
+		// picker, or a loss before it could be taken) leaves Connecting.
+		if state.Presentation == PresentConnecting {
+			state.Presentation = PresentPicker
+		}
 	case supervisorOverlayOpened:
 		// Only a committed attachment can host the overlay: a connecting
 		// foreground has not proven its first frame yet.
@@ -493,6 +513,18 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	return supervisor, nil
 }
 
+// initialNavigationPending reports whether an initial navigation other than
+// the picker is still armed. A resolver may still resolve to the picker; the
+// navigation then settles back to it without an attachment.
+func (s *Supervisor) initialNavigationPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.navigationConsumed {
+		return false
+	}
+	return s.cfg.ResolveInitialNavigation != nil || s.navigation.Kind != InitialNavigationPicker
+}
+
 // State returns the current immutable projection.
 func (s *Supervisor) State() State {
 	s.mu.Lock()
@@ -551,7 +583,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		// The generation is claimed before the connector runs, so the attempt is
 		// always attributable to the state that started it and a completion can be
 		// matched against the generation that produced it.
-		s.transition(supervisorEvent{kind: supervisorBeginAttempt})
+		s.transition(supervisorEvent{kind: supervisorBeginAttempt, navigating: s.initialNavigationPending()})
 		generation := s.State().Generation
 		attemptCtx, cancelAttempt := context.WithCancel(ctx)
 		outcome := make(chan supervisorAttempt, 1)
@@ -626,6 +658,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 			s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
 			return termErr
 		}
+		s.transition(supervisorEvent{kind: supervisorNavigationSettled})
 
 		// Ready phase: fold publications, admit committed attachments one at a
 		// time, and return to the picker after each. A committed attachment

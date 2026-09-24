@@ -500,16 +500,17 @@ func TestWebGatewayTabsShareOneBrokerWithIndependentStreamsAndServices(t *testin
 	require.Equal(t, carriageAfterFirst, fixture.broker.physicalCount(),
 		"the second tab opened another daemonmux carriage instead of reusing the pooled one")
 
-	// The identical state machine: each browser run presents Picker, Connecting,
-	// and Attached exactly like every other frontend. Consult the durable
-	// observation barrier: the two Attached notifications above were consumed
-	// while synchronizing startup and must still count here.
+	// The identical state machine: each browser run's initial creation presents
+	// Connecting then Attached exactly like every other frontend, never a
+	// picker flash first. Consult the durable observation barrier: the two
+	// Attached notifications above were consumed while synchronizing startup
+	// and must still count here.
 	require.Eventually(t, func() bool {
 		presentations := fixture.observedPresentations()
-		return presentations[client.PresentPicker] >= 2 &&
-			presentations[client.PresentConnecting] >= 2 &&
+		return presentations[client.PresentConnecting] >= 2 &&
 			presentations[client.PresentAttached] >= 2
-	}, brokerTestWait, 5*time.Millisecond, "both browser runs must present picker, connecting, and attached; observed %v", fixture.observedPresentations())
+	}, brokerTestWait, 5*time.Millisecond, "both browser runs must present connecting and attached; observed %v", fixture.observedPresentations())
+	require.Zero(t, fixture.observedPresentations()[client.PresentPicker], "an initial creation never flashes the picker")
 
 	// Real content and real actions, and each tab renders only its own session.
 	first.submit(t, "PING-FIRST")
@@ -674,12 +675,13 @@ func TestWebGatewayTerminalIsNotDialedBeforeConnect(t *testing.T) {
 
 	fixture := startWebGatewayFixtureOver(t, offlineClientFixture{}, newProductionBrokerConnector)
 	tab := fixture.openTab(t)
-	fixture.awaitPresentation(t, client.PresentPicker)
+	// The tab's initial creation is pending, so it presents Connecting.
+	fixture.awaitPresentation(t, client.PresentConnecting)
 	// Construction performs no I/O: the gateway reaches the broker only through
 	// Connect, and an unreachable broker is an ordinary attempt failure.
 	require.Eventually(t, func() bool { return connects.Load() >= 1 }, brokerTestWait, 5*time.Millisecond,
 		"the gateway must reach the broker only through Connect")
-	// A broker that is never reachable keeps the tab usable in the picker.
+	// A broker that is never reachable keeps the tab alive and repainting.
 	before := tab.frameCount()
 	tab.awaitMoreFrames(t, before+1)
 	select {

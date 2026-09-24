@@ -569,6 +569,36 @@ func TestSupervisorReducerTransitions(t *testing.T) {
 			want:  State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected, Attempt: 1, Generation: 3, Err: incompatible},
 		},
 		{
+			name:  "begin attempt with a pending navigation presents connecting, not the picker",
+			state: picker,
+			event: supervisorEvent{kind: supervisorBeginAttempt, navigating: true},
+			want:  State{Presentation: PresentConnecting, Connectivity: ConnectivityConnectingBroker, Generation: 1},
+		},
+		{
+			name:  "retry wait keeps a pending navigation connecting",
+			state: State{Presentation: PresentConnecting, Connectivity: ConnectivityConnectingBroker, Generation: 2},
+			event: supervisorEvent{kind: supervisorTransientFailure, err: transient},
+			want:  State{Presentation: PresentConnecting, Connectivity: ConnectivityRetryWait, Attempt: 1, Generation: 2, Err: transient},
+		},
+		{
+			name:  "non-retryable failure during a pending navigation falls back to the picker",
+			state: State{Presentation: PresentConnecting, Connectivity: ConnectivityConnectingBroker, Generation: 3},
+			event: supervisorEvent{kind: supervisorNonRetryable, err: incompatible},
+			want:  State{Presentation: PresentPicker, Connectivity: ConnectivityDisconnected, Generation: 3, Err: incompatible},
+		},
+		{
+			name:  "a navigation that settles without attaching returns to the picker",
+			state: State{Presentation: PresentConnecting, Connectivity: ConnectivityReady, Generation: 4},
+			event: supervisorEvent{kind: supervisorNavigationSettled},
+			want:  State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 4},
+		},
+		{
+			name:  "navigation settled leaves an unrelated presentation alone",
+			state: State{Presentation: PresentAttached, Connectivity: ConnectivityReady, Generation: 4},
+			event: supervisorEvent{kind: supervisorNavigationSettled},
+			want:  State{Presentation: PresentAttached, Connectivity: ConnectivityReady, Generation: 4},
+		},
+		{
 			name:  "terminal failure terminates",
 			state: State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 7},
 			event: supervisorEvent{kind: supervisorTerminal, err: exited},

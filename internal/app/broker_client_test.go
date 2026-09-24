@@ -737,11 +737,16 @@ func TestTerminalCompositionRefusedTargetOpensNothingAndKeepsThePicker(t *testin
 				t.Fatal("the refused target reported no failure")
 			}
 			require.Empty(t, run.service.openedRequests(), "a refused target never opens a stream")
+			// The pending navigation presents Connecting, never the picker
+			// first; the refusal then returns to the picker and never attaches.
+			last := client.PresentConnecting
 			for {
 				select {
 				case state := <-run.states:
-					require.Equal(t, client.PresentPicker, state.Presentation, "a refusal keeps the picker presentation")
+					require.NotEqual(t, client.PresentAttached, state.Presentation, "a refusal never attaches")
+					last = state.Presentation
 				case <-time.After(100 * time.Millisecond):
+					require.Equal(t, client.PresentPicker, last, "a refusal ends on the picker")
 					return
 				}
 			}
@@ -1009,11 +1014,13 @@ func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T
 		t.Fatal("the exact attach reported no failure")
 	}
 	// The refused navigation never writes a session frame and never attaches:
-	// only the Picker presentation may be published, never a Connecting or
-	// Attached session presentation.
-	for _, status := range terminal.publishes() {
-		require.Equal(t, ports.UIStatusPicker, status, "a refused navigation publishes only Picker")
+	// it presents Connecting while pending and ends on the picker.
+	publishes := terminal.publishes()
+	for _, status := range publishes {
+		require.NotEqual(t, ports.UIStatusAttached, status, "a refused navigation never attaches")
 	}
+	require.NotEmpty(t, publishes)
+	require.Equal(t, ports.UIStatusPicker, publishes[len(publishes)-1], "a refused navigation ends on the picker")
 	cancel()
 	require.NoError(t, ignoreContextCancellation(<-done))
 }
