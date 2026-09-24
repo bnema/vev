@@ -44,7 +44,7 @@ func TestPickerRendererPreservesANSI256ProfileAcrossResize(t *testing.T) {
 	styles := picker.RenderStyles{
 		Selection: rgbPickerStyle(), SelectionName: rgbPickerStyle(), SelectionMuted: rgbPickerStyle(),
 		Name: rgbPickerStyle(), Detail: rgbPickerStyle(), Background: rgbPickerStyle(), Base: rgbPickerStyle(),
-		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Status: rgbPickerStyle(),
+		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Tree: rgbPickerStyle(), Status: rgbPickerStyle(),
 		SearchMatch: rgbPickerStyle(), SelectionMatch: rgbPickerStyle(),
 	}
 
@@ -70,7 +70,7 @@ func TestPickerRenderersFollowTerminalColorProfile(t *testing.T) {
 	styles := picker.RenderStyles{
 		Selection: rgbPickerStyle(), SelectionName: rgbPickerStyle(), SelectionMuted: rgbPickerStyle(),
 		Name: rgbPickerStyle(), Detail: rgbPickerStyle(), Background: rgbPickerStyle(), Base: rgbPickerStyle(),
-		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Status: rgbPickerStyle(),
+		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Tree: rgbPickerStyle(), Status: rgbPickerStyle(),
 		SearchMatch: rgbPickerStyle(), SelectionMatch: rgbPickerStyle(),
 	}
 	renderers := map[string]func(trueColor bool) *pickerRenderer{

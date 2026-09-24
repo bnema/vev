@@ -489,7 +489,57 @@ func TestTreePrefixesBranchSessionsAndTabs(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 40, Rows: 30}, Preview{})
 	cell := frame.At(0, 1)
 	require.Equal(t, '├', cell.Rune)
-	require.NotZero(t, cell.Style.Attrs&renderer.AttrDim, "tree lines are dimmed")
+	require.NotZero(t, cell.Style.Attrs&renderer.AttrDim, "the selected row keeps its dimmed tree")
+
+	cell = frame.At(0, 4) // "└─ beta", not selected
+	require.Equal(t, '└', cell.Rune)
+	// A fixed grey, not SGR dim: some terminals barely dim box drawing.
+	require.Equal(t, 244, cell.Style.Foreground, "tree lines use a readable grey")
+	require.False(t, cell.Style.HasForegroundRGB)
+	require.Zero(t, cell.Style.Attrs&renderer.AttrDim)
+}
+
+func TestTreeStyleKeepsRowDimming(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []protocol.PickerLine
+		query string
+	}{
+		{name: "dim line", lines: func() []protocol.PickerLine {
+			dim := navLine("b", "beta")
+			dim.Dim = true
+			return []protocol.PickerLine{section("local"), navLine("a", "alpha"), dim}
+		}()},
+		{name: "search miss", lines: []protocol.PickerLine{section("local"), navLine("a", "alpha"), navLine("b", "beta")}, query: "alp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(tt.lines, Config{})
+			if tt.query != "" {
+				m.EnterSearch()
+				for _, r := range tt.query {
+					m.InsertSearch(r)
+				}
+			}
+			frame := m.Render(domain.Size{Cols: 40, Rows: 30}, Preview{})
+			cell := frame.At(0, 2) // "└─ beta", not selected
+			require.Equal(t, '└', cell.Rune)
+			require.Equal(t, 244, cell.Style.Foreground)
+			require.NotZero(t, cell.Style.Attrs&renderer.AttrDim, "a dimmed row keeps its tree dimmed")
+		})
+	}
+}
+
+func TestDetailLeadingSpaceIsTrimmed(t *testing.T) {
+	tab := tabLine("a1", "1", protocol.PickerCanNavigate)
+	tab.Detail = " (fish)"
+	m := New([]protocol.PickerLine{section("local"), navLine("a", "alpha"), tab}, Config{})
+	frame := m.Render(domain.Size{Cols: 40, Rows: 30}, Preview{})
+	row := ""
+	for x := range 14 {
+		row += string(frame.At(x, 2).Rune)
+	}
+	require.Equal(t, "   └─ 1 (fish)", row, "one gap, not two")
 }
 
 func TestReplaceLinesPreviousRowRespectsSearch(t *testing.T) {

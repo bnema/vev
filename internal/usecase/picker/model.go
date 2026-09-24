@@ -57,6 +57,7 @@ type RenderStyles struct {
 	Base           renderer.Style // non-selected row fill + suffixes
 	Stopped        renderer.Style // full row style for non-selected stopped rows (fill, name, detail, suffix)
 	Separator      renderer.Style // preview separator
+	Tree           renderer.Style // foreground of tree prefixes on non-selected rows; zero keeps them dimmed
 	Status         renderer.Style // one-row picker-local contextual help
 	SearchMatch    renderer.Style // matched runes on ordinary rows
 	SelectionMatch renderer.Style // matched runes on the selected row
@@ -75,7 +76,12 @@ func defaultRenderStyles() RenderStyles {
 	searchMatch.Bold = true
 	selectionMatch := selection
 	selectionMatch.Bold = true
-	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Stopped: stopped, Status: separator, SearchMatch: searchMatch, SelectionMatch: selectionMatch}
+	// Tree lines use the palette's bright black (the theme's grey) rather
+	// than SGR dim: terminals such as kitty draw box-drawing glyphs
+	// themselves and barely dim them, so dim lines stayed near full white.
+	tree := renderer.DefaultStyle()
+	tree.Foreground = 244 // fixed mid grey: readable on dark and light themes
+	return RenderStyles{Selection: selection, SelectionName: selection, SelectionMuted: selection, Name: base, Detail: base, Background: base, Base: base, Separator: separator, Tree: tree, Stopped: stopped, Status: separator, SearchMatch: searchMatch, SelectionMatch: selectionMatch}
 }
 
 // Preview is a bounded view of the selected pane's visible frame.
@@ -270,6 +276,10 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 			return
 		}
 		for _, line := range m.sortRun(run) {
+			// The picker draws its own gap before a detail. A source such as a
+			// tab title (" (fish)") may already lead with a space, which would
+			// double it; every source, local or remote, is trimmed here.
+			line.Detail = strings.TrimSpace(line.Detail)
 			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label), foldedDetail: strings.ToLower(line.Detail)})
 		}
 		run = run[:0]
@@ -620,7 +630,17 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		treeX := rect.X
 		if r.tree != "" {
 			treeStyle := base
-			treeStyle.Attrs |= renderer.AttrDim
+			// A caller style set without its own Tree style keeps the row's
+			// colors dimmed; a zero Tree style would be black on black.
+			if idx == m.selected || r.line.Stopped || styles.Tree == (renderer.Style{}) {
+				treeStyle.Attrs |= renderer.AttrDim
+			} else {
+				// Only the foreground comes from Tree: the row's fill and its
+				// dimming (a Dim line or a search miss) stay as they are.
+				treeStyle.Foreground = styles.Tree.Foreground
+				treeStyle.HasForegroundRGB = styles.Tree.HasForegroundRGB
+				treeStyle.ForegroundRGB = styles.Tree.ForegroundRGB
+			}
 			treeX = ui.DrawText(frame, rect.X, rect.Y+y, max(rect.X, clipX-2), r.tree, treeStyle)
 		}
 		badge := ""
