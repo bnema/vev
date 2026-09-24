@@ -1236,7 +1236,7 @@ type RecentRouteEntry struct {
 	// Client-assigned attention onset order; zero without attention.
 	AttentionSeq uint64 `protobuf:"varint,10,opt,name=attention_seq,json=attentionSeq,proto3" json:"attention_seq,omitempty"`
 	// True once this client attached to the route; the status-bar history
-	// shows only visited routes.
+	// shows visited routes plus ringing ones.
 	Visited       bool `protobuf:"varint,11,opt,name=visited,proto3" json:"visited,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

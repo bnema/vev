@@ -32,7 +32,8 @@ import (
 //   - Visited marks entries this client attached to. Attach recency sorts
 //     first, so visited entries are always a prefix of Entries and Previous
 //     is the first of them; the daemon's status history and jump-recent
-//     ranks show only that prefix, while the palette shows every entry.
+//     ranks show that prefix plus any ringing entry after it, so visited
+//     ranks stay stable, while the palette shows every entry.
 //   - The attached lifecycle is metadata only (ActiveEntry), never an entry.
 //   - Attention is any(tab.Attention). AttentionSeq orders onsets as the
 //     client observed them, across daemons, so the serving daemon can jump to

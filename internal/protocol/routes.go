@@ -319,7 +319,7 @@ type RecentRouteEntry struct {
 	// observes: a smaller value is older. It is zero without attention.
 	AttentionSeq uint64
 	// Visited reports that this client attached to the route. The status-bar
-	// history and jump-recent ranks show only visited routes.
+	// history and jump-recent ranks show visited routes plus ringing ones.
 	Visited bool
 }
 

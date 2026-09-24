@@ -256,6 +256,43 @@ func TestRouteLedgerAttention(t *testing.T) {
 	}
 }
 
+// TestRouteLedgerVisitedPrefixPrecedesRingingRoutes pins the order the
+// daemon's status history relies on: visited routes stay a prefix of Entries
+// even when an unvisited route on a higher tier rings, so ringing routes never
+// shift the jump-recent ranks of visited ones.
+func TestRouteLedgerVisitedPrefixPrecedesRingingRoutes(t *testing.T) {
+	tests := []struct {
+		name    string
+		visited routeActive
+		build   ports.BrokerSnapshot
+	}{
+		{
+			name:    "visited stopped local before ringing live local",
+			visited: routeTestActive(true, "old", 2),
+			build:   routeTestSnapshot(routeTestLocal(routeTestLive("here", 4, 9), routeTestLive("loud", 1, 8, true), routeTestStopped("old", 2, 1))),
+		},
+		{
+			name:    "visited remote before ringing live local",
+			visited: routeTestActive(false, "r", 3),
+			build:   routeTestSnapshot(routeTestLocal(routeTestLive("here", 4, 9), routeTestLive("loud", 1, 8, true)), routeTestRemoteHost(routeTestLive("r", 3, 0))),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := newRouteLedger()
+			ledger.build(tt.build, tt.visited)
+			snapshot, _ := ledger.build(tt.build, routeTestActive(true, "here", 4))
+			require.NoError(t, snapshot.Validate())
+			require.Len(t, snapshot.Entries, 2)
+			require.True(t, snapshot.Entries[0].Visited, "the visited route leads")
+			require.Equal(t, tt.visited.target.SessionName, snapshot.Entries[0].Name)
+			require.False(t, snapshot.Entries[1].Visited)
+			require.True(t, snapshot.Entries[1].Attention, "the ringing route follows")
+			require.Equal(t, "loud", snapshot.Entries[1].Name)
+		})
+	}
+}
+
 func TestRouteLedgerBounds(t *testing.T) {
 	sessions := make([]catalogue.RemoteCatalogSession, 0, protocol.RouteSnapshotMaxEntries+5)
 	for i := 0; i < protocol.RouteSnapshotMaxEntries+5; i++ {

@@ -163,7 +163,7 @@ message RecentRouteEntry {
   // Client-assigned attention onset order; zero without attention.
   uint64 attention_seq = 10;
   // True once this client attached to the route; the status-bar history
-  // shows only visited routes.
+  // shows visited routes plus ringing ones.
   bool visited = 11;
 }
 

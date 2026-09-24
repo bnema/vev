@@ -65,21 +65,30 @@ func TestAttachmentRouteSnapshotCopiesPublishedEntries(t *testing.T) {
 	require.Equal(t, "before", ac.routeSnapshotCopy().Entries[0].Name)
 }
 
-func TestPaletteJumpRecentSessionTargetsVisitedRank(t *testing.T) {
+func TestPaletteJumpRecentSessionTargetsHistoryRank(t *testing.T) {
 	unvisited := testRouteEntry(5, 1, "other", 5, protocol.RouteKindLocal)
 	unvisited.Visited = false
-	snapshot := protocol.RecentRouteSnapshot{
+	ringing := testRouteEntry(6, 1, "loud", 6, protocol.RouteKindLocal)
+	ringing.Visited, ringing.Attention, ringing.AttentionSeq = false, true, 1
+	quiet := protocol.RecentRouteSnapshot{
 		Generation: 4,
 		Entries:    []protocol.RecentRouteEntry{unvisited, testRouteEntry(2, 3, "remote", 2, protocol.RouteKindRemote)},
 	}
+	rung := protocol.RecentRouteSnapshot{
+		Generation: 4,
+		Entries:    []protocol.RecentRouteEntry{testRouteEntry(2, 3, "remote", 2, protocol.RouteKindRemote), unvisited, ringing},
+	}
 	tests := []struct {
-		name    string
-		rank    int
-		wantKey uint64
-		wantErr error
+		name     string
+		snapshot protocol.RecentRouteSnapshot
+		rank     int
+		wantKey  uint64
+		wantGen  uint64
+		wantErr  error
 	}{
-		{name: "rank 1 skips the unvisited entry", rank: 1, wantKey: 2},
-		{name: "rank beyond the visited prefix is refused", rank: 2, wantErr: command.ErrInvalidArguments},
+		{name: "rank 1 skips the unvisited entry", snapshot: quiet, rank: 1, wantKey: 2, wantGen: 3},
+		{name: "rank beyond the history is refused", snapshot: quiet, rank: 2, wantErr: command.ErrInvalidArguments},
+		{name: "rank after the visited prefix reaches a ringing entry", snapshot: rung, rank: 2, wantKey: 6, wantGen: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,7 +103,7 @@ func TestPaletteJumpRecentSessionTargetsVisitedRank(t *testing.T) {
 			require.True(t, admitted)
 			defer effect.End()
 
-			exec := paletteExec{d: d, sess: source, attachment: source, ac: ac, routeSnapshot: snapshot, effect: effect}
+			exec := paletteExec{d: d, sess: source, attachment: source, ac: ac, routeSnapshot: tt.snapshot, effect: effect}
 			err := exec.JumpRecentSession(tt.rank)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -110,8 +119,8 @@ func TestPaletteJumpRecentSessionTargetsVisitedRank(t *testing.T) {
 				}
 			}
 			require.True(t, found)
-			require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: tt.wantKey, Generation: 3}, action)
-			hints := recentRouteHints(snapshot, nil)
+			require.Equal(t, protocol.RouteNavigationAction{SnapshotGeneration: 4, Key: tt.wantKey, Generation: tt.wantGen}, action)
+			hints := recentRouteHints(tt.snapshot, nil)
 			require.Equal(t, action.Key, hints.Recent[tt.rank-1].Key, "hint and jump share the rank mapping")
 		})
 	}
@@ -134,9 +143,13 @@ func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
 	require.Equal(t, uint64(7), hints.Recent[0].Generation)
 }
 
-func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
+func TestStatusHistoryShowsVisitedAndRingingRoutes(t *testing.T) {
 	unvisited := testRouteEntry(4, 1, "other", 4, protocol.RouteKindLocal)
 	unvisited.Visited = false
+	ringingLocal := testRouteEntry(5, 1, "build", 5, protocol.RouteKindLocal)
+	ringingLocal.Visited, ringingLocal.Attention, ringingLocal.AttentionSeq = false, true, 1
+	ringingRemote := testRouteEntry(6, 1, "deploy", 6, protocol.RouteKindRemote)
+	ringingRemote.Visited, ringingRemote.Attention, ringingRemote.AttentionSeq = false, true, 2
 	tests := []struct {
 		name    string
 		entries []protocol.RecentRouteEntry
@@ -144,6 +157,8 @@ func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
 	}{
 		{name: "fresh client shows no history", entries: []protocol.RecentRouteEntry{unvisited}, want: nil},
 		{name: "visited routes keep their order", entries: []protocol.RecentRouteEntry{testRouteEntry(2, 1, "work", 2, protocol.RouteKindLocal), unvisited, testRouteEntry(3, 1, "logs", 3, protocol.RouteKindLocal)}, want: []string{"work", "logs"}},
+		{name: "fresh client still shows ringing local and remote routes", entries: []protocol.RecentRouteEntry{unvisited, ringingLocal, ringingRemote}, want: []string{"build", "deploy@remote"}},
+		{name: "ringing routes follow visited ones", entries: []protocol.RecentRouteEntry{testRouteEntry(2, 1, "work", 2, protocol.RouteKindLocal), unvisited, ringingLocal}, want: []string{"work", "build"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,6 +170,9 @@ func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
 			var names []string
 			for _, entry := range state.mru {
 				names = append(names, entry.name)
+				if entry.name == "build" || entry.name == "deploy@remote" {
+					require.True(t, entry.attention, "%s must draw its bell", entry.name)
+				}
 			}
 			require.Equal(t, tt.want, names)
 			require.Equal(t, len(tt.want), len(recentRouteHints(ac.routeSnapshotCopy(), nil).Recent))
