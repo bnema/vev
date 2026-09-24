@@ -15,12 +15,21 @@
 
 ---
 
+## Three modes
+
+| Mode | Command | What you get |
+|---|---|---|
+| **Local** | `vev` | Sessions on this machine, kept by a local daemon. |
+| **Remote** | `vev attach user@host` | Sessions on a server, rendered there and sent as small diffs over SSH + QUIC. |
+| **Hybrid** | `vev host add user@host` | Local and remote sessions in one picker; switch between them without leaving vev. |
+
+Remote and hybrid need vev installed on the remote host. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. See [remote resilience](docs/remote-resilience.md).
+
 ## Features
 
 - **No prefix key**: Alt shortcuts plus a command palette with short codes.
 - **Tabs, splits, stacks, and a floating terminal** per tab.
 - **Persistent sessions**: detach and re-attach; named sessions survive daemon restarts.
-- **Remote attach** over SSH + QUIC, with local and remote sessions in one client.
 - **Browser terminal**: the same UI in a private web page.
 - **Copy mode** with vim motions, notifications, and a fuzzy session picker.
 - **Scriptable**: `vev cmd` controls a running daemon; `--ui-driver` drives it headlessly.
@@ -91,14 +100,6 @@ bar.top-right = date +%H:%M  # status command shown in the bar
 ```
 
 Full list: [configuration](docs/configuration.md).
-
-## Remote attach
-
-```sh
-vev attach user@host[:session]
-```
-
-vev must be installed on the remote host. SSH sets up a direct QUIC connection; set `VEV_REMOTE_TRANSPORT=stdio` to stay on SSH only. See [remote resilience](docs/remote-resilience.md).
 
 ## Browser terminal
 
