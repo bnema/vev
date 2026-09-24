@@ -230,8 +230,14 @@ func (p *brokerClientPresentation) pickerContext() ports.UIContext {
 // notice through the picker, so this is the complementary diagnostic: one
 // bounded line under the shared writer lock, never a raw cause chain and never
 // a competing terminal owner.
-func (p *brokerClientPresentation) Failure(err error) {
+func (p *brokerClientPresentation) Failure(state client.State, err error) {
 	if p == nil || err == nil {
+		return
+	}
+	// A retryable failure is already shown by the repainted retry notice. A
+	// raw line here would scroll the painted screen on every attempt and
+	// leave a trail of stale notices behind it.
+	if state.Connectivity == client.ConnectivityRetryWait {
 		return
 	}
 	text := err.Error()
@@ -292,12 +298,12 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 		SessionEnvironment:       sessionEnv,
 		LifecycleActions:         cfg.LifecycleActions,
 		Render:                   presentation.Render,
-		Notify: func(_ client.State, err error) {
+		Notify: func(state client.State, err error) {
 			if cfg.OnFailure != nil {
 				cfg.OnFailure(err)
 				return
 			}
-			presentation.Failure(err)
+			presentation.Failure(state, err)
 		},
 		NotifyLifecycle: func(notice client.LifecycleNotice) {
 			if cfg.OnLifecycle != nil {

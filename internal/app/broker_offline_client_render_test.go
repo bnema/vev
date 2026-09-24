@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -307,4 +308,27 @@ func TestOfflineClientPickerPaintCommitsPickerTransaction(t *testing.T) {
 	}
 	require.Equal(t, 0, terminal.beginDepth, "the transaction is balanced")
 	require.Equal(t, []bool{true}, terminal.endSuccesses, "the frame committed after write and flush")
+}
+
+// TestBrokerClientFailureWritesOnlyNonRetryableErrors pins that a retryable
+// failure never writes a raw line: the retry notice already shows it, and a
+// line per attempt would scroll the painted screen and duplicate the notice.
+func TestBrokerClientFailureWritesOnlyNonRetryableErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		connectivity client.Connectivity
+		wantLine     bool
+	}{
+		{name: "retry wait stays silent", connectivity: client.ConnectivityRetryWait},
+		{name: "disconnected is reported", connectivity: client.ConnectivityDisconnected, wantLine: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			presentation := &brokerClientPresentation{terminal: terminal}
+			presentation.Failure(client.State{Connectivity: tt.connectivity}, errors.New("broker connection lost"))
+			written, _ := terminal.written()
+			require.Equal(t, tt.wantLine, strings.Contains(written, "broker connection lost"))
+		})
+	}
 }
