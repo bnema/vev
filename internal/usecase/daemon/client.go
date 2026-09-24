@@ -638,6 +638,7 @@ type attachClientOptions struct {
 	terminalCapabilities   terminalcap.Capabilities
 	capabilitiesSet        bool
 	navigationCapabilities protocol.NavigationCapabilities
+	terminalFocus          domain.TerminalFocus
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -719,6 +720,7 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		resumeCapable:          opts.resumeCapable,
 		resumeToken:            resumeToken,
 	}
+	ac.setTerminalFocus(opts.terminalFocus)
 	output.attachment = ac
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)

@@ -112,7 +112,8 @@ func (r *focusReporter) next() (protocol.TerminalFocus, bool) {
 // stripTerminalFocusReports removes complete focus reports from data and
 // records the last one in state. It never withholds a prefix: a terminal
 // writes each report whole, while a lone Escape or Alt+[ typed by the user
-// must reach the session without delay. Other bytes keep their order.
+// must reach the session without delay. Other bytes keep their order. A
+// pasted literal report, or one split across reads, is accepted as rare.
 func stripTerminalFocusReports(state *TerminalFocusState, data []byte) []byte {
 	at, focus := nextTerminalFocusReport(data)
 	if at < 0 {

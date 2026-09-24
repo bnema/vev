@@ -133,3 +133,39 @@ func TestNilTerminalFocusStateIsUnknown(t *testing.T) {
 	require.Nil(t, changed)
 	require.Equal(t, domain.TerminalFocusUnknown, state.Focus())
 }
+
+// TestAttachmentDeclaresFocusInHelloThenReportsChanges proves the daemon
+// learns a terminal's focus before its first paint: Hello carries the focus
+// already known, and each later change follows as TerminalFocus.
+func TestAttachmentDeclaresFocusInHelloThenReportsChanges(t *testing.T) {
+	pump := newTerminalInputPump(blockingReader{})
+	pump.focus.set(domain.TerminalFocusUnfocused)
+	stream := newSessionTestStream()
+	host := newWorkerTestHost(newWorkerTestTerminal(), pump, nil)
+	worker, err := newSessionAttachmentWorker(sessionTestWorkerConfig(sessionTestRequest(true)))
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _, _ = host.Run(ctx, AttachmentToken{Generation: 4, Attempt: 1}, worker, stream) }()
+
+	hello := awaitHello(t, stream)
+	require.Equal(t, domain.TerminalFocusUnfocused, hello.TerminalFocus)
+	require.NoError(t, protocol.ValidateHello(hello))
+
+	stream.deliver(protocol.Welcome{SessionName: "alpha"})
+	stream.deliver(sessionTestOutput(1, "\x1b[Hready"))
+	pump.focus.set(domain.TerminalFocusFocused)
+	require.Eventually(t, func() bool {
+		for _, message := range stream.messages() {
+			if message == (protocol.TerminalFocus{Focus: domain.TerminalFocusFocused}) {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, time.Millisecond, "a focus change after attach is reported")
+}
+
+// blockingReader is a terminal that never sends input.
+type blockingReader struct{}
+
+func (blockingReader) Read([]byte) (int, error) { select {} }

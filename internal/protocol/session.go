@@ -122,6 +122,9 @@ type Hello struct {
 	EnvironmentPolicy      EnvironmentPolicy
 	NavigationCapabilities NavigationCapabilities
 	Remote                 bool
+	// TerminalFocus is the client's terminal window focus when it attaches,
+	// so the attachment's first paint already knows whether it may be seen.
+	TerminalFocus domain.TerminalFocus
 }
 
 func (h Hello) Geometry() domain.Geometry {
@@ -423,7 +426,7 @@ func ValidateHello(h Hello) error {
 	if err := ValidateGeometry(domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}); err != nil {
 		return fmt.Errorf("%w: geometry", ErrInvalidHello)
 	}
-	if !validEnvironmentPolicy(h.EnvironmentPolicy) {
+	if !validEnvironmentPolicy(h.EnvironmentPolicy) || !h.TerminalFocus.Valid() {
 		return ErrInvalidHello
 	}
 	if err := ValidateNavigation(h.Intent, h.NavigationCapabilities); err != nil {

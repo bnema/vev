@@ -51,6 +51,7 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 		NavigationCapabilities: uint32(message.NavigationCapabilities),
 		Remote:                 message.Remote,
 		KittyDirectGraphics:    message.KittyDirectGraphics,
+		TerminalFocus:          uint32(message.TerminalFocus),
 	}, nil
 }
 
@@ -133,6 +134,10 @@ func helloFromWire(message *wire.Hello) (protocol.Hello, error) {
 	}
 	hello.Remote = message.GetRemote()
 	hello.KittyDirectGraphics = message.GetKittyDirectGraphics()
+	hello.TerminalFocus, err = enum8[domain.TerminalFocus](message.GetTerminalFocus())
+	if err != nil {
+		return protocol.Hello{}, err
+	}
 	if err := protocol.ValidateHello(hello); err != nil {
 		return protocol.Hello{}, err
 	}
