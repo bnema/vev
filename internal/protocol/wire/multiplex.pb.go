@@ -4,13 +4,13 @@
 //
 // daemonmux is a third conversation, separate from the session protocol
 // (tags 1-32) and the broker protocol (client 101-111, server 201-209):
-// client tags 301-304 and server tags 401-405 are disjoint from every other
+// client tags 301-305 and server tags 401-406 are disjoint from every other
 // tag, and each direction is its own closed oneof union. The physical
 // preamble is a separate adapter message pair, not an envelope variant:
 // roles 5/6 negotiate the per-connection ceilings, the authenticated daemon
 // identity, and the accepted policy once, before any application message.
 //
-// MuxData, MuxClose, and MuxReset are shared payloads carried in both
+// MuxData, MuxClose, MuxReset, and MuxWindowUpdate are shared payloads carried in both
 // directions; MuxOpen carries the full stream identity, and every later
 // frame is routed by physical_stream_id alone.
 
@@ -501,6 +501,64 @@ func (x *MuxReset) GetError() *BrokerErrorDetail {
 	return nil
 }
 
+// MuxWindowUpdate returns receive credit for one logical stream in either
+// direction: the receiver consumed `credit_bytes` bytes of MuxData payload,
+// so the sender may send that many more. Each stream starts with the same
+// byte window on both sides, derived from the negotiated ceilings; a sender
+// never has more MuxData payload in flight than its credit, so a slow
+// receiver slows the sender instead of overflowing its queue.
+type MuxWindowUpdate struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	PhysicalStreamId uint64                 `protobuf:"varint,1,opt,name=physical_stream_id,json=physicalStreamId,proto3" json:"physical_stream_id,omitempty"`
+	CreditBytes      uint64                 `protobuf:"varint,2,opt,name=credit_bytes,json=creditBytes,proto3" json:"credit_bytes,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *MuxWindowUpdate) Reset() {
+	*x = MuxWindowUpdate{}
+	mi := &file_multiplex_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MuxWindowUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MuxWindowUpdate) ProtoMessage() {}
+
+func (x *MuxWindowUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_multiplex_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MuxWindowUpdate.ProtoReflect.Descriptor instead.
+func (*MuxWindowUpdate) Descriptor() ([]byte, []int) {
+	return file_multiplex_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *MuxWindowUpdate) GetPhysicalStreamId() uint64 {
+	if x != nil {
+		return x.PhysicalStreamId
+	}
+	return 0
+}
+
+func (x *MuxWindowUpdate) GetCreditBytes() uint64 {
+	if x != nil {
+		return x.CreditBytes
+	}
+	return 0
+}
+
 // MuxClientEnvelope is the closed broker-to-daemon mux union. Exactly one
 // variant must be set per envelope; empty, duplicate, and wrong-direction
 // payloads are rejected before generated unmarshal.
@@ -512,6 +570,7 @@ type MuxClientEnvelope struct {
 	//	*MuxClientEnvelope_Data
 	//	*MuxClientEnvelope_Close
 	//	*MuxClientEnvelope_Reset_
+	//	*MuxClientEnvelope_WindowUpdate
 	Payload       isMuxClientEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -519,7 +578,7 @@ type MuxClientEnvelope struct {
 
 func (x *MuxClientEnvelope) Reset() {
 	*x = MuxClientEnvelope{}
-	mi := &file_multiplex_proto_msgTypes[7]
+	mi := &file_multiplex_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -531,7 +590,7 @@ func (x *MuxClientEnvelope) String() string {
 func (*MuxClientEnvelope) ProtoMessage() {}
 
 func (x *MuxClientEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_multiplex_proto_msgTypes[7]
+	mi := &file_multiplex_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -544,7 +603,7 @@ func (x *MuxClientEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MuxClientEnvelope.ProtoReflect.Descriptor instead.
 func (*MuxClientEnvelope) Descriptor() ([]byte, []int) {
-	return file_multiplex_proto_rawDescGZIP(), []int{7}
+	return file_multiplex_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *MuxClientEnvelope) GetPayload() isMuxClientEnvelope_Payload {
@@ -590,6 +649,15 @@ func (x *MuxClientEnvelope) GetReset_() *MuxReset {
 	return nil
 }
 
+func (x *MuxClientEnvelope) GetWindowUpdate() *MuxWindowUpdate {
+	if x != nil {
+		if x, ok := x.Payload.(*MuxClientEnvelope_WindowUpdate); ok {
+			return x.WindowUpdate
+		}
+	}
+	return nil
+}
+
 type isMuxClientEnvelope_Payload interface {
 	isMuxClientEnvelope_Payload()
 }
@@ -610,6 +678,10 @@ type MuxClientEnvelope_Reset_ struct {
 	Reset_ *MuxReset `protobuf:"bytes,304,opt,name=reset,proto3,oneof"`
 }
 
+type MuxClientEnvelope_WindowUpdate struct {
+	WindowUpdate *MuxWindowUpdate `protobuf:"bytes,305,opt,name=window_update,json=windowUpdate,proto3,oneof"`
+}
+
 func (*MuxClientEnvelope_Open) isMuxClientEnvelope_Payload() {}
 
 func (*MuxClientEnvelope_Data) isMuxClientEnvelope_Payload() {}
@@ -617,6 +689,8 @@ func (*MuxClientEnvelope_Data) isMuxClientEnvelope_Payload() {}
 func (*MuxClientEnvelope_Close) isMuxClientEnvelope_Payload() {}
 
 func (*MuxClientEnvelope_Reset_) isMuxClientEnvelope_Payload() {}
+
+func (*MuxClientEnvelope_WindowUpdate) isMuxClientEnvelope_Payload() {}
 
 // MuxServerEnvelope is the closed daemon-to-broker mux union. Exactly one
 // variant must be set per envelope.
@@ -629,6 +703,7 @@ type MuxServerEnvelope struct {
 	//	*MuxServerEnvelope_Data
 	//	*MuxServerEnvelope_Close
 	//	*MuxServerEnvelope_Reset_
+	//	*MuxServerEnvelope_WindowUpdate
 	Payload       isMuxServerEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -636,7 +711,7 @@ type MuxServerEnvelope struct {
 
 func (x *MuxServerEnvelope) Reset() {
 	*x = MuxServerEnvelope{}
-	mi := &file_multiplex_proto_msgTypes[8]
+	mi := &file_multiplex_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +723,7 @@ func (x *MuxServerEnvelope) String() string {
 func (*MuxServerEnvelope) ProtoMessage() {}
 
 func (x *MuxServerEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_multiplex_proto_msgTypes[8]
+	mi := &file_multiplex_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +736,7 @@ func (x *MuxServerEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MuxServerEnvelope.ProtoReflect.Descriptor instead.
 func (*MuxServerEnvelope) Descriptor() ([]byte, []int) {
-	return file_multiplex_proto_rawDescGZIP(), []int{8}
+	return file_multiplex_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *MuxServerEnvelope) GetPayload() isMuxServerEnvelope_Payload {
@@ -716,6 +791,15 @@ func (x *MuxServerEnvelope) GetReset_() *MuxReset {
 	return nil
 }
 
+func (x *MuxServerEnvelope) GetWindowUpdate() *MuxWindowUpdate {
+	if x != nil {
+		if x, ok := x.Payload.(*MuxServerEnvelope_WindowUpdate); ok {
+			return x.WindowUpdate
+		}
+	}
+	return nil
+}
+
 type isMuxServerEnvelope_Payload interface {
 	isMuxServerEnvelope_Payload()
 }
@@ -740,6 +824,10 @@ type MuxServerEnvelope_Reset_ struct {
 	Reset_ *MuxReset `protobuf:"bytes,405,opt,name=reset,proto3,oneof"`
 }
 
+type MuxServerEnvelope_WindowUpdate struct {
+	WindowUpdate *MuxWindowUpdate `protobuf:"bytes,406,opt,name=window_update,json=windowUpdate,proto3,oneof"`
+}
+
 func (*MuxServerEnvelope_Opened) isMuxServerEnvelope_Payload() {}
 
 func (*MuxServerEnvelope_Refused) isMuxServerEnvelope_Payload() {}
@@ -749,6 +837,8 @@ func (*MuxServerEnvelope_Data) isMuxServerEnvelope_Payload() {}
 func (*MuxServerEnvelope_Close) isMuxServerEnvelope_Payload() {}
 
 func (*MuxServerEnvelope_Reset_) isMuxServerEnvelope_Payload() {}
+
+func (*MuxServerEnvelope_WindowUpdate) isMuxServerEnvelope_Payload() {}
 
 // MuxPreambleRequest is the daemonmux client's first frame on one physical
 // connection: the requested per-connection ceilings and the broker policy
@@ -775,7 +865,7 @@ type MuxPreambleRequest struct {
 
 func (x *MuxPreambleRequest) Reset() {
 	*x = MuxPreambleRequest{}
-	mi := &file_multiplex_proto_msgTypes[9]
+	mi := &file_multiplex_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -787,7 +877,7 @@ func (x *MuxPreambleRequest) String() string {
 func (*MuxPreambleRequest) ProtoMessage() {}
 
 func (x *MuxPreambleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_multiplex_proto_msgTypes[9]
+	mi := &file_multiplex_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -800,7 +890,7 @@ func (x *MuxPreambleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MuxPreambleRequest.ProtoReflect.Descriptor instead.
 func (*MuxPreambleRequest) Descriptor() ([]byte, []int) {
-	return file_multiplex_proto_rawDescGZIP(), []int{9}
+	return file_multiplex_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *MuxPreambleRequest) GetMagic() uint32 {
@@ -901,7 +991,7 @@ type MuxPreambleResponse struct {
 
 func (x *MuxPreambleResponse) Reset() {
 	*x = MuxPreambleResponse{}
-	mi := &file_multiplex_proto_msgTypes[10]
+	mi := &file_multiplex_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -913,7 +1003,7 @@ func (x *MuxPreambleResponse) String() string {
 func (*MuxPreambleResponse) ProtoMessage() {}
 
 func (x *MuxPreambleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_multiplex_proto_msgTypes[10]
+	mi := &file_multiplex_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -926,7 +1016,7 @@ func (x *MuxPreambleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MuxPreambleResponse.ProtoReflect.Descriptor instead.
 func (*MuxPreambleResponse) Descriptor() ([]byte, []int) {
-	return file_multiplex_proto_rawDescGZIP(), []int{10}
+	return file_multiplex_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *MuxPreambleResponse) GetMagic() uint32 {
@@ -1064,19 +1154,24 @@ const file_multiplex_proto_rawDesc = "" +
 	"\x12physical_stream_id\x18\x01 \x01(\x04R\x10physicalStreamId\"n\n" +
 	"\bMuxReset\x12,\n" +
 	"\x12physical_stream_id\x18\x01 \x01(\x04R\x10physicalStreamId\x124\n" +
-	"\x05error\x18\x02 \x01(\v2\x1e.vev.wire.v1.BrokerErrorDetailR\x05error\"\xd8\x01\n" +
+	"\x05error\x18\x02 \x01(\v2\x1e.vev.wire.v1.BrokerErrorDetailR\x05error\"b\n" +
+	"\x0fMuxWindowUpdate\x12,\n" +
+	"\x12physical_stream_id\x18\x01 \x01(\x04R\x10physicalStreamId\x12!\n" +
+	"\fcredit_bytes\x18\x02 \x01(\x04R\vcreditBytes\"\x9e\x02\n" +
 	"\x11MuxClientEnvelope\x12+\n" +
 	"\x04open\x18\xad\x02 \x01(\v2\x14.vev.wire.v1.MuxOpenH\x00R\x04open\x12+\n" +
 	"\x04data\x18\xae\x02 \x01(\v2\x14.vev.wire.v1.MuxDataH\x00R\x04data\x12.\n" +
 	"\x05close\x18\xaf\x02 \x01(\v2\x15.vev.wire.v1.MuxCloseH\x00R\x05close\x12.\n" +
-	"\x05reset\x18\xb0\x02 \x01(\v2\x15.vev.wire.v1.MuxResetH\x00R\x05resetB\t\n" +
-	"\apayload\"\x94\x02\n" +
+	"\x05reset\x18\xb0\x02 \x01(\v2\x15.vev.wire.v1.MuxResetH\x00R\x05reset\x12D\n" +
+	"\rwindow_update\x18\xb1\x02 \x01(\v2\x1c.vev.wire.v1.MuxWindowUpdateH\x00R\fwindowUpdateB\t\n" +
+	"\apayload\"\xda\x02\n" +
 	"\x11MuxServerEnvelope\x121\n" +
 	"\x06opened\x18\x91\x03 \x01(\v2\x16.vev.wire.v1.MuxOpenedH\x00R\x06opened\x124\n" +
 	"\arefused\x18\x92\x03 \x01(\v2\x17.vev.wire.v1.MuxRefusedH\x00R\arefused\x12+\n" +
 	"\x04data\x18\x93\x03 \x01(\v2\x14.vev.wire.v1.MuxDataH\x00R\x04data\x12.\n" +
 	"\x05close\x18\x94\x03 \x01(\v2\x15.vev.wire.v1.MuxCloseH\x00R\x05close\x12.\n" +
-	"\x05reset\x18\x95\x03 \x01(\v2\x15.vev.wire.v1.MuxResetH\x00R\x05resetB\t\n" +
+	"\x05reset\x18\x95\x03 \x01(\v2\x15.vev.wire.v1.MuxResetH\x00R\x05reset\x12D\n" +
+	"\rwindow_update\x18\x96\x03 \x01(\v2\x1c.vev.wire.v1.MuxWindowUpdateH\x00R\fwindowUpdateB\t\n" +
 	"\apayload\"\xa5\x03\n" +
 	"\x12MuxPreambleRequest\x12\x14\n" +
 	"\x05magic\x18\x01 \x01(\rR\x05magic\x12\x14\n" +
@@ -1121,7 +1216,7 @@ func file_multiplex_proto_rawDescGZIP() []byte {
 	return file_multiplex_proto_rawDescData
 }
 
-var file_multiplex_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_multiplex_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_multiplex_proto_goTypes = []any{
 	(*MuxStreamRef)(nil),          // 0: vev.wire.v1.MuxStreamRef
 	(*MuxOpen)(nil),               // 1: vev.wire.v1.MuxOpen
@@ -1130,45 +1225,48 @@ var file_multiplex_proto_goTypes = []any{
 	(*MuxData)(nil),               // 4: vev.wire.v1.MuxData
 	(*MuxClose)(nil),              // 5: vev.wire.v1.MuxClose
 	(*MuxReset)(nil),              // 6: vev.wire.v1.MuxReset
-	(*MuxClientEnvelope)(nil),     // 7: vev.wire.v1.MuxClientEnvelope
-	(*MuxServerEnvelope)(nil),     // 8: vev.wire.v1.MuxServerEnvelope
-	(*MuxPreambleRequest)(nil),    // 9: vev.wire.v1.MuxPreambleRequest
-	(*MuxPreambleResponse)(nil),   // 10: vev.wire.v1.MuxPreambleResponse
-	(*RemoteRegistration)(nil),    // 11: vev.wire.v1.RemoteRegistration
-	(*ExactTarget)(nil),           // 12: vev.wire.v1.ExactTarget
-	(*BrokerWirePolicy)(nil),      // 13: vev.wire.v1.BrokerWirePolicy
-	(*BrokerErrorDetail)(nil),     // 14: vev.wire.v1.BrokerErrorDetail
-	(*PreambleRole)(nil),          // 15: vev.wire.v1.PreambleRole
-	(*PreambleRejectionCode)(nil), // 16: vev.wire.v1.PreambleRejectionCode
+	(*MuxWindowUpdate)(nil),       // 7: vev.wire.v1.MuxWindowUpdate
+	(*MuxClientEnvelope)(nil),     // 8: vev.wire.v1.MuxClientEnvelope
+	(*MuxServerEnvelope)(nil),     // 9: vev.wire.v1.MuxServerEnvelope
+	(*MuxPreambleRequest)(nil),    // 10: vev.wire.v1.MuxPreambleRequest
+	(*MuxPreambleResponse)(nil),   // 11: vev.wire.v1.MuxPreambleResponse
+	(*RemoteRegistration)(nil),    // 12: vev.wire.v1.RemoteRegistration
+	(*ExactTarget)(nil),           // 13: vev.wire.v1.ExactTarget
+	(*BrokerWirePolicy)(nil),      // 14: vev.wire.v1.BrokerWirePolicy
+	(*BrokerErrorDetail)(nil),     // 15: vev.wire.v1.BrokerErrorDetail
+	(*PreambleRole)(nil),          // 16: vev.wire.v1.PreambleRole
+	(*PreambleRejectionCode)(nil), // 17: vev.wire.v1.PreambleRejectionCode
 }
 var file_multiplex_proto_depIdxs = []int32{
 	0,  // 0: vev.wire.v1.MuxOpen.ref:type_name -> vev.wire.v1.MuxStreamRef
-	11, // 1: vev.wire.v1.MuxOpen.registration:type_name -> vev.wire.v1.RemoteRegistration
-	12, // 2: vev.wire.v1.MuxOpen.target:type_name -> vev.wire.v1.ExactTarget
-	13, // 3: vev.wire.v1.MuxOpen.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	12, // 1: vev.wire.v1.MuxOpen.registration:type_name -> vev.wire.v1.RemoteRegistration
+	13, // 2: vev.wire.v1.MuxOpen.target:type_name -> vev.wire.v1.ExactTarget
+	14, // 3: vev.wire.v1.MuxOpen.policy:type_name -> vev.wire.v1.BrokerWirePolicy
 	0,  // 4: vev.wire.v1.MuxOpened.ref:type_name -> vev.wire.v1.MuxStreamRef
 	0,  // 5: vev.wire.v1.MuxRefused.ref:type_name -> vev.wire.v1.MuxStreamRef
-	14, // 6: vev.wire.v1.MuxRefused.error:type_name -> vev.wire.v1.BrokerErrorDetail
-	14, // 7: vev.wire.v1.MuxReset.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	15, // 6: vev.wire.v1.MuxRefused.error:type_name -> vev.wire.v1.BrokerErrorDetail
+	15, // 7: vev.wire.v1.MuxReset.error:type_name -> vev.wire.v1.BrokerErrorDetail
 	1,  // 8: vev.wire.v1.MuxClientEnvelope.open:type_name -> vev.wire.v1.MuxOpen
 	4,  // 9: vev.wire.v1.MuxClientEnvelope.data:type_name -> vev.wire.v1.MuxData
 	5,  // 10: vev.wire.v1.MuxClientEnvelope.close:type_name -> vev.wire.v1.MuxClose
 	6,  // 11: vev.wire.v1.MuxClientEnvelope.reset:type_name -> vev.wire.v1.MuxReset
-	2,  // 12: vev.wire.v1.MuxServerEnvelope.opened:type_name -> vev.wire.v1.MuxOpened
-	3,  // 13: vev.wire.v1.MuxServerEnvelope.refused:type_name -> vev.wire.v1.MuxRefused
-	4,  // 14: vev.wire.v1.MuxServerEnvelope.data:type_name -> vev.wire.v1.MuxData
-	5,  // 15: vev.wire.v1.MuxServerEnvelope.close:type_name -> vev.wire.v1.MuxClose
-	6,  // 16: vev.wire.v1.MuxServerEnvelope.reset:type_name -> vev.wire.v1.MuxReset
-	15, // 17: vev.wire.v1.MuxPreambleRequest.role:type_name -> vev.wire.v1.PreambleRole
-	13, // 18: vev.wire.v1.MuxPreambleRequest.policy:type_name -> vev.wire.v1.BrokerWirePolicy
-	15, // 19: vev.wire.v1.MuxPreambleResponse.role:type_name -> vev.wire.v1.PreambleRole
-	13, // 20: vev.wire.v1.MuxPreambleResponse.accepted_policy:type_name -> vev.wire.v1.BrokerWirePolicy
-	16, // 21: vev.wire.v1.MuxPreambleResponse.rejection:type_name -> vev.wire.v1.PreambleRejectionCode
-	22, // [22:22] is the sub-list for method output_type
-	22, // [22:22] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	7,  // 12: vev.wire.v1.MuxClientEnvelope.window_update:type_name -> vev.wire.v1.MuxWindowUpdate
+	2,  // 13: vev.wire.v1.MuxServerEnvelope.opened:type_name -> vev.wire.v1.MuxOpened
+	3,  // 14: vev.wire.v1.MuxServerEnvelope.refused:type_name -> vev.wire.v1.MuxRefused
+	4,  // 15: vev.wire.v1.MuxServerEnvelope.data:type_name -> vev.wire.v1.MuxData
+	5,  // 16: vev.wire.v1.MuxServerEnvelope.close:type_name -> vev.wire.v1.MuxClose
+	6,  // 17: vev.wire.v1.MuxServerEnvelope.reset:type_name -> vev.wire.v1.MuxReset
+	7,  // 18: vev.wire.v1.MuxServerEnvelope.window_update:type_name -> vev.wire.v1.MuxWindowUpdate
+	16, // 19: vev.wire.v1.MuxPreambleRequest.role:type_name -> vev.wire.v1.PreambleRole
+	14, // 20: vev.wire.v1.MuxPreambleRequest.policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	16, // 21: vev.wire.v1.MuxPreambleResponse.role:type_name -> vev.wire.v1.PreambleRole
+	14, // 22: vev.wire.v1.MuxPreambleResponse.accepted_policy:type_name -> vev.wire.v1.BrokerWirePolicy
+	17, // 23: vev.wire.v1.MuxPreambleResponse.rejection:type_name -> vev.wire.v1.PreambleRejectionCode
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_multiplex_proto_init() }
@@ -1179,18 +1277,20 @@ func file_multiplex_proto_init() {
 	file_broker_proto_init()
 	file_common_proto_init()
 	file_envelope_proto_init()
-	file_multiplex_proto_msgTypes[7].OneofWrappers = []any{
+	file_multiplex_proto_msgTypes[8].OneofWrappers = []any{
 		(*MuxClientEnvelope_Open)(nil),
 		(*MuxClientEnvelope_Data)(nil),
 		(*MuxClientEnvelope_Close)(nil),
 		(*MuxClientEnvelope_Reset_)(nil),
+		(*MuxClientEnvelope_WindowUpdate)(nil),
 	}
-	file_multiplex_proto_msgTypes[8].OneofWrappers = []any{
+	file_multiplex_proto_msgTypes[9].OneofWrappers = []any{
 		(*MuxServerEnvelope_Opened)(nil),
 		(*MuxServerEnvelope_Refused)(nil),
 		(*MuxServerEnvelope_Data)(nil),
 		(*MuxServerEnvelope_Close)(nil),
 		(*MuxServerEnvelope_Reset_)(nil),
+		(*MuxServerEnvelope_WindowUpdate)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1198,7 +1298,7 @@ func file_multiplex_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_multiplex_proto_rawDesc), len(file_multiplex_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

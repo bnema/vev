@@ -401,18 +401,20 @@ func TestPumpBlockedConsumerDoesNotBlockReaderOrSibling(t *testing.T) {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(PhysicalStreamID(i))}))
 	}
 
-	// The consumer never Takes stream 1: its bounded queue fills.
-	for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-		deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte{byte(i)}})
+	// A peer ignores flow control and fills stream 1's whole window while the
+	// consumer never Takes it.
+	chunk, full := floodWindow(pump.Ceilings())
+	for i := 0; i < full; i++ {
+		deliverClientFrame(t, carrier, Data{Physical: 1, Data: chunk})
 	}
 	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
 		status, ok := e.Status(1)
-		return ok && status.QueuedChunks == MaxMuxStreamQueueChunks
+		return ok && status.QueuedChunks == full
 	})
 
-	// One more chunk overflows stream 1's own bound; a sibling chunk still
-	// lands, so neither the reader nor the sibling was blocked.
-	deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte{'x'}})
+	// One more chunk exceeds the granted window; a sibling chunk still lands,
+	// so neither the reader nor the sibling was blocked.
+	deliverClientFrame(t, carrier, Data{Physical: 1, Data: chunk})
 	deliverClientFrame(t, carrier, Data{Physical: 2, Data: []byte("sibling")})
 
 	taken, ok := takeEventually(t, pump, 2)
@@ -422,7 +424,7 @@ func TestPumpBlockedConsumerDoesNotBlockReaderOrSibling(t *testing.T) {
 	stalled := mustStatus(t, pump.Engine(), 1)
 	require.Equal(t, StreamTerminal, stalled.State)
 	require.ErrorIs(t, stalled.Err, ErrStreamQueueFull)
-	require.Equal(t, domain.RemoteFailureTransport, stalled.FailureKind)
+	require.Equal(t, domain.RemoteFailureInvalidResponse, stalled.FailureKind)
 	require.Zero(t, stalled.QueuedChunks)
 	require.Equal(t, StreamOpen, mustStatus(t, pump.Engine(), 2).State)
 	require.False(t, pump.Engine().Closed())
@@ -430,7 +432,7 @@ func TestPumpBlockedConsumerDoesNotBlockReaderOrSibling(t *testing.T) {
 
 	reset := decodeReset(t, carrier.nextSent(t), DirectionServer)
 	require.Equal(t, PhysicalStreamID(1), reset.Physical)
-	require.Equal(t, domain.RemoteFailureTransport, reset.Error.FailureKind)
+	require.Equal(t, domain.RemoteFailureInvalidResponse, reset.Error.FailureKind)
 }
 
 // TestPumpBlockedWriterDoesNotBlockReader proves the reader keeps applying
@@ -561,14 +563,15 @@ func TestPumpResetIsolation(t *testing.T) {
 			require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
 		}
 
-		for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-			deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte{byte(i)}})
+		chunk, full := floodWindow(pump.Ceilings())
+		for i := 0; i < full; i++ {
+			deliverClientFrame(t, carrier, Data{Physical: 1, Data: chunk})
 		}
 		requireEngineEventually(t, pump, func(e *StreamEngine) bool {
 			status, ok := e.Status(1)
-			return ok && status.QueuedChunks == MaxMuxStreamQueueChunks
+			return ok && status.QueuedChunks == full
 		})
-		deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte{'x'}})
+		deliverClientFrame(t, carrier, Data{Physical: 1, Data: chunk})
 		requireEngineEventually(t, pump, func(e *StreamEngine) bool {
 			status, ok := e.Status(1)
 			return ok && status.State == StreamTerminal
@@ -581,7 +584,7 @@ func TestPumpResetIsolation(t *testing.T) {
 
 		reset := decodeReset(t, carrier.nextSent(t), DirectionServer)
 		require.Equal(t, PhysicalStreamID(1), reset.Physical)
-		require.Equal(t, domain.RemoteFailureTransport, reset.Error.FailureKind)
+		require.Equal(t, domain.RemoteFailureInvalidResponse, reset.Error.FailureKind)
 		require.False(t, pump.Engine().Closed())
 	})
 }
@@ -930,38 +933,108 @@ func TestPumpFlushCancellationMayDrop(t *testing.T) {
 	carrier.requireNoSent(t, 50*time.Millisecond)
 }
 
-// TestPumpOutboundOverflowSchedulesReset proves an outbound queue overflow
-// discards the stream's queued frames, resets its engine record to free the
-// live admission slot, and schedules exactly one Reset for the peer.
-func TestPumpOutboundOverflowSchedulesReset(t *testing.T) {
+// TestPumpSendDataBackpressure proves a sender that exhausted its stream
+// credit waits instead of overflowing or resetting the stream, resumes once
+// the peer returns credit, and that the stream stays open throughout.
+func TestPumpSendDataBackpressure(t *testing.T) {
 	pump, carrier := newTestPump(t, DirectionClient)
-	require.NoError(t, pump.Engine().Open(Open{Ref: testRef(1)}))
+	pump.Start(context.Background())
+	deliverClientFrame(t, carrier, openFor(1))
+	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 1 })
 	require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
 
-	// Fill the per-stream frame bound with no writer draining it.
-	for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-		require.NoError(t, pump.Send(ServerMessage(Data{Physical: 1, Data: []byte{byte(i)}})))
+	chunk, full := floodWindow(pump.Ceilings())
+	for i := 0; i < full; i++ {
+		require.NoError(t, pump.SendData(1, chunk, nil))
 	}
-	require.Equal(t, MaxMuxStreamQueueChunks, pump.scheduler.QueuedFrames(1))
+	for i := 0; i < full; i++ {
+		carrier.nextSent(t)
+	}
 
-	require.ErrorIs(t, pump.Send(ServerMessage(Data{Physical: 1, Data: []byte("overflow")})), ErrSchedulerFull)
-	require.Equal(t, 0, pump.Engine().Live(), "the overflowed stream released its admission slot")
-	status := mustStatus(t, pump.Engine(), 1)
-	require.Equal(t, StreamTerminal, status.State)
-	require.ErrorContains(t, status.Err, "scheduler queue overflow")
-	require.Equal(t, 1, pump.scheduler.QueuedFrames(1), "exactly the one Reset remains queued")
-	require.False(t, pump.Engine().Closed())
+	sent := make(chan error, 1)
+	go func() { sent <- pump.SendData(1, chunk, nil) }()
+	select {
+	case err := <-sent:
+		t.Fatalf("SendData returned %v without credit", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.Equal(t, StreamOpen, mustStatus(t, pump.Engine(), 1).State, "a slow peer never resets the stream")
 
+	deliverClientFrame(t, carrier, WindowUpdate{Physical: 1, Credit: chunkCredit(len(chunk))})
+	require.NoError(t, <-sent)
+	message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
+	require.NoError(t, err)
+	require.Equal(t, Data{Physical: 1, Data: chunk}, message)
+	require.Equal(t, StreamOpen, mustStatus(t, pump.Engine(), 1).State)
+}
+
+// TestPumpSendDataCancel proves a sender blocked on credit returns when its
+// cancel channel closes or its stream settles.
+func TestPumpSendDataCancel(t *testing.T) {
+	cases := []struct {
+		name   string
+		settle func(*testing.T, *Pump, *fakeCarrier, chan struct{})
+		want   error
+	}{
+		{"cancel", func(_ *testing.T, _ *Pump, _ *fakeCarrier, cancel chan struct{}) { close(cancel) }, ErrLogicalClosed},
+		{"peer reset", func(t *testing.T, _ *Pump, carrier *fakeCarrier, _ chan struct{}) {
+			deliverClientFrame(t, carrier, Reset{Physical: 1})
+		}, errStreamSettled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pump, carrier := newTestPump(t, DirectionClient)
+			pump.Start(context.Background())
+			deliverClientFrame(t, carrier, openFor(1))
+			requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 1 })
+			require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
+			chunk, full := floodWindow(pump.Ceilings())
+			for i := 0; i < full; i++ {
+				require.NoError(t, pump.SendData(1, chunk, nil))
+			}
+
+			cancel := make(chan struct{})
+			sent := make(chan error, 1)
+			go func() { sent <- pump.SendData(1, chunk, cancel) }()
+			tc.settle(t, pump, carrier, cancel)
+			select {
+			case err := <-sent:
+				require.ErrorIs(t, err, tc.want)
+			case <-time.After(5 * time.Second):
+				t.Fatal("blocked SendData never returned")
+			}
+		})
+	}
+}
+
+// TestPumpReturnsCreditInBatches proves the receiver grants consumed credit
+// back with one WindowUpdate per batch, not one per chunk.
+func TestPumpReturnsCreditInBatches(t *testing.T) {
+	pump, carrier := newTestPump(t, DirectionClient)
 	pump.Start(context.Background())
-	reset := decodeReset(t, carrier.nextSent(t), DirectionServer)
-	require.Equal(t, PhysicalStreamID(1), reset.Physical)
-	require.True(t, reset.HasError)
-	require.Equal(t, domain.RemoteFailureTransport, reset.Error.FailureKind)
+	deliverClientFrame(t, carrier, openFor(1))
+	requireEngineEventually(t, pump, func(e *StreamEngine) bool { return e.Live() == 1 })
+	require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
 
-	// The record is sealed after its one reset: a later frame for the retired
-	// stream is refused and never dequeued again.
-	require.ErrorIs(t, pump.Send(ServerMessage(Data{Physical: 1, Data: []byte("late")})), ErrSchedulerSettled)
-	carrier.requireNoSent(t, 50*time.Millisecond)
+	chunk, full := floodWindow(pump.Ceilings())
+	for i := 0; i < full; i++ {
+		deliverClientFrame(t, carrier, Data{Physical: 1, Data: chunk})
+	}
+	var granted uint64
+	updates := 0
+	for i := 0; i < full; i++ {
+		_, ok := takeEventually(t, pump, 1)
+		require.True(t, ok)
+	}
+	for granted < pump.Ceilings().creditReturnThreshold() {
+		message, err := DecodeServer(carrier.nextSent(t), testEnvelopeCeiling, testChunkCeiling)
+		require.NoError(t, err)
+		update, ok := message.(WindowUpdate)
+		require.True(t, ok, "got %T", message)
+		granted += update.Credit
+		updates++
+	}
+	require.Less(t, updates, full, "credit is batched")
 }
 
 // TestPumpInboundTerminalRetiresQueuedOutbound proves an inbound Close or Reset

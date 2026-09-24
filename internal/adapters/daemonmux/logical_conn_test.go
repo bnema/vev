@@ -557,15 +557,22 @@ func TestLogicalHundredConnectionsConcurrentAdmission(t *testing.T) {
 	require.False(t, channelClosed(daemonPump.Done()))
 }
 
-// TestLogicalBlockedReaderSiblingProgresses proves a logical connection whose
-// consumer never reads lets only its own bounded stream reset while a sibling
-// keeps exchanging typed messages and the physical connection stays open.
+// TestLogicalBlockedReaderSiblingProgresses is the regression for a slow
+// remote consumer killing its own attachment. The daemon floods far more
+// frames than one stream window holds while the consumer is not reading: the
+// daemon's writer must wait for credit instead of resetting the stream, the
+// sibling keeps exchanging typed messages, and once the consumer reads again
+// every flooded frame arrives in order on the still-open stream.
 func TestLogicalBlockedReaderSiblingProgresses(t *testing.T) {
 	brokerPump, daemonPump := newPairedPumps(t, DefaultMuxCeilings())
 	connector := mustConnector(t, brokerPump)
 	deadline := time.Now().Add(15 * time.Second)
 
-	blockedAcceptor := newDaemonAcceptor(daemonPump, MaxMuxStreamQueueChunks+4)
+	// Each Pong is one tiny frame, so the flood is far more frames than the
+	// eight queued frames that used to reset the stream, and more credit than
+	// one window.
+	const flood = 20000
+	blockedAcceptor := newDaemonAcceptor(daemonPump, flood)
 	blockedAcceptor.start(1, deadline)
 	siblingAcceptor := newDaemonAcceptor(daemonPump, 1)
 	siblingAcceptor.start(2, deadline)
@@ -580,11 +587,14 @@ func TestLogicalBlockedReaderSiblingProgresses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, protocol.Pong{}, message)
 
-	// Run the blocked stream's handshake, then never read it; the daemon floods
-	// Pong frames until the blocked stream's own bounded queue overflows.
+	// Trigger the flood, then do not read: the daemon fills the window and
+	// its writer waits for credit.
 	require.NoError(t, blocked.SendClient(protocol.Ping{}))
-	require.Eventually(t, func() bool { return channelClosed(blocked.Done()) }, 5*time.Second, time.Millisecond)
-	require.Error(t, blocked.Err())
+	require.Eventually(t, func() bool {
+		status, ok := daemonPump.Engine().Status(1)
+		return ok && status.SendCredit < chunkCredit(int(MaxMuxChunkBytes))
+	}, 5*time.Second, time.Millisecond, "the daemon never exhausted its credit")
+	require.False(t, channelClosed(blocked.Done()), "a slow consumer must not reset its stream")
 
 	// The sibling still progresses and the physical connection is untouched.
 	require.NoError(t, sibling.SendClient(protocol.Ping{}))
@@ -593,6 +603,15 @@ func TestLogicalBlockedReaderSiblingProgresses(t *testing.T) {
 	require.Equal(t, protocol.Pong{}, message)
 	require.False(t, channelClosed(brokerPump.Done()))
 	require.Equal(t, StreamOpen, mustStatus(t, brokerPump.Engine(), 2).State)
+
+	// The consumer catches up: every flooded frame arrives on the same stream.
+	for i := 0; i < flood; i++ {
+		message, err := blocked.ReceiveServer()
+		require.NoError(t, err, "frame %d", i)
+		require.Equal(t, protocol.Pong{}, message)
+	}
+	require.False(t, channelClosed(blocked.Done()))
+	require.Equal(t, StreamOpen, mustStatus(t, brokerPump.Engine(), 1).State)
 }
 
 // TestLogicalMalformedInnerFrameResetsOnlyStream proves a malformed inner

@@ -81,7 +81,40 @@ const (
 	// MaxMuxAggregateBytes is the largest legal aggregate buffered-bytes
 	// ceiling: 64 MiB across every live stream of one physical connection.
 	MaxMuxAggregateBytes uint64 = 64 << 20
+
+	// MuxChunkCreditOverhead is the fixed credit one Data frame costs on top of
+	// its payload bytes. Charging it keeps a burst of tiny frames bounded in
+	// count as well as in bytes.
+	MuxChunkCreditOverhead uint64 = MuxEnvelopeOverheadBytes
+	// MaxMuxStreamWindowBytes caps one stream's receive window and every
+	// WindowUpdate grant.
+	MaxMuxStreamWindowBytes uint64 = 4 << 20
 )
+
+// chunkCredit is the flow-control cost of one Data frame of n payload bytes.
+func chunkCredit(n int) uint64 { return uint64(n) + MuxChunkCreditOverhead }
+
+// StreamWindow is the per-stream receive window both peers derive from the
+// same negotiated ceilings: the aggregate budget shared evenly across the
+// stream ceiling, so every live stream's window fits the aggregate at once,
+// never below one maximum chunk (a full chunk must always be sendable) and
+// never above MaxMuxStreamWindowBytes. With the default ceilings it is 512 KiB.
+func (c MuxCeilings) StreamWindow() uint64 {
+	window := c.MaxAggregateBytes / max(c.MaxStreams, 1)
+	window = max(window, chunkCredit(int(c.StreamChunkLimit)))
+	return min(window, MaxMuxStreamWindowBytes)
+}
+
+// creditReturnThreshold is the consumed credit a receiver batches before it
+// grants a WindowUpdate: half the window, lowered when needed so a sender
+// blocked on a maximum chunk is always unblocked. A sender waits only once it
+// spent more than window-chunkCredit(limit), so granting at or below that
+// point can never deadlock.
+func (c MuxCeilings) creditReturnThreshold() uint64 {
+	window := c.StreamWindow()
+	cost := chunkCredit(int(c.StreamChunkLimit))
+	return max(min(window/2, window-cost+1), 1)
+}
 
 // ErrInvalidCeilings reports an advertisement outside its window: a zero,
 // below-floor, or above-ceiling envelope, chunk, stream-count, or aggregate

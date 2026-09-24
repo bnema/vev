@@ -146,6 +146,17 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Mu
 			return nil, ErrInvalidMessage
 		}
 		return encodeClientEnvelope(*m, maxChunkBytes)
+	case WindowUpdate:
+		converted, err := windowUpdateToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.MuxClientEnvelope{Payload: &wire.MuxClientEnvelope_WindowUpdate{WindowUpdate: converted}}, nil
+	case *WindowUpdate:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeClientEnvelope(*m, maxChunkBytes)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -167,6 +178,8 @@ func decodeClientEnvelope(envelope *wire.MuxClientEnvelope, maxChunkBytes uint64
 		return closeFromWire(payload.Close)
 	case *wire.MuxClientEnvelope_Reset_:
 		return resetFromWire(payload.Reset_)
+	case *wire.MuxClientEnvelope_WindowUpdate:
+		return windowUpdateFromWire(payload.WindowUpdate)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -233,6 +246,17 @@ func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.Mu
 			return nil, ErrInvalidMessage
 		}
 		return encodeServerEnvelope(*m, maxChunkBytes)
+	case WindowUpdate:
+		converted, err := windowUpdateToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.MuxServerEnvelope{Payload: &wire.MuxServerEnvelope_WindowUpdate{WindowUpdate: converted}}, nil
+	case *WindowUpdate:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeServerEnvelope(*m, maxChunkBytes)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -260,6 +284,8 @@ func decodeServerEnvelope(envelope *wire.MuxServerEnvelope, maxChunkBytes uint64
 		return closeFromWire(payload.Close)
 	case *wire.MuxServerEnvelope_Reset_:
 		return resetFromWire(payload.Reset_)
+	case *wire.MuxServerEnvelope_WindowUpdate:
+		return windowUpdateFromWire(payload.WindowUpdate)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -468,6 +494,31 @@ func closeFromWire(message *wire.MuxClose) (Close, error) {
 		return Close{}, ErrInvalidMessage
 	}
 	return Close{Physical: physical}, nil
+}
+
+func windowUpdateToWire(m WindowUpdate) (*wire.MuxWindowUpdate, error) {
+	if err := m.Physical.Validate(); err != nil {
+		return nil, ErrInvalidMessage
+	}
+	if m.Credit == 0 || m.Credit > MaxMuxStreamWindowBytes {
+		return nil, ErrInvalidMessage
+	}
+	return &wire.MuxWindowUpdate{PhysicalStreamId: physicalToWire(m.Physical), CreditBytes: m.Credit}, nil
+}
+
+func windowUpdateFromWire(message *wire.MuxWindowUpdate) (WindowUpdate, error) {
+	if message == nil {
+		return WindowUpdate{}, ErrInvalidMessage
+	}
+	physical, err := physicalFromWire(message.GetPhysicalStreamId())
+	if err != nil {
+		return WindowUpdate{}, ErrInvalidMessage
+	}
+	credit := message.GetCreditBytes()
+	if credit == 0 || credit > MaxMuxStreamWindowBytes {
+		return WindowUpdate{}, ErrInvalidMessage
+	}
+	return WindowUpdate{Physical: physical, Credit: credit}, nil
 }
 
 func resetToWire(m Reset) (*wire.MuxReset, error) {

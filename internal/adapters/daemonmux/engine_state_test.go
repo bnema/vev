@@ -480,8 +480,17 @@ func TestStreamEngineIsolation(t *testing.T) {
 	require.Equal(t, 2, e.AggregateBytes())
 }
 
-// TestStreamEngineQueueOverflow proves a stalled queue resets exactly its own
-// stream, frees that stream's budget, and leaves a sibling progressing.
+// floodWindow returns a maximum chunk and how many of them exactly fill one
+// stream's receive window under ceilings: one more is a peer flow-control
+// violation.
+func floodWindow(ceilings MuxCeilings) ([]byte, int) {
+	chunk := make([]byte, ceilings.StreamChunkLimit)
+	return chunk, int(ceilings.StreamWindow() / chunkCredit(len(chunk)))
+}
+
+// TestStreamEngineQueueOverflow proves a peer that sends past its granted
+// window resets exactly its own stream, frees that stream's budget, and leaves
+// a sibling progressing.
 func TestStreamEngineQueueOverflow(t *testing.T) {
 	e := testEngine()
 	openTestStream(t, e, 1)
@@ -489,14 +498,15 @@ func TestStreamEngineQueueOverflow(t *testing.T) {
 	_, err := e.Data(Data{Physical: 2, Data: []byte("sibling")})
 	require.NoError(t, err)
 
-	for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-		disposition, err := e.Data(Data{Physical: 1, Data: []byte{byte(i)}})
+	chunk, full := floodWindow(DefaultMuxCeilings())
+	for i := 0; i < full; i++ {
+		disposition, err := e.Data(Data{Physical: 1, Data: chunk})
 		require.NoError(t, err)
 		require.Equal(t, StreamAccepted, disposition)
 	}
-	require.Equal(t, MaxMuxStreamQueueChunks, mustStatus(t, e, 1).QueuedChunks)
+	require.Equal(t, full, mustStatus(t, e, 1).QueuedChunks)
 
-	disposition, err := e.Data(Data{Physical: 1, Data: []byte{'x'}})
+	disposition, err := e.Data(Data{Physical: 1, Data: chunk})
 	require.ErrorIs(t, err, ErrStreamQueueFull)
 	require.Zero(t, disposition)
 
@@ -504,7 +514,7 @@ func TestStreamEngineQueueOverflow(t *testing.T) {
 	require.Equal(t, StreamTerminal, status.State)
 	require.True(t, channelClosed(status.Done))
 	require.ErrorIs(t, status.Err, ErrStreamQueueFull)
-	require.Equal(t, domain.RemoteFailureTransport, status.FailureKind)
+	require.Equal(t, domain.RemoteFailureInvalidResponse, status.FailureKind)
 	require.Zero(t, status.QueuedChunks)
 	require.Zero(t, status.QueuedBytes)
 	require.Equal(t, len("sibling"), e.AggregateBytes(), "the overflowed stream released its budget")
@@ -527,36 +537,16 @@ func TestStreamEngineQueueOverflow(t *testing.T) {
 	require.ErrorIs(t, mustStatus(t, e, 1).Err, ErrStreamQueueFull)
 }
 
-// TestStreamEngineQueueByteBounds proves the per-stream and aggregate byte
-// ceilings reset only the offending stream.
+// TestStreamEngineQueueByteBounds proves the aggregate byte ceiling resets
+// only the offending stream.
 func TestStreamEngineQueueByteBounds(t *testing.T) {
-	t.Run("per-stream byte bound", func(t *testing.T) {
-		e := testEngine()
-		// The codec never admits a chunk above the negotiated chunk ceiling;
-		// raise the engine's private ceiling so this test can reach the
-		// defensive per-stream byte bound directly.
-		e.maxChunkBytes = MaxMuxStreamQueueBytes
-		openTestStream(t, e, 1)
-		chunk := make([]byte, MaxMuxStreamQueueBytes/2+1)
-		disposition, err := e.Data(Data{Physical: 1, Data: chunk})
-		require.NoError(t, err)
-		require.Equal(t, StreamAccepted, disposition)
-		require.Equal(t, len(chunk), e.AggregateBytes())
-
-		// The second chunk fits the chunk-count and aggregate bounds but
-		// exceeds the per-stream byte bound.
-		disposition, err = e.Data(Data{Physical: 1, Data: chunk})
-		require.ErrorIs(t, err, ErrStreamQueueFull)
-		require.Zero(t, disposition)
-		require.Zero(t, e.AggregateBytes(), "the reset stream released its bytes")
-		require.Equal(t, StreamTerminal, mustStatus(t, e, 1).State)
-	})
-
 	t.Run("aggregate byte bound", func(t *testing.T) {
 		e := testEngine()
-		// As above: bypass the codec-level chunk ceiling to reach the
-		// defensive aggregate byte bound with oversized chunks.
+		// Bypass the codec-level chunk ceiling and widen the window so this
+		// test reaches the defensive aggregate byte bound with oversized
+		// chunks.
 		e.maxChunkBytes = 16 << 20
+		e.window = 32 << 20
 		chunk := make([]byte, 16<<20)
 		for i := 1; i <= 4; i++ {
 			openTestStream(t, e, PhysicalStreamID(i))

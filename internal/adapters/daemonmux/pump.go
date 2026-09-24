@@ -310,7 +310,64 @@ func (p *Pump) Take(physical PhysicalStreamID) ([]byte, bool) {
 	if finalized {
 		p.signalWatch(physical)
 	}
+	if ok {
+		p.returnCredit(physical)
+	}
 	return chunk, ok
+}
+
+// returnCredit grants consumed inbound credit back to the peer once a batch
+// is due. A refused WindowUpdate only means the stream already settled.
+func (p *Pump) returnCredit(physical PhysicalStreamID) {
+	grant := p.engine.takeReturn(physical)
+	if grant == 0 || p.isTerminal() {
+		return
+	}
+	update := WindowUpdate{Physical: physical, Credit: grant}
+	var err error
+	if p.local == DirectionServer {
+		err = p.scheduler.EnqueueServer(update)
+	} else {
+		err = p.scheduler.EnqueueClient(update)
+	}
+	if err == nil {
+		p.signal()
+	}
+}
+
+// SendData sends one stream data chunk under the stream's flow-control
+// credit. It blocks while the peer has not granted enough credit, so a slow
+// network or a slow remote consumer slows the writer instead of resetting the
+// stream. It returns when the chunk is queued, the stream or the connection
+// settles, or cancel closes.
+func (p *Pump) SendData(physical PhysicalStreamID, chunk []byte, cancel <-chan struct{}) error {
+	if p == nil {
+		return ErrPumpConfig
+	}
+	for {
+		if p.isTerminal() {
+			return ErrPhysicalClosed
+		}
+		ok, wake, err := p.engine.reserveSend(physical, len(chunk))
+		if err != nil {
+			return err
+		}
+		if ok {
+			break
+		}
+		select {
+		case <-wake:
+		case <-cancel:
+			return ErrLogicalClosed
+		case <-p.Done():
+			return ErrPhysicalClosed
+		}
+	}
+	if err := p.Send(Data{Physical: physical, Data: chunk}); err != nil {
+		p.engine.refundSend(physical, len(chunk))
+		return err
+	}
+	return nil
 }
 
 // Ceilings returns the negotiated ceilings the pump enforces. The value is
@@ -762,6 +819,13 @@ func (p *Pump) applyClient(message ClientMessage) error {
 			return ErrInvalidMessage
 		}
 		return p.applyClient(*m)
+	case WindowUpdate:
+		return p.applyWindowUpdate(m)
+	case *WindowUpdate:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return p.applyClient(*m)
 	default:
 		return ErrWrongDirection
 	}
@@ -854,6 +918,13 @@ func (p *Pump) applyServer(message ServerMessage) error {
 			return ErrInvalidMessage
 		}
 		return p.applyServer(*m)
+	case WindowUpdate:
+		return p.applyWindowUpdate(m)
+	case *WindowUpdate:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return p.applyServer(*m)
 	default:
 		return ErrWrongDirection
 	}
@@ -874,6 +945,16 @@ func (p *Pump) applyStreamTerminal(physical PhysicalStreamID, disposition Stream
 		p.maybeSignalFlush()
 	}
 	return nil
+}
+
+// applyWindowUpdate grows one stream's send credit. A credit violation resets
+// only that stream.
+func (p *Pump) applyWindowUpdate(message WindowUpdate) error {
+	_, err := p.engine.WindowUpdate(message)
+	if err == nil {
+		return nil
+	}
+	return p.applyStreamError(message.Physical, err)
 }
 
 // applyData queues one inbound chunk and classifies the engine's refusal.
@@ -1025,10 +1106,9 @@ func openRefusalDetail(cause error) ErrorDetail {
 // response.
 func resetErrorDetail(cause error) ErrorDetail {
 	kind := domain.RemoteFailureInvalidResponse
-	if errors.Is(cause, ErrStreamQueueFull) || errors.Is(cause, ErrSchedulerFull) {
-		// A local byte-budget overflow is a transport-class abort in either
-		// direction: the stream was reset because a bounded queue could not
-		// hold the frame, not because the peer sent something invalid.
+	if errors.Is(cause, ErrSchedulerFull) {
+		// The local aggregate safety net: a transport-class abort, not an
+		// invalid peer frame.
 		kind = domain.RemoteFailureTransport
 	}
 	return ErrorDetail{

@@ -256,18 +256,20 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(PhysicalStreamID(i))}))
 	}
 
-	// The consumer never Takes stream 1: its bounded queue fills.
-	for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-		injectUnixClientFrame(t, client, Data{Physical: 1, Data: []byte{byte(i)}})
+	// A peer ignores flow control and fills stream 1's whole window while the
+	// consumer never Takes it.
+	chunk, full := floodWindow(pump.Ceilings())
+	for i := 0; i < full; i++ {
+		injectUnixClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	}
 	requireEngineEventually(t, pump, func(e *StreamEngine) bool {
 		status, ok := e.Status(1)
-		return ok && status.QueuedChunks == MaxMuxStreamQueueChunks
+		return ok && status.QueuedChunks == full
 	})
 
-	// One more chunk overflows stream 1's own bound; a sibling chunk still
-	// lands, so neither the reader nor the sibling was blocked.
-	injectUnixClientFrame(t, client, Data{Physical: 1, Data: []byte{'x'}})
+	// One more chunk exceeds the granted window; a sibling chunk still lands,
+	// so neither the reader nor the sibling was blocked.
+	injectUnixClientFrame(t, client, Data{Physical: 1, Data: chunk})
 	injectUnixClientFrame(t, client, Data{Physical: 2, Data: []byte("sibling")})
 
 	taken, ok := takeEventually(t, pump, 2)
@@ -277,14 +279,14 @@ func TestUnixCarriageBlockedConsumerSiblingProgress(t *testing.T) {
 	stalled := mustStatus(t, pump.Engine(), 1)
 	require.Equal(t, StreamTerminal, stalled.State)
 	require.ErrorIs(t, stalled.Err, ErrStreamQueueFull)
-	require.Equal(t, domain.RemoteFailureTransport, stalled.FailureKind)
+	require.Equal(t, domain.RemoteFailureInvalidResponse, stalled.FailureKind)
 	require.Equal(t, StreamOpen, mustStatus(t, pump.Engine(), 2).State)
 	require.False(t, pump.Engine().Closed())
 	require.False(t, channelClosed(pump.Done()))
 
 	reset := decodeReset(t, nextUnixServerFrame(t, client), DirectionServer)
 	require.Equal(t, PhysicalStreamID(1), reset.Physical)
-	require.Equal(t, domain.RemoteFailureTransport, reset.Error.FailureKind)
+	require.Equal(t, domain.RemoteFailureInvalidResponse, reset.Error.FailureKind)
 }
 
 // TestUnixCarriageResetIsolation proves, over a real Unix carriage, that one

@@ -126,6 +126,7 @@ func TestMuxClientVariants(t *testing.T) {
 		{"close", Close{Physical: 5}, 303},
 		{"reset", Reset{Physical: 5, Error: testErrorDetail(), HasError: true}, 304},
 		{"reset_orderly", Reset{Physical: 5}, 304},
+		{"window_update", WindowUpdate{Physical: 5, Credit: 4096}, 305},
 	}
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,6 +156,7 @@ func TestMuxServerVariants(t *testing.T) {
 		{"close", Close{Physical: 5}, 404},
 		{"reset", Reset{Physical: 5, Error: testErrorDetail(), HasError: true}, 405},
 		{"reset_orderly", Reset{Physical: 5}, 405},
+		{"window_update", WindowUpdate{Physical: 5, Credit: 4096}, 406},
 	}
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {

@@ -126,6 +126,17 @@ type Reset struct {
 func (Reset) muxClientMessage() {}
 func (Reset) muxServerMessage() {}
 
+// WindowUpdate returns receive credit for one stream: the receiver consumed
+// Credit bytes of Data payload, so the sender may send that many more. It
+// travels in both directions over the same wire payload.
+type WindowUpdate struct {
+	Physical PhysicalStreamID
+	Credit   uint64
+}
+
+func (WindowUpdate) muxClientMessage() {}
+func (WindowUpdate) muxServerMessage() {}
+
 // Opened confirms one logical stream is established.
 type Opened struct {
 	Ref StreamRef
