@@ -3,6 +3,7 @@ package brokeripc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/adapters/streamframe"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/protocol/wire"
@@ -363,6 +365,7 @@ func TestOrderlyDisconnectClassification(t *testing.T) {
 	require.True(t, orderlyDisconnect(&net.OpError{Op: "read", Net: "unix", Err: syscall.ECONNRESET}))
 	require.True(t, orderlyDisconnect(net.ErrClosed))
 	require.True(t, orderlyDisconnect(fs.ErrClosed))
+	require.True(t, orderlyDisconnect(fmt.Errorf("write: %w", streamframe.ErrClosed)))
 	require.False(t, orderlyDisconnect(ErrMalformedFrame))
 	require.False(t, orderlyDisconnect(ErrProtocol))
 }
