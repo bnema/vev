@@ -130,7 +130,13 @@ func BrokerDisplayText(value string, maxBytes int) error {
 }
 
 func BrokerEnvEntry(entry string) error {
-	return BrokerDisplayText(entry, ports.BrokerMaxEnvEntryBytes)
+	if len(entry) > ports.BrokerMaxEnvEntryBytes {
+		return ErrTooLarge
+	}
+	if !utf8.ValidString(entry) || strings.ContainsRune(entry, 0) {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func BrokerEnvEntries(env []string) error {
