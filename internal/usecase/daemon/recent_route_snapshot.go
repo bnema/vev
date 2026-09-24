@@ -35,21 +35,23 @@ func recentRoutePresentationsFromSnapshot(snapshot protocol.RecentRouteSnapshot)
 	return out
 }
 
-// visitedRouteSnapshot keeps only the routes this client attached to. The
-// status-bar history and jump-recent ranks start from the current session and
-// grow as the client visits others; the palette and attention keep the full
-// snapshot.
-func visitedRouteSnapshot(snapshot protocol.RecentRouteSnapshot) protocol.RecentRouteSnapshot {
+// historyRouteSnapshot keeps the routes the status-bar history and
+// jump-recent ranks show: every route this client attached to, plus every
+// route that rings. Attention is shared by all clients, so a fresh client
+// still sees a bell on a session it never visited. Visited routes lead the
+// snapshot, so their ranks are unaffected by ringing ones. The palette and
+// attention jumps keep the full snapshot.
+func historyRouteSnapshot(snapshot protocol.RecentRouteSnapshot) protocol.RecentRouteSnapshot {
 	if snapshot.Entries == nil {
 		return snapshot
 	}
-	visited := make([]protocol.RecentRouteEntry, 0, len(snapshot.Entries))
+	history := make([]protocol.RecentRouteEntry, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
-		if entry.Visited {
-			visited = append(visited, entry)
+		if entry.Visited || entry.Attention {
+			history = append(history, entry)
 		}
 	}
-	snapshot.Entries = visited
+	snapshot.Entries = history
 	return snapshot
 }
 

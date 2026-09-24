@@ -27,7 +27,7 @@ Open it with `SSP` in the palette. It lists local sessions and, if you added hos
 | `CNS` | create a named session; asks where when several daemons are available |
 | `CES` | create a numbered session |
 
-Recent-session history belongs to one client and is not saved. A new client starts with an empty history.
+Recent-session history belongs to one client and is not saved. A new client starts with an empty history. A session that rings a bell always shows in the history with its bell, on every client, until it is seen.
 
 ## Move panes and tabs
 

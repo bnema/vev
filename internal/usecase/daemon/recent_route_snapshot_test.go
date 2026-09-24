@@ -134,9 +134,13 @@ func TestRecentRouteHintsRetainSnapshotSelectionIdentity(t *testing.T) {
 	require.Equal(t, uint64(7), hints.Recent[0].Generation)
 }
 
-func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
+func TestStatusHistoryShowsVisitedAndRingingRoutes(t *testing.T) {
 	unvisited := testRouteEntry(4, 1, "other", 4, protocol.RouteKindLocal)
 	unvisited.Visited = false
+	ringingLocal := testRouteEntry(5, 1, "build", 5, protocol.RouteKindLocal)
+	ringingLocal.Visited, ringingLocal.Attention, ringingLocal.AttentionSeq = false, true, 1
+	ringingRemote := testRouteEntry(6, 1, "deploy", 6, protocol.RouteKindRemote)
+	ringingRemote.Visited, ringingRemote.Attention, ringingRemote.AttentionSeq = false, true, 2
 	tests := []struct {
 		name    string
 		entries []protocol.RecentRouteEntry
@@ -144,6 +148,8 @@ func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
 	}{
 		{name: "fresh client shows no history", entries: []protocol.RecentRouteEntry{unvisited}, want: nil},
 		{name: "visited routes keep their order", entries: []protocol.RecentRouteEntry{testRouteEntry(2, 1, "work", 2, protocol.RouteKindLocal), unvisited, testRouteEntry(3, 1, "logs", 3, protocol.RouteKindLocal)}, want: []string{"work", "logs"}},
+		{name: "fresh client still shows ringing local and remote routes", entries: []protocol.RecentRouteEntry{unvisited, ringingLocal, ringingRemote}, want: []string{"build", "deploy@remote"}},
+		{name: "ringing routes follow visited ones", entries: []protocol.RecentRouteEntry{testRouteEntry(2, 1, "work", 2, protocol.RouteKindLocal), unvisited, ringingLocal}, want: []string{"work", "build"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,6 +161,9 @@ func TestStatusHistoryShowsOnlyVisitedRoutes(t *testing.T) {
 			var names []string
 			for _, entry := range state.mru {
 				names = append(names, entry.name)
+				if entry.name == "build" || entry.name == "deploy@remote" {
+					require.True(t, entry.attention, "%s must draw its bell", entry.name)
+				}
 			}
 			require.Equal(t, tt.want, names)
 			require.Equal(t, len(tt.want), len(recentRouteHints(ac.routeSnapshotCopy(), nil).Recent))
