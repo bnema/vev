@@ -324,8 +324,27 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	if err := input.start(ctx); err != nil {
 		return w.settle(ctx, fg, stream, token, err)
 	}
+	// Hello declared the focus known at attach, for the first paint. The
+	// reporter re-sends the current focus, which the daemon ignores when
+	// unchanged, then every change. The pump records a focus report before it
+	// delivers the input read with it, so flushing focus first keeps the
+	// daemon's view in input order.
+	focus := &focusReporter{state: attachmentTerminalFocus(fg)}
+	sendFocus := func() error {
+		if message, ok := focus.next(); ok {
+			return w.send(ctx, fg, stream, message)
+		}
+		return nil
+	}
+	if err := sendFocus(); err != nil {
+		return w.settle(ctx, fg, stream, token, err)
+	}
 	for {
 		select {
+		case <-focus.changed:
+			if err := sendFocus(); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-input.wake:
 			if err := input.flush(ctx); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
@@ -479,6 +498,12 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if event.input != nil && event.input.Err != nil {
 				fg.PreserveInput(event.input.Data)
 				return w.settle(ctx, fg, stream, token, event.input.Err)
+			}
+			if event.input != nil {
+				if err := sendFocus(); err != nil {
+					fg.PreserveInput(event.input.Data)
+					return w.settle(ctx, fg, stream, token, err)
+				}
 			}
 			if event.input != nil && event.input.actionID == 0 {
 				// A physical read: replies are stripped and ordinary bytes
@@ -685,7 +710,9 @@ func (w *sessionAttachmentWorker) validateIdentity(stage string, got protocol.Ex
 
 // sendHello sends the typed Hello derived from the exact opened request.
 func (w *sessionAttachmentWorker) sendHello(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection) error {
-	return w.send(ctx, fg, stream, w.hello(stream))
+	hello := w.hello(stream)
+	hello.TerminalFocus = attachmentTerminalFocus(fg).Focus()
+	return w.send(ctx, fg, stream, hello)
 }
 
 // hello builds the Hello the daemon expects for exactly one opened request. No

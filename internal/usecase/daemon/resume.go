@@ -667,6 +667,8 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	// direct-terminal capability before resumed capture or first paint observes
 	// the replacement transport.
 	d.reconfigureAttachmentOutput(sess, ac, h)
+	// The replacement terminal's focus, too, is declared before first paint.
+	ac.setTerminalFocus(h.TerminalFocus)
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}

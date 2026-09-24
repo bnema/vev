@@ -48,7 +48,10 @@ type terminalAutomationRequest struct {
 // after Run exits; suspend drops any result received while inactive and never
 // closes caller-owned stdin. Reconnects and later runs never add another reader.
 type terminalInputPump struct {
-	in         io.Reader
+	in io.Reader
+	// focus is the terminal focus decoded from this reader. The pump strips
+	// focus reports before any consumer sees the bytes.
+	focus      *TerminalFocusState
 	done       chan struct{}
 	automation chan terminalAutomationRequest
 
@@ -87,6 +90,7 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 	space <- struct{}{}
 	return &terminalInputPump{
 		in:           in,
+		focus:        newTerminalFocusState(),
 		done:         make(chan struct{}),
 		automation:   make(chan terminalAutomationRequest),
 		activation:   1,
@@ -339,7 +343,12 @@ func (p *terminalInputPump) start() {
 				n, err := p.in.Read(buf)
 				result := terminalReadResult{err: err}
 				if n > 0 {
-					result.data = append([]byte(nil), buf[:n]...)
+					if data := stripTerminalFocusReports(p.focus, buf[:n]); len(data) != 0 {
+						result.data = append([]byte(nil), data...)
+					} else if err == nil {
+						// A read that only carried focus reports delivers nothing.
+						continue
+					}
 				}
 				if !p.enqueue(result, activation) {
 					if p.isClosed() {

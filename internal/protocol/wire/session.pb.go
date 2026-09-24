@@ -49,8 +49,11 @@ type Hello struct {
 	KittyDirectGraphics    bool                 `protobuf:"varint,21,opt,name=kitty_direct_graphics,json=kittyDirectGraphics,proto3" json:"kitty_direct_graphics,omitempty"`
 	SessionTarget          *SessionAttachTarget `protobuf:"bytes,22,opt,name=session_target,json=sessionTarget,proto3" json:"session_target,omitempty"` // optional pointer
 	KittyKeyboard          bool                 `protobuf:"varint,23,opt,name=kitty_keyboard,json=kittyKeyboard,proto3" json:"kitty_keyboard,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Terminal window focus when the attachment opens: 0 = unknown,
+	// 1 = focused, 2 = unfocused. Later changes travel as TerminalFocus.
+	TerminalFocus uint32 `protobuf:"varint,24,opt,name=terminal_focus,json=terminalFocus,proto3" json:"terminal_focus,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
@@ -235,6 +238,13 @@ func (x *Hello) GetKittyKeyboard() bool {
 		return x.KittyKeyboard
 	}
 	return false
+}
+
+func (x *Hello) GetTerminalFocus() uint32 {
+	if x != nil {
+		return x.TerminalFocus
+	}
+	return 0
 }
 
 // Welcome answers an accepted attach.
@@ -2287,7 +2297,7 @@ var File_session_proto protoreflect.FileDescriptor
 
 const file_session_proto_rawDesc = "" +
 	"\n" +
-	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\xa8\x06\n" +
+	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\xcf\x06\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
 	"\x06intent\x18\x02 \x01(\rR\x06intent\x12\x1b\n" +
@@ -2313,7 +2323,8 @@ const file_session_proto_rawDesc = "" +
 	"\x06remote\x18\x14 \x01(\bR\x06remote\x122\n" +
 	"\x15kitty_direct_graphics\x18\x15 \x01(\bR\x13kittyDirectGraphics\x12G\n" +
 	"\x0esession_target\x18\x16 \x01(\v2 .vev.wire.v1.SessionAttachTargetR\rsessionTarget\x12%\n" +
-	"\x0ekitty_keyboard\x18\x17 \x01(\bR\rkittyKeyboardJ\x04\b\x0f\x10\x10R\rremote_target\"\x84\x02\n" +
+	"\x0ekitty_keyboard\x18\x17 \x01(\bR\rkittyKeyboard\x12%\n" +
+	"\x0eterminal_focus\x18\x18 \x01(\rR\rterminalFocusJ\x04\b\x0f\x10\x10R\rremote_target\"\x84\x02\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +

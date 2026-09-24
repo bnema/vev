@@ -10,7 +10,7 @@ import (
 )
 
 func TestVersionRemainsWireCompatible(t *testing.T) {
-	require.Equal(t, uint16(62), Version)
+	require.Equal(t, uint16(63), Version)
 	require.Equal(t, (16<<20)-407, MaxOutputDataLen)
 }
 

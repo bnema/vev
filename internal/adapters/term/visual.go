@@ -14,15 +14,17 @@ const (
 	bracketedPasteDisable = "\x1b[?2004l"
 	colorSchemeEnable     = "\x1b[?2031h"
 	colorSchemeDisable    = "\x1b[?2031l"
+	focusReportEnable     = "\x1b[?1004h"
+	focusReportDisable    = "\x1b[?1004l"
 	autowrapDisable       = "\x1b[?7l"
 	autowrapEnable        = "\x1b[?7h"
 	kittyKeyboardPop      = "\x1b[<u"
 )
 
-const visualEnter = altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable
+const visualEnter = altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + focusReportEnable
 
 const visualRestore = cursorShow + cursorStyleDefault + mouseDisable +
-	bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+	bracketedPasteDisable + colorSchemeDisable + focusReportDisable + autowrapEnable + altScreenExit
 
 // VisualEnterSequence returns a fresh copy of the visual initialization used
 // after acquiring a terminal. It intentionally excludes OS raw-mode setup.

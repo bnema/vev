@@ -292,6 +292,56 @@ func TestProtoSelectTabWire(t *testing.T) {
 	require.Error(t, err, "an empty tab identity is never decoded")
 }
 
+// TestProtoTerminalFocusWire pins the TerminalFocus payload byte for byte and
+// refuses unknown focus, a truncated prefix, and trailing garbage.
+func TestProtoTerminalFocusWire(t *testing.T) {
+	tests := []struct {
+		name  string
+		focus domain.TerminalFocus
+		want  []byte
+	}{
+		// field 33 (length-delimited) -> TerminalFocus{field 1 = focus}.
+		{name: "focused", focus: domain.TerminalFocusFocused, want: []byte{0x8A, 0x02, 0x02, 0x08, 0x01}},
+		{name: "unfocused", focus: domain.TerminalFocusUnfocused, want: []byte{0x8A, 0x02, 0x02, 0x08, 0x02}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			message := protocol.TerminalFocus{Focus: tt.focus}
+			envelope, err := encodeProtoClient(message)
+			require.NoError(t, err)
+			raw, err := proto.Marshal(envelope)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, raw)
+
+			require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw[:len(raw)-1]), "truncated prefix")
+			require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, append(append([]byte(nil), raw...), 0xFF)), "trailing garbage")
+			require.NoError(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw))
+			decoded := &wire.ClientEnvelope{}
+			require.NoError(t, proto.Unmarshal(raw, decoded))
+			got, err := decodeProtoClient(decoded)
+			require.NoError(t, err)
+			require.Equal(t, message, got)
+		})
+	}
+
+	invalid := []struct {
+		name  string
+		focus uint32
+	}{
+		{name: "unknown is never reported", focus: 0},
+		{name: "out of taxonomy", focus: 3},
+		{name: "out of range", focus: 256},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decodeProtoClient(&wire.ClientEnvelope{Payload: &wire.ClientEnvelope_TerminalFocus{TerminalFocus: &wire.TerminalFocus{Focus: tt.focus}}})
+			require.Error(t, err)
+		})
+	}
+	_, err := encodeProtoClient(protocol.TerminalFocus{})
+	require.Error(t, err, "unknown focus is never encoded")
+}
+
 func protoMessageName(message any) string {
 	return protoShortName(message)
 }

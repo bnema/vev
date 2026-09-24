@@ -90,7 +90,8 @@ func (t *Terminal) Handle(ctx context.Context, event browser.Event) error {
 		}
 		data = sb.String()
 	case browser.EventFocus:
-		// Focus reporting is not negotiated by the current client terminal contract.
+		// The browser page stays out of focus reporting: web clients keep
+		// unknown focus and count as possibly seen.
 		return nil
 	}
 	return t.Send(ctx, []byte(data))

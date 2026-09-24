@@ -34,6 +34,9 @@ message Hello {
   bool kitty_direct_graphics = 21;
   SessionAttachTarget session_target = 22; // optional pointer
   bool kitty_keyboard = 23;
+  // Terminal window focus when the attachment opens: 0 = unknown,
+  // 1 = focused, 2 = unfocused. Later changes travel as TerminalFocus.
+  uint32 terminal_focus = 24;
 }
 
 // Welcome answers an accepted attach.

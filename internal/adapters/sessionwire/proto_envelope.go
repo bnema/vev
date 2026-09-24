@@ -159,6 +159,17 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 			return nil, ErrInvalidMessage
 		}
 		return encodeProtoClient(*m)
+	case protocol.TerminalFocus:
+		converted, err := terminalFocusToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_TerminalFocus{TerminalFocus: converted}}, nil
+	case *protocol.TerminalFocus:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeProtoClient(*m)
 	case protocol.UIFence:
 		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_UiFence{UiFence: uiFenceToWire(m)}}, nil
 	case *protocol.UIFence:
@@ -643,6 +654,8 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 		return uiFenceFromWire(payload.UiFence)
 	case *wire.ClientEnvelope_SelectTab:
 		return selectTabFromWire(payload.SelectTab)
+	case *wire.ClientEnvelope_TerminalFocus:
+		return terminalFocusFromWire(payload.TerminalFocus)
 	case *wire.ClientEnvelope_RemotePreviewWatch:
 		return remotePreviewWatchFromWire(payload.RemotePreviewWatch)
 	case *wire.ClientEnvelope_RouteAttentionSubscription:

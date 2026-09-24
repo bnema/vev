@@ -61,6 +61,26 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 			wantErr: errProtoConvertRange,
 		},
 		{
+			name: "hello terminal focus range",
+			run: func(t *testing.T) error {
+				hello := testWireHello(t)
+				hello.TerminalFocus = 256
+				_, err := helloFromWire(hello)
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
+			name: "hello terminal focus taxonomy",
+			run: func(t *testing.T) error {
+				hello := testWireHello(t)
+				hello.TerminalFocus = 3
+				_, err := helloFromWire(hello)
+				return err
+			},
+			wantErr: protocol.ErrInvalidHello,
+		},
+		{
 			name: "hello geometry",
 			run: func(t *testing.T) error {
 				hello := testWireHello(t)

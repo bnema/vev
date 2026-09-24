@@ -90,6 +90,10 @@ A terminal resize reaches the client as one coalesced invalidation owned by the 
 
 Attention remains a daemon fact. The broker publishes it from fresh observations but strips it from durable snapshots. The client's route ledger forwards attention order to the serving daemon for status-bar bells and cross-daemon jump-to-attention; the picker displays session and tab bells. The serving daemon uses that same route snapshot to display remote palette destinations, without monitoring other daemons.
 
+### Terminal focus
+
+The client turns on focus reporting (DEC mode 1004). Its terminal input pump strips each `ESC [ I`/`ESC [ O` report into a `TerminalFocusState` that any client feature can read or watch, `Hello` declares the focus known at attach, so the first paint already respects it, and the attached loop sends every later change to the daemon as `TerminalFocus` ahead of the input read that carried it. The daemon keeps it per attachment as a lock-free `terminalFocus()`. Unknown focus, from a terminal that never reports, counts as possibly seen, so every feature keeps its previous behavior there. Attention uses it: only an attachment that may be seen clears a bell.
+
 ## Broker-owned hosts and daemon composition
 
 `vev _broker-ready --require local-authority|local-catalogue` is an internal,

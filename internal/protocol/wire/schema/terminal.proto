@@ -86,6 +86,12 @@ message ClientNotice {
 // OutputResetRequest restarts the output chain. Empty marker.
 message OutputResetRequest {}
 
+// TerminalFocus reports a focus change of the client's terminal window.
+message TerminalFocus {
+  // Closed focus taxonomy: 1 = focused, 2 = unfocused.
+  uint32 focus = 1;
+}
+
 // SelectTab shows one exact tab of the attached session on this attachment.
 message SelectTab {
   string tab_id = 1;

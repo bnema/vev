@@ -186,6 +186,8 @@ func (d *Daemon) handleActiveAttachmentClientMessage(capability attachmentCapabi
 		d.switchSamePeerForAttachment(effect, message)
 	case protocol.SelectTab:
 		d.selectTabForAttachment(effect, message)
+	case protocol.TerminalFocus:
+		d.applyTerminalFocusForAttachment(effect, message)
 	case protocol.RecentRouteSnapshot:
 		replayIdentity := effect.ac.setRouteSnapshot(message)
 		d.pokeAttentionTicker()

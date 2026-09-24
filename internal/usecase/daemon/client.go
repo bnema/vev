@@ -69,6 +69,10 @@ type attachedClient struct {
 	resumeClaimToken uint64
 	parked           bool
 	echoAck          atomic.Uint64
+	// focus holds the domain.TerminalFocus the client last reported. It is an
+	// atomic so any daemon path reads it without taking a lock; see
+	// terminalFocus.
+	focus atomic.Uint32
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
@@ -636,6 +640,7 @@ type attachClientOptions struct {
 	terminalCapabilities   terminalcap.Capabilities
 	capabilitiesSet        bool
 	navigationCapabilities protocol.NavigationCapabilities
+	terminalFocus          domain.TerminalFocus
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -717,6 +722,7 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		resumeCapable:          opts.resumeCapable,
 		resumeToken:            resumeToken,
 	}
+	ac.setTerminalFocus(opts.terminalFocus)
 	output.attachment = ac
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
