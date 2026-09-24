@@ -119,6 +119,16 @@ and bounded per-connection queues. The remote helpers `_broker-mux-stdio`,
 `_broker-mux-quic-bootstrap`, and `_broker-mux-quic-proxy` bridge a remote
 daemonmux socket to stdio or to one freshly authenticated QUIC stream.
 
+Every daemonmux logical stream is credit flow controlled in both directions.
+Each side starts with the same per-stream byte window, derived from the
+negotiated ceilings (aggregate bytes / max streams, 512 KiB by default). A
+`MuxData` frame costs its payload plus 64 bytes of credit; the writer waits
+when credit runs out, and the receiver returns consumed credit with
+`MuxWindowUpdate` once half a window is drained. A slow link or a slow
+consumer therefore slows its own stream without affecting siblings. Data
+beyond the granted window, or credit beyond the window, is a peer violation
+and resets only that stream.
+
 Setup is fully bounded: the dialer's one context/deadline covers the Unix
 dial, preamble, Register send, and wait for Registered, and the server requires Register within
 the same accept-time handshake budget that bounded the preamble and admission.
