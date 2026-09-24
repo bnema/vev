@@ -69,6 +69,10 @@ type attachedClient struct {
 	resumeClaimToken uint64
 	parked           bool
 	echoAck          atomic.Uint64
+	// focus holds the domain.TerminalFocus the client last reported. It is an
+	// atomic so any daemon path reads it without taking a lock; see
+	// terminalFocus.
+	focus atomic.Uint32
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.

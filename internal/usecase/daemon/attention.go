@@ -31,7 +31,7 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 	tb.attention = true
 	for _, attachment := range sess.snapshotAttachmentsLocked() {
 		view := attachment.viewSnapshot()
-		if domain.TabStableID(tb.stableID) == view.tabID {
+		if domain.TabStableID(tb.stableID) == view.tabID && attachment.terminalFocus().MaySee() {
 			tb.attentionVisiblePaint = true
 			break
 		}
@@ -232,8 +232,11 @@ func (d *Daemon) repaintAllAttachedClients() {
 	}
 }
 
+// ackAttention clears the bell of the tab ac shows. A client whose terminal
+// window reported losing focus is not looked at, so it never clears a bell:
+// the bell stays for every client until one that may be seen shows the tab.
 func (s *session) ackAttention(tb *tab, ac *attachedClient, visible bool) bool {
-	if tb == nil || ac == nil {
+	if tb == nil || ac == nil || !ac.terminalFocus().MaySee() {
 		return false
 	}
 	s.mu.Lock()

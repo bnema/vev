@@ -99,6 +99,7 @@ message ClientEnvelope {
     ActivateAttachment activate_attachment = 30;
     SelectTab select_tab = 31;
     RemotePreviewWatch remote_preview_watch = 32;
+    TerminalFocus terminal_focus = 33;
   }
 }
 

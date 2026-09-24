@@ -9,7 +9,7 @@ import (
 )
 
 func acquisitionTestPolicy() BrokerPolicy {
-	return BrokerPolicy{ProtocolVersion: 59, CatalogSchemaVersion: 3, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: "quic", Trust: "openssh", Launch: "explicit", Isolation: "user"}
+	return BrokerPolicy{ProtocolVersion: 60, CatalogSchemaVersion: 3, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: "quic", Trust: "openssh", Launch: "explicit", Isolation: "user"}
 }
 
 func TestBrokerDialTargetFirstContactAndBoundValidation(t *testing.T) {

@@ -92,7 +92,7 @@ func TestTerminal_RealPTY_RawModeSizeAndEscapes(t *testing.T) {
 
 	select {
 	case got := <-captured:
-		want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + autowrapEnable + altScreenExit
+		want := altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable + focusReportEnable + cursorShow + cursorStyleDefault + mouseDisable + bracketedPasteDisable + colorSchemeDisable + focusReportDisable + autowrapEnable + altScreenExit
 		if string(got) != want {
 			t.Fatalf("captured escapes = %q, want %q", got, want)
 		}

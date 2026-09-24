@@ -29,6 +29,8 @@ Open it with `SSP` in the palette. It lists local sessions and, if you added hos
 
 Recent-session history belongs to one client and is not saved. A new client starts with an empty history. A session that rings a bell also shows in the history with its bell, after the sessions this client visited, until any client sees it.
 
+A vev window only counts as seeing a bell while it has focus. With several vev windows open, a window on another workspace or behind another app never clears a bell, so the window you are using still shows it. This needs a terminal with focus reporting, such as kitty, foot, WezTerm, or Ghostty; other terminals keep treating every open window as seen.
+
 ## Move panes and tabs
 
 - `MFP` moves the focused pane to another tab.

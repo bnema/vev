@@ -16,7 +16,7 @@ import (
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 59
+const Version uint16 = 60
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -51,6 +51,7 @@ var (
 	ErrInvalidNavigation        = errors.New("ports: invalid navigation")
 	ErrInvalidEnvironmentPolicy = errors.New("ports: invalid environment policy")
 	ErrInvalidClientNotice      = errors.New("ports: invalid client notice")
+	ErrInvalidTerminalFocus     = errors.New("ports: invalid terminal focus")
 	ErrInvalidDetached          = errors.New("ports: invalid detached reason")
 )
 
@@ -355,6 +356,21 @@ type SelectTab struct {
 // Validate requires a well-formed stable tab identity.
 func (m SelectTab) Validate() error {
 	return domain.ValidateTabStableID(m.TabID)
+}
+
+// TerminalFocus reports that the client's terminal window gained or lost
+// focus. A client sends it only after its terminal reports focus, so an
+// attachment that never sends it keeps unknown focus.
+type TerminalFocus struct {
+	Focus domain.TerminalFocus
+}
+
+// Validate accepts only a reported state: unknown is the absence of a report.
+func (m TerminalFocus) Validate() error {
+	if m.Focus != domain.TerminalFocusFocused && m.Focus != domain.TerminalFocusUnfocused {
+		return ErrInvalidTerminalFocus
+	}
+	return nil
 }
 
 func validEnvironmentPolicy(policy EnvironmentPolicy) bool {

@@ -206,6 +206,9 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 	name := formatRecentRouteName(presentation)
 	snap := statusSnapshot{session: name, tabs: make([]statusTab, len(s.tabs))}
 	activeIndex := 0
+	// An unfocused client leaves the bell of its own tab pending, so it shows
+	// it like a background tab's bell.
+	seen := ac.terminalFocus().MaySee()
 	if ac != nil {
 		view := ac.viewSnapshot()
 		for i, tb := range s.tabs {
@@ -218,7 +221,7 @@ func (s *session) statusSegmentsFor(ac *attachedClient, includeTerminalTitle boo
 	for i, tb := range s.tabs {
 		name := tabDisplayName(tb, i)
 		active := i == activeIndex
-		attention := tb.attention && (!active || tb.attentionVisiblePaint)
+		attention := tb.attention && (!active || !seen || tb.attentionVisiblePaint)
 		snap.tabs[i] = statusTab{name: name, paneTitle: tb.focusedPaneTitle(includeTerminalTitle), active: active, attention: attention}
 	}
 	return snap

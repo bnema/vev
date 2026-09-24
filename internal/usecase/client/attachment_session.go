@@ -311,8 +311,20 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	if err := input.start(ctx); err != nil {
 		return w.settle(ctx, fg, stream, token, err)
 	}
+	focus := &focusReporter{state: attachmentTerminalFocus(fg)}
+	if message, ok := focus.next(); ok {
+		if err := w.send(ctx, fg, stream, message); err != nil {
+			return w.settle(ctx, fg, stream, token, err)
+		}
+	}
 	for {
 		select {
+		case <-focus.changed:
+			if message, ok := focus.next(); ok {
+				if err := w.send(ctx, fg, stream, message); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
+			}
 		case <-input.wake:
 			if err := input.flush(ctx); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
