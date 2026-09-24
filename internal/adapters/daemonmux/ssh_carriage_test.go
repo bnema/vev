@@ -491,7 +491,7 @@ func TestSSHCarriageConnectErrorBoundedAndSanitized(t *testing.T) {
 // in-process relay end. Every byte crosses the real subprocess pipes.
 func sshRawCarriagePair(t *testing.T) (RawFramedTransport, RawFramedTransport) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "relay.sock")
+	sockPath := filepath.Join(filepath.Dir(muxCarriagePath(t)), "relay.sock")
 	listener, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })

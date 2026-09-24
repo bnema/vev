@@ -139,8 +139,11 @@ func (l Layout) VerifyCreated() error {
 }
 
 // rejectSymlinkedComponents refuses a path any of whose existing components is
-// a symlink. A component that does not exist yet ends the walk: the caller
-// creates the remaining private directories itself.
+// a symlink not owned by root. A component that does not exist yet ends the
+// walk: the caller creates the remaining private directories itself.
+//
+// Root-owned symlinks are system layout, such as macOS /var -> private/var and
+// /tmp -> private/tmp; no other user can plant or retarget them.
 func rejectSymlinkedComponents(abs string) error {
 	volume := filepath.VolumeName(abs)
 	rest := strings.TrimPrefix(abs, volume)
@@ -161,11 +164,16 @@ func rejectSymlinkedComponents(abs string) error {
 			}
 			return fmt.Errorf("brokerconfig: inspect %q: %w", current, err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 && !ownedByRoot(info) {
 			return fmt.Errorf("brokerconfig: %q is a symlink", current)
 		}
 	}
 	return nil
+}
+
+func ownedByRoot(info fs.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == 0
 }
 
 // overlaps reports whether two absolute cleaned paths are equal or one contains

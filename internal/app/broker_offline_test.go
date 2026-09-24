@@ -457,7 +457,7 @@ type brokerMuxFixture struct {
 // Pings on every admitted logical stream.
 func newBrokerMuxFixture(t *testing.T, policy ports.BrokerPolicy) *brokerMuxFixture {
 	t.Helper()
-	routeDir := t.TempDir()
+	routeDir := shortTempDir(t, "mux")
 	require.NoError(t, os.Chmod(routeDir, 0o700))
 	return newBrokerMuxFixtureAt(t, policy, filepath.Join(routeDir, "mux.sock"))
 }
