@@ -550,11 +550,44 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
+	resumes := 0
 	for {
 		terminated, termErr, swap := s.attachOnce(ctx, input, service, target, localProvenance)
-		if terminated || swap == nil {
+		if terminated {
 			return terminated, termErr
 		}
+		if swap == nil {
+			resume := s.resume
+			s.resume = nil
+			if resume == nil && resumes > 0 && !s.attemptAttached {
+				// A resume attempt that failed before attaching (the route or
+				// destination is still down) tries the same target again.
+				retry := target
+				resume = &retry
+			}
+			if resume == nil {
+				return false, nil
+			}
+			resumes++
+			if resumes > maxAttachmentResumes {
+				s.logger.Warn("client_attachment_resume_exhausted", "endpoint", resume.request.Endpoint, "session", resume.request.Target.SessionName, "attempts", resumes-1)
+				s.notifyLifecycle(LifecycleNoticeDestinationFailed)
+				return false, nil
+			}
+			if terminated, termErr := s.waitResume(ctx, input, resumes); terminated {
+				return true, termErr
+			}
+			stream, err := service.NextStreamID()
+			if err != nil {
+				s.reportAttachmentFailure(err)
+				return false, nil
+			}
+			resume.request.Stream = stream
+			s.logger.Info("client_attachment_resume", "endpoint", resume.request.Endpoint, "session", resume.request.Target.SessionName, "attempt", resumes)
+			target = *resume
+			continue
+		}
+		resumes = 0
 		// A commit from the picker overlay to another target: the previous
 		// attachment detached cleanly, and the swap goes through Connecting
 		// exactly like any committed selection. The stream identity is
@@ -585,6 +618,7 @@ func (s *Supervisor) attachOnce(ctx context.Context, input *terminalInputLifetim
 
 func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error) {
 	request := target.request
+	s.attemptAttached = false
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
@@ -721,6 +755,7 @@ settlement:
 
 	// The attachment settled, so its foreground (and overlay slot) is gone.
 	overlay.drop()
+	s.attemptAttached = run.fg.Attached()
 	if !terminated && !brokerLost {
 		s.takeSettledNavigation(service, run.token, request)
 	}
@@ -755,6 +790,16 @@ settlement:
 		s.notifyLifecycle(LifecycleNoticeDetachToPicker)
 		return false, nil
 	}
+	if result.adopted && result.event.Kind == AttachmentEventLost && run.fg.Attached() {
+		// The stream carrying a live attachment was lost while the broker stayed
+		// up. The daemon parks the session for resume, so reconnect to the exact
+		// session and tab that were showing instead of dropping to the picker.
+		if resume, ok := resumeTarget(request, run.fg); ok {
+			s.logger.Warn("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String(), "error", result.event.Err, "cause", errors.Unwrap(result.event.Err), "resume", true)
+			s.resume = &resume
+			return false, nil
+		}
+	}
 	if result.adopted && (result.event.Kind == AttachmentEventLost || result.event.Kind == AttachmentEventFailed) {
 		s.logger.Warn("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String(), "error", result.event.Err, "cause", errors.Unwrap(result.event.Err))
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: result.event.Err})
@@ -772,6 +817,51 @@ settlement:
 		s.notifyLifecycle(LifecycleNoticeSessionEnded)
 	}
 	return false, nil
+}
+
+// maxAttachmentResumes bounds how many times one lost attachment reconnects
+// before the client gives up and returns to the picker. With the supervisor
+// backoff this spans a few seconds, enough to ride out a transient drop.
+const maxAttachmentResumes = 5
+
+// resumeTarget builds the exact reattach request for a lost attachment: the
+// session and tab it last committed, over the same local or remote route. A
+// foreground that never committed a session has nothing to resume.
+func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForeground) (pickerAttachmentTarget, bool) {
+	target, tab, known := fg.committedSnapshot()
+	if !known || target.Validate() != nil {
+		return pickerAttachmentTarget{}, false
+	}
+	resume := request
+	resume.Admission = ports.BrokerAdmissionExact
+	resume.Target = target
+	resume.Name = ""
+	resume.Env = append([]string(nil), request.Env...)
+	return pickerAttachmentTarget{request: resume, tab: attachmentTab{preferred: tab}}, true
+}
+
+// waitResume presents Connecting and waits one backoff interval before the
+// next resume attempt, settling early on cancellation, terminal EOF, or an
+// explicit picker close.
+func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, attempt int) (bool, error) {
+	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
+	timer := s.cfg.Clock.NewTimer(delay)
+	defer stopSupervisorTimer(timer)
+	for {
+		select {
+		case <-timer.C():
+			return false, nil
+		case <-ctx.Done():
+			return true, ctx.Err()
+		case err := <-input.EOF():
+			return true, terminalReadCause(err)
+		case <-s.presentationInvalidation():
+			s.renderResizeInvalidation()
+		case <-s.spinnerTick():
+			s.cfg.Spinner.AdvanceSpinner(s.State())
+		}
+	}
 }
 
 // reportAttachmentFailure returns to the picker with a typed, visible failure.

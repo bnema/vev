@@ -915,6 +915,18 @@ func (f *attachmentForeground) overlayRepaint() <-chan struct{} {
 	return f.repaint
 }
 
+// committedSnapshot reports the session and tab this foreground last
+// committed output for. It stays readable after the foreground is finished,
+// so a settled attachment can still name what it was showing.
+func (f *attachmentForeground) committedSnapshot() (protocol.ExactSessionTarget, domain.TabStableID, bool) {
+	if f == nil {
+		return protocol.ExactSessionTarget{}, "", false
+	}
+	f.overlayMu.Lock()
+	defer f.overlayMu.Unlock()
+	return f.committed, f.committedTab, f.committedKnown
+}
+
 func (f *attachmentForeground) noteCommitted(target protocol.ExactSessionTarget, tab domain.TabStableID) {
 	if f == nil {
 		return

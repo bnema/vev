@@ -1288,42 +1288,98 @@ func TestAttachmentDeadlineConcurrentExpiryAndRetirement(t *testing.T) {
 	}
 }
 
-// TestSupervisorAttachmentPostAttachmentLossReturnsToPicker proves a stream
-// that fails after attachment never keeps the attached presentation: the
-// supervisor returns to the picker with the typed loss.
-func TestSupervisorAttachmentPostAttachmentLossReturnsToPicker(t *testing.T) {
-	picker := newAttachTestPicker()
-	var (
-		streamMu sync.Mutex
-		stream   *sessionTestStream
-	)
-	harness := startAttachHarness(t, picker)
-	harness.service.setOpenStream(func(_ context.Context, _ ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		admitted := newSessionTestStream()
-		streamMu.Lock()
-		stream = admitted
-		streamMu.Unlock()
-		return admitted, nil
-	})
-	picker.commit(sessionTestRequest(true))
-	require.Eventually(t, func() bool { return len(harness.service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
+// testStreamLoss is a physical loss of the stream carrying an attachment.
+func testStreamLoss() ports.BrokerStreamLost {
+	return ports.BrokerStreamLost{Connection: ports.BrokerConnectionID{1}, Stream: 1, Epoch: 3, Cause: domain.RemoteFailureTransport, Err: errors.New("attachment lost")}
+}
 
-	streamMu.Lock()
-	admitted := stream
-	streamMu.Unlock()
-	deliverReadyStream(t, admitted)
-	awaitAttachedState(t, harness.sup)
+// fireResumeTimer fires the resume backoff timer for one attempt. Other timers
+// share the clock, so it matches the exact backoff delay (the harness jitter
+// is zero).
+func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
+	t.Helper()
+	want := supervisorBackoffDelay(uint64(attempt), func() float64 { return 0 })
+	for {
+		timer := clock.awaitTimer(t)
+		if timer.delay == want {
+			timer.fire()
+			return
+		}
+	}
+}
 
-	admitted.fail(ports.BrokerStreamLost{
-		Connection: ports.BrokerConnectionID{1},
-		Stream:     1,
-		Epoch:      3,
-		Cause:      domain.RemoteFailureTransport,
-		Err:        errors.New("attachment lost"),
-	})
-	awaitPickerState(t, harness.sup)
-	require.Eventually(t, func() bool { return harness.sup.State().Err != nil }, 5*time.Second, time.Millisecond)
-	require.NotEqual(t, PresentAttached, harness.sup.State().Presentation, "a failed stream is never still attached")
+// TestSupervisorAttachmentLossResumesSameSession is the regression for a
+// remote attachment that died with attachment_lost and left the client stuck:
+// a stream lost after attachment reconnects to the exact session it was
+// showing, and only falls back to the picker when every resume fails.
+func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
+	cases := []struct {
+		name string
+		// resumeOK makes every resume attempt attach successfully.
+		resumeOK bool
+	}{
+		{name: "resume attaches again", resumeOK: true},
+		{name: "resume exhausted returns to picker"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			picker := newAttachTestPicker()
+			notices := make(chan LifecycleNotice, 16)
+			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+			})
+			streams := make(chan *sessionTestStream, maxAttachmentResumes+2)
+			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				stream := newSessionTestStream()
+				streams <- stream
+				return stream, nil
+			})
+			picker.commit(sessionTestRequest(false))
+			first := <-streams
+			deliverReadyStream(t, first)
+			awaitAttachedState(t, harness.sup)
+
+			first.fail(testStreamLoss())
+			if tc.resumeOK {
+				fireResumeTimer(t, harness.clock, 1)
+				resumed := <-streams
+				require.Eventually(t, func() bool { return len(resumed.messages()) > 0 }, 5*time.Second, time.Millisecond)
+				deliverReadyStream(t, resumed)
+				awaitAttachedState(t, harness.sup)
+
+				requests := harness.service.openedRequests()
+				require.Len(t, requests, 2)
+				resume := requests[1]
+				require.Equal(t, ports.BrokerAdmissionExact, resume.Admission)
+				require.Equal(t, sessionTestOutput(1, "").Context.Route.Target, resume.Target, "resume names the committed session")
+				require.Equal(t, requests[0].Endpoint, resume.Endpoint)
+				require.NotEqual(t, requests[0].Stream, resume.Stream, "resume uses a fresh stream identity")
+				require.False(t, picker.owns(), "the picker never took the terminal")
+				return
+			}
+
+			for i := 1; i <= maxAttachmentResumes; i++ {
+				fireResumeTimer(t, harness.clock, i)
+				(<-streams).fail(testStreamLoss())
+			}
+			awaitPickerState(t, harness.sup)
+			require.Len(t, harness.service.openedRequests(), 1+maxAttachmentResumes)
+			require.NotEqual(t, PresentAttached, harness.sup.State().Presentation, "a failed stream is never still attached")
+			require.Eventually(t, func() bool {
+				for {
+					select {
+					case notice := <-notices:
+						if notice.Kind == LifecycleNoticeDestinationFailed {
+							return true
+						}
+					default:
+						return false
+					}
+				}
+			}, 5*time.Second, time.Millisecond)
+			require.True(t, picker.owns())
+		})
+	}
 }
 
 // TestSupervisorAttachmentCancellationRetiresGeneration proves cancellation
