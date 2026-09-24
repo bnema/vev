@@ -118,8 +118,6 @@ code.yank-last-notification = YLN
 - A reload applies to existing panes right away. Lowering a limit drops the oldest rows.
 - Idle panes compress old history in the background. This saves memory but does not raise the limit.
 
-See [compact storage measurements](compact-storage-benchmarks.md) for the numbers.
-
 ## Development environments
 
 Set `VEV_ENV=<name>` to move every vev file into `.dev/<name>/` under the current directory. Use it to test a build without touching your real sessions.

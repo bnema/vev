@@ -126,7 +126,6 @@ Use `vev cmd --help` for all commands. For headless capture and input, see [UI d
 - [Durable session recovery](docs/durable-session-recovery.md)
 - [Browser terminal](docs/web-terminal.md)
 - [UI driver](docs/ui-driver.md)
-- [Performance](docs/performance.md)
 
 ## Development
 
@@ -146,3 +145,5 @@ make lint   # goimports check, go vet
 make mocks  # regenerate mocks
 make demo   # regenerate docs/assets/demo.gif (needs Docker)
 ```
+
+Contributor docs: [architecture](docs/architecture.md), [protocol](docs/protocol.md), [performance measurement](docs/performance.md).

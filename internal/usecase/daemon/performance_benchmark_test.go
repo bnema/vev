@@ -832,8 +832,7 @@ func benchmarkReportMetrics(b *testing.B, metrics performanceMetrics, operations
 	b.ReportMetric(float64(historyRows), "historyrows/pane")
 }
 
-// Compact-page budgets are measured against the dense baseline in
-// docs/compact-storage-benchmarks.md. Count and byte limits are separate:
+// Compact-page budgets were measured against the dense VT baseline. Count and byte limits are separate:
 // small page dictionaries cost allocations but replace much larger cell copies.
 // The Protobuf envelope cutover added a measured ~47 allocations per warm
 // paint (generated message construction plus deterministic marshal); the
