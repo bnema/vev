@@ -886,7 +886,7 @@ func TestBrokerReadyEndpointSecurityClassificationTable(t *testing.T) {
 	regular := filepath.Join(dir, "not-a-socket")
 	require.NoError(t, os.WriteFile(regular, []byte("x"), 0o600))
 
-	socketDir := t.TempDir()
+	socketDir := shortTempDir(t, "ready")
 	socketPath := filepath.Join(socketDir, "broker.sock")
 	listener, err := net.Listen("unix", socketPath)
 	require.NoError(t, err)
