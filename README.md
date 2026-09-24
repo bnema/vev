@@ -23,7 +23,7 @@
 | **Remote** | `vev attach user@host` | Sessions on a server, rendered there and sent as small diffs over SSH + QUIC. |
 | **Hybrid** | `vev host add user@host` | Local and remote sessions in one picker; switch between them without leaving vev. |
 
-Remote and hybrid need vev installed on the remote host. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. See [remote resilience](docs/remote-resilience.md).
+Remote and hybrid need vev installed on the remote host. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. See [remote sessions](docs/remote-resilience.md).
 
 ## Features
 
@@ -82,7 +82,7 @@ Type a code or fuzzy-search the palette. Common default codes:
 | `MFP` / `MAT` | move pane / tab | `SSP` | session picker |
 | `DET` | detach | `NTC` | notifications |
 
-- **Session picker**: `/` to search, Ctrl+n/Ctrl+p to move, Escape to clear.
+- **Session picker** (`SSP`): ↑/↓ or `j`/`k` to move, `/` to search, `s` to sort, `x` to kill, Escape or `q` to close.
 - **Copy mode**: scroll up, then vim motions, `v` to select, `y` to copy.
 - With local and remote daemons attached, `CNS` asks where to create the session.
 
@@ -121,7 +121,8 @@ Use `vev cmd --help` for all commands. For headless capture and input, see [UI d
 
 - [Configuration](docs/configuration.md): bindings, palette, theme, overlays, and bar anchors
 - [Terminal compatibility](docs/terminal.md)
-- [Remote resilience](docs/remote-resilience.md)
+- [Remote sessions](docs/remote-resilience.md)
+- [Session navigation](docs/session-navigation.md)
 - [Durable session recovery](docs/durable-session-recovery.md)
 - [Browser terminal](docs/web-terminal.md)
 - [UI driver](docs/ui-driver.md)

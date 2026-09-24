@@ -1,5 +1,7 @@
 # Compact storage: measured budgets
 
+**Summary:** compact scrollback uses about 4–5× less memory per paint and copy-mode entry than the old dense format, at the cost of roughly 0.3–1.5 ms more CPU per operation. Details below.
+
 Measured September 5, 2026 (CEST; September 4 UTC) on Linux amd64, Ryzen 5 7535HS, Go 1.27.1,
 `GOMAXPROCS=2`. The existing manual-test binary was not replaced or restarted.
 

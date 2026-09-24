@@ -1,8 +1,17 @@
 # Performance measurement
 
-vev measures the current session and attachment stack with process-local runtime
-marks and harness-owned end-to-end boundaries. Measurement does not alter
-rendering, pacing, transport policy, wire bytes, or `ProtocolVersion`.
+For contributors. How to measure vev's latency end to end, and the budgets it should meet.
+
+**Quick start:**
+
+```sh
+go build -o /tmp/vev ./
+go run ./cmd/vev-perf-harness --vev-bin /tmp/vev \
+  --manifest testdata/perf/manifest.json --out testdata/perf/results \
+  --scenario 1x4-idle-local
+```
+
+Measurement never changes rendering, pacing, transports, or wire bytes.
 
 ## Canonical matrix
 
