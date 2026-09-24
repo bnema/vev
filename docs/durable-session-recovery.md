@@ -1,47 +1,58 @@
 # Durable session recovery
 
-vev opens named-session state only while holding `$XDG_RUNTIME_DIR/vev/lifecycle.lock` (or the platform runtime fallback). Catalogue corruption prevents socket publication; vev never substitutes an empty healthy daemon.
+Named sessions are saved to disk and come back after a daemon restart. This page explains what is saved, what can go wrong, and how to recover.
 
-## Session states
+## What is saved
 
-`stopped` is safe fresh metadata, `restoring` is validation in progress, and `degraded` preserves uncertain state without starting a replacement shell. A degraded session remains visible in `vev ls`, but attach is refused until an explicit recovery action succeeds. A session reserved for durable purge is hidden from listings and pickers until deletion either completes or leaves a retained broken record.
+- Session name and working directory.
+- Tabs and layout.
+- Scrollback and the last visible screen, restored as copy-mode history.
+- Allowed processes are relaunched (see `snapshot.restore_processes` in [configuration](configuration.md)).
 
-## Bulk purge
+The live process state, cursor, and terminal modes are not restored.
 
-`kill --sessions` purges every live, stopped, and broken session while leaving the daemon running. Its admission gate is transient and each phase spends its own bounded deadline (admission drain, stopped/broken sweep, shared live teardown), so an uncooperative repository can never hold purge admission or control indefinitely. A durable delete that ignores cancellation is completed by a detached worker under the exact session name, incarnation, and creation time it captured, so it can never remove a same-name replacement; until it returns, the stopped authority still reserves the name and the purge reports a typed failure. A live unit whose teardown aborts before it owns destructive work stays registered, and its snapshot-coordinator quarantine is rolled back so it keeps checkpointing.
+vev keeps the latest checkpoint and the one before it as a fallback.
 
-## Recovery commands
+## Session states in `vev ls`
 
-- `vev cmd -s NAME session-recovery discard`
+| State | Meaning |
+|---|---|
+| `up` | Running. |
+| `temporary` | Running numbered session. Not saved to disk. |
+| `down` | Saved and stopped. Attaching restarts it. |
+| `broken` | Saved state could not be loaded safely. Attach is refused until you recover it. |
 
-Discard creates a new incarnation and retains the old record and snapshots under `snapshots/quarantine/` until an explicit later purge.
+## Recover a broken session
 
-## Catalogue format upgrades
+```sh
+vev cmd -s NAME session-recovery discard
+```
 
-Catalogue format version 6 is independent from the live client/daemon protocol. At startup, vev losslessly converts supported version 3–5 records to version 6 before publishing its socket. The conversion preserves session identity, working directory, tabs, timestamps, checkpoint references, and degradation state; a wire-protocol update alone never resets durable sessions.
+This deletes the saved tabs, layout, and history of `NAME`. The name and working directory are kept, so the next attach starts a fresh session.
 
-Before rewriting a legacy catalogue, vev creates and syncs a private `sessions.kv.pre-v6.bak` backup beside it. The catalogue is then replaced atomically. If the source is corrupt, from an unsupported future format, or conflicts with an existing backup, startup fails closed and leaves the catalogue untouched. Version 6 is not readable by older binaries; to roll back, stop vev and restore the backup before starting the older binary.
+## Upgrades
 
-## Incompatible checkpoints
+- A new vev release converts the old session catalogue automatically at startup. A backup is written next to it as `sessions.kv.pre-v6.bak`.
+- To go back to an older vev, stop vev and restore that backup first.
+- When the checkpoint format changes, old checkpoints are reset: names and working directories stay, but tabs, layout, and history are cleared.
+- Installing a new binary does not restart a running daemon. Run `vev kill --all` to switch.
 
-Compact VT storage uses VEVM version 4 and VEVS version 5. Dense VT checkpoints are intentionally incompatible: there is no scrollback migration or legacy decoder. On the next daemon startup, healthy older VEVM checkpoints take the reset path below. This clears saved tabs, layout, screen contents, scrollback, and recovery transcripts while preserving session names and working directories. The live client/daemon protocol is unchanged. Installing a binary does not restart an existing daemon.
+## When the daemon refuses to start
 
-After verifying a VEVM manifest's digest, vev treats any VEVM version mismatch as an incompatible healthy checkpoint. It atomically replaces only that named session's exact healthy checkpoint with a fresh incarnation. Unlike a protocol reset, this replacement retains the session name and working directory, but has no checkpoint, tabs, terminal history, or recovery transcript.
+If the session catalogue cannot be read, the daemon stops instead of starting empty. This protects your data.
 
-Digest mismatches, corruption, validation failures, I/O errors, and ambiguous failures are never reset or purged. The session remains degraded for explicit recovery.
+1. Do not edit or delete files in `~/.local/state/vev/`.
+2. Look for `catalogue_validation_failed` in `~/.local/state/vev/vev-daemon.log`.
+3. Fix the cause (disk full, wrong file owner), then start vev again.
+4. For real corruption, back up the whole directory before trying anything else.
 
-## Retention
+A `lifecycle_owner_wait` log line means another daemon is still starting or stopping. Wait for it to finish.
 
-Healthy sessions retain the committed checkpoint and up to two direct fallbacks. Degraded and unresolved state remains pinned.
+## Where files live
 
-## Fail-closed startup
+| What | Where |
+|---|---|
+| Catalogue, snapshots, logs | `~/.local/state/vev/` |
+| Socket and lock | `$XDG_RUNTIME_DIR/vev/` |
 
-If the catalogue cannot be opened or validated, the daemon does not publish its socket. Do not delete or edit state files. Check `vev-daemon.log` for `catalogue_validation_failed`, preserve the complete state directory, correct filesystem ownership or capacity problems, and retry. For corruption, make a backup before attempting recovery or exporting data.
-
-A `lifecycle_owner_wait` event normally means another daemon is initializing or shutting down. Wait for ownership transfer; only terminate the prior process when its identity is known. The operating system releases `lifecycle.lock` when that process exits.
-
-## Diagnostics
-
-Durable state and catalogue migration backups are under `$XDG_STATE_HOME/vev` (default `~/.local/state/vev`). Snapshot quarantine is under its `snapshots/quarantine/` tree. Runtime ownership is under `$XDG_RUNTIME_DIR/vev`; logs are JSON lines in the state directory.
-
-Use session names, incarnation IDs, generation numbers, reason codes, and cursors from recovery events when diagnosing a failure. Recovery logs never include terminal or snapshot object contents.
+Recovery logs never contain terminal content.

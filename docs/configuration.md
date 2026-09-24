@@ -1,6 +1,13 @@
 # Configuration
 
-vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` respected). No file means defaults. The session daemon picks up changes within a couple of seconds. Browser gateway settings (`web.listen` and `web.origin`) require a gateway restart; flags override their config values. See [browser terminal](web-terminal.md#listener-and-public-origin) for private-network and HTTPS proxy setup.
+vev reads `~/.config/vev/config` (`$XDG_CONFIG_HOME` is respected).
+
+- No file means defaults.
+- Changes apply live within a couple of seconds.
+- Exception: `web.listen` and `web.origin` need a gateway restart. See [browser terminal](web-terminal.md#listener-and-public-origin).
+- Invalid values log a warning and fall back to the default.
+
+The full list with defaults:
 
 ```text
 # Browser gateway: HTTP listener and browser-facing origin, read at startup.
@@ -41,6 +48,8 @@ focus-pane-down = alt+j
 # Optional pane rearrangement actions are unbound by default.
 # consume-or-expel-pane-left = alt+H
 # consume-or-expel-pane-right = alt+L
+# grow-pane-width, shrink-pane-width, grow-pane-height, shrink-pane-height,
+# and equalize-panes are also unbound by default.
 switch-tab-1 = alt+1
 # ... through switch-tab-9 = alt+9
 
@@ -60,6 +69,7 @@ bar.interval = 5s
 # Command palette codes: 2-3 letters or digits.
 code.new-tab = CNT
 code.new-session = CNS
+code.create-ephemeral-session = CES
 code.close-tab = CLT
 code.split-right = SPR
 code.split-left = SPL
@@ -74,6 +84,14 @@ code.focus-pane-left = FPL
 code.focus-pane-right = FPR
 code.focus-pane-up = FPU
 code.focus-pane-down = FPD
+code.resize-pane = RSZ
+code.grow-pane-width = GPW
+code.shrink-pane-width = SPW
+code.grow-pane-height = GPH
+code.shrink-pane-height = SPH
+code.equalize-panes = EQP
+code.move-pane = MFP
+code.move-tab = MAT
 code.next-tab = NXT
 code.previous-tab = PVT
 code.back-session = BCK
@@ -84,39 +102,25 @@ code.toggle-floating-pane = TFP
 code.rename-session = RNS
 code.rename-tab = RNT
 code.detach = DET
+code.notifications = NTC
+code.yank-last-notification = YLN
 ```
-
-Invalid values log a warning and resolve that setting to its default on both initial load and reload.
 
 ## Scrollback
 
-`vev` chooses the retention policy; `vev-vt` enforces it. The PTY transports
-bytes and does not own scrollback.
+| Key | Range | Default | Zero means |
+|---|---|---|---|
+| `scrollback.megabytes` | 0–4096 MB | 50 | no history |
+| `scrollback.lines` | 0–1,000,000 | 10,000 | no line limit, bytes only |
 
-- `scrollback.megabytes`: 0–4096 decimal MB, default 50. Zero disables history.
-- `scrollback.lines`: 0–1,000,000 lines, default 10,000. Zero removes the
-  additional line ceiling when the byte budget is positive.
-- Limits apply independently to each pane, including hidden floating panes,
-  and exclude visible primary/alternate grids. They measure uncompressed
-  logical history bytes, not total process RSS.
-- Reload applies to existing panes immediately. Lowering a limit evicts the
-  oldest rows; disabling history discards its retained contents. Existing copy
-  documents remain stable. New and restored panes use the current limits.
-- Idle maintenance visits at most one sealed page per pane every five seconds,
-  skips busy panes, and compresses only pages that remain cold. Compression does
-  not grant additional retention or count compressed bytes toward the budget.
-
-Persistence has separate per-blob and aggregate safety ceilings; raising the
-runtime retention budget does not remove them. The compact codec replaces the
-old VT encoding directly: old VT history blobs are not readable by this alpha
-build. Test with `VEV_ENV=dev`, not your normal daemon's persisted state.
-
-See [compact storage measurements](compact-storage-benchmarks.md) for memory,
-allocation and CPU trade-offs.
+- Limits are per pane, including hidden floating panes.
+- They count uncompressed history, not process memory.
+- A reload applies to existing panes right away. Lowering a limit drops the oldest rows.
+- Idle panes compress old history in the background. This saves memory but does not raise the limit.
 
 ## Development environments
 
-Set `VEV_ENV` to a name such as `dev` to redirect all vev-owned paths into `.dev/<name>/` under the directory where vev was invoked. The name must be one safe segment of at most 64 ASCII letters, digits, dots, underscores, or hyphens, and must start with a letter or digit.
+Set `VEV_ENV=<name>` to move every vev file into `.dev/<name>/` under the current directory. Use it to test a build without touching your real sessions.
 
 ```sh
 VEV_ENV=dev go run .
@@ -124,25 +128,29 @@ VEV_ENV=dev go run . kill --sessions
 rm -rf .dev/dev
 ```
 
-The selected absolute root is retained by the detached daemon and inherited vev processes even when their working directory changes. A name isolates configuration, runtime files, durable sessions, hosts, snapshots, and logs from normal XDG locations and from other names. Invocations using the same name intentionally share a daemon and files; use separate names for side-by-side binaries.
-
-If the runtime path would exceed the portable Unix-socket limit (103 bytes, including `vev/broker/broker.sock`), sockets and lifecycle locks instead use `/tmp/vev-<uid>-<sha256>`; the hash identifies the complete original runtime directory. Configuration and durable state remain under `.dev/<name>/`. All roles resolve the same private runtime directory, and distinct roots remain isolated. Short paths keep their existing location. Stop processes using an older binary before switching versions if their runtime location changes; do not delete a live runtime directory or its lock files.
-
-This feature isolates vev-owned data only. It does not sandbox pane processes or provide OS, filesystem, or network isolation.
+- Name: up to 64 letters, digits, `.`, `_`, or `-`, starting with a letter or digit.
+- The same name shares one daemon. Use different names to run builds side by side.
+- Config, sessions, hosts, snapshots, and logs are isolated.
+- If the socket path gets too long, sockets move to `/tmp/vev-<uid>-<hash>`. Everything else stays in `.dev/<name>/`.
+- It is not a sandbox: pane processes see your real system.
 
 ## Remote hosts
 
-Remote host commands, listing, and successful direct-attach learning are always active.
+```sh
+vev host add user@host   # add a host
+vev host rm user@host    # remove it
+vev host list            # show hosts and their status
+```
 
-`$XDG_STATE_HOME/vev/hosts.json` (or `~/.local/state/vev/hosts.json` when unset) is the only host-list location. It is versioned JSON with pinned and learned targets. `vev host add` adds a pinned target, `vev host rm` atomically removes a target from both sets, and `vev host list` shows `pinned`, `learned`, or `pinned,learned` in its `SOURCE` column. Pinned hosts keep stored order; learned-only hosts follow in lexical order. vev rejects empty targets, surrounding whitespace, and internal whitespace or control characters; SSH alias grammar is left to OpenSSH.
-
-`vev ls <host>` and `vev ls --all` run `ssh -- <host> 'vev cmd remote-catalog --json'` for each known host. OpenSSH resolves aliases and connection settings from your SSH config. Remote session names appear as `session@host`. `vev ls --all` prints local sessions first, then remote sessions in merged host order. A catalog failure is reported after the successful output with the host and error; the command exits non-zero so partial output is not mistaken for a complete inventory.
+- The broker stores hosts in `~/.local/state/vev/broker/state/state.json`.
+- Hosts connect over SSH, so your SSH config (aliases, keys) applies.
+- Remote sessions appear as `session@host` in `vev ls --all` and in the picker.
 
 ### Warm remote transports
 
-The connection broker keeps a remote's physical transport warm after the last terminal client leaves it. Returning to that remote opens a new logical stream over the retained, already authenticated SSH or QUIC connection: no second SSH bootstrap, QUIC handshake, or remote helper start. Broker observation probes borrow the same pooled transport instead of dialing their own. The remote daemon sees a fresh attach; session state lives on the daemon, so the screen and scrollback are unchanged.
+After you leave a remote, vev keeps its connection open for a while. Going back is then instant: no new SSH login or QUIC handshake.
 
-Retention is set in the broker configuration, `~/.config/vev/broker.json` (`$XDG_CONFIG_HOME` respected), which the broker creates on first use. It is read when the broker starts.
+Configure this in `~/.config/vev/broker.json`. The file is created on first use and read when the broker starts.
 
 ```json
 {
@@ -153,61 +161,76 @@ Retention is set in the broker configuration, `~/.config/vev/broker.json` (`$XDG
 }
 ```
 
-- `warmTransports`: 0–64 idle transports kept warm, default 8. When one more goes idle, the least recently idled one closes. `0` closes a transport as soon as its last stream ends. Transports with an attached client never count.
-- `warmIdleTimeout`: `off` (default, no age bound) or a positive Go duration up to `24h`, such as `30s` or `5m`. A warm transport closes that long after it went idle.
+- `warmTransports`: how many idle connections to keep (0–64, default 8). The oldest one closes first. `0` disables it.
+- `warmIdleTimeout`: close an idle connection after this long, such as `5m` (max `24h`). Default `off`: no time limit.
 
-A remote closing the connection also evicts it; the next visit dials normally. Warm transports never keep the broker alive: when the broker stops after its idle grace, it closes them. Aliases stay distinct unless the broker authenticated them as the same daemon under the same connection policy. These keys replace the client-side `remote.attachment-cache`, `remote.attachment-cache-capacity`, and `remote.attachment-cache-idle-timeout` settings, which no longer exist.
+Warm connections never keep the broker running.
 
 ## Logs and durable state
 
-Set `VEV_LOG=debug`, `VEV_LOG=warn`, or `VEV_LOG=error` to change verbosity; the default is `info`. JSON-line logs such as `vev-daemon.log` live in `$XDG_STATE_HOME/vev`, or `~/.local/state/vev` when unset. The same state directory contains the strict session catalogue, any private pre-migration catalogue backup, notices, `hosts.json`, and `snapshots/`. The lifecycle lock and socket live in `$XDG_RUNTIME_DIR/vev` (with platform runtime fallbacks).
+| What | Where |
+|---|---|
+| Logs (JSON lines, e.g. `vev-daemon.log`) | `~/.local/state/vev/` |
+| Sessions and snapshots | `~/.local/state/vev/` |
+| Broker hosts and logs | `~/.local/state/vev/broker/` |
+| Socket and lock | `$XDG_RUNTIME_DIR/vev/` |
 
-Recovery events include `lifecycle_owner_wait`, `lifecycle_owner_acquired`, `lifecycle_owner_released`, `catalogue_validated`, `catalogue_compaction_recovery_complete`, `session_restore_complete`, `fallback_checkpoint_promoted`, `snapshot_head_repair_complete`, `session_degraded`, `snapshot_garbage_collection_complete`, `interrupted_transaction_recovery_complete`, and `daemon_startup_complete`.
+`$XDG_STATE_HOME` is respected. Set `VEV_LOG=debug|warn|error` to change the log level (default `info`).
 
-Snapshot garbage collection is startup-only: the daemon runs one coordinator-owned pass before it publishes its socket, and no periodic snapshot collection runs afterward. The five-second idle maintenance loop compresses sealed scrollback pages and never collects snapshots or incarnations (GO-002, deferred).
-
-Catalogue failure is fail-closed: vev does not publish an empty replacement daemon. Preserve the state directory, inspect `catalogue_validation_failed`, correct storage or ownership problems, and retry without editing catalogue files. See [Durable session recovery](durable-session-recovery.md) for explicit recovery commands, migration, diagnostics, and the committed checkpoint plus up to two direct fallbacks retention policy.
+If the daemon refuses to start because its session data is broken, do not edit the files. See [durable session recovery](durable-session-recovery.md).
 
 ## Theme
 
-With `theme = auto`, vev follows the terminal's reported foreground, background, light/dark scheme, and ANSI palette. `theme.palette = on` is the default. `theme.accent = auto` derives one accent from the terminal's chromatic ANSI colors; larger and more cohesive repeated-color groups are preferred, then conventional normal/bright pairs, otherwise vev uses an eligible blue slot when available. `theme.accent = 0` through `theme.accent = 15` selects exactly that ANSI slot. Arbitrary RGB values and `off` are not accepted for `theme.accent`.
+| Setting | Effect |
+|---|---|
+| `theme = auto` | Follow your terminal's colors and light/dark mode. |
+| `theme = dark` / `light` | Neutral built-in colors. Ignores the two settings below. |
+| `theme.palette = off` | Neutral colors, no accent. |
+| `theme.accent = auto` | Pick an accent from your terminal's ANSI colors (blue if unsure). |
+| `theme.accent = 0`–`15` | Use exactly that ANSI color as the accent. |
 
-When the terminal provides truecolor defaults and a usable RGB palette slot, vev uses the resolved accent for active chrome and derives softer bar, inactive, recent-session, and border colors from it. It preserves readability by reducing a surface intensity when needed. Terminal application/pane colors are not recolored. Without truecolor default colors or a usable RGB resolved accent, chrome backgrounds remain neutral; an available selected ANSI slot can still decorate foregrounds or borders. An explicit unavailable slot is never replaced with another slot.
-
-Slots `0`, `7`, `8`, and `15` are valid explicit selections, but log a warning because conventional neutral slots may provide little or no accent separation. An invalid accent value logs a warning and falls back to `auto`, including on hot reload.
-
-`theme.palette = off` is authoritative: it keeps exact neutral foreground/background rendering and ignores `theme.accent`. Forced `theme = dark` or `theme = light` is also neutral and ignores both palette and accent policy. Configuration reload immediately reapplies the current terminal snapshot; vev updates a live palette when the terminal reports a light/dark scheme change, but cannot detect palette changes a terminal does not report.
+- vev only colors its own UI (bars, borders, palette). Pane content is never recolored.
+- Tinted backgrounds need a truecolor terminal. Otherwise the accent only colors text and borders.
+- vev follows light/dark switches your terminal reports. It cannot see palette changes the terminal does not report.
 
 ## Bindings
 
-Key specs: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` through `alt+9`. Configuring an action replaces all of its built-in aliases (set `focus-pane-left` and the Alt+Arrow alias is gone). Tab switching also accepts the top-row symbols of non-QWERTY layouts, so AZERTY works without extra config.
+Valid keys: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` to `alt+9`.
 
-`alt+[` is unsupported because terminals frame it as the CSI prefix `ESC [`, which vev passes through as terminal input. Cmd/Super is not a vev key-spec modifier; map a physical Cmd/Super chord in the terminal emulator to an unused, safe `ESC` + character sequence (not `ESC [`), then configure the matching `alt+<char>` in vev.
+- Setting an action replaces all its default keys. For example, setting `focus-pane-left` removes Alt+Left too.
+- Tab switching works with AZERTY and other layouts without extra config.
+- `alt+[` is not supported: terminals use it for escape sequences.
+- Cmd/Super is not supported. Map it in your terminal to `ESC` + a character, then bind `alt+<char>` in vev.
 
 ## Pane consume or expel
 
-The `consume-or-expel-pane-left` and `consume-or-expel-pane-right` actions are unbound by default; the commented Alt+H/Alt+L bindings above are optional examples. Use palette codes `MPL` and `MPR`, or script them as `vev cmd consume-or-expel-pane-left` and `vev cmd consume-or-expel-pane-right`.
+Moves the focused pane between columns, like the Niri window manager. It has no default key: use palette codes `MPL` / `MPR`, or bind `consume-or-expel-pane-left/right`.
 
-A singleton pane moves into the immediate column on the requested side; at the outer edge, nothing changes. A pane in a multi-member vertical or stack column moves out as an adjacent singleton column. This works only with canonical column layouts: one column, or a top-level horizontal split of columns, where each column is a singleton pane, a vertical split of panes, or a pane stack. Nested mixed splits are unsupported.
+- A pane alone in its column joins the column next to it.
+- A pane sharing a column leaves it and becomes its own column.
+- Works only with column layouts. Nested mixed splits are not supported.
 
 ## Navigation overflow
 
-Both settings are independent and default to `off`. With `nav.overflow-tabs = on`, left/right keyboard focus (`Alt+H`/`Alt+L` by default) continues from a pane edge to the adjacent tab. With `nav.overflow-sessions = on`, up/down keyboard focus (`Alt+K`/`Alt+J` by default) continues to the adjacent live session in alphabetical order. Neither setting wraps at the first or last destination.
+Both are `off` by default.
 
-Overflow applies only to keyboard focus actions; mouse navigation does not overflow, and floating panes never overflow. Hot reload applies either setting to subsequent navigation without restarting the daemon.
+- `nav.overflow-tabs = on`: Alt+h/l at the edge of the tab moves to the next tab.
+- `nav.overflow-sessions = on`: Alt+k/j at the edge moves to the next session (alphabetical).
+
+No wrap-around. Only keyboard focus overflows, never the mouse or floating panes.
 
 ## Copy mode
 
-Scroll up with the mouse to enter copy mode. Use `h`, `j`, `k`, and `l` to move, `w`, `b`, and `e` for word motions, `v` or Space to start line selection, and `y` or Enter to copy.
+Scroll up with the mouse to enter. Scroll back to the bottom to leave.
 
-The mouse wheel moves the viewport immediately in either direction, independently
-of keyboard cursor navigation. Scrolling has a short, decelerating animation:
-the first row responds immediately and the remaining movement is paced at 16 ms
-intervals. Reversing direction cancels the old tail. Keyboard input and mouse
-selection stop the animation; selection scrolling remains immediate. Returning
-to the bottom exits copy mode and shows live output.
+| Key | Action |
+|---|---|
+| `h` `j` `k` `l` | move |
+| `w` `b` `e` | word motions |
+| `v` or Space | start selection |
+| `y` or Enter | copy |
 
-Mouse drag selects a text range. Double-click selects the word under the pointer; dragging after a double-click extends by complete words.
+With the mouse: drag to select, double-click to select a word.
 
 ```ini
 # Unicode whitespace always separates words.
@@ -217,34 +240,32 @@ copy.word-separators = " -_@"
 copy.reduce-motion = off
 ```
 
-Set `copy.word-separators = ""` to use only Unicode whitespace as a separator.
-Set `copy.reduce-motion = on` for immediate three-row wheel steps. The setting
-applies to subsequent wheel input after configuration reload. Applications that
-capture the mouse, and alternate-screen wheel-to-arrow forwarding, are unchanged.
-
-Motion is row-based: vev cannot animate fractional pixels inside the outer
-terminal. The easing preserves requested scroll distance rather than adding
-extra momentum, and drains any remaining tail on the first animation tick at
-least 120 ms after the last wheel input.
+- `copy.word-separators = ""` uses only whitespace.
+- `copy.reduce-motion = on` scrolls three rows per wheel step, without animation.
 
 ## Responsive overlays
 
-On complete frames below 80 columns, interactive overlays use full-width bottom drawers immediately above the bottom bar. This applies to the floating terminal, command palette, session picker, notification history, prompts, and copy search. A drawer keeps its overlay's preferred outer height, capped at the frame height minus four rows, so frame rows 0–2 remain visible. Drawers use only a top border.
-
-Opening an interactive overlay dims the complete underlying frame, including panes, both bars, notices, and any lower-priority overlay. Notice toasts remain compact rather than becoming drawers. Copy mode remains full-screen; only its search prompt uses the responsive drawer.
+Below 80 columns, popups (palette, picker, floating terminal, prompts) become full-width drawers at the bottom of the screen. The background dims while a popup is open.
 
 ## Palette anchor
 
-The command palette is centered by default. With `palette.anchor = auto`, it uses a full-width bottom shelf from 80 through 95 columns and a 64-column bottom-right rail from 96 columns up. Set an explicit anchor to position the shelf or rail. Below 80 columns, the palette is always a bottom drawer, so an explicit anchor does not override the responsive layout. Reload moves an open palette without losing your query.
+- Default: centered.
+- `palette.anchor = auto`: bottom bar from 80 to 95 columns, right-side rail from 96 columns.
+- Any other value places it at that spot. Below 80 columns it is always a bottom drawer.
 
 ## Floating terminal
 
-The command runs through your shell. A changed command applies on the next launch; changed dimensions on the next show or resize. Below 80 columns, `floating.height` continues to determine the drawer's outer height, capped to preserve the first three frame rows and the bottom bar; `floating.width` is replaced by the full frame width. Floating state is not restored across daemon restarts.
+- `floating.command` runs through your shell. Changes apply on the next launch.
+- Below 80 columns, the terminal takes the full width and keeps `floating.height`.
+- Floating terminals are not restored after a daemon restart.
 
 ## Bar anchors
 
-Anchor commands run on the daemon host every `bar.interval` (minimum 1s). vev reads the first line of stdout, strips ANSI codes, and keeps the last good value on failure. Scripts get `VEV_ANCHOR`, `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`.
+`bar.top-right` and `bar.bottom-right` show the output of a command in the bar. Both are off by default.
 
-Commands resolve against the environment of the client currently attached to the session, the same environment new panes inherit. A command that works in your shell will work as an anchor without restarting the daemon. When an anchor fails, the daemon logs the exit code and the command's stderr; exit 127 means the command was not found on that `PATH`.
+- The command runs on the daemon host every `bar.interval` (minimum `1s`), with the same environment as your panes.
+- vev shows the first line of output, without colors. On failure it keeps the last good value.
+- Scripts receive `VEV_ANCHOR`, `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`.
+- Failures are logged with the exit code and stderr. Exit 127 means "command not found".
 
-Both anchors are disabled by default, so `go install github.com/bnema/vev@latest` needs no companion scripts. Set either command to opt in; explicit commands are run unchanged. Checkout and release installs include `vev-bar-top-right` and `vev-bar-bottom-right` example scripts, which can be configured by name when they are on the attaching client's `PATH`. The bottom-right example runs `git status --porcelain` on each refresh; raise the interval or replace it if that is too heavy for your repository.
+Release installs ship two example scripts: `vev-bar-top-right` and `vev-bar-bottom-right`. The second one runs `git status` on every refresh; raise the interval on large repositories.

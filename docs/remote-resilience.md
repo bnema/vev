@@ -1,187 +1,81 @@
-# Remote resilience
+# Remote sessions
 
-Remote attachments connect directly to the selected vev daemon. QUIC is the
-normal carriage: SSH bootstraps an authenticated endpoint (ephemeral
-certificate, token, SHA-256 pin), then the attachment carries the vev
-protocol over one QUIC stream. Set `VEV_REMOTE_TRANSPORT=stdio` to use an
-SSH-only carriage explicitly when QUIC is unavailable. vev must be installed on
-the remote host.
+```sh
+vev attach user@host[:session]
+```
 
-The session remains shared across all attachments. It owns PTYs, VT state, tabs,
-panes, shared PTY content geometry, and ordered mutations. Each attachment keeps
-its own window size, selected tab and pane, copy mode, overlays, render/output
-acknowledgements, and reconnect state. Reconnecting one attachment resumes that
-attachment without replacing its peers or changing their attachment-local
-windows/views; its latest claim may still update shared PTY geometry.
+vev must be installed on the remote host. The remote daemon owns the session: it runs the shells, renders the screen, and sends only small diffs to your client. Nothing is proxied through your local daemon.
 
-## Remote picker identity
+## How the connection works
 
-The session picker shows remote live, stopped, broken, stale, and unavailable
-rows using the same expandable session/tab shape as local rows. A row carries a
-lifecycle ID and stable tab selector separately from its display origin; labels
-are never parsed back into routes. Cached and stale rows remain navigable, but
-activation is gated until the host catalog and the exact lifecycle/tab identity
-are current. A successful picker handoff sends the structured target to the
-owning daemon without creating a local shadow session. Picker-selected remote
-attachments use the daemon's environment and persisted session working
-directory; direct CLI remote attaches retain their client-request semantics.
+1. vev opens SSH to the host and starts a short-lived QUIC server there.
+2. SSH hands back a one-time token and the server's certificate fingerprint.
+3. Your client connects directly over QUIC (UDP), checks the fingerprint, and uses the token once.
 
-Remote attachments remain direct: the selected remote daemon owns the session,
-PTYs, rendering, input, resize, effects, and teardown. The client does not
-proxy remote content through the local daemon. The session picker and command
-palette read remote session inventory from the daemon's durable catalog cache
-and refresh it asynchronously while either overlay is open. Cached names appear
-immediately, but selection still requires a fresh exact lifecycle and tab
-identity.
+Terminal traffic then goes over QUIC, not SSH. The token and keys stay in memory only.
 
-A single client process separately keeps a bounded, in-memory route history
-across local, direct remote, and picker-discovered attachments. Catalog targets
-retain exact endpoints, while route snapshots keep endpoints private; rows from
-those sources therefore remain separate when their authority cannot be compared
-exactly. The daemon renders the latest attachment snapshot; active routes are
-metadata-only. `JRS` and cross-daemon `BCK` transitions send typed
-key/generation actions back to the client, while `BCK` to a live session on the
-current authenticated daemon uses an in-band switch. Route history is
-process-local and is not persisted or shared between clients. The status-bar
-history and `JRS` ranks list only routes this client has attached to, so a new
-client starts with an empty history; the palette lists every known route.
+If UDP is blocked, use SSH only:
 
-A picker-selected remote target is a direct handoff with one input pump. Exact
-lifecycle/name identities are carried separately from display labels, and a
-successful daemon-local switch publishes a new committed identity before the
-client republishes its snapshot. These navigation actions use the strict,
-exact-match protocol version. Attach handshakes may carry an exact target, and
-successful Welcomes can return the daemon's committed identity.
+```sh
+VEV_REMOTE_TRANSPORT=stdio vev attach user@host
+```
 
-Selecting an ordinary active session row on the daemon already serving the
-attachment uses an in-band switch. The daemon first offers an endpoint-empty,
-exact lifecycle target; the client confirms it with its remembered stable tab
-cursor while holding raw input. The daemon either commits the fenced attachment
-transition and publishes the committed identity before the rebased full paint,
-or sends a typed pre-commit rejection and leaves the source attachment usable.
-No hostname, label, DNS result, or SSH alias authorizes reuse. Stopped and
-cross-origin targets outside the hybrid QUIC flow retain direct close-and-dial
-handoff.
+## What survives a network problem
 
-A QUIC attachment opening the hybrid home picker keeps its authenticated remote
-transport parked while a transient local connection renders the picker. The
-remote daemon suspends that attachment's rendered output only after a
-lease-bound prepare handshake, so the picker has sole terminal ownership and
-the client does not acknowledge screen updates it did not display. Terminal-
-external one-shot effects generated while parked, such as OSC 52 clipboard
-writes, are intentionally suppressed and are not replayed after Back or a
-switch; applying them later could affect a different terminal owner. Back
-resumes the parked attachment's current VT state with a full paint. Selecting a
-live or stopped session from the exact same configured endpoint sends the
-structured lifecycle/tab target over the parked transport; the serving daemon
-revalidates it and switches or restores with its persisted working directory
-and daemon-owned environment. Different endpoints and SSH stdio routes close
-and dial normally. While any switch takes longer than the short display
-threshold, the client overlays an animated switching or starting toast until
-the destination's authoritative output is flushed.
-
-Opening the home picker does not change the client's active route or recent
-session order, on either QUIC or SSH stdio. Its status bar keeps the source
-session label (for example, `misc@igor`), not the local session hosting the
-picker. Local backing-session tabs and bar-script output are hidden while
-this temporary attachment renders the picker. Selecting a destination commits
-that route; Back returns to the source. Local tab selections also hand off to
-the client, including selections in the backing session itself: the temporary
-picker connection never becomes the destination attachment. Protocol version
-40 carries the explicit local tab in `AttachTarget.PreferredTabID`; it overrides
-remembered tab state. If that tab disappears before attach, the existing Hello
-default-tab fallback applies. Upgrade the client and both daemons together.
-
-## Durable record compatibility
-
-Catalogue record format version 6 stores durable session metadata independently
-from the live protocol version. At daemon startup, supported version 3–5 records
-are losslessly converted before socket publication and the original catalogue is
-preserved as a private `sessions.kv.pre-v6.bak` backup. A wire-protocol change
-does not reset session state. Unsupported or corrupt records fail closed without
-modifying the catalogue. Older binaries cannot read version 6, so restore the
-backup before a rollback.
-
-Remote catalogues are bounded and versioned. The current schema is mandatory
-and contains lifecycle IDs, ordered typed tab records, state, active tab,
-attachment state, and MRU sequence. Peers without the exact schema are rejected
-as version-incompatible rather than exposed as partial picker rows.
-
-Remote picker previews are bounded styled-cell snapshots fetched without
-attachment or PTY mutation. They are held in a short-lived in-memory cache only;
-viewport contents are not persisted or written to diagnostics. Live preview
-requests use debounce, same-key single-flight, bounded concurrency, TTL
-stale-while-revalidate, and failure cooldowns. Stopped sessions show a static
-placeholder, and late or canceled preview responses are discarded when the
-picker selection changes.
-
-## Connection limits
-
-- A connection handshake has one 15-second deadline from connection start
-  through Hello, Welcome, and the initial committed publication. The deadline
-  applies to local and remote connections.
-- Each command request has a 10-second deadline for its result. A timeout
-  abandons only that request; it does not complete a later request with a stale
-  result.
-- Each parked-route control response and its required full paint have separate
-  15-second client deadlines. A parked lease expires after 15 minutes and
-  closes only its exact retained transport generation.
-- Shared PTY content geometry follows the latest valid, non-superseded attach,
-  resume, or resize claim. A later attachment can therefore replace the current
-  shared geometry; if the winning attachment detaches, the most recently
-  claimed remaining valid attachment becomes authoritative.
-
-## QUIC operation
-
-- The remote host runs one ephemeral QUIC server per bootstrap: fresh
-  certificate, 32-byte token, nonce, ≤4 KiB readiness line, ≤15 s expiry,
-  and atomic one-time token consumption. The client pins the exact SHA-256
-  certificate fingerprint and answers with one bounded auth record.
-- The QUIC carriage runs over UDP with TLS 1.3, the epoch ALPN, and
-  QUIC-native reliability, ordering, and congestion control; no custom
-  retransmission layer exists. Link health reports transport connectivity
-  without logging payloads, addresses, keys, or identities.
-- Large full output snapshots use bounded zlib compression when it reduces the
-  wire payload. Incremental output and non-beneficial snapshots retain their
-  canonical encoding. The protocol validates the compression kind, declared
-  decoded length, stream integrity, and trailing bytes before terminal output
-  is applied.
-- The attachment reconnects with its resume token after a path change. If the
-  attachment resume window expires but its exact session lifecycle still
-  exists, the client opens a fresh exact attachment instead. The remote session
-  and its PTYs remain in place while the attachment is offline.
-
-The bootstrap token and ephemeral key live only in memory. They are not
-written to durable state.
+- The remote session and its shells keep running while you are offline.
+- The client reconnects by itself after a network change, a VPN switch, or a laptop sleep.
+- If the reconnect window has expired but the session still exists, the client opens a fresh attachment to it.
+- Several clients can attach to the same session. Each keeps its own window, tab, focus, and copy mode.
 
 ## Connection states
 
 | State | Meaning |
-| --- | --- |
-| `connected` | Recent authenticated contact and complete frame progress. |
-| `degraded` | Authenticated packets arrive, but complete-frame or acknowledgement progress is delayed. |
-| `probing` | Authenticated contact is absent and the carriage is probing for a recovered path. |
-| `resuming` | This attachment is opening a replacement connection with its resume token. |
-| `offline` | The attachment is re-establishing the selected remote transport. |
-| `expired` | The session or attachment resume window is no longer available. |
+|---|---|
+| `connected` | Everything works. |
+| `degraded` | Packets arrive, but updates are slow. |
+| `probing` | No contact; vev is looking for a working path. |
+| `offline` | No contact for a while; vev is reconnecting. |
+| `dead` | The connection is gone for good. |
 
-In raw terminal mode, state changes appear as vev status text rather than bytes
-written into the PTY's output stream.
+States appear in the vev status bar, never inside your shell output.
 
-## Diagnostics and checks
+## Hybrid mode: local and remote together
 
-At debug level, transport-health logs contain only state, elapsed progress ages,
-and bounded counters. `scripts/debug-remote-attach.sh user@host`
-collects redacted health lines.
+Add a host once:
 
-Useful checks are:
+```sh
+vev host add user@host
+```
 
-- block and unblock UDP traffic;
-- move between networks or change VPN state;
-- suspend and resume the attachment machine;
-- reconnect to the same named session;
-- verify that a second attachment retains its independent view while the first
-  reconnects.
+Then the session picker (`SSP`) shows local and remote sessions in one list. Remote sessions appear as `session@host`, with tags like `down` or `broken` when they can't be opened.
 
-Keep hostnames, usernames, keys, and local paths out of shared logs and
-screenshots.
+- Selecting a session switches to it, local or remote. `BCK` goes back to the previous one; `JRS` jumps to a recent one.
+- A remote session opened from the picker uses the remote host's environment and saved working directory.
+- `CNS` asks where to create the new session when several daemons are available.
+- Session history is per client and is not saved.
+- Previews of remote sessions are cached in memory only, never written to disk.
+
+After you leave a remote, vev keeps its connection warm so going back is instant. See [warm remote transports](configuration.md#warm-remote-transports).
+
+## Timeouts
+
+| What | Limit |
+|---|---|
+| Connect to first screen | 15 s |
+| `vev cmd` result | 10 s |
+| A detached remote attachment waiting to resume | 15 min |
+
+## Upgrading
+
+Client and daemons must run the same protocol version. Upgrade vev on your machine and on every remote host together.
+
+## Debugging
+
+```sh
+VEV_LOG=debug vev attach user@host
+scripts/debug-remote-attach.sh user@host   # collects redacted connection health
+```
+
+Useful manual checks: block UDP, switch networks or VPN, suspend the laptop, then reattach to the same session.
+
+Keep hostnames, usernames, and keys out of shared logs and screenshots.

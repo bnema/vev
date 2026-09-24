@@ -12,12 +12,12 @@ wrong-direction frame before any mutation (`sessionwire.ErrWrongDirection`
 
 Client → server: `Hello`, `Input`, `Resize`, `Detach`, `Ping`, `List`,
 `Kill`, `Theme`, `Ack`, `ImagePush`, `ClientNotice`, `CommandRequest`,
-`OutputResetRequest`, `RemotePreviewRequest`,
+`OutputResetRequest`, `SelectTab`, `RemotePreviewWatch`,
 `RouteAttentionSubscription`, `SamePeerSwitchRequest`,
 `RecentRouteSnapshot`, `RouteNavigationFailure`,
 `SessionCreationFailure`, `UIFence`, `NavigationInventoryRequest`,
 `NavigationInventoryPublication`, `NavigationInventoryFailure`,
-`PickerClose`, `PickerSelection`, `PickerPreviewRequest`.
+`PickerClose`, `PickerSelection`.
 
 Server → client: `Welcome`, `ErrorMsg`, `Output`, `Detached`, `Pong`,
 `Sessions`, `CommandResult`, `AttachTarget`, `RemotePreview`,
@@ -26,8 +26,7 @@ Server → client: `Welcome`, `ErrorMsg`, `Output`, `Detached`, `Pong`,
 `RouteRetired`, `SamePeerSwitchFailure`, `UIReceipt`, `UIViewUpdate`,
 `NavigationInventoryResponse`, `NavigationInventoryDemand`,
 `NavigationInventorySelection`, `PickerOffer`, `PickerSnapshot`,
-`PickerClosed`, `PickerResult`, `PickerFailure`, `PickerPreview`,
-`KillResult`.
+`PickerClosed`, `PickerResult`, `PickerFailure`, `KillResult`.
 
 `RouteNavigationFailure` is the one payload that appears in both unions.
 `sessionwire` conversion switches (`decodeProtoClient`/`decodeProtoServer`,
@@ -66,9 +65,9 @@ negotiated ceiling.
   the handshake deadline.
 
 First frame routing (`daemon.go:handleConn`): `Hello` → full attach;
-`List`, `CommandRequest`, `RemotePreviewRequest`,
-`NavigationInventoryRequest`, `Kill` are one-shot
-control connections answered and closed. Anything else, including any
+`List`, `CommandRequest`, `NavigationInventoryRequest`, and `Kill` are
+one-shot control connections answered and closed. `RemotePreviewWatch`
+streams `RemotePreview` frames until the client closes. Anything else, including any
 malformed first frame, gets a typed compatibility response and no session
 mutation:
 
@@ -83,7 +82,7 @@ mutation:
 | other / unknown | `ErrorMsg{ErrInternal, "expected hello"}` | no |
 
 Live checks after decode: `Hello.Version`, `CommandRequest.Version`,
-`NavigationInventoryRequest.Version`, and `RemotePreviewRequest.Version`
+`NavigationInventoryRequest.Version`, and the watch's `RemotePreviewRequest.Version`
 (independent catalogue-era schema version `1`) must equal the negotiated
 constant or the request fails
 with the version-mismatch response above. There is no multi-version
@@ -110,21 +109,16 @@ bounded to 4 KiB (`wire.PreambleLimit`, exposed as
 `brokerwire.CheckPreambleSize`) before scan or allocation.
 
 Refusals use the shared `PreambleRejectionCode` taxonomy. There is no
-capability negotiation in P3.1: nonzero capability bits are refused as
-code 7 (`limit refused`), and code 6 (`out of order`) is reserved for the
-connection dispatcher, which owns framing-order detection and never surfaces
-it from the stateless codec. Brokerwire is not activated by production
-composition until P3.2. The P3.3 private local endpoint
-(`internal/adapters/brokeripc`) carries this conversation over one per-user
-AF_UNIX socket: `broker.sock` in the per-user runtime directory, with
-same-user peer-credential admission, bounded per-connection queues, and
-production composition deferred to P3.4 and the P7 cutover. P3.4 adds
-the hidden, isolated offline sandbox entries -- `_broker-serve`,
-`_broker-launcher`, and `_broker-status` -- over an operator-supplied private
-root, plus the hidden remote mux helpers `_broker-mux-stdio`,
-`_broker-mux-quic-bootstrap`, and `_broker-mux-quic-proxy` that bridge a
-provisioned private daemonmux Unix carriage to stdio or to one freshly
-authenticated QUIC stream; ordinary production composition still waits for P7.
+capability negotiation: nonzero capability bits are refused as code 7
+(`limit refused`), and code 6 (`out of order`) is reserved for the
+connection dispatcher.
+
+`internal/adapters/brokeripc` carries this conversation over `broker.sock`
+in the per-user runtime directory, with same-user peer-credential admission
+and bounded per-connection queues. The remote helpers `_broker-mux-stdio`,
+`_broker-mux-quic-bootstrap`, and `_broker-mux-quic-proxy` bridge a remote
+daemonmux socket to stdio or to one freshly authenticated QUIC stream.
+
 Setup is fully bounded: the dialer's one context/deadline covers the Unix
 dial, preamble, Register send, and wait for Registered, and the server requires Register within
 the same accept-time handshake budget that bounded the preamble and admission.
