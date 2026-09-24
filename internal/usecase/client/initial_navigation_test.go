@@ -606,3 +606,48 @@ func TestInitialNavigationWaitsForTargetObservation(t *testing.T) {
 		})
 	}
 }
+
+// TestInitialNavigationDropsDecisionsTakenWhileHidden pins that a selection
+// recorded by the picker while it was hidden behind the Connecting
+// presentation of a pending initial navigation never replays: after the
+// initial attachment ends, the supervisor returns to the picker and opens
+// nothing the user did not see.
+func TestInitialNavigationDropsDecisionsTakenWhileHidden(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := newSupervisorTestClock()
+	reader := newAttachTestReader()
+	terminal := &attachTestTerminal{in: reader}
+	picker := newAttachTestPicker()
+
+	service := newSupervisorTestService(ports.BrokerConnectionID{1})
+	stream := newSessionTestStream()
+	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return stream, nil
+	})
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil })
+	// A keystroke typed during the cold start: the hidden picker recorded a
+	// commit before the broker published anything.
+	picker.recordOp(pickerOp{commit: true}, "row", ports.BrokerOpenStreamRequest{})
+
+	sup := mustSupervisor(t, SupervisorConfig{
+		Connector: connector, Terminal: terminal, Clock: clock,
+		Jitter: func() float64 { return 0 }, Picker: picker,
+		InitialNavigation: InitialNavigation{Kind: InitialNavigationCreateEphemeral, Destination: ports.BrokerEndpointFence{Local: true}},
+	})
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+
+	require.Eventually(t, func() bool { return sup.State().Presentation == PresentConnecting }, 5*time.Second, time.Millisecond,
+		"a pending navigation presents Connecting, not the picker")
+	service.publishSnapshot(localDaemonSnapshot(7, 1))
+	require.Eventually(t, func() bool { return len(service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
+
+	stream.deliver(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "creation failed"})
+	require.Eventually(t, func() bool { return sup.State().Presentation == PresentPicker }, 5*time.Second, time.Millisecond)
+	require.Never(t, func() bool { return len(service.openedRequests()) > 1 }, 200*time.Millisecond, 5*time.Millisecond,
+		"a decision taken while hidden must not open a second stream")
+	require.Zero(t, picker.resolveCount(), "the hidden commit was never resolved")
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}

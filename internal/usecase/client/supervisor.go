@@ -658,7 +658,11 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 			s.transition(supervisorEvent{kind: supervisorTerminal, err: termErr})
 			return termErr
 		}
-		s.transition(supervisorEvent{kind: supervisorNavigationSettled})
+		// A navigation left armed (the broker was lost while it waited for an
+		// observation) keeps Connecting: the next attempt takes it again.
+		if !s.initialNavigationPending() {
+			s.transition(supervisorEvent{kind: supervisorNavigationSettled})
+		}
 
 		// Ready phase: fold publications, admit committed attachments one at a
 		// time, and return to the picker after each. A committed attachment

@@ -507,6 +507,13 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 		s.reportAttachmentFailure(err)
 		return false, nil
 	}
+	// The picker was hidden behind Connecting while this navigation was
+	// pending: keys typed then must not replay as a selection or a close
+	// after the attachment returns to it.
+	if s.cfg.Picker != nil {
+		s.cfg.Picker.TakeOp()
+	}
+	s.pendingPickerKey = ""
 	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request}, SessionEnvironmentLocalCLI)
 }
 

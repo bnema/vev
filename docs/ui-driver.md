@@ -61,8 +61,10 @@ and it is stable for the whole run. `generation` is zero until a committed
 attachment publishes one; a client must wait for `status` to become `attached`
 and use the generation that publication reports, and never assume
 `generation == 1`. A broker that is absent or incompatible is not fatal: the
-driver stays in the picker with a bounded notice and keeps answering `capture`
-and `wait`.
+driver keeps answering `capture` and `wait`. A run that requested a session
+stays `connecting` while it retries and never shows the picker first; a
+`--picker` run, a refused destination, or a failure retrying cannot fix
+presents `picker` with a bounded notice.
 
 The stream then accepts one JSON object per line. Every request has `version`, a nonzero `id`, `op`, and the discovered `attachment`:
 
