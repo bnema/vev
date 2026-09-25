@@ -530,9 +530,15 @@ var closedWatchChan = func() <-chan struct{} {
 
 func closedChannel() <-chan struct{} { return closedWatchChan }
 
-// watchClosed reports whether a channel returned by Watch is already closed,
-// which means its stream is terminal or unknown and can never receive another
-// applied frame.
+// watchSettled reports whether a channel returned by Watch marks a terminal or
+// unknown stream. Only that case returns the shared closed channel: a live
+// stream's watch channel is also closed, by signalWatch, whenever a frame
+// arrives, so being closed alone never means the stream ended.
+func watchSettled(ch <-chan struct{}) bool { return ch == closedWatchChan }
+
+// watchClosed reports whether a signal channel is already closed. Use
+// watchSettled, not this, to tell whether a Watch channel marks a settled
+// stream.
 func watchClosed(ch <-chan struct{}) bool {
 	select {
 	case <-ch:

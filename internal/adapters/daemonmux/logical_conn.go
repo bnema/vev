@@ -551,9 +551,11 @@ func (s *muxStreamPipe) Read(p []byte) (int, error) {
 			s.mu.Unlock()
 			continue
 		}
-		if watchClosed(watch) {
-			// Watch returns an already-closed channel only for a terminal or
-			// unknown stream, so no further inbound chunk can ever be queued.
+		if watchSettled(watch) {
+			// The stream is terminal or unknown, so no further inbound chunk
+			// can ever be queued. A live stream's watch may also be closed
+			// already, by a frame that arrived after Take: the select below
+			// then returns at once and the loop takes it.
 			return 0, io.EOF
 		}
 		select {
