@@ -24,7 +24,7 @@ func TestPumpApplyOpenDuplicateIsolation(t *testing.T) {
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
 		// A queued outbound frame proves the duplicate Open neither resets the
 		// engine record nor discards the scheduler's queued work.
-		require.NoError(t, pump.Send(ServerMessage(Data{Physical: 1, Data: []byte("out")})))
+		require.NoError(t, pump.SendData(1, []byte("out"), nil))
 		before := mustStatus(t, pump.Engine(), 1)
 		watch := pump.Watch(1)
 

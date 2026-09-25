@@ -3,6 +3,8 @@ package brokeripc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/ports"
@@ -94,11 +96,24 @@ func admissionError(err error) error {
 }
 
 // errorDetail converts one broker failure into the bounded, presentation-safe
-// wire detail. The diagnostic cause stays local: only the typed code, bounded
-// display text, closed admission code, and sanitized failure kind travel.
+// wire detail. Causes stay local, except for a physical stream loss: its
+// failure kind and a sanitized, bounded description of the transport cause
+// travel as display text so the client can report why the attachment ended.
+// Otherwise only the typed code, bounded display text, and closed admission
+// code travel.
 func errorDetail(err error) brokerwire.ErrorDetail {
 	if err == nil {
 		return brokerwire.ErrorDetail{}
+	}
+	// A physical loss keeps its failure kind and a bounded description of the
+	// transport cause, so the client can report why the attachment ended.
+	var lost ports.BrokerStreamLost
+	if errors.As(err, &lost) && lost.Validate() == nil {
+		detail := brokerwire.ErrorDetail{Code: ports.BrokerErrorAttachmentLost, Text: lost.Cause.String()}
+		if lost.Err != nil {
+			detail.Text = boundedBrokerErrorText(fmt.Errorf("%s: %w", lost.Cause, lost.Err))
+		}
+		return detail
 	}
 	var failure ports.BrokerError
 	if errors.As(err, &failure) {
@@ -138,9 +153,9 @@ func errorDetail(err error) brokerwire.ErrorDetail {
 
 func boundedBrokerErrorText(err error) string {
 	const max = 256
-	text := err.Error()
+	text := ports.SanitizeBrokerDisplayText(err.Error())
 	if len(text) > max {
-		text = text[:max]
+		text = strings.ToValidUTF8(text[:max], "")
 	}
 	return text
 }

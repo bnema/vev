@@ -64,6 +64,7 @@ package daemonmux
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 
 	"github.com/bnema/vev/internal/domain"
@@ -89,6 +90,10 @@ type FramedCarrier interface {
 // ErrPumpConfig reports a pump constructed without a carrier or with an
 // unknown inbound direction.
 var ErrPumpConfig = errors.New("daemonmux: invalid pump configuration")
+
+// ErrDataNeedsCredit reports a Data frame handed to Send: stream data must go
+// through SendData so it is sent under the stream's flow-control credit.
+var ErrDataNeedsCredit = errors.New("daemonmux: stream data must be sent with SendData")
 
 // ErrAdmissionObserverLate reports an admission-observer registration attempted
 // after Start. The reader goroutine is already running and may have admitted an
@@ -310,7 +315,61 @@ func (p *Pump) Take(physical PhysicalStreamID) ([]byte, bool) {
 	if finalized {
 		p.signalWatch(physical)
 	}
+	if ok {
+		p.returnCredit(physical)
+	}
 	return chunk, ok
+}
+
+// returnCredit grants consumed inbound credit back to the peer once a batch
+// is due. A refusal for a settled stream is dropped; an aggregate overflow
+// resets the stream like any outbound overflow, because the lost grant would
+// otherwise leave the peer's writer short of credit forever.
+func (p *Pump) returnCredit(physical PhysicalStreamID) {
+	grant := p.engine.takeReturn(physical)
+	if grant == 0 || p.isTerminal() {
+		return
+	}
+	_ = p.enqueue(WindowUpdate{Physical: physical, Credit: grant})
+}
+
+// SendData sends one stream data chunk under the stream's flow-control
+// credit. It blocks while the peer has not granted enough credit, so a slow
+// network or a slow remote consumer slows the writer instead of resetting the
+// stream. It returns when the chunk is queued, the stream or the connection
+// settles, or cancel closes.
+func (p *Pump) SendData(physical PhysicalStreamID, chunk []byte, cancel <-chan struct{}) error {
+	if p == nil {
+		return ErrPumpConfig
+	}
+	for {
+		if p.isTerminal() {
+			return ErrPhysicalClosed
+		}
+		ok, wake, err := p.engine.reserveSend(physical, len(chunk))
+		if err != nil {
+			return err
+		}
+		if ok {
+			break
+		}
+		select {
+		case <-wake:
+		case <-cancel:
+			return ErrLogicalClosed
+		case <-p.Done():
+			return ErrPhysicalClosed
+		}
+	}
+	if p.isTerminal() {
+		p.engine.refundSend(physical, len(chunk))
+		return ErrPhysicalClosed
+	}
+	if err := p.enqueue(Data{Physical: physical, Data: chunk}); err != nil {
+		p.engine.refundSend(physical, len(chunk))
+		return err
+	}
+	return nil
 }
 
 // Ceilings returns the negotiated ceilings the pump enforces. The value is
@@ -471,9 +530,15 @@ var closedWatchChan = func() <-chan struct{} {
 
 func closedChannel() <-chan struct{} { return closedWatchChan }
 
-// watchClosed reports whether a channel returned by Watch is already closed,
-// which means its stream is terminal or unknown and can never receive another
-// applied frame.
+// watchSettled reports whether a channel returned by Watch marks a terminal or
+// unknown stream. Only that case returns the shared closed channel: a live
+// stream's watch channel is also closed, by signalWatch, whenever a frame
+// arrives, so being closed alone never means the stream ended.
+func watchSettled(ch <-chan struct{}) bool { return ch == closedWatchChan }
+
+// watchClosed reports whether a signal channel is already closed. Use
+// watchSettled, not this, to tell whether a Watch channel marks a settled
+// stream.
 func watchClosed(ch <-chan struct{}) bool {
 	select {
 	case <-ch:
@@ -490,8 +555,9 @@ func watchClosed(ch <-chan struct{}) bool {
 // values satisfy both. A wrong-direction value fails with ErrWrongDirection
 // before anything is encoded or queued, a message the codec refuses propagates
 // the codec's error, and a pump that already reached its terminal outcome
-// fails with ErrPhysicalClosed. On success the encoded bytes are immutable and
-// owned by the writer.
+// fails with ErrPhysicalClosed. Data is refused with ErrDataNeedsCredit:
+// stream data goes through SendData. On success the encoded bytes are
+// immutable and owned by the writer.
 //
 // An accepted Send only means the frame is queued, never that it reached the
 // wire: the writer drains asynchronously. Call Flush to wait until every
@@ -509,9 +575,19 @@ func (p *Pump) Send(message any) error {
 	if message == nil {
 		return ErrInvalidMessage
 	}
+	switch message.(type) {
+	case Data, *Data:
+		return ErrDataNeedsCredit
+	}
 	if p.isTerminal() {
 		return ErrPhysicalClosed
 	}
+	return p.enqueue(message)
+}
+
+// enqueue queues one validated outbound message on the scheduler in the
+// pump's local direction and isolates a stream-local overflow.
+func (p *Pump) enqueue(message any) error {
 	switch p.local {
 	case DirectionClient:
 		client, ok := message.(ClientMessage)
@@ -756,8 +832,16 @@ func (p *Pump) applyClient(message ClientMessage) error {
 		return p.applyClient(*m)
 	case Reset:
 		disposition, err := p.engine.Reset(m)
+		p.logPeerReset(m, disposition)
 		return p.applyStreamTerminal(m.Physical, disposition, err)
 	case *Reset:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return p.applyClient(*m)
+	case WindowUpdate:
+		return p.applyWindowUpdate(m)
+	case *WindowUpdate:
 		if m == nil {
 			return ErrInvalidMessage
 		}
@@ -848,8 +932,16 @@ func (p *Pump) applyServer(message ServerMessage) error {
 		return p.applyServer(*m)
 	case Reset:
 		disposition, err := p.engine.Reset(m)
+		p.logPeerReset(m, disposition)
 		return p.applyStreamTerminal(m.Physical, disposition, err)
 	case *Reset:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return p.applyServer(*m)
+	case WindowUpdate:
+		return p.applyWindowUpdate(m)
+	case *WindowUpdate:
 		if m == nil {
 			return ErrInvalidMessage
 		}
@@ -874,6 +966,25 @@ func (p *Pump) applyStreamTerminal(physical PhysicalStreamID, disposition Stream
 		p.maybeSignalFlush()
 	}
 	return nil
+}
+
+// logPeerReset records one stream the peer aborted, with the reason it sent.
+// A late reset for an already settled stream is not logged.
+func (p *Pump) logPeerReset(message Reset, disposition StreamDisposition) {
+	if disposition != StreamAccepted || !message.HasError {
+		return
+	}
+	slog.Warn("daemonmux_stream_reset", "side", p.local.String(), "stream", uint64(message.Physical), "initiator", "peer", "kind", message.Error.FailureKind.String(), "code", message.Error.Code.String(), "cause", message.Error.Text)
+}
+
+// applyWindowUpdate grows one stream's send credit. A credit violation resets
+// only that stream.
+func (p *Pump) applyWindowUpdate(message WindowUpdate) error {
+	_, err := p.engine.WindowUpdate(message)
+	if err == nil {
+		return nil
+	}
+	return p.applyStreamError(message.Physical, err)
 }
 
 // applyData queues one inbound chunk and classifies the engine's refusal.
@@ -917,6 +1028,7 @@ func (p *Pump) scheduleReset(physical PhysicalStreamID, cause error) {
 	}
 	detail := resetErrorDetail(cause)
 	reset := Reset{Physical: physical, Error: detail, HasError: true}
+	slog.Warn("daemonmux_stream_reset", "side", p.local.String(), "stream", uint64(physical), "initiator", "local", "kind", detail.FailureKind.String(), "cause", cause)
 	_, _ = p.engine.Reset(reset)
 	var err error
 	if p.local == DirectionServer {
@@ -941,6 +1053,7 @@ func (p *Pump) settleFailure(kind domain.RemoteFailureKind, cause error) {
 	p.termMu.Lock()
 	if !p.settled {
 		p.settled = true
+		slog.Warn("daemonmux_physical_failed", "side", p.local.String(), "kind", kind.String(), "live_streams", p.engine.Live(), "cause", cause)
 		p.terminal.Fail(kind, cause)
 		p.engine.Fail(kind, cause)
 	}
@@ -1025,10 +1138,9 @@ func openRefusalDetail(cause error) ErrorDetail {
 // response.
 func resetErrorDetail(cause error) ErrorDetail {
 	kind := domain.RemoteFailureInvalidResponse
-	if errors.Is(cause, ErrStreamQueueFull) || errors.Is(cause, ErrSchedulerFull) {
-		// A local byte-budget overflow is a transport-class abort in either
-		// direction: the stream was reset because a bounded queue could not
-		// hold the frame, not because the peer sent something invalid.
+	if errors.Is(cause, ErrSchedulerFull) {
+		// The local aggregate safety net: a transport-class abort, not an
+		// invalid peer frame.
 		kind = domain.RemoteFailureTransport
 	}
 	return ErrorDetail{

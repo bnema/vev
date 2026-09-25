@@ -747,7 +747,7 @@ func TestListenerMalformedStreamDoesNotStopAccept(t *testing.T) {
 	daemon.await(t, 1)
 
 	// The peer speaks garbage on the first frame of its stream.
-	require.NoError(t, h.brokerPump.Send(Data{Physical: 1, Data: []byte("not-a-session-frame")}))
+	require.NoError(t, h.brokerPump.SendData(1, []byte("not-a-session-frame"), nil))
 
 	malformed := requireStreamState(t, h.daemonPump, 1, StreamTerminal)
 	require.Equal(t, domain.RemoteFailureInvalidResponse, malformed.FailureKind)
@@ -928,7 +928,7 @@ func TestListenerConnectionPreambleFailureLeavesNoResidue(t *testing.T) {
 
 	// The peer's first frame is not a valid session preamble; the failed
 	// handshake closes the stream's carriage.
-	require.NoError(t, h.brokerPump.Send(Data{Physical: 1, Data: []byte("not-a-session-preamble")}))
+	require.NoError(t, h.brokerPump.SendData(1, []byte("not-a-session-preamble"), nil))
 	_, err := daemonConnection.ReceiveClient()
 	require.Error(t, err)
 
@@ -1042,7 +1042,7 @@ func TestListenerConnectionCloseDiscardsQueuedInboundReleasesAccounting(t *testi
 
 		// The broker sent one chunk the daemon never reads, so the stream holds
 		// accepted inbound data when the local Close arrives.
-		require.NoError(t, h.brokerPump.Send(Data{Physical: id, Data: chunk}))
+		require.NoError(t, h.brokerPump.SendData(id, chunk, nil))
 		requireEngineEventually(t, h.daemonPump, func(e *StreamEngine) bool { return e.AggregateBytes() > 0 },
 			"cycle %d: the accepted chunk was never queued", i)
 

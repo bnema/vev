@@ -581,12 +581,17 @@ func startRegistry(t *testing.T, r *Registry) context.CancelFunc {
 	return cancel
 }
 
+// registryTestWait bounds how long a test waits for an expected probe or
+// snapshot. It only delays a failing test, so it is generous for loaded
+// race-enabled CI runners.
+const registryTestWait = 5 * time.Second
+
 func receiveCall(t *testing.T, probe *testProbe) probeCall {
 	t.Helper()
 	select {
 	case call := <-probe.calls:
 		return call
-	case <-time.After(time.Second):
+	case <-time.After(registryTestWait):
 		t.Fatal("timed out waiting for probe")
 		return probeCall{}
 	}
@@ -607,7 +612,7 @@ func waitSnapshot(t *testing.T, r *Registry, predicate func(ports.BrokerSnapshot
 	t.Helper()
 	sub := r.Subscribe()
 	defer sub.Close()
-	deadline := time.After(time.Second)
+	deadline := time.After(registryTestWait)
 	for {
 		snapshot := r.Snapshot()
 		if predicate(snapshot) {

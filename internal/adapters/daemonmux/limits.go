@@ -81,7 +81,42 @@ const (
 	// MaxMuxAggregateBytes is the largest legal aggregate buffered-bytes
 	// ceiling: 64 MiB across every live stream of one physical connection.
 	MaxMuxAggregateBytes uint64 = 64 << 20
+
+	// MuxChunkCreditOverhead is the fixed credit one Data frame costs on top of
+	// its payload bytes. Charging it keeps a burst of tiny frames bounded in
+	// count as well as in bytes.
+	MuxChunkCreditOverhead uint64 = MuxEnvelopeOverheadBytes
+	// MaxMuxStreamWindowBytes caps one stream's receive window and every
+	// WindowUpdate grant.
+	MaxMuxStreamWindowBytes uint64 = 4 << 20
 )
+
+// chunkCredit is the flow-control cost of one Data frame of n payload bytes.
+func chunkCredit(n int) uint64 { return uint64(n) + MuxChunkCreditOverhead }
+
+// StreamWindow is the per-stream receive window both peers derive from the
+// same negotiated ceilings: the aggregate budget shared evenly across the
+// stream ceiling, never below one maximum chunk (a full chunk must always be
+// sendable) and never above MaxMuxStreamWindowBytes. With the default
+// ceilings it is 512 KiB. EffectiveMuxCeilings lowers the stream ceiling so
+// the one-chunk floor never pushes the sum of every live stream's window past
+// the aggregate: a conforming peer then never exceeds the aggregate budget.
+func (c MuxCeilings) StreamWindow() uint64 {
+	window := c.MaxAggregateBytes / max(c.MaxStreams, 1)
+	window = max(window, chunkCredit(int(c.StreamChunkLimit)))
+	return min(window, MaxMuxStreamWindowBytes)
+}
+
+// creditReturnThreshold is the consumed credit a receiver batches before it
+// grants a WindowUpdate: half the window, lowered when needed so a sender
+// blocked on a maximum chunk is always unblocked. A sender waits only once it
+// spent more than window-chunkCredit(limit), so granting at or below that
+// point can never deadlock.
+func (c MuxCeilings) creditReturnThreshold() uint64 {
+	window := c.StreamWindow()
+	cost := chunkCredit(int(c.StreamChunkLimit))
+	return max(min(window/2, window-cost+1), 1)
+}
 
 // ErrInvalidCeilings reports an advertisement outside its window: a zero,
 // below-floor, or above-ceiling envelope, chunk, stream-count, or aggregate
@@ -159,13 +194,21 @@ func DefaultMuxCeilings() MuxCeilings {
 // the local policy. Each field is independent, so a peer that offers less in
 // one dimension lowers only that dimension. Both inputs are assumed
 // individually valid; the minima of two valid advertisements is valid.
+//
+// The stream ceiling is then lowered, when needed, so every stream can hold a
+// full window of one maximum chunk inside the aggregate budget at once. Both
+// peers apply the same rule, so they agree on the result; the aggregate floor
+// admits at least one stream.
 func EffectiveMuxCeilings(local, remote MuxCeilings) MuxCeilings {
-	return MuxCeilings{
+	effective := MuxCeilings{
 		MaxReceiveEnvelopeBytes: min(local.MaxReceiveEnvelopeBytes, remote.MaxReceiveEnvelopeBytes),
 		StreamChunkLimit:        min(local.StreamChunkLimit, remote.StreamChunkLimit),
 		MaxStreams:              min(local.MaxStreams, remote.MaxStreams),
 		MaxAggregateBytes:       min(local.MaxAggregateBytes, remote.MaxAggregateBytes),
 	}
+	fair := effective.MaxAggregateBytes / chunkCredit(int(effective.StreamChunkLimit))
+	effective.MaxStreams = max(min(effective.MaxStreams, fair), MinMuxStreams)
+	return effective
 }
 
 // checkMuxCeilings refuses an invalid advertisement as a preamble refusal so

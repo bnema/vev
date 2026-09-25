@@ -17,12 +17,12 @@ import (
 
 // muxClientTags is the frozen client tag inventory.
 var muxClientTags = map[string]protoreflect.FieldNumber{
-	"open": 301, "data": 302, "close": 303, "reset": 304,
+	"open": 301, "data": 302, "close": 303, "reset": 304, "window_update": 305,
 }
 
 // muxServerTags is the frozen server tag inventory.
 var muxServerTags = map[string]protoreflect.FieldNumber{
-	"opened": 401, "refused": 402, "data": 403, "close": 404, "reset": 405,
+	"opened": 401, "refused": 402, "data": 403, "close": 404, "reset": 405, "window_update": 406,
 }
 
 func muxStreamRef() *MuxStreamRef {
@@ -59,20 +59,22 @@ func muxClientSamples() map[string]*MuxClientEnvelope {
 			Env:          []string{"TERM=xterm-256color", "LANG=C.UTF-8"},
 			Policy:       muxPolicy(),
 		}}},
-		"data":  {Payload: &MuxClientEnvelope_Data{Data: &MuxData{PhysicalStreamId: 5, Data: bytes.Repeat([]byte{0x66}, 24)}}},
-		"close": {Payload: &MuxClientEnvelope_Close{Close: &MuxClose{PhysicalStreamId: 5}}},
-		"reset": {Payload: &MuxClientEnvelope_Reset_{Reset_: &MuxReset{PhysicalStreamId: 5, Error: muxErrorDetail()}}},
+		"data":          {Payload: &MuxClientEnvelope_Data{Data: &MuxData{PhysicalStreamId: 5, Data: bytes.Repeat([]byte{0x66}, 24)}}},
+		"close":         {Payload: &MuxClientEnvelope_Close{Close: &MuxClose{PhysicalStreamId: 5}}},
+		"reset":         {Payload: &MuxClientEnvelope_Reset_{Reset_: &MuxReset{PhysicalStreamId: 5, Error: muxErrorDetail()}}},
+		"window_update": {Payload: &MuxClientEnvelope_WindowUpdate{WindowUpdate: &MuxWindowUpdate{PhysicalStreamId: 5, CreditBytes: 4096}}},
 	}
 }
 
 // muxServerSamples returns one populated envelope per server variant.
 func muxServerSamples() map[string]*MuxServerEnvelope {
 	return map[string]*MuxServerEnvelope{
-		"opened":  {Payload: &MuxServerEnvelope_Opened{Opened: &MuxOpened{Ref: muxStreamRef()}}},
-		"refused": {Payload: &MuxServerEnvelope_Refused{Refused: &MuxRefused{Ref: muxStreamRef(), Error: muxErrorDetail()}}},
-		"data":    {Payload: &MuxServerEnvelope_Data{Data: &MuxData{PhysicalStreamId: 5, Data: bytes.Repeat([]byte{0x77}, 24)}}},
-		"close":   {Payload: &MuxServerEnvelope_Close{Close: &MuxClose{PhysicalStreamId: 5}}},
-		"reset":   {Payload: &MuxServerEnvelope_Reset_{Reset_: &MuxReset{PhysicalStreamId: 5}}},
+		"opened":        {Payload: &MuxServerEnvelope_Opened{Opened: &MuxOpened{Ref: muxStreamRef()}}},
+		"refused":       {Payload: &MuxServerEnvelope_Refused{Refused: &MuxRefused{Ref: muxStreamRef(), Error: muxErrorDetail()}}},
+		"data":          {Payload: &MuxServerEnvelope_Data{Data: &MuxData{PhysicalStreamId: 5, Data: bytes.Repeat([]byte{0x77}, 24)}}},
+		"close":         {Payload: &MuxServerEnvelope_Close{Close: &MuxClose{PhysicalStreamId: 5}}},
+		"reset":         {Payload: &MuxServerEnvelope_Reset_{Reset_: &MuxReset{PhysicalStreamId: 5}}},
+		"window_update": {Payload: &MuxServerEnvelope_WindowUpdate{WindowUpdate: &MuxWindowUpdate{PhysicalStreamId: 5, CreditBytes: 4096}}},
 	}
 }
 

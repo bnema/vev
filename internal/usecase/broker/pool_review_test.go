@@ -171,6 +171,37 @@ func TestPoolTerminalPrecedence(t *testing.T) {
 	}
 }
 
+// TestPoolRetiredEntryNamesReason proves a stream ended by an entry retirement
+// carries the retirement reason, not a bare attachment_lost.
+func TestPoolRetiredEntryNamesReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason error
+	}{
+		{"idle", errEntryIdle},
+		{"evicted", errEntryEvicted},
+		{"abandoned", errEntryAbandoned},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := setupPool(t, func(context.Context, ports.BrokerDialTarget) (ports.BrokerPhysicalConnection, error) {
+				panic("unused")
+			})
+			ctx, cancel := context.WithCancelCause(context.Background())
+			e := &poolEntry{ctx: ctx, cancel: cancel, physical: &fakePhysical{done: make(chan struct{})}}
+			e.retire(tc.reason)()
+
+			err := p.streamTerminal(context.Background(), e, poolRequest(ports.BrokerConnectionID{1}, 1), nil)
+			var typed ports.BrokerError
+			require.ErrorAs(t, err, &typed)
+			require.Equal(t, ports.BrokerErrorAttachmentLost, typed.Code)
+			require.Equal(t, tc.reason.Error(), typed.Text)
+			require.NoError(t, typed.Validate())
+			require.ErrorIs(t, err, tc.reason)
+		})
+	}
+}
+
 // Reset deliberately does not drain, matching older buffered timer adapters.
 type bufferedPoolTimer struct {
 	ch     chan time.Time

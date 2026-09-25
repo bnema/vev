@@ -551,9 +551,11 @@ func (s *muxStreamPipe) Read(p []byte) (int, error) {
 			s.mu.Unlock()
 			continue
 		}
-		if watchClosed(watch) {
-			// Watch returns an already-closed channel only for a terminal or
-			// unknown stream, so no further inbound chunk can ever be queued.
+		if watchSettled(watch) {
+			// The stream is terminal or unknown, so no further inbound chunk
+			// can ever be queued. A live stream's watch may also be closed
+			// already, by a frame that arrived after Take: the select below
+			// then returns at once and the loop takes it.
 			return 0, io.EOF
 		}
 		select {
@@ -569,8 +571,10 @@ func (s *muxStreamPipe) Read(p []byte) (int, error) {
 }
 
 // Write splits p into ordered chunks at or below the negotiated chunk ceiling
-// and sends each as one Data frame. It reports the bytes fully sent before an
-// error.
+// and sends each as one Data frame under the stream's flow-control credit: it
+// blocks while the peer has not granted credit, so a slow link slows the
+// writer instead of resetting the stream. It reports the bytes fully sent
+// before an error.
 func (s *muxStreamPipe) Write(p []byte) (int, error) {
 	written := 0
 	for len(p) > 0 {
@@ -581,8 +585,8 @@ func (s *muxStreamPipe) Write(p []byte) (int, error) {
 		if uint64(n) > s.limit {
 			n = int(s.limit)
 		}
-		if err := s.pump.Send(Data{Physical: s.id, Data: p[:n]}); err != nil {
-			if s.closed() {
+		if err := s.pump.SendData(s.id, p[:n], s.done); err != nil {
+			if s.closed() || errors.Is(err, errStreamSettled) {
 				return written, ErrLogicalClosed
 			}
 			return written, err

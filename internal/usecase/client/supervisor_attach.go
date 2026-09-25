@@ -36,6 +36,10 @@ func attachmentTimeoutError(cause error) error {
 	return ports.BrokerError{Code: ports.BrokerErrorTimeout, Text: "attachment timed out", Cause: cause}
 }
 
+// errResumeForegroundBusy ends a resume whose reattach could not claim the
+// terminal foreground.
+var errResumeForegroundBusy = ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "resume could not claim the terminal"}
+
 // attachmentDeadline owns the one absolute deadline of a whole attachment. It
 // is safe for concurrent use: its timer goroutine expires it while the
 // supervisor's run goroutine may adopt a later deadline after the stream opens.
@@ -550,11 +554,64 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
+	defer func() { s.resuming, s.resumeErr, s.resume = false, nil, nil }()
+	resumes := 0
 	for {
+		s.resumeErr = nil
+		attemptStart := s.cfg.Clock.Now()
 		terminated, termErr, swap := s.attachOnce(ctx, input, service, target, localProvenance)
-		if terminated || swap == nil {
+		if terminated {
 			return terminated, termErr
 		}
+		if swap == nil {
+			resume := s.resume
+			s.resume = nil
+			switch {
+			case resume != nil:
+				// A live attachment was lost. One that stayed up long enough
+				// starts a fresh resume budget; one that drops right after
+				// attaching keeps counting, so a flapping session gives up.
+				if s.cfg.Clock.Now().Sub(attemptStart) >= resumeStableAttachment {
+					resumes = 0
+				}
+			case s.resuming && s.resumeErr != nil:
+				// A resume attempt hit a transport-class failure before
+				// attaching (the route or destination is still down): try the
+				// same target again.
+				retry := target
+				resume = &retry
+			default:
+				// No resume, or the attempt already presented a final outcome
+				// (session gone, ended, refused).
+				return false, nil
+			}
+			lastErr := s.resumeErr
+			resumes++
+			if resumes > maxAttachmentResumes {
+				s.logger.Warn("client_attachment_resume_exhausted", "endpoint", resume.request.Endpoint, "session", resume.request.Target.SessionName, "attempts", resumes-1, "error", lastErr)
+				s.resuming = false
+				s.transition(supervisorEvent{kind: supervisorAttachEnded, err: lastErr})
+				s.notifyLifecycle(LifecycleNoticeDestinationFailed)
+				s.notifyAttachment(lastErr)
+				return false, nil
+			}
+			s.resuming = true
+			if terminated, termErr, brokerLost := s.waitResume(ctx, input, service, resumes); terminated || brokerLost {
+				return terminated, termErr
+			}
+			stream, err := service.NextStreamID()
+			if err != nil {
+				s.resuming = false
+				s.reportAttachmentFailure(err)
+				return false, nil
+			}
+			resume.request.Stream = stream
+			s.logger.Info("client_attachment_resume", "endpoint", resume.request.Endpoint, "session", resume.request.Target.SessionName, "attempt", resumes)
+			target = *resume
+			continue
+		}
+		resumes = 0
+		s.resuming = false
 		// A commit from the picker overlay to another target: the previous
 		// attachment detached cleanly, and the swap goes through Connecting
 		// exactly like any committed selection. The stream identity is
@@ -642,6 +699,13 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		// Another foreground owns the terminal, or the shared reader is
 		// claimed. Begin never closes the stream, so the supervisor does.
 		_ = stream.Close()
+		if s.resuming {
+			// A resume must say why it stopped instead of dropping silently
+			// to the picker.
+			s.resuming = false
+			s.reportAttachmentFailure(errResumeForegroundBusy)
+			return false, nil
+		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return false, nil
 	}
@@ -739,6 +803,9 @@ settlement:
 	}
 	if deadline.TimedOut() && !result.adopted {
 		timeout := attachmentTimeoutError(errAttachmentDeadline)
+		if s.deferResumeFailure(timeout) {
+			return false, nil
+		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: timeout})
 		s.notifyAttachment(timeout)
 		return false, nil
@@ -755,8 +822,25 @@ settlement:
 		s.notifyLifecycle(LifecycleNoticeDetachToPicker)
 		return false, nil
 	}
+	if result.adopted && result.event.Kind == AttachmentEventLost && run.fg.Attached() {
+		// The stream carrying a live attachment was lost while the broker stayed
+		// up. The daemon parks the session for resume, so reconnect to the exact
+		// session and tab that were showing instead of dropping to the picker.
+		if resume, ok := resumeTarget(request, run.fg); ok {
+			s.logger.Warn("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String(), "error", result.event.Err, "cause", errors.Unwrap(result.event.Err), "resume", true)
+			s.resume = &resume
+			s.resumeErr = result.event.Err
+			return false, nil
+		}
+	}
 	if result.adopted && (result.event.Kind == AttachmentEventLost || result.event.Kind == AttachmentEventFailed) {
 		s.logger.Warn("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String(), "error", result.event.Err, "cause", errors.Unwrap(result.event.Err))
+		// A resume attempt whose stream was lost before attaching is still a
+		// transport failure: retry instead of presenting it.
+		if result.event.Kind == AttachmentEventLost && s.resuming {
+			s.resumeErr = result.event.Err
+			return false, nil
+		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: result.event.Err})
 		s.notifyLifecycle(LifecycleNoticeDestinationFailed)
 		s.notifyAttachment(result.event.Err)
@@ -774,8 +858,96 @@ settlement:
 	return false, nil
 }
 
-// reportAttachmentFailure returns to the picker with a typed, visible failure.
+// maxAttachmentResumes bounds how many times one lost attachment reconnects
+// before the client gives up and returns to the picker. With the supervisor
+// backoff this spans a few seconds, enough to ride out a transient drop.
+const maxAttachmentResumes = 5
+
+// resumeStableAttachment is how long a resumed attachment must stay up before
+// its next loss gets a fresh resume budget.
+const resumeStableAttachment = 30 * time.Second
+
+// resumeTarget builds the exact reattach request for a lost attachment: the
+// session and tab it last committed, over the same local or remote route. A
+// foreground that never committed a session has nothing to resume.
+func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForeground) (pickerAttachmentTarget, bool) {
+	target, tab, known := fg.committedSnapshot()
+	if !known || target.Validate() != nil {
+		return pickerAttachmentTarget{}, false
+	}
+	resume := request
+	resume.Admission = ports.BrokerAdmissionExact
+	resume.Target = target
+	resume.Name = ""
+	return pickerAttachmentTarget{request: resume, tab: attachmentTab{preferred: tab}}, true
+}
+
+// waitResume presents Connecting and waits one backoff interval before the
+// next resume attempt. It settles early on cancellation or terminal EOF
+// (terminated), or on broker loss, which ends the resume and leaves the ready
+// loop to observe and retire the connection.
+func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, attempt int) (terminated bool, termErr error, brokerLost bool) {
+	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
+	timer := s.cfg.Clock.NewTimer(delay)
+	defer stopSupervisorTimer(timer)
+	for {
+		select {
+		case <-timer.C():
+			return false, nil, false
+		case <-ctx.Done():
+			return true, ctx.Err(), false
+		case err := <-input.EOF():
+			return true, terminalReadCause(err), false
+		case <-service.Done():
+			s.transition(supervisorEvent{kind: supervisorAttachEnded})
+			return false, nil, true
+		case <-s.presentationInvalidation():
+			s.renderResizeInvalidation()
+		case <-s.spinnerTick():
+			s.cfg.Spinner.AdvanceSpinner(s.State())
+		}
+	}
+}
+
+// deferResumeFailure records a transport-class failure of a resume attempt so
+// runResolvedAttachment retries it while Connecting stays up. Any other
+// failure, or a failure outside a resume, is presented by the caller.
+func (s *Supervisor) deferResumeFailure(err error) bool {
+	if !s.resuming || !resumableFailure(err) {
+		return false
+	}
+	s.logger.Info("client_attachment_resume_failed", "code", brokerErrorCode(err), "error", err, "cause", errors.Unwrap(err))
+	s.resumeErr = err
+	return true
+}
+
+// resumableFailure reports whether a resume attempt failed for a transport
+// reason worth retrying. Refusals, protocol failures, and an ambiguous outcome
+// are final.
+func resumableFailure(err error) bool {
+	var lost ports.BrokerStreamLost
+	if errors.As(err, &lost) {
+		return true
+	}
+	var typed ports.BrokerError
+	if !errors.As(err, &typed) {
+		return false
+	}
+	switch typed.Code {
+	case ports.BrokerErrorUnavailable, ports.BrokerErrorTimeout, ports.BrokerErrorAttachmentLost:
+		return true
+	default:
+		return false
+	}
+}
+
+// reportAttachmentFailure returns to the picker with a typed, visible failure,
+// unless a resume attempt defers it for a retry.
 func (s *Supervisor) reportAttachmentFailure(err error) {
+	if s.deferResumeFailure(err) {
+		return
+	}
 	s.transition(supervisorEvent{kind: supervisorAttachEnded, err: err})
 	// Classification order matters: a local refusal never dialed a destination,
 	// so it must not be reported as one, and only a genuinely unknown outcome

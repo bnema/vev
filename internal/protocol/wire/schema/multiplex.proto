@@ -4,13 +4,13 @@
 //
 // daemonmux is a third conversation, separate from the session protocol
 // (tags 1-32) and the broker protocol (client 101-111, server 201-209):
-// client tags 301-304 and server tags 401-405 are disjoint from every other
+// client tags 301-305 and server tags 401-406 are disjoint from every other
 // tag, and each direction is its own closed oneof union. The physical
 // preamble is a separate adapter message pair, not an envelope variant:
 // roles 5/6 negotiate the per-connection ceilings, the authenticated daemon
 // identity, and the accepted policy once, before any application message.
 //
-// MuxData, MuxClose, and MuxReset are shared payloads carried in both
+// MuxData, MuxClose, MuxReset, and MuxWindowUpdate are shared payloads carried in both
 // directions; MuxOpen carries the full stream identity, and every later
 // frame is routed by physical_stream_id alone.
 syntax = "proto3";
@@ -95,6 +95,18 @@ message MuxReset {
   BrokerErrorDetail error = 2;
 }
 
+// MuxWindowUpdate returns receive credit for one logical stream in either
+// direction: the receiver consumed MuxData frames worth `credit_bytes` credit
+// bytes, so the sender may spend that many more. One MuxData frame costs its
+// payload length plus 64 credit bytes. Each stream starts with the same window
+// on both sides, derived from the negotiated ceilings; a sender never has more
+// credit in flight than its window, so a slow receiver slows the sender
+// instead of overflowing its queue.
+message MuxWindowUpdate {
+  uint64 physical_stream_id = 1;
+  uint64 credit_bytes = 2;
+}
+
 // MuxClientEnvelope is the closed broker-to-daemon mux union. Exactly one
 // variant must be set per envelope; empty, duplicate, and wrong-direction
 // payloads are rejected before generated unmarshal.
@@ -104,6 +116,7 @@ message MuxClientEnvelope {
     MuxData data = 302;
     MuxClose close = 303;
     MuxReset reset = 304;
+    MuxWindowUpdate window_update = 305;
   }
 }
 
@@ -116,6 +129,7 @@ message MuxServerEnvelope {
     MuxData data = 403;
     MuxClose close = 404;
     MuxReset reset = 405;
+    MuxWindowUpdate window_update = 406;
   }
 }
 

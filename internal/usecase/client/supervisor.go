@@ -442,6 +442,17 @@ type Supervisor struct {
 	// target while an attachment was live. It is only touched from the run
 	// goroutine and consumed by runResolvedAttachment.
 	pendingSwap *pickerAttachmentTarget
+	// resume is the exact target a lost attachment reconnects to, set by
+	// settleAttachment and consumed by runResolvedAttachment. It is only
+	// touched from the run goroutine.
+	resume *pickerAttachmentTarget
+	// resuming is true while runResolvedAttachment reconnects a lost
+	// attachment; transport-class failures of those attempts are recorded in
+	// resumeErr instead of being presented, so a retry stays on Connecting.
+	// resumeErr also carries the loss that started the resume. Both are only
+	// touched from the run goroutine.
+	resuming  bool
+	resumeErr error
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
 	// routes is the client route ledger published to the serving daemon;

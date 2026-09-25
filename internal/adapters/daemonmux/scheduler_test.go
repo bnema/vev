@@ -36,12 +36,23 @@ func countActive(scheduler *Scheduler, ids []PhysicalStreamID) int {
 	return active
 }
 
+// overflowOne queues one small frame for id and then overflows the aggregate
+// bound with a frame the budget cannot hold, so id's record is overflowed and
+// empty. The aggregate is restored for the next caller.
+func overflowOne(t *testing.T, scheduler *Scheduler, id PhysicalStreamID) {
+	t.Helper()
+	saved := scheduler.maxAggregateBytes
+	defer func() { scheduler.maxAggregateBytes = saved }()
+	require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("a")}))
+	scheduler.maxAggregateBytes = scheduler.AggregateBytes()
+	require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("b")}), ErrSchedulerFull)
+}
+
 // TestSchedulerConstants pins the negotiated bounds the scheduler is specified
 // to enforce.
 func TestSchedulerConstants(t *testing.T) {
-	require.Equal(t, 8, MaxMuxStreamQueueChunks)
-	require.Equal(t, 32<<20, MaxMuxStreamQueueBytes)
 	require.Equal(t, 64<<20, int(MaxMuxAggregateBytes))
+	require.Equal(t, uint64(512<<10), DefaultMuxCeilings().StreamWindow())
 	require.Equal(t, int64(64<<10), SchedulerQuantum)
 	require.Equal(t, 4, MaxMuxSchedulerControlBurst)
 }
@@ -180,8 +191,9 @@ func TestSchedulerStalledAndHotStream(t *testing.T) {
 
 	// The hot stream keeps a maximal backlog; the siblings are refilled to full
 	// whenever the round drains a slot.
+	const backlog = 8
 	fill := func(id PhysicalStreamID, seed byte) {
-		for scheduler.QueuedFrames(id) < MaxMuxStreamQueueChunks {
+		for scheduler.QueuedFrames(id) < backlog {
 			require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte{seed}}))
 		}
 	}
@@ -315,45 +327,9 @@ func TestSchedulerResetDiscard(t *testing.T) {
 	require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: 3, Data: []byte("x")}), ErrSchedulerSettled)
 }
 
-// TestSchedulerAggregateAndPerStreamCaps proves each bound discards exactly the
+// TestSchedulerAggregateCap proves the aggregate bound discards exactly the
 // offending stream and leaves its siblings' budget intact.
-func TestSchedulerAggregateAndPerStreamCaps(t *testing.T) {
-	t.Run("per-stream frame bound", func(t *testing.T) {
-		_, scheduler, ids := testScheduler(t, 2)
-		for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-			require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: []byte{byte(i)}}))
-		}
-		require.Equal(t, MaxMuxStreamQueueChunks, scheduler.QueuedFrames(ids[0]))
-
-		require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: []byte("x")}), ErrSchedulerFull)
-		require.Zero(t, scheduler.QueuedFrames(ids[0]))
-		require.Zero(t, scheduler.QueuedBytes(ids[0]))
-		// The overflowed record is not yet sealed: data stays refused with the
-		// overflow sentinel until its one terminal Close or Reset is enqueued.
-		require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: []byte("y")}), ErrSchedulerFull)
-
-		require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[1], Data: []byte("sibling")}))
-		require.Equal(t, scheduler.QueuedBytes(ids[1]), scheduler.AggregateBytes())
-	})
-
-	t.Run("per-stream byte bound", func(t *testing.T) {
-		_, scheduler, ids := testScheduler(t, 1)
-		payload := make([]byte, 300)
-		require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: payload}))
-		unit := scheduler.QueuedBytes(ids[0])
-		require.Positive(t, unit)
-
-		scheduler.maxStreamFrames = 100
-		scheduler.maxStreamBytes = unit * 3
-		for i := 0; i < 2; i++ {
-			require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: payload}))
-		}
-		require.Equal(t, unit*3, scheduler.QueuedBytes(ids[0]))
-
-		require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: payload}), ErrSchedulerFull)
-		require.Zero(t, scheduler.AggregateBytes())
-	})
-
+func TestSchedulerAggregateCap(t *testing.T) {
 	t.Run("aggregate byte bound", func(t *testing.T) {
 		_, scheduler, ids := testScheduler(t, 3)
 		payload := make([]byte, 300)
@@ -361,8 +337,6 @@ func TestSchedulerAggregateAndPerStreamCaps(t *testing.T) {
 		unit := scheduler.QueuedBytes(ids[0])
 		require.Positive(t, unit)
 
-		scheduler.maxStreamFrames = 100
-		scheduler.maxStreamBytes = unit * 100
 		scheduler.maxAggregateBytes = unit * 3
 
 		require.NoError(t, scheduler.EnqueueClient(Data{Physical: ids[0], Data: payload}))
@@ -561,8 +535,6 @@ func TestNewSchedulerWithCeilings(t *testing.T) {
 		// the offending stream and frees its budget.
 		scheduler, err := NewSchedulerWithCeilings(nil, probeCeiling)
 		require.NoError(t, err)
-		scheduler.maxStreamFrames = 100
-		scheduler.maxStreamBytes = unit * 100
 		scheduler.maxAggregateBytes = unit * 2
 		// The negotiated chunk ceiling is refused statelessly.
 		require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: 1, Data: make([]byte, 9)}), ErrTooLarge)
@@ -610,11 +582,12 @@ func TestSchedulerTerminalBypass(t *testing.T) {
 		engine := testEngine()
 		scheduler := NewScheduler(engine)
 		openTestStream(t, engine, 1)
-		for i := 0; i < MaxMuxStreamQueueChunks; i++ {
-			_, err := engine.Data(Data{Physical: 1, Data: []byte{byte(i)}})
+		chunk, full := floodWindow(DefaultMuxCeilings())
+		for i := 0; i < full; i++ {
+			_, err := engine.Data(Data{Physical: 1, Data: chunk})
 			require.NoError(t, err)
 		}
-		_, err := engine.Data(Data{Physical: 1, Data: []byte{'x'}})
+		_, err := engine.Data(Data{Physical: 1, Data: chunk})
 		require.ErrorIs(t, err, ErrStreamQueueFull)
 		require.Equal(t, StreamTerminal, mustStatus(t, engine, 1).State)
 
@@ -746,8 +719,8 @@ func TestSchedulerOverflowAllowsOneTerminal(t *testing.T) {
 		t.Run(terminal.name, func(t *testing.T) {
 			_, scheduler, ids := testScheduler(t, 1)
 			id := ids[0]
-			scheduler.maxStreamFrames = 2
 			require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("a")}))
+			scheduler.maxAggregateBytes = 2 * scheduler.AggregateBytes()
 			require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("b")}))
 			require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("c")}), ErrSchedulerFull)
 			require.Zero(t, scheduler.QueuedFrames(id))
@@ -779,12 +752,10 @@ func TestSchedulerOverflowAllowsOneTerminal(t *testing.T) {
 // MaxRetiredSchedulerRecords.
 func TestSchedulerOverflowRecordsBounded(t *testing.T) {
 	scheduler := NewScheduler(nil)
-	scheduler.maxStreamFrames = 1
 	const churn = MaxRetiredSchedulerRecords * 4
 	for i := 1; i <= churn; i++ {
 		id := PhysicalStreamID(i)
-		require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("a")}))
-		require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("b")}), ErrSchedulerFull)
+		overflowOne(t, scheduler, id)
 	}
 	require.LessOrEqual(t, len(scheduler.streams), MaxRetiredSchedulerRecords)
 	require.Zero(t, scheduler.AggregateBytes())
@@ -799,14 +770,12 @@ func TestSchedulerOverflowRecordsBounded(t *testing.T) {
 // stream table to the configured bound.
 func TestSchedulerOverflowTerminalReclaimsRetiredRecords(t *testing.T) {
 	scheduler := NewScheduler(nil)
-	scheduler.maxStreamFrames = 1
 	const churn = MaxRetiredSchedulerRecords + 64
 
 	for i := 1; i <= churn; i++ {
 		id := PhysicalStreamID(i)
-		require.NoError(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("a")}))
 		// Overflow the queue so the record is retired while still empty.
-		require.ErrorIs(t, scheduler.EnqueueClient(Data{Physical: id, Data: []byte("b")}), ErrSchedulerFull)
+		overflowOne(t, scheduler, id)
 		// The one terminal the overflow leaves open lands while the record sits
 		// in the retired list; later streams force it past the bound.
 		require.NoError(t, scheduler.EnqueueClient(Reset{Physical: id}))

@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -64,9 +63,8 @@ func TestP54AttachmentOutcomesReturnToPicker(t *testing.T) {
 		// the client instead of returning to the picker.
 		{name: "server shutdown", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonServerShutdown}) }, notice: LifecycleNoticeSessionEnded},
 		{name: "session deletion", settle: func(s *sessionTestStream) { s.deliver(protocol.Detached{Reason: protocol.ReasonSessionKilled}) }, notice: LifecycleNoticeSessionEnded},
-		{name: "destination failure", settle: func(s *sessionTestStream) {
-			s.fail(ports.BrokerStreamLost{Connection: ports.BrokerConnectionID{1}, Stream: 1, Epoch: 3, Cause: domain.RemoteFailureTransport, Err: errors.New("private diagnostic")})
-		}, notice: LifecycleNoticeDestinationFailed},
+		// A stream loss after attachment resumes the same session instead:
+		// TestSupervisorAttachmentLossResumesSameSession pins that path.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			picker := newAttachTestPicker()

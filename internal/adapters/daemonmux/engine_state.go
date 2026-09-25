@@ -33,17 +33,22 @@
 // that always discards the queue immediately. Neither Close nor Reset ever
 // terminalizes the physical connection or a sibling stream.
 //
-// The inbound queue is bounded, and bytes are charged against every budget
-// before the chunk is copied into the queue: at most MaxMuxStreamQueueChunks
-// chunks and MaxMuxStreamQueueBytes bytes per stream, the negotiated aggregate
-// ceiling (MuxCeilings.MaxAggregateBytes) across the connection, and the
-// negotiated chunk ceiling (MuxCeilings.StreamChunkLimit) per chunk. A chunk
-// above the negotiated chunk ceiling is refused statelessly with ErrTooLarge
-// and mutates nothing, exactly as the codec refuses it. A chunk that would
-// exceed a queue bound resets exactly that stream and releases the bytes it
-// held; sibling streams keep their budget and keep progressing. The per-stream
-// byte bound is defensive: the codec already refuses a chunk above the
-// negotiated chunk ceiling, so a conforming caller never reaches it.
+// Every stream is credit flow controlled in both directions. Each side starts
+// with the same per-stream window (MuxCeilings.StreamWindow) of send credit; a
+// Data frame costs its payload plus a fixed overhead (chunkCredit), and the
+// receiver returns credit with WindowUpdate as its consumer takes chunks. A
+// conforming sender therefore waits for credit instead of overrunning the
+// receiver, so a slow network or a slow consumer only slows the stream.
+//
+// The inbound queue is bounded by that same window, and bytes are charged
+// against every budget before the chunk is copied into the queue: the stream
+// window per stream, the negotiated aggregate ceiling
+// (MuxCeilings.MaxAggregateBytes) across the connection, and the negotiated
+// chunk ceiling (MuxCeilings.StreamChunkLimit) per chunk. A chunk above the
+// negotiated chunk ceiling is refused statelessly with ErrTooLarge and mutates
+// nothing, exactly as the codec refuses it. A chunk beyond the window is a
+// peer flow-control violation: it resets exactly that stream and releases the
+// bytes it held; sibling streams keep their budget and keep progressing.
 //
 // Terminal publication is deliberately ordered: a physical terminal outcome
 // publishes its own Done first and only then terminalizes every live stream
@@ -71,15 +76,8 @@ import (
 
 // Stream queue bounds. The stream-count and aggregate-bytes ceilings are the
 // negotiated maxima from limits.go (MaxMuxStreams, MaxMuxAggregateBytes); the
-// per-stream chunk and byte ceilings are engine-local.
+// per-stream bound is the flow-control window (MuxCeilings.StreamWindow).
 const (
-	// MaxMuxStreamQueueChunks bounds the inbound chunks queued for one stream.
-	MaxMuxStreamQueueChunks = 8
-	// MaxMuxStreamQueueBytes bounds the inbound bytes queued for one stream:
-	// 32 MiB. It is only reachable by a caller that hands the engine a chunk
-	// above the negotiated chunk ceiling, which the codec already refuses.
-	MaxMuxStreamQueueBytes = 32 << 20
-
 	// MaxRetiredStreamRecords bounds the settled stream records one engine
 	// retains so a late frame is still classified as retired instead of
 	// mistaken for a future stream. It mirrors the negotiated stream ceiling
@@ -109,9 +107,17 @@ var (
 	// ErrStreamRefMismatch reports an Opened or Refused whose full stream
 	// reference does not match the one recorded at admission.
 	ErrStreamRefMismatch = errors.New("daemonmux: stream reference mismatch")
-	// ErrStreamQueueFull reports an inbound chunk that would exceed a queue
-	// bound. The offending stream is reset and its budget released.
-	ErrStreamQueueFull = errors.New("daemonmux: stream queue overflow")
+	// ErrStreamQueueFull reports an inbound chunk the peer sent beyond the
+	// credit it was granted, or beyond the aggregate budget. It is a peer
+	// flow-control violation: the offending stream is reset and its budget
+	// released.
+	ErrStreamQueueFull = errors.New("daemonmux: stream receive window exceeded")
+	// ErrStreamCredit reports a WindowUpdate that would grow the send credit
+	// past the stream window: a peer flow-control violation.
+	ErrStreamCredit = errors.New("daemonmux: stream credit exceeds window")
+	// errStreamSettled reports a local send on a stream that already reached
+	// its terminal state.
+	errStreamSettled = errors.New("daemonmux: stream is settled")
 	// ErrPhysicalClosed reports admission or stream work presented to a
 	// physical connection that already reached its terminal outcome.
 	ErrPhysicalClosed = errors.New("daemonmux: physical connection is closed")
@@ -190,6 +196,9 @@ type StreamStatus struct {
 	// and bytes.
 	QueuedChunks int
 	QueuedBytes  int
+	// SendCredit is the remaining outbound credit in credit bytes: payload
+	// plus MuxChunkCreditOverhead per Data frame (see chunkCredit).
+	SendCredit uint64
 }
 
 // muxStream is one tracked logical stream. Every field is guarded by the
@@ -203,14 +212,25 @@ type muxStream struct {
 	bytes    int
 	refused  bool
 	refusal  ErrorDetail
+
+	// recvUsed is the inbound credit the peer spent that has not been
+	// returned yet: queued chunks plus consumed chunks awaiting a
+	// WindowUpdate. It never exceeds the window for a conforming peer.
+	recvUsed uint64
+	// recvReturn is consumed credit not yet granted back to the peer.
+	recvReturn uint64
+	// sendCredit is the outbound credit this side may still spend.
+	sendCredit uint64
+	// creditWake closes and is replaced whenever sendCredit grows or the
+	// stream settles, so a blocked writer wakes without polling.
+	creditWake chan struct{}
 }
 
 // StreamEngine is the in-memory stream table and admission authority of one
 // physical daemon connection. It is safe for concurrent use. It owns no I/O.
 // The admission, chunk, and aggregate budgets are copied from the negotiated
-// MuxCeilings at construction; the per-stream queue bounds are engine-local.
-// They are fields so the engine's private ceilings are fixed per instance and
-// a test can tighten them.
+// MuxCeilings at construction, and the per-stream window is derived from
+// them. They are fields so the ceilings are fixed per instance.
 type StreamEngine struct {
 	mu        sync.Mutex
 	physical  *terminalState
@@ -222,8 +242,8 @@ type StreamEngine struct {
 
 	maxStreams        int
 	maxChunkBytes     uint64
-	maxStreamBytes    int
-	maxStreamFrames   int
+	window            uint64
+	returnAt          uint64
 	maxAggregateBytes int
 
 	// restricted, when set, binds every fresh inbound Open to the exact
@@ -255,8 +275,8 @@ func newStreamEngine(ceilings MuxCeilings) *StreamEngine {
 		streams:           make(map[PhysicalStreamID]*muxStream, int(ceilings.MaxStreams)),
 		maxStreams:        int(ceilings.MaxStreams),
 		maxChunkBytes:     ceilings.StreamChunkLimit,
-		maxStreamBytes:    MaxMuxStreamQueueBytes,
-		maxStreamFrames:   MaxMuxStreamQueueChunks,
+		window:            ceilings.StreamWindow(),
+		returnAt:          ceilings.creditReturnThreshold(),
 		maxAggregateBytes: int(ceilings.MaxAggregateBytes),
 	}
 }
@@ -383,7 +403,7 @@ func (e *StreamEngine) Open(msg Open) error {
 	if e.live >= e.maxStreams {
 		return ErrTooManyStreams
 	}
-	e.streams[id] = &muxStream{ref: msg.Ref, state: StreamOpening, terminal: newTerminalState()}
+	e.streams[id] = &muxStream{ref: msg.Ref, state: StreamOpening, terminal: newTerminalState(), sendCredit: e.window, creditWake: make(chan struct{})}
 	e.highest = id
 	e.live++
 	return nil
@@ -445,9 +465,9 @@ func (e *StreamEngine) Refused(msg Refused) error {
 // (closing) accepts no new data and refuses it with ErrStreamState, exactly as
 // an unconfirmed stream refuses data. A chunk above the negotiated chunk
 // ceiling is refused statelessly with ErrTooLarge and mutates nothing. A chunk
-// that would exceed the per-stream chunk, the per-stream byte, or the
-// aggregate byte bound resets exactly this stream and releases the bytes it
-// held, leaving every sibling untouched.
+// beyond the stream's receive window or the aggregate byte bound is a peer
+// flow-control violation: it resets exactly this stream and releases the
+// bytes it held, leaving every sibling untouched.
 func (e *StreamEngine) Data(msg Data) (StreamDisposition, error) {
 	if e == nil {
 		return 0, ErrPhysicalClosed
@@ -469,11 +489,98 @@ func (e *StreamEngine) Data(msg Data) (StreamDisposition, error) {
 	}
 	if e.queueOverflowsLocked(stream, len(msg.Data)) {
 		e.retireLocked(stream)
-		stream.terminal.Fail(domain.RemoteFailureTransport, ErrStreamQueueFull)
+		stream.terminal.Fail(domain.RemoteFailureInvalidResponse, ErrStreamQueueFull)
 		return 0, ErrStreamQueueFull
 	}
 	e.enqueueLocked(stream, msg.Data)
 	return StreamAccepted, nil
+}
+
+// WindowUpdate grows one stream's send credit by the credit the peer returned.
+// A late update for a retired stream is discarded. Credit that would exceed
+// the stream window is a peer flow-control violation (ErrStreamCredit).
+func (e *StreamEngine) WindowUpdate(msg WindowUpdate) (StreamDisposition, error) {
+	if e == nil {
+		return 0, ErrPhysicalClosed
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	stream, state, err := e.lookupLocked(msg.Physical)
+	if err != nil {
+		return 0, err
+	}
+	if state == StreamTerminal {
+		return StreamDiscarded, nil
+	}
+	if msg.Credit > e.window-stream.sendCredit {
+		return 0, ErrStreamCredit
+	}
+	stream.sendCredit += msg.Credit
+	wakeCreditLocked(stream)
+	return StreamAccepted, nil
+}
+
+// reserveSend spends the credit of one outbound Data frame of n bytes. It
+// reports ok=false with a wake channel when credit is short; the caller waits
+// on it and retries. A closing, terminal, or unknown stream reports
+// errStreamSettled: the peer already retired it and grants no more credit.
+func (e *StreamEngine) reserveSend(physical PhysicalStreamID, n int) (bool, <-chan struct{}, error) {
+	if e == nil {
+		return false, nil, ErrPhysicalClosed
+	}
+	cost := chunkCredit(n)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	stream := e.streams[physical]
+	if stream == nil || stream.state == StreamTerminal || stream.state == StreamClosing {
+		return false, nil, errStreamSettled
+	}
+	if stream.sendCredit < cost {
+		return false, stream.creditWake, nil
+	}
+	stream.sendCredit -= cost
+	return true, nil, nil
+}
+
+// refundSend returns the credit of one outbound Data frame that was reserved
+// but never enqueued.
+func (e *StreamEngine) refundSend(physical PhysicalStreamID, n int) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if stream := e.streams[physical]; stream != nil && stream.state != StreamTerminal {
+		stream.sendCredit = min(stream.sendCredit+chunkCredit(n), e.window)
+		wakeCreditLocked(stream)
+	}
+}
+
+// takeReturn claims the consumed inbound credit of one stream once it reaches
+// the return threshold, so the peer is granted credit in batches instead of
+// one WindowUpdate per chunk. It returns zero when nothing is due yet.
+func (e *StreamEngine) takeReturn(physical PhysicalStreamID) uint64 {
+	if e == nil {
+		return 0
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	stream := e.streams[physical]
+	if stream == nil || stream.state != StreamOpen || stream.recvReturn < e.returnAt {
+		return 0
+	}
+	grant := stream.recvReturn
+	stream.recvReturn = 0
+	stream.recvUsed -= grant
+	return grant
+}
+
+// wakeCreditLocked wakes every writer waiting on this stream's credit.
+func wakeCreditLocked(stream *muxStream) {
+	if stream.creditWake != nil {
+		close(stream.creditWake)
+	}
+	stream.creditWake = make(chan struct{})
 }
 
 // Close orderly terminates one opening, open, or closing stream. A late close
@@ -504,6 +611,9 @@ func (e *StreamEngine) Close(msg Close) (StreamDisposition, error) {
 		return StreamAccepted, nil
 	}
 	stream.state = StreamClosing
+	// The peer retired the stream: a writer waiting on credit must observe it
+	// instead of waiting for a WindowUpdate that never comes.
+	wakeCreditLocked(stream)
 	return StreamAccepted, nil
 }
 
@@ -586,6 +696,7 @@ func (e *StreamEngine) Status(physical PhysicalStreamID) (StreamStatus, bool) {
 		Refusal:      stream.refusal,
 		QueuedChunks: len(stream.queue),
 		QueuedBytes:  stream.bytes,
+		SendCredit:   stream.sendCredit,
 	}, true
 }
 
@@ -636,6 +747,7 @@ func (e *StreamEngine) take(physical PhysicalStreamID) ([]byte, bool, bool) {
 	stream.queue = stream.queue[1:]
 	stream.bytes -= len(chunk)
 	e.aggregate -= len(chunk)
+	stream.recvReturn += chunkCredit(len(chunk))
 	if stream.state == StreamClosing && len(stream.queue) == 0 {
 		e.retireLocked(stream)
 		stream.terminal.Close()
@@ -680,6 +792,8 @@ func (e *StreamEngine) terminalizeAllLocked(publish func(*muxStream)) {
 func (e *StreamEngine) retireLocked(stream *muxStream) {
 	e.releaseQueueLocked(stream)
 	stream.state = StreamTerminal
+	stream.sendCredit = 0
+	wakeCreditLocked(stream)
 	e.live--
 	e.retired = append(e.retired, stream.ref.Physical)
 	for len(e.retired) > MaxRetiredStreamRecords {
@@ -705,11 +819,9 @@ func (e *StreamEngine) releaseQueueLocked(stream *muxStream) {
 }
 
 // queueOverflowsLocked reports whether one inbound chunk would exceed the
-// per-stream chunk bound, the per-stream byte bound, or the negotiated
-// aggregate byte bound.
+// credit granted to the peer or the negotiated aggregate byte bound.
 func (e *StreamEngine) queueOverflowsLocked(stream *muxStream, n int) bool {
-	return len(stream.queue) >= e.maxStreamFrames ||
-		stream.bytes+n > e.maxStreamBytes ||
+	return stream.recvUsed+chunkCredit(n) > e.window ||
 		e.aggregate+n > e.maxAggregateBytes
 }
 
@@ -719,6 +831,7 @@ func (e *StreamEngine) enqueueLocked(stream *muxStream, chunk []byte) {
 	n := len(chunk)
 	e.aggregate += n
 	stream.bytes += n
+	stream.recvUsed += chunkCredit(n)
 	owned := make([]byte, n)
 	copy(owned, chunk)
 	stream.queue = append(stream.queue, owned)

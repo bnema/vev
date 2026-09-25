@@ -19,13 +19,14 @@
 // a refused Open is still answered; that refusal seals its own record. A
 // duplicate terminal, a duplicate refusal, and data for a settled, unadmitted,
 // or closing identity stay refused while the settling record is retained (see
-// below). Each stream queues at most MaxMuxStreamQueueChunks (8) envelopes and
-// MaxMuxStreamQueueBytes (32 MiB), and all streams together queue at most
-// MaxMuxAggregateBytes (64 MiB) of application data. A frame is charged
-// against both byte budgets before it is inserted, and a frame that would
-// exceed the per-stream frame bound, the per-stream byte bound, or the
-// aggregate byte bound discards exactly its own stream queue, frees that
-// budget, and leaves every sibling untouched.
+// below). Data frames are admitted only after the writer spent the stream's
+// send credit (see StreamEngine), so each stream's queued data never exceeds
+// its window and a slow peer slows the writer rather than filling the queue.
+// All streams together queue at most the negotiated aggregate bytes; a frame
+// that would exceed it discards exactly its own stream queue, frees that
+// budget, and leaves every sibling untouched. With the default ceilings the
+// stream windows fit inside the aggregate, so that bound is a safety net, not
+// a flow-control path.
 //
 // An overflowed stream is not sealed outright: the discard settles its data
 // but leaves its record open for exactly one terminal Close or Reset, so the
@@ -126,9 +127,8 @@ var (
 	// stream fencing.
 	ErrSchedulerSettled = errors.New("daemonmux: stream is settled for scheduling")
 	// ErrSchedulerFull reports an outbound frame that would exceed the
-	// per-stream frame bound, the per-stream byte bound, or the aggregate byte
-	// bound. The offending stream's queue is discarded and its budget
-	// released. It also reports a non-terminal frame for a stream that already
+	// aggregate byte bound. The offending stream's queue is discarded and its
+	// budget released. It also reports a non-terminal frame for a stream that already
 	// overflowed and is awaiting its one terminal Close or Reset: the data was
 	// discarded and the record is not yet sealed.
 	ErrSchedulerFull = errors.New("daemonmux: scheduler queue overflow")
@@ -253,8 +253,6 @@ type Scheduler struct {
 	// Bounds and quantum are constructed from the package defaults and are
 	// owned by the scheduler; they are fields so a test can tighten them.
 	maxAggregateBytes int
-	maxStreamBytes    int
-	maxStreamFrames   int
 	quantum           int64
 }
 
@@ -280,8 +278,6 @@ func newScheduler(engine *StreamEngine, ceilings MuxCeilings) *Scheduler {
 		maxEnvelopeBytes:  ceilings.MaxReceiveEnvelopeBytes,
 		maxChunkBytes:     ceilings.StreamChunkLimit,
 		maxAggregateBytes: int(ceilings.MaxAggregateBytes),
-		maxStreamBytes:    MaxMuxStreamQueueBytes,
-		maxStreamFrames:   MaxMuxStreamQueueChunks,
 		quantum:           SchedulerQuantum,
 		controlBurst:      MaxMuxSchedulerControlBurst,
 	}
@@ -354,7 +350,7 @@ func (s *Scheduler) Refuse(message Refused) error {
 		stream = &schedStream{physical: physical}
 		s.streams[physical] = stream
 	}
-	if s.overflowLocked(stream, len(frame.bytes)) {
+	if s.overflowLocked(len(frame.bytes)) {
 		s.overflowLockedStream(stream)
 		return ErrSchedulerFull
 	}
@@ -436,7 +432,7 @@ func (s *Scheduler) enqueue(frame schedFrame, physical PhysicalStreamID) error {
 		stream = &schedStream{physical: physical}
 		s.streams[physical] = stream
 	}
-	if s.overflowLocked(stream, len(frame.bytes)) {
+	if s.overflowLocked(len(frame.bytes)) {
 		s.overflowLockedStream(stream)
 		return ErrSchedulerFull
 	}
@@ -651,12 +647,10 @@ func (s *Scheduler) listRetiredLocked(stream *schedStream) {
 	}
 }
 
-// overflowLocked reports whether one frame would exceed the per-stream frame
-// bound, the per-stream byte bound, or the aggregate byte bound.
-func (s *Scheduler) overflowLocked(stream *schedStream, n int) bool {
-	return len(stream.queue) >= s.maxStreamFrames ||
-		stream.bytes+n > s.maxStreamBytes ||
-		s.aggregate+n > s.maxAggregateBytes
+// overflowLocked reports whether one frame would exceed the aggregate byte
+// bound.
+func (s *Scheduler) overflowLocked(n int) bool {
+	return s.aggregate+n > s.maxAggregateBytes
 }
 
 // discardLocked drops every queued frame of one stream and returns its bytes
@@ -891,6 +885,13 @@ func clientFrame(message ClientMessage) (PhysicalStreamID, FrameClass, error) {
 			return 0, 0, ErrInvalidMessage
 		}
 		return clientFrame(*m)
+	case WindowUpdate:
+		return m.Physical, FrameControl, nil
+	case *WindowUpdate:
+		if m == nil {
+			return 0, 0, ErrInvalidMessage
+		}
+		return clientFrame(*m)
 	default:
 		return 0, 0, ErrWrongDirection
 	}
@@ -931,6 +932,13 @@ func serverFrame(message ServerMessage) (PhysicalStreamID, FrameClass, error) {
 	case Reset:
 		return m.Physical, FrameControl, nil
 	case *Reset:
+		if m == nil {
+			return 0, 0, ErrInvalidMessage
+		}
+		return serverFrame(*m)
+	case WindowUpdate:
+		return m.Physical, FrameControl, nil
+	case *WindowUpdate:
 		if m == nil {
 			return 0, 0, ErrInvalidMessage
 		}
