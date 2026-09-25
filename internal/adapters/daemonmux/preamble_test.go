@@ -300,6 +300,41 @@ func TestEffectiveMuxCeilings(t *testing.T) {
 	require.Equal(t, effective, EffectiveMuxCeilings(effective, effective))
 }
 
+// TestEffectiveMuxCeilingsWindowsFitAggregate proves the negotiated stream
+// ceiling never lets the sum of every stream's full window exceed the
+// aggregate budget, so a peer that respects its credit can never trip the
+// aggregate bound and be reset for it.
+func TestEffectiveMuxCeilingsWindowsFitAggregate(t *testing.T) {
+	cases := []struct {
+		name        string
+		chunk       uint64
+		streams     uint64
+		aggregate   uint64
+		wantStreams uint64
+	}{
+		{"defaults unchanged", MaxMuxChunkBytes, MaxMuxStreams, MaxMuxAggregateBytes, MaxMuxStreams},
+		{"aggregate floor admits one stream", MaxMuxChunkBytes, MaxMuxStreams, MinMuxAggregateBytes, 1},
+		{"1 MiB aggregate with max chunks", MaxMuxChunkBytes, MaxMuxStreams, 1 << 20, (1 << 20) / chunkCredit(int(MaxMuxChunkBytes))},
+		{"small chunks keep every stream", 1024, MaxMuxStreams, 1 << 20, MaxMuxStreams},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			offer := MuxCeilings{
+				MaxReceiveEnvelopeBytes: MinMuxEnvelopeBytes,
+				StreamChunkLimit:        tc.chunk,
+				MaxStreams:              tc.streams,
+				MaxAggregateBytes:       tc.aggregate,
+			}
+			effective := EffectiveMuxCeilings(DefaultMuxCeilings(), offer)
+			require.NoError(t, effective.Validate())
+			require.Equal(t, tc.wantStreams, effective.MaxStreams)
+			require.LessOrEqual(t, effective.MaxStreams*effective.StreamWindow(), effective.MaxAggregateBytes)
+			require.Equal(t, effective, EffectiveMuxCeilings(effective, effective), "idempotent, so both peers agree")
+			require.NoError(t, ValidatePreambleResponseAgainstOffer(MuxPreambleResponse{Accepted: true, Ceilings: effective}, offer))
+		})
+	}
+}
+
 // TestValidatePreambleResponseAgainstOffer proves an accepted response is
 // refused when any effective ceiling exceeds the local offer, and accepted
 // when every ceiling is at or below it. A refusal, or an invalid offer, is a

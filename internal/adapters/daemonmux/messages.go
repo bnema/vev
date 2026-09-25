@@ -127,7 +127,8 @@ func (Reset) muxClientMessage() {}
 func (Reset) muxServerMessage() {}
 
 // WindowUpdate returns receive credit for one stream: the receiver consumed
-// Credit bytes of Data payload, so the sender may send that many more. It
+// Data frames worth Credit credit bytes (payload plus MuxChunkCreditOverhead
+// per frame, see chunkCredit), so the sender may spend that many more. It
 // travels in both directions over the same wire payload.
 type WindowUpdate struct {
 	Physical PhysicalStreamID

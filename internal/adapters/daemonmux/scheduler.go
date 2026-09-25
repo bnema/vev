@@ -350,7 +350,7 @@ func (s *Scheduler) Refuse(message Refused) error {
 		stream = &schedStream{physical: physical}
 		s.streams[physical] = stream
 	}
-	if s.overflowLocked(stream, len(frame.bytes)) {
+	if s.overflowLocked(len(frame.bytes)) {
 		s.overflowLockedStream(stream)
 		return ErrSchedulerFull
 	}
@@ -432,7 +432,7 @@ func (s *Scheduler) enqueue(frame schedFrame, physical PhysicalStreamID) error {
 		stream = &schedStream{physical: physical}
 		s.streams[physical] = stream
 	}
-	if s.overflowLocked(stream, len(frame.bytes)) {
+	if s.overflowLocked(len(frame.bytes)) {
 		s.overflowLockedStream(stream)
 		return ErrSchedulerFull
 	}
@@ -649,7 +649,7 @@ func (s *Scheduler) listRetiredLocked(stream *schedStream) {
 
 // overflowLocked reports whether one frame would exceed the aggregate byte
 // bound.
-func (s *Scheduler) overflowLocked(_ *schedStream, n int) bool {
+func (s *Scheduler) overflowLocked(n int) bool {
 	return s.aggregate+n > s.maxAggregateBytes
 }
 

@@ -502,11 +502,12 @@ func (x *MuxReset) GetError() *BrokerErrorDetail {
 }
 
 // MuxWindowUpdate returns receive credit for one logical stream in either
-// direction: the receiver consumed `credit_bytes` bytes of MuxData payload,
-// so the sender may send that many more. Each stream starts with the same
-// byte window on both sides, derived from the negotiated ceilings; a sender
-// never has more MuxData payload in flight than its credit, so a slow
-// receiver slows the sender instead of overflowing its queue.
+// direction: the receiver consumed MuxData frames worth `credit_bytes` credit
+// bytes, so the sender may spend that many more. One MuxData frame costs its
+// payload length plus 64 credit bytes. Each stream starts with the same window
+// on both sides, derived from the negotiated ceilings; a sender never has more
+// credit in flight than its window, so a slow receiver slows the sender
+// instead of overflowing its queue.
 type MuxWindowUpdate struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	PhysicalStreamId uint64                 `protobuf:"varint,1,opt,name=physical_stream_id,json=physicalStreamId,proto3" json:"physical_stream_id,omitempty"`

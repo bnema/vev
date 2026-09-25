@@ -96,11 +96,12 @@ message MuxReset {
 }
 
 // MuxWindowUpdate returns receive credit for one logical stream in either
-// direction: the receiver consumed `credit_bytes` bytes of MuxData payload,
-// so the sender may send that many more. Each stream starts with the same
-// byte window on both sides, derived from the negotiated ceilings; a sender
-// never has more MuxData payload in flight than its credit, so a slow
-// receiver slows the sender instead of overflowing its queue.
+// direction: the receiver consumed MuxData frames worth `credit_bytes` credit
+// bytes, so the sender may spend that many more. One MuxData frame costs its
+// payload length plus 64 credit bytes. Each stream starts with the same window
+// on both sides, derived from the negotiated ceilings; a sender never has more
+// credit in flight than its window, so a slow receiver slows the sender
+// instead of overflowing its queue.
 message MuxWindowUpdate {
   uint64 physical_stream_id = 1;
   uint64 credit_bytes = 2;

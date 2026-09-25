@@ -91,6 +91,10 @@ type FramedCarrier interface {
 // unknown inbound direction.
 var ErrPumpConfig = errors.New("daemonmux: invalid pump configuration")
 
+// ErrDataNeedsCredit reports a Data frame handed to Send: stream data must go
+// through SendData so it is sent under the stream's flow-control credit.
+var ErrDataNeedsCredit = errors.New("daemonmux: stream data must be sent with SendData")
+
 // ErrAdmissionObserverLate reports an admission-observer registration attempted
 // after Start. The reader goroutine is already running and may have admitted an
 // inbound Open, so a late observer would silently miss it; a consumer must
@@ -318,22 +322,15 @@ func (p *Pump) Take(physical PhysicalStreamID) ([]byte, bool) {
 }
 
 // returnCredit grants consumed inbound credit back to the peer once a batch
-// is due. A refused WindowUpdate only means the stream already settled.
+// is due. A refusal for a settled stream is dropped; an aggregate overflow
+// resets the stream like any outbound overflow, because the lost grant would
+// otherwise leave the peer's writer short of credit forever.
 func (p *Pump) returnCredit(physical PhysicalStreamID) {
 	grant := p.engine.takeReturn(physical)
 	if grant == 0 || p.isTerminal() {
 		return
 	}
-	update := WindowUpdate{Physical: physical, Credit: grant}
-	var err error
-	if p.local == DirectionServer {
-		err = p.scheduler.EnqueueServer(update)
-	} else {
-		err = p.scheduler.EnqueueClient(update)
-	}
-	if err == nil {
-		p.signal()
-	}
+	_ = p.enqueue(WindowUpdate{Physical: physical, Credit: grant})
 }
 
 // SendData sends one stream data chunk under the stream's flow-control
@@ -364,7 +361,11 @@ func (p *Pump) SendData(physical PhysicalStreamID, chunk []byte, cancel <-chan s
 			return ErrPhysicalClosed
 		}
 	}
-	if err := p.Send(Data{Physical: physical, Data: chunk}); err != nil {
+	if p.isTerminal() {
+		p.engine.refundSend(physical, len(chunk))
+		return ErrPhysicalClosed
+	}
+	if err := p.enqueue(Data{Physical: physical, Data: chunk}); err != nil {
 		p.engine.refundSend(physical, len(chunk))
 		return err
 	}
@@ -548,8 +549,9 @@ func watchClosed(ch <-chan struct{}) bool {
 // values satisfy both. A wrong-direction value fails with ErrWrongDirection
 // before anything is encoded or queued, a message the codec refuses propagates
 // the codec's error, and a pump that already reached its terminal outcome
-// fails with ErrPhysicalClosed. On success the encoded bytes are immutable and
-// owned by the writer.
+// fails with ErrPhysicalClosed. Data is refused with ErrDataNeedsCredit:
+// stream data goes through SendData. On success the encoded bytes are
+// immutable and owned by the writer.
 //
 // An accepted Send only means the frame is queued, never that it reached the
 // wire: the writer drains asynchronously. Call Flush to wait until every
@@ -567,9 +569,18 @@ func (p *Pump) Send(message any) error {
 	if message == nil {
 		return ErrInvalidMessage
 	}
+	if _, ok := message.(Data); ok {
+		return ErrDataNeedsCredit
+	}
 	if p.isTerminal() {
 		return ErrPhysicalClosed
 	}
+	return p.enqueue(message)
+}
+
+// enqueue queues one validated outbound message on the scheduler in the
+// pump's local direction and isolates a stream-local overflow.
+func (p *Pump) enqueue(message any) error {
 	switch p.local {
 	case DirectionClient:
 		client, ok := message.(ClientMessage)

@@ -76,7 +76,7 @@ import (
 
 // Stream queue bounds. The stream-count and aggregate-bytes ceilings are the
 // negotiated maxima from limits.go (MaxMuxStreams, MaxMuxAggregateBytes); the
-// per-stream chunk and byte ceilings are engine-local.
+// per-stream bound is the flow-control window (MuxCeilings.StreamWindow).
 const (
 	// MaxRetiredStreamRecords bounds the settled stream records one engine
 	// retains so a late frame is still classified as retired instead of
@@ -196,7 +196,8 @@ type StreamStatus struct {
 	// and bytes.
 	QueuedChunks int
 	QueuedBytes  int
-	// SendCredit is the remaining outbound credit, in chunkCredit units.
+	// SendCredit is the remaining outbound credit in credit bytes: payload
+	// plus MuxChunkCreditOverhead per Data frame (see chunkCredit).
 	SendCredit uint64
 }
 
@@ -228,9 +229,8 @@ type muxStream struct {
 // StreamEngine is the in-memory stream table and admission authority of one
 // physical daemon connection. It is safe for concurrent use. It owns no I/O.
 // The admission, chunk, and aggregate budgets are copied from the negotiated
-// MuxCeilings at construction; the per-stream queue bounds are engine-local.
-// They are fields so the engine's private ceilings are fixed per instance and
-// a test can tighten them.
+// MuxCeilings at construction, and the per-stream window is derived from
+// them. They are fields so the ceilings are fixed per instance.
 type StreamEngine struct {
 	mu        sync.Mutex
 	physical  *terminalState
@@ -522,7 +522,8 @@ func (e *StreamEngine) WindowUpdate(msg WindowUpdate) (StreamDisposition, error)
 
 // reserveSend spends the credit of one outbound Data frame of n bytes. It
 // reports ok=false with a wake channel when credit is short; the caller waits
-// on it and retries. A terminal or unknown stream reports errStreamSettled.
+// on it and retries. A closing, terminal, or unknown stream reports
+// errStreamSettled: the peer already retired it and grants no more credit.
 func (e *StreamEngine) reserveSend(physical PhysicalStreamID, n int) (bool, <-chan struct{}, error) {
 	if e == nil {
 		return false, nil, ErrPhysicalClosed
@@ -531,7 +532,7 @@ func (e *StreamEngine) reserveSend(physical PhysicalStreamID, n int) (bool, <-ch
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	stream := e.streams[physical]
-	if stream == nil || stream.state == StreamTerminal {
+	if stream == nil || stream.state == StreamTerminal || stream.state == StreamClosing {
 		return false, nil, errStreamSettled
 	}
 	if stream.sendCredit < cost {
@@ -610,6 +611,9 @@ func (e *StreamEngine) Close(msg Close) (StreamDisposition, error) {
 		return StreamAccepted, nil
 	}
 	stream.state = StreamClosing
+	// The peer retired the stream: a writer waiting on credit must observe it
+	// instead of waiting for a WindowUpdate that never comes.
+	wakeCreditLocked(stream)
 	return StreamAccepted, nil
 }
 

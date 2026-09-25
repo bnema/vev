@@ -639,7 +639,7 @@ func TestLogicalMalformedInnerFrameResetsOnlyStream(t *testing.T) {
 
 	// A zero-length inner frame is malformed: the client's first read fails and
 	// must reset only this stream.
-	require.NoError(t, daemonPump.Send(Data{Physical: 1, Data: []byte{0, 0, 0, 0}}))
+	require.NoError(t, daemonPump.SendData(1, []byte{0, 0, 0, 0}, nil))
 	_, err = malformed.ReceiveServer()
 	require.Error(t, err)
 	require.True(t, channelClosed(malformed.Done()))

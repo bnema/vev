@@ -96,9 +96,11 @@ func chunkCredit(n int) uint64 { return uint64(n) + MuxChunkCreditOverhead }
 
 // StreamWindow is the per-stream receive window both peers derive from the
 // same negotiated ceilings: the aggregate budget shared evenly across the
-// stream ceiling, so every live stream's window fits the aggregate at once,
-// never below one maximum chunk (a full chunk must always be sendable) and
-// never above MaxMuxStreamWindowBytes. With the default ceilings it is 512 KiB.
+// stream ceiling, never below one maximum chunk (a full chunk must always be
+// sendable) and never above MaxMuxStreamWindowBytes. With the default
+// ceilings it is 512 KiB. EffectiveMuxCeilings lowers the stream ceiling so
+// the one-chunk floor never pushes the sum of every live stream's window past
+// the aggregate: a conforming peer then never exceeds the aggregate budget.
 func (c MuxCeilings) StreamWindow() uint64 {
 	window := c.MaxAggregateBytes / max(c.MaxStreams, 1)
 	window = max(window, chunkCredit(int(c.StreamChunkLimit)))
@@ -192,13 +194,21 @@ func DefaultMuxCeilings() MuxCeilings {
 // the local policy. Each field is independent, so a peer that offers less in
 // one dimension lowers only that dimension. Both inputs are assumed
 // individually valid; the minima of two valid advertisements is valid.
+//
+// The stream ceiling is then lowered, when needed, so every stream can hold a
+// full window of one maximum chunk inside the aggregate budget at once. Both
+// peers apply the same rule, so they agree on the result; the aggregate floor
+// admits at least one stream.
 func EffectiveMuxCeilings(local, remote MuxCeilings) MuxCeilings {
-	return MuxCeilings{
+	effective := MuxCeilings{
 		MaxReceiveEnvelopeBytes: min(local.MaxReceiveEnvelopeBytes, remote.MaxReceiveEnvelopeBytes),
 		StreamChunkLimit:        min(local.StreamChunkLimit, remote.StreamChunkLimit),
 		MaxStreams:              min(local.MaxStreams, remote.MaxStreams),
 		MaxAggregateBytes:       min(local.MaxAggregateBytes, remote.MaxAggregateBytes),
 	}
+	fair := effective.MaxAggregateBytes / chunkCredit(int(effective.StreamChunkLimit))
+	effective.MaxStreams = max(min(effective.MaxStreams, fair), MinMuxStreams)
+	return effective
 }
 
 // checkMuxCeilings refuses an invalid advertisement as a preamble refusal so

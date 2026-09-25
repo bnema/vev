@@ -296,7 +296,8 @@ func TestNewPumpValidation(t *testing.T) {
 		require.NoError(t, pump.Close())
 		require.True(t, channelClosed(pump.Done()))
 		require.Equal(t, 1, carrier.closeCalls())
-		require.ErrorIs(t, pump.Send(Data{Physical: 1, Data: []byte("x")}), ErrPhysicalClosed)
+		require.ErrorIs(t, pump.SendData(1, []byte("x"), nil), ErrPhysicalClosed)
+		require.ErrorIs(t, pump.Send(Data{Physical: 1, Data: []byte("x")}), ErrDataNeedsCredit, "stream data never bypasses credit")
 	})
 }
 
@@ -329,7 +330,7 @@ func TestPumpTwoAndHundredStreams(t *testing.T) {
 			require.Equal(t, count-1, pump.Engine().AggregateBytes())
 
 			for _, id := range ids {
-				require.NoError(t, pump.Send(ServerMessage(Data{Physical: id, Data: []byte("out")})))
+				require.NoError(t, pump.SendData(id, []byte("out"), nil))
 			}
 			seen := make(map[PhysicalStreamID]int, count)
 			for i := 0; i < count; i++ {
@@ -482,7 +483,7 @@ func TestPumpFairWriterProgress(t *testing.T) {
 	const rounds = 2
 	for round := 0; round < rounds; round++ {
 		for _, id := range ids {
-			require.NoError(t, pump.Send(ServerMessage(Data{Physical: id, Data: []byte{byte(id), byte(round)}})))
+			require.NoError(t, pump.SendData(id, []byte{byte(id), byte(round)}, nil))
 		}
 	}
 
@@ -770,7 +771,7 @@ func TestPumpConcurrentClose(t *testing.T) {
 	require.Equal(t, 1, carrier.closeCalls())
 	require.True(t, channelClosed(pump.readerDone))
 	require.True(t, channelClosed(pump.writerDone))
-	require.ErrorIs(t, pump.Send(Data{Physical: 1, Data: []byte("x")}), ErrPhysicalClosed)
+	require.ErrorIs(t, pump.SendData(1, []byte("x"), nil), ErrPhysicalClosed)
 }
 
 // TestPumpCloseBeforeStart proves Close never starts or joins goroutines that
@@ -894,7 +895,7 @@ func TestPumpFlushHonoursContext(t *testing.T) {
 	require.NoError(t, pump.Engine().Open(Open{Ref: testRef(1)}))
 	require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(1)}))
 	// No writer is started, so the queued frame can never drain.
-	require.NoError(t, pump.Send(ServerMessage(Data{Physical: 1, Data: []byte("queued")})))
+	require.NoError(t, pump.SendData(1, []byte("queued"), nil))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -922,7 +923,7 @@ func TestPumpFlushCancellationMayDrop(t *testing.T) {
 
 	hold := make(chan struct{})
 	carrier.setHold(hold)
-	require.NoError(t, pump.Send(ServerMessage(Data{Physical: 1, Data: []byte("first")})))
+	require.NoError(t, pump.SendData(1, []byte("first"), nil))
 	require.Eventually(t, func() bool { return carrier.enteredSends() >= 1 }, 5*time.Second, time.Millisecond)
 	// The final Close is queued behind the blocked write.
 	require.NoError(t, pump.Send(ServerMessage(Close{Physical: 1})))
@@ -979,6 +980,20 @@ func TestPumpSendDataCancel(t *testing.T) {
 		{"cancel", func(_ *testing.T, _ *Pump, _ *fakeCarrier, cancel chan struct{}) { close(cancel) }, ErrLogicalClosed},
 		{"peer reset", func(t *testing.T, _ *Pump, carrier *fakeCarrier, _ chan struct{}) {
 			deliverClientFrame(t, carrier, Reset{Physical: 1})
+		}, errStreamSettled},
+		{"peer close with unread data", func(t *testing.T, pump *Pump, carrier *fakeCarrier, _ chan struct{}) {
+			deliverClientFrame(t, carrier, Data{Physical: 1, Data: []byte("unread")})
+			deliverClientFrame(t, carrier, Close{Physical: 1})
+			requireEngineEventually(t, pump, func(e *StreamEngine) bool {
+				status, ok := e.Status(1)
+				return ok && status.State == StreamClosing
+			})
+		}, errStreamSettled},
+		{"physical failure", func(t *testing.T, _ *Pump, carrier *fakeCarrier, _ chan struct{}) {
+			carrier.deliver(t, fakeFrame{err: errors.New("carriage lost")})
+		}, ErrPhysicalClosed},
+		{"credit beyond window resets the stream", func(t *testing.T, pump *Pump, carrier *fakeCarrier, _ chan struct{}) {
+			deliverClientFrame(t, carrier, WindowUpdate{Physical: 1, Credit: pump.Ceilings().StreamWindow()})
 		}, errStreamSettled},
 	}
 	for _, tc := range cases {
@@ -1048,7 +1063,7 @@ func TestPumpInboundTerminalRetiresQueuedOutbound(t *testing.T) {
 		id := PhysicalStreamID(i)
 		require.NoError(t, pump.Engine().Open(Open{Ref: testRef(id)}))
 		require.NoError(t, pump.Engine().Opened(Opened{Ref: testRef(id)}))
-		require.NoError(t, pump.Send(ServerMessage(Data{Physical: id, Data: []byte("out")})))
+		require.NoError(t, pump.SendData(id, []byte("out"), nil))
 		require.Equal(t, 1, pump.scheduler.QueuedFrames(id))
 
 		if i%2 == 0 {
