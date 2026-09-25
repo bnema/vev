@@ -1128,10 +1128,14 @@ func observationOutcome(result probeResult) (domain.RemoteFailureKind, domain.Re
 	if result.err != nil {
 		kind := domain.RemoteFailureTransport
 		var typed domain.RemoteFailure
+		var brokerErr ports.BrokerError
 		switch {
 		case errors.As(result.err, &typed) && typed.Kind != domain.RemoteFailureNone:
 			// The dialer classified the failure (for example SSH authentication).
 			kind = typed.Kind
+		case errors.As(result.err, &brokerErr) && (brokerErr.Code == ports.BrokerErrorConflictingPolicy || brokerErr.Code == ports.BrokerErrorIncompatible):
+			// SSH worked; the daemon's identity or version was refused.
+			kind = domain.RemoteFailureIncompatible
 		case errors.Is(result.err, context.DeadlineExceeded):
 			kind = domain.RemoteFailureTimeout
 		}

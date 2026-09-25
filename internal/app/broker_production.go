@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/ipc"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -60,6 +61,40 @@ func remoteBrokerPolicy(transport string) ports.BrokerPolicy {
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: transport,
 		Trust: "openssh-config-v1", Launch: "explicit", Isolation: "per-user",
 	}
+}
+
+// upgradeBrokerHostVersions moves durable host policies to this build's
+// protocol and catalogue versions. Those fields describe the running binary,
+// not a user choice, so hosts pinned by an older build must follow an upgrade;
+// otherwise the unchanged daemon identity is refused as a conflicting policy.
+func upgradeBrokerHostVersions(store ports.BrokerHostStore) error {
+	hosts, err := store.LoadHosts()
+	if err != nil {
+		return fmt.Errorf("vev: load broker hosts: %w", err)
+	}
+	changed := false
+	records := ports.CloneBrokerHostRecords(hosts.Hosts)
+	for i := range records {
+		policy := &records[i].Policy
+		if policy.ProtocolVersion == protocol.Version && policy.CatalogSchemaVersion == catalogue.RemoteCatalogSchemaVersion {
+			continue
+		}
+		// A policy change advances the generation so stale observations are fenced.
+		if records[i].Registration.Generation == ^domain.RemoteGeneration(0) {
+			return ports.ErrBrokerRevisionExhausted
+		}
+		records[i].Registration.Generation++
+		policy.ProtocolVersion = protocol.Version
+		policy.CatalogSchemaVersion = catalogue.RemoteCatalogSchemaVersion
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := store.ReplaceHosts(hosts.Revision, records); err != nil {
+		return fmt.Errorf("vev: upgrade broker host versions: %w", err)
+	}
+	return nil
 }
 
 func localDaemonPolicy() ports.BrokerPolicy {
