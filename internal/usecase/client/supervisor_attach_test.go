@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1311,25 +1312,56 @@ func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 // TestSupervisorAttachmentLossResumesSameSession is the regression for a
 // remote attachment that died with attachment_lost and left the client stuck:
 // a stream lost after attachment reconnects to the exact session it was
-// showing, and only falls back to the picker when every resume fails.
+// showing, retries only transport-class failures, and returns to the picker
+// with a single notice when the resume gives up.
 func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
+	type step uint8
+	const (
+		// attachThenLose attaches the resumed stream, then loses it again.
+		attachThenLose step = iota + 1
+		// attachAndStay attaches the resumed stream and keeps it.
+		attachAndStay
+		// loseBeforeAttach loses the resumed stream before it attaches.
+		loseBeforeAttach
+		// refuse fails the resumed open with a non-transport refusal.
+		refuse
+		// cancelDuringBackoff ends the client while the backoff runs.
+		cancelDuringBackoff
+	)
+	repeat := func(s step, n int) []step {
+		steps := make([]step, n)
+		for i := range steps {
+			steps[i] = s
+		}
+		return steps
+	}
 	cases := []struct {
-		name string
-		// resumeOK makes every resume attempt attach successfully.
-		resumeOK bool
+		name  string
+		steps []step
+		// wantPicker is the final outcome: back on the picker with exactly one
+		// DestinationFailed notice, or still attached with none.
+		wantPicker bool
 	}{
-		{name: "resume attaches again", resumeOK: true},
-		{name: "resume exhausted returns to picker"},
+		{name: "resume attaches again", steps: []step{attachAndStay}},
+		{name: "every successful resume restores the budget", steps: append(repeat(attachThenLose, maxAttachmentResumes+1), attachAndStay)},
+		{name: "transient failures then attach", steps: append(repeat(loseBeforeAttach, maxAttachmentResumes-1), attachAndStay)},
+		{name: "exhausted returns to picker", steps: repeat(loseBeforeAttach, maxAttachmentResumes), wantPicker: true},
+		{name: "refusal is final", steps: []step{refuse}, wantPicker: true},
+		{name: "cancel during backoff never resumes", steps: []step{cancelDuringBackoff}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			picker := newAttachTestPicker()
-			notices := make(chan LifecycleNotice, 16)
+			notices := make(chan LifecycleNotice, 64)
 			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
 				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 			})
-			streams := make(chan *sessionTestStream, maxAttachmentResumes+2)
+			streams := make(chan *sessionTestStream, len(tc.steps)+2)
+			var refusing atomic.Bool
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				if refusing.Load() {
+					return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "session gone"}
+				}
 				stream := newSessionTestStream()
 				streams <- stream
 				return stream, nil
@@ -1338,46 +1370,61 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 			first := <-streams
 			deliverReadyStream(t, first)
 			awaitAttachedState(t, harness.sup)
-
 			first.fail(testStreamLoss())
-			if tc.resumeOK {
-				fireResumeTimer(t, harness.clock, 1)
+
+			attempt := 1
+			for _, s := range tc.steps {
+				if s == cancelDuringBackoff {
+					backoff := supervisorBackoffDelay(1, func() float64 { return 0 })
+					for harness.clock.awaitTimer(t).delay != backoff {
+					}
+					harness.cancel()
+					<-harness.runDone
+					require.Len(t, harness.service.openedRequests(), 1, "no resume after cancellation")
+					return
+				}
+				refusing.Store(s == refuse)
+				fireResumeTimer(t, harness.clock, attempt)
+				if s == refuse {
+					break
+				}
 				resumed := <-streams
+				if s == loseBeforeAttach {
+					resumed.fail(testStreamLoss())
+					attempt++
+					continue
+				}
 				require.Eventually(t, func() bool { return len(resumed.messages()) > 0 }, 5*time.Second, time.Millisecond)
 				deliverReadyStream(t, resumed)
 				awaitAttachedState(t, harness.sup)
+				if s == attachThenLose {
+					resumed.fail(testStreamLoss())
+					attempt = 1
+				}
+			}
 
-				requests := harness.service.openedRequests()
-				require.Len(t, requests, 2)
-				resume := requests[1]
+			requests := harness.service.openedRequests()
+			for _, resume := range requests[1:] {
 				require.Equal(t, ports.BrokerAdmissionExact, resume.Admission)
 				require.Equal(t, sessionTestOutput(1, "").Context.Route.Target, resume.Target, "resume names the committed session")
 				require.Equal(t, requests[0].Endpoint, resume.Endpoint)
 				require.NotEqual(t, requests[0].Stream, resume.Stream, "resume uses a fresh stream identity")
+			}
+			if !tc.wantPicker {
+				awaitAttachedState(t, harness.sup)
 				require.False(t, picker.owns(), "the picker never took the terminal")
+				require.Empty(t, notices, "a resume that attaches reports nothing")
 				return
 			}
-
-			for i := 1; i <= maxAttachmentResumes; i++ {
-				fireResumeTimer(t, harness.clock, i)
-				(<-streams).fail(testStreamLoss())
-			}
 			awaitPickerState(t, harness.sup)
-			require.Len(t, harness.service.openedRequests(), 1+maxAttachmentResumes)
-			require.NotEqual(t, PresentAttached, harness.sup.State().Presentation, "a failed stream is never still attached")
-			require.Eventually(t, func() bool {
-				for {
-					select {
-					case notice := <-notices:
-						if notice.Kind == LifecycleNoticeDestinationFailed {
-							return true
-						}
-					default:
-						return false
-					}
+			require.Eventually(t, picker.owns, 5*time.Second, time.Millisecond)
+			failed := 0
+			for len(notices) > 0 {
+				if (<-notices).Kind == LifecycleNoticeDestinationFailed {
+					failed++
 				}
-			}, 5*time.Second, time.Millisecond)
-			require.True(t, picker.owns())
+			}
+			require.Equal(t, 1, failed, "the resume reports its failure once")
 		})
 	}
 }

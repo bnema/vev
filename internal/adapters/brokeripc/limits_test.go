@@ -263,8 +263,8 @@ func TestErrorDetailMapping(t *testing.T) {
 }
 
 // TestErrorDetailKeepsStreamLossCause proves a physical stream loss reaches
-// the client with its failure kind and a bounded, display-safe cause instead
-// of a bare attachment_lost.
+// the client with its failure kind and a bounded, display-safe cause in the
+// display text instead of a bare attachment_lost.
 func TestErrorDetailKeepsStreamLossCause(t *testing.T) {
 	lost := func(err error) ports.BrokerStreamLost {
 		return ports.BrokerStreamLost{Connection: ports.BrokerConnectionID{1}, Stream: 1, Epoch: 1, Cause: domain.RemoteFailureTimeout, Err: err}
@@ -283,7 +283,6 @@ func TestErrorDetailKeepsStreamLossCause(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			detail := errorDetail(tc.err)
 			require.Equal(t, ports.BrokerErrorAttachmentLost, detail.Code)
-			require.Equal(t, domain.RemoteFailureTimeout, detail.FailureKind)
 			require.Equal(t, tc.want, detail.Text)
 			_, err := brokerwire.EncodeServer(brokerwire.StreamClosed{
 				Epoch: 1, Connection: ports.BrokerConnectionID{1}, Stream: 1, Error: detail, HasError: true,

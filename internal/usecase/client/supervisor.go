@@ -446,9 +446,13 @@ type Supervisor struct {
 	// settleAttachment and consumed by runResolvedAttachment. It is only
 	// touched from the run goroutine.
 	resume *pickerAttachmentTarget
-	// attemptAttached reports whether the latest attachment attempt reached
-	// the attached state. It is only touched from the run goroutine.
-	attemptAttached bool
+	// resuming is true while runResolvedAttachment reconnects a lost
+	// attachment; transport-class failures of those attempts are recorded in
+	// resumeErr instead of being presented, so a retry stays on Connecting.
+	// resumeErr also carries the loss that started the resume. Both are only
+	// touched from the run goroutine.
+	resuming  bool
+	resumeErr error
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
 	// routes is the client route ledger published to the serving daemon;

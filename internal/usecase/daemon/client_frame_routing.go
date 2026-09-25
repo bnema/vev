@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"net"
 	"runtime"
 
 	"github.com/bnema/vev/internal/domain"
@@ -64,8 +65,12 @@ func (d *Daemon) runConnLoop(ac *attachedClient) {
 				)
 				continue
 			}
-			if !errors.Is(err, io.EOF) {
-				d.log.Warn("client connection lost", "err", err)
+			// A transport the daemon already swapped out or closed itself is
+			// ordinary teardown, not a lost connection.
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && ac.currentTransportIs(tr) {
+				if sess := ac.currentAttachmentSession(); sess != nil {
+					d.log.Warn("client connection lost", "session", sess.nameSnapshot(), "err", err)
+				}
 			}
 			for range connectionSnapshotAttempts {
 				sess, _, ok := d.currentAttachmentConnection(ac, tr)

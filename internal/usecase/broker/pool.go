@@ -349,8 +349,6 @@ func (p *Pool) OpenStream(ctx context.Context, req ports.BrokerOpenStreamRequest
 		case <-ctx.Done():
 			terminal = ports.BrokerError{Code: ports.BrokerErrorCancelled}
 		case <-entry.ctx.Done():
-			reason := context.Cause(entry.ctx)
-			terminal = ports.BrokerError{Code: ports.BrokerErrorAttachmentLost, Text: reason.Error(), Cause: reason}
 		case <-entry.physical.Done():
 		case <-raw.Done():
 			terminal = raw.Err()
@@ -460,7 +458,11 @@ retire:
 	e.retiring = true
 	refs := e.refs
 	p.mu.Unlock()
-	e.cancel(errEntryLost)
+	if err != nil {
+		e.cancel(err)
+	} else {
+		e.cancel(errEntryLost)
+	}
 	if physical != nil {
 		p.logRetire(e, physical, refs)
 		_ = physical.Close()

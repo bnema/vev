@@ -96,8 +96,11 @@ func admissionError(err error) error {
 }
 
 // errorDetail converts one broker failure into the bounded, presentation-safe
-// wire detail. The diagnostic cause stays local: only the typed code, bounded
-// display text, closed admission code, and sanitized failure kind travel.
+// wire detail. Causes stay local, except for a physical stream loss: its
+// failure kind and a sanitized, bounded description of the transport cause
+// travel as display text so the client can report why the attachment ended.
+// Otherwise only the typed code, bounded display text, and closed admission
+// code travel.
 func errorDetail(err error) brokerwire.ErrorDetail {
 	if err == nil {
 		return brokerwire.ErrorDetail{}
@@ -106,7 +109,7 @@ func errorDetail(err error) brokerwire.ErrorDetail {
 	// transport cause, so the client can report why the attachment ended.
 	var lost ports.BrokerStreamLost
 	if errors.As(err, &lost) && lost.Validate() == nil {
-		detail := brokerwire.ErrorDetail{Code: ports.BrokerErrorAttachmentLost, FailureKind: lost.Cause, Text: lost.Cause.String()}
+		detail := brokerwire.ErrorDetail{Code: ports.BrokerErrorAttachmentLost, Text: lost.Cause.String()}
 		if lost.Err != nil {
 			detail.Text = boundedBrokerErrorText(fmt.Errorf("%s: %w", lost.Cause, lost.Err))
 		}
