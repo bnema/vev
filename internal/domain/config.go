@@ -86,7 +86,8 @@ type TabsConfig struct {
 // EphemeralConfig contains numbered-session lifetime settings.
 type EphemeralConfig struct {
 	// CloseOnExit removes an ephemeral session once its last attachment ends
-	// definitively: a closed client, an explicit detach, or an expired park.
+	// definitively: a closed client process (Detach{Closed}), or an expired
+	// park or suspension. A user detach keeps it.
 	CloseOnExit bool
 }
 

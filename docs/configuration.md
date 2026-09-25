@@ -125,7 +125,7 @@ code.yank-last-notification = YLN
 
 With `ephemeral.close-on-exit = on` (default), a numbered session is removed once its last client is gone for good:
 
-- The client process ends (terminal closed, SIGHUP, or SIGTERM).
+- The client process ends (terminal closed, SIGHUP, or SIGTERM). The client tells the daemon on a best-effort basis; if that message is lost, the rule below applies.
 - A client that lost its connection does not reconnect before the resume window (15 minutes) expires.
 
 The session stays while any other client is attached. A detach (keybinding, palette, or picker switch) keeps it, and so does a network drop within the resume window. Named sessions are never affected. Set `off` to keep numbered sessions until you kill them.

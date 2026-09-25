@@ -1363,6 +1363,9 @@ type sessionKillParticipants struct {
 	source      *session
 	sourceToken *attachmentCapability
 	target      *session
+	// requireEphemeral aborts the kill if the target stopped being ephemeral
+	// (a concurrent rename) between the snapshot and publication.
+	requireEphemeral bool
 }
 
 func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge bool, effect *attachmentEffect, action string) error {
@@ -1376,8 +1379,8 @@ func (d *Daemon) killSessionForAttachment(sess *session, reason uint8, purge boo
 // architecture locks, but releases every lock before any attachment gate is frozen or
 // drained. The initiator is part of the same deduplicated global gate set even
 // when it belongs to a different source session.
-func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *sessionKillAdmission, requireEmpty bool) (sessionKillParticipants, bool) {
-	snapshot := sessionKillParticipants{target: target}
+func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *sessionKillAdmission, condition sessionKillCondition) (sessionKillParticipants, bool) {
+	snapshot := sessionKillParticipants{target: target, requireEphemeral: condition.ephemeral}
 	if admission != nil {
 		token := admission.capability
 		if token.sess == nil || token.ac == nil || token.transport.transport == nil {
@@ -1401,7 +1404,8 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		source = target
 	}
 	unlockSessions := lockAttachmentSessions(source, target)
-	if requireEmpty && (len(target.attachments) != 0 || d.sessionHasPendingResumeLocked(target)) {
+	if condition.empty && (len(target.attachments) != 0 || d.sessionHasPendingResumeLocked(target)) ||
+		condition.ephemeral && !target.ephemeral {
 		unlockSessions()
 		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
@@ -1483,6 +1487,9 @@ func (d *Daemon) sessionKillParticipantsCurrent(snapshot sessionKillParticipants
 // session and coordinator locks.
 func sessionKillParticipantsCurrentLocked(snapshot sessionKillParticipants, sourceCoordinator *renderCoordinator) bool {
 	target := snapshot.target
+	if snapshot.requireEphemeral && !target.ephemeral {
+		return false
+	}
 	if len(target.attachments) != len(snapshot.attachments) {
 		return false
 	}
@@ -1683,24 +1690,39 @@ func teardownDeadlineElapsed(deadline *snapshotShutdownDeadline) bool {
 // mistaken for a completed one. Ordinary callers that pass nil preserve their
 // previous behavior exactly.
 func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline, admission *sessionKillAdmission) error {
-	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, deadline, admission, false)
+	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, deadline, admission, sessionKillCondition{})
+}
+
+// sessionKillCondition narrows a kill to a target state that is checked under
+// the architecture locks at snapshot and again at publication.
+type sessionKillCondition struct {
+	// empty requires no attachment and no parked or parking resume credential.
+	empty bool
+	// ephemeral requires the target to still be an ephemeral session.
+	ephemeral bool
 }
 
 // killSessionIfEmpty tears down sess only while its exact registry entry has no
-// attachments and no parked or parking resume credential. Membership is captured under the normal architecture locks and
-// fenced again at publication, so an attachment winning either side survives.
+// attachments and no parked or parking resume credential. Membership is
+// captured under the normal architecture locks and fenced again at publication, so an attachment winning either side survives.
 func (d *Daemon) killSessionIfEmpty(sess *session, reason uint8, purge bool) error {
-	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, nil, nil, true)
+	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, nil, nil, sessionKillCondition{empty: true})
 }
 
-func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline, admission *sessionKillAdmission, requireEmpty bool) error {
+// killEphemeralSessionIfEmpty is killSessionIfEmpty that also refuses a target
+// renamed into a named session after the caller's check.
+func (d *Daemon) killEphemeralSessionIfEmpty(sess *session, reason uint8) error {
+	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, false, nil, nil, sessionKillCondition{empty: true, ephemeral: true})
+}
+
+func (d *Daemon) killSessionWithSnapshotDeadlineAndCondition(sess *session, reason uint8, purge bool, deadline *snapshotShutdownDeadline, admission *sessionKillAdmission, condition sessionKillCondition) error {
 	if sess == nil {
 		return nil
 	}
 	// Discover every attachment whose membership can be invalidated before freezing
 	// any one of them. The common gate helper deduplicates and freezes the whole
 	// immutable identity set in the same global order used by transitions.
-	participants, ok := d.snapshotSessionKillParticipants(sess, admission, requireEmpty)
+	participants, ok := d.snapshotSessionKillParticipants(sess, admission, condition)
 	if !ok {
 		return nil
 	}
