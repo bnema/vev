@@ -1294,12 +1294,16 @@ func testStreamLoss() ports.BrokerStreamLost {
 	return ports.BrokerStreamLost{Connection: ports.BrokerConnectionID{1}, Stream: 1, Epoch: 3, Cause: domain.RemoteFailureTransport, Err: errors.New("attachment lost")}
 }
 
+// resumeTestJitter is the backoff jitter of the resume tests. It keeps every
+// resume delay distinct from the other timers sharing the fake clock (the
+// 15s attachment deadline and the 200ms palette deadline).
+func resumeTestJitter() float64 { return 0.5 }
+
 // fireResumeTimer fires the resume backoff timer for one attempt. Other timers
-// share the clock, so it matches the exact backoff delay (the harness jitter
-// is zero).
+// share the clock, so it matches the exact backoff delay.
 func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 	t.Helper()
-	want := supervisorBackoffDelay(uint64(attempt), func() float64 { return 0 })
+	want := supervisorBackoffDelay(uint64(attempt), resumeTestJitter)
 	for {
 		timer := clock.awaitTimer(t)
 		if timer.delay == want {
@@ -1317,8 +1321,11 @@ func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 	type step uint8
 	const (
-		// attachThenLose attaches the resumed stream, then loses it again.
+		// attachThenLose attaches the resumed stream, stays up long enough to
+		// count as stable, then loses it again.
 		attachThenLose step = iota + 1
+		// attachThenFlap attaches the resumed stream and loses it right away.
+		attachThenFlap
 		// attachAndStay attaches the resumed stream and keeps it.
 		attachAndStay
 		// loseBeforeAttach loses the resumed stream before it attaches.
@@ -1343,7 +1350,8 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		wantPicker bool
 	}{
 		{name: "resume attaches again", steps: []step{attachAndStay}},
-		{name: "every successful resume restores the budget", steps: append(repeat(attachThenLose, maxAttachmentResumes+1), attachAndStay)},
+		{name: "every stable resume restores the budget", steps: append(repeat(attachThenLose, maxAttachmentResumes+1), attachAndStay)},
+		{name: "a flapping session gives up", steps: repeat(attachThenFlap, maxAttachmentResumes), wantPicker: true},
 		{name: "transient failures then attach", steps: append(repeat(loseBeforeAttach, maxAttachmentResumes-1), attachAndStay)},
 		{name: "exhausted returns to picker", steps: repeat(loseBeforeAttach, maxAttachmentResumes), wantPicker: true},
 		{name: "refusal is final", steps: []step{refuse}, wantPicker: true},
@@ -1355,6 +1363,7 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 			notices := make(chan LifecycleNotice, 64)
 			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
 				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+				cfg.Jitter = resumeTestJitter
 			})
 			streams := make(chan *sessionTestStream, len(tc.steps)+2)
 			var refusing atomic.Bool
@@ -1375,7 +1384,7 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 			attempt := 1
 			for _, s := range tc.steps {
 				if s == cancelDuringBackoff {
-					backoff := supervisorBackoffDelay(1, func() float64 { return 0 })
+					backoff := supervisorBackoffDelay(1, resumeTestJitter)
 					for harness.clock.awaitTimer(t).delay != backoff {
 					}
 					harness.cancel()
@@ -1397,9 +1406,14 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				require.Eventually(t, func() bool { return len(resumed.messages()) > 0 }, 5*time.Second, time.Millisecond)
 				deliverReadyStream(t, resumed)
 				awaitAttachedState(t, harness.sup)
-				if s == attachThenLose {
+				switch s {
+				case attachThenLose:
+					advancePickerClock(harness.clock, resumeStableAttachment)
 					resumed.fail(testStreamLoss())
 					attempt = 1
+				case attachThenFlap:
+					resumed.fail(testStreamLoss())
+					attempt++
 				}
 			}
 

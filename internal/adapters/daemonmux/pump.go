@@ -569,7 +569,8 @@ func (p *Pump) Send(message any) error {
 	if message == nil {
 		return ErrInvalidMessage
 	}
-	if _, ok := message.(Data); ok {
+	switch message.(type) {
+	case Data, *Data:
 		return ErrDataNeedsCredit
 	}
 	if p.isTerminal() {

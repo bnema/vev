@@ -298,6 +298,7 @@ func TestNewPumpValidation(t *testing.T) {
 		require.Equal(t, 1, carrier.closeCalls())
 		require.ErrorIs(t, pump.SendData(1, []byte("x"), nil), ErrPhysicalClosed)
 		require.ErrorIs(t, pump.Send(Data{Physical: 1, Data: []byte("x")}), ErrDataNeedsCredit, "stream data never bypasses credit")
+		require.ErrorIs(t, pump.Send(&Data{Physical: 1, Data: []byte("x")}), ErrDataNeedsCredit, "nor in pointer form")
 	})
 }
 

@@ -36,6 +36,10 @@ func attachmentTimeoutError(cause error) error {
 	return ports.BrokerError{Code: ports.BrokerErrorTimeout, Text: "attachment timed out", Cause: cause}
 }
 
+// errResumeForegroundBusy ends a resume whose reattach could not claim the
+// terminal foreground.
+var errResumeForegroundBusy = ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "resume could not claim the terminal"}
+
 // attachmentDeadline owns the one absolute deadline of a whole attachment. It
 // is safe for concurrent use: its timer goroutine expires it while the
 // supervisor's run goroutine may adopt a later deadline after the stream opens.
@@ -554,6 +558,7 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 	resumes := 0
 	for {
 		s.resumeErr = nil
+		attemptStart := s.cfg.Clock.Now()
 		terminated, termErr, swap := s.attachOnce(ctx, input, service, target, localProvenance)
 		if terminated {
 			return terminated, termErr
@@ -563,9 +568,12 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			s.resume = nil
 			switch {
 			case resume != nil:
-				// A live attachment was lost: each loss after a successful
-				// attach starts a fresh resume budget.
-				resumes = 0
+				// A live attachment was lost. One that stayed up long enough
+				// starts a fresh resume budget; one that drops right after
+				// attaching keeps counting, so a flapping session gives up.
+				if s.cfg.Clock.Now().Sub(attemptStart) >= resumeStableAttachment {
+					resumes = 0
+				}
 			case s.resuming && s.resumeErr != nil:
 				// A resume attempt hit a transport-class failure before
 				// attaching (the route or destination is still down): try the
@@ -691,6 +699,13 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		// Another foreground owns the terminal, or the shared reader is
 		// claimed. Begin never closes the stream, so the supervisor does.
 		_ = stream.Close()
+		if s.resuming {
+			// A resume must say why it stopped instead of dropping silently
+			// to the picker.
+			s.resuming = false
+			s.reportAttachmentFailure(errResumeForegroundBusy)
+			return false, nil
+		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return false, nil
 	}
@@ -847,6 +862,10 @@ settlement:
 // before the client gives up and returns to the picker. With the supervisor
 // backoff this spans a few seconds, enough to ride out a transient drop.
 const maxAttachmentResumes = 5
+
+// resumeStableAttachment is how long a resumed attachment must stay up before
+// its next loss gets a fresh resume budget.
+const resumeStableAttachment = 30 * time.Second
 
 // resumeTarget builds the exact reattach request for a lost attachment: the
 // session and tab it last committed, over the same local or remote route. A
