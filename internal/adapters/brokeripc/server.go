@@ -918,14 +918,16 @@ func (s *serverSession) Close() error {
 // outcome is the peer's departure, so a listener draining its sessions never
 // reports it as its own failure.
 //
-// A peer that closes abruptly can surface a reset (or a local-close sentinel
-// from a concurrently interrupted read) instead of a clean EOF; both are still
+// A peer that closes abruptly can surface a reset, a broken pipe on the next
+// write, or a local-close sentinel from a concurrently interrupted read instead
+// of a clean EOF; all are still
 // the peer's or this side's ordinary departure, never a sandbox failure. The
 // same holds for a frame write interrupted by this side's own carriage close.
 func orderlyDisconnect(err error) bool {
 	return err == nil ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, fs.ErrClosed) ||
 		errors.Is(err, streamframe.ErrClosed) ||

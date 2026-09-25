@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"os"
 	"sync"
 	"syscall"
 	"testing"
@@ -398,6 +399,7 @@ func TestOrderlyDisconnectClassification(t *testing.T) {
 	require.True(t, orderlyDisconnect(ErrConnectionClosed))
 	require.True(t, orderlyDisconnect(errors.Join(ErrRegistrationTimeout, context.DeadlineExceeded)))
 	require.True(t, orderlyDisconnect(&net.OpError{Op: "read", Net: "unix", Err: syscall.ECONNRESET}))
+	require.True(t, orderlyDisconnect(&net.OpError{Op: "write", Net: "unix", Err: os.NewSyscallError("write", syscall.EPIPE)}))
 	require.True(t, orderlyDisconnect(net.ErrClosed))
 	require.True(t, orderlyDisconnect(fs.ErrClosed))
 	require.True(t, orderlyDisconnect(fmt.Errorf("write: %w", streamframe.ErrClosed)))
