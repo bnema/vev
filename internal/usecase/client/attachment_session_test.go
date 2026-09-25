@@ -127,6 +127,36 @@ func TestSessionAttachmentSendCancellationClosesStreamAndJoinsSend(t *testing.T)
 	}
 }
 
+func TestSessionAttachmentSettleReportsClosedProcess(t *testing.T) {
+	tests := []struct {
+		name       string
+		cause      error
+		wantClosed bool
+	}{
+		{name: "closed process sends closed detach", cause: ErrClientClosed, wantClosed: true},
+		{name: "plain cancellation sends nothing", cause: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := newSessionTestStream()
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(tt.cause)
+			w := &sessionAttachmentWorker{cfg: sessionAttachmentConfig{Clock: systemClock{}}}
+
+			event := w.settle(ctx, &attachmentForeground{done: make(chan struct{})}, stream, AttachmentToken{}, nil)
+
+			require.Equal(t, AttachmentEventFailed, event.Kind)
+			stream.mu.Lock()
+			defer stream.mu.Unlock()
+			if tt.wantClosed {
+				require.Equal(t, []protocol.ClientMessage{protocol.Detach{Closed: true}}, stream.sent)
+			} else {
+				require.Empty(t, stream.sent)
+			}
+		})
+	}
+}
+
 func (s *sessionTestStream) deliver(message protocol.ServerMessage) {
 	select {
 	case s.incoming <- message:

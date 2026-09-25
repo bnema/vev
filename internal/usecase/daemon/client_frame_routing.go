@@ -117,8 +117,13 @@ func (d *Daemon) handleAttachmentClientMessage(capability attachmentCapability, 
 					return true
 				}
 			}
-			if _, detach := message.(protocol.Detach); detach {
+			if detach, ok := message.(protocol.Detach); ok {
 				d.clientGoneWithoutNotice(capability.sess, capability.ac, capability.transport.transport, true)
+				if detach.Closed {
+					// Safe even if this call did not detach: the reap re-checks
+					// emptiness under the architecture locks.
+					d.reapAbandonedEphemeral(capability.sess)
+				}
 				return true
 			}
 			return false
@@ -167,7 +172,10 @@ func (d *Daemon) handleActiveAttachmentClientMessage(capability attachmentCapabi
 		d.handleClientNoticeForAttachment(effect, message)
 	case protocol.Detach:
 		if effect.current() {
-			d.clientGoneForAttachment(effect, true)
+			sess := effect.capability().sess
+			if d.clientGoneForAttachment(effect, true) && message.Closed {
+				d.reapAbandonedEphemeral(sess)
+			}
 			return true
 		}
 	case protocol.Ack:

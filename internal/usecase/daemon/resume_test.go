@@ -1390,11 +1390,12 @@ func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
 	}
 }
 
-func TestEphemeralParkExpiryKeepsSession(t *testing.T) {
+func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
 	clk := &signalClock{timers: make(chan *signalTimer, 8)}
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactory(t, pty), clk)
+	d.ephemeralConfig.Store(&domain.EphemeralConfig{CloseOnExit: false})
 
 	tr := &closeTrackingTransport{}
 	sess, ac, err := d.route(helloResumeCapable(protocol.IntentEphemeral, "", 0), tr)

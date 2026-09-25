@@ -883,7 +883,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 		}
 		return errors.New("vev: sessions should be nested with care; unset VEV to force")
 	}
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := clientSignalContext(ctx)
 	defer stop()
 	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {

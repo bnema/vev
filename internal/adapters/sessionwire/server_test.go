@@ -26,6 +26,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "input", want: protocol.Input{InputSeq: 1, Data: []byte("x")}},
 		{name: "resize", want: protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}}},
 		{name: "detach", want: protocol.Detach{}},
+		{name: "closed detach", want: protocol.Detach{Closed: true}},
 		{name: "ping", want: protocol.Ping{}},
 		{name: "list", want: protocol.List{}},
 		{name: "kill", want: protocol.Kill{RequestID: 1, Name: "work"}},

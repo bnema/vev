@@ -118,8 +118,11 @@ message Detached {
   uint32 reason = 1;
 }
 
-// Detach asks the daemon to release the attachment. Empty marker.
-message Detach {}
+// Detach asks the daemon to release the attachment. closed reports that the
+// client process is ending (terminal closed or terminated), not a user detach.
+message Detach {
+  bool closed = 1;
+}
 
 // Ping / Pong are empty keepalive markers.
 message Ping {}

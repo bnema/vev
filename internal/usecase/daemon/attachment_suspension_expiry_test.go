@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -140,6 +141,7 @@ func TestSuspendedAttachmentSafetyExpiryEvictsAfterTimer(t *testing.T) {
 
 func TestSuspendedAttachmentExpiryLeavesEphemeralSessionRegistered(t *testing.T) {
 	d, sess, ac, timer, _ := newSuspendedExpiryFixture(t)
+	d.ephemeralConfig.Store(&domain.EphemeralConfig{CloseOnExit: false})
 	sess.mu.Lock()
 	sess.ephemeral = true
 	sess.mu.Unlock()
@@ -148,7 +150,7 @@ func TestSuspendedAttachmentExpiryLeavesEphemeralSessionRegistered(t *testing.T)
 	d.afterClientGoneDetach = func() { once.Do(func() { close(evicted) }) }
 	timer.ch <- time.Now()
 	awaitTestCompletion(t, evicted, "safety expiry never evicted the ephemeral attachment")
-	require.Same(t, sess, firstSession(d), "ephemeral sessions follow existing lifetime policy")
+	require.Same(t, sess, firstSession(d), "with close-on-exit off, ephemeral sessions follow headless lifetime policy")
 	require.Nil(t, ac.currentAttachmentSession())
 	waitForAttachmentCleanup(t, d)
 }

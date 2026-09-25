@@ -35,6 +35,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenPaletteKeys := make(map[string]bool)
 	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
+	seenEphemeralKeys := make(map[string]bool)
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
 
@@ -153,6 +154,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Tabs.TerminalTitle = on
+		case key == "ephemeral.close-on-exit":
+			warnings = warnDuplicateKey(warnings, seenEphemeralKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid ephemeral.close-on-exit %q", value)})
+				continue
+			}
+			cfg.Ephemeral.CloseOnExit = on
 		case key == "copy.word-separators":
 			warnings = warnDuplicateKey(warnings, seenCopyKeys, key, lineNo)
 			separators, ok := parseConfigString(value)

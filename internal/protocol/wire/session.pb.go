@@ -913,9 +913,11 @@ func (x *Detached) GetReason() uint32 {
 	return 0
 }
 
-// Detach asks the daemon to release the attachment. Empty marker.
+// Detach asks the daemon to release the attachment. closed reports that the
+// client process is ending (terminal closed or terminated), not a user detach.
 type Detach struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Closed        bool                   `protobuf:"varint,1,opt,name=closed,proto3" json:"closed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -948,6 +950,13 @@ func (x *Detach) ProtoReflect() protoreflect.Message {
 // Deprecated: Use Detach.ProtoReflect.Descriptor instead.
 func (*Detach) Descriptor() ([]byte, []int) {
 	return file_session_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *Detach) GetClosed() bool {
+	if x != nil {
+		return x.Closed
+	}
+	return false
 }
 
 // Ping / Pong are empty keepalive markers.
@@ -2351,8 +2360,9 @@ const file_session_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\x124\n" +
 	"\bfailures\x18\x05 \x03(\v2\x18.vev.wire.v1.KillFailureR\bfailures\"\"\n" +
 	"\bDetached\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\rR\x06reason\"\b\n" +
-	"\x06Detach\"\x06\n" +
+	"\x06reason\x18\x01 \x01(\rR\x06reason\" \n" +
+	"\x06Detach\x12\x16\n" +
+	"\x06closed\x18\x01 \x01(\bR\x06closed\"\x06\n" +
 	"\x04Ping\"\x06\n" +
 	"\x04Pong\"\x06\n" +
 	"\x04List\"<\n" +

@@ -83,6 +83,14 @@ type TabsConfig struct {
 	TerminalTitle bool
 }
 
+// EphemeralConfig contains numbered-session lifetime settings.
+type EphemeralConfig struct {
+	// CloseOnExit removes an ephemeral session once its last attachment ends
+	// definitively: a closed client process (Detach{Closed}), or an expired
+	// park or suspension. A user detach keeps it.
+	CloseOnExit bool
+}
+
 // ScrollbackConfig is vev's per-pane retention policy. The terminal library
 // only enforces these application-selected limits. Zero megabytes disables
 // history; zero lines removes the additional line ceiling.
@@ -122,6 +130,7 @@ type Config struct {
 	Floating       FloatingConfig
 	Nav            NavConfig
 	Tabs           TabsConfig
+	Ephemeral      EphemeralConfig
 	Scrollback     ScrollbackConfig
 }
 
@@ -159,6 +168,9 @@ func Defaults() Config {
 		},
 		Tabs: TabsConfig{
 			TerminalTitle: true,
+		},
+		Ephemeral: EphemeralConfig{
+			CloseOnExit: true,
 		},
 		Scrollback: DefaultScrollbackConfig(),
 	}

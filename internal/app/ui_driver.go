@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/clock"
@@ -433,7 +431,7 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 	if options.control {
 		options.observe = true
 	}
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	ctx, stop := clientSignalContext(ctx)
 	defer stop()
 	log, logCloser, err := configureLogging(logging.Client, false)
 	if err != nil {

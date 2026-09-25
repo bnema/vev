@@ -58,7 +58,7 @@ vev kill --all                   stop vev entirely
 vev --web-daemon                 start the browser terminal
 ```
 
-- **Numbered sessions** survive detach, not a daemon stop.
+- **Numbered sessions** survive detach, not a daemon stop. They close when their last client exits ([`ephemeral.close-on-exit`](docs/configuration.md#ephemeral-sessions)).
 - **Named sessions** also come back after `kill --all` or a daemon restart ([recovery](docs/durable-session-recovery.md)).
 - The daemon starts on first use. Exiting the last shell of a session returns you to your previous one.
 
