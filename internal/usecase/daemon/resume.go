@@ -300,6 +300,7 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 		d.mu.Unlock()
 		d.closePaletteIfCurrent(parked.ac, parked.paletteGeneration)
 		d.log.Warn("parked client expired", "session", parked.sess.nameSnapshot())
+		d.reapAbandonedEphemeral(parked.sess)
 		return
 	}
 	d.mu.Unlock()

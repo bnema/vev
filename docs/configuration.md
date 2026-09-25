@@ -37,6 +37,9 @@ nav.overflow-sessions = off
 # Show the focused pane's terminal title in tab labels; off keeps the process name only.
 tabs.terminal-title = on
 
+# Remove a numbered (ephemeral) session when its last client exits.
+ephemeral.close-on-exit = on
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f
@@ -117,6 +120,17 @@ code.yank-last-notification = YLN
 - They count uncompressed history, not process memory.
 - A reload applies to existing panes right away. Lowering a limit drops the oldest rows.
 - Idle panes compress old history in the background. This saves memory but does not raise the limit.
+
+## Ephemeral sessions
+
+With `ephemeral.close-on-exit = on` (default), a numbered session is removed once its last client is gone for good:
+
+- The client process ends (terminal closed, SIGHUP, or SIGTERM).
+- A client that lost its connection does not reconnect before the resume window (15 minutes) expires.
+
+The session stays while any other client is attached. A detach (keybinding, palette, or picker switch) keeps it, and so does a network drop within the resume window. Named sessions are never affected. Set `off` to keep numbered sessions until you kill them.
+
+Closing the terminal of a client running inside SSH also sends SIGHUP, so a dropped SSH connection removes the session. Use a named session for work you want to resume.
 
 ## Development environments
 

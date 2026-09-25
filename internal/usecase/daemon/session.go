@@ -1401,7 +1401,7 @@ func (d *Daemon) snapshotSessionKillParticipants(target *session, admission *ses
 		source = target
 	}
 	unlockSessions := lockAttachmentSessions(source, target)
-	if requireEmpty && len(target.attachments) != 0 {
+	if requireEmpty && (len(target.attachments) != 0 || d.sessionHasPendingResumeLocked(target)) {
 		unlockSessions()
 		d.notices.routingMu.Unlock()
 		d.mu.Unlock()
@@ -1687,7 +1687,7 @@ func (d *Daemon) killSessionWithSnapshotDeadline(sess *session, reason uint8, pu
 }
 
 // killSessionIfEmpty tears down sess only while its exact registry entry has no
-// attachments. Membership is captured under the normal architecture locks and
+// attachments and no parked or parking resume credential. Membership is captured under the normal architecture locks and
 // fenced again at publication, so an attachment winning either side survives.
 func (d *Daemon) killSessionIfEmpty(sess *session, reason uint8, purge bool) error {
 	return d.killSessionWithSnapshotDeadlineAndCondition(sess, reason, purge, nil, nil, true)

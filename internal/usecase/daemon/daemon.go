@@ -355,6 +355,7 @@ type Daemon struct {
 	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
 	navConfig                      atomic.Pointer[domain.NavConfig]
 	tabsConfig                     atomic.Pointer[domain.TabsConfig]
+	ephemeralConfig                atomic.Pointer[domain.EphemeralConfig]
 	scrollbackConfig               atomic.Pointer[domain.ScrollbackConfig]
 	themeConfig                    atomic.Pointer[themeConfigSnapshot]
 	barScripts                     *barScriptState

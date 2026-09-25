@@ -75,7 +75,7 @@ Typed messages and negotiated version live in `internal/protocol`. Remote discov
 
 ## Session flow
 
-- Ephemeral numbered sessions survive detach while the daemon retains them, but are not persisted.
+- Ephemeral numbered sessions survive detach while the daemon retains them, but are not persisted. With `ephemeral.close-on-exit` (default on) the daemon removes one when its last attachment ends definitively: a client `Detach{Closed}` (sent on SIGHUP/SIGTERM) or an expired park/suspension. Parked, parking, suspended, or live attachments keep it.
 - Named sessions survive headless and persist across daemon restarts.
 - The daemon starts on first use and survives an empty session registry: final session removal is not shutdown, so it can be reused; it ends only on an explicit shutdown request, `kill --all`, or process cancellation.
 - A bulk purge (`kill --sessions`) takes a transient admission gate and bounds each phase with its own deadline: admission drain, stopped/broken sweep, and a shared live-teardown budget. A repository delete that ignores cancellation is detached behind an exact name/incarnation/created-time fence and reported as a typed failure instead of holding purge admission or control.

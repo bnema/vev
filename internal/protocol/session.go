@@ -170,7 +170,11 @@ const (
 	ClientNoticeLinkConnected     uint8 = 4
 )
 
-type Detach struct{}
+// Detach releases the attachment. Closed reports that the client process is
+// ending, so the daemon applies the ephemeral close-on-exit policy.
+type Detach struct {
+	Closed bool
+}
 type Ping struct{}
 type Pong struct{}
 

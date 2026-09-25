@@ -66,6 +66,8 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 	d.navConfig.Store(&nav)
 	tabs := cfg.Tabs
 	d.tabsConfig.Store(&tabs)
+	ephemeral := cfg.Ephemeral
+	d.ephemeralConfig.Store(&ephemeral)
 	d.storeThemeConfig(cfg)
 	d.applyHistoryLimits()
 	barChanged := false
@@ -283,6 +285,13 @@ func (d *Daemon) currentTabsConfig() domain.TabsConfig {
 		return *cfg
 	}
 	return domain.Defaults().Tabs
+}
+
+func (d *Daemon) currentEphemeralConfig() domain.EphemeralConfig {
+	if cfg := d.ephemeralConfig.Load(); cfg != nil {
+		return *cfg
+	}
+	return domain.Defaults().Ephemeral
 }
 
 func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {

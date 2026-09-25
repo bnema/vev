@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
@@ -26,6 +27,15 @@ import (
 // reader. It reaches the terminal only through the supervisor-granted
 // AttachmentForeground. Input, geometry and lifecycle sends therefore retain
 // the foreground token and stop when the grant is superseded.
+
+// closedDetachTimeout bounds the final Detach{Closed} send when the client
+// process is ending, so a slow broker never delays terminal shutdown.
+const closedDetachTimeout = 300 * time.Millisecond
+
+// ErrClientClosed is the cancellation cause composition uses when the client
+// process is ending (SIGHUP/SIGTERM). The attachment then sends Detach{Closed}
+// so the daemon can apply ephemeral.close-on-exit instead of parking.
+var ErrClientClosed = errors.New("client: process closed")
 
 var (
 	// errAttachmentDeadline is the stable local sentinel of an expired
@@ -777,6 +787,9 @@ func (w *sessionAttachmentWorker) awaitServer(ctx context.Context, fg Attachment
 // application failure on the stream.
 func (w *sessionAttachmentWorker) settle(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, token AttachmentToken, err error) AttachmentEvent {
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		if errors.Is(context.Cause(ctx), ErrClientClosed) {
+			w.sendClosed(stream)
+		}
 		return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: errors.Join(ctxErr, err)}
 	}
 	if cause := streamErr(stream); cause != nil {
@@ -789,6 +802,23 @@ func (w *sessionAttachmentWorker) settle(ctx context.Context, fg AttachmentForeg
 		return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: err}
 	}
 	return AttachmentEvent{Token: token, Kind: AttachmentEventEnded}
+}
+
+// sendClosed makes a best-effort, bounded attempt to tell the daemon that this
+// client process is ending. It bypasses send's cancellation because the run
+// context is already done; the daemon parks the attachment if it never arrives.
+func (w *sessionAttachmentWorker) sendClosed(stream ports.BrokerLogicalConnection) {
+	if supervisorNil(stream) {
+		return
+	}
+	sent := make(chan error, 1)
+	go func() { sent <- stream.SendClient(protocol.Detach{Closed: true}) }()
+	timer := w.cfg.Clock.NewTimer(closedDetachTimeout)
+	defer stopSupervisorTimer(timer)
+	select {
+	case <-sent:
+	case <-timer.C():
+	}
 }
 
 // streamErr reads the logical stream's stable terminal cause without treating a

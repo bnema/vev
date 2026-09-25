@@ -22,6 +22,7 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "input", message: protocol.Input{InputSeq: 1, Data: []byte("x")}},
 		{name: "resize", message: protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}}},
 		{name: "detach", message: protocol.Detach{}},
+		{name: "closed detach", message: protocol.Detach{Closed: true}},
 		{name: "ping", message: protocol.Ping{}},
 		{name: "list", message: protocol.List{}},
 		{name: "kill", message: protocol.Kill{RequestID: 1, Name: "work"}},

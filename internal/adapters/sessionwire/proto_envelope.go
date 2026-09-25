@@ -67,7 +67,7 @@ func encodeProtoClient(message protocol.ClientMessage) (*wire.ClientEnvelope, er
 		}
 		return encodeProtoClient(*m)
 	case protocol.Detach:
-		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_Detach{Detach: &wire.Detach{}}}, nil
+		return &wire.ClientEnvelope{Payload: &wire.ClientEnvelope_Detach{Detach: &wire.Detach{Closed: m.Closed}}}, nil
 	case *protocol.Detach:
 		if m == nil {
 			return nil, ErrInvalidMessage
@@ -620,7 +620,7 @@ func decodeProtoClient(envelope *wire.ClientEnvelope) (protocol.ClientMessage, e
 	case *wire.ClientEnvelope_Resize:
 		return resizeFromWire(payload.Resize)
 	case *wire.ClientEnvelope_Detach:
-		return protocol.Detach{}, nil
+		return protocol.Detach{Closed: payload.Detach.GetClosed()}, nil
 	case *wire.ClientEnvelope_Ping:
 		return protocol.Ping{}, nil
 	case *wire.ClientEnvelope_List:

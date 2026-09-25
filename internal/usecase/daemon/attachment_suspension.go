@@ -367,4 +367,5 @@ func (d *Daemon) expireSuspendedAttachment(record *suspendedAttachmentRetention)
 	// picker/palette/output cleanup, and the physical transport close all run
 	// outside every architecture lock. Expiry never parks a resume credential.
 	d.finishClientGone(sess, ac, record.transport.transport, true, false)
+	d.reapAbandonedEphemeral(sess)
 }

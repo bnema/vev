@@ -349,6 +349,9 @@ func TestParse(t *testing.T) {
 			if !tt.want.Tabs.TerminalTitle {
 				tt.want.Tabs = domain.Defaults().Tabs
 			}
+			if !tt.want.Ephemeral.CloseOnExit {
+				tt.want.Ephemeral = domain.Defaults().Ephemeral
+			}
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}
@@ -469,6 +472,46 @@ func TestParseTabsTerminalTitle(t *testing.T) {
 			}
 			if got.Tabs.TerminalTitle != tt.want {
 				t.Fatalf("Parse() Tabs.TerminalTitle = %v, want %v", got.Tabs.TerminalTitle, tt.want)
+			}
+			if !reflect.DeepEqual(warnings, tt.wantWarnings) {
+				t.Fatalf("Parse() warnings = %#v, want %#v", warnings, tt.wantWarnings)
+			}
+		})
+	}
+}
+
+func TestParseEphemeralCloseOnExit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		input        string
+		want         bool
+		wantWarnings []domain.Warning
+	}{
+		{name: "absent key defaults on", input: "theme = dark\n", want: true},
+		{name: "on", input: "ephemeral.close-on-exit = on\n", want: true},
+		{name: "off", input: "ephemeral.close-on-exit = off\n", want: false},
+		{
+			name:  "invalid value warns and keeps default",
+			input: "ephemeral.close-on-exit = kill\n",
+			want:  true,
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid ephemeral.close-on-exit \"kill\""},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, warnings, err := Parse(strings.NewReader(tt.input))
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got.Ephemeral.CloseOnExit != tt.want {
+				t.Fatalf("Parse() Ephemeral.CloseOnExit = %v, want %v", got.Ephemeral.CloseOnExit, tt.want)
 			}
 			if !reflect.DeepEqual(warnings, tt.wantWarnings) {
 				t.Fatalf("Parse() warnings = %#v, want %#v", warnings, tt.wantWarnings)
