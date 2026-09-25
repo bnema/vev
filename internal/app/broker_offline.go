@@ -270,6 +270,9 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 		return fmt.Errorf("vev: open broker sandbox store: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, store.Close()) }()
+	if err := upgradeBrokerHostVersions(store); err != nil {
+		return err
+	}
 
 	epoch, err := deps.newEpoch()
 	if err != nil {

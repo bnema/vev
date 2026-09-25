@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 )
 
 func TestObservationOutcomeKeepsTypedDialFailure(t *testing.T) {
@@ -22,6 +23,9 @@ func TestObservationOutcomeKeepsTypedDialFailure(t *testing.T) {
 		{name: "deadline is timeout", err: context.DeadlineExceeded, kind: domain.RemoteFailureTimeout, want: domain.RemoteAvailabilityUnreachable},
 		{name: "wrapped authentication", err: fmt.Errorf("dial: %w", domain.RemoteFailure{Kind: domain.RemoteFailureAuthentication, Err: errors.New("exit 255")}), kind: domain.RemoteFailureAuthentication, want: domain.RemoteAvailabilityAuthFailed},
 		{name: "wrapped trust", err: fmt.Errorf("dial: %w", domain.RemoteFailure{Kind: domain.RemoteFailureTrust}), kind: domain.RemoteFailureTrust, want: domain.RemoteAvailabilityUnreachable},
+		{name: "conflicting policy is incompatible", err: fmt.Errorf("bind: %w", ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy}), kind: domain.RemoteFailureIncompatible, want: domain.RemoteAvailabilityIncompatible},
+		{name: "incompatible broker error", err: ports.BrokerError{Code: ports.BrokerErrorIncompatible}, kind: domain.RemoteFailureIncompatible, want: domain.RemoteAvailabilityIncompatible},
+		{name: "unavailable broker error stays transport", err: ports.BrokerError{Code: ports.BrokerErrorUnavailable}, kind: domain.RemoteFailureTransport, want: domain.RemoteAvailabilityUnreachable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
