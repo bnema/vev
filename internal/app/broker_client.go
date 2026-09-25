@@ -334,23 +334,22 @@ func localEphemeralNavigation() client.InitialNavigation {
 	}
 }
 
-// errTerminalNavigationUnresolved reports that a CLI target could not be
-// translated into the exact identity a snapshot carries. It is a local refusal:
+// errTerminalNavigationUnresolved reports that a CLI target names a host the
+// broker catalogue does not carry. It is a local refusal:
 // no destination was dialed, so the supervisor surfaces it as a bounded
 // selection-unavailable notice and returns to the picker instead of attaching a
 // fallback or creating implicitly.
-var errTerminalNavigationUnresolved = errors.New("vev: attach target is not in the broker catalogue")
+var errTerminalNavigationUnresolved = errors.New("vev: attach host is not in the broker catalogue")
 
 // terminalBrokerNavigation translates the parsed terminal CLI intent into the
 // closed initial-navigation union. An intent that is fully determined before
-// the connection (local creation) is a value; an intent whose exact identity
-// only exists in a broker publication (`attach`, and any remote target) is a
-// single-shot resolver that runs once against the first committed snapshot.
+// the connection (local creation, local named attach) is a value; a remote
+// target is a single-shot resolver that runs once against the first committed
+// snapshot to fence the host registration.
 //
-// The translation never invents identity: a remote destination is only ever the
-// complete registration a snapshot carries, and an exact target is only ever
-// the lifecycle/name pair the snapshot publishes. A target the snapshot does not
-// carry is a refusal, never an implicit create and never a same-name fallback.
+// Named attach never consults the catalogue for session existence: the daemon
+// restores or refuses the name. A remote destination is only ever the complete
+// registration a snapshot carries; an unknown host is a refusal.
 func terminalBrokerNavigation(intent uint8, name, remoteTarget string) (client.InitialNavigation, client.InitialNavigationResolver, error) {
 	if remoteTarget == "" {
 		switch intent {

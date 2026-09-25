@@ -122,7 +122,7 @@ func (a SessionAdmission) Validate() error {
 				return errors.New("ports: named admission carries an exact target")
 			}
 			if err := domain.ValidateSessionName(a.Name); err != nil {
-				return fmt.Errorf("ports: invalid creation session name: %w", err)
+				return fmt.Errorf("ports: invalid admission session name: %w", err)
 			}
 		case BrokerAdmissionCreateEphemeral:
 			if a.Target != (protocol.ExactSessionTarget{}) {

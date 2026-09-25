@@ -602,7 +602,9 @@ func resolvePickerTarget(epoch ports.BrokerEpoch, authority pickerResolveAuthori
 	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind == pickerSelectionExact {
 		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "remote host has no vev daemon; choose create session"})
 	}
-	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind != pickerSelectionCreateNamed && ref.kind != pickerSelectionCreateEphemeral {
+	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind != pickerSelectionCreateNamed && ref.kind != pickerSelectionCreateEphemeral && ref.kind != pickerSelectionAttachNamed {
+		// A named attach carries StartIfNeeded and lets the started daemon
+		// restore or refuse the name, so a no-daemon observation is no refusal.
 		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "no daemon exists on this host; choose create session"})
 	}
 	if refuseFailing && !ref.local && pickerObservationFailing(observation) && observation.Availability != domain.RemoteAvailabilityNoDaemon {
