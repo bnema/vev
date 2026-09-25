@@ -31,6 +31,8 @@ import (
 //     only for the named variant, and no target.
 //   - AttachExact carries a valid endpoint fence, a nonzero epoch, no name, and
 //     a validated protocol.ExactSessionTarget.
+//   - AttachNamed carries a valid endpoint fence, a name, and no target; the
+//     daemon resolves the name and refuses an unknown one.
 //   - A local creation may state epoch zero, meaning "bind to the first adopted
 //     publication". Every remote intent, and every exact attach even locally,
 //     requires the epoch of the snapshot that resolved it, and a nonzero epoch
@@ -48,6 +50,9 @@ const (
 	InitialNavigationCreateNamed
 	// InitialNavigationAttachExact attaches to one exact session lifecycle.
 	InitialNavigationAttachExact
+	// InitialNavigationAttachNamed attaches to the session the daemon knows by
+	// name; existence is the daemon's decision, not the broker catalogue's.
+	InitialNavigationAttachNamed
 )
 
 func (k InitialNavigationKind) String() string {
@@ -60,6 +65,8 @@ func (k InitialNavigationKind) String() string {
 		return "create_named"
 	case InitialNavigationAttachExact:
 		return "attach_exact"
+	case InitialNavigationAttachNamed:
+		return "attach_named"
 	default:
 		return fmt.Sprintf("invalid(%d)", uint8(k))
 	}
@@ -104,7 +111,7 @@ func (n InitialNavigation) Validate() error {
 			return errors.New("vev: picker navigation carries an exact target")
 		}
 		return nil
-	case InitialNavigationCreateEphemeral, InitialNavigationCreateNamed, InitialNavigationAttachExact:
+	case InitialNavigationCreateEphemeral, InitialNavigationCreateNamed, InitialNavigationAttachExact, InitialNavigationAttachNamed:
 	default:
 		return fmt.Errorf("vev: unknown initial navigation kind %d", uint8(n.Kind))
 	}
@@ -124,12 +131,12 @@ func (n InitialNavigation) Validate() error {
 		if n.Target != (protocol.ExactSessionTarget{}) {
 			return errors.New("vev: ephemeral creation navigation carries an exact target")
 		}
-	case InitialNavigationCreateNamed:
+	case InitialNavigationCreateNamed, InitialNavigationAttachNamed:
 		if err := domain.ValidateSessionName(n.Name); err != nil {
 			return fmt.Errorf("vev: initial navigation session name: %w", err)
 		}
 		if n.Target != (protocol.ExactSessionTarget{}) {
-			return errors.New("vev: named creation navigation carries an exact target")
+			return errors.New("vev: named navigation carries an exact target")
 		}
 	case InitialNavigationAttachExact:
 		if n.Epoch == 0 {
@@ -202,6 +209,9 @@ func pickerSelectionFromNavigation(n InitialNavigation) pickerSelectionRef {
 		ref.kind = pickerSelectionExact
 		ref.lifecycle = n.Target.LifecycleID
 		ref.name = n.Target.SessionName
+	case InitialNavigationAttachNamed:
+		ref.kind = pickerSelectionAttachNamed
+		ref.name = n.Name
 	}
 	return ref
 }
@@ -211,7 +221,7 @@ func pickerSelectionFromNavigation(n InitialNavigation) pickerSelectionRef {
 // creation name keeps its own code, and every other contradiction is an
 // unknown-kind refusal.
 func initialNavigationRefusal(n InitialNavigation) pickerCatalogueErrorCode {
-	if n.Kind == InitialNavigationCreateNamed {
+	if n.Kind == InitialNavigationCreateNamed || n.Kind == InitialNavigationAttachNamed {
 		if err := domain.ValidateSessionName(n.Name); err != nil {
 			return pickerCatalogueInvalidName
 		}

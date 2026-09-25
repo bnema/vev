@@ -122,7 +122,18 @@ func NewBrokerOperations(service ports.BrokerService, clock ports.Clock) (*Broke
 // unreachable: a refused or lost listing is an ordinary error. A new explicit
 // list is always safe, so the implementation never retries on its own.
 func (o *BrokerOperations) List(ctx context.Context, route BrokerOperationRoute) ([]protocol.SessionInfo, error) {
-	reply, err := o.exchange(ctx, route, ports.BrokerDaemonExistingOnly, protocol.List{})
+	return o.list(ctx, route, ports.BrokerDaemonExistingOnly)
+}
+
+// ListStarting is List that may start the destination daemon first, so the
+// reply includes sessions it restores from disk. Use it when the answer
+// decides an attach, where a stopped daemon must not read as "no sessions".
+func (o *BrokerOperations) ListStarting(ctx context.Context, route BrokerOperationRoute) ([]protocol.SessionInfo, error) {
+	return o.list(ctx, route, ports.BrokerDaemonStartIfNeeded)
+}
+
+func (o *BrokerOperations) list(ctx context.Context, route BrokerOperationRoute, mode ports.BrokerDaemonStartMode) ([]protocol.SessionInfo, error) {
+	reply, err := o.exchange(ctx, route, mode, protocol.List{})
 	if err != nil {
 		if errors.Is(err, errBrokerOperationLost) {
 			return nil, fmt.Errorf("vev: reading session list: %w", err)

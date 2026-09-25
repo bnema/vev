@@ -181,7 +181,8 @@ message Reconcile {
 // admission is the closed attachment-admission taxonomy: an attachment
 // stream names exactly how the daemon must admit it, while control and
 // observation streams carry none (0). name is validated session-name
-// authority for create-named and is empty for every other variant.
+// authority for create-named and attach-named and is empty for every other
+// variant.
 // start_mode is the explicit daemon-start authorization carried to the
 // transport: observation and daemon-stop must be existing_only, while
 // attach/creation and the explicit list/mutate controls may be
@@ -199,9 +200,10 @@ message OpenStream {
   repeated string env = 7;
   BrokerWirePolicy policy = 8;
   // Closed admission taxonomy: 0 = none (control/observation), 1 = exact
-  // attach/resume, 2 = create named, 3 = create ephemeral.
+  // attach/resume, 2 = create named, 3 = create ephemeral, 4 = attach named
+  // (the daemon resolves the name and refuses an unknown one).
   uint32 admission = 9;
-  // Validated session name for create-named; empty otherwise.
+  // Validated session name for create-named and attach-named; empty otherwise.
   string name = 10;
   // Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =
   // existing_only, 2 = start_if_needed. Always present; zero is refused.

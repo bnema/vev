@@ -7,8 +7,10 @@ import (
 	"os"
 	"sync"
 
+	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/internal/usecase/confirm"
 	"github.com/bnema/vev/pkg/rawterm"
 )
@@ -50,21 +52,19 @@ func (w flushingWriter) Write(data []byte) (int, error) {
 	return written, nil
 }
 
-// resolveAttachCreationIntent decides the attach intent for one direct exact
+// resolveAttachCreationIntent decides the attach intent for one direct
 // `attach <name>` target (local when remoteTarget is empty, otherwise a
 // configured remote host) before the client owns any console reader or raw
-// mode. It reuses the broker's own attach resolution (the same exact-target
-// lookup `localExactAttachResolver`/`remoteExactAttachResolver` run later) so
-// existence is decided from one committed broker publication, never from
-// error-text matching.
+// mode. Existence is asked of the destination daemon itself through a list
+// that may start it, never read from the broker catalogue: right after
+// `kill --all` the catalogue is empty while the daemon still restores the
+// session from disk.
 //
-// When the session exists, the host is not configured, or existence cannot be
-// determined (the broker is unreachable), it keeps IntentAttach unchanged and
-// the resolver's own rejection, if any, surfaces unchanged later. When the
-// session is confirmed absent on a known host, it offers creation on an
-// interactive console and returns IntentNew on confirmation; a declined
-// answer, an unusable console, or a non-interactive console all keep
-// IntentAttach so the existing resolver reports its own clear refusal.
+// When the session exists, the host is not configured, or the daemon cannot
+// answer, it keeps IntentAttach; the named attach then lets the daemon decide
+// and report its own refusal. Only a daemon listing without the name offers
+// creation on an interactive console, returning IntentNew on confirmation; a
+// declined answer or a non-interactive console keeps IntentAttach.
 //
 // The check runs before Supervisor.Run enters raw mode, so the create prompt
 // is always the sole console reader: no attachment worker can leave a
@@ -85,8 +85,7 @@ func resolveAttachCreationIntent(ctx context.Context, intent uint8, name, remote
 		// cadence) decide, exactly as if this preflight had never run.
 		return protocol.IntentAttach, nil, nil
 	}
-	exists, hostKnown := attachTargetSessionExists(service.Snapshot(), remoteTarget, name)
-	if exists || !hostKnown {
+	if !daemonReportsSessionMissing(ctx, service, remoteTarget, name) {
 		return protocol.IntentAttach, service, nil
 	}
 	resolved, err := confirmMissingSessionCreate(ctx, name, terminal)
@@ -97,25 +96,39 @@ func resolveAttachCreationIntent(ctx context.Context, intent uint8, name, remote
 	return resolved, service, nil
 }
 
-// attachTargetSessionExists reports whether one exact-name attach target is
-// present in the committed publication, and whether the target's daemon (the
-// local daemon, or the named remote host) is even a configured observation.
-// hostKnown is false only when the daemon itself is absent from the snapshot;
-// a known daemon with no matching session name reports exists=false,
-// hostKnown=true.
-func attachTargetSessionExists(snapshot ports.BrokerSnapshot, remoteTarget, name string) (exists, hostKnown bool) {
-	var observation ports.BrokerDaemonObservation
-	var ok bool
-	if remoteTarget == "" {
-		observation, ok = localBrokerObservation(snapshot)
-	} else {
-		observation, ok = snapshot.Find(remoteTarget)
+// attachSessionLister is the daemon listing seam; production starts the
+// destination daemon if needed so restored sessions are included.
+var attachSessionLister = func(ctx context.Context, service ports.BrokerService, route client.BrokerOperationRoute) ([]protocol.SessionInfo, error) {
+	operations, err := client.NewBrokerOperations(service, clock.New())
+	if err != nil {
+		return nil, err
 	}
-	if !ok {
-		return false, false
+	return operations.ListStarting(ctx, route)
+}
+
+// daemonReportsSessionMissing reports true only when the destination daemon
+// answered a listing that does not carry name. An unconfigured host or a
+// failed listing proves nothing, so it reports false.
+func daemonReportsSessionMissing(ctx context.Context, service ports.BrokerService, remoteTarget, name string) bool {
+	snapshot := service.Snapshot()
+	route := client.BrokerOperationRoute{Epoch: snapshot.Epoch, Destination: ports.BrokerEndpointFence{Local: true}}
+	if remoteTarget != "" {
+		observation, ok := snapshot.Find(remoteTarget)
+		if !ok {
+			return false
+		}
+		route.Destination = ports.BrokerEndpointFence{Registration: observation.Registration}
 	}
-	_, found := brokerObservationExactTarget(observation, name)
-	return found, true
+	sessions, err := attachSessionLister(ctx, service, route)
+	if err != nil {
+		return false
+	}
+	for _, session := range sessions {
+		if session.Name == name {
+			return false
+		}
+	}
+	return true
 }
 
 // confirmMissingSessionCreate prompts to create an absent session and maps

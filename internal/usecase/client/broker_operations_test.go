@@ -464,33 +464,45 @@ func TestBrokerOperationOpenFailureIsNotSent(t *testing.T) {
 // control stream, sends exactly one List, and returns the daemon's own
 // sessions rather than a fabricated or cached value.
 func TestBrokerOperationsListUsesOneControlStream(t *testing.T) {
-	stream := newBrokerOpsTestStream()
-	stream.deliver(protocol.Sessions{Sessions: []protocol.SessionInfo{{Name: "alpha", State: protocol.SessionUp}}})
-	ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
+	tests := []struct {
+		name      string
+		list      func(*BrokerOperations, context.Context, BrokerOperationRoute) ([]protocol.SessionInfo, error)
+		startMode ports.BrokerDaemonStartMode
+	}{
+		{name: "list never starts the daemon", list: (*BrokerOperations).List, startMode: ports.BrokerDaemonExistingOnly},
+		{name: "list starting may start the daemon", list: (*BrokerOperations).ListStarting, startMode: ports.BrokerDaemonStartIfNeeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := newBrokerOpsTestStream()
+			stream.deliver(protocol.Sessions{Sessions: []protocol.SessionInfo{{Name: "alpha", State: protocol.SessionUp}}})
+			ops, service, _ := brokerOpsTestOperation(t, brokerOpsTestLocalSnapshot(), stream)
 
-	sessions, err := ops.List(context.Background(), brokerOpsTestLocalRoute())
-	require.NoError(t, err)
-	require.Equal(t, []protocol.SessionInfo{{Name: "alpha", State: protocol.SessionUp}}, sessions)
+			sessions, err := tt.list(ops, context.Background(), brokerOpsTestLocalRoute())
+			require.NoError(t, err)
+			require.Equal(t, []protocol.SessionInfo{{Name: "alpha", State: protocol.SessionUp}}, sessions)
 
-	requests := service.openedRequests()
-	require.Len(t, requests, 1)
-	request := requests[0]
-	require.Equal(t, ports.BrokerStreamControl, request.Purpose)
-	require.Equal(t, ports.BrokerStreamAdmission(0), request.Admission)
-	require.Empty(t, request.Name)
-	require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
-	require.Empty(t, request.Env)
-	require.Equal(t, ports.BrokerDaemonExistingOnly, request.StartMode)
-	require.True(t, request.Local)
-	require.Equal(t, service.ConnectionID(), request.Connection)
-	require.NotZero(t, request.Stream)
-	require.Equal(t, brokerOpsTestEpoch, request.Epoch)
+			requests := service.openedRequests()
+			require.Len(t, requests, 1)
+			request := requests[0]
+			require.Equal(t, ports.BrokerStreamControl, request.Purpose)
+			require.Equal(t, ports.BrokerStreamAdmission(0), request.Admission)
+			require.Empty(t, request.Name)
+			require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
+			require.Empty(t, request.Env)
+			require.Equal(t, tt.startMode, request.StartMode)
+			require.True(t, request.Local)
+			require.Equal(t, service.ConnectionID(), request.Connection)
+			require.NotZero(t, request.Stream)
+			require.Equal(t, brokerOpsTestEpoch, request.Epoch)
 
-	sent := stream.messages()
-	require.Len(t, sent, 1)
-	require.Equal(t, protocol.List{}, sent[0])
-	require.Equal(t, 1, stream.closeCount(), "the owned stream is closed exactly once")
-	require.Equal(t, 0, service.closeCount(), "the borrowed service is never closed")
+			sent := stream.messages()
+			require.Len(t, sent, 1)
+			require.Equal(t, protocol.List{}, sent[0])
+			require.Equal(t, 1, stream.closeCount(), "the owned stream is closed exactly once")
+			require.Equal(t, 0, service.closeCount(), "the borrowed service is never closed")
+		})
+	}
 }
 
 // TestBrokerOperationsListLostReplyIsError proves a lost or malformed listing

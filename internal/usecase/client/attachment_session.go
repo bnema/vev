@@ -652,7 +652,7 @@ func (w *sessionAttachmentWorker) validateWelcome(welcome protocol.Welcome) erro
 	if welcome.CommittedIdentity != nil {
 		return w.validateIdentity("welcome", welcome.CommittedIdentity.Target)
 	}
-	if w.cfg.Request.Admission == ports.BrokerAdmissionCreateNamed && welcome.SessionName != w.cfg.Request.Name {
+	if (w.cfg.Request.Admission == ports.BrokerAdmissionCreateNamed || w.cfg.Request.Admission == ports.BrokerAdmissionAttachNamed) && welcome.SessionName != w.cfg.Request.Name {
 		return &AttachmentIdentityError{Stage: "welcome", Got: protocol.ExactSessionTarget{SessionName: welcome.SessionName}, Name: w.cfg.Request.Name}
 	}
 	return nil
@@ -672,7 +672,7 @@ func (w *sessionAttachmentWorker) validateIdentity(stage string, got protocol.Ex
 		if got != request.Target {
 			return &AttachmentIdentityError{Stage: stage, Want: request.Target, Got: got}
 		}
-	case ports.BrokerAdmissionCreateNamed:
+	case ports.BrokerAdmissionCreateNamed, ports.BrokerAdmissionAttachNamed:
 		if got.SessionName != request.Name {
 			return &AttachmentIdentityError{Stage: stage, Got: got, Name: request.Name}
 		}
@@ -739,6 +739,10 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		}
 	case ports.BrokerAdmissionCreateNamed:
 		hello.Intent = protocol.IntentNew
+		hello.Name = request.Name
+	case ports.BrokerAdmissionAttachNamed:
+		// The daemon resolves the name, restoring it if needed.
+		hello.Intent = protocol.IntentAttach
 		hello.Name = request.Name
 	case ports.BrokerAdmissionCreateEphemeral:
 		hello.Intent = protocol.IntentEphemeral

@@ -97,6 +97,43 @@ func TestValidateSessionHelloAdmissionMatrix(t *testing.T) {
 			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionCreateNamed, Name: "work", Env: localEnv}),
 		},
 		{
+			name:      "local named attach",
+			hello:     protocol.Hello{Intent: protocol.IntentAttach, Name: "work", Cwd: "/client/cwd", Env: localEnv},
+			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionAttachNamed, Name: "work", Env: localEnv}),
+		},
+		{
+			name: "remote named attach",
+			hello: protocol.Hello{
+				Intent: protocol.IntentAttach, Name: "work", Remote: true,
+				EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned,
+			},
+			admission: remote(ports.SessionAdmission{Admission: ports.BrokerAdmissionAttachNamed, Name: "work"}),
+		},
+		{
+			name:      "named attach cannot create",
+			hello:     protocol.Hello{Intent: protocol.IntentNew, Name: "work"},
+			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionAttachNamed, Name: "work"}),
+			wantErr:   true,
+		},
+		{
+			name:      "liar name on a named attach",
+			hello:     protocol.Hello{Intent: protocol.IntentAttach, Name: "other"},
+			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionAttachNamed, Name: "work"}),
+			wantErr:   true,
+		},
+		{
+			name:      "named attach smuggles an exact target",
+			hello:     protocol.Hello{Intent: protocol.IntentAttach, Name: "work", ExactTarget: &target},
+			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionAttachNamed, Name: "work"}),
+			wantErr:   true,
+		},
+		{
+			name:      "named attach smuggles a resume token",
+			hello:     protocol.Hello{Intent: protocol.IntentAttach, Name: "work", ResumeToken: 4},
+			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionAttachNamed, Name: "work"}),
+			wantErr:   true,
+		},
+		{
 			name:      "local fresh exact attach",
 			hello:     protocol.Hello{Intent: protocol.IntentAttach, Name: "work", ExactTarget: &target},
 			admission: local(ports.SessionAdmission{Admission: ports.BrokerAdmissionExact, Target: target}),

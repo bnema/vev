@@ -116,16 +116,16 @@ func TestUIDriverCreationRoutes(t *testing.T) {
 	require.Equal(t, "work", namedAttached.Context.Route.Target.SessionName)
 }
 
-// TestUIDriverExactAttachResolvesTheCommittedLifecycle pins the attach route
-// deterministically against the scripted broker: `attach work` resolves the
-// committed local lifecycle into exactly one exact admission whose target is
-// that published identity, and the run dials no daemon itself.
-func TestUIDriverExactAttachResolvesTheCommittedLifecycle(t *testing.T) {
+// TestUIDriverNamedAttachLetsTheDaemonResolve pins the attach route
+// deterministically against the scripted broker: `attach work` opens exactly
+// one named admission, the daemon commits the identity, and the run dials no
+// daemon itself.
+func TestUIDriverNamedAttachLetsTheDaemonResolve(t *testing.T) {
 	snapshot := terminalCompositionSnapshot([]string{"work"}, nil)
 	navigation, resolver, err := terminalBrokerNavigation(protocol.IntentAttach, "work", "")
 	require.NoError(t, err)
-	require.Equal(t, client.InitialNavigation{}, navigation, "a name is resolved against the committed publication")
-	require.NotNil(t, resolver)
+	require.Nil(t, resolver, "a local name needs no catalogue resolution")
+	require.Equal(t, client.InitialNavigationAttachNamed, navigation.Kind)
 
 	service := newTerminalCompositionService(snapshot)
 	run := startScriptedUIDriverRun(t, service, navigation, resolver)
@@ -135,10 +135,10 @@ func TestUIDriverExactAttachResolvesTheCommittedLifecycle(t *testing.T) {
 	require.Len(t, opened, 1, "attach work opens exactly one broker stream")
 	request := opened[0]
 	require.NoError(t, request.Validate())
-	require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
+	require.Equal(t, ports.BrokerAdmissionAttachNamed, request.Admission)
 	require.True(t, request.Local)
-	require.Equal(t, "work", request.Target.SessionName)
-	require.Equal(t, terminalCompositionSessions([]string{"work"})[0].LifecycleID, request.Target.LifecycleID)
+	require.Equal(t, "work", request.Name)
+	require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
 }
 
 // TestUIDriverRefusedTargetStaysPickerAndKeepsServing pins the local-refusal

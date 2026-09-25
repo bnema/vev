@@ -554,8 +554,8 @@ func openStreamToWire(m OpenStream) (*wire.OpenStream, error) {
 		Env:    append([]string(nil), m.Env...),
 		Policy: policyToWire(m.Policy),
 		// The admission taxonomy mirrors the port values (0 none, 1 exact,
-		// 2 create named, 3 create ephemeral); the name travels only for the
-		// create-named variant.
+		// 2 create named, 3 create ephemeral, 4 attach named); the name
+		// travels only for the two named variants.
 		Admission: admission, Name: m.Name, StartMode: startMode,
 	}
 	if !m.Local {
@@ -581,6 +581,8 @@ func admissionToWire(admission ports.BrokerStreamAdmission) (uint32, error) {
 		return 2, nil
 	case ports.BrokerAdmissionCreateEphemeral:
 		return 3, nil
+	case ports.BrokerAdmissionAttachNamed:
+		return 4, nil
 	default:
 		return 0, errConvertRange
 	}
@@ -597,6 +599,8 @@ func admissionFromWire(value uint32) (ports.BrokerStreamAdmission, error) {
 		return ports.BrokerAdmissionCreateNamed, nil
 	case 3:
 		return ports.BrokerAdmissionCreateEphemeral, nil
+	case 4:
+		return ports.BrokerAdmissionAttachNamed, nil
 	default:
 		return 0, errConvertRange
 	}

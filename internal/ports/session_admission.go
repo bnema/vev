@@ -77,8 +77,8 @@ type SessionAdmission struct {
 	// Admission is the closed attachment-admission variant. It is nonzero only
 	// for BrokerStreamAttachment; control and observation carry none.
 	Admission BrokerStreamAdmission
-	// Name is the validated creation session name for
-	// BrokerAdmissionCreateNamed and is empty for every other variant.
+	// Name is the validated session name for BrokerAdmissionCreateNamed and
+	// BrokerAdmissionAttachNamed and is empty for every other variant.
 	Name string
 	// Target is the exact session lifecycle target for BrokerAdmissionExact and
 	// is zero for every other variant.
@@ -117,9 +117,9 @@ func (a SessionAdmission) Validate() error {
 			if a.Name != "" {
 				return errors.New("ports: exact admission carries a creation name")
 			}
-		case BrokerAdmissionCreateNamed:
+		case BrokerAdmissionCreateNamed, BrokerAdmissionAttachNamed:
 			if a.Target != (protocol.ExactSessionTarget{}) {
-				return errors.New("ports: named creation carries an exact target")
+				return errors.New("ports: named admission carries an exact target")
 			}
 			if err := domain.ValidateSessionName(a.Name); err != nil {
 				return fmt.Errorf("ports: invalid creation session name: %w", err)

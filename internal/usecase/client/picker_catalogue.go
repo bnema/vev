@@ -136,6 +136,9 @@ const (
 	pickerSelectionCreateNamed
 	// pickerSelectionCreateEphemeral creates one ephemeral session.
 	pickerSelectionCreateEphemeral
+	// pickerSelectionAttachNamed attaches to a session the daemon resolves by
+	// name. It is produced only by an initial CLI navigation, never a row.
+	pickerSelectionAttachNamed
 )
 
 // pickerSelectionRef is the client's exact selection identity, captured when a
@@ -658,6 +661,12 @@ func resolvePickerTarget(epoch ports.BrokerEpoch, authority pickerResolveAuthori
 		}
 		request.Admission = ports.BrokerAdmissionCreateNamed
 		request.Name = ref.createName
+	case pickerSelectionAttachNamed:
+		if err := domain.ValidateSessionName(ref.name); err != nil {
+			return fail(pickerCatalogueError{Code: pickerCatalogueInvalidName, Text: "session name is not valid"})
+		}
+		request.Admission = ports.BrokerAdmissionAttachNamed
+		request.Name = ref.name
 	case pickerSelectionCreateEphemeral:
 		request.Admission = ports.BrokerAdmissionCreateEphemeral
 	default:

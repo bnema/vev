@@ -6,11 +6,10 @@ package app
 //
 // resolveAttachCreationIntent restores the `vev attach <missing>` create
 // prompt main once ran through the direct-dial preflight, but through the
-// broker: it peeks the first committed publication over the same
-// connectProductionClientBroker seam the ordinary terminal composition uses,
-// decides existence with the exact lookup the later resolver also runs
-// (attachTargetSessionExists / brokerObservationExactTarget), and on a
-// confirmed create hands its already-open connection back so the run still
+// broker: it connects over the same connectProductionClientBroker seam the
+// ordinary terminal composition uses, asks the destination daemon for its
+// session list (daemonReportsSessionMissing, starting it if needed), and on a
+// definite answer hands its already-open connection back so the run still
 // opens exactly one broker connection.
 
 import (
@@ -30,6 +29,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/client"
 	"github.com/bnema/vev/pkg/rawterm"
 )
 
@@ -59,66 +59,68 @@ func withPreflightBroker(t *testing.T, connect func(context.Context) (ports.Brok
 	t.Cleanup(func() { connectProductionClientBroker = previous })
 }
 
-func TestAttachTargetSessionExists(t *testing.T) {
+// withDaemonSessions installs a scripted daemon listing: the destination named
+// by the route answers with sessions, or listErr when set. The broker
+// catalogue is deliberately not consulted, matching production.
+func withDaemonSessions(t *testing.T, sessions map[string][]string, listErr error) *[]client.BrokerOperationRoute {
+	t.Helper()
+	var routes []client.BrokerOperationRoute
+	previous := attachSessionLister
+	attachSessionLister = func(_ context.Context, _ ports.BrokerService, route client.BrokerOperationRoute) ([]protocol.SessionInfo, error) {
+		routes = append(routes, route)
+		if listErr != nil {
+			return nil, listErr
+		}
+		key := route.Destination.Registration.Endpoint
+		var out []protocol.SessionInfo
+		for _, name := range sessions[key] {
+			out = append(out, protocol.SessionInfo{Name: name})
+		}
+		return out, nil
+	}
+	t.Cleanup(func() { attachSessionLister = previous })
+	return &routes
+}
+
+func TestDaemonReportsSessionMissing(t *testing.T) {
+	remote := "user@example.test"
 	tests := []struct {
-		name         string
-		snapshot     ports.BrokerSnapshot
-		remote       string
-		target       string
-		wantExists   bool
-		wantHostKnow bool
+		name        string
+		snapshot    ports.BrokerSnapshot
+		daemon      map[string][]string // listing per endpoint; "" is local
+		listErr     error
+		remote      string
+		target      string
+		wantMissing bool
+		wantListed  bool
 	}{
-		{
-			name:         "local session present",
-			snapshot:     terminalCompositionSnapshot([]string{"work"}, nil),
-			target:       "work",
-			wantExists:   true,
-			wantHostKnow: true,
-		},
-		{
-			name:         "local session absent",
-			snapshot:     terminalCompositionSnapshot([]string{"work"}, nil),
-			target:       "gone",
-			wantExists:   false,
-			wantHostKnow: true,
-		},
-		{
-			name:         "local daemon absent from snapshot",
-			snapshot:     ports.BrokerSnapshot{Epoch: 1, Revision: 1},
-			target:       "gone",
-			wantExists:   false,
-			wantHostKnow: false,
-		},
-		{
-			name:         "remote session present",
-			snapshot:     terminalCompositionSnapshot(nil, map[string][]string{"user@example.test": {"work"}}),
-			remote:       "user@example.test",
-			target:       "work",
-			wantExists:   true,
-			wantHostKnow: true,
-		},
-		{
-			name:         "remote session absent on known host",
-			snapshot:     terminalCompositionSnapshot(nil, map[string][]string{"user@example.test": {"work"}}),
-			remote:       "user@example.test",
-			target:       "gone",
-			wantExists:   false,
-			wantHostKnow: true,
-		},
-		{
-			name:         "remote host not configured",
-			snapshot:     terminalCompositionSnapshot([]string{"work"}, nil),
-			remote:       "user@elsewhere.test",
-			target:       "work",
-			wantExists:   false,
-			wantHostKnow: false,
-		},
+		{name: "local session present", snapshot: terminalCompositionSnapshot(nil, nil), daemon: map[string][]string{"": {"work"}}, target: "work", wantListed: true},
+		{name: "local session absent", snapshot: terminalCompositionSnapshot(nil, nil), daemon: map[string][]string{"": {"work"}}, target: "gone", wantMissing: true, wantListed: true},
+		{name: "catalogue empty but daemon restored it", snapshot: terminalCompositionSnapshot(nil, nil), daemon: map[string][]string{"": {"vev"}}, target: "vev", wantListed: true},
+		{name: "daemon listing failed proves nothing", snapshot: terminalCompositionSnapshot(nil, nil), listErr: errors.New("unreachable"), target: "gone", wantListed: true},
+		{name: "remote session present", snapshot: terminalCompositionSnapshot(nil, map[string][]string{remote: nil}), daemon: map[string][]string{remote: {"work"}}, remote: remote, target: "work", wantListed: true},
+		{name: "remote session absent", snapshot: terminalCompositionSnapshot(nil, map[string][]string{remote: nil}), daemon: map[string][]string{remote: {"work"}}, remote: remote, target: "gone", wantMissing: true, wantListed: true},
+		{name: "remote host not configured", snapshot: terminalCompositionSnapshot(nil, nil), remote: "user@elsewhere.test", target: "work"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			exists, hostKnown := attachTargetSessionExists(tc.snapshot, tc.remote, tc.target)
-			require.Equal(t, tc.wantExists, exists)
-			require.Equal(t, tc.wantHostKnow, hostKnown)
+			routes := withDaemonSessions(t, tc.daemon, tc.listErr)
+			service := portsmocks.NewMockBrokerService(t)
+			service.EXPECT().Snapshot().Return(tc.snapshot).Once()
+
+			require.Equal(t, tc.wantMissing, daemonReportsSessionMissing(context.Background(), service, tc.remote, tc.target))
+			if !tc.wantListed {
+				require.Empty(t, *routes, "an unconfigured host is never listed")
+				return
+			}
+			require.Len(t, *routes, 1)
+			route := (*routes)[0]
+			require.Equal(t, tc.snapshot.Epoch, route.Epoch)
+			require.Equal(t, tc.remote == "", route.Destination.Local)
+			if tc.remote != "" {
+				observation, _ := tc.snapshot.Find(tc.remote)
+				require.True(t, route.Destination.Registration.Equal(observation.Registration))
+			}
 		})
 	}
 }
@@ -160,7 +162,8 @@ func TestResolveAttachCreationIntentBrokerUnavailableKeepsAttach(t *testing.T) {
 
 func TestResolveAttachCreationIntentExistingSessionAttachesWithoutPrompt(t *testing.T) {
 	service := portsmocks.NewMockBrokerService(t)
-	service.EXPECT().Snapshot().Return(terminalCompositionSnapshot([]string{"work"}, nil)).Once()
+	service.EXPECT().Snapshot().Return(terminalCompositionSnapshot(nil, nil)).Once()
+	withDaemonSessions(t, map[string][]string{"": {"work"}}, nil)
 	withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
 	withAttachInteractiveConsole(t, true) // must not even be consulted
 
@@ -209,6 +212,7 @@ func TestResolveAttachCreationIntentMissingSessionPrompt(t *testing.T) {
 			}
 			service := portsmocks.NewMockBrokerService(t)
 			service.EXPECT().Snapshot().Return(snapshot).Once()
+			withDaemonSessions(t, map[string][]string{tc.remote: {"work"}}, nil)
 			withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
 			withAttachInteractiveConsole(t, tc.interactive)
 
@@ -234,8 +238,9 @@ func TestResolveAttachCreationIntentMissingSessionPrompt(t *testing.T) {
 
 func TestResolveAttachCreationIntentCancelledPromptClosesThePeek(t *testing.T) {
 	service := portsmocks.NewMockBrokerService(t)
-	service.EXPECT().Snapshot().Return(terminalCompositionSnapshot([]string{"work"}, nil)).Once()
+	service.EXPECT().Snapshot().Return(terminalCompositionSnapshot(nil, nil)).Once()
 	service.EXPECT().Close().Return(nil).Once()
+	withDaemonSessions(t, nil, nil)
 	withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
 	withAttachInteractiveConsole(t, true)
 

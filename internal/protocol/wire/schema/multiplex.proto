@@ -55,7 +55,8 @@ message MuxOpen {
   BrokerWirePolicy policy = 8;
   // Closed attachment-admission taxonomy (ports.BrokerStreamAdmission):
   // 0 = none (control/observation), 1 = exact attach/resume carrying
-  // target, 2 = create named carrying name, 3 = create ephemeral.
+  // target, 2 = create named carrying name, 3 = create ephemeral, 4 = attach
+  // named carrying name.
   uint32 admission = 9;
   string name = 10;
   // Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =
