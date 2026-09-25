@@ -98,6 +98,8 @@ func TestBrokerConversionFailures(t *testing.T) {
 		{"invalid utf8", func() error { return BrokerDisplayText("\xff", 20) }, ErrInvalid},
 		{"oversize env", func() error { return BrokerEnvEntries([]string{strings.Repeat("a", ports.BrokerMaxEnvEntryBytes+1)}) }, ErrTooLarge},
 		{"missing equals", func() error { return BrokerEnvEntries([]string{"TERM"}) }, ErrInvalid},
+		{"nul env", func() error { return BrokerEnvEntries([]string{"A=x\x00y"}) }, ErrInvalid},
+		{"ansi prompt env", func() error { return BrokerEnvEntries([]string{"PS1=\x1b[32m$ \x1b[0m"}) }, nil},
 		{"valid env", func() error { return BrokerEnvEntries([]string{"TERM=x"}) }, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

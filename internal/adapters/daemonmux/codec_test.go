@@ -527,7 +527,7 @@ func TestMuxValidationNegatives(t *testing.T) {
 		_, err := EncodeServer(Refused{Ref: testRef(5), Error: boundary}, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
 	})
-	t.Run("bidi and control text refused", func(t *testing.T) {
+	t.Run("display control text and env NUL refused", func(t *testing.T) {
 		evil := testErrorDetail()
 		evil.Text = "timeout\u202erorrE"
 		_, err := EncodeServer(Refused{Ref: testRef(5), Error: evil}, testEnvelopeCeiling, testChunkCeiling)
@@ -537,7 +537,7 @@ func TestMuxValidationNegatives(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMessage)
 
 		badEnv := testOpen()
-		badEnv.Env = []string{"K=\u202eevil"}
+		badEnv.Env = []string{"K=bad\x00value"}
 		_, err = EncodeClient(badEnv, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
 	})
