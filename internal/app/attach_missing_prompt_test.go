@@ -106,6 +106,17 @@ func TestAttachTargetSessionExists(t *testing.T) {
 			wantHostKnow: true,
 		},
 		{
+			name: "local inventory not observed yet",
+			snapshot: func() ports.BrokerSnapshot {
+				s := terminalCompositionSnapshot(nil, nil)
+				s.Daemons[0].InventoryKnown = false
+				return s
+			}(),
+			target:       "work",
+			wantExists:   false,
+			wantHostKnow: false,
+		},
+		{
 			name:         "remote host not configured",
 			snapshot:     terminalCompositionSnapshot([]string{"work"}, nil),
 			remote:       "user@elsewhere.test",
@@ -168,6 +179,50 @@ func TestResolveAttachCreationIntentExistingSessionAttachesWithoutPrompt(t *test
 	require.NoError(t, err)
 	require.Equal(t, protocol.IntentAttach, intent)
 	require.Same(t, service, got, "the peeked connection is handed back for reuse")
+}
+
+func TestResolveAttachCreationIntentWaitsForFirstInventory(t *testing.T) {
+	unobserved := terminalCompositionSnapshot(nil, nil)
+	unobserved.Daemons[0].InventoryKnown = false
+	changed := make(chan struct{}, 1)
+	changed <- struct{}{}
+	subscription := portsmocks.NewMockBrokerSubscription(t)
+	subscription.EXPECT().Changed().Return(changed)
+	subscription.EXPECT().Close().Once()
+	service := portsmocks.NewMockBrokerService(t)
+	service.EXPECT().Snapshot().Return(unobserved).Twice()
+	service.EXPECT().Snapshot().Return(terminalCompositionSnapshot([]string{"work"}, nil))
+	service.EXPECT().Subscribe().Return(subscription, nil).Once()
+	service.EXPECT().Done().Return(nil).Maybe()
+	withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
+	withAttachInteractiveConsole(t, true) // must not prompt for an existing session
+
+	intent, got, err := resolveAttachCreationIntent(context.Background(), protocol.IntentAttach, "work", "", nil)
+	require.NoError(t, err)
+	require.Equal(t, protocol.IntentAttach, intent)
+	require.Same(t, service, got)
+}
+
+func TestResolveAttachCreationIntentUnobservedInventoryTimesOutToAttach(t *testing.T) {
+	previous := attachInventoryWait
+	attachInventoryWait = time.Millisecond
+	t.Cleanup(func() { attachInventoryWait = previous })
+	unobserved := terminalCompositionSnapshot(nil, nil)
+	unobserved.Daemons[0].InventoryKnown = false
+	subscription := portsmocks.NewMockBrokerSubscription(t)
+	subscription.EXPECT().Changed().Return(make(chan struct{}))
+	subscription.EXPECT().Close().Once()
+	service := portsmocks.NewMockBrokerService(t)
+	service.EXPECT().Snapshot().Return(unobserved)
+	service.EXPECT().Subscribe().Return(subscription, nil).Once()
+	service.EXPECT().Done().Return(nil).Maybe()
+	withPreflightBroker(t, func(context.Context) (ports.BrokerService, error) { return service, nil })
+	withAttachInteractiveConsole(t, true)
+
+	intent, got, err := resolveAttachCreationIntent(context.Background(), protocol.IntentAttach, "work", "", nil)
+	require.NoError(t, err)
+	require.Equal(t, protocol.IntentAttach, intent, "an unknown inventory never prompts to create")
+	require.Same(t, service, got)
 }
 
 func TestResolveAttachCreationIntentUnknownHostAttachesWithoutPrompt(t *testing.T) {

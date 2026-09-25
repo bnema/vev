@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -85,7 +86,8 @@ func resolveAttachCreationIntent(ctx context.Context, intent uint8, name, remote
 		// cadence) decide, exactly as if this preflight had never run.
 		return protocol.IntentAttach, nil, nil
 	}
-	exists, hostKnown := attachTargetSessionExists(service.Snapshot(), remoteTarget, name)
+	snapshot := awaitAttachTargetInventory(ctx, service, remoteTarget)
+	exists, hostKnown := attachTargetSessionExists(snapshot, remoteTarget, name)
 	if exists || !hostKnown {
 		return protocol.IntentAttach, service, nil
 	}
@@ -97,6 +99,56 @@ func resolveAttachCreationIntent(ctx context.Context, intent uint8, name, remote
 	return resolved, service, nil
 }
 
+// attachInventoryWait bounds how long the preflight waits for the target
+// daemon's first inventory. A freshly started broker publishes its daemons
+// before observing their sessions; without this wait every existing session
+// would look absent right after a restart.
+var attachInventoryWait = 3 * time.Second
+
+// awaitAttachTargetInventory returns the first publication whose target
+// daemon carries a known inventory, or the latest one once the bound expires.
+func awaitAttachTargetInventory(ctx context.Context, service ports.BrokerService, remoteTarget string) ports.BrokerSnapshot {
+	snapshot := service.Snapshot()
+	if observation, ok := attachTargetObservation(snapshot, remoteTarget); !ok || observation.InventoryKnown {
+		// An unconfigured host never gains an inventory by waiting.
+		return snapshot
+	}
+	subscription, err := service.Subscribe()
+	if err != nil {
+		return snapshot
+	}
+	defer subscription.Close()
+	timer := time.NewTimer(attachInventoryWait)
+	defer timer.Stop()
+	for {
+		snapshot = service.Snapshot()
+		if attachTargetInventoryKnown(snapshot, remoteTarget) {
+			return snapshot
+		}
+		select {
+		case <-subscription.Changed():
+		case <-timer.C:
+			return snapshot
+		case <-ctx.Done():
+			return snapshot
+		case <-service.Done():
+			return snapshot
+		}
+	}
+}
+
+func attachTargetInventoryKnown(snapshot ports.BrokerSnapshot, remoteTarget string) bool {
+	observation, ok := attachTargetObservation(snapshot, remoteTarget)
+	return ok && observation.InventoryKnown
+}
+
+func attachTargetObservation(snapshot ports.BrokerSnapshot, remoteTarget string) (ports.BrokerDaemonObservation, bool) {
+	if remoteTarget == "" {
+		return localBrokerObservation(snapshot)
+	}
+	return snapshot.Find(remoteTarget)
+}
+
 // attachTargetSessionExists reports whether one exact-name attach target is
 // present in the committed publication, and whether the target's daemon (the
 // local daemon, or the named remote host) is even a configured observation.
@@ -104,14 +156,9 @@ func resolveAttachCreationIntent(ctx context.Context, intent uint8, name, remote
 // a known daemon with no matching session name reports exists=false,
 // hostKnown=true.
 func attachTargetSessionExists(snapshot ports.BrokerSnapshot, remoteTarget, name string) (exists, hostKnown bool) {
-	var observation ports.BrokerDaemonObservation
-	var ok bool
-	if remoteTarget == "" {
-		observation, ok = localBrokerObservation(snapshot)
-	} else {
-		observation, ok = snapshot.Find(remoteTarget)
-	}
-	if !ok {
+	observation, ok := attachTargetObservation(snapshot, remoteTarget)
+	// An unobserved inventory proves nothing about absence.
+	if !ok || !observation.InventoryKnown {
 		return false, false
 	}
 	_, found := brokerObservationExactTarget(observation, name)
