@@ -14,16 +14,30 @@ import (
 // The attach main loop owns both this write and the later daemon-frame
 // reconciliation; input pumps must only publish a request for it.
 // The anchor places it: transitions stay centered, notices sit top-right so
-// they never cover the picker list.
-func drawClientToast(out io.Writer, size domain.Size, message string, anchor domain.Anchor) (domain.Rect, error) {
+// they never cover the picker list. The border is colored by severity.
+func drawClientToast(out io.Writer, size domain.Size, message string, anchor domain.Anchor, severity domain.NoticeSeverity) (domain.Rect, error) {
 	bounds := ui.ToastBounds(size, ui.Toast{Message: message, Anchor: anchor})
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return domain.Rect{}, nil
 	}
-	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message))
+	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message, toastBorderSGR(severity)))
 }
 
-func reconnectToastLinesFor(bounds domain.Rect, message string) []string {
+// toastBorderSGR is the border color per severity, in the same fixed
+// xterm-256 colors as the picker's problem dots: red error, yellow warn.
+// Info keeps the terminal's default color.
+func toastBorderSGR(severity domain.NoticeSeverity) string {
+	switch severity {
+	case domain.NoticeError:
+		return "\x1b[38;5;167m"
+	case domain.NoticeWarn:
+		return "\x1b[38;5;179m"
+	default:
+		return ""
+	}
+}
+
+func reconnectToastLinesFor(bounds domain.Rect, message, borderSGR string) []string {
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return nil
 	}
@@ -36,13 +50,26 @@ func reconnectToastLinesFor(bounds domain.Rect, message string) []string {
 	for y := range bounds.Height {
 		var b strings.Builder
 		b.Grow(bounds.Width)
+		colored := false
 		for x := range bounds.Width {
+			border := y == 0 || y == bounds.Height-1 || x == 0 || x == bounds.Width-1
+			if borderSGR != "" && border != colored {
+				if border {
+					b.WriteString(borderSGR)
+				} else {
+					b.WriteString("\x1b[39m")
+				}
+				colored = border
+			}
 			cell := frame.At(x, y)
 			if cell.Continuation || cell.Rune == 0 {
 				b.WriteRune(' ')
 				continue
 			}
 			b.WriteRune(cell.Rune)
+		}
+		if colored {
+			b.WriteString("\x1b[39m")
 		}
 		lines[y] = b.String()
 	}

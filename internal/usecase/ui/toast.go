@@ -17,6 +17,7 @@ const (
 type Toast struct {
 	ID            string
 	Message       string
+	Severity      domain.NoticeSeverity
 	Anchor        domain.Anchor
 	Duration      time.Duration
 	DimBackground bool

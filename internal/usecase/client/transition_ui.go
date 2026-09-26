@@ -12,7 +12,7 @@ var transitionSpinnerFrames = [...]rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴'
 // RenderTransitionNotice draws one connecting frame for the terminal owner.
 func RenderTransitionNotice(size domain.Size, frame int, message string) []byte {
 	var out bytes.Buffer
-	if _, err := drawClientToast(&out, size, fmt.Sprintf("%c %s", transitionSpinnerFrames[frame%len(transitionSpinnerFrames)], message), domain.AnchorCenter); err != nil {
+	if _, err := drawClientToast(&out, size, fmt.Sprintf("%c %s", transitionSpinnerFrames[frame%len(transitionSpinnerFrames)], message), domain.AnchorCenter, domain.NoticeInfo); err != nil {
 		return nil
 	}
 	return out.Bytes()

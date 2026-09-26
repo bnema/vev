@@ -495,7 +495,7 @@ func (p *pickerController) RenderNotice(size domain.Size) []byte {
 		return nil
 	}
 	var buffer bytes.Buffer
-	if _, err := drawClientToast(&buffer, size, newest.Message, newest.Anchor); err != nil {
+	if _, err := drawClientToast(&buffer, size, newest.Message, newest.Anchor, newest.Severity); err != nil {
 		return nil
 	}
 	return buffer.Bytes()
@@ -755,7 +755,7 @@ func (p *pickerController) notifyLocked(n domain.Notification) {
 	if n.Message == "" {
 		return
 	}
-	p.notices.Show(p.clock.Now(), ui.Toast{ID: n.Subject(), Message: n.Message, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
+	p.notices.Show(p.clock.Now(), ui.Toast{ID: n.Subject(), Message: n.Message, Severity: n.Severity, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
 }
 
 // mergePickerOps accumulates two presentation decisions from one read. Close
