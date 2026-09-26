@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -42,7 +43,7 @@ func TestAttachmentLossParksOnlyThatAttachment(t *testing.T) {
 	sess.mu.Unlock()
 	require.False(t, firstAttached)
 	require.True(t, secondAttached)
-	require.Contains(t, sess.snapshotAttachments(), second)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), second))
 	require.False(t, secondTransport.Closed())
 }
 

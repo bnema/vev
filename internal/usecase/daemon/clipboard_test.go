@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -366,7 +367,7 @@ func TestQueuedClipboardAfterPaneMoveDoesNotSendToFormerOwner(t *testing.T) {
 	d.clipboardWorker(sess)
 
 	require.Zero(t, oldTransport.sendCount(), "clipboard queued by the former pane owner reached its client")
-	require.Contains(t, sess.snapshotAttachments(), ac, "stale clipboard send handling detached the former owner's client")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale clipboard send handling detached the former owner's client")
 }
 
 type movingClipboardErrorTransport struct {
@@ -435,7 +436,7 @@ func TestQueuedClipboardRevalidatesOwnerAfterWaitingForClientSendLock(t *testing
 	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
 
 	require.Zero(t, oldTransport.sendCount(), "clipboard send was not revalidated immediately before transport I/O")
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 }
 
 func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
@@ -464,7 +465,7 @@ func TestClipboardSendErrorAfterPaneMoveDoesNotDetachFormerOwner(t *testing.T) {
 	close(oldTransport.release)
 	awaitTestCompletion(t, workerDone, "clipboard worker did not finish")
 
-	require.Contains(t, sess.snapshotAttachments(), ac, "a send error from the pane's retired owner detached its client")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "a send error from the pane's retired owner detached its client")
 	select {
 	case <-oldTransport.closed:
 		t.Fatal("a send error from the pane's retired owner closed its client transport")

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -112,7 +113,7 @@ func TestSuspendedAttachmentSafetyExpiryEvictsAfterTimer(t *testing.T) {
 	// Suspended-only presence is not observable, but membership and transport
 	// ownership are retained until expiry.
 	require.False(t, sess.snapshotView(viewOptions{}).attached, "suspended-only session must not be observably attached")
-	require.Contains(t, sess.snapshotAttachments(), ac, "suspension retains session membership")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "suspension retains session membership")
 	d.mu.Lock()
 	require.NotNil(t, d.suspended[ac], "suspension arms the daemon-owned safety expiry")
 	d.mu.Unlock()
@@ -438,7 +439,7 @@ func TestHandleListAttachedExcludesSuspendedOnly(t *testing.T) {
 	ac.installTestAttachmentCapability(token)
 	require.NoError(t, d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}))
 	require.False(t, listedAttached(t, d, sess.name), "a suspended-only session is not attached in the listing")
-	require.Contains(t, sess.snapshotAttachments(), ac, "suspension retains membership for activation")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "suspension retains membership for activation")
 
 	require.NoError(t, d.activateAttachment(ac, ac.transportSnapshot(), protocol.ActivateAttachment{
 		RequestID: 2,

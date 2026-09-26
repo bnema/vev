@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -413,7 +414,7 @@ func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
 	require.NotEqual(t, token, resumedAC.resumeToken, "resume rotates token")
-	require.Contains(t, sess.snapshotAttachments(), resumedAC)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), resumedAC))
 	d.firstPaint(sess, resumedAC)
 	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, peerAC.sizeSnapshot())
 	tb.mu.Lock()
@@ -508,7 +509,7 @@ func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	token := ac.resumeToken
 	require.NotZero(t, token)
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 	d.mu.Lock()
 	_, parkedAtStart := d.parked[token]
 	sessionsBefore := len(d.sessions)
@@ -581,7 +582,7 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	require.NoError(t, err)
 	token := ac.resumeToken
 	require.NotZero(t, token)
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 
 	reachedGap := make(chan struct{})
 	releaseGap := make(chan struct{})
@@ -647,7 +648,7 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	require.NoError(t, got.err, "same-client token must recover across detach-before-park")
 	require.Same(t, sess, got.sess)
 	require.Same(t, ac, got.ac)
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 	require.Same(t, newTr, ac.transport())
 	require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
 	require.True(t, d.commitResumeClaim(ac), "successful resume must consume its parked credential")
@@ -661,7 +662,7 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	require.False(t, stillParking, "parking marker must be consumed after park/resume")
 
 	d.clientGone(sess, ac, oldTr, false)
-	require.Contains(t, sess.snapshotAttachments(), ac, "stale old-link cleanup must not detach the rebound attachment")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale old-link cleanup must not detach the rebound attachment")
 	require.Same(t, newTr, ac.transport())
 	require.False(t, newTr.Closed())
 }
@@ -680,7 +681,7 @@ func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 	require.NoError(t, err)
 	token := ac.resumeToken
 	require.NotZero(t, token)
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 
 	reachedGap := make(chan struct{})
 	releaseGap := make(chan struct{})
@@ -750,7 +751,7 @@ func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 
 	require.Same(t, sess, winner.sess)
 	require.Same(t, ac, winner.ac)
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 	require.Same(t, winnerTr, ac.transport())
 	require.NotEqual(t, token, ac.resumeToken, "successful resume rotates the credential")
 	require.True(t, oldTr.Closed(), "winning resume must retire the old transport")
@@ -771,7 +772,7 @@ func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 	require.False(t, stillParking, "parking marker must be consumed after park/resume")
 
 	d.clientGone(sess, ac, oldTr, false)
-	require.Contains(t, sess.snapshotAttachments(), ac, "stale old-link cleanup must not detach the rebound attachment")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale old-link cleanup must not detach the rebound attachment")
 	require.Same(t, winnerTr, ac.transport())
 	require.False(t, winnerTr.Closed())
 }
@@ -902,7 +903,7 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 			require.NoError(t, err)
 			token := ac.resumeToken
 			require.NotZero(t, token)
-			require.Contains(t, sess.snapshotAttachments(), ac)
+			require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 
 			validated := make(chan struct{})
 			releaseMark := make(chan struct{})
@@ -1018,7 +1019,7 @@ func TestStaleClientGoneAfterTransportCheckDoesNotDetachReboundAttachment(t *tes
 	releaseOnce.Do(func() { close(releaseDetach) })
 	awaitTestCompletion(t, goneDone, "stale clientGone did not finish after resume rebound")
 
-	require.Contains(t, sess.snapshotAttachments(), ac, "stale cleanup must not detach the rebound attachment")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale cleanup must not detach the rebound attachment")
 	require.Same(t, newTr, ac.transport())
 	require.False(t, newTr.Closed(), "rebound transport must survive stale old-link cleanup")
 	require.True(t, oldTr.Closed(), "live resume retires the captured old transport")
@@ -1075,7 +1076,7 @@ func TestResumeRebindsRotatesAndDoesNotOpenPTY(t *testing.T) {
 	require.Same(t, sess, resumedSess)
 	require.Same(t, ac, resumedAC)
 	require.NotEqual(t, oldToken, resumedAC.resumeToken, "resume rotates token")
-	require.Contains(t, sess.snapshotAttachments(), resumedAC)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), resumedAC))
 }
 
 func TestOutputAckLagAloneDoesNotForceFullStateRepaint(t *testing.T) {
@@ -1523,7 +1524,7 @@ func TestStaleClientGoneDoesNotDetachOrCloseFreshTransport(t *testing.T) {
 
 	d.clientGone(sess, ac, oldTr, false)
 
-	require.Contains(t, sess.snapshotAttachments(), ac, "stale connection must not detach current client")
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac), "stale connection must not detach current client")
 	require.False(t, oldTr.Closed(), "stale transport is owned by its own loop/handler")
 	require.False(t, freshTr.Closed(), "fresh resumed transport must not be closed by stale loop")
 }
