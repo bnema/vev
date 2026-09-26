@@ -24,6 +24,8 @@ func TestHelloSemanticValidation(t *testing.T) {
 		{name: "valid", mutate: func(*Hello) {}},
 		{name: "unknown intent", mutate: func(h *Hello) { h.Intent = 99 }, want: ErrInvalidHello},
 		{name: "invalid geometry", mutate: func(h *Hello) { h.Size.Rows = 0 }, want: ErrInvalidHello},
+		{name: "local client pid", mutate: func(h *Hello) { h.ClientPID = 4242 }},
+		{name: "remote client pid", mutate: func(h *Hello) { h.Remote, h.ClientPID = true, 4242 }, want: ErrInvalidHello},
 		{name: "unsafe navigation", mutate: func(h *Hello) { h.NavigationCapabilities = 8 }, want: ErrInvalidHello},
 		{name: "exact target name mismatch", mutate: func(h *Hello) {
 			h.ExactTarget = &ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "other"}

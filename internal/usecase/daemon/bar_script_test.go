@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/stretchr/testify/mock"
@@ -50,17 +51,19 @@ func TestBarScriptContextEnv(t *testing.T) {
 		"VEV_PANE=old",
 		"VEV_PANE_CWD=/old",
 		"VEV_COLS=1",
+		"VEV_CLIENT_PID=1",
 	}
-	ctx := barScriptContext{Anchor: "top-right", Session: "work", Tab: "2", Pane: "pane-3", PaneCWD: "/repo", Cols: 120}
+	ctx := barScriptContext{Anchor: "top-right", Session: "work", Tab: "2", Pane: "pane-3", PaneCWD: "/repo", Cols: 120, ClientPID: 4242}
 	got := ctx.env(base)
 
 	want := map[string]string{
-		"VEV_ANCHOR":   "top-right",
-		"VEV_SESSION":  "work",
-		"VEV_TAB":      "2",
-		"VEV_PANE":     "pane-3",
-		"VEV_PANE_CWD": "/repo",
-		"VEV_COLS":     "120",
+		"VEV_ANCHOR":     "top-right",
+		"VEV_SESSION":    "work",
+		"VEV_TAB":        "2",
+		"VEV_PANE":       "pane-3",
+		"VEV_PANE_CWD":   "/repo",
+		"VEV_COLS":       "120",
+		"VEV_CLIENT_PID": "4242",
 	}
 	seen := map[string]int{}
 	for _, entry := range got {
@@ -78,6 +81,39 @@ func TestBarScriptContextEnv(t *testing.T) {
 	for key := range want {
 		if seen[key] != 1 {
 			t.Fatalf("%s appears %d times, want 1 in env %v", key, seen[key], got)
+		}
+	}
+}
+
+func TestBarScriptContextEnvEmptyClientPID(t *testing.T) {
+	got := barScriptContext{}.env([]string{"VEV_CLIENT_PID=99"})
+	if !slices.Equal(got[len(got)-1:], []string{"VEV_CLIENT_PID="}) || slices.Contains(got, "VEV_CLIENT_PID=99") {
+		t.Fatalf("env = %v, want an empty VEV_CLIENT_PID", got)
+	}
+}
+
+func TestBarClientPID(t *testing.T) {
+	client := func(pid uint32, focus domain.TerminalFocus) *attachedClient {
+		ac := &attachedClient{}
+		ac.clientPID.Store(pid)
+		ac.setTerminalFocus(focus)
+		return ac
+	}
+	remote := client(0, domain.TerminalFocusFocused)
+	first := client(10, domain.TerminalFocusUnfocused)
+	focused := client(20, domain.TerminalFocusFocused)
+	for _, tc := range []struct {
+		name string
+		acs  []*attachedClient
+		want uint32
+	}{
+		{"none", nil, 0},
+		{"remote only", []*attachedClient{remote}, 0},
+		{"first local", []*attachedClient{remote, first}, 10},
+		{"focused local wins", []*attachedClient{first, focused}, 20},
+	} {
+		if got := barClientPID(tc.acs); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
 		}
 	}
 }

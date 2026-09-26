@@ -27,16 +27,23 @@ type barScriptContext struct {
 	Pane    string
 	PaneCWD string
 	Cols    int
+	// ClientPID is a local attached client, 0 when only remote clients are
+	// attached. It is exported empty when 0.
+	ClientPID uint32
 }
 
 func (c barScriptContext) env(base []string) []string {
 	vars := map[string]string{
-		"VEV_ANCHOR":   c.Anchor,
-		"VEV_SESSION":  c.Session,
-		"VEV_TAB":      c.Tab,
-		"VEV_PANE":     c.Pane,
-		"VEV_PANE_CWD": c.PaneCWD,
-		"VEV_COLS":     strconv.Itoa(c.Cols),
+		"VEV_ANCHOR":     c.Anchor,
+		"VEV_SESSION":    c.Session,
+		"VEV_TAB":        c.Tab,
+		"VEV_PANE":       c.Pane,
+		"VEV_PANE_CWD":   c.PaneCWD,
+		"VEV_COLS":       strconv.Itoa(c.Cols),
+		"VEV_CLIENT_PID": "",
+	}
+	if c.ClientPID != 0 {
+		vars["VEV_CLIENT_PID"] = strconv.FormatUint(uint64(c.ClientPID), 10)
 	}
 	out := make([]string, 0, len(base)+len(vars))
 	for _, entry := range base {
@@ -48,7 +55,7 @@ func (c barScriptContext) env(base []string) []string {
 		}
 		out = append(out, entry)
 	}
-	for _, key := range []string{"VEV_ANCHOR", "VEV_SESSION", "VEV_TAB", "VEV_PANE", "VEV_PANE_CWD", "VEV_COLS"} {
+	for _, key := range []string{"VEV_ANCHOR", "VEV_SESSION", "VEV_TAB", "VEV_PANE", "VEV_PANE_CWD", "VEV_COLS", "VEV_CLIENT_PID"} {
 		out = append(out, key+"="+vars[key])
 	}
 	return out

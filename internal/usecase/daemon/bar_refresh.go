@@ -125,6 +125,7 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 	attachments := sess.snapshotAttachmentsLocked()
 	ctx.PaneCWD = sess.cwd
 	sess.mu.Unlock()
+	ctx.ClientPID = barClientPID(attachments)
 	tb := sess.firstTab()
 	if len(attachments) == 0 || tb == nil {
 		return ctx, env, false
@@ -146,6 +147,26 @@ func (d *Daemon) collectBarScriptContext(sess *session, anchor string) (barScrip
 		}
 	}
 	return ctx, env, true
+}
+
+// barClientPID picks the local client a bar script should describe: the one
+// whose terminal has focus, else the first local one. Remote clients carry no
+// PID, so a session attached only remotely yields 0.
+func barClientPID(attachments []*attachedClient) uint32 {
+	var first uint32
+	for _, ac := range attachments {
+		pid := ac.clientPID.Load()
+		if pid == 0 {
+			continue
+		}
+		if ac.terminalFocus() == domain.TerminalFocusFocused {
+			return pid
+		}
+		if first == 0 {
+			first = pid
+		}
+	}
+	return first
 }
 
 // signalBarPollerReload wakes the poller without blocking. The channel is

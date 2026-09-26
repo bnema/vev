@@ -52,6 +52,8 @@ type Hello struct {
 	// Terminal window focus when the attachment opens: 0 = unknown,
 	// 1 = focused, 2 = unfocused. Later changes travel as TerminalFocus.
 	TerminalFocus uint32 `protobuf:"varint,24,opt,name=terminal_focus,json=terminalFocus,proto3" json:"terminal_focus,omitempty"`
+	// PID of a local client process, for bar scripts. 0 when unknown or remote.
+	ClientPid     uint32 `protobuf:"varint,25,opt,name=client_pid,json=clientPid,proto3" json:"client_pid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -243,6 +245,13 @@ func (x *Hello) GetKittyKeyboard() bool {
 func (x *Hello) GetTerminalFocus() uint32 {
 	if x != nil {
 		return x.TerminalFocus
+	}
+	return 0
+}
+
+func (x *Hello) GetClientPid() uint32 {
+	if x != nil {
+		return x.ClientPid
 	}
 	return 0
 }
@@ -2297,7 +2306,7 @@ var File_session_proto protoreflect.FileDescriptor
 
 const file_session_proto_rawDesc = "" +
 	"\n" +
-	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\xcf\x06\n" +
+	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\xee\x06\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
 	"\x06intent\x18\x02 \x01(\rR\x06intent\x12\x1b\n" +
@@ -2324,7 +2333,9 @@ const file_session_proto_rawDesc = "" +
 	"\x15kitty_direct_graphics\x18\x15 \x01(\bR\x13kittyDirectGraphics\x12G\n" +
 	"\x0esession_target\x18\x16 \x01(\v2 .vev.wire.v1.SessionAttachTargetR\rsessionTarget\x12%\n" +
 	"\x0ekitty_keyboard\x18\x17 \x01(\bR\rkittyKeyboard\x12%\n" +
-	"\x0eterminal_focus\x18\x18 \x01(\rR\rterminalFocusJ\x04\b\x0f\x10\x10R\rremote_target\"\x84\x02\n" +
+	"\x0eterminal_focus\x18\x18 \x01(\rR\rterminalFocus\x12\x1d\n" +
+	"\n" +
+	"client_pid\x18\x19 \x01(\rR\tclientPidJ\x04\b\x0f\x10\x10R\rremote_target\"\x84\x02\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +

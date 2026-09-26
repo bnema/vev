@@ -1,8 +1,24 @@
 #!/bin/sh
 
 # Print a compact, single-line system summary for vev's top-right bar anchor.
-# When available, segments are ordered as CPU, memory, then clock.
+# When available, segments are ordered as workspace, CPU, memory, then clock.
 # Segments that cannot be read are omitted without producing stderr.
+#
+# The workspace segment needs the NeferWL compositor and a local client
+# (VEV_CLIENT_PID set), plus jq. It shows the client's monitor and its workspaces,
+# e.g. "DP-2 [x][ ][ ]". A remote client or another compositor omits it.
+
+workspace=
+if [ -n "${VEV_CLIENT_PID:-}" ] && [ -n "${NEFERWL_STATE:-}" ] && command -v neferwl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+	workspace=$(
+		neferwl state output-of "$VEV_CLIENT_PID" 2>/dev/null |
+			jq -r '
+				if .workspace != "" and .active == 0 then "\(.name) \(.workspace)"
+				else "\(.name) " + ([range(1; .count + 1) as $i | if $i == .active then "[x]" else "[ ]" end] | join(""))
+				end
+			' 2>/dev/null || true
+	)
+fi
 
 now=$(date +%H:%M 2>/dev/null || true)
 
@@ -39,9 +55,13 @@ if [ -r /proc/meminfo ]; then
 	)
 fi
 
-line=
+line=$workspace
 if [ -n "$cpu_pct" ]; then
-	line="C $cpu_pct%"
+	if [ -n "$line" ]; then
+		line="$line C $cpu_pct%"
+	else
+		line="C $cpu_pct%"
+	fi
 fi
 if [ -n "$mem_pct" ]; then
 	if [ -n "$line" ]; then
