@@ -16,7 +16,7 @@ import (
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 61
+const Version uint16 = 62
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -112,7 +112,10 @@ type Hello struct {
 	TrueColor   bool
 	// KittyDirectGraphics is an explicit declaration that the client has
 	// probed its direct outer terminal and it accepts Kitty graphics output.
-	KittyDirectGraphics    bool
+	KittyDirectGraphics bool
+	// KittyKeyboard declares that the client enabled the kitty keyboard
+	// protocol on its outer terminal, so input carries kitty key sequences.
+	KittyKeyboard          bool
 	MaxOutputInFlight      uint8
 	Env                    []string
 	SessionTarget          *SessionAttachTarget

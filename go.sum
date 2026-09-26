@@ -44,6 +44,8 @@ github.com/bmatcuk/doublestar/v4 v4.10.0 h1:zU9WiOla1YA122oLM6i4EXvGW62DvKZVxIe6
 github.com/bmatcuk/doublestar/v4 v4.10.0/go.mod h1:xBQ8jztBU6kakFMg+8WGxn0c6z1fTSPVIjEY1Wr7jzc=
 github.com/bnema/vev-vt v0.5.2-0.20260909134859-55a2b5aa1b3a h1:n25PbH+nlilKwrNHzR9OJjiKsAZDbDuSQzE/GDtArUY=
 github.com/bnema/vev-vt v0.5.2-0.20260909134859-55a2b5aa1b3a/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
+github.com/bnema/vev-vt v0.5.2-0.20260926054010-6ae9bc5fde91 h1:ALEfartmRuNPmiJ6tmN2pI4rfeE1faEY9FrX3y5O4Ls=
+github.com/bnema/vev-vt v0.5.2-0.20260926054010-6ae9bc5fde91/go.mod h1:mBdVV+ALtBgPNVHPrxY50S+d1ZO/sDn0AA7EtJf00M4=
 github.com/brianvoe/gofakeit/v6 v6.28.0 h1:Xib46XXuQfmlLS2EXRuJpqcw8St6qSZz75OUo0tgAW4=
 github.com/brianvoe/gofakeit/v6 v6.28.0/go.mod h1:Xj58BMSnFqcn/fAQeSK+/PLtC5kSb7FJIq4JyGa8vEs=
 github.com/bufbuild/buf v1.73.0 h1:fDNKlxaf+PYi20dmVM7Yt3kOfXEhwrgKDLMNZFjztDs=

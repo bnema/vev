@@ -623,3 +623,79 @@ func TestRouterPasteMarkerSplitAcrossFramesKeepsCurrentBehavior(t *testing.T) {
 	require.Empty(t, h.actions)
 	require.Equal(t, [][]byte{[]byte("\x1b[200~hello"), []byte("\x1b[201~")}, h.forwards)
 }
+
+func TestRouterKittyKeyboardEvents(t *testing.T) {
+	tests := []struct {
+		name         string
+		reads        []string
+		wantActions  []Action
+		wantForwards []string
+	}{
+		{name: "alt j binding", reads: []string{"\x1b[106;3u"}, wantActions: []Action{ActionFocusPaneDown}},
+		{name: "alt space binding", reads: []string{"\x1b[32;3u"}, wantActions: []Action{ActionOpenPalette}},
+		{name: "alt azerty 1 via symbol", reads: []string{"\x1b[38::49;3u"}, wantActions: []Action{ActionSwitchTab1}},
+		{name: "alt unbound forwarded", reads: []string{"\x1b[122;3u"}, wantForwards: []string{"\x1b[122;3u"}},
+		{name: "ctrl 1 forwarded", reads: []string{"\x1b[49;5u"}, wantForwards: []string{"\x1b[49;5u"}},
+		{name: "text around", reads: []string{"ab\x1b[106;3ucd"}, wantActions: []Action{ActionFocusPaneDown}, wantForwards: []string{"ab", "cd"}},
+		{name: "split across reads", reads: []string{"\x1b[106", ";3u"}, wantActions: []Action{ActionFocusPaneDown}},
+		{name: "split after esc", reads: []string{"\x1b", "[106;3u"}, wantActions: []Action{ActionFocusPaneDown}},
+		{name: "ctrl a forwarded", reads: []string{"\x1b[97;5u"}, wantForwards: []string{"\x1b[97;5u"}},
+		{name: "unbound split after esc stays whole", reads: []string{"\x1b", "[97;5u"}, wantForwards: []string{"\x1b[97;5u"}},
+		{name: "unbound split mid sequence stays whole", reads: []string{"\x1b[97", ";5ux"}, wantForwards: []string{"\x1b[97;5u", "x"}},
+		{name: "alt shift h uses shifted key", reads: []string{"\x1b[104:72;4u"}, wantForwards: []string{"\x1b[104:72;4u"}},
+		{name: "inside paste untouched", reads: []string{"\x1b[200~\x1b[49;5u\x1b[201~"}, wantForwards: []string{"\x1b[200~\x1b[49;5u\x1b[201~"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clk := &fakeClock{}
+			h := &captureHandler{}
+			r := NewRouter(clk, h, nil)
+			r.SetKittyKeyboard(true)
+			for _, read := range tt.reads {
+				r.Route([]byte(read))
+			}
+			require.Equal(t, tt.wantActions, h.actions)
+			var forwards []string
+			for _, f := range h.forwards {
+				forwards = append(forwards, string(f))
+			}
+			require.Equal(t, tt.wantForwards, forwards)
+			assertRouterPendingCleared(t, r)
+		})
+	}
+}
+
+func TestRouterKittyKeyboardAltShiftBindings(t *testing.T) {
+	custom := DefaultBindings().clone()
+	custom.bind(ActionConsumeOrExpelPaneLeft, KeySpec{altRunes: []rune{'H'}})
+	custom.bind(ActionEqualizePanes, KeySpec{altRunes: []rune{'?'}})
+	var bindings atomic.Pointer[Bindings]
+	bindings.Store(custom)
+	tests := []struct {
+		name string
+		in   string
+		want Action
+	}{
+		{name: "alt shift h with shifted key", in: "\x1b[104:72;4u", want: ActionConsumeOrExpelPaneLeft},
+		{name: "alt shift h without shifted key", in: "\x1b[104;4u", want: ActionConsumeOrExpelPaneLeft},
+		{name: "alt shift slash", in: "\x1b[47:63;4u", want: ActionEqualizePanes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &captureHandler{}
+			r := NewRouter(&fakeClock{}, h, &bindings)
+			r.SetKittyKeyboard(true)
+			r.Route([]byte(tt.in))
+			require.Equal(t, []Action{tt.want}, h.actions)
+			require.Empty(t, h.forwards)
+		})
+	}
+}
+
+func TestRouterIgnoresKittyKeysUnlessEnabled(t *testing.T) {
+	h := &captureHandler{}
+	r := NewRouter(&fakeClock{}, h, nil)
+	r.Route([]byte("\x1b[106;3u"))
+	require.Empty(t, h.actions)
+	require.Equal(t, [][]byte{[]byte("\x1b[106;3u")}, h.forwards)
+}

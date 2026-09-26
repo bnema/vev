@@ -36,6 +36,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenNavKeys := make(map[string]bool)
 	seenTabsKeys := make(map[string]bool)
 	seenEphemeralKeys := make(map[string]bool)
+	seenKeyboardKeys := make(map[string]bool)
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
 
@@ -162,6 +163,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Ephemeral.CloseOnExit = on
+		case key == "keyboard.kitty-protocol":
+			warnings = warnDuplicateKey(warnings, seenKeyboardKeys, key, lineNo)
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid keyboard.kitty-protocol %q", value)})
+				continue
+			}
+			cfg.Keyboard.KittyProtocol = on
 		case key == "copy.word-separators":
 			warnings = warnDuplicateKey(warnings, seenCopyKeys, key, lineNo)
 			separators, ok := parseConfigString(value)

@@ -8,6 +8,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
 )
 
@@ -230,6 +231,8 @@ func (p *attachmentMovePicker) release() {
 // supervised when the supervisor-owned navigation picker consumed them: its
 // action is then settled by the supervisor, never fenced through the daemon.
 func (p *attachmentMovePicker) consumeInput(ctx context.Context, state outputApplyState, input AttachmentInputEvent) (consumed, supervised bool, err error) {
+	// Overlays decode legacy keys; the session path keeps kitty sequences.
+	input.Data = kittykey.Translate(input.Data, 0)
 	if p.move.presenting {
 		p.stopEscape()
 		op, changed := p.move.input(input.Data, input.actionID)

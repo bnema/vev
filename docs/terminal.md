@@ -47,6 +47,16 @@ Not supported: file or shared-memory transfer, animations (first frame only), Un
 
 Terminals without Kitty graphics get text only and one warning.
 
+## Kitty keyboard
+
+When your outer terminal supports the kitty keyboard protocol (kitty, foot, ghostty, WezTerm, recent Alacritty), vev enables it at startup.
+
+- Detection uses the same short query as Kitty graphics. Other terminals keep their usual keys.
+- It works with AZERTY and other layouts.
+- Programs in panes that ask for the kitty keyboard protocol (Neovim, Helix, fish) receive it. Others get classic key bytes.
+- Turn it off with `keyboard.kitty-protocol = off` in the [configuration](configuration.md).
+- If vev is killed and your shell gets odd keys, run `printf '\e[<u'` to reset the terminal.
+
 ## Environment
 
 - New panes inherit the environment of the client that last attached. Running processes keep theirs.

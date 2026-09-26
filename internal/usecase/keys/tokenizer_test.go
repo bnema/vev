@@ -39,7 +39,7 @@ func TestScanEscape(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := scanEscape([]byte(tt.in))
+			got := scanEscape([]byte(tt.in), false)
 			require.Equal(t, tt.kind, got.kind)
 			require.Equal(t, []byte(tt.raw), got.raw)
 			require.Equal(t, tt.rune, got.rune)
@@ -51,7 +51,7 @@ func TestScanEscape(t *testing.T) {
 func TestScanEscapeEveryAltArrowPrefixIsIncomplete(t *testing.T) {
 	for _, full := range []string{"\x1b[1;3A", "\x1b[1;9C"} {
 		for n := 1; n < len(full); n++ {
-			got := scanEscape([]byte(full[:n]))
+			got := scanEscape([]byte(full[:n]), false)
 			require.Equal(t, escIncomplete, got.kind, "prefix %q", full[:n])
 			require.Equal(t, []byte(full[:n]), got.raw)
 		}

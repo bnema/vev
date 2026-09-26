@@ -40,6 +40,9 @@ tabs.terminal-title = on
 # Remove a numbered (ephemeral) session when its last client exits.
 ephemeral.close-on-exit = on
 
+# Use the kitty keyboard protocol when the terminal supports it.
+keyboard.kitty-protocol = on
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f

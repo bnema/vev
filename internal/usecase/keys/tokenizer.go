@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
 
 // escKind classifies the input introduced by one ESC byte.
@@ -24,6 +25,8 @@ const (
 	escControlPrefix
 	// escAltRune is ESC followed by one complete, valid UTF-8 rune.
 	escAltRune
+	// escKittyKey is a complete kitty keyboard protocol CSI u key event.
+	escKittyKey
 	// escBare is an ESC that starts none of the above.
 	escBare
 )
@@ -35,13 +38,14 @@ type escToken struct {
 	raw   []byte
 	rune  rune // escAltRune and escControlPrefix: the rune after ESC
 	arrow byte // escAltArrow: the final byte, one of 'A'..'D'
+	key   kittykey.Event
 }
 
 const altArrowLen = len("\x1b[1;3A")
 
 // scanEscape lexes the unit starting at data[0], which must be ESC. It only
 // classifies bytes; binding lookups and forwarding decisions belong to Router.
-func scanEscape(data []byte) escToken {
+func scanEscape(data []byte, kitty bool) escToken {
 	if len(data) == 1 {
 		return escToken{kind: escIncomplete, raw: data}
 	}
@@ -55,6 +59,13 @@ func scanEscape(data []byte) escToken {
 	}
 	if isAltArrowPrefix(data) {
 		return escToken{kind: escIncomplete, raw: data}
+	}
+	if kitty {
+		if ev, n, ok, partial := kittykey.Parse(data); ok {
+			return escToken{kind: escKittyKey, raw: data[:n], key: ev}
+		} else if partial {
+			return escToken{kind: escIncomplete, raw: data}
+		}
 	}
 	next := data[1]
 	if next == '[' || next == 'O' {

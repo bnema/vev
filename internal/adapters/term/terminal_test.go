@@ -490,3 +490,56 @@ func TestTerminal_Size_NonTTY_ReturnsError(t *testing.T) {
 		t.Fatalf("expected Geometry() to error on a non-tty fd")
 	}
 }
+
+func TestTerminal_KittyKeyboardPushedInsideAltScreenAndPoppedBeforeExit(t *testing.T) {
+	tests := []struct {
+		name   string
+		enable bool
+		before bool // enable before EnterRaw: must be a no-op
+		want   string
+	}{
+		{name: "disabled", want: visualEnter + visualRestore},
+		{name: "enabled", enable: true, want: visualEnter + "\x1b[>5u" + kittyKeyboardPop + visualRestore},
+		{name: "enable before enter is ignored", enable: true, before: true, want: visualEnter + visualRestore},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inR, inW, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("os.Pipe(in): %v", err)
+			}
+			defer func() { _ = inW.Close() }()
+			defer func() { _ = inR.Close() }()
+			outR, outW, captured, done := pipeCapture(t)
+			defer func() { _ = outR.Close() }()
+
+			tm := NewWithFiles(inR, outW)
+			if tt.before {
+				if err := tm.EnableKittyKeyboard(5); err != nil {
+					t.Fatalf("EnableKittyKeyboard: %v", err)
+				}
+			}
+			restore, err := tm.EnterRaw()
+			if err != nil {
+				t.Fatalf("EnterRaw: %v", err)
+			}
+			if tt.enable && !tt.before {
+				if err := tm.EnableKittyKeyboard(5); err != nil {
+					t.Fatalf("EnableKittyKeyboard: %v", err)
+				}
+				// A second enable must not push twice.
+				if err := tm.EnableKittyKeyboard(5); err != nil {
+					t.Fatalf("second EnableKittyKeyboard: %v", err)
+				}
+			}
+			if err := restore(); err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			_ = outW.Close()
+			<-done
+			if got := captured.String(); got != tt.want {
+				t.Fatalf("captured escapes = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

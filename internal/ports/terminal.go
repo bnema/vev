@@ -14,4 +14,9 @@ type Terminal interface {
 	In() io.Reader
 	Out() io.Writer
 	Flush() error
+	// EnableKittyKeyboard pushes the given kitty keyboard protocol flags on
+	// the outer terminal's alternate screen. The restore returned by EnterRaw
+	// pops them before leaving the alternate screen. Terminals without an
+	// outer keyboard return nil and do nothing.
+	EnableKittyKeyboard(flags int) error
 }

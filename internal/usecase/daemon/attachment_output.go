@@ -49,6 +49,10 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 		return
 	}
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
+	// A replacement terminal declares its own keyboard protocol.
+	if ac.keys != nil {
+		ac.keys.SetKittyKeyboard(h.KittyKeyboard)
+	}
 	ac.output.graphicsUnsupportedWarned.Store(false)
 	// A replacement connection is a different outer terminal. Retire the old
 	// attachment-local state without writing cleanup to the new terminal, then

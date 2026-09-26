@@ -7,9 +7,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
 
 const (
@@ -62,6 +64,10 @@ type Router struct {
 	delay    time.Duration
 	h        Handler
 	bindings *atomic.Pointer[Bindings]
+	// kitty enables kitty keyboard protocol decoding. Only an attachment
+	// whose client enabled the protocol on its outer terminal sets it, so
+	// CSI u from any other source passes through untouched.
+	kitty atomic.Bool
 
 	mu             sync.Mutex
 	pending        bool
@@ -128,7 +134,7 @@ func (r *Router) route(data []byte, h Handler) {
 			i++
 			continue
 		}
-		tok := scanEscape(data[i:])
+		tok := r.scan(data[i:])
 		if tok.kind == escIncomplete {
 			flush()
 			r.retainESC(h, tok.raw[1:])
@@ -141,7 +147,7 @@ func (r *Router) route(data []byte, h Handler) {
 			continue
 		}
 		switch tok.kind {
-		case escPaste, escAltArrow, escControlPrefix:
+		case escPaste, escAltArrow, escControlPrefix, escKittyKey:
 			// Pastes are forwarded verbatim so embedded Alt lookalikes never
 			// fire; unbound arrows and control prefixes pass through.
 			buf = append(buf, tok.raw...)
@@ -160,13 +166,18 @@ func (r *Router) route(data []byte, h Handler) {
 // that ESC; pendingAltLen bytes of data were retained with it. It returns how
 // many bytes of data it consumed.
 func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler) int {
-	tok := scanEscape(append([]byte{ESC}, data...))
+	tok := r.scan(append([]byte{ESC}, data...))
 	if tok.kind == escIncomplete {
 		r.retainESC(h, data)
 		return len(data)
 	}
 	if action, ok := r.tokenAction(tok); ok {
 		r.action(action, tok.raw, h)
+		return len(tok.raw) - 1
+	}
+	if tok.kind == escKittyKey {
+		// Forward the whole sequence so the handler can re-encode it.
+		r.forward(tok.raw, h)
 		return len(tok.raw) - 1
 	}
 	if _, size := utf8.DecodeRune(data); size > 1 {
@@ -185,6 +196,19 @@ func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler)
 	return 0
 }
 
+// SetKittyKeyboard enables or disables kitty keyboard protocol decoding.
+func (r *Router) SetKittyKeyboard(enabled bool) { r.kitty.Store(enabled) }
+
+// KittyKeyboard reports whether kitty keyboard protocol decoding is enabled.
+// A nil Router reports false.
+func (r *Router) KittyKeyboard() bool { return r != nil && r.kitty.Load() }
+
+// scan lexes one ESC-introduced unit, ignoring kitty key events unless the
+// attachment enabled the protocol.
+func (r *Router) scan(data []byte) escToken {
+	return scanEscape(data, r.kitty.Load())
+}
+
 // tokenAction resolves a lexed unit against the current bindings.
 func (r *Router) tokenAction(tok escToken) (Action, bool) {
 	bindings := r.currentBindings()
@@ -193,6 +217,8 @@ func (r *Router) tokenAction(tok escToken) (Action, bool) {
 		return bindings.actionForAltArrow(tok.arrow)
 	case escAltRune:
 		return bindings.actionForAltRune(tok.rune)
+	case escKittyKey:
+		return kittyKeyAction(bindings, tok.key)
 	default:
 		return 0, false
 	}
@@ -289,6 +315,33 @@ func topRowDigitIndex(key rune) (int, bool) {
 		if slices.Contains(aliases, key) {
 			return idx, true
 		}
+	}
+	return 0, false
+}
+
+// kittyKeyAction resolves a kitty keyboard protocol key event. Alt+key uses
+// the configured Alt bindings.
+// The PC-101 base key lets layouts such as AZERTY match digit bindings.
+func kittyKeyAction(bindings *Bindings, ev kittykey.Event) (Action, bool) {
+	if ev.Release {
+		return 0, false
+	}
+	switch ev.Mods {
+	case kittykey.ModAlt:
+		if action, ok := bindings.actionForAltRune(ev.Code); ok {
+			return action, true
+		}
+		if ev.Base != 0 {
+			return bindings.actionForAltRune(ev.Base)
+		}
+	case kittykey.ModAlt | kittykey.ModShift:
+		// Legacy terminals send Alt+Shift+key as ESC plus the shifted rune,
+		// which is what alt+<shifted char> bindings match.
+		shifted := ev.Shifted
+		if shifted == 0 {
+			shifted = unicode.ToUpper(ev.Code)
+		}
+		return bindings.actionForAltRune(shifted)
 	}
 	return 0, false
 }

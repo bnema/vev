@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
 
 // Autonomous client supervisor.
@@ -383,6 +384,12 @@ type AttachmentEnvironment struct {
 	TermEnv   string
 	Cwd       string
 	TrueColor bool
+	// ProbeTerminal enables the one bounded capability probe of a real outer
+	// terminal (Kitty graphics and keyboard). Virtual terminals leave it off.
+	ProbeTerminal bool
+	// KittyKeyboard enables the kitty keyboard protocol when the probe finds
+	// it, which makes Ctrl+1..9 recent-session switching available.
+	KittyKeyboard bool
 }
 
 // AttachmentLifecycleAction is an explicit process/attachment decision.
@@ -434,6 +441,9 @@ type Supervisor struct {
 	// theme retains the terminal-reported colors across attachments, so a
 	// replacement attachment restores them before its own palette query ends.
 	theme terminalThemeState
+	// capabilities is the outer terminal's probed and enabled capabilities,
+	// written once in Run before any attachment starts.
+	capabilities terminalCapabilities
 	// readySub is the adopted connection's subscription while the ready phase
 	// runs, so the picker overlay over a live attachment keeps folding broker
 	// publications. It is only touched from the run goroutine.
@@ -563,7 +573,9 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	input := startTerminalInputLifetime(s.cfg.Terminal.In(), s.cfg.Picker)
+	input := startTerminalInputLifetimeWith(s.cfg.Terminal.In(), s.cfg.Picker, func(pump *terminalInputPump) {
+		s.detectTerminalCapabilities(ctx, pump)
+	})
 	defer input.stop()
 	s.attachments.setInput(input.pump)
 	s.attachments.startGeometry(ctx)
@@ -1307,6 +1319,13 @@ type terminalInputLifetime struct {
 // treated as an immediate orderly EOF. A nil consumer discards read bytes; a
 // non-nil consumer owns them for the picker presentation.
 func startTerminalInputLifetime(in io.Reader, consumer pickerInputConsumer) *terminalInputLifetime {
+	return startTerminalInputLifetimeWith(in, consumer, nil)
+}
+
+// startTerminalInputLifetimeWith runs beforeConsumers on the started pump
+// before the picker may claim it, so a terminal probe sees its responses
+// first and hands every other byte on to the picker.
+func startTerminalInputLifetimeWith(in io.Reader, consumer pickerInputConsumer, beforeConsumers func(*terminalInputPump)) *terminalInputLifetime {
 	lifetime := &terminalInputLifetime{eof: make(chan error, 1), consumer: consumer}
 	if supervisorNil(in) {
 		lifetime.finish(io.EOF)
@@ -1314,6 +1333,9 @@ func startTerminalInputLifetime(in io.Reader, consumer pickerInputConsumer) *ter
 	}
 	lifetime.pump = newTerminalInputPump(in)
 	lifetime.pump.start()
+	if beforeConsumers != nil {
+		beforeConsumers(lifetime.pump)
+	}
 	if consumer != nil {
 		lifetime.acquirePicker()
 	}
@@ -1439,4 +1461,24 @@ func supervisorNil(dependency any) bool {
 	default:
 		return false
 	}
+}
+
+// detectTerminalCapabilities probes the outer terminal once and enables the
+// kitty keyboard protocol when it is supported and wanted. It runs in Run
+// before any input consumer or attachment exists.
+func (s *Supervisor) detectTerminalCapabilities(ctx context.Context, pump *terminalInputPump) {
+	env := s.cfg.AttachmentEnvironment
+	if !env.ProbeTerminal {
+		return
+	}
+	caps := probeTerminalCapabilities(ctx, s.cfg.Terminal, s.cfg.Clock, pump)
+	if caps.KittyKeyboard && env.KittyKeyboard {
+		if err := s.cfg.Terminal.EnableKittyKeyboard(kittykey.OuterFlags); err != nil {
+			s.logger.Warn("enabling kitty keyboard protocol failed", "err", err)
+			caps.KittyKeyboard = false
+		}
+	} else {
+		caps.KittyKeyboard = false
+	}
+	s.capabilities = caps
 }

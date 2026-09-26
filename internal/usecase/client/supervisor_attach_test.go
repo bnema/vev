@@ -62,6 +62,8 @@ type attachTestEvent struct {
 	state  uint64
 }
 
+func (t *attachTestTerminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *attachTestTerminal) EnterRaw() (func() error, error) {
 	return func() error {
 		t.mu.Lock()

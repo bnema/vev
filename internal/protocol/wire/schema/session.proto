@@ -33,6 +33,7 @@ message Hello {
   bool remote = 20;
   bool kitty_direct_graphics = 21;
   SessionAttachTarget session_target = 22; // optional pointer
+  bool kitty_keyboard = 23;
 }
 
 // Welcome answers an accepted attach.

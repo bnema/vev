@@ -38,6 +38,7 @@ func TestProtoClientRoundTrips(t *testing.T) {
 	target := protoTestTarget()
 	messages := []protocol.ClientMessage{
 		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}},
+		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, KittyDirectGraphics: true, KittyKeyboard: true},
 		protocol.Input{InputSeq: 1, ActionID: 2, Data: []byte("x")},
 		protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}},
 		protocol.Detach{},

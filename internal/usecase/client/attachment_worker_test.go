@@ -122,6 +122,8 @@ func newWorkerTestTerminal() *workerTestTerminal {
 	return &workerTestTerminal{resizes: make(chan domain.Geometry, 4)}
 }
 
+func (t *workerTestTerminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *workerTestTerminal) EnterRaw() (func() error, error) {
 	return func() error {
 		t.mu.Lock()

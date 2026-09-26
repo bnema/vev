@@ -91,6 +91,13 @@ type EphemeralConfig struct {
 	CloseOnExit bool
 }
 
+// KeyboardConfig contains outer-terminal keyboard settings.
+type KeyboardConfig struct {
+	// KittyProtocol enables the kitty keyboard protocol on outer terminals
+	// that support it, which makes Ctrl+1..9 recent-session switching work.
+	KittyProtocol bool
+}
+
 // ScrollbackConfig is vev's per-pane retention policy. The terminal library
 // only enforces these application-selected limits. Zero megabytes disables
 // history; zero lines removes the additional line ceiling.
@@ -131,6 +138,7 @@ type Config struct {
 	Nav            NavConfig
 	Tabs           TabsConfig
 	Ephemeral      EphemeralConfig
+	Keyboard       KeyboardConfig
 	Scrollback     ScrollbackConfig
 }
 
@@ -171,6 +179,9 @@ func Defaults() Config {
 		},
 		Ephemeral: EphemeralConfig{
 			CloseOnExit: true,
+		},
+		Keyboard: KeyboardConfig{
+			KittyProtocol: true,
 		},
 		Scrollback: DefaultScrollbackConfig(),
 	}
