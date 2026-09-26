@@ -132,20 +132,24 @@ func TestFocusReportDrawsTheBellBeforeAcknowledging(t *testing.T) {
 
 // TestFocusGainClaimsSharedGeometry pins that a client whose terminal window
 // gains focus becomes the shared geometry claimant, while losing focus leaves
-// the current claimant in place.
+// the current claimant in place and a repeated report never claims again.
 func TestFocusGainClaimsSharedGeometry(t *testing.T) {
 	tests := []struct {
 		name        string
+		prior       domain.TerminalFocus
 		focus       domain.TerminalFocus
 		wantClaimed bool
 	}{
-		{name: "focus gain claims geometry", focus: domain.TerminalFocusFocused, wantClaimed: true},
-		{name: "focus loss keeps claimant", focus: domain.TerminalFocusUnfocused, wantClaimed: false},
+		{name: "unknown to focused claims", prior: domain.TerminalFocusUnknown, focus: domain.TerminalFocusFocused, wantClaimed: true},
+		{name: "unfocused to focused claims", prior: domain.TerminalFocusUnfocused, focus: domain.TerminalFocusFocused, wantClaimed: true},
+		{name: "repeated focused report does not claim", prior: domain.TerminalFocusFocused, focus: domain.TerminalFocusFocused, wantClaimed: false},
+		{name: "focus loss keeps claimant", prior: domain.TerminalFocusUnknown, focus: domain.TerminalFocusUnfocused, wantClaimed: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
 			first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			first.setTerminalFocus(tt.prior)
 			second := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
 			require.True(t, sess.geometry.reconcile(d, sess, second))
 			requireMultiplexGeometry(t, sess, second, domain.Size{Cols: 120, Rows: 38})
@@ -162,6 +166,51 @@ func TestFocusGainClaimsSharedGeometry(t *testing.T) {
 				return
 			}
 			requireMultiplexGeometry(t, sess, second, domain.Size{Cols: 120, Rows: 38})
+		})
+	}
+}
+
+// TestUnfocusedClaimDoesNotTakeGeometry pins the claim ranking: a claim from
+// an attachment that reported losing focus (a resumed or tiled background
+// window) never displaces one that may be seen, but still wins once it is the
+// only candidate. Without focus reports the newest claim wins as before.
+func TestUnfocusedClaimDoesNotTakeGeometry(t *testing.T) {
+	tests := []struct {
+		name       string
+		firstFocus domain.TerminalFocus
+		lateFocus  domain.TerminalFocus
+		wantLate   bool
+	}{
+		{name: "unfocused late claim loses to focused", firstFocus: domain.TerminalFocusFocused, lateFocus: domain.TerminalFocusUnfocused, wantLate: false},
+		{name: "unfocused late claim loses to unknown", firstFocus: domain.TerminalFocusUnknown, lateFocus: domain.TerminalFocusUnfocused, wantLate: false},
+		{name: "unknown focus keeps newest-claim rule", firstFocus: domain.TerminalFocusUnknown, lateFocus: domain.TerminalFocusUnknown, wantLate: true},
+		{name: "focused late claim wins", firstFocus: domain.TerminalFocusUnfocused, lateFocus: domain.TerminalFocusFocused, wantLate: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+			first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			first.setTerminalFocus(tt.firstFocus)
+			require.True(t, sess.geometry.reconcile(d, sess, first))
+			requireMultiplexGeometry(t, sess, first, domain.Size{Cols: 80, Rows: 22})
+
+			late := &attachedClient{output: newOutputStateStream()}
+			late.tr, _ = newCapturingTransport(t)
+			late.output.attachment = late
+			late.initOverlays()
+			late.setGeometry(domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
+			late.setTerminalFocus(tt.lateFocus)
+			late.setSession(sess)
+			require.True(t, sess.registerAttachment(late)) // attach and resume claim here
+			sess.geometry.reconcile(d, sess, late)         // as a client Resize does
+
+			if !tt.wantLate {
+				requireMultiplexGeometry(t, sess, first, domain.Size{Cols: 80, Rows: 22})
+				// Once the seen claimant leaves, the unfocused claim is the only one.
+				d.clientGone(sess, first, first.transport(), true)
+				sess.geometry.reconcile(d, sess, nil)
+			}
+			requireMultiplexGeometry(t, sess, late, domain.Size{Cols: 120, Rows: 38})
 		})
 	}
 }

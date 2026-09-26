@@ -51,9 +51,8 @@ func (d *Daemon) applyTerminalFocusForAttachment(effect *attachmentEffect, messa
 	// the focus lets any paint acknowledge.
 	effect.sess.markVisibleAttention(effect.ac)
 	effect.ac.setTerminalFocus(message.Focus)
-	if message.Focus == domain.TerminalFocusFocused && effect.current() {
-		effect.sess.geometry.reconcileAndInvalidate(d, effect.sess, effect.ac, "terminal_focus.go")
-	}
+	// The caller admitted this effect, and only Focused reaches here.
+	effect.sess.geometry.reconcileAndInvalidate(d, effect.sess, effect.ac, "terminal_focus.go")
 	d.invalidateRender(effect.sess, effect.ac, false, "terminal_focus.go")
 }
 

@@ -29,8 +29,23 @@ type sharedPTYGeometry struct {
 	applied  domain.Geometry                     // mu
 }
 
-// latestValidClaimLocked selects the most recent valid remaining Attachment
-// claim. The caller holds both session.mu and g.mu.
+// claimOutranks reports whether claim a wins over b. A claim from an
+// attachment whose terminal reported losing focus never wins over one that may
+// be seen, so a background window cannot take geometry from the focused one.
+// Otherwise the newest claim wins, as when no terminal reports focus.
+func claimOutranks(a *sharedPTYClaim, aOrder uint64, b *sharedPTYClaim, bOrder uint64) bool {
+	if b == nil {
+		return true
+	}
+	aSeen, bSeen := a.attachment.terminalFocus().MaySee(), b.attachment.terminalFocus().MaySee()
+	if aSeen != bSeen {
+		return aSeen
+	}
+	return a.sequence > b.sequence || (a.sequence == b.sequence && aOrder > bOrder)
+}
+
+// latestValidClaimLocked selects the winning valid remaining Attachment claim
+// (see claimOutranks). The caller holds both session.mu and g.mu.
 func (g *sharedPTYGeometry) latestValidClaimLocked(core *sessionCore, exclude *attachedClient) *sharedPTYClaim {
 	if g == nil || core == nil {
 		return nil
@@ -46,8 +61,7 @@ func (g *sharedPTYGeometry) latestValidClaimLocked(core *sessionCore, exclude *a
 			continue
 		}
 		order := core.attachmentOrder[attachment]
-		if latest == nil || claim.sequence > latest.sequence ||
-			(claim.sequence == latest.sequence && order > latestOrder) {
+		if claimOutranks(claim, order, latest, latestOrder) {
 			latest = claim
 			latestOrder = order
 		}
@@ -73,8 +87,10 @@ func (g *sharedPTYGeometry) refreshLocked(core *sessionCore) {
 	g.latest.Store(g.latestValidClaimLocked(core, nil))
 }
 
-// claimLocked publishes a new immutable claim. The caller holds session.mu;
-// claim publication then follows the session.mu -> geometry.mu order.
+// claimLocked records a new immutable claim and publishes the winning claim,
+// which is the new one unless an unfocused attachment made it while another
+// may be seen. The caller holds session.mu; claim publication then follows the
+// session.mu -> geometry.mu order.
 func (g *sharedPTYGeometry) claimLocked(core *sessionCore, attachment *attachedClient, geometry domain.Geometry) *sharedPTYClaim {
 	if g == nil || core == nil || attachment == nil || !geometry.Valid() {
 		return nil
@@ -91,8 +107,27 @@ func (g *sharedPTYGeometry) claimLocked(core *sessionCore, attachment *attachedC
 		sequence:   g.sequence,
 	}
 	g.claims[attachment] = claim
-	g.latest.Store(claim)
+	if !g.currentHidesLocked(core, claim) {
+		g.latest.Store(claim)
+	}
 	return claim
+}
+
+// currentHidesLocked reports whether the published claim must stay ahead of a
+// newer claim: the newer one comes from an unfocused window while the current
+// one is live and may be seen. The caller holds session.mu and g.mu.
+func (g *sharedPTYGeometry) currentHidesLocked(core *sessionCore, claim *sharedPTYClaim) bool {
+	current := g.latest.Load()
+	if current == nil || current.attachment == claim.attachment {
+		return false
+	}
+	if g.claims[current.attachment] != current {
+		return false // the current claim was superseded or released
+	}
+	if _, registered := core.attachments[current.attachment]; !registered {
+		return false
+	}
+	return !claim.attachment.terminalFocus().MaySee() && current.attachment.terminalFocus().MaySee()
 }
 
 // removeAttachmentLocked removes the exact Attachment claim and republishes
