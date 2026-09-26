@@ -389,6 +389,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	// under that same ownership so concurrent fallback paints cannot observe a
 	// partially published runtime.
 	ac.initOverlays()
+	frameCapture := ac.afterFrame.beginCapture()
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false
 	defer func() {
@@ -397,6 +398,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 		// Emit the captured sequence before any follow-up repaint can introduce
 		// another boundary, while no attachment, session, tab, or pane lock is held.
 		marks.flush()
+		ac.afterFrame.runReady()
 		if repaintAttachedClients {
 			d.repaintAllAttachedClients()
 		}
@@ -464,6 +466,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	if ac.renderStages.capture != nil {
 		ac.renderStages.capture()
 	}
+	state.frameCapture = frameCapture
 	captureOverlayLayers(state, overlays, paletteCfg)
 	endCompose := marks.span(ports.RuntimeComposeStart, ports.RuntimeComposeEnd, 0)
 	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)

@@ -48,6 +48,7 @@ type capturedRenderState struct {
 	incarnation     domain.IncarnationID
 	lease           *attachmentLease
 	uiFence         uint64
+	frameCapture    uint64 // numbers this capture in the attachment's afterFrame queue
 	view            attachmentView
 	focusedPaneID   domain.PaneStableID
 	window          domain.Size
