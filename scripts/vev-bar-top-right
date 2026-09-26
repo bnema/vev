@@ -9,7 +9,7 @@
 # e.g. "DP-2 [x][ ][ ]". A remote client or another compositor omits it.
 
 workspace=
-if [ -n "${VEV_CLIENT_PID:-}" ] && [ -n "${NEFERWL_STATE:-}" ] && command -v neferwl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+if [ -n "${VEV_CLIENT_PID:-}" ] && command -v neferwl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
 	workspace=$(
 		neferwl state output-of "$VEV_CLIENT_PID" 2>/dev/null |
 			jq -r '
