@@ -581,7 +581,10 @@ func TestBrokerLocalObservationPublishesReachableCatalogueWhenIdentityAppears(t 
 	store, err := brokerstore.Open(brokerstore.Options{Dir: stateDir})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	registry, err := broker.NewRegistryWithConfig(brokerLocalTestEpoch, store, nil, clock.New(), discardLog(), broker.RegistryConfig{Local: local, MembershipMode: broker.MembershipMutable})
+	// A deterministic clock: the identity retry is a jittered multi-second
+	// delay, so wall time would race the test's wait bound.
+	clk := newSandboxClock()
+	registry, err := broker.NewRegistryWithConfig(brokerLocalTestEpoch, store, nil, clk, discardLog(), broker.RegistryConfig{Local: local, MembershipMode: broker.MembershipMutable})
 	require.NoError(t, err)
 	startLocalRegistry(t, registry)
 
@@ -589,6 +592,9 @@ func TestBrokerLocalObservationPublishesReachableCatalogueWhenIdentityAppears(t 
 	require.Equal(t, int32(0), daemon.dials.Load(), "no dial happens while no identity exists")
 
 	identity.Store(daemonIdentity)
+	// Step past the longest jittered retry (retry base plus 10%) so the next
+	// attempt reads the published identity.
+	clk.Advance(6 * time.Second)
 	observed := waitLocalEntry(t, registry, func(entry ports.BrokerDaemonObservation) bool {
 		return entry.Availability == domain.RemoteAvailabilityReachable
 	})
