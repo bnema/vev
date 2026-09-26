@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -930,7 +931,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 				}
 				// Escape and q cancel; with no attachment there is nothing to
 				// cancel back to, so the picker stays and says how to leave.
-				s.offerPickerNotice("picker-exit-hint", "no session attached: press Ctrl+C to quit")
+				s.notifyPicker(pickerExitHint)
 				s.renderCurrent()
 				continue
 			}
@@ -978,12 +979,12 @@ func (s *Supervisor) takePickerClose() bool {
 		s.pendingPickerKey = key
 	}
 	if op.close && !op.exit {
-		s.offerPickerNotice("picker-exit-hint", "no session attached: press Ctrl+C to quit")
+		s.notifyPicker(pickerExitHint)
 		s.renderCurrent()
 	}
 	if op.kill && !op.commit && !op.close && key != "" {
 		// A kill needs the broker's control stream; it is refused, not queued.
-		s.offerPickerNotice("picker-kill", "couldn't kill: broker unavailable")
+		s.notifyPicker(pickerKillRefused("couldn't kill: broker unavailable"))
 		s.renderCurrent()
 	}
 	return op.close && op.exit
@@ -992,17 +993,20 @@ func (s *Supervisor) takePickerClose() bool {
 // pickerPresentationHost is the optional presentation surface of the real
 // picker. Scripted pickers may omit it.
 type pickerPresentationHost interface {
-	offerNotice(id, message string)
+	Notify(n domain.Notification)
 	invalidatePresentation()
 }
 
-// offerPickerNotice shows one bounded client-local notice when the picker
+// notifyPicker shows one bounded client-local notice when the picker
 // supports it.
-func (s *Supervisor) offerPickerNotice(id, message string) {
+func (s *Supervisor) notifyPicker(n domain.Notification) {
 	if host, ok := s.cfg.Picker.(pickerPresentationHost); ok {
-		host.offerNotice(id, message)
+		host.Notify(n)
 	}
 }
+
+// pickerExitHint tells an unattached user how to leave the picker.
+var pickerExitHint = domain.Notification{Code: domain.NoticeUser, Severity: domain.NoticeInfo, Message: "no session attached: press Ctrl+C to quit"}
 
 // invalidatePickerPresentation forces the next picker frame to redraw the
 // whole box after another owner wrote the terminal.

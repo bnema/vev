@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -45,9 +46,9 @@ func (p *parityTestPicker) ResolveKill(string) (pickerKillTarget, error) {
 	return p.kill, nil
 }
 
-func (p *parityTestPicker) offerNotice(_ string, message string) {
+func (p *parityTestPicker) Notify(n domain.Notification) {
 	p.mu.Lock()
-	p.notices = append(p.notices, message)
+	p.notices = append(p.notices, n.Message)
 	p.mu.Unlock()
 }
 

@@ -310,10 +310,10 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 				cfg.OnLifecycle(notice)
 			}
 			if notice.Kind == client.LifecycleNoticeBrokerLost {
-				picker.OfferNotice("broker-lost", "Connection lost; retrying…")
+				picker.Notify(domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "Connection lost; retrying…"})
 			}
 			if notice.Kind == client.LifecycleNoticeBrokerReconnected {
-				picker.OfferNotice("broker-reconnected", "Connection restored")
+				picker.Notify(domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeInfo, Message: "Connection restored"})
 			}
 		},
 		Spinner: presentation,

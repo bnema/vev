@@ -558,66 +558,29 @@ func (c *pickerCatalogue) ResolveKill(key string) (pickerKillTarget, error) {
 	}, nil
 }
 
-// pickerHostFailure is one remote host failure episode worth one toast.
-type pickerHostFailure struct {
-	key     string
-	episode uint64
-	message string
-}
-
-// failures reports every remote host currently in a failure episode. The
-// controller toasts each (host, episode) once, as main's
-// notifyNewRemoteFailures did.
-func (c *pickerCatalogue) failures() []pickerHostFailure {
+// remoteHealth reports the notice-relevant state of every remote host, in
+// catalogue order. Transition policy lives in domain.RemoteHealthNotice.
+func (c *pickerCatalogue) remoteHealth() []domain.RemoteHealth {
 	if c == nil {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	failures := make([]pickerHostFailure, 0)
+	health := make([]domain.RemoteHealth, 0, len(c.order))
 	for _, key := range c.order {
 		host, ok := c.hosts[key]
 		if !ok || host.observation.Local {
 			continue
 		}
 		observation := host.observation
-		if !pickerObservationFailing(observation) && observation.Availability != domain.RemoteAvailabilityIncompatible && !pickerObservationVersionMismatch(observation) {
-			continue
-		}
-		failures = append(failures, pickerHostFailure{
-			key:     key,
-			episode: observation.FailureEpisode,
-			message: pickerHostFailureMessage(observation),
+		health = append(health, domain.RemoteHealth{
+			Key:             key,
+			Origin:          pickerOriginLabel(observation),
+			Availability:    observation.Availability,
+			Failure:         observation.LastFailure.Kind,
+			VersionMismatch: pickerObservationVersionMismatch(observation),
+			Episode:         observation.FailureEpisode,
 		})
 	}
-	return failures
-}
-
-// pickerHostFailureMessage is main's remoteFailureNoticeMessage, named by the
-// host's display origin rather than a raw endpoint.
-func pickerHostFailureMessage(observation ports.BrokerDaemonObservation) string {
-	prefix := "Remote check failed: " + pickerOriginLabel(observation) + " — "
-	if observation.Availability == domain.RemoteAvailabilityIncompatible || pickerObservationVersionMismatch(observation) {
-		return prefix + "remote vev version is incompatible"
-	}
-	switch observation.LastFailure.Kind {
-	case domain.RemoteFailureAuthentication:
-		return prefix + "SSH authentication failed; verify non-interactive SSH access"
-	case domain.RemoteFailureTrust:
-		return prefix + "SSH host verification failed; verify the host key policy"
-	case domain.RemoteFailureIncompatible:
-		return prefix + "remote vev version is incompatible"
-	case domain.RemoteFailureInvalidResponse:
-		return prefix + "remote catalog response is invalid"
-	case domain.RemoteFailureTimeout:
-		return prefix + "SSH timed out"
-	}
-	switch observation.Availability {
-	case domain.RemoteAvailabilityAuthFailed:
-		return prefix + "SSH authentication failed; verify non-interactive SSH access"
-	case domain.RemoteAvailabilityInvalidResponse:
-		return prefix + "remote catalog response is invalid"
-	default:
-		return prefix + "SSH connection failed; verify SSH access"
-	}
+	return health
 }

@@ -540,7 +540,10 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 
 	recovered := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(time.Second))
 	recovered.FailureEpisode = 2
-	require.Empty(t, apply(recovered))
+	toasts = apply(recovered)
+	require.Len(t, toasts, 1, "a recovery toasts once")
+	require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Message)
+	require.Empty(t, apply(recovered), "a steady healthy host is silent")
 	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
 
 	toasts = apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))

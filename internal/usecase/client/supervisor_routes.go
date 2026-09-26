@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -169,7 +170,7 @@ func (s *Supervisor) resolveDaemonNavigation(service ports.BrokerService, token 
 // revalidates the exact identity on Hello.
 func (s *Supervisor) resolveServingHandoff(service ports.BrokerService, request ports.BrokerOpenStreamRequest, handoff protocol.AttachTarget) (pickerAttachmentTarget, bool) {
 	if handoff.Endpoint != "" || handoff.SessionTarget != nil || handoff.ExactTarget == nil || handoff.Intent != protocol.IntentAttach {
-		s.offerPickerNotice("daemon-handoff", "the daemon asked for a destination this client cannot open")
+		s.notifyPicker(domain.Notification{Code: domain.NoticeSessionUnavailable, Severity: domain.NoticeWarn, Message: "the daemon asked for a destination this client cannot open"})
 		return pickerAttachmentTarget{}, false
 	}
 	stream, err := service.NextStreamID()

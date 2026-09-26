@@ -109,10 +109,10 @@ type pickerController struct {
 	lastCommitKey string
 	// lastKillKey is the catalogue key captured with a pending kill decision.
 	lastKillKey string
-	// noticedFailures records the failure episode already toasted per remote
-	// host, so one outage toasts once (main's notifyNewRemoteFailures).
-	noticedFailures map[string]uint64
-	preview         pickerusecase.Preview
+	// hostHealth is the last remote host state seen, so each host transition
+	// is judged once by domain.RemoteHealthNotice.
+	hostHealth map[string]domain.RemoteHealth
+	preview    pickerusecase.Preview
 	// flushStop cancels the armed lone-escape flush. It is non-nil exactly
 	// while one flush is armed for the currently withheld prefix.
 	flushStop chan struct{}
@@ -177,7 +177,7 @@ func (p *pickerController) ApplySnapshot(snapshot ports.BrokerSnapshot) {
 		// notice instead of silently vanishing. A merely stale publication
 		// validates and is ignored without a notice.
 		if snapshot.Validate() != nil {
-			p.offerNotice("picker-snapshot-rejected", "broker catalogue update rejected")
+			p.Notify(domain.Notification{Code: domain.NoticeInternal, Severity: domain.NoticeError, Message: "broker catalogue update rejected"})
 		}
 		return
 	}
@@ -534,7 +534,7 @@ func (p *pickerController) Resolve(base pickerResolveBase) (ports.BrokerOpenStre
 	key, ok := p.displayedKey()
 	if !ok {
 		err := pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "no row is selected"}
-		p.offerNotice("picker-refusal", err.Error())
+		p.Notify(pickerRefusalNotice(err))
 		return ports.BrokerOpenStreamRequest{}, err
 	}
 	return p.ResolveKey(key, base)
@@ -549,7 +549,7 @@ func (p *pickerController) ResolveKey(key string, base pickerResolveBase) (ports
 	if p == nil || p.catalogue == nil {
 		err := pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
 		if p != nil {
-			p.offerNotice("picker-refusal", err.Error())
+			p.Notify(pickerRefusalNotice(err))
 		}
 		return ports.BrokerOpenStreamRequest{}, err
 	}
@@ -562,14 +562,14 @@ func (p *pickerController) ResolveKeyTarget(key string, base pickerResolveBase) 
 	if p == nil || p.catalogue == nil {
 		err := pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
 		if p != nil {
-			p.offerNotice("picker-refusal", err.Error())
+			p.Notify(pickerRefusalNotice(err))
 		}
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
 	ref, ok := p.catalogue.Ref(key)
 	if !ok {
 		err := pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker row is not in the catalogue"}
-		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
+		p.Notify(pickerRefusalNotice(err))
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
 	var request ports.BrokerOpenStreamRequest
@@ -583,7 +583,7 @@ func (p *pickerController) ResolveKeyTarget(key string, base pickerResolveBase) 
 		err = pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "this picker row is not a session destination"}
 	}
 	if err != nil {
-		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
+		p.Notify(pickerRefusalNotice(err))
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
 	return request, tab, nil
@@ -596,7 +596,7 @@ func (p *pickerController) ResolveKill(key string) (pickerKillTarget, error) {
 	}
 	target, err := p.catalogue.ResolveKill(key)
 	if err != nil {
-		p.offerNotice("picker-refusal", pickerRefusalNotice(err))
+		p.Notify(pickerRefusalNotice(err))
 		return pickerKillTarget{}, err
 	}
 	return target, nil
@@ -630,13 +630,14 @@ func (p *pickerController) rememberSortLocked() {
 	}
 }
 
-// pickerRefusalNotice is the toast text for one resolution refusal.
-func pickerRefusalNotice(err error) string {
+// pickerRefusalNotice is the notice for one resolution refusal.
+func pickerRefusalNotice(err error) domain.Notification {
+	text := err.Error()
 	var typed pickerCatalogueError
 	if errors.As(err, &typed) {
-		return typed.noticeText()
+		text = typed.noticeText()
 	}
-	return err.Error()
+	return domain.Notification{Code: domain.NoticeSessionUnavailable, Severity: domain.NoticeWarn, Message: text}
 }
 
 // displayedKey names the row under the cursor, whether or not it admits an
@@ -719,42 +720,37 @@ func (p *pickerController) rebuildLocked() {
 	p.loop.replaceLines(snapshot())
 }
 
-// offerDiagnosticsLocked toasts each remote host failure once per failure
-// episode (main's notifyNewRemoteFailures). Ordinary observation progress and
-// catalogue aging stay on the rows; a recovered host forgets its episode so a
-// later outage toasts again.
+// offerDiagnosticsLocked notices each remote host transition that
+// domain.RemoteHealthNotice deems worth one toast: a new failure episode or a
+// recovery. Ordinary observation progress stays on the rows.
 func (p *pickerController) offerDiagnosticsLocked() {
-	failing := make(map[string]struct{})
-	for _, failure := range p.catalogue.failures() {
-		failing[failure.key] = struct{}{}
-		if noticed, ok := p.noticedFailures[failure.key]; ok && noticed == failure.episode {
-			continue
-		}
-		if p.noticedFailures == nil {
-			p.noticedFailures = make(map[string]uint64)
-		}
-		p.noticedFailures[failure.key] = failure.episode
-		p.notices.Show(p.clock.Now(), ui.Toast{
-			ID:       "picker-host:" + failure.key,
-			Message:  failure.message,
-			Anchor:   domain.AnchorTopRight,
-			Duration: pickerNoticeLifetime,
-		})
-	}
-	for key := range p.noticedFailures {
-		if _, ok := failing[key]; !ok {
-			delete(p.noticedFailures, key)
+	current := make(map[string]domain.RemoteHealth)
+	for _, health := range p.catalogue.remoteHealth() {
+		current[health.Key] = health
+		prev, seen := p.hostHealth[health.Key]
+		if n, ok := domain.RemoteHealthNotice(prev, seen, health); ok {
+			p.notifyLocked(n)
 		}
 	}
+	p.hostHealth = current
 }
 
-func (p *pickerController) offerNotice(id, message string) {
-	if message == "" {
+// Notify shows one client-local notice. Notices about the same subject
+// (domain.Notification.Subject) replace each other.
+func (p *pickerController) Notify(n domain.Notification) {
+	if p == nil || n.Message == "" {
 		return
 	}
 	p.mu.Lock()
-	p.notices.Show(p.clock.Now(), ui.Toast{ID: id, Message: message, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
+	p.notifyLocked(n)
 	p.mu.Unlock()
+}
+
+func (p *pickerController) notifyLocked(n domain.Notification) {
+	if n.Message == "" {
+		return
+	}
+	p.notices.Show(p.clock.Now(), ui.Toast{ID: n.Subject(), Message: n.Message, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
 }
 
 // mergePickerOps accumulates two presentation decisions from one read. Close
