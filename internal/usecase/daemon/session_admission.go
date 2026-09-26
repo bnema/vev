@@ -108,6 +108,16 @@ func validateSessionHelloAdmission(h protocol.Hello, admission ports.SessionAdmi
 		if h.ExactTarget != nil || h.SessionTarget != nil || h.ResumeToken != 0 {
 			return admissionError("named admission forbids a target or resume token")
 		}
+	case ports.BrokerAdmissionAttachNamed:
+		if h.Intent != protocol.IntentAttach {
+			return admissionError("named attach admission requires an attach hello")
+		}
+		if h.Name != admission.Name {
+			return admissionError("hello name contradicts the admitted session name")
+		}
+		if h.ExactTarget != nil || h.SessionTarget != nil || h.ResumeToken != 0 {
+			return admissionError("named attach admission forbids a target or resume token")
+		}
 	case ports.BrokerAdmissionExact:
 		if h.ExactTarget == nil || *h.ExactTarget != admission.Target {
 			return admissionError("hello exact target contradicts the admitted target")

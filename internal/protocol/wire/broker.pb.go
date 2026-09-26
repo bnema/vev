@@ -1326,7 +1326,8 @@ func (x *Reconcile) GetRegistration() *RemoteRegistration {
 // admission is the closed attachment-admission taxonomy: an attachment
 // stream names exactly how the daemon must admit it, while control and
 // observation streams carry none (0). name is validated session-name
-// authority for create-named and is empty for every other variant.
+// authority for create-named and attach-named and is empty for every other
+// variant.
 // start_mode is the explicit daemon-start authorization carried to the
 // transport: observation and daemon-stop must be existing_only, while
 // attach/creation and the explicit list/mutate controls may be
@@ -1345,9 +1346,10 @@ type OpenStream struct {
 	Env    []string          `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty"`
 	Policy *BrokerWirePolicy `protobuf:"bytes,8,opt,name=policy,proto3" json:"policy,omitempty"`
 	// Closed admission taxonomy: 0 = none (control/observation), 1 = exact
-	// attach/resume, 2 = create named, 3 = create ephemeral.
+	// attach/resume, 2 = create named, 3 = create ephemeral, 4 = attach named
+	// (the daemon resolves the name and refuses an unknown one).
 	Admission uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
-	// Validated session name for create-named; empty otherwise.
+	// Validated session name for create-named and attach-named; empty otherwise.
 	Name string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
 	// Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =
 	// existing_only, 2 = start_if_needed. Always present; zero is refused.

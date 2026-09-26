@@ -412,6 +412,12 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 			message.Admission = ports.BrokerAdmissionCreateEphemeral
 			return message
 		}()},
+		{"attach named", func() OpenStream {
+			message := base()
+			message.Admission = ports.BrokerAdmissionAttachNamed
+			message.Name = "work"
+			return message
+		}()},
 		{"control carries none", OpenStream{
 			Epoch: 7, Connection: connection, Stream: 3, Purpose: ports.BrokerStreamControl,
 			Local: true, Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded,
@@ -452,6 +458,18 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 				m.Admission = ports.BrokerAdmissionCreateNamed
 				return m
 			}(),
+			"attach named with target": func() OpenStream {
+				m := base()
+				m.Admission = ports.BrokerAdmissionAttachNamed
+				m.Name = "work"
+				m.Target = testTarget()
+				return m
+			}(),
+			"attach named without name": func() OpenStream {
+				m := base()
+				m.Admission = ports.BrokerAdmissionAttachNamed
+				return m
+			}(),
 			"ephemeral with name": func() OpenStream {
 				m := base()
 				m.Admission = ports.BrokerAdmissionCreateEphemeral
@@ -484,7 +502,7 @@ func TestBrokerOpenStreamAdmissionVariants(t *testing.T) {
 				raw, err := EncodeClient(message, testEnvelopeCeiling, testChunkCeiling)
 				require.NoError(t, err)
 				_, err = DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
-				if name == "named with target" {
+				if name == "named with target" || name == "attach named with target" {
 					// The encoder omits a target on creation; test the untrusted wire directly.
 					envelope := &wire.BrokerClientEnvelope{}
 					require.NoError(t, proto.Unmarshal(raw, envelope))

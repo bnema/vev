@@ -351,6 +351,10 @@ const (
 	// BrokerAdmissionCreateEphemeral creates one ephemeral session when the
 	// stream attaches.
 	BrokerAdmissionCreateEphemeral
+	// BrokerAdmissionAttachNamed attaches to the session the daemon knows by
+	// this validated name, restoring it if needed. The daemon, not a broker
+	// catalogue, decides existence and refuses an unknown name.
+	BrokerAdmissionAttachNamed
 )
 
 func (a BrokerStreamAdmission) String() string {
@@ -361,6 +365,8 @@ func (a BrokerStreamAdmission) String() string {
 		return "create_named"
 	case BrokerAdmissionCreateEphemeral:
 		return "create_ephemeral"
+	case BrokerAdmissionAttachNamed:
+		return "attach_named"
 	default:
 		return fmt.Sprintf("invalid(%d)", uint8(a))
 	}
@@ -368,7 +374,7 @@ func (a BrokerStreamAdmission) String() string {
 
 func (a BrokerStreamAdmission) Validate() error {
 	switch a {
-	case BrokerAdmissionExact, BrokerAdmissionCreateNamed, BrokerAdmissionCreateEphemeral:
+	case BrokerAdmissionExact, BrokerAdmissionCreateNamed, BrokerAdmissionCreateEphemeral, BrokerAdmissionAttachNamed:
 		return nil
 	default:
 		return errors.New("ports: invalid broker stream admission")
@@ -379,7 +385,8 @@ func (a BrokerStreamAdmission) Validate() error {
 // cancellable logical stream to the owning daemon. The daemon revalidates
 // the exact session identity before attachment. Admission selects the
 // attachment admission variant; Name is the validated session name for
-// BrokerAdmissionCreateNamed and is empty for every other variant. StartMode
+// BrokerAdmissionCreateNamed and BrokerAdmissionAttachNamed and is empty for
+// every other variant. StartMode
 // is the explicit daemon-start authorization this request carries to the
 // transport; Pending acquisition keys on it so an ExistingOnly request is
 // never coalesced with a dial that may start the target. Env is the
@@ -442,12 +449,12 @@ func (r BrokerOpenStreamRequest) Validate() error {
 			if r.Name != "" {
 				return errors.New("ports: exact admission carries a creation name")
 			}
-		case BrokerAdmissionCreateNamed:
+		case BrokerAdmissionCreateNamed, BrokerAdmissionAttachNamed:
 			if r.Target != (protocol.ExactSessionTarget{}) {
-				return errors.New("ports: named creation carries an exact target")
+				return errors.New("ports: named admission carries an exact target")
 			}
 			if err := domain.ValidateSessionName(r.Name); err != nil {
-				return fmt.Errorf("ports: invalid creation session name: %w", err)
+				return fmt.Errorf("ports: invalid admission session name: %w", err)
 			}
 		case BrokerAdmissionCreateEphemeral:
 			if r.Target != (protocol.ExactSessionTarget{}) {

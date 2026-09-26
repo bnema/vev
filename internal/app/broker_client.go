@@ -334,23 +334,22 @@ func localEphemeralNavigation() client.InitialNavigation {
 	}
 }
 
-// errTerminalNavigationUnresolved reports that a CLI target could not be
-// translated into the exact identity a snapshot carries. It is a local refusal:
+// errTerminalNavigationUnresolved reports that a CLI target names a host the
+// broker catalogue does not carry. It is a local refusal:
 // no destination was dialed, so the supervisor surfaces it as a bounded
 // selection-unavailable notice and returns to the picker instead of attaching a
 // fallback or creating implicitly.
-var errTerminalNavigationUnresolved = errors.New("vev: attach target is not in the broker catalogue")
+var errTerminalNavigationUnresolved = errors.New("vev: attach host is not in the broker catalogue")
 
 // terminalBrokerNavigation translates the parsed terminal CLI intent into the
 // closed initial-navigation union. An intent that is fully determined before
-// the connection (local creation) is a value; an intent whose exact identity
-// only exists in a broker publication (`attach`, and any remote target) is a
-// single-shot resolver that runs once against the first committed snapshot.
+// the connection (local creation, local named attach) is a value; a remote
+// target is a single-shot resolver that runs once against the first committed
+// snapshot to fence the host registration.
 //
-// The translation never invents identity: a remote destination is only ever the
-// complete registration a snapshot carries, and an exact target is only ever
-// the lifecycle/name pair the snapshot publishes. A target the snapshot does not
-// carry is a refusal, never an implicit create and never a same-name fallback.
+// Named attach never consults the catalogue for session existence: the daemon
+// restores or refuses the name. A remote destination is only ever the complete
+// registration a snapshot carries; an unknown host is a refusal.
 func terminalBrokerNavigation(intent uint8, name, remoteTarget string) (client.InitialNavigation, client.InitialNavigationResolver, error) {
 	if remoteTarget == "" {
 		switch intent {
@@ -369,7 +368,13 @@ func terminalBrokerNavigation(intent uint8, name, remoteTarget string) (client.I
 			if err := domain.ValidateSessionName(name); err != nil {
 				return client.InitialNavigation{}, nil, err
 			}
-			return client.InitialNavigation{}, localExactAttachResolver(name), nil
+			// The daemon resolves the name, so a catalogue that has not
+			// observed the session yet cannot refuse it.
+			return client.InitialNavigation{
+				Kind:        client.InitialNavigationAttachNamed,
+				Destination: ports.BrokerEndpointFence{Local: true},
+				Name:        name,
+			}, nil, nil
 		default:
 			return client.InitialNavigation{}, nil, usagef("unsupported attach intent %d", intent)
 		}
@@ -391,32 +396,25 @@ func terminalBrokerNavigation(intent uint8, name, remoteTarget string) (client.I
 		if err := domain.ValidateSessionName(name); err != nil {
 			return client.InitialNavigation{}, nil, err
 		}
-		return client.InitialNavigation{}, remoteExactAttachResolver(remoteTarget, name), nil
+		return client.InitialNavigation{}, remoteNamedAttachResolver(remoteTarget, name), nil
 	default:
 		return client.InitialNavigation{}, nil, usagef("unsupported attach intent %d", intent)
 	}
 }
 
-// localExactAttachResolver resolves one local session name to its exact
-// lifecycle in the committed publication. `attach <name>` is a target
-// translation only: a name the local observation does not carry is refused, so
-// the client returns to the picker with a notice instead of creating a session
-// implicitly.
-func localExactAttachResolver(name string) client.InitialNavigationResolver {
+// remoteNamedAttachResolver binds a remote named attach to the endpoint's
+// committed registration; the remote daemon resolves the name.
+func remoteNamedAttachResolver(endpoint, name string) client.InitialNavigationResolver {
 	return func(snapshot ports.BrokerSnapshot) (client.InitialNavigation, error) {
-		observation, ok := localBrokerObservation(snapshot)
+		observation, ok := snapshot.Find(endpoint)
 		if !ok {
-			return client.InitialNavigation{}, fmt.Errorf("%w: no local daemon observation", errTerminalNavigationUnresolved)
-		}
-		target, ok := brokerObservationExactTarget(observation, name)
-		if !ok {
-			return client.InitialNavigation{}, fmt.Errorf("%w: %q", errTerminalNavigationUnresolved, name)
+			return client.InitialNavigation{}, fmt.Errorf("%w: %q is not a configured broker host", errTerminalNavigationUnresolved, endpoint)
 		}
 		return client.InitialNavigation{
-			Kind:        client.InitialNavigationAttachExact,
+			Kind:        client.InitialNavigationAttachNamed,
 			Epoch:       snapshot.Epoch,
-			Destination: ports.BrokerEndpointFence{Local: true},
-			Target:      target,
+			Destination: ports.BrokerEndpointFence{Registration: observation.Registration},
+			Name:        name,
 		}, nil
 	}
 }

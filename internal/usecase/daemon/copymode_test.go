@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -61,7 +62,7 @@ func TestOwnedSynchronousSendReturnsCapturedTransportAcrossReplacement(t *testin
 	out := unmarshalTestOutput(t, (<-failed.sent).Payload)
 	require.Equal(t, []byte("copy"), out.Data)
 	d.detachOnSendError(sess, ac, used)
-	require.Contains(t, sess.snapshotAttachments(), ac)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 	require.False(t, replacement.Closed())
 }
 

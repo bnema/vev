@@ -849,6 +849,7 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 		hostRow bool
 		create  bool
 		exact   bool
+		named   bool
 	}{
 		{
 			name:   "unobserved unknown stays attemptable",
@@ -916,6 +917,19 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 			wantErr: pickerCatalogueUnavailable,
 		},
 		{
+			name: "no daemon lets the daemon decide a named attach", named: true,
+			daemon: func() ports.BrokerDaemonObservation {
+				o := pickerTestRemoteObservation("user@arch", 1, 1, now)
+				o.Identity = ""
+				o.Incarnation = ports.BrokerDaemonIncarnation{}
+				o.ProtocolVersion = 0
+				o.Availability = domain.RemoteAvailabilityNoDaemon
+				o.LastSuccess = time.Time{}
+				o.InventoryKnown = false
+				return o
+			}(),
+		},
+		{
 			name: "reachable mismatch refuses incompatible",
 			daemon: func() ports.BrokerDaemonObservation {
 				o := pickerTestLocalObservation(now, pickerTestSession("alpha", 1, catalogue_Up))
@@ -950,6 +964,15 @@ func TestPickerCatalogueResolutionAdmission(t *testing.T) {
 				request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
 				require.NoError(t, err)
 				require.Equal(t, ports.BrokerAdmissionCreateEphemeral, request.Admission)
+				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
+				return
+			}
+			if tt.named {
+				ref := pickerSelectionRef{kind: pickerSelectionAttachNamed, epoch: catalogue.snapshot.Epoch, endpoint: tt.daemon.Endpoint,
+					registration: tt.daemon.Registration, name: "restored"}
+				request, err := resolvePickerRequest(catalogue.snapshot.Epoch, pickerAuthorityInSnapshot(catalogue.snapshot, ref), ref, pickerTestBase())
+				require.NoError(t, err)
+				require.Equal(t, ports.BrokerAdmissionAttachNamed, request.Admission)
 				require.Equal(t, ports.BrokerDaemonStartIfNeeded, request.StartMode)
 				return
 			}

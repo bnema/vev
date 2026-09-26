@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
@@ -179,7 +180,7 @@ func TestMultiplexReconnectGenerationFencesOldEffects(t *testing.T) {
 		t.Fatal("stale generation emitted a frame")
 	default:
 	}
-	require.Contains(t, sess.snapshotAttachments(), peer)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), peer))
 }
 
 // TestMultiplexSingleStreamErrorIsolation proves one failed attachment is
@@ -197,8 +198,8 @@ func TestMultiplexSingleStreamErrorIsolation(t *testing.T) {
 	failed.installTestAttachmentCapability(failedToken)
 
 	d.detachOnAttachmentSendError(failedToken, failedTransport)
-	require.NotContains(t, sess.snapshotAttachments(), failed)
-	require.Contains(t, sess.snapshotAttachments(), peer)
+	require.False(t, slices.Contains(sess.snapshotAttachments(), failed))
+	require.True(t, slices.Contains(sess.snapshotAttachments(), peer))
 	require.Same(t, sess, peer.currentSession())
 	d.mu.Lock()
 	require.Same(t, sess, d.sessions[sess.id])

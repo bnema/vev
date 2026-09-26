@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -523,8 +524,8 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 		t.Fatal("replacement publication remained blocked behind the old render send")
 	}
 	require.NoError(t, <-transitionErr)
-	require.Contains(t, sess.snapshotAttachments(), next)
-	require.Contains(t, sess.snapshotAttachments(), old)
+	require.True(t, slices.Contains(sess.snapshotAttachments(), next))
+	require.True(t, slices.Contains(sess.snapshotAttachments(), old))
 	require.False(t, newTransport.Closed(), "new attachment transport was affected by publication")
 
 	// Generic attachment publication does not interrupt or retire another

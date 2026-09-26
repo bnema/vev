@@ -127,12 +127,15 @@ func sortStrings(values []string) {
 type terminalCompositionService struct {
 	mu       sync.Mutex
 	snapshot ports.BrokerSnapshot
-	closed   bool
-	next     ports.BrokerStreamID
-	opened   []ports.BrokerOpenStreamRequest
-	streams  []*terminalCompositionStream
-	done     chan struct{}
-	changed  chan struct{}
+	// daemonSessions, when set, is what the local daemon owns regardless of
+	// what the broker catalogue has observed.
+	daemonSessions []string
+	closed         bool
+	next           ports.BrokerStreamID
+	opened         []ports.BrokerOpenStreamRequest
+	streams        []*terminalCompositionStream
+	done           chan struct{}
+	changed        chan struct{}
 }
 
 func newTerminalCompositionService(snapshot ports.BrokerSnapshot) *terminalCompositionService {
@@ -177,7 +180,11 @@ func (s *terminalCompositionService) OpenStream(_ context.Context, request ports
 		return nil, ports.BrokerAdmissionClosed
 	}
 	s.opened = append(s.opened, request)
-	stream := newTerminalCompositionStream(request)
+	sessions := terminalCompositionDaemonSessions(s.snapshot, request)
+	if request.Local && s.daemonSessions != nil {
+		sessions = terminalCompositionSessions(s.daemonSessions)
+	}
+	stream := newTerminalCompositionStream(request, sessions)
 	s.streams = append(s.streams, stream)
 	s.mu.Unlock()
 	return stream, nil
@@ -211,10 +218,26 @@ func (s *terminalCompositionService) Close() error {
 	return nil
 }
 
+// openedRequests returns the attachment streams opened; the preflight's
+// control listings are reported by openedControls.
 func (s *terminalCompositionService) openedRequests() []ports.BrokerOpenStreamRequest {
+	return s.openedWithPurpose(ports.BrokerStreamAttachment)
+}
+
+func (s *terminalCompositionService) openedControls() []ports.BrokerOpenStreamRequest {
+	return s.openedWithPurpose(ports.BrokerStreamControl)
+}
+
+func (s *terminalCompositionService) openedWithPurpose(purpose ports.BrokerStreamPurpose) []ports.BrokerOpenStreamRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]ports.BrokerOpenStreamRequest(nil), s.opened...)
+	var out []ports.BrokerOpenStreamRequest
+	for _, request := range s.opened {
+		if request.Purpose == purpose {
+			out = append(out, request)
+		}
+	}
+	return out
 }
 
 // streamHello returns the Hello the supervisor sent on the single admitted
@@ -223,7 +246,12 @@ func (s *terminalCompositionService) openedRequests() []ports.BrokerOpenStreamRe
 func (s *terminalCompositionService) streamHello(t *testing.T) protocol.Hello {
 	t.Helper()
 	s.mu.Lock()
-	streams := append([]*terminalCompositionStream(nil), s.streams...)
+	var streams []*terminalCompositionStream
+	for _, stream := range s.streams {
+		if stream.request.Purpose == ports.BrokerStreamAttachment {
+			streams = append(streams, stream)
+		}
+	}
 	s.mu.Unlock()
 	require.Len(t, streams, 1)
 	for _, message := range streams[0].sentMessages() {
@@ -253,8 +281,33 @@ type terminalCompositionStream struct {
 	done   chan struct{}
 }
 
-func newTerminalCompositionStream(request ports.BrokerOpenStreamRequest) *terminalCompositionStream {
+// terminalCompositionDaemonSessions is the session list the scripted
+// destination daemon owns: the sessions its observation publishes.
+func terminalCompositionDaemonSessions(snapshot ports.BrokerSnapshot, request ports.BrokerOpenStreamRequest) []catalogue.RemoteCatalogSession {
+	for _, observation := range snapshot.Daemons {
+		if observation.Local == request.Local && (request.Local || observation.Endpoint == request.Endpoint) {
+			return observation.Sessions
+		}
+	}
+	return nil
+}
+
+func newTerminalCompositionStream(request ports.BrokerOpenStreamRequest, sessions []catalogue.RemoteCatalogSession) *terminalCompositionStream {
 	stream := &terminalCompositionStream{request: request, done: make(chan struct{})}
+	if request.Purpose == ports.BrokerStreamControl {
+		// The scripted daemon answers a List with its own sessions.
+		infos := make([]protocol.SessionInfo, 0, len(sessions))
+		for _, session := range sessions {
+			infos = append(infos, protocol.SessionInfo{Name: session.Name})
+		}
+		stream.queue = append(stream.queue, protocol.Sessions{Sessions: infos})
+		return stream
+	}
+	if request.Admission == ports.BrokerAdmissionAttachNamed && !slices.ContainsFunc(sessions, func(session catalogue.RemoteCatalogSession) bool { return session.Name == request.Name }) {
+		// Like the real daemon, an unknown name is refused, never created.
+		stream.queue = append(stream.queue, protocol.ErrorMsg{Code: protocol.ErrNoSuchSession, Text: "no such resumable session: " + request.Name})
+		return stream
+	}
 	target := terminalCompositionCommittedTarget(request)
 	stream.queue = append(stream.queue, protocol.Welcome{
 		SessionID: "sess", SessionName: request.Name,
@@ -466,11 +519,19 @@ func (r *terminalCompositionRun) wait(t *testing.T) error {
 
 func startTerminalComposition(t *testing.T, intent uint8, name, remoteTarget string, snapshot ports.BrokerSnapshot) *terminalCompositionRun {
 	t.Helper()
+	return startTerminalCompositionWithDaemon(t, intent, name, remoteTarget, snapshot, nil)
+}
+
+// startTerminalCompositionWithDaemon is startTerminalComposition whose local
+// daemon owns daemonSessions even when the catalogue has not observed them.
+func startTerminalCompositionWithDaemon(t *testing.T, intent uint8, name, remoteTarget string, snapshot ports.BrokerSnapshot, daemonSessions []string) *terminalCompositionRun {
+	t.Helper()
 	// The ordinary terminal path reads the nested-session and remote-transport
 	// environment; a test drives the broker composition with both unset.
 	t.Setenv("VEV", "")
 	t.Setenv(envRemoteTransport, "")
 	service := newTerminalCompositionService(snapshot)
+	service.daemonSessions = daemonSessions
 	terminal := newTerminalCompositionTerminal()
 	previousConnect := connectProductionClientBroker
 	previousTerminal := terminalForAttach
@@ -582,8 +643,8 @@ func TestTerminalNavigationTranslationClosesTheIntent(t *testing.T) {
 	}{
 		{name: "no arguments creates a local ephemeral session", intent: protocol.IntentEphemeral, wantKind: client.InitialNavigationCreateEphemeral, wantLocal: true},
 		{name: "new creates a local named session", intent: protocol.IntentNew, session: "scratch", wantKind: client.InitialNavigationCreateNamed, wantLocal: true, wantName: "scratch"},
-		{name: "attach resolves a local exact target", intent: protocol.IntentAttach, session: "work", wantResolver: true},
-		{name: "remote attach resolves an exact remote target", intent: protocol.IntentAttach, session: "work", remote: "user@example.test", wantResolver: true},
+		{name: "attach names a local session for the daemon to resolve", intent: protocol.IntentAttach, session: "work", wantKind: client.InitialNavigationAttachNamed, wantLocal: true, wantName: "work"},
+		{name: "remote attach resolves the remote registration", intent: protocol.IntentAttach, session: "work", remote: "user@example.test", wantResolver: true},
 		{name: "remote new resolves a named remote creation", intent: protocol.IntentNew, session: "work", remote: "user@example.test", wantResolver: true},
 		{name: "remote ephemeral attach resolves a remote creation", intent: protocol.IntentEphemeral, remote: "user@example.test", wantResolver: true},
 		{name: "invalid local name is refused", intent: protocol.IntentNew, session: "bad name", wantError: true},
@@ -624,24 +685,26 @@ func TestTerminalCompositionOpensTheExactBrokerStream(t *testing.T) {
 		return terminalCompositionSnapshot(nil, map[string][]string{"user@example.test": {"work"}})
 	}
 	tests := []struct {
-		name          string
-		intent        uint8
-		session       string
-		remote        string
-		snapshot      ports.BrokerSnapshot
-		wantAdmission ports.BrokerStreamAdmission
-		wantLocal     bool
-		wantName      string
-		wantHello     uint8
+		name           string
+		intent         uint8
+		session        string
+		remote         string
+		snapshot       ports.BrokerSnapshot
+		daemonSessions []string
+		wantAdmission  ports.BrokerStreamAdmission
+		wantLocal      bool
+		wantName       string
+		wantHello      uint8
 	}{
 		{name: "no arguments creates a local ephemeral session", intent: protocol.IntentEphemeral, snapshot: localSnapshot(), wantAdmission: ports.BrokerAdmissionCreateEphemeral, wantLocal: true, wantHello: protocol.IntentEphemeral},
 		{name: "new creates a local named session", intent: protocol.IntentNew, session: "scratch", snapshot: localSnapshot(), wantAdmission: ports.BrokerAdmissionCreateNamed, wantLocal: true, wantName: "scratch", wantHello: protocol.IntentNew},
-		{name: "attach resolves the local session lifecycle", intent: protocol.IntentAttach, session: "work", snapshot: localSnapshot(), wantAdmission: ports.BrokerAdmissionExact, wantLocal: true, wantHello: protocol.IntentAttach},
-		{name: "remote attach resolves the remote session lifecycle", intent: protocol.IntentAttach, session: "work", remote: "user@example.test", snapshot: remoteSnapshot(), wantAdmission: ports.BrokerAdmissionExact, wantHello: protocol.IntentAttach},
+		{name: "attach names the local session", intent: protocol.IntentAttach, session: "work", snapshot: localSnapshot(), wantAdmission: ports.BrokerAdmissionAttachNamed, wantLocal: true, wantName: "work", wantHello: protocol.IntentAttach},
+		{name: "remote attach names the remote session", intent: protocol.IntentAttach, session: "work", remote: "user@example.test", snapshot: remoteSnapshot(), wantAdmission: ports.BrokerAdmissionAttachNamed, wantName: "work", wantHello: protocol.IntentAttach},
+		{name: "attach reaches a session the catalogue has not observed yet", intent: protocol.IntentAttach, session: "work", snapshot: terminalCompositionUnobservedLocal(), daemonSessions: []string{"work"}, wantAdmission: ports.BrokerAdmissionAttachNamed, wantLocal: true, wantName: "work", wantHello: protocol.IntentAttach},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			run := startTerminalComposition(t, tc.intent, tc.session, tc.remote, tc.snapshot)
+			run := startTerminalCompositionWithDaemon(t, tc.intent, tc.session, tc.remote, tc.snapshot, tc.daemonSessions)
 			awaitTerminalCompositionAttachment(t, run)
 			opened := run.service.openedRequests()
 			require.Len(t, opened, 1, "one CLI target opens exactly one broker stream")
@@ -674,8 +737,23 @@ func TestTerminalCompositionOpensTheExactBrokerStream(t *testing.T) {
 				require.NotNil(t, hello.ExactTarget)
 				require.Equal(t, request.Target, *hello.ExactTarget)
 			}
+			if tc.wantAdmission == ports.BrokerAdmissionAttachNamed {
+				require.Nil(t, hello.ExactTarget, "a named attach leaves identity to the daemon")
+				controls := run.service.openedControls()
+				require.Len(t, controls, 1, "the preflight asks the daemon once")
+				require.Equal(t, ports.BrokerDaemonStartIfNeeded, controls[0].StartMode, "the preflight may start a stopped daemon")
+			}
 		})
 	}
+}
+
+// terminalCompositionUnobservedLocal is the publication a freshly started
+// broker commits right after `kill --all`: the local daemon is known but its
+// sessions are not observed yet, while the daemon itself restores them.
+func terminalCompositionUnobservedLocal() ports.BrokerSnapshot {
+	snapshot := terminalCompositionSnapshot(nil, nil)
+	snapshot.Daemons[0].InventoryKnown = false
+	return snapshot
 }
 
 // TestTerminalCompositionPublishesRealSessionOutput proves an admitted
@@ -717,10 +795,8 @@ func TestTerminalCompositionRefusedTargetOpensNothingAndKeepsThePicker(t *testin
 		remote   string
 		snapshot ports.BrokerSnapshot
 	}{
-		{name: "missing local session", intent: protocol.IntentAttach, session: "gone", snapshot: terminalCompositionSnapshot([]string{"work"}, nil)},
 		{name: "local daemon absent", intent: protocol.IntentEphemeral, snapshot: ports.BrokerSnapshot{Epoch: terminalCompositionEpoch, Revision: 1}},
 		{name: "unconfigured remote host", intent: protocol.IntentAttach, session: "work", remote: "user@elsewhere.test", snapshot: terminalCompositionSnapshot([]string{"work"}, nil)},
-		{name: "missing remote session", intent: protocol.IntentAttach, session: "gone", remote: "user@example.test", snapshot: terminalCompositionSnapshot(nil, map[string][]string{"user@example.test": {"work"}})},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -750,6 +826,39 @@ func TestTerminalCompositionRefusedTargetOpensNothingAndKeepsThePicker(t *testin
 					return
 				}
 			}
+		})
+	}
+}
+
+// TestTerminalCompositionDaemonRefusesMissingName pins that existence is the
+// daemon's decision: a declined (non-interactive) create prompt keeps the
+// named attach, the daemon answers ErrNoSuchSession, and the client reports
+// that refusal without attaching or creating.
+func TestTerminalCompositionDaemonRefusesMissingName(t *testing.T) {
+	tests := []struct {
+		name     string
+		remote   string
+		snapshot ports.BrokerSnapshot
+	}{
+		{name: "local", snapshot: terminalCompositionSnapshot([]string{"work"}, nil)},
+		{name: "remote", remote: "user@example.test", snapshot: terminalCompositionSnapshot(nil, map[string][]string{"user@example.test": {"work"}})},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			withAttachInteractiveConsole(t, false)
+			run := startTerminalComposition(t, protocol.IntentAttach, "gone", tc.remote, tc.snapshot)
+			require.Equal(t, client.LifecycleNoticeDestinationFailed, awaitTerminalCompositionNotice(t, run).Kind)
+			select {
+			case failure := <-run.failures:
+				var protocolErr *client.ProtocolError
+				require.ErrorAs(t, failure, &protocolErr)
+				require.Equal(t, protocol.ErrNoSuchSession, protocolErr.Code)
+			case <-time.After(brokerTestWait):
+				t.Fatal("the daemon refusal was not reported")
+			}
+			opened := run.service.openedRequests()
+			require.Len(t, opened, 1)
+			require.Equal(t, ports.BrokerAdmissionAttachNamed, opened[0].Admission, "a missing name is never created implicitly")
 		})
 	}
 }

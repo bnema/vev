@@ -717,6 +717,13 @@ func TestMuxAdmissionVariants(t *testing.T) {
 		named.Target = protocol.ExactSessionTarget{}
 		require.Equal(t, named, roundTrip(t, named))
 	})
+	t.Run("named attach round-trips", func(t *testing.T) {
+		named := testOpen()
+		named.Admission = ports.BrokerAdmissionAttachNamed
+		named.Name = "work"
+		named.Target = protocol.ExactSessionTarget{}
+		require.Equal(t, named, roundTrip(t, named))
+	})
 	t.Run("ephemeral creation round-trips", func(t *testing.T) {
 		ephemeral := testOpen()
 		ephemeral.Admission = ports.BrokerAdmissionCreateEphemeral
@@ -843,6 +850,10 @@ func TestMuxAdmissionWireRange(t *testing.T) {
 	ephemeral := testOpen()
 	ephemeral.Admission = ports.BrokerAdmissionCreateEphemeral
 	ephemeral.Target = protocol.ExactSessionTarget{}
+	attachNamed := testOpen()
+	attachNamed.Admission = ports.BrokerAdmissionAttachNamed
+	attachNamed.Name = "work"
+	attachNamed.Target = protocol.ExactSessionTarget{}
 
 	tests := []struct {
 		name      string
@@ -854,6 +865,9 @@ func TestMuxAdmissionWireRange(t *testing.T) {
 		{"exact admission", testOpen(), uint32(ports.BrokerAdmissionExact), false},
 		{"create-named admission", named, uint32(ports.BrokerAdmissionCreateNamed), false},
 		{"create-ephemeral admission", ephemeral, uint32(ports.BrokerAdmissionCreateEphemeral), false},
+		{"attach-named admission", attachNamed, uint32(ports.BrokerAdmissionAttachNamed), false},
+		{"wire value 5 past the closed set", attachNamed, 5, true},
+		{"wire value 260 aliasing attach-named", attachNamed, 260, true},
 		{"wire value 257 aliasing exact", testOpen(), 257, true},
 		{"wire value 258 aliasing create-named", named, 258, true},
 		{"wire value 1024 aliasing no admission", control, 1024, true},

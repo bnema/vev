@@ -131,7 +131,8 @@ type MuxOpen struct {
 	Policy       *BrokerWirePolicy   `protobuf:"bytes,8,opt,name=policy,proto3" json:"policy,omitempty"`
 	// Closed attachment-admission taxonomy (ports.BrokerStreamAdmission):
 	// 0 = none (control/observation), 1 = exact attach/resume carrying
-	// target, 2 = create named carrying name, 3 = create ephemeral.
+	// target, 2 = create named carrying name, 3 = create ephemeral, 4 = attach
+	// named carrying name.
 	Admission uint32 `protobuf:"varint,9,opt,name=admission,proto3" json:"admission,omitempty"`
 	Name      string `protobuf:"bytes,10,opt,name=name,proto3" json:"name,omitempty"`
 	// Closed daemon-start taxonomy (ports.BrokerDaemonStartMode): 1 =

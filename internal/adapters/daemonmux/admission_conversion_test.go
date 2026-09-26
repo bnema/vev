@@ -67,6 +67,17 @@ func TestOpenMessageCarriesAttachmentAdmission(t *testing.T) {
 			}(),
 			admission: ports.BrokerAdmissionCreateEphemeral,
 		},
+		{
+			name: "named attach keeps its name",
+			request: func() ports.BrokerOpenStreamRequest {
+				r := base
+				r.Admission = ports.BrokerAdmissionAttachNamed
+				r.Name = "work"
+				return r
+			}(),
+			admission: ports.BrokerAdmissionAttachNamed,
+			createAs:  "work",
+		},
 	}
 
 	for _, tc := range tests {

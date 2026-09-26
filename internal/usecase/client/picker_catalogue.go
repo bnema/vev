@@ -136,6 +136,9 @@ const (
 	pickerSelectionCreateNamed
 	// pickerSelectionCreateEphemeral creates one ephemeral session.
 	pickerSelectionCreateEphemeral
+	// pickerSelectionAttachNamed attaches to a session the daemon resolves by
+	// name. It is produced only by an initial CLI navigation, never a row.
+	pickerSelectionAttachNamed
 )
 
 // pickerSelectionRef is the client's exact selection identity, captured when a
@@ -599,7 +602,9 @@ func resolvePickerTarget(epoch ports.BrokerEpoch, authority pickerResolveAuthori
 	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind == pickerSelectionExact {
 		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "remote host has no vev daemon; choose create session"})
 	}
-	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind != pickerSelectionCreateNamed && ref.kind != pickerSelectionCreateEphemeral {
+	if observation.Availability == domain.RemoteAvailabilityNoDaemon && ref.kind != pickerSelectionCreateNamed && ref.kind != pickerSelectionCreateEphemeral && ref.kind != pickerSelectionAttachNamed {
+		// A named attach carries StartIfNeeded and lets the started daemon
+		// restore or refuse the name, so a no-daemon observation is no refusal.
 		return fail(pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "no daemon exists on this host; choose create session"})
 	}
 	if refuseFailing && !ref.local && pickerObservationFailing(observation) && observation.Availability != domain.RemoteAvailabilityNoDaemon {
@@ -658,6 +663,12 @@ func resolvePickerTarget(epoch ports.BrokerEpoch, authority pickerResolveAuthori
 		}
 		request.Admission = ports.BrokerAdmissionCreateNamed
 		request.Name = ref.createName
+	case pickerSelectionAttachNamed:
+		if err := domain.ValidateSessionName(ref.name); err != nil {
+			return fail(pickerCatalogueError{Code: pickerCatalogueInvalidName, Text: "session name is not valid"})
+		}
+		request.Admission = ports.BrokerAdmissionAttachNamed
+		request.Name = ref.name
 	case pickerSelectionCreateEphemeral:
 		request.Admission = ports.BrokerAdmissionCreateEphemeral
 	default:
