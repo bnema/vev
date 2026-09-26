@@ -4,19 +4,21 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 const (
 	noticeHistoryCap = 200
 	noticePendingCap = 32
-	// maxVisibleToasts bounds the stack drawn over a client's screen; anything
-	// trimmed is counted in noticeOverflow and stays reachable in history.
+	// maxVisibleToasts bounds the stack drawn over a client's screen; later
+	// notices wait for a free slot and are counted as "+N more" meanwhile.
 	maxVisibleToasts = 3
 )
 
@@ -133,14 +135,6 @@ func (nc *noticeCenter) drainPending() []domain.Notification {
 	out := nc.pending
 	nc.pending = nil
 	return out
-}
-
-// noticeToast is one entry in a client's visible toast stack. seq identifies the
-// entry across coalescing so a stale expiry timer removes only its own toast.
-type noticeToast struct {
-	n     domain.Notification
-	seq   uint64
-	timer pendingByteTimer
 }
 
 // noticeTTL is how long a toast of this severity stays visible.
@@ -387,6 +381,8 @@ func (d *Daemon) NotifyGlobal(sev domain.NoticeSeverity, code domain.NoticeCode,
 // publishToast durably mutates one client's toast state without repainting.
 // Routing paths call it while routingMu excludes detach, then release routingMu
 // before rendering so a render failure can safely route another notice.
+// A notice matching a visible or waiting one (sameToastNotice) adds to its
+// count and restarts its lifetime; otherwise it takes a free slot or waits.
 func (d *Daemon) publishToast(ac *attachedClient, n domain.Notification) bool {
 	if ac == nil {
 		return false
@@ -396,66 +392,37 @@ func (d *Daemon) publishToast(ac *attachedClient, n domain.Notification) bool {
 
 	rt.noticeMu.Lock()
 	defer rt.noticeMu.Unlock()
-	if i := rt.indexOfMatchingToastLocked(n); i >= 0 {
-		rt.noticeToasts[i].n.Count += n.Count
-		rt.noticeToasts[i].n.Time = n.Time
-		rt.noticeToasts[i].timer.stop()
-		d.retainToastTimerLocked(ac, &rt.noticeToasts[i])
-		return true
+	if rt.noticeQueue == nil {
+		rt.noticeQueue = ui.NewToastQueue[domain.Notification](ui.ToastQueueOptions{MaxVisible: maxVisibleToasts, MaxPending: noticePendingCap})
 	}
-
-	toast := noticeToast{n: n}
-	rt.noticeToasts = append([]noticeToast{toast}, rt.noticeToasts...)
-	if len(rt.noticeToasts) > maxVisibleToasts {
-		for i := maxVisibleToasts; i < len(rt.noticeToasts); i++ {
-			rt.noticeToasts[i].timer.stop()
-			rt.noticeOverflow++
-		}
-		rt.noticeToasts = rt.noticeToasts[:maxVisibleToasts]
+	id := toastNoticeID(n)
+	if prev, ok := rt.noticeQueue.Get(id); ok {
+		prev.Value.Count += n.Count
+		prev.Value.Time = n.Time
+		n = prev.Value
 	}
-	d.retainToastTimerLocked(ac, &rt.noticeToasts[0])
+	rt.noticeQueue.Push(d.clock.Now(), ui.QueuedToast[domain.Notification]{ID: id, Value: n, Duration: noticeTTL(n.Severity)})
+	d.armToastTimerLocked(ac)
 	return true
 }
 
+// toastNoticeID is a notice's coalescing identity. Generic user notices and
+// endpoint-scoped remote observations use their visible message and details;
+// other typed daemon notices coalesce by code and session.
+func toastNoticeID(n domain.Notification) string {
+	id := strconv.Itoa(int(n.Code)) + "\x00" + string(n.SessionID)
+	if n.Code != domain.NoticeUser && n.Code != domain.NoticeRemoteObservation {
+		return id
+	}
+	return id + "\x00" + strconv.Itoa(int(n.Severity)) + "\x00" + n.Message + "\x00" + n.Details
+}
+
+// sameToastNotice reports whether a and b coalesce into one toast.
 func sameToastNotice(a, b domain.Notification) bool {
-	if a.Code != b.Code || a.SessionID != b.SessionID {
-		return false
-	}
-	// Generic user notices and endpoint-scoped remote observations use their
-	// visible message and details as identity. Other typed daemon notices retain
-	// their established code-and-scope coalescing behavior.
-	if a.Code != domain.NoticeUser && a.Code != domain.NoticeRemoteObservation {
-		return true
-	}
-	return a.Severity == b.Severity &&
-		a.Message == b.Message &&
-		a.Details == b.Details
+	return toastNoticeID(a) == toastNoticeID(b)
 }
 
-// indexOfMatchingToastLocked finds a visible toast with the code-specific
-// coalescing identity. Count and time are occurrence metadata, not identity.
-// Callers must hold noticeMu.
-func (rt *overlayRuntime) indexOfMatchingToastLocked(n domain.Notification) int {
-	for i := range rt.noticeToasts {
-		if sameToastNotice(rt.noticeToasts[i].n, n) {
-			return i
-		}
-	}
-	return -1
-}
-
-// indexOfToastLocked finds a visible toast with the same code and scope.
-// Callers must hold noticeMu.
-func (rt *overlayRuntime) indexOfToastLocked(code domain.NoticeCode, sid domain.SessionID) int {
-	for i := range rt.noticeToasts {
-		if rt.noticeToasts[i].n.Code == code && rt.noticeToasts[i].n.SessionID == sid {
-			return i
-		}
-	}
-	return -1
-}
-
-// dismissToast removes only the specified visible toast. In particular, a
+// dismissToastWithoutRepaint removes only the specified toast. In particular, a
 // link-connected event must not clear clipboard or other notice state.
 func (d *Daemon) dismissToastWithoutRepaint(ac *attachedClient, code domain.NoticeCode, sid domain.SessionID) bool {
 	if ac == nil || ac.overlays == nil {
@@ -464,38 +431,36 @@ func (d *Daemon) dismissToastWithoutRepaint(ac *attachedClient, code domain.Noti
 	rt := ac.overlays
 	rt.noticeMu.Lock()
 	defer rt.noticeMu.Unlock()
-	i := rt.indexOfToastLocked(code, sid)
-	if i < 0 {
+	if rt.noticeQueue == nil || !rt.noticeQueue.Dismiss(d.clock.Now(), toastNoticeID(domain.Notification{Code: code, SessionID: sid})) {
 		return false
 	}
-	rt.noticeToasts[i].timer.stop()
-	rt.noticeToasts = append(rt.noticeToasts[:i], rt.noticeToasts[i+1:]...)
-	if len(rt.noticeToasts) == 0 {
-		rt.noticeOverflow = 0
-	}
+	d.armToastTimerLocked(ac)
 	return true
 }
 
-// retainToastTimerLocked arms the toast's TTL. Callers must hold noticeMu; the
-// timer goroutine re-acquires it and releases it before repainting, so the
-// callback never runs with noticeMu held.
-func (d *Daemon) retainToastTimerLocked(ac *attachedClient, t *noticeToast) {
+// armToastTimerLocked points the client's single toast timer at the queue's
+// next expiry. Callers must hold noticeMu; the timer goroutine re-acquires it
+// and releases it before repainting, so the callback never runs with noticeMu
+// held.
+func (d *Daemon) armToastTimerLocked(ac *attachedClient) {
 	rt := ac.overlays
-	rt.noticeSeq++
-	t.seq = rt.noticeSeq
-	seq := t.seq
-	t.timer.retain(d.clock, noticeTTL(t.n.Severity), func(ports.Timer) {
+	due, ok := rt.noticeQueue.NextDeadline()
+	if ok && due.Equal(rt.noticeDue) && rt.noticeTimer.timer != nil {
+		return
+	}
+	rt.noticeTimer.stop()
+	rt.noticeDue = time.Time{}
+	if !ok {
+		return
+	}
+	rt.noticeDue = due
+	rt.noticeTimer.retain(d.clock, max(due.Sub(d.clock.Now()), 0), func(fired ports.Timer) {
 		rt.noticeMu.Lock()
-		kept := rt.noticeToasts[:0]
-		for _, tt := range rt.noticeToasts {
-			if tt.seq == seq {
-				continue
-			}
-			kept = append(kept, tt)
-		}
-		rt.noticeToasts = kept
-		if len(rt.noticeToasts) == 0 {
-			rt.noticeOverflow = 0
+		rt.noticeQueue.Visible(d.clock.Now())
+		// A fire that lost the race to a re-arm leaves the newer timer alone.
+		if rt.noticeTimer.timer == fired {
+			rt.noticeTimer.timer, rt.noticeTimer.done = nil, nil
+			d.armToastTimerLocked(ac)
 		}
 		rt.noticeMu.Unlock()
 		d.repaintForNotice(ac)

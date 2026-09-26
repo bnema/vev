@@ -139,7 +139,9 @@ func pickerKillNotice(outcome pickerKillOutcome) domain.Notification {
 	if outcome.err == nil && outcome.result.Outcome == protocol.KillSucceeded {
 		sev = domain.NoticeInfo
 	}
-	return domain.Notification{Code: domain.NoticeSessionKill, Severity: sev, Message: pickerKillText(outcome)}
+	// Each target is its own subject, so kills in a row stack instead of
+	// replacing each other.
+	return domain.Notification{Code: domain.NoticeSessionKill, Severity: sev, Message: pickerKillText(outcome), Scope: outcome.target.name}
 }
 
 func pickerKillText(outcome pickerKillOutcome) string {

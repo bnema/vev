@@ -346,9 +346,8 @@ func TestUnsupportedGraphicsWarningIsBoundedForLateSceneCreation(t *testing.T) {
 
 	require.True(t, d.warnUnsupportedGraphics(ac), "late graphics creation should explain suppression")
 	require.False(t, d.warnUnsupportedGraphics(ac), "suppression warning must be bounded per attachment")
-	ac.overlays.noticeMu.Lock()
-	require.Len(t, ac.overlays.noticeToasts, 1)
-	ac.overlays.noticeMu.Unlock()
+	toasts, _ := visibleToasts(ac)
+	require.Len(t, toasts, 1)
 }
 
 func TestGraphicsNamespacesAreDeterministicAndCollisionSafe(t *testing.T) {

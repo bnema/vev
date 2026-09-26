@@ -525,8 +525,8 @@ func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	messages := make([]string, 0)
-	for _, toast := range controller.notices.Active(clock.Now()) {
-		messages = append(messages, toast.Message)
+	for _, toast := range controller.notices.Visible(clock.Now()) {
+		messages = append(messages, toast.Value.Message)
 	}
 	require.Len(t, messages, 2, "each host keeps one toast")
 	require.Contains(t, messages, "Remote host reconnected: user@arch")
@@ -549,21 +549,21 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 		return o
 	}
 	revision := ports.BrokerRevision(0)
-	apply := func(daemons ...ports.BrokerDaemonObservation) []ui.ActiveToast {
+	apply := func(daemons ...ports.BrokerDaemonObservation) []ui.QueuedToast[ui.Toast] {
 		revision++
 		controller.mu.Lock()
-		controller.notices.Clear()
+		controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
 		controller.mu.Unlock()
 		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: revision, Daemons: daemons})
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
-		return controller.notices.Active(clock.Now())
+		return controller.notices.Visible(clock.Now())
 	}
 
 	toasts := apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust))
 	require.Len(t, toasts, 1)
-	require.Contains(t, toasts[0].Message, "SSH host verification failed")
-	require.Contains(t, toasts[0].Message, "user@arch")
+	require.Contains(t, toasts[0].Value.Message, "SSH host verification failed")
+	require.Contains(t, toasts[0].Value.Message, "user@arch")
 	require.Empty(t, apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust)), "the same episode toasts once")
 	require.Len(t, apply(failing("user@arch", 1, 2, domain.RemoteFailureTrust)), 1, "a new episode toasts again")
 
@@ -571,7 +571,7 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	recovered.FailureEpisode = 2
 	toasts = apply(recovered)
 	require.Len(t, toasts, 1, "a recovery toasts once")
-	require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Message)
+	require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Value.Message)
 	require.Empty(t, apply(recovered), "a steady healthy host is silent")
 
 	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1)
@@ -586,7 +586,7 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 
 	toasts = apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
 	require.Len(t, toasts, 1, "only the newly failing endpoint toasts")
-	require.Contains(t, toasts[0].Message, "user@mule")
+	require.Contains(t, toasts[0].Value.Message, "user@mule")
 }
 
 // TestPickerControllerRefusesFailingRemoteInstantly pins B4: a commit on a
@@ -609,7 +609,7 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 			o.Availability = tt.availability
 			controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{o}})
 			controller.mu.Lock()
-			controller.notices.Clear()
+			controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
 			controller.mu.Unlock()
 
 			_, _, err := controller.ResolveKeyTarget(pickerRowKeyByLabel(t, controller, "remote-a"), pickerTestBase())
@@ -619,10 +619,10 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 			}
 			require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnavailable))
 			controller.mu.Lock()
-			active := controller.notices.Active(clock.Now())
+			active := controller.notices.Visible(clock.Now())
 			controller.mu.Unlock()
 			require.Len(t, active, 1)
-			require.Equal(t, tt.wantNotice, active[0].Message)
+			require.Equal(t, tt.wantNotice, active[0].Value.Message)
 		})
 	}
 }

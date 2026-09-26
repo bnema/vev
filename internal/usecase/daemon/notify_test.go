@@ -300,11 +300,26 @@ func visibleToasts(ac *attachedClient) ([]domain.Notification, int) {
 	rt := ac.overlays
 	rt.noticeMu.Lock()
 	defer rt.noticeMu.Unlock()
-	out := make([]domain.Notification, 0, len(rt.noticeToasts))
-	for _, toast := range rt.noticeToasts {
-		out = append(out, toast.n)
+	if rt.noticeQueue == nil {
+		return nil, 0
 	}
-	return out, rt.noticeOverflow
+	var out []domain.Notification
+	for _, toast := range rt.noticeQueue.Peek() {
+		out = append(out, toast.Value)
+	}
+	return out, rt.noticeQueue.Pending()
+}
+
+// toastLifetimes lists the visible toasts' lifetimes, newest first.
+func toastLifetimes(ac *attachedClient) []time.Duration {
+	rt := ac.overlays
+	rt.noticeMu.Lock()
+	defer rt.noticeMu.Unlock()
+	var out []time.Duration
+	for _, toast := range rt.noticeQueue.Peek() {
+		out = append(out, toast.Duration)
+	}
+	return out
 }
 
 // awaitToastCount waits for the toast slice to reach want. The polled condition
@@ -788,7 +803,7 @@ func TestShowToastCoalesceAndTrim(t *testing.T) {
 
 		toasts := awaitToastCount(t, ac, 1)
 		require.Equal(t, 2, toasts[0].Count)
-		require.Equal(t, []time.Duration{4 * time.Second, 4 * time.Second}, clk.durations(), "coalescing renews the identical notice's ttl")
+		require.Equal(t, []time.Duration{4 * time.Second}, toastLifetimes(ac), "coalescing keeps one entry with its severity ttl")
 		_, overflow := visibleToasts(ac)
 		require.Zero(t, overflow)
 		require.Len(t, d.notices.history(), 2, "coalescing is display-only; history keeps both")
@@ -806,7 +821,7 @@ func TestShowToastCoalesceAndTrim(t *testing.T) {
 		require.Equal(t, domain.NoticeWarn, toasts[0].Severity)
 		require.Equal(t, "build started", toasts[1].Message)
 		require.Equal(t, domain.NoticeInfo, toasts[1].Severity)
-		require.Equal(t, []time.Duration{4 * time.Second, 6 * time.Second}, clk.durations(), "each distinct notice keeps its severity ttl")
+		require.Equal(t, []time.Duration{6 * time.Second, 4 * time.Second}, toastLifetimes(ac), "each distinct notice keeps its severity ttl")
 	})
 
 	t.Run("same code different scope does not coalesce", func(t *testing.T) {
@@ -820,7 +835,7 @@ func TestShowToastCoalesceAndTrim(t *testing.T) {
 		require.Equal(t, 1, toasts[1].Count)
 	})
 
-	t.Run("four distinct codes trim to three newest first", func(t *testing.T) {
+	t.Run("four distinct codes show three newest first and queue one", func(t *testing.T) {
 		d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 		codes := []domain.NoticeCode{
 			domain.NoticePaneSpawn,
@@ -833,11 +848,11 @@ func TestShowToastCoalesceAndTrim(t *testing.T) {
 		}
 
 		toasts := awaitToastCount(t, ac, maxVisibleToasts)
-		require.Equal(t, []domain.NoticeCode{codes[3], codes[2], codes[1]}, []domain.NoticeCode{
+		require.Equal(t, []domain.NoticeCode{codes[2], codes[1], codes[0]}, []domain.NoticeCode{
 			toasts[0].Code, toasts[1].Code, toasts[2].Code,
-		}, "newest first, oldest evicted")
-		_, overflow := visibleToasts(ac)
-		require.Equal(t, 1, overflow)
+		}, "the first three show newest first; the fourth waits its turn")
+		_, waiting := visibleToasts(ac)
+		require.Equal(t, 1, waiting)
 	})
 }
 
@@ -911,32 +926,25 @@ func TestToastExpiryOnlyRemovesItsOwnEntry(t *testing.T) {
 	require.Equal(t, domain.NoticePaneSpawn, toasts[0].Code, "only the expired info toast is removed")
 }
 
-// TestToastExpiryRemovesOnlyTheEntryItArmed pins the removal predicate: an
-// expiry timer identifies its toast by entry sequence, not by code and scope.
-// Coalescing re-arms the entry under a fresh sequence, so a timer that was
-// stopped but had already slipped past its select cannot dismiss the refreshed
-// toast that replaced the one it belonged to.
-func TestToastExpiryRemovesOnlyTheEntryItArmed(t *testing.T) {
+// TestToastBurstWaitsAndAdvancesOnExpiry pins the daemon toast queue: a burst
+// beyond the visible slots waits as "+N more" and each expiry promotes the
+// next waiting notice instead of dropping it.
+func TestToastBurstWaitsAndAdvancesOnExpiry(t *testing.T) {
 	clk := newNoticeClock()
 	d, sess, ac, _ := newNoticeFixture(t, clk)
+	codes := []domain.NoticeCode{domain.NoticePaneSpawn, domain.NoticeTabSpawn, domain.NoticeSnapshotWrite, domain.NoticeClipboard, domain.NoticeConfigReload}
+	for _, c := range codes {
+		d.notify(sess, domain.NoticeInfo, c, c.String(), nil)
+	}
+	awaitToastCount(t, ac, maxVisibleToasts)
+	_, waiting := visibleToasts(ac)
+	require.Equal(t, 2, waiting)
 
-	d.notify(sess, domain.NoticeInfo, domain.NoticeClipboard, "copied", nil)
-	awaitToastCount(t, ac, 1)
-
-	// Re-stamp the live entry's sequence, exactly as coalescing does, without
-	// disturbing the already-armed timer. Its code and scope are unchanged.
-	rt := ac.overlays
-	rt.noticeMu.Lock()
-	rt.noticeSeq++
-	rt.noticeToasts[0].seq = rt.noticeSeq
-	rt.noticeMu.Unlock()
-
-	clk.advance(4 * time.Second)
-
-	require.Never(t, func() bool {
-		ns, _ := visibleToasts(ac)
-		return len(ns) == 0
-	}, 200*time.Millisecond, 5*time.Millisecond, "expiry must remove only the entry it armed")
+	clk.advance(noticeTTL(domain.NoticeInfo))
+	require.Eventually(t, func() bool {
+		ns, waiting := visibleToasts(ac)
+		return len(ns) == 2 && waiting == 0 && ns[0].Code == codes[4] && ns[1].Code == codes[3]
+	}, 2*time.Second, time.Millisecond, "expiry must promote the waiting notices")
 }
 
 // TestReportErrorClassifiedUserErrorWinsOverBenignCause proves an explicitly

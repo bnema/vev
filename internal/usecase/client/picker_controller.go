@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -83,6 +84,8 @@ const (
 	pickerGeneration = uint64(1)
 	// pickerNoticeLifetime bounds how long one catalogue notice is displayed.
 	pickerNoticeLifetime = 4 * time.Second
+	// pickerNoticeVisible is how many notices stack at once; later ones wait.
+	pickerNoticeVisible = 3
 )
 
 // pickerController owns one client-owned picker: catalogue, model, renderer,
@@ -92,12 +95,15 @@ type pickerController struct {
 	clock     ports.Clock
 	catalogue *pickerCatalogue
 
-	mu          sync.Mutex
-	loop        *pickerLoop
-	consumer    pickerConsumer
-	renderer    *pickerRenderer
-	notices     ui.ToastManager
-	interaction uint64
+	mu       sync.Mutex
+	loop     *pickerLoop
+	consumer pickerConsumer
+	renderer *pickerRenderer
+	notices  *ui.ToastQueue[ui.Toast]
+	// noticeBounds are the toast boxes drawn last. The client cannot restore
+	// the session under them, so boxes that go away are blanked.
+	noticeBounds []domain.Rect
+	interaction  uint64
 	// sort is this client's picker ordering. It survives every picker
 	// reopen for the lifetime of the client process.
 	sort      pickerusecase.SortMode
@@ -130,6 +136,7 @@ func newPickerController(clock ports.Clock, freshness time.Duration, trueColor b
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
 		renderer:  newPickerRenderer(pickerColorProfile(trueColor)),
 		sort:      defaultPickerSort(),
+		notices:   ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible}),
 		ownsInput: true,
 		opsReady:  make(chan struct{}, 1),
 	}
@@ -360,6 +367,8 @@ func (p *pickerController) invalidatePresentation() {
 	}
 	p.mu.Lock()
 	p.renderer.invalidate()
+	// Another owner repainted the screen: the old toast cells are gone.
+	p.noticeBounds = nil
 	p.mu.Unlock()
 }
 
@@ -385,7 +394,14 @@ func (p *pickerController) Render(size domain.Size) []byte {
 	if p.loop == nil {
 		return nil
 	}
-	return p.renderer.render(p.loop, size, p.preview)
+	// Blank gone notices before the box is drawn, so a blank that overlaps
+	// the box never erases cells the picker renderer believes are on screen.
+	// A blank may also cover part of the box, so the box is then redrawn whole.
+	_, blanks := p.noticeStackLocked(size)
+	if len(blanks) != 0 {
+		p.renderer.invalidate()
+	}
+	return append(blanks, p.renderer.render(p.loop, size, p.preview)...)
 }
 
 // SetPreview displays one preview frame in the given state. A frame is shown
@@ -468,37 +484,75 @@ func (p *pickerController) ClearPreview() {
 	p.mu.Unlock()
 }
 
-// RenderNotice composes the newest bounded catalogue notice as a client-local
-// toast. It reuses the client's existing toast rendering and returns nil when
-// nothing is displayed.
+// RenderNotice composes the live notice stack as client-local toasts: the
+// newest at the top-right corner, older ones below it, and any extra notices
+// waiting for a free slot. Boxes drawn by the previous call that are gone now
+// are blanked in the same payload. It returns nil when nothing changes on
+// screen.
 func (p *pickerController) RenderNotice(size domain.Size) []byte {
 	if p == nil {
 		return nil
 	}
 	p.mu.Lock()
-	active := p.notices.Active(p.clock.Now())
-	p.mu.Unlock()
-	if len(active) == 0 {
-		return nil
+	defer p.mu.Unlock()
+	toasts, blanks := p.noticeStackLocked(size)
+	if len(blanks) != 0 {
+		// A blank may cover picker box cells drawn by the previous Render.
+		p.renderer.invalidate()
 	}
-	// ToastManager.Active returns toasts in map-iteration order, so "the last
-	// one" is arbitrary and can change between frames. Select the newest by
-	// ShownAt, tie-broken deterministically by ID.
-	newest := active[0]
-	for _, toast := range active[1:] {
-		if toast.ShownAt.After(newest.ShownAt) ||
-			(toast.ShownAt.Equal(newest.ShownAt) && toast.ID > newest.ID) {
-			newest = toast
-		}
+	buffer := bytes.NewBuffer(blanks)
+	for i, rect := range p.noticeBounds {
+		_ = writeClientToast(buffer, rect, clientToastLines(rect, toasts[i].Message, toastBorderSGR(toasts[i].Severity)))
 	}
-	if newest.Message == "" {
-		return nil
-	}
-	var buffer bytes.Buffer
-	if _, err := drawClientToast(&buffer, size, newest.Message, newest.Anchor, newest.Severity); err != nil {
+	if buffer.Len() == 0 {
 		return nil
 	}
 	return buffer.Bytes()
+}
+
+// noticeStackLocked lays out the live notices for size and returns them with
+// the bytes that blank boxes drawn before but no longer part of the stack.
+// It records the new layout in noticeBounds.
+func (p *pickerController) noticeStackLocked(size domain.Size) ([]ui.Toast, []byte) {
+	active := p.notices.Visible(p.clock.Now())
+	toasts := make([]ui.Toast, len(active))
+	for i, t := range active {
+		toasts[i] = t.Value
+	}
+	bounds := ui.ToastStackBounds(size, toasts)
+	var buffer bytes.Buffer
+	for _, old := range p.noticeBounds {
+		if slices.Contains(bounds, old) {
+			continue
+		}
+		// After a shrink the old box may overhang the screen; writing past the
+		// edge would wrap onto unrelated cells.
+		if gone := clipRect(old, size); gone.Width > 0 && gone.Height > 0 {
+			_ = writeClientToast(&buffer, gone, blankToastLines(gone))
+		}
+	}
+	p.noticeBounds = bounds
+	return toasts[:len(bounds)], buffer.Bytes()
+}
+
+// clipRect is the part of r inside a size-sized screen.
+func clipRect(r domain.Rect, size domain.Size) domain.Rect {
+	x0, y0 := max(r.X, 0), max(r.Y, 0)
+	x1, y1 := min(r.X+r.Width, size.Cols), min(r.Y+r.Height, size.Rows)
+	if x1 <= x0 || y1 <= y0 {
+		return domain.Rect{}
+	}
+	return domain.Rect{X: x0, Y: y0, Width: x1 - x0, Height: y1 - y0}
+}
+
+// noticeDeadline is when the notice stack next changes on its own.
+func (p *pickerController) noticeDeadline() (time.Time, bool) {
+	if p == nil {
+		return time.Time{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.notices.NextDeadline()
 }
 
 // CursorKey reports the opaque key of the row under the cursor, or false when
@@ -620,6 +674,7 @@ func (p *pickerController) SetCurrent(current pickerCurrent) {
 	p.loop = nil
 	p.rebuildLocked()
 	p.renderer.invalidate()
+	p.noticeBounds = nil
 }
 
 // rememberSortLocked keeps the sort the user chose in the closing
@@ -751,7 +806,7 @@ func (p *pickerController) notifyLocked(n domain.Notification) {
 	if n.Message == "" {
 		return
 	}
-	p.notices.Show(p.clock.Now(), ui.Toast{ID: n.Subject(), Message: n.Message, Severity: n.Severity, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
+	p.notices.Push(p.clock.Now(), ui.QueuedToast[ui.Toast]{ID: n.Subject(), Duration: pickerNoticeLifetime, Value: ui.Toast{Message: n.Message, Severity: n.Severity, Anchor: domain.AnchorTopRight}})
 }
 
 // mergePickerOps accumulates two presentation decisions from one read. Close
