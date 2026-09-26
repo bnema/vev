@@ -17,6 +17,9 @@ import (
 // bell, so a vev window left open on another workspace no longer clears it for
 // every other client. When that window gains focus again, the tab it shows is
 // acknowledged by its next paint.
+//
+// Geometry uses it too: a reported focus gain makes the attachment the latest
+// shared PTY geometry claimant, so session content follows the focused window.
 
 // terminalFocus returns the focus the client last reported.
 func (ac *attachedClient) terminalFocus() domain.TerminalFocus {
@@ -32,8 +35,9 @@ func (ac *attachedClient) setTerminalFocus(focus domain.TerminalFocus) bool {
 }
 
 // applyTerminalFocusForAttachment records a focus report. Gaining focus
-// repaints the attachment, whose paint acknowledges the visible tab's bell,
-// and the bars of every client, whose bells may clear with it.
+// claims shared session geometry and repaints the attachment, whose paint
+// acknowledges the visible tab's bell, and the bars of every client, whose
+// bells may clear with it.
 func (d *Daemon) applyTerminalFocusForAttachment(effect *attachmentEffect, message protocol.TerminalFocus) {
 	if message.Validate() != nil || effect == nil || effect.sess == nil || effect.ac == nil || effect.ac.terminalFocus() == message.Focus {
 		return
@@ -47,6 +51,9 @@ func (d *Daemon) applyTerminalFocusForAttachment(effect *attachmentEffect, messa
 	// the focus lets any paint acknowledge.
 	effect.sess.markVisibleAttention(effect.ac)
 	effect.ac.setTerminalFocus(message.Focus)
+	if message.Focus == domain.TerminalFocusFocused && effect.current() {
+		effect.sess.geometry.reconcileAndInvalidate(d, effect.sess, effect.ac, "terminal_focus.go")
+	}
 	d.invalidateRender(effect.sess, effect.ac, false, "terminal_focus.go")
 }
 

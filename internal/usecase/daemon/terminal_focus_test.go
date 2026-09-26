@@ -129,3 +129,39 @@ func TestFocusReportDrawsTheBellBeforeAcknowledging(t *testing.T) {
 	d.applyTerminalFocusForAttachment(effect, protocol.TerminalFocus{Focus: domain.TerminalFocusFocused})
 	require.Empty(t, sends, "an unchanged focus does not repaint")
 }
+
+// TestFocusGainClaimsSharedGeometry pins that a client whose terminal window
+// gains focus becomes the shared geometry claimant, while losing focus leaves
+// the current claimant in place.
+func TestFocusGainClaimsSharedGeometry(t *testing.T) {
+	tests := []struct {
+		name        string
+		focus       domain.TerminalFocus
+		wantClaimed bool
+	}{
+		{name: "focus gain claims geometry", focus: domain.TerminalFocusFocused, wantClaimed: true},
+		{name: "focus loss keeps claimant", focus: domain.TerminalFocusUnfocused, wantClaimed: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, sess, first, _ := newManualSessionWithPTYs(t, &transactionalResizePTY{})
+			first.setGeometry(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			second := addMultiplexTestAttachment(t, sess, domain.Geometry{Size: domain.Size{Cols: 120, Rows: 40}})
+			require.True(t, sess.geometry.reconcile(d, sess, second))
+			requireMultiplexGeometry(t, sess, second, domain.Size{Cols: 120, Rows: 38})
+
+			token := sess.captureAttachmentCapability(first, first.transport())
+			first.installTestAttachmentCapability(token)
+			effect, admitted := first.beginAttachmentEffect(token)
+			require.True(t, admitted)
+			d.applyTerminalFocusForAttachment(effect, protocol.TerminalFocus{Focus: tt.focus})
+			effect.End()
+
+			if tt.wantClaimed {
+				requireMultiplexGeometry(t, sess, first, domain.Size{Cols: 80, Rows: 22})
+				return
+			}
+			requireMultiplexGeometry(t, sess, second, domain.Size{Cols: 120, Rows: 38})
+		})
+	}
+}
