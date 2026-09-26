@@ -168,14 +168,18 @@ adapter's queue. IPC reuses one grow-once read buffer internally.
 
 ## Picker admission without physical write
 
-While a client-picker lease is acquiring/owned/releasing
-(`client/picker_lease.go`), the client still applies every accepted
-daemon frame to its output shadow and acknowledges it inside the bounded
-window, but suppresses the physical write until the barrier
-(epoch/state) is applied (acquire), an authoritative post-close full
-paint arrives (release), or the lease aborts (disconnect/generation
-change). The daemon side drops raw key/mouse input for that attachment
-while `pickerOpen`; only typed picker messages act.
+While a client picker overlay is open over a live attachment (session
+picker `PickerOffer`, or the first move `PickerSnapshot`), the client
+still applies and acknowledges every accepted daemon frame but does not
+write it. Closing the overlay sends `OutputResetRequest`, and the daemon
+answers with an authoritative full paint.
+
+The daemon sends a palette-opened picker only after a frame composed
+after the palette closed has been emitted, so the erased palette is on
+screen before output suppression starts. An ACK-blocked paint or a
+transient freeze delays the picker; a detach or transport change drops it. The daemon side drops raw
+key/mouse input for the attachment while a move picker is open; only
+typed picker messages act.
 
 ## Ordering, close, and admission semantics
 

@@ -574,6 +574,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 				return true
 			}
 		}
+		ac.afterFrame.emitted(state.frameCapture)
 		// Publish only after output preparation and transport emission both
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this

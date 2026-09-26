@@ -137,6 +137,8 @@ func TestPaletteMovePaneCapturesSourceAndOpensPicker(t *testing.T) {
 	d.handleInput(source, ac, []byte("MFP\r"))
 	require.False(t, ac.overlays.paletteActive())
 
+	// The picker opens after the frame erasing the palette.
+	require.Eventually(t, ac.overlays.pickerClientActive, testWaitTimeout, time.Millisecond)
 	ac.overlays.pickerMu.Lock()
 	open := ac.overlays.pickerOpen
 	intent, captured := ac.overlays.pickerIntent, ac.overlays.pickerMoveSource
@@ -158,6 +160,8 @@ func TestPaletteMoveTabCapturesActiveTabAndOpensPicker(t *testing.T) {
 	d.handleInput(source, ac, []byte("\x1b "))
 	d.handleInput(source, ac, []byte("MAT\r"))
 
+	// The picker opens after the frame erasing the palette.
+	require.Eventually(t, ac.overlays.pickerClientActive, testWaitTimeout, time.Millisecond)
 	ac.overlays.pickerMu.Lock()
 	open := ac.overlays.pickerOpen
 	intent, captured := ac.overlays.pickerIntent, ac.overlays.pickerMoveSource

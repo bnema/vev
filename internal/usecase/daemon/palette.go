@@ -971,7 +971,21 @@ func (e paletteExec) openMovePicker(intent protocol.PickerIntent, source moveSou
 		defer fresh.End()
 		effect = fresh
 	}
-	return e.d.openPickerForAttachment(e.ac, effect, intent, source, 0)
+	if !e.redrawClosedPalette {
+		return e.d.openPickerForAttachment(e.ac, effect, intent, source, 0)
+	}
+	// The client overlay suppresses attachment output once the first move
+	// snapshot arrives, so open only after the frame erasing the palette.
+	// Refusals known now still fail the command synchronously.
+	if err := e.d.movePickerPrecheck(e.sess, e.ac, intent, source); err != nil {
+		return err
+	}
+	e.d.afterNextFrame(e.sess, e.ac, effect, func(fresh *attachmentEffect) {
+		if err := e.d.openPickerForAttachment(e.ac, fresh, intent, source, 0); err != nil && !errors.Is(err, errAttachmentTransition) {
+			e.d.reportError(e.sess, movePickerUserError(err))
+		}
+	})
+	return nil
 }
 
 func (e paletteExec) focus(direction layout.Direction) error {
@@ -1098,7 +1112,18 @@ func (e paletteExec) OpenSessionPicker() error {
 	// over this attachment and owns its input until the user commits or
 	// cancels. Detach-to-picker is reserved for attachment loss, session end,
 	// and explicit detach.
-	return e.d.offerClientNavigationPicker(e.ac, effect)
+	if !e.redrawClosedPalette {
+		return e.d.offerClientNavigationPicker(e.ac, effect)
+	}
+	// The overlay suppresses attachment output, so the offer follows the
+	// frame erasing the palette.
+	e.d.afterNextFrame(e.sess, e.ac, effect, func(fresh *attachmentEffect) {
+		if err := e.d.offerClientNavigationPicker(e.ac, fresh); err != nil && !errors.Is(err, errAttachmentTransition) {
+			e.d.log.Error("palette command failed", "err", err, "command", "SSP")
+			e.d.reportError(e.sess, err)
+		}
+	})
+	return nil
 }
 
 func (e paletteExec) OpenNotifications() error {

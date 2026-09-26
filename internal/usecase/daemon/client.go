@@ -101,6 +101,7 @@ type attachedClient struct {
 	renderStages               renderStageHooks // optional render and handoff observability hooks
 	linkMu                     sync.Mutex
 	sendMu                     sync.Mutex
+	afterFrame                 afterFrameQueue
 	routeMu                    sync.RWMutex
 	routeSnapshot              protocol.RecentRouteSnapshot
 	pendingRouteIdentity       bool
