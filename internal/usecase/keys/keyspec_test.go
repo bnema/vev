@@ -254,14 +254,14 @@ func TestBuildBindingEntriesFailedOverrideRestoreDoesNotOverwriteEarlierOverride
 
 func assertAltRuneAction(t *testing.T, bindings *Bindings, key rune, want Action) {
 	t.Helper()
-	got, _, ok := bindings.actionForAltBytes([]byte(string(key)))
+	got, ok := bindings.actionForAltRune(key)
 	require.True(t, ok)
 	require.Equal(t, want, got)
 }
 
 func assertAltRuneUnbound(t *testing.T, bindings *Bindings, key rune) {
 	t.Helper()
-	_, _, ok := bindings.actionForAltBytes([]byte(string(key)))
+	_, ok := bindings.actionForAltRune(key)
 	require.False(t, ok)
 }
 

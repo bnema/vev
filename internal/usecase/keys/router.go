@@ -3,7 +3,6 @@
 package keys
 
 import (
-	"bytes"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -129,79 +128,48 @@ func (r *Router) route(data []byte, h Handler) {
 			i++
 			continue
 		}
-		if i == len(data)-1 {
+		tok := scanEscape(data[i:])
+		if tok.kind == escIncomplete {
 			flush()
-			r.retainESC(h)
+			r.retainESC(h, tok.raw[1:])
 			return
 		}
-		remaining := data[i+1:]
-		if bytes.HasPrefix(data[i:], ports.BracketedPasteOpenMarker) {
-			// A bracketed paste whose closing marker is in this same frame is
-			// forwarded verbatim: pasted content bytes (including embedded
-			// ESC+letter Alt lookalikes or ESC [ 1 ; 3 A sequences) must never
-			// fire an Action mid-paste. Without a closing marker in-frame we
-			// fall through to today's per-byte routing (the '[' passes through
-			// as a control prefix); Part A keeps pastes single-frame in
-			// practice, so no cross-frame paste state is tracked here.
-			if rel := bytes.Index(data[i:], ports.BracketedPasteCloseMarker); rel >= 0 {
-				end := i + rel + len(ports.BracketedPasteCloseMarker)
-				buf = append(buf, data[i:end]...)
-				i = end
-				continue
-			}
-		}
-		if action, size, ok, partial := r.altArrowCSI(remaining); ok {
+		if action, ok := r.tokenAction(tok); ok {
 			flush()
-			r.action(action, data[i:i+1+size], h)
-			i += 1 + size
-			continue
-		} else if partial {
-			flush()
-			r.retainESC(h, remaining)
-			return
-		}
-		next := data[i+1]
-		if passThroughPrefix(next) {
-			buf = append(buf, ESC, next)
-			i += 2
+			r.action(action, tok.raw, h)
+			i += len(tok.raw)
 			continue
 		}
-		if action, size, ok := r.binding(remaining); ok {
-			flush()
-			r.action(action, data[i:i+1+size], h)
-			i += 1 + size
-			continue
+		switch tok.kind {
+		case escPaste, escAltArrow, escControlPrefix:
+			// Pastes are forwarded verbatim so embedded Alt lookalikes never
+			// fire; unbound arrows and control prefixes pass through.
+			buf = append(buf, tok.raw...)
+			i += len(tok.raw)
+		default:
+			// Unbound Alt rune or bare ESC: forward the ESC alone and route
+			// the following bytes normally.
+			buf = append(buf, ESC)
+			i++
 		}
-		if partialUTF8Rune(remaining) {
-			flush()
-			r.retainESC(h, remaining)
-			return
-		}
-		buf = append(buf, ESC)
-		i++
 	}
 	flush()
 }
 
+// routeAfterPendingESC routes data that follows a retained ESC. data excludes
+// that ESC; pendingAltLen bytes of data were retained with it. It returns how
+// many bytes of data it consumed.
 func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler) int {
-	if action, size, ok, partial := r.altArrowCSI(data); ok {
-		r.action(action, append([]byte{ESC}, data[:size]...), h)
-		return size
-	} else if partial {
+	tok := scanEscape(append([]byte{ESC}, data...))
+	if tok.kind == escIncomplete {
 		r.retainESC(h, data)
 		return len(data)
 	}
-	next := data[0]
-	if action, size, ok := r.binding(data); ok {
-		r.action(action, append([]byte{ESC}, data[:size]...), h)
-		return size
+	if action, ok := r.tokenAction(tok); ok {
+		r.action(action, tok.raw, h)
+		return len(tok.raw) - 1
 	}
-	if partialUTF8Rune(data) {
-		r.retainESC(h, data)
-		return len(data)
-	}
-	_, size := utf8.DecodeRune(data)
-	if size > 1 {
+	if _, size := utf8.DecodeRune(data); size > 1 {
 		r.forward(append([]byte{ESC}, data[:size]...), h)
 		return size
 	}
@@ -209,12 +177,25 @@ func (r *Router) routeAfterPendingESC(data []byte, pendingAltLen int, h Handler)
 		r.forward(append([]byte{ESC}, data[:pendingAltLen]...), h)
 		return pendingAltLen
 	}
-	if passThroughPrefix(next) {
+	if next := data[0]; next == '[' || next == 'O' {
 		r.forward([]byte{ESC, next}, h)
 		return 1
 	}
 	r.forward([]byte{ESC}, h)
 	return 0
+}
+
+// tokenAction resolves a lexed unit against the current bindings.
+func (r *Router) tokenAction(tok escToken) (Action, bool) {
+	bindings := r.currentBindings()
+	switch tok.kind {
+	case escAltArrow:
+		return bindings.actionForAltArrow(tok.arrow)
+	case escAltRune:
+		return bindings.actionForAltRune(tok.rune)
+	default:
+		return 0, false
+	}
 }
 
 func (r *Router) retainESC(h Handler, altBytes ...[]byte) {
@@ -267,14 +248,6 @@ func (r *Router) stopTimer() {
 	}
 }
 
-func partialUTF8Rune(data []byte) bool {
-	if len(data) == 0 || utf8.FullRune(data) {
-		return false
-	}
-	key, size := utf8.DecodeRune(data)
-	return key == utf8.RuneError && size == 1
-}
-
 func (r *Router) forward(data []byte, h Handler) {
 	cp := append([]byte(nil), data...)
 	h.Forward(cp)
@@ -285,8 +258,6 @@ func (r *Router) action(action Action, raw []byte, h Handler) {
 	h.Action(action, cp)
 }
 
-func passThroughPrefix(b byte) bool { return b == '[' || b == 'O' }
-
 func (r *Router) currentBindings() *Bindings {
 	if r.bindings == nil {
 		return defaultBindings
@@ -296,44 +267,6 @@ func (r *Router) currentBindings() *Bindings {
 		return defaultBindings
 	}
 	return bindings
-}
-
-func (r *Router) altArrowCSI(data []byte) (Action, int, bool, bool) {
-	const seqLen = len("[1;3A")
-	if len(data) < seqLen {
-		return 0, 0, false, hasAltArrowCSIPrefix(data)
-	}
-	seq := data[:seqLen]
-	if seq[0] != '[' || seq[1] != '1' || seq[2] != ';' || (seq[3] != '3' && seq[3] != '9') {
-		return 0, 0, false, false
-	}
-	if action, ok := r.currentBindings().actionForAltArrow(seq[4]); ok {
-		return action, seqLen, true, false
-	}
-	return 0, 0, false, false
-}
-
-func hasAltArrowCSIPrefix(data []byte) bool {
-	if len(data) == 0 || len(data) >= len("[1;3A") {
-		return false
-	}
-	return matchesPrefix(data, "[1;3") || matchesPrefix(data, "[1;9")
-}
-
-func matchesPrefix(data []byte, want string) bool {
-	if len(data) > len(want) {
-		return false
-	}
-	for i := range data {
-		if data[i] != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (r *Router) binding(data []byte) (Action, int, bool) {
-	return r.currentBindings().actionForAltBytes(data)
 }
 
 var topRowDigitAliases = [][]rune{
