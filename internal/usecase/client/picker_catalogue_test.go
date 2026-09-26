@@ -124,6 +124,15 @@ func pickerLineByLabel(lines []protocol.PickerLine, label string) (protocol.Pick
 	return protocol.PickerLine{}, false
 }
 
+func pickerSectionByLabel(lines []protocol.PickerLine, label string) (protocol.PickerLine, bool) {
+	for _, line := range lines {
+		if line.Kind == protocol.PickerLineSection && line.Label == label {
+			return line, true
+		}
+	}
+	return protocol.PickerLine{}, false
+}
+
 func pickerHostLine(lines []protocol.PickerLine) (protocol.PickerLine, bool) {
 	for _, line := range lines {
 		if line.Kind == protocol.PickerLineHost {
@@ -187,6 +196,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 		wantSessions []string
 		wantActions  map[string]protocol.PickerLineActions
 		wantStatus   map[string]protocol.PickerLineStatus
+		wantSection  map[string]protocol.PickerLineStatus
 		wantDim      map[string]bool
 		wantHostRow  bool
 		wantNoDaemon bool
@@ -244,7 +254,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"local"},
 			wantSessions: []string{"alpha"},
 			wantActions:  map[string]protocol.PickerLineActions{"alpha": navigateKill},
-			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusUp},
+			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusNone},
+			wantSection:  map[string]protocol.PickerLineStatus{"local": protocol.PickerLineStatusStale},
 			wantDim:      map[string]bool{"alpha": true},
 		},
 		{
@@ -259,7 +270,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{"remote-a"},
 			wantActions:  map[string]protocol.PickerLineActions{"remote-a": protocol.PickerCanNavigate},
-			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp},
+			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusNone},
+			wantSection:  map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusDown},
 			wantDim:      map[string]bool{"remote-a": true},
 		},
 		{
@@ -288,7 +300,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{"remote-a"},
 			wantActions:  map[string]protocol.PickerLineActions{"remote-a": 0},
-			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp},
+			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusNone},
+			wantSection:  map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusVersion},
 			wantDim:      map[string]bool{"remote-a": true},
 		},
 		{
@@ -327,6 +340,11 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 				line, ok := pickerLineByLabel(lines, label)
 				require.True(t, ok, "row %q must be projected", label)
 				require.Equal(t, status, line.Status, "row %q badge", label)
+			}
+			for label, status := range tt.wantSection {
+				line, ok := pickerSectionByLabel(lines, label)
+				require.True(t, ok, "section %q must be projected", label)
+				require.Equal(t, status, line.Status, "section %q problem dot", label)
 			}
 			for label, dim := range tt.wantDim {
 				line, ok := pickerLineByLabel(lines, label)

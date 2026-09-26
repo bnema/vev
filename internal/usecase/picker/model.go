@@ -553,19 +553,16 @@ func (s SortMode) Title() string {
 	return " Sessions · recent "
 }
 
-// statusDot is the one-cell state marker. Every state uses the same dot and
-// a fixed xterm-256 color, so it reads the same in any terminal and theme:
-// green up, gray stopped, red down or error, yellow stale, magenta version
-// mismatch, blue no daemon.
+// statusDot is the one-cell problem marker. It is drawn only when something
+// is wrong, in a fixed xterm-256 color so it reads the same in any terminal
+// and theme: red down or error, yellow stale, magenta version mismatch, blue
+// no daemon. Healthy and stopped rows carry no dot: a stopped row is already
+// muted, and the toast explains each failure in words.
 const statusDot = "●"
 
-// lineStatusColor is the xterm-256 index for a status, or -1 for none.
+// lineStatusColor is the xterm-256 index for a problem status, or -1 for none.
 func lineStatusColor(status protocol.PickerLineStatus) int {
 	switch status {
-	case protocol.PickerLineStatusUp:
-		return 71 // green
-	case protocol.PickerLineStatusStopped:
-		return 244 // gray
 	case protocol.PickerLineStatusDown, protocol.PickerLineStatusError:
 		return 167 // red
 	case protocol.PickerLineStatusStale:
@@ -579,6 +576,19 @@ func lineStatusColor(status protocol.PickerLineStatus) int {
 	}
 }
 
+// drawStatusBadge draws a problem dot right-aligned on row y. The dot keeps
+// its own color even on the inverse selected row.
+func drawStatusBadge(frame renderer.Frame, rect domain.Rect, y, clipX int, badge string, base renderer.Style, status protocol.PickerLineStatus) {
+	if badge == "" {
+		return
+	}
+	style := base
+	style.Inverse = false
+	style.Foreground = lineStatusColor(status)
+	style.HasForegroundRGB = false
+	ui.DrawText(frame, max(rect.X, clipX-textCellWidth(badge)), rect.Y+y, clipX, badge, style)
+}
+
 func lineStatusBadge(status protocol.PickerLineStatus) string {
 	if lineStatusColor(status) < 0 {
 		return ""
@@ -589,8 +599,8 @@ func lineStatusBadge(status protocol.PickerLineStatus) string {
 // renderList draws each visible row: a dimmed tree prefix, the name (bold on
 // unselected live session and host headers), the attention marker, then for
 // headers a right-aligned muted detail (tab count, "*" when attached) and a
-// status dot in a fixed xterm-256 color. A tight width truncates the detail
-// before the name.
+// problem dot in a fixed xterm-256 color. Section headers carry their host's
+// problem dot. A tight width truncates the detail before the name.
 func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles RenderStyles) {
 	if m == nil || rect.Width <= 0 || rect.Height <= 0 {
 		return
@@ -644,7 +654,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 			treeX = ui.DrawText(frame, rect.X, rect.Y+y, max(rect.X, clipX-2), r.tree, treeStyle)
 		}
 		badge := ""
-		if r.rendersAsHeader() {
+		if r.rendersAsHeader() || r.section() {
 			badge = lineStatusBadge(r.line.Status)
 		}
 		contentClipX := clipX
@@ -664,6 +674,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		x := drawMatchedText(frame, treeX, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
 
 		if r.section() {
+			drawStatusBadge(frame, rect, y, clipX, badge, base, r.line.Status)
 			continue
 		}
 		if r.rendersAsHeader() {
@@ -679,15 +690,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
 				drawMatchedText(frame, detailX, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			}
-			if badge != "" {
-				badgeX := max(rect.X, clipX-badgeWidth)
-				badgeStyle := base
-				// The dot keeps its own color even on the inverse selected row.
-				badgeStyle.Inverse = false
-				badgeStyle.Foreground = lineStatusColor(r.line.Status)
-				badgeStyle.HasForegroundRGB = false
-				ui.DrawText(frame, badgeX, rect.Y+y, clipX, badge, badgeStyle)
-			}
+			drawStatusBadge(frame, rect, y, clipX, badge, base, r.line.Status)
 			continue
 		}
 

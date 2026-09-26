@@ -67,9 +67,11 @@ func (c *pickerCatalogue) projectLocked() {
 	refs := make(map[string]pickerSelectionRef)
 	var localLive, localStopped []pickerSessionBlock
 	localOrigin := ""
+	localStatus := protocol.PickerLineStatusNone
 	hasLocal := false
 	type remoteGroup struct {
 		origin string
+		status protocol.PickerLineStatus
 		rows   []pickerRow
 	}
 	var remotes []remoteGroup
@@ -110,7 +112,7 @@ func (c *pickerCatalogue) projectLocked() {
 				Kind:         protocol.PickerLineHost,
 				Label:        origin,
 				Detail:       pickerHostDetail(observation),
-				Status:       pickerObservationStatus(observation, fresh),
+				Status:       pickerHostProblem(observation, fresh),
 				StatusDetail: pickerObservationReason(observation, fresh),
 				Dim:          true,
 				// A host row is focusable and offers creation only when no daemon
@@ -127,11 +129,12 @@ func (c *pickerCatalogue) projectLocked() {
 		if observation.Local {
 			hasLocal = true
 			localOrigin = origin
+			localStatus = pickerHostProblem(observation, fresh)
 			localHost = hostRows
 			continue
 		}
 		if len(hostRows) != 0 {
-			remotes = append(remotes, remoteGroup{origin: origin, rows: hostRows})
+			remotes = append(remotes, remoteGroup{origin: origin, status: pickerHostProblem(observation, fresh), rows: hostRows})
 		}
 	}
 	sortPickerBlocks(localLive)
@@ -170,11 +173,11 @@ func (c *pickerCatalogue) projectLocked() {
 
 	localRows = append(localRows, stoppedRows...)
 	if hasLocal && len(localRows) != 0 {
-		grouped = append(grouped, pickerRow{line: protocol.PickerLine{Kind: protocol.PickerLineSection, Label: localOrigin, Dim: true}})
+		grouped = append(grouped, pickerRow{line: protocol.PickerLine{Kind: protocol.PickerLineSection, Label: localOrigin, Status: localStatus, Dim: true}})
 		grouped = append(grouped, localRows...)
 	}
 	for _, remote := range remotes {
-		grouped = append(grouped, pickerRow{line: protocol.PickerLine{Kind: protocol.PickerLineSection, Label: remote.origin, Dim: true}})
+		grouped = append(grouped, pickerRow{line: protocol.PickerLine{Kind: protocol.PickerLineSection, Label: remote.origin, Status: remote.status, Dim: true}})
 		grouped = append(grouped, remote.rows...)
 	}
 

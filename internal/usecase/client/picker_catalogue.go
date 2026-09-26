@@ -919,22 +919,26 @@ func pickerHostDetail(observation ports.BrokerDaemonObservation) string {
 	if !observation.InventoryKnown {
 		return "…"
 	}
-	// A host row is only published when it has no sessions: the status dot
-	// already says why, so no count is shown.
+	// The problem dot and its toast already say why no session is listed.
 	return ""
 }
 
-func pickerSessionStatus(session catalogue.RemoteCatalogSession) protocol.PickerLineStatus {
-	switch session.State {
-	case catalogue.RemoteCatalogSessionUp:
-		return protocol.PickerLineStatusUp
-	case catalogue.RemoteCatalogSessionDown:
-		return protocol.PickerLineStatusStopped
-	case catalogue.RemoteCatalogSessionBroken:
-		return protocol.PickerLineStatusError
-	default:
+// pickerHostProblem is the host's problem dot, or none when it is healthy.
+func pickerHostProblem(observation ports.BrokerDaemonObservation, fresh bool) protocol.PickerLineStatus {
+	status := pickerObservationStatus(observation, fresh)
+	if status == protocol.PickerLineStatusUp {
 		return protocol.PickerLineStatusNone
 	}
+	return status
+}
+
+// pickerSessionStatus marks only a broken session. A live session is the
+// normal case and a stopped one is already muted, so neither carries a dot.
+func pickerSessionStatus(session catalogue.RemoteCatalogSession) protocol.PickerLineStatus {
+	if session.State == catalogue.RemoteCatalogSessionBroken {
+		return protocol.PickerLineStatusError
+	}
+	return protocol.PickerLineStatusNone
 }
 
 func pickerSessionDetail(session catalogue.RemoteCatalogSession) string {
@@ -943,7 +947,7 @@ func pickerSessionDetail(session catalogue.RemoteCatalogSession) string {
 		count = strconv.Itoa(n)
 	}
 	if session.Attached {
-		// "*" marks the attached session; ● is reserved for the status dot.
+		// "*" marks the attached session; ● is reserved for the problem dot.
 		return strings.TrimSpace("* " + count)
 	}
 	return count
