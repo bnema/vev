@@ -354,7 +354,7 @@ func routeReachability(daemon ports.BrokerDaemonObservation) protocol.RouteReach
 	switch {
 	case daemon.Availability == domain.RemoteAvailabilityReachable:
 		return protocol.RouteReachabilityReachable
-	case pickerObservationFailing(daemon) || daemon.Availability == domain.RemoteAvailabilityIncompatible:
+	case daemon.Availability.Failing():
 		return protocol.RouteReachabilityUnavailable
 	default:
 		return protocol.RouteReachabilityUnknown

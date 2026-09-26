@@ -113,7 +113,7 @@ func (c *pickerCatalogue) projectLocked() {
 				Kind:         protocol.PickerLineHost,
 				Label:        origin,
 				Detail:       pickerHostDetail(observation),
-				Status:       pickerHostProblem(observation, fresh),
+				Status:       pickerObservationStatus(observation, fresh),
 				StatusDetail: pickerObservationReason(observation, fresh),
 				Dim:          true,
 				// A host row is focusable and offers creation only when no daemon
@@ -130,7 +130,7 @@ func (c *pickerCatalogue) projectLocked() {
 		// The section carries the host's problem dot unless a host row below
 		// it already does. The local host never shows a transient stale dot:
 		// no toast would explain it.
-		sectionStatus := pickerHostProblem(observation, fresh)
+		sectionStatus := pickerObservationStatus(observation, fresh)
 		if hasHostRow || observation.Local && sectionStatus == protocol.PickerLineStatusStale {
 			sectionStatus = protocol.PickerLineStatusNone
 		}
@@ -458,14 +458,10 @@ func pickerResolveTab(ref pickerSelectionRef, session catalogue.RemoteCatalogSes
 }
 
 // pickerObservationFailing reports a host the broker observed failing: its
-// last probe could not reach it, authenticate, or read its catalogue.
+// last probe could not reach it, authenticate, or read its catalogue. An
+// incompatible host is reachable and handled apart.
 func pickerObservationFailing(observation ports.BrokerDaemonObservation) bool {
-	switch observation.Availability {
-	case domain.RemoteAvailabilityUnreachable, domain.RemoteAvailabilityAuthFailed, domain.RemoteAvailabilityInvalidResponse, domain.RemoteAvailabilityNoDaemon:
-		return true
-	default:
-		return false
-	}
+	return observation.Availability.Failing() && observation.Availability != domain.RemoteAvailabilityIncompatible
 }
 
 // pickerUnavailableNotice is main's remote-unavailable notice: the session
@@ -569,29 +565,79 @@ func (c *pickerCatalogue) ResolveKill(key string) (pickerKillTarget, error) {
 	}, nil
 }
 
-// remoteHealth reports the notice-relevant state of every remote host, in
-// catalogue order. Transition policy lives in domain.RemoteHealthNotice.
-func (c *pickerCatalogue) remoteHealth() []domain.RemoteHealth {
+// pickerHostHealth is one remote host's notice-relevant state.
+type pickerHostHealth struct {
+	key         string
+	observation ports.BrokerDaemonObservation
+	health      domain.RemoteHealth
+}
+
+// remoteHealth reports every remote host's state, in catalogue order.
+// Transition policy lives in domain.RemoteHealthTransition.
+func (c *pickerCatalogue) remoteHealth() []pickerHostHealth {
 	if c == nil {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	health := make([]domain.RemoteHealth, 0, len(c.order))
+	hosts := make([]pickerHostHealth, 0, len(c.order))
 	for _, key := range c.order {
 		host, ok := c.hosts[key]
 		if !ok || host.observation.Local {
 			continue
 		}
 		observation := host.observation
-		health = append(health, domain.RemoteHealth{
-			Key:             key,
-			Origin:          pickerOriginLabel(observation),
+		hosts = append(hosts, pickerHostHealth{key: key, observation: observation, health: domain.RemoteHealth{
 			Availability:    observation.Availability,
-			Failure:         observation.LastFailure.Kind,
 			VersionMismatch: pickerObservationVersionMismatch(observation),
 			Episode:         observation.FailureEpisode,
-		})
+		}})
 	}
-	return health
+	return hosts
+}
+
+// pickerHostHealthNotice renders one host event as a toast scoped to the host,
+// so a recovery replaces the visible failure.
+func pickerHostHealthNotice(host pickerHostHealth, event domain.RemoteHealthEvent) domain.Notification {
+	n := domain.Notification{Code: domain.NoticeRemoteObservation, Scope: host.key}
+	origin := pickerOriginLabel(host.observation)
+	if event == domain.RemoteHealthRecovered {
+		n.Severity = domain.NoticeInfo
+		n.Message = "Remote host reconnected: " + origin
+		return n
+	}
+	n.Severity = domain.NoticeError
+	if host.observation.Availability == domain.RemoteAvailabilityNoDaemon {
+		n.Severity = domain.NoticeWarn
+	}
+	n.Message = "Remote check failed: " + origin + " — " + pickerHostFailureText(host.observation, host.health.VersionMismatch)
+	return n
+}
+
+func pickerHostFailureText(observation ports.BrokerDaemonObservation, versionMismatch bool) string {
+	if observation.Availability == domain.RemoteAvailabilityIncompatible || versionMismatch {
+		return "remote vev version is incompatible"
+	}
+	switch observation.LastFailure.Kind {
+	case domain.RemoteFailureAuthentication:
+		return "SSH authentication failed; verify non-interactive SSH access"
+	case domain.RemoteFailureTrust:
+		return "SSH host verification failed; verify the host key policy"
+	case domain.RemoteFailureIncompatible:
+		return "remote vev version is incompatible"
+	case domain.RemoteFailureInvalidResponse:
+		return "remote catalog response is invalid"
+	case domain.RemoteFailureTimeout:
+		return "SSH timed out"
+	}
+	switch observation.Availability {
+	case domain.RemoteAvailabilityAuthFailed:
+		return "SSH authentication failed; verify non-interactive SSH access"
+	case domain.RemoteAvailabilityInvalidResponse:
+		return "remote catalog response is invalid"
+	case domain.RemoteAvailabilityNoDaemon:
+		return "no vev daemon is running"
+	default:
+		return "SSH connection failed; verify SSH access"
+	}
 }

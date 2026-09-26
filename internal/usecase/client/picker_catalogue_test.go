@@ -839,11 +839,11 @@ func TestPickerCatalogueAvailabilityClassifiedBeforeCompatibility(t *testing.T) 
 			o.ProtocolVersion = protocol.Version + 1
 		}), wantStatus: protocol.PickerLineStatusDown, wantReason: domain.RemoteReasonHostUnreachable},
 		{name: "reachable mismatch is version", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.ProtocolVersion = protocol.Version + 1 }), fresh: true, wantStatus: protocol.PickerLineStatusVersion, wantReason: domain.RemoteReasonVersionMismatch},
-		{name: "reachable compatible fresh is up", observation: reachable(nil), fresh: true, wantStatus: protocol.PickerLineStatusUp, wantReason: ""},
+		{name: "reachable compatible fresh is up", observation: reachable(nil), fresh: true, wantStatus: protocol.PickerLineStatusNone, wantReason: ""},
 		{name: "reachable compatible stale is stale", observation: reachable(nil), fresh: false, wantStatus: protocol.PickerLineStatusStale, wantReason: domain.RemoteReasonCatalogStale},
 		{name: "reachable unobserved is stale and refreshing", observation: unobserved(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityReachable }), fresh: true, wantStatus: protocol.PickerLineStatusStale, wantReason: domain.RemoteReasonRefreshing},
 		{name: "legacy incompatible availability is version", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityIncompatible }), fresh: true, wantStatus: protocol.PickerLineStatusVersion, wantReason: domain.RemoteReasonVersionMismatch},
-		{name: "reachable checking is up and refreshing", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.Checking = true }), fresh: true, wantStatus: protocol.PickerLineStatusUp, wantReason: domain.RemoteReasonRefreshing},
+		{name: "reachable checking is up and refreshing", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.Checking = true }), fresh: true, wantStatus: protocol.PickerLineStatusNone, wantReason: domain.RemoteReasonRefreshing},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

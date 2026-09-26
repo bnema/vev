@@ -2,11 +2,14 @@ package client
 
 import (
 	"bytes"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/ui"
 )
 
 func TestDrawClientToastPlacement(t *testing.T) {
@@ -32,6 +35,31 @@ func TestDrawClientToastPlacement(t *testing.T) {
 			require.NoError(t, err)
 			require.NotZero(t, out.Len())
 			tt.check(t, bounds)
+		})
+	}
+}
+
+func TestClientToastLinesKeepExactWidth(t *testing.T) {
+	sgr := regexp.MustCompile("\x1b\\[[0-9;]*m")
+	tests := []struct {
+		name    string
+		message string
+		border  string
+	}{
+		{name: "ascii", message: "host down"},
+		{name: "wide rune", message: "hôte 東京 down"},
+		{name: "colored border", message: "hôte 東京 down", border: toastBorderSGR(domain.NoticeError)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bounds := ui.ToastBounds(domain.Size{Cols: 100, Rows: 30}, ui.Toast{Message: tt.message, Anchor: domain.AnchorTopRight})
+			for i, line := range clientToastLines(bounds, tt.message, tt.border) {
+				width := 0
+				for _, r := range sgr.ReplaceAllString(line, "") {
+					width += renderer.RuneWidth(r)
+				}
+				require.Equal(t, bounds.Width, width, "row %d width", i)
+			}
 		})
 	}
 }

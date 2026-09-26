@@ -509,6 +509,33 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 // TestPickerControllerHostFailureToastOncePerEpisode ports main's
 // TestRemoteFailureNoticeEmittedOncePerFailureEpisode and
 // TestRemoteFailureNoticesKeepEndpointsDistinct.
+func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
+	controller, clock := pickerTestController(t)
+	down := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
+	down.Availability = domain.RemoteAvailabilityUnreachable
+	down.FailureEpisode = 1
+	other := pickerTestRemoteObservation("user@mule", 2, 2, clock.Now())
+	other.Availability = domain.RemoteAvailabilityUnreachable
+	other.FailureEpisode = 1
+	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{down, other}})
+
+	up := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
+	up.FailureEpisode = 1
+	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{up, other}})
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	messages := make([]string, 0)
+	for _, toast := range controller.notices.Active(clock.Now()) {
+		messages = append(messages, toast.Message)
+	}
+	require.Len(t, messages, 2, "each host keeps one toast")
+	require.Contains(t, messages, "Remote host reconnected: user@arch")
+	for _, message := range messages {
+		require.NotContains(t, message, "Remote check failed: user@arch", "the recovery replaced the failure")
+	}
+}
+
 func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	failing := func(endpoint string, seed byte, episode uint64, kind domain.RemoteFailureKind) ports.BrokerDaemonObservation {

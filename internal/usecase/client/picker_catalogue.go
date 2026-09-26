@@ -869,7 +869,8 @@ func pickerObservationStatus(observation ports.BrokerDaemonObservation, fresh bo
 		if observation.ProtocolVersion == 0 || !fresh {
 			return protocol.PickerLineStatusStale
 		}
-		return protocol.PickerLineStatusUp
+		// A healthy host carries no dot.
+		return protocol.PickerLineStatusNone
 	default:
 		// Availability Unknown (unobserved) and any out-of-range value are
 		// never treated as compatible.
@@ -921,15 +922,6 @@ func pickerHostDetail(observation ports.BrokerDaemonObservation) string {
 	}
 	// The problem dot and its toast already say why no session is listed.
 	return ""
-}
-
-// pickerHostProblem is the host's problem dot, or none when it is healthy.
-func pickerHostProblem(observation ports.BrokerDaemonObservation, fresh bool) protocol.PickerLineStatus {
-	status := pickerObservationStatus(observation, fresh)
-	if status == protocol.PickerLineStatusUp {
-		return protocol.PickerLineStatusNone
-	}
-	return status
 }
 
 // pickerSessionStatus marks only a broken session. A live session is the

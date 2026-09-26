@@ -721,21 +721,17 @@ func (p *pickerController) rebuildLocked() {
 }
 
 // offerDiagnosticsLocked notices each remote host transition that
-// domain.RemoteHealthNotice deems worth one toast: a new failure episode or a
+// domain.RemoteHealthTransition deems worth one toast: a new failure or a
 // recovery. Ordinary observation progress stays on the rows.
 func (p *pickerController) offerDiagnosticsLocked() {
 	current := make(map[string]domain.RemoteHealth)
-	for _, health := range p.catalogue.remoteHealth() {
-		prev, seen := p.hostHealth[health.Key]
-		if n, ok := domain.RemoteHealthNotice(prev, seen, health); ok {
-			p.notifyLocked(n)
+	for _, host := range p.catalogue.remoteHealth() {
+		prev, seen := p.hostHealth[host.key]
+		next, event := domain.RemoteHealthTransition(prev, seen, host.health)
+		current[host.key] = next
+		if event != domain.RemoteHealthSilent {
+			p.notifyLocked(pickerHostHealthNotice(host, event))
 		}
-		// An in-between state (unknown, checking) keeps the last settled one,
-		// so failing → unknown → reachable still reports the recovery.
-		if seen && !health.Failing() && health.Availability != domain.RemoteAvailabilityReachable {
-			health = prev
-		}
-		current[health.Key] = health
 	}
 	p.hostHealth = current
 }
@@ -743,7 +739,7 @@ func (p *pickerController) offerDiagnosticsLocked() {
 // Notify shows one client-local notice. Notices about the same subject
 // (domain.Notification.Subject) replace each other.
 func (p *pickerController) Notify(n domain.Notification) {
-	if p == nil || n.Message == "" {
+	if p == nil {
 		return
 	}
 	p.mu.Lock()

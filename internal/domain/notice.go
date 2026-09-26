@@ -127,8 +127,9 @@ type Notification struct {
 	Scope string `json:",omitempty"`
 }
 
-// Subject is the stable identity of what a notice is about. A newer notice
-// for the same subject replaces the visible one instead of stacking.
+// Subject is the stable identity of what a notice is about. Client toasts
+// use it so a newer notice for the same subject replaces the visible one;
+// the daemon's notice coalescing keeps its own rule (sameToastNotice).
 func (n Notification) Subject() string {
 	return n.Code.String() + "/" + string(n.SessionID) + "/" + n.Scope
 }

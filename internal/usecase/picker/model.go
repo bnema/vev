@@ -560,13 +560,20 @@ func (s SortMode) Title() string {
 // muted, and the toast explains each failure in words.
 const statusDot = "●"
 
+// Fixed xterm-256 problem colors, shared with client toast borders so one
+// color always means one thing.
+const (
+	ColorProblemError = 167 // red
+	ColorProblemWarn  = 179 // yellow
+)
+
 // lineStatusColor is the xterm-256 index for a problem status, or -1 for none.
 func lineStatusColor(status protocol.PickerLineStatus) int {
 	switch status {
 	case protocol.PickerLineStatusDown, protocol.PickerLineStatusError:
-		return 167 // red
+		return ColorProblemError
 	case protocol.PickerLineStatusStale:
-		return 179 // yellow
+		return ColorProblemWarn
 	case protocol.PickerLineStatusVersion:
 		return 170 // magenta
 	case protocol.PickerLineStatusNoDaemon:

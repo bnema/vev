@@ -7,6 +7,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
@@ -20,24 +21,26 @@ func drawClientToast(out io.Writer, size domain.Size, message string, anchor dom
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return domain.Rect{}, nil
 	}
-	return bounds, writeReconnectToast(out, bounds, reconnectToastLinesFor(bounds, message, toastBorderSGR(severity)))
+	return bounds, writeClientToast(out, bounds, clientToastLines(bounds, message, toastBorderSGR(severity)))
 }
 
 // toastBorderSGR is the border color per severity, in the same fixed
-// xterm-256 colors as the picker's problem dots: red error, yellow warn.
-// Info keeps the terminal's default color.
+// xterm-256 colors as the picker's problem dots. Info keeps the terminal's
+// default color.
 func toastBorderSGR(severity domain.NoticeSeverity) string {
 	switch severity {
 	case domain.NoticeError:
-		return "\x1b[38;5;167m"
+		return fmt.Sprintf("\x1b[38;5;%dm", picker.ColorProblemError)
 	case domain.NoticeWarn:
-		return "\x1b[38;5;179m"
+		return fmt.Sprintf("\x1b[38;5;%dm", picker.ColorProblemWarn)
 	default:
 		return ""
 	}
 }
 
-func reconnectToastLinesFor(bounds domain.Rect, message, borderSGR string) []string {
+// clientToastLines renders the toast box as one string per row, exactly
+// bounds.Width columns wide.
+func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return nil
 	}
@@ -62,7 +65,11 @@ func reconnectToastLinesFor(bounds domain.Rect, message, borderSGR string) []str
 				colored = border
 			}
 			cell := frame.At(x, y)
-			if cell.Continuation || cell.Rune == 0 {
+			if cell.Continuation {
+				// The wide rune before it already covers this column.
+				continue
+			}
+			if cell.Rune == 0 {
 				b.WriteRune(' ')
 				continue
 			}
@@ -76,7 +83,7 @@ func reconnectToastLinesFor(bounds domain.Rect, message, borderSGR string) []str
 	return lines
 }
 
-func writeReconnectToast(out io.Writer, bounds domain.Rect, lines []string) error {
+func writeClientToast(out io.Writer, bounds domain.Rect, lines []string) error {
 	if _, err := io.WriteString(out, "\x1b[s"); err != nil {
 		return err
 	}
