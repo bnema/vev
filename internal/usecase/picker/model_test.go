@@ -284,8 +284,13 @@ func TestChooseGeometryReservesTheStatusRow(t *testing.T) {
 	require.Equal(t, domain.Rect{Y: 23, Width: 80, Height: 1}, geometry.Status)
 }
 
-func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
+func TestRenderDrawsProblemDotsOnly(t *testing.T) {
 	m := New([]protocol.PickerLine{
+		{Kind: protocol.PickerLineSection, Label: "host-a", Status: protocol.PickerLineStatusDown},
+		{
+			Key: "a/broken", Kind: protocol.PickerLineSession, Label: "broken", Focusable: true, Actions: protocol.PickerCanNavigate,
+			Status: protocol.PickerLineStatusError, Detail: "2",
+		},
 		{
 			Key: "a/live", Kind: protocol.PickerLineSession, Label: "live", Focusable: true, Actions: protocol.PickerCanNavigate,
 			Status: protocol.PickerLineStatusUp, Detail: "2",
@@ -299,14 +304,17 @@ func TestRenderDrawsStatusBadgesAndStoppedRows(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 60, Rows: 8}, Preview{})
 	require.Equal(t, 60, frame.Width)
 	require.Equal(t, 8, frame.Height)
-	for row, want := range map[int]int{0: 71, 1: 244} {
+	for row, want := range map[int]int{0: 167, 1: 167} {
 		text := []rune(strings.TrimRight(rowText(frame.Row(row)), " "))
-		require.Equal(t, '●', text[len(text)-1])
+		require.Equal(t, '●', text[len(text)-1], "row %d has a problem dot", row)
 		dot := frame.At(len(text)-1, row).Style
 		require.Equal(t, want, dot.Foreground, "row %d dot color", row)
 		require.False(t, dot.Inverse, "row %d dot is never inverted, even when selected", row)
 	}
-	require.True(t, frame.At(0, 0).Style.Inverse, "row 0 is the selected row")
+	require.True(t, frame.At(0, 1).Style.Inverse, "the broken session is the selected row")
+	for _, row := range []int{2, 3} {
+		require.NotContains(t, rowText(frame.Row(row)), "●", "healthy and stopped rows carry no dot")
+	}
 }
 
 func TestRenderShowsNoDaemonBadgeAndCreateHint(t *testing.T) {

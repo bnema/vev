@@ -130,14 +130,12 @@ func (p *Picker) SetOwnsInput(owns bool) {
 	p.controller.SetOwnsInput(owns)
 }
 
-// OfferNotice shows one bounded client-local notice on the picker.
-func (p *Picker) OfferNotice(id, message string) {
+// Notify shows one bounded client-local notice on the picker.
+func (p *Picker) Notify(n domain.Notification) {
 	if p != nil && p.controller != nil {
-		p.controller.offerNotice(id, message)
+		p.controller.Notify(n)
 	}
 }
-
-func (p *Picker) offerNotice(id, message string) { p.OfferNotice(id, message) }
 
 // invalidatePresentation forces the next frame to redraw the whole box.
 func (p *Picker) invalidatePresentation() {

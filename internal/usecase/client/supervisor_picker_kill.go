@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -69,7 +70,7 @@ func (s *Supervisor) startPickerKill(service ports.BrokerService, key string) {
 		return
 	}
 	if s.kills.running {
-		s.offerPickerNotice("picker-kill", "a kill is already in progress")
+		s.notifyPicker(pickerKillRefused("a kill is already in progress"))
 		return
 	}
 	target, err := resolver.ResolveKill(key)
@@ -78,7 +79,7 @@ func (s *Supervisor) startPickerKill(service ports.BrokerService, key string) {
 	}
 	operations, err := NewBrokerOperations(service, s.cfg.Clock)
 	if err != nil {
-		s.offerPickerNotice("picker-kill", "couldn't kill "+target.name+": broker unavailable")
+		s.notifyPicker(pickerKillRefused("couldn't kill " + target.name + ": broker unavailable"))
 		return
 	}
 	if s.kills.done == nil {
@@ -99,7 +100,7 @@ func (s *Supervisor) startPickerKill(service ports.BrokerService, key string) {
 // the local daemon, so the killed row leaves the catalogue promptly.
 func (s *Supervisor) finishPickerKill(service ports.BrokerService, outcome pickerKillOutcome) {
 	s.settlePickerKill()
-	s.offerPickerNotice("picker-kill", pickerKillNotice(outcome))
+	s.notifyPicker(pickerKillNotice(outcome))
 	if !supervisorNil(service) {
 		service.RequestReconcile("")
 	}
@@ -116,7 +117,7 @@ func (s *Supervisor) retirePickerKill() {
 	s.kills.wg.Wait()
 	outcome := <-s.kills.done
 	s.settlePickerKill()
-	s.offerPickerNotice("picker-kill", pickerKillNotice(outcome))
+	s.notifyPicker(pickerKillNotice(outcome))
 }
 
 func (s *Supervisor) settlePickerKill() {
@@ -127,8 +128,21 @@ func (s *Supervisor) settlePickerKill() {
 	s.kills.cancel = nil
 }
 
+// pickerKillRefused is a kill that was never sent.
+func pickerKillRefused(message string) domain.Notification {
+	return domain.Notification{Code: domain.NoticeSessionKill, Severity: domain.NoticeWarn, Message: message}
+}
+
 // pickerKillNotice renders one typed kill outcome.
-func pickerKillNotice(outcome pickerKillOutcome) string {
+func pickerKillNotice(outcome pickerKillOutcome) domain.Notification {
+	sev := domain.NoticeError
+	if outcome.err == nil && outcome.result.Outcome == protocol.KillSucceeded {
+		sev = domain.NoticeInfo
+	}
+	return domain.Notification{Code: domain.NoticeSessionKill, Severity: sev, Message: pickerKillText(outcome)}
+}
+
+func pickerKillText(outcome pickerKillOutcome) string {
 	name := outcome.target.name
 	verb, done := "kill", "killed session "
 	if outcome.target.stopped {

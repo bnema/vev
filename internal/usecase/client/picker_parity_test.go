@@ -506,6 +506,35 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 	}
 }
 
+// TestPickerControllerRecoveryReplacesVisibleFailure checks that a host's
+// recovery toast replaces its failure toast and leaves other hosts' toasts.
+func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
+	controller, clock := pickerTestController(t)
+	down := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
+	down.Availability = domain.RemoteAvailabilityUnreachable
+	down.FailureEpisode = 1
+	other := pickerTestRemoteObservation("user@mule", 2, 2, clock.Now())
+	other.Availability = domain.RemoteAvailabilityUnreachable
+	other.FailureEpisode = 1
+	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{down, other}})
+
+	up := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
+	up.FailureEpisode = 1
+	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{up, other}})
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	messages := make([]string, 0)
+	for _, toast := range controller.notices.Active(clock.Now()) {
+		messages = append(messages, toast.Message)
+	}
+	require.Len(t, messages, 2, "each host keeps one toast")
+	require.Contains(t, messages, "Remote host reconnected: user@arch")
+	for _, message := range messages {
+		require.NotContains(t, message, "Remote check failed: user@arch", "the recovery replaced the failure")
+	}
+}
+
 // TestPickerControllerHostFailureToastOncePerEpisode ports main's
 // TestRemoteFailureNoticeEmittedOncePerFailureEpisode and
 // TestRemoteFailureNoticesKeepEndpointsDistinct.
@@ -540,10 +569,22 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 
 	recovered := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(time.Second))
 	recovered.FailureEpisode = 2
-	require.Empty(t, apply(recovered))
-	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
+	toasts = apply(recovered)
+	require.Len(t, toasts, 1, "a recovery toasts once")
+	require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Message)
+	require.Empty(t, apply(recovered), "a steady healthy host is silent")
 
-	toasts = apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
+	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1)
+	unknown := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(2*time.Second))
+	unknown.Availability = domain.RemoteAvailabilityUnknown
+	unknown.FailureEpisode = 3
+	require.Empty(t, apply(unknown), "an in-between state is silent")
+	recovered = pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(3*time.Second))
+	recovered.FailureEpisode = 3
+	require.Len(t, apply(recovered), 1, "failing → unknown → reachable still reports recovery")
+	require.Len(t, apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
+
+	toasts = apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
 	require.Len(t, toasts, 1, "only the newly failing endpoint toasts")
 	require.Contains(t, toasts[0].Message, "user@mule")
 }

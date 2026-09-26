@@ -124,6 +124,15 @@ func pickerLineByLabel(lines []protocol.PickerLine, label string) (protocol.Pick
 	return protocol.PickerLine{}, false
 }
 
+func pickerSectionByLabel(lines []protocol.PickerLine, label string) (protocol.PickerLine, bool) {
+	for _, line := range lines {
+		if line.Kind == protocol.PickerLineSection && line.Label == label {
+			return line, true
+		}
+	}
+	return protocol.PickerLine{}, false
+}
+
 func pickerHostLine(lines []protocol.PickerLine) (protocol.PickerLine, bool) {
 	for _, line := range lines {
 		if line.Kind == protocol.PickerLineHost {
@@ -187,6 +196,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 		wantSessions []string
 		wantActions  map[string]protocol.PickerLineActions
 		wantStatus   map[string]protocol.PickerLineStatus
+		wantSection  map[string]protocol.PickerLineStatus
 		wantDim      map[string]bool
 		wantHostRow  bool
 		wantNoDaemon bool
@@ -244,7 +254,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"local"},
 			wantSessions: []string{"alpha"},
 			wantActions:  map[string]protocol.PickerLineActions{"alpha": navigateKill},
-			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusUp},
+			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusNone},
+			wantSection:  map[string]protocol.PickerLineStatus{"local": protocol.PickerLineStatusNone},
 			wantDim:      map[string]bool{"alpha": true},
 		},
 		{
@@ -259,7 +270,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{"remote-a"},
 			wantActions:  map[string]protocol.PickerLineActions{"remote-a": protocol.PickerCanNavigate},
-			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp},
+			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusNone},
+			wantSection:  map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusDown},
 			wantDim:      map[string]bool{"remote-a": true},
 		},
 		{
@@ -274,6 +286,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{},
 			wantStatus:   map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusDown},
+			wantSection:  map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusNone},
 			wantHostRow:  true,
 		},
 		{
@@ -288,7 +301,8 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{"remote-a"},
 			wantActions:  map[string]protocol.PickerLineActions{"remote-a": 0},
-			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusUp},
+			wantStatus:   map[string]protocol.PickerLineStatus{"remote-a": protocol.PickerLineStatusNone},
+			wantSection:  map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusVersion},
 			wantDim:      map[string]bool{"remote-a": true},
 		},
 		{
@@ -327,6 +341,11 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 				line, ok := pickerLineByLabel(lines, label)
 				require.True(t, ok, "row %q must be projected", label)
 				require.Equal(t, status, line.Status, "row %q badge", label)
+			}
+			for label, status := range tt.wantSection {
+				line, ok := pickerSectionByLabel(lines, label)
+				require.True(t, ok, "section %q must be projected", label)
+				require.Equal(t, status, line.Status, "section %q problem dot", label)
 			}
 			for label, dim := range tt.wantDim {
 				line, ok := pickerLineByLabel(lines, label)
@@ -820,11 +839,11 @@ func TestPickerCatalogueAvailabilityClassifiedBeforeCompatibility(t *testing.T) 
 			o.ProtocolVersion = protocol.Version + 1
 		}), wantStatus: protocol.PickerLineStatusDown, wantReason: domain.RemoteReasonHostUnreachable},
 		{name: "reachable mismatch is version", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.ProtocolVersion = protocol.Version + 1 }), fresh: true, wantStatus: protocol.PickerLineStatusVersion, wantReason: domain.RemoteReasonVersionMismatch},
-		{name: "reachable compatible fresh is up", observation: reachable(nil), fresh: true, wantStatus: protocol.PickerLineStatusUp, wantReason: ""},
+		{name: "reachable compatible fresh is up", observation: reachable(nil), fresh: true, wantStatus: protocol.PickerLineStatusNone, wantReason: ""},
 		{name: "reachable compatible stale is stale", observation: reachable(nil), fresh: false, wantStatus: protocol.PickerLineStatusStale, wantReason: domain.RemoteReasonCatalogStale},
 		{name: "reachable unobserved is stale and refreshing", observation: unobserved(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityReachable }), fresh: true, wantStatus: protocol.PickerLineStatusStale, wantReason: domain.RemoteReasonRefreshing},
 		{name: "legacy incompatible availability is version", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.Availability = domain.RemoteAvailabilityIncompatible }), fresh: true, wantStatus: protocol.PickerLineStatusVersion, wantReason: domain.RemoteReasonVersionMismatch},
-		{name: "reachable checking is up and refreshing", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.Checking = true }), fresh: true, wantStatus: protocol.PickerLineStatusUp, wantReason: domain.RemoteReasonRefreshing},
+		{name: "reachable checking is up and refreshing", observation: reachable(func(o *ports.BrokerDaemonObservation) { o.Checking = true }), fresh: true, wantStatus: protocol.PickerLineStatusNone, wantReason: domain.RemoteReasonRefreshing},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1048,4 +1067,43 @@ func TestPickerCatalogueOriginLabelNeverShowsRawEndpoint(t *testing.T) {
 
 	require.Equal(t, "local", pickerOriginLabel(pickerTestUnobservedObservation(time.Unix(1000, 0))))
 	require.Equal(t, "user@arch", pickerOriginLabel(pickerTestRemoteObservation("user@arch", 1, 1, time.Unix(1000, 0))))
+}
+
+func TestPickerHostHealthNotice(t *testing.T) {
+	now := time.Unix(1000, 0)
+	host := func(availability domain.RemoteAvailability, kind domain.RemoteFailureKind, mismatch bool) pickerHostHealth {
+		o := pickerTestRemoteObservation("user@arch", 1, 1, now)
+		o.Availability = availability
+		o.LastFailure = domain.RemoteFailure{Kind: kind}
+		return pickerHostHealth{key: "host-key", observation: o, health: domain.RemoteHealth{Availability: availability, VersionMismatch: mismatch}}
+	}
+	const failed = "Remote check failed: user@arch — "
+	tests := []struct {
+		name     string
+		host     pickerHostHealth
+		event    domain.RemoteHealthEvent
+		severity domain.NoticeSeverity
+		message  string
+	}{
+		{name: "recovered", host: host(domain.RemoteAvailabilityReachable, 0, false), event: domain.RemoteHealthRecovered, severity: domain.NoticeInfo, message: "Remote host reconnected: user@arch"},
+		{name: "timeout", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureTimeout, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH timed out"},
+		{name: "authentication", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureAuthentication, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH authentication failed; verify non-interactive SSH access"},
+		{name: "trust", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureTrust, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH host verification failed; verify the host key policy"},
+		{name: "invalid response kind", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureInvalidResponse, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote catalog response is invalid"},
+		{name: "auth failed availability fallback", host: host(domain.RemoteAvailabilityAuthFailed, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH authentication failed; verify non-interactive SSH access"},
+		{name: "invalid response availability fallback", host: host(domain.RemoteAvailabilityInvalidResponse, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote catalog response is invalid"},
+		{name: "unreachable default", host: host(domain.RemoteAvailabilityUnreachable, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH connection failed; verify SSH access"},
+		{name: "incompatible", host: host(domain.RemoteAvailabilityIncompatible, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote vev version is incompatible"},
+		{name: "version mismatch", host: host(domain.RemoteAvailabilityReachable, 0, true), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote vev version is incompatible"},
+		{name: "no daemon warns", host: host(domain.RemoteAvailabilityNoDaemon, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeWarn, message: failed + "no vev daemon is running"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := pickerHostHealthNotice(tt.host, tt.event)
+			require.Equal(t, domain.NoticeRemoteObservation, n.Code)
+			require.Equal(t, "host-key", n.Scope, "failure and recovery share the host subject")
+			require.Equal(t, tt.severity, n.Severity)
+			require.Equal(t, tt.message, n.Message)
+		})
+	}
 }

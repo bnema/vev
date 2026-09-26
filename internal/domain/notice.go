@@ -44,6 +44,7 @@ const (
 	NoticeUser
 	NoticeNavigationInventory
 	NoticeRemoteObservation
+	NoticeSessionKill
 
 	// noticeCodeLimit is an append-only declaration sentinel, not a persisted
 	// valid notice code. Keep it last when adding a NoticeCode.
@@ -74,6 +75,7 @@ var noticeSlugs = map[NoticeCode]string{
 	NoticeUser:                "user",
 	NoticeNavigationInventory: "navigation-inventory",
 	NoticeRemoteObservation:   "remote-observation",
+	NoticeSessionKill:         "session-kill",
 }
 
 func (c NoticeCode) String() string {
@@ -120,4 +122,14 @@ type Notification struct {
 	Time      time.Time
 	Count     int       // >1 when coalesced
 	SessionID SessionID // "" = daemon-global
+	// Scope narrows the subject below the session, such as one remote host.
+	// Notices with the same code, session, and scope replace each other.
+	Scope string `json:",omitempty"`
+}
+
+// Subject is the stable identity of what a notice is about. Client toasts
+// use it so a newer notice for the same subject replaces the visible one;
+// the daemon's notice coalescing keeps its own rule (sameToastNotice).
+func (n Notification) Subject() string {
+	return n.Code.String() + "/" + string(n.SessionID) + "/" + n.Scope
 }

@@ -15,8 +15,11 @@ const (
 
 // Toast describes a transient message rendered over a frame.
 type Toast struct {
-	ID            string
-	Message       string
+	ID      string
+	Message string
+	// Severity is carried for callers that style by it (client toast
+	// borders); CompositeToasts does not read it.
+	Severity      domain.NoticeSeverity
 	Anchor        domain.Anchor
 	Duration      time.Duration
 	DimBackground bool
