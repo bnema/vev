@@ -73,6 +73,9 @@ type attachedClient struct {
 	// atomic so any daemon path reads it without taking a lock; see
 	// terminalFocus.
 	focus atomic.Uint32
+	// clientPID is the local client process from Hello, 0 when remote. It is
+	// atomic because a resume replaces it while bar scripts read it.
+	clientPID atomic.Uint32
 	// prepareFailureFallback prevents a direct fallback paint from recursively
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
@@ -641,6 +644,7 @@ type attachClientOptions struct {
 	capabilitiesSet        bool
 	navigationCapabilities protocol.NavigationCapabilities
 	terminalFocus          domain.TerminalFocus
+	clientPID              uint32
 }
 
 func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domain.Size, opts attachClientOptions) (*attachedClient, error) {
@@ -723,6 +727,7 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		resumeToken:            resumeToken,
 	}
 	ac.setTerminalFocus(opts.terminalFocus)
+	ac.clientPID.Store(opts.clientPID)
 	output.attachment = ac
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)

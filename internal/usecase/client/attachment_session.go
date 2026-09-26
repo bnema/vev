@@ -74,6 +74,8 @@ type sessionAttachmentConfig struct {
 	TermEnv   string
 	Cwd       string
 	TrueColor bool
+	// PID is this client's process ID; Hello carries it on local attaches.
+	PID uint32
 	// Capabilities are the outer terminal's probed capabilities, declared in
 	// Hello.
 	Capabilities       terminalCapabilities
@@ -752,6 +754,9 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		Env:                 env,
 		EnvironmentPolicy:   environmentPolicy,
 		Remote:              !request.Local,
+	}
+	if request.Local {
+		hello.ClientPID = w.cfg.PID
 	}
 	switch request.Admission {
 	case ports.BrokerAdmissionExact:

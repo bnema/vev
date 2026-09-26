@@ -1507,6 +1507,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		maxOutputInFlight:      normalizeOutputWindow(h.MaxOutputInFlight),
 		navigationCapabilities: h.NavigationCapabilities,
 		terminalFocus:          h.TerminalFocus,
+		clientPID:              h.ClientPID,
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
 	}

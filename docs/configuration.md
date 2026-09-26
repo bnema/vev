@@ -283,7 +283,8 @@ Below 80 columns, popups (palette, picker, floating terminal, prompts) become fu
 
 - The command runs on the daemon host every `bar.interval` (minimum `1s`), with the same environment as your panes.
 - vev shows the first line of output, without colors. On failure it keeps the last good value.
-- Scripts receive `VEV_ANCHOR`, `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, and `VEV_COLS`.
+- Scripts receive `VEV_ANCHOR`, `VEV_SESSION`, `VEV_TAB`, `VEV_PANE`, `VEV_PANE_CWD`, `VEV_COLS`, and `VEV_CLIENT_PID`.
+- `VEV_CLIENT_PID` is the PID of a local attached client, so a script can find the terminal window and monitor showing the bar. With several clients attached, it is the one whose terminal has focus, else the first local one. It is empty when only remote clients (SSH or another machine) are attached, since their process lives elsewhere.
 - Failures are logged with the exit code and stderr. Exit 127 means "command not found".
 
-Release installs ship two example scripts: `vev-bar-top-right` and `vev-bar-bottom-right`. The second one runs `git status` on every refresh; raise the interval on large repositories.
+Release installs ship two example scripts: `vev-bar-top-right` and `vev-bar-bottom-right`. Under the NeferWL compositor, the first one also shows the client's monitor and workspaces (`DP-2 [x][ ][ ]`); set `bar.interval = 1s` to follow workspace changes. The second one runs `git status` on every refresh; raise the interval on large repositories.

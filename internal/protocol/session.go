@@ -16,7 +16,7 @@ import (
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 63
+const Version uint16 = 64
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -128,6 +128,9 @@ type Hello struct {
 	// TerminalFocus is the client's terminal window focus when it attaches,
 	// so the attachment's first paint already knows whether it may be seen.
 	TerminalFocus domain.TerminalFocus
+	// ClientPID is the local client process, exposed to bar scripts. It is 0
+	// for remote attaches, which run on another machine.
+	ClientPID uint32
 }
 
 func (h Hello) Geometry() domain.Geometry {
@@ -433,7 +436,7 @@ func ValidateHello(h Hello) error {
 	if err := ValidateGeometry(domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}); err != nil {
 		return fmt.Errorf("%w: geometry", ErrInvalidHello)
 	}
-	if !validEnvironmentPolicy(h.EnvironmentPolicy) || !h.TerminalFocus.Valid() {
+	if !validEnvironmentPolicy(h.EnvironmentPolicy) || !h.TerminalFocus.Valid() || (h.Remote && h.ClientPID != 0) {
 		return ErrInvalidHello
 	}
 	if err := ValidateNavigation(h.Intent, h.NavigationCapabilities); err != nil {

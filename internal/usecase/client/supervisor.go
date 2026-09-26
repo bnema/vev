@@ -385,6 +385,8 @@ type AttachmentEnvironment struct {
 	TermEnv   string
 	Cwd       string
 	TrueColor bool
+	// PID is this client's process ID, sent on local attaches only.
+	PID uint32
 	// ProbeTerminal enables the one bounded capability probe of a real outer
 	// terminal (Kitty graphics and keyboard). Virtual terminals leave it off.
 	ProbeTerminal bool

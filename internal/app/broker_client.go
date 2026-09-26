@@ -611,6 +611,7 @@ func terminalAttachmentEnvironment() client.AttachmentEnvironment {
 		TermEnv:   os.Getenv("TERM"),
 		Cwd:       currentWorkingDirectory(),
 		TrueColor: terminalcap.DetectTrueColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
+		PID:       uint32(os.Getpid()),
 	}
 }
 
