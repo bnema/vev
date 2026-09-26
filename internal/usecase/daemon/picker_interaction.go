@@ -201,6 +201,21 @@ func (d *Daemon) openPickerForAttachment(ac *attachedClient, effect *attachmentE
 	return nil
 }
 
+// movePickerPrecheck reports the move-picker refusals that are known before
+// the picker opens, so a deferred open still fails its command synchronously.
+// openPickerForAttachment re-checks both when it actually opens.
+func (d *Daemon) movePickerPrecheck(sess *session, ac *attachedClient, intent protocol.PickerIntent, source moveSourceLocator) error {
+	if sess == nil || !sess.capabilities().yieldsMoves() {
+		return errSessionCannotYieldMoves
+	}
+	_, groupedViews, current := d.pickerViewProjections(sess, ac)
+	filter := pickerSourceFilter{Session: source.Session.ID, Incarnation: source.Session.Incarnation, TabID: source.TabID}
+	if !pickerLineSetHasMove(pickerLineSetFor(groupedViews, intent, filter, current)) {
+		return errNoMoveDestination
+	}
+	return nil
+}
+
 // pickerMoveSourceKey names the captured move source in the offer. It is
 // opaque and never a route: only the daemon resolves it, and only for the
 // interaction that captured it.

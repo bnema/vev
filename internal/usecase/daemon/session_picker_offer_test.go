@@ -95,9 +95,9 @@ func TestPaletteClientPickerFollowsPaletteErasingFrame(t *testing.T) {
 			d.handleInput(source, ac, []byte("\r"))
 			require.False(t, ac.overlays.paletteActive())
 			if tt.saturated {
-				for _, frame := range drainAllFrames(sends) {
-					require.False(t, tt.opens(decodeServerMessage(t, frame)), "picker opened before the palette-erasing frame could be sent")
-				}
+				// The work runs asynchronously once released, so give a wrong
+				// early release time to reach the wire before asserting.
+				assertNoSentServerMessage(t, sends, 200*time.Millisecond, tt.opens, "picker opened before the palette-erasing frame could be sent")
 				d.handleAttachmentClientMessage(captureAttachmentCapability(source, ac, ac.transport()), protocol.Ack{Epoch: blocking.Epoch, State: blocking.New})
 			}
 
@@ -119,4 +119,36 @@ func isPickerOffer(message protocol.ServerMessage) bool {
 func isPickerSnapshot(message protocol.ServerMessage) bool {
 	_, ok := message.(protocol.PickerSnapshot)
 	return ok
+}
+
+// assertNoSentServerMessage fails if a matching message is sent within wait.
+func assertNoSentServerMessage(t *testing.T, sends <-chan wire.Envelope, wait time.Duration, match func(protocol.ServerMessage) bool, failure string) {
+	t.Helper()
+	deadline := time.After(wait)
+	for {
+		select {
+		case frame := <-sends:
+			require.False(t, match(decodeServerMessage(t, frame)), failure)
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// A scripted CommandRequest has no palette to erase: its refusals stay
+// synchronous command results instead of a false success.
+func TestCommandRequestMovePickerReportsRefusalSynchronously(t *testing.T) {
+	d, source, ac, _, _, releases, sends := setupMovePickerSessionsCore(t, stubClock{}, 0)
+	defer releaseAll(releases)
+	d.mu.Lock()
+	delete(d.sessions, "destination")
+	d.mu.Unlock()
+	token := captureAttachmentCapability(source, ac, ac.transport())
+	require.False(t, d.handleAttachmentClientMessage(token, protocol.CommandRequest{Version: protocol.Version, RequestID: 5, Attached: true, Slug: "move-pane"}))
+	result := awaitSentServerMessage(t, sends, "CommandResult", func(message protocol.ServerMessage) bool {
+		_, ok := message.(protocol.CommandResult)
+		return ok
+	}).(protocol.CommandResult)
+	require.NotEqual(t, protocol.CommandSucceeded, result.Outcome, "a refused move must not report success")
+	require.False(t, ac.overlays.pickerClientActive())
 }

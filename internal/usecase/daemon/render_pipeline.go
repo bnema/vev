@@ -570,8 +570,6 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		if len(data) == 0 {
 			prepared.commitNoSend()
 			if !prepared.sent() {
-				// Nothing differed: the client already shows this capture.
-				ac.afterFrame.emitted(state.frameCapture)
 				ac.sendMu.Unlock()
 				return true
 			}

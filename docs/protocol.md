@@ -176,8 +176,8 @@ answers with an authoritative full paint.
 
 The daemon sends a palette-opened picker only after a frame composed
 after the palette closed has been emitted, so the erased palette is on
-screen before output suppression starts. An ACK-blocked paint delays the
-picker; a detach or transport change drops it. The daemon side drops raw
+screen before output suppression starts. An ACK-blocked paint or a
+transient freeze delays the picker; a detach or transport change drops it. The daemon side drops raw
 key/mouse input for the attachment while a move picker is open; only
 typed picker messages act.
 
