@@ -631,15 +631,20 @@ func TestRouterKittyKeyboardEvents(t *testing.T) {
 		wantActions  []Action
 		wantForwards []string
 	}{
+		{name: "ctrl 1", reads: []string{"\x1b[49;5u"}, wantActions: []Action{ActionSwitchRecent1}},
+		{name: "ctrl 9", reads: []string{"\x1b[57;5u"}, wantActions: []Action{ActionSwitchRecent9}},
+		{name: "azerty ctrl 2 base key", reads: []string{"\x1b[233::50;5u"}, wantActions: []Action{ActionSwitchRecent2}},
+		{name: "ctrl 0 forwarded", reads: []string{"\x1b[48;5u"}, wantForwards: []string{"\x1b[48;5u"}},
+		{name: "ctrl shift 1 forwarded", reads: []string{"\x1b[49;6u"}, wantForwards: []string{"\x1b[49;6u"}},
+		{name: "ctrl 1 release ignored", reads: []string{"\x1b[49;5:3u"}, wantForwards: []string{"\x1b[49;5:3u"}},
 		{name: "alt j binding", reads: []string{"\x1b[106;3u"}, wantActions: []Action{ActionFocusPaneDown}},
 		{name: "alt space binding", reads: []string{"\x1b[32;3u"}, wantActions: []Action{ActionOpenPalette}},
 		{name: "alt azerty 1 via symbol", reads: []string{"\x1b[38::49;3u"}, wantActions: []Action{ActionSwitchTab1}},
 		{name: "alt unbound forwarded", reads: []string{"\x1b[122;3u"}, wantForwards: []string{"\x1b[122;3u"}},
-		{name: "ctrl 1 forwarded", reads: []string{"\x1b[49;5u"}, wantForwards: []string{"\x1b[49;5u"}},
-		{name: "text around", reads: []string{"ab\x1b[106;3ucd"}, wantActions: []Action{ActionFocusPaneDown}, wantForwards: []string{"ab", "cd"}},
-		{name: "split across reads", reads: []string{"\x1b[106", ";3u"}, wantActions: []Action{ActionFocusPaneDown}},
-		{name: "split after esc", reads: []string{"\x1b", "[106;3u"}, wantActions: []Action{ActionFocusPaneDown}},
 		{name: "ctrl a forwarded", reads: []string{"\x1b[97;5u"}, wantForwards: []string{"\x1b[97;5u"}},
+		{name: "text around", reads: []string{"ab\x1b[49;5ucd"}, wantActions: []Action{ActionSwitchRecent1}, wantForwards: []string{"ab", "cd"}},
+		{name: "split across reads", reads: []string{"\x1b[49", ";5u"}, wantActions: []Action{ActionSwitchRecent1}},
+		{name: "split after esc", reads: []string{"\x1b", "[49;5u"}, wantActions: []Action{ActionSwitchRecent1}},
 		{name: "unbound split after esc stays whole", reads: []string{"\x1b", "[97;5u"}, wantForwards: []string{"\x1b[97;5u"}},
 		{name: "unbound split mid sequence stays whole", reads: []string{"\x1b[97", ";5ux"}, wantForwards: []string{"\x1b[97;5u", "x"}},
 		{name: "alt shift h uses shifted key", reads: []string{"\x1b[104:72;4u"}, wantForwards: []string{"\x1b[104:72;4u"}},
@@ -695,7 +700,7 @@ func TestRouterKittyKeyboardAltShiftBindings(t *testing.T) {
 func TestRouterIgnoresKittyKeysUnlessEnabled(t *testing.T) {
 	h := &captureHandler{}
 	r := NewRouter(&fakeClock{}, h, nil)
-	r.Route([]byte("\x1b[106;3u"))
+	r.Route([]byte("\x1b[49;5u"))
 	require.Empty(t, h.actions)
-	require.Equal(t, [][]byte{[]byte("\x1b[106;3u")}, h.forwards)
+	require.Equal(t, [][]byte{[]byte("\x1b[49;5u")}, h.forwards)
 }

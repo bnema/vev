@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 	"github.com/bnema/vev/internal/usecase/layout"
@@ -546,6 +547,14 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: layout.Left})
 	case keys.ActionConsumeOrExpelPaneRight:
 		runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: layout.Right})
+	case keys.ActionSwitchRecent1, keys.ActionSwitchRecent2, keys.ActionSwitchRecent3,
+		keys.ActionSwitchRecent4, keys.ActionSwitchRecent5, keys.ActionSwitchRecent6,
+		keys.ActionSwitchRecent7, keys.ActionSwitchRecent8, keys.ActionSwitchRecent9:
+		rank := int(action-keys.ActionSwitchRecent1) + 1
+		exec := paletteExec{d: h.d, sess: sess, attachment: sess, ac: h.ac, routeSnapshot: h.ac.routeSnapshotCopy(), effect: effect}
+		if err := exec.JumpRecentSession(rank); err != nil && !errors.Is(err, errAttachmentTransition) && !errors.Is(err, command.ErrInvalidArguments) {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

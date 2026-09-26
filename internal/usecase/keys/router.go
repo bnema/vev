@@ -46,6 +46,19 @@ const (
 	ActionEqualizePanes
 	ActionConsumeOrExpelPaneLeft
 	ActionConsumeOrExpelPaneRight
+	// ActionSwitchRecent1..9 switch to the Nth previous session of the
+	// client's recent history. They are fixed to Ctrl+1..9, which only a
+	// terminal speaking the kitty keyboard protocol can send, and are not
+	// rebindable.
+	ActionSwitchRecent1
+	ActionSwitchRecent2
+	ActionSwitchRecent3
+	ActionSwitchRecent4
+	ActionSwitchRecent5
+	ActionSwitchRecent6
+	ActionSwitchRecent7
+	ActionSwitchRecent8
+	ActionSwitchRecent9
 )
 
 // Handler receives router outputs. Forward is called only for bytes that should
@@ -320,7 +333,7 @@ func topRowDigitIndex(key rune) (int, bool) {
 }
 
 // kittyKeyAction resolves a kitty keyboard protocol key event. Alt+key uses
-// the configured Alt bindings.
+// the configured Alt bindings; Ctrl+1..9 is the fixed recent-session switch.
 // The PC-101 base key lets layouts such as AZERTY match digit bindings.
 func kittyKeyAction(bindings *Bindings, ev kittykey.Event) (Action, bool) {
 	if ev.Release {
@@ -342,6 +355,10 @@ func kittyKeyAction(bindings *Bindings, ev kittykey.Event) (Action, bool) {
 			shifted = unicode.ToUpper(ev.Code)
 		}
 		return bindings.actionForAltRune(shifted)
+	case kittykey.ModCtrl:
+		if digit, ok := ev.Digit(); ok {
+			return ActionSwitchRecent1 + Action(digit-1), true
+		}
 	}
 	return 0, false
 }

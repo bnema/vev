@@ -40,7 +40,7 @@ tabs.terminal-title = on
 # Remove a numbered (ephemeral) session when its last client exits.
 ephemeral.close-on-exit = on
 
-# Use the kitty keyboard protocol when the terminal supports it.
+# Use the kitty keyboard protocol when the terminal supports it (enables Ctrl+1..9).
 keyboard.kitty-protocol = on
 
 # Rebindable actions. Leave a line out to keep its built-in binding.
@@ -216,6 +216,7 @@ Valid keys: `alt+<char>`, `alt+space`, `alt+left/right/up/down`, `alt+1` to `alt
 
 - Setting an action replaces all its default keys. For example, setting `focus-pane-left` removes Alt+Left too.
 - Tab switching works with AZERTY and other layouts without extra config.
+- Ctrl+1 to Ctrl+9 (recent sessions) are fixed and not rebindable. Turn them off with `keyboard.kitty-protocol = off`.
 - `alt+[` is not supported: terminals use it for escape sequences.
 - Cmd/Super is not supported. Map it in your terminal to `ESC` + a character, then bind `alt+<char>` in vev.
 
