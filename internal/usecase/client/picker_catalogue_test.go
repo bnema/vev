@@ -255,7 +255,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSessions: []string{"alpha"},
 			wantActions:  map[string]protocol.PickerLineActions{"alpha": navigateKill},
 			wantStatus:   map[string]protocol.PickerLineStatus{"alpha": protocol.PickerLineStatusNone},
-			wantSection:  map[string]protocol.PickerLineStatus{"local": protocol.PickerLineStatusStale},
+			wantSection:  map[string]protocol.PickerLineStatus{"local": protocol.PickerLineStatusNone},
 			wantDim:      map[string]bool{"alpha": true},
 		},
 		{
@@ -286,6 +286,7 @@ func TestPickerCatalogueProjectionCases(t *testing.T) {
 			wantSections: []string{"user@arch"},
 			wantSessions: []string{},
 			wantStatus:   map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusDown},
+			wantSection:  map[string]protocol.PickerLineStatus{"user@arch": protocol.PickerLineStatusNone},
 			wantHostRow:  true,
 		},
 		{

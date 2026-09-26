@@ -544,9 +544,18 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	require.Len(t, toasts, 1, "a recovery toasts once")
 	require.Equal(t, "Remote host reconnected: user@arch", toasts[0].Message)
 	require.Empty(t, apply(recovered), "a steady healthy host is silent")
-	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
 
-	toasts = apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
+	require.Len(t, apply(failing("user@arch", 1, 3, domain.RemoteFailureTimeout)), 1)
+	unknown := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(2*time.Second))
+	unknown.Availability = domain.RemoteAvailabilityUnknown
+	unknown.FailureEpisode = 3
+	require.Empty(t, apply(unknown), "an in-between state is silent")
+	recovered = pickerTestRemoteObservation("user@arch", 1, 1, clock.Now().Add(3*time.Second))
+	recovered.FailureEpisode = 3
+	require.Len(t, apply(recovered), 1, "failing → unknown → reachable still reports recovery")
+	require.Len(t, apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout)), 1, "an outage after recovery toasts again")
+
+	toasts = apply(failing("user@arch", 1, 4, domain.RemoteFailureTimeout), failing("user@mule", 2, 1, domain.RemoteFailureAuthentication))
 	require.Len(t, toasts, 1, "only the newly failing endpoint toasts")
 	require.Contains(t, toasts[0].Message, "user@mule")
 }

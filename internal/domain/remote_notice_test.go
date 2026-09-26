@@ -25,6 +25,9 @@ func TestRemoteHealthNotice(t *testing.T) {
 		{name: "recovery notifies", prev: down(1, RemoteFailureTimeout), seen: true, cur: healthy, want: true, severity: NoticeInfo, message: "Remote host reconnected: host-a"},
 		{name: "unknown after failure is silent", prev: down(1, RemoteFailureTimeout), seen: true, cur: RemoteHealth{Key: "h", Origin: "host-a", Availability: RemoteAvailabilityUnknown}},
 		{name: "version mismatch notifies", cur: RemoteHealth{Key: "h", Origin: "host-a", Availability: RemoteAvailabilityReachable, VersionMismatch: true}, want: true, severity: NoticeError, message: "Remote check failed: host-a — remote vev version is incompatible"},
+		{name: "daemon started after no daemon is silent", prev: RemoteHealth{Key: "h", Origin: "host-a", Availability: RemoteAvailabilityNoDaemon}, seen: true, cur: healthy},
+		{name: "version fixed notifies recovery", prev: RemoteHealth{Key: "h", Origin: "host-a", Availability: RemoteAvailabilityReachable, VersionMismatch: true}, seen: true, cur: healthy, want: true, severity: NoticeInfo, message: "Remote host reconnected: host-a"},
+		{name: "incompatible notifies", cur: RemoteHealth{Key: "h", Origin: "host-a", Availability: RemoteAvailabilityIncompatible}, want: true, severity: NoticeError, message: "Remote check failed: host-a — remote vev version is incompatible"},
 		{name: "no daemon warns", cur: RemoteHealth{Key: "h", Origin: "host-a", Availability: RemoteAvailabilityNoDaemon}, want: true, severity: NoticeWarn, message: "Remote check failed: host-a — no vev daemon is running"},
 	}
 	for _, tt := range tests {

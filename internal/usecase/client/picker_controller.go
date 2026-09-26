@@ -726,11 +726,16 @@ func (p *pickerController) rebuildLocked() {
 func (p *pickerController) offerDiagnosticsLocked() {
 	current := make(map[string]domain.RemoteHealth)
 	for _, health := range p.catalogue.remoteHealth() {
-		current[health.Key] = health
 		prev, seen := p.hostHealth[health.Key]
 		if n, ok := domain.RemoteHealthNotice(prev, seen, health); ok {
 			p.notifyLocked(n)
 		}
+		// An in-between state (unknown, checking) keeps the last settled one,
+		// so failing → unknown → reachable still reports the recovery.
+		if seen && !health.Failing() && health.Availability != domain.RemoteAvailabilityReachable {
+			health = prev
+		}
+		current[health.Key] = health
 	}
 	p.hostHealth = current
 }

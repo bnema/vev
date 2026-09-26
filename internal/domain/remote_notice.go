@@ -50,7 +50,8 @@ func RemoteHealthNotice(prev RemoteHealth, seen bool, cur RemoteHealth) (Notific
 		}
 		n.Message = "Remote check failed: " + cur.Origin + " — " + remoteFailureText(cur)
 		return n, true
-	case seen && prev.Failing() && cur.healthy():
+	case seen && prev.Failing() && prev.Availability != RemoteAvailabilityNoDaemon && cur.healthy():
+		// A host whose daemon just started was never disconnected.
 		n.Severity = NoticeInfo
 		n.Message = "Remote host reconnected: " + cur.Origin
 		return n, true

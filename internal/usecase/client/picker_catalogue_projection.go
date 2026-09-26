@@ -102,7 +102,8 @@ func (c *pickerCatalogue) projectLocked() {
 				localStopped = append(localStopped, block)
 			}
 		}
-		if len(observation.Sessions) == 0 && observation.Availability != domain.RemoteAvailabilityReachable {
+		hasHostRow := len(observation.Sessions) == 0 && observation.Availability != domain.RemoteAvailabilityReachable
+		if hasHostRow {
 			hostRef := pickerSelectionRef{
 				kind: pickerSelectionCreateEphemeral, epoch: c.snapshot.Epoch,
 				local: observation.Local, endpoint: observation.Endpoint, registration: observation.Registration,
@@ -126,15 +127,22 @@ func (c *pickerCatalogue) projectLocked() {
 				}(),
 			}, ref: hostRef, hasRef: observation.Availability == domain.RemoteAvailabilityNoDaemon})
 		}
+		// The section carries the host's problem dot unless a host row below
+		// it already does. The local host never shows a transient stale dot:
+		// no toast would explain it.
+		sectionStatus := pickerHostProblem(observation, fresh)
+		if hasHostRow || observation.Local && sectionStatus == protocol.PickerLineStatusStale {
+			sectionStatus = protocol.PickerLineStatusNone
+		}
 		if observation.Local {
 			hasLocal = true
 			localOrigin = origin
-			localStatus = pickerHostProblem(observation, fresh)
+			localStatus = sectionStatus
 			localHost = hostRows
 			continue
 		}
 		if len(hostRows) != 0 {
-			remotes = append(remotes, remoteGroup{origin: origin, status: pickerHostProblem(observation, fresh), rows: hostRows})
+			remotes = append(remotes, remoteGroup{origin: origin, status: sectionStatus, rows: hostRows})
 		}
 	}
 	sortPickerBlocks(localLive)
