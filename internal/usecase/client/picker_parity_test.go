@@ -525,7 +525,7 @@ func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
 	messages := make([]string, 0)
-	for _, toast := range controller.notices.Active(clock.Now()) {
+	for _, toast := range controller.notices.Visible(clock.Now()) {
 		messages = append(messages, toast.Message)
 	}
 	require.Len(t, messages, 2, "each host keeps one toast")
@@ -557,7 +557,7 @@ func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 		controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: revision, Daemons: daemons})
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
-		return controller.notices.Active(clock.Now())
+		return controller.notices.Visible(clock.Now())
 	}
 
 	toasts := apply(failing("user@arch", 1, 1, domain.RemoteFailureTrust))
@@ -619,7 +619,7 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 			}
 			require.True(t, pickerCatalogueErrorIs(err, pickerCatalogueUnavailable))
 			controller.mu.Lock()
-			active := controller.notices.Active(clock.Now())
+			active := controller.notices.Visible(clock.Now())
 			controller.mu.Unlock()
 			require.Len(t, active, 1)
 			require.Equal(t, tt.wantNotice, active[0].Message)

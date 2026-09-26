@@ -908,8 +908,12 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 		}
 		ops = s.cfg.Picker.OpsReady()
 	}
+	notices := noticeWake{clock: s.cfg.Clock}
+	defer notices.stop()
 	for {
 		select {
+		case <-notices.arm(s.cfg.Picker):
+			s.renderCurrent()
 		case <-service.Done():
 			return readyOutcome{lossErr: service.Err()}
 		case <-changed:
@@ -1015,6 +1019,45 @@ func (s *Supervisor) notifyPicker(n domain.Notification) {
 	if host, ok := s.cfg.Picker.(pickerPresentationHost); ok {
 		host.Notify(n)
 	}
+}
+
+// noticeDeadliner reports when the picker's notice stack next changes.
+type noticeDeadliner interface {
+	noticeDeadline() (time.Time, bool)
+}
+
+// noticeWake wakes the ready loop when a picker notice expires, so the stack
+// advances and freed cells are blanked without waiting for other input.
+type noticeWake struct {
+	clock ports.Clock
+	timer ports.Timer
+	due   time.Time
+}
+
+// arm returns a channel that fires at the next notice deadline, or nil when
+// no notice will change on its own.
+func (w *noticeWake) arm(picker pickerHost) <-chan time.Time {
+	host, ok := picker.(noticeDeadliner)
+	if !ok || supervisorNil(w.clock) {
+		return nil
+	}
+	due, ok := host.noticeDeadline()
+	if !ok {
+		w.stop()
+		return nil
+	}
+	if w.timer == nil || !due.Equal(w.due) {
+		w.stop()
+		w.timer = w.clock.NewTimer(max(due.Sub(w.clock.Now()), 0))
+		w.due = due
+	}
+	return w.timer.C()
+}
+
+func (w *noticeWake) stop() {
+	stopSupervisorTimer(w.timer)
+	w.timer = nil
+	w.due = time.Time{}
 }
 
 // pickerExitHint tells an unattached user how to leave the picker.

@@ -138,6 +138,13 @@ func (p *Picker) Notify(n domain.Notification) {
 	}
 }
 
+func (p *Picker) noticeDeadline() (time.Time, bool) {
+	if p == nil || p.controller == nil {
+		return time.Time{}, false
+	}
+	return p.controller.noticeDeadline()
+}
+
 // invalidatePresentation forces the next frame to redraw the whole box.
 func (p *Picker) invalidatePresentation() {
 	if p != nil && p.controller != nil {

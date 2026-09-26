@@ -83,6 +83,16 @@ func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 	return lines
 }
 
+// blankToastLines erases a toast box. The session under it belongs to the
+// daemon, so blank cells are the best the client can restore.
+func blankToastLines(bounds domain.Rect) []string {
+	lines := make([]string, max(0, bounds.Height))
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", max(0, bounds.Width))
+	}
+	return lines
+}
+
 func writeClientToast(out io.Writer, bounds domain.Rect, lines []string) error {
 	if _, err := io.WriteString(out, "\x1b[s"); err != nil {
 		return err

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -579,7 +580,7 @@ func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
 	require.Equal(t, ports.BrokerRevision(1), controller.Catalogue().Revision())
 
 	controller.mu.Lock()
-	active := controller.notices.Active(clock.Now())
+	active := controller.notices.Visible(clock.Now())
 	controller.mu.Unlock()
 	require.Len(t, active, 1)
 	require.Equal(t, "broker catalogue update rejected", active[0].Message)
@@ -596,7 +597,7 @@ func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testi
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}})
 
 	controller.mu.Lock()
-	active := controller.notices.Active(clock.Now())
+	active := controller.notices.Visible(clock.Now())
 	controller.mu.Unlock()
 	require.Empty(t, active)
 	lines := controller.Catalogue().Lines()
@@ -606,26 +607,51 @@ func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testi
 	require.NotEqual(t, domain.RemoteReasonVersionMismatch, host.StatusDetail)
 }
 
-// TestPickerControllerRenderNoticeSelectsNewest pins that the notice shown is
-// the newest by ShownAt (tie-broken by ID), independent of the toast manager's
-// map-iteration order.
-func TestPickerControllerRenderNoticeSelectsNewest(t *testing.T) {
-	controller, _ := pickerTestController(t)
+// TestPickerControllerRenderNoticeStacksQueuesAndBlanks pins the picker notice
+// stack: the newest notice sits at the top-right corner, a burst beyond the
+// visible slots waits for a free slot, and a box that goes away is blanked.
+func TestPickerControllerRenderNoticeStacksQueuesAndBlanks(t *testing.T) {
 	size := domain.Size{Cols: 80, Rows: 24}
-
-	controller.mu.Lock()
-	controller.notices.Show(time.Unix(20, 0), ui.Toast{ID: "zzz-older", Message: "older-message"})
-	controller.notices.Show(time.Unix(30, 0), ui.Toast{ID: "aaa-newer", Message: "newer-message"})
-	controller.mu.Unlock()
-	require.Contains(t, string(controller.RenderNotice(size)), "newer-message")
-
-	// Equal ShownAt: the lexicographically greatest ID wins, deterministically.
-	controller.mu.Lock()
-	controller.notices.Clear()
-	controller.notices.Show(time.Unix(40, 0), ui.Toast{ID: "aaa", Message: "from-aaa"})
-	controller.notices.Show(time.Unix(40, 0), ui.Toast{ID: "bbb", Message: "from-bbb"})
-	controller.mu.Unlock()
-	for range 10 {
-		require.Contains(t, string(controller.RenderNotice(size)), "from-bbb")
+	notice := func(msg string) domain.Notification {
+		return domain.Notification{Code: domain.NoticeSessionKill, Severity: domain.NoticeInfo, Message: msg, Scope: msg}
+	}
+	tests := []struct {
+		name        string
+		notices     []string
+		advance     time.Duration
+		wantShown   []string
+		wantHidden  []string
+		wantBlanked bool
+	}{
+		{name: "distinct subjects stack", notices: []string{"killed session 1", "killed session 2"}, wantShown: []string{"killed session 1", "killed session 2"}},
+		{name: "burst waits for a slot", notices: []string{"killed session 1", "killed session 2", "killed session 3", "killed session 4"}, wantShown: []string{"killed session 1", "killed session 2", "killed session 3"}, wantHidden: []string{"killed session 4"}},
+		{name: "expiry promotes the next notice", notices: []string{"killed session 1", "killed session 2", "killed session 3", "killed session 4"}, advance: pickerNoticeLifetime, wantShown: []string{"killed session 4"}, wantBlanked: true},
+		{name: "expiry of the last notice blanks it", notices: []string{"killed session 1"}, advance: pickerNoticeLifetime, wantHidden: []string{"killed session 1"}, wantBlanked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, clock := pickerTestController(t)
+			for _, msg := range tt.notices {
+				controller.Notify(notice(msg))
+			}
+			first := string(controller.RenderNotice(size))
+			if tt.advance > 0 {
+				clock.mu.Lock()
+				clock.now = clock.now.Add(tt.advance)
+				clock.mu.Unlock()
+			}
+			got := first
+			if tt.advance > 0 {
+				got = string(controller.RenderNotice(size))
+			}
+			for _, msg := range tt.wantShown {
+				require.Contains(t, got, msg)
+			}
+			for _, msg := range tt.wantHidden {
+				require.NotContains(t, got, msg)
+			}
+			blank := strings.Repeat(" ", ui.ToastBounds(size, ui.Toast{Message: "killed session 1", Anchor: domain.AnchorTopRight}).Width)
+			require.Equal(t, tt.wantBlanked, tt.advance > 0 && strings.Contains(got, blank))
+		})
 	}
 }
