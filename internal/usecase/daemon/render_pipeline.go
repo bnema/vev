@@ -63,6 +63,21 @@ type composedRenderFrame struct {
 // scratch cache. It returns a new cache without mutating committed.
 const inactivePaneForegroundDimming = 55
 
+// clearOutsideLayout blanks the content cells that the shared layout does not
+// cover. A window larger than the shared session geometry reuses its previous
+// frame, so without this the cells of a wider or taller earlier layout stay on
+// screen.
+func clearOutsideLayout(frame renderer.Frame, content, area domain.Rect) {
+	blank := renderer.BlankCell()
+	for y := content.Y; y < content.Y+content.Height; y++ {
+		start := area.Width
+		if y-content.Y >= area.Height {
+			start = 0
+		}
+		frame.FillRow(y, content.X+start, content.X+content.Width, blank)
+	}
+}
+
 func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...composeCacheInput) composedRenderFrame {
 	scratch := composeCacheInput{}
 	if len(scratchIn) > 0 {
@@ -123,6 +138,9 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 
 	full := state.reset || !in.valid || in.frame.Width != width || in.frame.Height != frameHeight || in.layoutFingerprint != state.layout.fingerprint || in.theme != state.theme || in.styleGeneration != state.styleGeneration || in.floatingVisible != state.floating.visible
+	if full {
+		clearOutsideLayout(frame, content, state.layout.area)
+	}
 	titles := scratch.titleGenerations
 	if titles == nil {
 		titles = make(map[layout.PaneID]uint64, len(state.panes))

@@ -80,3 +80,40 @@ func TestComposeFrameDividerFollowsWeights(t *testing.T) {
 		})
 	}
 }
+
+// TestComposeFrameClearsCellsOutsideSharedLayout pins that a window larger
+// than the shared session layout blanks the cells the layout no longer covers
+// instead of keeping a wider earlier layout's cells on screen.
+func TestComposeFrameClearsCellsOutsideSharedLayout(t *testing.T) {
+	tests := []struct {
+		name       string
+		wide, next domain.Rect
+		x, y       int // stale content cell outside next, frame coordinates
+	}{
+		{name: "narrower layout clears the right side", wide: domain.Rect{Width: 6, Height: 2}, next: domain.Rect{Width: 4, Height: 2}, x: 5, y: 1},
+		{name: "shorter layout clears the bottom rows", wide: domain.Rect{Width: 6, Height: 2}, next: domain.Rect{Width: 6, Height: 1}, x: 0, y: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stateFor := func(area domain.Rect, fingerprint string) capturedRenderState {
+				pane := renderer.NewFrame(area.Width, area.Height)
+				for y := range area.Height {
+					for x := range area.Width {
+						pane.Set(x, y, renderer.Cell{Rune: 'X', Style: renderer.DefaultStyle()})
+					}
+				}
+				placement := layout.Placement{ID: "p", Content: area}
+				return capturedRenderState{
+					window: domain.Size{Cols: 6, Rows: 2 + tabChromeRows},
+					layout: capturedTabLayout{area: area, focus: "p", valid: true, fingerprint: fingerprint, placements: []layout.Placement{placement}},
+					panes:  []capturedPaneRenderState{{id: "p", frame: pane, focused: true, placement: placement, damage: []renderer.Damage{renderer.FullRedraw()}}},
+				}
+			}
+			committed := composeFrame(stateFor(tt.wide, "wide"), composeCacheInput{})
+			require.Equal(t, 'X', committed.frame.At(tt.x, tt.y).Rune)
+
+			out := composeFrame(stateFor(tt.next, "next"), committed.cache, composeCacheInput{})
+			require.Equal(t, ' ', out.frame.At(tt.x, tt.y).Rune, "cell outside the shared layout must be blanked")
+		})
+	}
+}
