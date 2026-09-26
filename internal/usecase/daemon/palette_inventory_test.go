@@ -229,11 +229,10 @@ func hasInventoryNotice(t *testing.T, ac *attachedClient) bool {
 
 func countInventoryNotices(t *testing.T, ac *attachedClient) int {
 	t.Helper()
-	ac.overlays.noticeMu.Lock()
-	defer ac.overlays.noticeMu.Unlock()
+	toasts, _ := visibleToasts(ac)
 	count := 0
-	for _, toast := range ac.overlays.noticeToasts {
-		if toast.n.Code == domain.NoticeNavigationInventory {
+	for _, toast := range toasts {
+		if toast.Code == domain.NoticeNavigationInventory {
 			count++
 		}
 	}

@@ -99,7 +99,7 @@ type pickerController struct {
 	loop     *pickerLoop
 	consumer pickerConsumer
 	renderer *pickerRenderer
-	notices  *ui.ToastQueue
+	notices  *ui.ToastQueue[ui.Toast]
 	// noticeBounds are the toast boxes drawn last. The client cannot restore
 	// the session under them, so boxes that go away are blanked.
 	noticeBounds []domain.Rect
@@ -136,7 +136,7 @@ func newPickerController(clock ports.Clock, freshness time.Duration, trueColor b
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
 		renderer:  newPickerRenderer(pickerColorProfile(trueColor)),
 		sort:      defaultPickerSort(),
-		notices:   ui.NewToastQueue(ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible}),
+		notices:   ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible}),
 		ownsInput: true,
 		opsReady:  make(chan struct{}, 1),
 	}
@@ -496,6 +496,10 @@ func (p *pickerController) RenderNotice(size domain.Size) []byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	toasts, blanks := p.noticeStackLocked(size)
+	if len(blanks) != 0 {
+		// A blank may cover picker box cells drawn by the previous Render.
+		p.renderer.invalidate()
+	}
 	buffer := bytes.NewBuffer(blanks)
 	for i, rect := range p.noticeBounds {
 		_ = writeClientToast(buffer, rect, clientToastLines(rect, toasts[i].Message, toastBorderSGR(toasts[i].Severity)))
@@ -513,17 +517,32 @@ func (p *pickerController) noticeStackLocked(size domain.Size) ([]ui.Toast, []by
 	active := p.notices.Visible(p.clock.Now())
 	toasts := make([]ui.Toast, len(active))
 	for i, t := range active {
-		toasts[i] = t.Toast
+		toasts[i] = t.Value
 	}
 	bounds := ui.ToastStackBounds(size, toasts)
 	var buffer bytes.Buffer
 	for _, old := range p.noticeBounds {
-		if !slices.Contains(bounds, old) {
-			_ = writeClientToast(&buffer, old, blankToastLines(old))
+		if slices.Contains(bounds, old) {
+			continue
+		}
+		// After a shrink the old box may overhang the screen; writing past the
+		// edge would wrap onto unrelated cells.
+		if gone := clipRect(old, size); gone.Width > 0 && gone.Height > 0 {
+			_ = writeClientToast(&buffer, gone, blankToastLines(gone))
 		}
 	}
 	p.noticeBounds = bounds
 	return toasts[:len(bounds)], buffer.Bytes()
+}
+
+// clipRect is the part of r inside a size-sized screen.
+func clipRect(r domain.Rect, size domain.Size) domain.Rect {
+	x0, y0 := max(r.X, 0), max(r.Y, 0)
+	x1, y1 := min(r.X+r.Width, size.Cols), min(r.Y+r.Height, size.Rows)
+	if x1 <= x0 || y1 <= y0 {
+		return domain.Rect{}
+	}
+	return domain.Rect{X: x0, Y: y0, Width: x1 - x0, Height: y1 - y0}
 }
 
 // noticeDeadline is when the notice stack next changes on its own.
@@ -787,7 +806,7 @@ func (p *pickerController) notifyLocked(n domain.Notification) {
 	if n.Message == "" {
 		return
 	}
-	p.notices.Push(p.clock.Now(), ui.Toast{ID: n.Subject(), Message: n.Message, Severity: n.Severity, Anchor: domain.AnchorTopRight, Duration: pickerNoticeLifetime})
+	p.notices.Push(p.clock.Now(), ui.QueuedToast[ui.Toast]{ID: n.Subject(), Duration: pickerNoticeLifetime, Value: ui.Toast{Message: n.Message, Severity: n.Severity, Anchor: domain.AnchorTopRight}})
 }
 
 // mergePickerOps accumulates two presentation decisions from one read. Close

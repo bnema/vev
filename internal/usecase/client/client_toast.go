@@ -45,10 +45,10 @@ func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 		return nil
 	}
 	frame := renderer.NewFrame(bounds.Width, bounds.Height)
-	ui.CompositeToasts(frame, []ui.ActiveToast{{Toast: ui.Toast{Message: message, Anchor: domain.AnchorCenter}}}, ui.ToastStyles{
+	ui.DrawToast(frame, ui.Toast{Message: message, Anchor: domain.AnchorCenter}, ui.ToastStyles{
 		Text: renderer.DefaultStyle(),
 		Box:  renderer.DefaultStyle(),
-	}, nil)
+	})
 	lines := make([]string, bounds.Height)
 	for y := range bounds.Height {
 		var b strings.Builder

@@ -180,9 +180,9 @@ func (p *Picker) Render(size domain.Size) []byte {
 	return p.controller.Render(size)
 }
 
-// RenderNotice returns the newest bounded notice frame for size, or nil when no
-// notice is live. A composition renders it over or beside the picker frame only
-// while the supervisor reports PresentPicker.
+// RenderNotice returns the notice stack for size, including blanks for boxes
+// that went away, or nil when nothing changes on screen. A composition paints
+// it after the picker frame only while the supervisor reports PresentPicker.
 func (p *Picker) RenderNotice(size domain.Size) []byte {
 	if p == nil || p.controller == nil {
 		return nil

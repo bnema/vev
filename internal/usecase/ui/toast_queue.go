@@ -11,95 +11,102 @@ type ToastQueueOptions struct {
 	// MaxVisible is how many toasts show at once (default 3).
 	MaxVisible int
 	// MaxPending is how many toasts wait for a free slot (default 32). When
-	// full, the oldest waiting toast moves straight to history.
+	// full, the oldest waiting toast is dropped.
 	MaxPending int
-	// MaxHistory is how many dismissed or expired toasts are kept (default 50).
-	MaxHistory int
 }
 
 const (
 	defaultQueueVisible = 3
 	defaultQueuePending = 32
-	defaultQueueHistory = 50
 )
+
+// QueuedToast is one entry of a ToastQueue. Value is the caller's payload.
+type QueuedToast[T any] struct {
+	// ID is the coalescing identity: pushing an ID that is visible or waiting
+	// replaces that entry. An empty ID never matches.
+	ID    string
+	Value T
+	// Duration is how long the entry stays visible; zero never expires.
+	Duration time.Duration
+	// ShownAt is when the entry became visible. Push sets it.
+	ShownAt time.Time
+}
 
 // ToastQueue shows a bounded number of toasts and queues the rest, so a burst
 // is displayed one slot at a time instead of being dropped or overdrawn.
-// Toasts leaving the screen are kept in a bounded history. A toast pushed with
-// the ID of a visible or waiting toast replaces it in place. Time comes only
-// from the caller, so the queue is deterministic and needs no locking of its
-// own; callers serialize access.
-type ToastQueue struct {
+// Time comes only
+// from the caller, so the queue is deterministic; callers serialize access.
+type ToastQueue[T any] struct {
 	opts    ToastQueueOptions
-	visible []ActiveToast // newest first
-	pending []Toast       // oldest first
-	history []ActiveToast // oldest first
+	visible []QueuedToast[T] // newest first
+	pending []QueuedToast[T] // oldest first
 }
 
 // NewToastQueue returns an empty queue with opts, defaults filled in.
-func NewToastQueue(opts ToastQueueOptions) *ToastQueue {
+func NewToastQueue[T any](opts ToastQueueOptions) *ToastQueue[T] {
 	if opts.MaxVisible <= 0 {
 		opts.MaxVisible = defaultQueueVisible
 	}
 	if opts.MaxPending <= 0 {
 		opts.MaxPending = defaultQueuePending
 	}
-	if opts.MaxHistory <= 0 {
-		opts.MaxHistory = defaultQueueHistory
-	}
-	return &ToastQueue{opts: opts}
+	return &ToastQueue[T]{opts: opts}
 }
 
-// Push shows toast at now when a slot is free, otherwise queues it.
-func (q *ToastQueue) Push(now time.Time, toast Toast) {
+// Push shows toast at now when a slot is free, otherwise queues it. A visible
+// entry with the same ID is replaced, moved to the front, and restarts its
+// lifetime; a waiting one is replaced where it waits.
+func (q *ToastQueue[T]) Push(now time.Time, toast QueuedToast[T]) {
 	q.expire(now)
-	if toast.ID != "" {
-		for i := range q.visible {
-			if q.visible[i].ID == toast.ID {
-				q.visible = append(q.visible[:i], q.visible[i+1:]...)
-				q.visible = append([]ActiveToast{{Toast: toast, ShownAt: now}}, q.visible...)
-				return
-			}
-		}
-		for i := range q.pending {
-			if q.pending[i].ID == toast.ID {
-				q.pending[i] = toast
-				return
-			}
-		}
+	toast.ShownAt = now
+	if i := q.indexVisible(toast.ID); i >= 0 {
+		q.visible = append(q.visible[:i], q.visible[i+1:]...)
+		q.visible = append([]QueuedToast[T]{toast}, q.visible...)
+		return
+	}
+	if i := q.indexPending(toast.ID); i >= 0 {
+		q.pending[i] = toast
+		return
 	}
 	if len(q.visible) < q.opts.MaxVisible {
-		q.visible = append([]ActiveToast{{Toast: toast, ShownAt: now}}, q.visible...)
+		q.visible = append([]QueuedToast[T]{toast}, q.visible...)
 		return
 	}
 	if len(q.pending) >= q.opts.MaxPending {
-		q.remember(ActiveToast{Toast: q.pending[0]})
 		q.pending = q.pending[1:]
 	}
 	q.pending = append(q.pending, toast)
 }
 
-// Visible expires toasts due at now, promotes waiting ones into the freed
-// slots, and returns the displayed toasts newest first.
-func (q *ToastQueue) Visible(now time.Time) []ActiveToast {
-	q.expire(now)
-	return append([]ActiveToast(nil), q.visible...)
-}
-
-// Pending reports how many toasts wait for a slot.
-func (q *ToastQueue) Pending() int { return len(q.pending) }
-
-// History returns dismissed and expired toasts, newest first.
-func (q *ToastQueue) History() []ActiveToast {
-	out := make([]ActiveToast, len(q.history))
-	for i, t := range q.history {
-		out[len(q.history)-1-i] = t
+// Get returns the visible or waiting entry with id.
+func (q *ToastQueue[T]) Get(id string) (QueuedToast[T], bool) {
+	if i := q.indexVisible(id); i >= 0 {
+		return q.visible[i], true
 	}
-	return out
+	if i := q.indexPending(id); i >= 0 {
+		return q.pending[i], true
+	}
+	return QueuedToast[T]{}, false
 }
 
-// NextDeadline is the earliest instant a visible toast expires.
-func (q *ToastQueue) NextDeadline() (time.Time, bool) {
+// Visible expires entries due at now, promotes waiting ones into the freed
+// slots, and returns the displayed entries newest first.
+func (q *ToastQueue[T]) Visible(now time.Time) []QueuedToast[T] {
+	q.expire(now)
+	return append([]QueuedToast[T](nil), q.visible...)
+}
+
+// Peek returns the displayed entries newest first without expiring any, for
+// readers that must not change the queue, such as a render snapshot.
+func (q *ToastQueue[T]) Peek() []QueuedToast[T] {
+	return append([]QueuedToast[T](nil), q.visible...)
+}
+
+// Pending reports how many entries wait for a slot.
+func (q *ToastQueue[T]) Pending() int { return len(q.pending) }
+
+// NextDeadline is the earliest instant a visible entry expires.
+func (q *ToastQueue[T]) NextDeadline() (time.Time, bool) {
 	var next time.Time
 	found := false
 	for _, t := range q.visible {
@@ -114,53 +121,71 @@ func (q *ToastQueue) NextDeadline() (time.Time, bool) {
 	return next, found
 }
 
-// Dismiss moves the toast with id to history and frees its slot at now.
-func (q *ToastQueue) Dismiss(now time.Time, id string) {
-	for i := range q.visible {
-		if q.visible[i].ID == id {
-			q.remember(q.visible[i])
-			q.visible = append(q.visible[:i], q.visible[i+1:]...)
-			break
-		}
+// Dismiss removes the visible or waiting entry with id and fills a
+// freed slot at now. It reports whether an entry was removed.
+func (q *ToastQueue[T]) Dismiss(now time.Time, id string) bool {
+	removed := false
+	if i := q.indexVisible(id); i >= 0 {
+		q.visible = append(q.visible[:i], q.visible[i+1:]...)
+		removed = true
+	} else if i := q.indexPending(id); i >= 0 {
+		q.pending = append(q.pending[:i], q.pending[i+1:]...)
+		removed = true
 	}
 	q.expire(now)
 	q.promote(now)
+	return removed
 }
 
-// promote fills free slots with waiting toasts, shown from at.
-func (q *ToastQueue) promote(at time.Time) {
-	for len(q.visible) < q.opts.MaxVisible && len(q.pending) > 0 {
-		next := q.pending[0]
-		q.pending = q.pending[1:]
-		q.visible = append([]ActiveToast{{Toast: next, ShownAt: at}}, q.visible...)
+func (q *ToastQueue[T]) indexVisible(id string) int {
+	if id == "" {
+		return -1
 	}
-}
-
-// Clear drops visible and waiting toasts. History is kept.
-func (q *ToastQueue) Clear() {
-	for _, t := range q.visible {
-		q.remember(t)
+	for i := range q.visible {
+		if q.visible[i].ID == id {
+			return i
+		}
 	}
-	q.visible = nil
-	q.pending = nil
+	return -1
 }
 
-// expire retires due toasts oldest first and fills each freed slot at the
+func (q *ToastQueue[T]) indexPending(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := range q.pending {
+		if q.pending[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// expire retires due entries oldest first and fills each freed slot at the
 // instant it was freed, so a burst advances at a steady pace even when the
 // caller polls late.
-func (q *ToastQueue) expire(now time.Time) {
+func (q *ToastQueue[T]) expire(now time.Time) {
 	for {
 		i, due := q.firstDue(now)
 		if i < 0 {
 			return
 		}
-		q.remember(q.visible[i])
 		q.visible = append(q.visible[:i], q.visible[i+1:]...)
 		q.promote(due)
 	}
 }
 
-func (q *ToastQueue) firstDue(now time.Time) (int, time.Time) {
+// promote fills free slots with waiting entries, shown from at.
+func (q *ToastQueue[T]) promote(at time.Time) {
+	for len(q.visible) < q.opts.MaxVisible && len(q.pending) > 0 {
+		next := q.pending[0]
+		q.pending = q.pending[1:]
+		next.ShownAt = at
+		q.visible = append([]QueuedToast[T]{next}, q.visible...)
+	}
+}
+
+func (q *ToastQueue[T]) firstDue(now time.Time) (int, time.Time) {
 	idx := -1
 	var first time.Time
 	for i, t := range q.visible {
@@ -172,19 +197,12 @@ func (q *ToastQueue) firstDue(now time.Time) (int, time.Time) {
 			continue
 		}
 		// visible is newest first, so a later index wins a tie: the oldest
-		// toast leaves first.
+		// entry leaves first.
 		if idx < 0 || !due.After(first) {
 			idx, first = i, due
 		}
 	}
 	return idx, first
-}
-
-func (q *ToastQueue) remember(t ActiveToast) {
-	q.history = append(q.history, t)
-	if len(q.history) > q.opts.MaxHistory {
-		q.history = q.history[len(q.history)-q.opts.MaxHistory:]
-	}
 }
 
 // ToastStackBounds lays toasts (newest first) out as a column at their shared

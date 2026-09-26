@@ -583,8 +583,8 @@ func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
 	active := controller.notices.Visible(clock.Now())
 	controller.mu.Unlock()
 	require.Len(t, active, 1)
-	require.Equal(t, "broker catalogue update rejected", active[0].Message)
-	require.NotContains(t, active[0].Message, "user@")
+	require.Equal(t, "broker catalogue update rejected", active[0].Value.Message)
+	require.NotContains(t, active[0].Value.Message, "user@")
 }
 
 // TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch pins the

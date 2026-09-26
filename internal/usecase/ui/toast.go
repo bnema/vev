@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"time"
-
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 )
@@ -15,91 +13,21 @@ const (
 
 // Toast describes a transient message rendered over a frame.
 type Toast struct {
-	ID      string
 	Message string
 	// Severity is carried for callers that style by it (client toast
-	// borders); CompositeToasts does not read it.
-	Severity      domain.NoticeSeverity
-	Anchor        domain.Anchor
-	Duration      time.Duration
-	DimBackground bool
-	MinWidth      int
-	MaxWidth      int
-	PaddingX      int
-	PaddingY      int
-}
-
-// ActiveToast is a toast currently tracked by a manager.
-type ActiveToast struct {
-	Toast
-	ShownAt time.Time
-}
-
-// ToastManager tracks currently visible toasts.
-type ToastManager struct {
-	active map[string]ActiveToast
+	// borders); DrawToast does not read it.
+	Severity domain.NoticeSeverity
+	Anchor   domain.Anchor
+	MinWidth int
+	MaxWidth int
+	PaddingX int
+	PaddingY int
 }
 
 // ToastStyles contains styles used when drawing a toast.
 type ToastStyles struct {
 	Text renderer.Style
 	Box  renderer.Style
-}
-
-// DimStyleFunc transforms an existing cell style for dimmed backgrounds.
-type DimStyleFunc func(renderer.Style) renderer.Style
-
-// NewToastManager creates an empty toast manager.
-func NewToastManager() *ToastManager {
-	return &ToastManager{active: make(map[string]ActiveToast)}
-}
-
-// Show records toast as active at now. Empty IDs are replaced with a stable key.
-func (m *ToastManager) Show(now time.Time, toast Toast) {
-	if m.active == nil {
-		m.active = make(map[string]ActiveToast)
-	}
-	id := toast.ID
-	if id == "" {
-		id = toastAnchorID(toast.Anchor)
-		toast.ID = id
-	}
-	m.active[id] = ActiveToast{Toast: toast, ShownAt: now}
-}
-
-func toastAnchorID(anchor domain.Anchor) string {
-	return "anchor:" + anchor.String()
-}
-
-// Dismiss removes a toast by ID.
-func (m *ToastManager) Dismiss(id string) {
-	delete(m.active, id)
-}
-
-// Clear removes all toasts.
-func (m *ToastManager) Clear() {
-	m.active = make(map[string]ActiveToast)
-}
-
-// Active returns non-expired toasts at now and prunes expired entries.
-func (m *ToastManager) Active(now time.Time) []ActiveToast {
-	if m.active == nil {
-		return nil
-	}
-	active := make([]ActiveToast, 0, len(m.active))
-	for id, toast := range m.active {
-		if toast.Duration > 0 && !now.Before(toast.ShownAt.Add(toast.Duration)) {
-			delete(m.active, id)
-			continue
-		}
-		active = append(active, toast)
-	}
-	return active
-}
-
-// HasActive reports whether any toast is active at now.
-func (m *ToastManager) HasActive(now time.Time) bool {
-	return len(m.Active(now)) > 0
 }
 
 // ToastBounds returns the toast rectangle positioned within base and clamped to base.
@@ -135,66 +63,8 @@ func ToastBounds(base domain.Size, toast Toast) domain.Rect {
 	})
 }
 
-// CompositeToasts draws the latest toast per anchor over frame.
-func CompositeToasts(frame renderer.Frame, toasts []ActiveToast, styles ToastStyles, dim DimStyleFunc) {
-	visible := latestToastsByAnchor(toasts)
-	if len(visible) == 0 {
-		return
-	}
-
-	if dim != nil {
-		shouldDim := false
-		for _, toast := range visible {
-			if toast.DimBackground {
-				shouldDim = true
-				break
-			}
-		}
-		if shouldDim {
-			for y := 0; y < frame.Height; y++ {
-				for x := 0; x < frame.Width; x++ {
-					cell := frame.At(x, y)
-					cell.Style = dim(cell.Style)
-					frame.Set(x, y, cell)
-				}
-			}
-		}
-	}
-
-	for _, toast := range visible {
-		drawToast(frame, toast.Toast, styles)
-	}
-}
-
-func latestToastsByAnchor(toasts []ActiveToast) []ActiveToast {
-	byAnchor := make(map[domain.Anchor]ActiveToast)
-	for _, toast := range toasts {
-		current, ok := byAnchor[toast.Anchor]
-		if !ok || toast.ShownAt.After(current.ShownAt) || toast.ShownAt.Equal(current.ShownAt) {
-			byAnchor[toast.Anchor] = toast
-		}
-	}
-	anchors := []domain.Anchor{
-		domain.AnchorTopLeft,
-		domain.AnchorTopRight,
-		domain.AnchorBottomLeft,
-		domain.AnchorBottomRight,
-		domain.AnchorCenter,
-		domain.AnchorTop,
-		domain.AnchorLeft,
-		domain.AnchorRight,
-		domain.AnchorBottom,
-	}
-	visible := make([]ActiveToast, 0, len(byAnchor))
-	for _, anchor := range anchors {
-		if toast, ok := byAnchor[anchor]; ok {
-			visible = append(visible, toast)
-		}
-	}
-	return visible
-}
-
-func drawToast(frame renderer.Frame, toast Toast, styles ToastStyles) {
+// DrawToast draws one bordered toast at its anchor within frame.
+func DrawToast(frame renderer.Frame, toast Toast, styles ToastStyles) {
 	bounds := ToastBounds(domain.Size{Cols: frame.Width, Rows: frame.Height}, toast)
 	if bounds.Width <= 0 || bounds.Height <= 0 {
 		return

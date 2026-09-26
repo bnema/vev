@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/usecase/palette"
 	"github.com/bnema/vev/internal/usecase/picker"
 	promptui "github.com/bnema/vev/internal/usecase/prompt"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/bnema/vev/internal/usecase/visualsearch"
 )
 
@@ -112,12 +113,14 @@ type overlayRuntime struct {
 	// The notification history overlay's fields share this lock rather than
 	// adding one of their own: both concern notice presentation for this
 	// client and neither is ever held across a render call.
-	noticeMu       sync.Mutex
-	noticeToasts   []noticeToast
-	noticeOverflow int
-	// noticeSeq numbers toast entries so an already-fired expiry timer cannot
-	// dismiss the refreshed entry that replaced the one it belonged to.
-	noticeSeq uint64
+	noticeMu sync.Mutex
+	// noticeQueue is this client's toast stack and its waiting notices. nil
+	// until the first notice.
+	noticeQueue *ui.ToastQueue[domain.Notification]
+	// noticeTimer fires at the queue's next expiry. A stale fire is harmless:
+	// it only re-evaluates the queue at the current time.
+	noticeTimer pendingByteTimer
+	noticeDue   time.Time
 
 	// noticesOverlay is the `notifications` command's history modal. nil when
 	// closed.
@@ -365,13 +368,12 @@ func (rt *overlayRuntime) SnapshotForRender() *overlayRenderSnapshot {
 	// noticeMu is innermost and never held across render, so it is taken and
 	// released here rather than tracked like paletteMu/promptMu below.
 	rt.noticeMu.Lock()
-	if len(rt.noticeToasts) > 0 {
-		snap.notices = make([]domain.Notification, len(rt.noticeToasts))
-		for i, t := range rt.noticeToasts {
-			snap.notices[i] = t.n
+	if rt.noticeQueue != nil {
+		for _, t := range rt.noticeQueue.Peek() {
+			snap.notices = append(snap.notices, t.Value)
 		}
+		snap.noticeOverflow = rt.noticeQueue.Pending()
 	}
-	snap.noticeOverflow = rt.noticeOverflow
 	snap.noticesOverlayActive = rt.noticesOverlay != nil
 	snap.noticesOverlayModel = rt.noticesOverlay.Clone()
 	rt.noticeMu.Unlock()

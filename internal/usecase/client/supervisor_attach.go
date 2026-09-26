@@ -731,6 +731,8 @@ func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputL
 	var brokerLost bool
 	var terminated bool
 	var termErr error
+	notices := noticeWake{clock: s.cfg.Clock}
+	defer notices.stop()
 settlement:
 	for {
 		// Begin has admitted the foreground, which can write before MarkAttached
@@ -762,6 +764,8 @@ settlement:
 			overlay.settleAction(consumed)
 		case <-overlay.invalidation():
 			overlay.resize()
+		case <-notices.arm(s.cfg.Picker):
+			s.renderCurrent()
 		case outcome := <-s.kills.results():
 			s.finishPickerKill(service, outcome)
 		case <-service.Done():

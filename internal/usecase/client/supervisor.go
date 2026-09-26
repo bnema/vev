@@ -1075,6 +1075,8 @@ func (s *Supervisor) invalidatePickerPresentation() {
 // failure until the terminal ends or the process is cancelled. A clean terminal
 // EOF returns nil; every other cause is reported.
 func (s *Supervisor) awaitTermination(ctx context.Context, input *terminalInputLifetime) error {
+	notices := noticeWake{clock: s.cfg.Clock}
+	defer notices.stop()
 	for {
 		select {
 		case <-s.pickerOps():
@@ -1087,6 +1089,8 @@ func (s *Supervisor) awaitTermination(ctx context.Context, input *terminalInputL
 			return terminalReadCause(err)
 		case <-s.presentationInvalidation():
 			s.renderResizeInvalidation()
+		case <-notices.arm(s.cfg.Picker):
+			s.renderCurrent()
 		}
 	}
 }
@@ -1101,6 +1105,8 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 	}
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
+	notices := noticeWake{clock: s.cfg.Clock}
+	defer notices.stop()
 	for {
 		select {
 		case <-s.pickerOps():
@@ -1117,6 +1123,8 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 			s.renderResizeInvalidation()
 		case <-s.spinnerTick():
 			s.cfg.Spinner.AdvanceSpinner(s.State())
+		case <-notices.arm(s.cfg.Picker):
+			s.renderCurrent()
 		}
 	}
 }

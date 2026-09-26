@@ -129,7 +129,7 @@ type Notification struct {
 
 // Subject is the stable identity of what a notice is about. Client toasts
 // use it so a newer notice for the same subject replaces the visible one;
-// the daemon's notice coalescing keeps its own rule (sameToastNotice).
+// the daemon's notice coalescing keeps its own rule (daemon toastNoticeID).
 func (n Notification) Subject() string {
 	return n.Code.String() + "/" + string(n.SessionID) + "/" + n.Scope
 }

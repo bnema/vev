@@ -11,8 +11,8 @@ import (
 func TestToastQueue(t *testing.T) {
 	start := time.Unix(100, 0)
 	life := 4 * time.Second
-	toast := func(id string) Toast { return Toast{ID: id, Message: id, Duration: life} }
-	ids := func(ts []ActiveToast) []string {
+	toast := func(id string) QueuedToast[string] { return QueuedToast[string]{ID: id, Value: id, Duration: life} }
+	ids := func(ts []QueuedToast[string]) []string {
 		out := make([]string, len(ts))
 		for i, t := range ts {
 			out[i] = t.ID
@@ -23,56 +23,49 @@ func TestToastQueue(t *testing.T) {
 	tests := []struct {
 		name        string
 		opts        ToastQueueOptions
-		push        []Toast
+		push        []QueuedToast[string]
 		at          time.Duration
 		wantVisible []string
 		wantPending int
-		wantHistory []string
 	}{
-		{name: "fills slots newest first", opts: ToastQueueOptions{MaxVisible: 3}, push: []Toast{toast("a"), toast("b")}, wantVisible: []string{"b", "a"}},
-		{name: "overflow waits", opts: ToastQueueOptions{MaxVisible: 2}, push: []Toast{toast("a"), toast("b"), toast("c")}, wantVisible: []string{"b", "a"}, wantPending: 1},
-		{name: "expiry promotes waiting toasts", opts: ToastQueueOptions{MaxVisible: 2}, push: []Toast{toast("a"), toast("b"), toast("c")}, at: life, wantVisible: []string{"c"}, wantHistory: []string{"b", "a"}},
-		{name: "late poll paces the burst", opts: ToastQueueOptions{MaxVisible: 1}, push: []Toast{toast("a"), toast("b"), toast("c")}, at: 2 * life, wantVisible: []string{"c"}, wantHistory: []string{"b", "a"}},
-		{name: "same id replaces in place", opts: ToastQueueOptions{MaxVisible: 3}, push: []Toast{toast("a"), toast("b"), toast("a")}, wantVisible: []string{"a", "b"}},
-		{name: "same id replaces waiting", opts: ToastQueueOptions{MaxVisible: 1}, push: []Toast{toast("a"), toast("b"), toast("b")}, wantVisible: []string{"a"}, wantPending: 1},
-		{name: "full queue retires oldest waiting", opts: ToastQueueOptions{MaxVisible: 1, MaxPending: 1}, push: []Toast{toast("a"), toast("b"), toast("c")}, wantVisible: []string{"a"}, wantPending: 1, wantHistory: []string{"b"}},
-		{name: "history is bounded", opts: ToastQueueOptions{MaxVisible: 3, MaxHistory: 1}, push: []Toast{toast("a"), toast("b")}, at: life, wantHistory: []string{"b"}},
-		{name: "persistent toast never expires", opts: ToastQueueOptions{}, push: []Toast{{ID: "p"}}, at: time.Hour, wantVisible: []string{"p"}},
+		{name: "fills slots newest first", opts: ToastQueueOptions{MaxVisible: 3}, push: []QueuedToast[string]{toast("a"), toast("b")}, wantVisible: []string{"b", "a"}},
+		{name: "overflow waits", opts: ToastQueueOptions{MaxVisible: 2}, push: []QueuedToast[string]{toast("a"), toast("b"), toast("c")}, wantVisible: []string{"b", "a"}, wantPending: 1},
+		{name: "expiry promotes waiting toasts", opts: ToastQueueOptions{MaxVisible: 2}, push: []QueuedToast[string]{toast("a"), toast("b"), toast("c")}, at: life, wantVisible: []string{"c"}},
+		{name: "late poll paces the burst", opts: ToastQueueOptions{MaxVisible: 1}, push: []QueuedToast[string]{toast("a"), toast("b"), toast("c")}, at: 2 * life, wantVisible: []string{"c"}},
+		{name: "same id replaces in place", opts: ToastQueueOptions{MaxVisible: 3}, push: []QueuedToast[string]{toast("a"), toast("b"), toast("a")}, wantVisible: []string{"a", "b"}},
+		{name: "same id replaces waiting", opts: ToastQueueOptions{MaxVisible: 1}, push: []QueuedToast[string]{toast("a"), toast("b"), toast("b")}, wantVisible: []string{"a"}, wantPending: 1},
+		{name: "full queue drops oldest waiting", opts: ToastQueueOptions{MaxVisible: 1, MaxPending: 1}, push: []QueuedToast[string]{toast("a"), toast("b"), toast("c")}, wantVisible: []string{"a"}, wantPending: 1},
+		{name: "persistent toast never expires", opts: ToastQueueOptions{}, push: []QueuedToast[string]{{ID: "p"}}, at: time.Hour, wantVisible: []string{"p"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			q := NewToastQueue(tt.opts)
+			q := NewToastQueue[string](tt.opts)
 			for _, p := range tt.push {
 				q.Push(start, p)
 			}
 			require.Equal(t, tt.wantVisible, nilIfEmpty(ids(q.Visible(start.Add(tt.at)))))
 			require.Equal(t, tt.wantPending, q.Pending())
-			require.Equal(t, tt.wantHistory, nilIfEmpty(ids(q.History())))
 		})
 	}
 }
 
-func TestToastQueueDeadlineDismissAndClear(t *testing.T) {
+func TestToastQueueDeadlineAndDismiss(t *testing.T) {
 	start := time.Unix(100, 0)
-	q := NewToastQueue(ToastQueueOptions{MaxVisible: 1})
+	q := NewToastQueue[string](ToastQueueOptions{MaxVisible: 1})
 	_, ok := q.NextDeadline()
 	require.False(t, ok)
 
-	q.Push(start, Toast{ID: "a", Duration: time.Second})
-	q.Push(start, Toast{ID: "b", Duration: time.Second})
+	q.Push(start, QueuedToast[string]{ID: "a", Duration: time.Second})
+	q.Push(start, QueuedToast[string]{ID: "b", Duration: time.Second})
 	due, ok := q.NextDeadline()
 	require.True(t, ok)
 	require.Equal(t, start.Add(time.Second), due)
 
-	q.Dismiss(start.Add(time.Millisecond), "a")
+	require.True(t, q.Dismiss(start.Add(time.Millisecond), "a"))
+	require.False(t, q.Dismiss(start.Add(time.Millisecond), "missing"))
 	require.Equal(t, "b", q.Visible(start.Add(time.Millisecond))[0].ID)
 	due, _ = q.NextDeadline()
 	require.Equal(t, start.Add(time.Second+time.Millisecond), due, "a promoted toast gets its full lifetime")
-
-	q.Clear()
-	require.Empty(t, q.Visible(start))
-	require.Equal(t, 0, q.Pending())
-	require.Len(t, q.History(), 2)
 }
 
 func TestToastStackBounds(t *testing.T) {
