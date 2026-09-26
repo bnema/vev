@@ -427,6 +427,8 @@ func (i *terminalCompositionInput) Read(buffer []byte) (int, error) {
 	return copy(buffer, chunk), nil
 }
 
+func (t *terminalCompositionTerminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *terminalCompositionTerminal) EnterRaw() (func() error, error) {
 	return func() error {
 		t.mu.Lock()

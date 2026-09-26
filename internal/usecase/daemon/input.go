@@ -7,7 +7,9 @@ import (
 	"strconv"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/keys"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
@@ -38,7 +40,7 @@ func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {
 	ac.mouseScan.Scan(data,
 		func(ev mouse.Event) { d.handleMouse(ac, ev) },
 		func(b []byte) {
-			if ac.overlays.HandleInput(d, b) {
+			if ac.overlays.HandleInput(d, ac.legacyKeys(b)) {
 				return
 			}
 			ac.keys.Route(b)
@@ -64,7 +66,9 @@ func (d *Daemon) handleInputForAttachment(effect *attachmentEffect, data []byte)
 			if !effect.current() {
 				return
 			}
-			if ac.overlays.HandleInput(d, b, effect) {
+			// Overlays parse legacy key bytes; only the router and panes see
+			// kitty keyboard sequences.
+			if ac.overlays.HandleInput(d, ac.legacyKeys(b), effect) {
 				return
 			}
 			if !effect.current() {
@@ -436,9 +440,37 @@ func (h daemonKeyHandler) Forward(data []byte) {
 		tb.mu.Lock()
 		p := tb.terminalTargetLocked()
 		tb.mu.Unlock()
+		if h.ac.keys.KittyKeyboard() {
+			data = paneKeyInput(p, data)
+		}
 		h.d.writeToPane(sess, p, data)
 		return nil
 	})
+}
+
+// paneKeyInput re-encodes kitty keyboard protocol key events for the pane's
+// program: legacy bytes unless it requested the protocol itself.
+func paneKeyInput(p *pane, data []byte) []byte {
+	if p == nil {
+		return data
+	}
+	p.mu.Lock()
+	if p.screen == nil {
+		p.mu.Unlock()
+		return data
+	}
+	flags := p.screen.KittyKeyboardFlags()
+	p.mu.Unlock()
+	return kittykey.Translate(data, flags)
+}
+
+// legacyKeys returns input as legacy key bytes for daemon overlays. Only an
+// attachment that enabled the kitty keyboard protocol needs translating.
+func (ac *attachedClient) legacyKeys(data []byte) []byte {
+	if !ac.keys.KittyKeyboard() {
+		return data
+	}
+	return kittykey.Translate(data, 0)
 }
 
 func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
@@ -515,6 +547,14 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 		runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: layout.Left})
 	case keys.ActionConsumeOrExpelPaneRight:
 		runAction(daemonActionRequest{kind: daemonActionConsumeOrExpelPane, direction: layout.Right})
+	case keys.ActionSwitchRecent1, keys.ActionSwitchRecent2, keys.ActionSwitchRecent3,
+		keys.ActionSwitchRecent4, keys.ActionSwitchRecent5, keys.ActionSwitchRecent6,
+		keys.ActionSwitchRecent7, keys.ActionSwitchRecent8, keys.ActionSwitchRecent9:
+		rank := int(action-keys.ActionSwitchRecent1) + 1
+		exec := paletteExec{d: h.d, sess: sess, attachment: sess, ac: h.ac, routeSnapshot: h.ac.routeSnapshotCopy(), effect: effect}
+		if err := exec.JumpRecentSession(rank); err != nil && !errors.Is(err, errAttachmentTransition) && !errors.Is(err, command.ErrInvalidArguments) {
+			h.d.reportError(sess, err)
+		}
 	case keys.ActionSwitchTab1, keys.ActionSwitchTab2, keys.ActionSwitchTab3,
 		keys.ActionSwitchTab4, keys.ActionSwitchTab5, keys.ActionSwitchTab6,
 		keys.ActionSwitchTab7, keys.ActionSwitchTab8, keys.ActionSwitchTab9:

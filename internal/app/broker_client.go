@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/term"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
+	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
@@ -611,6 +612,16 @@ func terminalAttachmentEnvironment() client.AttachmentEnvironment {
 		Cwd:       currentWorkingDirectory(),
 		TrueColor: terminalcap.DetectTrueColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
 	}
+}
+
+// outerTerminalAttachmentEnvironment extends terminalAttachmentEnvironment for
+// a client that owns a real outer terminal: it probes that terminal once and
+// applies the user's keyboard setting. Virtual terminals never probe.
+func outerTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvironment {
+	env := terminalAttachmentEnvironment()
+	env.ProbeTerminal = true
+	env.KittyKeyboard = loadConfigOrDefaults(log, platform.ConfigPath()).Keyboard.KittyProtocol
+	return env
 }
 
 // terminalSessionEnvironment captures one LocalCLI process snapshot for

@@ -76,6 +76,9 @@ func New(ctx context.Context, geometry domain.Geometry) (*Terminal, error) {
 	return t, nil
 }
 
+// EnableKittyKeyboard is a no-op: a virtual terminal has no outer keyboard.
+func (t *Terminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *Terminal) EnterRaw() (func() error, error) {
 	if _, err := t.Write(term.VisualEnterSequence()); err != nil {
 		return nil, err

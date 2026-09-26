@@ -1,7 +1,5 @@
 package keys
 
-import "unicode/utf8"
-
 // Bindings maps intercepted Alt keys to actions. A Bindings value is mutable
 // while being built, then treated as frozen once published through an atomic
 // pointer; callers must clone before using mutators.
@@ -110,19 +108,12 @@ func (b *Bindings) conflictingAction(spec KeySpec, action Action) (Action, bool)
 	return 0, false
 }
 
-func (b *Bindings) actionForAltBytes(data []byte) (Action, int, bool) {
+func (b *Bindings) actionForAltRune(key rune) (Action, bool) {
 	if b == nil {
 		b = defaultBindings
 	}
-	if len(data) == 0 {
-		return 0, 0, false
-	}
-	key, size := utf8.DecodeRune(data)
-	if key == utf8.RuneError && size == 1 {
-		return 0, 0, false
-	}
 	action, ok := b.altRunes[key]
-	return action, size, ok
+	return action, ok
 }
 
 func (b *Bindings) actionForAltArrow(final byte) (Action, bool) {

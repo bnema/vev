@@ -8,6 +8,7 @@ import (
 
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
 
 // ctrlV is the byte a Ctrl+V keypress sends on the wire.
@@ -67,7 +68,7 @@ func (c *clipboardIntercept) Scan(data []byte) {
 	boundary := pasteMarkerBoundary(data)
 	segment := data[:boundary]
 	for len(segment) > 0 {
-		idx := bytes.IndexByte(segment, ctrlV)
+		idx, size := indexCtrlV(segment)
 		if idx < 0 {
 			c.next(segment)
 			break
@@ -75,8 +76,9 @@ func (c *clipboardIntercept) Scan(data []byte) {
 		if idx > 0 {
 			c.next(segment[:idx])
 		}
-		segment = segment[idx+1:]
-		c.handleCtrlV()
+		raw := segment[idx : idx+size]
+		segment = segment[idx+size:]
+		c.handleCtrlV(raw)
 	}
 
 	// Bytes at/after boundary are (the possible start of) a bracketed
@@ -104,7 +106,27 @@ func pasteMarkerBoundary(data []byte) int {
 	return len(data)
 }
 
-func (c *clipboardIntercept) handleCtrlV() {
+// indexCtrlV finds the first Ctrl+V keypress: the legacy 0x16 byte or a
+// kitty keyboard protocol press of Ctrl+V on any layout.
+func indexCtrlV(data []byte) (idx, size int) {
+	for i, b := range data {
+		switch b {
+		case ctrlV:
+			return i, 1
+		case 0x1b:
+			if ev, n, ok, _ := kittykey.Parse(data[i:]); ok && isKittyCtrlV(ev) {
+				return i, n
+			}
+		}
+	}
+	return -1, 0
+}
+
+func isKittyCtrlV(ev kittykey.Event) bool {
+	return !ev.Release && ev.Mods == kittykey.ModCtrl && (ev.Code == 'v' || ev.Base == 'v')
+}
+
+func (c *clipboardIntercept) handleCtrlV(raw []byte) {
 	ctx := c.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -117,7 +139,7 @@ func (c *clipboardIntercept) handleCtrlV() {
 				c.sendNotice(protocol.ClientNoticeClipboardFallback)
 			}
 		}
-		c.next([]byte{ctrlV})
+		c.next(raw)
 		return
 	}
 	if len(data) > maxClipboardImagePush {
@@ -125,7 +147,7 @@ func (c *clipboardIntercept) handleCtrlV() {
 		if c.sendNotice != nil {
 			c.sendNotice(protocol.ClientNoticeClipboardTooLarge)
 		}
-		c.next([]byte{ctrlV})
+		c.next(raw)
 		return
 	}
 	c.sendImage(mime, data)

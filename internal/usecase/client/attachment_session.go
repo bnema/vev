@@ -68,12 +68,15 @@ func (e *AttachmentIdentityError) Error() string {
 // The request is the exact request the supervisor opened the stream with; the
 // rest is client-local presentation data the worker mirrors into Hello.
 type sessionAttachmentConfig struct {
-	Request            ports.BrokerOpenStreamRequest
-	ClientID           [16]byte
-	Geometry           domain.Geometry
-	TermEnv            string
-	Cwd                string
-	TrueColor          bool
+	Request   ports.BrokerOpenStreamRequest
+	ClientID  [16]byte
+	Geometry  domain.Geometry
+	TermEnv   string
+	Cwd       string
+	TrueColor bool
+	// Capabilities are the outer terminal's probed capabilities, declared in
+	// Hello.
+	Capabilities       terminalCapabilities
 	SessionEnvironment SessionEnvironment
 	// BeforeAttached runs after the initial frame commits but before attached
 	// presentation becomes observable. A failure keeps the run unattached.
@@ -705,19 +708,23 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		environmentPolicy = protocol.EnvironmentPolicyDaemonOwned
 	}
 	hello := protocol.Hello{
-		Version:           protocol.Version,
-		Intent:            protocol.IntentAttach,
-		ClientID:          w.cfg.ClientID,
-		Size:              geometry.Size,
-		PixelWidth:        geometry.PixelWidth,
-		PixelHeight:       geometry.PixelHeight,
-		TermEnv:           w.cfg.TermEnv,
-		Cwd:               cwd,
-		TrueColor:         w.cfg.TrueColor,
-		MaxOutputInFlight: requestedOutputWindow(stream),
-		Env:               env,
-		EnvironmentPolicy: environmentPolicy,
-		Remote:            !request.Local,
+		Version:     protocol.Version,
+		Intent:      protocol.IntentAttach,
+		ClientID:    w.cfg.ClientID,
+		Size:        geometry.Size,
+		PixelWidth:  geometry.PixelWidth,
+		PixelHeight: geometry.PixelHeight,
+		TermEnv:     w.cfg.TermEnv,
+		Cwd:         cwd,
+		TrueColor:   w.cfg.TrueColor,
+		// A remote attach reaches the terminal through this client, so both
+		// declarations describe this client's outer terminal.
+		KittyDirectGraphics: w.cfg.Capabilities.KittyGraphics,
+		KittyKeyboard:       w.cfg.Capabilities.KittyKeyboard,
+		MaxOutputInFlight:   requestedOutputWindow(stream),
+		Env:                 env,
+		EnvironmentPolicy:   environmentPolicy,
+		Remote:              !request.Local,
 	}
 	switch request.Admission {
 	case ports.BrokerAdmissionExact:

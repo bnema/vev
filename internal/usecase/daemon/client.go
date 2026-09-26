@@ -630,6 +630,7 @@ func (d *Daemon) notifiesSnapshot() []chan struct{} {
 
 type attachClientOptions struct {
 	clientID               [16]byte
+	kittyKeyboard          bool
 	resumeCapable          bool
 	maxOutputInFlight      uint8
 	terminalCapabilities   terminalcap.Capabilities
@@ -719,6 +720,7 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 	output.attachment = ac
 	ac.initOverlays()
 	ac.keys = keys.NewRouter(d.clock, daemonKeyHandler{d: d, ac: ac}, &d.bindings)
+	ac.keys.SetKittyKeyboard(opts.kittyKeyboard)
 	return ac
 }
 

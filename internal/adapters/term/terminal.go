@@ -38,6 +38,7 @@ type Terminal struct {
 	entered    bool           // true between a successful EnterRaw and its restore
 	rawSkipped bool           // true if fd wasn't a tty, so MakeRaw/Restore were skipped
 	restoreFn  func() error   // the single idempotent restore closure for the current session
+	kittyKeys  bool           // kitty keyboard flags were pushed and must be popped on restore
 
 	// Resize watcher state, also guarded by mu so watcher start
 	// (ResizeEvents) and watcher stop (restore) are strictly ordered:
@@ -116,6 +117,34 @@ func (t *Terminal) EnterRaw() (func() error, error) {
 	return t.restoreFn, nil
 }
 
+// EnableKittyKeyboard pushes kitty keyboard protocol flags on the alternate
+// screen entered by EnterRaw. The session's restore pops them.
+func (t *Terminal) EnableKittyKeyboard(flags int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.entered || t.kittyKeys {
+		return nil
+	}
+	// Mark first: if any prefix reached the terminal, restore must pop.
+	t.kittyKeys = true
+	if _, err := t.bw.Write(KittyKeyboardPushSequence(flags)); err != nil {
+		return fmt.Errorf("term: enable kitty keyboard: %w", err)
+	}
+	if err := t.bw.Flush(); err != nil {
+		return fmt.Errorf("term: enable kitty keyboard: %w", err)
+	}
+	return nil
+}
+
+// restoreSequenceLocked returns the visual cleanup for the current session.
+// Must be called with t.mu held.
+func (t *Terminal) restoreSequenceLocked() []byte {
+	if t.kittyKeys {
+		return VisualRestoreSequenceWithKittyKeyboard()
+	}
+	return VisualRestoreSequence()
+}
+
 // resetVisualModesDirect writes visualRestore straight to the descriptor
 // instead of through the batched writer. It is the fallback for a writer that
 // has already failed: any prefix of the enter sequence may have reached the
@@ -127,7 +156,7 @@ func (t *Terminal) resetVisualModesDirect() {
 	if t.observation != nil {
 		t.observation.InvalidateTerminalObservation()
 	}
-	_, _ = t.out.Write(VisualRestoreSequence())
+	_, _ = t.out.Write(t.restoreSequenceLocked())
 }
 
 // makeRestoreLocked returns an idempotent restore closure for the
@@ -150,7 +179,7 @@ func (t *Terminal) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	_, werr := t.bw.Write(VisualRestoreSequence())
+	_, werr := t.bw.Write(t.restoreSequenceLocked())
 	ferr := t.bw.Flush()
 	if werr != nil || ferr != nil {
 		t.resetVisualModesDirect()
@@ -159,6 +188,7 @@ func (t *Terminal) restore() error {
 	rerr := t.restoreRawLocked()
 
 	t.entered = false
+	t.kittyKeys = false
 	t.restoreFn = nil
 
 	t.stopResizeLocked()

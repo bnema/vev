@@ -1,5 +1,7 @@
 package term
 
+import "strconv"
+
 const (
 	altScreenEnter        = "\x1b[?1049h"
 	altScreenExit         = "\x1b[?1049l"
@@ -14,6 +16,7 @@ const (
 	colorSchemeDisable    = "\x1b[?2031l"
 	autowrapDisable       = "\x1b[?7l"
 	autowrapEnable        = "\x1b[?7h"
+	kittyKeyboardPop      = "\x1b[<u"
 )
 
 const visualEnter = altScreenEnter + autowrapDisable + cursorHide + mouseEnable + bracketedPasteEnable + colorSchemeEnable
@@ -27,3 +30,16 @@ func VisualEnterSequence() []byte { return []byte(visualEnter) }
 
 // VisualRestoreSequence returns a fresh copy of the idempotent visual cleanup.
 func VisualRestoreSequence() []byte { return []byte(visualRestore) }
+
+// KittyKeyboardPushSequence pushes kitty keyboard protocol flags. Send it
+// after VisualEnterSequence so it lands on the alternate screen's stack.
+func KittyKeyboardPushSequence(flags int) []byte {
+	return []byte("\x1b[>" + strconv.Itoa(flags) + "u")
+}
+
+// VisualRestoreSequenceWithKittyKeyboard pops the kitty keyboard flags pushed
+// on the alternate screen before running the visual cleanup, so the main
+// screen's keyboard mode is left as it was.
+func VisualRestoreSequenceWithKittyKeyboard() []byte {
+	return []byte(kittyKeyboardPop + visualRestore)
+}

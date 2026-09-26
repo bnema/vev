@@ -51,6 +51,8 @@ func newOfflineRenderTerminal(geometry domain.Geometry) *offlineRenderTerminal {
 	return &offlineRenderTerminal{geometry: geometry}
 }
 
+func (t *offlineRenderTerminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *offlineRenderTerminal) EnterRaw() (func() error, error) {
 	return func() error { return nil }, nil
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
 
 // Picker is the composition seam over the client-owned picker.
@@ -157,7 +158,9 @@ func (p *Picker) ConsumeTerminalRead(data []byte) bool {
 	if p == nil || p.controller == nil {
 		return false
 	}
-	return p.controller.ConsumeTerminalRead(data)
+	// The picker decodes legacy keys; kitty keyboard sequences are
+	// translated back before it sees them.
+	return p.controller.ConsumeTerminalRead(kittykey.Translate(data, 0))
 }
 
 // Render returns the current picker frame for size, or nil when no catalogue

@@ -140,6 +140,8 @@ func newSupervisorTestTerminal(in io.Reader) *supervisorTestTerminal {
 	return &supervisorTestTerminal{in: in}
 }
 
+func (t *supervisorTestTerminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *supervisorTestTerminal) EnterRaw() (func() error, error) {
 	if t.enterErr != nil {
 		return nil, t.enterErr

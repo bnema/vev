@@ -179,3 +179,57 @@ func TestStatusHistoryShowsVisitedAndRingingRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestCtrlDigitSwitchesToRecentHistoryRank(t *testing.T) {
+	snapshot := protocol.RecentRouteSnapshot{
+		Generation: 4,
+		Entries: []protocol.RecentRouteEntry{
+			testRouteEntry(2, 3, "first", 2, protocol.RouteKindLocal),
+			testRouteEntry(7, 1, "second", 7, protocol.RouteKindRemote),
+		},
+	}
+	tests := []struct {
+		name    string
+		input   string
+		wantKey uint64
+		wantGen uint64
+		none    bool
+		legacy  bool
+	}{
+		{name: "ctrl 1 previous session", input: "\x1b[49;5u", wantKey: 2, wantGen: 3},
+		{name: "ctrl 2 second previous", input: "\x1b[50;5u", wantKey: 7, wantGen: 1},
+		{name: "azerty ctrl 2 base key", input: "\x1b[233::50;5u", wantKey: 7, wantGen: 1},
+		{name: "ctrl 3 beyond history is a no-op", input: "\x1b[51;5u", none: true},
+		{name: "legacy client does not intercept", input: "\x1b[49;5u", none: true, legacy: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, source, ac, _ := newManualSessionWithPTYs(t, nil)
+			transport := &closeTrackingTransport{}
+			ac.replaceTransport(transport)
+			rc := d.attachCoordinator(source, nil, ac, true)
+			token := source.captureAttachmentCapability(ac, transport)
+			token.lease = rc.attachmentLease(ac)
+			ac.installTestAttachmentCapability(token)
+			ac.setRouteSnapshot(snapshot)
+			ac.keys.SetKittyKeyboard(!tt.legacy)
+			effect, admitted := ac.beginAttachmentEffect(token)
+			require.True(t, admitted)
+			defer effect.End()
+
+			d.handleInputForAttachment(effect, []byte(tt.input))
+
+			var actions []protocol.RouteNavigationAction
+			for _, frame := range transport.Sends() {
+				if decoded, ok := decodeServerMessage(t, frame).(protocol.RouteNavigationAction); ok {
+					actions = append(actions, decoded)
+				}
+			}
+			if tt.none {
+				require.Empty(t, actions)
+				return
+			}
+			require.Equal(t, []protocol.RouteNavigationAction{{SnapshotGeneration: 4, Key: tt.wantKey, Generation: tt.wantGen}}, actions)
+		})
+	}
+}

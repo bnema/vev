@@ -1502,6 +1502,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 	}
 	opts := attachClientOptions{
 		clientID:               h.ClientID,
+		kittyKeyboard:          h.KittyKeyboard,
 		resumeCapable:          true,
 		maxOutputInFlight:      normalizeOutputWindow(h.MaxOutputInFlight),
 		navigationCapabilities: h.NavigationCapabilities,

@@ -51,6 +51,7 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 		NavigationCapabilities: uint32(message.NavigationCapabilities),
 		Remote:                 message.Remote,
 		KittyDirectGraphics:    message.KittyDirectGraphics,
+		KittyKeyboard:          message.KittyKeyboard,
 	}, nil
 }
 
@@ -133,6 +134,7 @@ func helloFromWire(message *wire.Hello) (protocol.Hello, error) {
 	}
 	hello.Remote = message.GetRemote()
 	hello.KittyDirectGraphics = message.GetKittyDirectGraphics()
+	hello.KittyKeyboard = message.GetKittyKeyboard()
 	if err := protocol.ValidateHello(hello); err != nil {
 		return protocol.Hello{}, err
 	}

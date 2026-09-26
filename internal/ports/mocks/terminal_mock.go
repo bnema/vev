@@ -38,6 +38,57 @@ func (_m *MockTerminal) EXPECT() *MockTerminal_Expecter {
 	return &MockTerminal_Expecter{mock: &_m.Mock}
 }
 
+// EnableKittyKeyboard provides a mock function for the type MockTerminal
+func (_mock *MockTerminal) EnableKittyKeyboard(flags int) error {
+	ret := _mock.Called(flags)
+
+	if len(ret) == 0 {
+		panic("no return value specified for EnableKittyKeyboard")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(int) error); ok {
+		r0 = returnFunc(flags)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockTerminal_EnableKittyKeyboard_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'EnableKittyKeyboard'
+type MockTerminal_EnableKittyKeyboard_Call struct {
+	*mock.Call
+}
+
+// EnableKittyKeyboard is a helper method to define mock.On call
+//   - flags int
+func (_e *MockTerminal_Expecter) EnableKittyKeyboard(flags any) *MockTerminal_EnableKittyKeyboard_Call {
+	return &MockTerminal_EnableKittyKeyboard_Call{Call: _e.mock.On("EnableKittyKeyboard", flags)}
+}
+
+func (_c *MockTerminal_EnableKittyKeyboard_Call) Run(run func(flags int)) *MockTerminal_EnableKittyKeyboard_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 int
+		if args[0] != nil {
+			arg0 = args[0].(int)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockTerminal_EnableKittyKeyboard_Call) Return(err error) *MockTerminal_EnableKittyKeyboard_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockTerminal_EnableKittyKeyboard_Call) RunAndReturn(run func(flags int) error) *MockTerminal_EnableKittyKeyboard_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // EnterRaw provides a mock function for the type MockTerminal
 func (_mock *MockTerminal) EnterRaw() (func() error, error) {
 	ret := _mock.Called()

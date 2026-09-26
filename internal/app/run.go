@@ -917,7 +917,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	return runBrokerClient(ctx, brokerClientConfig{
 		Logger: log, Connector: withPreconnected(newProductionBrokerConnector(), preconnected), Terminal: terminal, Clock: clk,
 		InitialNavigation: navigation, ResolveInitialNavigation: resolver,
-		AttachmentEnvironment: terminalAttachmentEnvironment(), SessionEnvironment: terminalSessionEnvironment(),
+		AttachmentEnvironment: outerTerminalAttachmentEnvironment(log), SessionEnvironment: terminalSessionEnvironment(),
 		OnState: callbacks.OnState, OnLifecycle: callbacks.OnLifecycle, OnFailure: callbacks.OnFailure,
 	})
 }

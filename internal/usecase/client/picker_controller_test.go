@@ -83,6 +83,8 @@ type pickerRecordingTerminal struct {
 	enters int
 }
 
+func (t *pickerRecordingTerminal) EnableKittyKeyboard(int) error { return nil }
+
 func (t *pickerRecordingTerminal) EnterRaw() (func() error, error) {
 	t.mu.Lock()
 	t.enters++
