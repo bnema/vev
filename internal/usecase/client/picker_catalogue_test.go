@@ -1068,3 +1068,42 @@ func TestPickerCatalogueOriginLabelNeverShowsRawEndpoint(t *testing.T) {
 	require.Equal(t, "local", pickerOriginLabel(pickerTestUnobservedObservation(time.Unix(1000, 0))))
 	require.Equal(t, "user@arch", pickerOriginLabel(pickerTestRemoteObservation("user@arch", 1, 1, time.Unix(1000, 0))))
 }
+
+func TestPickerHostHealthNotice(t *testing.T) {
+	now := time.Unix(1000, 0)
+	host := func(availability domain.RemoteAvailability, kind domain.RemoteFailureKind, mismatch bool) pickerHostHealth {
+		o := pickerTestRemoteObservation("user@arch", 1, 1, now)
+		o.Availability = availability
+		o.LastFailure = domain.RemoteFailure{Kind: kind}
+		return pickerHostHealth{key: "host-key", observation: o, health: domain.RemoteHealth{Availability: availability, VersionMismatch: mismatch}}
+	}
+	const failed = "Remote check failed: user@arch — "
+	tests := []struct {
+		name     string
+		host     pickerHostHealth
+		event    domain.RemoteHealthEvent
+		severity domain.NoticeSeverity
+		message  string
+	}{
+		{name: "recovered", host: host(domain.RemoteAvailabilityReachable, 0, false), event: domain.RemoteHealthRecovered, severity: domain.NoticeInfo, message: "Remote host reconnected: user@arch"},
+		{name: "timeout", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureTimeout, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH timed out"},
+		{name: "authentication", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureAuthentication, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH authentication failed; verify non-interactive SSH access"},
+		{name: "trust", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureTrust, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH host verification failed; verify the host key policy"},
+		{name: "invalid response kind", host: host(domain.RemoteAvailabilityUnreachable, domain.RemoteFailureInvalidResponse, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote catalog response is invalid"},
+		{name: "auth failed availability fallback", host: host(domain.RemoteAvailabilityAuthFailed, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH authentication failed; verify non-interactive SSH access"},
+		{name: "invalid response availability fallback", host: host(domain.RemoteAvailabilityInvalidResponse, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote catalog response is invalid"},
+		{name: "unreachable default", host: host(domain.RemoteAvailabilityUnreachable, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "SSH connection failed; verify SSH access"},
+		{name: "incompatible", host: host(domain.RemoteAvailabilityIncompatible, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote vev version is incompatible"},
+		{name: "version mismatch", host: host(domain.RemoteAvailabilityReachable, 0, true), event: domain.RemoteHealthFailed, severity: domain.NoticeError, message: failed + "remote vev version is incompatible"},
+		{name: "no daemon warns", host: host(domain.RemoteAvailabilityNoDaemon, 0, false), event: domain.RemoteHealthFailed, severity: domain.NoticeWarn, message: failed + "no vev daemon is running"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := pickerHostHealthNotice(tt.host, tt.event)
+			require.Equal(t, domain.NoticeRemoteObservation, n.Code)
+			require.Equal(t, "host-key", n.Scope, "failure and recovery share the host subject")
+			require.Equal(t, tt.severity, n.Severity)
+			require.Equal(t, tt.message, n.Message)
+		})
+	}
+}

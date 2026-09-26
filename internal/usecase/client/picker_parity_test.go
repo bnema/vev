@@ -506,9 +506,8 @@ func TestPickerControllerKillKeyWakesSupervisor(t *testing.T) {
 	}
 }
 
-// TestPickerControllerHostFailureToastOncePerEpisode ports main's
-// TestRemoteFailureNoticeEmittedOncePerFailureEpisode and
-// TestRemoteFailureNoticesKeepEndpointsDistinct.
+// TestPickerControllerRecoveryReplacesVisibleFailure checks that a host's
+// recovery toast replaces its failure toast and leaves other hosts' toasts.
 func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	down := pickerTestRemoteObservation("user@arch", 1, 1, clock.Now())
@@ -536,6 +535,9 @@ func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 	}
 }
 
+// TestPickerControllerHostFailureToastOncePerEpisode ports main's
+// TestRemoteFailureNoticeEmittedOncePerFailureEpisode and
+// TestRemoteFailureNoticesKeepEndpointsDistinct.
 func TestPickerControllerHostFailureToastOncePerEpisode(t *testing.T) {
 	controller, clock := pickerTestController(t)
 	failing := func(endpoint string, seed byte, episode uint64, kind domain.RemoteFailureKind) ports.BrokerDaemonObservation {
