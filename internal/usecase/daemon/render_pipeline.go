@@ -456,25 +456,25 @@ func commitDamageReceipts(receipts []damageReceipt) {
 	}
 }
 
-// emitFrame is the sole side-effecting half of the pipeline. The caller holds
-// sendMu for the complete capture/compose/emit transaction.
-func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, batches ...*runtimeMarkBatch) bool {
-	var ownedMarks runtimeMarkBatch
-	var marks *runtimeMarkBatch
-	if len(batches) != 0 {
-		marks = batches[0]
-	} else {
-		ownedMarks = d.newRuntimeMarkBatch()
-		marks = &ownedMarks
-		// Direct test callers retain the same guarantee as paint: observer I/O
-		// follows emitFrame's release of attachment ownership.
-		defer marks.flush()
-	}
+// frameFollowUp is the work a frame publication leaves for after the
+// attachment's sendMu is released: notices, repaints, and send-error cleanup
+// may re-enter rendering or take session locks, so they never run under it.
+type frameFollowUp struct {
+	prepareErr   error
+	sendErr      error
+	sendTr       ports.ServerConnection
+	warnGraphics bool
+}
+
+// publishFrameLocked is the sole side-effecting half of the pipeline: it
+// revalidates ownership, prepares, sends, and commits or aborts one captured
+// frame. The caller holds ac.sendMu for the complete capture/compose/publish
+// transaction; publishFrameLocked never releases it. It reports false when the
+// frame was rejected before preparation. The returned follow-up must be passed
+// to settleFrame after sendMu is released.
+func (d *Daemon) publishFrameLocked(entry *session, ac *attachedClient, state *capturedRenderState, composed composedRenderFrame, marks *runtimeMarkBatch) (frameFollowUp, bool) {
 	if entry == nil || entry.core() == nil || ac == nil || state == nil {
-		if ac != nil {
-			ac.sendMu.Unlock()
-		}
-		return false
+		return frameFollowUp{}, false
 	}
 	entry.core().mu.Lock()
 	_, owned := entry.core().attachments[ac]
@@ -485,19 +485,16 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	entry.core().mu.Unlock()
 	if marks.attachmentEffect != nil {
 		if !marks.attachmentEffect.current() || state.attachment != ac {
-			ac.sendMu.Unlock()
-			return false
+			return frameFollowUp{}, false
 		}
 	} else {
 		if !owned || state.attachment != ac || ac.currentAttachmentSession() != entry {
-			ac.sendMu.Unlock()
-			return false
+			return frameFollowUp{}, false
 		}
 		if state.lease != nil {
 			rc := attachmentRenderCoordinator(entry)
 			if rc == nil || state.lease.attachment != ac || !rc.leaseCurrent(state.lease, true) {
-				ac.sendMu.Unlock()
-				return false
+				return frameFollowUp{}, false
 			}
 		}
 	}
@@ -509,28 +506,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 	}
 	endDiff(0, err == nil)
 	if err != nil {
-		ac.sendMu.Unlock()
-		core := entry.core()
-		core.mu.Lock()
-		sessionName := core.name
-		core.mu.Unlock()
-		d.log.Error("render draw failed", "err", err, "session", sessionName)
-		// Without a coordinator reportError repaints synchronously. Suppress only
-		// that nested notice repaint; leave the guard before returning so a later,
-		// independent failed transaction can still notify the user.
-		if entry.renderCoordinator() == nil {
-			if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
-				return true
-			}
-			d.reportError(entry, domain.UserErr(domain.NoticeInternal, "display update failed", err))
-			ac.prepareFailureFallback.Store(false)
-			return true
-		}
-		d.reportError(entry, domain.UserErr(domain.NoticeInternal, "display update failed", err))
-		// Notices are session-scoped, while the attachment repaint still needs
-		// to redraw its chrome after a failed transaction.
-		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
-		return true
+		return frameFollowUp{prepareErr: err}, true
 	}
 	var sendTr ports.ServerConnection
 	var sendErr error
@@ -577,8 +553,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		emitted := sendErr == nil && prepared.sent()
 		endEmit(uint64(len(data)), emitted)
 		if sendErr == nil && !emitted {
-			ac.sendMu.Unlock()
-			return true
+			return frameFollowUp{}, true
 		}
 		if sendErr != nil {
 			prepared.abort()
@@ -588,8 +563,7 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 		if len(data) == 0 {
 			prepared.commitNoSend()
 			if !prepared.sent() {
-				ac.sendMu.Unlock()
-				return true
+				return frameFollowUp{}, true
 			}
 		}
 		ac.afterFrame.emitted(state.frameCapture)
@@ -657,25 +631,52 @@ func (d *Daemon) emitFrame(entry *session, ac *attachedClient, state *capturedRe
 			}
 		}
 	}
-	ac.sendMu.Unlock()
-	if suppressedGraphics && d.warnUnsupportedGraphics(ac) {
+	return frameFollowUp{sendErr: sendErr, sendTr: sendTr, warnGraphics: suppressedGraphics}, true
+}
+
+// settleFrame runs a publication's follow-up with sendMu released and no
+// attachment, session, tab, or pane lock held.
+func (d *Daemon) settleFrame(entry *session, ac *attachedClient, marks *runtimeMarkBatch, f frameFollowUp) {
+	if f.prepareErr != nil {
+		core := entry.core()
+		core.mu.Lock()
+		sessionName := core.name
+		core.mu.Unlock()
+		d.log.Error("render draw failed", "err", f.prepareErr, "session", sessionName)
+		// Without a coordinator reportError repaints synchronously. Suppress only
+		// that nested notice repaint; leave the guard before returning so a later,
+		// independent failed transaction can still notify the user.
+		if entry.renderCoordinator() == nil {
+			if !ac.prepareFailureFallback.CompareAndSwap(false, true) {
+				return
+			}
+			d.reportError(entry, domain.UserErr(domain.NoticeInternal, "display update failed", f.prepareErr))
+			ac.prepareFailureFallback.Store(false)
+			return
+		}
+		d.reportError(entry, domain.UserErr(domain.NoticeInternal, "display update failed", f.prepareErr))
+		// Notices are session-scoped, while the attachment repaint still needs
+		// to redraw its chrome after a failed transaction.
+		d.invalidateRender(entry, ac, true, "render_pipeline.go:prepare-failed")
+		return
+	}
+	if f.warnGraphics && d.warnUnsupportedGraphics(ac) {
 		d.repaintForNotice(ac)
 	}
-	if sendErr != nil {
+	if f.sendErr != nil {
 		// A transport failure may invalidate the role gate. Release this render's
 		// admission first. Detachment freezes the gate and therefore cannot mutate
 		// ownership until any enclosing admitted operation has also ended.
 		if marks.attachmentEffect == nil {
-			d.detachOnSendError(entry, ac, sendTr)
+			d.detachOnSendError(entry, ac, f.sendTr)
 		} else {
 			// Capture the exact admitted capability, including its coordinator
 			// lease, before End permits a new attachment publication. Reserve
 			// cleanup accounting before End so terminal Wait cannot race a later Add.
 			capability := marks.attachmentEffect.capability()
-			launchCleanup := d.reserveAttachmentSendErrorCleanup(capability, sendTr)
+			launchCleanup := d.reserveAttachmentSendErrorCleanup(capability, f.sendTr)
 			marks.attachmentEffect.End()
 			launchCleanup()
 		}
 	}
-	return true
 }

@@ -35,7 +35,7 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 				ac.replaceTransport(cacheFailTransport{})
 			}
 			ac.sendMu.Lock()
-			require.True(t, d.emitFrame(sess, ac, &state, pending))
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
 			require.Equal(t, before, cloneComposeCache(ac.pipelineCache))
 			require.Zero(t, ac.output.next)
 			if failure == "send" {
@@ -48,7 +48,7 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 			pending = composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
 			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
-			require.True(t, d.emitFrame(sess, ac, &state, pending))
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
 			require.Equal(t, pending.cache, ac.pipelineCache)
 			require.NotContains(t, frameText(ac.pipelineCache.frame), "COPY")
 			output := unmarshalTestOutput(t, (<-sends).Payload)

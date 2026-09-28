@@ -90,7 +90,7 @@ func TestCaptureComposeEmitAcknowledgesCollapsedPaneDamageOnlyAfterEmission(t *t
 	require.True(t, collapsedReceipt, "capture must retain a receipt for the collapsed pane")
 	require.NotEmpty(t, collapsed.screen.Damage(), "capture alone must not acknowledge collapsed-pane damage")
 	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
-	require.True(t, d.emitFrame(sess, ac, state, composed))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 
 	<-sends
 	require.Empty(t, collapsed.screen.Damage(), "successful emission must acknowledge the collapsed-pane receipt")
@@ -140,14 +140,14 @@ func TestRenderDamageReceiptRetainsRealVTDamageAcrossFailedEmission(t *testing.T
 
 			state, composed := captureComposeForReceiptTest(t, sess, ac)
 			tt.fail(&composed, ac)
-			require.True(t, d.emitFrame(sess, ac, state, composed))
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 			p.mu.Lock()
 			require.NotEmpty(t, p.screen.Damage(), "failed emission must retain real VT damage")
 			p.mu.Unlock()
 
 			tt.restore(sess, ac, healthy)
 			state, composed = captureComposeForReceiptTest(t, sess, ac)
-			require.True(t, d.emitFrame(sess, ac, state, composed))
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 			frame := <-sends
 			out := unmarshalTestOutput(t, frame.Payload)
 			require.Contains(t, string(out.Data), "changed", "retry must emit the retained terminal bytes")
@@ -166,17 +166,17 @@ func TestPrepareFailureNotifiesAndSchedulesRecovery(t *testing.T) {
 	var producers []string
 	rc.opts.onInvalidate = func(inv renderInvalidation) {
 		// Both the notice repaint and the explicit recovery must re-enter only
-		// after emitFrame releases its attachment locks.
+		// after the publication releases its attachment locks.
 		require.True(t, ac.sendMu.TryLock(), "invalidation must not run under sendMu")
 		ac.sendMu.Unlock()
 		producers = append(producers, inv.producer)
 	}
 	state, composed := captureComposeForReceiptTest(t, sess, ac)
-	// An invalid frame makes output.prepare fail after capture. emitFrame owns
-	// sendMu on entry and releases it before reporting and rescheduling.
+	// An invalid frame makes output.prepare fail after capture. The publication
+	// releases sendMu before reporting and rescheduling.
 	composed.frame = renderer.Frame{Width: 1}
 
-	require.True(t, d.emitFrame(sess, ac, state, composed))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 
 	history := d.notices.history()
 	require.Len(t, history, 1)
@@ -203,7 +203,7 @@ func TestPrepareFailureFallbackOnlySuppressesRecursiveNoticePaint(t *testing.T) 
 	ac.prepareFailureFallback.Store(true)
 	state, composed := captureComposeForReceiptTest(t, sess, ac)
 	composed.frame = renderer.Frame{Width: 1}
-	require.True(t, d.emitFrame(sess, ac, state, composed))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 	require.Empty(t, d.notices.history())
 	ac.prepareFailureFallback.Store(false)
 
@@ -212,7 +212,7 @@ func TestPrepareFailureFallbackOnlySuppressesRecursiveNoticePaint(t *testing.T) 
 	for want := 1; want <= 2; want++ {
 		state, composed = captureComposeForReceiptTest(t, sess, ac)
 		composed.frame = renderer.Frame{Width: 1}
-		require.True(t, d.emitFrame(sess, ac, state, composed))
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 		require.Len(t, d.notices.history(), want)
 		frame := <-sends
 		require.Equal(t, "Output", envelopeMessageName(t, frame.Payload), "outer failure %d must repaint its notice", want)
@@ -232,7 +232,7 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 	p.mu.Lock()
 	p.screen.Write([]byte("\x1b[2;1Hsecond"))
 	p.mu.Unlock()
-	require.True(t, d.emitFrame(sess, ac, state, composed))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 	<-sends
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -241,7 +241,7 @@ func TestRenderDamageReceiptStaleGenerationForcesFullRedraw(t *testing.T) {
 
 func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClient) (*capturedRenderState, composedRenderFrame) {
 	t.Helper()
-	ac.sendMu.Lock() // emitFrame releases the transaction lock.
+	ac.sendMu.Lock() // the publication helper releases the transaction lock.
 	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
 		bars:        barState{},
 		overlays:    capturedOverlayRenderState{},

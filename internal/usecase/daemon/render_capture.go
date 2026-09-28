@@ -238,7 +238,7 @@ func capturePaneRenderStateLockedInto(p *pane, visible domain.Rect, out captured
 	} else {
 		out.damage = append(out.damage[:0], damage.Damage...)
 	}
-	// Consumption is transactional: capture only snapshots damage. emitFrame
+	// Consumption is transactional: capture only snapshots damage. publishFrameLocked
 	// acknowledges this generation after preparation and transport success.
 	return out
 }
