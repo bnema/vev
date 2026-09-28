@@ -720,8 +720,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		_ = stream.Close()
 		if resuming {
 			// A resume must say why it stopped instead of dropping silently
-			// to the picker. The busy error is not resumable, so it is
-			// presented.
+			// to the picker, so the busy error is presented, never retried.
 			s.reportAttachmentFailure(errResumeForegroundBusy)
 			return attachmentEndedOutcome()
 		}
