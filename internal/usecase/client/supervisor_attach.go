@@ -825,7 +825,7 @@ settlement:
 	}
 	if deadline.TimedOut() && !result.adopted {
 		timeout := attachmentTimeoutError(errAttachmentDeadline)
-		if outcome, ok := resumeRetry(s, timeout, resuming); ok {
+		if outcome, ok := s.resumeRetry(timeout, resuming); ok {
 			return outcome
 		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: timeout})
@@ -932,7 +932,7 @@ func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetim
 // resumeRetry turns a transport-class failure of a resume attempt into an
 // attachmentRetry outcome, so runResolvedAttachment retries while Connecting
 // stays up. Any other failure, or a failure outside a resume, is not retried.
-func resumeRetry(s *Supervisor, err error, resuming bool) (attachmentOutcome, bool) {
+func (s *Supervisor) resumeRetry(err error, resuming bool) (attachmentOutcome, bool) {
 	if !resuming || !resumableFailure(err) {
 		return attachmentOutcome{}, false
 	}
@@ -943,7 +943,7 @@ func resumeRetry(s *Supervisor, err error, resuming bool) (attachmentOutcome, bo
 // attemptFailed ends one attachment attempt that failed before settlement:
 // a resume retries a transport-class failure, anything else is presented.
 func (s *Supervisor) attemptFailed(err error, resuming bool) attachmentOutcome {
-	if outcome, ok := resumeRetry(s, err, resuming); ok {
+	if outcome, ok := s.resumeRetry(err, resuming); ok {
 		return outcome
 	}
 	s.reportAttachmentFailure(err)

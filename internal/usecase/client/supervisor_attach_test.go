@@ -1334,6 +1334,8 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		loseBeforeAttach
 		// refuse fails the resumed open with a non-transport refusal.
 		refuse
+		// openUnavailable fails the resumed open with a transport-class error.
+		openUnavailable
 		// cancelDuringBackoff ends the client while the backoff runs.
 		cancelDuringBackoff
 	)
@@ -1357,6 +1359,8 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		{name: "transient failures then attach", steps: append(repeat(loseBeforeAttach, maxAttachmentResumes-1), attachAndStay)},
 		{name: "exhausted returns to picker", steps: repeat(loseBeforeAttach, maxAttachmentResumes), wantPicker: true},
 		{name: "refusal is final", steps: []step{refuse}, wantPicker: true},
+		{name: "unavailable opens then attach", steps: append(repeat(openUnavailable, maxAttachmentResumes-1), attachAndStay)},
+		{name: "unavailable opens exhaust", steps: repeat(openUnavailable, maxAttachmentResumes), wantPicker: true},
 		{name: "cancel during backoff never resumes", steps: []step{cancelDuringBackoff}},
 	}
 	for _, tc := range cases {
@@ -1368,10 +1372,13 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				cfg.Jitter = resumeTestJitter
 			})
 			streams := make(chan *sessionTestStream, len(tc.steps)+2)
-			var refusing atomic.Bool
+			var refusing, unavailable atomic.Bool
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				if refusing.Load() {
 					return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "session gone"}
+				}
+				if unavailable.Load() {
+					return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "route down"}
 				}
 				stream := newSessionTestStream()
 				streams <- stream
@@ -1395,9 +1402,18 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 					return
 				}
 				refusing.Store(s == refuse)
+				unavailable.Store(s == openUnavailable)
+				opened := len(harness.service.openedRequests())
 				fireResumeTimer(t, harness.clock, attempt)
 				if s == refuse {
 					break
+				}
+				if s == openUnavailable {
+					// The failed open is retried on Connecting, without a notice.
+					// Wait for it before the next step changes the open result.
+					require.Eventually(t, func() bool { return len(harness.service.openedRequests()) > opened }, 5*time.Second, time.Millisecond)
+					attempt++
+					continue
 				}
 				resumed := <-streams
 				if s == loseBeforeAttach {

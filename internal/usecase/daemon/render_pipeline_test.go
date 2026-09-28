@@ -221,7 +221,7 @@ func TestCursorCandidateDoesNotPublishDuringPreparation(t *testing.T) {
 	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, candidate.next)
 }
 
-func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
+func TestPublishFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t)
 	healthy := ac.transport()
 	beforeCursor := cursorOut{valid: true, row: 1, col: 2, style: 1, hasStyle: true}
@@ -256,7 +256,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	require.Equal(t, uint64(1), out.New)
 }
 
-func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T) {
+func TestPublishFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	state := cacheState("steady", 1)
 	state.attachment = ac
@@ -699,7 +699,7 @@ func TestNoticeStylesFromMapsWarnToDedicatedRoleDistinctFromInfo(t *testing.T) {
 	require.NotEqual(t, got.BoxInfo, got.BoxWarn)
 }
 
-func TestEmitFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.T) {
+func TestPublishFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.T) {
 	d, sess, ac, sends := newManualSessionWithPTYs(t, nil)
 	token := sess.captureAttachmentCapability(ac, ac.transport())
 	effect, admitted := ac.beginAttachmentEffect(token)
