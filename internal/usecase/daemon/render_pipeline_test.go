@@ -233,7 +233,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	composed.cursor = cursorOut{row: 3, col: 4, style: 2, hasStyle: true}
 
 	ac.sendMu.Lock()
-	require.True(t, d.emitFrame(sess, ac, &state, composed))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed))
 
 	require.Equal(t, beforeCursor, ac.output.lastCursor)
 	require.Zero(t, ac.output.next)
@@ -248,7 +248,7 @@ func TestEmitFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	ac.replaceTransport(healthy)
 	state.attachment = ac
 	ac.sendMu.Lock()
-	require.True(t, d.emitFrame(sess, ac, &state, composed))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed))
 	require.Equal(t, cursorOut{valid: true, row: 3, col: 4, style: 2, hasStyle: true}, ac.output.lastCursor)
 	require.Equal(t, uint64(1), ac.output.next)
 	out := unmarshalTestOutput(t, (<-sends).Payload)
@@ -265,7 +265,7 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	state.view.revision = ac.viewSnapshot().revision
 	initial := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
 	ac.sendMu.Lock()
-	require.True(t, d.emitFrame(sess, ac, &state, initial))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, initial))
 	<-sends
 
 	p := newPane("collapsed", nil, domain.Size{Cols: 1, Rows: 1})
@@ -285,7 +285,7 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	}
 	noByte.cache.layoutFingerprint = "no-byte-committed"
 	ac.sendMu.Lock()
-	require.True(t, d.emitFrame(sess, ac, &state, noByte))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, noByte))
 
 	require.Equal(t, beforeNext, ac.output.next)
 	require.Equal(t, beforeCursor, ac.output.lastCursor)
@@ -302,7 +302,7 @@ func TestEmitFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing.T)
 	state.focusedPaneID = "pane-2"
 	state.panes[0].stableID = "pane-2"
 	ac.sendMu.Lock()
-	require.True(t, d.emitFrame(sess, ac, &state, noByte))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, noByte))
 	var frame wire.Envelope
 	select {
 	case frame = <-sends:
@@ -712,7 +712,7 @@ func TestEmitFrameSkipsTransportSendWhenAttachmentEffectFenceRejects(t *testing.
 	state.attachment = ac
 	composed := composeFrame(state, composeCacheInput{})
 	ac.sendMu.Lock()
-	require.True(t, d.emitFrame(sess, ac, &state, composed, &runtimeMarkBatch{attachmentEffect: effect}))
+	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, composed, &runtimeMarkBatch{attachmentEffect: effect}))
 	d.attachmentCleanupWg.Wait()
 
 	require.Zero(t, ac.output.next, "rejected transport effect must not commit output state")

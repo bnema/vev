@@ -53,7 +53,7 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
-			require.True(t, d.emitFrame(sess, ac, &state, pending))
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
 			require.Equal(t, before, cloneComposeCache(ac.pipelineCache), "failed emission must not publish any composed cache backing storage")
 
 			// A send error detaches the failed link. Re-own this test attachment with
@@ -71,7 +71,7 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
-			require.True(t, d.emitFrame(sess, ac, &state, pending))
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
 			require.Equal(t, pending.cache, ac.pipelineCache)
 			frame := <-sends
 			output := unmarshalTestOutput(t, frame.Payload)

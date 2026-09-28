@@ -347,10 +347,24 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	}
 
 	ac.sendMu.Lock()
+	result, afterUnlock := d.paintLocked(entry, ac, tb, reset, lease, paintEffect, &marks)
+	ac.sendMu.Unlock()
+	afterUnlock()
+	return result
+}
+
+func noAfterUnlock() {}
+
+// paintLocked is the complete capture/compose/publish transaction. It runs with
+// ac.sendMu held and never releases it; paint is the sole owner of that lock.
+// The returned function runs after sendMu is released, with no attachment,
+// session, tab, or pane lock held.
+func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset bool, lease *attachmentLease, paintEffect *attachmentEffect, marks *runtimeMarkBatch) (paintResult, func()) {
+	sess := entry
+	local := sess != nil
 	if paintEffect != nil {
 		if !paintEffect.current() {
-			ac.sendMu.Unlock()
-			return paintRejected
+			return paintRejected, noAfterUnlock
 		}
 	} else {
 		// Direct/headless rendering has no Attachment effect and retains its
@@ -359,8 +373,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 		_, owned := entry.core().attachments[ac]
 		entry.core().mu.Unlock()
 		if !owned || ac.currentAttachmentSession() != entry {
-			ac.sendMu.Unlock()
-			return paintRejected
+			return paintRejected, noAfterUnlock
 		}
 	}
 	// Capacity is checked before any destructive capture. Refresh the atomic
@@ -376,8 +389,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	if ac.output != nil && ac.output.atCapacity() {
 		// The coordinator owns the blocked interval; this guard only protects
 		// direct test/resize paint calls from destructive capture.
-		ac.sendMu.Unlock()
-		return paintBlockedCapacity
+		return paintBlockedCapacity, noAfterUnlock
 	}
 	var uiFence uint64
 	if lease != nil {
@@ -392,17 +404,22 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	frameCapture := ac.afterFrame.beginCapture()
 	overlays := ac.overlays.SnapshotForRender()
 	repaintAttachedClients := false
-	defer func() {
+	var published bool
+	var followUp frameFollowUp
+	afterUnlock := func() {
+		// Frame follow-up (notices, repaints, send-error cleanup) runs first,
+		// then the captured sequence is emitted before any follow-up repaint can
+		// introduce another boundary.
+		if published {
+			d.settleFrame(entry, ac, marks, followUp)
+		}
 		overlays.Unlock()
-		// Every return below has released sendMu before reaching this defer.
-		// Emit the captured sequence before any follow-up repaint can introduce
-		// another boundary, while no attachment, session, tab, or pane lock is held.
 		marks.flush()
 		ac.afterFrame.runReady()
 		if repaintAttachedClients {
 			d.repaintAllAttachedClients()
 		}
-	}()
+	}
 	if local {
 		d.refreshSessionFocusedTitles(sess)
 	}
@@ -460,8 +477,7 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	})
 	endCapture(0, ok)
 	if !ok {
-		ac.sendMu.Unlock()
-		return paintRejected
+		return paintRejected, afterUnlock
 	}
 	if ac.renderStages.capture != nil {
 		ac.renderStages.capture()
@@ -474,8 +490,8 @@ func (d *Daemon) paintWithActivationEffect(entry *session, ac *attachedClient, r
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()
 	}
-	d.emitFrame(entry, ac, state, composed, &marks)
-	return paintEmitted
+	followUp, published = d.publishFrameLocked(entry, ac, state, composed, marks)
+	return paintEmitted, afterUnlock
 }
 
 var fallbackChromeStyles = themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles

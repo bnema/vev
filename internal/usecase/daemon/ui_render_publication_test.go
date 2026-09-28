@@ -32,7 +32,7 @@ func TestRenderPublicationUsesCapturedIdentityAndRevision(t *testing.T) {
 				view.revision++
 				ac.publishView(view)
 			}
-			require.True(t, d.emitFrame(sess, ac, state, composed)) // releases sendMu
+			require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed)) // releases sendMu
 			if scenario == "view replaced after capture" {
 				require.Empty(t, drainAllFrames(sends))
 				require.Zero(t, ac.output.viewPublication)
@@ -59,7 +59,7 @@ func TestRenderPublishesContextWithoutTerminalBytes(t *testing.T) {
 			t.Fatal("capture rejected")
 		}
 		composed := composeFrame(*state, ac.pipelineCache)
-		require.True(t, d.emitFrame(sess, ac, state, composed))
+		require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 	}
 	paint(true)
 	initial := unmarshalTestOutput(t, awaitFrame(t, sends, "Output").Payload)
