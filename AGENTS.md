@@ -16,7 +16,7 @@ go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -be
 ```
 
 - Format with **goimports**.
-- Install dev tools once with `go install golang.org/x/tools/cmd/goimports@latest` and `go install github.com/vektra/mockery/v3@v3.7.4`.
+- Install dev tools once with `go install golang.org/x/tools/cmd/goimports@latest` and `go install github.com/vektra/mockery/v3@v3.8.0`.
 - Use Mockery v3 consistently across Go projects.
 - `make test` runs `go test ./... -race`.
 - `make lint` checks `goimports -l`, then `go vet`.
