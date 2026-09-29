@@ -13,6 +13,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/bnema/vev/internal/usecase/broker"
 	"github.com/bnema/vev/pkg/safedir"
 )
 
@@ -59,7 +60,7 @@ func remoteBrokerPolicy(transport string) ports.BrokerPolicy {
 	return ports.BrokerPolicy{
 		ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion,
 		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: transport,
-		Trust: "openssh-config-v1", Launch: "explicit", Isolation: "per-user",
+		Trust: "openssh-config-v1", Launch: broker.DaemonLaunchAuthority, Isolation: "per-user",
 	}
 }
 
@@ -101,7 +102,7 @@ func localDaemonPolicy() ports.BrokerPolicy {
 	return ports.BrokerPolicy{
 		ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion,
 		EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned, Transport: "unix-mux",
-		Trust: "same-user", Launch: "explicit", Isolation: "per-user",
+		Trust: "same-user", Launch: broker.DaemonLaunchAuthority, Isolation: "per-user",
 	}
 }
 
