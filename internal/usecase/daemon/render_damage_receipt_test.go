@@ -45,7 +45,7 @@ func TestPrimaryCaptureAloneRecordsDamageReceipts(t *testing.T) {
 	p.screen.Write([]byte("preview-safe"))
 	p.mu.Unlock()
 
-	require.Empty(t, ac.renderScratch.receipts, "no receipt exists before any capture runs")
+	require.Empty(t, ac.render.capture.receipts, "no receipt exists before any capture runs")
 
 	ac.sendMu.Lock()
 	state, ok := captureRenderState(sess, ac, renderCaptureRequest{
@@ -89,7 +89,7 @@ func TestCaptureComposeEmitAcknowledgesCollapsedPaneDamageOnlyAfterEmission(t *t
 	}
 	require.True(t, collapsedReceipt, "capture must retain a receipt for the collapsed pane")
 	require.NotEmpty(t, collapsed.screen.Damage(), "capture alone must not acknowledge collapsed-pane damage")
-	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	composed := composeFrame(*state, ac.render.cache, ac.render.spare)
 	require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 
 	<-sends
@@ -250,5 +250,5 @@ func captureComposeForReceiptTest(t *testing.T, sess *session, ac *attachedClien
 		lease:       nil,
 	})
 	require.True(t, ok)
-	return state, composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	return state, composeFrame(*state, ac.render.cache, ac.render.spare)
 }

@@ -15,7 +15,7 @@ func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {
 		t.Run(fmt.Sprint(panes), func(t *testing.T) {
 			f := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 120, Rows: 40}, panes: panes, historyRows: 200})
 			f.d.enterCopyMode(f.sess, f.ac)
-			base := f.ac.pipelineCache.frame
+			base := f.ac.render.cache.frame
 			terminal := vt.NewScreen(base.Width, base.Height)
 			replay := func() []byte {
 				output := unmarshalTestOutput(t, f.output.lastPayload())
@@ -25,7 +25,7 @@ func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {
 			}
 			replay()
 			for i, delta := range []int{-30, -3, 3, -1, 1, -60, 3, 1} {
-				previous := f.ac.pipelineCache.copyViewport.frame
+				previous := f.ac.render.cache.copyViewport.frame
 				var before vt.Frame
 				if previous.Width > 0 {
 					before = captureTestFrame(previous)
@@ -40,7 +40,7 @@ func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {
 				if before.Width > 0 {
 					require.Equal(t, before, captureTestFrame(previous))
 				}
-				cache := f.ac.pipelineCache
+				cache := f.ac.render.cache
 				mode := f.ac.overlays.copyMode
 				require.NotNil(t, mode)
 				target := cache.copyViewport.target

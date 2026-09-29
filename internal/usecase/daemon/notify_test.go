@@ -904,7 +904,7 @@ func TestToastExpiresOnFakeClock(t *testing.T) {
 	expiredOutput := unmarshalTestOutput(t, expired.Payload)
 	terminal.Write(expiredOutput.Data)
 	ac.sendMu.Lock()
-	base := ac.pipelineCache.frame.Clone()
+	base := ac.render.cache.frame.Clone()
 	ac.sendMu.Unlock()
 	require.Equal(t, frameRows(base), frameRows(terminal), "fake-clock expiry must restore every old toast cell")
 }

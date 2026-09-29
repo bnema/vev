@@ -404,9 +404,9 @@ func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
 	floating.mu.Unlock()
 	tb.mu.Unlock()
 
-	sourceClient := &attachedClient{captureFrames: map[*pane]capturedPaneRenderState{floating: {}}}
+	sourceClient := &attachedClient{render: attachmentRenderState{panes: map[*pane]capturedPaneRenderState{floating: {}}}}
 	sourceClient.initOverlays()
-	destinationClient := &attachedClient{captureFrames: map[*pane]capturedPaneRenderState{floating: {}}}
+	destinationClient := &attachedClient{render: attachmentRenderState{panes: map[*pane]capturedPaneRenderState{floating: {}}}}
 	destinationClient.initOverlays()
 	source.registerAttachment(sourceClient)
 	destination.registerAttachment(destinationClient)
@@ -419,10 +419,10 @@ func TestFloatingExitUsesCurrentOwnerAfterTabTransfer(t *testing.T) {
 	require.Nil(t, tb.floating.pane)
 	tb.mu.Unlock()
 	sourceClient.sendMu.Lock()
-	_, sourceRetained := sourceClient.captureFrames[floating]
+	_, sourceRetained := sourceClient.render.panes[floating]
 	sourceClient.sendMu.Unlock()
 	destinationClient.sendMu.Lock()
-	_, destinationRetained := destinationClient.captureFrames[floating]
+	_, destinationRetained := destinationClient.render.panes[floating]
 	destinationClient.sendMu.Unlock()
 	require.True(t, sourceRetained, "exit must not clean up the retired source owner")
 	require.False(t, destinationRetained, "exit must clean up the current destination owner")

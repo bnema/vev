@@ -522,12 +522,7 @@ func TestPickerControllerRecoveryReplacesVisibleFailure(t *testing.T) {
 	up.FailureEpisode = 1
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 2, Daemons: []ports.BrokerDaemonObservation{up, other}})
 
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	messages := make([]string, 0)
-	for _, toast := range controller.notices.Visible(clock.Now()) {
-		messages = append(messages, toast.Value.Message)
-	}
+	messages := controller.state().notices
 	require.Len(t, messages, 2, "each host keeps one toast")
 	require.Contains(t, messages, "Remote host reconnected: user@arch")
 	for _, message := range messages {

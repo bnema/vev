@@ -22,6 +22,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/wire"
+	"github.com/bnema/vev/internal/usecase/broker"
 )
 
 // Broker mux remote helper composition.
@@ -156,51 +157,34 @@ func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, erro
 	return command{kind: kind, brokerMux: options}, nil
 }
 
-// brokerDynamicMuxConnector keeps the configured local carriage, but remote
-// targets must still match committed registry authority at dial time.
-func brokerDynamicMuxConnector(config *brokerconfig.Config, routes *brokerRoutes, log *slog.Logger) (*daemonmux.EndpointConnector, error) {
+// newBrokerRoutes composes the broker's route authorization policy over the
+// configured local binding. Remote hosts are wired once the registry exists.
+func newBrokerRoutes(config *brokerconfig.Config) *broker.Routes {
+	return &broker.Routes{Local: config.Resolver(), Address: brokerconfig.RouteSpecAddress}
+}
+
+// brokerDynamicMuxConnector dials one authorized target. Remote targets are
+// re-authorized by broker.Routes against committed membership immediately
+// before dialing; the local target must still name the provisioned binding.
+func brokerDynamicMuxConnector(config *brokerconfig.Config, routes *broker.Routes, log *slog.Logger) (*daemonmux.EndpointConnector, error) {
 	return daemonmux.NewEndpointConnector(func(ctx context.Context, target ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
 		if !target.Fence.Local {
-			route, err := routes.remoteRoute(ctx, target)
+			spec, err := routes.AuthorizeRemoteDial(ctx, target)
+			if err != nil {
+				return nil, err
+			}
+			route, err := brokerconfig.RouteFromSpec(spec)
 			if err != nil {
 				return nil, err
 			}
 			return dialBrokerRoute(ctx, route, target, log)
 		}
-		if err := brokerRouteAuthorityMatches(config, target); err != nil {
-			return nil, err
-		}
-		route, ok := config.RouteByAddress(target.Address)
-		if !ok {
-			return nil, errors.New("vev: unknown local route")
-		}
-		return dialBrokerRoute(ctx, route, target, log)
-	}, daemonmux.DefaultMuxCeilings())
-}
-
-// brokerRouteAuthorityMatches re-verifies that the route the opaque address
-// selected is still the one the resolved target's authority names: the same
-// fence, and a policy the provisioned entry accepts. The pool and the daemonmux
-// preamble already check this; re-checking here keeps the dial decision and the
-// authentication decision on one authority instead of two that could drift.
-func brokerRouteAuthorityMatches(config *brokerconfig.Config, target ports.BrokerDialTarget) error {
-	if target.Fence.Local {
 		binding, ok := config.LocalBinding()
 		if !ok || binding.Route.Address() != target.Address || !binding.Policy.Compatible(target.Policy) {
-			return ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("vev: broker mux: local route authority does not match the resolved target")}
+			return nil, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("vev: broker mux: local route authority does not match the resolved target")}
 		}
-		return nil
-	}
-	for _, endpoint := range config.Endpoints() {
-		registration, ok := config.Registration(endpoint)
-		if !ok || registration.Route.Address() != target.Address {
-			continue
-		}
-		if registration.Registration.Equal(target.Fence.Registration) && registration.Policy.Compatible(target.Policy) {
-			return nil
-		}
-	}
-	return ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("vev: broker mux: route authority does not match the resolved target")}
+		return dialBrokerRoute(ctx, binding.Route, target, log)
+	}, daemonmux.DefaultMuxCeilings())
 }
 
 // dialBrokerRoute dials one provisioned route under one resolved target as an

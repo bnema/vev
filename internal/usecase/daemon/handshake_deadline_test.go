@@ -125,7 +125,7 @@ func TestAcceptedHandshakeDeadlineSpansFirstFrameThroughWelcome(t *testing.T) {
 	requireClosedHandshakeTransport(t, conn.handshakeBlockingTransport)
 	d.mu.Lock()
 	require.Empty(t, d.sessions, "a budget-expired newly-created handshake must not leave an empty session")
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }
 
@@ -155,7 +155,7 @@ func TestExpiredAcceptedHandshakeDeadlineClosesConn(t *testing.T) {
 	}
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }
 
@@ -190,6 +190,6 @@ func TestHandleHelloAdoptsExpiredAcceptedDeadline(t *testing.T) {
 	}
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }

@@ -621,7 +621,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 			d.clientGone(sess, ac, transport, false)
 
 			d.mu.Lock()
-			parked := d.parked[token]
+			parked := d.resume.parked[token]
 			d.mu.Unlock()
 			require.NotNil(t, parked)
 
@@ -633,7 +633,7 @@ func TestRouteRejectsInvalidTerminalSizeBeforeResumeMutation(t *testing.T) {
 			require.Equal(t, protocol.ErrInternal, protocolErr.code)
 
 			d.mu.Lock()
-			require.Same(t, parked, d.parked[token], "invalid resume must not consume the parked attachment")
+			require.Same(t, parked, d.resume.parked[token], "invalid resume must not consume the parked attachment")
 			d.mu.Unlock()
 			require.Same(t, transport, ac.transport(), "invalid resume must not bind a replacement transport")
 		})

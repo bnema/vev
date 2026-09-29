@@ -17,7 +17,7 @@ func TestCopyWheelPreservesOutputEpoch(t *testing.T) {
 		require.Equal(t, epoch, f.ac.output.currentEpoch(), "ordinary scrolling must not reset the output dependency chain")
 		f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 	}
-	viewport := f.ac.pipelineCache.copyViewport
+	viewport := f.ac.render.cache.copyViewport
 	require.NotNil(t, viewport.document)
 	require.Equal(t, viewport.document.Height(), viewport.target.Height)
 	require.Equal(t, viewport.document.Width(), viewport.target.Width)

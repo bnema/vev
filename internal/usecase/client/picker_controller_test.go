@@ -135,20 +135,21 @@ func mustCursorKey(t *testing.T, controller *pickerController) string {
 	return key
 }
 
+func (p *pickerController) modelState(t *testing.T) pickerState {
+	t.Helper()
+	state := p.state()
+	require.True(t, state.hasModel, "the picker must have a model")
+	return state
+}
+
 func (p *pickerController) modelQuery(t *testing.T) string {
 	t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	require.NotNil(t, p.loop)
-	return p.loop.model.Query()
+	return p.modelState(t).query
 }
 
 func (p *pickerController) modelSearchActive(t *testing.T) bool {
 	t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	require.NotNil(t, p.loop)
-	return p.loop.model.SearchActive()
+	return p.modelState(t).searchActive
 }
 
 func TestPickerControllerRendersLatestSnapshotImmediately(t *testing.T) {
@@ -579,12 +580,8 @@ func TestPickerControllerApplySnapshotRejectsInvalidSnapshot(t *testing.T) {
 	require.Equal(t, before, controller.Catalogue().Lines(), "the previous projection is kept")
 	require.Equal(t, ports.BrokerRevision(1), controller.Catalogue().Revision())
 
-	controller.mu.Lock()
-	active := controller.notices.Visible(clock.Now())
-	controller.mu.Unlock()
-	require.Len(t, active, 1)
-	require.Equal(t, "broker catalogue update rejected", active[0].Value.Message)
-	require.NotContains(t, active[0].Value.Message, "user@")
+	active := controller.state().notices
+	require.Equal(t, []string{"broker catalogue update rejected"}, active)
 }
 
 // TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch pins the
@@ -596,10 +593,7 @@ func TestPickerControllerUnobservedDaemonIsRefreshingNotVersionMismatch(t *testi
 	unobserved := pickerTestUnobservedObservation(clock.Now())
 	controller.ApplySnapshot(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{unobserved}})
 
-	controller.mu.Lock()
-	active := controller.notices.Visible(clock.Now())
-	controller.mu.Unlock()
-	require.Empty(t, active)
+	require.Empty(t, controller.state().notices)
 	lines := controller.Catalogue().Lines()
 	host, ok := pickerHostLine(lines)
 	require.True(t, ok)

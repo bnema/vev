@@ -124,16 +124,7 @@ func (d *Daemon) activateAttachment(ac *attachedClient, expected transportSnapsh
 	d.mu.Unlock()
 	sess.geometry.reconcileAndInvalidate(d, sess, nil, "attachment_suspension.go")
 	ac.sendMu.Lock()
-	view := ac.viewSnapshot()
-	view.windowRows = request.Size.Rows
-	view.windowSet = true
-	view.windowTop = 0
-	view.revision++
-	ac.publishView(view)
-	ac.rebaseOutput()
-	ac.pipelineCache = composeCacheInput{}
-	ac.pipelineScratch = composeCacheInput{}
-	ac.captureFrames = nil
+	ac.publishWindowLocked(request.Size.Rows, true)
 	ac.sendMu.Unlock()
 	paintDone := make(chan struct{})
 	paintTimer := d.clock.NewTimer(detachNotifyTimeout)

@@ -140,7 +140,8 @@ type Daemon struct {
 	// Serve may be waiting, and WaitGroup forbids Add-from-zero concurrent
 	// with Wait.
 	notifies []chan struct{}
-	parked   map[uint64]*parkedAttachment
+	// resume owns parked and in-flight parking resume credentials. Guarded by mu.
+	resume resumeCredentials
 	// suspended retains one daemon-owned safety expiry per suspended
 	// attachment. Expiry is exact: the record carries the suspension's
 	// lifecycle generation and transport incarnation, so a later activation,
@@ -159,11 +160,6 @@ type Daemon struct {
 	// are hashed. Kitty IDs are terminal-global, so a restarted or neighboring
 	// daemon must not deterministically reopen the previous daemon's block.
 	graphicsNamespaceSalt uint64
-	// parking tracks resume-capable attachments from before detach clears the
-	// live seat until parkAttachment publishes the token into parked.
-	// IntentResume waits on the matching entry instead of treating the live
-	// credential as unknown across that gap.
-	parking map[uint64]*parkingAttachment
 
 	attnMu    sync.Mutex
 	animFrame int
@@ -717,13 +713,12 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 		sessions:                     make(map[domain.SessionID]*session),
 		inactive:                     make(map[string]inactiveSession),
 		creating:                     make(map[string]struct{}),
-		parked:                       make(map[uint64]*parkedAttachment),
+		resume:                       newResumeCredentials(),
 		suspended:                    make(map[*attachedClient]*suspendedAttachmentRetention),
 		graphicsNamespaces:           make(map[uint64]struct{}),
 		graphicsNamespaceFences:      make(map[uint64]uint64),
 		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
 		graphicsNamespaceSalt:        newGraphicsNamespaceSalt(),
-		parking:                      make(map[uint64]*parkingAttachment),
 		paneProcessCtx:               paneProcessCtx,
 		paneProcessCancel:            paneProcessCancel,
 		ptys:                         ptys,
@@ -1697,7 +1692,7 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 	// for the requested session; hand that into the park/resume lifecycle.
 	if h.ResumeToken != 0 {
 		d.mu.Lock()
-		parkedAtStart := d.parked[h.ResumeToken]
+		parkedAtStart := d.resume.parkedFor(h.ResumeToken)
 		d.mu.Unlock()
 		if parkedAtStart == nil {
 			if sess, ac, ok, err := d.resumeLiveAttachment(h, tr, sz); err != nil {

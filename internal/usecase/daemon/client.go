@@ -80,15 +80,8 @@ type attachedClient struct {
 	// reporting the same failed prepare through its notice repaint. It is only
 	// needed while no render coordinator is installed.
 	prepareFailureFallback atomic.Bool
-	// pipelineCache is the last successfully emitted composition. pipelineScratch
-	// is its attachment-owned alternate buffer; both are only touched under
-	// sendMu and must never share mutable backing storage.
-	pipelineCache   composeCacheInput
-	pipelineScratch composeCacheInput
-	renderScratch   renderCaptureScratch // only touched while sendMu is held
-	// captureFrames is keyed by pane ownership, not the tab-local PaneID, so
-	// snapshots cannot leak when an attachment switches tabs or sessions.
-	captureFrames map[*pane]capturedPaneRenderState // only touched while sendMu is held
+	// render is the attachment's composition state. Only touched under sendMu.
+	render attachmentRenderState
 	// sizeMu lets shared-geometry snapshots read attachment windows without
 	// waiting behind a blocked transport send.
 	sizeMu   sync.RWMutex
@@ -239,9 +232,7 @@ func (ac *attachedClient) pruneCaptureFrames(panes ...*pane) {
 		return
 	}
 	ac.sendMu.Lock()
-	for _, p := range panes {
-		delete(ac.captureFrames, p)
-	}
+	ac.render.forgetPanes(panes...)
 	ac.sendMu.Unlock()
 }
 
@@ -252,7 +243,7 @@ func (ac *attachedClient) clearCaptureFrames() {
 		return
 	}
 	ac.sendMu.Lock()
-	ac.captureFrames = nil
+	ac.render.forgetAllPanes()
 	ac.sendMu.Unlock()
 }
 
@@ -421,12 +412,12 @@ func (ac *attachedClient) routeAttentionTarget(ref protocol.RouteRef) (protocol.
 	return protocol.RouteAttentionTarget{}, false
 }
 
-func (ac *attachedClient) ackOutputState(epoch, state uint64) {
+// ackOutputState applies one cumulative output ACK under the send boundary and
+// reports whether it advanced the paint window.
+func (ac *attachedClient) ackOutputState(epoch, state uint64) bool {
 	ac.sendMu.Lock()
 	defer ac.sendMu.Unlock()
-	if ac.output != nil {
-		ac.output.ack(epoch, state)
-	}
+	return ac.output != nil && ac.output.ack(epoch, state)
 }
 
 // rebaseOutput resets only this attachment's output representations. Callers
@@ -436,6 +427,31 @@ func (ac *attachedClient) rebaseOutput() {
 		return
 	}
 	ac.output.rebaseAttachment()
+}
+
+// restartOutputLocked starts a new output epoch and drops the composition it
+// would otherwise diff against, so the next paint is a complete frame.
+// dropPanes also drops per-pane capture snapshots, which is required when the
+// panes may belong to another session or a different window size. Caller
+// holds sendMu.
+func (ac *attachedClient) restartOutputLocked(dropPanes bool) {
+	ac.rebaseOutput()
+	ac.render.forgetComposition()
+	if dropPanes {
+		ac.render.forgetAllPanes()
+	}
+}
+
+// publishWindowLocked publishes a new window height to the attachment view and
+// restarts output for it. Caller holds sendMu.
+func (ac *attachedClient) publishWindowLocked(rows int, dropPanes bool) {
+	view := ac.viewSnapshot()
+	view.windowRows = rows
+	view.windowSet = true
+	view.windowTop = 0
+	view.revision++
+	ac.publishView(view)
+	ac.restartOutputLocked(dropPanes)
 }
 
 var errTransportReplaced = errors.New("client transport was replaced")
@@ -866,7 +882,7 @@ func (d *Daemon) firstPaintForTransition(capability attachmentCapability) bool {
 		effect.ac.rebaseOutput()
 		// Captures belong to the old session even when pane-local IDs happen
 		// to be reused by the destination.
-		effect.ac.captureFrames = nil
+		effect.ac.render.forgetAllPanes()
 		effect.ac.sendMu.Unlock()
 	}
 	if effect.sess == nil {
@@ -997,15 +1013,7 @@ func (d *Daemon) resizeAttachmentGeometryForLease(effect *attachmentEffect, geom
 		ac.setGeometry(geometry)
 	}
 	if !sameSize {
-		view := ac.viewSnapshot()
-		view.windowRows = geometry.Rows
-		view.windowSet = true
-		view.windowTop = 0
-		view.revision++
-		ac.publishView(view)
-		ac.rebaseOutput()
-		ac.pipelineCache = composeCacheInput{}
-		ac.pipelineScratch = composeCacheInput{}
+		ac.publishWindowLocked(geometry.Rows, false)
 	}
 	ac.sendMu.Unlock()
 

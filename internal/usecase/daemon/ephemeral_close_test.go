@@ -87,7 +87,7 @@ func TestEphemeralCloseOnExitWaitsForParkExpiry(t *testing.T) {
 			require.True(t, d.sessionRegistered(sess), "parked attachment keeps the ephemeral session")
 
 			d.mu.Lock()
-			parked := d.parked[token]
+			parked := d.resume.parked[token]
 			d.mu.Unlock()
 			require.NotNil(t, parked)
 			// Expire directly instead of firing the timer, so no watcher

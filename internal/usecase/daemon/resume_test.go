@@ -134,7 +134,7 @@ func TestResumeRejectsMismatchedRemoteTargetBeforeOwnershipMutation(t *testing.T
 	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 	require.Same(t, oldTransport, ac.transport())
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	_, parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.False(t, parked, "mismatched target must not park the live attachment")
 
@@ -162,7 +162,7 @@ func TestParkedResumeRejectsMismatchedRemoteTargetBeforeClaim(t *testing.T) {
 	require.ErrorAs(t, err, &protocolErr)
 	require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	claimed := parked != nil && parked.claimed
 	d.mu.Unlock()
 	require.NotNil(t, parked)
@@ -184,7 +184,7 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 	parkTimer := <-clock.timers
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
 
@@ -203,7 +203,7 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	rearmedTimer := <-clock.timers
 	require.NotSame(t, parkTimer, rearmedTimer)
 	d.mu.Lock()
-	rearmed := d.parked[token]
+	rearmed := d.resume.parked[token]
 	claimed := rearmed != nil && rearmed.claimed
 	d.mu.Unlock()
 	require.NotNil(t, rearmed)
@@ -211,7 +211,7 @@ func TestFailedResumeRearmsParkExpiryAfterClaimTimerFires(t *testing.T) {
 	rearmedTimer.ch <- time.Time{}
 	d.expireParked(token, rearmed)
 	d.mu.Lock()
-	_, retained := d.parked[token]
+	_, retained := d.resume.parked[token]
 	d.mu.Unlock()
 	require.False(t, retained, "rearmed credential must still expire")
 
@@ -234,7 +234,7 @@ func TestNamedLinkLossParks(t *testing.T) {
 	require.Equal(t, 1, sessionCount(d), "named session survives parked link loss")
 	require.Empty(t, sess.snapshotAttachments())
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	_, parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.True(t, parked, "named resume-capable link loss is parked")
 }
@@ -402,7 +402,7 @@ func TestEphemeralLinkLossParksAndResumes(t *testing.T) {
 	}
 	require.True(t, peerRegistered, "the live peer attachment was removed while parking")
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	_, parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.True(t, parked, "ephemeral resume-capable link loss is parked")
 
@@ -440,7 +440,7 @@ func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
 	d.clientGone(sess, ac, oldTr, false)
 	require.Empty(t, sess.snapshotAttachments())
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	sessionsBefore := len(d.sessions)
 	d.mu.Unlock()
 	require.NotNil(t, parked)
@@ -468,9 +468,9 @@ func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
 	awaitTestCompletion(t, reachedLookup, "resumeParked did not pause after the parked lookup")
 
 	d.mu.Lock()
-	require.Same(t, parked, d.parked[token], "fixture: token must still be parked at the seam")
+	require.Same(t, parked, d.resume.parked[token], "fixture: token must still be parked at the seam")
 	d.removeParkedLocked(token, parked)
-	require.Nil(t, d.parked[token])
+	require.Nil(t, d.resume.parked[token])
 	require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
 	d.mu.Unlock()
 
@@ -487,7 +487,7 @@ func TestResumeParkedTokenReplacedDuringWaitFailsClosed(t *testing.T) {
 	require.Empty(t, sess.snapshotAttachments(), "lifecycle-race resume must not take over the named session")
 	require.Empty(t, resumeTr.Sends(), "failed resume must not complete a Welcome handshake")
 	d.mu.Lock()
-	_, stillParked := d.parked[token]
+	_, stillParked := d.resume.parked[token]
 	sessionsAfter := len(d.sessions)
 	d.mu.Unlock()
 	require.False(t, stillParked, "consumed token must stay invalid")
@@ -511,7 +511,7 @@ func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 	require.NotZero(t, token)
 	require.True(t, slices.Contains(sess.snapshotAttachments(), ac))
 	d.mu.Lock()
-	_, parkedAtStart := d.parked[token]
+	_, parkedAtStart := d.resume.parked[token]
 	sessionsBefore := len(d.sessions)
 	d.mu.Unlock()
 	require.False(t, parkedAtStart, "fixture: live attachment must not be parked yet")
@@ -539,11 +539,11 @@ func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 	awaitTestCompletion(t, reachedLookup, "live resume did not pause inside resumeParked after parking")
 
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	require.NotNil(t, parked, "fixture: live recovery must have parked before the sendMu seam")
 	require.Same(t, ac, parked.ac)
 	d.removeParkedLocked(token, parked)
-	require.Nil(t, d.parked[token])
+	require.Nil(t, d.resume.parked[token])
 	require.Same(t, sess, d.sessions[sess.id], "fixture: named session must remain registered")
 	d.mu.Unlock()
 
@@ -561,7 +561,7 @@ func TestResumeLiveAttachmentParkedResumeRaceFailsClosed(t *testing.T) {
 	require.Empty(t, sess.snapshotAttachments(), "losing live resume must not take over the named session")
 	require.Empty(t, resumeTr.Sends(), "failed live resume must not complete a Welcome handshake")
 	d.mu.Lock()
-	_, stillParked := d.parked[token]
+	_, stillParked := d.resume.parked[token]
 	sessionsAfter := len(d.sessions)
 	d.mu.Unlock()
 	require.False(t, stillParked, "consumed token must stay invalid")
@@ -602,8 +602,8 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 
 	require.Empty(t, sess.snapshotAttachments(), "fixture: detach must have cleared the live owner")
 	d.mu.Lock()
-	parkingInGap := d.parking[token]
-	_, parkedInGap := d.parked[token]
+	parkingInGap := d.resume.parking[token]
+	_, parkedInGap := d.resume.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach publication")
 	require.Same(t, ac, parkingInGap.ac)
@@ -655,8 +655,8 @@ func TestResumeDuringTeardownBeforeParkRecoversSameAttachment(t *testing.T) {
 	require.True(t, oldTr.Closed(), "teardown/resume must retire the old transport")
 	require.False(t, newTr.Closed(), "rebound transport must survive")
 	d.mu.Lock()
-	_, oldTokenParked := d.parked[token]
-	_, stillParking := d.parking[token]
+	_, oldTokenParked := d.resume.parked[token]
+	_, stillParking := d.resume.parking[token]
 	d.mu.Unlock()
 	require.False(t, oldTokenParked, "consumed credential must not remain resumeable")
 	require.False(t, stillParking, "parking marker must be consumed after park/resume")
@@ -707,8 +707,8 @@ func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 
 	require.Empty(t, sess.snapshotAttachments(), "fixture: winning resume must have cleared the live owner")
 	d.mu.Lock()
-	parkingInGap := d.parking[token]
-	_, parkedInGap := d.parked[token]
+	parkingInGap := d.resume.parking[token]
+	_, parkedInGap := d.resume.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parkingInGap, "fixture: parking marker must precede detach for concurrent resumes")
 	require.Same(t, ac, parkingInGap.ac)
@@ -765,8 +765,8 @@ func TestConcurrentLiveResumesWaitParkingMarkerBeforePark(t *testing.T) {
 
 	require.True(t, d.commitResumeClaim(ac), "successful concurrent resume must consume its parked credential")
 	d.mu.Lock()
-	_, oldTokenParked := d.parked[token]
-	_, stillParking := d.parking[token]
+	_, oldTokenParked := d.resume.parked[token]
+	_, stillParking := d.resume.parking[token]
 	d.mu.Unlock()
 	require.False(t, oldTokenParked, "consumed credential must not remain resumeable")
 	require.False(t, stillParking, "parking marker must be consumed after park/resume")
@@ -801,8 +801,8 @@ func TestExplicitDetachClearsOrphanedSameAttachmentParkingMarker(t *testing.T) {
 	// Pre-mark as a same-attachment non-explicit teardown would before detach.
 	require.Equal(t, token, d.markParkingInFlight(sess, ac))
 	d.mu.Lock()
-	orphaned := d.parking[token]
-	otherMarker := d.parking[otherToken]
+	orphaned := d.resume.parking[token]
+	otherMarker := d.resume.parking[otherToken]
 	d.mu.Unlock()
 	require.NotNil(t, orphaned, "fixture: non-explicit teardown must publish the parking marker")
 	require.Same(t, ac, orphaned.ac)
@@ -824,8 +824,8 @@ func TestExplicitDetachClearsOrphanedSameAttachmentParkingMarker(t *testing.T) {
 	require.True(t, waited, "waiter must observe the same-attachment marker before it is cleared")
 
 	d.mu.Lock()
-	_, stillParking := d.parking[token]
-	otherAfter := d.parking[otherToken]
+	_, stillParking := d.resume.parking[token]
+	otherAfter := d.resume.parking[otherToken]
 	d.mu.Unlock()
 	require.False(t, stillParking, "explicit winner must clear the same attachment's orphaned marker")
 	require.NotNil(t, otherAfter, "explicit winner must not clear another attachment's marker")
@@ -849,15 +849,15 @@ func TestExplicitDetachClearsOrphanedSameAttachmentParkingMarker(t *testing.T) {
 	// scoped to the retired attachment identity.
 	require.True(t, d.parkAttachment(otherSess, otherAC))
 	d.mu.Lock()
-	parkedOther := d.parked[otherToken]
-	_, otherStillParking := d.parking[otherToken]
+	parkedOther := d.resume.parked[otherToken]
+	_, otherStillParking := d.resume.parking[otherToken]
 	d.mu.Unlock()
 	require.NotNil(t, parkedOther, "subsequent park must publish the other attachment")
 	require.False(t, otherStillParking, "park consumes the other attachment's in-flight marker")
 
 	d.clearParkingInFlight(otherToken, ac)
 	d.mu.Lock()
-	parkedAfterMismatchedClear := d.parked[otherToken]
+	parkedAfterMismatchedClear := d.resume.parked[otherToken]
 	d.mu.Unlock()
 	require.Same(t, parkedOther, parkedAfterMismatchedClear, "mismatched clear must not drop a subsequent parked lifecycle")
 }
@@ -927,7 +927,7 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 			tc.win(t, d, sess, ac, oldTr, token)
 
 			d.mu.Lock()
-			_, parkingBeforeRelease := d.parking[token]
+			_, parkingBeforeRelease := d.resume.parking[token]
 			d.mu.Unlock()
 			require.False(t, parkingBeforeRelease, "terminal cleanup must not leave a parking marker before late mark resumes")
 
@@ -940,8 +940,8 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 			require.Contains(t, pe.Error(), "resume token is no longer valid")
 
 			d.mu.Lock()
-			_, stillParking := d.parking[token]
-			_, stillParked := d.parked[token]
+			_, stillParking := d.resume.parking[token]
+			_, stillParked := d.resume.parked[token]
 			d.mu.Unlock()
 			require.False(t, stillParking, "late markParkingInFlight must not recreate a parking marker after terminal cleanup")
 			require.False(t, stillParked, "terminal cleanup must not leave a parked credential")
@@ -964,14 +964,14 @@ func TestLiveResumeRejectsLateMarkerAfterTerminalCleanupWins(t *testing.T) {
 		require.Zero(t, d.markParkingInFlight(sess, ac), "detached active attachment must not publish a late marker")
 
 		d.mu.Lock()
-		_, parkingBeforePark := d.parking[token]
+		_, parkingBeforePark := d.resume.parking[token]
 		d.mu.Unlock()
 		require.False(t, parkingBeforePark)
 
 		require.True(t, d.parkAttachment(sess, ac), "direct parkAttachment after detach must still park without recreating an in-flight marker")
 		d.mu.Lock()
-		parked := d.parked[token]
-		_, stillParking := d.parking[token]
+		parked := d.resume.parked[token]
+		_, stillParking := d.resume.parking[token]
 		d.mu.Unlock()
 		require.NotNil(t, parked)
 		require.Same(t, ac, parked.ac)
@@ -1054,7 +1054,7 @@ func TestResumeLiveAttachmentParkFailureRetiresOldTransport(t *testing.T) {
 	require.Nil(t, ac.transport(), "failed live park must revoke the captured old transport")
 	require.True(t, oldTr.Closed(), "failed live park must close the captured old transport")
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	_, parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.False(t, parked, "failed live park must not publish a resume credential")
 }
@@ -1124,7 +1124,7 @@ func TestResumeClientIDMismatchDoesNotConsumeParkedToken(t *testing.T) {
 	wrongClient.ClientID = [16]byte{9, 9, 9, 9}
 	_, _, ok, err := d.resumeParked(wrongClient, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	d.mu.Lock()
-	_, stillParked := d.parked[token]
+	_, stillParked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.Error(t, err)
 	require.False(t, ok)
@@ -1221,7 +1221,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	d.paint(sess, ac, true, nil)
 
 	ac.sendMu.Lock()
-	require.Contains(t, ac.captureFrames, closed, "fixture must render and capture the pane before parking")
+	require.Contains(t, ac.render.panes, closed, "fixture must render and capture the pane before parking")
 	ac.sendMu.Unlock()
 	token := ac.resumeToken
 	require.True(t, sess.detachIfCurrent(ac))
@@ -1231,7 +1231,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	// Its capture must already have been released before the attachment parked.
 	require.NoError(t, d.closePane(sess, tb, closed.id, nil, false))
 	ac.sendMu.Lock()
-	require.NotContains(t, ac.captureFrames, closed, "parked attachment must not retain a pane closed while headless")
+	require.NotContains(t, ac.render.panes, closed, "parked attachment must not retain a pane closed while headless")
 	ac.sendMu.Unlock()
 
 	newTransport := &closeTrackingTransport{}
@@ -1262,7 +1262,7 @@ func TestExplicitDetachDoesNotPark(t *testing.T) {
 	require.NoError(t, err)
 	d.clientGone(sess, ac, ac.transport(), true)
 	d.mu.Lock()
-	parked := len(d.parked)
+	parked := len(d.resume.parked)
 	d.mu.Unlock()
 	require.Zero(t, parked)
 }
@@ -1282,7 +1282,7 @@ func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
 	timer := <-clk.timers
 	require.Equal(t, 20*time.Minute, timer.duration)
 	d.mu.Lock()
-	_, parkedBeforeGrace := d.parked[token]
+	_, parkedBeforeGrace := d.resume.parked[token]
 	d.mu.Unlock()
 	require.True(t, parkedBeforeGrace, "parked attachment remains before configured grace timer fires")
 
@@ -1290,7 +1290,7 @@ func TestResumeParkUsesConfiguredGraceAndExpiresOnlyAfterGrace(t *testing.T) {
 	require.Eventually(t, func() bool {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		_, ok := d.parked[token]
+		_, ok := d.resume.parked[token]
 		return !ok
 	}, 2*time.Second, 10*time.Millisecond)
 }
@@ -1310,7 +1310,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	require.Eventually(t, func() bool {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		_, ok := d.parked[token]
+		_, ok := d.resume.parked[token]
 		return !ok
 	}, 2*time.Second, 10*time.Millisecond)
 
@@ -1323,7 +1323,7 @@ func TestParkExpiryAndShutdownCleanup(t *testing.T) {
 	d2.clientGone(sess2, ac2, ac2.transport(), false)
 	d2.shutdownAll(protocol.ReasonServerShutdown)
 	d2.mu.Lock()
-	parked := len(d2.parked)
+	parked := len(d2.resume.parked)
 	d2.mu.Unlock()
 	require.Zero(t, parked)
 }
@@ -1340,7 +1340,7 @@ func TestLiveParkAndResumeRetainsAttachmentWithoutDaemonHistory(t *testing.T) {
 
 	token := ac.resumeToken
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
 
@@ -1381,7 +1381,7 @@ func TestDiscardingParkedAttachmentDoesNotOwnPreviousSession(t *testing.T) {
 			d.clientGone(sess, ac, ac.transport(), false)
 
 			d.mu.Lock()
-			parked := d.parked[ac.resumeToken]
+			parked := d.resume.parked[ac.resumeToken]
 			require.NotNil(t, parked)
 			retirements := tc.discard(d, ac.resumeToken, parked)
 			d.mu.Unlock()
@@ -1411,7 +1411,7 @@ func TestEphemeralParkExpiryKeepsSessionWhenCloseOnExitOff(t *testing.T) {
 	require.Eventually(t, func() bool {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		_, ok := d.parked[token]
+		_, ok := d.resume.parked[token]
 		return !ok
 	}, 2*time.Second, 10*time.Millisecond)
 
@@ -1433,7 +1433,7 @@ func TestKilledSessionPurgesParkedResumeToken(t *testing.T) {
 
 	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 	d.mu.Lock()
-	_, parked := d.parked[token]
+	_, parked := d.resume.parked[token]
 	d.mu.Unlock()
 	_, _, ok, err := d.resumeParked(helloResumeCapable(protocol.IntentResume, "work", token), &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.False(t, parked, "killSession purges parked token")
@@ -1470,8 +1470,8 @@ func TestKilledSessionUnblocksParkingWaiterFailsClosed(t *testing.T) {
 
 	require.Equal(t, token, d.markParkingInFlight(sess, ac))
 	d.mu.Lock()
-	parkingMarker := d.parking[token]
-	otherMarker := d.parking[otherToken]
+	parkingMarker := d.resume.parking[token]
+	otherMarker := d.resume.parking[otherToken]
 	d.mu.Unlock()
 	require.NotNil(t, parkingMarker, "fixture: parking marker must be published before kill")
 	require.Same(t, ac, parkingMarker.ac)
@@ -1492,8 +1492,8 @@ func TestKilledSessionUnblocksParkingWaiterFailsClosed(t *testing.T) {
 	require.True(t, waited, "waiter must observe the session marker before it is purged")
 
 	d.mu.Lock()
-	_, stillParking := d.parking[token]
-	otherAfter := d.parking[otherToken]
+	_, stillParking := d.resume.parking[token]
+	otherAfter := d.resume.parking[otherToken]
 	otherRegistered := d.sessions[otherSess.id] == otherSess
 	closing := d.closing
 	d.mu.Unlock()

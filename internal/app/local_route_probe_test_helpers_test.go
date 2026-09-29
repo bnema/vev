@@ -7,6 +7,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/broker"
 )
 
 // newLocalRouteProbe fences one broker-owned local binding into a probe over a
@@ -17,7 +18,7 @@ import (
 // its own endpoint connector; a caller that already owns the pooled connector
 // uses newLocalRouteProbeWithConnector instead, exactly as brokerLocalProbe
 // does in production.
-func newLocalRouteProbe(binding brokerconfig.LocalBinding, epoch ports.BrokerEpoch, dial localCarrierDialer, ceilings daemonmux.MuxCeilings) (*localRouteProbe, error) {
+func newLocalRouteProbe(binding brokerconfig.LocalBinding, epoch ports.BrokerEpoch, dial localCarrierDialer, ceilings daemonmux.MuxCeilings) (*broker.LocalDaemonProbe, error) {
 	if dial == nil {
 		return nil, errors.New("vev: broker local probe requires a dialer")
 	}
@@ -31,7 +32,7 @@ func newLocalRouteProbe(binding brokerconfig.LocalBinding, epoch ports.BrokerEpo
 // newLocalRouteProbeWithConnector fences one broker-owned local binding into a
 // probe over an existing connector, delegating to the same
 // newDynamicLocalRouteProbe production constructor brokerLocalProbe uses.
-func newLocalRouteProbeWithConnector(binding brokerconfig.LocalBinding, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector) (*localRouteProbe, error) {
+func newLocalRouteProbeWithConnector(binding brokerconfig.LocalBinding, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector) (*broker.LocalDaemonProbe, error) {
 	return newDynamicLocalRouteProbe(binding.Route, binding.Policy, epoch, connector, func() (ports.BrokerDaemonIdentity, error) {
 		return binding.Identity, nil
 	})

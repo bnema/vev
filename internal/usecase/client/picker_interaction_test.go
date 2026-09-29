@@ -137,7 +137,7 @@ func pickerLoopFixture(t *testing.T) *pickerLoop {
 
 func pickedKey(t *testing.T, loop *pickerLoop) string {
 	t.Helper()
-	selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 0)
+	selection, ok := loop.selection(protocol.PickerActionNavigate, 0)
 	require.True(t, ok)
 	return selection.Key
 }
@@ -197,7 +197,7 @@ func TestPickerLoopMergesSourcesAndCommitsOwningIdentity(t *testing.T) {
 	loop.replaceLines(remote)
 
 	loop.down()
-	selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 9)
+	selection, ok := loop.selection(protocol.PickerActionNavigate, 9)
 	require.True(t, ok)
 	require.Equal(t, "authority/remote-a", selection.SourceID)
 	require.Equal(t, uint64(1), selection.SourceRevision)
@@ -222,7 +222,7 @@ func TestPickerLoopRefreshesOneSourceWithoutInvalidatingAnother(t *testing.T) {
 	local.SourceRevision++
 	local.Lines[0].Detail = "refreshed"
 	loop.replaceLines(local)
-	selection, ok := commitSelection(loop, protocol.PickerActionNavigate, 0)
+	selection, ok := loop.selection(protocol.PickerActionNavigate, 0)
 	require.True(t, ok)
 	require.Equal(t, "authority/remote-a", selection.SourceID)
 	require.Equal(t, uint64(1), selection.SourceRevision)
@@ -294,7 +294,7 @@ func TestPickerLoopKillRequiresAuthorisedRow(t *testing.T) {
 
 	// The first row authorises destruction; its typed kill carries the
 	// displayed source revision and the fatal action.
-	selection, ok := killSelection(loop, 0)
+	selection, ok := loop.selection(protocol.PickerActionKill, 0)
 	require.True(t, ok)
 	require.Equal(t, protocol.PickerActionKill, selection.Action)
 	require.Equal(t, "aa/work", selection.Key)
@@ -303,8 +303,41 @@ func TestPickerLoopKillRequiresAuthorisedRow(t *testing.T) {
 	// The stopped row is navigable but not destructible from here.
 	loop.down()
 	require.Equal(t, "bb/perso", pickedKey(t, loop))
-	_, ok = killSelection(loop, 0)
+	_, ok = loop.selection(protocol.PickerActionKill, 0)
 	require.False(t, ok, "a row without the kill action must not be destroyed")
+}
+
+// TestPickerDecisionCapturesRowWithDecision proves the key handed to a driver
+// is the row selected when the decision was recorded, and that a commit wins
+// over a kill in the same accumulated decision.
+func TestPickerDecisionCapturesRowWithDecision(t *testing.T) {
+	tests := []struct {
+		name       string
+		ops        []pickerOp
+		moveAfter  bool
+		wantKey    string
+		wantAction bool
+	}{
+		{name: "no decision", ops: []pickerOp{{}}},
+		{name: "commit captures cursor row", ops: []pickerOp{{commit: true}}, moveAfter: true, wantKey: "aa/work", wantAction: true},
+		{name: "kill captures cursor row", ops: []pickerOp{{kill: true}}, moveAfter: true, wantKey: "aa/work", wantAction: true},
+		{name: "close carries no row", ops: []pickerOp{{close: true}}, wantAction: true},
+		{name: "commit wins over kill", ops: []pickerOp{{kill: true}, {commit: true}}, wantKey: "aa/work", wantAction: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loop := pickerLoopFixture(t)
+			var decision pickerDecision
+			for _, op := range tt.ops {
+				decision.record(op, loop)
+			}
+			if tt.moveAfter {
+				loop.down()
+			}
+			require.Equal(t, tt.wantAction, decision.actionable())
+			require.Equal(t, tt.wantKey, decision.key())
+		})
+	}
 }
 
 func TestPickerLoopKeepsPublishedLineOrderAndKeys(t *testing.T) {
@@ -326,29 +359,29 @@ func TestPickerDriverOpReportsActionsAndLocalSort(t *testing.T) {
 	loop := pickerLoopFixture(t)
 
 	// Normal mode: arrows and j/k move; Enter asks to commit; x asks to kill.
-	op, changed := pickerDriverOp(loop, []string{"Down"}, "")
+	op, changed := loop.drive([]string{"Down"}, "")
 	require.False(t, op.commit)
 	require.False(t, op.close)
 	require.True(t, changed)
 	require.Equal(t, "bb/perso", pickedKey(t, loop))
-	op, _ = pickerDriverOp(loop, []string{"k"}, "")
+	op, _ = loop.drive([]string{"k"}, "")
 	require.False(t, op.commit)
 	require.Equal(t, "aa/work", pickedKey(t, loop))
 
-	op, _ = pickerDriverOp(loop, []string{"Enter"}, "")
+	op, _ = loop.drive([]string{"Enter"}, "")
 	require.True(t, op.commit)
-	op, _ = pickerDriverOp(loop, []string{"x"}, "")
+	op, _ = loop.drive([]string{"x"}, "")
 	require.True(t, op.kill)
 	require.False(t, op.close)
 
 	// q and Ctrl+C close in normal mode.
 	for _, key := range []string{"q", "Ctrl+C"} {
-		op, _ = pickerDriverOp(loop, []string{key}, "")
+		op, _ = loop.drive([]string{key}, "")
 		require.True(t, op.close, "%s must close the picker", key)
 	}
 
 	// s reorders locally without asking the daemon, and keeps the selection.
-	op, changed = pickerDriverOp(loop, []string{"s"}, "")
+	op, changed = loop.drive([]string{"s"}, "")
 	require.False(t, op.commit)
 	require.False(t, op.kill)
 	require.False(t, op.close)
@@ -358,7 +391,7 @@ func TestPickerDriverOpReportsActionsAndLocalSort(t *testing.T) {
 
 	// While searching, Enter still commits and printable keys are text.
 	loop.insert('w')
-	_, changed = pickerDriverOp(loop, []string{"o", "r"}, "")
+	_, changed = loop.drive([]string{"o", "r"}, "")
 	require.True(t, changed)
 	require.Equal(t, "wor", loop.model.Query())
 }

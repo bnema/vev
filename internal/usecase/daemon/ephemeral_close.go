@@ -35,15 +35,5 @@ func (d *Daemon) reapAbandonedEphemeral(sess *session) {
 // in-flight parking attachment that a reconnecting client may resume. Caller
 // holds d.mu.
 func (d *Daemon) sessionHasPendingResumeLocked(sess *session) bool {
-	for _, parked := range d.parked {
-		if parked.sess == sess {
-			return true
-		}
-	}
-	for _, parking := range d.parking {
-		if parking.sess == sess {
-			return true
-		}
-	}
-	return false
+	return d.resume.retainsSession(sess)
 }

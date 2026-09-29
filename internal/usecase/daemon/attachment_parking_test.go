@@ -34,7 +34,7 @@ func TestAttachmentLossParksOnlyThatAttachment(t *testing.T) {
 	d.clientGone(sess, first, firstTransport, false)
 
 	d.mu.Lock()
-	parked := d.parked[first.resumeToken]
+	parked := d.resume.parked[first.resumeToken]
 	d.mu.Unlock()
 	require.NotNil(t, parked)
 	sess.mu.Lock()
@@ -62,7 +62,7 @@ func TestTwoAttachmentsParkIndependently(t *testing.T) {
 	d.clientGone(sess, first, firstTransport, false)
 	d.clientGone(sess, second, secondTransport, false)
 	d.mu.Lock()
-	firstParked, secondParked := d.parked[firstToken], d.parked[secondToken]
+	firstParked, secondParked := d.resume.parked[firstToken], d.resume.parked[secondToken]
 	d.mu.Unlock()
 	require.NotNil(t, firstParked)
 	require.NotNil(t, secondParked)
@@ -86,12 +86,12 @@ func TestParkExpiryRemovesOnlyOneAttachment(t *testing.T) {
 	d.clientGone(sess, second, secondTransport, false)
 	firstToken, secondToken := first.resumeToken, second.resumeToken
 	d.mu.Lock()
-	firstParked := d.parked[firstToken]
+	firstParked := d.resume.parked[firstToken]
 	d.mu.Unlock()
 	d.expireParked(firstToken, firstParked)
 	d.mu.Lock()
-	_, firstRetained := d.parked[firstToken]
-	_, secondRetained := d.parked[secondToken]
+	_, firstRetained := d.resume.parked[firstToken]
+	_, secondRetained := d.resume.parked[secondToken]
 	d.mu.Unlock()
 	require.False(t, firstRetained)
 	require.True(t, secondRetained)
@@ -118,7 +118,7 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	require.Greater(t, ac.lifecycle.generationValue(), oldGeneration)
 	require.True(t, d.commitResumeClaim(ac))
 	d.mu.Lock()
-	_, oldRetained := d.parked[oldToken]
+	_, oldRetained := d.resume.parked[oldToken]
 	d.mu.Unlock()
 	require.False(t, oldRetained)
 
@@ -126,7 +126,7 @@ func TestResumeRotatesCredentialAndRejectsStaleTransport(t *testing.T) {
 	d.clientGone(sess, ac, oldTransport, false)
 	require.Equal(t, before, ac.resumeToken)
 	d.mu.Lock()
-	_, staleParked := d.parked[oldToken]
+	_, staleParked := d.resume.parked[oldToken]
 	d.mu.Unlock()
 	require.False(t, staleParked)
 }
@@ -147,8 +147,8 @@ func TestSuccessfulResumeRejectsOldCredentialAfterWelcome(t *testing.T) {
 	newToken := ac.resumeToken
 	require.NotEqual(t, oldToken, newToken)
 	d.mu.Lock()
-	_, oldRetained := d.parked[oldToken]
-	newParked := d.parked[newToken]
+	_, oldRetained := d.resume.parked[oldToken]
+	newParked := d.resume.parked[newToken]
 	d.mu.Unlock()
 	require.False(t, oldRetained)
 	require.NotNil(t, newParked)
@@ -170,7 +170,7 @@ func TestFailedResumeHandshakeKeepsParkedCredential(t *testing.T) {
 	d.handleHello(failed, helloResumeCapable(protocol.IntentResume, "work", token))
 	require.Nil(t, ac.transport())
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	claimed := parked != nil && parked.claimed
 	d.mu.Unlock()
 	require.NotNil(t, parked)
@@ -237,7 +237,7 @@ func TestKillSessionClosesEveryAttachmentAndParkedCredential(t *testing.T) {
 	require.True(t, secondTransport.Closed())
 	require.True(t, parkedTransport.Closed())
 	d.mu.Lock()
-	_, retained := d.parked[parkedToken]
+	_, retained := d.resume.parked[parkedToken]
 	d.mu.Unlock()
 	require.False(t, retained)
 }

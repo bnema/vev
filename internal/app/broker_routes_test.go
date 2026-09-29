@@ -35,27 +35,27 @@ func TestBrokerRoutesDurableFirstAddAndRestart(t *testing.T) {
 	store, err := brokerstore.Open(brokerstore.Options{Dir: dir})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, store.Close()) }()
-	routes := &brokerRoutes{}
-	probe := &brokerRemoteProbe{epoch: 1, routes: routes}
+	routes := newBrokerRoutes(nil)
+	probe := &broker.RemoteProbe{Epoch: 1, Routes: routes}
 	registry, err := broker.NewRegistryWithConfig(1, store, probe, clock.New(), nil, broker.RegistryConfig{MembershipMode: broker.MembershipMutable})
 	require.NoError(t, err)
-	routes.hosts = registry
-	probe.hosts = registry
+	routes.Hosts = registry
 	policy := remoteBrokerPolicy("stdio")
 	reg, err := registry.AddHost(ctx, "user@example.test", policy)
 	require.NoError(t, err)
-	request, err := probe.request(ctx, reg)
-	require.NoError(t, err)
+	request := ports.BrokerOpenStreamRequest{Endpoint: reg.Endpoint, Registration: reg, Policy: policy, StartMode: ports.BrokerDaemonExistingOnly}
 	target, err := routes.ResolveDialTarget(ctx, request)
 	require.NoError(t, err)
 	require.False(t, target.ExpectedIdentity.Bound)
-	route, err := routes.remoteRoute(ctx, target)
+	spec, err := routes.AuthorizeRemoteDial(ctx, target)
+	require.NoError(t, err)
+	route, err := brokerconfig.RouteFromSpec(spec)
 	require.NoError(t, err)
 	require.Equal(t, brokerconfig.RouteSSHStdio, route.Kind())
 	require.Equal(t, []string{"vev", brokerMuxStdioCommand, "--production"}, route.Argv())
 	identity, err := registry.BindAuthenticatedIdentity(ctx, ports.BrokerIdentityBindingRequest{Fence: target.Fence, Policy: policy, Identity: "daemon-test"})
 	require.NoError(t, err)
-	_, err = routes.remoteRoute(ctx, target)
+	_, err = routes.AuthorizeRemoteDial(ctx, target)
 	require.Error(t, err, "an unbound target cannot bypass a newly committed identity")
 	target, err = routes.ResolveDialTarget(ctx, request)
 	require.NoError(t, err)
@@ -69,44 +69,11 @@ func TestBrokerRoutesDurableFirstAddAndRestart(t *testing.T) {
 	require.NoError(t, err)
 	restarted, err := broker.NewRegistryWithConfig(2, store, probe, clock.New(), nil, broker.RegistryConfig{MembershipMode: broker.MembershipMutable})
 	require.NoError(t, err)
-	routes.hosts = restarted
+	routes.Hosts = restarted
 	recovered, err := routes.ResolveDialTarget(ctx, request)
 	require.NoError(t, err)
 	require.Equal(t, target, recovered)
 	restarted.Run(cancelled)
-}
-
-func TestBrokerRoutesRejectChangedAuthority(t *testing.T) {
-	reg := domain.RemoteRegistration{Endpoint: "user@example.test", Incarnation: [16]byte{1}, Generation: 1}
-	policy := remoteBrokerPolicy("stdio")
-	spec, err := ports.BrokerRouteForTransport(policy.Transport, reg.Endpoint)
-	require.NoError(t, err)
-	original := ports.BrokerHostRecord{Registration: reg, Policy: policy, Route: spec}
-	for _, tc := range []struct {
-		name   string
-		change func(*routeTestHosts)
-	}{
-		{"removed", func(h *routeTestHosts) { h.found = false }},
-		{"readded", func(h *routeTestHosts) { h.record.Registration.Incarnation[0]++ }},
-		{"policy", func(h *routeTestHosts) { h.record.Policy.Trust = "other" }},
-		{"route", func(h *routeTestHosts) { h.record.Route.Target = "other@example.test" }},
-		{"identity", func(h *routeTestHosts) { h.record.Identity = "other-daemon" }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			hosts := &routeTestHosts{record: original, found: true}
-			routes := &brokerRoutes{hosts: hosts}
-			req := ports.BrokerOpenStreamRequest{Endpoint: reg.Endpoint, Registration: reg, Policy: policy, StartMode: ports.BrokerDaemonExistingOnly}
-			target, err := routes.ResolveDialTarget(context.Background(), req)
-			require.NoError(t, err)
-			tc.change(hosts)
-			_, err = routes.remoteRoute(context.Background(), target)
-			require.Error(t, err)
-		})
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = (&brokerRoutes{}).ResolveDialTarget(ctx, ports.BrokerOpenStreamRequest{})
-	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestCanonicalBrokerRoutesSelectProductionHelpers(t *testing.T) {
@@ -162,7 +129,8 @@ func TestBrokerDynamicConnectorDialsDurableRouteWithoutConfigEntry(t *testing.T)
 	hosts := &routeTestHosts{found: true, record: ports.BrokerHostRecord{
 		Registration: reg, Policy: policy, Route: ports.BrokerRouteSpec{Kind: ports.BrokerRouteUnix, Path: fixture.route},
 	}}
-	routes := &brokerRoutes{hosts: hosts}
+	routes := newBrokerRoutes(nil)
+	routes.Hosts = hosts
 	target, err := routes.ResolveDialTarget(context.Background(), ports.BrokerOpenStreamRequest{
 		Endpoint: reg.Endpoint, Registration: reg, Policy: policy, StartMode: ports.BrokerDaemonExistingOnly,
 	})
@@ -199,7 +167,7 @@ func TestProductionMuxHelperExistingOnlyNeverSpawns(t *testing.T) {
 
 func TestBrokerRoutesLocalRemainsConfigured(t *testing.T) {
 	config, binding := testLocalSandboxConfigForCarriage(t, filepath.Join(t.TempDir(), "daemon.sock"))
-	routes := &brokerRoutes{local: config.Resolver()} // no remote authority at all
+	routes := newBrokerRoutes(config) // no remote authority at all
 	request := ports.BrokerOpenStreamRequest{Local: true, Policy: binding.Policy, StartMode: ports.BrokerDaemonExistingOnly}
 	target, err := routes.ResolveDialTarget(context.Background(), request)
 	require.NoError(t, err)

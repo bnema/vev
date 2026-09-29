@@ -317,9 +317,9 @@ func captureLocalRenderState(
 	// this capture runs, so retaining this attachment's prior pane snapshots
 	// would compose an old frame with a fresh reset epoch.
 	if reset {
-		ac.captureFrames = nil
+		ac.render.forgetAllPanes()
 	}
-	scratch := &ac.renderScratch
+	scratch := &ac.render.capture
 	scratch.statusTabs = append(scratch.statusTabs[:0], bars.status.tabs...)
 	bars.status.tabs = scratch.statusTabs
 	scratch.mru = append(scratch.mru[:0], bars.mru...)
@@ -387,9 +387,6 @@ func captureLocalRenderState(
 	}
 	state.panes = scratch.panes[:0]
 	state.tabGeneration = uint64(len(layoutSnap.fingerprint))
-	if ac.captureFrames == nil {
-		ac.captureFrames = make(map[*pane]capturedPaneRenderState)
-	}
 	for _, placement := range layoutSnap.placements {
 		p := tb.panes[placement.ID]
 		if p == nil {
@@ -400,7 +397,7 @@ func captureLocalRenderState(
 			visible = domain.Rect{}
 		}
 		p.mu.Lock()
-		captured := capturePaneRenderStateLockedInto(p, visible, ac.captureFrames[p])
+		captured := capturePaneRenderStateLockedInto(p, visible, ac.render.paneSnapshot(p))
 		if !ac.terminalCapabilities.SupportsKittyGraphics() {
 			if captured.graphics != nil && captured.graphics.Usage().Placements != 0 {
 				state.suppressedGraphics = true
@@ -418,7 +415,7 @@ func captureLocalRenderState(
 			translated = append(translated, translatePaneDamage(damage, placement.Content, layoutSnap.area)...)
 		}
 		captured.rawDamage, captured.damage = captured.damage, translated
-		ac.captureFrames[p] = captured
+		ac.render.storePaneSnapshot(p, captured)
 		state.panes = append(state.panes, captured)
 	}
 	scratch.panes = state.panes
@@ -426,7 +423,7 @@ func captureLocalRenderState(
 		p := tb.floating.pane
 		p.mu.Lock()
 		geometry := p.committedFloatingGeometryLocked(calculateContentFloatingGeometry(domain.Size{Cols: layoutSnap.area.Width, Rows: layoutSnap.area.Height}, floatingCfg))
-		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, ac.captureFrames[p])
+		captured := capturePaneRenderStateLockedInto(p, geometry.Inner, ac.render.paneSnapshot(p))
 		if !ac.terminalCapabilities.SupportsKittyGraphics() {
 			if captured.graphics != nil && captured.graphics.Usage().Placements != 0 {
 				state.suppressedGraphics = true
@@ -443,7 +440,7 @@ func captureLocalRenderState(
 		if !seen {
 			state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		}
-		ac.captureFrames[p] = captured
+		ac.render.storePaneSnapshot(p, captured)
 		// A visible floating pane is the terminal input target, so its structural
 		// border carries the focused semantic role independently of its content.
 		state.floating = capturedFloatingRenderState{visible: true, focused: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}

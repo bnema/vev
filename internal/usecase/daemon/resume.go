@@ -31,19 +31,7 @@ func newResumeToken() uint64 {
 	return binary.BigEndian.Uint64(b[:])
 }
 
-func (d *Daemon) nextResumeTokenLocked() uint64 {
-	for {
-		tok := newResumeToken()
-		if tok == 0 {
-			continue
-		}
-		if _, exists := d.parked[tok]; !exists {
-			if _, parking := d.parking[tok]; !parking {
-				return tok
-			}
-		}
-	}
-}
+func (d *Daemon) nextResumeTokenLocked() uint64 { return d.resume.issue() }
 
 // markParkingInFlight publishes an observable parking lifecycle so IntentResume
 // can wait out the detach→park gap. Callers must publish this before clearing
@@ -78,23 +66,7 @@ func (d *Daemon) markParkingInFlight(sess *session, ac *attachedClient) uint64 {
 // ensureParkingInFlightLocked records or refreshes the in-flight marker for ac.
 // Caller holds d.mu and has verified the daemon is not closing.
 func (d *Daemon) ensureParkingInFlightLocked(sess *session, ac *attachedClient) {
-	token := ac.resumeToken
-	if token == 0 {
-		return
-	}
-	if existing := d.parking[token]; existing != nil {
-		if existing.ac == ac {
-			existing.sess = sess
-			return
-		}
-		delete(d.parking, token)
-		existing.closeDone()
-	}
-	d.parking[token] = &parkingAttachment{
-		sess: sess,
-		ac:   ac,
-		done: make(chan struct{}),
-	}
+	d.resume.markParking(sess, ac)
 }
 
 func (d *Daemon) clearParkingInFlight(token uint64, ac *attachedClient) {
@@ -116,7 +88,7 @@ func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClie
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.parked[token] != nil {
+	if d.resume.parkedFor(token) != nil {
 		return
 	}
 	stillOwner := false
@@ -132,33 +104,17 @@ func (d *Daemon) clearParkingInFlightIfAbandoned(sess *session, ac *attachedClie
 }
 
 func (d *Daemon) clearParkingInFlightLocked(token uint64, ac *attachedClient) {
-	pending := d.parking[token]
-	if pending == nil {
-		return
-	}
-	if ac != nil && pending.ac != ac {
-		return
-	}
-	delete(d.parking, token)
-	pending.closeDone()
+	d.resume.clearParking(token, ac)
 }
 
-func (d *Daemon) purgeAllParkingLocked() {
-	for token, pending := range d.parking {
-		delete(d.parking, token)
-		pending.closeDone()
-	}
-}
+func (d *Daemon) purgeAllParkingLocked() { d.resume.purgeParking(nil) }
 
 // purgeParkingForSessionLocked removes and closes every in-flight parking
 // marker for sess so same-token waiters fail closed instead of hanging when
 // the session is removed before park publication. Caller holds d.mu.
 func (d *Daemon) purgeParkingForSessionLocked(sess *session) {
-	for token, pending := range d.parking {
-		if pending.sess == sess {
-			delete(d.parking, token)
-			pending.closeDone()
-		}
+	if sess != nil {
+		d.resume.purgeParking(sess)
 	}
 }
 
@@ -170,7 +126,7 @@ func (d *Daemon) waitParkingInFlight(h protocol.Hello) bool {
 		return false
 	}
 	d.mu.Lock()
-	pending := d.parking[h.ResumeToken]
+	pending := d.resume.parkingFor(h.ResumeToken)
 	if pending == nil {
 		d.mu.Unlock()
 		return false
@@ -243,7 +199,7 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 		oldRetirement *parkedAttachmentRetirement
 		oldSame       *parkedAttachment
 	)
-	if old := d.parked[token]; old != nil {
+	if old := d.resume.parkedFor(token); old != nil {
 		if old.ac == ac {
 			oldSame = old
 		} else {
@@ -258,8 +214,7 @@ func (d *Daemon) parkAttachment(sess *session, ac *attachedClient) bool {
 		timer: timer, done: make(chan struct{}),
 	}
 	ac.parked = true
-	d.parked[token] = parked
-	d.clearParkingInFlightLocked(token, ac)
+	d.resume.publishParked(token, parked)
 	d.mu.Unlock()
 	if oldRetirement != nil {
 		d.finishParkedAttachmentRetirements([]parkedAttachmentRetirement{*oldRetirement})
@@ -291,7 +246,7 @@ func (d *Daemon) watchParkedTimer(token uint64, parked *parkedAttachment) {
 
 func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 	d.mu.Lock()
-	if d.parked[token] == parked {
+	if d.resume.parkedFor(token) == parked {
 		if parked.claimed {
 			d.mu.Unlock()
 			return
@@ -307,9 +262,9 @@ func (d *Daemon) expireParked(token uint64, parked *parkedAttachment) {
 }
 
 // removeParkedLocked invalidates one non-nil parked attachment. Caller holds
-// d.mu and has verified d.parked[token] still points at parked when that matters.
+// d.mu and has verified token still holds parked when that matters.
 func (d *Daemon) removeParkedLocked(token uint64, parked *parkedAttachment) {
-	delete(d.parked, token)
+	d.resume.takeParked(token, parked)
 	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
@@ -336,11 +291,11 @@ func (d *Daemon) commitResumeClaim(ac *attachedClient) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	token := ac.resumeClaimToken
-	parked := d.parked[token]
+	parked := d.resume.parkedFor(token)
 	if token == 0 || parked == nil || parked.ac != ac || !parked.claimed {
 		return token == 0
 	}
-	delete(d.parked, token)
+	d.resume.takeParked(token, parked)
 	parked.claimed = false
 	if parked.timer != nil {
 		parked.timer.Stop()
@@ -359,7 +314,7 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	}
 	d.mu.Lock()
 	token := ac.resumeClaimToken
-	parked := d.parked[token]
+	parked := d.resume.parkedFor(token)
 	if token == 0 || parked == nil || parked.ac != ac || !parked.claimed {
 		d.mu.Unlock()
 		return false
@@ -372,7 +327,7 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 	defer frozen.unfreeze()
 
 	d.mu.Lock()
-	if d.parked[token] != parked || !parked.claimed || ac.resumeClaimToken != token {
+	if d.resume.parkedFor(token) != parked || !parked.claimed || ac.resumeClaimToken != token {
 		d.mu.Unlock()
 		return false
 	}
@@ -405,7 +360,7 @@ func (d *Daemon) abortResumeClaim(ac *attachedClient) bool {
 		timer:             d.clock.NewTimer(d.resumeParkGrace),
 		done:              make(chan struct{}),
 	}
-	d.parked[token] = rearmed
+	d.resume.publishParked(token, rearmed)
 	captured := ac.transportSnapshot().transport
 	d.mu.Unlock()
 	if sess != nil {
@@ -425,7 +380,7 @@ type parkedAttachmentRetirement struct {
 }
 
 func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttachment) parkedAttachmentRetirement {
-	delete(d.parked, token)
+	d.resume.takeParked(token, parked)
 	d.discardAttachmentOutputLocked(parked.ac)
 	parked.ac.resumeToken = 0
 	parked.ac.parked = false
@@ -442,18 +397,19 @@ func (d *Daemon) retireParkedAttachmentLocked(token uint64, parked *parkedAttach
 // returns the external resources that must be retired after releasing d.mu.
 // It is reserved for terminal session kill and daemon shutdown.
 func (d *Daemon) purgeParkedForSessionLocked(sess *session) []parkedAttachmentRetirement {
-	var retirements []parkedAttachmentRetirement
-	for token, parked := range d.parked {
-		if parked.sess == sess {
-			retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
-		}
+	if sess == nil {
+		return nil
 	}
-	return retirements
+	return d.retireParkedLocked(d.resume.parkedForSession(sess))
 }
 
 func (d *Daemon) purgeAllParkedLocked() []parkedAttachmentRetirement {
-	retirements := make([]parkedAttachmentRetirement, 0, len(d.parked))
-	for token, parked := range d.parked {
+	return d.retireParkedLocked(d.resume.parkedForSession(nil))
+}
+
+func (d *Daemon) retireParkedLocked(entries map[uint64]*parkedAttachment) []parkedAttachmentRetirement {
+	retirements := make([]parkedAttachmentRetirement, 0, len(entries))
+	for token, parked := range entries {
 		retirements = append(retirements, d.retireParkedAttachmentLocked(token, parked))
 	}
 	return retirements
@@ -484,7 +440,7 @@ func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.ServerConnectio
 		return nil, nil, false, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
 	// Teardown may have parked the credential already.
-	if d.parked[h.ResumeToken] != nil {
+	if d.resume.parkedFor(h.ResumeToken) != nil {
 		d.mu.Unlock()
 		return d.resumeParked(h, tr, sz)
 	}
@@ -513,7 +469,7 @@ func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.ServerConnectio
 		sess.mu.Unlock()
 	}
 	// Teardown may have parked the credential while we resolved the session.
-	if d.parked[h.ResumeToken] != nil {
+	if d.resume.parkedFor(h.ResumeToken) != nil {
 		d.mu.Unlock()
 		return d.resumeParked(h, tr, sz)
 	}
@@ -581,7 +537,7 @@ func (d *Daemon) resumeLiveAttachment(h protocol.Hello, tr ports.ServerConnectio
 // the initial lookup and lock acquisition.
 func (d *Daemon) resumeParked(h protocol.Hello, tr ports.ServerConnection, sz domain.Size) (*session, *attachedClient, bool, error) {
 	d.mu.Lock()
-	parked := d.parked[h.ResumeToken]
+	parked := d.resume.parkedFor(h.ResumeToken)
 	d.mu.Unlock()
 	if parked == nil || h.ResumeToken == 0 {
 		return nil, nil, false, nil
@@ -598,7 +554,7 @@ func (d *Daemon) resumeParked(h protocol.Hello, tr ports.ServerConnection, sz do
 		ac.sendMu.Unlock()
 		return nil, nil, false, &protoErr{protocol.ErrServerShutdown, "daemon is shutting down"}
 	}
-	if d.parked[h.ResumeToken] != parked || parked.claimed {
+	if d.resume.parkedFor(h.ResumeToken) != parked || parked.claimed {
 		if d.sessions[parked.sess.id] == parked.sess {
 			d.mu.Unlock()
 			ac.sendMu.Unlock()
@@ -629,7 +585,7 @@ func (d *Daemon) resumeParked(h protocol.Hello, tr ports.ServerConnection, sz do
 // resumeParkedLocked completes a validated resume. Caller holds both ac.sendMu
 // and d.mu in that order.
 func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection, sz domain.Size) (*session, *attachedClient, bool, error) {
-	parked := d.parked[h.ResumeToken]
+	parked := d.resume.parkedFor(h.ResumeToken)
 	if parked == nil || h.ResumeToken == 0 {
 		return nil, nil, false, nil
 	}
