@@ -229,7 +229,7 @@ func TestPublishFrameFailedSendDoesNotPublishCursorOrOutputState(t *testing.T) {
 	ac.replaceTransport(cacheFailTransport{})
 	state := cacheState("failed", 1)
 	state.attachment = ac
-	composed := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
+	composed := composeFrame(state, ac.render.cache, ac.render.spare)
 	composed.cursor = cursorOut{row: 3, col: 4, style: 2, hasStyle: true}
 
 	ac.sendMu.Lock()
@@ -263,7 +263,7 @@ func TestPublishFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing
 	state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 	state.view.tabID = domain.TabStableID(sess.tabs[0].stableID)
 	state.view.revision = ac.viewSnapshot().revision
-	initial := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
+	initial := composeFrame(state, ac.render.cache, ac.render.spare)
 	ac.sendMu.Lock()
 	require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, initial))
 	<-sends
@@ -289,7 +289,7 @@ func TestPublishFrameNoByteSuccessCommitsTransactionWithoutStateFrame(t *testing
 
 	require.Equal(t, beforeNext, ac.output.next)
 	require.Equal(t, beforeCursor, ac.output.lastCursor)
-	require.Equal(t, "no-byte-committed", ac.pipelineCache.layoutFingerprint)
+	require.Equal(t, "no-byte-committed", ac.render.cache.layoutFingerprint)
 	p.mu.Lock()
 	require.Empty(t, p.screen.Damage())
 	p.mu.Unlock()

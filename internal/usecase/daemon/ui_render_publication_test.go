@@ -21,7 +21,7 @@ func TestRenderPublicationUsesCapturedIdentityAndRevision(t *testing.T) {
 			want := state.viewContext()
 			want.Publication = 1
 			require.NoError(t, want.Validate())
-			composed := composeFrame(*state, ac.pipelineCache)
+			composed := composeFrame(*state, ac.render.cache)
 			switch scenario {
 			case "rename after capture":
 				sess.mu.Lock()
@@ -58,7 +58,7 @@ func TestRenderPublishesContextWithoutTerminalBytes(t *testing.T) {
 			ac.sendMu.Unlock()
 			t.Fatal("capture rejected")
 		}
-		composed := composeFrame(*state, ac.pipelineCache)
+		composed := composeFrame(*state, ac.render.cache)
 		require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 	}
 	paint(true)

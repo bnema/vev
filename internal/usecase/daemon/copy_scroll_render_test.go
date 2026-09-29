@@ -61,14 +61,14 @@ func TestCopyScrollKeepsBaseUnadornedAndExitRefreshesLiveState(t *testing.T) {
 	ack := func() { f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next) }
 	f.d.enterCopyMode(f.sess, f.ac)
 	ack()
-	require.True(t, f.ac.pipelineCache.valid)
-	committed := f.ac.pipelineCache.frame
+	require.True(t, f.ac.render.cache.valid)
+	committed := f.ac.render.cache.frame
 	before := captureTestFrame(committed)
 	f.d.copyWheel(f.sess, f.ac, -30)
 	ack()
-	require.True(t, f.ac.pipelineCache.valid)
+	require.True(t, f.ac.render.cache.valid)
 	require.Equal(t, before, captureTestFrame(committed), "scroll must not mutate the committed buffer")
-	require.NotContains(t, frameText(f.ac.pipelineCache.frame), "[SCROLL]")
+	require.NotContains(t, frameText(f.ac.render.cache.frame), "[SCROLL]")
 
 	// Live damage still updates the base behind the immutable history viewport.
 	f.activePane.mu.Lock()
@@ -76,12 +76,12 @@ func TestCopyScrollKeepsBaseUnadornedAndExitRefreshesLiveState(t *testing.T) {
 	f.activePane.mu.Unlock()
 	f.d.copyWheel(f.sess, f.ac, -3)
 	ack()
-	require.Contains(t, frameText(f.ac.pipelineCache.frame), "LIVE-UPDATED")
-	require.NotContains(t, frameText(f.ac.pipelineCache.frame), "[SCROLL]")
+	require.Contains(t, frameText(f.ac.render.cache.frame), "LIVE-UPDATED")
+	require.NotContains(t, frameText(f.ac.render.cache.frame), "[SCROLL]")
 
 	f.d.copyWheel(f.sess, f.ac, 1000)
 	ack()
 	require.Nil(t, f.ac.overlays.copyMode)
-	require.Contains(t, frameText(f.ac.pipelineCache.frame), "LIVE-UPDATED")
-	require.NoError(t, f.ac.pipelineCache.frame.CheckInvariants())
+	require.Contains(t, frameText(f.ac.render.cache.frame), "LIVE-UPDATED")
+	require.NoError(t, f.ac.render.cache.frame.CheckInvariants())
 }

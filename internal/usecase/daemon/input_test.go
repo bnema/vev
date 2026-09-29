@@ -222,14 +222,14 @@ func TestClosePanePrunesAttachedCaptureFrameAndKeepsSurvivor(t *testing.T) {
 	tb.mu.Unlock()
 
 	cachedSurvivor := capturedPaneRenderState{title: "survivor"}
-	ac.captureFrames = map[*pane]capturedPaneRenderState{
+	ac.render.panes = map[*pane]capturedPaneRenderState{
 		survivor: cachedSurvivor,
 		closed:   {title: "closed"},
 	}
 
 	require.NoError(t, d.closePane(sess, tb, closed.id, ac, false))
-	require.NotContains(t, ac.captureFrames, closed, "closed pane must not remain strongly retained by its attachment")
-	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving pane keeps its incremental capture")
+	require.NotContains(t, ac.render.panes, closed, "closed pane must not remain strongly retained by its attachment")
+	require.Equal(t, cachedSurvivor, ac.render.panes[survivor], "surviving pane keeps its incremental capture")
 }
 
 func TestCloseTabPrunesAttachedCaptureFrames(t *testing.T) {
@@ -238,14 +238,14 @@ func TestCloseTabPrunesAttachedCaptureFrames(t *testing.T) {
 	closed := closedTab.panes["pane-1"]
 	survivor := survivorTab.panes["pane-1"]
 	cachedSurvivor := capturedPaneRenderState{title: "survivor"}
-	ac.captureFrames = map[*pane]capturedPaneRenderState{
+	ac.render.panes = map[*pane]capturedPaneRenderState{
 		closed:   {title: "closed"},
 		survivor: cachedSurvivor,
 	}
 
 	require.NoError(t, d.closeTab(sess, closedTab, false))
-	require.NotContains(t, ac.captureFrames, closed, "closed tab panes must not remain strongly retained by its attachment")
-	require.Equal(t, cachedSurvivor, ac.captureFrames[survivor], "surviving tab pane keeps its incremental capture")
+	require.NotContains(t, ac.render.panes, closed, "closed tab panes must not remain strongly retained by its attachment")
+	require.Equal(t, cachedSurvivor, ac.render.panes[survivor], "surviving tab pane keeps its incremental capture")
 }
 
 func TestAltCForwardsToPTY(t *testing.T) {

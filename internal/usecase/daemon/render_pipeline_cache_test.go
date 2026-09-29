@@ -43,9 +43,9 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			d, sess, ac, sends := newManualSessionWithPTYs(t)
 			healthy := ac.transport()
 			committed := composeFrame(cacheState("committed", 1), composeCacheInput{})
-			ac.pipelineCache = committed.cache
-			before := cloneComposeCache(ac.pipelineCache)
-			pending := composeFrame(cacheState("next", 2), ac.pipelineCache, ac.pipelineScratch)
+			ac.render.cache = committed.cache
+			before := cloneComposeCache(ac.render.cache)
+			pending := composeFrame(cacheState("next", 2), ac.render.cache, ac.render.spare)
 			failure.apply(&pending, ac)
 
 			state := cacheState("next", 2)
@@ -54,7 +54,7 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
 			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
-			require.Equal(t, before, cloneComposeCache(ac.pipelineCache), "failed emission must not publish any composed cache backing storage")
+			require.Equal(t, before, cloneComposeCache(ac.render.cache), "failed emission must not publish any composed cache backing storage")
 
 			// A send error detaches the failed link. Re-own this test attachment with
 			// its original healthy transport, then retry the pending state.
@@ -65,14 +65,14 @@ func TestPipelineCachePublishesOnlyAfterEmission(t *testing.T) {
 				ac.setSession(sess)
 				ac.replaceTransport(healthy)
 			}
-			pending = composeFrame(cacheState("next", 2), ac.pipelineCache, ac.pipelineScratch)
+			pending = composeFrame(cacheState("next", 2), ac.render.cache, ac.render.spare)
 			state = cacheState("next", 2)
 			state.attachment = ac
 			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
 			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
-			require.Equal(t, pending.cache, ac.pipelineCache)
+			require.Equal(t, pending.cache, ac.render.cache)
 			frame := <-sends
 			output := unmarshalTestOutput(t, frame.Payload)
 			require.Contains(t, string(output.Data), "next", "the retry must emit state retained after the failed emission")

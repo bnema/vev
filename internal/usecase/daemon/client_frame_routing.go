@@ -410,9 +410,7 @@ func (d *Daemon) resetOutput(effect *attachmentEffect) bool {
 		ac.sendMu.Unlock()
 		return false
 	}
-	ac.rebaseOutput()
-	ac.pipelineCache = composeCacheInput{}
-	ac.pipelineScratch = composeCacheInput{}
+	ac.restartOutputLocked(false)
 	ac.sendMu.Unlock()
 	go d.paint(effect.sess, ac, true, effect.lease)
 	return true
@@ -422,14 +420,7 @@ func (d *Daemon) ackOutput(effect *attachmentEffect, epoch, state uint64) bool {
 	if !effect.current() || effect.ac == nil {
 		return false
 	}
-	ac := effect.ac
-	ac.sendMu.Lock()
-	if ac.output == nil {
-		ac.sendMu.Unlock()
-		return false
-	}
-	acknowledged := ac.output.ack(epoch, state)
-	ac.sendMu.Unlock()
+	acknowledged := effect.ac.ackOutputState(epoch, state)
 	if acknowledged {
 		if rc := effect.sess.renderCoordinator(); rc != nil {
 			rc.notifyAckForLease(effect.lease)

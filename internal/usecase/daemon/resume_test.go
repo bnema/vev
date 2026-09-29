@@ -1221,7 +1221,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	d.paint(sess, ac, true, nil)
 
 	ac.sendMu.Lock()
-	require.Contains(t, ac.captureFrames, closed, "fixture must render and capture the pane before parking")
+	require.Contains(t, ac.render.panes, closed, "fixture must render and capture the pane before parking")
 	ac.sendMu.Unlock()
 	token := ac.resumeToken
 	require.True(t, sess.detachIfCurrent(ac))
@@ -1231,7 +1231,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	// Its capture must already have been released before the attachment parked.
 	require.NoError(t, d.closePane(sess, tb, closed.id, nil, false))
 	ac.sendMu.Lock()
-	require.NotContains(t, ac.captureFrames, closed, "parked attachment must not retain a pane closed while headless")
+	require.NotContains(t, ac.render.panes, closed, "parked attachment must not retain a pane closed while headless")
 	ac.sendMu.Unlock()
 
 	newTransport := &closeTrackingTransport{}

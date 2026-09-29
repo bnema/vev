@@ -571,8 +571,7 @@ func (d *Daemon) publishFrameLocked(entry *session, ac *attachedClient, state *c
 		// succeed. A cross-session transition may publish concurrently, but its
 		// mandatory first-paint rebase waits for sendMu and therefore follows this
 		// completed output transaction.
-		ac.pipelineScratch = ac.pipelineCache
-		ac.pipelineCache = composed.cache
+		ac.render.commitComposition(composed.cache)
 
 		// A successful no-byte emission also commits: its renderer shadow still
 		// represents the captured frame. Lock panes only under sendMu and with no

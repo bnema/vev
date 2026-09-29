@@ -443,11 +443,11 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 	// boundary and outside tab/pane ownership locks.
 	if local {
 		tb.mu.Lock()
-		titleIDs := ac.renderScratch.titleIDs[:0]
+		titleIDs := ac.render.capture.titleIDs[:0]
 		if tb.tree != nil {
 			titleIDs = appendStackPaneIDs(titleIDs, tb.tree.Root)
 		}
-		ac.renderScratch.titleIDs = titleIDs
+		ac.render.capture.titleIDs = titleIDs
 		floating := tb.floating.pane
 		hasFloating := tb.floating.state == floatingVisible && floating != nil
 		tb.mu.Unlock()
@@ -485,7 +485,7 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 	state.frameCapture = frameCapture
 	captureOverlayLayers(state, overlays, paletteCfg)
 	endCompose := marks.span(ports.RuntimeComposeStart, ports.RuntimeComposeEnd, 0)
-	composed := composeFrame(*state, ac.pipelineCache, ac.pipelineScratch)
+	composed := composeFrame(*state, ac.render.cache, ac.render.spare)
 	endCompose(0, true)
 	if ac.renderStages.compose != nil {
 		ac.renderStages.compose()

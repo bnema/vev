@@ -84,7 +84,7 @@ func TestUIFencePreRegistrationCaptureCannotConfirmAction(t *testing.T) {
 	}
 	emit := func(state *capturedRenderState) {
 		t.Helper()
-		composed := composeFrame(*state, ac.pipelineCache)
+		composed := composeFrame(*state, ac.render.cache)
 		require.True(t, d.publishCapturedFrameForTest(sess, ac, state, composed))
 	}
 	state := capture(true)

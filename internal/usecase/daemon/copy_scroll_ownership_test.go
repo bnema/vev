@@ -22,13 +22,13 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 			}
 			committed := composeFrame(state, composeCacheInput{})
 			require.True(t, committed.cache.valid)
-			ac.pipelineCache = committed.cache
-			before := cloneComposeCache(ac.pipelineCache)
+			ac.render.cache = committed.cache
+			before := cloneComposeCache(ac.render.cache)
 			state.bars.topRight = "retry"
 			state.attachment = ac
 			state.route.Target = protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 			state.view.revision = ac.viewSnapshot().revision
-			pending := composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
+			pending := composeFrame(state, ac.render.cache, ac.render.spare)
 			if failure == "prepare" {
 				pending.frame = renderer.Frame{Width: 1}
 			} else {
@@ -36,7 +36,7 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 			}
 			ac.sendMu.Lock()
 			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
-			require.Equal(t, before, cloneComposeCache(ac.pipelineCache))
+			require.Equal(t, before, cloneComposeCache(ac.render.cache))
 			require.Zero(t, ac.output.next)
 			if failure == "send" {
 				sess.mu.Lock()
@@ -45,12 +45,12 @@ func TestCopyCacheFailedPublicationAndRetry(t *testing.T) {
 				ac.setSession(sess)
 				ac.replaceTransport(healthy)
 			}
-			pending = composeFrame(state, ac.pipelineCache, ac.pipelineScratch)
+			pending = composeFrame(state, ac.render.cache, ac.render.spare)
 			state.view.revision = ac.viewSnapshot().revision
 			ac.sendMu.Lock()
 			require.True(t, d.publishCapturedFrameForTest(sess, ac, &state, pending))
-			require.Equal(t, pending.cache, ac.pipelineCache)
-			require.NotContains(t, frameText(ac.pipelineCache.frame), "COPY")
+			require.Equal(t, pending.cache, ac.render.cache)
+			require.NotContains(t, frameText(ac.render.cache.frame), "COPY")
 			output := unmarshalTestOutput(t, (<-sends).Payload)
 			terminal := renderer.NewScreen(pending.frame.Width, pending.frame.Height)
 			terminal.Write(output.Data)
@@ -69,19 +69,19 @@ func TestCopyCacheSearchTransition(t *testing.T) {
 	}
 	d.enterCopyMode(sess, ac)
 	ack()
-	require.True(t, ac.pipelineCache.valid)
-	base := captureTestFrame(ac.pipelineCache.frame)
+	require.True(t, ac.render.cache.valid)
+	base := captureTestFrame(ac.render.cache.frame)
 	d.handleInput(sess, ac, []byte("/"))
 	ack()
 	require.NotNil(t, ac.overlays.copySearch)
-	require.False(t, ac.pipelineCache.valid)
-	require.Equal(t, base, captureTestFrame(ac.pipelineCache.frame), "search modal must not contaminate the live base")
+	require.False(t, ac.render.cache.valid)
+	require.Equal(t, base, captureTestFrame(ac.render.cache.frame), "search modal must not contaminate the live base")
 	d.handleInput(sess, ac, []byte("\x1b"))
 	ack()
 	require.Nil(t, ac.overlays.copySearch)
 	require.NotNil(t, ac.overlays.copyMode)
-	require.True(t, ac.pipelineCache.valid)
-	require.Equal(t, base, captureTestFrame(ac.pipelineCache.frame))
+	require.True(t, ac.render.cache.valid)
+	require.Equal(t, base, captureTestFrame(ac.render.cache.frame))
 }
 
 func TestCopyExitRefreshesAfterOtherAttachmentConsumesDamage(t *testing.T) {
@@ -91,7 +91,7 @@ func TestCopyExitRefreshesAfterOtherAttachmentConsumesDamage(t *testing.T) {
 	d.enterCopyMode(sess, ac)
 	mustOutputData(t, sends)
 	ac.ackOutputState(ac.output.currentEpoch(), ac.output.next)
-	copyBefore := captureTestFrame(ac.pipelineCache.frame)
+	copyBefore := captureTestFrame(ac.render.cache.frame)
 
 	tr, peerSends := newCapturingTransport(t)
 	peer := &attachedClient{tr: tr, output: newOutputStateStream(), size: ac.size}
@@ -110,14 +110,14 @@ func TestCopyExitRefreshesAfterOtherAttachmentConsumesDamage(t *testing.T) {
 	p.mu.Lock()
 	require.Empty(t, p.screen.Damage())
 	p.mu.Unlock()
-	require.Contains(t, frameText(peer.pipelineCache.frame), "after-peer")
-	require.Equal(t, copyBefore, captureTestFrame(ac.pipelineCache.frame), "peer publication cannot mutate another attachment's cache")
+	require.Contains(t, frameText(peer.render.cache.frame), "after-peer")
+	require.Equal(t, copyBefore, captureTestFrame(ac.render.cache.frame), "peer publication cannot mutate another attachment's cache")
 
 	// The copy document is still frozen, but leaving it must recapture live
 	// cells even though the other attachment already acknowledged the damage.
 	d.copyWheel(sess, ac, 1)
 	mustOutputData(t, sends)
 	require.Nil(t, ac.overlays.copyMode)
-	require.Contains(t, frameText(ac.pipelineCache.frame), "after-peer")
-	require.NoError(t, ac.pipelineCache.frame.CheckInvariants())
+	require.Contains(t, frameText(ac.render.cache.frame), "after-peer")
+	require.NoError(t, ac.render.cache.frame.CheckInvariants())
 }

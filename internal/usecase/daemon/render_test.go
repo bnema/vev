@@ -782,21 +782,21 @@ func TestOverlayPaintBypassesComposedCache(t *testing.T) {
 
 	d.paint(sess, ac, true, nil)
 	_ = mustOutputData(t, sends)
-	require.True(t, ac.pipelineCache.valid)
-	require.NotContains(t, frameText(ac.pipelineCache.frame), "Rename session")
+	require.True(t, ac.render.cache.valid)
+	require.NotContains(t, frameText(ac.render.cache.frame), "Rename session")
 
 	d.enterPrompt(sess, ac, " Rename session ", "work", func(string) error { return nil })
 	shown := string(mustOutputData(t, sends))
 	require.Contains(t, shown, "Rename session")
-	require.False(t, ac.pipelineCache.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
-	require.NotContains(t, frameText(ac.pipelineCache.frame), "Rename session")
+	require.False(t, ac.render.cache.valid, "overlay paint must not store the modal-mutated frame in the composed cache")
+	require.NotContains(t, frameText(ac.render.cache.frame), "Rename session")
 
 	d.closePrompt(ac)
 	d.paint(sess, ac, false, nil)
 	restored := string(mustOutputData(t, sends))
 	require.NotContains(t, restored, "Rename session")
-	require.True(t, ac.pipelineCache.valid)
-	cached := frameText(ac.pipelineCache.frame)
+	require.True(t, ac.render.cache.valid)
+	cached := frameText(ac.render.cache.frame)
 	require.Contains(t, cached, "live")
 	require.NotContains(t, cached, "Rename session")
 }

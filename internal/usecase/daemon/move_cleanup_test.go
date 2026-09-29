@@ -57,7 +57,7 @@ func TestMovePaneCleanupUsesCapturedSourceAttachment(t *testing.T) {
 	displaced.overlays.copyMode = &scopy.Mode{}
 	displaced.overlays.copyMu.Unlock()
 	displaced.sendMu.Lock()
-	displaced.captureFrames = map[*pane]capturedPaneRenderState{moved: {}}
+	displaced.render.panes = map[*pane]capturedPaneRenderState{moved: {}}
 	displaced.sendMu.Unlock()
 
 	replacementTransport, _ := newCapturingTransport(t)
@@ -71,7 +71,7 @@ func TestMovePaneCleanupUsesCapturedSourceAttachment(t *testing.T) {
 	replacement.overlays.copyMode = &scopy.Mode{}
 	replacement.overlays.copyMu.Unlock()
 	replacement.sendMu.Lock()
-	replacement.captureFrames = map[*pane]capturedPaneRenderState{moved: {}}
+	replacement.render.panes = map[*pane]capturedPaneRenderState{moved: {}}
 	replacement.sendMu.Unlock()
 
 	// Keep the source layout fence occupied while the move has captured its
@@ -110,7 +110,7 @@ func TestMovePaneCleanupUsesCapturedSourceAttachment(t *testing.T) {
 	require.Nil(t, displaced.overlays.copyPane)
 	displaced.overlays.copyMu.Unlock()
 	displaced.sendMu.Lock()
-	_, displacedCaptured := displaced.captureFrames[moved]
+	_, displacedCaptured := displaced.render.panes[moved]
 	displaced.sendMu.Unlock()
 	require.False(t, displacedCaptured, "moved attachment capture was not pruned")
 
@@ -119,7 +119,7 @@ func TestMovePaneCleanupUsesCapturedSourceAttachment(t *testing.T) {
 	require.Same(t, moved, replacement.overlays.copyPane)
 	replacement.overlays.copyMu.Unlock()
 	replacement.sendMu.Lock()
-	_, replacementCaptured := replacement.captureFrames[moved]
+	_, replacementCaptured := replacement.render.panes[moved]
 	replacement.sendMu.Unlock()
 	require.True(t, replacementCaptured, "independent attachment capture was pruned")
 }
