@@ -1305,7 +1305,7 @@ func (f *performanceFixture) retryLatest() {
 		members = append(members, plan.members...)
 	}
 	failuresBefore, callsBefore := f.pty.metrics()
-	f.sess.geometry.retryResizeMembers(f.d, f.sess, f.ac, f.sess.renderCoordinator().attachmentLease(f.ac), epoch, members)
+	attachmentResize{d: f.d, sess: f.sess, ac: f.ac, lease: f.sess.renderCoordinator().attachmentLease(f.ac), epoch: epoch}.retry(members)
 	failuresAfter, callsAfter := f.pty.metrics()
 	f.ptyFailures += failuresAfter - failuresBefore
 	if callsAfter > callsBefore {

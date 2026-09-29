@@ -336,7 +336,7 @@ func TestTransactionalResizeRetryMarksNamedSnapshotDirtyOnlyOnSuccess(t *testing
 			require.True(t, sess.geometry.requestResize(d, sess, ac, domain.Size{Cols: 100, Rows: 30}, true))
 			rc := sess.renderCoordinator()
 			snapshot := rc.resizeSnapshot()
-			sess.geometry.retryResizeMembers(d, sess, ac, rc.attachmentLease(ac), snapshot.epoch, []resizeMember{{session: sess, tab: tb, pane: p, rect: p.rect}})
+			attachmentResize{d: d, sess: sess, ac: ac, lease: rc.attachmentLease(ac), epoch: snapshot.epoch}.retry([]resizeMember{{session: sess, tab: tb, pane: p, rect: p.rect}})
 
 			sess.snapshotMu.Lock()
 			generation := sess.snapshotGeneration
@@ -441,7 +441,7 @@ func TestTransactionalResizeRejectsNewerEpochBeforeSessionPublication(t *testing
 		require.Equal(t, domain.Size{Cols: 80, Rows: 23}, domain.Size{Cols: p.screen.Columns(), Rows: p.screen.Rows()}, "rejected epoch published a VT size")
 	}
 
-	require.True(t, sess.geometry.runResizeTransaction(d, sess, ac, lease, newer))
+	require.True(t, attachmentResize{d: d, sess: sess, ac: ac, lease: lease, epoch: newer}.run())
 	for _, tb := range sess.tabs {
 		require.Equal(t, domain.Size{Cols: 120, Rows: 32}, tb.size)
 		p := tb.focusedPane()
@@ -486,7 +486,7 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 				<-release
 			}
 			done := make(chan bool, 1)
-			go func() { done <- sess.geometry.runResizeTransaction(d, sess, ac, lease, epoch) }()
+			go func() { done <- attachmentResize{d: d, sess: sess, ac: ac, lease: lease, epoch: epoch}.run() }()
 			<-entered
 			newer := rc.recordResizeRequestForLease(domain.Size{Cols: 120, Rows: 34}, ac, lease)
 			require.NotZero(t, newer)
@@ -557,7 +557,7 @@ func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	rc := d.attachCoordinator(source, nil, ac, true)
 	lease := rc.attachmentLease(ac)
 	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
-	require.True(t, source.geometry.runResizeTransaction(d, source, ac, lease, epoch))
+	require.True(t, attachmentResize{d: d, sess: source, ac: ac, lease: lease, epoch: epoch}.run())
 
 	destination := &session{sessionCore: sessionCore{id: "destination", name: "destination"}, ctx: source.ctx, tabs: []*tab{tb}}
 	publishPaneOwner(popup, destination, tb, 7)
@@ -571,7 +571,7 @@ func TestRetryOwnerCannotPublishFloatingGeometryAfterMove(t *testing.T) {
 	source.snapshotMu.Unlock()
 	requested := popupPTY.requested()
 
-	source.geometry.retryResizeMembers(d, source, ac, lease, epoch, []resizeMember{{session: source, tab: tb, pane: popup, owner: owner, isFloating: true, floatingGeneration: 7}})
+	attachmentResize{d: d, sess: source, ac: ac, lease: lease, epoch: epoch}.retry([]resizeMember{{session: source, tab: tb, pane: popup, owner: owner, isFloating: true, floatingGeneration: 7}})
 
 	require.Equal(t, requested, popupPTY.requested(), "stale floating retry reached the moved PTY")
 	popup.mu.Lock()
@@ -787,11 +787,11 @@ func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) 
 	lease := rc.attachmentLease(ac)
 	epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 80, Rows: 24}, ac, lease)
 	require.NotZero(t, epoch)
-	require.True(t, sess.geometry.runResizeTransaction(d, sess, ac, lease, epoch))
+	require.True(t, attachmentResize{d: d, sess: sess, ac: ac, lease: lease, epoch: epoch}.run())
 	first := popupPTY.requested()
 	require.Len(t, first, 1)
 
-	sess.geometry.retryResizeMembers(d, sess, ac, lease, epoch, []resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
+	attachmentResize{d: d, sess: sess, ac: ac, lease: lease, epoch: epoch}.retry([]resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
 	retried := popupPTY.requested()
 	require.Len(t, retried, 2)
 	require.Equal(t, first[0], retried[1], "retry must use the current validated floating slot geometry")
@@ -805,7 +805,7 @@ func TestTransactionalResizeRetriesAcceptedFloatingSlotByIdentity(t *testing.T) 
 	tb.mu.Lock()
 	tb.floating = floatingSlot{state: floatingVisible, pane: replacement, generation: 8}
 	tb.mu.Unlock()
-	sess.geometry.retryResizeMembers(d, sess, ac, lease, epoch, []resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
+	attachmentResize{d: d, sess: sess, ac: ac, lease: lease, epoch: epoch}.retry([]resizeMember{{session: sess, tab: tb, pane: popup, isFloating: true, floatingGeneration: 7}})
 	require.Empty(t, replacementPTY.requested(), "a replaced floating slot must not inherit an old retry")
 }
 
