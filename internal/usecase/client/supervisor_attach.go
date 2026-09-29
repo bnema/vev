@@ -579,14 +579,13 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
-	// resuming is true while the loop reconnects a lost attachment: attempts
-	// then return transport-class failures as attachmentRetry instead of
-	// presenting them, so a retry stays on Connecting.
-	resuming := false
-	resumes := 0
+	// budget.resuming is true while the loop reconnects a lost attachment:
+	// attempts then return transport-class failures as attachmentRetry instead
+	// of presenting them, so a retry stays on Connecting.
+	var budget attachmentResumeBudget
 	for {
 		attemptStart := s.cfg.Clock.Now()
-		outcome := s.attachResolved(ctx, input, service, target, localProvenance, resuming)
+		outcome := s.attachResolved(ctx, input, service, target, localProvenance, budget.resuming)
 		switch outcome.kind {
 		case attachmentTerminated:
 			return true, outcome.cause
@@ -595,57 +594,75 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			// ended, refused).
 			return false, nil
 		case attachmentSwap:
-			resumes = 0
-			resuming = false
 			// A commit from the picker overlay to another target: the previous
 			// attachment detached cleanly, and the swap goes through Connecting
-			// exactly like any committed selection. The stream identity is
-			// allocated now, not at commit: streams opened while the source was
-			// live (route publications) may have moved the connection's
-			// anti-replay window past an identity reserved earlier.
-			stream, err := service.NextStreamID()
-			if err != nil {
-				s.reportAttachmentFailure(err)
+			// exactly like any committed selection.
+			budget = attachmentResumeBudget{}
+			next, ok := s.withFreshStream(service, outcome.target)
+			if !ok {
 				return false, nil
 			}
-			target, localProvenance = outcome.target, SessionEnvironmentLocalPicker
-			target.request.Stream = stream
+			target, localProvenance = next, SessionEnvironmentLocalPicker
 			continue
-		case attachmentResume:
-			// A live attachment was lost. One that stayed up long enough
-			// starts a fresh resume budget; one that drops right after
-			// attaching keeps counting, so a flapping session gives up.
-			if s.cfg.Clock.Now().Sub(attemptStart) >= resumeStableAttachment {
-				resumes = 0
-			}
 		case attachmentRetry:
 			// A resume attempt hit a transport-class failure before
 			// attaching (the route or destination is still down): try the
 			// same target again.
 			outcome.target = target
 		}
-		resume, lastErr := outcome.target, outcome.cause
-		resumes++
-		if resumes > maxAttachmentResumes {
-			s.logger.Warn("client_attachment_resume_exhausted", "endpoint", resume.request.Endpoint, "session", resume.request.Target.SessionName, "attempts", resumes-1, "error", lastErr)
-			s.transition(supervisorEvent{kind: supervisorAttachEnded, err: lastErr})
+		attempt, ok := budget.spend(outcome.kind, s.cfg.Clock.Now().Sub(attemptStart))
+		if !ok {
+			s.logger.Warn("client_attachment_resume_exhausted", "endpoint", outcome.target.request.Endpoint, "session", outcome.target.request.Target.SessionName, "attempts", attempt-1, "error", outcome.cause)
+			s.transition(supervisorEvent{kind: supervisorAttachEnded, err: outcome.cause})
 			s.notifyLifecycle(LifecycleNoticeDestinationFailed)
-			s.notifyAttachment(lastErr)
+			s.notifyAttachment(outcome.cause)
 			return false, nil
 		}
-		resuming = true
-		if terminated, termErr, brokerLost := s.waitResume(ctx, input, service, resumes); terminated || brokerLost {
+		if terminated, termErr, brokerLost := s.waitResume(ctx, input, service, attempt); terminated || brokerLost {
 			return terminated, termErr
 		}
-		stream, err := service.NextStreamID()
-		if err != nil {
-			s.reportAttachmentFailure(err)
+		next, ok := s.withFreshStream(service, outcome.target)
+		if !ok {
 			return false, nil
 		}
-		resume.request.Stream = stream
-		s.logger.Info("client_attachment_resume", "endpoint", resume.request.Endpoint, "session", resume.request.Target.SessionName, "attempt", resumes)
-		target = resume
+		s.logger.Info("client_attachment_resume", "endpoint", next.request.Endpoint, "session", next.request.Target.SessionName, "attempt", attempt)
+		target = next
 	}
+}
+
+// attachmentResumeBudget bounds how often one lost attachment reconnects.
+type attachmentResumeBudget struct {
+	used     int
+	resuming bool
+}
+
+// spend records one resume after an attempt of the given kind that ran for
+// up. A live attachment that stayed up for resumeStableAttachment starts a
+// fresh budget; one that drops right after attaching keeps counting, so a
+// flapping session gives up.
+// It returns the 1-based resume attempt, and false once the budget is
+// exhausted.
+func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Duration) (int, bool) {
+	if kind == attachmentResume && up >= resumeStableAttachment {
+		b.used = 0
+	}
+	b.used++
+	b.resuming = true
+	return b.used, b.used <= maxAttachmentResumes
+}
+
+// withFreshStream gives target a newly allocated stream identity. It is
+// allocated right before the open, never earlier: streams opened meanwhile
+// (route publications) may have moved the connection's anti-replay window past
+// an identity reserved at commit. A refusal is presented.
+func (s *Supervisor) withFreshStream(service ports.BrokerNavigator, target pickerAttachmentTarget) (pickerAttachmentTarget, bool) {
+	stream, err := service.NextStreamID()
+	if err != nil {
+		s.reportAttachmentFailure(err)
+		return pickerAttachmentTarget{}, false
+	}
+	target.request.Stream = stream
+	return target, true
 }
 
 // attachResolved runs one resolved attachment attempt end to end: open the
