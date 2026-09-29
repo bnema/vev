@@ -142,7 +142,7 @@ func (r attachmentResize) run() bool {
 	d.refreshBarScriptsIfDue(sess, d.clock.Now(), true)
 	// A successful transaction publishes exactly one full S2 frame. The
 	// coordinator is the only emission route and stale epochs never reach it.
-	if !current() || !rc.invalidateForLeaseAtResizeEpoch(ac, lease, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"}) {
+	if !current() || !rc.invalidateForLeaseAtResizeEpoch(ac, lease, epoch, renderInvalidation{class: invalidateUrgent, reset: true, producer: "attachment_resize.go"}) {
 		return false
 	}
 	// The resize debounce has already elapsed. Consume this sticky reset now;
@@ -280,6 +280,6 @@ func (r attachmentResize) retry(members []resizeMember) {
 		// Retry completion changes VT state after the original layout commit.
 		// Keep a named session's eventual snapshot generation aligned with it.
 		markSnapshotDirty(sess)
-		rc.invalidateForLease(r.ac, r.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "transactional_resize.go"})
+		rc.invalidateForLease(r.ac, r.lease, renderInvalidation{class: invalidateUrgent, reset: true, producer: "attachment_resize.go"})
 	}
 }

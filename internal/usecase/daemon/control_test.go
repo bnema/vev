@@ -1534,9 +1534,12 @@ func TestCloseTabParticipantsChangedReportsRetryable(t *testing.T) {
 func TestDispatchActionLifecycle(t *testing.T) {
 	boom := errors.New("boom")
 	tests := []struct {
-		name        string
-		runErr      error
-		serialize   bool
+		name      string
+		runErr    error
+		serialize bool
+		// callerHolds enters dispatchAction already inside the dispatch
+		// boundary, as the palette and control paths do.
+		callerHolds bool
 		wantChanged bool
 		wantErr     error
 		wantRender  bool
@@ -1545,6 +1548,7 @@ func TestDispatchActionLifecycle(t *testing.T) {
 		{name: "no change is success without render", runErr: errDaemonActionNoChange},
 		{name: "failure skips render", runErr: boom, wantErr: boom},
 		{name: "serialized change holds dispatch boundary", serialize: true, wantChanged: true, wantRender: true},
+		{name: "caller-held boundary is reused and still renders", callerHolds: true, wantChanged: true, wantRender: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1564,10 +1568,11 @@ func TestDispatchActionLifecycle(t *testing.T) {
 			runner.EXPECT().Run(mock.Anything).RunAndReturn(func(request daemonActionRequest) error {
 				require.Same(t, sess, request.target.session, "unset target resolves from the attachment")
 				require.Same(t, ac, request.target.attachment)
-				require.Equal(t, tt.serialize, !sess.dispatchMu.TryLock(), "dispatch boundary ownership")
-				if !tt.serialize {
+				held := !sess.dispatchMu.TryLock()
+				if !held {
 					sess.dispatchMu.Unlock()
 				}
+				require.Equal(t, tt.serialize || tt.callerHolds, held, "dispatch boundary ownership")
 				return tt.runErr
 			}).Once()
 			x := daemonActionDispatch{runner: runner, request: daemonActionRequest{kind: daemonActionEqualizePanes}, resolveFrom: sess, attachment: ac, producer: "test"}
@@ -1575,12 +1580,18 @@ func TestDispatchActionLifecycle(t *testing.T) {
 				x.serialize = sess
 			}
 
+			if tt.callerHolds {
+				sess.dispatchMu.Lock()
+			}
 			changed, err := d.dispatchAction(x)
+			if tt.callerHolds {
+				sess.dispatchMu.Unlock()
+			}
 
 			require.ErrorIs(t, err, tt.wantErr)
 			require.NotErrorIs(t, err, errDaemonActionNoChange)
 			require.Equal(t, tt.wantChanged, changed)
-			require.True(t, sess.dispatchMu.TryLock(), "follow-up runs after the dispatch boundary is released")
+			require.True(t, sess.dispatchMu.TryLock(), "dispatchAction must not leave the boundary held")
 			sess.dispatchMu.Unlock()
 			if tt.wantRender {
 				require.Equal(t, "test", awaitInvalidation(t, invalidations).producer)

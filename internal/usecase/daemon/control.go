@@ -487,9 +487,10 @@ type daemonActionDispatch struct {
 
 // dispatchAction runs one daemon action through its whole lifecycle: target
 // resolution, the mutation, no-change normalization, and the attached
-// client's follow-up render after the dispatch boundary is released. It
-// reports whether the action changed anything; errDaemonActionNoChange is
-// never returned.
+// client's follow-up render. With serialize set, the render runs after the
+// dispatch boundary is released; otherwise it runs inside the caller's
+// boundary (palette and control paths). It reports whether the action
+// changed anything; errDaemonActionNoChange is never returned.
 func (d *Daemon) dispatchAction(x daemonActionDispatch) (bool, error) {
 	runner := x.runner
 	if runner == nil {
