@@ -1,6 +1,7 @@
 # Demo and sandbox scripts
 
-- `run.sh`, `demo.tape`, `smoke.tape`: VHS demo recording.
+- `run.sh`, `demo.tape`, `smoke.tape`, `compose.demo.yaml`: VHS demo recording
+  (`make demo`). One remote container, `remote-a`.
 - `sandbox-run.sh`: automated acceptance. Client and two remotes all run in
   containers on an internal network.
 - `test-remotes.sh`: two containerised remotes for manual testing from your own

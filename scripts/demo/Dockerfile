@@ -6,7 +6,7 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
       htop fastfetch gifsicle imagemagick \
-      eza neovim man-db man-pages coreutils \
+      eza fzf neovim man-db man-pages coreutils \
       ncurses openssh util-linux \
       ttf-jetbrains-mono-nerd
 RUN useradd -m -u 1000 demo
@@ -16,7 +16,7 @@ COPY build/vev /usr/local/bin/vev
 COPY scripts/demo/ticker.sh /usr/local/bin/ticker
 COPY scripts/demo/demo-shell.sh /usr/local/bin/demo-shell
 RUN chmod +x /usr/local/bin/ticker /usr/local/bin/demo-shell \
-    && install -d -o demo -g demo -m 0700 /home/demo/.ssh \
+    && install -d -o demo -g demo -m 0700 /home/demo/.ssh /home/demo/.local \
     && install -d -m 0755 /run/sshd \
     && ssh-keygen -A \
     && ssh-keygen -q -t ed25519 -N '' -C vev-demo -f /home/demo/.ssh/id_ed25519 \

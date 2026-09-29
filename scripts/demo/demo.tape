@@ -22,7 +22,7 @@ Set WaitTimeout 30s
 
 # ── Local and remote history, shown immediately ──────────
 Type@180ms "vev"
-Sleep 600ms
+Sleep 1.2s
 Enter
 Sleep 1.1s
 # Keep the initial local shell so the final detach/attach cycle is meaningful.
@@ -30,6 +30,7 @@ Alt+" "
 Sleep 550ms
 Type "RNS "
 Type@95ms "local"
+Sleep 1s
 Enter
 Sleep 1s
 
@@ -39,8 +40,10 @@ Sleep 550ms
 Type "SSP"
 Enter
 Sleep 1.5s
-Down 2
-Sleep 700ms
+Down
+Sleep 800ms
+Down
+Sleep 1.5s
 Enter
 Sleep 2.5s
 
@@ -67,6 +70,10 @@ Alt+" "
 Sleep 550ms
 Type "CNS "
 Type@95ms "agents"
+Sleep 400ms
+# From a remote session CNS offers two destinations; pick the local one.
+Down 2
+Sleep 300ms
 Enter
 Sleep 900ms
 Type@80ms "sleep "
@@ -93,6 +100,7 @@ Sleep 550ms
 Alt+" "
 Sleep 550ms
 Type "STP"
+Sleep 1.5s
 Enter
 Sleep 650ms
 Type@85ms "nvim "
@@ -106,9 +114,8 @@ Sleep 900ms
 Alt+j
 Sleep 900ms
 
-# ── Session "work": floating pane preserves its program ──
-# Open a man page, scroll it, hide, then show again at the same
-# scroll position — proves the float keeps program + scroll state.
+# ── Session "work": floating pane ─────────────────────
+# Open a man page in the float, scroll it, then hide the float.
 Alt+f
 Sleep 550ms
 Type@90ms "man "
@@ -116,15 +123,9 @@ Type@130ms "ls"
 Enter
 Sleep 1.2s
 Space
-Sleep 700ms
+Sleep 1.2s
 Alt+f
 Sleep 900ms
-Alt+f
-Sleep 1.2s
-Type "q"
-Sleep 550ms
-Alt+f
-Sleep 500ms
 
 # ── Session "monitor": fastfetch + htop, each full-width,
 #    never split. ─────────────────────────────────────────
@@ -132,6 +133,9 @@ Alt+" "
 Sleep 550ms
 Type "CNS "
 Type@95ms "monitor"
+Sleep 400ms
+Down 2
+Sleep 300ms
 Enter
 Sleep 900ms
 Type@80ms "fast"
@@ -156,16 +160,39 @@ Sleep 900ms
 Alt+a
 Sleep 1.9s
 
-# ── Session picker now lists local and remote sessions ───
+# ── Move pane: start fzf beside the agents job, type a query,
+#    then carry it live into the "local" session. ───────────
 Alt+" "
 Sleep 550ms
-Type "SSP"
+Type "SPR"
+Enter
+Sleep 650ms
+Type@85ms "cd "
+Type@120ms "/etc "
+Type@80ms "&& "
+Type@110ms "fzf"
+Enter
+Sleep 1.2s
+Type@140ms "ssh"
+Sleep 1.2s
+Alt+" "
+Sleep 550ms
+Type "MFP"
+Sleep 800ms
 Enter
 Sleep 1.5s
+Down
+Sleep 800ms
+Down
+Sleep 1.5s
+Enter
+# The picker stays open after a pane move so more panes can follow; close it.
+# The final re-attach to "local" shows fzf still open with its query.
+Sleep 1.5s
 Escape
-Sleep 650ms
+Sleep 1s
 
-# ── Detach / re-attach: local sessions survive, ticker on ─
+# ── Detach / re-attach: local sessions survive, fzf intact ─
 Alt+" "
 Sleep 550ms
 Type "DET"
@@ -181,5 +208,4 @@ Sleep 150ms
 Type@80ms "attach "
 Type@140ms "local"
 Enter
-Sleep 2.2s
-Sleep 400ms
+Sleep 3.5s

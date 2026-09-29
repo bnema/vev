@@ -1,0 +1,22 @@
+# VHS demo recording. Driven by scripts/demo/run.sh (make demo).
+name: vev-demo
+
+services:
+  remote-a:
+    image: vev-demo
+    hostname: remote-a
+    user: root
+    entrypoint: ["/usr/bin/sshd", "-D", "-e"]
+
+  client:
+    image: vev-demo
+    depends_on:
+      - remote-a
+    volumes:
+      - ../../scripts/demo:/tape:ro
+      - ../../scripts/demo/out:/home/demo/out
+      # Shared by the host-registration and recording runs; removed by `down -v`.
+      - demo-local:/home/demo/.local
+
+volumes:
+  demo-local:
