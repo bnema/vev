@@ -1729,6 +1729,9 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 			require.Equal(t, resolved, picker.resolveCount(), "revoked picker operations must not resolve")
 			require.Equal(t, consumed, picker.consumedCount(), "revoked input must not be consumed")
 			require.ErrorIs(t, harness.waitRun(t), context.Canceled)
+			// Teardown has fully run: a cancelled attachment must not hand input
+			// back to the picker on its way out.
+			require.False(t, picker.owns(), "a terminated run must not re-acquire the picker")
 			require.True(t, stream.closedNow(), "the admitted stream must be released")
 			require.NotEqual(t, PresentAttached, harness.sup.State().Presentation)
 		})
