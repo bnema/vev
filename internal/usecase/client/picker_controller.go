@@ -551,6 +551,7 @@ func (p *pickerController) noticeDeadline() (time.Time, bool) {
 
 // pickerState is a consistent read of the controller's interactive state.
 type pickerState struct {
+	hasModel     bool
 	query        string
 	searchActive bool
 	notices      []string
@@ -562,6 +563,7 @@ func (p *pickerController) state() pickerState {
 	defer p.mu.Unlock()
 	var state pickerState
 	if p.loop != nil && p.loop.model != nil {
+		state.hasModel = true
 		state.query = p.loop.model.Query()
 		state.searchActive = p.loop.model.SearchActive()
 	}

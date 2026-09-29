@@ -135,14 +135,21 @@ func mustCursorKey(t *testing.T, controller *pickerController) string {
 	return key
 }
 
+func (p *pickerController) modelState(t *testing.T) pickerState {
+	t.Helper()
+	state := p.state()
+	require.True(t, state.hasModel, "the picker must have a model")
+	return state
+}
+
 func (p *pickerController) modelQuery(t *testing.T) string {
 	t.Helper()
-	return p.state().query
+	return p.modelState(t).query
 }
 
 func (p *pickerController) modelSearchActive(t *testing.T) bool {
 	t.Helper()
-	return p.state().searchActive
+	return p.modelState(t).searchActive
 }
 
 func TestPickerControllerRendersLatestSnapshotImmediately(t *testing.T) {
