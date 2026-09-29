@@ -26,7 +26,7 @@ func runOfflineClient(ctx context.Context, socket string, terminal ports.Termina
 		log.Debug("broker_offline_client", "socket", socket)
 	}
 	return runBrokerClient(ctx, brokerClientConfig{
-		Connector: brokeripc.NewConnector(socket, brokeripc.Config{}),
+		Connector: brokeripc.NewConnector(socket, brokeripc.Config{}).Navigator(),
 		Terminal:  terminal,
 		UI:        ui,
 		// No-argument composition creates one ephemeral local session through
@@ -66,7 +66,7 @@ func runOfflineUIDriverClient(ctx context.Context, harness offlineUIDriverHarnes
 		harness.log.Debug("broker_offline_ui_driver", "socket", harness.socket)
 	}
 	return runUIDriverClient(ctx, brokerClientConfig{
-		Connector:                brokeripc.NewConnector(harness.socket, brokeripc.Config{}),
+		Connector:                brokeripc.NewConnector(harness.socket, brokeripc.Config{}).Navigator(),
 		Terminal:                 harness.terminal,
 		Clock:                    clock.New(),
 		UI:                       harness.ui,

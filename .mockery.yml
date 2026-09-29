@@ -40,6 +40,13 @@ packages:
       OwnedSynchronousTransport:
       Dialer:
       Listener:
+  github.com/bnema/vev/internal/usecase/daemon:
+    interfaces:
+      daemonActionRunner:
+        config:
+          dir: internal/usecase/daemon
+          filename: action_runner_mock_test.go
+          pkgname: daemon
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
       Context:

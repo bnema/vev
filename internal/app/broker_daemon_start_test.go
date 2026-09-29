@@ -372,6 +372,28 @@ func TestDaemonStartRefusesForeignCarriageStart(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(filepath.Dir(own), spawnLockName))
 }
 
+// TestDaemonStartForeignCarriageWinsOverPolicyRefusal pins the refusal order:
+// an absent daemon on a foreign carriage is incompatible even when the policy
+// also forbids launching.
+func TestDaemonStartForeignCarriageWinsOverPolicyRefusal(t *testing.T) {
+	isolateSandboxEnv(t)
+	_, own := testDaemonCarriage(t)
+	foreignDir := t.TempDir()
+	require.NoError(t, os.Chmod(foreignDir, 0o700))
+	foreign := filepath.Join(foreignDir, "daemonmux.sock")
+	scripted := &scriptedDaemonStarter{carriage: own, published: own}
+	withDaemonStarter(t, scripted.starter(fastDaemonStartBackoff))
+
+	target := startableLocalTarget(t, foreign, ports.BrokerDaemonStartIfNeeded)
+	target.Policy.Launch = "sandbox-private"
+	_, err := dialBrokerDaemonCarriage(context.Background(), foreign, target)
+	var typed ports.BrokerError
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, ports.BrokerErrorIncompatible, typed.Code)
+	_, spawns := scripted.counters()
+	require.Zero(t, spawns)
+}
+
 // TestDaemonStartDoesNotSpawnOnNonAbsenceFailure proves only proven absence can
 // authorize a start: a permission, path, peer, or cancellation failure is
 // reported unchanged and never repaired by spawning a second daemon.

@@ -483,26 +483,19 @@ func (h daemonKeyHandler) Action(action keys.Action, _ []byte) {
 	}
 	runAction := func(request daemonActionRequest) {
 		request.effect = effect
-		runner := h.actions
-		if runner == nil {
-			runner = daemonActions{d: h.d}
-		}
-		if err := sess.runMutation(func() error {
-			request.target = resolveDaemonActionTargetForAttachment(sess, h.ac)
-			return runner.Run(request)
+		if _, err := h.d.dispatchAction(daemonActionDispatch{
+			runner:      h.actions,
+			request:     request,
+			serialize:   sess,
+			resolveFrom: sess,
+			attachment:  h.ac,
+			producer:    "input.go",
 		}); err != nil {
-			if errors.Is(err, errDaemonActionNoChange) {
-				return
-			}
 			var userErr *domain.UserError
 			if !errors.As(err, &userErr) {
 				err = resizeUserError(err)
 			}
 			h.d.reportError(sess, err)
-			return
-		}
-		if h.actions == nil {
-			finishDaemonActionForClient(h.d, request, h.ac, "input.go")
 		}
 	}
 	switch action {

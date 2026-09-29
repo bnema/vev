@@ -570,11 +570,15 @@ func newProductionBrokerConnector() ports.BrokerConnector {
 // Connect connect-or-spawns one broker connection for the calling attempt,
 // including the first one, so every attempt is under the supervisor's retry
 // cadence.
-func (c *productionBrokerConnector) Connect(ctx context.Context) (ports.BrokerService, error) {
+func (c *productionBrokerConnector) Connect(ctx context.Context) (ports.BrokerNavigator, error) {
 	if c == nil || c.connect == nil {
 		return nil, errors.New("vev: broker connector is not configured")
 	}
-	return c.connect(ctx)
+	service, err := c.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 // terminalBrokerSeams are the optional observation callbacks of one terminal

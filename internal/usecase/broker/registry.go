@@ -1398,36 +1398,12 @@ func (r *Registry) publishLocked(persist bool) {
 }
 
 // durable returns the persistable copy of a publication, rendered by the
-// writer goroutine. Checking is transient in-flight state and never reaches
-// the durable snapshot. Retirement tombstones are process-local fencing state:
-// they retire registrations only for this process lifetime and a restart never
-// adopts them, so persisting them would leak stale authority into durable
-// state. Removed is therefore cleared before persistence.
-//
-// Policy is membership authority, not observation state, so the durable format
-// deliberately omits it: membership is the single policy authority, and the
-// loader re-stamps every restored observation from the matching
-// ports.BrokerHostRecord (see stampHostAuthority). Persisting it would create a
-// second, stale authority that a later membership change could contradict.
-//
-// Only remote observations are durable: a local daemon observation is
-// process-local state and is dropped here (the store also rejects one), so a
-// future local producer can never break durable persistence.
+// writer goroutine with the shared rule (ports.BrokerSnapshot.DurableProjection).
+// The registry may publish the process-local daemon, which is never durable,
+// so it is dropped first; the store would refuse it otherwise. Restored
+// observations regain policy from membership (see stampHostAuthority).
 func durable(snapshot ports.BrokerSnapshot) ports.BrokerSnapshot {
-	out := snapshot.Clone()
-	out.Removed = nil
-	daemons := out.Daemons[:0]
-	for _, daemon := range out.Daemons {
-		if daemon.Local {
-			continue
-		}
-		daemon.Checking = false
-		daemon.LastFailure.Err = nil
-		daemon.Policy = ports.BrokerPolicy{}
-		daemons = append(daemons, daemon)
-	}
-	out.Daemons = daemons
-	return out
+	return snapshot.WithoutLocal().DurableProjection()
 }
 
 // snapshotWriter serializes durable snapshot writes off the registry lock.

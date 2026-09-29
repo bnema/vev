@@ -305,7 +305,7 @@ func startWebGatewayFixture(t *testing.T) *webGatewayFixture {
 	t.Helper()
 	broker := startOfflineClientFixtureWithShell(t, "/bin/sh", []string{"-c", webGatewayShellScript})
 	return startWebGatewayFixtureOver(t, broker, func() ports.BrokerConnector {
-		return brokeripc.NewConnector(broker.socket, brokeripc.Config{})
+		return brokeripc.NewConnector(broker.socket, brokeripc.Config{}).Navigator()
 	})
 }
 
@@ -609,7 +609,7 @@ func TestWebGatewayTabReturnsToPickerOnBrokerLoss(t *testing.T) {
 	service := newTerminalCompositionService(terminalCompositionSnapshot([]string{"work"}, nil))
 	connector := portsmocks.NewMockBrokerConnector(t)
 	var calls atomic.Int32
-	connector.EXPECT().Connect(mock.Anything).RunAndReturn(func(context.Context) (ports.BrokerService, error) {
+	connector.EXPECT().Connect(mock.Anything).RunAndReturn(func(context.Context) (ports.BrokerNavigator, error) {
 		if calls.Add(1) == 1 {
 			return service, nil
 		}

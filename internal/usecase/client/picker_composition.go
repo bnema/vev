@@ -72,20 +72,12 @@ func (p *Picker) TakeOp() (pickerOp, string) {
 	return p.controller.TakeOp()
 }
 
-// ResolveKey resolves a committed catalogue key for the supervisor.
-func (p *Picker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+// ResolveCommit resolves a committed key plus the exact tab it names.
+func (p *Picker) ResolveCommit(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	if p == nil || p.controller == nil {
-		return (*pickerController)(nil).ResolveKey(key, base)
+		return (*pickerController)(nil).ResolveCommit(key, base)
 	}
-	return p.controller.ResolveKey(key, base)
-}
-
-// ResolveKeyTarget resolves a committed key plus the exact tab it names.
-func (p *Picker) ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
-	if p == nil || p.controller == nil {
-		return (*pickerController)(nil).ResolveKeyTarget(key, base)
-	}
-	return p.controller.ResolveKeyTarget(key, base)
+	return p.controller.ResolveCommit(key, base)
 }
 
 // ResolveKill revalidates one kill key for the supervisor.

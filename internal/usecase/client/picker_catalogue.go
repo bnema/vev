@@ -394,8 +394,10 @@ func (c *pickerCatalogue) Resolve(key string, base pickerResolveBase) (ports.Bro
 	return c.resolveRefLocked(ref, base)
 }
 
-// ResolveTarget is Resolve plus the exact tab the row names, both revalidated
-// under one lock against the same publication.
+// ResolveTarget is the commit resolution of one published row: the row's
+// selection kind, the exact broker stream request, and the tab it names, all
+// revalidated under one lock against the same publication. Only a session,
+// tab, or create row is a destination; any other kind is refused.
 func (c *pickerCatalogue) ResolveTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	if c == nil {
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "no catalogue"}
@@ -408,6 +410,11 @@ func (c *pickerCatalogue) ResolveTarget(key string, base pickerResolveBase) (por
 	}
 	if !ok {
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker row is not in the catalogue"}
+	}
+	switch ref.kind {
+	case pickerSelectionExact, pickerSelectionCreateNamed, pickerSelectionCreateEphemeral:
+	default:
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "this picker row is not a session destination"}
 	}
 	return resolvePickerTarget(c.snapshot.Epoch, c.authorityForRefLocked(ref), ref, base, true)
 }

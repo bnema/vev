@@ -41,7 +41,7 @@ func (s *Supervisor) brokerChanged() <-chan struct{} {
 
 // publishRoutes rebuilds the ledger over the live attachment and hands a
 // changed snapshot, or the first one of this attachment, to its worker.
-func (s *Supervisor) publishRoutes(service ports.BrokerService, run *attachmentRun, request ports.BrokerOpenStreamRequest) {
+func (s *Supervisor) publishRoutes(service ports.BrokerNavigator, run *attachmentRun, request ports.BrokerOpenStreamRequest) {
 	target, _, known := s.attachments.committedView()
 	if !known {
 		return
@@ -67,7 +67,7 @@ func requestAuthority(request ports.BrokerOpenStreamRequest) routeAuthority {
 
 // settleDaemonNavigation carries out one daemon navigation request over the
 // live attachment.
-func (s *Supervisor) settleDaemonNavigation(service ports.BrokerService, overlay *attachmentPickerOverlay, message protocol.ServerMessage) {
+func (s *Supervisor) settleDaemonNavigation(service ports.BrokerNavigator, overlay *attachmentPickerOverlay, message protocol.ServerMessage) {
 	target, ok := s.resolveDaemonNavigation(service, overlay.run.token, overlay.request, message)
 	if !ok {
 		return
@@ -106,7 +106,7 @@ func navigationCauseActionID(message protocol.ServerMessage) uint64 {
 // takeSettledNavigation adopts a navigation request the worker handed over
 // just before its attachment ended, such as a close-and-dial handoff whose
 // daemon detached the source right after sending it.
-func (s *Supervisor) takeSettledNavigation(service ports.BrokerService, token AttachmentToken, request ports.BrokerOpenStreamRequest) {
+func (s *Supervisor) takeSettledNavigation(service ports.BrokerNavigator, token AttachmentToken, request ports.BrokerOpenStreamRequest) {
 	message, ok := s.attachments.takeNavigation()
 	if !ok || s.pendingSwap != nil {
 		return
@@ -121,7 +121,7 @@ func (s *Supervisor) takeSettledNavigation(service ports.BrokerService, token At
 
 // resolveDaemonNavigation turns one daemon request into an exact attachment
 // target. A refusal is answered on the attachment with the typed failure.
-func (s *Supervisor) resolveDaemonNavigation(service ports.BrokerService, token AttachmentToken, request ports.BrokerOpenStreamRequest, message protocol.ServerMessage) (pickerAttachmentTarget, bool) {
+func (s *Supervisor) resolveDaemonNavigation(service ports.BrokerNavigator, token AttachmentToken, request ports.BrokerOpenStreamRequest, message protocol.ServerMessage) (pickerAttachmentTarget, bool) {
 	switch typed := message.(type) {
 	case protocol.RouteNavigationAction:
 		fail := func(code protocol.RouteFailureCode) (pickerAttachmentTarget, bool) {
@@ -168,7 +168,7 @@ func (s *Supervisor) resolveDaemonNavigation(service ports.BrokerService, token 
 // daemon itself named one of its own lifecycles, so the attachment's own
 // authority is kept and only the exact target and tab change. The daemon
 // revalidates the exact identity on Hello.
-func (s *Supervisor) resolveServingHandoff(service ports.BrokerService, request ports.BrokerOpenStreamRequest, handoff protocol.AttachTarget) (pickerAttachmentTarget, bool) {
+func (s *Supervisor) resolveServingHandoff(service ports.BrokerNavigator, request ports.BrokerOpenStreamRequest, handoff protocol.AttachTarget) (pickerAttachmentTarget, bool) {
 	if handoff.Endpoint != "" || handoff.SessionTarget != nil || handoff.ExactTarget == nil || handoff.Intent != protocol.IntentAttach {
 		s.notifyPicker(domain.Notification{Code: domain.NoticeSessionUnavailable, Scope: "handoff", Severity: domain.NoticeWarn, Message: "the daemon asked for a destination this client cannot open"})
 		return pickerAttachmentTarget{}, false
@@ -200,7 +200,7 @@ func (s *Supervisor) resolveRoute(ref protocol.RouteRef) (routeLedgerTarget, boo
 
 // resolveRouteSelection resolves one route through the same catalogue rules
 // as a picker commit, against the latest broker publication.
-func (s *Supervisor) resolveRouteSelection(service ports.BrokerService, selection pickerSelectionRef) (pickerAttachmentTarget, error) {
+func (s *Supervisor) resolveRouteSelection(service ports.BrokerNavigator, selection pickerSelectionRef) (pickerAttachmentTarget, error) {
 	stream, err := service.NextStreamID()
 	if err != nil {
 		return pickerAttachmentTarget{}, err

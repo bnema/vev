@@ -136,7 +136,7 @@ func TestP54InitialNavigationCreatesEphemeralThroughBroker(t *testing.T) {
 	service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream, nil
 	})
-	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil }), Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
+	sup := mustSupervisor(t, SupervisorConfig{Connector: newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }), Terminal: terminal, Clock: clock, Jitter: func() float64 { return 0 }, Picker: picker, InitialNavigation: navigation})
 	done := make(chan error, 1)
 	go func() { done <- sup.Run(ctx) }()
 	require.Eventually(t, func() bool { return len(service.openedRequests()) == 1 }, 5*time.Second, time.Millisecond)
@@ -165,7 +165,7 @@ func TestP54InitialNavigationIsNotReplayedAfterReconnect(t *testing.T) {
 	first.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return stream, nil
 	})
-	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerService, error) {
+	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 		if call == 1 {
 			return first, nil
 		}
@@ -229,7 +229,7 @@ func TestP54BrokerRestartDoesNotReattachOrReplayUnknownMutation(t *testing.T) {
 	first := newSupervisorTestService(ports.BrokerConnectionID{1})
 	first.publish(1, 1)
 	second := newSupervisorTestService(ports.BrokerConnectionID{2})
-	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerService, error) {
+	connector := newSupervisorTestConnector(func(_ context.Context, call int) (ports.BrokerNavigator, error) {
 		if call == 1 {
 			return first, nil
 		}

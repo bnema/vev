@@ -17,7 +17,9 @@ import (
 	"github.com/bnema/vev/internal/adapters/uiterm"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/usecase/client"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,12 +31,12 @@ import (
 // so every assertion holds for the production `--ui-driver` entry point and for
 // the sandbox harness that delegates to the same function.
 
-// failingBrokerConnector is a connector whose every attempt fails, so a test can
+// failingBrokerConnector returns a connector whose every attempt fails, so a test can
 // drive the non-fatal broker path without any transport.
-type failingBrokerConnector struct{ err error }
-
-func (c failingBrokerConnector) Connect(context.Context) (ports.BrokerService, error) {
-	return nil, c.err
+func failingBrokerConnector(t *testing.T, err error) ports.BrokerConnector {
+	connector := portsmocks.NewMockBrokerConnector(t)
+	connector.EXPECT().Connect(mock.Anything).Return(nil, err).Maybe()
+	return connector
 }
 
 // uidriverTestStream is an owned bidirectional JSONL stream over two private
@@ -222,7 +224,7 @@ func TestUIDriverClientReadyOnBrokerFailureKeepsServing(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- runUIDriverClient(ctx, brokerClientConfig{
-			Connector:             failingBrokerConnector{err: errors.New("broker not reachable")},
+			Connector:             failingBrokerConnector(t, errors.New("broker not reachable")),
 			Terminal:              terminal,
 			Clock:                 clk,
 			UI:                    ui,
@@ -271,7 +273,7 @@ func TestUIDriverClientRejectsMissingCompositionInputs(t *testing.T) {
 	clk := clock.New()
 	stream := newUIDriverTestStream()
 	defer func() { _ = stream.Close() }()
-	require.Error(t, runUIDriverClient(t.Context(), brokerClientConfig{Connector: failingBrokerConnector{}}, stream))
+	require.Error(t, runUIDriverClient(t.Context(), brokerClientConfig{Connector: failingBrokerConnector(t, errors.New("unused"))}, stream))
 	require.Error(t, runUIDriverClient(t.Context(), brokerClientConfig{Clock: clk, UI: client.NewUI(nil, clk)}, stream))
 	require.Error(t, runUIDriverClient(t.Context(), brokerClientConfig{Clock: clk, UI: client.NewUI(nil, clk), Terminal: nil}, stream))
 	require.Error(t, runUIDriverClient(t.Context(), brokerClientConfig{Clock: clk, UI: client.NewUI(nil, clk)}, nil))

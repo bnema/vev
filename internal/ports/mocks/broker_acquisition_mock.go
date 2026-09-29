@@ -17,10 +17,19 @@ func NewMockBrokerRouteAuthority(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockBrokerRouteAuthority {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockBrokerRouteAuthority{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -110,10 +119,19 @@ func NewMockBrokerIdentityBinder(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockBrokerIdentityBinder {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockBrokerIdentityBinder{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }

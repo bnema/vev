@@ -11,6 +11,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/usecase/broker"
 )
 
 // Broker-owned daemon start.
@@ -47,14 +48,11 @@ import (
 // verified by the daemonmux preamble after this function returns, so those
 // failures can never trigger a spawn either.
 
-// brokerLaunchAuthority is the broker-owned policy launch token that explicitly
-// authorizes starting a stopped target daemon. The ports policy carries the
-// token opaquely — it never interprets it — so the component that owns "may
-// this daemon be started?" is the composition. The broker's own production local
-// daemon authority names this token; an operator-provisioned registration that
-// names something else, and every sandbox-private token, fails closed and never
-// spawns.
-const brokerLaunchAuthority = "explicit"
+// The start decision itself (mode, launch authority, local-only target) is
+// owned by broker.ClassifyDaemonDialFailure, broker.AuthorizeDaemonLaunch, and
+// broker.RequireLocalDaemonTarget.
+// This file keeps only the mechanics: carriage path validation, absence
+// classification of a dial error, and the spawn election.
 
 // brokerDaemonStarter owns the three facts a daemon start needs: the private
 // daemonmux carriage dial, the detached daemon launcher, and the exact carriage
@@ -118,8 +116,8 @@ func dialLocalDaemonCarriage(ctx context.Context, carriage string) (daemonmux.Ra
 // carriage: only the broker-owned local authority names the daemon this
 // process can start, so a configured host can never be spawned by mistake.
 func dialBrokerLocalDaemon(ctx context.Context, carriage string, target ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
-	if !target.Fence.Local {
-		return nil, localDaemonStartRefused("the target is not the broker-owned local daemon")
+	if err := broker.RequireLocalDaemonTarget(target); err != nil {
+		return nil, err
 	}
 	return dialBrokerDaemonCarriage(ctx, carriage, target)
 }
@@ -152,24 +150,16 @@ func dialBrokerDaemonCarriage(ctx context.Context, carriage string, target ports
 	if err == nil {
 		return raw, nil
 	}
-	if target.StartMode == ports.BrokerDaemonExistingOnly {
-		// An existing-only acquisition is one dial: no lifecycle probe, no spawn
-		// lock, no process, and no fallback of any kind.
-		if daemonCarriageAbsence(err) {
-			return nil, ports.BrokerError{Code: ports.BrokerErrorNoDaemon, Cause: err}
-		}
-		return nil, err
-	}
-	// A refusal that spawning could never repair is reported unchanged: a
-	// cancelled attempt, a foreign path, a rejected peer, or a permission
-	// failure is not daemon absence.
-	if !daemonCarriageAbsence(err) {
+	// The broker decides; nothing below runs unless it authorizes a start.
+	// The carriage check sits between its two steps, so a foreign carriage is
+	// reported as incompatible before any policy refusal.
+	if err := broker.ClassifyDaemonDialFailure(target, err, daemonCarriageAbsence(err)); err != nil {
 		return nil, err
 	}
 	if err := validateDaemonCarriageStart(carriage, starter); err != nil {
 		return nil, err
 	}
-	if err := daemonStartRefusal(target); err != nil {
+	if err := broker.AuthorizeDaemonLaunch(target); err != nil {
 		return nil, err
 	}
 	published := starter.effectivePublished()
@@ -205,34 +195,6 @@ func validateDaemonCarriageStart(carriage string, starter brokerDaemonStarter) e
 		}
 	}
 	return nil
-}
-
-// daemonStartRefusal refuses a start-if-needed acquisition that must never reach
-// the spawn mechanics. The condition is checked before the election, so a
-// refused start creates no lock and launches no process.
-//
-// The mode is an authorization, never an obligation, and it can only narrow what
-// the resolved policy already permits. A policy that does not name the broker's
-// launch authority therefore refuses the start outright, which is exactly how a
-// provisioned configuration that forbids launching stays authoritative.
-func daemonStartRefusal(target ports.BrokerDialTarget) error {
-	if target.StartMode != ports.BrokerDaemonStartIfNeeded {
-		return localDaemonStartRefused("the acquisition does not authorize starting a daemon")
-	}
-	if target.Policy.Launch != brokerLaunchAuthority {
-		return localDaemonStartRefused("the resolved policy does not authorize launching")
-	}
-	return nil
-}
-
-// localDaemonStartRefused reports a refusal to start a daemon as a typed broker
-// policy conflict. The reason is local diagnostic authority; it is never a
-// message the daemon produced.
-func localDaemonStartRefused(reason string) error {
-	return ports.BrokerError{
-		Code:  ports.BrokerErrorConflictingPolicy,
-		Cause: fmt.Errorf("vev: refusing to start the daemon: %s", reason),
-	}
 }
 
 // daemonCarriageAbsence reports whether a failed carriage dial means the daemon

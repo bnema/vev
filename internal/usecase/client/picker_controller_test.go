@@ -422,7 +422,7 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 	reader := newPickerChunkReader()
 	t.Cleanup(reader.close)
 	terminal := &pickerRecordingTerminal{in: reader}
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) {
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		service := newSupervisorTestService(ports.BrokerConnectionID{1})
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha", "beta"))
 		return service, nil
@@ -468,7 +468,7 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 	terminal := &pickerRecordingTerminal{in: reader}
 
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) {
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
 		return service, nil
 	})
@@ -518,7 +518,7 @@ func TestPickerControllerResolveKeyUsesCommittedRow(t *testing.T) {
 	require.Equal(t, "beta", displayed.Target.SessionName)
 
 	// ...while the captured key resolves exactly the committed row.
-	committed, err := controller.ResolveKey(committedKey, pickerTestBase())
+	committed, _, err := controller.ResolveCommit(committedKey, pickerTestBase())
 	require.NoError(t, err)
 	require.Equal(t, "alpha", committed.Target.SessionName)
 }
@@ -554,7 +554,7 @@ func TestPickerControllerCommittedKeySurvivesConcurrentApply(t *testing.T) {
 		if !op.commit || key == "" {
 			continue
 		}
-		request, err := controller.ResolveKey(key, pickerTestBase())
+		request, _, err := controller.ResolveCommit(key, pickerTestBase())
 		if err != nil {
 			continue
 		}

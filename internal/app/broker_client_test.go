@@ -12,12 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/client"
@@ -904,8 +906,10 @@ func TestTerminalCompositionCapturesSessionEnvironmentDefensively(t *testing.T) 
 	service := newTerminalCompositionService(servicesnapshot)
 	terminal := newTerminalCompositionTerminal()
 	navigation := localEphemeralNavigation()
+	connector := portsmocks.NewMockBrokerConnector(t)
+	connector.EXPECT().Connect(mock.Anything).Return(service, nil).Maybe()
 	_, err := client.NewSupervisor(client.SupervisorConfig{
-		Connector: scriptedBrokerConnector{service: service},
+		Connector: connector,
 		Terminal:  terminal,
 		Clock:     clock.New(),
 		// The picker is omitted: creation alone proves the snapshot does not
@@ -1093,7 +1097,7 @@ func TestTerminalCompositionExactAttachReportsMissingLocalInventory(t *testing.T
 	done := make(chan error, 1)
 	go func() {
 		done <- runBrokerClient(ctx, brokerClientConfig{
-			Connector:          brokeripc.NewConnector(fixture.socket, brokeripc.Config{}),
+			Connector:          brokeripc.NewConnector(fixture.socket, brokeripc.Config{}).Navigator(),
 			Terminal:           terminal,
 			InitialNavigation:  navigation,
 			SessionEnvironment: client.SessionEnvironment{Provenance: client.SessionEnvironmentLocalCLI},

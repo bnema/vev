@@ -337,28 +337,9 @@ func (s *Store) Store(snapshot ports.BrokerSnapshot) error {
 	if err := s.ready(); err != nil {
 		return err
 	}
-	// Removed tombstones and in-flight checking/failure detail are process-local
-	// fencing and observation state; the durable snapshot never carries them, so
-	// sanitize the caller's copy before validating the durable shape. Policy is
-	// membership authority, not observation state, so the durable format omits
-	// it too: membership is the single policy authority and the loader re-stamps
-	// every restored observation from the matching record.
-	snapshot = snapshot.Clone()
-	snapshot.Removed = nil
-	for i := range snapshot.Daemons {
-		snapshot.Daemons[i].Checking = false
-		snapshot.Daemons[i].LastFailure.Err = nil
-		snapshot.Daemons[i].Policy = ports.BrokerPolicy{}
-		// Attention is transient observation state, not durable identity: a
-		// bell recorded the instant before a broker restart must never
-		// resurrect on reload, so every tab's Attention is zeroed before the
-		// durable shape is validated and written.
-		for j := range snapshot.Daemons[i].Sessions {
-			for k := range snapshot.Daemons[i].Sessions[j].Tabs {
-				snapshot.Daemons[i].Sessions[j].Tabs[k].Attention = false
-			}
-		}
-	}
+	// Sanitize the caller's copy with the shared durable rule before
+	// validating the durable shape.
+	snapshot = snapshot.DurableProjection()
 	if err := ports.ValidateDurableSnapshot(snapshot); err != nil {
 		return err
 	}

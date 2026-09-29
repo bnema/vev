@@ -29,7 +29,7 @@ import (
 type attachmentPickerOverlay struct {
 	sup     *Supervisor
 	run     *attachmentRun
-	service ports.BrokerService
+	service ports.BrokerNavigator
 	request ports.BrokerOpenStreamRequest
 	active  bool
 	// swapping is set once a commit elsewhere asked the live attachment to

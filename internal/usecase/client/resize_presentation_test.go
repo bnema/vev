@@ -228,7 +228,7 @@ type resizeHarnessOptions struct {
 	// closeResizes hands the supervisor an already closed ResizeEvents channel.
 	closeResizes bool
 	// connect scripts the broker attempts; nil returns the harness service.
-	connect func(ctx context.Context, call int) (ports.BrokerService, error)
+	connect func(ctx context.Context, call int) (ports.BrokerNavigator, error)
 }
 
 // startResizeHarness builds and runs one supervisor over the resize-aware
@@ -250,7 +250,7 @@ func startResizeHarness(t *testing.T, options resizeHarnessOptions) *resizeSuper
 	service.publish(3, 1)
 	connect := options.connect
 	if connect == nil {
-		connect = func(context.Context, int) (ports.BrokerService, error) { return service, nil }
+		connect = func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil }
 	}
 	connector := newSupervisorTestConnector(connect)
 	recorder := newResizeRenderRecorder(terminal)
@@ -442,7 +442,7 @@ func TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting(t *testin
 			name: "broker connect in flight",
 			start: func(t *testing.T) (*resizeSupervisorHarness, State) {
 				harness := startResizeHarness(t, resizeHarnessOptions{
-					connect: func(ctx context.Context, _ int) (ports.BrokerService, error) {
+					connect: func(ctx context.Context, _ int) (ports.BrokerNavigator, error) {
 						<-ctx.Done()
 						return nil, ctx.Err()
 					},
@@ -455,7 +455,7 @@ func TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting(t *testin
 			name: "retry cadence wait",
 			start: func(t *testing.T) (*resizeSupervisorHarness, State) {
 				harness := startResizeHarness(t, resizeHarnessOptions{
-					connect: func(context.Context, int) (ports.BrokerService, error) { return nil, unavailable },
+					connect: func(context.Context, int) (ports.BrokerNavigator, error) { return nil, unavailable },
 				})
 				harness.clock.awaitTimer(t)
 				// The cadence exists because the first attempt already failed, so its
@@ -470,7 +470,7 @@ func TestSupervisorResizeRepaintsConnectingRetryAndNonRetryableWaiting(t *testin
 			name: "non-retryable picker wait",
 			start: func(t *testing.T) (*resizeSupervisorHarness, State) {
 				harness := startResizeHarness(t, resizeHarnessOptions{
-					connect: func(context.Context, int) (ports.BrokerService, error) { return nil, incompatible },
+					connect: func(context.Context, int) (ports.BrokerNavigator, error) { return nil, incompatible },
 				})
 				require.Eventually(t, func() bool {
 					state := harness.sup.State()
@@ -842,7 +842,7 @@ func TestResizeCollectorAndSupervisorJoinOnClosedEventsAndCancellation(t *testin
 	t.Run("supervisor run joins on closed ResizeEvents and cancellation", func(t *testing.T) {
 		harness := startResizeHarness(t, resizeHarnessOptions{
 			closeResizes: true,
-			connect: func(context.Context, int) (ports.BrokerService, error) {
+			connect: func(context.Context, int) (ports.BrokerNavigator, error) {
 				return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "down"}
 			},
 		})

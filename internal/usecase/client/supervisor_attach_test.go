@@ -266,7 +266,7 @@ type attachTestPicker struct {
 	consumed  int
 	op        pickerOp
 	key       string
-	// resolveErr makes ResolveKey refuse locally, which is how a test reaches
+	// resolveErr makes ResolveCommit refuse locally, which is how a test reaches
 	// the local-refusal classification without dialing anything.
 	resolveErr error
 	request    ports.BrokerOpenStreamRequest
@@ -277,6 +277,8 @@ type attachTestPicker struct {
 	consumeRequest ports.BrokerOpenStreamRequest
 	// resolvedStream is the stream identity the last resolution reserved.
 	resolvedStream ports.BrokerStreamID
+	// tab is the tab every resolution names.
+	tab attachmentTab
 }
 
 func newAttachTestPicker() *attachTestPicker {
@@ -318,18 +320,18 @@ func (p *attachTestPicker) TakeOp() (pickerOp, string) {
 	return op, key
 }
 
-func (p *attachTestPicker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+func (p *attachTestPicker) ResolveCommit(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.resolved++
 	if p.resolveErr != nil {
-		return ports.BrokerOpenStreamRequest{}, p.resolveErr
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, p.resolveErr
 	}
 	request := p.request
 	request.Connection = base.Connection
 	request.Stream = base.Stream
 	p.resolvedStream = base.Stream
-	return request, nil
+	return request, p.tab, nil
 }
 
 func (p *attachTestPicker) SetOwnsInput(owns bool) {
@@ -407,7 +409,7 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publish(3, 1)
 
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) {
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		return service, nil
 	})
 	cfg := SupervisorConfig{
@@ -1315,6 +1317,55 @@ func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 	}
 }
 
+func TestAttachmentResumeBudget(t *testing.T) {
+	brief := time.Second
+	tests := []struct {
+		name  string
+		steps []attachmentOutcomeKind
+		ups   []time.Duration
+		want  []bool
+	}{
+		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), want: repeatBools(true, maxAttachmentResumes+2)},
+		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var budget attachmentResumeBudget
+			require.False(t, budget.resuming)
+			for i, kind := range tt.steps {
+				_, ok := budget.spend(kind, tt.ups[i])
+				require.Equal(t, tt.want[i], ok, "step %d", i)
+				require.True(t, budget.resuming)
+			}
+		})
+	}
+}
+
+func repeatKinds(k attachmentOutcomeKind, n int) []attachmentOutcomeKind {
+	out := make([]attachmentOutcomeKind, n)
+	for i := range out {
+		out[i] = k
+	}
+	return out
+}
+
+func repeatDurations(d time.Duration, n int) []time.Duration {
+	out := make([]time.Duration, n)
+	for i := range out {
+		out[i] = d
+	}
+	return out
+}
+
+func repeatBools(b bool, n int) []bool {
+	out := make([]bool, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
 // TestSupervisorAttachmentLossResumesSameSession is the regression for a
 // remote attachment that died with attachment_lost and left the client stuck:
 // a stream lost after attachment reconnects to the exact session it was
@@ -1584,7 +1635,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	})
 
 	controller := newPickerController(clock, pickerTestFreshness, true)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil })
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,

@@ -758,27 +758,18 @@ type paletteExec struct {
 
 func (e paletteExec) runAction(request daemonActionRequest) error {
 	request.effect = e.effect
-	if request.target.session == nil {
-		request.target = resolveDaemonActionTargetForAttachment(e.sess, e.ac)
+	changed, err := e.d.dispatchAction(daemonActionDispatch{
+		runner:      e.actions,
+		request:     request,
+		resolveFrom: e.sess,
+		attachment:  e.ac,
+		producer:    "palette.go",
+	})
+	if err == nil && !changed && e.redrawClosedPalette && e.d != nil {
+		// The palette closed before a no-op action; repaint what it covered.
+		e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
 	}
-	runner := e.actions
-	if runner == nil {
-		runner = daemonActions{d: e.d}
-	}
-	err := runner.Run(request)
-	if errors.Is(err, errDaemonActionNoChange) {
-		if e.redrawClosedPalette {
-			e.d.invalidateRender(e.sess, e.ac, true, "palette.go")
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if e.actions == nil {
-		finishDaemonActionForClient(e.d, request, e.ac, "palette.go")
-	}
-	return nil
+	return err
 }
 
 func (e paletteExec) CreateTab() error {

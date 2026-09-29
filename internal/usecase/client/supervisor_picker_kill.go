@@ -64,7 +64,7 @@ func (s *Supervisor) setPickerCurrent(current pickerCurrent) {
 // startPickerKill resolves one kill key against the latest catalogue and runs
 // the kill. A refusal is already a picker notice; a second `x` while one kill
 // runs is refused rather than queued.
-func (s *Supervisor) startPickerKill(service ports.BrokerService, key string) {
+func (s *Supervisor) startPickerKill(service ports.BrokerNavigator, key string) {
 	resolver, ok := s.cfg.Picker.(pickerKillResolver)
 	if !ok || key == "" || supervisorNil(service) {
 		return
@@ -98,7 +98,7 @@ func (s *Supervisor) startPickerKill(service ports.BrokerService, key string) {
 
 // finishPickerKill reports one settled kill and asks the broker to re-observe
 // the local daemon, so the killed row leaves the catalogue promptly.
-func (s *Supervisor) finishPickerKill(service ports.BrokerService, outcome pickerKillOutcome) {
+func (s *Supervisor) finishPickerKill(service ports.BrokerNavigator, outcome pickerKillOutcome) {
 	s.settlePickerKill()
 	s.notifyPicker(pickerKillNotice(outcome))
 	if !supervisorNil(service) {

@@ -36,16 +36,28 @@ func Dial(ctx context.Context, path string, cfg Config) (ports.BrokerService, er
 	return dial(ctx, path, cfg, ipc.SameUserPeerVerifier())
 }
 
-// Connector implements ports.BrokerConnector over the private broker IPC
-// carriage. It holds only the endpoint and its bounds, so every Connect is an
-// independent attempt and the caller owns Close on the returned service. The
-// client process reaches the broker use case exclusively through this seam.
+// Connector dials the private broker IPC carriage. It holds only the endpoint
+// and its bounds, so every Connect is an independent attempt and the caller
+// owns Close on the returned service. Navigator adapts it to
+// ports.BrokerConnector for session frontends.
 type Connector struct {
 	path string
 	cfg  Config
 }
 
-var _ ports.BrokerConnector = (*Connector)(nil)
+// Navigator returns c as a ports.BrokerConnector, which hands session
+// frontends only the navigation surface of each connection.
+func (c *Connector) Navigator() ports.BrokerConnector { return navigatorConnector{c} }
+
+type navigatorConnector struct{ c *Connector }
+
+func (n navigatorConnector) Connect(ctx context.Context) (ports.BrokerNavigator, error) {
+	service, err := n.c.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return service, nil
+}
 
 // NewConnector returns a connector for one broker endpoint. An empty path is
 // refused by Connect, exactly as Dial refuses it, so a misconfigured connector

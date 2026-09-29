@@ -73,7 +73,7 @@ func startUIDriverBrokerFixture(t *testing.T) *uiDriverBrokerFixture {
 // broker. It is the only transport authority a sandbox harness is given: it
 // starts no production broker and never falls back to the production XDG layout.
 func (f *uiDriverBrokerFixture) Connector() ports.BrokerConnector {
-	return brokeripc.NewConnector(f.broker.socket, brokeripc.Config{})
+	return brokeripc.NewConnector(f.broker.socket, brokeripc.Config{}).Navigator()
 }
 
 // Streams reports one event per logical stream the fixture broker admitted.

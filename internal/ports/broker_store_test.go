@@ -1,13 +1,62 @@
 package ports
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBrokerSnapshotDurableProjection(t *testing.T) {
+	published := BrokerSnapshot{
+		Epoch: 2, Revision: 3,
+		Removed: []BrokerHostTombstone{{Endpoint: "gone"}},
+		Daemons: []BrokerDaemonObservation{
+			{Local: true, Policy: BrokerPolicy{Transport: "ssh"}},
+			{
+				Endpoint:    "user@host:22",
+				Checking:    true,
+				LastFailure: domain.RemoteFailure{Kind: domain.RemoteFailureTimeout, Err: errors.New("live cause")},
+				Policy:      BrokerPolicy{Transport: "ssh"},
+				Sessions: []catalogue.RemoteCatalogSession{{Name: "work", Tabs: []catalogue.RemoteCatalogTab{
+					{ID: "t1", Attention: true},
+				}}},
+			},
+		},
+	}
+	tests := []struct {
+		name      string
+		project   func(BrokerSnapshot) BrokerSnapshot
+		wantLocal bool
+	}{
+		{name: "durable projection keeps local for refusal", project: BrokerSnapshot.DurableProjection, wantLocal: true},
+		{name: "producer drops local first", project: func(s BrokerSnapshot) BrokerSnapshot { return s.WithoutLocal().DurableProjection() }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := tt.project(published)
+
+			require.Nil(t, out.Removed)
+			remote, ok := out.Find("user@host:22")
+			require.True(t, ok)
+			require.False(t, remote.Checking)
+			require.NoError(t, remote.LastFailure.Err)
+			require.Equal(t, domain.RemoteFailureTimeout, remote.LastFailure.Kind, "the failure kind is durable")
+			require.Equal(t, BrokerPolicy{}, remote.Policy)
+			require.False(t, remote.Sessions[0].Tabs[0].Attention)
+			require.Equal(t, tt.wantLocal, out.Daemons[0].Local)
+
+			// The published snapshot is never mutated.
+			require.Len(t, published.Removed, 1)
+			require.True(t, published.Daemons[1].Checking)
+			require.True(t, published.Daemons[1].Sessions[0].Tabs[0].Attention)
+		})
+	}
+}
 
 // TestValidateDurableHostProjectionIdentity pins the durable rule to the live
 // observation rule: an identity and incarnation must appear together, and an
