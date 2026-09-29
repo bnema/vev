@@ -273,6 +273,49 @@ func ValidateDurableObservation(daemon BrokerDaemonObservation) error {
 	return ValidateDurableHostProjection(daemon)
 }
 
+// DurableProjection returns the persistable copy of a published snapshot. It
+// is the single rule for what is transient, shared by the registry writer and
+// every store:
+//
+//   - Removed tombstones are process-local fencing; a restart never adopts them.
+//   - Checking and the live failure cause are in-flight observation state.
+//   - Policy is membership authority, not observation: the loader re-stamps it
+//     from the matching BrokerHostRecord, so persisting it would create a
+//     second, stale authority.
+//   - Tab Attention is a transient bell that must not resurrect on reload.
+//
+// Local observations are kept so ValidateDurableSnapshot still refuses them;
+// a producer that may hold one drops it first (see WithoutLocal).
+func (s BrokerSnapshot) DurableProjection() BrokerSnapshot {
+	out := s.Clone()
+	out.Removed = nil
+	for i := range out.Daemons {
+		daemon := &out.Daemons[i]
+		daemon.Checking = false
+		daemon.LastFailure.Err = nil
+		daemon.Policy = BrokerPolicy{}
+		for j := range daemon.Sessions {
+			for k := range daemon.Sessions[j].Tabs {
+				daemon.Sessions[j].Tabs[k].Attention = false
+			}
+		}
+	}
+	return out
+}
+
+// WithoutLocal returns a copy without the process-local daemon observation.
+func (s BrokerSnapshot) WithoutLocal() BrokerSnapshot {
+	out := s.Clone()
+	daemons := out.Daemons[:0]
+	for _, daemon := range out.Daemons {
+		if !daemon.Local {
+			daemons = append(daemons, daemon)
+		}
+	}
+	out.Daemons = daemons
+	return out
+}
+
 // ValidateDurableSnapshot checks the shared durable snapshot shape.
 func ValidateDurableSnapshot(snapshot BrokerSnapshot) error {
 	if snapshot.Epoch == 0 {
