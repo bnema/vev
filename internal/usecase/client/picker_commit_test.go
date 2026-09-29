@@ -78,4 +78,48 @@ func TestPickerCommitResolvesTheCommittedRow(t *testing.T) {
 	}
 }
 
+// TestPickerCatalogueResolveTargetKinds covers every selection kind a commit
+// key can carry: destinations resolve to their admission, while a CLI-only
+// attach-by-name identity is refused as a picker commit.
+func TestPickerCatalogueResolveTargetKinds(t *testing.T) {
+	observation := pickerTestLocalObservation(time.Unix(1000, 0), pickerTestSession("alpha", 1, catalogue_Up))
+	tests := []struct {
+		name          string
+		ref           pickerSelectionRef
+		wantAdmission ports.BrokerStreamAdmission
+		wantErr       pickerCatalogueErrorCode
+	}{
+		{name: "exact session", ref: pickerSelectionRef{kind: pickerSelectionExact, lifecycle: pickerTestLifecycle(1), name: "alpha"}, wantAdmission: ports.BrokerAdmissionExact},
+		{name: "create named", ref: pickerSelectionRef{kind: pickerSelectionCreateNamed, createName: "fresh"}, wantAdmission: ports.BrokerAdmissionCreateNamed},
+		{name: "create named with invalid name", ref: pickerSelectionRef{kind: pickerSelectionCreateNamed, createName: "bad name/"}, wantErr: pickerCatalogueInvalidName},
+		{name: "create ephemeral", ref: pickerSelectionRef{kind: pickerSelectionCreateEphemeral}, wantAdmission: ports.BrokerAdmissionCreateEphemeral},
+		{name: "attach named is not a picker destination", ref: pickerSelectionRef{kind: pickerSelectionAttachNamed, name: "alpha"}, wantErr: pickerCatalogueUnavailable},
+		{name: "unknown key", wantErr: pickerCatalogueUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			catalogue, _ := pickerTestCatalogue(t)
+			require.True(t, catalogue.Apply(ports.BrokerSnapshot{Epoch: 3, Revision: 1, Daemons: []ports.BrokerDaemonObservation{observation}}))
+			key := "missing"
+			if tt.ref.kind != 0 {
+				key = "injected"
+				tt.ref.epoch = 3
+				tt.ref.local = true
+				catalogue.mu.Lock()
+				catalogue.refs[key] = tt.ref
+				catalogue.mu.Unlock()
+			}
+
+			request, _, err := catalogue.ResolveTarget(key, pickerTestBase())
+
+			if tt.wantErr != 0 {
+				require.True(t, pickerCatalogueErrorIs(err, tt.wantErr), "want %v, got %v", tt.wantErr, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantAdmission, request.Admission)
+		})
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
