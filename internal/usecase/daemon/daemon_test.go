@@ -665,10 +665,16 @@ type notifyClock struct{}
 
 func (notifyClock) Now() time.Time { return time.Now() }
 func (notifyClock) NewTimer(d time.Duration) ports.Timer {
-	if d == debounceInterval {
+	switch d {
+	case debounceInterval:
 		return stubTimer{}
+	case detachNotifyTimeout:
+		return realTimer{t: time.NewTimer(5 * time.Millisecond)}
+	default:
+		// Other budgets, such as the handshake deadline, keep their real length
+		// so a slow runner cannot expire them before the client is welcomed.
+		return realTimer{t: time.NewTimer(d)}
 	}
-	return realTimer{t: time.NewTimer(5 * time.Millisecond)}
 }
 
 type realTimer struct{ t *time.Timer }
