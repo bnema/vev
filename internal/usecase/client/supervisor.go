@@ -576,7 +576,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	// The active connection is owned across loop iterations. retire is
 	// idempotent so every exit path closes exactly the connection it adopted.
 	var (
-		service ports.BrokerService
+		service ports.BrokerNavigator
 		sub     ports.BrokerSubscription
 	)
 	retire := func() {
@@ -725,7 +725,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 // that produced it (see adoptAttempt's generation fence).
 type supervisorAttempt struct {
 	generation uint64
-	service    ports.BrokerService
+	service    ports.BrokerNavigator
 	sub        ports.BrokerSubscription
 	err        error
 }
@@ -886,7 +886,7 @@ type readyOutcome struct {
 // folded into the picker as they arrive; a commit decision wakes the loop so
 // the supervisor can admit exactly the row the user committed. It opens no
 // stream and starts no terminal work itself.
-func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, sub ports.BrokerSubscription) readyOutcome {
+func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, sub ports.BrokerSubscription) readyOutcome {
 	if key := s.pendingPickerKey; key != "" {
 		s.pendingPickerKey = ""
 		return readyOutcome{commitKey: key}
@@ -957,7 +957,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetim
 	}
 }
 
-func (s *Supervisor) refreshPreview(service ports.BrokerService) {
+func (s *Supervisor) refreshPreview(service ports.BrokerNavigator) {
 	if s == nil || s.cfg.Picker == nil {
 		return
 	}

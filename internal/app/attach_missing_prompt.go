@@ -182,7 +182,7 @@ type preconnectedBrokerConnector struct {
 	used bool
 }
 
-func (c *preconnectedBrokerConnector) Connect(ctx context.Context) (ports.BrokerService, error) {
+func (c *preconnectedBrokerConnector) Connect(ctx context.Context) (ports.BrokerNavigator, error) {
 	c.mu.Lock()
 	if !c.used {
 		c.used = true

@@ -407,7 +407,7 @@ func startAttachHarnessConfig(t *testing.T, picker pickerHost, configure func(*S
 	service := newSupervisorTestService(ports.BrokerConnectionID{1})
 	service.publish(3, 1)
 
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) {
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) {
 		return service, nil
 	})
 	cfg := SupervisorConfig{
@@ -1584,7 +1584,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 	})
 
 	controller := newPickerController(clock, pickerTestFreshness, true)
-	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerService, error) { return service, nil })
+	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
 		Terminal:  terminal,

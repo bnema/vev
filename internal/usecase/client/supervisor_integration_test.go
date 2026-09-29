@@ -167,7 +167,7 @@ func integrationSupervisor(t *testing.T, path string) (*Supervisor, *supervisorT
 	t.Cleanup(reader.unblock)
 	terminal := newSupervisorTestTerminal(reader)
 	sup := mustSupervisor(t, SupervisorConfig{
-		Connector: brokeripc.NewConnector(path, brokeripc.Config{}),
+		Connector: brokeripc.NewConnector(path, brokeripc.Config{}).Navigator(),
 		Terminal:  terminal,
 		Clock:     clock,
 		Jitter:    func() float64 { return 0 },

@@ -99,14 +99,14 @@ func (r BrokerOperationRoute) Validate() error {
 // closes the borrowed service, and exposes no way to open or retarget a
 // session.
 type BrokerOperations struct {
-	service ports.BrokerService
+	service ports.BrokerNavigator
 	clock   ports.Clock
 }
 
 // NewBrokerOperations builds the executor over a borrowed broker service. It
 // refuses a nil or typed-nil service or clock so no operation can panic on a
 // missing dependency; the caller keeps ownership of the service lifetime.
-func NewBrokerOperations(service ports.BrokerService, clock ports.Clock) (*BrokerOperations, error) {
+func NewBrokerOperations(service ports.BrokerNavigator, clock ports.Clock) (*BrokerOperations, error) {
 	if supervisorNil(service) {
 		return nil, errors.New("vev: broker operations require a broker service")
 	}

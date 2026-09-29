@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -210,22 +209,6 @@ func (s *brokerOpsTestService) closeCount() int {
 	return s.closes
 }
 
-func (s *brokerOpsTestService) CloseStream(ports.BrokerConnectionID, ports.BrokerStreamID) error {
-	return nil
-}
-
-func (s *brokerOpsTestService) AddHost(context.Context, string, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-
-func (s *brokerOpsTestService) RemoveHost(context.Context, domain.RemoteRegistration) (bool, error) {
-	return false, nil
-}
-
-func (s *brokerOpsTestService) UpdateHostPolicy(context.Context, domain.RemoteRegistration, ports.BrokerPolicy) (domain.RemoteRegistration, error) {
-	return domain.RemoteRegistration{}, nil
-}
-
 func (s *brokerOpsTestService) RequestReconcile(endpoint string) {
 	s.mu.Lock()
 	s.reconciles = append(s.reconciles, endpoint)
@@ -239,7 +222,7 @@ func (s *brokerOpsTestService) Close() error {
 	return nil
 }
 
-var _ ports.BrokerService = (*brokerOpsTestService)(nil)
+var _ ports.BrokerNavigator = (*brokerOpsTestService)(nil)
 
 func brokerOpsTestLocalSnapshot() ports.BrokerSnapshot {
 	now := time.Unix(1000, 0)
@@ -297,7 +280,7 @@ func TestBrokerOperationsConstructorRefusesMissingDependencies(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		service ports.BrokerService
+		service ports.BrokerNavigator
 		clock   ports.Clock
 		wantErr bool
 	}{

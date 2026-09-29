@@ -103,7 +103,7 @@ type previewManager struct {
 // previewDebounce is one armed selection. Its goroutine only forwards the
 // clock timer to wake and exits on fire or cancellation.
 type previewDebounce struct {
-	service ports.BrokerService
+	service ports.BrokerNavigator
 	route   ports.BrokerPreviewRoute
 	preview protocol.RemotePreviewRequest
 	wake    chan struct{}
@@ -112,7 +112,7 @@ type previewDebounce struct {
 
 func (d *previewDebounce) cancel() { close(d.stop) }
 
-func (m *previewManager) armDebounce(service ports.BrokerService, route ports.BrokerPreviewRoute, preview protocol.RemotePreviewRequest) {
+func (m *previewManager) armDebounce(service ports.BrokerNavigator, route ports.BrokerPreviewRoute, preview protocol.RemotePreviewRequest) {
 	pending := &previewDebounce{service: service, route: route, preview: preview, wake: make(chan struct{}, 1), stop: make(chan struct{})}
 	m.pending = pending
 	if supervisorNil(m.clock) {
@@ -163,7 +163,7 @@ func (m *previewManager) selected(route ports.BrokerPreviewRoute, preview protoc
 // refresh follows the picker's selected row. A new selection shows its cached
 // frame (stale) or a loading placeholder at once, then subscribes after the
 // cursor rests for the debounce.
-func (m *previewManager) refresh(service ports.BrokerService, host pickerHost, size domain.Size) {
+func (m *previewManager) refresh(service ports.BrokerNavigator, host pickerHost, size domain.Size) {
 	picker, ok := host.(pickerPreviewHost)
 	if supervisorNil(service) || !ok {
 		m.close(host)

@@ -277,7 +277,7 @@ func attachmentTerminatedOutcome(err error) attachmentOutcome {
 // allocated by the broker service — the single allocator on its own connection
 // — and is consumed even when resolution refuses, matching the never-reused
 // contract.
-func (s *Supervisor) resolveInitialStreamRequest(service ports.BrokerService, snapshot ports.BrokerSnapshot, navigation InitialNavigation) (ports.BrokerOpenStreamRequest, error) {
+func (s *Supervisor) resolveInitialStreamRequest(service ports.BrokerNavigator, snapshot ports.BrokerSnapshot, navigation InitialNavigation) (ports.BrokerOpenStreamRequest, error) {
 	// The intent is resolved against the very snapshot the resolver saw, so the
 	// authority the resolver translated its target into and the authority the
 	// request is resolved from can never diverge.
@@ -310,7 +310,7 @@ func classifyInitialNavigationFailure(err error) error {
 	return pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "initial navigation could not be resolved"}
 }
 
-func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerService, key string) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerNavigator, key string) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	stream, err := service.NextStreamID()
 	if err != nil {
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
@@ -474,7 +474,7 @@ type initialNavigationTake struct {
 // expires (the resolver's fallback, or a bounded refusal without one), or the
 // run ends. The returned snapshot is the publication the decision was made on,
 // so the stream request resolves against the same authority.
-func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, pending InitialNavigationNotObserved) initialNavigationTake {
+func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, pending InitialNavigationNotObserved) initialNavigationTake {
 	timer := s.cfg.Clock.NewTimer(initialNavigationObservationBudget)
 	defer timer.Stop()
 	for {
@@ -513,7 +513,7 @@ func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, inpu
 // the picker. It reports terminated=true only when the run itself must end
 // (process cancellation or terminal EOF); every attachment outcome returns to
 // the picker in the same process.
-func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService) (bool, error) {
+func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator) (bool, error) {
 	// The intent is consumed against the first committed publication of the
 	// adopted connection; the resolver and the request resolution share that one
 	// read.
@@ -557,7 +557,7 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request}, SessionEnvironmentLocalCLI)
 }
 
-func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, key string) (bool, error) {
+func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, key string) (bool, error) {
 	if s.cfg.Picker == nil {
 		return false, nil
 	}
@@ -571,7 +571,7 @@ func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminal
 	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request, tab: tab}, SessionEnvironmentLocalPicker)
 }
 
-func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error) {
+func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error) {
 	picker := s.cfg.Picker
 	if picker == nil {
 		return false, nil
@@ -664,7 +664,7 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 // foreground grant, settle it, and classify the result. resuming marks an
 // attempt of the resume loop, whose transport-class failures are returned as
 // attachmentRetry instead of presented.
-func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
+func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
 	request := target.request
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
@@ -734,7 +734,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 // context, terminal EOF, and broker-connection loss. The deadline is the only
 // other stop: when it fires before the worker settled, the attachment ends as
 // a typed timeout without claiming attachment.
-func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest, resuming bool) attachmentOutcome {
+func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest, resuming bool) attachmentOutcome {
 	settled := make(chan attachmentSettlement, 1)
 	go func() {
 		event, adopted := run.Wait(deadline.Context())
@@ -905,7 +905,7 @@ func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForegroun
 // next resume attempt. It settles early on cancellation or terminal EOF
 // (terminated), or on broker loss, which ends the resume and leaves the ready
 // loop to observe and retire the connection.
-func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerService, attempt int) (terminated bool, termErr error, brokerLost bool) {
+func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (terminated bool, termErr error, brokerLost bool) {
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)

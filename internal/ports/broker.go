@@ -826,11 +826,8 @@ type BrokerPreviewSubscription interface {
 	Close()
 }
 
-// BrokerService is the client-facing broker façade. All clients reach
-// local and remote daemons through it, including the local daemon.
-// Snapshot access performs no I/O; request methods are non-blocking
-// coalesced hints except where the context explicitly bounds them.
-type BrokerSession interface {
+// BrokerConnection is one client connection's identity and lifetime.
+type BrokerConnection interface {
 	// ConnectionID returns the ID assigned when this client connection was
 	// accepted. Clients carry it on stream operations to fence stale requests.
 	ConnectionID() BrokerConnectionID
@@ -848,25 +845,55 @@ type BrokerSession interface {
 	// Err returns the terminal cause, stable once Done is closed. It is nil for
 	// an orderly local Close and non-nil for a broker-side loss or failure.
 	Err() error
+	Close() error
+}
+
+// BrokerObservation reads committed broker state. Snapshot access performs no
+// I/O; RequestReconcile is a non-blocking coalesced hint.
+type BrokerObservation interface {
 	Snapshot() BrokerSnapshot
 	Subscribe() (BrokerSubscription, error)
 	SubscribePreview(request BrokerPreviewRequest) (BrokerPreviewSubscription, error)
-	CloseStream(connection BrokerConnectionID, stream BrokerStreamID) error
+	RequestReconcile(endpoint string)
+}
+
+// BrokerHostMembership mutates durable configured-host membership. Every
+// mutation is bounded by its context.
+type BrokerHostMembership interface {
 	// AddHost durably adds or pins endpoint under policy and returns its authority.
 	AddHost(ctx context.Context, endpoint string, policy BrokerPolicy) (domain.RemoteRegistration, error)
 	// RemoveHost removes only the exact expected registration.
 	RemoveHost(ctx context.Context, expected domain.RemoteRegistration) (bool, error)
 	// UpdateHostPolicy changes policy only for exact expected authority and returns the advanced registration.
 	UpdateHostPolicy(ctx context.Context, expected domain.RemoteRegistration, policy BrokerPolicy) (domain.RemoteRegistration, error)
-	RequestReconcile(endpoint string)
-	Close() error
 }
 
-// BrokerService is the typed client-side broker connection.
+// BrokerSession is the complete connection-scoped broker surface shared by
+// the client IPC connection and the broker-side admitted connection.
+type BrokerSession interface {
+	BrokerConnection
+	BrokerObservation
+	BrokerHostMembership
+	CloseStream(connection BrokerConnectionID, stream BrokerStreamID) error
+}
+
+// BrokerService is the client-facing broker façade. All clients reach local
+// and remote daemons through it, including the local daemon.
 type BrokerService interface {
 	BrokerSession
 	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
 }
+
+// BrokerNavigator is what a session frontend needs from the broker: its
+// connection, committed observations, and logical streams. It never mutates
+// host membership. Every BrokerService is a BrokerNavigator.
+type BrokerNavigator interface {
+	BrokerConnection
+	BrokerObservation
+	OpenStream(ctx context.Context, request BrokerOpenStreamRequest) (BrokerLogicalConnection, error)
+}
+
+var _ BrokerNavigator = (BrokerService)(nil)
 
 // BrokerEnvelopeStream carries opaque complete session envelopes across the core.
 type BrokerEnvelopeStream interface {
@@ -975,7 +1002,7 @@ type BrokerEndpointConnector interface {
 // broker, so a caller that abandons the setup context (a bounded attempt) still
 // owns a live connection it must Close.
 type BrokerConnector interface {
-	Connect(ctx context.Context) (BrokerService, error)
+	Connect(ctx context.Context) (BrokerNavigator, error)
 }
 
 // BrokerAuthority admits one accepted client connection to the broker core

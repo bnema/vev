@@ -18,13 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// scriptedBrokerConnector is also used by broker_client_test.go, outside this change's scope.
-type scriptedBrokerConnector struct{ service *terminalCompositionService }
-
-func (c scriptedBrokerConnector) Connect(context.Context) (ports.BrokerService, error) {
-	return c.service, nil
-}
-
 // startScriptedUIDriverRun launches one driver run over a scripted broker
 // service, waits for its discovery response, and then waits for the run's single
 // logical stream admission.
