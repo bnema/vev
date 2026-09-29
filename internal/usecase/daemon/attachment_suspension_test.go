@@ -132,7 +132,7 @@ func TestAttachmentSuspensionCloseDoesNotPark(t *testing.T) {
 	require.NoError(t, d.suspendAttachment(token, protocol.SuspendAttachment{RequestID: 1}))
 	d.clientGone(sess, ac, token.transport.transport, false)
 	require.Nil(t, ac.currentAttachmentSession())
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	require.False(t, ac.parked)
 }
 
@@ -187,7 +187,7 @@ func TestAttachmentSuspensionReaderKeepsControlAlive(t *testing.T) {
 	require.IsType(t, protocol.Pong{}, messages[1])
 	require.Zero(t, ac.echoAck.Load())
 	require.Nil(t, ac.currentAttachmentSession())
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 }
 
 func TestAttachmentActivationCloseDuringFullPublication(t *testing.T) {
@@ -215,5 +215,5 @@ func TestAttachmentActivationCloseDuringFullPublication(t *testing.T) {
 	d.attachmentCleanupWg.Wait()
 	require.False(t, activated)
 	require.Nil(t, ac.currentAttachmentSession())
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 }

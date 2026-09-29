@@ -192,11 +192,8 @@ func (d *Daemon) validateResumeAdmittedTarget(token uint64, target protocol.Exac
 func (d *Daemon) resumeTokenOwnedSession(token uint64) *session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if parked := d.parked[token]; parked != nil {
-		return parked.sess
-	}
-	if pending := d.parking[token]; pending != nil {
-		return pending.sess
+	if sess := d.resume.sessionFor(token); sess != nil {
+		return sess
 	}
 	for _, sess := range d.sessions {
 		if sess == nil {

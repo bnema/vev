@@ -399,7 +399,7 @@ func TestGraphicsNamespaceQuarantinesOnParkExpiryAndFailedCleanup(t *testing.T) 
 	}
 	d.mu.Lock()
 	d.graphicsNamespaces[block] = struct{}{}
-	d.parked[1] = parked
+	d.resume.parked[1] = parked
 	d.mu.Unlock()
 	d.expireParked(1, parked)
 	require.Nil(t, parked.ac.output.graphicsOutput)
@@ -486,7 +486,7 @@ func TestGraphicsNamespaceStaysQuarantinedAfterFinalDeleteAndParkExpiry(t *testi
 		done: make(chan struct{}),
 	}
 	d.mu.Lock()
-	d.parked[1] = parked
+	d.resume.parked[1] = parked
 	d.mu.Unlock()
 	d.expireParked(1, parked)
 

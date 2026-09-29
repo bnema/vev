@@ -130,7 +130,7 @@ func TestSuspendedAttachmentSafetyExpiryEvictsAfterTimer(t *testing.T) {
 	require.True(t, tr.Closed(), "expiry closes the retained transport")
 	d.mu.Lock()
 	_, retained := d.suspended[ac]
-	parked := d.parked[123]
+	parked := d.resume.parked[123]
 	d.mu.Unlock()
 	require.False(t, retained)
 	require.Nil(t, parked, "expiry must not park a resume credential")

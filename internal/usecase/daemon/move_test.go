@@ -160,7 +160,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 		DestinationTabID: domain.TabStableID(destination.tabs[0].stableID),
 	}))
 	d.mu.Lock()
-	require.Empty(t, d.parked, "retired source parked clients must leave the daemon registry")
+	require.Empty(t, d.resume.parked, "retired source parked clients must leave the daemon registry")
 	d.mu.Unlock()
 	require.True(t, transport.Closed(), "retired source parked transport was not closed")
 }

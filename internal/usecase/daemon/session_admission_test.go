@@ -684,7 +684,7 @@ func TestRouteResumeRejectsMismatchedAdmittedTargetBeforeClaim(t *testing.T) {
 			require.Equal(t, protocol.ErrNoSuchTarget, protocolErr.code)
 
 			d.mu.Lock()
-			parked := d.parked[token]
+			parked := d.resume.parked[token]
 			claimed := parked != nil && parked.claimed
 			d.mu.Unlock()
 			require.NotNil(t, parked, "a mismatched admitted target must not remove the parked credential")

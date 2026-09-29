@@ -187,7 +187,7 @@ func TestHandshakeTimeoutClosesBlockedReceive(t *testing.T) {
 	requireClosedHandshakeTransport(t, tr)
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }
 
@@ -218,7 +218,7 @@ func TestFailedResumeHandshakeRestoresParkedCredential(t *testing.T) {
 	awaitTestCompletion(t, done, "failed resume handshake did not finish")
 	requireClosedHandshakeTransport(t, resumeTransport)
 	d.mu.Lock()
-	parked := d.parked[token]
+	parked := d.resume.parked[token]
 	d.mu.Unlock()
 	require.NotNil(t, parked, "failed pre-claim resume must restore the parked credential")
 	require.Same(t, ac, parked.ac)
@@ -247,7 +247,7 @@ func TestHandshakeTimeoutClosesBlockedWelcomeSend(t *testing.T) {
 	requireClosedHandshakeTransport(t, tr)
 	d.mu.Lock()
 	require.Empty(t, d.sessions, "a timed-out newly-created handshake must not leave an empty session")
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }
 
@@ -282,7 +282,7 @@ func TestHandshakeTimeoutCancelsRouteRestoreWait(t *testing.T) {
 	requireClosedHandshakeTransport(t, tr)
 	d.mu.Lock()
 	require.Empty(t, d.sessions)
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 }
 
@@ -344,7 +344,7 @@ func TestHandshakeTimeoutPreservesUnrelatedAttachment(t *testing.T) {
 	require.Equal(t, []*attachedClient{old}, sess.snapshotAttachments())
 	d.mu.Lock()
 	require.Len(t, d.sessions, 1)
-	require.Empty(t, d.parked)
+	require.Empty(t, d.resume.parked)
 	d.mu.Unlock()
 	_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
 }
