@@ -22,7 +22,7 @@ Set WaitTimeout 30s
 
 # ── Local and remote history, shown immediately ──────────
 Type@180ms "vev"
-Sleep 600ms
+Sleep 1.2s
 Enter
 Sleep 1.1s
 # Keep the initial local shell so the final detach/attach cycle is meaningful.
@@ -30,6 +30,7 @@ Alt+" "
 Sleep 550ms
 Type "RNS "
 Type@95ms "local"
+Sleep 1s
 Enter
 Sleep 1s
 
@@ -39,8 +40,10 @@ Sleep 550ms
 Type "SSP"
 Enter
 Sleep 1.5s
-Down 2
-Sleep 700ms
+Down
+Sleep 800ms
+Down
+Sleep 1.5s
 Enter
 Sleep 2.5s
 
@@ -163,14 +166,33 @@ Sleep 900ms
 Alt+a
 Sleep 1.9s
 
-# ── Session picker now lists local and remote sessions ───
+# ── Move pane: start a ticker beside the agents job, then
+#    carry it live into the "local" session. ─────────────────
 Alt+" "
 Sleep 550ms
-Type "SSP"
+Type "SPR"
+Enter
+Sleep 650ms
+Type@80ms "tick"
+Type@150ms "er"
 Enter
 Sleep 1.5s
+Alt+" "
+Sleep 550ms
+Type "MFP"
+Sleep 800ms
+Enter
+Sleep 1.5s
+Down
+Sleep 800ms
+Down
+Sleep 1.5s
+Enter
+# The picker stays open after a pane move so more panes can follow; close it.
+# The final re-attach to "local" shows the moved ticker still counting.
+Sleep 1.5s
 Escape
-Sleep 650ms
+Sleep 1s
 
 # ── Detach / re-attach: local sessions survive, ticker on ─
 Alt+" "
@@ -188,5 +210,4 @@ Sleep 150ms
 Type@80ms "attach "
 Type@140ms "local"
 Enter
-Sleep 2.2s
-Sleep 400ms
+Sleep 3.5s
