@@ -49,7 +49,8 @@ import (
 // failures can never trigger a spawn either.
 
 // The start decision itself (mode, launch authority, local-only target) is
-// owned by broker.AuthorizeDaemonStart and broker.RequireLocalDaemonTarget.
+// owned by broker.ClassifyDaemonDialFailure, broker.AuthorizeDaemonLaunch, and
+// broker.RequireLocalDaemonTarget.
 // This file keeps only the mechanics: carriage path validation, absence
 // classification of a dial error, and the spawn election.
 
@@ -150,10 +151,15 @@ func dialBrokerDaemonCarriage(ctx context.Context, carriage string, target ports
 		return raw, nil
 	}
 	// The broker decides; nothing below runs unless it authorizes a start.
-	if err := broker.AuthorizeDaemonStart(target, err, daemonCarriageAbsence(err)); err != nil {
+	// The carriage check sits between its two steps, so a foreign carriage is
+	// reported as incompatible before any policy refusal.
+	if err := broker.ClassifyDaemonDialFailure(target, err, daemonCarriageAbsence(err)); err != nil {
 		return nil, err
 	}
 	if err := validateDaemonCarriageStart(carriage, starter); err != nil {
+		return nil, err
+	}
+	if err := broker.AuthorizeDaemonLaunch(target); err != nil {
 		return nil, err
 	}
 	published := starter.effectivePublished()

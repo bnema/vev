@@ -23,20 +23,20 @@ func RequireLocalDaemonTarget(target ports.BrokerDialTarget) error {
 	return nil
 }
 
-// AuthorizeDaemonStart decides what follows a failed carriage dial. absent
-// reports whether the transport proved the daemon is simply not there; that
-// classification belongs to the carriage adapter and must fail closed.
+// ClassifyDaemonDialFailure decides whether a failed carriage dial may lead to
+// a start at all. absent reports whether the transport proved the daemon is
+// simply not there; that classification belongs to the carriage adapter and
+// must fail closed.
 //
-// It returns nil only when a start may proceed. Otherwise it returns the
-// error to report, and no lock, election, or process may be touched:
+// It returns nil only when the daemon is absent under a mode other than
+// ExistingOnly. Otherwise it returns the error to report, and no lock,
+// election, or process may be touched:
 //
 //   - ExistingOnly never starts: absence becomes BrokerErrorNoDaemon and every
 //     other failure is reported unchanged.
 //   - A failure that is not absence (cancellation, a rejected peer, a foreign
 //     path, a permission error) is never repaired by starting another daemon.
-//   - The start mode can only narrow the policy: the resolved policy must also
-//     name DaemonLaunchAuthority.
-func AuthorizeDaemonStart(target ports.BrokerDialTarget, dialErr error, absent bool) error {
+func ClassifyDaemonDialFailure(target ports.BrokerDialTarget, dialErr error, absent bool) error {
 	if dialErr == nil {
 		return errors.New("broker: a running daemon is never started again")
 	}
@@ -49,6 +49,13 @@ func AuthorizeDaemonStart(target ports.BrokerDialTarget, dialErr error, absent b
 	if !absent {
 		return dialErr
 	}
+	return nil
+}
+
+// AuthorizeDaemonLaunch is the final start decision for an absent daemon. The
+// start mode is an authorization, never an obligation, and it can only narrow
+// the policy: the resolved policy must also name DaemonLaunchAuthority.
+func AuthorizeDaemonLaunch(target ports.BrokerDialTarget) error {
 	if target.StartMode != ports.BrokerDaemonStartIfNeeded {
 		return daemonStartRefused("the acquisition does not authorize starting a daemon")
 	}
