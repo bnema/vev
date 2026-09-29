@@ -303,11 +303,13 @@ func (s BrokerSnapshot) DurableProjection() BrokerSnapshot {
 	return out
 }
 
-// WithoutLocal returns a copy without the process-local daemon observation.
+// WithoutLocal returns s without the process-local daemon observation. The
+// daemon list is new, but nested data stays shared with s; chain
+// DurableProjection (or Clone) before mutating the result.
 func (s BrokerSnapshot) WithoutLocal() BrokerSnapshot {
-	out := s.Clone()
-	daemons := out.Daemons[:0]
-	for _, daemon := range out.Daemons {
+	out := s
+	daemons := make([]BrokerDaemonObservation, 0, len(s.Daemons))
+	for _, daemon := range s.Daemons {
 		if !daemon.Local {
 			daemons = append(daemons, daemon)
 		}
