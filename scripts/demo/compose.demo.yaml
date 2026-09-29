@@ -15,4 +15,8 @@ services:
     volumes:
       - ../../scripts/demo:/tape:ro
       - ../../scripts/demo/out:/home/demo/out
-      - ../../scripts/demo/out/local:/home/demo/.local
+      # Shared by the host-registration and recording runs; removed by `down -v`.
+      - demo-local:/home/demo/.local
+
+volumes:
+  demo-local:

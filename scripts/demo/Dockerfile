@@ -16,7 +16,7 @@ COPY build/vev /usr/local/bin/vev
 COPY scripts/demo/ticker.sh /usr/local/bin/ticker
 COPY scripts/demo/demo-shell.sh /usr/local/bin/demo-shell
 RUN chmod +x /usr/local/bin/ticker /usr/local/bin/demo-shell \
-    && install -d -o demo -g demo -m 0700 /home/demo/.ssh \
+    && install -d -o demo -g demo -m 0700 /home/demo/.ssh /home/demo/.local \
     && install -d -m 0755 /run/sshd \
     && ssh-keygen -A \
     && ssh-keygen -q -t ed25519 -N '' -C vev-demo -f /home/demo/.ssh/id_ed25519 \
