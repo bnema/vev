@@ -1,4 +1,4 @@
-package app
+package broker
 
 import (
 	"context"
@@ -7,12 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/broker"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +20,7 @@ import (
 // again, and redials only when the borrowed transport has retired.
 func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 	registration := domain.RemoteRegistration{Endpoint: "user@example.test", Incarnation: [16]byte{1}, Generation: 1}
-	policy := remoteBrokerPolicy("quic")
+	policy := observationPolicy()
 	const identity ports.BrokerDaemonIdentity = "remote-daemon"
 	dialErr := errors.New("dial refused")
 	tests := []struct {
@@ -77,7 +75,7 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 						return nil
 					})
 					typed.EXPECT().ReceiveServer().RunAndReturn(func() (protocol.ServerMessage, error) {
-						return protocol.CommandResult{RequestID: sent.RequestID, Outcome: protocol.CommandSucceeded, Output: testLocalCatalogue(t)}, nil
+						return protocol.CommandResult{RequestID: sent.RequestID, Outcome: protocol.CommandSucceeded, Output: observationCatalogue(t)}, nil
 					})
 					logical.EXPECT().Close().Return(nil)
 					physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(logical, nil)
@@ -85,13 +83,13 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 					physical.EXPECT().Incarnation().Return(ports.BrokerDaemonIncarnation{1})
 				}
 			}
-			probe := &brokerRemoteProbe{
-				epoch: 7, routes: routes, binder: portsmocks.NewMockBrokerIdentityBinder(t), connector: connector,
-				hosts: &routeTestHosts{record: record, found: true}, codec: codec,
+			probe := &RemoteProbe{
+				Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
+				Hosts: observationHosts(t, record), Codec: codec,
 			}
 			// Use the real pool for borrowing. Stateful pool retirement is
 			// covered with a fake physical in broker's worker tests.
-			pool, err := broker.NewPool(7, routes, probe.binder, connector, clock.New(), broker.PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
+			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, pool.Close()) })
 			if tt.shared && tt.bound && !tt.retired {
@@ -102,7 +100,7 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 				physical.EXPECT().Close().Return(nil).Maybe()
 				require.True(t, pool.AdoptPhysical(physical, policy))
 			}
-			probe.shared.share(pool)
+			probe.SharePool(pool)
 
 			observation, err := probe.Probe(context.Background(), registration)
 			switch {
@@ -126,7 +124,7 @@ func TestBrokerRemoteProbeBorrowsWarmTransport(t *testing.T) {
 // abandoned for a redial just because one observation went unanswered.
 func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 	registration := domain.RemoteRegistration{Endpoint: "user@example.test", Incarnation: [16]byte{1}, Generation: 1}
-	policy := remoteBrokerPolicy("quic")
+	policy := observationPolicy()
 	const identity ports.BrokerDaemonIdentity = "remote-daemon"
 	tests := []struct {
 		name string
@@ -182,15 +180,15 @@ func TestBrokerRemoteProbeSilentBorrowedTransportNeverRedials(t *testing.T) {
 				logical.EXPECT().Close().RunAndReturn(func() error { once.Do(func() { close(closed) }); return nil })
 				physical.EXPECT().OpenStream(mock.Anything, mock.Anything).Return(logical, nil)
 			}
-			probe := &brokerRemoteProbe{
-				epoch: 7, routes: routes, binder: portsmocks.NewMockBrokerIdentityBinder(t), connector: connector,
-				hosts: &routeTestHosts{record: record, found: true}, codec: codec,
+			probe := &RemoteProbe{
+				Epoch: 7, Routes: routes, Binder: portsmocks.NewMockBrokerIdentityBinder(t), Connector: connector,
+				Hosts: observationHosts(t, record), Codec: codec,
 			}
-			pool, err := broker.NewPool(7, routes, probe.binder, connector, clock.New(), broker.PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
+			pool, err := NewPool(7, routes, probe.Binder, connector, newManualClock(time.Unix(0, 0)), PoolLimits{Physical: 1, Clients: 1, Streams: 2, StreamsPerClient: 2, Warm: 1})
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, pool.Close()) })
 			require.True(t, pool.AdoptPhysical(physical, policy))
-			probe.shared.share(pool)
+			probe.SharePool(pool)
 
 			type outcome struct{ err error }
 			done := make(chan outcome, 1)

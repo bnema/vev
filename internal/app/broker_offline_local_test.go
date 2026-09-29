@@ -259,41 +259,6 @@ func TestBrokerLocalProbeObservesAuthenticatedCatalogue(t *testing.T) {
 	require.EqualValues(t, 1, daemon.dials.Load())
 }
 
-// TestBrokerLocalProbeRequestIsObservationOnly proves the one open the local
-// probe performs is a local observation that may never start the daemon: it
-// carries no admission, no name, no target, no environment, no endpoint, and
-// no registration, and it is refused outright when it authorizes a spawn.
-func TestBrokerLocalProbeRequestIsObservationOnly(t *testing.T) {
-	_, binding := testLocalSandboxConfig(t)
-	probe, err := newLocalRouteProbe(binding, brokerLocalTestEpoch, func(context.Context, ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
-		return nil, nil
-	}, daemonmux.DefaultMuxCeilings())
-	require.NoError(t, err)
-
-	request, err := probe.request()
-	require.NoError(t, err)
-	require.NoError(t, request.Validate())
-	require.Equal(t, ports.BrokerStreamObservation, request.Purpose)
-	require.Equal(t, brokerLocalTestEpoch, request.Epoch)
-	require.True(t, request.Local)
-	require.Zero(t, request.Admission)
-	require.Empty(t, request.Name)
-	require.Empty(t, request.Endpoint)
-	require.Equal(t, domain.RemoteRegistration{}, request.Registration)
-	require.Empty(t, request.Env)
-	require.Equal(t, protocol.ExactSessionTarget{}, request.Target)
-	require.Equal(t, binding.Policy, request.Policy)
-	require.NotZero(t, request.Connection)
-	require.NotZero(t, request.Stream)
-	// Observation must never start the target: the request carries the
-	// existing-only authorization, and a spawn-capable one is refused rather
-	// than silently narrowed.
-	require.Equal(t, ports.BrokerDaemonExistingOnly, request.StartMode)
-	startable := request
-	startable.StartMode = ports.BrokerDaemonStartIfNeeded
-	require.Error(t, startable.Validate())
-}
-
 // TestBrokerLocalProbeFailsClosed proves an unavailable carriage yields zero
 // observed identity, no inventory, and an explicit availability, never an
 // invented one, and that the probe only dials the provisioned local address: it
@@ -452,14 +417,8 @@ func TestBrokerLocalObservationComposition(t *testing.T) {
 	require.Equal(t, binding.DisplayOrigin, observation.DisplayOrigin)
 	require.Equal(t, binding.Policy, observation.Policy)
 	require.NotNil(t, observation.Probe)
-	// Shared transport: the probe composes the exact connector the pool already
-	// owns instead of dialing its own, so one broker process holds one transport
-	// owner per route.
-	probe, ok := observation.Probe.(*localRouteProbe)
+	_, ok := observation.Probe.(*broker.LocalDaemonProbe)
 	require.True(t, ok)
-	require.Same(t, connector, probe.connector)
-	require.Equal(t, brokerLocalTestEpoch, probe.epoch)
-
 }
 
 // Production always composes local observation and mutable membership, even
@@ -506,7 +465,7 @@ func TestBrokerLocalObservationWithoutIdentityPublishesLocalUnknown(t *testing.T
 	config, _ := productionLocalConfig(t)
 	// The loader re-reads an absent identity on every attempt, so the probe is
 	// dynamic: it never dials and never spawns while no identity exists.
-	loader := localIdentityLoader(func() (ports.BrokerDaemonIdentity, error) { return "", nil })
+	loader := broker.LocalIdentityLoader(func() (ports.BrokerDaemonIdentity, error) { return "", nil })
 	var dials atomic.Int32
 	connector := testLocalConnector(t, func(context.Context, ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
 		dials.Add(1)
@@ -828,16 +787,6 @@ func TestBrokerLocalProbeRefusesNonLocalRoute(t *testing.T) {
 	}, daemonmux.DefaultMuxCeilings())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "local route")
-}
-
-// TestBrokerLocalProbeNilReceiverFailsClosed proves a nil probe reports an
-// explicit error and an observation whose availability is never zero.
-func TestBrokerLocalProbeNilReceiverFailsClosed(t *testing.T) {
-	var probe *localRouteProbe
-	observation, err := probe.ProbeLocal(context.Background())
-	require.Error(t, err)
-	require.Equal(t, domain.RemoteAvailabilityUnreachable, observation.Availability)
-	require.NotZero(t, observation.Availability, "availability is never zero")
 }
 
 // startLocalRegistry runs one registry for the duration of a test.

@@ -332,6 +332,16 @@ func parseTrust(document *trustDocument) (TrustInputs, error) {
 	return trust, nil
 }
 
+// RouteSpecAddress returns the opaque pool address RouteFromSpec would give
+// the durable route.
+func RouteSpecAddress(spec ports.BrokerRouteSpec) (string, error) {
+	route, err := RouteFromSpec(spec)
+	if err != nil {
+		return "", err
+	}
+	return route.Address(), nil
+}
+
 // RouteFromSpec materializes canonical durable routing authority. Runtime SSH
 // trust is OpenSSH-owned; no startup configuration lookup participates.
 func RouteFromSpec(spec ports.BrokerRouteSpec) (Route, error) {

@@ -305,7 +305,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	defer startupLease.Release()
 
 	// Membership is imported once, then only durable remote authority is used.
-	resolver := &brokerRoutes{local: config.Resolver()}
+	resolver := newBrokerRoutes(config)
 	connector, err := brokerDynamicMuxConnector(config, resolver, log)
 	if err != nil {
 		return err
@@ -321,15 +321,15 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	if err != nil {
 		return err
 	}
-	remoteProbe := &brokerRemoteProbe{epoch: epoch, routes: resolver, connector: connector, codec: sessionwire.BrokerCodec{}}
+	remoteProbe := &broker.RemoteProbe{Epoch: epoch, Routes: resolver, Connector: connector, Codec: sessionwire.BrokerCodec{}}
 	registry, err := broker.NewRegistryWithConfig(epoch, store, remoteProbe, clk, log, registryConfig)
 	if err != nil {
 		return err
 	}
-	resolver.hosts = registry
+	resolver.Hosts = registry
 	binder := productionIdentityBinder{delegate: registry, stateDir: platform.StateDir(), policy: localDaemonPolicy()}
-	remoteProbe.binder = binder
-	remoteProbe.hosts = registry
+	remoteProbe.Binder = binder
+	remoteProbe.Hosts = registry
 	// RegisterRunner starts immediately: finish the cyclic composition before
 	// publishing it to any goroutine. Shutdown remains listener -> pool -> registry.
 	if err := supervisor.RegisterRunner("registry", registry); err != nil {
@@ -340,10 +340,10 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 		return err
 	}
 	// Observation borrows pooled transports rather than dialing its own.
-	remoteProbe.shared.share(pool)
+	remoteProbe.SharePool(pool)
 	if registryConfig.Local != nil {
-		if local, ok := registryConfig.Local.Probe.(*localRouteProbe); ok {
-			local.shared.share(pool)
+		if local, ok := registryConfig.Local.Probe.(*broker.LocalDaemonProbe); ok {
+			local.SharePool(pool)
 		}
 	}
 	if err := supervisor.RegisterCloseable("pool", pool); err != nil {
@@ -454,7 +454,7 @@ func durableBrokerRoute(route brokerconfig.Route) (ports.BrokerRouteSpec, error)
 // snapshot owner issues no probes, arms no timers, and never reconciles. The
 // disabled fixture's membership mode follows the endpoints it was provisioned
 // with, exactly as before.
-func offlineRegistryConfig(config *brokerconfig.Config, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector, loaders ...localIdentityLoader) (broker.RegistryConfig, error) {
+func offlineRegistryConfig(config *brokerconfig.Config, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector, loaders ...broker.LocalIdentityLoader) (broker.RegistryConfig, error) {
 	if config == nil {
 		return broker.RegistryConfig{}, errors.New("vev: offline registry requires configuration")
 	}

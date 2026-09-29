@@ -23,6 +23,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/bnema/vev/internal/usecase/broker"
 	"github.com/bnema/vev/internal/usecase/daemon"
 )
 
@@ -100,7 +101,7 @@ func startRealLocalDaemon(t *testing.T) *realLocalDaemonFixture {
 }
 
 // probe returns one probe over the fixture's real carriage.
-func (f *realLocalDaemonFixture) probe(t *testing.T) *localRouteProbe {
+func (f *realLocalDaemonFixture) probe(t *testing.T) *broker.LocalDaemonProbe {
 	t.Helper()
 	dial := func(ctx context.Context, target ports.BrokerDialTarget) (daemonmux.RawFramedTransport, error) {
 		require.Equal(t, f.binding.Route.Address(), target.Address, "the probe dials only its provisioned local address")
