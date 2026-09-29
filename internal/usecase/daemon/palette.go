@@ -16,25 +16,17 @@ import (
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
-const (
-	paletteRailBreakpoint = 96
-	paletteRailWidth      = 64
-)
-
 var (
-	paletteModal                    = ui.Modal{WidthPct: 100, MinWidth: 32, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottom, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
+	// Floating palettes use a compact rail; below ui.ResponsiveDrawerBreakpoint
+	// the presentation becomes a full-width drawer regardless of this width.
+	paletteModal                    = ui.Modal{FixedWidth: 64, FixedHeight: 11, Title: " Commands ", Anchor: domain.AnchorBottomRight, Margins: ui.Margins{Top: 1, Right: 1, Bottom: 1, Left: 1}}
 	errCreateDestinationUnavailable = errors.New("that destination is no longer available")
 )
 
-func paletteModalFor(size domain.Size, cfg domain.PaletteConfig) ui.Modal {
+func paletteModalFor(cfg domain.PaletteConfig) ui.Modal {
 	modal := paletteModal
-	if size.Cols >= paletteRailBreakpoint {
-		modal.FixedWidth = paletteRailWidth
-	}
 	if cfg.AnchorSet {
 		modal.Anchor = cfg.Anchor
-	} else if size.Cols >= paletteRailBreakpoint {
-		modal.Anchor = domain.AnchorBottomRight
 	}
 	return modal
 }
@@ -1173,7 +1165,7 @@ func (e paletteExec) NavigateRecentRoute(action protocol.RouteNavigationAction) 
 
 func composePaletteClientFrame(model *palette.Model, base renderer.Frame, cfg domain.PaletteConfig, guidance string, styles ...themeui.Styles) (renderer.Frame, []renderer.Damage) {
 	styleSet := resolveStyles(styles)
-	modal := paletteModalFor(domain.Size{Cols: base.Width, Rows: base.Height}, cfg)
+	modal := paletteModalFor(cfg)
 	return composeModalClientFrame(base, modal, styleSet, func(size domain.Size) renderer.Frame {
 		return model.Render(size, palette.RenderOptions{Styles: palette.RenderStyles{Base: styleSet.PickerBase, Row: styleSet.PickerBase, Selection: styleSet.PickerSelection, Description: styleSet.PickerDescription, SelectionDescription: styleSet.PickerSelectionMuted}, Guidance: guidance})
 	})

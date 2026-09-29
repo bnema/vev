@@ -1063,8 +1063,8 @@ func TestPaletteModalGeometry(t *testing.T) {
 	auto := domain.PaletteConfig{}
 	tests := []testCase{
 		{name: "auto 79 column drawer", size: domain.Size{Cols: 79, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 79, Height: 11}},
-		{name: "auto 80 column shelf", size: domain.Size{Cols: 80, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 80, Height: 11}},
-		{name: "auto 95 column shelf", size: domain.Size{Cols: 95, Rows: 40}, cfg: auto, want: domain.Rect{X: 0, Y: 28, Width: 95, Height: 11}},
+		{name: "auto 80 column rail", size: domain.Size{Cols: 80, Rows: 40}, cfg: auto, want: domain.Rect{X: 15, Y: 28, Width: 64, Height: 11}},
+		{name: "auto 95 column rail", size: domain.Size{Cols: 95, Rows: 40}, cfg: auto, want: domain.Rect{X: 30, Y: 28, Width: 64, Height: 11}},
 		{name: "auto 96 column rail", size: domain.Size{Cols: 96, Rows: 40}, cfg: auto, want: domain.Rect{X: 31, Y: 28, Width: 64, Height: 11}},
 		{name: "auto 120 column rail", size: domain.Size{Cols: 120, Rows: 40}, cfg: auto, want: domain.Rect{X: 55, Y: 28, Width: 64, Height: 11}},
 		{name: "auto tiny terminal clamps", size: domain.Size{Cols: 20, Rows: 6}, cfg: auto, want: domain.Rect{X: 0, Y: 3, Width: 20, Height: 2}},
@@ -1075,12 +1075,13 @@ func TestPaletteModalGeometry(t *testing.T) {
 		tests = append(tests, testCase{name: anchor.String(), size: domain.Size{Cols: 120, Rows: 40}, cfg: domain.PaletteConfig{Anchor: anchor, AnchorSet: true}, want: domain.Rect{X: wantX, Y: wantY, Width: 64, Height: 11}})
 	}
 	for _, anchor := range []domain.Anchor{domain.AnchorLeft, domain.AnchorCenter, domain.AnchorRight} {
-		tests = append(tests, testCase{name: "narrow " + anchor.String(), size: domain.Size{Cols: 95, Rows: 40}, cfg: domain.PaletteConfig{Anchor: anchor, AnchorSet: true}, want: domain.Rect{X: 0, Y: 14, Width: 95, Height: 11}})
+		wantX := map[domain.Anchor]int{domain.AnchorLeft: 1, domain.AnchorCenter: 15, domain.AnchorRight: 30}[anchor]
+		tests = append(tests, testCase{name: "95 column " + anchor.String(), size: domain.Size{Cols: 95, Rows: 40}, cfg: domain.PaletteConfig{Anchor: anchor, AnchorSet: true}, want: domain.Rect{X: wantX, Y: 14, Width: 64, Height: 11}})
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			modal := paletteModalFor(tt.size, tt.cfg)
+			modal := paletteModalFor(tt.cfg)
 			presentation := modal.Resolve(tt.size)
 			require.Equal(t, tt.want, presentation.Bounds)
 			if tt.size.Cols < ui.ResponsiveDrawerBreakpoint {
@@ -1102,17 +1103,18 @@ func TestComposePaletteClientFrameUsesResponsivePresentation(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		width     int
+		left      int
 		topLeft   rune
 		innerLeft rune
 	}{
-		{name: "79 column drawer", width: 79, topLeft: '─', innerLeft: '>'},
-		{name: "80 column shelf", width: 80, topLeft: '┌', innerLeft: '│'},
+		{name: "79 column drawer", width: 79, left: 0, topLeft: '─', innerLeft: '>'},
+		{name: "80 column rail", width: 80, left: 15, topLeft: '┌', innerLeft: '│'},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			frame, _ := composePaletteClientFrame(model, renderer.NewFrame(tt.width, 40), domain.PaletteConfig{}, "")
 
-			require.Equal(t, tt.topLeft, frame.At(0, 28).Rune)
-			require.Equal(t, tt.innerLeft, frame.At(0, 29).Rune)
+			require.Equal(t, tt.topLeft, frame.At(tt.left, 28).Rune)
+			require.Equal(t, tt.innerLeft, frame.At(tt.left, 29).Rune)
 		})
 	}
 }
@@ -1142,7 +1144,7 @@ func TestComposePaletteClientFrameUsesSelectedDescriptionTheme(t *testing.T) {
 	styles := themeui.Resolve(themeui.BuiltinDark, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
 
 	frame, _ := composePaletteClientFrame(model, base, domain.PaletteConfig{}, "", styles)
-	inner := paletteModalFor(size, domain.PaletteConfig{}).Resolve(size).Inner
+	inner := paletteModalFor(domain.PaletteConfig{}).Resolve(size).Inner
 
 	require.True(t, frame.At(inner.X+4, inner.Y+1).Style.Equal(styles.PickerSelectionMuted))
 }

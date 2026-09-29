@@ -312,7 +312,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		o.noticesOverlay.inner = snap.noticesOverlayModel.Render(rectSize(presentation.Inner), renderStyles)
 	}
 	if snap.paletteActive && snap.paletteModel != nil {
-		modal := paletteModalFor(size, paletteCfg)
+		modal := paletteModalFor(paletteCfg)
 		presentation := modal.Resolve(size)
 		o.palette = capturedModal{active: true, title: modal.Title, presentation: presentation, focused: true}
 		guidance := ""
