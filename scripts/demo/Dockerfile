@@ -6,7 +6,7 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
     && pacman -Syu --noconfirm \
       vhs ttyd ffmpeg chromium \
       htop fastfetch gifsicle imagemagick \
-      eza neovim man-db man-pages coreutils \
+      eza fzf neovim man-db man-pages coreutils \
       ncurses openssh util-linux \
       ttf-jetbrains-mono-nerd
 RUN useradd -m -u 1000 demo

@@ -100,6 +100,7 @@ Sleep 550ms
 Alt+" "
 Sleep 550ms
 Type "STP"
+Sleep 1.5s
 Enter
 Sleep 650ms
 Type@85ms "nvim "
@@ -159,17 +160,21 @@ Sleep 900ms
 Alt+a
 Sleep 1.9s
 
-# ── Move pane: start a ticker beside the agents job, then
-#    carry it live into the "local" session. ─────────────────
+# ── Move pane: start fzf beside the agents job, type a query,
+#    then carry it live into the "local" session. ───────────
 Alt+" "
 Sleep 550ms
 Type "SPR"
 Enter
 Sleep 650ms
-Type@80ms "tick"
-Type@150ms "er"
+Type@85ms "cd "
+Type@120ms "/etc "
+Type@80ms "&& "
+Type@110ms "fzf"
 Enter
-Sleep 1.5s
+Sleep 1.2s
+Type@140ms "ssh"
+Sleep 1.2s
 Alt+" "
 Sleep 550ms
 Type "MFP"
@@ -182,12 +187,12 @@ Down
 Sleep 1.5s
 Enter
 # The picker stays open after a pane move so more panes can follow; close it.
-# The final re-attach to "local" shows the moved ticker still counting.
+# The final re-attach to "local" shows fzf still open with its query.
 Sleep 1.5s
 Escape
 Sleep 1s
 
-# ── Detach / re-attach: local sessions survive, ticker on ─
+# ── Detach / re-attach: local sessions survive, fzf intact ─
 Alt+" "
 Sleep 550ms
 Type "DET"
