@@ -67,6 +67,10 @@ Alt+" "
 Sleep 550ms
 Type "CNS "
 Type@95ms "agents"
+Sleep 400ms
+# From a remote session CNS offers two destinations; pick the local one.
+Down 2
+Sleep 300ms
 Enter
 Sleep 900ms
 Type@80ms "sleep "
@@ -132,6 +136,9 @@ Alt+" "
 Sleep 550ms
 Type "CNS "
 Type@95ms "monitor"
+Sleep 400ms
+Down 2
+Sleep 300ms
 Enter
 Sleep 900ms
 Type@80ms "fast"

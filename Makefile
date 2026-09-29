@@ -56,6 +56,7 @@ protocol-check:
 	test -z "$$(git status --porcelain -- internal/protocol/wire/*.pb.go)"
 
 demo:
+	go build -o build/vev .
 	docker build -f scripts/demo/Dockerfile -t vev-demo .
 	./scripts/demo/run.sh demo.tape
 	# vhs cannot emit a transparent margin, so cut the window out after the
