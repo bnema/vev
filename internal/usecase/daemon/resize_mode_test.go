@@ -27,27 +27,30 @@ func TestPaletteAndControlShareResizeAction(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &actionRunnerSpy{}
-			c := &actionRunnerSpy{}
+			p := newMockdaemonActionRunner(t)
+			c := newMockdaemonActionRunner(t)
+			paletteRequests := recordActionRuns(p, nil)
+			controlRequests := recordActionRuns(c, nil)
 			require.NoError(t, tt.palette(paletteExec{actions: p}))
 			require.NoError(t, tt.control(controlExec{actions: c}))
-			require.Len(t, p.requests, 1)
-			require.Equal(t, p.requests, c.requests)
-			require.Equal(t, tt.kind, p.requests[0].kind)
-			require.Equal(t, tt.axis, p.requests[0].axis)
-			require.Equal(t, tt.delta, p.requests[0].delta)
+			require.Len(t, *paletteRequests, 1)
+			require.Equal(t, *paletteRequests, *controlRequests)
+			require.Equal(t, tt.kind, (*paletteRequests)[0].kind)
+			require.Equal(t, tt.axis, (*paletteRequests)[0].axis)
+			require.Equal(t, tt.delta, (*paletteRequests)[0].delta)
 		})
 	}
 }
 
 func TestControlEqualizeMapsResizeErrors(t *testing.T) {
-	runner := &actionRunnerSpy{err: layout.ErrTooSmall}
+	runner := newMockdaemonActionRunner(t)
+	requests := recordActionRuns(runner, layout.ErrTooSmall)
 	err := (controlExec{actions: runner}).EqualizePanes()
 	require.ErrorIs(t, err, layout.ErrTooSmall)
 	var userErr *domain.UserError
 	require.ErrorAs(t, err, &userErr)
-	require.Len(t, runner.requests, 1)
-	require.Equal(t, daemonActionEqualizePanes, runner.requests[0].kind)
+	require.Len(t, *requests, 1)
+	require.Equal(t, daemonActionEqualizePanes, (*requests)[0].kind)
 }
 
 func TestResizeControlHeadlessAndErrors(t *testing.T) {

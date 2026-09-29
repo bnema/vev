@@ -465,25 +465,65 @@ func (e controlExec) runAction(request daemonActionRequest) error {
 	if request.target.session == nil {
 		request.target = e.target
 	}
-	runner := e.actions
+	_, err := e.d.dispatchAction(daemonActionDispatch{runner: e.actions, request: request, producer: "control.go"})
+	return err
+}
+
+// daemonActionDispatch describes one action started by any initiating path
+// (palette, control command, key binding, or resize mode).
+type daemonActionDispatch struct {
+	// runner performs the mutation; nil selects the daemon's own actions.
+	runner  daemonActionRunner
+	request daemonActionRequest
+	// serialize, when non-nil, runs target resolution and the mutation under
+	// that session's dispatch boundary. Callers already inside it leave it nil.
+	serialize *session
+	// resolveFrom and attachment resolve an unset target from the attachment's
+	// current view; attachment also receives the follow-up render.
+	resolveFrom *session
+	attachment  *attachedClient
+	producer    string
+}
+
+// dispatchAction runs one daemon action through its whole lifecycle: target
+// resolution, the mutation, no-change normalization, and the attached
+// client's follow-up render after the dispatch boundary is released. It
+// reports whether the action changed anything; errDaemonActionNoChange is
+// never returned.
+func (d *Daemon) dispatchAction(x daemonActionDispatch) (bool, error) {
+	runner := x.runner
 	if runner == nil {
-		runner = daemonActions{d: e.d}
+		runner = daemonActions{d: d}
 	}
-	err := runner.Run(request)
+	request := x.request
+	run := func() error {
+		if request.target.session == nil && x.resolveFrom != nil {
+			request.target = resolveDaemonActionTargetForAttachment(x.resolveFrom, x.attachment)
+		}
+		return runner.Run(request)
+	}
+	var err error
+	if x.serialize != nil {
+		err = x.serialize.runMutation(run)
+	} else {
+		err = run()
+	}
 	if errors.Is(err, errDaemonActionNoChange) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if e.actions == nil {
-		finishDaemonActionForClient(e.d, request, request.target.attachment, "control.go")
+	ac := x.attachment
+	if ac == nil {
+		ac = request.target.attachment
 	}
-	return nil
+	finishDaemonActionForClient(d, request, ac, x.producer)
+	return true, nil
 }
 
 func finishDaemonActionForClient(d *Daemon, request daemonActionRequest, ac *attachedClient, producer string) {
-	if ac == nil {
+	if d == nil || ac == nil {
 		return
 	}
 	if request.kind == daemonActionFocusPane && request.target.tab != nil && request.target.pane != nil {

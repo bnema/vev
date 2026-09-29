@@ -131,14 +131,15 @@ func (d *Daemon) handleResizeInput(ac *attachedClient, data []byte) {
 		return
 	}
 	for _, request := range requests {
-		if err := sess.runMutation(func() error {
-			request.target = resolveDaemonActionTargetForAttachment(sess, ac)
-			return (daemonActions{d: d}).Run(request)
+		if _, err := d.dispatchAction(daemonActionDispatch{
+			request:     request,
+			serialize:   sess,
+			resolveFrom: sess,
+			attachment:  ac,
+			producer:    "resize_mode.go",
 		}); err != nil {
 			d.reportError(sess, resizeUserError(err))
-			continue
 		}
-		finishDaemonActionForClient(d, request, ac, "resize_mode.go")
 	}
 	if exit {
 		d.invalidateRender(sess, ac, true, "resize_mode.go")

@@ -28,22 +28,6 @@ import (
 
 // --- test doubles -----------------------------------------------------------
 
-type blockingInputActionRunner struct {
-	admitted chan<- struct{}
-	release  <-chan struct{}
-	mu       *sync.Mutex
-	order    *[]string
-}
-
-func (r *blockingInputActionRunner) Run(daemonActionRequest) error {
-	close(r.admitted)
-	<-r.release
-	r.mu.Lock()
-	*r.order = append(*r.order, "keyboard")
-	r.mu.Unlock()
-	return nil
-}
-
 func TestAttachedKeyboardMutationSharesDispatchBoundaryWithCommand(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	sess := addControlSession(d, "work", "t_work", "p_work")
@@ -54,7 +38,15 @@ func TestAttachedKeyboardMutationSharesDispatchBoundaryWithCommand(t *testing.T)
 	var order []string
 	admitted := make(chan struct{})
 	release := make(chan struct{})
-	runner := &blockingInputActionRunner{admitted: admitted, release: release, mu: &orderMu, order: &order}
+	runner := newMockdaemonActionRunner(t)
+	runner.EXPECT().Run(mock.Anything).RunAndReturn(func(daemonActionRequest) error {
+		close(admitted)
+		<-release
+		orderMu.Lock()
+		order = append(order, "keyboard")
+		orderMu.Unlock()
+		return nil
+	}).Once()
 	handler := daemonKeyHandler{d: d, ac: ac, actions: runner}
 	keyboardDone := make(chan struct{})
 	go func() {
@@ -166,11 +158,12 @@ func TestConsumeOrExpelKeyActionPreservesRearrangementWarning(t *testing.T) {
 			sess := addControlSession(d, "work", "t_work", "p_work")
 			ac := &attachedClient{}
 			ac.setSession(sess)
-			runner := &actionRunnerSpy{err: domain.UserWarn(
+			runner := newMockdaemonActionRunner(t)
+			runner.EXPECT().Run(mock.Anything).Return(domain.UserWarn(
 				domain.NoticeLayoutTooSmall,
 				"not enough space to rearrange pane",
 				layout.ErrTooSmall,
-			)}
+			)).Once()
 
 			daemonKeyHandler{d: d, ac: ac, actions: runner}.Action(tt.action, nil)
 

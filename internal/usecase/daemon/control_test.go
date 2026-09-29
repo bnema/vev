@@ -21,6 +21,7 @@ import (
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,14 +46,15 @@ func TestPaletteAndControlShareExplicitDaemonActionTarget(t *testing.T) {
 			tb.mu.Lock()
 			pane := tb.focusedPane()
 			tb.mu.Unlock()
-			spy := &actionRunnerSpy{}
+			spy := newMockdaemonActionRunner(t)
+			requests := recordActionRuns(spy, nil)
 			target := daemonActionTarget{session: sess, tab: tb, pane: pane}
 
 			require.NoError(t, tt.palette(paletteExec{d: d, sess: sess, actions: spy}))
 			require.NoError(t, tt.control(controlExec{d: d, sess: sess, tab: tb, actions: spy, target: target}))
 
-			require.Len(t, spy.requests, 2)
-			for _, request := range spy.requests {
+			require.Len(t, *requests, 2)
+			for _, request := range *requests {
 				require.Equal(t, tt.kind, request.kind)
 				require.Same(t, sess, request.target.session)
 				require.Same(t, tb, request.target.tab)
@@ -118,14 +120,14 @@ func TestConsumeOrExpelControlEdgeNoopReturnsOKAndPreservesFocus(t *testing.T) {
 	requireNoInvalidation(t, invalidations)
 }
 
-type actionRunnerSpy struct {
-	requests []daemonActionRequest
-	err      error
-}
-
-func (s *actionRunnerSpy) Run(request daemonActionRequest) error {
-	s.requests = append(s.requests, request)
-	return s.err
+// recordActionRuns makes runner return err and records every request it runs.
+func recordActionRuns(runner *mockdaemonActionRunner, err error) *[]daemonActionRequest {
+	var requests []daemonActionRequest
+	runner.EXPECT().Run(mock.Anything).RunAndReturn(func(request daemonActionRequest) error {
+		requests = append(requests, request)
+		return err
+	})
+	return &requests
 }
 
 func TestHandleCommandTimesOutWithRequestGeneration(t *testing.T) {
@@ -1527,4 +1529,64 @@ func TestCloseTabParticipantsChangedReportsRetryable(t *testing.T) {
 	sess.mu.Unlock()
 	require.Equal(t, 1, tabs, "an aborted last-tab close must retain the tab")
 	require.Equal(t, 1, sessionCount(d), "an aborted last-tab close must retain the session")
+}
+
+func TestDispatchActionLifecycle(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name        string
+		runErr      error
+		serialize   bool
+		wantChanged bool
+		wantErr     error
+		wantRender  bool
+	}{
+		{name: "change renders the attachment", wantChanged: true, wantRender: true},
+		{name: "no change is success without render", runErr: errDaemonActionNoChange},
+		{name: "failure skips render", runErr: boom, wantErr: boom},
+		{name: "serialized change holds dispatch boundary", serialize: true, wantChanged: true, wantRender: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			ac := &attachedClient{}
+			ac.setSession(sess)
+			sess.mu.Lock()
+			sess.registerAttachmentLocked(ac)
+			sess.mu.Unlock()
+			invalidations := make(chan renderInvalidation, 2)
+			rc := newRenderCoordinator(renderCoordinatorOptions{onInvalidate: func(inv renderInvalidation) { invalidations <- inv }})
+			rc.attach(ac)
+			sess.installRenderCoordinator(rc)
+
+			runner := newMockdaemonActionRunner(t)
+			runner.EXPECT().Run(mock.Anything).RunAndReturn(func(request daemonActionRequest) error {
+				require.Same(t, sess, request.target.session, "unset target resolves from the attachment")
+				require.Same(t, ac, request.target.attachment)
+				require.Equal(t, tt.serialize, !sess.dispatchMu.TryLock(), "dispatch boundary ownership")
+				if !tt.serialize {
+					sess.dispatchMu.Unlock()
+				}
+				return tt.runErr
+			}).Once()
+			x := daemonActionDispatch{runner: runner, request: daemonActionRequest{kind: daemonActionEqualizePanes}, resolveFrom: sess, attachment: ac, producer: "test"}
+			if tt.serialize {
+				x.serialize = sess
+			}
+
+			changed, err := d.dispatchAction(x)
+
+			require.ErrorIs(t, err, tt.wantErr)
+			require.NotErrorIs(t, err, errDaemonActionNoChange)
+			require.Equal(t, tt.wantChanged, changed)
+			require.True(t, sess.dispatchMu.TryLock(), "follow-up runs after the dispatch boundary is released")
+			sess.dispatchMu.Unlock()
+			if tt.wantRender {
+				require.Equal(t, "test", awaitInvalidation(t, invalidations).producer)
+			} else {
+				requireNoInvalidation(t, invalidations)
+			}
+		})
+	}
 }
