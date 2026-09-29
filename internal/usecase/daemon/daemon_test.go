@@ -661,14 +661,23 @@ func rowText(row []renderer.Cell) string {
 	return string(runes)
 }
 
+// notifyClock stubs debounceInterval so schedulers park, and shortens
+// detachNotifyTimeout to 5ms so a wedged client's Detached send is
+// force-closed quickly. Every other budget, including the handshake deadline,
+// runs at its real length. Timers are matched by duration value, so another
+// budget equal to one of these constants gets the same treatment.
 type notifyClock struct{}
 
 func (notifyClock) Now() time.Time { return time.Now() }
 func (notifyClock) NewTimer(d time.Duration) ports.Timer {
-	if d == debounceInterval {
+	switch d {
+	case debounceInterval:
 		return stubTimer{}
+	case detachNotifyTimeout:
+		return realTimer{t: time.NewTimer(5 * time.Millisecond)}
+	default:
+		return realTimer{t: time.NewTimer(d)}
 	}
-	return realTimer{t: time.NewTimer(5 * time.Millisecond)}
 }
 
 type realTimer struct{ t *time.Timer }

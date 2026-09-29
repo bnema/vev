@@ -739,9 +739,6 @@ func TestHelloAfterExplicitShutdownIsRejected(t *testing.T) {
 
 // --- wedged-client teardown ---------------------------------------------------
 
-// notifyClock drives the daemon with a stub debounce timer (schedulers park)
-// but a short real timer for the detach-notify deadline, so a wedged client's
-
 func TestServeReturnsDespiteWedgedClientOnShutdown(t *testing.T) {
 	p, _ := newBlockingPTY(t) // Close unblocks the parked reader
 
