@@ -20,24 +20,16 @@ import (
 // They drive the real supervisor, host, foreground, and worker with bounded
 // waits and no sleeps.
 
-// parityTestPicker adds the optional tab, kill, and notice seams of the real
-// picker to the scripted picker. The fields are guarded by attachTestPicker.mu.
+// parityTestPicker adds the optional kill and notice seams of the real picker
+// to the scripted picker. The fields are guarded by attachTestPicker.mu.
 type parityTestPicker struct {
 	*attachTestPicker
-	tab     attachmentTab
 	kill    pickerKillTarget
 	notices []string
 }
 
 func newParityTestPicker() *parityTestPicker {
 	return &parityTestPicker{attachTestPicker: newAttachTestPicker()}
-}
-
-func (p *parityTestPicker) ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
-	request, err := p.ResolveKey(key, base)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return request, p.tab, err
 }
 
 func (p *parityTestPicker) ResolveKill(string) (pickerKillTarget, error) {

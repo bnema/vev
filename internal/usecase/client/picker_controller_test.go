@@ -518,7 +518,7 @@ func TestPickerControllerResolveKeyUsesCommittedRow(t *testing.T) {
 	require.Equal(t, "beta", displayed.Target.SessionName)
 
 	// ...while the captured key resolves exactly the committed row.
-	committed, err := controller.ResolveKey(committedKey, pickerTestBase())
+	committed, _, err := controller.ResolveCommit(committedKey, pickerTestBase())
 	require.NoError(t, err)
 	require.Equal(t, "alpha", committed.Target.SessionName)
 }
@@ -554,7 +554,7 @@ func TestPickerControllerCommittedKeySurvivesConcurrentApply(t *testing.T) {
 		if !op.commit || key == "" {
 			continue
 		}
-		request, err := controller.ResolveKey(key, pickerTestBase())
+		request, _, err := controller.ResolveCommit(key, pickerTestBase())
 		if err != nil {
 			continue
 		}

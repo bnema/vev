@@ -45,7 +45,7 @@ import (
 // The commit seam is what lets the supervisor turn a user
 // commit into one exact broker stream without ever reading the presentation
 // model itself: the picker records the decision and the key it committed
-// atomically, the supervisor wakes on OpsReady, and ResolveKey revalidates
+// atomically, the supervisor wakes on OpsReady, and ResolveCommit revalidates
 // exactly that key. The picker never opens a stream, and the supervisor never
 // reconstructs a selection from a display label.
 type pickerHost interface {
@@ -56,9 +56,9 @@ type pickerHost interface {
 	// TakeOp returns and clears the accumulated presentation decision together
 	// with the catalogue key captured with a commit decision.
 	TakeOp() (pickerOp, string)
-	// ResolveKey revalidates exactly one committed catalogue key into the
-	// exact broker stream request the user committed.
-	ResolveKey(string, pickerResolveBase) (ports.BrokerOpenStreamRequest, error)
+	// ResolveCommit revalidates exactly one committed catalogue key into the
+	// exact broker stream request and tab the user committed.
+	ResolveCommit(string, pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error)
 	// SetOwnsInput releases or re-acquires picker input ownership at an attach
 	// boundary, so exactly one owner consumes the shared terminal reader.
 	SetOwnsInput(bool)
@@ -580,7 +580,7 @@ func (p *pickerController) CursorKey() (string, bool) {
 // Resolve reads the mutable presentation model, so a concurrent ApplySnapshot
 // can move the cursor between the caller's commit decision and this call. A
 // driver that is committing a specific row must capture that row's key with
-// the decision (TakeOp) and resolve it with ResolveKey instead.
+// the decision (TakeOp) and resolve it with ResolveCommit instead.
 func (p *pickerController) Resolve(base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
 	if p == nil {
 		return ports.BrokerOpenStreamRequest{}, pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
@@ -591,28 +591,18 @@ func (p *pickerController) Resolve(base pickerResolveBase) (ports.BrokerOpenStre
 		p.Notify(pickerRefusalNotice(err))
 		return ports.BrokerOpenStreamRequest{}, err
 	}
-	return p.ResolveKey(key, base)
-}
-
-// ResolveKey revalidates exactly the supplied catalogue key against the latest
-// applied snapshot and returns the exact broker stream request. It is the
-// commit path: the key captured atomically with the commit decision (see
-// TakeOp) resolves the row the user committed even if the cursor has since
-// moved. A refusal is bounded and is also surfaced as a notice.
-func (p *pickerController) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
-	if p == nil || p.catalogue == nil {
-		err := pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
-		if p != nil {
-			p.Notify(pickerRefusalNotice(err))
-		}
-		return ports.BrokerOpenStreamRequest{}, err
-	}
-	request, _, err := p.ResolveKeyTarget(key, base)
+	request, _, err := p.ResolveCommit(key, base)
 	return request, err
 }
 
-// ResolveKeyTarget is ResolveKey plus the exact tab the committed row names.
-func (p *pickerController) ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
+// ResolveCommit is the single commit path from a published row to an
+// attachment target. It revalidates exactly the supplied catalogue key
+// against the latest applied snapshot, in one catalogue transaction, and
+// returns the exact broker stream request plus the tab the row names. The key
+// captured atomically with the commit decision (see TakeOp) resolves the row
+// the user committed even if the cursor has since moved. A refusal is bounded
+// and is also surfaced as a notice.
+func (p *pickerController) ResolveCommit(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	if p == nil || p.catalogue == nil {
 		err := pickerCatalogueError{Code: pickerCatalogueNoSelection, Text: "picker is not available"}
 		if p != nil {
@@ -620,22 +610,7 @@ func (p *pickerController) ResolveKeyTarget(key string, base pickerResolveBase) 
 		}
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
-	ref, ok := p.catalogue.Ref(key)
-	if !ok {
-		err := pickerCatalogueError{Code: pickerCatalogueUnknown, Text: "picker row is not in the catalogue"}
-		p.Notify(pickerRefusalNotice(err))
-		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
-	}
-	var request ports.BrokerOpenStreamRequest
-	var tab attachmentTab
-	var err error
-	if ref.kind == pickerSelectionCreateNamed || ref.kind == pickerSelectionCreateEphemeral {
-		request, err = p.catalogue.Resolve(key, base)
-	} else if ref.kind == pickerSelectionExact {
-		request, tab, err = p.catalogue.ResolveTarget(key, base)
-	} else {
-		err = pickerCatalogueError{Code: pickerCatalogueUnavailable, Text: "this picker row is not a session destination"}
-	}
+	request, tab, err := p.catalogue.ResolveTarget(key, base)
 	if err != nil {
 		p.Notify(pickerRefusalNotice(err))
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err

@@ -315,21 +315,10 @@ func (s *Supervisor) resolveCommittedStreamRequest(service ports.BrokerNavigator
 	if err != nil {
 		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, err
 	}
-	base := pickerResolveBase{
+	return s.cfg.Picker.ResolveCommit(key, pickerResolveBase{
 		Connection: service.ConnectionID(),
 		Stream:     stream,
-	}
-	if resolver, ok := s.cfg.Picker.(pickerTargetResolver); ok {
-		return resolver.ResolveKeyTarget(key, base)
-	}
-	request, err := s.cfg.Picker.ResolveKey(key, base)
-	return request, attachmentTab{}, err
-}
-
-// pickerTargetResolver is the optional tab-aware resolution of the real
-// picker; a scripted picker may resolve sessions only.
-type pickerTargetResolver interface {
-	ResolveKeyTarget(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error)
+	})
 }
 
 // pickerAttachmentTarget is one resolved attachment: the exact broker stream

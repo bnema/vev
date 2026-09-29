@@ -612,7 +612,7 @@ func TestPickerControllerRefusesFailingRemoteInstantly(t *testing.T) {
 			controller.notices = ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible})
 			controller.mu.Unlock()
 
-			_, _, err := controller.ResolveKeyTarget(pickerRowKeyByLabel(t, controller, "remote-a"), pickerTestBase())
+			_, _, err := controller.ResolveCommit(pickerRowKeyByLabel(t, controller, "remote-a"), pickerTestBase())
 			if tt.wantNotice == "" {
 				require.NoError(t, err)
 				return

@@ -266,7 +266,7 @@ type attachTestPicker struct {
 	consumed  int
 	op        pickerOp
 	key       string
-	// resolveErr makes ResolveKey refuse locally, which is how a test reaches
+	// resolveErr makes ResolveCommit refuse locally, which is how a test reaches
 	// the local-refusal classification without dialing anything.
 	resolveErr error
 	request    ports.BrokerOpenStreamRequest
@@ -277,6 +277,8 @@ type attachTestPicker struct {
 	consumeRequest ports.BrokerOpenStreamRequest
 	// resolvedStream is the stream identity the last resolution reserved.
 	resolvedStream ports.BrokerStreamID
+	// tab is the tab every resolution names.
+	tab attachmentTab
 }
 
 func newAttachTestPicker() *attachTestPicker {
@@ -318,18 +320,18 @@ func (p *attachTestPicker) TakeOp() (pickerOp, string) {
 	return op, key
 }
 
-func (p *attachTestPicker) ResolveKey(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, error) {
+func (p *attachTestPicker) ResolveCommit(key string, base pickerResolveBase) (ports.BrokerOpenStreamRequest, attachmentTab, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.resolved++
 	if p.resolveErr != nil {
-		return ports.BrokerOpenStreamRequest{}, p.resolveErr
+		return ports.BrokerOpenStreamRequest{}, attachmentTab{}, p.resolveErr
 	}
 	request := p.request
 	request.Connection = base.Connection
 	request.Stream = base.Stream
 	p.resolvedStream = base.Stream
-	return request, nil
+	return request, p.tab, nil
 }
 
 func (p *attachTestPicker) SetOwnsInput(owns bool) {
