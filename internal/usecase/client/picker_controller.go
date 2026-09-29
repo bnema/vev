@@ -109,12 +109,8 @@ type pickerController struct {
 	sort      pickerusecase.SortMode
 	ownsInput bool
 	opsReady  chan struct{}
-	lastOp    pickerOp
-	// lastCommitKey is the catalogue key captured with the pending commit
-	// decision, so TakeOp can hand a driver the exact committed row.
-	lastCommitKey string
-	// lastKillKey is the catalogue key captured with a pending kill decision.
-	lastKillKey string
+	// pending is the decision accumulated since the last TakeOp.
+	pending pickerDecision
 	// hostHealth is the last remote host state seen, so each host transition
 	// is judged once by domain.RemoteHealthNotice.
 	hostHealth map[string]domain.RemoteHealth
@@ -206,24 +202,63 @@ func (p *pickerController) ConsumeTerminalRead(data []byte) bool {
 	return p.handleRead(data)
 }
 
-// recordOpLocked accumulates one read's presentation decision. A commit also
-// captures the committed row key under the same lock, so the key and the
-// decision can never disagree.
-func (p *pickerController) recordOpLocked(op pickerOp) {
+// pickerDecision accumulates the presentation decisions of one or more reads
+// together with the row keys each decision selected when it was recorded, so
+// a key and its decision can never disagree.
+type pickerDecision struct {
+	op        pickerOp
+	commitKey string
+	killKey   string
+}
+
+// record merges op, capturing the cursor row for a commit or a kill.
+func (d *pickerDecision) record(op pickerOp, loop *pickerLoop) {
 	if op.commit {
-		p.lastCommitKey = p.commitKeyLocked()
+		d.commitKey = loop.selectionKey(protocol.PickerActionNavigate)
 	}
 	if op.kill {
-		p.lastKillKey = p.killKeyLocked()
+		d.killKey = loop.selectionKey(protocol.PickerActionKill)
 	}
-	p.lastOp = mergePickerOps(p.lastOp, op)
-	if p.lastOp.commit || p.lastOp.close || p.lastOp.kill {
-		// Coalesce exactly one wakeup: a driver that has not yet run TakeOp
-		// re-reads the accumulated decision, so a dropped signal is harmless.
-		select {
-		case p.opsReady <- struct{}{}:
-		default:
-		}
+	d.op = mergePickerOps(d.op, op)
+}
+
+// actionable reports whether the decision asks the driver to act.
+func (d pickerDecision) actionable() bool { return d.op.commit || d.op.close || d.op.kill }
+
+// key is the row the decision acts on. A commit wins over a kill in the same
+// read because it leaves the picker anyway.
+func (d pickerDecision) key() string {
+	if d.op.commit {
+		return d.commitKey
+	}
+	return d.killKey
+}
+
+// recordOpLocked accumulates one read's presentation decision and wakes the
+// driver once when it became actionable. Callers hold p.mu.
+func (p *pickerController) recordOpLocked(op pickerOp) {
+	p.pending.record(op, p.loop)
+	if p.pending.actionable() {
+		p.wakeLocked()
+	}
+}
+
+// wakeLocked coalesces exactly one wakeup: a driver that has not yet run
+// TakeOp re-reads the accumulated decision, so a dropped signal is harmless.
+func (p *pickerController) wakeLocked() {
+	select {
+	case p.opsReady <- struct{}{}:
+	default:
+	}
+}
+
+// applyEventsLocked applies one decoded batch to the open loop and records
+// its decision. Callers hold p.mu.
+func (p *pickerController) applyEventsLocked(events []pickerEvent) {
+	op, changed := p.loop.apply(events)
+	p.recordOpLocked(op)
+	if changed {
+		p.wakeLocked()
 	}
 }
 
@@ -235,32 +270,6 @@ func (p *pickerController) OpsReady() <-chan struct{} {
 		return nil
 	}
 	return p.opsReady
-}
-
-// commitKeyLocked returns the opaque catalogue key of the row under the cursor
-// for a commit, or the empty string when no committable row is selected.
-func (p *pickerController) commitKeyLocked() string {
-	if p.loop == nil {
-		return ""
-	}
-	selection, ok := commitSelection(p.loop, protocol.PickerActionNavigate, 0)
-	if !ok {
-		return ""
-	}
-	return selection.Key
-}
-
-// killKeyLocked returns the opaque catalogue key of the row under the cursor
-// when it authorises destruction, or the empty string.
-func (p *pickerController) killKeyLocked() string {
-	if p.loop == nil {
-		return ""
-	}
-	selection, ok := killSelection(p.loop, 0)
-	if !ok {
-		return ""
-	}
-	return selection.Key
 }
 
 // TakeOp returns and clears the accumulated presentation decision since the
@@ -275,17 +284,9 @@ func (p *pickerController) TakeOp() (pickerOp, string) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	op := p.lastOp
-	key := p.lastCommitKey
-	if !op.commit {
-		// A kill carries its own captured row; a commit in the same read wins
-		// because it leaves the picker anyway.
-		key = p.lastKillKey
-	}
-	p.lastOp = pickerOp{}
-	p.lastCommitKey = ""
-	p.lastKillKey = ""
-	return op, key
+	decision := p.pending
+	p.pending = pickerDecision{}
+	return decision.op, decision.key()
 }
 
 // FlushPending resolves a withheld escape or UTF-8 prefix once its
@@ -307,14 +308,7 @@ func (p *pickerController) FlushPending() {
 	if outcome.interaction != pickerGeneration || outcome.generation != pickerGeneration {
 		return
 	}
-	op, changed := applyPickerBatch(p.loop, outcome.events)
-	p.recordOpLocked(op)
-	if changed {
-		select {
-		case p.opsReady <- struct{}{}:
-		default:
-		}
-	}
+	p.applyEventsLocked(outcome.events)
 }
 
 // armFlushLocked bounds a withheld escape or UTF-8 prefix with the picker's
@@ -555,6 +549,28 @@ func (p *pickerController) noticeDeadline() (time.Time, bool) {
 	return p.notices.NextDeadline()
 }
 
+// pickerState is a consistent read of the controller's interactive state.
+type pickerState struct {
+	query        string
+	searchActive bool
+	notices      []string
+}
+
+// state reads the interactive state under one lock.
+func (p *pickerController) state() pickerState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var state pickerState
+	if p.loop != nil && p.loop.model != nil {
+		state.query = p.loop.model.Query()
+		state.searchActive = p.loop.model.SearchActive()
+	}
+	for _, toast := range p.notices.Visible(p.clock.Now()) {
+		state.notices = append(state.notices, toast.Value.Message)
+	}
+	return state
+}
+
 // CursorKey reports the opaque key of the row under the cursor, or false when
 // nothing qualifies. It is the selection displayed now; a commit decision is
 // captured with TakeOp instead so a concurrent publication cannot move it.
@@ -564,11 +580,8 @@ func (p *pickerController) CursorKey() (string, bool) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := p.commitKeyLocked()
-	if key == "" {
-		return "", false
-	}
-	return key, true
+	key := p.loop.selectionKey(protocol.PickerActionNavigate)
+	return key, key != ""
 }
 
 // Resolve revalidates the row displayed now and returns the exact broker
@@ -655,8 +668,8 @@ func (p *pickerController) SetCurrent(current pickerCurrent) {
 // rememberSortLocked keeps the sort the user chose in the closing
 // presentation for the next one.
 func (p *pickerController) rememberSortLocked() {
-	if p.loop != nil && p.loop.model != nil {
-		p.sort = p.loop.model.SortMode()
+	if sort, ok := p.loop.sortMode(); ok {
+		p.sort = sort
 	}
 }
 
@@ -675,18 +688,7 @@ func pickerRefusalNotice(err error) domain.Notification {
 func (p *pickerController) displayedKey() (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.loop == nil || p.loop.model == nil {
-		return "", false
-	}
-	line, ok := p.loop.model.Cursor()
-	if !ok {
-		return "", false
-	}
-	identity, ok := p.loop.rows[line.Key]
-	if !ok {
-		return "", false
-	}
-	return identity.key, true
+	return p.loop.displayedKey()
 }
 
 func (p *pickerController) handleRead(data []byte) bool {
@@ -717,14 +719,7 @@ func (p *pickerController) handleRead(data []byte) bool {
 		}
 		return true
 	}
-	op, changed := applyPickerBatch(p.loop, outcome.events)
-	p.recordOpLocked(op)
-	if changed {
-		select {
-		case p.opsReady <- struct{}{}:
-		default:
-		}
-	}
+	p.applyEventsLocked(outcome.events)
 	return true
 }
 

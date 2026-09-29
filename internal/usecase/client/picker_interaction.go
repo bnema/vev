@@ -454,24 +454,25 @@ func copyFrameRect(dst renderer.Frame, target domain.Rect, src renderer.Frame) {
 	}
 }
 
-// commitSelection builds the typed commit for the row under the cursor at the
+// selection builds the typed selection for the row under the cursor at the
 // displayed source revision. Zero picker bytes travel toward the PTY: the
 // opaque key plus revision ride a PickerSelection on the ordered control
-// channel and the owning source resolves them.
-func commitSelection(loop *pickerLoop, action protocol.PickerAction, causeActionID uint64) (protocol.PickerSelection, bool) {
-	if loop == nil || loop.model == nil {
+// channel and the owning source resolves them. A kill additionally requires
+// the row to authorise destruction, so the source can verify it again.
+func (l *pickerLoop) selection(action protocol.PickerAction, causeActionID uint64) (protocol.PickerSelection, bool) {
+	if l == nil || l.model == nil {
 		return protocol.PickerSelection{}, false
 	}
-	line, ok := loop.model.Selected()
-	if !ok {
+	line, ok := l.model.Selected()
+	if !ok || (action == protocol.PickerActionKill && line.Actions&protocol.PickerCanKill == 0) {
 		return protocol.PickerSelection{}, false
 	}
-	identity, ok := loop.rows[line.Key]
+	identity, ok := l.rows[line.Key]
 	if !ok {
 		return protocol.PickerSelection{}, false
 	}
 	selection := protocol.PickerSelection{
-		CauseActionID: causeActionID, InteractionID: loop.interaction,
+		CauseActionID: causeActionID, InteractionID: l.interaction,
 		SourceID: identity.sourceID, SourceRevision: identity.sourceRevision,
 		Key: identity.key, Action: action,
 	}
@@ -481,30 +482,36 @@ func commitSelection(loop *pickerLoop, action protocol.PickerAction, causeAction
 	return selection, true
 }
 
-// killSelection builds the typed kill for the row under the cursor. It is a
-// distinct commit so the source can verify the row still authorises
-// destruction.
-func killSelection(loop *pickerLoop, causeActionID uint64) (protocol.PickerSelection, bool) {
-	if loop == nil || loop.model == nil {
-		return protocol.PickerSelection{}, false
-	}
-	line, ok := loop.model.Selected()
-	if !ok || line.Actions&protocol.PickerCanKill == 0 {
-		return protocol.PickerSelection{}, false
-	}
-	identity, ok := loop.rows[line.Key]
+// selectionKey returns the source key a selection of action would carry, or
+// the empty string when the cursor row does not admit it.
+func (l *pickerLoop) selectionKey(action protocol.PickerAction) string {
+	selection, ok := l.selection(action, 0)
 	if !ok {
-		return protocol.PickerSelection{}, false
+		return ""
 	}
-	selection := protocol.PickerSelection{
-		CauseActionID: causeActionID, InteractionID: loop.interaction,
-		SourceID: identity.sourceID, SourceRevision: identity.sourceRevision,
-		Key: identity.key, Action: protocol.PickerActionKill,
+	return selection.Key
+}
+
+// displayedKey names the source key of the row under the cursor, whether or
+// not it admits an action.
+func (l *pickerLoop) displayedKey() (string, bool) {
+	if l == nil || l.model == nil {
+		return "", false
 	}
-	if protocol.ValidatePickerSelection(selection) != nil {
-		return protocol.PickerSelection{}, false
+	line, ok := l.model.Cursor()
+	if !ok {
+		return "", false
 	}
-	return selection, true
+	identity, ok := l.rows[line.Key]
+	return identity.key, ok
+}
+
+// sortMode reports the loop's current ordering, or ok=false without a model.
+func (l *pickerLoop) sortMode() (picker.SortMode, bool) {
+	if l == nil || l.model == nil {
+		return 0, false
+	}
+	return l.model.SortMode(), true
 }
 
 // pickerOp is the presentation decision one driver operation asks the attach
@@ -520,14 +527,14 @@ type pickerOp struct {
 	exit bool
 }
 
-// pickerDriverOp is one ui-driver operation applied to an open loop. Keys
+// drive applies one ui-driver operation to an open loop. Keys
 // drive cursor/search/exit: arrows and j/k move in normal mode (j/k are
 // literal in search), `/` enters search, `s` reorders locally, `x` asks to
 // destroy the cursor row, `q`/Ctrl-C/Escape close in normal mode (Escape
 // exits search first), Backspace edits the query. Text runes insert only
 // while search is active; normal-mode typing is ignored exactly like the
 // overlay.
-func pickerDriverOp(loop *pickerLoop, keys []string, text string) (op pickerOp, changed bool) {
+func (loop *pickerLoop) drive(keys []string, text string) (op pickerOp, changed bool) {
 	if loop == nil || loop.model == nil {
 		return pickerOp{}, false
 	}
@@ -558,7 +565,7 @@ func pickerDriverOp(loop *pickerLoop, keys []string, text string) (op pickerOp, 
 				loop.up()
 			}
 		case "Enter":
-			// Commit is typed at the call site via commitSelection; the
+			// Commit is typed at the call site via selection; the
 			// key itself sends zero bytes toward the PTY.
 			op.commit = true
 		case "Escape":
@@ -641,12 +648,12 @@ func (o pickerConsumeOutcome) acceptOutcome(interaction, generation uint64) bool
 	return o.consumed && o.interaction != 0 && o.interaction == interaction && o.generation == generation
 }
 
-// applyPickerBatch applies one decoded batch in arrival order. Every event
+// apply applies one decoded batch in arrival order. Every event
 // is applied: a terminal read can legitimately carry several keystrokes, so
 // batch size never decides whether input is a command. Paste protection is
 // the decoder's paste state, not a heuristic here: a bracketed paste's
 // content never reaches this function.
-func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (op pickerOp, changed bool) {
+func (loop *pickerLoop) apply(events []pickerEvent) (op pickerOp, changed bool) {
 	if loop == nil || loop.model == nil || len(events) == 0 {
 		return pickerOp{}, false
 	}
@@ -658,7 +665,7 @@ func applyPickerBatch(loop *pickerLoop, events []pickerEvent) (op pickerOp, chan
 			}
 			continue
 		}
-		eventOp, eventChanged := pickerDriverOp(loop, []string{event.key}, "")
+		eventOp, eventChanged := loop.drive([]string{event.key}, "")
 		changed = changed || eventChanged
 		if eventOp.close {
 			return pickerOp{close: true, exit: eventOp.exit}, changed

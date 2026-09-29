@@ -118,7 +118,7 @@ func (m *movePickerOverlay) apply(outcome pickerConsumeOutcome, consumed bool) (
 	if !consumed || m.loop == nil || !outcome.acceptOutcome(m.namespace.interaction, movePickerInputGeneration) {
 		return pickerOp{}, false
 	}
-	return applyPickerBatch(m.loop, outcome.events)
+	return m.loop.apply(outcome.events)
 }
 
 // selection builds the typed move for the cursor row, refusing rows the daemon
@@ -128,7 +128,7 @@ func (m *movePickerOverlay) selection(causeActionID uint64) (protocol.PickerSele
 	if !ok || action != protocol.PickerActionMove {
 		return protocol.PickerSelection{}, false
 	}
-	return commitSelection(m.loop, action, causeActionID)
+	return m.loop.selection(action, causeActionID)
 }
 
 // render composes the box for one terminal size.
