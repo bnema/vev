@@ -560,7 +560,7 @@ func (s *Supervisor) runCommittedAttachment(ctx context.Context, input *terminal
 	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request, tab: tab}, SessionEnvironmentLocalPicker)
 }
 
-func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (bool, error) {
+func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance) (terminated bool, termErr error) {
 	picker := s.cfg.Picker
 	if picker == nil {
 		return false, nil
@@ -568,6 +568,11 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 	picker.SetOwnsInput(false)
 	input.releasePicker()
 	defer func() {
+		// A terminated run never returns to the picker: handing it input back
+		// during teardown would let a retired picker consume keys.
+		if terminated {
+			return
+		}
 		// Whoever owned the terminal since the last picker frame, the next
 		// frame must draw the whole box again.
 		s.invalidatePickerPresentation()
@@ -808,6 +813,15 @@ settlement:
 			result = <-settled
 			terminated, termErr = true, terminalReadCause(err)
 			break settlement
+		}
+	}
+
+	// Parent cancellation wins over a settlement that raced it: the attachment
+	// context derives from ctx, so cancellation can settle the run before the
+	// ctx.Done case is selected.
+	if !terminated {
+		if cause := ctx.Err(); cause != nil {
+			terminated, termErr = true, cause
 		}
 	}
 
