@@ -113,9 +113,8 @@ Sleep 900ms
 Alt+j
 Sleep 900ms
 
-# ── Session "work": floating pane preserves its program ──
-# Open a man page, scroll it, hide, then show again at the same
-# scroll position — proves the float keeps program + scroll state.
+# ── Session "work": floating pane ─────────────────────
+# Open a man page in the float, scroll it, then hide the float.
 Alt+f
 Sleep 550ms
 Type@90ms "man "
@@ -123,15 +122,9 @@ Type@130ms "ls"
 Enter
 Sleep 1.2s
 Space
-Sleep 700ms
+Sleep 1.2s
 Alt+f
 Sleep 900ms
-Alt+f
-Sleep 1.2s
-Type "q"
-Sleep 550ms
-Alt+f
-Sleep 500ms
 
 # ── Session "monitor": fastfetch + htop, each full-width,
 #    never split. ─────────────────────────────────────────
