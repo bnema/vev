@@ -29,13 +29,21 @@ func (m *sessionTabMemory) remember(authority routeAuthority, target protocol.Ex
 	if m.tabs == nil {
 		m.tabs = make(map[sessionTabKey]domain.TabStableID)
 	}
-	// A recreated session cannot use its predecessor's cursor.
-	for key := range m.tabs {
-		if key.authority == authority && key.target.SessionName == target.SessionName && key.target != target {
-			delete(m.tabs, key)
+	key := sessionTabKey{authority: authority, target: target}
+	if previous, known := m.tabs[key]; known {
+		if previous != tab {
+			m.tabs[key] = tab
+		}
+		return
+	}
+	// Reclaim obsolete lifecycles only on the first view of a session.
+	// The exact key, not this cleanup, isolates recreated sessions.
+	for old := range m.tabs {
+		if old.authority == authority && old.target.SessionName == target.SessionName {
+			delete(m.tabs, old)
 		}
 	}
-	m.tabs[sessionTabKey{authority: authority, target: target}] = tab
+	m.tabs[key] = tab
 }
 
 func (m *sessionTabMemory) preferred(authority routeAuthority, target protocol.ExactSessionTarget, explicit domain.TabStableID) domain.TabStableID {

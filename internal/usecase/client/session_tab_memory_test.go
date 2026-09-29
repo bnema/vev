@@ -121,4 +121,56 @@ func TestSessionTabMemorySamePeerRoundTrip(t *testing.T) {
 		return ok && request.RequestID == 2
 	}).(protocol.SamePeerSwitchRequest)
 	require.Equal(t, domain.TabStableID("t_second"), second.PreferredTabID)
+	stream.deliver(protocol.SamePeerSwitchFailure{RequestID: 2, Code: protocol.SamePeerSwitchStaleTarget})
+	stream.deliver(protocol.AttachTarget{Session: "alpha", Intent: protocol.IntentAttach, ExactTarget: &alpha, SamePeer: true, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, PreferredTabID: "t_explicit"})
+	third := awaitSent(t, stream, "explicit switch", func(message protocol.ClientMessage) bool {
+		request, ok := message.(protocol.SamePeerSwitchRequest)
+		return ok && request.RequestID == 3
+	}).(protocol.SamePeerSwitchRequest)
+	require.Equal(t, domain.TabStableID("t_explicit"), third.PreferredTabID)
+}
+
+func TestSessionTabMemoryLifecycleCleanup(t *testing.T) {
+	local := routeAuthority{local: true}
+	remote := routeAuthority{endpoint: "remote"}
+	alpha := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "alpha"}
+	beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "beta"}
+	replacement := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "alpha"}
+	var memory sessionTabMemory
+	memory.remember(local, alpha, "t_old")
+	memory.remember(remote, alpha, "t_remote")
+	memory.remember(local, beta, "t_beta")
+	memory.remember(local, replacement, "t_new")
+	memory.remember(local, replacement, "t_latest")
+	for _, tt := range []struct {
+		name      string
+		authority routeAuthority
+		target    protocol.ExactSessionTarget
+		want      domain.TabStableID
+	}{
+		{name: "old lifecycle reclaimed", authority: local, target: alpha},
+		{name: "new lifecycle retained", authority: local, target: replacement, want: "t_latest"},
+		{name: "other host retained", authority: remote, target: alpha, want: "t_remote"},
+		{name: "other session retained", authority: local, target: beta, want: "t_beta"},
+	} {
+		t.Run(tt.name, func(t *testing.T) { require.Equal(t, tt.want, memory.preferred(tt.authority, tt.target, "")) })
+	}
+}
+
+func TestSessionTabMemoryPreservesStoppedRemoteSelector(t *testing.T) {
+	request := sessionTestRequest(false)
+	var memory sessionTabMemory
+	memory.remember(requestAuthority(request), request.Target, "t_remembered")
+	selector := protocol.SessionAttachTarget{LifecycleID: request.Target.LifecycleID, SessionName: request.Target.SessionName, Stopped: true, TabID: "t_explicit", TabIndex: protocol.NoTabIndex}
+	cfg := sessionTestWorkerConfig(request)
+	cfg.Tabs = &memory
+	cfg.Tab = attachmentTab{stopped: &selector}
+	cfg.SessionEnvironment = SessionEnvironment{Provenance: SessionEnvironmentRemote}
+	stream := newSessionTestStream()
+	events := sessionTestRun(t, stream, newWorkerTestTerminal(), cfg, newSessionTestAttachments())
+	t.Cleanup(func() { _ = stream.Close(); <-events })
+	hello := awaitHello(t, stream)
+	require.Equal(t, &selector, hello.SessionTarget)
+	require.Empty(t, hello.PreferredTabID)
+	require.NoError(t, protocol.ValidateHello(hello))
 }
