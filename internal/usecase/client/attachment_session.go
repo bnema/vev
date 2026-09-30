@@ -96,6 +96,8 @@ type sessionAttachmentConfig struct {
 	// Tab is the exact tab a picker tab row committed; its zero value
 	// attaches at session level.
 	Tab attachmentTab
+	// Tabs retains this client's committed tab per authority and session.
+	Tabs *sessionTabMemory
 }
 
 // sessionAttachmentWorker implements AttachmentWorker for one broker logical
@@ -219,7 +221,7 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 				return state, &event
 			}
 			state = next
-			attachmentNoteCommitted(fg, state.context)
+			w.noteCommitted(fg, state.context)
 			// The frame transaction is the pre-attach publication: it commits the first
 			// session bytes with the Connecting presentation and, through the foreground
 			// shape rule, a public generation of zero. Attached is published only after
@@ -284,7 +286,8 @@ func attachmentOverlay(fg AttachmentForeground) attachmentOverlayForeground {
 	return overlay
 }
 
-func attachmentNoteCommitted(fg AttachmentForeground, view protocol.ViewContext) {
+func (w *sessionAttachmentWorker) noteCommitted(fg AttachmentForeground, view protocol.ViewContext) {
+	w.cfg.Tabs.remember(requestAuthority(w.cfg.Request), view.Route.Target, view.TabID)
 	if overlay := attachmentOverlay(fg); overlay != nil {
 		overlay.noteCommitted(view.Route.Target, view.TabID)
 	}
@@ -413,7 +416,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 						samePeerUI.uiSamePeerArrived()
 					}
 				}
-				attachmentNoteCommitted(fg, state.context)
+				w.noteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
 				}
@@ -432,7 +435,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					continue
 				}
 				state = next
-				attachmentNoteCommitted(fg, state.context)
+				w.noteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), nil); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing view update: %w", err)}
 				}
@@ -453,7 +456,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					// An endpoint-empty offer on this very connection: confirm
 					// it and the daemon moves this attachment in place.
 					samePeerRequests++
-					request := protocol.SamePeerSwitchRequest{RequestID: samePeerRequests, Target: *typed.ExactTarget, PreferredTabID: typed.PreferredTabID}
+					request := protocol.SamePeerSwitchRequest{
+						RequestID: samePeerRequests, Target: *typed.ExactTarget,
+						PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), *typed.ExactTarget, typed.PreferredTabID),
+					}
 					if request.Validate() != nil {
 						continue
 					}
@@ -773,8 +779,8 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 			// A stopped remote tab is restored through its exact selector.
 			selector := *w.cfg.Tab.stopped
 			hello.SessionTarget = &selector
-		case w.cfg.Tab.preferred != "":
-			hello.PreferredTabID = w.cfg.Tab.preferred
+		default:
+			hello.PreferredTabID = w.cfg.Tabs.preferred(requestAuthority(request), target, w.cfg.Tab.preferred)
 		}
 	case ports.BrokerAdmissionCreateNamed:
 		hello.Intent = protocol.IntentNew

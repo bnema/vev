@@ -356,6 +356,7 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 		Theme:              &s.theme,
 		Clipboard:          s.cfg.Clipboard,
 		Tab:                tab,
+		Tabs:               &s.tabs,
 	})
 	if err != nil {
 		return nil, err

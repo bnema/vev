@@ -52,7 +52,7 @@ Then the session picker (`SSP`) shows local and remote sessions in one list. Rem
 - Selecting a session switches to it, local or remote. `BCK` goes back to the previous one; `JRS` jumps to a recent one.
 - A remote session opened from the picker uses the remote host's environment and saved working directory.
 - `CNS` asks where to create the new session when several daemons are available.
-- Session history is per client and is not saved.
+- Session history and the last selected tab in each session are per client and kept only while that client runs. Switching back restores that tab; choosing a specific tab overrides it. If the remembered tab was closed, vev falls back to the first tab.
 - Previews of remote sessions are cached in memory only, never written to disk.
 
 After you leave a remote, vev keeps its connection warm so going back is instant. See [warm remote transports](configuration.md#warm-remote-transports).

@@ -444,6 +444,8 @@ type Supervisor struct {
 	// theme retains the terminal-reported colors across attachments, so a
 	// replacement attachment restores them before its own palette query ends.
 	theme terminalThemeState
+	// tabs remembers navigation only for this client process.
+	tabs sessionTabMemory
 	// capabilities is the outer terminal's probed and enabled capabilities,
 	// written once in Run before any attachment starts.
 	capabilities terminalCapabilities
