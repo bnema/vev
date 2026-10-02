@@ -1041,12 +1041,10 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 				shutdownClock,
 				discardLog(),
 				daemon.WithSnapshotRepository(repository),
-				daemon.WithDurableMaintenance(catalogue, maintenanceRepository),
+				daemon.WithRecoveryCoordinator(recovery.NewCoordinator(catalogue, maintenanceRepository, nil)),
+				daemon.WithSnapshotGarbageCollection(),
 				daemon.WithCatalogue(catalogue, nil),
 			)
-			if err := d.CollectStartupGarbage(ctx); err != nil {
-				return err
-			}
 			listener, err := ipc.Listen(runtimeDir)
 			if err != nil {
 				return err
@@ -1055,7 +1053,7 @@ func TestLifecycleOwnershipOutlivesMaintenanceWriter(t *testing.T) {
 		})
 	}()
 
-	awaitLifecycleStage(t, maintenanceRepository.entered, "pre-publication maintenance repository call")
+	awaitLifecycleStage(t, maintenanceRepository.entered, "background maintenance repository call")
 	cancel()
 	select {
 	case <-callbackReturned:
@@ -1086,7 +1084,11 @@ type lifecycleBlockingMaintenanceRepository struct {
 	returnOnce sync.Once
 }
 
-func (r *lifecycleBlockingMaintenanceRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
+func (r *lifecycleBlockingMaintenanceRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
+	return []domain.IncarnationID{{1}}, nil
+}
+
+func (r *lifecycleBlockingMaintenanceRepository) CollectIncarnationGarbage(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
 	r.enterOnce.Do(func() { close(r.entered) })
 	<-r.release // Intentionally ignore cancellation: lifecycle ownership must outlive this call.
 	r.returnOnce.Do(func() { close(r.returned) })

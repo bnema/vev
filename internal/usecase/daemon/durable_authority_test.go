@@ -18,7 +18,10 @@ type testLifecycleRepository struct{ ports.SnapshotRepository }
 func (testLifecycleRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
 	return nil
 }
-func (testLifecycleRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
+func (testLifecycleRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
+	return nil, nil
+}
+func (testLifecycleRepository) CollectIncarnationGarbage(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
 	return nil
 }
 

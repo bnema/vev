@@ -262,9 +262,7 @@ func (d *Daemon) WaitDurableWriters() {
 func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}) {
 	d.snapshotWorkerMu.Lock()
 	defer d.snapshotWorkerMu.Unlock()
-	if d.maintenanceWorkerCancel != nil {
-		d.maintenanceWorkerCancel()
-	}
+	d.cancelDurableMaintenanceLocked()
 	cancel := d.snapshotWorkerCancel
 	if cancel == nil {
 		return nil, nil

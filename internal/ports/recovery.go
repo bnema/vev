@@ -44,5 +44,10 @@ type SnapshotRepository interface {
 	LoadCheckpoint(context.Context, domain.IncarnationID, string, CheckpointRef) (SnapshotGeneration, error)
 	ReconcileCheckpoint(context.Context, domain.IncarnationID, CheckpointRef) error
 	DeleteIncarnation(context.Context, domain.IncarnationID) error
-	CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error
+	// SnapshotIncarnations lists the incarnations present in the repository.
+	SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error)
+	// CollectIncarnationGarbage applies retention to one incarnation. A nil
+	// keep marks an orphan absent from a validated catalogue and removes it
+	// whole; otherwise *keep is the committed checkpoint (zero when none).
+	CollectIncarnationGarbage(ctx context.Context, id domain.IncarnationID, keep *domain.CheckpointRef) error
 }

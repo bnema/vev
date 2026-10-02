@@ -117,7 +117,11 @@ func (r *snapshotLifecycleRepository) DeleteIncarnation(ctx context.Context, id 
 	return nil
 }
 
-func (r *snapshotLifecycleRepository) CollectGarbage(ctx context.Context, _ map[domain.IncarnationID]domain.CheckpointRef) error {
+func (r *snapshotLifecycleRepository) SnapshotIncarnations(ctx context.Context) ([]domain.IncarnationID, error) {
+	return nil, ctx.Err()
+}
+
+func (r *snapshotLifecycleRepository) CollectIncarnationGarbage(ctx context.Context, _ domain.IncarnationID, _ *domain.CheckpointRef) error {
 	return ctx.Err()
 }
 

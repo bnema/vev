@@ -21,7 +21,6 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/usecase/daemon"
 	"github.com/bnema/vev/pkg/kv"
 	"github.com/bnema/vev/pkg/safedir"
 	"github.com/stretchr/testify/require"
@@ -167,28 +166,6 @@ func TestLifecycleOwnershipAcceptsOwnerOnlyVariantLock(t *testing.T) {
 	owner, err := lifecycle.TryAcquire(runtimeDir)
 	require.NoError(t, err, "lifecycle ownership must be released after startup")
 	require.NoError(t, owner.Release())
-}
-
-func TestCatalogueRegistryConstructionPrecedesSocketPublication(t *testing.T) {
-	var events []string
-	_, _, err := constructDaemonBeforeSocketPublication(
-		func() *daemon.Daemon {
-			events = append(events, "catalogue-registry")
-			return nil
-		},
-		func(*daemon.Daemon) error {
-			require.Equal(t, []string{"catalogue-registry"}, events)
-			events = append(events, "startup-garbage-collection")
-			return nil
-		},
-		func() (wire.Listener, error) {
-			require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection"}, events)
-			events = append(events, "socket-publication")
-			return nil, nil
-		},
-	)
-	require.NoError(t, err)
-	require.Equal(t, []string{"catalogue-registry", "startup-garbage-collection", "socket-publication"}, events)
 }
 
 func TestLifecycleOwnershipPrecedesDaemonStartup(t *testing.T) {

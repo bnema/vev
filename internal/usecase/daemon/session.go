@@ -1272,7 +1272,7 @@ func (d *Daemon) beginSnapshotPurge(_ string, _ domain.IncarnationID) error {
 }
 
 // finishSnapshotPurge removes catalogue metadata first, then deletes the
-// incarnation directory. Startup garbage collection removes the directory if
+// incarnation directory. Background garbage collection removes the directory if
 // the second step is interrupted.
 func (d *Daemon) finishSnapshotPurge(ctx context.Context, name string, incarnation domain.IncarnationID, createdAt int64) error {
 	if !d.persistEnabled {

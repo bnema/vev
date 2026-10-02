@@ -14,7 +14,7 @@ var (
 // Discard throws away a broken session's persisted state and replaces it with a
 // fresh incarnation. It is retry-idempotent, not crash-resumable: a crash
 // leaves either the old record (rerun discard) or a new record plus an orphan
-// directory that startup garbage collection removes.
+// directory that background garbage collection removes.
 func (c *Coordinator) Discard(ctx context.Context, name string) error {
 	if c == nil || c.catalogue == nil || c.repository == nil || c.locks == nil || c.random == nil {
 		return errors.New("recovery: incomplete discard dependencies")

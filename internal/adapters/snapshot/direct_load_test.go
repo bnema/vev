@@ -186,6 +186,46 @@ func TestReconcileCheckpoint(t *testing.T) {
 	}
 }
 
+func TestReconcileCheckpointRepairsOnlyDivergentHead(t *testing.T) {
+	tests := []struct {
+		name      string
+		prepare   func(t *testing.T, repo *Repository, id domain.IncarnationID)
+		wantWrite bool
+	}{
+		{name: "matching HEAD is left untouched", prepare: func(*testing.T, *Repository, domain.IncarnationID) {}},
+		{name: "missing HEAD is repaired", wantWrite: true, prepare: func(t *testing.T, repo *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.Remove(repo.headPath(id)))
+		}},
+		{name: "corrupt HEAD is repaired", wantWrite: true, prepare: func(t *testing.T, repo *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.WriteFile(repo.headPath(id), []byte("garbage"), 0o600))
+		}},
+		{name: "stale HEAD is repaired", wantWrite: true, prepare: func(t *testing.T, repo *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.WriteFile(repo.headPath(id), marshalHead(1, [32]byte{9}), 0o600))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := NewRepository(privateDir(t))
+			id := domain.IncarnationID{1}
+			pub := incarnationPublication(t, id, "work", 1, nil)
+			require.NoError(t, repo.Publish(t.Context(), pub))
+			ref := domain.CheckpointRef{Generation: 1, ManifestDigest: sha256.Sum256(pub.Manifest)}
+			tt.prepare(t, repo, id)
+			before, _ := os.Stat(repo.headPath(id))
+
+			require.NoError(t, repo.ReconcileCheckpoint(t.Context(), id, ref))
+
+			generation, digest, err := repo.readHead(id)
+			require.NoError(t, err)
+			require.Equal(t, ref.Generation, generation)
+			require.Equal(t, ports.SnapshotDigest(ref.ManifestDigest), digest)
+			after, err := os.Stat(repo.headPath(id))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantWrite, before == nil || !os.SameFile(before, after), "HEAD rewrite")
+		})
+	}
+}
+
 func TestForwardOrphanRetryValidatesCheckpointBeforeCatalogueAdvance(t *testing.T) {
 	for _, tt := range []struct {
 		name   string

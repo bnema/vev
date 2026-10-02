@@ -85,10 +85,9 @@ type Coordinator struct {
 	catalogue  ports.Catalogue
 	repository ports.SnapshotRepository
 	locks      *KeyLocks
-	// mutationMu serializes the startup GC snapshot and collection with every
-	// catalogue or checkpoint mutation. Startup normally provides this fence by
-	// running before socket publication; retaining it here also makes the
-	// coordinator safe when used directly by a composition root.
+	// mutationMu serializes every catalogue or checkpoint mutation with each
+	// per-incarnation GC step. It is the only fence: GC runs while the daemon
+	// serves, so a step holds it for one incarnation at a time.
 	mutationMu sync.Mutex
 	random     io.Reader
 }
@@ -223,10 +222,16 @@ func (c *Coordinator) DeleteExact(ctx context.Context, name string, incarnation 
 	return c.repository.DeleteIncarnation(ctx, incarnation)
 }
 
-// CollectGarbage takes a catalogue snapshot and applies retention while all
-// catalogue mutations and checkpoint publications are fenced. Its keep map is
-// therefore never stale relative to an operation that creates an incarnation
-// or commits a new generation.
+// errGarbageCollectionCatalogue stops a pass: without a readable catalogue no
+// incarnation can be classified.
+var errGarbageCollectionCatalogue = errors.New("recovery: read catalogue for garbage collection")
+
+// CollectGarbage applies retention to every repository incarnation. Each
+// incarnation is collected in its own fenced step that re-reads the catalogue
+// under mutationMu, so its keep decision is never stale relative to an
+// operation that creates an incarnation or commits a generation, and a
+// mutation waits for at most one incarnation instead of a whole pass. Failures
+// are joined so one bad incarnation does not stop the rest.
 func (c *Coordinator) CollectGarbage(ctx context.Context) (int, error) {
 	if c == nil || c.catalogue == nil || c.repository == nil {
 		return 0, errors.New("recovery: incomplete garbage collection dependencies")
@@ -234,23 +239,43 @@ func (c *Coordinator) CollectGarbage(ctx context.Context) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	c.mutationMu.Lock()
-	defer c.mutationMu.Unlock()
-
-	records, err := c.catalogue.Records()
+	ids, err := c.repository.SnapshotIncarnations(ctx)
 	if err != nil {
 		return 0, err
 	}
-	keep := make(map[domain.IncarnationID]domain.CheckpointRef, len(records))
+	var collected error
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return len(ids), errors.Join(collected, err)
+		}
+		if err := c.collectIncarnation(ctx, id); errors.Is(err, errGarbageCollectionCatalogue) {
+			return len(ids), errors.Join(collected, err)
+		} else if err != nil {
+			collected = errors.Join(collected, err)
+		}
+	}
+	return len(ids), collected
+}
+
+func (c *Coordinator) collectIncarnation(ctx context.Context, id domain.IncarnationID) error {
+	c.mutationMu.Lock()
+	defer c.mutationMu.Unlock()
+	// A catalogue read failure never produces a keep decision, so destructive
+	// collection cannot run without known-good catalogue state.
+	records, err := c.catalogue.Records()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errGarbageCollectionCatalogue, err)
+	}
+	var keep *domain.CheckpointRef
 	for _, record := range records {
-		if record.Committed != nil {
-			keep[record.IncarnationID] = *record.Committed
+		if record.IncarnationID != id {
 			continue
 		}
-		keep[record.IncarnationID] = domain.CheckpointRef{}
+		keep = &domain.CheckpointRef{}
+		if record.Committed != nil {
+			*keep = *record.Committed
+		}
+		break
 	}
-	if err := c.repository.CollectGarbage(ctx, keep); err != nil {
-		return len(keep), err
-	}
-	return len(keep), nil
+	return c.repository.CollectIncarnationGarbage(ctx, id, keep)
 }

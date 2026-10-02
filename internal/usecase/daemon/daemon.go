@@ -297,10 +297,11 @@ type Daemon struct {
 	catalogueRecords            []domain.CatalogueRecord
 	catalogueRecordsProvided    bool
 	// snapshotRepository is the sole checkpoint storage contract.
-	snapshotRepository      ports.SnapshotRepository
-	recovery                *recoveryusecase.Coordinator
-	maintenanceWorkerCancel context.CancelFunc
-	maintenanceWorkerDone   chan struct{}
+	snapshotRepository        ports.SnapshotRepository
+	recovery                  *recoveryusecase.Coordinator
+	snapshotGarbageCollection bool
+	maintenanceWorkerCancel   context.CancelFunc
+	maintenanceWorkerDone     chan struct{}
 	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
 	// restoration reconciles durable checkpoints, so it is a durable writer and
 	// is guarded by snapshotWorkerMu with the other two.
@@ -555,15 +556,10 @@ func WithNoticeStore(store ports.NoticeStore) Option {
 	return func(d *Daemon) { d.noticeStore = store }
 }
 
-// WithDurableMaintenance retains the application wiring for the one
-// pre-publication GC pass. Standalone users without an explicitly supplied
-// coordinator receive the same canonical coordinator path.
-func WithDurableMaintenance(catalogue ports.Catalogue, repository ports.SnapshotRepository) Option {
-	return func(d *Daemon) {
-		if d.recovery == nil {
-			d.recovery = recoveryusecase.NewCoordinator(catalogue, repository, nil)
-		}
-	}
+// WithSnapshotGarbageCollection runs background snapshot GC through the
+// recovery coordinator installed by WithRecoveryCoordinator.
+func WithSnapshotGarbageCollection() Option {
+	return func(d *Daemon) { d.snapshotGarbageCollection = true }
 }
 
 // WithCwdReader overrides the process cwd reader used for persistence tests.
@@ -830,6 +826,7 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 			d.snapshotRepositorySaver(d.serveCtx)
 		})
 		d.startSnapshotRestoration()
+		d.startDurableMaintenance()
 	} else {
 		d.closeRestoreDone()
 	}
@@ -926,6 +923,9 @@ func (d *Daemon) shutdownAll(reason uint8) (checkpointIncomplete bool) {
 // shutdownAll and Serve's exit path. It is separate from purgeAllSessions,
 // which leaves every daemon-wide shutdown fact untouched.
 func (d *Daemon) terminateAllForShutdown(reason uint8, deadline *snapshotShutdownDeadline) (checkpointIncomplete bool) {
+	// Stop background GC first so it releases the recovery fence before final
+	// checkpoints are published under the shutdown deadline.
+	d.cancelDurableMaintenance()
 	d.closeMoveLifecycles()
 	d.mu.Lock()
 	d.closing = true

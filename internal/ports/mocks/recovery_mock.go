@@ -560,59 +560,65 @@ func (_m *MockSnapshotRepository) EXPECT() *MockSnapshotRepository_Expecter {
 	return &MockSnapshotRepository_Expecter{mock: &_m.Mock}
 }
 
-// CollectGarbage provides a mock function for the type MockSnapshotRepository
-func (_mock *MockSnapshotRepository) CollectGarbage(context1 context.Context, incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef) error {
-	ret := _mock.Called(context1, incarnationIDToCheckpointRef)
+// CollectIncarnationGarbage provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) CollectIncarnationGarbage(ctx context.Context, id domain.IncarnationID, keep *domain.CheckpointRef) error {
+	ret := _mock.Called(ctx, id, keep)
 
 	if len(ret) == 0 {
-		panic("no return value specified for CollectGarbage")
+		panic("no return value specified for CollectIncarnationGarbage")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error); ok {
-		r0 = returnFunc(context1, incarnationIDToCheckpointRef)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.IncarnationID, *domain.CheckpointRef) error); ok {
+		r0 = returnFunc(ctx, id, keep)
 	} else {
 		r0 = ret.Error(0)
 	}
 	return r0
 }
 
-// MockSnapshotRepository_CollectGarbage_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CollectGarbage'
-type MockSnapshotRepository_CollectGarbage_Call struct {
+// MockSnapshotRepository_CollectIncarnationGarbage_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CollectIncarnationGarbage'
+type MockSnapshotRepository_CollectIncarnationGarbage_Call struct {
 	*mock.Call
 }
 
-// CollectGarbage is a helper method to define mock.On call
-//   - context1 context.Context
-//   - incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef
-func (_e *MockSnapshotRepository_Expecter) CollectGarbage(context1 any, incarnationIDToCheckpointRef any) *MockSnapshotRepository_CollectGarbage_Call {
-	return &MockSnapshotRepository_CollectGarbage_Call{Call: _e.mock.On("CollectGarbage", context1, incarnationIDToCheckpointRef)}
+// CollectIncarnationGarbage is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id domain.IncarnationID
+//   - keep *domain.CheckpointRef
+func (_e *MockSnapshotRepository_Expecter) CollectIncarnationGarbage(ctx any, id any, keep any) *MockSnapshotRepository_CollectIncarnationGarbage_Call {
+	return &MockSnapshotRepository_CollectIncarnationGarbage_Call{Call: _e.mock.On("CollectIncarnationGarbage", ctx, id, keep)}
 }
 
-func (_c *MockSnapshotRepository_CollectGarbage_Call) Run(run func(context1 context.Context, incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef)) *MockSnapshotRepository_CollectGarbage_Call {
+func (_c *MockSnapshotRepository_CollectIncarnationGarbage_Call) Run(run func(ctx context.Context, id domain.IncarnationID, keep *domain.CheckpointRef)) *MockSnapshotRepository_CollectIncarnationGarbage_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 map[domain.IncarnationID]domain.CheckpointRef
+		var arg1 domain.IncarnationID
 		if args[1] != nil {
-			arg1 = args[1].(map[domain.IncarnationID]domain.CheckpointRef)
+			arg1 = args[1].(domain.IncarnationID)
+		}
+		var arg2 *domain.CheckpointRef
+		if args[2] != nil {
+			arg2 = args[2].(*domain.CheckpointRef)
 		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
 }
 
-func (_c *MockSnapshotRepository_CollectGarbage_Call) Return(err error) *MockSnapshotRepository_CollectGarbage_Call {
+func (_c *MockSnapshotRepository_CollectIncarnationGarbage_Call) Return(err error) *MockSnapshotRepository_CollectIncarnationGarbage_Call {
 	_c.Call.Return(err)
 	return _c
 }
 
-func (_c *MockSnapshotRepository_CollectGarbage_Call) RunAndReturn(run func(context1 context.Context, incarnationIDToCheckpointRef map[domain.IncarnationID]domain.CheckpointRef) error) *MockSnapshotRepository_CollectGarbage_Call {
+func (_c *MockSnapshotRepository_CollectIncarnationGarbage_Call) RunAndReturn(run func(ctx context.Context, id domain.IncarnationID, keep *domain.CheckpointRef) error) *MockSnapshotRepository_CollectIncarnationGarbage_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -868,6 +874,68 @@ func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) Return(err error) *Mo
 }
 
 func (_c *MockSnapshotRepository_ReconcileCheckpoint_Call) RunAndReturn(run func(context1 context.Context, incarnationID domain.IncarnationID, checkpointRef ports.CheckpointRef) error) *MockSnapshotRepository_ReconcileCheckpoint_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SnapshotIncarnations provides a mock function for the type MockSnapshotRepository
+func (_mock *MockSnapshotRepository) SnapshotIncarnations(context1 context.Context) ([]domain.IncarnationID, error) {
+	ret := _mock.Called(context1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SnapshotIncarnations")
+	}
+
+	var r0 []domain.IncarnationID
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]domain.IncarnationID, error)); ok {
+		return returnFunc(context1)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []domain.IncarnationID); ok {
+		r0 = returnFunc(context1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]domain.IncarnationID)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(context1)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockSnapshotRepository_SnapshotIncarnations_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SnapshotIncarnations'
+type MockSnapshotRepository_SnapshotIncarnations_Call struct {
+	*mock.Call
+}
+
+// SnapshotIncarnations is a helper method to define mock.On call
+//   - context1 context.Context
+func (_e *MockSnapshotRepository_Expecter) SnapshotIncarnations(context1 any) *MockSnapshotRepository_SnapshotIncarnations_Call {
+	return &MockSnapshotRepository_SnapshotIncarnations_Call{Call: _e.mock.On("SnapshotIncarnations", context1)}
+}
+
+func (_c *MockSnapshotRepository_SnapshotIncarnations_Call) Run(run func(context1 context.Context)) *MockSnapshotRepository_SnapshotIncarnations_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSnapshotRepository_SnapshotIncarnations_Call) Return(incarnationIDs []domain.IncarnationID, err error) *MockSnapshotRepository_SnapshotIncarnations_Call {
+	_c.Call.Return(incarnationIDs, err)
+	return _c
+}
+
+func (_c *MockSnapshotRepository_SnapshotIncarnations_Call) RunAndReturn(run func(context1 context.Context) ([]domain.IncarnationID, error)) *MockSnapshotRepository_SnapshotIncarnations_Call {
 	_c.Call.Return(run)
 	return _c
 }

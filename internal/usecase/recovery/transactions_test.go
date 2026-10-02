@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 
@@ -113,51 +114,75 @@ type transactionRepository struct {
 	releaseDelete chan struct{}
 }
 
+// garbageCollectionFenceRepository models per-incarnation retention. The first
+// CollectIncarnationGarbage call blocks until released, so a test can race a
+// mutation against a step that already read its keep decision.
 type garbageCollectionFenceRepository struct {
 	ports.SnapshotRepository
-	mu                 sync.Mutex
-	events             []string
-	collectionEntered  chan struct{}
-	releaseCollection  chan struct{}
-	collectionFinished bool
-	publishBeforeGC    bool
-	incarnations       map[domain.IncarnationID]struct{}
-	generations        map[domain.IncarnationID]map[uint64]struct{}
+	mu                sync.Mutex
+	events            []string
+	collectionEntered chan struct{}
+	releaseCollection chan struct{}
+	blocked           bool
+	incarnations      map[domain.IncarnationID]struct{}
+	generations       map[domain.IncarnationID]map[uint64]struct{}
 }
 
-func (r *garbageCollectionFenceRepository) CollectGarbage(_ context.Context, keep map[domain.IncarnationID]domain.CheckpointRef) error {
-	close(r.collectionEntered)
-	<-r.releaseCollection
+func (r *garbageCollectionFenceRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	seen := make(map[domain.IncarnationID]struct{})
 	for id := range r.incarnations {
-		if _, known := keep[id]; !known {
-			delete(r.incarnations, id)
-		}
+		seen[id] = struct{}{}
 	}
-	for id, generations := range r.generations {
-		committed, known := keep[id]
-		if !known {
-			delete(r.generations, id)
-			continue
-		}
-		for generation := range generations {
-			if generation != committed.Generation && generation+1 != committed.Generation {
-				delete(generations, generation)
+	for id := range r.generations {
+		seen[id] = struct{}{}
+	}
+	ids := make([]domain.IncarnationID, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	// Deterministic order lets tests pause between known steps.
+	slices.SortFunc(ids, func(a, b domain.IncarnationID) int { return bytes.Compare(a[:], b[:]) })
+	return ids, nil
+}
+
+func (r *garbageCollectionFenceRepository) CollectIncarnationGarbage(_ context.Context, id domain.IncarnationID, keep *domain.CheckpointRef) error {
+	r.mu.Lock()
+	block := !r.blocked
+	r.blocked = true
+	r.mu.Unlock()
+	if block {
+		close(r.collectionEntered)
+		<-r.releaseCollection
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if keep == nil {
+		delete(r.incarnations, id)
+		delete(r.generations, id)
+	} else {
+		for generation := range r.generations[id] {
+			if generation != keep.Generation && generation+1 != keep.Generation {
+				delete(r.generations[id], generation)
 			}
 		}
 	}
-	r.collectionFinished = true
 	r.events = append(r.events, "collect")
+	return nil
+}
+
+func (r *garbageCollectionFenceRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.incarnations, id)
+	delete(r.generations, id)
 	return nil
 }
 
 func (r *garbageCollectionFenceRepository) Publish(_ context.Context, publication ports.SnapshotPublication) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.collectionFinished {
-		r.publishBeforeGC = true
-	}
 	if r.generations == nil {
 		r.generations = make(map[domain.IncarnationID]map[uint64]struct{})
 	}
@@ -192,10 +217,10 @@ func (r *garbageCollectionFenceRepository) hasGeneration(id domain.IncarnationID
 	return ok
 }
 
-func (r *garbageCollectionFenceRepository) eventLog() ([]string, bool) {
+func (r *garbageCollectionFenceRepository) eventLog() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.events...), r.publishBeforeGC
+	return append([]string(nil), r.events...)
 }
 
 func (r *transactionRepository) DeleteIncarnation(_ context.Context, id domain.IncarnationID) error {
@@ -381,45 +406,42 @@ func TestResetIncompatibleStaleAuthorityIsNoOp(t *testing.T) {
 	}
 }
 
-func TestStartupGarbageCollectionFencesNewIncarnationsAndCheckpointPublications(t *testing.T) {
+func TestGarbageCollectionFencesNewIncarnationsAndCheckpointPublications(t *testing.T) {
 	t.Parallel()
 
-	t.Run("a stale keep snapshot cannot remove a newly created incarnation", func(t *testing.T) {
+	t.Run("a keep decision is re-read under the fence for every incarnation", func(t *testing.T) {
 		t.Parallel()
+		// The pass lists incarnation 9 (an orphan) and pauses after step 1;
+		// "new" is then created with ID 9, so step 9 must re-read the catalogue
+		// and keep it. A keep decision read once per pass would remove it.
+		reused := domain.IncarnationID{9}
 		catalogue := newTransactionCatalogue()
 		repository := &garbageCollectionFenceRepository{
-			collectionEntered: make(chan struct{}),
-			releaseCollection: make(chan struct{}),
+			blocked:      true,
+			incarnations: map[domain.IncarnationID]struct{}{{1}: {}, reused: {}},
 		}
 		catalogue.onCreate = repository.addIncarnation
-		coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+		coordinator := NewCoordinator(catalogue, repository, bytes.NewReader(nil))
+		ctx := &betweenStepsContext{Context: context.Background(), repository: repository, reached: make(chan struct{}), release: make(chan struct{})}
 
 		collected := make(chan error, 1)
 		go func() {
-			_, err := coordinator.CollectGarbage(context.Background())
+			_, err := coordinator.CollectGarbage(ctx)
 			collected <- err
 		}()
-		<-repository.collectionEntered
+		<-ctx.reached
+		require.False(t, repository.hasIncarnation(domain.IncarnationID{1}), "step 1 ran first")
 
-		created := make(chan error, 1)
-		go func() {
-			_, err := coordinator.Create(context.Background(), domain.CatalogueRecord{Name: "new"})
-			created <- err
-		}()
-		close(repository.releaseCollection)
+		_, err := coordinator.Create(context.Background(), domain.CatalogueRecord{Name: "new", IncarnationID: reused})
+		require.NoError(t, err)
+		close(ctx.release)
 
 		require.NoError(t, <-collected)
-		require.NoError(t, <-created)
-		got, ok, err := catalogue.Record("new")
-		require.NoError(t, err)
-		require.True(t, ok)
-		require.NotZero(t, got.IncarnationID)
-		require.True(t, repository.hasIncarnation(got.IncarnationID), "GC's stale keep snapshot must finish before the new incarnation is published")
-		events, _ := repository.eventLog()
-		require.Equal(t, []string{"collect"}, events)
+		require.True(t, repository.hasIncarnation(reused), "a step after the creation must keep the new incarnation")
+		require.False(t, repository.hasIncarnation(domain.IncarnationID{1}), "a true orphan is still removed")
 	})
 
-	t.Run("a stale keep snapshot cannot prune a newly committed generation", func(t *testing.T) {
+	t.Run("a stale keep decision cannot prune a newly committed generation", func(t *testing.T) {
 		t.Parallel()
 		committed := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
 		record := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, Committed: &committed}
@@ -455,11 +477,108 @@ func TestStartupGarbageCollectionFencesNewIncarnationsAndCheckpointPublications(
 
 		require.NoError(t, <-collected)
 		require.NoError(t, <-published)
-		events, publishedBeforeGC := repository.eventLog()
-		require.Equal(t, []string{"collect", "publish"}, events)
-		require.False(t, publishedBeforeGC)
-		require.True(t, repository.hasGeneration(record.IncarnationID, 2), "GC's stale keep snapshot must finish before generation two is published")
+		require.Equal(t, []string{"collect", "publish"}, repository.eventLog())
+		require.True(t, repository.hasGeneration(record.IncarnationID, 2), "the fenced step must finish before generation two is published")
 	})
+}
+
+// betweenStepsContext pauses a GC pass at its first cancellation check after
+// one incarnation step has completed, outside any fenced step.
+type betweenStepsContext struct {
+	context.Context
+	repository *garbageCollectionFenceRepository
+	once       sync.Once
+	reached    chan struct{}
+	release    chan struct{}
+}
+
+func (c *betweenStepsContext) Err() error {
+	if len(c.repository.eventLog()) == 1 {
+		c.once.Do(func() {
+			close(c.reached)
+			<-c.release
+		})
+	}
+	return c.Context.Err()
+}
+
+// TestDurableMutationWaitsForAtMostOneIncarnation proves the fence is released
+// between incarnation steps, so every mutation entry point can run while a
+// pass is still in progress instead of waiting for the whole pass.
+func TestDurableMutationWaitsForAtMostOneIncarnation(t *testing.T) {
+	t.Parallel()
+	committed := domain.CheckpointRef{Generation: 1, ManifestDigest: [32]byte{1}}
+	work := domain.CatalogueRecord{Name: "work", IncarnationID: domain.IncarnationID{1}, Committed: &committed}
+	broken := degradedTransactionRecord()
+	broken.IncarnationID = domain.IncarnationID{2}
+	tests := []struct {
+		name   string
+		mutate func(*Coordinator) error
+	}{
+		{name: "create", mutate: func(c *Coordinator) error {
+			_, err := c.Create(context.Background(), domain.CatalogueRecord{Name: "new"})
+			return err
+		}},
+		{name: "rename", mutate: func(c *Coordinator) error {
+			_, err := c.Rename(context.Background(), work.Name, "renamed")
+			return err
+		}},
+		{name: "delete", mutate: func(c *Coordinator) error { return c.Delete(context.Background(), work.Name) }},
+		{name: "exact delete", mutate: func(c *Coordinator) error {
+			return c.DeleteExact(context.Background(), work.Name, work.IncarnationID, work.CreatedAt)
+		}},
+		{name: "mark broken", mutate: func(c *Coordinator) error {
+			_, _, err := c.MarkBroken(context.Background(), work.Name, work.IncarnationID, "restore failed")
+			return err
+		}},
+		{name: "discard", mutate: func(c *Coordinator) error { return c.Discard(context.Background(), broken.Name) }},
+		{name: "reset incompatible", mutate: func(c *Coordinator) error {
+			_, _, err := c.ResetIncompatible(context.Background(), work.Name, work.IncarnationID, committed)
+			return err
+		}},
+		{name: "checkpoint publication", mutate: func(c *Coordinator) error {
+			_, err := c.PublishCheckpoint(context.Background(), work.Name, ports.SnapshotPublication{
+				Name: work.Name, IncarnationID: work.IncarnationID, Generation: 2,
+				ParentCheckpoint: &committed, Manifest: []byte("generation two"),
+			})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Two orphan incarnations give the pass two fenced steps.
+			repository := &garbageCollectionFenceRepository{
+				blocked:      true,
+				incarnations: map[domain.IncarnationID]struct{}{{7}: {}, {8}: {}},
+			}
+			coordinator := NewCoordinator(newTransactionCatalogue(work, broken), repository, bytes.NewReader(bytes.Repeat([]byte{2}, 32)))
+			ctx := &betweenStepsContext{Context: context.Background(), repository: repository, reached: make(chan struct{}), release: make(chan struct{})}
+
+			collected := make(chan error, 1)
+			go func() {
+				_, err := coordinator.CollectGarbage(ctx)
+				collected <- err
+			}()
+			<-ctx.reached
+
+			// TryLock first so a regression that holds the fence across the pass
+			// fails here instead of deadlocking the mutation.
+			require.True(t, coordinator.mutationMu.TryLock(), "the fence must be free between incarnation steps")
+			coordinator.mutationMu.Unlock()
+			require.NoError(t, tt.mutate(coordinator))
+
+			close(ctx.release)
+			require.NoError(t, <-collected)
+			steps := 0
+			for _, event := range repository.eventLog() {
+				if event == "collect" {
+					steps++
+				}
+			}
+			require.Equal(t, 2, steps, "both incarnation steps ran")
+		})
+	}
 }
 
 func TestMarkBrokenCannotOverwriteDiscardReplacement(t *testing.T) {
@@ -597,7 +716,7 @@ func TestDiscardIsRetryIdempotent(t *testing.T) {
 			if tt.failBefore {
 				require.Contains(t, repository.deletedIDs, old.IncarnationID)
 			} else {
-				require.Empty(t, repository.deletedIDs, "startup garbage collection owns the orphaned old directory")
+				require.Empty(t, repository.deletedIDs, "background garbage collection owns the orphaned old directory")
 			}
 		})
 	}

@@ -78,6 +78,12 @@ func (r *Repository) ReconcileCheckpoint(ctx context.Context, id domain.Incarnat
 	}
 	lock := r.lockSession(key)
 	defer r.unlockSession(lock)
+	// HEAD normally already names the committed checkpoint. Skip the full
+	// reload and the durable rewrite then; only a divergent or unreadable HEAD
+	// needs repair, and repair still validates the checkpoint first.
+	if generation, digest, err := r.readHead(id); err == nil && generation == ref.Generation && digest == ref.ManifestDigest {
+		return nil
+	}
 	_, manifest, err := r.loadCheckpointLocked(ctx, id, "", ref)
 	if err != nil {
 		return fmt.Errorf("validate checkpoint before HEAD repair: %w", err)

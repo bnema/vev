@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -342,7 +343,7 @@ func readBoundedFile(f *os.File) ([]byte, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("snapshot file too large")
 	}
-	data, readErr := io.ReadAll(io.LimitReader(f, int64(maxRepositoryRead)+1))
+	data, readErr := readSizedFile(f, int(stat.Size), maxRepositoryRead)
 	closeErr := f.Close()
 	if readErr != nil {
 		return nil, readErr
@@ -354,4 +355,16 @@ func readBoundedFile(f *os.File) ([]byte, error) {
 		return nil, fmt.Errorf("snapshot file too large")
 	}
 	return data, nil
+}
+
+// readSizedFile reads at most limit+1 bytes of f into a buffer sized from
+// fstat, avoiding the repeated grow-and-copy of io.ReadAll for multi-megabyte
+// snapshot objects. The extra byte lets the caller detect a file that grew
+// past limit after fstat.
+func readSizedFile(f io.Reader, size, limit int) ([]byte, error) {
+	buf := bytes.NewBuffer(make([]byte, 0, min(size, limit)+bytes.MinRead))
+	if _, err := buf.ReadFrom(io.LimitReader(f, int64(limit)+1)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

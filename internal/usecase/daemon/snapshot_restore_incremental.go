@@ -428,9 +428,12 @@ func generationObject(generation ports.SnapshotGeneration, ref snapcodec.ObjectR
 	if !ok || uint32(len(data)) != ref.Size || sha256.Sum256(data) != ref.Digest {
 		return nil, fmt.Errorf("snapshot: missing object")
 	}
-	gotKind, payload, err := snapcodec.UnmarshalObject(data)
+	// The payload aliases the loaded object. A generation's objects are private
+	// to this restore and are only decoded, never mutated, so copying here would
+	// double the transient footprint of every restored history chunk.
+	gotKind, payload, err := snapcodec.PreflightObject(data)
 	if err != nil || gotKind != kind {
 		return nil, fmt.Errorf("snapshot: invalid object")
 	}
-	return append([]byte(nil), payload...), nil
+	return payload, nil
 }

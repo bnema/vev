@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -59,6 +60,42 @@ func TestReadBoundedRejectsUnsafeFiles(t *testing.T) {
 		if _, err := readBounded(wrongOwner); err == nil {
 			t.Fatal("readBounded accepted wrong-owner file")
 		}
+	}
+}
+
+func TestReadSizedFile(t *testing.T) {
+	const limit = 16
+	tests := []struct {
+		name     string
+		content  string
+		hintSize int
+		want     string
+	}{
+		{name: "empty", content: "", hintSize: 0, want: ""},
+		{name: "exact size hint", content: "snapshot object", hintSize: 15, want: "snapshot object"},
+		{name: "file grew after stat", content: "snapshot", hintSize: 4, want: "snapshot"},
+		{name: "file shrank after stat", content: "tiny", hintSize: 64, want: "tiny"},
+		{name: "file grew past limit stops one byte over", content: "snapshot object grew far", hintSize: 4, want: "snapshot object g"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readSizedFile(strings.NewReader(tt.content), tt.hintSize, limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("readSizedFile = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// An exact size hint must cost one buffer, unlike io.ReadAll's growth.
+	content := strings.Repeat("x", 1<<20)
+	allocs := testing.AllocsPerRun(10, func() {
+		_, _ = readSizedFile(strings.NewReader(content), len(content), maxRepositoryRead)
+	})
+	if allocs > 3 {
+		t.Fatalf("readSizedFile allocations = %v, want at most 3", allocs)
 	}
 }
 

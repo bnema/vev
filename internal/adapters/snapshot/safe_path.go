@@ -82,6 +82,11 @@ func (r *Repository) openDirectory(path string) (file *os.File, err error) {
 		}
 		joinCloseError(&err, "close snapshot root", closeErr)
 	}()
+	return openRootDirectory(root, rel)
+}
+
+// openRootDirectory opens rel through a pinned root, refusing a final symlink.
+func openRootDirectory(root *os.Root, rel string) (*os.File, error) {
 	if err := rejectFinalSymlink(root, rel); err != nil {
 		return nil, err
 	}

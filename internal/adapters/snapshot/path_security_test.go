@@ -45,8 +45,8 @@ func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {
 		t.Fatal("LoadCheckpoint succeeded through replaced configured-root symlink")
 	}
 	keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {Generation: publication.Generation, ManifestDigest: codec.ManifestDigest(publication.Manifest)}}
-	if err := repo.CollectGarbage(context.Background(), keep); err == nil {
-		t.Fatal("CollectGarbage succeeded through replaced configured-root symlink")
+	if err := collectAll(context.Background(), repo, keep); err == nil {
+		t.Fatal("GC succeeded through replaced configured-root symlink")
 	}
 	loaded, err := loadPublication(context.Background(), external, externalPublication)
 	if err != nil {
@@ -94,8 +94,8 @@ func TestRepositoryRejectsSymlinkedGenerationAndObjectShards(t *testing.T) {
 				t.Fatal("LoadCheckpoint succeeded through symlinked repository component")
 			}
 			keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {Generation: publication.Generation, ManifestDigest: codec.ManifestDigest(publication.Manifest)}}
-			if err := repo.CollectGarbage(context.Background(), keep); err == nil {
-				t.Fatal("CollectGarbage succeeded through symlinked repository component")
+			if err := collectAll(context.Background(), repo, keep); err == nil {
+				t.Fatal("GC succeeded through symlinked repository component")
 			}
 			got, err := os.ReadFile(guard)
 			if err != nil || string(got) != "guard" {

@@ -113,7 +113,10 @@ func (noOpSnapshotRepository) ReconcileCheckpoint(context.Context, domain.Incarn
 func (noOpSnapshotRepository) DeleteIncarnation(context.Context, domain.IncarnationID) error {
 	return nil
 }
-func (noOpSnapshotRepository) CollectGarbage(context.Context, map[domain.IncarnationID]domain.CheckpointRef) error {
+func (noOpSnapshotRepository) SnapshotIncarnations(context.Context) ([]domain.IncarnationID, error) {
+	return nil, nil
+}
+func (noOpSnapshotRepository) CollectIncarnationGarbage(context.Context, domain.IncarnationID, *domain.CheckpointRef) error {
 	return nil
 }
 

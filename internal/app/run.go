@@ -704,19 +704,6 @@ func logStartupRecoveryCounts(log *slog.Logger, records []domain.CatalogueRecord
 	log.Info("daemon_startup_complete", "healthy", healthy, "fresh", fresh, "restoring", restoring, "broken", broken)
 }
 
-func constructDaemonBeforeSocketPublication(
-	construct func() *daemon.Daemon,
-	prepare func(*daemon.Daemon) error,
-	listen func() (wire.Listener, error),
-) (*daemon.Daemon, wire.Listener, error) {
-	d := construct()
-	if err := prepare(d); err != nil {
-		return d, nil, err
-	}
-	ln, err := listen()
-	return d, ln, err
-}
-
 func runDaemonOwned(ctx context.Context) (retErr error) {
 	log, logCloser, err := configureLogging(logging.Daemon, true)
 	if err != nil {
@@ -788,7 +775,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	}
 	logCatalogueRecovery(log, opened.Records, recoveryMode)
 	daemonOpts = append(daemonOpts, daemon.WithRecoveryCoordinator(coordinator))
-	daemonOpts = append(daemonOpts, daemon.WithDurableMaintenance(opened.Catalogue, snapshotRepository))
+	daemonOpts = append(daemonOpts, daemon.WithSnapshotGarbageCollection())
 	log.Info("session persistence enabled", "path", storePath)
 	daemonOpts = append(daemonOpts, daemon.WithCatalogue(opened.Catalogue, opened.Records))
 
@@ -831,23 +818,15 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		}
 	}()
 
-	d, ln, err := constructDaemonBeforeSocketPublication(
-		func() *daemon.Daemon { return daemon.New(pty.NewFactory(), clk, log, daemonOpts...) },
-		func(d *daemon.Daemon) error {
-			if err := d.CollectStartupGarbage(ctx); err != nil {
-				// GC is best-effort, but it is fully finished before socket
-				// publication. A failed pass leaves durable state untouched and
-				// restoration retains its per-session failure isolation.
-				log.Warn("snapshot_garbage_collection_failed", "err", err)
-			}
-			return nil
-		},
-		func() (wire.Listener, error) { return listenDaemon(ipc.SocketDir(), observer) },
-	)
+	// The catalogue-backed registry exists before the socket is published.
+	// Snapshot GC runs in the background once restoration finishes, so it never
+	// delays socket publication.
+	d := daemon.New(pty.NewFactory(), clk, log, daemonOpts...)
+	ln, err := listenDaemon(ipc.SocketDir(), observer)
 	if err != nil {
 		closeErr := opened.Catalogue.Close()
-		log.Error("daemon startup preparation failed", "socket_dir", ipc.SocketDir(), "err", err)
-		return errors.Join(fmt.Errorf("vev: prepare daemon startup: %w", err), closeErr)
+		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
+		return errors.Join(fmt.Errorf("vev: daemon listen: %w", err), closeErr)
 	}
 	defer func() { _ = ln.Close() }()
 	log.Info("daemon starting", "socket", ln.Addr())

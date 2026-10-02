@@ -26,7 +26,7 @@ func (r *retryablePurgeRepository) DeleteIncarnation(ctx context.Context, _ doma
 	return r.deleteErr
 }
 
-func TestLivePurgeLeavesFailedDirectoryDeletionForStartupGarbageCollection(t *testing.T) {
+func TestLivePurgeLeavesFailedDirectoryDeletionForBackgroundGarbageCollection(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	repository := &retryablePurgeRepository{deleteErr: errors.New("delete failed")}
 	WithSnapshotRepository(repository)(d)

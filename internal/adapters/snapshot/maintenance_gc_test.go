@@ -20,9 +20,9 @@ func TestCollectGarbageClearsUncommittedCheckpointHead(t *testing.T) {
 	require.NoError(t, repository.Publish(context.Background(), publication))
 
 	// Repository publication completed, but the catalogue commit did not.
-	// Startup GC knows the incarnation but has no committed checkpoint for it.
+	// GC knows the incarnation but has no committed checkpoint for it.
 	keep := map[domain.IncarnationID]domain.CheckpointRef{publication.IncarnationID: {}}
-	require.NoError(t, repository.CollectGarbage(context.Background(), keep))
+	require.NoError(t, collectAll(context.Background(), repository, keep))
 	_, err := os.Stat(repository.headPath(publication.IncarnationID))
 	require.ErrorIs(t, err, os.ErrNotExist)
 	require.Empty(t, garbageCollectionGenerations(t, repository, publication.IncarnationID))
@@ -32,9 +32,60 @@ func TestCollectGarbageClearsUncommittedCheckpointHead(t *testing.T) {
 	require.NoError(t, repository.Publish(context.Background(), publication))
 	committed := domain.CheckpointRef{Generation: publication.Generation, ManifestDigest: sha256.Sum256(publication.Manifest)}
 	keep[publication.IncarnationID] = committed
-	require.NoError(t, repository.CollectGarbage(context.Background(), keep))
+	require.NoError(t, collectAll(context.Background(), repository, keep))
 	_, err = repository.LoadCheckpoint(context.Background(), publication.IncarnationID, publication.Name, committed)
 	require.NoError(t, err)
+}
+
+func TestCollectIncarnationGarbageKeepsHeadPublishable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, repository *Repository, id domain.IncarnationID)
+	}{
+		// Generation 4 reached the repository but its catalogue commit failed.
+		{name: "forward orphan HEAD is rewound", prepare: func(*testing.T, *Repository, domain.IncarnationID) {}},
+		{name: "missing HEAD is restored", prepare: func(t *testing.T, repository *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.Remove(repository.headPath(id)))
+		}},
+		// An interrupted earlier pass must never leave HEAD naming a removed
+		// manifest: HEAD is reconciled before generations are removed.
+		{name: "HEAD naming a removed generation is rewound", prepare: func(t *testing.T, repository *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.Remove(repository.manifestPath(id, 4)))
+		}},
+		// Generation 2 is retained as the committed parent, but HEAD must still
+		// name the commit or the next publication is rejected.
+		{name: "HEAD naming a retained older generation is moved forward", prepare: func(t *testing.T, repository *Repository, id domain.IncarnationID) {
+			manifest, err := os.ReadFile(repository.manifestPath(id, 2))
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(repository.headPath(id), marshalHead(2, sha256.Sum256(manifest)), 0o600))
+		}},
+		{name: "HEAD with a mismatched digest is rewritten", prepare: func(t *testing.T, repository *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.WriteFile(repository.headPath(id), marshalHead(3, ports.SnapshotDigest{1}), 0o600))
+		}},
+		{name: "malformed HEAD is restored", prepare: func(t *testing.T, repository *Repository, id domain.IncarnationID) {
+			require.NoError(t, os.WriteFile(repository.headPath(id), []byte("corrupt"), 0o600))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repository := NewRepository(privateDir(t))
+			publications := publishGarbageCollectionGenerations(t, repository, "work", 4)
+			id := publications[0].IncarnationID
+			committed := domain.CheckpointRef{Generation: 3, ManifestDigest: sha256.Sum256(publications[2].Manifest)}
+			tt.prepare(t, repository, id)
+
+			require.NoError(t, repository.CollectIncarnationGarbage(t.Context(), id, &committed))
+
+			generation, digest, err := repository.readHead(id)
+			require.NoError(t, err)
+			require.Equal(t, committed.Generation, generation)
+			require.Equal(t, ports.SnapshotDigest(committed.ManifestDigest), digest)
+			// The live session retries generation 4 against its committed parent.
+			require.NoError(t, repository.Publish(t.Context(), publications[3]))
+		})
+	}
 }
 
 func TestCollectGarbageRejectsMalformedAuthorityWithoutMutation(t *testing.T) {
@@ -74,7 +125,7 @@ func TestCollectGarbageRejectsMalformedAuthorityWithoutMutation(t *testing.T) {
 			committed = tt.mutate(t, repository, id, committed)
 			before := snapshotRepositoryFiles(t, repository.dir)
 
-			require.Error(t, repository.CollectGarbage(t.Context(), map[domain.IncarnationID]domain.CheckpointRef{id: committed}))
+			require.Error(t, collectAll(t.Context(), repository, map[domain.IncarnationID]domain.CheckpointRef{id: committed}))
 			require.Equal(t, before, snapshotRepositoryFiles(t, repository.dir), "malformed catalogue authority must fail closed")
 		})
 	}
@@ -103,7 +154,7 @@ func TestCollectGarbage(t *testing.T) {
 				keep[id] = domain.CheckpointRef{Generation: tt.committed, ManifestDigest: sha256.Sum256(publication.Manifest)}
 			}
 
-			require.NoError(t, repository.CollectGarbage(context.Background(), keep))
+			require.NoError(t, collectAll(context.Background(), repository, keep))
 			if !tt.known {
 				_, err := os.Stat(repository.sessionPath(id))
 				require.ErrorIs(t, err, os.ErrNotExist)
