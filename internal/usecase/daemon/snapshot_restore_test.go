@@ -607,18 +607,12 @@ func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 			delete(g.Objects, tailRef.Digest)
 			g.Objects[replacement.Digest] = replacement.Data
 		}},
-		{"wrong digest", func(g *ports.SnapshotGeneration) {
-			for digest, data := range g.Objects {
-				kind, payload, err := snapcodec.UnmarshalObject(data)
-				require.NoError(t, err)
-				payload = append([]byte(nil), payload...)
-				payload[len(payload)-1] ^= 1
-				replacement, err := snapcodec.MarshalObject(kind, payload)
-				require.NoError(t, err)
-				require.Equal(t, len(data), len(replacement.Data))
-				g.Objects[digest] = replacement.Data
-				break
-			}
+		{"manifest size mismatch", func(g *ports.SnapshotGeneration) {
+			manifest, err := snapcodec.UnmarshalManifest(g.Manifest)
+			require.NoError(t, err)
+			manifest.Tabs[0].Panes[0].Tail.Size++
+			g.Manifest, err = snapcodec.MarshalManifest(manifest)
+			require.NoError(t, err)
 		}},
 	} {
 		t.Run(mutate.name, func(t *testing.T) {

@@ -23,7 +23,10 @@ type SnapshotGeneration struct {
 	Generation       uint64
 	ParentCheckpoint *domain.CheckpointRef
 	Manifest         []byte
-	Objects          map[SnapshotDigest][]byte
+	// Objects maps each object digest to its bytes. Implementations must only
+	// return objects whose SHA-256 equals their key; consumers rely on this and
+	// do not rehash.
+	Objects map[SnapshotDigest][]byte
 }
 
 type Catalogue interface {
@@ -41,6 +44,8 @@ type Catalogue interface {
 
 type SnapshotRepository interface {
 	Publish(context.Context, SnapshotPublication) error
+	// LoadCheckpoint returns a generation whose manifest matches the reference
+	// digest and whose objects each match their digest key, or an error.
 	LoadCheckpoint(context.Context, domain.IncarnationID, string, CheckpointRef) (SnapshotGeneration, error)
 	ReconcileCheckpoint(context.Context, domain.IncarnationID, CheckpointRef) error
 	DeleteIncarnation(context.Context, domain.IncarnationID) error

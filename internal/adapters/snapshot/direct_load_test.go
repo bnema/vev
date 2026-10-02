@@ -141,6 +141,21 @@ func TestLoadCheckpointDoesNotClassifyCorruptionAsManifestVersion(t *testing.T) 
 				require.NoError(t, os.WriteFile(repo.objectPath(pub.IncarnationID, pub.Objects[0].Digest), []byte("corrupt"), 0o600))
 			},
 		},
+		{
+			name: "well-formed object with wrong digest",
+			mutate: func(t *testing.T, repo *Repository, pub ports.SnapshotPublication, _ *domain.CheckpointRef) {
+				t.Helper()
+				object := pub.Objects[0]
+				kind, payload, err := codec.UnmarshalObject(object.Data)
+				require.NoError(t, err)
+				payload = append([]byte(nil), payload...)
+				payload[len(payload)-1] ^= 1
+				replacement, err := codec.MarshalObject(kind, payload)
+				require.NoError(t, err)
+				require.Len(t, replacement.Data, len(object.Data))
+				require.NoError(t, os.WriteFile(repo.objectPath(pub.IncarnationID, object.Digest), replacement.Data, 0o600))
+			},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := NewRepository(privateDir(t))

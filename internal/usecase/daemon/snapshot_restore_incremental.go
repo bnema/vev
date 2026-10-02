@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -424,9 +423,14 @@ func generationObject(generation ports.SnapshotGeneration, ref snapcodec.ObjectR
 	if ref.Kind != kind {
 		return nil, fmt.Errorf("snapshot: object kind mismatch")
 	}
+	// The repository port guarantees every object matches its digest key, so
+	// the content hash is not recomputed here; see ports.SnapshotGeneration.
 	data, ok := generation.Objects[ref.Digest]
-	if !ok || uint32(len(data)) != ref.Size || sha256.Sum256(data) != ref.Digest {
+	if !ok {
 		return nil, fmt.Errorf("snapshot: missing object")
+	}
+	if uint32(len(data)) != ref.Size {
+		return nil, fmt.Errorf("snapshot: object size mismatch")
 	}
 	// The payload aliases the loaded object. A generation's objects are private
 	// to this restore and are only decoded, never mutated, so copying here would
