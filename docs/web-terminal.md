@@ -81,3 +81,28 @@ VEV_ENV=web-visual .dev/vev-web ls
 Keep the printed link out of screenshots.
 
 `scripts/web-visual-smoke.cjs` and `scripts/web-access-smoke.cjs` run Playwright checks. Set `PLAYWRIGHT_MODULE`, `VEV_BINARY`, `VEV_ENV=web-visual`, and optionally `CHROMIUM_PATH`. Run them only against an isolated profile: they create sessions and revoke access.
+
+## Measuring scroll performance
+
+`scripts/web-scroll-bench.cjs` measures how much browser work a fast history scroll costs. It starts its own gateway in a temporary profile, prints 10,000 colored lines, scrolls up and back down with the mouse wheel, and sums the page's main-thread time from a Chromium trace. It stops the gateway and deletes the profile when it ends. Linux only.
+
+```sh
+go build -o .dev/vev-web .
+PLAYWRIGHT_MODULE=/path/to/node_modules/playwright VEV_BINARY=$PWD/.dev/vev-web \
+  node scripts/web-scroll-bench.cjs --viewport 1638x987 --scale 1.25
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--lines` | 10000 | History lines printed before scrolling |
+| `--notches` | 120 | Wheel notches: half up, half down, one every 16 ms |
+| `--port` | 8799 | Gateway port on 127.0.0.1 |
+| `--viewport` | 1600x1000 | Page size in CSS pixels (headless only) |
+| `--scale` | 1 | Device pixel ratio, for example `1.25` for 125% zoom (headless only) |
+| `--cdp` | | Use a running Chromium instead of headless, for example `http://127.0.0.1:9222` |
+
+The output is JSON. `wireFrames`, `wireKB` and `avgFrameKB` count the WebSocket updates the page received during the scroll. `totalMs` is the main thread's busy time; `scriptMs`, `styleMs`, `layoutMs` and `paintMs` split it. `totalMsPerNotch` above 16 means the browser cannot keep up with a 60 Hz wheel. Compare two builds with the same options and run each a few times: the numbers vary by about 10%.
+
+Headless Chromium has no GPU compositor, so it underestimates paint. For numbers that match what users see, start Chromium with `--remote-debugging-port=9222`, keep the benchmark tab in the foreground, and pass `--cdp`. The window size and zoom then come from that browser. Close it afterwards: the debugging port lets any local process control it.
+
+To try a frontend change without rebuilding, set `WEB_APP_JS` or `WEB_RUNTIME_JS` to a local `app.js` or `terminal.js`.

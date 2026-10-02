@@ -134,18 +134,30 @@
     status.textContent = 'Connecting…';
     reconnect.hidden = true;
     // Presentation coalescing: at most one scheduled present task per
-    // animation frame, preserving every incremental update in order. Each
-    // queued delta is still applied in order; never drops intermediate
-    // deltas. requestAnimationFrame is throttled to zero in hidden pages,
-    // so a timeout fallback keeps the terminal live there.
+    // animation frame. applyAll validates every queued update, then merges
+    // them so each changed row is rebuilt once per frame. requestAnimationFrame
+    // is throttled to zero in hidden pages, so a timeout fallback keeps the
+    // terminal live there.
+    // Presents are capped at about 30 per second: a full-screen redraw (fast
+    // history scroll) costs the browser more style, layout and paint than one
+    // 60 Hz frame allows. The first update after a pause is presented on the
+    // next frame, so typing latency is unchanged.
+    const minPresentMs = 32;
     let queuedUpdates = [];
     let presentScheduled = false;
-    function flushUpdates() {
+    let lastPresent = -Infinity;
+    function flushUpdates(now = performance.now()) {
+      if (now - lastPresent < minPresentMs) {
+        if (document.visibilityState === 'visible') requestAnimationFrame(flushUpdates);
+        else setTimeout(flushUpdates, minPresentMs - (now - lastPresent));
+        return;
+      }
+      lastPresent = now;
       presentScheduled = false;
       const batch = queuedUpdates;
       queuedUpdates = [];
       try {
-        for (const update of batch) terminal.apply(update);
+        terminal.applyAll(batch);
       } catch {
         status.textContent = 'Invalid terminal update — connection stopped.';
         socket.close();

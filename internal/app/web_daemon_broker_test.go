@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev-vt/html/browser"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
@@ -190,7 +191,7 @@ func (tab *webBrowserTab) close() {
 // sendText types one browser text event at the tab.
 func (tab *webBrowserTab) sendText(t *testing.T, text string) {
 	t.Helper()
-	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "type": "text", "text": text})
+	payload, err := json.Marshal(map[string]any{"schemaVersion": browser.EventSchemaVersion, "type": "text", "text": text})
 	require.NoError(t, err)
 	require.NoError(t, tab.conn.Write(t.Context(), websocket.MessageText, payload))
 }
@@ -199,7 +200,7 @@ func (tab *webBrowserTab) sendText(t *testing.T, text string) {
 // A text event deliberately cannot carry a control byte.
 func (tab *webBrowserTab) sendEnter(t *testing.T) {
 	t.Helper()
-	payload, err := json.Marshal(map[string]any{"schemaVersion": 1, "type": "key", "key": "Enter", "code": "Enter"})
+	payload, err := json.Marshal(map[string]any{"schemaVersion": browser.EventSchemaVersion, "type": "key", "key": "Enter", "code": "Enter"})
 	require.NoError(t, err)
 	require.NoError(t, tab.conn.Write(t.Context(), websocket.MessageText, payload))
 }

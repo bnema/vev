@@ -3,6 +3,7 @@ package webterm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/vev-vt/html/browser"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 )
@@ -115,11 +117,12 @@ func TestWebSocketRoundTripAndDetach(t *testing.T) {
 	_, data, err := conn.Read(ctx)
 	require.NoError(t, err)
 	require.True(t, json.Valid(data))
-	require.NoError(t, conn.Write(ctx, websocket.MessageText, []byte(`{"schemaVersion":1,"type":"text","text":"Z"}`)))
+	event := fmt.Sprintf(`{"schemaVersion":%d,"type":"text","text":"Z"}`, browser.EventSchemaVersion)
+	require.NoError(t, conn.Write(ctx, websocket.MessageText, []byte(event)))
 	for {
 		_, data, err = conn.Read(ctx)
 		require.NoError(t, err)
-		if strings.Contains(string(data), `"text":"Z"`) {
+		if strings.Contains(string(data), `"text":"Z`) {
 			break
 		}
 	}
