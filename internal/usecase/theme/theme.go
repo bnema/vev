@@ -418,7 +418,6 @@ const defaultDimmingPercent = 35
 // Dimmer transforms resolved terminal colors for subdued UI states. Construct
 // it once and reuse it while rendering cells with the same theme and policy.
 type Dimmer struct {
-	attribute         bool
 	theme             Theme
 	backgroundPercent int
 	foregroundPercent int
@@ -448,9 +447,13 @@ func WithForegroundDimming(percent int) DimmerOption {
 }
 
 // NewDimmer returns a reusable dimmer with optional per-channel overrides.
+//
+// Keep this function inlinable: it sits on the per-cell render path, and adding
+// fields or work pushes it over the inline budget (80). After changing it,
+// check `go build -gcflags=-m=2 ./internal/usecase/theme 2>&1 | grep NewDimmer`
+// and rerun BenchmarkComposeCapturedFrame in internal/usecase/daemon.
 func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
 	d := Dimmer{
-		attribute:         t.DimByAttribute,
 		theme:             t,
 		backgroundPercent: defaultDimmingPercent,
 		foregroundPercent: defaultDimmingPercent,
@@ -471,7 +474,7 @@ func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
 // Dim fades a style's resolved background toward the terminal background,
 // then fades its foreground and custom underline toward that dimmed background.
 func (d Dimmer) Dim(style renderer.Style) renderer.Style {
-	if d.attribute {
+	if d.theme.DimByAttribute {
 		style.Attrs |= renderer.AttrDim
 		return style
 	}
