@@ -131,7 +131,7 @@ func TestMRUStyleFadesFromNearActiveTowardBar(t *testing.T) {
 		{name: "dark teal", theme: rampTheme(false), accent: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}},
 		{name: "dark blue", theme: rampTheme(false), accent: renderer.RGB{R: 0x3b, G: 0x82, B: 0xf6}},
 		{name: "light teal", theme: rampTheme(true), accent: renderer.RGB{R: 0x2a, G: 0x7a, B: 0x7a}},
-		{name: "low contrast grey with blue fallback", theme: Theme{Foreground: renderer.RGB{R: 160, G: 160, B: 160}, Background: renderer.RGB{R: 32, G: 32, B: 32}, HasFG: true, HasBG: true, TrueColor: true, Known: true, UsePalette: true}, accent: renderer.RGB{R: 0, G: 102, B: 255}, fallback: true},
+		{name: "low contrast grey with blue fallback", theme: Theme{Foreground: renderer.RGB{R: 160, G: 160, B: 160}, Background: renderer.RGB{R: 32, G: 32, B: 32}, HasFG: true, HasBG: true, Known: true, UsePalette: true}, accent: renderer.RGB{R: 0, G: 102, B: 255}, fallback: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
