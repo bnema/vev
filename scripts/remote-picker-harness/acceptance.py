@@ -7,10 +7,12 @@ lifecycle/session/focus context, observed published output). Sending a key
 or accepting a request is never success: every scenario ends on a
 postcondition ``wait`` or a verified capture.
 
-Transport selection passes through the client process environment:
-``VEV_REMOTE_TRANSPORT`` unset means QUIC, ``stdio`` means SSH stdio. The
-value is forwarded into the container with ``docker exec -e`` so it actually
-reaches the driver process.
+Transport selection is host registration state: before each scenario the
+``remote`` host is re-registered in the client container with
+``vev host add --transport quic|ssh remote``. A bare scenario or ``@quic``
+means QUIC; ``@stdio`` means the SSH stdio carriage (``--transport ssh``).
+``VEV_ACCEPTANCE_TRANSPORT`` carries the selected name to the scenarios for
+evidence labels only.
 
 Direct-remote scenarios use ``--remote ENDPOINT --session NAME`` against a
 named fixture session: a named exact remote target, never an ephemeral
@@ -369,7 +371,7 @@ def scenario_direct_remote_named(client_container, remote_container, env):
     --session NAME`` attaches to that exact lifecycle instead of creating an
     ephemeral one, so the daemon-owned target is pinned, not inferred.
     """
-    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
+    mode = env.get("VEV_ACCEPTANCE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
     name = "direct" + suffix
     fixture = Driver(remote_container, ["--session", name])
@@ -416,7 +418,7 @@ def scenario_warm_reuse(client_container, remote_container, env):
     fails the scenario. The remote daemon's attach count is recorded, not
     asserted: each visit is a new logical attachment by design.
     """
-    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
+    mode = env.get("VEV_ACCEPTANCE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
     local_name = "locl" + suffix
     remote_name = "remt" + suffix
@@ -556,7 +558,7 @@ def commit_target(driver, target, before):
 def scenario_client_picker_navigate(client_container, remote_container, env):
     """P6.2: client-owned navigation picker end to end, plus its cancel path."""
     topology = picker_topology(env)
-    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
+    mode = env.get("VEV_ACCEPTANCE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
     first, second, entry = (name + suffix for name in ("picka", "pickb", "pickc"))
     # Direct mode is served by the remote daemon: the picker interaction
@@ -601,7 +603,7 @@ def scenario_client_picker_navigate(client_container, remote_container, env):
 
 def scenario_hybrid_exact_return(client_container, remote_container, env):
     """M4/M5: local A -> local B -> remote -> exact local A with committed action."""
-    mode = env.get("VEV_REMOTE_TRANSPORT", "quic")
+    mode = env.get("VEV_ACCEPTANCE_TRANSPORT", "quic")
     suffix = uuid.uuid4().hex[:8]
     first, second, remote = (name + suffix for name in ("sample", "second", "other"))
     fixture = Driver(remote_container, ["--session", remote])
@@ -643,6 +645,24 @@ SCENARIOS = {
 }
 
 
+REMOTE_HOST = "remote"
+HOST_TRANSPORT_FLAGS = {"quic": "quic", "stdio": "ssh"}
+
+
+def register_remote(client_container, transport):
+    """Re-register the remote host with the requested carriage.
+
+    A host keeps the transport it was added with, so switching requires
+    ``host rm`` then ``host add``. The rm may fail when nothing is registered.
+    """
+    docker_capture(["exec", client_container, "vev", "host", "rm", REMOTE_HOST])
+    result = docker_capture(["exec", client_container, "vev", "host", "add",
+                             "--transport", HOST_TRANSPORT_FLAGS[transport], REMOTE_HOST])
+    check(result.returncode == 0,
+          f"vev host add --transport {HOST_TRANSPORT_FLAGS[transport]} failed",
+          {"stdout": result.stdout, "stderr": result.stderr})
+
+
 def main(argv):
     if len(argv) != 4:
         raise SystemExit("usage: acceptance.py CLIENT_CONTAINER REMOTE_CONTAINER SCENARIO[@stdio|@quic]")
@@ -651,10 +671,11 @@ def main(argv):
     if name not in SCENARIOS:
         raise SystemExit(f"unknown scenario {name}; want one of {sorted(SCENARIOS)}")
     env = {}
-    if transport == "stdio":
-        env["VEV_REMOTE_TRANSPORT"] = "stdio"
-    elif transport and transport != "quic":
+    if transport and transport not in HOST_TRANSPORT_FLAGS:
         raise SystemExit(f"unknown transport {transport}; want stdio or quic")
+    transport = transport or "quic"
+    env["VEV_ACCEPTANCE_TRANSPORT"] = transport
+    register_remote(client_container, transport)
     topology = os.environ.get("VEV_ACCEPTANCE_TOPOLOGY")
     if topology:
         env["VEV_ACCEPTANCE_TOPOLOGY"] = topology

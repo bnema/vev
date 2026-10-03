@@ -3,7 +3,7 @@
 #
 # sshd is published on loopback only. QUIC is not published: the remote QUIC
 # proxy listens on a random UDP port per bootstrap and the client dials the
-# SSH target name, so hosts are registered with VEV_REMOTE_TRANSPORT=stdio.
+# SSH target name, so hosts are registered with `vev host add --transport ssh`.
 # The project name is derived from VEV_ENV/VEV_TEST_ENV so distinct sandbox
 # environments (see scripts/demo/test-remotes.sh) never share one compose
 # project's containers or network.

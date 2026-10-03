@@ -533,10 +533,9 @@ func startTerminalComposition(t *testing.T, intent uint8, name, remoteTarget str
 // daemon owns daemonSessions even when the catalogue has not observed them.
 func startTerminalCompositionWithDaemon(t *testing.T, intent uint8, name, remoteTarget string, snapshot ports.BrokerSnapshot, daemonSessions []string) *terminalCompositionRun {
 	t.Helper()
-	// The ordinary terminal path reads the nested-session and remote-transport
-	// environment; a test drives the broker composition with both unset.
+	// The ordinary terminal path reads the nested-session environment; a test
+	// drives the broker composition with it unset.
 	t.Setenv("VEV", "")
-	t.Setenv(envRemoteTransport, "")
 	service := newTerminalCompositionService(snapshot)
 	service.daemonSessions = daemonSessions
 	terminal := newTerminalCompositionTerminal()
@@ -929,7 +928,6 @@ func TestTerminalCompositionCapturesSessionEnvironmentDefensively(t *testing.T) 
 // without opening any stream. It remains live until the terminal ends.
 func TestTerminalCompositionReportsBrokerFailureInThePicker(t *testing.T) {
 	t.Setenv("VEV", "")
-	t.Setenv(envRemoteTransport, "")
 	startupErr := errors.New("broker not reachable")
 	previousConnect := connectProductionClientBroker
 	terminal := newTerminalCompositionTerminal()
@@ -974,7 +972,6 @@ func TestTerminalCompositionReportsBrokerFailureInThePicker(t *testing.T) {
 // without reaching the broker.
 func TestRunAttachNestedSessionBehavior(t *testing.T) {
 	t.Setenv("VEV", "outer")
-	t.Setenv(envRemoteTransport, "")
 	connectCalls := 0
 	previousConnect := connectProductionClientBroker
 	previousCreate := createDetachedTerminalSession

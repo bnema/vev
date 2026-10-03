@@ -157,11 +157,14 @@ rm -rf .dev/dev
 ## Remote hosts
 
 ```sh
-vev host add user@host   # add a host
-vev host rm user@host    # remove it
-vev host list            # show hosts and their status
+vev host add user@host                    # add a host (QUIC, the default)
+vev host add --transport ssh user@host    # add a host that uses SSH only
+vev host rm user@host                     # remove it
+vev host list                             # show hosts and their status
 ```
 
+- `--transport quic|ssh` selects the carriage. `quic` (default) opens a direct QUIC connection bootstrapped over SSH; `ssh` carries everything over SSH, for networks that block UDP.
+- A host keeps the transport it was added with. To change it, run `vev host rm` and then `vev host add` again; adding it with a different transport is refused.
 - The broker stores hosts in `~/.local/state/vev/broker/state/state.json`.
 - Hosts connect over SSH, so your SSH config (aliases, keys) applies.
 - Remote sessions appear as `session@host` in `vev ls --all` and in the picker.

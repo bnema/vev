@@ -618,7 +618,7 @@ func TestProductionRegistryOwnsMutableMembershipWithZeroHosts(t *testing.T) {
 	startLocalRegistry(t, registry)
 
 	require.Empty(t, registry.Snapshot().Daemons[0].Registration, "the local entry carries no configured registration")
-	registration, err := registry.AddHost(context.Background(), "user@example.com", remoteBrokerPolicy("quic"))
+	registration, err := registry.AddHost(context.Background(), "user@example.com", remoteBrokerPolicy(hostTransportQUIC))
 	require.NoError(t, err, "a zero-host production run must admit a first host")
 	require.Equal(t, "user@example.com", registration.Endpoint)
 

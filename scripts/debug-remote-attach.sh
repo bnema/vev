@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE' >&2
-Usage: scripts/debug-remote-attach.sh [--mode stdio|quic|default] [--session NAME] [--duration 8s] [--vev-bin PATH] user@host
+Usage: scripts/debug-remote-attach.sh [--mode ssh|quic|default] [--session NAME] [--duration 8s] [--vev-bin PATH] user@host
 
 Runs a real remote attach smoke/debug attempt under a PTY, captures local and
 remote vev versions, and stores local/remote log tails around the attempt.
@@ -20,6 +20,8 @@ Notes:
     vev/ssh error is captured; inspect the bundle for confirmation.
   - The remote host must be reachable by SSH for log collection.
   - The attach attempt unsets VEV so the smoke test can run from inside vev.
+  - --mode ssh|quic re-registers the host (vev host rm, then vev host add
+    --transport MODE) before attaching; default keeps the existing registration.
 USAGE
 }
 
@@ -53,8 +55,8 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 case "$mode" in
-  default|stdio|quic) ;;
-  *) echo "invalid --mode $mode (want default, stdio, or quic)" >&2; exit 2 ;;
+  default|ssh|quic) ;;
+  *) echo "invalid --mode $mode (want default, ssh, or quic)" >&2; exit 2 ;;
 esac
 
 target="$1"
@@ -153,10 +155,11 @@ attach_log_raw="$out_dir/.attach.typescript.raw"
 attach_err_raw="$out_dir/.attach.err.raw"
 attach_stdout_raw="$out_dir/.attach.stdout.raw"
 cmd=("$vev_bin" attach "$attach_target")
-if [[ "$mode" == "default" ]]; then
-  env_cmd=(env -u VEV -u VEV_REMOTE_TRANSPORT)
-else
-  env_cmd=(env -u VEV "VEV_REMOTE_TRANSPORT=$mode")
+env_cmd=(env -u VEV)
+if [[ "$mode" != "default" ]]; then
+  # A host keeps the transport it was added with: switching is rm then add.
+  run_capture host-rm "${env_cmd[@]}" "$vev_bin" host rm "$target"
+  run_capture host-add "${env_cmd[@]}" "$vev_bin" host add --transport "$mode" "$target"
 fi
 
 set +e

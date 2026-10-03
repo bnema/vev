@@ -14,11 +14,13 @@ vev must be installed on the remote host. The remote daemon owns the session: it
 
 Terminal traffic then goes over QUIC, not SSH. The token and keys stay in memory only.
 
-If UDP is blocked, use SSH only:
+If UDP is blocked, register the host with SSH only:
 
 ```sh
-VEV_REMOTE_TRANSPORT=stdio vev attach user@host
+vev host add --transport ssh user@host
 ```
+
+The transport is fixed when the host is added (`quic` by default). To switch, run `vev host rm user@host`, then add it again with the other `--transport`.
 
 ## What survives a network problem
 

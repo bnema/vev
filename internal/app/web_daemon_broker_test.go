@@ -314,10 +314,9 @@ func startWebGatewayFixture(t *testing.T) *webGatewayFixture {
 // connector composition, so a test can script the broker without a process.
 func startWebGatewayFixtureOver(t *testing.T, broker offlineClientFixture, connector func() ports.BrokerConnector) *webGatewayFixture {
 	t.Helper()
-	// The gateway composition reads the nested-session and transport environment;
-	// a test drives the broker client with both unset.
+	// The gateway composition reads the nested-session environment; a test
+	// drives the broker client with it unset.
 	t.Setenv("VEV", "")
-	t.Setenv(envRemoteTransport, "")
 	settings, err := webterm.ParseSettings("", webterm.Origin)
 	require.NoError(t, err)
 	fixture := &webGatewayFixture{

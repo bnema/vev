@@ -263,7 +263,7 @@ acceptance. Local carriage requires the preamble + `Hello`/`Welcome`
 inside the 15-second budget; a failed handshake closes the exact
 connection. Broker-owned remote carriage uses QUIC (`internal/adapters/quic`,
 TLS 1.3, ALPN `vev/1`, exact SHA-256 pin, one bidirectional stream,
-no 0-RTT); `VEV_REMOTE_TRANSPORT=stdio` selects SSH stdio instead.
+no 0-RTT); a host added with `vev host add --transport ssh` uses SSH stdio instead.
 For the QUIC route the broker starts one short-lived `_broker-mux-quic-bootstrap --production` over SSH
 which spawns a detached `_broker-mux-quic-proxy` (ephemeral listener +
 certificate, 32-byte token, ≤4 KiB readiness with host-independent
