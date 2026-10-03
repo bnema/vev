@@ -1,7 +1,10 @@
 // Package terminalcap owns pure terminal capability values and detection policy.
 package terminalcap
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // ColorMode is the color output mode selected for one attachment.
 type ColorMode uint8
@@ -111,10 +114,57 @@ func Detect(env []string) Capabilities {
 	if caps.Color.Source == SourceDeclared {
 		return caps
 	}
-	if strings.Contains(term, "256color") || term == "dumb" {
+	if mode, ok := termColorMode(term); ok {
+		caps.Color.Mode = mode
 		caps.Color.Source = SourceDeclared
 	}
 	return caps
+}
+
+// termColorMode classifies a lowercase TERM value that carries no truecolor
+// signal. It is deliberately conservative: only well-known terminfo names map
+// to a constrained mode, and anything else reports ok=false so the caller keeps
+// its unverified 256-color default. The rules apply in this order:
+//
+//   - monochrome: dumb, vt52, vt100, vt102, vt220, or a name ending in -m or -mono;
+//   - 256 colors: any name containing "256color";
+//   - 16 colors: linux, ansi, cons25, or a name ending in -16color or -color.
+func termColorMode(term string) (ColorMode, bool) {
+	switch term {
+	case "dumb", "vt52", "vt100", "vt102", "vt220":
+		return Monochrome, true
+	case "linux", "ansi", "cons25":
+		return ANSI16, true
+	}
+	switch {
+	case strings.HasSuffix(term, "-m"), strings.HasSuffix(term, "-mono"):
+		return Monochrome, true
+	case strings.Contains(term, "256color"):
+		return ANSI256, true
+	case strings.HasSuffix(term, "-16color"), strings.HasSuffix(term, "-color"):
+		return ANSI16, true
+	}
+	return 0, false
+}
+
+// ParseColorMode parses a user color override: auto, truecolor, 256, 16, or
+// mono, case-insensitively and ignoring surrounding space. An empty value is
+// auto. When auto is true the caller must use detection and mode is
+// meaningless; an unknown value returns an error.
+func ParseColorMode(value string) (mode ColorMode, auto bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return TrueColor, true, nil
+	case "truecolor":
+		return TrueColor, false, nil
+	case "256":
+		return ANSI256, false, nil
+	case "16":
+		return ANSI16, false, nil
+	case "mono":
+		return Monochrome, false, nil
+	}
+	return TrueColor, false, fmt.Errorf("invalid color mode %q (want auto, truecolor, 256, 16, or mono)", value)
 }
 
 func environmentValues(env []string) map[string]string {
