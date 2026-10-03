@@ -86,9 +86,10 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 			incarnation:      request.Target.LifecycleID,
 			checkIncarnation: true,
 		},
-		activateTargetTab: true,
-		targetTabIndex:    targetTabIndex,
-		ready:             true,
+		activateTargetTab:        true,
+		targetTabIndex:           targetTabIndex,
+		refreshTargetEnvironment: true,
+		ready:                    true,
 	})
 	if err != nil {
 		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)

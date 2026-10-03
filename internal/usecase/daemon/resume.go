@@ -626,6 +626,7 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	// The replacement terminal's focus, too, is declared before first paint.
 	ac.setTerminalFocus(h.TerminalFocus)
 	ac.clientPID.Store(h.ClientPID)
+	ac.setClientEnvironment(helloClientEnvironment(h))
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}

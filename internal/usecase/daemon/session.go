@@ -506,8 +506,9 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 		target: newSess,
 		next:   ac,
 
-		expectedTransport: ac.transportSnapshot(),
-		ready:             true,
+		expectedTransport:        ac.transportSnapshot(),
+		refreshTargetEnvironment: true,
+		ready:                    true,
 	})
 	if err != nil {
 		_ = d.killSession(newSess, protocol.ReasonSessionKilled, true)
@@ -542,7 +543,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(effect *attachmentEffect, n
 		source: capability.sess, next: capability.ac,
 
 		expectedTransport: capability.transport, sourceCapability: &capability, sourceEffect: effect, action: "create-session",
-		copySourceEnvironment: true, ready: true,
+		refreshTargetEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
 			source := capability.sess
 			if source == nil {
@@ -606,7 +607,7 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 	}
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: from, target: newSess, next: ac,
-		expectedTransport: ac.transportSnapshot(), ready: true,
+		expectedTransport: ac.transportSnapshot(), refreshTargetEnvironment: true, ready: true,
 	})
 	if err != nil {
 		_ = d.killSession(newSess, protocol.ReasonSessionKilled, true)
@@ -631,7 +632,7 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(effect *attachment
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: capability.sess, next: capability.ac,
 		expectedTransport: capability.transport, sourceCapability: &capability, sourceEffect: effect, action: "create-ephemeral-session",
-		copySourceEnvironment: true, ready: true,
+		refreshTargetEnvironment: true, ready: true,
 		createTargetLocked: func() (*session, error) {
 			if capability.sess == nil || d.closing {
 				return nil, errAttachmentTransition

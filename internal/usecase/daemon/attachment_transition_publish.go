@@ -173,8 +173,12 @@ func (d *Daemon) applyTargetStateLocked(publication *attachmentPublication) bool
 	if req.activateTargetTab && req.target != nil {
 		req.target.activateAttachmentViewLocked(req.next, req.targetTabIndex)
 	}
-	if req.copySourceEnvironment && publication.source != nil && req.target != nil {
-		req.target.adoptClientEnvironmentLocked(publication.source.env)
+	// The switching attachment's own client environment refreshes the target;
+	// a daemon-owned (remote) attachment never changes it.
+	if req.refreshTargetEnvironment && req.target != nil && req.next != nil {
+		if env, ok := req.next.clientEnvironment(); ok {
+			req.target.adoptClientEnvironmentLocked(env)
+		}
 	}
 	return req.preserveAttachment
 }

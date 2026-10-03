@@ -1615,8 +1615,13 @@ func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, pty), stubClock{})
 	d.baseEnv = []string{"DAEMON=owned"}
 	oldTransport := &closeTrackingTransport{}
-	sess, ac, err := d.route(helloResumeCapable(protocol.IntentNew, "work", 0), oldTransport)
+	created := helloResumeCapable(protocol.IntentNew, "work", 0)
+	created.Env = []string{"LOCAL=client"}
+	sess, ac, err := d.route(created, oldTransport)
 	require.NoError(t, err)
+	localEnv, owned := ac.clientEnvironment()
+	require.True(t, owned, "a client-owned route records the attachment environment")
+	require.Equal(t, []string{"LOCAL=client"}, localEnv)
 	sess.mu.Lock()
 	sess.env = copyEnvironment(d.baseEnv)
 	sess.mu.Unlock()
@@ -1633,6 +1638,8 @@ func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {
 	sess.mu.Lock()
 	require.Equal(t, []string{"DAEMON=owned"}, sess.env)
 	sess.mu.Unlock()
+	_, owned = ac.clientEnvironment()
+	require.False(t, owned, "a daemon-owned resume clears the attachment's client environment")
 
 	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
 }

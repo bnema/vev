@@ -3,6 +3,8 @@ package daemon
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // Session-bound variables describe the desktop or login the user attached
@@ -32,6 +34,39 @@ var sessionLoginEnvironment = []string{
 	"SSH_CONNECTION",
 	"SSH_CLIENT",
 	"SSH_TTY",
+}
+
+// setClientEnvironment records the attachment's own client-owned environment;
+// nil means the daemon owns it and the attachment never changes session env.
+func (ac *attachedClient) setClientEnvironment(env []string) {
+	if env == nil {
+		ac.clientEnv.Store(nil)
+		return
+	}
+	owned := append(make([]string, 0, len(env)), env...)
+	ac.clientEnv.Store(&owned)
+}
+
+// clientEnvironment returns the attachment's client-owned environment, or
+// ok=false when the daemon owns it. The slice is immutable; do not modify it.
+func (ac *attachedClient) clientEnvironment() ([]string, bool) {
+	env := ac.clientEnv.Load()
+	if env == nil {
+		return nil, false
+	}
+	return *env, true
+}
+
+// helloClientEnvironment returns the Hello environment when the client owns
+// it, or nil for a daemon-owned (remote) attach.
+func helloClientEnvironment(h protocol.Hello) []string {
+	if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned {
+		return nil
+	}
+	if h.Env == nil {
+		return []string{}
+	}
+	return h.Env
 }
 
 // adoptClientEnvironmentLocked applies a client-owned environment to the

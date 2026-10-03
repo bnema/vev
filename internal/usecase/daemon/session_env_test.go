@@ -3,6 +3,7 @@ package daemon
 import (
 	"testing"
 
+	"github.com/bnema/vev/internal/protocol"
 	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/stretchr/testify/require"
 )
@@ -150,39 +151,105 @@ func TestAdoptClientEnvironmentLocked(t *testing.T) {
 }
 
 func TestApplyTargetStateRefreshesTargetEnvironment(t *testing.T) {
+	// The source session last saw a desktop client; the switching attachment
+	// is a separate SSH client. Only the switching attachment's own
+	// environment may reach the target.
+	sourceEnv := []string{"SHELL=/bin/bash", "PATH=/source", "WAYLAND_DISPLAY=wayland-desktop", "SSH_AUTH_SOCK=/run/desktop-agent"}
+	sshEnv := []string{"SHELL=/bin/zsh", "PATH=/ssh", "SSH_AUTH_SOCK=/tmp/ssh-agent", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"}
+	targetEnv := []string{"SHELL=/usr/bin/fish", "PATH=/target", "WAYLAND_DISPLAY=wayland-old"}
 	tests := []struct {
 		name        string
-		copyEnv     bool
+		refresh     bool
 		provisional bool
+		clientEnv   []string
 		want        []string
 	}{
 		{
-			name:    "handoff refreshes session-bound variables only",
-			copyEnv: true,
-			want:    []string{"SHELL=/usr/bin/fish", "PATH=/target", "WAYLAND_DISPLAY=wayland-1"},
+			name:      "handoff refreshes from the switching attachment, not the source session",
+			refresh:   true,
+			clientEnv: sshEnv,
+			want:      []string{"SHELL=/usr/bin/fish", "PATH=/target", "WAYLAND_DISPLAY=wayland-old", "SSH_AUTH_SOCK=/tmp/ssh-agent", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"},
 		},
 		{
-			name:        "handoff into a restored session adopts the source environment",
-			copyEnv:     true,
+			name:        "handoff into a restored session adopts the attachment environment",
+			refresh:     true,
 			provisional: true,
-			want:        []string{"SHELL=/bin/bash", "PATH=/source", "WAYLAND_DISPLAY=wayland-1"},
+			clientEnv:   sshEnv,
+			want:        sshEnv,
 		},
 		{
-			name: "no environment copy leaves the target untouched",
-			want: []string{"SHELL=/usr/bin/fish", "PATH=/target", "WAYLAND_DISPLAY=wayland-old"},
+			name:    "daemon-owned attachment never changes the target",
+			refresh: true,
+			want:    targetEnv,
+		},
+		{
+			name:        "daemon-owned attachment keeps a restored target provisional",
+			refresh:     true,
+			provisional: true,
+			want:        targetEnv,
+		},
+		{
+			name:      "no refresh request leaves the target untouched",
+			clientEnv: sshEnv,
+			want:      targetEnv,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			source := &session{env: []string{"SHELL=/bin/bash", "PATH=/source", "WAYLAND_DISPLAY=wayland-1"}}
-			target := &session{env: []string{"SHELL=/usr/bin/fish", "PATH=/target", "WAYLAND_DISPLAY=wayland-old"}, envProvisional: tt.provisional}
+			source := &session{env: copyEnvironment(sourceEnv)}
+			target := &session{env: copyEnvironment(targetEnv), envProvisional: tt.provisional}
+			next := &attachedClient{}
+			next.setClientEnvironment(tt.clientEnv)
 			d := &Daemon{}
 			d.applyTargetStateLocked(&attachmentPublication{
-				req:    attachmentTransitionRequest{target: target, copySourceEnvironment: tt.copyEnv},
+				req:    attachmentTransitionRequest{target: target, next: next, refreshTargetEnvironment: tt.refresh},
 				source: source,
 			})
 			require.Equal(t, tt.want, target.env)
-			require.Equal(t, []string{"SHELL=/bin/bash", "PATH=/source", "WAYLAND_DISPLAY=wayland-1"}, source.env)
+			require.Equal(t, tt.provisional && tt.clientEnv == nil, target.envProvisional)
+			require.Equal(t, sourceEnv, source.env)
+		})
+	}
+}
+
+func TestAttachedClientEnvironment(t *testing.T) {
+	tests := []struct {
+		name   string
+		hello  protocol.Hello
+		want   []string
+		wantOK bool
+	}{
+		{
+			name:   "client-owned hello is recorded",
+			hello:  protocol.Hello{Env: []string{"A=1"}, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned},
+			want:   []string{"A=1"},
+			wantOK: true,
+		},
+		{
+			name:   "client-owned empty hello still owns an empty environment",
+			hello:  protocol.Hello{EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned},
+			want:   []string{},
+			wantOK: true,
+		},
+		{
+			name:  "daemon-owned hello records nothing",
+			hello: protocol.Hello{Env: []string{"A=1"}, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hello := tt.hello
+			hello.Env = append([]string(nil), tt.hello.Env...)
+			ac := &attachedClient{}
+			ac.setClientEnvironment(helloClientEnvironment(hello))
+			got, ok := ac.clientEnvironment()
+			require.Equal(t, tt.wantOK, ok)
+			require.Equal(t, tt.want, got)
+			if ok && len(hello.Env) > 0 {
+				hello.Env[0] = "MUTATED=1"
+				again, _ := ac.clientEnvironment()
+				require.Equal(t, tt.want, again, "the attachment owns a private copy")
+			}
 		})
 	}
 }

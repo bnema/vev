@@ -246,7 +246,7 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(effect *attachmentEffect
 
 		expectedTransport: effect.transport, sourceCapability: &capability, sourceEffect: effect, action: action,
 		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
-		activateTargetTab:       true, targetTabIndex: target.TabIndex, copySourceEnvironment: true, ready: true,
+		activateTargetTab:       true, targetTabIndex: target.TabIndex, refreshTargetEnvironment: true, ready: true,
 	})
 	if err != nil {
 		// Losing the exact source role is a benign stale action, not a notice for
@@ -536,16 +536,16 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		target: targetSess,
 		next:   ac,
 
-		expectedTransport:       expectedTransport,
-		sourceCapability:        sourceCapability,
-		sourceEffect:            sourceEffect,
-		action:                  action,
-		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
-		expectedSourceTab:       guard.expectedSource,
-		activateTargetTab:       target.TabIndex >= 0,
-		targetTabIndex:          target.TabIndex,
-		copySourceEnvironment:   true,
-		ready:                   true,
+		expectedTransport:        expectedTransport,
+		sourceCapability:         sourceCapability,
+		sourceEffect:             sourceEffect,
+		action:                   action,
+		expectedTargetLifecycle:  pickerTargetLifecycleFence(target),
+		expectedSourceTab:        guard.expectedSource,
+		activateTargetTab:        target.TabIndex >= 0,
+		targetTabIndex:           target.TabIndex,
+		refreshTargetEnvironment: true,
+		ready:                    true,
 	})
 	d.mu.Lock()
 	if err != nil {
@@ -573,7 +573,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
 			source: from, next: ac,
 			expectedTransport: sourceCapability.transport, sourceCapability: &sourceCapability, sourceEffect: sourceEffect, action: action,
-			expectedSourceTab: guard.expectedSource, copySourceEnvironment: true, ready: true,
+			expectedSourceTab: guard.expectedSource, refreshTargetEnvironment: true, ready: true,
 			createTargetLocked: func() (*session, error) {
 				if d.purgeAdmissionClosedLocked() {
 					return nil, errPurgeAdmissionClosed
@@ -629,7 +629,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: from, target: targetSess, next: ac,
 
-		expectedTransport: ac.transportSnapshot(), ready: true,
+		expectedTransport: ac.transportSnapshot(), refreshTargetEnvironment: true, ready: true,
 	})
 	d.mu.Lock()
 	if err != nil {

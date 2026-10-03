@@ -1480,8 +1480,8 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 	// Session state is the sole source for future PTY children. Refresh its
 	// session-bound variables before publishing the attachment; existing PTYs
 	// keep their original environment and can pull the refresh with `vev env`.
-	// A picker handoff deliberately leaves the daemon-owned environment and CWD
-	// untouched, even though Hello retains those fields for direct CLI clients.
+	// A daemon-owned (remote) attach leaves the environment and CWD untouched,
+	// even though Hello retains those fields for direct CLI clients.
 	sess.mu.Lock()
 	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
 		sess.adoptClientEnvironmentLocked(h.Env)
@@ -1504,6 +1504,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		navigationCapabilities: h.NavigationCapabilities,
 		terminalFocus:          h.TerminalFocus,
 		clientPID:              h.ClientPID,
+		clientEnv:              helloClientEnvironment(h),
 		terminalCapabilities:   terminalCapabilities,
 		capabilitiesSet:        true,
 	}

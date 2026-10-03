@@ -120,3 +120,57 @@ func TestSamePeerSwitchRejectsStaleTargetWithoutMutation(t *testing.T) {
 	failure := decodeServerMessage(t, failureFrame).(protocol.SamePeerSwitchFailure)
 	require.Equal(t, protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchStaleTarget}, failure)
 }
+
+func TestSamePeerSwitchRefreshesTargetFromSwitchingAttachment(t *testing.T) {
+	targetEnv := []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-old", "SSH_AUTH_SOCK=/run/other-agent"}
+	tests := []struct {
+		name      string
+		clientEnv []string
+		want      []string
+	}{
+		{
+			name:      "local attachment refreshes session-bound variables",
+			clientEnv: []string{"SHELL=/bin/bash", "WAYLAND_DISPLAY=wayland-1"},
+			want:      []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-1"},
+		},
+		{
+			name: "daemon-owned attachment leaves the target untouched",
+			want: targetEnv,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, source, ac, _, releases := newManualTabSession(t, 1)
+			defer releaseAll(releases)
+			ac.setClientEnvironment(tt.clientEnv)
+
+			lifecycle := domain.SessionLifecycleID{7}
+			target := &session{
+				sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
+				ctx:         source.ctx,
+				cancel:      func() {},
+				tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+				env:         append([]string(nil), targetEnv...),
+			}
+			publishTiledPaneOwners(target, target.tabs[0])
+			d.mu.Lock()
+			d.sessions[target.id] = target
+			d.mu.Unlock()
+			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+
+			token := source.captureAttachmentCapability(ac, ac.transport())
+			effect, admitted := ac.beginAttachmentEffect(token)
+			require.True(t, admitted)
+			defer effect.End()
+			requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
+			ac.offerSamePeerTarget(requestTarget)
+
+			d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
+
+			require.Same(t, target, ac.currentAttachmentSession())
+			target.mu.Lock()
+			defer target.mu.Unlock()
+			require.Equal(t, tt.want, target.env)
+		})
+	}
+}
