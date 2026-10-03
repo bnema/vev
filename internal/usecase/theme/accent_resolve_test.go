@@ -131,7 +131,6 @@ func TestResolveAccentAuto(t *testing.T) {
 			name: "known colors remain semantic without truecolor output",
 			theme: func() Theme {
 				t := paletteTheme(map[int]renderer.RGB{2: teal, 10: teal})
-				t.TrueColor = false
 				return t
 			}(),
 			want: Accent{RGB: teal, Slot: 2, Known: true},
@@ -206,7 +205,7 @@ func TestResolveAccentExplicitSlot(t *testing.T) {
 		},
 		{
 			name:   "explicit known slot remains semantic without truecolor output",
-			theme:  func() Theme { t := paletteTheme(map[int]renderer.RGB{3: teal}); t.TrueColor = false; return t }(),
+			theme:  paletteTheme(map[int]renderer.RGB{3: teal}),
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 3},
 			want:   Accent{RGB: teal, Slot: 3, Known: true},
 		},
@@ -273,7 +272,6 @@ func paletteTheme(colors map[int]renderer.RGB) Theme {
 		Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a},
 		HasFG:      true,
 		HasBG:      true,
-		TrueColor:  true,
 		Known:      true,
 		UsePalette: true,
 	}

@@ -21,7 +21,8 @@ message Hello {
   uint32 pixel_height = 9;
   string term_env = 10;
   string cwd = 11;
-  bool true_color = 12;
+  reserved 12;
+  reserved "true_color";
   uint32 max_output_in_flight = 13;
   repeated string env = 14;
   reserved 15;
@@ -39,6 +40,9 @@ message Hello {
   uint32 terminal_focus = 24;
   // PID of a local client process, for bar scripts. 0 when unknown or remote.
   uint32 client_pid = 25;
+  // Color output capability the client claims. Required: a missing message
+  // or an UNSPECIFIED mode is a decode error.
+  ColorCapabilities color = 26;
 }
 
 // Welcome answers an accepted attach.

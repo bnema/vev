@@ -28,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -115,7 +116,7 @@ func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, 
 	raw, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	conn := sessionwire.NewClientConnection(raw)
-	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
+	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}, Env: env}
 	require.NoError(t, conn.SendClient(hello))
 	p := recvTypedPump(conn)
 	select {

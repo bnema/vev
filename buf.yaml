@@ -18,5 +18,9 @@ breaking:
   ignore_only:
     # Protocol v58 intentionally replaces CommandResult.ok with a closed
     # outcome. Strict version equality prevents cross-version decoding.
+    # Protocol v65 replaces the Hello and Theme true_color bools with
+    # Hello.color capabilities under the same strict-equality rule.
     FIELD_NO_DELETE:
       - internal/protocol/wire/schema/command.proto
+      - internal/protocol/wire/schema/session.proto
+      - internal/protocol/wire/schema/terminal.proto

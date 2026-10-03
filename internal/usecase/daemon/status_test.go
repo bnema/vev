@@ -297,7 +297,6 @@ func TestDrawTopBarSnapshotStylesTabNameAndTitle(t *testing.T) {
 			HasFG:      true,
 			HasBG:      true,
 			Known:      true,
-			TrueColor:  true,
 		}
 		styles := themeui.NewStyles(theme)
 		require.False(t, styles.TabTitle.Equal(styles.StatusBar), "sanity: muted title style must differ from the base style on a truecolor theme")
@@ -445,7 +444,6 @@ func TestStatusCompositionUsesTruecolorTheme(t *testing.T) {
 		Background: renderer.RGB{R: 10, G: 20, B: 30},
 		HasFG:      true,
 		HasBG:      true,
-		TrueColor:  true,
 		Known:      true,
 	})
 
@@ -523,7 +521,7 @@ func TestApplyThemeForcedBuiltinThemePropagatesToChromeAndPanes(t *testing.T) {
 			d.applyTheme(sess, ac, protocol.Theme{
 				HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 				HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-				TrueColor: true, SchemeKnown: true, Light: !tc.want.Light,
+				SchemeKnown: true, Light: !tc.want.Light,
 			})
 
 			require.Equal(t, tc.want, ac.getAppliedTheme().Raw)
@@ -578,7 +576,7 @@ func TestAutoThemeDetachClearsPaneColorScheme(t *testing.T) {
 	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-		TrueColor: true, SchemeKnown: true, Light: true,
+		SchemeKnown: true, Light: true,
 	})
 	assertSessionColorScheme(t, sess, true)
 
@@ -595,7 +593,7 @@ func TestAttachClientClearsStaleColorSchemeOnReplacement(t *testing.T) {
 	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-		TrueColor: true, SchemeKnown: true, Light: true,
+		SchemeKnown: true, Light: true,
 	})
 	assertSessionColorScheme(t, sess, true)
 
@@ -614,7 +612,7 @@ func TestForcedThemeDetachPreservesBuiltinOnPanes(t *testing.T) {
 	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-		TrueColor: true, SchemeKnown: true, Light: true,
+		SchemeKnown: true, Light: true,
 	})
 
 	d.clientGone(sess, ac, ac.transport(), true)
@@ -631,12 +629,11 @@ func TestApplyThemeAutoUnknownDoesNotClobberPaneColorScheme(t *testing.T) {
 	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-		TrueColor: true, SchemeKnown: true, Light: true,
+		SchemeKnown: true, Light: true,
 	})
 	d.applyTheme(sess, ac, protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 7, G: 8, B: 9},
 		HasBackground: true, Background: renderer.RGB{R: 10, G: 11, B: 12},
-		TrueColor: true,
 	})
 
 	assertSessionDefaultColors(t, sess, renderer.RGB{R: 7, G: 8, B: 9}, renderer.RGB{R: 10, G: 11, B: 12})
@@ -1094,7 +1091,7 @@ func TestStatusBarRendersMRUNamesAndInlineBell(t *testing.T) {
 }
 
 func TestStatusBarCurrentSessionUsesAccentStyle(t *testing.T) {
-	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, TrueColor: true, Known: true}
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}, HasFG: true, HasBG: true, Known: true}
 	styles := themeui.NewStyles(theme)
 	row := make([]renderer.Cell, 16)
 
@@ -1141,7 +1138,7 @@ func TestStatusBarContextualRanksPreserveOriginalRanksAndSelectedAccent(t *testi
 }
 
 func TestStatusBarMRUGradientTruecolorAndPlainFallback(t *testing.T) {
-	theme := themeui.Theme{Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8}, Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a}, HasFG: true, HasBG: true, TrueColor: true, Known: true, UsePalette: true}
+	theme := themeui.Theme{Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8}, Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a}, HasFG: true, HasBG: true, Known: true, UsePalette: true}
 	theme.Palette[2] = renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}
 	theme.Palette[10] = theme.Palette[2]
 	theme.PaletteKnown = 1<<2 | 1<<10
@@ -1344,7 +1341,6 @@ func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
 		Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a},
 		HasFG:      true,
 		HasBG:      true,
-		TrueColor:  true,
 		Known:      true,
 		UsePalette: true,
 	}

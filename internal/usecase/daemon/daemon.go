@@ -1477,7 +1477,7 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		// otherwise falls back to the session's normal first-tab repair.
 		initialTabIndex = preferredTabIndex(sess, h.PreferredTabID)
 	}
-	terminalCapabilities := terminalcap.Resolve(h.Env, h.TrueColor)
+	terminalCapabilities := terminalcap.Resolve(h.Env, h.Color)
 	// Kitty graphics are enabled only by the explicit direct-terminal
 	// declaration in Hello. Environment values remain useful for color and
 	// diagnostics, but cannot authorize terminal-global graphics side effects.

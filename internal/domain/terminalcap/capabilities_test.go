@@ -16,6 +16,8 @@ func TestColorCapabilities(t *testing.T) {
 		{name: "zero value is truecolor", in: ColorCapabilities{}, wantRGB: true, wantColors: 16777216},
 		{name: "truecolor", in: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, wantRGB: true, wantColors: 16777216},
 		{name: "ansi256", in: ColorCapabilities{Mode: ANSI256}, wantRGB: false, wantColors: 256},
+		{name: "ansi16", in: ColorCapabilities{Mode: ANSI16, Source: SourceForced}, wantRGB: false, wantColors: 16},
+		{name: "monochrome", in: ColorCapabilities{Mode: Monochrome, Source: SourceForced}, wantRGB: false, wantColors: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -25,20 +27,44 @@ func TestColorCapabilities(t *testing.T) {
 	}
 }
 
+func TestColorCapabilitiesValid(t *testing.T) {
+	tests := []struct {
+		name string
+		in   ColorCapabilities
+		want bool
+	}{
+		{name: "zero value", in: ColorCapabilities{}, want: true},
+		{name: "every mode and source", in: ColorCapabilities{Mode: Monochrome, Source: SourceForced}, want: true},
+		{name: "unknown mode", in: ColorCapabilities{Mode: Monochrome + 1}},
+		{name: "unknown source", in: ColorCapabilities{Source: SourceForced + 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.in.Valid())
+		})
+	}
+}
+
 func TestResolve(t *testing.T) {
 	tests := []struct {
 		name     string
 		env      []string
-		declared bool
+		declared ColorCapabilities
 		want     ColorCapabilities
 		wantApp  Application
 	}{
-		{name: "256 color without declaration stays indexed", env: []string{"TERM=xterm-256color"}, want: ColorCapabilities{Mode: ANSI256, Source: SourceDeclared}},
-		{name: "declaration upgrades indexed terminal", env: []string{"TERM=xterm-256color"}, declared: true, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}},
-		{name: "declaration upgrades unknown terminal", env: []string{"TERM=unknown"}, declared: true, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}},
-		{name: "declaration keeps environment truecolor detection", env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, declared: true, want: ColorCapabilities{Mode: TrueColor, Source: SourceHeuristic}, wantApp: ApplicationKitty},
-		{name: "environment truecolor without declaration", env: []string{"TERM=xterm-256color", "COLORTERM=truecolor"}, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}},
-		{name: "declaration keeps application", env: []string{"TERM=tmux-256color", "KITTY_WINDOW_ID=1"}, declared: true, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, wantApp: ApplicationKitty},
+		{name: "unknown claim falls back to detection", env: []string{"TERM=xterm-256color"}, want: ColorCapabilities{Mode: ANSI256, Source: SourceDeclared}},
+		{name: "unknown truecolor claim falls back to detection", env: []string{"TERM=xterm-256color"}, declared: ColorCapabilities{Mode: TrueColor}, want: ColorCapabilities{Mode: ANSI256, Source: SourceDeclared}},
+		{name: "unknown claim with detected truecolor", env: []string{"TERM=xterm-256color", "COLORTERM=truecolor"}, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}},
+		{name: "declared truecolor overrides indexed detection", env: []string{"TERM=xterm-256color"}, declared: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}},
+		{name: "declared truecolor on unknown terminal", env: []string{"TERM=unknown"}, declared: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}},
+		{name: "declared 256 overrides detected truecolor verbatim", env: []string{"TERM=xterm-256color", "COLORTERM=truecolor"}, declared: ColorCapabilities{Mode: ANSI256, Source: SourceDeclared}, want: ColorCapabilities{Mode: ANSI256, Source: SourceDeclared}},
+		{name: "forced 16 colors", env: []string{"TERM=xterm-256color", "COLORTERM=truecolor"}, declared: ColorCapabilities{Mode: ANSI16, Source: SourceForced}, want: ColorCapabilities{Mode: ANSI16, Source: SourceForced}},
+		{name: "forced monochrome", env: nil, declared: ColorCapabilities{Mode: Monochrome, Source: SourceForced}, want: ColorCapabilities{Mode: Monochrome, Source: SourceForced}},
+		{name: "heuristic truecolor upgrades weaker detection", env: []string{"TERM=xterm-256color"}, declared: ColorCapabilities{Mode: TrueColor, Source: SourceHeuristic}, want: ColorCapabilities{Mode: TrueColor, Source: SourceHeuristic}},
+		{name: "heuristic truecolor keeps stronger detection", env: []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1"}, declared: ColorCapabilities{Mode: TrueColor, Source: SourceHeuristic}, want: ColorCapabilities{Mode: TrueColor, Source: SourceHeuristic}, wantApp: ApplicationKitty},
+		{name: "heuristic 16 colors falls back to detection", env: []string{"TERM=xterm-256color"}, declared: ColorCapabilities{Mode: ANSI16, Source: SourceHeuristic}, want: ColorCapabilities{Mode: ANSI256, Source: SourceDeclared}},
+		{name: "declared claim keeps detected application", env: []string{"TERM=tmux-256color", "KITTY_WINDOW_ID=1"}, declared: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, want: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, wantApp: ApplicationKitty},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

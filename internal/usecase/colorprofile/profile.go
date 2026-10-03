@@ -9,10 +9,17 @@ import (
 )
 
 // Profile returns the renderer profile for c. A terminal without RGB support
-// gets indexed colors, so RGB surfaces are quantized instead of dropped.
+// gets a reduced palette, so RGB surfaces are quantized instead of dropped.
+// Unknown modes fall back to the conservative 256-color profile.
 func Profile(c terminalcap.ColorCapabilities) ansi.ColorProfile {
-	if c.RGB() {
+	switch c.Mode {
+	case terminalcap.TrueColor:
 		return ansi.ColorProfileTrueColor
+	case terminalcap.ANSI16:
+		return ansi.ColorProfileANSI16
+	case terminalcap.Monochrome:
+		return ansi.ColorProfileMonochrome
+	default:
+		return ansi.ColorProfileANSI256
 	}
-	return ansi.ColorProfileANSI256
 }

@@ -65,6 +65,32 @@ message RGB {
   uint32 b = 3;
 }
 
+// ColorMode is the closed color output mode of one attachment
+// (terminalcap.ColorMode). UNSPECIFIED is never a valid value on the wire.
+enum ColorMode {
+  COLOR_MODE_UNSPECIFIED = 0;
+  COLOR_MODE_TRUE_COLOR = 1;
+  COLOR_MODE_ANSI256 = 2;
+  COLOR_MODE_ANSI16 = 3;
+  COLOR_MODE_MONOCHROME = 4;
+}
+
+// ColorSource records how confidently a color mode was selected
+// (terminalcap.Source). UNSPECIFIED is the explicit "unknown" source.
+enum ColorSource {
+  COLOR_SOURCE_UNSPECIFIED = 0;
+  COLOR_SOURCE_HEURISTIC = 1;
+  COLOR_SOURCE_DECLARED = 2;
+  COLOR_SOURCE_FORCED = 3;
+}
+
+// ColorCapabilities is the color output capability a client claims for one
+// attachment (terminalcap.ColorCapabilities).
+message ColorCapabilities {
+  ColorMode mode = 1;
+  ColorSource source = 2;
+}
+
 // CellStyle is the bounded style block of one preview cell
 // (renderer.Style). Indexed colors use int32 so -1 (unset) survives.
 message CellStyle {

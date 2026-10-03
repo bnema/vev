@@ -14,8 +14,7 @@ import (
 func lifecycleTheme(foreground, background renderer.RGB, palette map[uint8]renderer.RGB) protocol.Theme {
 	out := protocol.Theme{
 		Foreground: foreground, Background: background,
-		HasForeground: true, HasBackground: true, TrueColor: true,
-		SchemeKnown: true,
+		HasForeground: true, HasBackground: true, SchemeKnown: true,
 	}
 	for slot, color := range palette {
 		out.Palette[slot] = color
@@ -175,8 +174,7 @@ func TestAccentLifecycleNeutralChromeByteSnapshots(t *testing.T) {
 			d.ApplyConfig(tt.config)
 			got := chromeStyleSnapshot(t, d.resolveAppliedTheme(themeui.Theme{
 				Foreground: raw.Foreground, Background: raw.Background, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown,
-				HasFG: true, HasBG: true, TrueColor: true,
-			}).Resolved.Styles)
+				HasFG: true, HasBG: true}).Resolved.Styles)
 			require.Equal(t, []byte(tt.want), got)
 		})
 	}

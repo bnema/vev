@@ -27,7 +27,6 @@ func TestResolveAccentIndexedFallbackTruthTable(t *testing.T) {
 			name: "explicit known slot without truecolor remains semantic",
 			theme: func() Theme {
 				t := paletteTheme(map[int]renderer.RGB{5: teal})
-				t.TrueColor = false
 				return t
 			}(),
 			policy: explicit,
@@ -37,7 +36,7 @@ func TestResolveAccentIndexedFallbackTruthTable(t *testing.T) {
 			name: "automatic absent osc palette keeps dark scheme indexed blue fallback",
 			theme: Theme{
 				Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8}, Background: renderer.RGB{R: 8, G: 9, B: 10},
-				HasFG: true, HasBG: true, TrueColor: true, Known: true, SchemeKnown: true, UsePalette: true,
+				HasFG: true, HasBG: true, Known: true, SchemeKnown: true, UsePalette: true,
 			},
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto},
 			want:   Accent{Slot: 12, IndexedOnly: true},
@@ -45,14 +44,14 @@ func TestResolveAccentIndexedFallbackTruthTable(t *testing.T) {
 		{
 			name: "automatic absent defaults keeps light scheme indexed blue fallback",
 			theme: Theme{
-				TrueColor: true, Known: true, SchemeKnown: true, Light: true, UsePalette: true,
+				Known: true, SchemeKnown: true, Light: true, UsePalette: true,
 			},
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto},
 			want:   Accent{Slot: 4, IndexedOnly: true},
 		},
 		{
 			name:   "automatic absent palette and unknown scheme stays neutral",
-			theme:  Theme{TrueColor: true, Known: true, UsePalette: true},
+			theme:  Theme{Known: true, UsePalette: true},
 			policy: domain.ThemeAccent{Mode: domain.ThemeAccentAuto},
 			want:   Accent{},
 		},

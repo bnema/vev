@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 )
@@ -29,6 +30,10 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 		return nil, err
 	}
 	exact := exactTargetToWire(message.ExactTarget)
+	color, err := colorToWire(message.Color)
+	if err != nil {
+		return nil, err
+	}
 	return &wire.Hello{
 		Version:                uint32(message.Version),
 		Intent:                 uint32(message.Intent),
@@ -41,7 +46,7 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 		PixelHeight:            pixelHeight,
 		TermEnv:                message.TermEnv,
 		Cwd:                    message.Cwd,
-		TrueColor:              message.TrueColor,
+		Color:                  color,
 		MaxOutputInFlight:      uint32(message.MaxOutputInFlight),
 		Env:                    append([]string(nil), message.Env...),
 		SessionTarget:          sessionTarget,
@@ -55,6 +60,76 @@ func helloToWire(message protocol.Hello) (*wire.Hello, error) {
 		TerminalFocus:          uint32(message.TerminalFocus),
 		ClientPid:              message.ClientPID,
 	}, nil
+}
+
+// colorToWire maps a color capability to its wire message. Unknown semantic
+// values are never encoded.
+func colorToWire(color terminalcap.ColorCapabilities) (*wire.ColorCapabilities, error) {
+	if !color.Valid() {
+		return nil, errProtoConvertRange
+	}
+	var mode wire.ColorMode
+	switch color.Mode {
+	case terminalcap.TrueColor:
+		mode = wire.ColorMode_COLOR_MODE_TRUE_COLOR
+	case terminalcap.ANSI256:
+		mode = wire.ColorMode_COLOR_MODE_ANSI256
+	case terminalcap.ANSI16:
+		mode = wire.ColorMode_COLOR_MODE_ANSI16
+	case terminalcap.Monochrome:
+		mode = wire.ColorMode_COLOR_MODE_MONOCHROME
+	default:
+		return nil, errProtoConvertRange
+	}
+	var source wire.ColorSource
+	switch color.Source {
+	case terminalcap.SourceUnknown:
+		source = wire.ColorSource_COLOR_SOURCE_UNSPECIFIED
+	case terminalcap.SourceHeuristic:
+		source = wire.ColorSource_COLOR_SOURCE_HEURISTIC
+	case terminalcap.SourceDeclared:
+		source = wire.ColorSource_COLOR_SOURCE_DECLARED
+	case terminalcap.SourceForced:
+		source = wire.ColorSource_COLOR_SOURCE_FORCED
+	default:
+		return nil, errProtoConvertRange
+	}
+	return &wire.ColorCapabilities{Mode: mode, Source: source}, nil
+}
+
+// colorFromWire is strict: Hello must claim a color capability, so a missing
+// message, an UNSPECIFIED mode, or any value outside the closed enums is a
+// decode error. An UNSPECIFIED source is the explicit "unknown" source.
+func colorFromWire(message *wire.ColorCapabilities) (terminalcap.ColorCapabilities, error) {
+	if message == nil {
+		return terminalcap.ColorCapabilities{}, errProtoConvertRange
+	}
+	var color terminalcap.ColorCapabilities
+	switch message.GetMode() {
+	case wire.ColorMode_COLOR_MODE_TRUE_COLOR:
+		color.Mode = terminalcap.TrueColor
+	case wire.ColorMode_COLOR_MODE_ANSI256:
+		color.Mode = terminalcap.ANSI256
+	case wire.ColorMode_COLOR_MODE_ANSI16:
+		color.Mode = terminalcap.ANSI16
+	case wire.ColorMode_COLOR_MODE_MONOCHROME:
+		color.Mode = terminalcap.Monochrome
+	default:
+		return terminalcap.ColorCapabilities{}, errProtoConvertRange
+	}
+	switch message.GetSource() {
+	case wire.ColorSource_COLOR_SOURCE_UNSPECIFIED:
+		color.Source = terminalcap.SourceUnknown
+	case wire.ColorSource_COLOR_SOURCE_HEURISTIC:
+		color.Source = terminalcap.SourceHeuristic
+	case wire.ColorSource_COLOR_SOURCE_DECLARED:
+		color.Source = terminalcap.SourceDeclared
+	case wire.ColorSource_COLOR_SOURCE_FORCED:
+		color.Source = terminalcap.SourceForced
+	default:
+		return terminalcap.ColorCapabilities{}, errProtoConvertRange
+	}
+	return color, nil
 }
 
 func geometryToWire(size domain.Size, pixelWidth, pixelHeight int) (uint32, uint32, uint32, uint32, error) {
@@ -108,7 +183,10 @@ func helloFromWire(message *wire.Hello) (protocol.Hello, error) {
 	hello.PixelHeight = int(pixelHeight)
 	hello.TermEnv = message.GetTermEnv()
 	hello.Cwd = message.GetCwd()
-	hello.TrueColor = message.GetTrueColor()
+	hello.Color, err = colorFromWire(message.GetColor())
+	if err != nil {
+		return protocol.Hello{}, err
+	}
 	window, err := mustUint8(message.GetMaxOutputInFlight())
 	if err != nil {
 		return protocol.Hello{}, err

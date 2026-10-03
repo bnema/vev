@@ -11,7 +11,12 @@ const (
 	// historical renderer behavior; live Hello paths always use the detector.
 	TrueColor ColorMode = iota
 	ANSI256
+	ANSI16
+	Monochrome
 )
+
+// Valid reports whether m is one of the defined color modes.
+func (m ColorMode) Valid() bool { return m <= Monochrome }
 
 // ColorCapabilities is the color output capability selected for one attachment
 // and how confidently it was selected.
@@ -19,6 +24,9 @@ type ColorCapabilities struct {
 	Mode   ColorMode
 	Source Source
 }
+
+// Valid reports whether both the mode and the source are defined values.
+func (c ColorCapabilities) Valid() bool { return c.Mode.Valid() && c.Source.Valid() }
 
 // RGB reports whether the attachment can receive RGB ANSI output.
 func (c ColorCapabilities) RGB() bool { return c.Mode == TrueColor }
@@ -28,6 +36,10 @@ func (c ColorCapabilities) Colors() int {
 	switch c.Mode {
 	case ANSI256:
 		return 256
+	case ANSI16:
+		return 16
+	case Monochrome:
+		return 0
 	default:
 		return 1 << 24
 	}
@@ -40,7 +52,13 @@ const (
 	SourceUnknown Source = iota
 	SourceHeuristic
 	SourceDeclared
+	// SourceForced is an explicit user override that detection must not
+	// second-guess and that never warrants a downgrade notice.
+	SourceForced
 )
+
+// Valid reports whether s is one of the defined sources.
+func (s Source) Valid() bool { return s <= SourceForced }
 
 // Application identifies a known terminal application when its environment
 // provides a trustworthy origin signal.
@@ -111,12 +129,17 @@ func environmentValues(env []string) map[string]string {
 }
 
 // Resolve selects attachment capabilities from the client environment and the
-// client's explicit color declaration. A declared truecolor client upgrades a
-// weaker environment detection to declared TrueColor.
-func Resolve(env []string, declaredTrueColor bool) Capabilities {
+// client's color claim. A declared or forced client color is used verbatim. A
+// heuristic truecolor claim upgrades a weaker daemon-side detection, because
+// the daemon may not see the client environment that produced the inference.
+// Any other claim falls back to environment detection.
+func Resolve(env []string, declared ColorCapabilities) Capabilities {
 	caps := Detect(env)
-	if declaredTrueColor && !caps.Color.RGB() {
-		caps.Color = ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}
+	switch {
+	case declared.Source == SourceDeclared || declared.Source == SourceForced:
+		caps.Color = declared
+	case declared.Source == SourceHeuristic && declared.RGB() && !caps.Color.RGB():
+		caps.Color = declared
 	}
 	return caps
 }

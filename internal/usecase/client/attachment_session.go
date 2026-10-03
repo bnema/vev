@@ -752,7 +752,7 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		PixelHeight: geometry.PixelHeight,
 		TermEnv:     w.cfg.TermEnv,
 		Cwd:         cwd,
-		TrueColor:   w.cfg.Color.RGB(),
+		Color:       w.cfg.Color,
 		// A remote attach reaches the terminal through this client, so both
 		// declarations describe this client's outer terminal.
 		KittyDirectGraphics: w.cfg.Capabilities.KittyGraphics,

@@ -189,7 +189,6 @@ func TestAttachmentInputPublishesClearedThenDefinitivePalette(t *testing.T) {
 	first.awaitQueries(t, paletteColorBatch, 1)
 	require.True(t, strings.HasPrefix(first.term.written(), "\x1b[Hready"), "the query follows the committed frame")
 	cleared := first.awaitThemes(t, 1)[0]
-	require.True(t, cleared.TrueColor)
 	require.Zero(t, cleared.PaletteKnown)
 	require.False(t, cleared.HasForeground)
 

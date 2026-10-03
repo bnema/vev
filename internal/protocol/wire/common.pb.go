@@ -28,6 +28,117 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// ColorMode is the closed color output mode of one attachment
+// (terminalcap.ColorMode). UNSPECIFIED is never a valid value on the wire.
+type ColorMode int32
+
+const (
+	ColorMode_COLOR_MODE_UNSPECIFIED ColorMode = 0
+	ColorMode_COLOR_MODE_TRUE_COLOR  ColorMode = 1
+	ColorMode_COLOR_MODE_ANSI256     ColorMode = 2
+	ColorMode_COLOR_MODE_ANSI16      ColorMode = 3
+	ColorMode_COLOR_MODE_MONOCHROME  ColorMode = 4
+)
+
+// Enum value maps for ColorMode.
+var (
+	ColorMode_name = map[int32]string{
+		0: "COLOR_MODE_UNSPECIFIED",
+		1: "COLOR_MODE_TRUE_COLOR",
+		2: "COLOR_MODE_ANSI256",
+		3: "COLOR_MODE_ANSI16",
+		4: "COLOR_MODE_MONOCHROME",
+	}
+	ColorMode_value = map[string]int32{
+		"COLOR_MODE_UNSPECIFIED": 0,
+		"COLOR_MODE_TRUE_COLOR":  1,
+		"COLOR_MODE_ANSI256":     2,
+		"COLOR_MODE_ANSI16":      3,
+		"COLOR_MODE_MONOCHROME":  4,
+	}
+)
+
+func (x ColorMode) Enum() *ColorMode {
+	p := new(ColorMode)
+	*p = x
+	return p
+}
+
+func (x ColorMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ColorMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_proto_enumTypes[0].Descriptor()
+}
+
+func (ColorMode) Type() protoreflect.EnumType {
+	return &file_common_proto_enumTypes[0]
+}
+
+func (x ColorMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ColorMode.Descriptor instead.
+func (ColorMode) EnumDescriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{0}
+}
+
+// ColorSource records how confidently a color mode was selected
+// (terminalcap.Source). UNSPECIFIED is the explicit "unknown" source.
+type ColorSource int32
+
+const (
+	ColorSource_COLOR_SOURCE_UNSPECIFIED ColorSource = 0
+	ColorSource_COLOR_SOURCE_HEURISTIC   ColorSource = 1
+	ColorSource_COLOR_SOURCE_DECLARED    ColorSource = 2
+	ColorSource_COLOR_SOURCE_FORCED      ColorSource = 3
+)
+
+// Enum value maps for ColorSource.
+var (
+	ColorSource_name = map[int32]string{
+		0: "COLOR_SOURCE_UNSPECIFIED",
+		1: "COLOR_SOURCE_HEURISTIC",
+		2: "COLOR_SOURCE_DECLARED",
+		3: "COLOR_SOURCE_FORCED",
+	}
+	ColorSource_value = map[string]int32{
+		"COLOR_SOURCE_UNSPECIFIED": 0,
+		"COLOR_SOURCE_HEURISTIC":   1,
+		"COLOR_SOURCE_DECLARED":    2,
+		"COLOR_SOURCE_FORCED":      3,
+	}
+)
+
+func (x ColorSource) Enum() *ColorSource {
+	p := new(ColorSource)
+	*p = x
+	return p
+}
+
+func (x ColorSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ColorSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_proto_enumTypes[1].Descriptor()
+}
+
+func (ColorSource) Type() protoreflect.EnumType {
+	return &file_common_proto_enumTypes[1]
+}
+
+func (x ColorSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ColorSource.Descriptor instead.
+func (ColorSource) EnumDescriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{1}
+}
+
 // LifecycleID is the opaque 16-byte identity of one session lifecycle
 // (domain.SessionLifecycleID / domain.IncarnationID).
 type LifecycleID struct {
@@ -463,6 +574,60 @@ func (x *RGB) GetB() uint32 {
 	return 0
 }
 
+// ColorCapabilities is the color output capability a client claims for one
+// attachment (terminalcap.ColorCapabilities).
+type ColorCapabilities struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Mode          ColorMode              `protobuf:"varint,1,opt,name=mode,proto3,enum=vev.wire.v1.ColorMode" json:"mode,omitempty"`
+	Source        ColorSource            `protobuf:"varint,2,opt,name=source,proto3,enum=vev.wire.v1.ColorSource" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ColorCapabilities) Reset() {
+	*x = ColorCapabilities{}
+	mi := &file_common_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ColorCapabilities) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ColorCapabilities) ProtoMessage() {}
+
+func (x *ColorCapabilities) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ColorCapabilities.ProtoReflect.Descriptor instead.
+func (*ColorCapabilities) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ColorCapabilities) GetMode() ColorMode {
+	if x != nil {
+		return x.Mode
+	}
+	return ColorMode_COLOR_MODE_UNSPECIFIED
+}
+
+func (x *ColorCapabilities) GetSource() ColorSource {
+	if x != nil {
+		return x.Source
+	}
+	return ColorSource_COLOR_SOURCE_UNSPECIFIED
+}
+
 // CellStyle is the bounded style block of one preview cell
 // (renderer.Style). Indexed colors use int32 so -1 (unset) survives.
 type CellStyle struct {
@@ -488,7 +653,7 @@ type CellStyle struct {
 
 func (x *CellStyle) Reset() {
 	*x = CellStyle{}
-	mi := &file_common_proto_msgTypes[6]
+	mi := &file_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -500,7 +665,7 @@ func (x *CellStyle) String() string {
 func (*CellStyle) ProtoMessage() {}
 
 func (x *CellStyle) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[6]
+	mi := &file_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -513,7 +678,7 @@ func (x *CellStyle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CellStyle.ProtoReflect.Descriptor instead.
 func (*CellStyle) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{6}
+	return file_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CellStyle) GetBold() bool {
@@ -634,7 +799,7 @@ type PreviewCell struct {
 
 func (x *PreviewCell) Reset() {
 	*x = PreviewCell{}
-	mi := &file_common_proto_msgTypes[7]
+	mi := &file_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -646,7 +811,7 @@ func (x *PreviewCell) String() string {
 func (*PreviewCell) ProtoMessage() {}
 
 func (x *PreviewCell) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[7]
+	mi := &file_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -659,7 +824,7 @@ func (x *PreviewCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreviewCell.ProtoReflect.Descriptor instead.
 func (*PreviewCell) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{7}
+	return file_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PreviewCell) GetRuneValue() uint32 {
@@ -696,7 +861,7 @@ type RemoteRegistration struct {
 
 func (x *RemoteRegistration) Reset() {
 	*x = RemoteRegistration{}
-	mi := &file_common_proto_msgTypes[8]
+	mi := &file_common_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -708,7 +873,7 @@ func (x *RemoteRegistration) String() string {
 func (*RemoteRegistration) ProtoMessage() {}
 
 func (x *RemoteRegistration) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[8]
+	mi := &file_common_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -721,7 +886,7 @@ func (x *RemoteRegistration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteRegistration.ProtoReflect.Descriptor instead.
 func (*RemoteRegistration) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{8}
+	return file_common_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RemoteRegistration) GetEndpoint() string {
@@ -786,7 +951,10 @@ const file_common_proto_rawDesc = "" +
 	"\x03RGB\x12\f\n" +
 	"\x01r\x18\x01 \x01(\rR\x01r\x12\f\n" +
 	"\x01g\x18\x02 \x01(\rR\x01g\x12\f\n" +
-	"\x01b\x18\x03 \x01(\rR\x01b\"\xf0\x04\n" +
+	"\x01b\x18\x03 \x01(\rR\x01b\"q\n" +
+	"\x11ColorCapabilities\x12*\n" +
+	"\x04mode\x18\x01 \x01(\x0e2\x16.vev.wire.v1.ColorModeR\x04mode\x120\n" +
+	"\x06source\x18\x02 \x01(\x0e2\x18.vev.wire.v1.ColorSourceR\x06source\"\xf0\x04\n" +
 	"\tCellStyle\x12\x12\n" +
 	"\x04bold\x18\x01 \x01(\bR\x04bold\x12\x16\n" +
 	"\x06italic\x18\x02 \x01(\bR\x06italic\x12\x18\n" +
@@ -818,7 +986,18 @@ const file_common_proto_rawDesc = "" +
 	"\vincarnation\x18\x02 \x01(\fR\vincarnation\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x03 \x01(\x04R\n" +
-	"generationB-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
+	"generation*\x8c\x01\n" +
+	"\tColorMode\x12\x1a\n" +
+	"\x16COLOR_MODE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15COLOR_MODE_TRUE_COLOR\x10\x01\x12\x16\n" +
+	"\x12COLOR_MODE_ANSI256\x10\x02\x12\x15\n" +
+	"\x11COLOR_MODE_ANSI16\x10\x03\x12\x19\n" +
+	"\x15COLOR_MODE_MONOCHROME\x10\x04*{\n" +
+	"\vColorSource\x12\x1c\n" +
+	"\x18COLOR_SOURCE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16COLOR_SOURCE_HEURISTIC\x10\x01\x12\x19\n" +
+	"\x15COLOR_SOURCE_DECLARED\x10\x02\x12\x17\n" +
+	"\x13COLOR_SOURCE_FORCED\x10\x03B-Z+github.com/bnema/vev/internal/protocol/wireb\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once
@@ -832,32 +1011,38 @@ func file_common_proto_rawDescGZIP() []byte {
 	return file_common_proto_rawDescData
 }
 
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_common_proto_goTypes = []any{
-	(*LifecycleID)(nil),         // 0: vev.wire.v1.LifecycleID
-	(*TabSelector)(nil),         // 1: vev.wire.v1.TabSelector
-	(*RemoteTarget)(nil),        // 2: vev.wire.v1.RemoteTarget
-	(*ExactTarget)(nil),         // 3: vev.wire.v1.ExactTarget
-	(*SessionAttachTarget)(nil), // 4: vev.wire.v1.SessionAttachTarget
-	(*RGB)(nil),                 // 5: vev.wire.v1.RGB
-	(*CellStyle)(nil),           // 6: vev.wire.v1.CellStyle
-	(*PreviewCell)(nil),         // 7: vev.wire.v1.PreviewCell
-	(*RemoteRegistration)(nil),  // 8: vev.wire.v1.RemoteRegistration
+	(ColorMode)(0),              // 0: vev.wire.v1.ColorMode
+	(ColorSource)(0),            // 1: vev.wire.v1.ColorSource
+	(*LifecycleID)(nil),         // 2: vev.wire.v1.LifecycleID
+	(*TabSelector)(nil),         // 3: vev.wire.v1.TabSelector
+	(*RemoteTarget)(nil),        // 4: vev.wire.v1.RemoteTarget
+	(*ExactTarget)(nil),         // 5: vev.wire.v1.ExactTarget
+	(*SessionAttachTarget)(nil), // 6: vev.wire.v1.SessionAttachTarget
+	(*RGB)(nil),                 // 7: vev.wire.v1.RGB
+	(*ColorCapabilities)(nil),   // 8: vev.wire.v1.ColorCapabilities
+	(*CellStyle)(nil),           // 9: vev.wire.v1.CellStyle
+	(*PreviewCell)(nil),         // 10: vev.wire.v1.PreviewCell
+	(*RemoteRegistration)(nil),  // 11: vev.wire.v1.RemoteRegistration
 }
 var file_common_proto_depIdxs = []int32{
-	0, // 0: vev.wire.v1.RemoteTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	1, // 1: vev.wire.v1.RemoteTarget.stopped_tab:type_name -> vev.wire.v1.TabSelector
-	0, // 2: vev.wire.v1.ExactTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	0, // 3: vev.wire.v1.SessionAttachTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
-	5, // 4: vev.wire.v1.CellStyle.foreground_rgb:type_name -> vev.wire.v1.RGB
-	5, // 5: vev.wire.v1.CellStyle.background_rgb:type_name -> vev.wire.v1.RGB
-	5, // 6: vev.wire.v1.CellStyle.underline_color_rgb:type_name -> vev.wire.v1.RGB
-	6, // 7: vev.wire.v1.PreviewCell.style:type_name -> vev.wire.v1.CellStyle
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	2,  // 0: vev.wire.v1.RemoteTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	3,  // 1: vev.wire.v1.RemoteTarget.stopped_tab:type_name -> vev.wire.v1.TabSelector
+	2,  // 2: vev.wire.v1.ExactTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	2,  // 3: vev.wire.v1.SessionAttachTarget.lifecycle_id:type_name -> vev.wire.v1.LifecycleID
+	0,  // 4: vev.wire.v1.ColorCapabilities.mode:type_name -> vev.wire.v1.ColorMode
+	1,  // 5: vev.wire.v1.ColorCapabilities.source:type_name -> vev.wire.v1.ColorSource
+	7,  // 6: vev.wire.v1.CellStyle.foreground_rgb:type_name -> vev.wire.v1.RGB
+	7,  // 7: vev.wire.v1.CellStyle.background_rgb:type_name -> vev.wire.v1.RGB
+	7,  // 8: vev.wire.v1.CellStyle.underline_color_rgb:type_name -> vev.wire.v1.RGB
+	9,  // 9: vev.wire.v1.PreviewCell.style:type_name -> vev.wire.v1.CellStyle
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -871,13 +1056,14 @@ func file_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   9,
+			NumEnums:      2,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_common_proto_goTypes,
 		DependencyIndexes: file_common_proto_depIdxs,
+		EnumInfos:         file_common_proto_enumTypes,
 		MessageInfos:      file_common_proto_msgTypes,
 	}.Build()
 	File_common_proto = out.File

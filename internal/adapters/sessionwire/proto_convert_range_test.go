@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
@@ -79,6 +80,62 @@ func TestNarrowingConversionsRejectOverflow(t *testing.T) {
 				return err
 			},
 			wantErr: protocol.ErrInvalidHello,
+		},
+		{
+			name: "hello color missing",
+			run: func(t *testing.T) error {
+				hello := testWireHello(t)
+				hello.Color = nil
+				_, err := helloFromWire(hello)
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
+			name: "hello color mode unspecified",
+			run: func(t *testing.T) error {
+				hello := testWireHello(t)
+				hello.Color.Mode = wire.ColorMode_COLOR_MODE_UNSPECIFIED
+				_, err := helloFromWire(hello)
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
+			name: "hello color mode unknown",
+			run: func(t *testing.T) error {
+				hello := testWireHello(t)
+				hello.Color.Mode = wire.ColorMode(5)
+				_, err := helloFromWire(hello)
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
+			name: "hello color source unknown",
+			run: func(t *testing.T) error {
+				hello := testWireHello(t)
+				hello.Color.Source = wire.ColorSource(4)
+				_, err := helloFromWire(hello)
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
+			name: "hello color mode not encodable",
+			run: func(t *testing.T) error {
+				_, err := helloToWire(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, Color: terminalcap.ColorCapabilities{Mode: terminalcap.ColorMode(9)}})
+				return err
+			},
+			wantErr: errProtoConvertRange,
+		},
+		{
+			name: "hello color source not encodable",
+			run: func(t *testing.T) error {
+				_, err := helloToWire(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, Color: terminalcap.ColorCapabilities{Source: terminalcap.Source(9)}})
+				return err
+			},
+			wantErr: errProtoConvertRange,
 		},
 		{
 			name: "hello geometry",

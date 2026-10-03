@@ -693,14 +693,33 @@ func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domai
 	return ac, nil
 }
 
+// colorDowngradeNotice reports the toast shown when a declared (not forced)
+// terminal renders with fewer than TrueColor colors. A forced mode is a user
+// choice and never warrants a notice.
+func colorDowngradeNotice(color terminalcap.ColorCapabilities) (string, bool) {
+	if color.Source != terminalcap.SourceDeclared {
+		return "", false
+	}
+	switch color.Mode {
+	case terminalcap.ANSI256:
+		return "TrueColor was not detected; rendering with 256 colors.", true
+	case terminalcap.ANSI16:
+		return "TrueColor was not detected; rendering with 16 colors.", true
+	case terminalcap.Monochrome:
+		return "TrueColor was not detected; rendering without colors.", true
+	default:
+		return "", false
+	}
+}
+
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
-	if ac.terminalCapabilities.Color.Source == terminalcap.SourceDeclared && !ac.terminalCapabilities.Color.RGB() {
+	if message, ok := colorDowngradeNotice(ac.terminalCapabilities.Color); ok {
 		d.publishToast(ac, domain.Notification{
 			Code:      domain.NoticeUser,
 			Severity:  domain.NoticeWarn,
-			Message:   "TrueColor was not detected; rendering with 256 colors.",
+			Message:   message,
 			Time:      d.clock.Now(),
 			Count:     1,
 			SessionID: sess.id,
@@ -947,7 +966,6 @@ func themeFromMessage(msg protocol.Theme) themeui.Theme {
 		PaletteKnown: msg.PaletteKnown,
 		HasFG:        msg.HasForeground,
 		HasBG:        msg.HasBackground,
-		TrueColor:    msg.TrueColor,
 		Known:        msg.HasForeground && msg.HasBackground,
 		SchemeKnown:  msg.SchemeKnown,
 		Light:        msg.Light,

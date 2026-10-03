@@ -19,13 +19,10 @@ type Theme struct {
 	PaletteKnown uint16
 	HasFG        bool
 	HasBG        bool
-	// TrueColor records output capability for transport compatibility. Semantic
-	// styles remain RGB; the attachment renderer quantizes them when necessary.
-	TrueColor   bool
-	Known       bool
-	SchemeKnown bool
-	Light       bool
-	UsePalette  bool
+	Known        bool
+	SchemeKnown  bool
+	Light        bool
+	UsePalette   bool
 }
 
 // PaletteColor returns a palette color only when palette inheritance is
@@ -43,7 +40,6 @@ var (
 		Background:  renderer.RGB{R: 0x18, G: 0x18, B: 0x18},
 		HasFG:       true,
 		HasBG:       true,
-		TrueColor:   true,
 		Known:       true,
 		SchemeKnown: true,
 		Light:       false,
@@ -53,7 +49,6 @@ var (
 		Background:  renderer.RGB{R: 0xf8, G: 0xf8, B: 0xf8},
 		HasFG:       true,
 		HasBG:       true,
-		TrueColor:   true,
 		Known:       true,
 		SchemeKnown: true,
 		Light:       true,

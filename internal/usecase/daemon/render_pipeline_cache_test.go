@@ -94,7 +94,7 @@ func TestComposeFrameClearsFloatingFrameWhenItCloses(t *testing.T) {
 }
 
 func TestComposeFrameCacheSkipsUndamagedBlitsAndInvalidatesFocusAndLayout(t *testing.T) {
-	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	theme := themeui.Theme{Known: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
 	initial := cachedSplitState("horizontal-left", "left", layout.Horizontal, theme)
 	committed := composeFrame(initial, composeCacheInput{})
 	require.Equal(t, '│', committed.frame.At(20, 1).Rune)
@@ -170,7 +170,7 @@ func TestLayoutFingerprintWeightChangeInvalidatesGeometryCache(t *testing.T) {
 }
 
 func TestComposeFrameUsesCachedNeutralStructuralBorder(t *testing.T) {
-	theme := themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 210, B: 200}, Background: renderer.RGB{R: 20, G: 30, B: 40}}
+	theme := themeui.Theme{Known: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 210, B: 200}, Background: renderer.RGB{R: 20, G: 30, B: 40}}
 	neutralBorder := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 170, G: 80, B: 30}}
 	expected := themeui.NewDimmer(theme).Dim(neutralBorder)
 
@@ -197,7 +197,6 @@ func TestComposeFrameStackDrawsTitleBarsAndDimsCollapsed(t *testing.T) {
 	state := cachedStackTitleState("collapsed", 1, true)
 	state.theme = themeui.Theme{
 		Known:      true,
-		TrueColor:  true,
 		HasFG:      true,
 		HasBG:      true,
 		Foreground: renderer.RGB{R: 220, G: 210, B: 200},

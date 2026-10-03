@@ -60,7 +60,7 @@ func TestThemeGenerationTransportSequences(t *testing.T) {
 	cleared := protocol.Theme{
 		HasForeground: true, Foreground: renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true, Background: renderer.RGB{R: 4, G: 5, B: 6},
-		TrueColor: true, SchemeKnown: true,
+		SchemeKnown: true,
 	}
 	palette := [16]renderer.RGB{2: {R: 125, G: 181, B: 181}, 10: {R: 125, G: 181, B: 181}}
 	definitive := cleared

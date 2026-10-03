@@ -7,6 +7,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -24,7 +25,7 @@ func baselineHello() protocol.Hello {
 		Size:              domain.Size{Cols: 120, Rows: 40},
 		TermEnv:           "xterm-256color",
 		Cwd:               "/tmp/project",
-		TrueColor:         true,
+		Color:             terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared},
 		MaxOutputInFlight: 8,
 	}
 }
@@ -48,7 +49,7 @@ func BenchmarkHelloEnvelope(b *testing.B) {
 		Rows:              uint32(hello.Size.Rows),
 		TermEnv:           hello.TermEnv,
 		Cwd:               hello.Cwd,
-		TrueColor:         hello.TrueColor,
+		Color:             &ColorCapabilities{Mode: ColorMode_COLOR_MODE_ANSI256, Source: ColorSource_COLOR_SOURCE_DECLARED},
 		MaxOutputInFlight: uint32(hello.MaxOutputInFlight),
 	}
 	b.ReportAllocs()
