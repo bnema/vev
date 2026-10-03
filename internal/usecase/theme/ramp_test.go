@@ -121,13 +121,38 @@ func TestBuildRampWarnBorderIsAmberAndDistinctAcrossAccentHues(t *testing.T) {
 	}
 }
 
-func TestMRUStyleFadesFromRecentToElevenPercent(t *testing.T) {
-	theme := rampTheme(false)
-	ramp := BuildRamp(theme, Accent{RGB: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}, Known: true})
-	require.Equal(t, ramp.SurfaceRecent, MRUStyle(ramp, 0, 1))
-	require.Equal(t, ramp.SurfaceRecent, MRUStyle(ramp, 0, 3))
-	require.Equal(t, okLabLerp(theme.Background, renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}, 0.11), MRUStyle(ramp, 2, 3).BackgroundRGB)
-	require.NotEqual(t, ramp.SurfaceBar.BackgroundRGB, MRUStyle(ramp, 2, 3).BackgroundRGB)
+func TestMRUStyleFadesFromNearActiveTowardBar(t *testing.T) {
+	tests := []struct {
+		name   string
+		theme  Theme
+		accent renderer.RGB
+	}{
+		{name: "dark teal", theme: rampTheme(false), accent: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}},
+		{name: "dark blue", theme: rampTheme(false), accent: renderer.RGB{R: 0x3b, G: 0x82, B: 0xf6}},
+		{name: "light teal", theme: rampTheme(true), accent: renderer.RGB{R: 0x2a, G: 0x7a, B: 0x7a}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ramp := BuildRamp(tt.theme, Accent{RGB: tt.accent, Known: true})
+			require.True(t, ramp.rgb)
+			distance := func(style renderer.Style) float64 {
+				return okLabDistance(rgbToOKLab(style.BackgroundRGB), rgbToOKLab(tt.theme.Background))
+			}
+			for count := 1; count <= 9; count++ {
+				newest := MRUStyle(ramp, 0, count)
+				require.NotEqual(t, ramp.SurfaceActive.BackgroundRGB, newest.BackgroundRGB, "newest differs from active")
+				require.Greater(t, distance(newest), distance(ramp.SurfaceRecent), "newest stays close to the active accent")
+				previous := distance(ramp.SurfaceActive)
+				for index := range count {
+					style := MRUStyle(ramp, index, count)
+					require.LessOrEqual(t, distance(style), previous, "history fades with age")
+					require.Greater(t, distance(style), distance(ramp.SurfaceInactive), "oldest stays above inactive")
+					require.GreaterOrEqual(t, ContrastRatio(style.ForegroundRGB, style.BackgroundRGB), normalTextContrast)
+					previous = distance(style)
+				}
+			}
+		})
+	}
 }
 
 func TestResolveBuildsCompleteStylesFromOneAccent(t *testing.T) {

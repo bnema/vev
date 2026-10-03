@@ -1,6 +1,10 @@
 package theme
 
-import renderer "github.com/bnema/vev-vt"
+import (
+	"math"
+
+	renderer "github.com/bnema/vev-vt"
+)
 
 const (
 	normalTextContrast = 4.5
@@ -26,9 +30,11 @@ type Ramp struct {
 	BorderActive    renderer.Style
 	BorderWarn      renderer.Style
 
-	background renderer.RGB
-	accent     renderer.RGB
-	rgb        bool
+	background   renderer.RGB
+	foreground   renderer.RGB
+	accent       renderer.RGB
+	activeWeight int
+	rgb          bool
 }
 
 // BuildRamp derives every RGB surface from the terminal background and one
@@ -38,19 +44,19 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		return neutralRamp(t)
 	}
 
-	bar, ok := surfaceAtOrBelow(t, accent.RGB, 8)
+	bar, _, ok := surfaceAtOrBelow(t, accent.RGB, 8)
 	if !ok {
 		return neutralRamp(t)
 	}
-	inactive, ok := surfaceAtOrBelow(t, accent.RGB, 14)
+	inactive, _, ok := surfaceAtOrBelow(t, accent.RGB, 14)
 	if !ok {
 		return neutralRamp(t)
 	}
-	recent, ok := surfaceAtOrBelow(t, accent.RGB, 22)
+	recent, _, ok := surfaceAtOrBelow(t, accent.RGB, 22)
 	if !ok {
 		return neutralRamp(t)
 	}
-	active, ok := surfaceAtOrBelow(t, accent.RGB, 100)
+	active, activeWeight, ok := surfaceAtOrBelow(t, accent.RGB, 100)
 	if !ok {
 		return neutralRamp(t)
 	}
@@ -64,14 +70,16 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		BorderActive:    activeBorder(t, accent.RGB, bar.BackgroundRGB),
 		BorderWarn:      warnBorder(t, accent.RGB, bar.BackgroundRGB),
 		background:      t.Background,
+		foreground:      t.Foreground,
 		accent:          accent.RGB,
+		activeWeight:    activeWeight,
 		rgb:             true,
 	}
 }
 
 // surfaceAtOrBelow searches from the requested intensity to neutral. The
 // integer sequence is intentional: it makes contrast adaptation stable.
-func surfaceAtOrBelow(t Theme, accent renderer.RGB, target int) (renderer.Style, bool) {
+func surfaceAtOrBelow(t Theme, accent renderer.RGB, target int) (renderer.Style, int, bool) {
 	for weight := target; weight >= 0; weight-- {
 		background := okLabLerp(t.Background, accent, float64(weight)/100)
 		foreground, ok := primaryText(t, background)
@@ -81,9 +89,9 @@ func surfaceAtOrBelow(t Theme, accent renderer.RGB, target int) (renderer.Style,
 		if _, ok := secondaryText(foreground, background); !ok {
 			continue
 		}
-		return rgbSurface(foreground, background), true
+		return rgbSurface(foreground, background), weight, true
 	}
-	return renderer.Style{}, false
+	return renderer.Style{}, 0, false
 }
 
 func rgbSurface(foreground, background renderer.RGB) renderer.Style {
@@ -177,26 +185,43 @@ func neutralRamp(t Theme) Ramp {
 	}
 }
 
-// MRUStyle interpolates the newest entry from SurfaceRecent (22%) to 11% for
-// the oldest entry. A singleton is therefore the full recent surface.
+const (
+	// mruTopWeight is the newest history entry: a slightly faded active
+	// accent. mruFloorWeight keeps the oldest entry above the inactive and
+	// bar surfaces so the whole history stays visibly accent-tinted.
+	mruTopWeight   = 85
+	mruFloorWeight = 30
+)
+
+// MRUStyle fades history entries from just below the active accent toward
+// the bar. Only weights with readable primary text are used, and the entries
+// are spread evenly across them, so the gradient is recomputed per count and
+// stays strictly ordered.
 func MRUStyle(ramp Ramp, index, count int) renderer.Style {
-	if count <= 1 || !ramp.SurfaceRecent.HasBackgroundRGB || !ramp.SurfaceBar.HasBackgroundRGB {
+	if !ramp.rgb || count <= 0 {
 		return ramp.SurfaceRecent
 	}
-	if index < 0 {
-		index = 0
+	index = max(0, min(index, count-1))
+
+	theme := Theme{Foreground: ramp.foreground, Background: ramp.background}
+	top := min(mruTopWeight, ramp.activeWeight-1)
+	var weights [mruTopWeight - mruFloorWeight + 1]int
+	found := 0
+	for weight := top; weight >= mruFloorWeight; weight-- {
+		background := okLabLerp(ramp.background, ramp.accent, float64(weight)/100)
+		if _, ok := primaryText(theme, background); ok {
+			weights[found] = weight
+			found++
+		}
 	}
-	if index >= count {
-		index = count - 1
-	}
-	if !ramp.rgb {
+	if found == 0 {
 		return ramp.SurfaceRecent
 	}
-	weight := 22.0 - 11.0*float64(index)/float64(count-1)
-	background := okLabLerp(ramp.background, ramp.accent, weight/100)
-	foreground, ok := primaryText(Theme{Foreground: ramp.SurfaceRecent.ForegroundRGB, Background: ramp.background}, background)
-	if !ok {
-		return ramp.SurfaceRecent
+	position := 0
+	if count > 1 {
+		position = int(math.Round(float64(index*(found-1)) / float64(count-1)))
 	}
+	background := okLabLerp(ramp.background, ramp.accent, float64(weights[position])/100)
+	foreground, _ := primaryText(theme, background)
 	return rgbSurface(foreground, background)
 }
