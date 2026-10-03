@@ -7,23 +7,29 @@ import (
 	"github.com/bnema/vev/internal/protocol"
 )
 
-// Session-bound variables describe the desktop or login the user attached
-// from. A local client-owned attach refreshes only these; every other variable
-// (SHELL, PATH, HOME, ...) keeps the value the session was created with.
-//
-// Desktop variables are set when the client has them and never removed, so an
-// attach from a plain SSH or console login cannot strip a graphical session.
-var sessionDesktopEnvironment = []string{
+// Display variables describe one graphical session and move as a group: a
+// client with a non-empty WAYLAND_DISPLAY or DISPLAY replaces the whole group and removes
+// members it lacks, so a switch to another compositor or an X11-only desktop
+// never leaves a stale socket behind. A client without a display (console)
+// or reached over SSH leaves the group untouched: an X-forwarded DISPLAY
+// belongs to that one connection and must not replace the local desktop.
+var sessionDisplayEnvironment = []string{
 	"WAYLAND_DISPLAY",
 	"DISPLAY",
 	"XAUTHORITY",
-	"DBUS_SESSION_BUS_ADDRESS",
-	"XDG_RUNTIME_DIR",
 	"XDG_CURRENT_DESKTOP",
 	"XDG_SESSION_TYPE",
 	"XDG_SESSION_DESKTOP",
 	"XDG_SESSION_CLASS",
 	"XDG_SESSION_ID",
+}
+
+// User variables belong to the user login rather than one display: with
+// systemd, every graphical session of a user shares the runtime dir and user
+// bus. They are set when the client has them and never removed.
+var sessionUserEnvironment = []string{
+	"DBUS_SESSION_BUS_ADDRESS",
+	"XDG_RUNTIME_DIR",
 }
 
 // Login variables follow the latest attach exactly: a value the client lacks is
@@ -84,20 +90,29 @@ func (s *session) adoptClientEnvironmentLocked(client []string) {
 // refreshed from client. Refreshed variables move to the end; all others keep
 // their original bytes and order.
 func refreshSessionEnvironment(current, client []string) []string {
-	updates := make(map[string]string, len(sessionDesktopEnvironment)+len(sessionLoginEnvironment))
-	drop := make(map[string]bool, len(sessionLoginEnvironment))
-	for _, key := range sessionDesktopEnvironment {
+	updates := make(map[string]string)
+	drop := make(map[string]bool)
+	// exact copies a group from client: present values are set, absent ones
+	// removed.
+	exact := func(keys []string) {
+		for _, key := range keys {
+			if value, ok := lookupEnvironment(client, key); ok {
+				updates[key] = value
+			} else {
+				drop[key] = true
+			}
+		}
+	}
+	if ownsDisplay(client) {
+		exact(sessionDisplayEnvironment)
+	}
+	for _, key := range sessionUserEnvironment {
 		if value, ok := lookupEnvironment(client, key); ok {
 			updates[key] = value
 		}
 	}
-	for _, key := range sessionLoginEnvironment {
-		if value, ok := lookupEnvironment(client, key); ok {
-			updates[key] = value
-		} else {
-			drop[key] = true
-		}
-	}
+	exact(sessionLoginEnvironment)
+
 	out := make([]string, 0, len(current)+len(updates))
 	for _, entry := range current {
 		key, _, _ := environmentEntry(entry)
@@ -114,8 +129,31 @@ func refreshSessionEnvironment(current, client []string) []string {
 	return out
 }
 
+// ownsDisplay reports whether client is a local graphical session whose
+// display group should replace the session's. SSH clients never do, even with
+// X forwarding.
+func ownsDisplay(client []string) bool {
+	if _, ssh := lookupEnvironment(client, "SSH_CONNECTION"); ssh {
+		return false
+	}
+	return hasDisplay(client)
+}
+
+// hasDisplay reports whether env belongs to a graphical session. An empty
+// value names no display (it usually means "no X here"), so it does not count.
+func hasDisplay(env []string) bool {
+	wayland, _ := lookupEnvironment(env, "WAYLAND_DISPLAY")
+	x11, _ := lookupEnvironment(env, "DISPLAY")
+	return wayland != "" || x11 != ""
+}
+
+// sessionBoundEnvironment lists the variables that follow the attaching client.
+// A local client-owned attach refreshes only these; every other variable
+// (SHELL, PATH, HOME, ...) keeps the value the session was created with.
 func sessionBoundEnvironment() []string {
-	return append(append([]string(nil), sessionDesktopEnvironment...), sessionLoginEnvironment...)
+	keys := append([]string(nil), sessionDisplayEnvironment...)
+	keys = append(keys, sessionUserEnvironment...)
+	return append(keys, sessionLoginEnvironment...)
 }
 
 // lookupEnvironment returns the first value for key, matching getenv(3).
@@ -131,7 +169,8 @@ func lookupEnvironment(env []string, key string) (string, bool) {
 // sessionEnvironmentExport renders the session-bound variables a running shell
 // should apply. JSON maps each variable to its value, or null when the shell
 // should unset it. Text output is one KEY=value line per set variable.
-// Desktop variables the session never saw are omitted rather than unset, so a
+// Missing login variables are always unset. Missing display variables are
+// unset only when the session has a display; otherwise they are omitted, so a
 // shell keeps any value it obtained on its own.
 func sessionEnvironmentExport(env []string, asJSON bool) (string, error) {
 	values := make(map[string]*string)
@@ -142,7 +181,11 @@ func sessionEnvironmentExport(env []string, asJSON bool) (string, error) {
 			text.WriteString(key + "=" + value + "\n")
 		}
 	}
-	for _, key := range sessionLoginEnvironment {
+	unset := sessionLoginEnvironment
+	if hasDisplay(env) {
+		unset = append(append([]string(nil), sessionDisplayEnvironment...), sessionLoginEnvironment...)
+	}
+	for _, key := range unset {
 		if _, ok := values[key]; !ok {
 			values[key] = nil
 		}

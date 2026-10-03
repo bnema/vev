@@ -750,7 +750,7 @@ func TestHandleCommandEnvExportsTargetSessionEnvironment(t *testing.T) {
 		{
 			name:    "json from inside a pane",
 			request: protocol.CommandRequest{Slug: "env", TargetTab: "t_work", TargetPane: "p_work", JSON: true},
-			want:    `{"SSH_AGENT_PID":null,"SSH_AUTH_SOCK":null,"SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"WAYLAND_DISPLAY":"wayland-1"}` + "\n",
+			want:    `{"DISPLAY":null,"SSH_AGENT_PID":null,"SSH_AUTH_SOCK":null,"SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"WAYLAND_DISPLAY":"wayland-1","XAUTHORITY":null,"XDG_CURRENT_DESKTOP":null,"XDG_SESSION_CLASS":null,"XDG_SESSION_DESKTOP":null,"XDG_SESSION_ID":null,"XDG_SESSION_TYPE":null}` + "\n",
 		},
 	}
 	for _, tt := range tests {

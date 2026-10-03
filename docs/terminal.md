@@ -61,7 +61,8 @@ When your outer terminal supports the kitty keyboard protocol (kitty, foot, ghos
 
 - A session keeps the environment it was created with, including `SHELL`, `PATH`, and `HOME`. A session restored after a daemon restart takes the environment of the first local client that attaches.
 - Desktop and login variables follow the client that last attached:
-  - `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, and `XDG_SESSION_*`/`XDG_CURRENT_DESKTOP` update when the client has them. A client without them (SSH, console) never removes them.
+  - `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`, `XDG_CURRENT_DESKTOP`, and `XDG_SESSION_*` move as one group. A client with a non-empty `WAYLAND_DISPLAY` or `DISPLAY` replaces the whole group, so switching to another compositor or an X11-only desktop drops the old values. A client without a display (console) or connected over SSH leaves the group alone, even with X forwarding: after `ssh -X`, set `DISPLAY` yourself in the panes that need it.
+  - `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` update when the client has them and are never removed. With systemd, all your graphical sessions share them.
   - `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_CLIENT`, and `SSH_TTY` always match the last client and are removed when it has none.
 - New panes get these values. Running processes keep their own environment; a shell pulls the current values with `vev env <fish|sh>` from its prompt hook:
 

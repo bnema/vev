@@ -22,22 +22,46 @@ func TestRefreshSessionEnvironment(t *testing.T) {
 			want:    []string{"SHELL=/usr/bin/fish", "PATH=/a", "HOME=/home/user"},
 		},
 		{
-			name:    "graphical attach adds desktop variables to a console session",
+			name:    "graphical attach adds the display group to a console session",
 			current: []string{"SHELL=/usr/bin/fish", "XDG_RUNTIME_DIR=/run/user/1000"},
 			client:  []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0", "XDG_RUNTIME_DIR=/run/user/1000", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"},
 			want:    []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", "XDG_RUNTIME_DIR=/run/user/1000"},
 		},
 		{
-			name:    "attach without a desktop never strips desktop variables",
-			current: []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0", "KEEP=1"},
-			client:  []string{"SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"},
-			want:    []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0", "KEEP=1", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"},
+			name:    "attach without a display leaves the display group untouched",
+			current: []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0", "XDG_SESSION_TYPE=wayland", "KEEP=1"},
+			client:  []string{"XDG_SESSION_TYPE=tty", "XDG_SESSION_ID=7", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"},
+			want:    []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0", "XDG_SESSION_TYPE=wayland", "KEEP=1", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"},
 		},
 		{
-			name:    "desktop variables update to the latest attach",
-			current: []string{"WAYLAND_DISPLAY=wayland-2", "KEEP=1"},
+			name:    "ssh with x forwarding leaves the local display group untouched",
+			current: []string{"WAYLAND_DISPLAY=wayland-1", "XDG_SESSION_TYPE=wayland", "XDG_SESSION_ID=2"},
+			client:  []string{"DISPLAY=localhost:10.0", "XDG_SESSION_TYPE=tty", "XDG_SESSION_ID=9", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22", "SSH_AUTH_SOCK=/tmp/fwd-agent"},
+			want:    []string{"WAYLAND_DISPLAY=wayland-1", "XDG_SESSION_TYPE=wayland", "XDG_SESSION_ID=2", "SSH_AUTH_SOCK=/tmp/fwd-agent", "SSH_CONNECTION=10.0.0.2 1 10.0.0.1 22"},
+		},
+		{
+			name:    "second compositor on another console replaces the whole display group",
+			current: []string{"KEEP=1", "WAYLAND_DISPLAY=wayland-0", "DISPLAY=:0", "XDG_CURRENT_DESKTOP=first", "XDG_SESSION_ID=2"},
+			client:  []string{"WAYLAND_DISPLAY=wayland-1", "XDG_CURRENT_DESKTOP=second", "XDG_SESSION_ID=3"},
+			want:    []string{"KEEP=1", "WAYLAND_DISPLAY=wayland-1", "XDG_CURRENT_DESKTOP=second", "XDG_SESSION_ID=3"},
+		},
+		{
+			name:    "x11-only desktop removes the stale wayland socket",
+			current: []string{"WAYLAND_DISPLAY=wayland-1", "XDG_SESSION_TYPE=wayland"},
+			client:  []string{"DISPLAY=:1", "XAUTHORITY=/tmp/xauth", "XDG_SESSION_TYPE=x11"},
+			want:    []string{"DISPLAY=:1", "XAUTHORITY=/tmp/xauth", "XDG_SESSION_TYPE=x11"},
+		},
+		{
+			name:    "user bus variables follow a client that has them",
+			current: []string{"DBUS_SESSION_BUS_ADDRESS=unix:path=/old/bus", "XDG_RUNTIME_DIR=/old"},
+			client:  []string{"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", "XDG_RUNTIME_DIR=/run/user/1000"},
+			want:    []string{"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", "XDG_RUNTIME_DIR=/run/user/1000"},
+		},
+		{
+			name:    "user bus variables are kept by an attach without them",
+			current: []string{"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", "XDG_RUNTIME_DIR=/run/user/1000"},
 			client:  []string{"WAYLAND_DISPLAY=wayland-1"},
-			want:    []string{"KEEP=1", "WAYLAND_DISPLAY=wayland-1"},
+			want:    []string{"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus", "XDG_RUNTIME_DIR=/run/user/1000", "WAYLAND_DISPLAY=wayland-1"},
 		},
 		{
 			name:    "login variables absent from the client are removed",
@@ -52,22 +76,22 @@ func TestRefreshSessionEnvironment(t *testing.T) {
 			want:    []string{"SSH_AUTH_SOCK=/tmp/new"},
 		},
 		{
-			name:    "login variables follow the client",
-			current: []string{"SSH_AUTH_SOCK=/tmp/old"},
-			client:  []string{"SSH_AUTH_SOCK=/run/user/1000/agent"},
-			want:    []string{"SSH_AUTH_SOCK=/run/user/1000/agent"},
-		},
-		{
 			name:    "duplicate current entries collapse and the first client value wins",
 			current: []string{"WAYLAND_DISPLAY=a", "WAYLAND_DISPLAY=b", "PAIR=a=b"},
 			client:  []string{"WAYLAND_DISPLAY=c", "WAYLAND_DISPLAY=d"},
 			want:    []string{"PAIR=a=b", "WAYLAND_DISPLAY=c"},
 		},
 		{
-			name:    "empty values are values",
-			current: []string{"DISPLAY=:0"},
-			client:  []string{"DISPLAY="},
-			want:    []string{"DISPLAY="},
+			name:    "an empty display value is not a graphical client",
+			current: []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0"},
+			client:  []string{"DISPLAY=", "WAYLAND_DISPLAY="},
+			want:    []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0"},
+		},
+		{
+			name:    "an empty member of a graphical client's group is copied",
+			current: []string{"WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0"},
+			client:  []string{"WAYLAND_DISPLAY=wayland-2", "DISPLAY="},
+			want:    []string{"WAYLAND_DISPLAY=wayland-2", "DISPLAY="},
 		},
 	}
 	for _, tt := range tests {
@@ -81,7 +105,6 @@ func TestRefreshSessionEnvironment(t *testing.T) {
 }
 
 func TestSessionEnvironmentExport(t *testing.T) {
-	env := []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/agent", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/bus"}
 	tests := []struct {
 		name   string
 		env    []string
@@ -90,14 +113,26 @@ func TestSessionEnvironmentExport(t *testing.T) {
 	}{
 		{
 			name: "text lists set session-bound variables only",
-			env:  env,
+			env:  []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/agent", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/bus"},
 			want: "WAYLAND_DISPLAY=wayland-1\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/bus\nSSH_AUTH_SOCK=/run/agent\n",
 		},
 		{
-			name:   "json unsets absent login variables and omits absent desktop variables",
-			env:    env,
+			name:   "json with a display unsets the rest of the display group",
+			env:    []string{"WAYLAND_DISPLAY=wayland-1", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/bus", "SSH_AUTH_SOCK=/run/agent"},
 			asJSON: true,
-			want:   `{"DBUS_SESSION_BUS_ADDRESS":"unix:path=/run/bus","SSH_AGENT_PID":null,"SSH_AUTH_SOCK":"/run/agent","SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"WAYLAND_DISPLAY":"wayland-1"}` + "\n",
+			want:   `{"DBUS_SESSION_BUS_ADDRESS":"unix:path=/run/bus","DISPLAY":null,"SSH_AGENT_PID":null,"SSH_AUTH_SOCK":"/run/agent","SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"WAYLAND_DISPLAY":"wayland-1","XAUTHORITY":null,"XDG_CURRENT_DESKTOP":null,"XDG_SESSION_CLASS":null,"XDG_SESSION_DESKTOP":null,"XDG_SESSION_ID":null,"XDG_SESSION_TYPE":null}` + "\n",
+		},
+		{
+			name:   "json without a display leaves display variables alone",
+			env:    []string{"SHELL=/bin/sh", "XDG_RUNTIME_DIR=/run/user/1000"},
+			asJSON: true,
+			want:   `{"SSH_AGENT_PID":null,"SSH_AUTH_SOCK":null,"SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"XDG_RUNTIME_DIR":"/run/user/1000"}` + "\n",
+		},
+		{
+			name:   "json with only x11 unsets a stale wayland socket",
+			env:    []string{"DISPLAY=:1"},
+			asJSON: true,
+			want:   `{"DISPLAY":":1","SSH_AGENT_PID":null,"SSH_AUTH_SOCK":null,"SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"WAYLAND_DISPLAY":null,"XAUTHORITY":null,"XDG_CURRENT_DESKTOP":null,"XDG_SESSION_CLASS":null,"XDG_SESSION_DESKTOP":null,"XDG_SESSION_ID":null,"XDG_SESSION_TYPE":null}` + "\n",
 		},
 		{
 			name: "empty session exports nothing as text",
