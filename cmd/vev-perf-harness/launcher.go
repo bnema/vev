@@ -194,18 +194,17 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 	// a role working directory: daemon-owned subprocess cleanup may otherwise
 	// treat the evidence directory as its working tree and remove a preallocated
 	// trace while a later repetition is being merged.
-	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_PERF_BIN", "VEV_REMOTE_TRANSPORT", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME"), traceEnvironment(m)...)
+	cmd.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "VEV_PERF_BIN", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_CONFIG_HOME"), traceEnvironment(m)...)
 	cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+runtimeDir,
 		"XDG_STATE_HOME="+filepath.Join(runDir, "state"), "XDG_CONFIG_HOME="+filepath.Join(runDir, "config"), "TERM=xterm-256color", "SHELL=/bin/sh", "VEV_PERF_BIN="+bin)
 	l.mu.Lock()
 	peer, routed := l.peers[runDir]
 	l.mu.Unlock()
 	if routed && (m.Role == "client" || m.Role == "daemon") {
-		mode, err := remoteMode(peer.command.Transport)
-		if err != nil {
+		if _, err := hostTransport(peer.command.Transport); err != nil {
 			return nil, err
 		}
-		cmd.Env = append(withoutEnv(cmd.Env, "PATH", "VEV_REMOTE_TRANSPORT"), "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
+		cmd.Env = append(withoutEnv(cmd.Env, "PATH"), "PATH="+runDir+":"+os.Getenv("PATH"))
 	}
 	if err := safedir.EnsurePrivate(filepath.Join(runDir, "state")); err != nil {
 		return nil, err
@@ -231,12 +230,12 @@ func (l *cliLauncher) Launch(m processMapping, role roleCommand) (launchedProces
 		peer, routed := l.peers[runDir]
 		l.mu.Unlock()
 		if routed {
-			mode, modeErr := remoteMode(peer.command.Transport)
-			if modeErr != nil {
-				return nil, modeErr
+			transportName, transportErr := hostTransport(peer.command.Transport)
+			if transportErr != nil {
+				return nil, transportErr
 			}
-			p.configureCommand = exec.Command(bin, "host", "add", "harness@127.0.0.1")
-			p.configureCommand.Env = append(withoutEnv(cmd.Env, "PATH", "VEV_REMOTE_TRANSPORT"), "PATH="+runDir+":"+os.Getenv("PATH"), "VEV_REMOTE_TRANSPORT="+mode)
+			p.configureCommand = exec.Command(bin, "host", "add", "--transport", transportName, "harness@127.0.0.1")
+			p.configureCommand.Env = append(withoutEnv(cmd.Env, "PATH"), "PATH="+runDir+":"+os.Getenv("PATH"))
 			peerStart := exec.Command(bin, "--daemon")
 			peerStart.Env = append(withoutEnv(os.Environ(), "VEV", "VEV_PERF_TRACE", "VEV_PERF_PROCESS_ID", "VEV_PERF_SCENARIO", "VEV_PERF_RUN", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", "PATH"),
 				"PATH="+runDir+":"+os.Getenv("PATH"),
@@ -455,10 +454,11 @@ esac
 	return peer, nil
 }
 
-func remoteMode(t transport) (string, error) {
+// hostTransport maps a harness transport to the `vev host add --transport` value.
+func hostTransport(t transport) (string, error) {
 	switch t.Kind {
 	case "ssh_stdio":
-		return "stdio", nil
+		return "ssh", nil
 	default:
 		return "", fmt.Errorf("transport %q cannot route through a remote peer", t.ID)
 	}

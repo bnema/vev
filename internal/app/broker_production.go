@@ -51,15 +51,17 @@ func ensureProductionBrokerConfig() error {
 	return errors.Join(fmt.Errorf("vev: close broker configuration: %w", closeErr), removeErr)
 }
 
+// remoteBrokerPolicy builds the remote host policy for a CLI transport name
+// (hostTransportQUIC or hostTransportSSH). Callers pass a parsed value, so an
+// unknown name is a programming error.
 func remoteBrokerPolicy(transport string) ports.BrokerPolicy {
-	if transport == "stdio" {
-		transport = "ssh-stdio"
-	} else {
-		transport = "ssh-quic"
+	route, ok := hostTransportRoutes[transport]
+	if !ok {
+		panic(fmt.Sprintf("vev: unknown host transport %q", transport))
 	}
 	return ports.BrokerPolicy{
 		ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion,
-		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: transport,
+		EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, Transport: string(route),
 		Trust: "openssh-config-v1", Launch: broker.DaemonLaunchAuthority, Isolation: "per-user",
 	}
 }

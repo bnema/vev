@@ -16,17 +16,18 @@ lifecycle at return, and a successfully committed navigation action.
 `acceptance.py CLIENT_CONTAINER REMOTE_CONTAINER SCENARIO[@stdio|@quic]` runs
 the table-driven baseline matrix. Every scenario asserts committed outcomes
 (action IDs, exact lifecycle/session/focus context, observed published
-output); sending a key is never success. Transport selection is forwarded
-into the client container (`docker exec -e VEV_REMOTE_TRANSPORT=stdio`, or
-unset for QUIC); passing it to the `docker` CLI process alone never reached
-the driver. Direct-remote scenarios use `--remote remote --session NAME`
+output); sending a key is never success. Before each scenario the
+client container's `remote` host is re-registered with
+`vev host add --transport quic|ssh remote` (`@stdio` selects `ssh`; a host
+keeps the transport it was added with, so the script runs `host rm` first).
+Direct-remote scenarios use `--remote remote --session NAME`
 against a named fixture session, so the attached target is a named exact
 lifecycle rather than an ephemeral session, and never create a local home
 session as setup. `VEV_ACCEPTANCE_TOPOLOGY=local|direct` selects which daemon
 serves the client-picker scenario: `local` keeps the attachment and the
 picker rows in the client container, `direct` serves both from the remote
 container. The client needs a pinned `remote` SSH alias and
-`vev host add remote`. Scripts create uniquely named sessions and detach
+`vev host add remote` (the script then re-registers it per scenario). Scripts create uniquely named sessions and detach
 their clients; the container owner handles session cleanup.
 
 Client and daemon debug logging is on (`VEV_LOG=debug`); the remote accepts

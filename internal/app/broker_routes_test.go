@@ -40,7 +40,7 @@ func TestBrokerRoutesDurableFirstAddAndRestart(t *testing.T) {
 	registry, err := broker.NewRegistryWithConfig(1, store, probe, clock.New(), nil, broker.RegistryConfig{MembershipMode: broker.MembershipMutable})
 	require.NoError(t, err)
 	routes.Hosts = registry
-	policy := remoteBrokerPolicy("stdio")
+	policy := remoteBrokerPolicy(hostTransportSSH)
 	reg, err := registry.AddHost(ctx, "user@example.test", policy)
 	require.NoError(t, err)
 	request := ports.BrokerOpenStreamRequest{Endpoint: reg.Endpoint, Registration: reg, Policy: policy, StartMode: ports.BrokerDaemonExistingOnly}
@@ -110,7 +110,7 @@ func TestProductionBrokerFirstHostAdd(t *testing.T) {
 		socket := awaitSandboxReady(t, ready, done)
 		service, err := brokeripc.NewConnector(socket, brokeripc.Config{}).Connect(ctx)
 		require.NoError(t, err)
-		reg, err := service.AddHost(ctx, "user@127.0.0.1:1", remoteBrokerPolicy("stdio"))
+		reg, err := service.AddHost(ctx, "user@127.0.0.1:1", remoteBrokerPolicy(hostTransportSSH))
 		require.NoError(t, err)
 		if i == 0 {
 			registered = reg

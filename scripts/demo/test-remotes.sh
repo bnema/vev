@@ -52,7 +52,7 @@ port_for() {
 # command launched from inside a real vev pane does not look nested.
 vev_env() {
   env -u VEV -u VEV_ENV_ROOT \
-    VEV_ENV="$env_name" VEV_ENV_ROOT="$env_root" VEV_REMOTE_TRANSPORT=stdio \
+    VEV_ENV="$env_name" VEV_ENV_ROOT="$env_root" \
     PATH="$bin_dir:$PATH" "$@"
 }
 
@@ -152,7 +152,7 @@ register_hosts() {
       log "host already registered: $host"
       continue
     fi
-    vev_env timeout 30 "$vev_bin" host add "$host" || die "vev host add $host failed"
+    vev_env timeout 30 "$vev_bin" host add --transport ssh "$host" || die "vev host add --transport ssh $host failed"
     log "host registered: $host"
   done
 }
@@ -277,7 +277,7 @@ cmd_shell_hint() {
   cat <<EOF
 Sandbox ready. Launch the client from any terminal with:
 
-  cd $root && env -u VEV VEV_ENV=$env_name VEV_ENV_ROOT=$env_root VEV_REMOTE_TRANSPORT=stdio PATH=$bin_dir:\$PATH ./build/vev
+  cd $root && env -u VEV VEV_ENV=$env_name VEV_ENV_ROOT=$env_root PATH=$bin_dir:\$PATH ./build/vev
 
 or: $0 shell --exec
 Plain ssh:  $bin_dir/ssh remote-a
@@ -288,7 +288,7 @@ cmd_shell() {
   [[ -x $bin_dir/ssh ]] || die "sandbox is not up; run: $0 up"
   if [[ ${1:-} == --exec ]]; then
     shift
-    exec env -u VEV -u VEV_ENV_ROOT VEV_ENV="$env_name" VEV_ENV_ROOT="$env_root" VEV_REMOTE_TRANSPORT=stdio \
+    exec env -u VEV -u VEV_ENV_ROOT VEV_ENV="$env_name" VEV_ENV_ROOT="$env_root" \
       PATH="$bin_dir:$PATH" "$vev_bin" "$@"
   fi
   cmd_shell_hint

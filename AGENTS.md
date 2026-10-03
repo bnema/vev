@@ -82,6 +82,6 @@ Typed messages and negotiated version live in `internal/protocol`. Remote discov
 - A live unit whose teardown aborts before destructive ownership stays registered, and its snapshot-coordinator quarantine is rolled back so the surviving session resumes checkpoint scheduling and its attached clients are unfrozen.
 - Each connection has a 15-second handshake budget from connect through the initial committed publication.
 - Local and remote attach use the same typed `Hello`/`Welcome` session protocol. `sessionwire` translates typed traffic to Protobuf envelopes carried by IPC, QUIC, or SSH stdio.
-- Remote attach bootstraps an authenticated direct QUIC connection by default; `VEV_REMOTE_TRANSPORT=stdio` explicitly selects an SSH-only carriage.
+- Remote attach bootstraps an authenticated direct QUIC connection by default; `vev host add --transport ssh <host>` explicitly selects an SSH-only carriage.
 - A session owns shared PTYs, VT state, tabs, panes, PTY content geometry selected by the latest valid attachment claim, and ordered mutations. Each attachment owns its window/view, copy and overlay state, rendering/output state, and reconnect lifecycle; when the latest claimant detaches, the most recently claimed remaining attachment becomes authoritative.
 - Command requests have a 10-second result deadline and are tracked per connection.

@@ -29,7 +29,7 @@ shell --exec [vev args]`. It sets:
   option, so `.dev/test/bin/ssh` wraps the real client with
   `-F .dev/test/ssh/config`. The key, `known_hosts` and config are generated in
   `.dev/test/ssh/`. `~/.ssh` and your agent are never used.
-- `VEV_REMOTE_TRANSPORT=stdio`: hosts are registered with the SSH-only carriage.
+- `vev host add --transport ssh`: hosts are registered with the SSH-only carriage.
   QUIC cannot work here. The remote proxy listens on a random UDP port, and
   the client dials that port on the SSH target name (`remote-a`), which does
   not resolve to the loopback port mapping.

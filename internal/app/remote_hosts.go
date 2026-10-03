@@ -24,6 +24,18 @@ const (
 	hostActionList = "list"
 )
 
+// Remote carriages selectable with `host add --transport`.
+const (
+	hostTransportQUIC = "quic"
+	hostTransportSSH  = "ssh"
+)
+
+// hostTransportRoutes maps each CLI transport to the broker policy transport.
+var hostTransportRoutes = map[string]ports.BrokerRouteKind{
+	hostTransportQUIC: ports.BrokerRouteSSHQUIC,
+	hostTransportSSH:  ports.BrokerRouteSSHStdio,
+}
+
 type remoteHostDeps struct {
 	connect         func(context.Context) (ports.BrokerService, error)
 	connectExisting func(context.Context) (ports.BrokerService, error)
@@ -66,11 +78,13 @@ func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error
 		if err := domain.ValidateRemoteHostTarget(cmd.hostTarget); err != nil {
 			return err
 		}
-		transport, err := remoteTransportModeFromEnv(os.Getenv(envRemoteTransport))
-		if err != nil {
-			return err
+		policy := remoteBrokerPolicy(cmd.hostTransport)
+		_, err = service.AddHost(ctx, cmd.hostTarget, policy)
+		if isHostConflict(err) {
+			if stored := storedHostTransport(service.Snapshot(), cmd.hostTarget); stored != "" && stored != cmd.hostTransport {
+				return fmt.Errorf("vev: host %q is already registered with transport %q; run `vev host rm %s` first, then add it again: %w", cmd.hostTarget, stored, cmd.hostTarget, err)
+			}
 		}
-		_, err = service.AddHost(ctx, cmd.hostTarget, remoteBrokerPolicy(transport))
 		return err
 	case hostActionRm:
 		if err := domain.ValidateRemoteHostTarget(cmd.hostTarget); err != nil {
@@ -99,6 +113,32 @@ func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error
 	default:
 		return usagef("unknown host action %q", cmd.hostAction)
 	}
+}
+
+// isHostConflict matches a host conflict both in-process and after it crossed
+// broker IPC, where only the error code survives.
+func isHostConflict(err error) bool {
+	if errors.Is(err, ports.ErrBrokerHostConflict) {
+		return true
+	}
+	var brokerErr ports.BrokerError
+	return errors.As(err, &brokerErr) && brokerErr.Code == ports.BrokerErrorHostConflict
+}
+
+// storedHostTransport returns the CLI transport name registered for target,
+// or "" when it cannot be determined.
+func storedHostTransport(snapshot ports.BrokerSnapshot, target string) string {
+	for _, daemon := range snapshot.Daemons {
+		if daemon.Local || daemon.Endpoint != target {
+			continue
+		}
+		for name, route := range hostTransportRoutes {
+			if daemon.Policy.Transport == string(route) {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // listDisconnectedHosts reads configured endpoints without dialing any remote.
