@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 func awaitMoveTeardownState(t *testing.T, sess *session, reservations, waiters uint) {
@@ -278,43 +281,47 @@ func TestDaemonShutdownDrainsMoveBeforePaneLifetimeCancellation(t *testing.T) {
 // daemon-wide pane lifetime closes every PTY; a session whose reader sees that
 // EOF before its shutdown-preservation policy is reserved takes the natural
 // final-shell-exit path and purges its durable record instead of preserving it.
-// The drain step must therefore leave pane processes running; only the full
-// shutdown cancels them, after reserving preservation for every live session.
+// The test records each session's reservation at the exact moment the pane
+// lifetime is cancelled, so it fails if cancellation ever precedes it.
 func TestShutdownReservesPreservationBeforeCancellingPaneProcesses(t *testing.T) {
 	tests := []struct {
-		name          string
-		run           func(d *Daemon)
-		wantCancelled bool
-		wantReserved  bool
+		name     string
+		sessions []string
 	}{
-		{
-			name: "draining move admission leaves pane processes running",
-			run:  func(d *Daemon) { d.closeMoveLifecycles() },
-		},
-		{
-			name:          "full shutdown reserves preservation and cancels pane processes",
-			run:           func(d *Daemon) { d.shutdownAll(protocol.ReasonServerShutdown) },
-			wantCancelled: true,
-			wantReserved:  true,
-		},
+		{name: "one named session", sessions: []string{"work"}},
+		{name: "several named sessions", sessions: []string{"alpha", "beta", "gamma"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
-			sess := &session{sessionCore: sessionCore{id: "sess-0", name: "work"}}
+			sessions := make([]*session, 0, len(tt.sessions))
 			d.mu.Lock()
-			require.True(t, d.registerSessionLocked(sess))
+			for i, name := range tt.sessions {
+				sess := &session{sessionCore: sessionCore{id: domain.SessionID(fmt.Sprintf("sess-%d", i)), name: name}}
+				require.True(t, d.registerSessionLocked(sess))
+				sessions = append(sessions, sess)
+			}
 			d.mu.Unlock()
 
-			tt.run(d)
+			var reservedAtCancel []bool
+			cancel := d.paneProcessCancel
+			d.paneProcessCancel = func() {
+				for _, sess := range sessions {
+					sess.teardownMu.Lock()
+					reservedAtCancel = append(reservedAtCancel, sess.shutdownTeardownRequested)
+					sess.teardownMu.Unlock()
+				}
+				cancel()
+			}
 
-			cancelled := d.paneProcessCtx.Err() != nil
-			sess.teardownMu.Lock()
-			reserved := sess.shutdownTeardownRequested
-			sess.teardownMu.Unlock()
-			require.Equal(t, tt.wantCancelled, cancelled, "pane process cancellation")
-			require.Equal(t, tt.wantReserved, reserved, "shutdown preservation reservation")
+			d.shutdownAll(protocol.ReasonServerShutdown)
+
+			require.Error(t, d.paneProcessCtx.Err(), "shutdown must cancel pane processes")
+			require.NotEmpty(t, reservedAtCancel, "pane process cancellation was not observed")
+			for i, reserved := range reservedAtCancel {
+				require.True(t, reserved, "session %q was not reserved for preservation before its PTY was cancelled", tt.sessions[i%len(tt.sessions)])
+			}
 		})
 	}
 }

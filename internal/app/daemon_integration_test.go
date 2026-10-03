@@ -426,6 +426,7 @@ func requireListedAfterRestart(t *testing.T, sessions []protocol.SessionInfo, na
 		require.Contains(t, []protocol.SessionState{protocol.SessionDown, protocol.SessionUp}, info.State,
 			"session %q must be stopped or restored, not broken", info.Name)
 		require.False(t, info.Ephemeral, "session %q must be a durable named session", info.Name)
+		require.False(t, info.Attached, "session %q has no client after restart", info.Name)
 	}
 	require.Equal(t, names, got)
 }

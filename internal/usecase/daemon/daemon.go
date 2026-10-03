@@ -909,8 +909,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 
 // shutdownAll is the explicit daemon-stop operation (wire KillDaemon). It is
 // the only caller that irreversibly ends the daemon: it closes move admission,
-// marks closing, cancels the daemon-wide pane process context, preserves every
-// live session as stopped durable authority, and closes done so Serve returns.
+// marks closing, reserves shutdown preservation for every live session, then
+// cancels the daemon-wide pane process context, preserves every live session as
+// stopped durable authority, and closes done so Serve returns.
 // KillAll never reaches this path. Setting closing under the same lock as the
 // snapshot guarantees no session can be inserted after the snapshot: route
 // rejects once closing is set, and both run under d.mu. killSession (which
