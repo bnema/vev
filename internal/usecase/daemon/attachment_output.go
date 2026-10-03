@@ -52,8 +52,12 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
 	// The replacement terminal's color claim wins over whatever the previous
 	// link negotiated: its renderer must encode for the terminal now attached.
-	if color := terminalcap.Resolve(h.Env, h.Color).Color; color != ac.terminalCapabilities.Color {
-		ac.terminalCapabilities.Color = color
+	// Only the mode changes the encoding; the source is stored but never
+	// forces a renderer swap.
+	color := terminalcap.Resolve(h.Env, h.Color).Color
+	swap := color.Mode != ac.terminalCapabilities.Color.Mode
+	ac.terminalCapabilities.Color = color
+	if swap {
 		ac.output.setColorProfile(colorprofile.Profile(color))
 	}
 	// A replacement terminal declares its own keyboard protocol.

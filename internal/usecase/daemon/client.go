@@ -712,19 +712,27 @@ func colorDowngradeNotice(color terminalcap.ColorCapabilities) (string, bool) {
 	}
 }
 
+// publishColorDowngradeNotice toasts ac when its terminal declared a reduced
+// color mode (see colorDowngradeNotice).
+func (d *Daemon) publishColorDowngradeNotice(sess *session, ac *attachedClient) {
+	message, ok := colorDowngradeNotice(ac.terminalCapabilities.Color)
+	if !ok {
+		return
+	}
+	d.publishToast(ac, domain.Notification{
+		Code:      domain.NoticeUser,
+		Severity:  domain.NoticeWarn,
+		Message:   message,
+		Time:      d.clock.Now(),
+		Count:     1,
+		SessionID: sess.id,
+	})
+}
+
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
-	if message, ok := colorDowngradeNotice(ac.terminalCapabilities.Color); ok {
-		d.publishToast(ac, domain.Notification{
-			Code:      domain.NoticeUser,
-			Severity:  domain.NoticeWarn,
-			Message:   message,
-			Time:      d.clock.Now(),
-			Count:     1,
-			SessionID: sess.id,
-		})
-	}
+	d.publishColorDowngradeNotice(sess, ac)
 	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
 	if !ac.terminalCapabilities.SupportsKittyGraphics() && sessionHasKittyGraphics(sess) {
 		d.warnUnsupportedGraphics(ac)

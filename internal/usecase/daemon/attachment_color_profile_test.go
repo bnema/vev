@@ -195,9 +195,22 @@ func TestResumeAdoptsColorOfLatestHello(t *testing.T) {
 		name       string
 		from, to   terminalcap.ColorCapabilities
 		liveResume bool // resume while the old link is still registered
+		// wantToasts is checked only when checkToasts is set; it lists the
+		// visible toast messages after resume.
+		checkToasts bool
+		wantToasts  []string
 	}{
 		{name: "truecolor to monochrome", from: colorTrue, to: colorMono},
 		{name: "truecolor to ansi16", from: colorTrue, to: color16},
+		{
+			name: "declared ansi16 resume shows downgrade notice", from: colorTrue, to: color16,
+			checkToasts: true, wantToasts: []string{"Terminal supports 16 colors; vev UI colors are reduced."},
+		},
+		{
+			name: "forced monochrome resume shows no notice", from: colorTrue,
+			to:          terminalcap.ColorCapabilities{Mode: terminalcap.Monochrome, Source: terminalcap.SourceForced},
+			checkToasts: true,
+		},
 		{name: "monochrome to truecolor", from: colorMono, to: colorTrue},
 		{name: "ansi16 to truecolor", from: color16, to: colorTrue},
 		{name: "ansi16 to monochrome", from: color16, to: colorMono},
@@ -249,6 +262,15 @@ func TestResumeAdoptsColorOfLatestHello(t *testing.T) {
 			require.NotEmpty(t, outs)
 			require.NotZero(t, outs[0].Base)
 			requireProfile(t, tt.to.Mode, data)
+
+			if tt.checkToasts {
+				toasts, _ := visibleToasts(resumed)
+				var got []string
+				for _, toast := range toasts {
+					got = append(got, toast.Message)
+				}
+				require.Equal(t, tt.wantToasts, got)
+			}
 
 			// Chrome styling follows the new mode as well.
 			reduced := tt.to.Mode != terminalcap.TrueColor
