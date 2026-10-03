@@ -941,9 +941,12 @@ func (d *Daemon) terminateAllForShutdown(reason uint8, deadline *snapshotShutdow
 	// Publish preservation policy for the complete registry snapshot before
 	// cancelling any PTY. Cancellation-driven EOF is allowed to own teardown,
 	// but its disposition must remain daemon shutdown rather than session purge.
+	// closeMoveLifecycles therefore leaves pane processes running; only this
+	// ordering, reserve then cancel, keeps a named session durable.
 	for _, s := range snapshot {
 		s.reserveShutdownTeardown()
 	}
+	d.cancelPaneProcesses()
 	d.log.Info("session termination begin", "reason", reason, "live_sessions", len(snapshot))
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that

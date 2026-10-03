@@ -272,3 +272,49 @@ func TestDaemonShutdownDrainsMoveBeforePaneLifetimeCancellation(t *testing.T) {
 	require.Nil(t, reservation)
 	awaitDaemonMoveActive(t, d, 0)
 }
+
+// TestShutdownReservesPreservationBeforeCancellingPaneProcesses guards the
+// daemon-stop ordering that keeps named sessions durable. Cancelling the
+// daemon-wide pane lifetime closes every PTY; a session whose reader sees that
+// EOF before its shutdown-preservation policy is reserved takes the natural
+// final-shell-exit path and purges its durable record instead of preserving it.
+// The drain step must therefore leave pane processes running; only the full
+// shutdown cancels them, after reserving preservation for every live session.
+func TestShutdownReservesPreservationBeforeCancellingPaneProcesses(t *testing.T) {
+	tests := []struct {
+		name          string
+		run           func(d *Daemon)
+		wantCancelled bool
+		wantReserved  bool
+	}{
+		{
+			name: "draining move admission leaves pane processes running",
+			run:  func(d *Daemon) { d.closeMoveLifecycles() },
+		},
+		{
+			name:          "full shutdown reserves preservation and cancels pane processes",
+			run:           func(d *Daemon) { d.shutdownAll(protocol.ReasonServerShutdown) },
+			wantCancelled: true,
+			wantReserved:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := &session{sessionCore: sessionCore{id: "sess-0", name: "work"}}
+			d.mu.Lock()
+			require.True(t, d.registerSessionLocked(sess))
+			d.mu.Unlock()
+
+			tt.run(d)
+
+			cancelled := d.paneProcessCtx.Err() != nil
+			sess.teardownMu.Lock()
+			reserved := sess.shutdownTeardownRequested
+			sess.teardownMu.Unlock()
+			require.Equal(t, tt.wantCancelled, cancelled, "pane process cancellation")
+			require.Equal(t, tt.wantReserved, reserved, "shutdown preservation reservation")
+		})
+	}
+}
