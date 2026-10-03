@@ -7,6 +7,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
@@ -174,7 +175,7 @@ func TestAccentLifecycleNeutralChromeByteSnapshots(t *testing.T) {
 			d.ApplyConfig(tt.config)
 			got := chromeStyleSnapshot(t, d.resolveAppliedTheme(themeui.Theme{
 				Foreground: raw.Foreground, Background: raw.Background, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown,
-				HasFG: true, HasBG: true}).Resolved.Styles)
+				HasFG: true, HasBG: true}, terminalcap.ColorCapabilities{}).Resolved.Styles)
 			require.Equal(t, []byte(tt.want), got)
 		})
 	}

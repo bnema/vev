@@ -33,8 +33,16 @@ func pulseVisible(frame int) bool {
 // punching a default-background hole in a themed bar. On the invisible beat
 // it returns (base, false) unchanged.
 func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
+	return pulseStyleFor(frame, base, false)
+}
+
+// pulseStyleFor is pulseStyle for chrome built by the reduced-color policy.
+func pulseStyleFor(frame int, base renderer.Style, reduced bool) (renderer.Style, bool) {
 	if !pulseVisible(frame) {
 		return base, false
+	}
+	if reduced {
+		return themeui.PulseAttribute(base), true
 	}
 	f := frame % pulseFrameCount
 	peak := pulseFrameCount / 2
@@ -63,7 +71,7 @@ func drawTopBarSnapshot(row []renderer.Cell, status statusSnapshot, frame int, t
 		writeStatusText(row, &x, " "+label.text[:label.nameLen], nameStyle)
 		if w.attention {
 			writeStatusText(row, &x, " ", baseStyle)
-			writeBell(row, &x, frame, baseStyle)
+			writeBell(row, &x, frame, baseStyle, styles.Reduced)
 		}
 		writeStatusText(row, &x, label.text[label.nameLen:], titleStyle)
 		writeStatusText(row, &x, " ", baseStyle)
@@ -82,13 +90,13 @@ func drawStatusBarState(row []renderer.Cell, state barState, styles themeui.Styl
 			if sess.selected {
 				style = styles.SurfaceActive
 			}
-			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
+			drawRankedStatusSessionEntry(row, &x, sess, style, state.attentionFrame, styles.Reduced)
 		}
 	} else {
 		fittedMRU := fitMRU(state.mru, len(row), x, rightText)
 		for i, sess := range fittedMRU {
 			style := styles.MRUStyle(i, len(fittedMRU))
-			drawStatusSessionEntry(row, &x, sess, style, state.attentionFrame)
+			drawStatusSessionEntry(row, &x, sess, style, state.attentionFrame, styles.Reduced)
 		}
 	}
 	drawRightPlainText(row, rightText, x, styles.SurfaceBar)
@@ -103,23 +111,23 @@ type rankedRecent struct {
 	selected  bool
 }
 
-func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent, style renderer.Style, attentionFrame int) {
+func drawRankedStatusSessionEntry(row []renderer.Cell, x *int, sess rankedRecent, style renderer.Style, attentionFrame int, reduced bool) {
 	prefixStyle := style
 	prefixStyle.Bold = true
 	writeStatusText(row, x, " "+strconv.Itoa(sess.rank)+":", prefixStyle)
 	writeStatusText(row, x, sess.name, style)
 	if sess.attention {
 		writeStatusText(row, x, " ", style)
-		writeBell(row, x, attentionFrame, style)
+		writeBell(row, x, attentionFrame, style, reduced)
 	}
 	writeStatusText(row, x, " ", style)
 }
 
-func drawStatusSessionEntry(row []renderer.Cell, x *int, entry recentRouteDisplay, style renderer.Style, attentionFrame int) {
+func drawStatusSessionEntry(row []renderer.Cell, x *int, entry recentRouteDisplay, style renderer.Style, attentionFrame int, reduced bool) {
 	writeStatusText(row, x, " "+entry.name, style)
 	if entry.attention {
 		writeStatusText(row, x, " ", style)
-		writeBell(row, x, attentionFrame, style)
+		writeBell(row, x, attentionFrame, style, reduced)
 	}
 	writeStatusText(row, x, " ", style)
 }
@@ -490,8 +498,8 @@ func mruFutureRightReserve(rowLen int) int {
 // writeBell draws the attention glyph on its visible beat, or a plain cell in
 // base's style on its blank beat, so the bell never leaves a bare
 // default-background hole in a themed bar.
-func writeBell(row []renderer.Cell, x *int, frame int, base renderer.Style) {
-	style, visible := pulseStyle(frame, base)
+func writeBell(row []renderer.Cell, x *int, frame int, base renderer.Style, reduced bool) {
+	style, visible := pulseStyleFor(frame, base, reduced)
 	if !visible {
 		writeStatusText(row, x, " ", base)
 		return

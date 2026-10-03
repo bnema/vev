@@ -6,6 +6,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
@@ -495,6 +496,23 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 }
 
 var fallbackChromeStyles = themeui.Resolve(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}).Styles
+
+var (
+	fallbackANSI16Styles = themeui.ResolveForColor(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}, terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16}).Styles
+	fallbackMonoStyles   = themeui.ResolveForColor(themeui.Theme{}, domain.ThemeAccent{Mode: domain.ThemeAccentAuto}, terminalcap.ColorCapabilities{Mode: terminalcap.Monochrome}).Styles
+)
+
+// fallbackStylesFor is the static pre-theme chrome for one attachment's mode.
+func fallbackStylesFor(color terminalcap.ColorCapabilities) themeui.Styles {
+	switch color.Mode {
+	case terminalcap.ANSI16:
+		return fallbackANSI16Styles
+	case terminalcap.Monochrome:
+		return fallbackMonoStyles
+	default:
+		return fallbackChromeStyles
+	}
+}
 
 func resolveStyles(styles []themeui.Styles) themeui.Styles {
 	if len(styles) > 0 {

@@ -13,7 +13,8 @@ Both set `COLORTERM=truecolor` and `TERM_PROGRAM=vev`.
 
 - vev checks with `infocmp -x xterm-direct` before each new pane (1 second timeout). Existing panes keep their `TERM`.
 - With `xterm-256color`, apps must read `COLORTERM` to use RGB colors.
-- If your outer terminal does not support truecolor, vev converts colors to 256 and shows a one-time warning.
+- If your outer terminal does not support truecolor, vev converts colors to the terminal's palette (256, 16, or none) and shows a one-time notice unless the mode was forced with `terminal.colors` or `VEV_COLORS`.
+- On 16-color terminals vev's own UI (bars, borders, pickers, overlays) drops tinted backgrounds and uses reverse video, bold, faint, and the terminal's own palette slots for its accent. On monochrome terminals it uses only bold, reverse, and faint. Pane content is never recolored by vev's UI.
 
 ### Install `xterm-direct`
 

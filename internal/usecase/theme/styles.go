@@ -47,6 +47,14 @@ func PulseColor(base renderer.Style, intensity float64) renderer.Style {
 	return style
 }
 
+// PulseAttribute is PulseColor for reduced-color attachments: the glyph's
+// on/off beat already pulses, so the visible beat is just bold. Grey indexes
+// would quantize to arbitrary slots or vanish.
+func PulseAttribute(base renderer.Style) renderer.Style {
+	base.Bold = true
+	return base
+}
+
 // MRUFade fades an MRU style by position, reaching 60 percent of the terminal
 // background color at the oldest entry.
 func MRUFade(base renderer.Style, t Theme, i, count int) renderer.Style {
@@ -62,6 +70,10 @@ func MRUFade(base renderer.Style, t Theme, i, count int) renderer.Style {
 // Styles is the complete semantic set of terminal chrome styles. The legacy
 // aliases remain until daemon renderers consume the semantic fields directly.
 type Styles struct {
+	// Reduced marks the ANSI16/monochrome policy: no RGB anywhere, and the
+	// attention pulse uses bold instead of a grey ramp (see ResolveForColor).
+	Reduced bool
+
 	// mruStyles are all position/count combinations that status composition
 	// can display. They keep OKLab interpolation out of render paths.
 	mruStyles [9][9]renderer.Style

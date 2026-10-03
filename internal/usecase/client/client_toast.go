@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	renderer "github.com/bnema/vev-vt"
+	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -38,6 +39,39 @@ func toastBorderSGR(severity domain.NoticeSeverity) string {
 	}
 }
 
+// toastBorderSGRFor is toastBorderSGR for one renderer color profile. The
+// toast bypasses the renderer, so it must follow the profile itself: 16-color
+// terminals get basic red/yellow, monochrome terminals get bold for problems.
+// TrueColor and 256-color output is unchanged.
+func toastBorderSGRFor(severity domain.NoticeSeverity, profile ansirenderer.ColorProfile) string {
+	switch profile {
+	case ansirenderer.ColorProfileANSI16:
+		switch severity {
+		case domain.NoticeError:
+			return "\x1b[31m"
+		case domain.NoticeWarn:
+			return "\x1b[33m"
+		}
+		return ""
+	case ansirenderer.ColorProfileMonochrome:
+		if severity == domain.NoticeError || severity == domain.NoticeWarn {
+			return "\x1b[1m"
+		}
+		return ""
+	default:
+		return toastBorderSGR(severity)
+	}
+}
+
+// toastBorderReset undoes toastBorderSGR's attribute: default foreground for
+// colors, normal intensity for the monochrome bold border.
+func toastBorderReset(borderSGR string) string {
+	if borderSGR == "\x1b[1m" {
+		return "\x1b[22m"
+	}
+	return "\x1b[39m"
+}
+
 // clientToastLines renders the toast box as one string per row, exactly
 // bounds.Width columns wide.
 func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
@@ -60,7 +94,7 @@ func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 				if border {
 					b.WriteString(borderSGR)
 				} else {
-					b.WriteString("\x1b[39m")
+					b.WriteString(toastBorderReset(borderSGR))
 				}
 				colored = border
 			}
@@ -76,7 +110,7 @@ func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 			b.WriteRune(cell.Rune)
 		}
 		if colored {
-			b.WriteString("\x1b[39m")
+			b.WriteString(toastBorderReset(borderSGR))
 		}
 		lines[y] = b.String()
 	}

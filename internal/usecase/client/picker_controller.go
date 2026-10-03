@@ -498,7 +498,7 @@ func (p *pickerController) RenderNotice(size domain.Size) []byte {
 	}
 	buffer := bytes.NewBuffer(blanks)
 	for i, rect := range p.noticeBounds {
-		_ = writeClientToast(buffer, rect, clientToastLines(rect, toasts[i].Message, toastBorderSGR(toasts[i].Severity)))
+		_ = writeClientToast(buffer, rect, clientToastLines(rect, toasts[i].Message, toastBorderSGRFor(toasts[i].Severity, p.renderer.profile)))
 	}
 	if buffer.Len() == 0 {
 		return nil

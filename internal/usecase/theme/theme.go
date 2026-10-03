@@ -23,6 +23,10 @@ type Theme struct {
 	SchemeKnown  bool
 	Light        bool
 	UsePalette   bool
+	// DimByAttribute makes Dimmer use the faint attribute instead of blending
+	// colors. The daemon sets it per attachment for ANSI16 and monochrome
+	// output, where RGB blends would quantize badly or vanish.
+	DimByAttribute bool
 }
 
 // PaletteColor returns a palette color only when palette inheritance is
@@ -414,6 +418,7 @@ const defaultDimmingPercent = 35
 // Dimmer transforms resolved terminal colors for subdued UI states. Construct
 // it once and reuse it while rendering cells with the same theme and policy.
 type Dimmer struct {
+	attribute         bool
 	theme             Theme
 	backgroundPercent int
 	foregroundPercent int
@@ -445,6 +450,7 @@ func WithForegroundDimming(percent int) DimmerOption {
 // NewDimmer returns a reusable dimmer with optional per-channel overrides.
 func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
 	d := Dimmer{
+		attribute:         t.DimByAttribute,
 		theme:             t,
 		backgroundPercent: defaultDimmingPercent,
 		foregroundPercent: defaultDimmingPercent,
@@ -465,6 +471,10 @@ func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
 // Dim fades a style's resolved background toward the terminal background,
 // then fades its foreground and custom underline toward that dimmed background.
 func (d Dimmer) Dim(style renderer.Style) renderer.Style {
+	if d.attribute {
+		style.Attrs |= renderer.AttrDim
+		return style
+	}
 	if !usable(d.theme) {
 		return style
 	}

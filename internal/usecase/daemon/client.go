@@ -260,7 +260,7 @@ func (ac *attachedClient) getAppliedTheme() appliedTheme {
 	if applied.Generation == 0 {
 		// An unattached client has no terminal report yet. Reuse the static
 		// neutral cache rather than resolving from a render path.
-		applied.Resolved = themeui.ResolvedTheme{Theme: applied.Raw, Styles: fallbackChromeStyles}
+		applied.Resolved = themeui.ResolvedTheme{Theme: applied.Raw, Styles: fallbackStylesFor(ac.terminalCapabilities.Color)}
 	}
 	return applied
 }
