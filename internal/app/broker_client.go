@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -283,7 +284,7 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 	if reader == nil {
 		reader = clipboard.New()
 	}
-	picker := client.NewPicker(clk, 0, attachmentEnv.TrueColor)
+	picker := client.NewPicker(clk, 0, attachmentEnv.Color)
 	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState, clock: clk}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
 		Logger:                   cfg.Logger,
@@ -612,20 +613,91 @@ var (
 // process environment themselves.
 func terminalAttachmentEnvironment() client.AttachmentEnvironment {
 	return client.AttachmentEnvironment{
-		TermEnv:   os.Getenv("TERM"),
-		Cwd:       currentWorkingDirectory(),
-		TrueColor: terminalcap.DetectTrueColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
-		PID:       uint32(os.Getpid()),
+		TermEnv: os.Getenv("TERM"),
+		Cwd:     currentWorkingDirectory(),
+		Color:   detectTerminalColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
+		PID:     uint32(os.Getpid()),
 	}
 }
 
-// outerTerminalAttachmentEnvironment extends terminalAttachmentEnvironment for
-// a client that owns a real outer terminal: it probes that terminal once and
-// applies the user's keyboard setting. Virtual terminals never probe.
-func outerTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvironment {
+// detectTerminalColor derives the color capability from the process
+// environment. Explicit TERM/COLORTERM values override env entries.
+func detectTerminalColor(termEnv, colorTerm string, env []string) terminalcap.ColorCapabilities {
+	detectionEnv := make([]string, 0, len(env)+2)
+	detectionEnv = append(detectionEnv, env...)
+	detectionEnv = append(detectionEnv, "TERM="+termEnv, "COLORTERM="+colorTerm)
+	return terminalcap.Detect(detectionEnv).Color
+}
+
+// envColors is the client-side color-mode override. It wins over the
+// terminal.colors config key and is read by each client process; the daemon
+// never sees it except as the Forced Hello.Color it produces.
+const envColors = "VEV_COLORS"
+
+// virtualTerminalColor is the color capability declared by clients whose
+// terminal is an in-process RGB-capable VT mirror (the browser terminal and the
+// headless UI driver) rather than the gateway process' controlling terminal.
+// It is forced so the gateway's own TERM/COLORTERM never downgrades them.
+var virtualTerminalColor = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceForced}
+
+// virtualTerminalAttachmentEnvironment is terminalAttachmentEnvironment for a
+// client that renders into an RGB-capable virtual terminal: it declares forced
+// truecolor instead of detecting from the gateway process environment.
+func virtualTerminalAttachmentEnvironment() client.AttachmentEnvironment {
 	env := terminalAttachmentEnvironment()
+	env.Color = virtualTerminalColor
+	return env
+}
+
+// resolveColorOverride applies the explicit color override on top of the
+// detected capability: a valid VEV_COLORS wins over terminal.colors, and
+// "auto" at either level means detection. An empty VEV_COLORS is unset, so the
+// config value still applies. An invalid VEV_COLORS is reported through log
+// and ignored. A forced result carries SourceForced.
+func resolveColorOverride(detected terminalcap.ColorCapabilities, envValue string, cfg domain.TerminalConfig, log *slog.Logger) terminalcap.ColorCapabilities {
+	if strings.TrimSpace(envValue) != "" {
+		mode, auto, err := terminalcap.ParseColorMode(envValue)
+		switch {
+		case err != nil:
+			if log != nil {
+				log.Warn("ignoring invalid "+envColors, "value", envValue, "err", err)
+			}
+		case auto:
+			return detected
+		default:
+			return terminalcap.ColorCapabilities{Mode: mode, Source: terminalcap.SourceForced}
+		}
+	}
+	if cfg.ColorsSet {
+		return terminalcap.ColorCapabilities{Mode: cfg.Colors, Source: terminalcap.SourceForced}
+	}
+	return detected
+}
+
+// userTerminalAttachmentEnvironment is terminalAttachmentEnvironment for a
+// client whose terminal is the user's real one: the detected color capability
+// yields to VEV_COLORS and terminal.colors. The single resolved value feeds
+// both the picker and every Hello.
+func userTerminalAttachmentEnvironment(log *slog.Logger, cfg domain.TerminalConfig) client.AttachmentEnvironment {
+	env := terminalAttachmentEnvironment()
+	env.Color = resolveColorOverride(env.Color, os.Getenv(envColors), cfg, log)
+	return env
+}
+
+// configuredTerminalAttachmentEnvironment loads the user's config and returns
+// userTerminalAttachmentEnvironment for it.
+func configuredTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvironment {
+	return userTerminalAttachmentEnvironment(log, loadConfigOrDefaults(log, platform.ConfigPath()).Terminal)
+}
+
+// outerTerminalAttachmentEnvironment extends userTerminalAttachmentEnvironment
+// for a client that owns a real outer terminal: it probes that terminal once
+// and applies the user's keyboard setting. Virtual terminals never probe.
+func outerTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvironment {
+	cfg := loadConfigOrDefaults(log, platform.ConfigPath())
+	env := userTerminalAttachmentEnvironment(log, cfg.Terminal)
 	env.ProbeTerminal = true
-	env.KittyKeyboard = loadConfigOrDefaults(log, platform.ConfigPath()).Keyboard.KittyProtocol
+	env.KittyKeyboard = cfg.Keyboard.KittyProtocol
 	return env
 }
 

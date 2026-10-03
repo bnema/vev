@@ -59,12 +59,12 @@ func TestAttachmentOutputUsesTerminalColorProfile(t *testing.T) {
 	}{
 		{
 			name:         "truecolor",
-			capabilities: terminalcap.Capabilities{ColorMode: terminalcap.TrueColor},
+			capabilities: terminalcap.Capabilities{Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
 			want:         "\x1b[1;1H\x1b[0;38;2;255;0;0;48;2;0;0;255;58;2;0;255;0mX\x1b[0m",
 		},
 		{
 			name:         "indexed 256",
-			capabilities: terminalcap.Capabilities{ColorMode: terminalcap.Indexed256},
+			capabilities: terminalcap.Capabilities{Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256}},
 			want:         "\x1b[1;1H\x1b[0;38;5;196;48;5;21;58;5;46mX\x1b[0m",
 		},
 	}

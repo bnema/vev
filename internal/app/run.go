@@ -88,18 +88,20 @@ type command struct {
 	listAll      bool
 	hostAction   string
 	hostTarget   string
-	killAll      bool
-	killSessions bool
-	cmd          cmdInvocation
-	env          envInvocation
-	brokerServe  brokerServeOptions
-	brokerMux    brokerMuxOptions
-	brokerReady  brokerReadyOptions
-	uiDriver     uiDriverOptions
-	uiObserve    bool
-	uiControl    bool
-	uiSocket     string
-	web          webOptions
+	// hostTransport is the `host add` carriage: hostTransportQUIC or hostTransportSSH.
+	hostTransport string
+	killAll       bool
+	killSessions  bool
+	cmd           cmdInvocation
+	env           envInvocation
+	brokerServe   brokerServeOptions
+	brokerMux     brokerMuxOptions
+	brokerReady   brokerReadyOptions
+	uiDriver      uiDriverOptions
+	uiObserve     bool
+	uiControl     bool
+	uiSocket      string
+	web           webOptions
 }
 
 // usageError is a user-facing argument error; the app prints it (with usage)
@@ -123,7 +125,8 @@ usage:
   vev ls              list local sessions
   vev ls <host>       list sessions on a known remote host
   vev ls --all        list local and remote sessions
-  vev host add <host> add a pinned remote host
+  vev host add [--transport quic|ssh] <host>
+                      add a pinned remote host (default transport: quic)
   vev host rm <host>  remove a pinned remote host
   vev host list       list known remote hosts
   vev kill <name>     kill a session
@@ -439,25 +442,77 @@ func parseHostArgs(args []string) (command, error) {
 		return command{}, usagef("`host` requires add, rm, or list")
 	}
 	switch args[0] {
-	case hostActionAdd, hostActionRm:
+	case hostActionAdd:
+		return parseHostAddArgs(args[1:])
+	case hostActionRm:
 		if len(args) < 2 || args[1] == "" {
-			return command{}, usagef("`host %s` requires a host target", args[0])
+			return command{}, usagef("`host rm` requires a host target")
+		}
+		if strings.HasPrefix(args[1], "-") {
+			return command{}, usagef("unknown flag %q for `host rm`", args[1])
 		}
 		if len(args) > 2 {
-			return command{}, usagef("`host %s` accepts exactly one host target", args[0])
+			return command{}, usagef("`host rm` accepts exactly one host target")
 		}
 		if err := domain.ValidateRemoteHostTarget(args[1]); err != nil {
 			return command{}, err
 		}
-		return command{kind: kindHost, hostAction: args[0], hostTarget: args[1]}, nil
+		return command{kind: kindHost, hostAction: hostActionRm, hostTarget: args[1]}, nil
 	case hostActionList:
 		if len(args) > 1 {
+			if strings.HasPrefix(args[1], "-") {
+				return command{}, usagef("unknown flag %q for `host list`", args[1])
+			}
 			return command{}, usagef("`host list` accepts no arguments")
 		}
 		return command{kind: kindHost, hostAction: hostActionList}, nil
 	default:
 		return command{}, usagef("unknown host action %q", args[0])
 	}
+}
+
+// parseHostAddArgs parses `host add [--transport quic|ssh] <host>`.
+func parseHostAddArgs(args []string) (command, error) {
+	transport, target := "", ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--transport" || strings.HasPrefix(arg, "--transport="):
+			if transport != "" {
+				return command{}, usagef("`host add` accepts --transport once")
+			}
+			value, hasValue := strings.CutPrefix(arg, "--transport=")
+			if !hasValue {
+				if i+1 >= len(args) {
+					return command{}, usagef("`--transport` requires a value (%s or %s)", hostTransportQUIC, hostTransportSSH)
+				}
+				i++
+				value = args[i]
+			}
+			switch value {
+			case hostTransportQUIC, hostTransportSSH:
+				transport = value
+			default:
+				return command{}, usagef("invalid transport %q (want %q or %q)", value, hostTransportQUIC, hostTransportSSH)
+			}
+		case strings.HasPrefix(arg, "-"):
+			return command{}, usagef("unknown flag %q for `host add`", arg)
+		case target != "":
+			return command{}, usagef("`host add` accepts exactly one host target")
+		default:
+			target = arg
+		}
+	}
+	if target == "" {
+		return command{}, usagef("`host add` requires a host target")
+	}
+	if err := domain.ValidateRemoteHostTarget(target); err != nil {
+		return command{}, err
+	}
+	if transport == "" {
+		transport = hostTransportQUIC
+	}
+	return command{kind: kindHost, hostAction: hostActionAdd, hostTarget: target, hostTransport: transport}, nil
 }
 
 // performanceTrace creates one serialized timestamp owner for this process.
@@ -802,8 +857,8 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	}
 	binding, err := daemonmux.NewServerBindings(identity, incarnation, []daemonmux.ServerPolicyAdmission{
 		{Policy: localDaemonPolicy(), Origin: ports.SessionOriginLocal},
-		{Policy: remoteBrokerPolicy("quic"), Origin: ports.SessionOriginRemote},
-		{Policy: remoteBrokerPolicy("stdio"), Origin: ports.SessionOriginRemote},
+		{Policy: remoteBrokerPolicy(hostTransportQUIC), Origin: ports.SessionOriginRemote},
+		{Policy: remoteBrokerPolicy(hostTransportSSH), Origin: ports.SessionOriginRemote},
 	})
 	if err != nil {
 		return fmt.Errorf("vev: establish daemon mux authority: %w", err)
@@ -913,24 +968,12 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 }
 
 const (
-	envRemoteTransport     = "VEV_REMOTE_TRANSPORT"
 	uiRemoteCleanupCommand = "_ui-cleanup"
 	// daemonStopCommand is the hidden, environment-scoped graceful stop of
 	// this environment's daemon, for harnesses and scripts. Users run
 	// `kill --all` instead.
 	daemonStopCommand = "_daemon-stop"
 )
-
-func remoteTransportModeFromEnv(value string) (string, error) {
-	switch value {
-	case "", "quic":
-		return "quic", nil
-	case "stdio":
-		return "stdio", nil
-	default:
-		return "", fmt.Errorf("vev: invalid remote transport %q (want %q or %q)", value, "quic", "stdio")
-	}
-}
 
 const daemonStopTimeout = 2 * time.Second
 

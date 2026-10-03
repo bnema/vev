@@ -11,7 +11,7 @@ import (
 )
 
 func backdropTheme() themeui.Theme {
-	return themeui.Theme{Known: true, TrueColor: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
+	return themeui.Theme{Known: true, HasFG: true, HasBG: true, Foreground: renderer.RGB{R: 220, G: 220, B: 220}, Background: renderer.RGB{R: 10, G: 10, B: 10}}
 }
 
 func TestApplyOverlayBackdropDimsCompleteFrame(t *testing.T) {

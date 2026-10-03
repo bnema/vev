@@ -510,7 +510,7 @@ func TestGraphicsNamespacePoolExhaustionFallsBackToText(t *testing.T) {
 		domain.Geometry{Size: defaultSize},
 		attachClientOptions{
 			capabilitiesSet:      true,
-			terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true, ColorMode: terminalcap.TrueColor},
+			terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true, Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
 		},
 	)
 	d.mu.Unlock()

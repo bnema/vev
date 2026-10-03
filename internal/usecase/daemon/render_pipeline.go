@@ -157,7 +157,9 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			titles[pane.id] = pane.titleGeneration
 		}
 		if !pl.Collapsed && pl.Content.Width > 0 && pl.Content.Height > 0 && (full || len(pane.damage) > 0) {
-			blitPaneFrame(frame, pl.Content, pane.frame, !pane.focused, inactivePaneDimmer)
+			// Reduced-color chrome never recolors or fades pane content; focus is
+			// shown by the title bar and dividers.
+			blitPaneFrame(frame, pl.Content, pane.frame, !pane.focused && !state.theme.DimByAttribute, inactivePaneDimmer)
 		}
 		for _, d := range pane.damage {
 			if d.Kind != renderer.DamageFullRedraw {

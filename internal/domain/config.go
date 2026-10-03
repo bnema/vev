@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/bnema/vev/internal/domain/terminalcap"
+)
 
 // MinBarInterval is the minimum supported bar refresh interval.
 const MinBarInterval = time.Second
@@ -98,6 +102,16 @@ type KeyboardConfig struct {
 	KittyProtocol bool
 }
 
+// TerminalConfig contains client-side outer-terminal settings. It is read by
+// each client at startup and never applied by the daemon, so a change takes
+// effect on the next client process.
+type TerminalConfig struct {
+	// Colors is the forced color mode when ColorsSet is true. A false
+	// ColorsSet (terminal.colors = auto, the default) uses detection.
+	Colors    terminalcap.ColorMode
+	ColorsSet bool
+}
+
 // ScrollbackConfig is vev's per-pane retention policy. The terminal library
 // only enforces these application-selected limits. Zero megabytes disables
 // history; zero lines removes the additional line ceiling.
@@ -139,6 +153,7 @@ type Config struct {
 	Tabs           TabsConfig
 	Ephemeral      EphemeralConfig
 	Keyboard       KeyboardConfig
+	Terminal       TerminalConfig
 	Scrollback     ScrollbackConfig
 }
 

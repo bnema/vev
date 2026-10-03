@@ -54,7 +54,7 @@ func TestBuildRampReducesActiveToHighestSafeWeight(t *testing.T) {
 	theme := Theme{
 		Foreground: renderer.RGB{R: 0xe0, G: 0xe0, B: 0xe0},
 		Background: renderer.RGB{R: 0x59, G: 0x59, B: 0x59},
-		HasFG:      true, HasBG: true, TrueColor: true, Known: true, UsePalette: true,
+		HasFG:      true, HasBG: true, Known: true, UsePalette: true,
 	}
 	accent := Accent{RGB: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}, Known: true}
 	ramp := BuildRamp(theme, accent)
@@ -195,7 +195,6 @@ func TestResolveBuildsCompleteStylesFromOneAccent(t *testing.T) {
 
 func TestResolveANSI256AndPaletteOffSurfaces(t *testing.T) {
 	theme := rampTheme(false)
-	theme.TrueColor = false
 	theme.Palette[2] = renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}
 	theme.PaletteKnown = 1 << 2
 	indexed := Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2})
@@ -212,7 +211,6 @@ func TestResolveANSI256AndPaletteOffSurfaces(t *testing.T) {
 		})
 	}
 
-	theme.TrueColor = true
 	theme.UsePalette = false
 	off := Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentSlot, Slot: 2})
 	require.False(t, off.Accent.Known)
@@ -228,7 +226,7 @@ func TestResolveANSI256AndPaletteOffSurfaces(t *testing.T) {
 
 func rampTheme(light bool) Theme {
 	if light {
-		return Theme{Foreground: renderer.RGB{R: 0x20, G: 0x20, B: 0x20}, Background: renderer.RGB{R: 0xf8, G: 0xf8, B: 0xf8}, HasFG: true, HasBG: true, TrueColor: true, Known: true, UsePalette: true}
+		return Theme{Foreground: renderer.RGB{R: 0x20, G: 0x20, B: 0x20}, Background: renderer.RGB{R: 0xf8, G: 0xf8, B: 0xf8}, HasFG: true, HasBG: true, Known: true, UsePalette: true}
 	}
-	return Theme{Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8}, Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a}, HasFG: true, HasBG: true, TrueColor: true, Known: true, UsePalette: true}
+	return Theme{Foreground: renderer.RGB{R: 0xd8, G: 0xdc, B: 0xe8}, Background: renderer.RGB{R: 0x08, G: 0x09, B: 0x0a}, HasFG: true, HasBG: true, Known: true, UsePalette: true}
 }

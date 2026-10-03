@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -67,7 +68,7 @@ func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, reque
 	cfg.Clock = h.clock
 	cfg.Theme = themes
 	cfg.Clipboard = clipboard
-	cfg.TrueColor = true
+	cfg.Color = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}
 	worker, err := newSessionAttachmentWorker(cfg)
 	require.NoError(t, err)
 	go func() {
@@ -188,7 +189,6 @@ func TestAttachmentInputPublishesClearedThenDefinitivePalette(t *testing.T) {
 	first.awaitQueries(t, paletteColorBatch, 1)
 	require.True(t, strings.HasPrefix(first.term.written(), "\x1b[Hready"), "the query follows the committed frame")
 	cleared := first.awaitThemes(t, 1)[0]
-	require.True(t, cleared.TrueColor)
 	require.Zero(t, cleared.PaletteKnown)
 	require.False(t, cleared.HasForeground)
 

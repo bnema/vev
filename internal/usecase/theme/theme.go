@@ -19,13 +19,14 @@ type Theme struct {
 	PaletteKnown uint16
 	HasFG        bool
 	HasBG        bool
-	// TrueColor records output capability for transport compatibility. Semantic
-	// styles remain RGB; the attachment renderer quantizes them when necessary.
-	TrueColor   bool
-	Known       bool
-	SchemeKnown bool
-	Light       bool
-	UsePalette  bool
+	Known        bool
+	SchemeKnown  bool
+	Light        bool
+	UsePalette   bool
+	// DimByAttribute makes Dimmer use the faint attribute instead of blending
+	// colors. The daemon sets it per attachment for ANSI16 and monochrome
+	// output, where RGB blends would quantize badly or vanish.
+	DimByAttribute bool
 }
 
 // PaletteColor returns a palette color only when palette inheritance is
@@ -43,7 +44,6 @@ var (
 		Background:  renderer.RGB{R: 0x18, G: 0x18, B: 0x18},
 		HasFG:       true,
 		HasBG:       true,
-		TrueColor:   true,
 		Known:       true,
 		SchemeKnown: true,
 		Light:       false,
@@ -53,7 +53,6 @@ var (
 		Background:  renderer.RGB{R: 0xf8, G: 0xf8, B: 0xf8},
 		HasFG:       true,
 		HasBG:       true,
-		TrueColor:   true,
 		Known:       true,
 		SchemeKnown: true,
 		Light:       true,
@@ -448,6 +447,11 @@ func WithForegroundDimming(percent int) DimmerOption {
 }
 
 // NewDimmer returns a reusable dimmer with optional per-channel overrides.
+//
+// Keep this function inlinable: it sits on the per-cell render path, and adding
+// fields or work pushes it over the inline budget (80). After changing it,
+// check `go build -gcflags=-m=2 ./internal/usecase/theme 2>&1 | grep NewDimmer`
+// and rerun BenchmarkComposeCapturedFrame in internal/usecase/daemon.
 func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
 	d := Dimmer{
 		theme:             t,
@@ -470,6 +474,10 @@ func NewDimmer(t Theme, opts ...DimmerOption) Dimmer {
 // Dim fades a style's resolved background toward the terminal background,
 // then fades its foreground and custom underline toward that dimmed background.
 func (d Dimmer) Dim(style renderer.Style) renderer.Style {
+	if d.theme.DimByAttribute {
+		style.Attrs |= renderer.AttrDim
+		return style
+	}
 	if !usable(d.theme) {
 		return style
 	}

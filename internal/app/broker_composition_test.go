@@ -110,7 +110,7 @@ func TestProductionBrokerCompositionLocalAndMutableRemote(t *testing.T) {
 		return len(snapshot.Daemons) > 0 && snapshot.Daemons[0].Identity != ""
 	}, 10*time.Second, 10*time.Millisecond, "local observation: %+v", service.Snapshot())
 
-	registration, err := service.AddHost(ctx, "harness@127.0.0.1", remoteBrokerPolicy("stdio"))
+	registration, err := service.AddHost(ctx, "harness@127.0.0.1", remoteBrokerPolicy(hostTransportSSH))
 	require.NoError(t, err)
 	require.Equal(t, "harness@127.0.0.1", registration.Endpoint)
 	require.Eventually(t, func() bool {
@@ -128,8 +128,8 @@ func TestProductionBrokerRemoteMuxTransports(t *testing.T) {
 	for _, tc := range []struct {
 		name, helper string
 	}{
-		{"stdio", brokerMuxStdioCommand},
-		{"quic", brokerMuxQUICBootstrapCommand},
+		{hostTransportSSH, brokerMuxStdioCommand},
+		{hostTransportQUIC, brokerMuxQUICBootstrapCommand},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir := shortTempDir(t, "vb")

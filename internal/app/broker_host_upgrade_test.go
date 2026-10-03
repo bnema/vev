@@ -22,7 +22,7 @@ func TestUpgradeBrokerHostVersions(t *testing.T) {
 		{
 			name: "older build policy is upgraded and identity kept",
 			policy: func() ports.BrokerPolicy {
-				p := remoteBrokerPolicy("")
+				p := remoteBrokerPolicy(hostTransportQUIC)
 				p.ProtocolVersion--
 				return p
 			},
@@ -30,7 +30,7 @@ func TestUpgradeBrokerHostVersions(t *testing.T) {
 		},
 		{
 			name:         "current policy is left untouched",
-			policy:       func() ports.BrokerPolicy { return remoteBrokerPolicy("") },
+			policy:       func() ports.BrokerPolicy { return remoteBrokerPolicy(hostTransportQUIC) },
 			wantRevision: 0,
 		},
 	}

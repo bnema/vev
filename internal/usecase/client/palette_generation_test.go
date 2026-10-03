@@ -54,7 +54,6 @@ func (c *manualPaletteClock) fireCompletion(g *paletteGenerationCoordinator, id 
 
 func generationTheme() protocol.Theme {
 	return protocol.Theme{
-		TrueColor:     true,
 		HasForeground: true,
 		Foreground:    renderer.RGB{R: 1, G: 2, B: 3},
 		HasBackground: true,
@@ -119,7 +118,6 @@ func TestPaletteGenerationInitialPublishesClearedThenDefinitive(t *testing.T) {
 		paletteActionPublishFinal,
 	}, actionKinds(final))
 	got := findAction(t, final, paletteActionPublishFinal).theme
-	require.True(t, got.TrueColor)
 	require.True(t, got.HasForeground)
 	require.Equal(t, renderer.RGB{R: 10, G: 11, B: 12}, got.Foreground)
 	require.True(t, got.HasBackground)

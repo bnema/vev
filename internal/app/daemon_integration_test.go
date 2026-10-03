@@ -28,6 +28,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/sessionwire"
 	"github.com/bnema/vev/internal/adapters/snapshot"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
@@ -115,7 +116,7 @@ func attachWithEnvironment(t *testing.T, dir string, intent uint8, name string, 
 	raw, err := ipc.DialContext(context.Background(), dir)
 	require.NoError(t, err)
 	conn := sessionwire.NewClientConnection(raw)
-	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", TrueColor: true, Env: env}
+	hello := protocol.Hello{Version: protocol.Version, Intent: intent, Name: name, Size: sz, TermEnv: "xterm-256color", Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}, Env: env}
 	require.NoError(t, conn.SendClient(hello))
 	p := recvTypedPump(conn)
 	select {
@@ -410,6 +411,25 @@ func TestIntegration_MalformedCommandPreservesVersionAndRequestID(t *testing.T) 
 func awaitText(t *testing.T, p *typedPump, sz domain.Size, want string) {
 	t.Helper()
 	_ = awaitScreenText(t, p, sz, want)
+}
+
+// requireListedAfterRestart asserts that every wanted named session is listed,
+// in name order, as a healthy durable session. A restarted daemon restores
+// named sessions in the background, publishing each one atomically from the
+// stopped registry (SessionDown) to the live one (SessionUp), so a listing taken
+// right after startup legitimately observes either state per session. Only
+// SessionBroken, a missing name, or an unexpected extra name is a failure.
+func requireListedAfterRestart(t *testing.T, sessions []protocol.SessionInfo, names ...string) {
+	t.Helper()
+	got := make([]string, 0, len(sessions))
+	for _, info := range sessions {
+		got = append(got, info.Name)
+		require.Contains(t, []protocol.SessionState{protocol.SessionDown, protocol.SessionUp}, info.State,
+			"session %q must be stopped or restored, not broken", info.Name)
+		require.False(t, info.Ephemeral, "session %q must be a durable named session", info.Name)
+		require.False(t, info.Attached, "session %q has no client after restart", info.Name)
+	}
+	require.Equal(t, names, got)
 }
 
 // awaitDetached consumes typed messages until the daemon signals the session's
@@ -789,11 +809,7 @@ func TestIntegration_KillDaemonPreservesMultipleNamedSessions(t *testing.T) {
 	}
 
 	served = start()
-	sessions := listRemoteSessions(t, dir)
-	require.Equal(t, []protocol.SessionInfo{
-		{Name: "alpha", State: protocol.SessionDown},
-		{Name: "beta", State: protocol.SessionDown},
-	}, sessions.Sessions)
+	requireListedAfterRestart(t, listRemoteSessions(t, dir).Sessions, "alpha", "beta")
 
 	// Kill-all purges every durable record but leaves this daemon serving.
 	require.NoError(t, killAll(dir))
@@ -943,7 +959,7 @@ func TestIntegration_NamedSessionRestoresPersistedIdentity(t *testing.T) {
 		daemon.WithSnapshotRepository(repository),
 		daemon.WithRecoveryCoordinator(coordinator),
 	)
-	require.Equal(t, []protocol.SessionInfo{{Name: name, State: protocol.SessionDown}}, listRemoteSessions(t, dir).Sessions)
+	requireListedAfterRestart(t, listRemoteSessions(t, dir).Sessions, name)
 	select {
 	case err := <-served:
 		t.Fatalf("Serve stopped before the restore: %v", err)

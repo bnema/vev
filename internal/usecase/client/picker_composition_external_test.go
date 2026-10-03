@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
@@ -19,7 +20,7 @@ import (
 // so it could never resolve a selection into an attachment.
 func TestCompositionOutsideThePackageCanBuildThePicker(t *testing.T) {
 	geometry := domain.Size{Cols: 80, Rows: 24}
-	picker := client.NewPicker(nil, 0, true)
+	picker := client.NewPicker(nil, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	require.NotNil(t, picker)
 
 	// The exact assignment an app composition performs.

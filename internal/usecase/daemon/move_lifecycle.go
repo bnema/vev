@@ -120,8 +120,11 @@ func (r *moveLifecycleReservation) Release() {
 }
 
 // closeMoveLifecycles rejects new moves, publishes daemon shutdown to ordinary
-// routing, then drains reservations without holding either daemon mutex. Pane
-// process lifetime is cancelled only after the final reservation releases.
+// routing, then drains reservations without holding either daemon mutex. It
+// deliberately does not cancel pane processes: the caller must first publish the
+// shutdown-preservation policy for every live session, then call
+// cancelPaneProcesses, so a PTY EOF caused by the cancellation can never be
+// mistaken for a natural final-shell exit that purges a named session.
 func (d *Daemon) closeMoveLifecycles() {
 	if d == nil {
 		return
@@ -146,6 +149,18 @@ func (d *Daemon) closeMoveLifecycles() {
 		<-changed
 		d.moveLifecycleMu.Lock()
 	}
+	d.moveLifecycleMu.Unlock()
+}
+
+// cancelPaneProcesses cancels the daemon-wide pane process lifetime, closing
+// every PTY. It must run only after closeMoveLifecycles has drained the final
+// move reservation and after every live session has reserved its shutdown
+// teardown (see terminateAllForShutdown).
+func (d *Daemon) cancelPaneProcesses() {
+	if d == nil {
+		return
+	}
+	d.moveLifecycleMu.Lock()
 	cancel := d.paneProcessCancel
 	d.moveLifecycleMu.Unlock()
 	if cancel != nil {

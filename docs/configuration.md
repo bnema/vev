@@ -43,6 +43,9 @@ ephemeral.close-on-exit = on
 # Use the kitty keyboard protocol when the terminal supports it (enables Ctrl+1..9).
 keyboard.kitty-protocol = on
 
+# Outer terminal colors: auto (detect), truecolor, 256, 16, or mono.
+terminal.colors = auto
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f
@@ -154,11 +157,14 @@ rm -rf .dev/dev
 ## Remote hosts
 
 ```sh
-vev host add user@host   # add a host
-vev host rm user@host    # remove it
-vev host list            # show hosts and their status
+vev host add user@host                    # add a host (QUIC, the default)
+vev host add --transport ssh user@host    # add a host that uses SSH only
+vev host rm user@host                     # remove it
+vev host list                             # show hosts and their status
 ```
 
+- `--transport quic|ssh` selects the carriage. `quic` (default) opens a direct QUIC connection bootstrapped over SSH; `ssh` carries everything over SSH, for networks that block UDP.
+- A host keeps the transport it was added with. To change it, run `vev host rm` and then `vev host add` again; adding it with a different transport is refused.
 - The broker stores hosts in `~/.local/state/vev/broker/state/state.json`.
 - Hosts connect over SSH, so your SSH config (aliases, keys) applies.
 - Remote sessions appear as `session@host` in `vev ls --all` and in the picker.
@@ -207,7 +213,8 @@ If the daemon refuses to start because its session data is broken, do not edit t
 | `theme.accent = 0`–`15` | Use exactly that ANSI color as the accent. |
 
 - vev only colors its own UI (bars, borders, palette). Pane content is never recolored.
-- Tinted backgrounds need a truecolor terminal. Otherwise the accent only colors text and borders.
+- Tinted backgrounds need a truecolor or 256-color terminal. On 16-color and monochrome terminals vev uses bold, reverse, and faint instead. See [terminal colors](terminal.md#colors).
+- `terminal.colors` forces the color mode of your terminal (`auto`, `truecolor`, `256`, `16`, `mono`). `VEV_COLORS` overrides it. See [terminal colors](terminal.md#colors).
 - vev follows light/dark switches your terminal reports. It cannot see palette changes the terminal does not report.
 
 ## Bindings

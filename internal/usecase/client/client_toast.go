@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	renderer "github.com/bnema/vev-vt"
+	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -16,6 +17,12 @@ import (
 // reconciliation; input pumps must only publish a request for it.
 // The anchor places it: transitions stay centered, notices sit top-right so
 // they never cover the picker list. The border is colored by severity.
+//
+// The border uses fixed xterm-256 colors and does not follow the attachment
+// color profile, so production callers (the transition notice) pass only
+// domain.NoticeInfo, which emits no color. Toasts with a severity that must
+// honor 16-color or monochrome terminals go through toastBorderSGRFor, as the
+// picker does.
 func drawClientToast(out io.Writer, size domain.Size, message string, anchor domain.Anchor, severity domain.NoticeSeverity) (domain.Rect, error) {
 	bounds := ui.ToastBounds(size, ui.Toast{Message: message, Anchor: anchor})
 	if bounds.Width <= 0 || bounds.Height <= 0 {
@@ -36,6 +43,39 @@ func toastBorderSGR(severity domain.NoticeSeverity) string {
 	default:
 		return ""
 	}
+}
+
+// toastBorderSGRFor is toastBorderSGR for one renderer color profile. The
+// toast bypasses the renderer, so it must follow the profile itself: 16-color
+// terminals get basic red/yellow, monochrome terminals get bold for problems.
+// TrueColor and 256-color output is unchanged.
+func toastBorderSGRFor(severity domain.NoticeSeverity, profile ansirenderer.ColorProfile) string {
+	switch profile {
+	case ansirenderer.ColorProfileANSI16:
+		switch severity {
+		case domain.NoticeError:
+			return "\x1b[31m"
+		case domain.NoticeWarn:
+			return "\x1b[33m"
+		}
+		return ""
+	case ansirenderer.ColorProfileMonochrome:
+		if severity == domain.NoticeError || severity == domain.NoticeWarn {
+			return "\x1b[1m"
+		}
+		return ""
+	default:
+		return toastBorderSGR(severity)
+	}
+}
+
+// toastBorderReset undoes toastBorderSGR's attribute: default foreground for
+// colors, normal intensity for the monochrome bold border.
+func toastBorderReset(borderSGR string) string {
+	if borderSGR == "\x1b[1m" {
+		return "\x1b[22m"
+	}
+	return "\x1b[39m"
 }
 
 // clientToastLines renders the toast box as one string per row, exactly
@@ -60,7 +100,7 @@ func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 				if border {
 					b.WriteString(borderSGR)
 				} else {
-					b.WriteString("\x1b[39m")
+					b.WriteString(toastBorderReset(borderSGR))
 				}
 				colored = border
 			}
@@ -76,7 +116,7 @@ func clientToastLines(bounds domain.Rect, message, borderSGR string) []string {
 			b.WriteRune(cell.Rune)
 		}
 		if colored {
-			b.WriteString("\x1b[39m")
+			b.WriteString(toastBorderReset(borderSGR))
 		}
 		lines[y] = b.String()
 	}

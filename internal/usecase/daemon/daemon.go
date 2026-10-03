@@ -909,8 +909,9 @@ func (d *Daemon) Serve(ctx context.Context, l ports.ServerListener) error {
 
 // shutdownAll is the explicit daemon-stop operation (wire KillDaemon). It is
 // the only caller that irreversibly ends the daemon: it closes move admission,
-// marks closing, cancels the daemon-wide pane process context, preserves every
-// live session as stopped durable authority, and closes done so Serve returns.
+// marks closing, reserves shutdown preservation for every live session, then
+// cancels the daemon-wide pane process context, preserves every live session as
+// stopped durable authority, and closes done so Serve returns.
 // KillAll never reaches this path. Setting closing under the same lock as the
 // snapshot guarantees no session can be inserted after the snapshot: route
 // rejects once closing is set, and both run under d.mu. killSession (which
@@ -941,9 +942,12 @@ func (d *Daemon) terminateAllForShutdown(reason uint8, deadline *snapshotShutdow
 	// Publish preservation policy for the complete registry snapshot before
 	// cancelling any PTY. Cancellation-driven EOF is allowed to own teardown,
 	// but its disposition must remain daemon shutdown rather than session purge.
+	// closeMoveLifecycles therefore leaves pane processes running; only this
+	// ordering, reserve then cancel, keeps a named session durable.
 	for _, s := range snapshot {
 		s.reserveShutdownTeardown()
 	}
+	d.cancelPaneProcesses()
 	d.log.Info("session termination begin", "reason", reason, "live_sessions", len(snapshot))
 	for _, s := range snapshot {
 		// Cancellation and PTY closure must not wait behind a teardown owner that
@@ -1477,15 +1481,11 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		// otherwise falls back to the session's normal first-tab repair.
 		initialTabIndex = preferredTabIndex(sess, h.PreferredTabID)
 	}
-	terminalCapabilities := terminalcap.Detect(h.Env)
+	terminalCapabilities := terminalcap.Resolve(h.Env, h.Color)
 	// Kitty graphics are enabled only by the explicit direct-terminal
 	// declaration in Hello. Environment values remain useful for color and
 	// diagnostics, but cannot authorize terminal-global graphics side effects.
 	terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
-	if h.TrueColor && !terminalCapabilities.TrueColor() {
-		terminalCapabilities.ColorMode = terminalcap.TrueColor
-		terminalCapabilities.ColorSource = terminalcap.SourceDeclared
-	}
 	opts := attachClientOptions{
 		clientID:               h.ClientID,
 		kittyKeyboard:          h.KittyKeyboard,

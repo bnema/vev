@@ -14,6 +14,7 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -1594,7 +1595,7 @@ func TestResumeParkedRefreshesSessionBoundFuturePTYEnvironment(t *testing.T) {
 
 	resumeHello := helloResumeCapable(protocol.IntentResume, "work", token)
 	resumeHello.Env = []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}
-	resumeHello.TrueColor = true
+	resumeHello.Color = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}
 	_, _, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
 	require.True(t, ok)

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
@@ -116,7 +117,7 @@ func (w *offlineRenderTerminalWriter) Write(data []byte) (int, error) {
 // daemon with a single session, so Render produces a real frame at any size.
 func offlineRenderPicker(t *testing.T) *client.Picker {
 	t.Helper()
-	picker := client.NewPicker(nil, 0, true)
+	picker := client.NewPicker(nil, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	picker.ApplySnapshot(ports.BrokerSnapshot{
 		Epoch:    1,
 		Revision: 1,

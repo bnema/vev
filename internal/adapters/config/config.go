@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -37,6 +38,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenTabsKeys := make(map[string]bool)
 	seenEphemeralKeys := make(map[string]bool)
 	seenKeyboardKeys := make(map[string]bool)
+	seenTerminalKeys := make(map[string]bool)
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
 
@@ -171,6 +173,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Keyboard.KittyProtocol = on
+		case key == "terminal.colors":
+			warnings = warnDuplicateKey(warnings, seenTerminalKeys, key, lineNo)
+			mode, auto, err := terminalcap.ParseColorMode(value)
+			if err != nil {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid terminal.colors %q (want auto, truecolor, 256, 16, or mono)", value)})
+				continue
+			}
+			cfg.Terminal = domain.TerminalConfig{Colors: mode, ColorsSet: !auto}
 		case key == "copy.word-separators":
 			warnings = warnDuplicateKey(warnings, seenCopyKeys, key, lineNo)
 			separators, ok := parseConfigString(value)

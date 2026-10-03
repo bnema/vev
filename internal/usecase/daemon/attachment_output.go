@@ -10,6 +10,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/colorprofile"
 )
 
 // attachmentOutput owns the terminal-output dependency chain and emitted
@@ -49,6 +50,16 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 		return
 	}
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
+	// The replacement terminal's color claim wins over whatever the previous
+	// link negotiated: its renderer must encode for the terminal now attached.
+	// Only the mode changes the encoding; the source is stored but never
+	// forces a renderer swap.
+	color := terminalcap.Resolve(h.Env, h.Color).Color
+	swap := color.Mode != ac.terminalCapabilities.Color.Mode
+	ac.terminalCapabilities.Color = color
+	if swap {
+		ac.output.setColorProfile(colorprofile.Profile(color))
+	}
 	// A replacement terminal declares its own keyboard protocol.
 	if ac.keys != nil {
 		ac.keys.SetKittyKeyboard(h.KittyKeyboard)
@@ -69,6 +80,19 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 	}
 	// Namespace exhaustion fails closed; ANSI output remains available.
 	ac.terminalCapabilities.KittyGraphics = false
+}
+
+// setColorProfile swaps in a renderer for profile. The next frame is a full
+// repaint (rebaseLocked forces a snapshot), so no emitted-state diff crosses
+// the profile change.
+func (s *attachmentOutput) setColorProfile(profile renderer.ColorProfile) {
+	if s == nil {
+		return
+	}
+	s.lockView()
+	defer s.unlockView()
+	s.renderer = renderer.NewWithColorProfile(renderer.Capabilities{}, profile)
+	s.rebaseLocked()
 }
 
 // lockView serializes an attachment's view publication with every output
@@ -102,11 +126,7 @@ func newOutputStateStream(windowSize ...uint8) *attachmentOutput {
 }
 
 func newOutputStateStreamForCapabilities(capabilities terminalcap.Capabilities, windowSize ...uint8) *attachmentOutput {
-	profile := renderer.ColorProfileANSI256
-	if capabilities.TrueColor() {
-		profile = renderer.ColorProfileTrueColor
-	}
-	return newOutputStateStreamForProfile(profile, windowSize...)
+	return newOutputStateStreamForProfile(colorprofile.Profile(capabilities.Color), windowSize...)
 }
 
 func newOutputStateStreamForProfile(profile renderer.ColorProfile, windowSize ...uint8) *attachmentOutput {

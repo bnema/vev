@@ -23,7 +23,7 @@
 | **Remote** | `vev attach user@host` | Sessions on a server, rendered there and sent as small diffs over SSH + QUIC. |
 | **Hybrid** | `vev host add user@host` | Local and remote sessions in one picker; switch between them without leaving vev. |
 
-Remote and hybrid need vev installed on the remote host. Set `VEV_REMOTE_TRANSPORT=stdio` to use SSH only. See [remote sessions](docs/remote-resilience.md).
+Remote and hybrid need vev installed on the remote host. Use `vev host add --transport ssh user@host` for SSH only. See [remote sessions](docs/remote-resilience.md).
 
 ## Features
 

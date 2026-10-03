@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/stretchr/testify/require"
@@ -40,13 +41,15 @@ func TestProtoClientRoundTrips(t *testing.T) {
 		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}},
 		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, KittyDirectGraphics: true, KittyKeyboard: true},
 		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, ClientPID: 4242},
+		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceForced}},
+		protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, Color: terminalcap.ColorCapabilities{Mode: terminalcap.Monochrome, Source: terminalcap.SourceDeclared}},
 		protocol.Input{InputSeq: 1, ActionID: 2, Data: []byte("x")},
 		protocol.Resize{Size: domain.Size{Cols: 80, Rows: 24}},
 		protocol.Detach{},
 		protocol.Ping{},
 		protocol.List{},
 		protocol.Kill{RequestID: 1, Name: "work"},
-		protocol.Theme{TrueColor: true},
+		protocol.Theme{SchemeKnown: true},
 		protocol.Ack{Epoch: 1, State: 1},
 		protocol.ImagePush{InputSeq: 1, Mime: "image/png", Data: []byte{1}},
 		protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected},
@@ -352,4 +355,96 @@ func protoShortName(message any) string {
 		return "nil"
 	}
 	return reflect.TypeOf(message).Name()
+}
+
+// TestProtoHelloColorWire pins the Hello color capability byte for byte for
+// every mode and source, and refuses truncated prefixes, trailing garbage,
+// and values outside the closed enums.
+func TestProtoHelloColorWire(t *testing.T) {
+	modes := []struct {
+		name string
+		mode terminalcap.ColorMode
+		code byte
+	}{
+		{name: "truecolor", mode: terminalcap.TrueColor, code: 1},
+		{name: "ansi256", mode: terminalcap.ANSI256, code: 2},
+		{name: "ansi16", mode: terminalcap.ANSI16, code: 3},
+		{name: "monochrome", mode: terminalcap.Monochrome, code: 4},
+	}
+	sources := []struct {
+		name   string
+		source terminalcap.Source
+		code   byte
+	}{
+		{name: "unknown", source: terminalcap.SourceUnknown, code: 0},
+		{name: "heuristic", source: terminalcap.SourceHeuristic, code: 1},
+		{name: "declared", source: terminalcap.SourceDeclared, code: 2},
+		{name: "forced", source: terminalcap.SourceForced, code: 3},
+	}
+	for _, m := range modes {
+		for _, src := range sources {
+			t.Run(m.name+"/"+src.name, func(t *testing.T) {
+				color := terminalcap.ColorCapabilities{Mode: m.mode, Source: src.source}
+				// The minimal attach Hello: version, intent, empty client id, cols,
+				// rows, then color (field 26, length-delimited), preceded by the
+				// oneof tag for Hello (field 1).
+				colorBytes := []byte{0xD2, 0x01}
+				if src.code == 0 {
+					colorBytes = append(colorBytes, 0x02, 0x08, m.code)
+				} else {
+					colorBytes = append(colorBytes, 0x04, 0x08, m.code, 0x10, src.code)
+				}
+				hello := protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, ClientID: [16]byte{1}, Size: domain.Size{Cols: 80, Rows: 24}, Color: color}
+				envelope, err := encodeProtoClient(hello)
+				require.NoError(t, err)
+				raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(envelope)
+				require.NoError(t, err)
+				require.True(t, bytes.HasSuffix(raw, colorBytes), "color is the last Hello field on the wire: % x", raw)
+				// ClientEnvelope tag 1 (Hello), then the Hello length.
+				require.Equal(t, byte(0x0A), raw[0])
+
+				require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw[:len(raw)-1]), "truncated prefix")
+				require.Error(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, append(append([]byte(nil), raw...), 0xFF)), "trailing garbage")
+				require.NoError(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw))
+				decoded := &wire.ClientEnvelope{}
+				require.NoError(t, proto.Unmarshal(raw, decoded))
+				got, err := decodeProtoClient(decoded)
+				require.NoError(t, err)
+				require.Equal(t, hello, got)
+			})
+		}
+	}
+
+	t.Run("missing color is rejected", func(t *testing.T) {
+		message := &wire.Hello{Version: uint32(protocol.Version), Intent: uint32(protocol.IntentAttach), ClientId: make([]byte, 16), Cols: 80, Rows: 24}
+		raw, err := proto.Marshal(&wire.ClientEnvelope{Payload: &wire.ClientEnvelope_Hello{Hello: message}})
+		require.NoError(t, err)
+		require.NoError(t, wire.ScanEnvelope(&wire.ClientEnvelope{}, raw), "structurally valid")
+		decoded := &wire.ClientEnvelope{}
+		require.NoError(t, proto.Unmarshal(raw, decoded))
+		_, err = decodeProtoClient(decoded)
+		require.Error(t, err)
+	})
+
+	t.Run("unspecified mode on the wire is rejected", func(t *testing.T) {
+		message := &wire.Hello{Version: uint32(protocol.Version), Intent: uint32(protocol.IntentAttach), ClientId: make([]byte, 16), Cols: 80, Rows: 24, Color: &wire.ColorCapabilities{Source: wire.ColorSource_COLOR_SOURCE_DECLARED}}
+		_, err := decodeProtoClient(&wire.ClientEnvelope{Payload: &wire.ClientEnvelope_Hello{Hello: message}})
+		require.Error(t, err)
+	})
+
+	t.Run("unknown enum values are rejected", func(t *testing.T) {
+		for _, color := range []*wire.ColorCapabilities{
+			{Mode: wire.ColorMode(5)},
+			{Mode: wire.ColorMode_COLOR_MODE_TRUE_COLOR, Source: wire.ColorSource(4)},
+		} {
+			message := &wire.Hello{Version: uint32(protocol.Version), Intent: uint32(protocol.IntentAttach), ClientId: make([]byte, 16), Cols: 80, Rows: 24, Color: color}
+			_, err := decodeProtoClient(&wire.ClientEnvelope{Payload: &wire.ClientEnvelope_Hello{Hello: message}})
+			require.Error(t, err)
+		}
+	})
+
+	t.Run("invalid semantic color is never encoded", func(t *testing.T) {
+		_, err := encodeProtoClient(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Size: domain.Size{Cols: 80, Rows: 24}, Color: terminalcap.ColorCapabilities{Mode: terminalcap.ColorMode(9)}})
+		require.Error(t, err)
+	})
 }

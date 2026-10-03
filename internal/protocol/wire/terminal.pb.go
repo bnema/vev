@@ -418,7 +418,6 @@ type Theme struct {
 	Foreground    *RGB                   `protobuf:"bytes,2,opt,name=foreground,proto3" json:"foreground,omitempty"`
 	HasBackground bool                   `protobuf:"varint,3,opt,name=has_background,json=hasBackground,proto3" json:"has_background,omitempty"`
 	Background    *RGB                   `protobuf:"bytes,4,opt,name=background,proto3" json:"background,omitempty"`
-	TrueColor     bool                   `protobuf:"varint,5,opt,name=true_color,json=trueColor,proto3" json:"true_color,omitempty"`
 	SchemeKnown   bool                   `protobuf:"varint,6,opt,name=scheme_known,json=schemeKnown,proto3" json:"scheme_known,omitempty"`
 	Light         bool                   `protobuf:"varint,7,opt,name=light,proto3" json:"light,omitempty"`
 	PaletteKnown  uint32                 `protobuf:"varint,8,opt,name=palette_known,json=paletteKnown,proto3" json:"palette_known,omitempty"`
@@ -483,13 +482,6 @@ func (x *Theme) GetBackground() *RGB {
 		return x.Background
 	}
 	return nil
-}
-
-func (x *Theme) GetTrueColor() bool {
-	if x != nil {
-		return x.TrueColor
-	}
-	return false
 }
 
 func (x *Theme) GetSchemeKnown() bool {
@@ -1204,7 +1196,7 @@ const file_terminal_proto_rawDesc = "" +
 	"\x04rows\x18\x02 \x01(\rR\x04rows\x12\x1f\n" +
 	"\vpixel_width\x18\x03 \x01(\rR\n" +
 	"pixelWidth\x12!\n" +
-	"\fpixel_height\x18\x04 \x01(\rR\vpixelHeight\"\xe2\x02\n" +
+	"\fpixel_height\x18\x04 \x01(\rR\vpixelHeight\"\xd5\x02\n" +
 	"\x05Theme\x12%\n" +
 	"\x0ehas_foreground\x18\x01 \x01(\bR\rhasForeground\x120\n" +
 	"\n" +
@@ -1213,13 +1205,12 @@ const file_terminal_proto_rawDesc = "" +
 	"\x0ehas_background\x18\x03 \x01(\bR\rhasBackground\x120\n" +
 	"\n" +
 	"background\x18\x04 \x01(\v2\x10.vev.wire.v1.RGBR\n" +
-	"background\x12\x1d\n" +
-	"\n" +
-	"true_color\x18\x05 \x01(\bR\ttrueColor\x12!\n" +
+	"background\x12!\n" +
 	"\fscheme_known\x18\x06 \x01(\bR\vschemeKnown\x12\x14\n" +
 	"\x05light\x18\a \x01(\bR\x05light\x12#\n" +
 	"\rpalette_known\x18\b \x01(\rR\fpaletteKnown\x12*\n" +
-	"\apalette\x18\t \x03(\v2\x10.vev.wire.v1.RGBR\apalette\"P\n" +
+	"\apalette\x18\t \x03(\v2\x10.vev.wire.v1.RGBR\apaletteJ\x04\b\x05\x10\x06R\n" +
+	"true_color\"P\n" +
 	"\tImagePush\x12\x1b\n" +
 	"\tinput_seq\x18\x01 \x01(\x04R\binputSeq\x12\x12\n" +
 	"\x04mime\x18\x02 \x01(\tR\x04mime\x12\x12\n" +

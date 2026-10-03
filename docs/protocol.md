@@ -88,6 +88,18 @@ constant or the request fails
 with the version-mismatch response above. There is no multi-version
 negotiation: equality is mandatory.
 
+`Hello.color` (`ColorCapabilities{mode, source}`, field 26) is the only carrier
+of terminal color capability; `Theme` has no capability field. `mode` is a
+closed enum (`TRUE_COLOR`, `ANSI256`, `ANSI16`, `MONOCHROME`) and a missing
+message, an `UNSPECIFIED` mode, or any unknown enum value is a malformed Hello
+(`sessionwire` rejects it before any mutation). `source` `UNSPECIFIED` means
+"unknown": the daemon then ignores the claimed mode and re-detects from
+`Hello.Env`; `DECLARED` and `FORCED` claims are used verbatim. A `HEURISTIC` truecolor claim
+upgrades a weaker daemon-side detection; any other `HEURISTIC` claim falls back
+to detection.
+(`internal/domain/terminalcap.Resolve`; wire tests in
+`sessionwire/proto_convert_test.go:TestProtoHelloColorWire`.)
+
 Command requests additionally carry a 10-second result deadline
 (`daemon/command_tracker.go:CommandRequestTimeout`), tracked per
 connection and correlated by `RequestID`. Every dispatched request produces
@@ -251,7 +263,7 @@ acceptance. Local carriage requires the preamble + `Hello`/`Welcome`
 inside the 15-second budget; a failed handshake closes the exact
 connection. Broker-owned remote carriage uses QUIC (`internal/adapters/quic`,
 TLS 1.3, ALPN `vev/1`, exact SHA-256 pin, one bidirectional stream,
-no 0-RTT); `VEV_REMOTE_TRANSPORT=stdio` selects SSH stdio instead.
+no 0-RTT); a host added with `vev host add --transport ssh` uses SSH stdio instead.
 For the QUIC route the broker starts one short-lived `_broker-mux-quic-bootstrap --production` over SSH
 which spawns a detached `_broker-mux-quic-proxy` (ephemeral listener +
 certificate, 32-byte token, ≤4 KiB readiness with host-independent

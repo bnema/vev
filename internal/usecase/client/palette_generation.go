@@ -141,7 +141,6 @@ func (c *paletteGenerationCoordinator) start(retained protocol.Theme, replacemen
 		id:    id,
 		phase: generationCollecting,
 		theme: protocol.Theme{
-			TrueColor:   retained.TrueColor,
 			SchemeKnown: retained.SchemeKnown,
 			Light:       retained.Light,
 		},

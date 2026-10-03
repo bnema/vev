@@ -30,7 +30,7 @@ func TestServerConnectionDecodesEveryClientMessage(t *testing.T) {
 		{name: "ping", want: protocol.Ping{}},
 		{name: "list", want: protocol.List{}},
 		{name: "kill", want: protocol.Kill{RequestID: 1, Name: "work"}},
-		{name: "theme", want: protocol.Theme{TrueColor: true}},
+		{name: "theme", want: protocol.Theme{SchemeKnown: true}},
 		{name: "ack", want: protocol.Ack{Epoch: 1, State: 2}},
 		{name: "image", want: protocol.ImagePush{InputSeq: 2, Mime: "image/png", Data: []byte{1}}},
 		{name: "notice", want: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}},
