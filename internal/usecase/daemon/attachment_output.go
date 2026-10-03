@@ -50,6 +50,12 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 		return
 	}
 	ac.terminalCapabilities.KittyGraphics = h.KittyDirectGraphics
+	// The replacement terminal's color claim wins over whatever the previous
+	// link negotiated: its renderer must encode for the terminal now attached.
+	if color := terminalcap.Resolve(h.Env, h.Color).Color; color != ac.terminalCapabilities.Color {
+		ac.terminalCapabilities.Color = color
+		ac.output.setColorProfile(colorprofile.Profile(color))
+	}
 	// A replacement terminal declares its own keyboard protocol.
 	if ac.keys != nil {
 		ac.keys.SetKittyKeyboard(h.KittyKeyboard)
@@ -70,6 +76,19 @@ func (d *Daemon) reconfigureAttachmentOutput(sess *session, ac *attachedClient, 
 	}
 	// Namespace exhaustion fails closed; ANSI output remains available.
 	ac.terminalCapabilities.KittyGraphics = false
+}
+
+// setColorProfile swaps in a renderer for profile. The next frame is a full
+// repaint (rebaseLocked forces a snapshot), so no emitted-state diff crosses
+// the profile change.
+func (s *attachmentOutput) setColorProfile(profile renderer.ColorProfile) {
+	if s == nil {
+		return
+	}
+	s.lockView()
+	defer s.unlockView()
+	s.renderer = renderer.NewWithColorProfile(renderer.Capabilities{}, profile)
+	s.rebaseLocked()
 }
 
 // lockView serializes an attachment's view publication with every output
