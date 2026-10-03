@@ -35,7 +35,8 @@ type Ramp struct {
 	accent     renderer.RGB
 	// mruWeights lists, strongest first, the accent weights usable for the
 	// recent-session history; it is scanned once per ramp.
-	mruWeights [mruTopWeight - mruFloorWeight + 1]uint8
+	// The fallback scan can span weights mruTopWeight down to 1.
+	mruWeights [mruTopWeight]uint8
 	mruCount   int
 	rgb        bool
 }
@@ -51,7 +52,7 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 	if !ok {
 		return neutralRamp(t)
 	}
-	inactive, _, ok := surfaceAtOrBelow(t, accent.RGB, 14)
+	inactive, inactiveWeight, ok := surfaceAtOrBelow(t, accent.RGB, 14)
 	if !ok {
 		return neutralRamp(t)
 	}
@@ -77,7 +78,7 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		accent:          accent.RGB,
 		rgb:             true,
 	}
-	ramp.scanMRUWeights(t, activeWeight)
+	ramp.scanMRUWeights(t, activeWeight, inactiveWeight)
 	return ramp
 }
 
@@ -197,21 +198,15 @@ const (
 	mruFloorWeight = 30
 )
 
-const (
-	// mruFallbackTop and mruFallbackFloor bound the dimmer history range used
-	// when no weight in the main range has readable text.
-	mruFallbackTop   = 22
-	mruFallbackFloor = 11
-)
-
 // scanMRUWeights records the readable history weights, strongest first. It
-// stays strictly below the active surface and falls back to a dimmer range
-// so extreme themes still get an ordered fade.
-func (r *Ramp) scanMRUWeights(t Theme, activeWeight int) {
+// stays strictly between the active and inactive surfaces; when the main
+// range has no readable weight it uses the whole gap between them, so extreme
+// themes still get an ordered fade that never sinks below inactive tabs.
+func (r *Ramp) scanMRUWeights(t Theme, activeWeight, inactiveWeight int) {
 	r.mruCount = 0
-	r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), mruFloorWeight)
+	r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), max(mruFloorWeight, inactiveWeight+1))
 	if r.mruCount == 0 {
-		r.collectMRUWeights(t, min(mruFallbackTop, activeWeight-1), mruFallbackFloor)
+		r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), inactiveWeight+1)
 	}
 }
 
