@@ -8,6 +8,7 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
@@ -73,26 +74,26 @@ func TestPickerRenderersFollowTerminalColorProfile(t *testing.T) {
 		Stopped: rgbPickerStyle(), Separator: rgbPickerStyle(), Tree: rgbPickerStyle(), Status: rgbPickerStyle(),
 		SearchMatch: rgbPickerStyle(), SelectionMatch: rgbPickerStyle(),
 	}
-	renderers := map[string]func(trueColor bool) *pickerRenderer{
-		"session picker": func(trueColor bool) *pickerRenderer {
-			return NewPicker(nil, 0, trueColor).controller.renderer
+	renderers := map[string]func(color terminalcap.ColorCapabilities) *pickerRenderer{
+		"session picker": func(color terminalcap.ColorCapabilities) *pickerRenderer {
+			return NewPicker(nil, 0, color).controller.renderer
 		},
-		"move picker": func(trueColor bool) *pickerRenderer {
-			return newMovePickerOverlay(trueColor).renderer
+		"move picker": func(color terminalcap.ColorCapabilities) *pickerRenderer {
+			return newMovePickerOverlay(color).renderer
 		},
 	}
 	for name, build := range renderers {
 		for _, tc := range []struct {
-			trueColor bool
+			color     terminalcap.ColorCapabilities
 			profile   ansirenderer.ColorProfile
 			want      string
 			forbidden string
 		}{
-			{trueColor: false, profile: ansirenderer.ColorProfileANSI256, want: `(?:38|48);5;`, forbidden: `(?:38|48|58);2;`},
-			{trueColor: true, profile: ansirenderer.ColorProfileTrueColor, want: `(?:38|48);2;`, forbidden: `(?:38|48);5;`},
+			{color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256}, profile: ansirenderer.ColorProfileANSI256, want: `(?:38|48);5;`, forbidden: `(?:38|48|58);2;`},
+			{color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}, profile: ansirenderer.ColorProfileTrueColor, want: `(?:38|48);2;`, forbidden: `(?:38|48);5;`},
 		} {
-			t.Run(fmt.Sprintf("%s/truecolor=%v", name, tc.trueColor), func(t *testing.T) {
-				r := build(tc.trueColor)
+			t.Run(fmt.Sprintf("%s/truecolor=%v", name, tc.color.RGB()), func(t *testing.T) {
+				r := build(tc.color)
 				require.Equal(t, tc.profile, r.profile)
 				r.renderStyles = []picker.RenderStyles{styles}
 				output := string(r.render(loop, domain.Size{Cols: 100, Rows: 30}, emptyPickerPreview()))

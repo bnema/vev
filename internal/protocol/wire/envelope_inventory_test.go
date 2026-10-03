@@ -15,8 +15,8 @@ import (
 // shares a payload type except route navigation failure, and the preamble
 // constants agree with the schema authority.
 func TestEnvelopeInventoryProvesDirectionAndSemanticPath(t *testing.T) {
-	if protocol.Version != 64 {
-		t.Fatalf("protocol.Version = %d, want 64", protocol.Version)
+	if protocol.Version != 65 {
+		t.Fatalf("protocol.Version = %d, want 65", protocol.Version)
 	}
 	if ProtocolEpoch != 1 {
 		t.Fatalf("ProtocolEpoch = %d, want 1", ProtocolEpoch)

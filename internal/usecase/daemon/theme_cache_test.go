@@ -18,7 +18,7 @@ func cacheTheme() themeui.Theme {
 	palette[10] = palette[2]
 	return themeui.Theme{
 		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
-		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		HasFG: true, HasBG: true, Known: true, UsePalette: true,
 		Palette: palette, PaletteKnown: 1<<2 | 1<<10,
 	}
 }
@@ -26,7 +26,7 @@ func cacheTheme() themeui.Theme {
 func TestThemeAccentHotReloadRebuildsAppliedSnapshot(t *testing.T) {
 	d, sess, ac, _ := newManualSessionWithPTYs(t)
 	raw := cacheTheme()
-	d.applyTheme(sess, ac, protocol.Theme{Foreground: raw.Foreground, Background: raw.Background, HasForeground: true, HasBackground: true, TrueColor: true, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown})
+	d.applyTheme(sess, ac, protocol.Theme{Foreground: raw.Foreground, Background: raw.Background, HasForeground: true, HasBackground: true, Palette: raw.Palette, PaletteKnown: raw.PaletteKnown})
 	before := ac.getAppliedTheme()
 
 	cfg := domain.Defaults()

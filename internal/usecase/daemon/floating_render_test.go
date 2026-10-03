@@ -737,7 +737,6 @@ func benchmarkCapturedRenderState() capturedRenderState {
 		PaletteKnown: 1<<2 | 1<<4 | 1<<10 | 1<<12 | 1<<14,
 		HasFG:        true,
 		HasBG:        true,
-		TrueColor:    true,
 		Known:        true,
 		SchemeKnown:  true,
 		UsePalette:   true,

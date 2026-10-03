@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/usecase/command"
 	"github.com/bnema/vev/internal/usecase/keys"
 	"github.com/bnema/vev/internal/usecase/theme"
@@ -344,10 +345,14 @@ func (d *Daemon) effectiveTheme(clientTheme theme.Theme) theme.Theme {
 	return effectiveThemeForConfig(clientTheme, d.currentThemeConfig())
 }
 
-func (d *Daemon) resolveAppliedTheme(raw theme.Theme) appliedTheme {
+// resolveAppliedTheme resolves chrome for one attachment's color capability;
+// ANSI16 and monochrome attachments get attribute-based chrome, so the result
+// is never shared between attachments of different modes.
+func (d *Daemon) resolveAppliedTheme(raw theme.Theme, color terminalcap.ColorCapabilities) appliedTheme {
 	config := d.currentThemeConfig()
 	effective := effectiveThemeForConfig(raw, config)
-	return appliedTheme{Raw: effective, Resolved: theme.Resolve(effective, config.accent)}
+	resolved := theme.ResolveForColor(effective, config.accent, color)
+	return appliedTheme{Raw: resolved.Theme, Resolved: resolved}
 }
 
 func (d *Daemon) reapplyThemeAllSessions() {

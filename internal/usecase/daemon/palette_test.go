@@ -10,6 +10,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/command"
@@ -131,11 +132,10 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 	paletteColors[10] = paletteColors[2]
 	accentTheme := themeui.Theme{
 		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
-		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		HasFG: true, HasBG: true, Known: true, UsePalette: true,
 		Palette: paletteColors, PaletteKnown: 1<<2 | 1<<10,
 	}
 	indexedTheme := accentTheme
-	indexedTheme.TrueColor = false
 	neutralTheme := accentTheme
 	neutralTheme.PaletteKnown = 0
 	neutralTheme.SchemeKnown = false
@@ -164,7 +164,7 @@ func TestCaptureOverlayLayersPreservesPaletteDescriptionSurfaceAcrossFallbacks(t
 		t.Run(tt.name, func(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
 			d.ApplyConfig(tt.config)
-			applied := d.resolveAppliedTheme(tt.raw)
+			applied := d.resolveAppliedTheme(tt.raw, terminalcap.ColorCapabilities{})
 			model := palette.New(palette.CommandResults([]command.Command{
 				{Code: "ONE", Name: "One", Desc: "first description"},
 				{Code: "TWO", Name: "Two", Desc: "second description"},

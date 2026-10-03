@@ -194,7 +194,7 @@ func (webTerminal) PublishContext(ports.UIContext) error { return ports.ErrUIUna
 func runWebTerminalClient(ctx context.Context, terminal *webterm.Terminal) error {
 	callbacks := terminalBrokerCallbacks()
 	sessionEnv := terminalSessionEnvironment()
-	attachmentEnv := terminalAttachmentEnvironment()
+	attachmentEnv := virtualTerminalAttachmentEnvironment()
 	attachmentEnv.Cwd = sessionEnv.Cwd
 	return runBrokerClient(ctx, brokerClientConfig{
 		Connector:             webTerminalConnector(),

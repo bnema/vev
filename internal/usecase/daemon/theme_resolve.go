@@ -1,6 +1,9 @@
 package daemon
 
-import "github.com/bnema/vev/internal/usecase/theme"
+import (
+	"github.com/bnema/vev/internal/domain/terminalcap"
+	"github.com/bnema/vev/internal/usecase/theme"
+)
 
 func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
 	if ac != nil {
@@ -16,7 +19,11 @@ func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme
 	// Resolve while applying, never while composing. The theme mutex only
 	// publishes the completed value and is not held across session/tab/pane
 	// locks, preserving the daemon lock order.
-	applied := d.resolveAppliedTheme(t)
+	var color terminalcap.ColorCapabilities
+	if ac != nil {
+		color = ac.terminalCapabilities.Color
+	}
+	applied := d.resolveAppliedTheme(t, color)
 	t = applied.Raw
 	sess.mu.Lock()
 	if ac != nil {

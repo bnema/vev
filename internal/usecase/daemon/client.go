@@ -260,7 +260,7 @@ func (ac *attachedClient) getAppliedTheme() appliedTheme {
 	if applied.Generation == 0 {
 		// An unattached client has no terminal report yet. Reuse the static
 		// neutral cache rather than resolving from a render path.
-		applied.Resolved = themeui.ResolvedTheme{Theme: applied.Raw, Styles: fallbackChromeStyles}
+		applied.Resolved = themeui.ResolvedTheme{Theme: applied.Raw, Styles: fallbackStylesFor(ac.terminalCapabilities.Color)}
 	}
 	return applied
 }
@@ -693,19 +693,46 @@ func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domai
 	return ac, nil
 }
 
+// colorDowngradeNotice reports the toast shown when a declared (not forced)
+// terminal renders with fewer than TrueColor colors. A forced mode is a user
+// choice and never warrants a notice.
+func colorDowngradeNotice(color terminalcap.ColorCapabilities) (string, bool) {
+	if color.Source != terminalcap.SourceDeclared {
+		return "", false
+	}
+	switch color.Mode {
+	case terminalcap.ANSI256:
+		return "Terminal supports 256 colors; vev UI colors are reduced.", true
+	case terminalcap.ANSI16:
+		return "Terminal supports 16 colors; vev UI colors are reduced.", true
+	case terminalcap.Monochrome:
+		return "Terminal has no color support; vev UI uses bold and reverse.", true
+	default:
+		return "", false
+	}
+}
+
+// publishColorDowngradeNotice toasts ac when its terminal declared a reduced
+// color mode (see colorDowngradeNotice).
+func (d *Daemon) publishColorDowngradeNotice(sess *session, ac *attachedClient) {
+	message, ok := colorDowngradeNotice(ac.terminalCapabilities.Color)
+	if !ok {
+		return
+	}
+	d.publishToast(ac, domain.Notification{
+		Code:      domain.NoticeUser,
+		Severity:  domain.NoticeWarn,
+		Message:   message,
+		Time:      d.clock.Now(),
+		Count:     1,
+		SessionID: sess.id,
+	})
+}
+
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
-	if ac.terminalCapabilities.ColorSource == terminalcap.SourceDeclared && !ac.terminalCapabilities.TrueColor() {
-		d.publishToast(ac, domain.Notification{
-			Code:      domain.NoticeUser,
-			Severity:  domain.NoticeWarn,
-			Message:   "TrueColor was not detected; rendering with 256 colors.",
-			Time:      d.clock.Now(),
-			Count:     1,
-			SessionID: sess.id,
-		})
-	}
+	d.publishColorDowngradeNotice(sess, ac)
 	d.applyHostTheme(sess, ac, themeui.Theme{}, true)
 	if !ac.terminalCapabilities.SupportsKittyGraphics() && sessionHasKittyGraphics(sess) {
 		d.warnUnsupportedGraphics(ac)
@@ -721,7 +748,9 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		resumeToken = d.nextResumeTokenLocked()
 	}
 	if !opts.capabilitiesSet {
-		opts.terminalCapabilities = terminalcap.Capabilities{ColorMode: terminalcap.TrueColor}
+		// The zero value is TrueColor: manually constructed attachments keep
+		// the historical renderer behavior.
+		opts.terminalCapabilities = terminalcap.Capabilities{}
 	}
 	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
 	geometry = geometry.NormalizePixels()
@@ -945,7 +974,6 @@ func themeFromMessage(msg protocol.Theme) themeui.Theme {
 		PaletteKnown: msg.PaletteKnown,
 		HasFG:        msg.HasForeground,
 		HasBG:        msg.HasBackground,
-		TrueColor:    msg.TrueColor,
 		Known:        msg.HasForeground && msg.HasBackground,
 		SchemeKnown:  msg.SchemeKnown,
 		Light:        msg.Light,

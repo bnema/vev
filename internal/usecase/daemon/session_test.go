@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/persist"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
@@ -1618,7 +1619,7 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
-	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
+	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz}, tr)
 	require.NoError(t, err)
 	defer func() {
 		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
@@ -1663,9 +1664,9 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	tr2 := newMockServerConnection(t)
 	tr2.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr2.EXPECT().Close().Return(nil).Maybe()
-	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: false}, tr1)
+	sess, _, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}}, tr1)
 	require.NoError(t, err)
-	_, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz, TrueColor: true}, tr2)
+	_, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentAttach, Name: "work", Size: sz}, tr2)
 	require.NoError(t, err)
 	defer func() {
 		_ = d.killSession(sess, protocol.ReasonServerShutdown, false)
@@ -1704,7 +1705,7 @@ func TestCreateSessionAndSwitchInheritsTerminalEnv(t *testing.T) {
 	tr := newMockServerConnection(t)
 	tr.EXPECT().Send(mock.Anything).Return(nil).Maybe()
 	tr.EXPECT().Close().Return(nil).Maybe()
-	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz, TrueColor: true}, tr)
+	sess, ac, err := d.route(protocol.Hello{Version: protocol.Version, Intent: protocol.IntentNew, Name: "work", Size: sz}, tr)
 	require.NoError(t, err)
 	// The source coordinator is deliberately made pending so the switch must
 	// invalidate it rather than letting its stale callback render for ac.

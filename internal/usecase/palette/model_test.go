@@ -503,11 +503,10 @@ func TestPaletteDescriptionKeepsInactiveRowSurfaceAcrossFallbacks(t *testing.T) 
 	paletteColors[10] = paletteColors[2]
 	accentTheme := themeui.Theme{
 		Foreground: renderer.RGB{R: 230, G: 230, B: 230}, Background: renderer.RGB{R: 8, G: 9, B: 10},
-		HasFG: true, HasBG: true, Known: true, TrueColor: true, UsePalette: true,
+		HasFG: true, HasBG: true, Known: true, UsePalette: true,
 		Palette: paletteColors, PaletteKnown: 1<<2 | 1<<10,
 	}
 	indexedTheme := accentTheme
-	indexedTheme.TrueColor = false
 	paletteOffTheme := accentTheme
 	paletteOffTheme.UsePalette = false
 	neutralTheme := paletteOffTheme

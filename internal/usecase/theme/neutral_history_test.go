@@ -8,7 +8,7 @@ import (
 )
 
 func TestNeutralHistoryGradient(t *testing.T) {
-	theme := Theme{Foreground: renderer.RGB{R: 216, G: 216, B: 216}, Background: renderer.RGB{R: 16, G: 16, B: 16}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	theme := Theme{Foreground: renderer.RGB{R: 216, G: 216, B: 216}, Background: renderer.RGB{R: 16, G: 16, B: 16}, HasFG: true, HasBG: true, Known: true}
 	styles := NewStyles(theme)
 	require.Equal(t, theme.Foreground, styles.TabActive.BackgroundRGB)
 	for count := 1; count <= 9; count++ {

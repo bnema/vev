@@ -161,7 +161,7 @@ func (in *attachmentInput) start(ctx context.Context) error {
 	if in.palette == nil {
 		return nil
 	}
-	retained := in.themes.update(func(current *protocol.Theme) { current.TrueColor = in.worker.cfg.TrueColor })
+	retained := in.themes.update(func(*protocol.Theme) {})
 	return in.apply(ctx, in.palette.start(retained, false))
 }
 

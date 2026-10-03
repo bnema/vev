@@ -62,7 +62,8 @@ message Theme {
   RGB foreground = 2;
   bool has_background = 3;
   RGB background = 4;
-  bool true_color = 5;
+  reserved 5;
+  reserved "true_color";
   bool scheme_known = 6;
   bool light = 7;
   uint32 palette_known = 8;

@@ -340,16 +340,6 @@ func newPickerRenderer(profile ansirenderer.ColorProfile) *pickerRenderer {
 	return &pickerRenderer{profile: profile}
 }
 
-// pickerColorProfile maps the terminal's detected color capability to the
-// picker renderer profile. A terminal without truecolor gets indexed colors,
-// so RGB surfaces are quantized instead of dropped (#280).
-func pickerColorProfile(trueColor bool) ansirenderer.ColorProfile {
-	if trueColor {
-		return ansirenderer.ColorProfileTrueColor
-	}
-	return ansirenderer.ColorProfileANSI256
-}
-
 // render composes the loop model into terminal bytes for one display
 // refresh. Previews arrive as source data (picker_preview.go) and are attached
 // to the model by the caller; a full redraw every refresh keeps the shadow
@@ -389,7 +379,11 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	border := renderer.DefaultStyle()
 	border.Attrs |= renderer.AttrDim
 	picker.Modal.CompositePresentation(base, presentation, border, renderer.DefaultStyle())
-	inner := loop.model.Render(picker.Size(presentation.Inner), preview, r.renderStyles...)
+	styles := r.renderStyles
+	if len(styles) == 0 && r.profile == ansirenderer.ColorProfileMonochrome {
+		styles = []picker.RenderStyles{picker.DefaultRenderStyles(true)}
+	}
+	inner := loop.model.Render(picker.Size(presentation.Inner), preview, styles...)
 	copyFrameRect(base, presentation.Inner, inner)
 
 	// Only the box is written: the session stays on screen around it. A box

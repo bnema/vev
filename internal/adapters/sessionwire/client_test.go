@@ -26,7 +26,7 @@ func TestClientConnectionEncodesEveryClientMessage(t *testing.T) {
 		{name: "ping", message: protocol.Ping{}},
 		{name: "list", message: protocol.List{}},
 		{name: "kill", message: protocol.Kill{RequestID: 1, Name: "work"}},
-		{name: "theme", message: protocol.Theme{TrueColor: true}},
+		{name: "theme", message: protocol.Theme{SchemeKnown: true}},
 		{name: "ack", message: protocol.Ack{Epoch: 1, State: 1}},
 		{name: "image", message: protocol.ImagePush{InputSeq: 1, Mime: "image/png", Data: []byte{1}}},
 		{name: "notice", message: protocol.ClientNotice{Action: protocol.ClientNoticeLinkConnected}},

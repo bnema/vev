@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -528,9 +529,12 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 	tests := []struct {
 		name string
 		env  AttachmentEnvironment
+		want terminalcap.ColorCapabilities
 	}{
-		{name: "unset"},
-		{name: "supplied", env: AttachmentEnvironment{TermEnv: "xterm-256color", Cwd: "/workspace", TrueColor: true}},
+		{name: "unset defaults to truecolor", want: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
+		{name: "supplied truecolor", env: AttachmentEnvironment{TermEnv: "xterm-256color", Cwd: "/workspace", Color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}}, want: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}},
+		{name: "supplied ansi256", env: AttachmentEnvironment{TermEnv: "xterm-256color", Cwd: "/workspace", Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256}}, want: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256}},
+		{name: "supplied forced ansi16", env: AttachmentEnvironment{TermEnv: "xterm-256color", Cwd: "/workspace", Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceForced}}, want: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceForced}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -551,7 +555,7 @@ func TestSessionAttachmentWorkerHelloEnvironment(t *testing.T) {
 			hello := awaitHello(t, stream)
 			require.Equal(t, tt.env.TermEnv, hello.TermEnv)
 			require.Equal(t, tt.env.Cwd, hello.Cwd)
-			require.Equal(t, tt.env.TrueColor, hello.TrueColor)
+			require.Equal(t, tt.want, hello.Color)
 			require.NoError(t, stream.Close())
 			<-events
 		})

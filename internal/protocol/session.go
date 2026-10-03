@@ -10,13 +10,14 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 )
 
 // Version is the negotiated vev session protocol version. It carries the
 // daemonmux physical preamble conversation (multiplex.proto), whose
 // negotiated ceilings and accepted daemon binding ride the same wire
 // version as the session and broker conversations.
-const Version uint16 = 64
+const Version uint16 = 65
 
 // HandshakeTimeout bounds every transport handshake from connect through the
 // first committed publication. It excludes the preceding client-local
@@ -110,7 +111,9 @@ type Hello struct {
 	PixelHeight int
 	TermEnv     string
 	Cwd         string
-	TrueColor   bool
+	// Color is the color output capability the client claims for this
+	// attachment. It travels only in Hello; Theme carries no capability.
+	Color terminalcap.ColorCapabilities
 	// KittyDirectGraphics is an explicit declaration that the client has
 	// probed its direct outer terminal and it accepts Kitty graphics output.
 	KittyDirectGraphics bool
@@ -158,7 +161,6 @@ type Theme struct {
 	Foreground    renderer.RGB
 	HasBackground bool
 	Background    renderer.RGB
-	TrueColor     bool
 	SchemeKnown   bool
 	Light         bool
 	PaletteKnown  uint16
@@ -436,7 +438,7 @@ func ValidateHello(h Hello) error {
 	if err := ValidateGeometry(domain.Geometry{Size: h.Size, PixelWidth: h.PixelWidth, PixelHeight: h.PixelHeight}); err != nil {
 		return fmt.Errorf("%w: geometry", ErrInvalidHello)
 	}
-	if !validEnvironmentPolicy(h.EnvironmentPolicy) || !h.TerminalFocus.Valid() || (h.Remote && h.ClientPID != 0) {
+	if !validEnvironmentPolicy(h.EnvironmentPolicy) || !h.TerminalFocus.Valid() || !h.Color.Valid() || (h.Remote && h.ClientPID != 0) {
 		return ErrInvalidHello
 	}
 	if err := ValidateNavigation(h.Intent, h.NavigationCapabilities); err != nil {

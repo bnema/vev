@@ -43,6 +43,9 @@ ephemeral.close-on-exit = on
 # Use the kitty keyboard protocol when the terminal supports it (enables Ctrl+1..9).
 keyboard.kitty-protocol = on
 
+# Outer terminal colors: auto (detect), truecolor, 256, 16, or mono.
+terminal.colors = auto
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f
@@ -207,7 +210,8 @@ If the daemon refuses to start because its session data is broken, do not edit t
 | `theme.accent = 0`–`15` | Use exactly that ANSI color as the accent. |
 
 - vev only colors its own UI (bars, borders, palette). Pane content is never recolored.
-- Tinted backgrounds need a truecolor terminal. Otherwise the accent only colors text and borders.
+- Tinted backgrounds need a truecolor or 256-color terminal. On 16-color and monochrome terminals vev uses bold, reverse, and faint instead. See [terminal colors](terminal.md#colors).
+- `terminal.colors` forces the color mode of your terminal (`auto`, `truecolor`, `256`, `16`, `mono`). `VEV_COLORS` overrides it. See [terminal colors](terminal.md#colors).
 - vev follows light/dark switches your terminal reports. It cannot see palette changes the terminal does not report.
 
 ## Bindings

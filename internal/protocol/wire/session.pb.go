@@ -38,7 +38,6 @@ type Hello struct {
 	PixelHeight            uint32               `protobuf:"varint,9,opt,name=pixel_height,json=pixelHeight,proto3" json:"pixel_height,omitempty"`
 	TermEnv                string               `protobuf:"bytes,10,opt,name=term_env,json=termEnv,proto3" json:"term_env,omitempty"`
 	Cwd                    string               `protobuf:"bytes,11,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	TrueColor              bool                 `protobuf:"varint,12,opt,name=true_color,json=trueColor,proto3" json:"true_color,omitempty"`
 	MaxOutputInFlight      uint32               `protobuf:"varint,13,opt,name=max_output_in_flight,json=maxOutputInFlight,proto3" json:"max_output_in_flight,omitempty"`
 	Env                    []string             `protobuf:"bytes,14,rep,name=env,proto3" json:"env,omitempty"`
 	EnvironmentPolicy      uint32               `protobuf:"varint,16,opt,name=environment_policy,json=environmentPolicy,proto3" json:"environment_policy,omitempty"` // 0 = client-owned, 1 = daemon-owned
@@ -53,7 +52,10 @@ type Hello struct {
 	// 1 = focused, 2 = unfocused. Later changes travel as TerminalFocus.
 	TerminalFocus uint32 `protobuf:"varint,24,opt,name=terminal_focus,json=terminalFocus,proto3" json:"terminal_focus,omitempty"`
 	// PID of a local client process, for bar scripts. 0 when unknown or remote.
-	ClientPid     uint32 `protobuf:"varint,25,opt,name=client_pid,json=clientPid,proto3" json:"client_pid,omitempty"`
+	ClientPid uint32 `protobuf:"varint,25,opt,name=client_pid,json=clientPid,proto3" json:"client_pid,omitempty"`
+	// Color output capability the client claims. Required: a missing message
+	// or an UNSPECIFIED mode is a decode error.
+	Color         *ColorCapabilities `protobuf:"bytes,26,opt,name=color,proto3" json:"color,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -165,13 +167,6 @@ func (x *Hello) GetCwd() string {
 	return ""
 }
 
-func (x *Hello) GetTrueColor() bool {
-	if x != nil {
-		return x.TrueColor
-	}
-	return false
-}
-
 func (x *Hello) GetMaxOutputInFlight() uint32 {
 	if x != nil {
 		return x.MaxOutputInFlight
@@ -254,6 +249,13 @@ func (x *Hello) GetClientPid() uint32 {
 		return x.ClientPid
 	}
 	return 0
+}
+
+func (x *Hello) GetColor() *ColorCapabilities {
+	if x != nil {
+		return x.Color
+	}
+	return nil
 }
 
 // Welcome answers an accepted attach.
@@ -2306,7 +2308,7 @@ var File_session_proto protoreflect.FileDescriptor
 
 const file_session_proto_rawDesc = "" +
 	"\n" +
-	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\xee\x06\n" +
+	"\rsession.proto\x12\vvev.wire.v1\x1a\fcommon.proto\"\x97\a\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x16\n" +
 	"\x06intent\x18\x02 \x01(\rR\x06intent\x12\x1b\n" +
@@ -2320,9 +2322,7 @@ const file_session_proto_rawDesc = "" +
 	"\fpixel_height\x18\t \x01(\rR\vpixelHeight\x12\x19\n" +
 	"\bterm_env\x18\n" +
 	" \x01(\tR\atermEnv\x12\x10\n" +
-	"\x03cwd\x18\v \x01(\tR\x03cwd\x12\x1d\n" +
-	"\n" +
-	"true_color\x18\f \x01(\bR\ttrueColor\x12/\n" +
+	"\x03cwd\x18\v \x01(\tR\x03cwd\x12/\n" +
 	"\x14max_output_in_flight\x18\r \x01(\rR\x11maxOutputInFlight\x12\x10\n" +
 	"\x03env\x18\x0e \x03(\tR\x03env\x12-\n" +
 	"\x12environment_policy\x18\x10 \x01(\rR\x11environmentPolicy\x12;\n" +
@@ -2335,7 +2335,9 @@ const file_session_proto_rawDesc = "" +
 	"\x0ekitty_keyboard\x18\x17 \x01(\bR\rkittyKeyboard\x12%\n" +
 	"\x0eterminal_focus\x18\x18 \x01(\rR\rterminalFocus\x12\x1d\n" +
 	"\n" +
-	"client_pid\x18\x19 \x01(\rR\tclientPidJ\x04\b\x0f\x10\x10R\rremote_target\"\x84\x02\n" +
+	"client_pid\x18\x19 \x01(\rR\tclientPid\x124\n" +
+	"\x05color\x18\x1a \x01(\v2\x1e.vev.wire.v1.ColorCapabilitiesR\x05colorJ\x04\b\f\x10\rJ\x04\b\x0f\x10\x10R\n" +
+	"true_colorR\rremote_target\"\x84\x02\n" +
 	"\aWelcome\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
@@ -2557,38 +2559,40 @@ var file_session_proto_goTypes = []any{
 	(*AttachmentActivated)(nil),        // 32: vev.wire.v1.AttachmentActivated
 	(*ExactTarget)(nil),                // 33: vev.wire.v1.ExactTarget
 	(*SessionAttachTarget)(nil),        // 34: vev.wire.v1.SessionAttachTarget
+	(*ColorCapabilities)(nil),          // 35: vev.wire.v1.ColorCapabilities
 }
 var file_session_proto_depIdxs = []int32{
 	33, // 0: vev.wire.v1.Hello.exact_target:type_name -> vev.wire.v1.ExactTarget
 	34, // 1: vev.wire.v1.Hello.session_target:type_name -> vev.wire.v1.SessionAttachTarget
-	3,  // 2: vev.wire.v1.Welcome.committed_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	33, // 3: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 4: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
-	34, // 5: vev.wire.v1.AttachTarget.session_target:type_name -> vev.wire.v1.SessionAttachTarget
-	5,  // 6: vev.wire.v1.Sessions.sessions:type_name -> vev.wire.v1.SessionInfo
-	8,  // 7: vev.wire.v1.KillResult.failures:type_name -> vev.wire.v1.KillFailure
-	15, // 8: vev.wire.v1.RouteAttentionTarget.ref:type_name -> vev.wire.v1.RouteRef
-	33, // 9: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
-	16, // 10: vev.wire.v1.RouteAttentionSubscription.targets:type_name -> vev.wire.v1.RouteAttentionTarget
-	33, // 11: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
-	15, // 12: vev.wire.v1.RecentRouteSnapshot.active:type_name -> vev.wire.v1.RouteRef
-	18, // 13: vev.wire.v1.RecentRouteSnapshot.active_entry:type_name -> vev.wire.v1.RecentRouteEntry
-	15, // 14: vev.wire.v1.RecentRouteSnapshot.previous:type_name -> vev.wire.v1.RouteRef
-	15, // 15: vev.wire.v1.RecentRouteSnapshot.home:type_name -> vev.wire.v1.RouteRef
-	18, // 16: vev.wire.v1.RecentRouteSnapshot.entries:type_name -> vev.wire.v1.RecentRouteEntry
-	19, // 17: vev.wire.v1.RecentRouteSnapshot.hosts:type_name -> vev.wire.v1.RouteHost
-	33, // 18: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
-	15, // 19: vev.wire.v1.RouteRetired.ref:type_name -> vev.wire.v1.RouteRef
-	33, // 20: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 21: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 22: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
-	33, // 23: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
-	3,  // 24: vev.wire.v1.AttachmentActivated.identity:type_name -> vev.wire.v1.CommittedRouteIdentity
-	25, // [25:25] is the sub-list for method output_type
-	25, // [25:25] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	35, // 2: vev.wire.v1.Hello.color:type_name -> vev.wire.v1.ColorCapabilities
+	3,  // 3: vev.wire.v1.Welcome.committed_identity:type_name -> vev.wire.v1.CommittedRouteIdentity
+	33, // 4: vev.wire.v1.CommittedRouteIdentity.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 5: vev.wire.v1.AttachTarget.exact_target:type_name -> vev.wire.v1.ExactTarget
+	34, // 6: vev.wire.v1.AttachTarget.session_target:type_name -> vev.wire.v1.SessionAttachTarget
+	5,  // 7: vev.wire.v1.Sessions.sessions:type_name -> vev.wire.v1.SessionInfo
+	8,  // 8: vev.wire.v1.KillResult.failures:type_name -> vev.wire.v1.KillFailure
+	15, // 9: vev.wire.v1.RouteAttentionTarget.ref:type_name -> vev.wire.v1.RouteRef
+	33, // 10: vev.wire.v1.RouteAttentionTarget.target:type_name -> vev.wire.v1.ExactTarget
+	16, // 11: vev.wire.v1.RouteAttentionSubscription.targets:type_name -> vev.wire.v1.RouteAttentionTarget
+	33, // 12: vev.wire.v1.RecentRouteEntry.target:type_name -> vev.wire.v1.ExactTarget
+	15, // 13: vev.wire.v1.RecentRouteSnapshot.active:type_name -> vev.wire.v1.RouteRef
+	18, // 14: vev.wire.v1.RecentRouteSnapshot.active_entry:type_name -> vev.wire.v1.RecentRouteEntry
+	15, // 15: vev.wire.v1.RecentRouteSnapshot.previous:type_name -> vev.wire.v1.RouteRef
+	15, // 16: vev.wire.v1.RecentRouteSnapshot.home:type_name -> vev.wire.v1.RouteRef
+	18, // 17: vev.wire.v1.RecentRouteSnapshot.entries:type_name -> vev.wire.v1.RecentRouteEntry
+	19, // 18: vev.wire.v1.RecentRouteSnapshot.hosts:type_name -> vev.wire.v1.RouteHost
+	33, // 19: vev.wire.v1.RoutePosition.target:type_name -> vev.wire.v1.ExactTarget
+	15, // 20: vev.wire.v1.RouteRetired.ref:type_name -> vev.wire.v1.RouteRef
+	33, // 21: vev.wire.v1.RouteRetired.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 22: vev.wire.v1.SamePeerSwitchRequest.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 23: vev.wire.v1.AttachmentSuspended.target:type_name -> vev.wire.v1.ExactTarget
+	33, // 24: vev.wire.v1.ActivateAttachment.target:type_name -> vev.wire.v1.ExactTarget
+	3,  // 25: vev.wire.v1.AttachmentActivated.identity:type_name -> vev.wire.v1.CommittedRouteIdentity
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_session_proto_init() }

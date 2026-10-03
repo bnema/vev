@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/colorprofile"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
 )
@@ -40,8 +42,8 @@ type movePickerOverlay struct {
 	presenting bool
 }
 
-func newMovePickerOverlay(trueColor bool) *movePickerOverlay {
-	return &movePickerOverlay{renderer: newPickerRenderer(pickerColorProfile(trueColor))}
+func newMovePickerOverlay(color terminalcap.ColorCapabilities) *movePickerOverlay {
+	return &movePickerOverlay{renderer: newPickerRenderer(colorprofile.Profile(color))}
 }
 
 // offer opens the namespace a move offer names. A superseding offer retires

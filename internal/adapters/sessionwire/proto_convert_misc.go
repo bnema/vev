@@ -69,7 +69,6 @@ func themeToWire(message protocol.Theme) *wire.Theme {
 		Foreground:    rgbToWire(message.Foreground),
 		HasBackground: message.HasBackground,
 		Background:    rgbToWire(message.Background),
-		TrueColor:     message.TrueColor,
 		SchemeKnown:   message.SchemeKnown,
 		Light:         message.Light,
 		PaletteKnown:  uint32(message.PaletteKnown),
@@ -97,7 +96,6 @@ func themeFromWire(message *wire.Theme) (protocol.Theme, error) {
 	theme.Foreground = foreground
 	theme.HasBackground = message.GetHasBackground()
 	theme.Background = background
-	theme.TrueColor = message.GetTrueColor()
 	theme.SchemeKnown = message.GetSchemeKnown()
 	theme.Light = message.GetLight()
 	known := message.GetPaletteKnown()

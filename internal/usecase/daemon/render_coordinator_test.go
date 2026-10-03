@@ -1221,7 +1221,7 @@ func TestProducerInvalidations(t *testing.T) {
 			file: "client.go",
 			name: "client theme application",
 			run: func(t *testing.T, d *Daemon, sess *session, ac *attachedClient) {
-				d.applyTheme(sess, ac, protocol.Theme{TrueColor: true})
+				d.applyTheme(sess, ac, protocol.Theme{SchemeKnown: true})
 			},
 		},
 		{

@@ -271,8 +271,7 @@ func TestDimmer(t *testing.T) {
 	theme := Theme{
 		Foreground: renderer.RGB{R: 240, G: 240, B: 240},
 		Background: renderer.RGB{R: 10, G: 20, B: 30},
-		HasFG:      true, HasBG: true, Known: true, TrueColor: true,
-	}
+		HasFG:      true, HasBG: true, Known: true}
 	dimmer := NewDimmer(theme, WithForegroundDimming(55))
 
 	t.Run("fades foreground toward the faded cell background", func(t *testing.T) {
@@ -344,7 +343,7 @@ func TestDimmer(t *testing.T) {
 }
 
 func TestDimmerDefaults(t *testing.T) {
-	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true}
 	tests := []struct {
 		name string
 		in   renderer.Style
@@ -439,8 +438,7 @@ func TestDimmerUsesReportedPalette(t *testing.T) {
 	foreground := renderer.RGB{R: 200, G: 200, B: 200}
 	baseTheme := Theme{
 		Foreground: foreground, Background: background,
-		HasFG: true, HasBG: true, Known: true, TrueColor: true,
-	}
+		HasFG: true, HasBG: true, Known: true}
 
 	reportedSlot2 := renderer.RGB{R: 60, G: 180, B: 75}
 	reportedSlot4 := renderer.RGB{R: 30, G: 100, B: 200}
@@ -585,7 +583,7 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 		t.Fatalf("selection fallback=%+v want inverse", got)
 	}
 
-	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	theme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true}
 	if got, want := Blend(renderer.RGB{R: 0, G: 0, B: 0}, renderer.RGB{R: 100, G: 200, B: 255}, 0.25), (renderer.RGB{R: 25, G: 50, B: 64}); got != want {
 		t.Fatalf("blend=%+v want %+v", got, want)
 	}
@@ -608,7 +606,7 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 }
 
 func TestEmphasisStyle(t *testing.T) {
-	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true}
 	base := renderer.Style{HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 1, G: 2, B: 3}}
 
 	tests := []struct {
@@ -646,7 +644,7 @@ func TestEmphasisStyle(t *testing.T) {
 }
 
 func TestMutedVariantStyle(t *testing.T) {
-	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true, TrueColor: true}
+	usableTheme := Theme{Foreground: renderer.RGB{R: 200, G: 200, B: 200}, Background: renderer.RGB{R: 10, G: 20, B: 30}, HasFG: true, HasBG: true, Known: true}
 	rgbBase := renderer.Style{
 		HasForegroundRGB: true, ForegroundRGB: renderer.RGB{R: 100, G: 100, B: 100},
 		HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 0, G: 0, B: 0},
@@ -686,7 +684,7 @@ func TestMutedVariantStyle(t *testing.T) {
 		{
 			name:  "base without RGB background and theme without background returns base unchanged",
 			base:  fgOnlyBase,
-			theme: Theme{Known: true, TrueColor: true, HasFG: true},
+			theme: Theme{Known: true, HasFG: true},
 			want:  fgOnlyBase,
 		},
 		{

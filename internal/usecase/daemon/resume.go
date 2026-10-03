@@ -564,7 +564,9 @@ func (d *Daemon) resumeParked(h protocol.Hello, tr ports.ServerConnection, sz do
 		ac.sendMu.Unlock()
 		return nil, nil, false, &protoErr{protocol.ErrNoSuchSession, "resume token is no longer valid"}
 	}
+	colorBefore := ac.terminalCapabilities.Color.Mode
 	sess, resumed, ok, err := d.resumeParkedLocked(h, tr, sz)
+	colorChanged := resumed != nil && resumed.terminalCapabilities.Color.Mode != colorBefore
 	d.mu.Unlock()
 	ac.sendMu.Unlock()
 	if err == nil && ok && sess != nil && resumed != nil {
@@ -572,6 +574,14 @@ func (d *Daemon) resumeParked(h protocol.Hello, tr ports.ServerConnection, sz do
 		// complete the claiming terminal's geometry before the resumed
 		// attachment is allowed to produce its first frame.
 		sess.geometry.reconcile(d, sess, resumed)
+		if colorChanged {
+			// The applied theme (chrome styles) was resolved for the previous
+			// terminal's color mode; re-resolve it for the new one before the
+			// first paint, and tell the user about a declared downgrade just as a
+			// fresh attach would.
+			d.publishColorDowngradeNotice(sess, resumed)
+			d.applyHostTheme(sess, resumed, resumed.getClientTheme(), false)
+		}
 		// A resumed unsupported attachment bypasses finishAttachedClient. Check
 		// the restored scene at this boundary so suppression is explained once.
 		d.warnUnsupportedGraphics(resumed)

@@ -240,7 +240,7 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
 	defer terminal.Close()
 	ui := client.NewUI(terminal, clk)
 	sessionEnv := terminalSessionEnvironment()
-	attachmentEnv := terminalAttachmentEnvironment()
+	attachmentEnv := virtualTerminalAttachmentEnvironment()
 	attachmentEnv.Cwd = sessionEnv.Cwd
 	return runUIDriverClient(ctx, brokerClientConfig{
 		Logger:                   log,
@@ -495,7 +495,7 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 		return err
 	}
 	sessionEnv := terminalSessionEnvironment()
-	attachmentEnv := terminalAttachmentEnvironment()
+	attachmentEnv := configuredTerminalAttachmentEnvironment(log)
 	attachmentEnv.Cwd = sessionEnv.Cwd
 	return runBrokerClient(ctx, brokerClientConfig{
 		Logger:                   log,

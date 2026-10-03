@@ -88,6 +88,18 @@ constant or the request fails
 with the version-mismatch response above. There is no multi-version
 negotiation: equality is mandatory.
 
+`Hello.color` (`ColorCapabilities{mode, source}`, field 26) is the only carrier
+of terminal color capability; `Theme` has no capability field. `mode` is a
+closed enum (`TRUE_COLOR`, `ANSI256`, `ANSI16`, `MONOCHROME`) and a missing
+message, an `UNSPECIFIED` mode, or any unknown enum value is a malformed Hello
+(`sessionwire` rejects it before any mutation). `source` `UNSPECIFIED` means
+"unknown": the daemon then ignores the claimed mode and re-detects from
+`Hello.Env`; `DECLARED` and `FORCED` claims are used verbatim. A `HEURISTIC` truecolor claim
+upgrades a weaker daemon-side detection; any other `HEURISTIC` claim falls back
+to detection.
+(`internal/domain/terminalcap.Resolve`; wire tests in
+`sessionwire/proto_convert_test.go:TestProtoHelloColorWire`.)
+
 Command requests additionally carry a 10-second result deadline
 (`daemon/command_tracker.go:CommandRequestTimeout`), tracked per
 connection and correlated by `RequestID`. Every dispatched request produces

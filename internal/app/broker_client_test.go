@@ -3,9 +3,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -1160,5 +1163,101 @@ func awaitTerminalCompositionEpoch(t *testing.T, service ports.BrokerService) po
 		case <-deadline.C:
 			t.Fatal("broker never published a snapshot")
 		}
+	}
+}
+
+func TestDetectTerminalColor(t *testing.T) {
+	tests := []struct {
+		name      string
+		term      string
+		colorTerm string
+		env       []string
+		want      terminalcap.ColorCapabilities
+	}{
+		{name: "kitty environment keeps heuristic truecolor", term: "xterm-kitty", env: []string{"KITTY_WINDOW_ID=1"}, want: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceHeuristic}},
+		{name: "explicit COLORTERM overrides env", term: "xterm-256color", colorTerm: "truecolor", env: []string{"COLORTERM="}, want: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}},
+		{name: "explicit TERM overrides env", term: "xterm-256color", env: []string{"TERM=foot-direct"}, want: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}},
+		{name: "unknown terminal is indexed", term: "unknown", want: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, detectTerminalColor(tt.term, tt.colorTerm, tt.env))
+		})
+	}
+}
+
+func TestResolveColorOverride(t *testing.T) {
+	detected := terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}
+	forced := func(mode terminalcap.ColorMode) terminalcap.ColorCapabilities {
+		return terminalcap.ColorCapabilities{Mode: mode, Source: terminalcap.SourceForced}
+	}
+	tests := []struct {
+		name     string
+		env      string
+		cfg      domain.TerminalConfig
+		want     terminalcap.ColorCapabilities
+		wantWarn bool
+	}{
+		{name: "nothing set uses detection", want: detected},
+		{name: "config auto uses detection", cfg: domain.TerminalConfig{}, want: detected},
+		{name: "config forces mode", cfg: domain.TerminalConfig{Colors: terminalcap.ANSI16, ColorsSet: true}, want: forced(terminalcap.ANSI16)},
+		{name: "config forces truecolor", cfg: domain.TerminalConfig{Colors: terminalcap.TrueColor, ColorsSet: true}, want: forced(terminalcap.TrueColor)},
+		{name: "env forces mode", env: "mono", want: forced(terminalcap.Monochrome)},
+		{name: "env is case-insensitive and trimmed", env: " TrueColor ", want: forced(terminalcap.TrueColor)},
+		{name: "env wins over config", env: "256", cfg: domain.TerminalConfig{Colors: terminalcap.Monochrome, ColorsSet: true}, want: forced(terminalcap.ANSI256)},
+		{name: "env auto overrides config with detection", env: "auto", cfg: domain.TerminalConfig{Colors: terminalcap.Monochrome, ColorsSet: true}, want: detected},
+		{name: "blank env falls through to config", env: "  ", cfg: domain.TerminalConfig{Colors: terminalcap.ANSI16, ColorsSet: true}, want: forced(terminalcap.ANSI16)},
+		{name: "invalid env falls back to config with a warning", env: "rainbow", cfg: domain.TerminalConfig{Colors: terminalcap.ANSI16, ColorsSet: true}, want: forced(terminalcap.ANSI16), wantWarn: true},
+		{name: "invalid env falls back to detection with a warning", env: "24bit", want: detected, wantWarn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&logs, nil))
+			require.Equal(t, tt.want, resolveColorOverride(detected, tt.env, tt.cfg, log))
+			if tt.wantWarn {
+				require.Contains(t, logs.String(), "VEV_COLORS")
+			} else {
+				require.Empty(t, logs.String())
+			}
+		})
+	}
+	t.Run("nil logger tolerates invalid env", func(t *testing.T) {
+		require.Equal(t, detected, resolveColorOverride(detected, "rainbow", domain.TerminalConfig{}, nil))
+	})
+}
+
+func TestTerminalAttachmentEnvironmentColor(t *testing.T) {
+	forced := func(mode terminalcap.ColorMode) terminalcap.ColorCapabilities {
+		return terminalcap.ColorCapabilities{Mode: mode, Source: terminalcap.SourceForced}
+	}
+	tests := []struct {
+		name     string
+		term     string
+		colors   string
+		cfg      domain.TerminalConfig
+		wantUser terminalcap.ColorCapabilities
+	}{
+		{name: "dumb process terminal", term: "dumb", wantUser: terminalcap.ColorCapabilities{Mode: terminalcap.Monochrome, Source: terminalcap.SourceDeclared}},
+		{name: "linux console", term: "linux", wantUser: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}},
+		{name: "env overrides process terminal", term: "dumb", colors: "truecolor", wantUser: forced(terminalcap.TrueColor)},
+		{name: "config overrides process terminal", term: "xterm-256color", cfg: domain.TerminalConfig{Colors: terminalcap.ANSI16, ColorsSet: true}, wantUser: forced(terminalcap.ANSI16)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TERM", tt.term)
+			t.Setenv("COLORTERM", "")
+			t.Setenv("KITTY_WINDOW_ID", "")
+			t.Setenv("KITTY_PID", "")
+			t.Setenv("KITTY_LISTEN_ON", "")
+			t.Setenv(envColors, tt.colors)
+
+			require.Equal(t, tt.wantUser, userTerminalAttachmentEnvironment(nil, tt.cfg).Color)
+			// Web and headless UI-driver clients render into RGB VT mirrors and
+			// ignore both the gateway process terminal and the user override.
+			virtual := virtualTerminalAttachmentEnvironment()
+			require.Equal(t, forced(terminalcap.TrueColor), virtual.Color)
+			require.False(t, virtual.ProbeTerminal)
+		})
 	}
 }
