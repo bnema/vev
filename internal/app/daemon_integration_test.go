@@ -520,10 +520,19 @@ func assertChildEnvironment(t *testing.T, tr ports.ClientConnection, p *typedPum
 	}
 }
 
+// displayShellFixture names each shell after the WAYLAND_DISPLAY it started
+// with, so a test can tell which session-bound environment a PTY received.
+func displayShellFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "shell")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nprintf 'SHELL_COMMAND=%s\\n' \"${WAYLAND_DISPLAY#wayland-}\"\nexec /bin/sh\n"), 0o700))
+	return path
+}
+
 func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
-	firstShell := shellFixture(t, "first")
+	firstShell := displayShellFixture(t)
 	secondShell := shellFixture(t, "second")
 	firstEnv := []string{
 		"VEV_TEST_ENV=first", "SHELL=" + firstShell, "XDG_RUNTIME_DIR=/run/first", "WAYLAND_DISPLAY=wayland-first",
@@ -548,17 +557,21 @@ func TestIntegration_AttachEnvironmentRefreshesFuturePTYChildren(t *testing.T) {
 	require.NoError(t, tr2.SendClient(protocol.Input{Data: []byte("\x1b ")}))
 	awaitText(t, p2, sz, "Commands")
 	require.NoError(t, tr2.SendClient(protocol.Input{Data: []byte("CNT\r")}))
+	// The new tab keeps the creator's shell and ordinary variables; only the
+	// session-bound desktop variables follow the latest attach.
 	awaitText(t, p2, sz, "SHELL_COMMAND=second")
-	assertChildEnvironment(t, tr2, p2, sz, "second", secondShell, "/run/second", "wayland-second")
+	assertChildEnvironment(t, tr2, p2, sz, "first", firstShell, "/run/second", "wayland-second")
 }
 
 func TestIntegration_TwoAttachmentsReceiveSharedMutationPTYOutput(t *testing.T) {
 	sz := domain.Size{Cols: 80, Rows: 24}
 	dir, _ := startDaemon(t)
-	firstShell := shellFixture(t, "first")
 	const sharedOutput = "SECOND_SHARED_PTY_OUTPUT"
-	secondShell := filepath.Join(t.TempDir(), "second-shell")
-	require.NoError(t, os.WriteFile(secondShell, []byte("#!/bin/sh\nprintf 'SHELL_COMMAND=second\\n'\nIFS= read -r _\nprintf '"+sharedOutput+"\\n'\nexec /bin/sh\n"), 0o700))
+	// The session keeps its creator's SHELL, so one script serves both tabs and
+	// gates only the PTY opened after the second attach refreshed the display.
+	firstShell := filepath.Join(t.TempDir(), "shell")
+	require.NoError(t, os.WriteFile(firstShell, []byte("#!/bin/sh\nif [ \"$WAYLAND_DISPLAY\" = wayland-second ]; then\nprintf 'SHELL_COMMAND=second\\n'\nIFS= read -r _\nprintf '"+sharedOutput+"\\n'\nelse\nprintf 'SHELL_COMMAND=first\\n'\nfi\nexec /bin/sh\n"), 0o700))
+	secondShell := shellFixture(t, "unused")
 	firstEnv := []string{
 		"VEV_TEST_ENV=first", "SHELL=" + firstShell, "XDG_RUNTIME_DIR=/run/first", "WAYLAND_DISPLAY=wayland-first",
 		"TERM=client", "COLORTERM=client", "TERM_PROGRAM=client", "VEV=client",

@@ -1477,13 +1477,14 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		// otherwise falls back to the session's normal first-tab repair.
 		initialTabIndex = preferredTabIndex(sess, h.PreferredTabID)
 	}
-	// Session state is the sole source for future PTY children. Update it before
-	// publishing the attachment; existing PTYs keep their original environment.
+	// Session state is the sole source for future PTY children. Refresh its
+	// session-bound variables before publishing the attachment; existing PTYs
+	// keep their original environment and can pull the refresh with `vev env`.
 	// A picker handoff deliberately leaves the daemon-owned environment and CWD
 	// untouched, even though Hello retains those fields for direct CLI clients.
 	sess.mu.Lock()
 	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
-		sess.env = copyEnvironment(h.Env)
+		sess.adoptClientEnvironmentLocked(h.Env)
 	}
 	sess.mu.Unlock()
 	terminalCapabilities := terminalcap.Detect(h.Env)

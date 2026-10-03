@@ -554,11 +554,10 @@ func TestRouteLocalCreateUsesAdmittedClientEnvironment(t *testing.T) {
 }
 
 // TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment proves a local admitted
-// attach refreshes the session's environment for future PTY children while the
-// already-running PTY is untouched, which is the existing shared-session
-// semantics the admission must preserve.
+// attach refreshes the session-bound variables for future PTY children while
+// the already-running PTY and ordinary variables are untouched.
 func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
-	firstEnv := []string{"MARK=first"}
+	firstEnv := []string{"MARK=first", "WAYLAND_DISPLAY=wayland-old"}
 	pty, release := newBlockingPTY(t)
 	defer release()
 	d := newTestDaemon(t, newFactorySeq(t, pty, newQuietPTY()), stubClock{})
@@ -581,7 +580,7 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 	// A later attach refreshes only the session's future-child environment. A
 	// named admission authorizes creation only, so the attach rides a fresh
 	// exact admission for the live session's own lifecycle.
-	attachEnv := []string{"MARK=attach"}
+	attachEnv := []string{"MARK=attach", "WAYLAND_DISPLAY=wayland-new"}
 	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
 	attach := protocol.Hello{
 		Version: protocol.Version, Intent: protocol.IntentAttach, Name: target.SessionName, Size: defaultSize,
@@ -595,11 +594,54 @@ func TestRouteLocalAttachUpdatesOnlyFutureChildEnvironment(t *testing.T) {
 	require.NoError(t, err)
 
 	sess.mu.Lock()
-	require.Equal(t, attachEnv, sess.env, "a later client-owned attach refreshes future child environment")
+	require.Equal(t, []string{"MARK=first", "WAYLAND_DISPLAY=wayland-new"}, sess.env, "a later client-owned attach refreshes only session-bound variables")
 	require.Same(t, existingPane, sess.tabs[0].focusedPane(), "the existing PTY is untouched")
 	sess.mu.Unlock()
 
 	require.NoError(t, d.killSession(sess, protocol.ReasonSessionKilled, true))
+}
+
+// TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession proves a
+// session restored at daemon startup, whose environment came from the daemon
+// process, takes the first local client's environment wholesale and only
+// refreshes session-bound variables afterwards.
+func TestRouteLocalAttachAdoptsClientEnvironmentForRestoredSession(t *testing.T) {
+	d := newTestDaemon(t, nil, stubClock{})
+	sess := addControlSession(d, "work", "tab-1", "pane-1")
+	sess.ephemeral = false
+	sess.incarnation = newTestLifecycle(t)
+	sess.mu.Lock()
+	sess.env = []string{"SHELL=/bin/sh", "PATH=/daemon"}
+	sess.envProvisional = true
+	sess.mu.Unlock()
+
+	target := protocol.ExactSessionTarget{LifecycleID: sess.incarnation, SessionName: sess.name}
+	attach := func(env []string) {
+		t.Helper()
+		hello := protocol.Hello{
+			Version: protocol.Version, Intent: protocol.IntentAttach, Name: target.SessionName, Size: defaultSize,
+			ExactTarget: &target, Env: env, EnvironmentPolicy: protocol.EnvironmentPolicyClientOwned,
+		}
+		admission := ports.SessionAdmission{
+			Origin: ports.SessionOriginLocal, Policy: admissionTestPolicy(ports.SessionOriginLocal),
+			Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Target: target, Env: env,
+		}
+		tr := &admittedTransport{ServerConnection: &closeTrackingTransport{}, admission: admission, present: true}
+		_, ac, err := d.route(hello, tr)
+		require.NoError(t, err)
+		d.clientGone(sess, ac, tr, false)
+	}
+
+	attach([]string{"SHELL=/usr/bin/fish", "PATH=/client", "WAYLAND_DISPLAY=wayland-1"})
+	sess.mu.Lock()
+	require.Equal(t, []string{"SHELL=/usr/bin/fish", "PATH=/client", "WAYLAND_DISPLAY=wayland-1"}, sess.env)
+	require.False(t, sess.envProvisional)
+	sess.mu.Unlock()
+
+	attach([]string{"SHELL=/bin/bash", "PATH=/other", "WAYLAND_DISPLAY=wayland-2"})
+	sess.mu.Lock()
+	require.Equal(t, []string{"SHELL=/usr/bin/fish", "PATH=/client", "WAYLAND_DISPLAY=wayland-2"}, sess.env)
+	sess.mu.Unlock()
 }
 
 // TestRouteRemoteExactAttachPreservesSessionEnvironment proves a remote exact

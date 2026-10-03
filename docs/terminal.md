@@ -59,7 +59,32 @@ When your outer terminal supports the kitty keyboard protocol (kitty, foot, ghos
 
 ## Environment
 
-- New panes inherit the environment of the client that last attached. Running processes keep theirs.
+- A session keeps the environment it was created with, including `SHELL`, `PATH`, and `HOME`. A session restored after a daemon restart takes the environment of the first local client that attaches.
+- Desktop and login variables follow the client that last attached:
+  - `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, and `XDG_SESSION_*`/`XDG_CURRENT_DESKTOP` update when the client has them. A client without them (SSH, console) never removes them.
+  - `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_CLIENT`, and `SSH_TTY` always match the last client and are removed when it has none.
+- New panes get these values. Running processes keep their own environment; a shell pulls the current values with `vev env <fish|sh>` from its prompt hook:
+
+  ```fish
+  # ~/.config/fish/conf.d/vev.fish
+  if set -q VEV
+      function __vev_env --on-event fish_prompt
+          vev env fish 2>/dev/null | source
+      end
+  end
+  ```
+
+  ```zsh
+  # ~/.zshrc (bash: add the eval to PROMPT_COMMAND)
+  if [[ -n $VEV ]]; then
+    autoload -Uz add-zsh-hook
+    __vev_env() { eval "$(vev env sh 2>/dev/null)" }
+    add-zsh-hook precmd __vev_env
+  fi
+  ```
+
+  The hook overrides values you set by hand in that shell, such as `SSH_AUTH_SOCK` after `eval (ssh-agent)`.
+- `vev cmd env` prints the same values as data, and `vev cmd env --json` as JSON where `null` means unset.
 - vev always sets `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`. `SHELL` picks the shell.
 - A remote session opened from the picker uses the remote host's own environment, not yours. This keeps `HOME`, `PATH`, and `SHELL` correct on that host.
 

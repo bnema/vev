@@ -348,6 +348,10 @@ func (s *controlSpy) ListPanes(json bool) (string, error) {
 	_ = s.record("list-panes:" + strconv.FormatBool(json))
 	return "panes", nil
 }
+func (s *controlSpy) SessionEnvironment(json bool) (string, error) {
+	_ = s.record("env:" + strconv.FormatBool(json))
+	return "env", nil
+}
 func (s *controlSpy) RemoteCatalog(json bool) (string, error) {
 	_ = s.record("remote-catalog:" + strconv.FormatBool(json))
 	return s.catalogOutput, nil

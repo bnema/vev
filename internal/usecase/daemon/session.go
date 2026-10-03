@@ -63,9 +63,14 @@ type session struct {
 	cwd                    string
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
-	env          []string
-	snapDirty    atomic.Bool
-	snapEligible atomic.Bool
+	env []string
+	// envProvisional marks an env that came from the daemon's own process
+	// rather than a client (snapshot restore). The first client-owned
+	// environment replaces it wholesale; later ones refresh only session-bound
+	// variables. Guarded by mu.
+	envProvisional bool
+	snapDirty      atomic.Bool
+	snapEligible   atomic.Bool
 	// snapshotMu serializes mutation revisions and repository publication
 	// generations with worker completion. It is intentionally independent from
 	// mu: persistence never holds session state locks while encoding or writing.

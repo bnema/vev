@@ -1561,7 +1561,7 @@ func TestSequencedInputDoesNotPrematurelyEcho(t *testing.T) {
 	require.Zero(t, ac.echoAck.Load())
 }
 
-func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
+func TestResumeParkedRefreshesSessionBoundFuturePTYEnvironment(t *testing.T) {
 	initialPTY, releaseInitial := newBlockingPTY(t)
 	futurePTY, releaseFuture := newBlockingPTY(t)
 	defer releaseInitial()
@@ -1585,7 +1585,7 @@ func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
 	d := newTestDaemon(t, factory, stubClock{})
 	tr, _, _ := newConn(t, mustHello(protocol.IntentAttach, "unused", domain.Size{}))
 	hello := helloResumeCapable(protocol.IntentNew, "work", 0)
-	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old"}
+	hello.Env = []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "SSH_AUTH_SOCK=/run/old-agent"}
 	sess, ac, err := d.route(hello, tr)
 	require.NoError(t, err)
 	token := ac.resumeToken
@@ -1593,7 +1593,7 @@ func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
 	require.True(t, d.parkAttachment(sess, ac))
 
 	resumeHello := helloResumeCapable(protocol.IntentResume, "work", token)
-	resumeHello.Env = []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}
+	resumeHello.Env = []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}
 	resumeHello.TrueColor = true
 	_, _, ok, err := d.resumeParked(resumeHello, &closeTrackingTransport{}, domain.Size{Cols: 80, Rows: 24})
 	require.NoError(t, err)
@@ -1603,10 +1603,10 @@ func TestResumeParkedReplacesFuturePTYEnvironment(t *testing.T) {
 	sess.mu.Lock()
 	future := sess.tabs[1].focusedPane()
 	futureTabID, futurePaneID := sess.tabs[1].stableID, future.stableID
-	require.Equal(t, resumeHello.Env, sess.env)
+	require.Equal(t, []string{"SECRET=before", "SHELL=/bin/sh", "TERM=old", "VEV=old", "WAYLAND_DISPLAY=wayland-1"}, sess.env)
 	sess.mu.Unlock()
-	require.Equal(t, []string{"/bin/sh", "/usr/bin/fish"}, commands)
-	require.Equal(t, []string{"SECRET=after", "PAIR=a=b", "SHELL=/usr/bin/fish", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
+	require.Equal(t, []string{"/bin/sh", "/bin/sh"}, commands)
+	require.Equal(t, []string{"SECRET=before", "SHELL=/bin/sh", "WAYLAND_DISPLAY=wayland-1", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + futureTabID + ",pane=" + futurePaneID}, envs[1])
 }
 
 func TestResumeParkedDaemonOwnedPreservesSessionEnvironment(t *testing.T) {

@@ -906,6 +906,15 @@ func (e controlExec) ListTabs(asJSON bool) (string, error) {
 	return out.String(), nil
 }
 
+// SessionEnvironment exports the session-bound variables that future PTY
+// children of the target session receive, so running shells can catch up.
+func (e controlExec) SessionEnvironment(asJSON bool) (string, error) {
+	e.sess.mu.Lock()
+	env := e.sess.env
+	e.sess.mu.Unlock()
+	return sessionEnvironmentExport(env, asJSON)
+}
+
 func (e controlExec) ListPanes(asJSON bool) (string, error) {
 	type row struct {
 		ID      string `json:"id"`
