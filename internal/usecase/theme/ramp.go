@@ -30,11 +30,14 @@ type Ramp struct {
 	BorderActive    renderer.Style
 	BorderWarn      renderer.Style
 
-	background   renderer.RGB
-	foreground   renderer.RGB
-	accent       renderer.RGB
-	activeWeight int
-	rgb          bool
+	background renderer.RGB
+	foreground renderer.RGB
+	accent     renderer.RGB
+	// mruWeights lists, strongest first, the accent weights usable for the
+	// recent-session history; it is scanned once per ramp.
+	mruWeights [mruTopWeight - mruFloorWeight + 1]uint8
+	mruCount   int
+	rgb        bool
 }
 
 // BuildRamp derives every RGB surface from the terminal background and one
@@ -61,7 +64,7 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		return neutralRamp(t)
 	}
 
-	return Ramp{
+	ramp := Ramp{
 		SurfaceBar:      bar,
 		SurfaceInactive: inactive,
 		SurfaceRecent:   recent,
@@ -72,9 +75,10 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		background:      t.Background,
 		foreground:      t.Foreground,
 		accent:          accent.RGB,
-		activeWeight:    activeWeight,
 		rgb:             true,
 	}
+	ramp.scanMRUWeights(t, activeWeight)
+	return ramp
 }
 
 // surfaceAtOrBelow searches from the requested intensity to neutral. The
@@ -193,35 +197,58 @@ const (
 	mruFloorWeight = 30
 )
 
+const (
+	// mruFallbackTop and mruFallbackFloor bound the dimmer history range used
+	// when no weight in the main range has readable text.
+	mruFallbackTop   = 22
+	mruFallbackFloor = 11
+)
+
+// scanMRUWeights records the readable history weights, strongest first. It
+// stays strictly below the active surface and falls back to a dimmer range
+// so extreme themes still get an ordered fade.
+func (r *Ramp) scanMRUWeights(t Theme, activeWeight int) {
+	r.mruCount = 0
+	r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), mruFloorWeight)
+	if r.mruCount == 0 {
+		r.collectMRUWeights(t, min(mruFallbackTop, activeWeight-1), mruFallbackFloor)
+	}
+}
+
+func (r *Ramp) collectMRUWeights(t Theme, top, floor int) {
+	for weight := top; weight >= floor; weight-- {
+		background := okLabLerp(t.Background, r.accent, float64(weight)/100)
+		if _, ok := primaryText(t, background); ok {
+			r.mruWeights[r.mruCount] = uint8(weight)
+			r.mruCount++
+		}
+	}
+}
+
 // MRUStyle fades history entries from just below the active accent toward
-// the bar. Only weights with readable primary text are used, and the entries
-// are spread evenly across them, so the gradient is recomputed per count and
-// stays strictly ordered.
+// the bar, recomputed per count. Targets are spaced linearly in accent weight
+// and snapped to the nearest readable weight, so the fade is monotonically
+// non-increasing (strict when enough readable weights exist).
 func MRUStyle(ramp Ramp, index, count int) renderer.Style {
-	if !ramp.rgb || count <= 0 {
+	if !ramp.rgb || count <= 0 || ramp.mruCount == 0 {
 		return ramp.SurfaceRecent
 	}
 	index = max(0, min(index, count-1))
 
-	theme := Theme{Foreground: ramp.foreground, Background: ramp.background}
-	top := min(mruTopWeight, ramp.activeWeight-1)
-	var weights [mruTopWeight - mruFloorWeight + 1]int
-	found := 0
-	for weight := top; weight >= mruFloorWeight; weight-- {
-		background := okLabLerp(ramp.background, ramp.accent, float64(weight)/100)
-		if _, ok := primaryText(theme, background); ok {
-			weights[found] = weight
-			found++
+	weights := ramp.mruWeights[:ramp.mruCount]
+	top, bottom := float64(weights[0]), float64(weights[len(weights)-1])
+	target := top
+	if count > 1 {
+		target = top - (top-bottom)*float64(index)/float64(count-1)
+	}
+	weight := weights[0]
+	for _, candidate := range weights[1:] {
+		if math.Abs(float64(candidate)-target) < math.Abs(float64(weight)-target) {
+			weight = candidate
 		}
 	}
-	if found == 0 {
-		return ramp.SurfaceRecent
-	}
-	position := 0
-	if count > 1 {
-		position = int(math.Round(float64(index*(found-1)) / float64(count-1)))
-	}
-	background := okLabLerp(ramp.background, ramp.accent, float64(weights[position])/100)
-	foreground, _ := primaryText(theme, background)
+
+	background := okLabLerp(ramp.background, ramp.accent, float64(weight)/100)
+	foreground, _ := primaryText(Theme{Foreground: ramp.foreground, Background: ramp.background}, background)
 	return rgbSurface(foreground, background)
 }

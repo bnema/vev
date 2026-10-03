@@ -141,7 +141,7 @@ func TestMRUStyleFadesFromNearActiveTowardBar(t *testing.T) {
 			for count := 1; count <= 9; count++ {
 				newest := MRUStyle(ramp, 0, count)
 				require.NotEqual(t, ramp.SurfaceActive.BackgroundRGB, newest.BackgroundRGB, "newest differs from active")
-				require.Greater(t, distance(newest), distance(ramp.SurfaceRecent), "newest stays close to the active accent")
+				require.GreaterOrEqual(t, distance(newest), 0.7*distance(ramp.SurfaceActive), "newest stays close to the active accent")
 				previous := distance(ramp.SurfaceActive)
 				for index := range count {
 					style := MRUStyle(ramp, index, count)
@@ -153,6 +153,20 @@ func TestMRUStyleFadesFromNearActiveTowardBar(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMRUStyleFallsBackToDimRangeWhenActiveIsWeak(t *testing.T) {
+	theme := rampTheme(false)
+	ramp := BuildRamp(theme, Accent{RGB: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}, Known: true})
+	ramp.scanMRUWeights(theme, 20)
+
+	require.Equal(t, 9, ramp.mruCount, "fallback scans weights 19 down to 11")
+	require.Equal(t, okLabLerp(theme.Background, ramp.accent, 0.19), MRUStyle(ramp, 0, 3).BackgroundRGB)
+	require.Equal(t, okLabLerp(theme.Background, ramp.accent, 0.11), MRUStyle(ramp, 2, 3).BackgroundRGB)
+
+	ramp.scanMRUWeights(theme, 1)
+	require.Zero(t, ramp.mruCount)
+	require.Equal(t, ramp.SurfaceRecent, MRUStyle(ramp, 0, 3), "no readable weight keeps the recent surface")
 }
 
 func TestResolveBuildsCompleteStylesFromOneAccent(t *testing.T) {
