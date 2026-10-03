@@ -35,8 +35,7 @@ type Ramp struct {
 	accent     renderer.RGB
 	// mruWeights lists, strongest first, the accent weights usable for the
 	// recent-session history; it is scanned once per ramp.
-	// The fallback scan can span weights mruTopWeight down to 1.
-	mruWeights [mruTopWeight]uint8
+	mruWeights [mruTopWeight - mruFloorWeight + 1]uint8
 	mruCount   int
 	rgb        bool
 }
@@ -204,9 +203,9 @@ const (
 // themes still get an ordered fade that never sinks below inactive tabs.
 func (r *Ramp) scanMRUWeights(t Theme, activeWeight, inactiveWeight int) {
 	r.mruCount = 0
-	r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), max(mruFloorWeight, inactiveWeight+1))
+	r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), mruFloorWeight)
 	if r.mruCount == 0 {
-		r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), inactiveWeight+1)
+		r.collectMRUWeights(t, min(mruFloorWeight-1, activeWeight-1), inactiveWeight+1)
 	}
 }
 
