@@ -63,9 +63,16 @@ type session struct {
 	cwd                    string
 	// env is the authoritative immutable environment snapshot for future PTY children.
 	// It is guarded by mu and is always copied on ingress and egress.
-	env          []string
-	snapDirty    atomic.Bool
-	snapEligible atomic.Bool
+	env []string
+	// envProvisional marks an env that came from the daemon's own process
+	// rather than a client: a snapshot restore, a daemon-owned resume of a
+	// stopped session, or a session created or resumed from a provisional
+	// one. The first client-owned environment then replaces it (see
+	// adoptClientEnvironmentLocked for the display-group exception); later
+	// ones refresh only session-bound variables. Guarded by mu.
+	envProvisional bool
+	snapDirty      atomic.Bool
+	snapEligible   atomic.Bool
 	// snapshotMu serializes mutation revisions and repository publication
 	// generations with worker completion. It is intentionally independent from
 	// mu: persistence never holds session state locks while encoding or writing.
@@ -480,7 +487,7 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 	from.mu.Lock()
 	cwd := from.cwd
-	env := copyEnvironment(from.env)
+	env, provisional := from.environmentSeedLocked()
 	_, attached := from.attachments[ac]
 	from.mu.Unlock()
 	if !attached {
@@ -489,6 +496,9 @@ func (d *Daemon) createSessionAndSwitch(from *session, ac *attachedClient, name 
 	}
 
 	newSess, err := d.createSessionLockedWithMode(name, false, cwd, geometry, env)
+	if err == nil && provisional {
+		markEnvironmentProvisional(newSess)
+	}
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -537,7 +547,7 @@ func (d *Daemon) createSessionAndSwitchForAttachment(effect *attachmentEffect, n
 		source: capability.sess, next: capability.ac,
 
 		expectedTransport: capability.transport, sourceCapability: &capability, sourceEffect: effect, action: "create-session",
-		copySourceEnvironment: true, ready: true,
+		ready: true,
 		createTargetLocked: func() (*session, error) {
 			source := capability.sess
 			if source == nil {
@@ -553,10 +563,14 @@ func (d *Daemon) createSessionAndSwitchForAttachment(effect *attachmentEffect, n
 				return nil, errSessionNameInUse
 			}
 			source.mu.Lock()
-			cwd, env := source.cwd, copyEnvironment(source.env)
+			cwd := source.cwd
+			env, provisional := source.environmentSeedLocked()
 			source.mu.Unlock()
 			var createErr error
 			created, createErr = d.createSessionLockedWithMode(name, false, cwd, capability.ac.geometrySnapshot(), env)
+			if createErr == nil && provisional {
+				markEnvironmentProvisional(created)
+			}
 			return created, createErr
 		},
 	})
@@ -586,7 +600,8 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 		return errPurgeAdmissionClosed
 	}
 	from.mu.Lock()
-	cwd, env := from.cwd, copyEnvironment(from.env)
+	cwd := from.cwd
+	env, provisional := from.environmentSeedLocked()
 	_, attached := from.attachments[ac]
 	from.mu.Unlock()
 	if !attached {
@@ -595,6 +610,9 @@ func (d *Daemon) createEphemeralSessionAndSwitch(from *session, ac *attachedClie
 	}
 	name := d.allocEphemeralNameLocked()
 	newSess, err := d.createSessionLockedWithMode(name, true, cwd, geometry, env)
+	if err == nil && provisional {
+		markEnvironmentProvisional(newSess)
+	}
 	d.mu.Unlock()
 	if err != nil {
 		return err
@@ -626,7 +644,7 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(effect *attachment
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: capability.sess, next: capability.ac,
 		expectedTransport: capability.transport, sourceCapability: &capability, sourceEffect: effect, action: "create-ephemeral-session",
-		copySourceEnvironment: true, ready: true,
+		ready: true,
 		createTargetLocked: func() (*session, error) {
 			if capability.sess == nil || d.closing {
 				return nil, errAttachmentTransition
@@ -636,11 +654,15 @@ func (d *Daemon) createEphemeralSessionAndSwitchForAttachment(effect *attachment
 			}
 			source := capability.sess
 			source.mu.Lock()
-			cwd, env := source.cwd, copyEnvironment(source.env)
+			cwd := source.cwd
+			env, provisional := source.environmentSeedLocked()
 			source.mu.Unlock()
 			name := d.allocEphemeralNameLocked()
 			var createErr error
 			created, createErr = d.createSessionLockedWithMode(name, true, cwd, capability.ac.geometrySnapshot(), env)
+			if createErr == nil && provisional {
+				markEnvironmentProvisional(created)
+			}
 			return created, createErr
 		},
 	})

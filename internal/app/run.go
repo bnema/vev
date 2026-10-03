@@ -58,6 +58,7 @@ const (
 	kindHost
 	kindKill
 	kindCmd
+	kindEnv
 	kindDaemon
 	kindDaemonLauncher
 	kindUIDriver
@@ -90,6 +91,7 @@ type command struct {
 	killAll      bool
 	killSessions bool
 	cmd          cmdInvocation
+	env          envInvocation
 	brokerServe  brokerServeOptions
 	brokerMux    brokerMuxOptions
 	brokerReady  brokerReadyOptions
@@ -129,6 +131,7 @@ usage:
   vev kill --all      stop everything: every vev window, the broker, and the
                       daemon (named sessions come back on the next start)
   vev cmd <command>   run a control command (vev cmd --help)
+  vev env <fish|sh>   print shell code that refreshes desktop variables
   vev --ui-observe    expose passive observation for this interactive client
                       (optional: --ui-socket PATH)
   vev --ui-control    expose observation and input control for this client
@@ -308,6 +311,12 @@ parsedUIFlags:
 		return parseListArgs(args[1:])
 	case "host":
 		return parseHostArgs(args[1:])
+	case "env":
+		invocation, err := parseEnvArgs(args[1:])
+		if err != nil {
+			return command{}, err
+		}
+		return command{kind: kindEnv, env: invocation}, nil
 	case "cmd":
 		invocation, err := parseCmdArgs(args[1:])
 		if err != nil {
@@ -395,6 +404,8 @@ func dispatch(ctx context.Context, cmd command) error {
 		return runKill(ctx, cmd.name, cmd.killSessions)
 	case kindCmd:
 		return runCmd(ctx, cmd.cmd)
+	case kindEnv:
+		return runEnv(ctx, cmd.env)
 	case kindAttach:
 		return runAttachWithOptions(ctx, cmd.intent, cmd.name, cmd.remoteTarget, interactiveUIOptions{observe: cmd.uiObserve, control: cmd.uiControl, socket: cmd.uiSocket})
 	default:

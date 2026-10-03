@@ -88,6 +88,9 @@ func (d *Daemon) routeRemoteTargetWithContext(ctx context.Context, h protocol.He
 		}
 		return nil, nil, err
 	}
+	// Like a snapshot restore, the resumed session starts from the daemon's
+	// environment until a local client attaches.
+	markEnvironmentProvisional(sess)
 	ac, err := d.finishRouteAttach(sess, tr, h.Size, h, true, false)
 	return sess, ac, err
 }

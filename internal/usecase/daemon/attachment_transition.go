@@ -20,16 +20,15 @@ type attachmentLifecycleFence struct {
 }
 
 type attachmentTransitionRequest struct {
-	source                *session
-	target                *session
-	next                  *attachedClient
-	expectedTransport     transportSnapshot
-	sourceCapability      *attachmentCapability
-	sourceEffect          *attachmentEffect
-	action                string
-	activateTargetTab     bool
-	targetTabIndex        int
-	copySourceEnvironment bool
+	source            *session
+	target            *session
+	next              *attachedClient
+	expectedTransport transportSnapshot
+	sourceCapability  *attachmentCapability
+	sourceEffect      *attachmentEffect
+	action            string
+	activateTargetTab bool
+	targetTabIndex    int
 	// preserveAttachment commits Attachment-local navigation state without
 	// changing Session membership. The initiating capability remains the exact
 	// authority for this mutation.

@@ -52,6 +52,7 @@ func Registry() []Command {
 		listCommand("list-sessions", "List sessions", "List sessions with active markers", TargetNone, func(ctx ControlContext, json bool) (string, error) { return ctx.ListSessions(json) }),
 		listCommand("list-tabs", "List tabs", "List tabs in the target session", TargetSession, func(ctx ControlContext, json bool) (string, error) { return ctx.ListTabs(json) }),
 		listCommand("list-panes", "List panes", "List panes in the target tab", TargetTab, func(ctx ControlContext, json bool) (string, error) { return ctx.ListPanes(json) }),
+		listCommand("env", "Session environment", "Print the session's desktop and login variables (JSON null means unset)", TargetSession, func(ctx ControlContext, json bool) (string, error) { return ctx.SessionEnvironment(json) }),
 		remoteCatalogCommand(),
 		sessionRecoveryCommand(),
 	}

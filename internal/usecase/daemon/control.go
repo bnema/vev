@@ -542,7 +542,8 @@ func (e controlExec) CreateSessionNamed(name string) error {
 		return command.ErrInvalidArguments
 	}
 	e.sess.mu.Lock()
-	cwd, env := e.sess.cwd, copyEnvironment(e.sess.env)
+	cwd := e.sess.cwd
+	env, provisional := e.sess.environmentSeedLocked()
 	e.sess.mu.Unlock()
 	geometry := domain.Geometry{Size: e.sess.fullViewportSize()}
 	if source, ok := e.sess.geometry.sourceSnapshot(e.sess); ok {
@@ -559,7 +560,10 @@ func (e controlExec) CreateSessionNamed(name string) error {
 	if e.d.nameLiveOrStoppedLocked(name) {
 		return errSessionNameInUse
 	}
-	_, err := e.d.createSessionLocked(name, false, cwd, geometry, env)
+	created, err := e.d.createSessionLocked(name, false, cwd, geometry, env)
+	if err == nil && provisional {
+		markEnvironmentProvisional(created)
+	}
 	return err
 }
 func (e controlExec) CloseTab() error {
@@ -904,6 +908,15 @@ func (e controlExec) ListTabs(asJSON bool) (string, error) {
 		fmt.Fprintf(&out, "%d\t%s\t%s\t%d\t%t\n", row.Index, row.ID, row.Name, row.Panes, row.Active)
 	}
 	return out.String(), nil
+}
+
+// SessionEnvironment exports the session-bound variables that future PTY
+// children of the target session receive, so running shells can catch up.
+func (e controlExec) SessionEnvironment(asJSON bool) (string, error) {
+	e.sess.mu.Lock()
+	env := e.sess.env
+	e.sess.mu.Unlock()
+	return sessionEnvironmentExport(env, asJSON)
 }
 
 func (e controlExec) ListPanes(asJSON bool) (string, error) {

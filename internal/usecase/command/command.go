@@ -160,6 +160,7 @@ type ControlContext interface {
 	ListSessions(json bool) (string, error)
 	ListTabs(json bool) (string, error)
 	ListPanes(json bool) (string, error)
+	SessionEnvironment(json bool) (string, error)
 	RemoteCatalog(json bool) (string, error)
 }
 

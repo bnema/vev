@@ -626,6 +626,7 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	// The replacement terminal's focus, too, is declared before first paint.
 	ac.setTerminalFocus(h.TerminalFocus)
 	ac.clientPID.Store(h.ClientPID)
+	ac.setClientEnvironment(helloClientEnvironment(h))
 	geometry := h.Geometry()
 	if geometry.Size != sz {
 		geometry = domain.Geometry{Size: sz}
@@ -633,13 +634,6 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	ac.setGeometry(geometry)
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
-	// The resumed session's snapshot is the sole source for future PTY children.
-	// Existing PTYs retain the environment they were started with.
-	sess.mu.Lock()
-	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
-		sess.env = copyEnvironment(h.Env)
-	}
-	sess.mu.Unlock()
 	preferredTabIndex := preferredTabIndex(sess, h.PreferredTabID)
 	// Resume preparation used sendMu -> d.mu, but freeze/drain must run with
 	// neither held. Reacquire them before returning to preserve this helper's

@@ -114,9 +114,12 @@ Full list: [configuration](docs/configuration.md).
 vev cmd split-right
 vev cmd toast -l warn "build failed"
 vev cmd list-panes --json
+vev cmd env --json
 ```
 
 Use `vev cmd --help` for all commands. For headless capture and input, see [UI driver](docs/ui-driver.md).
+
+To refresh `WAYLAND_DISPLAY`, `SSH_AUTH_SOCK`, and other desktop variables in a running shell after you attach from another place, hook `vev env fish | source` (or `eval "$(vev env sh)"`) into your prompt. See [environment](docs/terminal.md#environment).
 
 ## Documentation
 

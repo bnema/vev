@@ -59,7 +59,34 @@ When your outer terminal supports the kitty keyboard protocol (kitty, foot, ghos
 
 ## Environment
 
-- New panes inherit the environment of the client that last attached. Running processes keep theirs.
+- A session keeps the environment it was created with, including `SHELL`, `PATH`, and `HOME`. A session restored after a daemon restart takes the environment of the first local client that attaches.
+- Desktop and login variables follow the client that last attached:
+  - `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`, `XDG_CURRENT_DESKTOP`, and `XDG_SESSION_*` move as one group. A client with a non-empty `WAYLAND_DISPLAY` or `DISPLAY` replaces the whole group, so switching to another compositor or an X11-only desktop drops the old values. A client without a display (console) or connected over SSH leaves the group alone, even with X forwarding: after `ssh -X`, set `DISPLAY` yourself in the panes that need it.
+  - `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` update when the client has them and are never removed. With systemd, all your graphical sessions share them.
+  - `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_CLIENT`, and `SSH_TTY` always match the last client and are removed when it has none.
+- New panes get these values. Running processes keep their own environment; a shell pulls the current values with `vev env <fish|sh>` from its prompt hook:
+
+  ```fish
+  # ~/.config/fish/conf.d/vev.fish
+  if set -q VEV
+      function __vev_env --on-event fish_prompt
+          vev env fish 2>/dev/null | source
+      end
+  end
+  ```
+
+  ```zsh
+  # ~/.zshrc (bash: add the eval to PROMPT_COMMAND)
+  if [[ -n $VEV ]]; then
+    autoload -Uz add-zsh-hook
+    __vev_env() { eval "$(vev env sh 2>/dev/null)" }
+    add-zsh-hook precmd __vev_env
+  fi
+  ```
+
+  The hook overrides values you set by hand in that shell, such as `SSH_AUTH_SOCK` after `eval (ssh-agent)`.
+- `vev cmd env` lists the set variables as `KEY=value` for reading. Scripts should use `vev cmd env --json`, which also lists the variables to unset as `null`.
+- In fish, the hook erases only global variables; a universal variable (`set -U`) with the same name shows through when the session has no value for it.
 - vev always sets `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`. `SHELL` picks the shell.
 - A remote session opened from the picker uses the remote host's own environment, not yours. This keeps `HOME`, `PATH`, and `SHELL` correct on that host.
 

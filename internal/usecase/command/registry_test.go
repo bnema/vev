@@ -145,7 +145,7 @@ func TestRegistryControlMetadata(t *testing.T) {
 		"grow-pane-height": TargetPane, "shrink-pane-height": TargetPane, "equalize-panes": TargetTab,
 		"move-pane": TargetPane, "move-tab": TargetTab,
 		"list-sessions": TargetNone, "list-tabs": TargetSession, "list-panes": TargetTab,
-		"remote-catalog": TargetNone,
+		"remote-catalog": TargetNone, "env": TargetSession,
 	}
 	notScriptable := []string{
 		"session-picker", "notifications", "visual-mode", "yank-last-notification",
@@ -174,7 +174,7 @@ func TestPaletteRegistryHidesAPIOnly(t *testing.T) {
 		if !cmd.PaletteVisible || cmd.Run == nil {
 			t.Errorf("palette command is not executable and visible: %#v", cmd)
 		}
-		if cmd.Slug == "toast" || cmd.Slug == "list-sessions" || cmd.Slug == "list-tabs" || cmd.Slug == "list-panes" || cmd.Slug == "remote-catalog" {
+		if cmd.Slug == "toast" || cmd.Slug == "list-sessions" || cmd.Slug == "list-tabs" || cmd.Slug == "list-panes" || cmd.Slug == "remote-catalog" || cmd.Slug == "env" {
 			t.Errorf("API-only command %q is visible", cmd.Slug)
 		}
 	}
@@ -275,6 +275,8 @@ func TestControlHandlersValidateAndDelegate(t *testing.T) {
 		{name: "toast rejects malformed flags", slug: "toast", args: []string{"-l", "warn"}, wantErr: ErrInvalidArguments},
 		{name: "query delegates JSON option", slug: "list-panes", opts: ControlOptions{JSON: true}, wantCall: "list-panes:true", wantOutput: "panes"},
 		{name: "query rejects args", slug: "list-panes", args: []string{"extra"}, wantErr: ErrInvalidArguments},
+		{name: "env delegates JSON option", slug: "env", opts: ControlOptions{JSON: true}, wantCall: "env:true", wantOutput: "env"},
+		{name: "env rejects args", slug: "env", args: []string{"extra"}, wantErr: ErrInvalidArguments},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -347,6 +349,10 @@ func (s *controlSpy) ListTabs(json bool) (string, error) {
 func (s *controlSpy) ListPanes(json bool) (string, error) {
 	_ = s.record("list-panes:" + strconv.FormatBool(json))
 	return "panes", nil
+}
+func (s *controlSpy) SessionEnvironment(json bool) (string, error) {
+	_ = s.record("env:" + strconv.FormatBool(json))
+	return "env", nil
 }
 func (s *controlSpy) RemoteCatalog(json bool) (string, error) {
 	_ = s.record("remote-catalog:" + strconv.FormatBool(json))

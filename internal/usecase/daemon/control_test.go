@@ -736,6 +736,38 @@ func TestHandleCommandListingsContainStableIDsMarkersAndCWD(t *testing.T) {
 	require.Equal(t, true, decoded[0]["focused"])
 }
 
+func TestHandleCommandEnvExportsTargetSessionEnvironment(t *testing.T) {
+	tests := []struct {
+		name    string
+		request protocol.CommandRequest
+		want    string
+	}{
+		{
+			name:    "text by session name",
+			request: protocol.CommandRequest{Slug: "env", TargetSession: "work"},
+			want:    "WAYLAND_DISPLAY=wayland-1\n",
+		},
+		{
+			name:    "json from inside a pane",
+			request: protocol.CommandRequest{Slug: "env", TargetTab: "t_work", TargetPane: "p_work", JSON: true},
+			want:    `{"DISPLAY":null,"SSH_AGENT_PID":null,"SSH_AUTH_SOCK":null,"SSH_CLIENT":null,"SSH_CONNECTION":null,"SSH_TTY":null,"WAYLAND_DISPLAY":"wayland-1","XAUTHORITY":null,"XDG_CURRENT_DESKTOP":null,"XDG_SESSION_CLASS":null,"XDG_SESSION_DESKTOP":null,"XDG_SESSION_ID":null,"XDG_SESSION_TYPE":null}` + "\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestDaemon(t, nil, stubClock{})
+			sess := addControlSession(d, "work", "t_work", "p_work")
+			sess.mu.Lock()
+			sess.env = []string{"SHELL=/bin/sh", "SECRET=hidden", "WAYLAND_DISPLAY=wayland-1"}
+			sess.mu.Unlock()
+
+			result := sendCommand(t, d, tt.request)
+			require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)
+			require.Equal(t, tt.want, result.Output)
+		})
+	}
+}
+
 func TestRemoteCatalogLeavesStoppedSessionsStopped(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 	d.mu.Lock()
