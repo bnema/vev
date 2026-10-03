@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -67,7 +68,7 @@ func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, reque
 	cfg.Clock = h.clock
 	cfg.Theme = themes
 	cfg.Clipboard = clipboard
-	cfg.TrueColor = true
+	cfg.Color = terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}
 	worker, err := newSessionAttachmentWorker(cfg)
 	require.NoError(t, err)
 	go func() {

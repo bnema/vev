@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 )
 
@@ -715,7 +716,7 @@ func TestSupervisorPickerPublicationRequestsRepaint(t *testing.T) {
 		}),
 		Terminal: newSupervisorTestTerminal(reader),
 		Clock:    clock,
-		Picker:   newPickerController(clock, pickerTestFreshness, true),
+		Picker:   newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
 		Render: func(state State) {
 			renders <- state
 		},
@@ -1494,7 +1495,7 @@ func TestSupervisorPickerCloseWhileOffline(t *testing.T) {
 			})
 			s := mustSupervisor(t, SupervisorConfig{
 				Connector: connector, Terminal: terminal, Clock: clock,
-				Picker: NewPicker(clock, 0, true),
+				Picker: NewPicker(clock, 0, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}),
 				Notify: func(State, error) { reached <- struct{}{} },
 			})
 			ctx, cancel := context.WithCancel(context.Background())

@@ -10,6 +10,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/usecase/colorprofile"
 )
 
 // attachmentOutput owns the terminal-output dependency chain and emitted
@@ -102,11 +103,7 @@ func newOutputStateStream(windowSize ...uint8) *attachmentOutput {
 }
 
 func newOutputStateStreamForCapabilities(capabilities terminalcap.Capabilities, windowSize ...uint8) *attachmentOutput {
-	profile := renderer.ColorProfileANSI256
-	if capabilities.TrueColor() {
-		profile = renderer.ColorProfileTrueColor
-	}
-	return newOutputStateStreamForProfile(profile, windowSize...)
+	return newOutputStateStreamForProfile(colorprofile.Profile(capabilities.Color), windowSize...)
 }
 
 func newOutputStateStreamForProfile(profile renderer.ColorProfile, windowSize ...uint8) *attachmentOutput {

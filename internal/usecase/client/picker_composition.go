@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
@@ -49,11 +50,11 @@ func PickerPresentation(state State) bool {
 }
 
 // NewPicker composes one client-owned picker. A nil clock uses the system
-// clock, and a zero freshness uses the catalogue default. trueColor is the
-// terminal's detected color capability (AttachmentEnvironment.TrueColor); the
+// clock, and a zero freshness uses the catalogue default. color is the
+// terminal's detected color capability (AttachmentEnvironment.Color); the
 // picker renders indexed colors without it.
-func NewPicker(clock ports.Clock, freshness time.Duration, trueColor bool) *Picker {
-	return &Picker{controller: newPickerController(clock, freshness, trueColor)}
+func NewPicker(clock ports.Clock, freshness time.Duration, color terminalcap.ColorCapabilities) *Picker {
+	return &Picker{controller: newPickerController(clock, freshness, color)}
 }
 
 // ApplySnapshot forwards a broker publication to the supervisor-owned picker.

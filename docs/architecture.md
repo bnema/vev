@@ -24,6 +24,7 @@ Every result keeps its request ID for strict correlation.
   carrying `Envelope{Payload}` (one complete serialized directional
   envelope, no type byte).
 - `internal/ports`: application-facing interfaces and the values required by those interfaces. It contains no codecs, raw frames, environment policy, or worker implementations.
+- `internal/usecase/colorprofile`: the single `terminalcap.ColorCapabilities` → vev-vt color profile mapping shared by the client picker and daemon output renderer.
 - `internal/usecase`: client, daemon, broker, and supporting application behavior. Production use cases may consume semantic protocol packages but never `protocol/wire` or concrete adapters. The broker may use its own subpackages but cannot import sibling use cases. Client, daemon, and remote-registry use cases cannot own or import each other; they collaborate only through ports and application composition.
 - `internal/adapters/sessionwire`: translates between typed session
   connections and raw wire transports: directional `oneof` envelope

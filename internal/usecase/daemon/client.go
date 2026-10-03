@@ -696,7 +696,7 @@ func (d *Daemon) attachClient(sess *session, tr ports.ServerConnection, sz domai
 func (d *Daemon) finishAttachedClient(sess *session, ac *attachedClient, opts attachClientOptions) {
 	d.touchMRU(sess)
 	d.log.Info("client attached", "session", sess.name, "resume", opts.resumeCapable)
-	if ac.terminalCapabilities.ColorSource == terminalcap.SourceDeclared && !ac.terminalCapabilities.TrueColor() {
+	if ac.terminalCapabilities.Color.Source == terminalcap.SourceDeclared && !ac.terminalCapabilities.Color.RGB() {
 		d.publishToast(ac, domain.Notification{
 			Code:      domain.NoticeUser,
 			Severity:  domain.NoticeWarn,
@@ -721,7 +721,9 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 		resumeToken = d.nextResumeTokenLocked()
 	}
 	if !opts.capabilitiesSet {
-		opts.terminalCapabilities = terminalcap.Capabilities{ColorMode: terminalcap.TrueColor}
+		// The zero value is TrueColor: manually constructed attachments keep
+		// the historical renderer behavior.
+		opts.terminalCapabilities = terminalcap.Capabilities{}
 	}
 	output := newOutputStateStreamForCapabilities(opts.terminalCapabilities, opts.maxOutputInFlight)
 	geometry = geometry.NormalizePixels()

@@ -116,6 +116,9 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 		{"daemon rejects client", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/client", false, false},
 		{"daemon rejects broker", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/broker", false, false},
 		{"daemon rejects app", modulePath + "/internal/usecase/daemon", modulePath + "/internal/app", false, false},
+		// Shared color-profile policy is a leaf use case both sides may import.
+		{"client accepts colorprofile", modulePath + "/internal/usecase/client", modulePath + "/internal/usecase/colorprofile", false, true},
+		{"daemon accepts colorprofile", modulePath + "/internal/usecase/daemon", modulePath + "/internal/usecase/colorprofile", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

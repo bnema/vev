@@ -10,8 +10,28 @@ const (
 	// TrueColor is the zero value so manually constructed attachments retain the
 	// historical renderer behavior; live Hello paths always use the detector.
 	TrueColor ColorMode = iota
-	Indexed256
+	ANSI256
 )
+
+// ColorCapabilities is the color output capability selected for one attachment
+// and how confidently it was selected.
+type ColorCapabilities struct {
+	Mode   ColorMode
+	Source Source
+}
+
+// RGB reports whether the attachment can receive RGB ANSI output.
+func (c ColorCapabilities) RGB() bool { return c.Mode == TrueColor }
+
+// Colors reports the number of colors the attachment can display.
+func (c ColorCapabilities) Colors() int {
+	switch c.Mode {
+	case ANSI256:
+		return 256
+	default:
+		return 1 << 24
+	}
+}
 
 // Source records how confidently a terminal capability was selected.
 type Source uint8
@@ -33,8 +53,7 @@ const (
 
 // Capabilities describes the output features selected for one client attachment.
 type Capabilities struct {
-	ColorMode     ColorMode
-	ColorSource   Source
+	Color         ColorCapabilities
 	Application   Application
 	KittyGraphics bool
 }
@@ -43,15 +62,12 @@ type Capabilities struct {
 // accepted the Kitty graphics protocol. Environment detection never sets it.
 func (c Capabilities) SupportsKittyGraphics() bool { return c.KittyGraphics }
 
-// TrueColor reports whether this attachment can receive RGB ANSI output.
-func (c Capabilities) TrueColor() bool { return c.ColorMode == TrueColor }
-
 // Detect derives conservative attachment capabilities from a client environment.
 func Detect(env []string) Capabilities {
 	values := environmentValues(env)
 	term := strings.ToLower(strings.TrimSpace(values["TERM"]))
 	colorTerm := strings.ToLower(strings.TrimSpace(values["COLORTERM"]))
-	caps := Capabilities{ColorMode: Indexed256}
+	caps := Capabilities{Color: ColorCapabilities{Mode: ANSI256}}
 
 	if values["KITTY_WINDOW_ID"] != "" || values["KITTY_PID"] != "" || values["KITTY_LISTEN_ON"] != "" {
 		caps.Application = ApplicationKitty
@@ -60,25 +76,25 @@ func Detect(env []string) Capabilities {
 	kittyIdentity := term == "xterm-kitty" && caps.Application == ApplicationKitty
 	switch colorTerm {
 	case "truecolor", "24bit":
-		caps.ColorMode = TrueColor
-		caps.ColorSource = SourceDeclared
+		caps.Color.Mode = TrueColor
+		caps.Color.Source = SourceDeclared
 	}
 	if term == "xterm-direct" || strings.HasSuffix(term, "-direct") {
-		caps.ColorMode = TrueColor
-		caps.ColorSource = SourceDeclared
+		caps.Color.Mode = TrueColor
+		caps.Color.Source = SourceDeclared
 	}
 	if kittyIdentity {
-		if caps.ColorSource == SourceUnknown {
-			caps.ColorSource = SourceHeuristic
+		if caps.Color.Source == SourceUnknown {
+			caps.Color.Source = SourceHeuristic
 		}
-		caps.ColorMode = TrueColor
+		caps.Color.Mode = TrueColor
 		return caps
 	}
-	if caps.ColorSource == SourceDeclared {
+	if caps.Color.Source == SourceDeclared {
 		return caps
 	}
 	if strings.Contains(term, "256color") || term == "dumb" {
-		caps.ColorSource = SourceDeclared
+		caps.Color.Source = SourceDeclared
 	}
 	return caps
 }
@@ -94,11 +110,13 @@ func environmentValues(env []string) map[string]string {
 	return values
 }
 
-// DetectTrueColor reports whether the supplied terminal environment advertises
-// direct color support. Explicit TERM/COLORTERM values override env entries.
-func DetectTrueColor(termEnv, colorTerm string, env []string) bool {
-	detectionEnv := make([]string, 0, len(env)+2)
-	detectionEnv = append(detectionEnv, env...)
-	detectionEnv = append(detectionEnv, "TERM="+termEnv, "COLORTERM="+colorTerm)
-	return Detect(detectionEnv).TrueColor()
+// Resolve selects attachment capabilities from the client environment and the
+// client's explicit color declaration. A declared truecolor client upgrades a
+// weaker environment detection to declared TrueColor.
+func Resolve(env []string, declaredTrueColor bool) Capabilities {
+	caps := Detect(env)
+	if declaredTrueColor && !caps.Color.RGB() {
+		caps.Color = ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}
+	}
+	return caps
 }

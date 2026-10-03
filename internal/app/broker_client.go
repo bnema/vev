@@ -283,7 +283,7 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 	if reader == nil {
 		reader = clipboard.New()
 	}
-	picker := client.NewPicker(clk, 0, attachmentEnv.TrueColor)
+	picker := client.NewPicker(clk, 0, attachmentEnv.Color)
 	presentation := &brokerClientPresentation{terminal: cfg.Terminal, picker: picker, ui: cfg.UI, onState: cfg.OnState, clock: clk}
 	supervisor, err := client.NewSupervisor(client.SupervisorConfig{
 		Logger:                   cfg.Logger,
@@ -612,11 +612,20 @@ var (
 // process environment themselves.
 func terminalAttachmentEnvironment() client.AttachmentEnvironment {
 	return client.AttachmentEnvironment{
-		TermEnv:   os.Getenv("TERM"),
-		Cwd:       currentWorkingDirectory(),
-		TrueColor: terminalcap.DetectTrueColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
-		PID:       uint32(os.Getpid()),
+		TermEnv: os.Getenv("TERM"),
+		Cwd:     currentWorkingDirectory(),
+		Color:   detectTerminalColor(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Environ()),
+		PID:     uint32(os.Getpid()),
 	}
+}
+
+// detectTerminalColor derives the color capability from the process
+// environment. Explicit TERM/COLORTERM values override env entries.
+func detectTerminalColor(termEnv, colorTerm string, env []string) terminalcap.ColorCapabilities {
+	detectionEnv := make([]string, 0, len(env)+2)
+	detectionEnv = append(detectionEnv, env...)
+	detectionEnv = append(detectionEnv, "TERM="+termEnv, "COLORTERM="+colorTerm)
+	return terminalcap.Detect(detectionEnv).Color
 }
 
 // outerTerminalAttachmentEnvironment extends terminalAttachmentEnvironment for

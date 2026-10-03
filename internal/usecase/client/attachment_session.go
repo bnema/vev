@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -68,12 +69,12 @@ func (e *AttachmentIdentityError) Error() string {
 // The request is the exact request the supervisor opened the stream with; the
 // rest is client-local presentation data the worker mirrors into Hello.
 type sessionAttachmentConfig struct {
-	Request   ports.BrokerOpenStreamRequest
-	ClientID  [16]byte
-	Geometry  domain.Geometry
-	TermEnv   string
-	Cwd       string
-	TrueColor bool
+	Request  ports.BrokerOpenStreamRequest
+	ClientID [16]byte
+	Geometry domain.Geometry
+	TermEnv  string
+	Cwd      string
+	Color    terminalcap.ColorCapabilities
 	// PID is this client's process ID; Hello carries it on local attaches.
 	PID uint32
 	// Capabilities are the outer terminal's probed capabilities, declared in
@@ -322,7 +323,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	var samePeerRequests uint64
 	var samePeerSwitch *samePeerSwitchPending
 	samePeerUI := attachmentSamePeerUI(fg)
-	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.TrueColor)}
+	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color)}
 	defer picker.stopEscape()
 	input := newAttachmentInput(ctx, w, fg, stream, picker)
 	defer input.close()
@@ -751,7 +752,7 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 		PixelHeight: geometry.PixelHeight,
 		TermEnv:     w.cfg.TermEnv,
 		Cwd:         cwd,
-		TrueColor:   w.cfg.TrueColor,
+		TrueColor:   w.cfg.Color.RGB(),
 		// A remote attach reaches the terminal through this client, so both
 		// declarations describe this client's outer terminal.
 		KittyDirectGraphics: w.cfg.Capabilities.KittyGraphics,

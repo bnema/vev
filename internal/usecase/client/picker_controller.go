@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
+	"github.com/bnema/vev/internal/usecase/colorprofile"
 	pickerusecase "github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -123,14 +125,14 @@ type pickerController struct {
 // newPickerController builds a picker over an empty catalogue. The picker owns
 // input from the start: the controller presents it for the whole picker presentation and
 // has no session pipeline to defer to.
-func newPickerController(clock ports.Clock, freshness time.Duration, trueColor bool) *pickerController {
+func newPickerController(clock ports.Clock, freshness time.Duration, color terminalcap.ColorCapabilities) *pickerController {
 	if supervisorNil(clock) {
 		clock = systemClock{}
 	}
 	controller := &pickerController{
 		clock:     clock,
 		catalogue: newPickerCatalogue(pickerCatalogueConfig{Clock: clock, Freshness: freshness}),
-		renderer:  newPickerRenderer(pickerColorProfile(trueColor)),
+		renderer:  newPickerRenderer(colorprofile.Profile(color)),
 		sort:      defaultPickerSort(),
 		notices:   ui.NewToastQueue[ui.Toast](ui.ToastQueueOptions{MaxVisible: pickerNoticeVisible}),
 		ownsInput: true,

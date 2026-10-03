@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
@@ -382,9 +383,11 @@ type SupervisorConfig struct {
 // AttachmentEnvironment is the composition seam for client environment data
 // carried by attachment Hello messages.
 type AttachmentEnvironment struct {
-	TermEnv   string
-	Cwd       string
-	TrueColor bool
+	TermEnv string
+	Cwd     string
+	// Color is the terminal's detected color capability. The zero value is
+	// TrueColor; composition fills it from terminal detection.
+	Color terminalcap.ColorCapabilities
 	// PID is this client's process ID, sent on local attaches only.
 	PID uint32
 	// ProbeTerminal enables the one bounded capability probe of a real outer

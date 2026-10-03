@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -118,7 +119,7 @@ func pickerTestSnapshot(epoch ports.BrokerEpoch, revision ports.BrokerRevision, 
 func pickerTestController(t *testing.T) (*pickerController, *supervisorTestClock) {
 	t.Helper()
 	clock := newSupervisorTestClock()
-	return newPickerController(clock, pickerTestFreshness, true), clock
+	return newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}), clock
 }
 
 func pickerRowKeyByLabel(t *testing.T, controller *pickerController, label string) string {
@@ -428,7 +429,7 @@ func TestSupervisorPickerFoldsPublicationsAndInput(t *testing.T) {
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha", "beta"))
 		return service, nil
 	})
-	controller := newPickerController(clock, pickerTestFreshness, true)
+	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Picker: controller})
 
 	runErr := make(chan error, 1)
@@ -473,7 +474,7 @@ func TestSupervisorPickerFoldsLaterPublication(t *testing.T) {
 		service.hub.publish(pickerTestSnapshot(3, 1, clock.Now(), "alpha"))
 		return service, nil
 	})
-	controller := newPickerController(clock, pickerTestFreshness, true)
+	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	sup := mustSupervisor(t, SupervisorConfig{Connector: connector, Terminal: terminal, Clock: clock, Picker: controller})
 
 	runErr := make(chan error, 1)

@@ -18,6 +18,7 @@ import (
 	"github.com/bnema/vev/internal/adapters/brokeripc"
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
@@ -1160,5 +1161,25 @@ func awaitTerminalCompositionEpoch(t *testing.T, service ports.BrokerService) po
 		case <-deadline.C:
 			t.Fatal("broker never published a snapshot")
 		}
+	}
+}
+
+func TestDetectTerminalColor(t *testing.T) {
+	tests := []struct {
+		name      string
+		term      string
+		colorTerm string
+		env       []string
+		want      terminalcap.ColorCapabilities
+	}{
+		{name: "kitty environment keeps heuristic truecolor", term: "xterm-kitty", env: []string{"KITTY_WINDOW_ID=1"}, want: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceHeuristic}},
+		{name: "explicit COLORTERM overrides env", term: "xterm-256color", colorTerm: "truecolor", env: []string{"COLORTERM="}, want: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}},
+		{name: "explicit TERM overrides env", term: "xterm-256color", env: []string{"TERM=foot-direct"}, want: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}},
+		{name: "unknown terminal is indexed", term: "unknown", want: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, detectTerminalColor(tt.term, tt.colorTerm, tt.env))
+		})
 	}
 }

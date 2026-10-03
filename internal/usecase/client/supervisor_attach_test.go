@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -1634,7 +1635,7 @@ func TestSupervisorAttachmentReachableFromRealPicker(t *testing.T) {
 		return admitted, nil
 	})
 
-	controller := newPickerController(clock, pickerTestFreshness, true)
+	controller := newPickerController(clock, pickerTestFreshness, terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor})
 	connector := newSupervisorTestConnector(func(context.Context, int) (ports.BrokerNavigator, error) { return service, nil })
 	sup := mustSupervisor(t, SupervisorConfig{
 		Connector: connector,
