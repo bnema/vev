@@ -1411,7 +1411,7 @@ func TestStatusBarsUseCompleteSemanticSurfaces(t *testing.T) {
 		drawStatusBarState(single, barState{status: statusSnapshot{session: "current"}, mru: []recentRouteDisplay{{name: "only"}}}, styles)
 		only := strings.Index(rowText(single), "only")
 		require.GreaterOrEqual(t, only, 0)
-		require.True(t, single[only].Style.Equal(styles.SurfaceRecent), "a singleton MRU must retain the 22 percent recent surface")
+		require.True(t, single[only].Style.Equal(themeui.MRUStyle(resolved.Ramp, 0, 1)), "a singleton MRU uses the newest history surface")
 	})
 
 	t.Run("attention pulse preserves its active or inactive base surface", func(t *testing.T) {

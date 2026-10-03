@@ -1,6 +1,10 @@
 package theme
 
-import renderer "github.com/bnema/vev-vt"
+import (
+	"math"
+
+	renderer "github.com/bnema/vev-vt"
+)
 
 const (
 	normalTextContrast = 4.5
@@ -27,7 +31,12 @@ type Ramp struct {
 	BorderWarn      renderer.Style
 
 	background renderer.RGB
+	foreground renderer.RGB
 	accent     renderer.RGB
+	// mruWeights lists, strongest first, the accent weights usable for the
+	// recent-session history; it is scanned once per ramp.
+	mruWeights [mruTopWeight - mruFloorWeight + 1]uint8
+	mruCount   int
 	rgb        bool
 }
 
@@ -38,24 +47,24 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		return neutralRamp(t)
 	}
 
-	bar, ok := surfaceAtOrBelow(t, accent.RGB, 8)
+	bar, _, ok := surfaceAtOrBelow(t, accent.RGB, 8)
 	if !ok {
 		return neutralRamp(t)
 	}
-	inactive, ok := surfaceAtOrBelow(t, accent.RGB, 14)
+	inactive, inactiveWeight, ok := surfaceAtOrBelow(t, accent.RGB, 14)
 	if !ok {
 		return neutralRamp(t)
 	}
-	recent, ok := surfaceAtOrBelow(t, accent.RGB, 22)
+	recent, _, ok := surfaceAtOrBelow(t, accent.RGB, 22)
 	if !ok {
 		return neutralRamp(t)
 	}
-	active, ok := surfaceAtOrBelow(t, accent.RGB, 100)
+	active, activeWeight, ok := surfaceAtOrBelow(t, accent.RGB, 100)
 	if !ok {
 		return neutralRamp(t)
 	}
 
-	return Ramp{
+	ramp := Ramp{
 		SurfaceBar:      bar,
 		SurfaceInactive: inactive,
 		SurfaceRecent:   recent,
@@ -64,14 +73,17 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		BorderActive:    activeBorder(t, accent.RGB, bar.BackgroundRGB),
 		BorderWarn:      warnBorder(t, accent.RGB, bar.BackgroundRGB),
 		background:      t.Background,
+		foreground:      t.Foreground,
 		accent:          accent.RGB,
 		rgb:             true,
 	}
+	ramp.scanMRUWeights(t, activeWeight, inactiveWeight)
+	return ramp
 }
 
 // surfaceAtOrBelow searches from the requested intensity to neutral. The
 // integer sequence is intentional: it makes contrast adaptation stable.
-func surfaceAtOrBelow(t Theme, accent renderer.RGB, target int) (renderer.Style, bool) {
+func surfaceAtOrBelow(t Theme, accent renderer.RGB, target int) (renderer.Style, int, bool) {
 	for weight := target; weight >= 0; weight-- {
 		background := okLabLerp(t.Background, accent, float64(weight)/100)
 		foreground, ok := primaryText(t, background)
@@ -81,9 +93,9 @@ func surfaceAtOrBelow(t Theme, accent renderer.RGB, target int) (renderer.Style,
 		if _, ok := secondaryText(foreground, background); !ok {
 			continue
 		}
-		return rgbSurface(foreground, background), true
+		return rgbSurface(foreground, background), weight, true
 	}
-	return renderer.Style{}, false
+	return renderer.Style{}, 0, false
 }
 
 func rgbSurface(foreground, background renderer.RGB) renderer.Style {
@@ -177,26 +189,60 @@ func neutralRamp(t Theme) Ramp {
 	}
 }
 
-// MRUStyle interpolates the newest entry from SurfaceRecent (22%) to 11% for
-// the oldest entry. A singleton is therefore the full recent surface.
+const (
+	// mruTopWeight is the newest history entry: a slightly faded active
+	// accent. mruFloorWeight keeps the oldest entry above the inactive and
+	// bar surfaces so the whole history stays visibly accent-tinted.
+	mruTopWeight   = 85
+	mruFloorWeight = 30
+)
+
+// scanMRUWeights records the readable history weights, strongest first. It
+// stays strictly between the active and inactive surfaces; when the main
+// range has no readable weight it uses the whole gap between them, so extreme
+// themes still get an ordered fade that never sinks below inactive tabs.
+func (r *Ramp) scanMRUWeights(t Theme, activeWeight, inactiveWeight int) {
+	r.mruCount = 0
+	r.collectMRUWeights(t, min(mruTopWeight, activeWeight-1), mruFloorWeight)
+	if r.mruCount == 0 {
+		r.collectMRUWeights(t, min(mruFloorWeight-1, activeWeight-1), inactiveWeight+1)
+	}
+}
+
+func (r *Ramp) collectMRUWeights(t Theme, top, floor int) {
+	for weight := top; weight >= floor; weight-- {
+		background := okLabLerp(t.Background, r.accent, float64(weight)/100)
+		if _, ok := primaryText(t, background); ok {
+			r.mruWeights[r.mruCount] = uint8(weight)
+			r.mruCount++
+		}
+	}
+}
+
+// MRUStyle fades history entries from just below the active accent toward
+// the bar, recomputed per count. Targets are spaced linearly in accent weight
+// and snapped to the nearest readable weight, so the fade is monotonically
+// non-increasing (strict when enough readable weights exist).
 func MRUStyle(ramp Ramp, index, count int) renderer.Style {
-	if count <= 1 || !ramp.SurfaceRecent.HasBackgroundRGB || !ramp.SurfaceBar.HasBackgroundRGB {
+	if !ramp.rgb || count <= 0 || ramp.mruCount == 0 {
 		return ramp.SurfaceRecent
 	}
-	if index < 0 {
-		index = 0
+	index = max(0, min(index, count-1))
+
+	weights := ramp.mruWeights[:ramp.mruCount]
+	top, bottom := float64(weights[0]), float64(weights[len(weights)-1])
+	target := top
+	if count > 1 {
+		target = top - (top-bottom)*float64(index)/float64(count-1)
 	}
-	if index >= count {
-		index = count - 1
+	weight := weights[0]
+	for _, candidate := range weights[1:] {
+		if math.Abs(float64(candidate)-target) < math.Abs(float64(weight)-target) {
+			weight = candidate
+		}
 	}
-	if !ramp.rgb {
-		return ramp.SurfaceRecent
-	}
-	weight := 22.0 - 11.0*float64(index)/float64(count-1)
-	background := okLabLerp(ramp.background, ramp.accent, weight/100)
-	foreground, ok := primaryText(Theme{Foreground: ramp.SurfaceRecent.ForegroundRGB, Background: ramp.background}, background)
-	if !ok {
-		return ramp.SurfaceRecent
-	}
+
+	background := okLabLerp(ramp.background, ramp.accent, float64(weight)/100)
+	foreground, _ := primaryText(Theme{Foreground: ramp.foreground, Background: ramp.background}, background)
 	return rgbSurface(foreground, background)
 }
