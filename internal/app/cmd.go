@@ -162,7 +162,12 @@ type cmdDeps struct {
 }
 
 func runCmd(ctx context.Context, invocation cmdInvocation) error {
-	return runCmdWithDeps(ctx, invocation, cmdDeps{
+	return runCmdWithDeps(ctx, invocation, productionCmdDeps())
+}
+
+// productionCmdDeps wires control commands to the real broker and daemon.
+func productionCmdDeps() cmdDeps {
+	return cmdDeps{
 		stdout:  os.Stdout,
 		getenv:  os.Getenv,
 		connect: connectProductionBroker,
@@ -171,7 +176,7 @@ func runCmd(ctx context.Context, invocation cmdInvocation) error {
 			return ensureDaemonWithLifecycle(ctx, dir, realDial, realSpawn, defaultBackoff)
 		},
 		clock: clock.New(),
-	})
+	}
 }
 
 func runCmdWithDeps(ctx context.Context, invocation cmdInvocation, deps cmdDeps) error {

@@ -131,7 +131,7 @@ usage:
   vev kill --all      stop everything: every vev window, the broker, and the
                       daemon (named sessions come back on the next start)
   vev cmd <command>   run a control command (vev cmd --help)
-  vev env <fish|sh>   print shell code that refreshes desktop variables (vev env --help)
+  vev env <fish|sh>   print shell code that refreshes desktop variables
   vev --ui-observe    expose passive observation for this interactive client
                       (optional: --ui-socket PATH)
   vev --ui-control    expose observation and input control for this client

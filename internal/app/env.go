@@ -5,19 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
-
-	"github.com/bnema/vev/internal/adapters/clock"
-	"github.com/bnema/vev/internal/protocol/wire"
 )
 
 const envHelp = `usage: vev env <fish|sh> [-s <session>]
 
 Print shell code that applies the session's current desktop and login
 variables (WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS, SSH_AUTH_SOCK, ...) to a
-running shell. Inside a pane the current session is used.
+running shell. Inside a pane the current session is used; outside a pane,
+-s <session> is required.
 
   fish   vev env fish | source
   sh     eval "$(vev env sh)"   (bash, zsh, and other POSIX shells)
@@ -63,16 +60,7 @@ func parseEnvArgs(args []string) (envInvocation, error) {
 }
 
 func runEnv(ctx context.Context, invocation envInvocation) error {
-	return runEnvWithDeps(ctx, invocation, cmdDeps{
-		stdout:  os.Stdout,
-		getenv:  os.Getenv,
-		connect: connectProductionBroker,
-		dial:    realDial,
-		ensure: func(ctx context.Context, dir string) (wire.Transport, error) {
-			return ensureDaemonWithLifecycle(ctx, dir, realDial, realSpawn, defaultBackoff)
-		},
-		clock: clock.New(),
-	})
+	return runEnvWithDeps(ctx, invocation, productionCmdDeps())
 }
 
 func runEnvWithDeps(ctx context.Context, invocation envInvocation, deps cmdDeps) error {
@@ -113,7 +101,9 @@ func writeShellEnvironment(out io.Writer, shell, encoded string) error {
 		value := values[key]
 		switch {
 		case shell == "fish" && value == nil:
-			code.WriteString("set -e " + key + "\n")
+			// -g: without a global, a bare `set -e` erases the user's
+			// universal variable for every fish session.
+			code.WriteString("set -e -g " + key + "\n")
 		case shell == "fish":
 			code.WriteString("set -gx " + key + " " + fishQuote(*value) + "\n")
 		case value == nil:

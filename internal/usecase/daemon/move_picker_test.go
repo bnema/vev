@@ -230,6 +230,10 @@ func TestMovePickerMoveCommitsTab(t *testing.T) {
 	defer releaseAll(releases)
 	movedTab := source.tabs[0]
 	movedTab.stableID = "moved-tab"
+	ac.setClientEnvironment([]string{"WAYLAND_DISPLAY=wayland-mover"})
+	destination.mu.Lock()
+	destination.env = []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-old"}
+	destination.mu.Unlock()
 
 	openMovePickerForTest(t, d, ac, source, protocol.PickerIntentMoveTab, moveSourceForSession(source, ac, "moved-tab", ""))
 	effect := pickActionEffectForTest(t, source, ac)
@@ -244,6 +248,9 @@ func TestMovePickerMoveCommitsTab(t *testing.T) {
 	require.Nil(t, source.tabs)
 	require.Len(t, destination.tabs, 2)
 	require.Same(t, movedTab, destination.tabs[1])
+	destination.mu.Lock()
+	defer destination.mu.Unlock()
+	require.Equal(t, []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-mover"}, destination.env, "a followed move refreshes the destination from the moving attachment")
 }
 
 func TestMovePickerCancelPerformsNoMutation(t *testing.T) {

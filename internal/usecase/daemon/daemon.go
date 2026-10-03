@@ -1477,16 +1477,6 @@ func (d *Daemon) finishAttach(sess *session, tr ports.ServerConnection, sz domai
 		// otherwise falls back to the session's normal first-tab repair.
 		initialTabIndex = preferredTabIndex(sess, h.PreferredTabID)
 	}
-	// Session state is the sole source for future PTY children. Refresh its
-	// session-bound variables before publishing the attachment; existing PTYs
-	// keep their original environment and can pull the refresh with `vev env`.
-	// A daemon-owned (remote) attach leaves the environment and CWD untouched,
-	// even though Hello retains those fields for direct CLI clients.
-	sess.mu.Lock()
-	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
-		sess.adoptClientEnvironmentLocked(h.Env)
-	}
-	sess.mu.Unlock()
 	terminalCapabilities := terminalcap.Detect(h.Env)
 	// Kitty graphics are enabled only by the explicit direct-terminal
 	// declaration in Hello. Environment values remain useful for color and
@@ -1821,7 +1811,8 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 			}
 			cwd := d.dirOrHome(stopped.cwd)
 			env := h.Env
-			if h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned {
+			daemonOwned := h.EnvironmentPolicy == protocol.EnvironmentPolicyDaemonOwned
+			if daemonOwned {
 				env = copyEnvironment(d.baseEnv)
 			}
 			var err error
@@ -1829,6 +1820,11 @@ func (d *Daemon) routeWithContext(ctx context.Context, h protocol.Hello, tr port
 			if err != nil {
 				d.mu.Unlock()
 				return nil, nil, err
+			}
+			if daemonOwned {
+				// Like a snapshot restore, the resumed session starts from the
+				// daemon's environment until a local client attaches.
+				markEnvironmentProvisional(sess)
 			}
 			created = true
 		}

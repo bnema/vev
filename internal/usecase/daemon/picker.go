@@ -246,7 +246,7 @@ func (d *Daemon) switchActiveTargetForAttachmentGuarded(effect *attachmentEffect
 
 		expectedTransport: effect.transport, sourceCapability: &capability, sourceEffect: effect, action: action,
 		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
-		activateTargetTab:       true, targetTabIndex: target.TabIndex, refreshTargetEnvironment: true, ready: true,
+		activateTargetTab:       true, targetTabIndex: target.TabIndex, ready: true,
 	})
 	if err != nil {
 		// Losing the exact source role is a benign stale action, not a notice for
@@ -536,16 +536,15 @@ func (d *Daemon) switchToActiveTargetLocked(from *session, ac *attachedClient, t
 		target: targetSess,
 		next:   ac,
 
-		expectedTransport:        expectedTransport,
-		sourceCapability:         sourceCapability,
-		sourceEffect:             sourceEffect,
-		action:                   action,
-		expectedTargetLifecycle:  pickerTargetLifecycleFence(target),
-		expectedSourceTab:        guard.expectedSource,
-		activateTargetTab:        target.TabIndex >= 0,
-		targetTabIndex:           target.TabIndex,
-		refreshTargetEnvironment: true,
-		ready:                    true,
+		expectedTransport:       expectedTransport,
+		sourceCapability:        sourceCapability,
+		sourceEffect:            sourceEffect,
+		action:                  action,
+		expectedTargetLifecycle: pickerTargetLifecycleFence(target),
+		expectedSourceTab:       guard.expectedSource,
+		activateTargetTab:       target.TabIndex >= 0,
+		targetTabIndex:          target.TabIndex,
+		ready:                   true,
 	})
 	d.mu.Lock()
 	if err != nil {
@@ -573,7 +572,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		transition, err := d.transitionAttachment(attachmentTransitionRequest{
 			source: from, next: ac,
 			expectedTransport: sourceCapability.transport, sourceCapability: &sourceCapability, sourceEffect: sourceEffect, action: action,
-			expectedSourceTab: guard.expectedSource, refreshTargetEnvironment: true, ready: true,
+			expectedSourceTab: guard.expectedSource, ready: true,
 			createTargetLocked: func() (*session, error) {
 				if d.purgeAdmissionClosedLocked() {
 					return nil, errPurgeAdmissionClosed
@@ -583,9 +582,13 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 					return nil, errAttachmentTransition
 				}
 				from.mu.Lock()
-				cwd, env := d.dirOrHome(current.cwd), copyEnvironment(from.env)
+				env, provisional := from.environmentSeedLocked()
 				from.mu.Unlock()
+				cwd := d.dirOrHome(current.cwd)
 				created, createErr := d.resumeInactiveSessionLocked(target.Name, cwd, ac.geometrySnapshot(), env, current, current.tabNames)
+				if createErr == nil && provisional {
+					markEnvironmentProvisional(created)
+				}
 				targetSess = created
 				return created, createErr
 			},
@@ -609,7 +612,7 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		from.mu.Unlock()
 		return nil, attachmentTransitionResult{}, false, nil
 	}
-	env := copyEnvironment(from.env)
+	env, provisional := from.environmentSeedLocked()
 	from.mu.Unlock()
 	if d.purgeAdmissionClosedLocked() {
 		return nil, attachmentTransitionResult{}, false, errPurgeAdmissionClosed
@@ -624,12 +627,15 @@ func (d *Daemon) resumeStoppedAndSwitchLocked(from *session, ac *attachedClient,
 		d.log.Warn("resuming stopped session failed", "err", err, "session", target.Name)
 		return nil, attachmentTransitionResult{}, false, err
 	}
+	if provisional {
+		markEnvironmentProvisional(targetSess)
+	}
 
 	d.mu.Unlock()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		source: from, target: targetSess, next: ac,
 
-		expectedTransport: ac.transportSnapshot(), refreshTargetEnvironment: true, ready: true,
+		expectedTransport: ac.transportSnapshot(), ready: true,
 	})
 	d.mu.Lock()
 	if err != nil {

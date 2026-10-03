@@ -634,14 +634,6 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	ac.setGeometry(geometry)
 	ac.resumeToken = d.nextResumeTokenLocked()
 	ac.parked = false
-	// The resumed session's snapshot is the sole source for future PTY children.
-	// Only session-bound variables follow the resuming client; existing PTYs
-	// retain the environment they were started with.
-	sess.mu.Lock()
-	if h.EnvironmentPolicy != protocol.EnvironmentPolicyDaemonOwned {
-		sess.adoptClientEnvironmentLocked(h.Env)
-	}
-	sess.mu.Unlock()
 	preferredTabIndex := preferredTabIndex(sess, h.PreferredTabID)
 	// Resume preparation used sendMu -> d.mu, but freeze/drain must run with
 	// neither held. Reacquire them before returning to preserve this helper's

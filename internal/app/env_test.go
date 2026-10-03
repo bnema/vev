@@ -58,7 +58,7 @@ func TestWriteShellEnvironment(t *testing.T) {
 			name:    "fish sets and erases",
 			shell:   "fish",
 			encoded: encoded,
-			want:    "set -gx ODD 'it\\'s \\\\ $HOME'\nset -e SSH_AUTH_SOCK\nset -gx WAYLAND_DISPLAY 'wayland-1'\n",
+			want:    "set -gx ODD 'it\\'s \\\\ $HOME'\nset -e -g SSH_AUTH_SOCK\nset -gx WAYLAND_DISPLAY 'wayland-1'\n",
 		},
 		{
 			name:    "sh exports and unsets",
@@ -103,7 +103,7 @@ func TestRunEnvWithDeps(t *testing.T) {
 			invocation:  envInvocation{shell: "fish"},
 			vev:         "session=work,tab=t_1,pane=p_1",
 			result:      protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded, Output: reply},
-			want:        "set -e SSH_AUTH_SOCK\nset -gx WAYLAND_DISPLAY 'wayland-1'\n",
+			want:        "set -e -g SSH_AUTH_SOCK\nset -gx WAYLAND_DISPLAY 'wayland-1'\n",
 			wantRequest: protocol.CommandRequest{Slug: "env", JSON: true, TargetSession: "work", TargetTab: "t_1", TargetPane: "p_1"},
 		},
 		{
@@ -112,6 +112,21 @@ func TestRunEnvWithDeps(t *testing.T) {
 			result:      protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded, Output: reply},
 			want:        "unset SSH_AUTH_SOCK\nexport WAYLAND_DISPLAY='wayland-1'\n",
 			wantRequest: protocol.CommandRequest{Slug: "env", JSON: true, TargetSession: "work"},
+		},
+		{
+			name:        "explicit session inside a pane targets that session only",
+			invocation:  envInvocation{shell: "sh", session: "other"},
+			vev:         "session=work,tab=t_1,pane=p_1",
+			result:      protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded, Output: reply},
+			want:        "unset SSH_AUTH_SOCK\nexport WAYLAND_DISPLAY='wayland-1'\n",
+			wantRequest: protocol.CommandRequest{Slug: "env", JSON: true, TargetSession: "other"},
+		},
+		{
+			name:       "invalid daemon output prints no shell code",
+			invocation: envInvocation{shell: "sh", session: "work"},
+			result:     protocol.CommandResult{RequestID: 1, Outcome: protocol.CommandSucceeded, Output: `{"BAD;rm":"x"}`},
+			wantErr:    "invalid session environment name",
+			wantCode:   1,
 		},
 		{
 			name:       "outside a pane without a session",
@@ -169,8 +184,4 @@ func TestRunEnvWithDeps(t *testing.T) {
 			require.Equal(t, tt.wantRequest.TargetPane, request.TargetPane)
 		})
 	}
-}
-
-func TestCmdEnvHelpUsesRegistryUsage(t *testing.T) {
-	require.Contains(t, cmdHelp(cmdInvocation{slug: "env", help: true}), "usage: vev cmd [-s <session>] [--self] env [--json]")
 }

@@ -85,7 +85,8 @@ When your outer terminal supports the kitty keyboard protocol (kitty, foot, ghos
   ```
 
   The hook overrides values you set by hand in that shell, such as `SSH_AUTH_SOCK` after `eval (ssh-agent)`.
-- `vev cmd env` prints the same values as data, and `vev cmd env --json` as JSON where `null` means unset.
+- `vev cmd env` lists the set variables as `KEY=value` for reading. Scripts should use `vev cmd env --json`, which also lists the variables to unset as `null`.
+- In fish, the hook erases only global variables; a universal variable (`set -U`) with the same name shows through when the session has no value for it.
 - vev always sets `TERM`, `COLORTERM`, `TERM_PROGRAM`, and `VEV`. `SHELL` picks the shell.
 - A remote session opened from the picker uses the remote host's own environment, not yours. This keeps `HOME`, `PATH`, and `SHELL` correct on that host.
 

@@ -29,9 +29,6 @@ type attachmentTransitionRequest struct {
 	action            string
 	activateTargetTab bool
 	targetTabIndex    int
-	// refreshTargetEnvironment refreshes the target session from next's own
-	// client-owned environment; daemon-owned attachments leave it untouched.
-	refreshTargetEnvironment bool
 	// preserveAttachment commits Attachment-local navigation state without
 	// changing Session membership. The initiating capability remains the exact
 	// authority for this mutation.
