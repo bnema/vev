@@ -34,20 +34,6 @@ func (c ColorCapabilities) Valid() bool { return c.Mode.Valid() && c.Source.Vali
 // RGB reports whether the attachment can receive RGB ANSI output.
 func (c ColorCapabilities) RGB() bool { return c.Mode == TrueColor }
 
-// Colors reports the number of colors the attachment can display.
-func (c ColorCapabilities) Colors() int {
-	switch c.Mode {
-	case ANSI256:
-		return 256
-	case ANSI16:
-		return 16
-	case Monochrome:
-		return 0
-	default:
-		return 1 << 24
-	}
-}
-
 // Source records how confidently a terminal capability was selected.
 type Source uint8
 

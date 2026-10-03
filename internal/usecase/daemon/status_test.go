@@ -885,32 +885,32 @@ func TestPulseStyleFadesFromBaseAndHidesAtFrameZero(t *testing.T) {
 
 	t.Run("invisible frame returns base unchanged", func(t *testing.T) {
 		for _, base := range []renderer.Style{rgbBase, indexedBase} {
-			style, visible := pulseStyle(0, base)
+			style, visible := pulseStyleFor(0, base, false)
 			require.False(t, visible)
 			require.True(t, style.Equal(base))
 		}
 	})
 
 	t.Run("rgb base blends the glyph foreground from the base background to its foreground, keeping the base background", func(t *testing.T) {
-		low, visible := pulseStyle(1, rgbBase)
+		low, visible := pulseStyleFor(1, rgbBase, false)
 		require.True(t, visible)
 		require.True(t, low.Bold)
 		require.True(t, low.HasBackgroundRGB)
 		require.Equal(t, rgbBase.BackgroundRGB, low.BackgroundRGB, "bell keeps the caller's background so it never punches a hole in a themed bar")
 
-		peak, visible := pulseStyle(pulseFrameCount/2, rgbBase)
+		peak, visible := pulseStyleFor(pulseFrameCount/2, rgbBase, false)
 		require.True(t, visible)
 		require.Equal(t, rgbBase.ForegroundRGB, peak.ForegroundRGB, "peak intensity reaches the base foreground exactly")
 		require.NotEqual(t, low.ForegroundRGB, peak.ForegroundRGB, "the glyph should ramp, not jump straight to full intensity")
 	})
 
 	t.Run("non-RGB base falls back to the indexed grey ramp and preserves other base attributes", func(t *testing.T) {
-		low, visible := pulseStyle(1, indexedBase)
+		low, visible := pulseStyleFor(1, indexedBase, false)
 		require.True(t, visible)
 		require.True(t, low.Bold)
 		require.True(t, low.Inverse, "non-color base attributes like inverse must survive")
 
-		peak, visible := pulseStyle(pulseFrameCount/2, indexedBase)
+		peak, visible := pulseStyleFor(pulseFrameCount/2, indexedBase, false)
 		require.True(t, visible)
 		require.Greater(t, peak.Foreground, low.Foreground)
 	})

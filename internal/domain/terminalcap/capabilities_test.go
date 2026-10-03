@@ -8,21 +8,19 @@ import (
 
 func TestColorCapabilities(t *testing.T) {
 	tests := []struct {
-		name       string
-		in         ColorCapabilities
-		wantRGB    bool
-		wantColors int
+		name    string
+		in      ColorCapabilities
+		wantRGB bool
 	}{
-		{name: "zero value is truecolor", in: ColorCapabilities{}, wantRGB: true, wantColors: 16777216},
-		{name: "truecolor", in: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, wantRGB: true, wantColors: 16777216},
-		{name: "ansi256", in: ColorCapabilities{Mode: ANSI256}, wantRGB: false, wantColors: 256},
-		{name: "ansi16", in: ColorCapabilities{Mode: ANSI16, Source: SourceForced}, wantRGB: false, wantColors: 16},
-		{name: "monochrome", in: ColorCapabilities{Mode: Monochrome, Source: SourceForced}, wantRGB: false, wantColors: 0},
+		{name: "zero value is truecolor", in: ColorCapabilities{}, wantRGB: true},
+		{name: "truecolor", in: ColorCapabilities{Mode: TrueColor, Source: SourceDeclared}, wantRGB: true},
+		{name: "ansi256", in: ColorCapabilities{Mode: ANSI256}, wantRGB: false},
+		{name: "ansi16", in: ColorCapabilities{Mode: ANSI16, Source: SourceForced}, wantRGB: false},
+		{name: "monochrome", in: ColorCapabilities{Mode: Monochrome, Source: SourceForced}, wantRGB: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.wantRGB, tt.in.RGB())
-			require.Equal(t, tt.wantColors, tt.in.Colors())
 		})
 	}
 }

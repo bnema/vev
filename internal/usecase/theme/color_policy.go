@@ -6,10 +6,10 @@ import (
 	"github.com/bnema/vev/internal/domain/terminalcap"
 )
 
-// ReducedColor reports whether chrome for c must be built from attributes and
+// reducedColor reports whether chrome for c must be built from attributes and
 // terminal palette slots instead of RGB surfaces: 16-color and monochrome
 // attachments.
-func ReducedColor(c terminalcap.ColorCapabilities) bool {
+func reducedColor(c terminalcap.ColorCapabilities) bool {
 	return c.Mode == terminalcap.ANSI16 || c.Mode == terminalcap.Monochrome
 }
 
@@ -19,7 +19,7 @@ func ReducedColor(c terminalcap.ColorCapabilities) bool {
 // and mark the returned Theme so dimming uses the faint attribute instead of
 // RGB blends. Color is per attachment, so callers resolve once per attachment.
 func ResolveForColor(t Theme, policy domain.ThemeAccent, color terminalcap.ColorCapabilities) ResolvedTheme {
-	if !ReducedColor(color) {
+	if !reducedColor(color) {
 		return Resolve(t, policy)
 	}
 	t.DimByAttribute = true

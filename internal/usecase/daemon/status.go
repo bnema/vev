@@ -27,16 +27,12 @@ func pulseVisible(frame int) bool {
 	return frame%pulseFrameCount != 0
 }
 
-// pulseStyle returns the style for the attention bell glyph at frame, built
+// pulseStyleFor returns the style for the attention bell glyph at frame, built
 // on top of base so the bell always keeps the caller's background (the tab's
 // accent/statusBar, or a faded MRU entry's blended colors) instead of
 // punching a default-background hole in a themed bar. On the invisible beat
-// it returns (base, false) unchanged.
-func pulseStyle(frame int, base renderer.Style) (renderer.Style, bool) {
-	return pulseStyleFor(frame, base, false)
-}
-
-// pulseStyleFor is pulseStyle for chrome built by the reduced-color policy.
+// it returns (base, false) unchanged. reduced selects the attribute-only pulse
+// for chrome built by the reduced-color policy.
 func pulseStyleFor(frame int, base renderer.Style, reduced bool) (renderer.Style, bool) {
 	if !pulseVisible(frame) {
 		return base, false

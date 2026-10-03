@@ -17,6 +17,12 @@ import (
 // reconciliation; input pumps must only publish a request for it.
 // The anchor places it: transitions stay centered, notices sit top-right so
 // they never cover the picker list. The border is colored by severity.
+//
+// The border uses fixed xterm-256 colors and does not follow the attachment
+// color profile, so production callers (the transition notice) pass only
+// domain.NoticeInfo, which emits no color. Toasts with a severity that must
+// honor 16-color or monochrome terminals go through toastBorderSGRFor, as the
+// picker does.
 func drawClientToast(out io.Writer, size domain.Size, message string, anchor domain.Anchor, severity domain.NoticeSeverity) (domain.Rect, error) {
 	bounds := ui.ToastBounds(size, ui.Toast{Message: message, Anchor: anchor})
 	if bounds.Width <= 0 || bounds.Height <= 0 {
