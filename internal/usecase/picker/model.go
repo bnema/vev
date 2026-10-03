@@ -61,6 +61,21 @@ type RenderStyles struct {
 	Status         renderer.Style // one-row picker-local contextual help
 	SearchMatch    renderer.Style // matched runes on ordinary rows
 	SelectionMatch renderer.Style // matched runes on the selected row
+	// ProblemBold draws error and warning dots bold. A monochrome terminal
+	// drops the fixed problem colors, so weight is what sets them apart.
+	ProblemBold bool
+}
+
+// DefaultRenderStyles returns the picker's built-in styles. monochrome selects
+// the attribute-only variant: tree lines are dimmed instead of grey and
+// problem dots are bold, since no color survives on such a terminal.
+func DefaultRenderStyles(monochrome bool) RenderStyles {
+	styles := defaultRenderStyles()
+	if monochrome {
+		styles.Tree = renderer.Style{} // zero Tree keeps the dimmed row style
+		styles.ProblemBold = true
+	}
+	return styles
 }
 
 func defaultRenderStyles() RenderStyles {
@@ -585,7 +600,7 @@ func lineStatusColor(status protocol.PickerLineStatus) int {
 
 // drawStatusBadge draws a problem dot right-aligned on row y. The dot keeps
 // its own color even on the inverse selected row.
-func drawStatusBadge(frame renderer.Frame, rect domain.Rect, y, clipX int, badge string, base renderer.Style, status protocol.PickerLineStatus) {
+func drawStatusBadge(frame renderer.Frame, rect domain.Rect, y, clipX int, badge string, base renderer.Style, status protocol.PickerLineStatus, problemBold bool) {
 	if badge == "" {
 		return
 	}
@@ -593,6 +608,9 @@ func drawStatusBadge(frame renderer.Frame, rect domain.Rect, y, clipX int, badge
 	style.Inverse = false
 	style.Foreground = lineStatusColor(status)
 	style.HasForegroundRGB = false
+	if color := lineStatusColor(status); problemBold && (color == ColorProblemError || color == ColorProblemWarn) {
+		style.Bold = true
+	}
 	ui.DrawText(frame, max(rect.X, clipX-textCellWidth(badge)), rect.Y+y, clipX, badge, style)
 }
 
@@ -681,7 +699,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		x := drawMatchedText(frame, treeX, rect.Y+y, contentClipX, name, nameStyle, nameMatchStyle, namePositions)
 
 		if r.section() {
-			drawStatusBadge(frame, rect, y, clipX, badge, base, r.line.Status)
+			drawStatusBadge(frame, rect, y, clipX, badge, base, r.line.Status, styles.ProblemBold)
 			continue
 		}
 		if r.rendersAsHeader() {
@@ -697,7 +715,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				detailPositions := visibleMatchPositions(m.matchPositions(idx, matchDetail), detail, detail != r.line.Detail)
 				drawMatchedText(frame, detailX, rect.Y+y, contentClipX, detail, detailStyle, nameMatchStyle, detailPositions)
 			}
-			drawStatusBadge(frame, rect, y, clipX, badge, base, r.line.Status)
+			drawStatusBadge(frame, rect, y, clipX, badge, base, r.line.Status, styles.ProblemBold)
 			continue
 		}
 

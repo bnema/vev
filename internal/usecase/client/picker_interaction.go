@@ -379,7 +379,11 @@ func (r *pickerRenderer) render(loop *pickerLoop, size domain.Size, preview pick
 	border := renderer.DefaultStyle()
 	border.Attrs |= renderer.AttrDim
 	picker.Modal.CompositePresentation(base, presentation, border, renderer.DefaultStyle())
-	inner := loop.model.Render(picker.Size(presentation.Inner), preview, r.renderStyles...)
+	styles := r.renderStyles
+	if len(styles) == 0 && r.profile == ansirenderer.ColorProfileMonochrome {
+		styles = []picker.RenderStyles{picker.DefaultRenderStyles(true)}
+	}
+	inner := loop.model.Render(picker.Size(presentation.Inner), preview, styles...)
 	copyFrameRect(base, presentation.Inner, inner)
 
 	// Only the box is written: the session stays on screen around it. A box
