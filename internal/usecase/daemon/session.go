@@ -65,9 +65,11 @@ type session struct {
 	// It is guarded by mu and is always copied on ingress and egress.
 	env []string
 	// envProvisional marks an env that came from the daemon's own process
-	// rather than a client (snapshot restore). The first client-owned
-	// environment replaces it wholesale; later ones refresh only session-bound
-	// variables. Guarded by mu.
+	// rather than a client: a snapshot restore, a daemon-owned resume of a
+	// stopped session, or a session created or resumed from a provisional
+	// one. The first client-owned environment then replaces it (see
+	// adoptClientEnvironmentLocked for the display-group exception); later
+	// ones refresh only session-bound variables. Guarded by mu.
 	envProvisional bool
 	snapDirty      atomic.Bool
 	snapEligible   atomic.Bool
