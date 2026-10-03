@@ -702,11 +702,11 @@ func colorDowngradeNotice(color terminalcap.ColorCapabilities) (string, bool) {
 	}
 	switch color.Mode {
 	case terminalcap.ANSI256:
-		return "TrueColor was not detected; rendering with 256 colors.", true
+		return "Terminal supports 256 colors; vev UI colors are reduced.", true
 	case terminalcap.ANSI16:
-		return "TrueColor was not detected; rendering with 16 colors.", true
+		return "Terminal supports 16 colors; vev UI colors are reduced.", true
 	case terminalcap.Monochrome:
-		return "TrueColor was not detected; rendering without colors.", true
+		return "Terminal has no color support; vev UI uses bold and reverse.", true
 	default:
 		return "", false
 	}

@@ -14,9 +14,9 @@ func TestColorDowngradeNotice(t *testing.T) {
 		color terminalcap.ColorCapabilities
 		want  string
 	}{
-		{name: "declared 256 colors", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}, want: "TrueColor was not detected; rendering with 256 colors."},
-		{name: "declared 16 colors", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}, want: "TrueColor was not detected; rendering with 16 colors."},
-		{name: "declared monochrome", color: terminalcap.ColorCapabilities{Mode: terminalcap.Monochrome, Source: terminalcap.SourceDeclared}, want: "TrueColor was not detected; rendering without colors."},
+		{name: "declared 256 colors", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}, want: "Terminal supports 256 colors; vev UI colors are reduced."},
+		{name: "declared 16 colors", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}, want: "Terminal supports 16 colors; vev UI colors are reduced."},
+		{name: "declared monochrome", color: terminalcap.ColorCapabilities{Mode: terminalcap.Monochrome, Source: terminalcap.SourceDeclared}, want: "Terminal has no color support; vev UI uses bold and reverse."},
 		{name: "declared truecolor", color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}},
 		{name: "forced 256 colors", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceForced}},
 		{name: "forced 16 colors", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceForced}},
@@ -42,8 +42,8 @@ func TestFinishAttachedClientColorToast(t *testing.T) {
 		color     terminalcap.ColorCapabilities
 		wantToast string
 	}{
-		{name: "declared 256 colors toasts", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}, wantToast: "TrueColor was not detected; rendering with 256 colors."},
-		{name: "declared 16 colors toasts", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}, wantToast: "TrueColor was not detected; rendering with 16 colors."},
+		{name: "declared 256 colors toasts", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI256, Source: terminalcap.SourceDeclared}, wantToast: "Terminal supports 256 colors; vev UI colors are reduced."},
+		{name: "declared 16 colors toasts", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceDeclared}, wantToast: "Terminal supports 16 colors; vev UI colors are reduced."},
 		{name: "forced 16 colors is silent", color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16, Source: terminalcap.SourceForced}},
 		{name: "declared truecolor is silent", color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor, Source: terminalcap.SourceDeclared}},
 	}
