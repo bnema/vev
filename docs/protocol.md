@@ -94,7 +94,9 @@ closed enum (`TRUE_COLOR`, `ANSI256`, `ANSI16`, `MONOCHROME`) and a missing
 message, an `UNSPECIFIED` mode, or any unknown enum value is a malformed Hello
 (`sessionwire` rejects it before any mutation). `source` `UNSPECIFIED` means
 "unknown": the daemon then ignores the claimed mode and re-detects from
-`Hello.Env`; `DECLARED` and `FORCED` claims are used verbatim.
+`Hello.Env`; `DECLARED` and `FORCED` claims are used verbatim. A `HEURISTIC` truecolor claim
+upgrades a weaker daemon-side detection; any other `HEURISTIC` claim falls back
+to detection.
 (`internal/domain/terminalcap.Resolve`; wire tests in
 `sessionwire/proto_convert_test.go:TestProtoHelloColorWire`.)
 

@@ -26,7 +26,7 @@ Detection reads the client's `TERM` and `COLORTERM`. The first matching row wins
 | 2 | `TERM=xterm-kitty` inside kitty | truecolor |
 | 3 | `TERM` is `dumb`, `vt52`, `vt100`, `vt102`, `vt220`, or ends in `-m` or `-mono` | monochrome |
 | 4 | `TERM` contains `256color` | 256 |
-| 5 | `TERM` is `linux`, `ansi`, `cons25`, or ends in `-16color` or `-color` | 16 |
+| 5 | `TERM` is `linux`, `ansi`, `cons25`, or ends in `-16color` or `-color` | 16 (8-color terminals use the first 8) |
 | 6 | anything else | 256 (unverified guess) |
 
 When detection finds a terminal with fewer than truecolor colors, vev shows a one-time notice. The notice is not shown for the unverified guess or for a forced mode.
@@ -40,7 +40,7 @@ When detection finds a terminal with fewer than truecolor colors, vev shows a on
 
 Values: `auto`, `truecolor`, `256`, `16`, `mono`. `auto` (or an empty value) means detection. A forced mode never shows the notice.
 
-The override is read when a client attaches or reconnects. A config reload in the running daemon does not change attached clients.
+`VEV_COLORS` and `terminal.colors` are read when the client starts; restart the client to apply a change. A config reload in the running daemon does not change attached clients.
 
 ### What each mode changes
 
