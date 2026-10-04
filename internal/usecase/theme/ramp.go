@@ -28,7 +28,6 @@ type Ramp struct {
 
 	background renderer.RGB
 	foreground renderer.RGB
-	accent     renderer.RGB
 	rgb        bool
 }
 
@@ -66,7 +65,6 @@ func BuildRamp(t Theme, accent Accent) Ramp {
 		BorderWarn:      warnBorder(t, accent.RGB, bar.BackgroundRGB),
 		background:      t.Background,
 		foreground:      t.Foreground,
-		accent:          accent.RGB,
 		rgb:             true,
 	}
 }
