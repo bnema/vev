@@ -167,6 +167,118 @@ type Daemon struct {
 
 	paletteRecentMu sync.Mutex
 	paletteRecent   []string
+	// daemonTestHooks holds deterministic test seams; production leaves every
+	// hook nil.
+	daemonTestHooks
+	ptys                     ports.PTYFactory
+	clock                    ports.Clock
+	log                      *slog.Logger
+	runtimeObserver          ports.RuntimeObserver
+	baseEnv                  []string
+	shell                    string
+	shellArgs                []string
+	shellOverride            bool
+	persistEnabled           bool
+	catalogue                ports.Catalogue
+	catalogueRecords         []domain.CatalogueRecord
+	catalogueRecordsProvided bool
+	// snapshotRepository is the sole checkpoint storage contract.
+	snapshotRepository        ports.SnapshotRepository
+	recovery                  *recoveryusecase.Coordinator
+	snapshotGarbageCollection bool
+	maintenanceWorkerCancel   context.CancelFunc
+	maintenanceWorkerDone     chan struct{}
+	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
+	// restoration reconciles durable checkpoints, so it is a durable writer and
+	// is guarded by snapshotWorkerMu with the other two.
+	restoreWorkerDone chan struct{}
+	snapsEnabled      bool
+	noticeStore       ports.NoticeStore
+	snapshotJobs      chan *snapshotCapture
+	// snapshotAdmitted contains every capture accepted by either worker queue,
+	// including captures buffered in snapshotJobs. Guarded by snapshotWorkerMu.
+	snapshotAdmitted map[*snapshotCapture]struct{}
+	// snapshotWake wakes the repository scheduler when a session becomes dirty
+	// or an attempt completes. It is never closed and producers only send
+	// non-blockingly.
+	snapshotWake            chan struct{}
+	snapshotWorkerMu        sync.Mutex
+	snapshotWorkerID        uint64
+	snapshotWorkerCtx       context.Context
+	snapshotWorkerCancel    context.CancelFunc
+	snapshotWorkerDone      chan struct{}
+	snapshotWorkerFlush     chan struct{}
+	snapshotWorkerFinalWake chan struct{}
+	// snapshotFinalJobs coalesces terminal captures by session when the bounded
+	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
+	// sessions, each with only its newest terminal state while the worker blocks.
+	snapshotFinalJobs      map[*session]*snapshotCapture
+	snapshotFinalOrder     []*session
+	snapshotWorkerClosing  bool
+	snapshotWorkerInFlight *snapshotCapture
+	// snapshotNoticeMu guards the active global persistence failure signature.
+	// It is separate from snapshotWorkerMu so notice routing cannot block a
+	// producer or a repository worker.
+	snapshotNoticeMu               sync.Mutex
+	snapshotActiveFailureSignature string
+	shutdownNoticeMu               sync.Mutex
+	shutdownNoticedSessions        map[string]struct{}
+	restoreDone                    chan struct{}
+	restoreOnce                    sync.Once
+	procCwd                        func(int) (string, error)
+	procComm                       func(int) (string, error)
+	procArgv                       func(int) ([]string, error)
+	procGroupArgv                  func(int, int) ([]string, error)
+	dirOrHome                      func(string) string
+	bindings                       atomic.Pointer[keys.Bindings]
+	codeOverrides                  atomic.Pointer[map[string]string]
+	restoreProcessAllowlist        atomic.Pointer[map[string]struct{}]
+	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
+	copyConfig                     atomic.Pointer[domain.CopyConfig]
+	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
+	navConfig                      atomic.Pointer[domain.NavConfig]
+	tabsConfig                     atomic.Pointer[domain.TabsConfig]
+	ephemeralConfig                atomic.Pointer[domain.EphemeralConfig]
+	scrollbackConfig               atomic.Pointer[domain.ScrollbackConfig]
+	themeConfig                    atomic.Pointer[themeConfigSnapshot]
+	barScripts                     *barScriptState
+	notices                        *noticeCenter
+	resumeParkGrace                time.Duration
+	suspendedSafetyExpiry          time.Duration
+	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
+	// (see clipboard.go); empty means use os.TempDir().
+	tempDir string
+
+	serveCtx    context.Context
+	serveCancel context.CancelFunc
+
+	// hardCtx force-closes connection transports on shutdown, but only after
+	// shutdownAll has delivered graceful Detached notices — keeping it separate
+	// from serveCtx so a parent-context cancel never races the notice.
+	hardCtx    context.Context
+	hardCancel context.CancelFunc
+
+	// done is closed exactly once by an explicit daemon stop (shutdownAll) to
+	// break Serve's accept loop. It is deliberately not closed by final session
+	// removal or by a KillAll purge: an empty registry and a purged registry
+	// both keep the daemon serving.
+	done     chan struct{}
+	doneOnce sync.Once
+
+	// sessWg owns attention animation, bar-script polling, CWD sampling,
+	// snapshot save/restore, and floating-session launch goroutines.
+	sessWg sync.WaitGroup
+	connWg sync.WaitGroup // per-connection handler goroutines
+	// attachmentCleanupWg owns replacement transport closes and retired render
+	// worker joins. Only connection handlers add work; Serve waits for those
+	// handlers before joining this group, so no Add races its terminal Wait.
+	attachmentCleanupWg sync.WaitGroup
+}
+
+// daemonTestHooks are deterministic seams that let tests pause or observe the
+// daemon inside narrow concurrency windows. Production never sets them, and no
+// hook may perform external work while locks are held.
+type daemonTestHooks struct {
 	// beforeRecentSessionHandoff is a deterministic test seam for the narrow
 	// interval between JRS validation and its committed hand-off.
 	beforeRecentSessionHandoff func()
@@ -284,109 +396,6 @@ type Daemon struct {
 	// and before it freezes the attachment effect gate, so tests can win
 	// activation, disconnect, or replacement first. It is a test-only seam.
 	beforeSuspendedExpiryFreeze func(*attachedClient)
-	ptys                        ports.PTYFactory
-	clock                       ports.Clock
-	log                         *slog.Logger
-	runtimeObserver             ports.RuntimeObserver
-	baseEnv                     []string
-	shell                       string
-	shellArgs                   []string
-	shellOverride               bool
-	persistEnabled              bool
-	catalogue                   ports.Catalogue
-	catalogueRecords            []domain.CatalogueRecord
-	catalogueRecordsProvided    bool
-	// snapshotRepository is the sole checkpoint storage contract.
-	snapshotRepository        ports.SnapshotRepository
-	recovery                  *recoveryusecase.Coordinator
-	snapshotGarbageCollection bool
-	maintenanceWorkerCancel   context.CancelFunc
-	maintenanceWorkerDone     chan struct{}
-	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
-	// restoration reconciles durable checkpoints, so it is a durable writer and
-	// is guarded by snapshotWorkerMu with the other two.
-	restoreWorkerDone chan struct{}
-	snapsEnabled      bool
-	noticeStore       ports.NoticeStore
-	snapshotJobs      chan *snapshotCapture
-	// snapshotAdmitted contains every capture accepted by either worker queue,
-	// including captures buffered in snapshotJobs. Guarded by snapshotWorkerMu.
-	snapshotAdmitted map[*snapshotCapture]struct{}
-	// snapshotWake wakes the repository scheduler when a session becomes dirty
-	// or an attempt completes. It is never closed and producers only send
-	// non-blockingly.
-	snapshotWake            chan struct{}
-	snapshotWorkerMu        sync.Mutex
-	snapshotWorkerID        uint64
-	snapshotWorkerCtx       context.Context
-	snapshotWorkerCancel    context.CancelFunc
-	snapshotWorkerDone      chan struct{}
-	snapshotWorkerFlush     chan struct{}
-	snapshotWorkerFinalWake chan struct{}
-	// snapshotFinalJobs coalesces terminal captures by session when the bounded
-	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
-	// sessions, each with only its newest terminal state while the worker blocks.
-	snapshotFinalJobs      map[*session]*snapshotCapture
-	snapshotFinalOrder     []*session
-	snapshotWorkerClosing  bool
-	snapshotWorkerInFlight *snapshotCapture
-	// snapshotNoticeMu guards the active global persistence failure signature.
-	// It is separate from snapshotWorkerMu so notice routing cannot block a
-	// producer or a repository worker.
-	snapshotNoticeMu               sync.Mutex
-	snapshotActiveFailureSignature string
-	shutdownNoticeMu               sync.Mutex
-	shutdownNoticedSessions        map[string]struct{}
-	restoreDone                    chan struct{}
-	restoreOnce                    sync.Once
-	procCwd                        func(int) (string, error)
-	procComm                       func(int) (string, error)
-	procArgv                       func(int) ([]string, error)
-	procGroupArgv                  func(int, int) ([]string, error)
-	dirOrHome                      func(string) string
-	bindings                       atomic.Pointer[keys.Bindings]
-	codeOverrides                  atomic.Pointer[map[string]string]
-	restoreProcessAllowlist        atomic.Pointer[map[string]struct{}]
-	floatingConfig                 atomic.Pointer[domain.FloatingConfig]
-	copyConfig                     atomic.Pointer[domain.CopyConfig]
-	paletteConfig                  atomic.Pointer[domain.PaletteConfig]
-	navConfig                      atomic.Pointer[domain.NavConfig]
-	tabsConfig                     atomic.Pointer[domain.TabsConfig]
-	ephemeralConfig                atomic.Pointer[domain.EphemeralConfig]
-	scrollbackConfig               atomic.Pointer[domain.ScrollbackConfig]
-	themeConfig                    atomic.Pointer[themeConfigSnapshot]
-	barScripts                     *barScriptState
-	notices                        *noticeCenter
-	resumeParkGrace                time.Duration
-	suspendedSafetyExpiry          time.Duration
-	// tempDir overrides os.TempDir() for clipboard-image-transfer writes
-	// (see clipboard.go); empty means use os.TempDir().
-	tempDir string
-
-	serveCtx    context.Context
-	serveCancel context.CancelFunc
-
-	// hardCtx force-closes connection transports on shutdown, but only after
-	// shutdownAll has delivered graceful Detached notices — keeping it separate
-	// from serveCtx so a parent-context cancel never races the notice.
-	hardCtx    context.Context
-	hardCancel context.CancelFunc
-
-	// done is closed exactly once by an explicit daemon stop (shutdownAll) to
-	// break Serve's accept loop. It is deliberately not closed by final session
-	// removal or by a KillAll purge: an empty registry and a purged registry
-	// both keep the daemon serving.
-	done     chan struct{}
-	doneOnce sync.Once
-
-	// sessWg owns attention animation, bar-script polling, CWD sampling,
-	// snapshot save/restore, and floating-session launch goroutines.
-	sessWg sync.WaitGroup
-	connWg sync.WaitGroup // per-connection handler goroutines
-	// attachmentCleanupWg owns replacement transport closes and retired render
-	// worker joins. Only connection handlers add work; Serve waits for those
-	// handlers before joining this group, so no Add races its terminal Wait.
-	attachmentCleanupWg sync.WaitGroup
 }
 
 type parkedAttachment struct {
