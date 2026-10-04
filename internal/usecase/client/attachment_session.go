@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -99,6 +100,8 @@ type sessionAttachmentConfig struct {
 	Tab attachmentTab
 	// Tabs retains this client's committed tab per authority and session.
 	Tabs *sessionTabMemory
+	// Logger receives link liveness records. Nil discards them.
+	Logger *slog.Logger
 }
 
 // sessionAttachmentWorker implements AttachmentWorker for one broker logical
@@ -325,6 +328,8 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	samePeerUI := attachmentSamePeerUI(fg)
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color)}
 	defer picker.stopEscape()
+	live := w.newAttachmentLiveness(fg, stream, overlay, func() domain.Size { return picker.size })
+	defer live.stop()
 	input := newAttachmentInput(ctx, w, fg, stream, picker)
 	defer input.close()
 	if err := input.start(ctx); err != nil {
@@ -375,6 +380,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				return w.settle(ctx, fg, stream, token, err)
 			}
 			outputResetRequested = true
+			if err := live.overlayReleased(state); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case tab := <-tabSelections:
 			// The picker overlay committed another tab of this session: switch
 			// the attachment's view in place instead of reconnecting.
@@ -391,6 +399,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if err := w.send(ctx, fg, stream, reply); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
+		case <-live.c():
+			if err := live.fired(ctx, state); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-picker.escape():
 			picker.escapeFired()
 			op, changed := picker.move.flush()
@@ -400,6 +412,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		case result := <-incoming:
 			if result.err != nil {
 				return w.settle(ctx, fg, stream, token, result.err)
+			}
+			// Any server message proves the link. The first one after a
+			// suspicion clears it by requesting a full repaint.
+			if live.received() && !outputResetRequested {
+				if err := w.send(ctx, fg, stream, protocol.OutputResetRequest{}); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
+				outputResetRequested = true
 			}
 			switch typed := result.message.(type) {
 			case protocol.Output:
@@ -554,6 +574,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			}
 			if resize, ok := event.message.(protocol.Resize); ok {
 				if err := picker.resize(ctx, state, resize.Size); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
+				if err := live.resized(state); err != nil {
 					return w.settle(ctx, fg, stream, token, err)
 				}
 			}

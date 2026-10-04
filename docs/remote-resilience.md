@@ -31,15 +31,11 @@ The transport is fixed when the host is added (`quic` by default). To switch, ru
 
 ## Connection states
 
-| State | Meaning |
-|---|---|
-| `connected` | Everything works. |
-| `degraded` | Packets arrive, but updates are slow. |
-| `probing` | No contact; vev is looking for a working path. |
-| `offline` | No contact for a while; vev is reconnecting. |
-| `dead` | The connection is gone for good. |
+While attached, the client checks that the host still answers. After a few seconds without anything from it, vev sends a probe. If that goes unanswered for a few more seconds, a "Host not responding…" notice appears over the last frame.
 
-States appear in the vev status bar, never inside your shell output.
+- The notice is drawn by the client, never written into your shell output, and is not shown while a picker is open.
+- When the host answers again, the notice disappears and the screen is repainted.
+- When the connection actually fails, vev reconnects by itself and shows "Connecting to session…" until the session is back.
 
 ## Hybrid mode: local and remote together
 

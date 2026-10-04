@@ -756,6 +756,7 @@ type attachmentOverlayForeground interface {
 	divertInput(data []byte, actionID uint64) bool
 	overlayRepaint() <-chan struct{}
 	overlayOutput(uiContext ports.UIContext, data []byte) error
+	overlayOutputIfIdle(uiContext ports.UIContext, data []byte) (bool, error)
 	noteCommitted(target protocol.ExactSessionTarget, tab domain.TabStableID)
 	tabSelections() <-chan domain.TabStableID
 	routeSnapshots() <-chan protocol.RecentRouteSnapshot
@@ -953,7 +954,16 @@ func (f *attachmentForeground) tabSelections() <-chan domain.TabStableID {
 // overlayOutput writes one overlay frame through the same lease and UI
 // transaction as attachment output, bypassing only the overlay suppression.
 func (f *attachmentForeground) overlayOutput(uiContext ports.UIContext, data []byte) error {
-	return f.write(uiContext, data, true)
+	_, err := f.write(uiContext, data, outputOverlayFrame)
+	return err
+}
+
+// overlayOutputIfIdle writes a transient client-drawn frame only when no
+// overlay owns the terminal. The check runs under the same lease as the write,
+// so a picker opened concurrently is never drawn over. It reports whether the
+// frame was written.
+func (f *attachmentForeground) overlayOutputIfIdle(uiContext ports.UIContext, data []byte) (bool, error) {
+	return f.write(uiContext, data, outputIdleFrame)
 }
 
 // attachmentQueryForeground is the optional terminal-query seam of the real
@@ -1422,24 +1432,43 @@ func (f *attachmentForeground) Resize(ctx context.Context) (domain.Geometry, boo
 // flush, and EndOutput(true) commit the frame; any failed or short write or
 // failed flush leaves EndOutput(false).
 func (f *attachmentForeground) Output(uiContext ports.UIContext, data []byte) error {
-	return f.write(uiContext, data, false)
+	_, err := f.write(uiContext, data, outputAttachmentFrame)
+	return err
 }
 
+// outputFrameKind selects how write treats an overlay that owns the terminal.
+type outputFrameKind uint8
+
+const (
+	// outputAttachmentFrame is session output: while an overlay owns the
+	// terminal it is accepted without being written or published.
+	outputAttachmentFrame outputFrameKind = iota
+	// outputOverlayFrame is an overlay's own frame and bypasses suppression.
+	outputOverlayFrame
+	// outputIdleFrame is a transient client-drawn frame: it is dropped, with
+	// no side effect, while an overlay owns the terminal.
+	outputIdleFrame
+)
+
 // write is the shared output transaction. While an overlay owns the terminal an
-// attachment frame (overlay=false) is accepted without being written or
-// published: the caller still applies and acknowledges it, and the overlay's
-// release requests an authoritative repaint. Overlay frames bypass only that
-// suppression.
-func (f *attachmentForeground) write(uiContext ports.UIContext, data []byte, overlay bool) error {
+// attachment frame is accepted without being written or published: the caller
+// still applies and acknowledges it, and the overlay's release requests an
+// authoritative repaint. Overlay frames bypass only that suppression. It
+// reports whether the frame reached the terminal.
+func (f *attachmentForeground) write(uiContext ports.UIContext, data []byte, kind outputFrameKind) (bool, error) {
 	if f == nil {
-		return errAttachmentForegroundRevoked
+		return false, errAttachmentForegroundRevoked
 	}
 	var outputErr error
+	written := false
 	ok := f.lease.send(func() bool {
 		if !f.authority.actionAuthorized(f) {
 			return false
 		}
-		if !overlay && f.overlayKind() != attachmentOverlayNone {
+		if kind == outputIdleFrame && f.overlayKind() != attachmentOverlayNone {
+			return true
+		}
+		if kind == outputAttachmentFrame && f.overlayKind() != attachmentOverlayNone {
 			// Applied, not written: remember its committed boundary so a
 			// daemon receipt fenced on it still settles its action.
 			if f.uiGeneration != 0 && f.host != nil && f.host.actionUI != nil {
@@ -1489,12 +1518,13 @@ func (f *attachmentForeground) write(uiContext ports.UIContext, data []byte, ove
 		}
 		outputErr = f.term.Flush()
 		success = outputErr == nil
+		written = success
 		return true
 	})
 	if !ok {
-		return errAttachmentForegroundRevoked
+		return false, errAttachmentForegroundRevoked
 	}
-	return outputErr
+	return written, outputErr
 }
 
 // presentationContext applies the published-context shape rule to one foreground
