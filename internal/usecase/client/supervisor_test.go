@@ -586,6 +586,30 @@ func TestSupervisorReducerTransitions(t *testing.T) {
 			want:  State{Presentation: PresentAttached, Connectivity: ConnectivityReady, Generation: 4},
 		},
 		{
+			name:  "a resume begin presents the cancel hint",
+			state: State{Presentation: PresentAttached, Connectivity: ConnectivityReady, Generation: 4},
+			event: supervisorEvent{kind: supervisorAttachBegin, resuming: true},
+			want:  State{Presentation: PresentConnecting, Connectivity: ConnectivityReady, Generation: 4, Resuming: true},
+		},
+		{
+			name:  "an initial attach begin does not",
+			state: State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 4},
+			event: supervisorEvent{kind: supervisorAttachBegin},
+			want:  State{Presentation: PresentConnecting, Connectivity: ConnectivityReady, Generation: 4},
+		},
+		{
+			name:  "attaching ends the resume",
+			state: State{Presentation: PresentConnecting, Connectivity: ConnectivityReady, Generation: 4, Resuming: true},
+			event: supervisorEvent{kind: supervisorAttached},
+			want:  State{Presentation: PresentAttached, Connectivity: ConnectivityReady, Generation: 4},
+		},
+		{
+			name:  "a settled resume returns to the picker",
+			state: State{Presentation: PresentConnecting, Connectivity: ConnectivityReady, Generation: 4, Resuming: true},
+			event: supervisorEvent{kind: supervisorAttachEnded},
+			want:  State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 4},
+		},
+		{
 			name:  "terminal failure terminates",
 			state: State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 7},
 			event: supervisorEvent{kind: supervisorTerminal, err: exited},

@@ -239,6 +239,11 @@ func (w *attachTestWriter) Write(data []byte) (int, error) {
 // closed. It is the supervisor's single terminal reader.
 type attachTestReader struct {
 	chunks chan []byte
+	// pushed counts chunks handed to push; entered counts Read calls. The
+	// terminal pump calls Read again only after it handled the previous
+	// result, so entered == pushed+1 proves every pushed chunk was handled.
+	pushed  atomic.Int64
+	entered atomic.Int64
 }
 
 func newAttachTestReader() *attachTestReader {
@@ -246,6 +251,7 @@ func newAttachTestReader() *attachTestReader {
 }
 
 func (r *attachTestReader) Read(buffer []byte) (int, error) {
+	r.entered.Add(1)
 	chunk, ok := <-r.chunks
 	if !ok {
 		return 0, io.EOF
@@ -253,7 +259,16 @@ func (r *attachTestReader) Read(buffer []byte) (int, error) {
 	return copy(buffer, chunk), nil
 }
 
-func (r *attachTestReader) push(data []byte) { r.chunks <- data }
+func (r *attachTestReader) push(data []byte) {
+	r.pushed.Add(1)
+	r.chunks <- data
+}
+
+// awaitHandled waits until the terminal pump handled every pushed chunk.
+func (r *attachTestReader) awaitHandled(t *testing.T) {
+	t.Helper()
+	require.Eventually(t, func() bool { return r.entered.Load() == r.pushed.Load()+1 }, 5*time.Second, time.Millisecond)
+}
 
 func (r *attachTestReader) close() { close(r.chunks) }
 
@@ -1308,63 +1323,92 @@ func resumeTestJitter() float64 { return 0.5 }
 // share the clock, so it matches the exact backoff delay.
 func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 	t.Helper()
-	want := supervisorBackoffDelay(uint64(attempt), resumeTestJitter)
+	awaitResumeTimer(t, clock, attempt).fire()
+}
+
+// awaitResumeTimer waits for the resume backoff timer of one attempt.
+func awaitResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) *supervisorTestTimer {
+	t.Helper()
+	want := backoffDelay(uint64(attempt), supervisorResumeRetryMax, resumeTestJitter)
 	for {
-		timer := clock.awaitTimer(t)
-		if timer.delay == want {
-			timer.fire()
-			return
+		if timer := clock.awaitTimer(t); timer.delay == want {
+			return timer
 		}
 	}
 }
 
 func TestAttachmentResumeBudget(t *testing.T) {
+	type spend struct {
+		kind attachmentOutcomeKind
+		up   time.Duration
+		// at is the time since the first resume's attempt finished.
+		at time.Duration
+		// attempt is the expected 1-based attempt; ok whether the window is open.
+		attempt int
+		ok      bool
+	}
 	brief := time.Second
 	tests := []struct {
-		name  string
-		steps []attachmentOutcomeKind
-		ups   []time.Duration
-		want  []bool
+		name   string
+		spends []spend
+		// wallOnly strips the monotonic reading from the later times, as a
+		// suspend does: only the wall clock advanced.
+		wallOnly bool
 	}{
-		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
-		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), want: repeatBools(true, maxAttachmentResumes+2)},
-		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "many failures stay inside the window", spends: []spend{
+			{attachmentRetry, brief, 0, 1, true},
+			{attachmentRetry, brief, time.Second, 2, true},
+			{attachmentRetry, brief, 2 * time.Second, 3, true},
+			{attachmentRetry, brief, 3 * time.Second, 4, true},
+			{attachmentRetry, brief, 4 * time.Second, 5, true},
+			{attachmentRetry, brief, 5 * time.Second, 6, true},
+			{attachmentRetry, brief, 6 * time.Second, 7, true},
+		}},
+		{name: "the window ends 15 minutes after the loss", spends: []spend{
+			{attachmentResume, brief, 0, 1, true},
+			{attachmentRetry, brief, attachmentResumeWindow - time.Nanosecond, 2, true},
+			{attachmentRetry, brief, attachmentResumeWindow, 3, false},
+		}},
+		{name: "a flapping session keeps one window", spends: []spend{
+			{attachmentResume, brief, 0, 1, true},
+			{attachmentResume, brief, 10 * time.Minute, 2, true},
+			{attachmentResume, brief, attachmentResumeWindow, 3, false},
+		}},
+		{name: "a stable attachment restores the window", spends: []spend{
+			{attachmentResume, brief, 0, 1, true},
+			{attachmentResume, resumeStableAttachment, 14 * time.Minute, 1, true},
+			{attachmentResume, brief, 14*time.Minute + time.Hour/60, 2, true},
+			{attachmentRetry, brief, 14*time.Minute + attachmentResumeWindow - time.Second, 3, true},
+			{attachmentRetry, brief, 14*time.Minute + attachmentResumeWindow, 4, false},
+		}},
+		{name: "wall time elapsed during a suspend counts", spends: []spend{
+			{attachmentResume, brief, 0, 1, true},
+			{attachmentResume, brief, attachmentResumeWindow, 2, false},
+		}, wallOnly: true},
+		{name: "retries never restore the window", spends: []spend{
+			{attachmentRetry, resumeStableAttachment, 0, 1, true},
+			{attachmentRetry, resumeStableAttachment, 10 * time.Minute, 2, true},
+			{attachmentRetry, resumeStableAttachment, attachmentResumeWindow, 3, false},
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var budget attachmentResumeBudget
 			require.False(t, budget.resuming)
-			for i, kind := range tt.steps {
-				_, ok := budget.spend(kind, tt.ups[i])
-				require.Equal(t, tt.want[i], ok, "step %d", i)
+			base := time.Now()
+			for i, step := range tt.spends {
+				at := base.Add(step.at)
+				if tt.wallOnly && step.at > 0 {
+					// Wall time advanced, the monotonic clock did not.
+					at = base.Round(0).Add(step.at)
+				}
+				attempt, ok := budget.spend(step.kind, step.up, at)
+				require.Equal(t, step.attempt, attempt, "step %d attempt", i)
+				require.Equal(t, step.ok, ok, "step %d window", i)
 				require.True(t, budget.resuming)
 			}
 		})
 	}
-}
-
-func repeatKinds(k attachmentOutcomeKind, n int) []attachmentOutcomeKind {
-	out := make([]attachmentOutcomeKind, n)
-	for i := range out {
-		out[i] = k
-	}
-	return out
-}
-
-func repeatDurations(d time.Duration, n int) []time.Duration {
-	out := make([]time.Duration, n)
-	for i := range out {
-		out[i] = d
-	}
-	return out
-}
-
-func repeatBools(b bool, n int) []bool {
-	out := make([]bool, n)
-	for i := range out {
-		out[i] = b
-	}
-	return out
 }
 
 // TestSupervisorAttachmentLossResumesSameSession is the regression for a
@@ -1390,7 +1434,16 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		openUnavailable
 		// cancelDuringBackoff ends the client while the backoff runs.
 		cancelDuringBackoff
+		// loseAfterWindow loses the resumed stream before it attaches, once
+		// the whole resume window has elapsed.
+		loseAfterWindow
+		// openUnavailableAfterWindow fails the resumed open with a
+		// transport-class error, once the whole resume window has elapsed.
+		openUnavailableAfterWindow
 	)
+	// beyondOldBudget is more consecutive failures than the former
+	// count-based budget allowed.
+	const beyondOldBudget = 8
 	repeat := func(s step, n int) []step {
 		steps := make([]step, n)
 		for i := range steps {
@@ -1406,13 +1459,13 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		wantPicker bool
 	}{
 		{name: "resume attaches again", steps: []step{attachAndStay}},
-		{name: "every stable resume restores the budget", steps: append(repeat(attachThenLose, maxAttachmentResumes+1), attachAndStay)},
-		{name: "a flapping session gives up", steps: repeat(attachThenFlap, maxAttachmentResumes), wantPicker: true},
-		{name: "transient failures then attach", steps: append(repeat(loseBeforeAttach, maxAttachmentResumes-1), attachAndStay)},
-		{name: "exhausted returns to picker", steps: repeat(loseBeforeAttach, maxAttachmentResumes), wantPicker: true},
+		{name: "every stable resume restores the window", steps: append(repeat(attachThenLose, beyondOldBudget), attachAndStay)},
+		{name: "a flapping session keeps resuming inside the window", steps: append(repeat(attachThenFlap, beyondOldBudget), attachAndStay)},
+		{name: "failures past the old budget still resume", steps: append(repeat(loseBeforeAttach, beyondOldBudget), attachAndStay)},
+		{name: "losses past the window return to the picker", steps: append(repeat(loseBeforeAttach, beyondOldBudget), loseAfterWindow), wantPicker: true},
 		{name: "refusal is final", steps: []step{refuse}, wantPicker: true},
-		{name: "unavailable opens then attach", steps: append(repeat(openUnavailable, maxAttachmentResumes-1), attachAndStay)},
-		{name: "unavailable opens exhaust", steps: repeat(openUnavailable, maxAttachmentResumes), wantPicker: true},
+		{name: "unavailable opens past the old budget still resume", steps: append(repeat(openUnavailable, beyondOldBudget), attachAndStay)},
+		{name: "unavailable opens past the window return to the picker", steps: append(repeat(openUnavailable, beyondOldBudget), openUnavailableAfterWindow), wantPicker: true},
 		{name: "cancel during backoff never resumes", steps: []step{cancelDuringBackoff}},
 	}
 	for _, tc := range cases {
@@ -1424,12 +1477,15 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				cfg.Jitter = resumeTestJitter
 			})
 			streams := make(chan *sessionTestStream, len(tc.steps)+2)
-			var refusing, unavailable atomic.Bool
+			var refusing, unavailable, expireOnOpen atomic.Bool
 			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 				if refusing.Load() {
 					return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Text: "session gone"}
 				}
 				if unavailable.Load() {
+					if expireOnOpen.Load() {
+						advancePickerClock(harness.clock, attachmentResumeWindow)
+					}
 					return nil, ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "route down"}
 				}
 				stream := newSessionTestStream()
@@ -1445,7 +1501,7 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 			attempt := 1
 			for _, s := range tc.steps {
 				if s == cancelDuringBackoff {
-					backoff := supervisorBackoffDelay(1, resumeTestJitter)
+					backoff := backoffDelay(1, supervisorResumeRetryMax, resumeTestJitter)
 					for harness.clock.awaitTimer(t).delay != backoff {
 					}
 					harness.cancel()
@@ -1454,13 +1510,17 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 					return
 				}
 				refusing.Store(s == refuse)
-				unavailable.Store(s == openUnavailable)
+				unavailable.Store(s == openUnavailable || s == openUnavailableAfterWindow)
+				expireOnOpen.Store(s == openUnavailableAfterWindow)
 				opened := len(harness.service.openedRequests())
 				fireResumeTimer(t, harness.clock, attempt)
 				if s == refuse {
 					break
 				}
-				if s == openUnavailable {
+				if s == openUnavailable || s == openUnavailableAfterWindow {
+					if s == openUnavailableAfterWindow {
+						break
+					}
 					// The failed open is retried on Connecting, without a notice.
 					// Wait for it before the next step changes the open result.
 					require.Eventually(t, func() bool { return len(harness.service.openedRequests()) > opened }, 5*time.Second, time.Millisecond)
@@ -1468,6 +1528,11 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 					continue
 				}
 				resumed := <-streams
+				if s == loseAfterWindow {
+					advancePickerClock(harness.clock, attachmentResumeWindow)
+					resumed.fail(testStreamLoss())
+					break
+				}
 				if s == loseBeforeAttach {
 					resumed.fail(testStreamLoss())
 					attempt++
@@ -1735,6 +1800,30 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 			require.False(t, picker.owns(), "a terminated run must not re-acquire the picker")
 			require.True(t, stream.closedNow(), "the admitted stream must be released")
 			require.NotEqual(t, PresentAttached, harness.sup.State().Presentation)
+		})
+	}
+}
+
+// TestResumeBackoffCadence pins the resume backoff: the same equal-jitter
+// doubling as the broker reconnect, capped at 5s instead of 2s.
+func TestResumeBackoffCadence(t *testing.T) {
+	zero := func() float64 { return 0 }
+	tests := []struct {
+		name    string
+		attempt uint64
+		jitter  func() float64
+		want    time.Duration
+	}{
+		{name: "first attempt", attempt: 1, jitter: zero, want: 50 * time.Millisecond},
+		{name: "doubles", attempt: 4, jitter: zero, want: 400 * time.Millisecond},
+		{name: "past the broker cap", attempt: 6, jitter: zero, want: 1600 * time.Millisecond},
+		{name: "reaches the resume cap", attempt: 7, jitter: zero, want: 2500 * time.Millisecond},
+		{name: "stays at the resume cap", attempt: 50, jitter: zero, want: 2500 * time.Millisecond},
+		{name: "jitter spans the upper half", attempt: 50, jitter: func() float64 { return 1 }, want: supervisorResumeRetryMax},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, backoffDelay(tt.attempt, supervisorResumeRetryMax, tt.jitter))
 		})
 	}
 }

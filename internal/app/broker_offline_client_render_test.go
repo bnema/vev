@@ -14,6 +14,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/client"
@@ -332,6 +333,33 @@ func TestBrokerClientFailureWritesOnlyNonRetryableErrors(t *testing.T) {
 			presentation.Failure(client.State{Connectivity: tt.connectivity}, errors.New("broker connection lost"))
 			written, _ := terminal.written()
 			require.Equal(t, tt.wantLine, strings.Contains(written, "broker connection lost"))
+		})
+	}
+}
+
+// TestBrokerClientRenderConnectingMessage pins the Connecting text: an initial
+// connect keeps its message, and a reconnect of a lost attachment offers the
+// cancel key.
+func TestBrokerClientRenderConnectingMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		resuming bool
+		want     string
+		notWant  string
+	}{
+		{name: "initial connect", want: "Connecting to session…", notWant: "Esc to cancel"},
+		{name: "resume", resuming: true, want: "Reconnecting… · Esc to cancel", notWant: "Connecting to session…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: portsmocks.NewMockClock(t)}
+
+			presentation.Render(client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1, Resuming: tt.resuming})
+
+			written, _ := terminal.written()
+			require.Contains(t, written, tt.want)
+			require.NotContains(t, written, tt.notWant)
 		})
 	}
 }

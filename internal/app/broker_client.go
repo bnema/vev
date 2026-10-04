@@ -138,7 +138,11 @@ func (p *brokerClientPresentation) Render(state client.State) {
 		frame = p.picker.Render(geometry.Size)
 		notice = p.picker.RenderNotice(geometry.Size)
 	} else {
-		frame = client.RenderTransitionNotice(geometry.Size, p.frame, "Connecting to session…")
+		message := "Connecting to session…"
+		if state.Resuming {
+			message = "Reconnecting… · Esc to cancel"
+		}
+		frame = client.RenderTransitionNotice(geometry.Size, p.frame, message)
 	}
 	if state.Connectivity == client.ConnectivityRetryWait {
 		notice = client.RenderTransitionNotice(geometry.Size, p.frame, "Connection lost; retrying…")
@@ -313,6 +317,9 @@ func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 			}
 			if notice.Kind == client.LifecycleNoticeBrokerLost {
 				picker.Notify(domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeWarn, Message: "Connection lost; retrying…"})
+			}
+			if notice.Kind == client.LifecycleNoticeResumeCancelled {
+				picker.Notify(domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeInfo, Message: "Reconnect cancelled"})
 			}
 			if notice.Kind == client.LifecycleNoticeBrokerReconnected {
 				picker.Notify(domain.Notification{Code: domain.NoticeConnection, Severity: domain.NoticeInfo, Message: "Connection restored"})

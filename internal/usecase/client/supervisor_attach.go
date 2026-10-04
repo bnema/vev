@@ -257,6 +257,9 @@ const (
 	// attachmentRetry repeats a resume attempt that hit the transport-class
 	// failure cause before attaching.
 	attachmentRetry
+	// attachmentCancelled ends a resume the user cancelled with Escape or
+	// Ctrl+C; it returns to the picker without a failure.
+	attachmentCancelled
 )
 
 // attachmentOutcome is the complete result of one attachment attempt.
@@ -588,8 +591,11 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 	}()
 	// budget.resuming is true while the loop reconnects a lost attachment:
 	// attempts then return transport-class failures as attachmentRetry instead
-	// of presenting them, so a retry stays on Connecting.
+	// of presenting them, so a retry stays on Connecting. The resume input
+	// window (see resume_input.go) is open exactly while it is, and always
+	// closes before the picker takes input back.
 	var budget attachmentResumeBudget
+	defer input.endResume()
 	for {
 		attemptStart := s.cfg.Clock.Now()
 		outcome := s.attachResolved(ctx, input, service, target, localProvenance, budget.resuming)
@@ -600,11 +606,15 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			// The attempt already presented a final outcome (session gone,
 			// ended, refused).
 			return false, nil
+		case attachmentCancelled:
+			s.endCancelledResume(target, budget.attempts)
+			return false, nil
 		case attachmentSwap:
 			// A commit from the picker overlay to another target: the previous
 			// attachment detached cleanly, and the swap goes through Connecting
 			// exactly like any committed selection.
 			budget = attachmentResumeBudget{}
+			input.endResume()
 			next, ok := s.withFreshStream(service, outcome.target)
 			if !ok {
 				return false, nil
@@ -617,16 +627,24 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			// same target again.
 			outcome.target = target
 		}
-		attempt, ok := budget.spend(outcome.kind, s.cfg.Clock.Now().Sub(attemptStart))
+		now := s.cfg.Clock.Now()
+		attempt, ok := budget.spend(outcome.kind, now.Sub(attemptStart), now)
 		if !ok {
-			s.logger.Warn("client_attachment_resume_exhausted", "endpoint", outcome.target.request.Endpoint, "session", outcome.target.request.Target.SessionName, "attempts", attempt-1, "error", outcome.cause)
+			s.logger.Warn("client_attachment_resume_exhausted", "endpoint", outcome.target.request.Endpoint, "session", outcome.target.request.Target.SessionName, "attempts", attempt-1, "window", attachmentResumeWindow, "error", outcome.cause)
 			s.transition(supervisorEvent{kind: supervisorAttachEnded, err: outcome.cause})
 			s.notifyLifecycle(LifecycleNoticeDestinationFailed)
 			s.notifyAttachment(outcome.cause)
 			return false, nil
 		}
-		if terminated, termErr, brokerLost := s.waitResume(ctx, input, service, attempt); terminated || brokerLost {
-			return terminated, termErr
+		input.beginResume()
+		switch wait, waitErr := s.waitResume(ctx, input, service, attempt); wait {
+		case resumeWaitTerminated:
+			return true, waitErr
+		case resumeWaitBrokerLost:
+			return false, nil
+		case resumeWaitCancelled:
+			s.endCancelledResume(outcome.target, attempt)
+			return false, nil
 		}
 		next, ok := s.withFreshStream(service, outcome.target)
 		if !ok {
@@ -637,25 +655,44 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 	}
 }
 
-// attachmentResumeBudget bounds how often one lost attachment reconnects.
+// endCancelledResume returns to the picker after the user cancelled a resume.
+// It is a deliberate choice, not a failure: no error is presented, only the
+// short cancelled notice.
+func (s *Supervisor) endCancelledResume(target pickerAttachmentTarget, attempts int) {
+	s.logger.Info("client_attachment_resume_cancelled", "endpoint", target.request.Endpoint, "session", target.request.Target.SessionName, "attempts", attempts)
+	// The notice is queued before the picker paints, so its first frame shows it.
+	s.notifyLifecycle(LifecycleNoticeResumeCancelled)
+	s.transition(supervisorEvent{kind: supervisorAttachEnded})
+}
+
+// attachmentResumeBudget bounds how long one lost attachment keeps
+// reconnecting: attachmentResumeWindow from the loss.
 type attachmentResumeBudget struct {
-	used     int
+	// started is when the current loss began; the window runs from it.
+	started time.Time
+	// attempts counts resume attempts since started.
+	attempts int
 	resuming bool
 }
 
-// spend records one resume after an attempt of the given kind that ran for
-// up. A live attachment that stayed up for resumeStableAttachment starts a
-// fresh budget; one that drops right after attaching keeps counting, so a
-// flapping session gives up.
-// It returns the 1-based resume attempt, and false once the budget is
-// exhausted.
-func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Duration) (int, bool) {
-	if kind == attachmentResume && up >= resumeStableAttachment {
-		b.used = 0
+// spend records one resume after an attempt of the given kind that ran for up,
+// finishing at now. The first resume starts the window. A live attachment that
+// stayed up for resumeStableAttachment starts a fresh window; one that drops
+// right after attaching keeps counting against the current one, so a flapping
+// session gives up. It returns the 1-based resume attempt, and false once the
+// window has elapsed.
+func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Duration, now time.Time) (int, bool) {
+	if !b.resuming || (kind == attachmentResume && up >= resumeStableAttachment) {
+		b.started = now
+		b.attempts = 0
 	}
-	b.used++
+	b.attempts++
 	b.resuming = true
-	return b.used, b.used <= maxAttachmentResumes
+	// The monotonic reading pauses while the machine sleeps, but the daemon's
+	// park grace is wall time: take the larger of the two elapsed times so a
+	// suspend counts toward the window.
+	elapsed := max(now.Sub(b.started), now.Round(0).Sub(b.started.Round(0)))
+	return b.attempts, elapsed < attachmentResumeWindow
 }
 
 // withFreshStream gives target a newly allocated stream identity. It is
@@ -679,9 +716,17 @@ func (s *Supervisor) withFreshStream(service ports.BrokerNavigator, target picke
 // attachmentRetry instead of presented.
 func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
 	request := target.request
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, resuming: resuming})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
+	// A resume attempt is abandoned the moment the user cancels: the signal
+	// cancels the attempt's context, which unblocks an in-flight open and the
+	// worker alike.
+	var cancelled <-chan struct{}
+	if resuming {
+		cancelled = input.resumeCancelled()
+		defer deadline.cancelOn(cancelled)()
+	}
 
 	sessionEnv := s.cfg.SessionEnvironment.Clone()
 	if request.Local {
@@ -699,6 +744,11 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	s.logger.Debug("client_stream_open_begin", "local", request.Local, "endpoint", request.Endpoint, "admission", request.Admission, "generation", s.State().Generation)
 	stream, err := service.OpenStream(deadline.Context(), request)
 	if err != nil {
+		// Process cancellation also unblocks the open; it wins over a cancel
+		// key pressed at the same moment.
+		if ctx.Err() == nil && resumeCancelFired(cancelled) {
+			return attachmentOutcome{kind: attachmentCancelled}
+		}
 		s.logger.Warn("client_stream_open_failed", "local", request.Local, "endpoint", request.Endpoint, "code", brokerErrorCode(err), "error", err, "cause", errors.Unwrap(err))
 		return s.attemptFailed(deadline.cause(err), resuming)
 	}
@@ -740,14 +790,49 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return attachmentEndedOutcome()
 	}
-	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming)
+	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming, cancelled)
+}
+
+// resumeCancelFired reports whether the resume cancel signal has fired. A nil
+// signal (no resume) never has.
+func resumeCancelFired(cancelled <-chan struct{}) bool {
+	select {
+	case <-cancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// cancelOn cancels the attachment context when cancelled fires and returns the
+// function that retires the watcher. The watcher is always joined, so no
+// goroutine outlives the attempt. A nil signal starts nothing.
+func (d *attachmentDeadline) cancelOn(cancelled <-chan struct{}) (stop func()) {
+	if cancelled == nil {
+		return func() {}
+	}
+	stopped := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-cancelled:
+			d.cancel()
+		case <-stopped:
+		case <-d.ctx.Done():
+		}
+	}()
+	return func() {
+		close(stopped)
+		<-done
+	}
 }
 
 // settleAttachment joins one admitted attachment while watching the parent
 // context, terminal EOF, and broker-connection loss. The deadline is the only
 // other stop: when it fires before the worker settled, the attachment ends as
 // a typed timeout without claiming attachment.
-func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest, resuming bool) attachmentOutcome {
+func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest, resuming bool, cancelled <-chan struct{}) attachmentOutcome {
 	settled := make(chan attachmentSettlement, 1)
 	go func() {
 		event, adopted := run.Wait(deadline.Context())
@@ -815,6 +900,12 @@ settlement:
 			result = <-settled
 			terminated, termErr = true, terminalReadCause(err)
 			break settlement
+		case <-cancelled:
+			// The user cancelled this resume attempt before it committed a
+			// frame: retire the run, which closes its stream.
+			run.Cancel()
+			result = <-settled
+			break settlement
 		}
 	}
 
@@ -838,6 +929,9 @@ settlement:
 	s.pendingSwap = nil
 	if terminated {
 		return attachmentTerminatedOutcome(termErr)
+	}
+	if resumeCancelFired(cancelled) {
+		return attachmentOutcome{kind: attachmentCancelled}
 	}
 	if swap != nil && !brokerLost {
 		// The overlay committed another target and this attachment detached
@@ -899,13 +993,19 @@ settlement:
 	return attachmentEndedOutcome()
 }
 
-// maxAttachmentResumes bounds how many times one lost attachment reconnects
-// before the client gives up and returns to the picker. With the supervisor
-// backoff this spans a few seconds, enough to ride out a transient drop.
-const maxAttachmentResumes = 5
+// attachmentResumeWindow is how long one lost attachment keeps reconnecting
+// before the client gives up and returns to the picker. It matches the
+// daemon's park grace (defaultResumeParkGrace): past it the remote session no
+// longer holds the attachment, so a resume could only start a new one.
+const attachmentResumeWindow = 15 * time.Minute
+
+// supervisorResumeRetryMax caps the equal-jitter backoff between resume
+// attempts. It is higher than supervisorRetryMax, which paces broker
+// reconnects, because a resume may keep trying for the whole window.
+const supervisorResumeRetryMax = 5 * time.Second
 
 // resumeStableAttachment is how long a resumed attachment must stay up before
-// its next loss gets a fresh resume budget.
+// its next loss gets a fresh resume window.
 const resumeStableAttachment = 30 * time.Second
 
 // resumeTarget builds the exact reattach request for a lost attachment: the
@@ -923,26 +1023,50 @@ func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForegroun
 	return pickerAttachmentTarget{request: resume, tab: attachmentTab{preferred: tab}}, true
 }
 
+// resumeWaitResult is how one waitResume ended.
+type resumeWaitResult uint8
+
+const (
+	// resumeWaitElapsed means the backoff ran out: attempt again.
+	resumeWaitElapsed resumeWaitResult = iota
+	// resumeWaitTerminated means cancellation or terminal EOF ended the run.
+	resumeWaitTerminated
+	// resumeWaitBrokerLost means the broker connection ended; the ready loop
+	// observes and retires it.
+	resumeWaitBrokerLost
+	// resumeWaitCancelled means the user cancelled the resume.
+	resumeWaitCancelled
+)
+
 // waitResume presents Connecting and waits one backoff interval before the
-// next resume attempt. It settles early on cancellation or terminal EOF
-// (terminated), or on broker loss, which ends the resume and leaves the ready
-// loop to observe and retire the connection.
-func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (terminated bool, termErr error, brokerLost bool) {
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
-	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
+// next resume attempt. It settles early on cancellation or terminal EOF, on
+// broker loss, which ends the resume and leaves the ready loop to observe and
+// retire the connection, and on the user's cancel key. The error is the
+// termination cause of resumeWaitTerminated.
+func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (resumeWaitResult, error) {
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, resuming: true})
+	delay := backoffDelay(uint64(attempt), supervisorResumeRetryMax, s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
+	cancelled := input.resumeCancelled()
 	for {
 		select {
 		case <-timer.C():
-			return false, nil, false
+			return resumeWaitElapsed, nil
+		case <-cancelled:
+			// Process cancellation wins over a cancel key pressed at the same
+			// moment.
+			if err := ctx.Err(); err != nil {
+				return resumeWaitTerminated, err
+			}
+			return resumeWaitCancelled, nil
 		case <-ctx.Done():
-			return true, ctx.Err(), false
+			return resumeWaitTerminated, ctx.Err()
 		case err := <-input.EOF():
-			return true, terminalReadCause(err), false
+			return resumeWaitTerminated, terminalReadCause(err)
 		case <-service.Done():
 			s.transition(supervisorEvent{kind: supervisorAttachEnded})
-			return false, nil, true
+			return resumeWaitBrokerLost, nil
 		case <-s.presentationInvalidation():
 			s.renderResizeInvalidation()
 		case <-s.spinnerTick():

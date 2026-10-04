@@ -73,7 +73,11 @@ type terminalInputPump struct {
 	// enqueues its final result for a consumer to report, but the exit watcher
 	// can win that race, so the cause is recorded here as well: a read failure
 	// must never be published as an orderly EOF.
-	readCause    error
+	readCause error
+	// resumeActive and resumeCancel are the supervisor's input ownership while
+	// a lost attachment reconnects; see resume_input.go.
+	resumeActive bool
+	resumeCancel chan struct{}
 	readyMu      sync.Mutex
 	ready        map[uint64]chan struct{}
 	claimChanged chan struct{}
@@ -191,6 +195,16 @@ func (p *terminalInputPump) enqueue(result terminalReadResult, activation uint64
 		p.mu.Unlock()
 		p.space <- struct{}{}
 		return false
+	}
+	if p.resumeActive {
+		// The supervisor owns input while it reconnects: nothing reaches a
+		// consumer, so no keystroke is queued for the resumed session.
+		p.discardResumeInputLocked(&result)
+		if result.err == nil {
+			p.mu.Unlock()
+			p.space <- struct{}{}
+			return true
+		}
 	}
 	p.pending = &result
 	consumer := p.consumer

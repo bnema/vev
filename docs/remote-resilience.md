@@ -35,7 +35,9 @@ While attached, the client checks that the host still answers. After a few secon
 
 - The notice is drawn by the client, never written into your shell output, and is not shown while a picker is open.
 - When the host answers again, the notice disappears and the screen is repainted.
-- When the connection actually fails, vev reconnects by itself and shows "Connecting to session…" until the session is back.
+- When the connection actually fails, vev reconnects by itself and shows "Reconnecting… · Esc to cancel" until the session is back.
+- Reconnecting keeps trying for up to 15 minutes, the time the remote host holds your attachment. Press `Esc` or `Ctrl+C` to stop and return to the session picker.
+- Keys you type while reconnecting are discarded, never sent to the session once it returns. Only `Esc` and `Ctrl+C` are read.
 
 ## Hybrid mode: local and remote together
 
@@ -62,6 +64,7 @@ After you leave a remote, vev keeps its connection warm so going back is instant
 | Connect to first screen | 15 s |
 | `vev cmd` result | 10 s |
 | A detached remote attachment waiting to resume | 15 min |
+| Client reconnect attempts after a lost attachment | 15 min |
 
 ## Upgrading
 

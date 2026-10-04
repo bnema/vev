@@ -149,6 +149,10 @@ type State struct {
 	// ReadyLost is set only when an established ready generation was lost and
 	// cleared by the replacement's committed publication.
 	ReadyLost bool
+	// Resuming is set while Connecting reconnects a lost attachment, so the
+	// presentation can offer the cancel key. It is false for an initial
+	// connect and clears when the attachment ends or attaches.
+	Resuming bool
 }
 
 // supervisorEventKind is one input to the pure supervisor reducer.
@@ -200,6 +204,9 @@ type supervisorEvent struct {
 	// picker, so the attempt presents Connecting instead of flashing the
 	// picker until the navigation settles.
 	navigating bool
+	// resuming marks a supervisorAttachBegin that reconnects a lost
+	// attachment rather than opening a committed selection.
+	resuming bool
 }
 
 // reduceSupervisor is the pure connectivity/presentation reducer. It is
@@ -215,6 +222,7 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		state.Connectivity = ConnectivityConnectingBroker
 		state.Generation++
 		state.Err = nil
+		state.Resuming = false
 	case supervisorReady:
 		state.Connectivity = ConnectivityReady
 		state.Attempt = 0
@@ -234,26 +242,31 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		// cadence is untouched.
 		state.Presentation = PresentConnecting
 		state.Err = nil
+		state.Resuming = event.resuming
 	case supervisorAttached:
 		state.Presentation = PresentAttached
 		state.Err = nil
+		state.Resuming = false
 	case supervisorAttachEnded:
 		// A settled attachment always returns to the picker in the same
 		// process, attached or not; a stream that fails after attachment must
 		// never leave the attached presentation showing.
 		state.Presentation = PresentPicker
 		state.Err = event.err
+		state.Resuming = false
 	case supervisorNonRetryable:
 		// The run stays on the picker with the visible error; a pending
 		// initial navigation can no longer present Connecting.
 		state.Presentation = PresentPicker
 		state.Connectivity = ConnectivityDisconnected
 		state.Err = event.err
+		state.Resuming = false
 	case supervisorNavigationSettled:
 		// An initial navigation that ended without an attachment (a resolved
 		// picker, or a loss before it could be taken) leaves Connecting.
 		if state.Presentation == PresentConnecting {
 			state.Presentation = PresentPicker
+			state.Resuming = false
 		}
 	case supervisorOverlayOpened:
 		// Only a committed attachment can host the overlay: a connecting
@@ -270,6 +283,7 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		state.Presentation = PresentTerminating
 		state.Connectivity = ConnectivityDisconnected
 		state.Err = event.err
+		state.Resuming = false
 	}
 	return state
 }
@@ -290,6 +304,9 @@ const (
 	// or initial navigation had nothing to resolve. No destination was dialed,
 	// so reporting it as a destination failure would name the wrong cause.
 	LifecycleNoticeSelectionUnavailable
+	// LifecycleNoticeResumeCancelled reports that the user cancelled the
+	// reconnection of a lost attachment and returned to the picker.
+	LifecycleNoticeResumeCancelled
 )
 
 // LifecycleNotice carries classification only; adapter diagnostics and free
@@ -522,11 +539,16 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	// second writer. The optional UI binds to this host's existing pump claim;
 	// it never starts another terminal reader.
 	supervisor.attachments = newAttachmentHost(attachmentHostConfig{
-		Terminal:   cfg.Terminal,
-		Clock:      cfg.Clock,
-		Actions:    cfg.LifecycleActions,
-		ActionUI:   cfg.UI,
-		OnAttached: func(AttachmentToken) { supervisor.transition(supervisorEvent{kind: supervisorAttached}) },
+		Terminal: cfg.Terminal,
+		Clock:    cfg.Clock,
+		Actions:  cfg.LifecycleActions,
+		ActionUI: cfg.UI,
+		OnAttached: func(AttachmentToken) {
+			// The resumed attachment committed its first frame: input belongs
+			// to the session again.
+			supervisor.attachments.input.endResume()
+			supervisor.transition(supervisorEvent{kind: supervisorAttached})
+		},
 	})
 	return supervisor, nil
 }
@@ -1131,15 +1153,22 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 // of the other half, so attempts spread across [cap/2, cap). It is pure so the
 // cadence can be tested exactly.
 func supervisorBackoffDelay(attempt uint64, jitter func() float64) time.Duration {
+	return backoffDelay(attempt, supervisorRetryMax, jitter)
+}
+
+// backoffDelay is supervisorBackoffDelay for an arbitrary cap, so resume
+// attempts can back off further than the broker reconnect cadence without
+// changing it.
+func backoffDelay(attempt uint64, ceiling time.Duration, jitter func() float64) time.Duration {
 	if attempt == 0 {
 		return 0
 	}
 	limit := supervisorRetryInitial
-	for i := uint64(1); i < attempt && limit < supervisorRetryMax; i++ {
+	for i := uint64(1); i < attempt && limit < ceiling; i++ {
 		limit *= 2
 	}
-	if limit > supervisorRetryMax {
-		limit = supervisorRetryMax
+	if limit > ceiling {
+		limit = ceiling
 	}
 	half := limit / 2
 	fraction := jitter()
@@ -1426,6 +1455,32 @@ func (l *terminalInputLifetime) acquirePicker() {
 		case <-l.pump.done:
 		}
 	}()
+}
+
+// beginResume opens the supervisor-owned input window of a lost attachment's
+// reconnection and returns its cancel signal; see resume_input.go. A lifetime
+// without a reader returns a nil signal, which never fires.
+func (l *terminalInputLifetime) beginResume() <-chan struct{} {
+	if l == nil {
+		return nil
+	}
+	return l.pump.beginResume()
+}
+
+// endResume closes the window opened by beginResume.
+func (l *terminalInputLifetime) endResume() {
+	if l == nil {
+		return
+	}
+	l.pump.endResume()
+}
+
+// resumeCancelled is the cancel signal of the open resume window, or nil.
+func (l *terminalInputLifetime) resumeCancelled() <-chan struct{} {
+	if l == nil {
+		return nil
+	}
+	return l.pump.resumeCancelled()
 }
 
 func (l *terminalInputLifetime) releasePicker() {
