@@ -23,12 +23,12 @@ import (
 
 // ErrDaemonUnreachable is returned when the daemon socket never becomes
 // dialable within the retry budget, despite a spawn attempt.
-var ErrDaemonUnreachable = errors.New("vev: daemon did not become reachable")
+var ErrDaemonUnreachable = errors.New("daemon did not become reachable")
 
 // ErrLifecycleHeldByOther reports that another process kept the daemon
 // lifecycle lock for the whole start budget without publishing the carriage,
 // for example a vev daemon from an older build. Spawning cannot recover this.
-var ErrLifecycleHeldByOther = errors.New("vev: a vev daemon holds the lifecycle lock but did not answer within the start budget; if it is from an older build, run `vev kill --all` and retry")
+var ErrLifecycleHeldByOther = errors.New("a vev daemon holds the lifecycle lock but did not answer within the start budget; if it is from an older build, run `vev kill --all` and retry")
 
 // spawnLockName is the mkdir-based lock directory guarding daemon spawn, so
 // concurrent first-clients elect a single spawner instead of racing to
@@ -195,7 +195,7 @@ func ensureTargetWithLifecycle[T any](ctx context.Context, lockDir string, dial 
 		return target, nil
 	}
 	if err := owner.Release(); err != nil {
-		return zero, fmt.Errorf("vev: release lifecycle spawn probe: %w", err)
+		return zero, fmt.Errorf("release lifecycle spawn probe: %w", err)
 	}
 	return ensureTarget(ctx, lockDir, dial, spawn, cfg)
 }
@@ -216,7 +216,7 @@ func ensureTarget[T any](ctx context.Context, lockDir string, dial func(ctx cont
 
 	release, acquired, err := acquireSpawnLock(lockDir)
 	if err != nil {
-		return zero, fmt.Errorf("vev: acquiring spawn lock: %w", err)
+		return zero, fmt.Errorf("acquiring spawn lock: %w", err)
 	}
 	if acquired {
 		// We won the election: spawn, and hold the lock until the socket is
@@ -229,7 +229,7 @@ func ensureTarget[T any](ctx context.Context, lockDir string, dial func(ctx cont
 		}
 		if err := spawn(); err != nil {
 			slog.Error("daemon spawn failed", "err", err)
-			return zero, fmt.Errorf("vev: spawning daemon: %w", err)
+			return zero, fmt.Errorf("spawning daemon: %w", err)
 		}
 	} else {
 		slog.Debug("waiting for daemon spawned by another process", "socket_dir", lockDir)

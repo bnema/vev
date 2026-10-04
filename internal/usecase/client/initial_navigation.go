@@ -99,54 +99,54 @@ func (n InitialNavigation) Validate() error {
 	switch n.Kind {
 	case InitialNavigationPicker:
 		if n.Destination != (ports.BrokerEndpointFence{}) {
-			return errors.New("vev: picker navigation carries a destination")
+			return errors.New("picker navigation carries a destination")
 		}
 		if n.Epoch != 0 {
-			return errors.New("vev: picker navigation carries an epoch")
+			return errors.New("picker navigation carries an epoch")
 		}
 		if n.Name != "" {
-			return errors.New("vev: picker navigation carries a session name")
+			return errors.New("picker navigation carries a session name")
 		}
 		if n.Target != (protocol.ExactSessionTarget{}) {
-			return errors.New("vev: picker navigation carries an exact target")
+			return errors.New("picker navigation carries an exact target")
 		}
 		return nil
 	case InitialNavigationCreateEphemeral, InitialNavigationCreateNamed, InitialNavigationAttachExact, InitialNavigationAttachNamed:
 	default:
-		return fmt.Errorf("vev: unknown initial navigation kind %d", uint8(n.Kind))
+		return fmt.Errorf("unknown initial navigation kind %d", uint8(n.Kind))
 	}
 	if err := n.Destination.Validate(); err != nil {
-		return fmt.Errorf("vev: initial navigation destination: %w", err)
+		return fmt.Errorf("initial navigation destination: %w", err)
 	}
 	if !n.Destination.Local && n.Epoch == 0 {
 		// A remote destination cannot be decided before the connection: it
 		// requires the epoch of the snapshot that resolved its registration.
-		return errors.New("vev: remote initial navigation carries no epoch")
+		return errors.New("remote initial navigation carries no epoch")
 	}
 	switch n.Kind {
 	case InitialNavigationCreateEphemeral:
 		if n.Name != "" {
-			return errors.New("vev: ephemeral creation navigation carries a session name")
+			return errors.New("ephemeral creation navigation carries a session name")
 		}
 		if n.Target != (protocol.ExactSessionTarget{}) {
-			return errors.New("vev: ephemeral creation navigation carries an exact target")
+			return errors.New("ephemeral creation navigation carries an exact target")
 		}
 	case InitialNavigationCreateNamed, InitialNavigationAttachNamed:
 		if err := domain.ValidateSessionName(n.Name); err != nil {
-			return fmt.Errorf("vev: initial navigation session name: %w", err)
+			return fmt.Errorf("initial navigation session name: %w", err)
 		}
 		if n.Target != (protocol.ExactSessionTarget{}) {
-			return errors.New("vev: named navigation carries an exact target")
+			return errors.New("named navigation carries an exact target")
 		}
 	case InitialNavigationAttachExact:
 		if n.Epoch == 0 {
-			return errors.New("vev: exact attach navigation carries no epoch")
+			return errors.New("exact attach navigation carries no epoch")
 		}
 		if n.Name != "" {
-			return errors.New("vev: exact attach navigation carries a session name")
+			return errors.New("exact attach navigation carries a session name")
 		}
 		if err := n.Target.Validate(); err != nil {
-			return fmt.Errorf("vev: initial navigation target: %w", err)
+			return fmt.Errorf("initial navigation target: %w", err)
 		}
 	}
 	return nil

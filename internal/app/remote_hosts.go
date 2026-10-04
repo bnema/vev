@@ -82,7 +82,7 @@ func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error
 		_, err = service.AddHost(ctx, cmd.hostTarget, policy)
 		if isHostConflict(err) {
 			if stored := storedHostTransport(service.Snapshot(), cmd.hostTarget); stored != "" && stored != cmd.hostTransport {
-				return fmt.Errorf("vev: host %q is already registered with transport %q; run `vev host rm %s` first, then add it again: %w", cmd.hostTarget, stored, cmd.hostTarget, err)
+				return fmt.Errorf("host %q is already registered with transport %q; run `vev host rm %s` first, then add it again: %w", cmd.hostTarget, stored, cmd.hostTarget, err)
 			}
 		}
 		return err
@@ -98,14 +98,14 @@ func runHostCommand(ctx context.Context, cmd command, deps remoteHostDeps) error
 			}
 		}
 		if registration.Endpoint == "" {
-			return fmt.Errorf("vev: unknown host %q", cmd.hostTarget)
+			return fmt.Errorf("unknown host %q", cmd.hostTarget)
 		}
 		removed, err := service.RemoveHost(ctx, registration)
 		if err != nil {
 			return err
 		}
 		if !removed {
-			return fmt.Errorf("vev: unknown host %q", cmd.hostTarget)
+			return fmt.Errorf("unknown host %q", cmd.hostTarget)
 		}
 		return nil
 	case hostActionList:
@@ -179,7 +179,7 @@ func listDisconnectedHosts(w io.Writer) error {
 
 func printBrokerHosts(w io.Writer, snapshot ports.BrokerSnapshot) error {
 	if err := snapshot.Validate(); err != nil {
-		return fmt.Errorf("vev: reading broker catalogue: %w", err)
+		return fmt.Errorf("reading broker catalogue: %w", err)
 	}
 	var endpoints []string
 	for _, daemon := range snapshot.Daemons {
@@ -213,7 +213,7 @@ func runBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io
 
 func renderBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout io.Writer, now time.Time) error {
 	if err := snapshot.Validate(); err != nil {
-		return fmt.Errorf("vev: reading broker catalogue: %w", err)
+		return fmt.Errorf("reading broker catalogue: %w", err)
 	}
 	var sessions []protocol.SessionInfo
 	var statuses []string
@@ -241,7 +241,7 @@ func renderBrokerSnapshotList(cmd command, snapshot ports.BrokerSnapshot, stdout
 		}
 	}
 	if !found {
-		return fmt.Errorf("vev: unknown host %q", cmd.listHost)
+		return fmt.Errorf("unknown host %q", cmd.listHost)
 	}
 	for _, status := range statuses {
 		if _, err := fmt.Fprintln(stdout, status); err != nil {

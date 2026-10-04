@@ -47,7 +47,7 @@ func parseWebArgs(args []string) (command, error) {
 func loadWebSettings(options webOptions) (webterm.Settings, []domain.Warning, error) {
 	cfg, warnings, err := config.Load(platform.ConfigPath())
 	if err != nil {
-		return webterm.Settings{}, nil, fmt.Errorf("vev: loading web configuration: %w", err)
+		return webterm.Settings{}, nil, fmt.Errorf("loading web configuration: %w", err)
 	}
 	if options.listen != "" {
 		cfg.WebListen = options.listen

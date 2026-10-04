@@ -25,7 +25,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 		if remoteTarget == "" && intent == protocol.IntentNew {
 			return createDetachedTerminalSession(ctx, name)
 		}
-		return errors.New("vev: sessions should be nested with care; unset VEV to force")
+		return errors.New("sessions should be nested with care; unset VEV to force")
 	}
 	ctx, stop := clientSignalContext(ctx)
 	defer stop()
@@ -37,7 +37,7 @@ func runAttach(ctx context.Context, intent uint8, name, remoteTarget string) (re
 	clk := clock.New()
 	observer, observerCloser, err := newPerformanceTrace(clk)
 	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
+		return fmt.Errorf("performance trace: %w", err)
 	}
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
@@ -96,7 +96,7 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 	// broker owns carriage, so the observed composition keeps no dialer seam.
 	_, observerCloser, err := newPerformanceTrace(clk)
 	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
+		return fmt.Errorf("performance trace: %w", err)
 	}
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
@@ -104,11 +104,11 @@ func runAttachWithOptions(ctx context.Context, intent uint8, name, remoteTarget 
 	physical := term.NewWithFilesAndObservation(os.Stdin, os.Stdout, nil)
 	geometry, err := physical.Geometry()
 	if err != nil {
-		return fmt.Errorf("vev: reading terminal geometry: %w", err)
+		return fmt.Errorf("reading terminal geometry: %w", err)
 	}
 	mirror, err := uiterm.NewMirror(ctx, geometry, "")
 	if err != nil {
-		return fmt.Errorf("vev: create UI mirror: %w", err)
+		return fmt.Errorf("create UI mirror: %w", err)
 	}
 	defer mirror.Close()
 	physical = term.NewWithFilesAndObservation(os.Stdin, os.Stdout, mirror)

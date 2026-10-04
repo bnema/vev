@@ -81,7 +81,7 @@ func (p *RemoteProbe) SharePool(pool *Pool) { p.shared.pool.Store(pool) }
 
 func (p *RemoteProbe) Probe(ctx context.Context, registration domain.RemoteRegistration) (ports.BrokerDaemonObservation, error) {
 	if p == nil || p.Epoch == 0 || p.Routes == nil || p.Binder == nil || p.Connector == nil {
-		return ports.BrokerDaemonObservation{}, errors.New("vev: incomplete broker remote probe")
+		return ports.BrokerDaemonObservation{}, errors.New("incomplete broker remote probe")
 	}
 	request, err := p.request(ctx, registration)
 	if err != nil {
@@ -117,11 +117,11 @@ func (p *RemoteProbe) Probe(ctx context.Context, registration domain.RemoteRegis
 		}
 	}()
 	if (endpoint.ExpectedIdentity.Bound && physical.Identity() != endpoint.ExpectedIdentity.Identity) || physical.Policy() != endpoint.Policy {
-		return ports.BrokerDaemonObservation{}, errors.New("vev: remote probe authenticated binding mismatch")
+		return ports.BrokerDaemonObservation{}, errors.New("remote probe authenticated binding mismatch")
 	}
 	identity, err := p.Binder.BindAuthenticatedIdentity(ctx, ports.BrokerIdentityBindingRequest{Fence: endpoint.Fence, Policy: endpoint.Policy, Identity: physical.Identity()})
 	if err != nil || identity != physical.Identity() {
-		return ports.BrokerDaemonObservation{}, errors.New("vev: remote probe could not commit authenticated binding")
+		return ports.BrokerDaemonObservation{}, errors.New("remote probe could not commit authenticated binding")
 	}
 	observation, err := observeDaemonCatalogue(ctx, physical, request, p.Codec)
 	if err == nil && ctx.Err() == nil {
@@ -132,7 +132,7 @@ func (p *RemoteProbe) Probe(ctx context.Context, registration domain.RemoteRegis
 
 func (p *RemoteProbe) request(ctx context.Context, registration domain.RemoteRegistration) (ports.BrokerOpenStreamRequest, error) {
 	if p.Hosts == nil {
-		return ports.BrokerOpenStreamRequest{}, errors.New("vev: remote probe has no policy authority")
+		return ports.BrokerOpenStreamRequest{}, errors.New("remote probe has no policy authority")
 	}
 	record, ok, err := p.Hosts.LookupHost(ctx, registration.Endpoint)
 	if err != nil {
@@ -175,22 +175,22 @@ var _ LocalProbe = (*LocalDaemonProbe)(nil)
 // probing must never spawn a process.
 func NewLocalDaemonProbe(epoch ports.BrokerEpoch, address string, policy ports.BrokerPolicy, connector ports.BrokerEndpointConnector, codec ports.SessionCodec, loadIdentity LocalIdentityLoader) (*LocalDaemonProbe, error) {
 	if epoch == 0 {
-		return nil, errors.New("vev: broker local probe requires a broker epoch")
+		return nil, errors.New("broker local probe requires a broker epoch")
 	}
 	if nilDependency(connector) {
-		return nil, errors.New("vev: broker local probe requires a connector")
+		return nil, errors.New("broker local probe requires a connector")
 	}
 	if nilDependency(codec) {
-		return nil, errors.New("vev: broker local probe requires a codec")
+		return nil, errors.New("broker local probe requires a codec")
 	}
 	if loadIdentity == nil {
-		return nil, errors.New("vev: broker local probe requires an identity loader")
+		return nil, errors.New("broker local probe requires an identity loader")
 	}
 	if address == "" {
-		return nil, errors.New("vev: broker local probe requires an address")
+		return nil, errors.New("broker local probe requires an address")
 	}
 	if err := policy.Validate(); err != nil {
-		return nil, fmt.Errorf("vev: broker local probe: %w", err)
+		return nil, fmt.Errorf("broker local probe: %w", err)
 	}
 	return &LocalDaemonProbe{epoch: epoch, address: address, policy: policy, loadIdentity: loadIdentity, connector: connector, codec: codec}, nil
 }
@@ -207,7 +207,7 @@ func (p *LocalDaemonProbe) SharePool(pool *Pool) { p.shared.pool.Store(pool) }
 func (p *LocalDaemonProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonObservation, error) {
 	unreachable := ports.BrokerDaemonObservation{Availability: domain.RemoteAvailabilityUnreachable}
 	if p == nil || p.connector == nil {
-		return unreachable, errors.New("vev: broker local probe is nil")
+		return unreachable, errors.New("broker local probe is nil")
 	}
 	identity, err := p.loadIdentity()
 	if err != nil {
@@ -222,7 +222,7 @@ func (p *LocalDaemonProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonOb
 		ExpectedIdentity: ports.BrokerExpectedIdentity{Identity: identity, Bound: true},
 	}
 	if err := endpoint.Validate(); err != nil {
-		return unreachable, fmt.Errorf("vev: broker local probe: %w", err)
+		return unreachable, fmt.Errorf("broker local probe: %w", err)
 	}
 	request, err := p.request()
 	if err != nil {
@@ -243,7 +243,7 @@ func (p *LocalDaemonProbe) ProbeLocal(ctx context.Context) (ports.BrokerDaemonOb
 	// though the connector already checked it, so a future connector change can
 	// never weaken what the probe publishes.
 	if physical.Identity() != endpoint.ExpectedIdentity.Identity || !physical.Policy().Compatible(endpoint.Policy) {
-		return unreachable, errors.New("vev: broker local probe authenticated binding mismatch")
+		return unreachable, errors.New("broker local probe authenticated binding mismatch")
 	}
 	observation, err := observeDaemonCatalogue(ctx, physical, request, p.codec)
 	if err != nil {
@@ -294,7 +294,7 @@ func newObservationRequest(epoch ports.BrokerEpoch, policy ports.BrokerPolicy) (
 // the caller receives an error and no observation it could publish.
 func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalConnection, request ports.BrokerOpenStreamRequest, codec ports.SessionCodec) (ports.BrokerDaemonObservation, error) {
 	if physical == nil || codec == nil || request.Purpose != ports.BrokerStreamObservation {
-		return ports.BrokerDaemonObservation{}, errors.New("vev: invalid daemon observation request")
+		return ports.BrokerDaemonObservation{}, errors.New("invalid daemon observation request")
 	}
 	logical, err := physical.OpenStream(ctx, request)
 	if err != nil {
@@ -305,7 +305,7 @@ func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalCo
 		return ports.BrokerDaemonObservation{}, err
 	}
 	if logical == nil {
-		return ports.BrokerDaemonObservation{}, errors.New("vev: daemon observation opened no logical stream")
+		return ports.BrokerDaemonObservation{}, errors.New("daemon observation opened no logical stream")
 	}
 	defer func() { _ = logical.Close() }()
 	commandID, err := randomNonzeroUint64()
@@ -318,14 +318,14 @@ func observeDaemonCatalogue(ctx context.Context, physical ports.BrokerPhysicalCo
 	}
 	result, ok := reply.(protocol.CommandResult)
 	if !ok || result.RequestID != commandID || !result.Valid() {
-		return ports.BrokerDaemonObservation{}, errors.New("vev: invalid daemon observation result")
+		return ports.BrokerDaemonObservation{}, errors.New("invalid daemon observation result")
 	}
 	if result.Outcome != protocol.CommandSucceeded {
-		return ports.BrokerDaemonObservation{}, fmt.Errorf("vev: daemon observation failed: %s", result.Text)
+		return ports.BrokerDaemonObservation{}, fmt.Errorf("daemon observation failed: %s", result.Text)
 	}
 	var catalog catalogue.RemoteCatalog
 	if err := json.Unmarshal([]byte(result.Output), &catalog); err != nil {
-		return ports.BrokerDaemonObservation{}, fmt.Errorf("vev: decode daemon observation: %w", err)
+		return ports.BrokerDaemonObservation{}, fmt.Errorf("decode daemon observation: %w", err)
 	}
 	if err := catalogue.ValidateRemoteCatalog(catalog); err != nil {
 		return ports.BrokerDaemonObservation{}, err

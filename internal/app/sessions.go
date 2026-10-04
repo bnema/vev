@@ -118,11 +118,11 @@ func runListWithoutBroker(ctx context.Context, cmd command, out io.Writer) error
 	case errors.Is(err, errNoLocalDaemon):
 		printSessions(out, nil)
 	case err != nil:
-		return fmt.Errorf("vev: list local sessions: %w", err)
+		return fmt.Errorf("list local sessions: %w", err)
 	default:
 		sessions, ok := reply.(protocol.Sessions)
 		if !ok {
-			return fmt.Errorf("vev: unexpected local list reply %T", reply)
+			return fmt.Errorf("unexpected local list reply %T", reply)
 		}
 		printSessions(out, sessions.Sessions)
 	}

@@ -96,14 +96,14 @@ func (b productionIdentityBinder) BindAuthenticatedIdentity(ctx context.Context,
 		return b.delegate.BindAuthenticatedIdentity(ctx, request)
 	}
 	if request.Policy != b.policy {
-		return "", errors.New("vev: local daemon policy authority changed")
+		return "", errors.New("local daemon policy authority changed")
 	}
 	identity, err := daemonidentity.Load(b.stateDir)
 	if err != nil {
-		return "", fmt.Errorf("vev: revalidate daemon authority: %w", err)
+		return "", fmt.Errorf("revalidate daemon authority: %w", err)
 	}
 	if identity != request.Identity {
-		return "", errors.New("vev: local daemon identity authority changed")
+		return "", errors.New("local daemon identity authority changed")
 	}
 	return identity, nil
 }
@@ -139,7 +139,7 @@ func runBrokerServeCommand(ctx context.Context, options brokerServeOptions) (ret
 	defer stop()
 	observer, observerCloser, err := newPerformanceTrace(clock.New())
 	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
+		return fmt.Errorf("performance trace: %w", err)
 	}
 	if observer != nil {
 		observer.ObserveRuntime(ports.NewRuntimeMark("broker", ports.RuntimeTransportDiagnostic, 0, true))
@@ -165,7 +165,7 @@ func sandboxLogging(dir string) (*slog.Logger, io.Closer, error) {
 func newBrokerEpoch() (ports.BrokerEpoch, error) {
 	var raw [8]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return 0, fmt.Errorf("vev: sample broker epoch: %w", err)
+		return 0, fmt.Errorf("sample broker epoch: %w", err)
 	}
 	epoch := ports.BrokerEpoch(binary.BigEndian.Uint64(raw[:]))
 	if epoch == 0 {
@@ -211,26 +211,26 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 		return err
 	}
 	if err := safedir.EnsurePrivate(ipc.SocketDir()); err != nil {
-		return fmt.Errorf("vev: secure broker runtime parent: %w", err)
+		return fmt.Errorf("secure broker runtime parent: %w", err)
 	}
 	layout := productionBrokerLayout()
 	configPath := productionBrokerConfigPath()
 	for _, dir := range []string{layout.Root, layout.Runtime, layout.State, layout.Log} {
 		if err := safedir.EnsurePrivate(dir); err != nil {
-			return fmt.Errorf("vev: secure broker sandbox directory %s: %w", dir, err)
+			return fmt.Errorf("secure broker sandbox directory %s: %w", dir, err)
 		}
 	}
 	// Re-walk every component now that EnsurePrivate created them, so a
 	// component swapped for a symlink in that window fails closed.
 	if err := layout.VerifyCreated(); err != nil {
-		return fmt.Errorf("vev: verify broker paths: %w", err)
+		return fmt.Errorf("verify broker paths: %w", err)
 	}
 	// The broker is allowed to precede the daemon. Identity is therefore an
 	// optional existing authority here; acquisition binds it after an
 	// authenticated StartIfNeeded connection when the daemon is first born.
 	identity, err := daemonidentity.Load(platform.StateDir())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("vev: load daemon authority: %w", err)
+		return fmt.Errorf("load daemon authority: %w", err)
 	}
 	config, err := brokerconfig.LoadProduction(layout, configPath, identity, localDaemonPolicy(), daemonmux.SocketPath(ipc.SocketDir()))
 	if err != nil {
@@ -242,7 +242,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	}
 	owner, err := deps.acquire(layout.Runtime)
 	if err != nil {
-		return fmt.Errorf("vev: broker sandbox ownership: %w", err)
+		return fmt.Errorf("broker sandbox ownership: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, owner.Release()) }()
 
@@ -258,7 +258,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	for _, endpoint := range config.Endpoints() {
 		registration, _ := config.Registration(endpoint)
 		if registration.Route.KnownHostsFile() != "" || registration.Route.ConnectTimeout() != 0 {
-			return errors.New("vev: broker routes require SSH trust and timeouts in OpenSSH configuration")
+			return errors.New("broker routes require SSH trust and timeouts in OpenSSH configuration")
 		}
 	}
 	initialHosts, err := configuredBrokerHosts(config)
@@ -267,7 +267,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	}
 	store, err := brokerstore.Open(brokerstore.Options{Dir: layout.State, InitialHosts: initialHosts, InitialImportProvided: true})
 	if err != nil {
-		return fmt.Errorf("vev: open broker sandbox store: %w", err)
+		return fmt.Errorf("open broker sandbox store: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, store.Close()) }()
 	if err := upgradeBrokerHostVersions(store); err != nil {
@@ -356,7 +356,7 @@ func runBrokerServe(ctx context.Context, options brokerServeOptions, deps broker
 	socketPath := brokeripc.SocketPath(layout.Runtime)
 	listener, err := deps.listen(socketPath, epoch, authority, brokeripc.Config{OnRetire: cancel})
 	if err != nil {
-		return fmt.Errorf("vev: listen on broker sandbox socket: %w", err)
+		return fmt.Errorf("listen on broker sandbox socket: %w", err)
 	}
 	if err := supervisor.RegisterCloseable("listener", listener); err != nil {
 		_ = listener.Close()
@@ -410,11 +410,11 @@ func configuredBrokerHosts(config *brokerconfig.Config) ([]ports.BrokerHostRecor
 	for _, endpoint := range config.Endpoints() {
 		registration, ok := config.Registration(endpoint)
 		if !ok {
-			return nil, fmt.Errorf("vev: missing configured broker registration %q", endpoint)
+			return nil, fmt.Errorf("missing configured broker registration %q", endpoint)
 		}
 		route, err := durableBrokerRoute(registration.Route)
 		if err != nil {
-			return nil, fmt.Errorf("vev: import configured broker host %q: %w", endpoint, err)
+			return nil, fmt.Errorf("import configured broker host %q: %w", endpoint, err)
 		}
 		records = append(records, ports.BrokerHostRecord{Registration: registration.Registration, Pinned: true, Policy: registration.Policy, Identity: registration.Identity, Route: route})
 	}
@@ -456,7 +456,7 @@ func durableBrokerRoute(route brokerconfig.Route) (ports.BrokerRouteSpec, error)
 // with, exactly as before.
 func offlineRegistryConfig(config *brokerconfig.Config, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector, loaders ...broker.LocalIdentityLoader) (broker.RegistryConfig, error) {
 	if config == nil {
-		return broker.RegistryConfig{}, errors.New("vev: offline registry requires configuration")
+		return broker.RegistryConfig{}, errors.New("offline registry requires configuration")
 	}
 	if _, ok := config.LocalBinding(); !ok {
 		mode := broker.MembershipImmutable

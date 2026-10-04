@@ -35,7 +35,7 @@ type BrokerLogicalConnection interface {
 // ID; callers must use a fresh ID. A connection ID is never reused in an epoch.
 type BrokerAdmissionError string
 
-func (e BrokerAdmissionError) Error() string { return "vev: broker admission: " + string(e) }
+func (e BrokerAdmissionError) Error() string { return "broker admission: " + string(e) }
 
 const (
 	BrokerAdmissionLimit   BrokerAdmissionError = "limit"

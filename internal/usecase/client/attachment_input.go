@@ -355,16 +355,16 @@ func (in *attachmentInput) apply(ctx context.Context, actions []paletteGeneratio
 		switch action.kind {
 		case paletteActionPublishCleared:
 			if err := in.send(ctx, action.theme); err != nil {
-				return fmt.Errorf("vev: publishing theme: %w", err)
+				return fmt.Errorf("publishing theme: %w", err)
 			}
 		case paletteActionPublishFinal:
 			in.themes.update(func(current *protocol.Theme) { *current = action.theme })
 			if err := in.send(ctx, action.theme); err != nil {
-				return fmt.Errorf("vev: publishing theme: %w", err)
+				return fmt.Errorf("publishing theme: %w", err)
 			}
 		case paletteActionWriteDrain, paletteActionWriteBatch:
 			if err := in.query.writeTerminalQuery([]byte(action.bytes)); err != nil {
-				return fmt.Errorf("vev: writing palette query: %w", err)
+				return fmt.Errorf("writing palette query: %w", err)
 			}
 		case paletteActionArmDrainDeadline:
 			in.drain.arm(in.clock, action.id, action.deadline)

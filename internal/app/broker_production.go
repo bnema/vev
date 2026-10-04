@@ -30,14 +30,14 @@ func productionBrokerConfigPath() string {
 func ensureProductionBrokerConfig() error {
 	path := productionBrokerConfigPath()
 	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("vev: secure broker configuration directory: %w", err)
+		return fmt.Errorf("secure broker configuration directory: %w", err)
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("vev: create broker configuration: %w", err)
+		return fmt.Errorf("create broker configuration: %w", err)
 	}
 	_, writeErr := file.WriteString(`{"marker":"vev.broker.offline/v1","registrations":[]}`)
 	closeErr := file.Close()
@@ -46,9 +46,9 @@ func ensureProductionBrokerConfig() error {
 	}
 	removeErr := os.Remove(path)
 	if writeErr != nil {
-		return errors.Join(fmt.Errorf("vev: write broker configuration: %w", writeErr), closeErr, removeErr)
+		return errors.Join(fmt.Errorf("write broker configuration: %w", writeErr), closeErr, removeErr)
 	}
-	return errors.Join(fmt.Errorf("vev: close broker configuration: %w", closeErr), removeErr)
+	return errors.Join(fmt.Errorf("close broker configuration: %w", closeErr), removeErr)
 }
 
 // remoteBrokerPolicy builds the remote host policy for a CLI transport name
@@ -57,7 +57,7 @@ func ensureProductionBrokerConfig() error {
 func remoteBrokerPolicy(transport string) ports.BrokerPolicy {
 	route, ok := hostTransportRoutes[transport]
 	if !ok {
-		panic(fmt.Sprintf("vev: unknown host transport %q", transport))
+		panic(fmt.Sprintf("unknown host transport %q", transport))
 	}
 	return ports.BrokerPolicy{
 		ProtocolVersion: protocol.Version, CatalogSchemaVersion: catalogue.RemoteCatalogSchemaVersion,
@@ -73,7 +73,7 @@ func remoteBrokerPolicy(transport string) ports.BrokerPolicy {
 func upgradeBrokerHostVersions(store ports.BrokerHostStore) error {
 	hosts, err := store.LoadHosts()
 	if err != nil {
-		return fmt.Errorf("vev: load broker hosts: %w", err)
+		return fmt.Errorf("load broker hosts: %w", err)
 	}
 	changed := false
 	records := ports.CloneBrokerHostRecords(hosts.Hosts)
@@ -95,7 +95,7 @@ func upgradeBrokerHostVersions(store ports.BrokerHostStore) error {
 		return nil
 	}
 	if err := store.ReplaceHosts(hosts.Revision, records); err != nil {
-		return fmt.Errorf("vev: upgrade broker host versions: %w", err)
+		return fmt.Errorf("upgrade broker host versions: %w", err)
 	}
 	return nil
 }

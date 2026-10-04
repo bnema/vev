@@ -43,7 +43,7 @@ func connectProductionBroker(ctx context.Context) (ports.BrokerService, error) {
 	// Validate the shared parent before creating broker-owned descendants,
 	// especially when a long XDG root maps directly into /tmp.
 	if err := safedir.EnsurePrivate(ipc.SocketDir()); err != nil {
-		return nil, fmt.Errorf("vev: secure broker runtime parent: %w", err)
+		return nil, fmt.Errorf("secure broker runtime parent: %w", err)
 	}
 	layout := productionBrokerLayout()
 	request := brokerStatusRequest{
@@ -57,7 +57,7 @@ func connectProductionBroker(ctx context.Context) (ports.BrokerService, error) {
 	}
 	connect := func() (ports.BrokerService, error) {
 		if _, err := ensureBrokerReady(ctx, request, deps); err != nil {
-			return nil, fmt.Errorf("vev: ensure broker: %w", err)
+			return nil, fmt.Errorf("ensure broker: %w", err)
 		}
 		return brokeripc.NewConnector(request.socketPath, brokeripc.Config{}).Connect(ctx)
 	}
@@ -65,23 +65,23 @@ func connectProductionBroker(ctx context.Context) (ports.BrokerService, error) {
 	if errors.Is(err, brokeripc.ErrBrokerRetired) {
 		owner, acquireErr := lifecycle.Acquire(ctx, layout.Runtime, 50*time.Millisecond)
 		if acquireErr != nil {
-			return nil, fmt.Errorf("vev: wait for retiring broker: %w", acquireErr)
+			return nil, fmt.Errorf("wait for retiring broker: %w", acquireErr)
 		}
 		if releaseErr := owner.Release(); releaseErr != nil {
-			return nil, fmt.Errorf("vev: release broker ownership: %w", releaseErr)
+			return nil, fmt.Errorf("release broker ownership: %w", releaseErr)
 		}
 		request.deadline = time.Now().Add(productionBrokerStartupTimeout)
 		service, err = connect()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("vev: connect broker: %w", err)
+		return nil, fmt.Errorf("connect broker: %w", err)
 	}
 	if _, stale := brokeripc.StaleBuild(service); stale {
 		fmt.Fprintln(os.Stderr, `vev: the running broker is from another build; run "vev kill --all" to restart it`)
 	}
 	if err := awaitBrokerPublication(ctx, service); err != nil {
 		_ = service.Close()
-		return nil, fmt.Errorf("vev: await broker publication: %w", err)
+		return nil, fmt.Errorf("await broker publication: %w", err)
 	}
 	return service, nil
 }

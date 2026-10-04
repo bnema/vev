@@ -144,7 +144,7 @@ func dialBrokerDaemonCarriage(ctx context.Context, carriage string, target ports
 	}
 	starter := localDaemonStarter
 	if starter.dial == nil || starter.spawn == nil {
-		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: errors.New("vev: daemon starter is incomplete")}
+		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: errors.New("daemon starter is incomplete")}
 	}
 	raw, err := starter.dial(ctx, carriage)
 	if err == nil {
@@ -172,12 +172,12 @@ func dialBrokerDaemonCarriage(ctx context.Context, carriage string, target ports
 // or empty path can never trigger a spawn.
 func validateDaemonCarriage(carriage string) error {
 	if carriage == "" {
-		return ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: errors.New("vev: daemon carriage path is empty")}
+		return ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: errors.New("daemon carriage path is empty")}
 	}
 	if !filepath.IsAbs(carriage) || filepath.Clean(carriage) != carriage {
 		return ports.BrokerError{
 			Code:  ports.BrokerErrorIncompatible,
-			Cause: fmt.Errorf("vev: daemon carriage %q is not an absolute cleaned path", carriage),
+			Cause: fmt.Errorf("daemon carriage %q is not an absolute cleaned path", carriage),
 		}
 	}
 	return nil
@@ -191,7 +191,7 @@ func validateDaemonCarriageStart(carriage string, starter brokerDaemonStarter) e
 	if want := starter.effectivePublished(); carriage != want {
 		return ports.BrokerError{
 			Code:  ports.BrokerErrorIncompatible,
-			Cause: fmt.Errorf("vev: refusing to start a daemon for carriage %q: this process publishes %q", carriage, want),
+			Cause: fmt.Errorf("refusing to start a daemon for carriage %q: this process publishes %q", carriage, want),
 		}
 	}
 	return nil
@@ -231,7 +231,7 @@ func brokerDaemonStartArgvFlag(mode ports.BrokerDaemonStartMode) (string, error)
 	case ports.BrokerDaemonStartIfNeeded:
 		return "if-needed", nil
 	default:
-		return "", fmt.Errorf("vev: invalid broker daemon start mode %s", mode)
+		return "", fmt.Errorf("invalid broker daemon start mode %s", mode)
 	}
 }
 
@@ -245,6 +245,6 @@ func parseBrokerDaemonStartArgvFlag(value string) (ports.BrokerDaemonStartMode, 
 	case "if-needed":
 		return ports.BrokerDaemonStartIfNeeded, nil
 	default:
-		return 0, fmt.Errorf("vev: unknown daemon start mode %q (want existing-only or if-needed)", value)
+		return 0, fmt.Errorf("unknown daemon start mode %q (want existing-only or if-needed)", value)
 	}
 }

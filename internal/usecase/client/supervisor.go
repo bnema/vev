@@ -478,13 +478,13 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	}
 	cfg.SessionEnvironment = cfg.SessionEnvironment.Clone()
 	if supervisorNil(cfg.Connector) {
-		return nil, errors.New("vev: supervisor requires a broker connector")
+		return nil, errors.New("supervisor requires a broker connector")
 	}
 	if supervisorNil(cfg.Terminal) {
-		return nil, errors.New("vev: supervisor requires a terminal")
+		return nil, errors.New("supervisor requires a terminal")
 	}
 	if supervisorNil(cfg.Clock) {
-		return nil, errors.New("vev: supervisor requires a clock")
+		return nil, errors.New("supervisor requires a clock")
 	}
 	if cfg.Render == nil {
 		cfg.Render = func(State) {}
@@ -499,10 +499,10 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 	}
 	if cfg.ResolveInitialNavigation != nil {
 		if cfg.InitialNavigation != (InitialNavigation{}) {
-			return nil, errors.New("vev: supervisor accepts either an initial navigation or a resolver, not both")
+			return nil, errors.New("supervisor accepts either an initial navigation or a resolver, not both")
 		}
 	} else if err := cfg.InitialNavigation.Validate(); err != nil {
-		return nil, fmt.Errorf("vev: supervisor initial navigation: %w", err)
+		return nil, fmt.Errorf("supervisor initial navigation: %w", err)
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -558,7 +558,7 @@ func (s *Supervisor) State() State {
 func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	restore, err := s.cfg.Terminal.EnterRaw()
 	if err != nil {
-		return fmt.Errorf("vev: entering raw mode: %w", err)
+		return fmt.Errorf("entering raw mode: %w", err)
 	}
 	if restore == nil {
 		restore = func() error { return nil }
@@ -566,7 +566,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	restoreTerminal := sync.OnceValue(restore)
 	defer func() {
 		if rerr := restoreTerminal(); rerr != nil && retErr == nil {
-			retErr = fmt.Errorf("vev: restoring terminal: %w", rerr)
+			retErr = fmt.Errorf("restoring terminal: %w", rerr)
 		}
 	}()
 

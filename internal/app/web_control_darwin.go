@@ -44,7 +44,7 @@ func sameWebUID(conn *net.UnixConn) bool {
 func bindWebControl() (*net.UnixListener, error) {
 	path := webControlAddress()
 	if err := safedir.EnsurePrivate(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("vev: securing web control directory: %w", err)
+		return nil, fmt.Errorf("securing web control directory: %w", err)
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
@@ -55,10 +55,10 @@ func bindWebControl() (*net.UnixListener, error) {
 		probeConn, probeErr := net.DialTimeout("unix", path, time.Second)
 		if probeErr == nil {
 			_ = probeConn.Close()
-			return nil, errors.New("vev: web gateway control is already bound")
+			return nil, errors.New("web gateway control is already bound")
 		}
 		if !errors.Is(probeErr, syscall.ECONNREFUSED) && !errors.Is(probeErr, syscall.ENOENT) {
-			return nil, fmt.Errorf("vev: probing web control socket: %w", probeErr)
+			return nil, fmt.Errorf("probing web control socket: %w", probeErr)
 		}
 		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
 			return nil, rmErr
@@ -74,7 +74,7 @@ func bindWebControl() (*net.UnixListener, error) {
 func secureWebControlSocket(listener *net.UnixListener, path string) error {
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = listener.Close()
-		return fmt.Errorf("vev: securing web control socket: %w", err)
+		return fmt.Errorf("securing web control socket: %w", err)
 	}
 	return nil
 }

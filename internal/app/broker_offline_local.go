@@ -30,10 +30,10 @@ func newDynamicLocalRouteProbe(route brokerconfig.Route, policy ports.BrokerPoli
 	// time; this re-checks the exported binding a caller may have built itself,
 	// because the dial seam routes an ssh address to a child process.
 	if !route.IsLocal() {
-		return nil, errors.New("vev: broker local probe requires a local route")
+		return nil, errors.New("broker local probe requires a local route")
 	}
 	if err := route.Validate(); err != nil {
-		return nil, fmt.Errorf("vev: broker local probe: %w", err)
+		return nil, fmt.Errorf("broker local probe: %w", err)
 	}
 	return broker.NewLocalDaemonProbe(epoch, route.Address(), policy, connector, sessionwire.BrokerCodec{}, loadIdentity)
 }
@@ -43,7 +43,7 @@ func newDynamicLocalRouteProbe(route brokerconfig.Route, policy ports.BrokerPoli
 func brokerLocalProbe(config *brokerconfig.Config, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector, loaders ...broker.LocalIdentityLoader) (*broker.LocalDaemonProbe, error) {
 	binding, ok := config.LocalBinding()
 	if !ok {
-		return nil, errors.New("vev: broker local probe requires a provisioned local binding")
+		return nil, errors.New("broker local probe requires a provisioned local binding")
 	}
 	loader := broker.LocalIdentityLoader(func() (ports.BrokerDaemonIdentity, error) { return binding.Identity, nil })
 	if len(loaders) != 0 {
@@ -58,7 +58,7 @@ func brokerLocalProbe(config *brokerconfig.Config, epoch ports.BrokerEpoch, conn
 func brokerLocalObservation(config *brokerconfig.Config, epoch ports.BrokerEpoch, connector ports.BrokerEndpointConnector, loaders ...broker.LocalIdentityLoader) (*broker.LocalObservation, error) {
 	binding, ok := config.LocalBinding()
 	if !ok {
-		return nil, errors.New("vev: broker local observation requires a provisioned local binding")
+		return nil, errors.New("broker local observation requires a provisioned local binding")
 	}
 	probe, err := brokerLocalProbe(config, epoch, connector, loaders...)
 	if err != nil {

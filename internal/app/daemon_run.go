@@ -56,7 +56,7 @@ func developmentTempDirOption(ensurePrivate func(string) error) (daemon.Option, 
 		return nil, nil
 	}
 	if err := ensurePrivate(dir); err != nil {
-		return nil, fmt.Errorf("vev: secure development temp directory: %w", err)
+		return nil, fmt.Errorf("secure development temp directory: %w", err)
 	}
 	return daemon.WithTempDir(dir), nil
 }
@@ -107,17 +107,17 @@ func runWithLifecycleOwnerDeps(ctx context.Context, runtimeDir, stateDir string,
 		log = slog.Default()
 	}
 	if err := deps.ensurePrivate(runtimeDir); err != nil {
-		return fmt.Errorf("vev: secure runtime directory: %w", err)
+		return fmt.Errorf("secure runtime directory: %w", err)
 	}
 	if err := deps.ensurePrivate(stateDir); err != nil {
-		return fmt.Errorf("vev: secure state directory: %w", err)
+		return fmt.Errorf("secure state directory: %w", err)
 	}
 	lockPath := lifecycle.Path(runtimeDir)
 	log.Info("lifecycle_owner_wait", "path", lockPath)
 	owner, err := deps.acquire(ctx, runtimeDir, lifecycleAcquireRetry)
 	if err != nil {
 		log.Warn("lifecycle_owner_wait_failed", "path", lockPath, "reason_code", "acquire-failed")
-		return fmt.Errorf("vev: acquire lifecycle ownership: %w", err)
+		return fmt.Errorf("acquire lifecycle ownership: %w", err)
 	}
 	log.Info("lifecycle_owner_acquired", "path", lockPath)
 	defer func() {
@@ -130,7 +130,7 @@ func runWithLifecycleOwnerDeps(ctx context.Context, runtimeDir, stateDir string,
 		retErr = errors.Join(retErr, releaseErr)
 	}()
 	if start == nil {
-		return errors.New("vev: nil owned daemon startup")
+		return errors.New("nil owned daemon startup")
 	}
 	return start(ctx)
 }
@@ -183,7 +183,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	clk := clock.New()
 	observer, observerCloser, err := newPerformanceTrace(clk)
 	if err != nil {
-		return fmt.Errorf("vev: performance trace: %w", err)
+		return fmt.Errorf("performance trace: %w", err)
 	}
 	if observerCloser != nil {
 		defer func() { retErr = errors.Join(retErr, observerCloser.Close()) }()
@@ -228,7 +228,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		if errors.Is(err, persist.ErrCatalogueUnreadable) {
 			return unreadableCatalogueError(stateDir)
 		}
-		return fmt.Errorf("vev: open durable session state %s: %w", storePath, err)
+		return fmt.Errorf("open durable session state %s: %w", storePath, err)
 	}
 	recoveryMode := "current"
 	if opened.NewInstall {
@@ -249,11 +249,11 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	// publication. Phase 3 snapshot restoration remains asynchronous in Serve.
 	identity, err := daemonidentity.LoadOrCreate(stateDir)
 	if err != nil {
-		return fmt.Errorf("vev: establish daemon identity: %w", err)
+		return fmt.Errorf("establish daemon identity: %w", err)
 	}
 	incarnation, err := daemonidentity.NewIncarnation()
 	if err != nil {
-		return fmt.Errorf("vev: establish daemon incarnation: %w", err)
+		return fmt.Errorf("establish daemon incarnation: %w", err)
 	}
 	binding, err := daemonmux.NewServerBindings(identity, incarnation, []daemonmux.ServerPolicyAdmission{
 		{Policy: localDaemonPolicy(), Origin: ports.SessionOriginLocal},
@@ -261,7 +261,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		{Policy: remoteBrokerPolicy(hostTransportSSH), Origin: ports.SessionOriginRemote},
 	})
 	if err != nil {
-		return fmt.Errorf("vev: establish daemon mux authority: %w", err)
+		return fmt.Errorf("establish daemon mux authority: %w", err)
 	}
 	aggregate := daemonmux.NewAggregateListener()
 	muxSupervisor, err := daemonmux.NewServerSupervisor(aggregate, binding, daemonmux.DefaultMuxCeilings(), 0)
@@ -271,7 +271,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	defer func() { retErr = errors.Join(retErr, muxSupervisor.Close()) }()
 	muxListener, err := ipc.ListenMux(daemonmux.SocketPath(ipc.SocketDir()))
 	if err != nil {
-		return fmt.Errorf("vev: listen daemon mux: %w", err)
+		return fmt.Errorf("listen daemon mux: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, muxListener.Close()) }()
 	go func() {
@@ -292,7 +292,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 	if err != nil {
 		closeErr := opened.Catalogue.Close()
 		log.Error("daemon listen failed", "socket_dir", ipc.SocketDir(), "err", err)
-		return errors.Join(fmt.Errorf("vev: daemon listen: %w", err), closeErr)
+		return errors.Join(fmt.Errorf("daemon listen: %w", err), closeErr)
 	}
 	defer func() { _ = ln.Close() }()
 	log.Info("daemon starting", "socket", ln.Addr())
@@ -308,7 +308,7 @@ func runDaemonOwnedWithLogger(ctx context.Context, log *slog.Logger) (retErr err
 		}
 	}()
 	if err := aggregate.Register(sessionwire.NewServerListener(ln)); err != nil {
-		return fmt.Errorf("vev: register local session listener: %w", err)
+		return fmt.Errorf("register local session listener: %w", err)
 	}
 	if err := d.Serve(ctx, aggregate); err != nil {
 		log.Error("daemon exited", "err", err)

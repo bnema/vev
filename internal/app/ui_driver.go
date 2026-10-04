@@ -237,7 +237,7 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
 	defer func() { _ = logCloser.Close() }()
 	terminal, err := uiterm.New(ctx, domain.Geometry{Size: domain.Size{Cols: options.cols, Rows: options.rows}}, "")
 	if err != nil {
-		return fmt.Errorf("vev: create headless terminal: %w", err)
+		return fmt.Errorf("create headless terminal: %w", err)
 	}
 	defer terminal.Close()
 	ui := client.NewUI(terminal, clk)
@@ -272,10 +272,10 @@ func runHeadlessUIDriver(ctx context.Context, options uiDriverOptions) error {
 // daemon, and every session stay alive for the other clients.
 func runUIDriverClient(ctx context.Context, cfg brokerClientConfig, stream io.ReadWriteCloser) error {
 	if cfg.UI == nil || cfg.Terminal == nil || cfg.Clock == nil {
-		return errors.New("vev: UI driver requires a UI, a terminal, and a clock")
+		return errors.New("UI driver requires a UI, a terminal, and a clock")
 	}
 	if stream == nil {
-		return errors.New("vev: UI driver requires a stream")
+		return errors.New("UI driver requires a stream")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -327,7 +327,7 @@ func waitForUIDriverPublication(ctx context.Context, ui *client.UI) (ports.UISna
 	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return ports.UISnapshot{}, fmt.Errorf("vev: UI driver published no initial state: %w", err)
+			return ports.UISnapshot{}, fmt.Errorf("UI driver published no initial state: %w", err)
 		}
 		return ports.UISnapshot{}, err
 	}

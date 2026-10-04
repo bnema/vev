@@ -137,7 +137,7 @@ var errCommandNotSent = errors.New("command request not sent")
 // uncorrelated, malformed, or never observed before the deadline. The daemon may
 // already have committed the command, so the outcome is indeterminate, the
 // request is never replayed, and a late result cannot change the verdict.
-var errCommandOutcomeUnknown = errors.New("vev: command outcome unknown")
+var errCommandOutcomeUnknown = errors.New("command outcome unknown")
 
 // commandOutcomeUnknown classifies one observation detail as an indeterminate
 // command outcome while preserving that detail's exact message and unwrap chain.

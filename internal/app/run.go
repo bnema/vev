@@ -155,17 +155,17 @@ const (
 const daemonStopTimeout = 2 * time.Second
 
 var (
-	errDaemonNotRunning   = errors.New("vev: no daemon running")
-	errKillOutcomeUnknown = errors.New("vev: kill outcome unknown")
+	errDaemonNotRunning   = errors.New("no daemon running")
+	errKillOutcomeUnknown = errors.New("kill outcome unknown")
 )
 
 func runUIRemoteCleanup(ctx context.Context) error {
 	root := os.Getenv("VEV_ENV_ROOT")
 	if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
-		return errors.New("vev: remote UI cleanup requires a private absolute launch root")
+		return errors.New("remote UI cleanup requires a private absolute launch root")
 	}
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir == "" || runtimeDir != filepath.Join(root, "runtime") {
-		return errors.New("vev: remote UI cleanup requires the launch runtime directory")
+		return errors.New("remote UI cleanup requires the launch runtime directory")
 	}
 	if err := requestDaemonStop(ctx); err != nil && !errors.Is(err, errDaemonNotRunning) {
 		return err
@@ -228,7 +228,7 @@ var dialListDaemon = ipc.DialContext
 
 // errNoLocalDaemon reports that no local daemon socket answers; nothing was
 // started to find out.
-var errNoLocalDaemon = errors.New("vev: no local daemon")
+var errNoLocalDaemon = errors.New("no local daemon")
 
 // stopDaemonWithoutBroker asks an existing local daemon to stop directly. A
 // daemon routinely outlives the idle broker, so "no broker" never means "no
@@ -239,11 +239,11 @@ func stopDaemonWithoutBroker(ctx context.Context) error {
 		return errDaemonNotRunning
 	}
 	if err != nil {
-		return fmt.Errorf("vev: stop local daemon: %w", err)
+		return fmt.Errorf("stop local daemon: %w", err)
 	}
 	result, ok := reply.(protocol.KillResult)
 	if !ok {
-		return fmt.Errorf("vev: unexpected daemon stop reply %T", reply)
+		return fmt.Errorf("unexpected daemon stop reply %T", reply)
 	}
 	return brokerKillResultError(result)
 }

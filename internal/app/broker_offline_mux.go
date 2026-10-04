@@ -181,7 +181,7 @@ func brokerDynamicMuxConnector(config *brokerconfig.Config, routes *broker.Route
 		}
 		binding, ok := config.LocalBinding()
 		if !ok || binding.Route.Address() != target.Address || !binding.Policy.Compatible(target.Policy) {
-			return nil, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("vev: broker mux: local route authority does not match the resolved target")}
+			return nil, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("broker mux: local route authority does not match the resolved target")}
 		}
 		return dialBrokerRoute(ctx, binding.Route, target, log)
 	}, daemonmux.DefaultMuxCeilings())
@@ -221,7 +221,7 @@ func dialBrokerRoute(ctx context.Context, route brokerconfig.Route, target ports
 	case brokerconfig.RouteSSHQUIC:
 		return dialBrokerQUICRoute(ctx, route, target.StartMode, log)
 	default:
-		return nil, fmt.Errorf("vev: broker mux: unsupported route kind %q", route.Kind())
+		return nil, fmt.Errorf("broker mux: unsupported route kind %q", route.Kind())
 	}
 }
 
@@ -241,7 +241,7 @@ func sshMuxCommandSpec(route brokerconfig.Route, mode ports.BrokerDaemonStartMod
 	argv := route.Argv()
 	for _, word := range argv {
 		if word == brokerDaemonStartArg {
-			return sshstdio.CommandSpec{}, fmt.Errorf("vev: broker mux route provisions its own %s", brokerDaemonStartArg)
+			return sshstdio.CommandSpec{}, fmt.Errorf("broker mux route provisions its own %s", brokerDaemonStartArg)
 		}
 	}
 	argv = append(argv, brokerDaemonStartArg, flag)
@@ -452,7 +452,7 @@ func brokerQUICUnavailable(action string, err error) error {
 	if err == nil {
 		err = errors.New("unavailable")
 	}
-	return fmt.Errorf("vev: broker mux QUIC unavailable: %s: %w", action, err)
+	return fmt.Errorf("broker mux QUIC unavailable: %s: %w", action, err)
 }
 
 // runBrokerMuxStdioCommand bridges the process' own stdio to the single
@@ -464,12 +464,12 @@ func runBrokerMuxStdioCommand(ctx context.Context, options brokerMuxOptions) err
 		if daemonCarriageAbsence(err) {
 			return &exitCoded{code: sshstdio.MuxExitNoDaemon, err: err}
 		}
-		return fmt.Errorf("vev: broker mux stdio: dial daemonmux carriage: %w", err)
+		return fmt.Errorf("broker mux stdio: dial daemonmux carriage: %w", err)
 	}
 	bounded, ok := raw.(wire.BoundedTransport)
 	if !ok {
 		_ = raw.Close()
-		return errors.New("vev: broker mux stdio: carriage is not a bounded transport")
+		return errors.New("broker mux stdio: carriage is not a bounded transport")
 	}
 	return bridgeMuxTransports(ctx, sshstdio.NewStdioTransport(), bounded)
 }
@@ -522,7 +522,7 @@ func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOpti
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return fmt.Errorf("vev: broker mux bootstrap readiness: %w", err)
+		return fmt.Errorf("broker mux bootstrap readiness: %w", err)
 	}
 	line, err := quic.EncodeReadiness(readiness)
 	if err != nil {
@@ -576,12 +576,12 @@ func runBrokerMuxQUICProxyCommand(ctx context.Context, options brokerMuxOptions)
 		if daemonCarriageAbsence(err) {
 			return &exitCoded{code: sshstdio.MuxExitNoDaemon, err: err}
 		}
-		return fmt.Errorf("vev: broker mux quic proxy: dial daemonmux carriage: %w", err)
+		return fmt.Errorf("broker mux quic proxy: dial daemonmux carriage: %w", err)
 	}
 	bounded, ok := raw.(wire.BoundedTransport)
 	if !ok {
 		_ = raw.Close()
-		return errors.New("vev: broker mux quic proxy: carriage is not a bounded transport")
+		return errors.New("broker mux quic proxy: carriage is not a bounded transport")
 	}
 	return bridgeMuxTransports(ctx, transport, bounded)
 }
