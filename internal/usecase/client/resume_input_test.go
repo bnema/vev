@@ -10,6 +10,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -85,13 +86,172 @@ func TestTerminalInputPumpResumeWindow(t *testing.T) {
 			}
 
 			pump.endResume()
-			require.Nil(t, pump.resumeCancelled())
+			require.False(t, pumpResumeOpen(pump), "the window is closed")
 			reader.push([]byte("after"))
 			require.Eventually(t, func() bool {
 				pump.mu.Lock()
 				defer pump.mu.Unlock()
 				return pump.pending != nil && string(pump.pending.data) == "after"
 			}, 5*time.Second, time.Millisecond, "input reaches the next owner once the window closes")
+		})
+	}
+}
+
+// TestTerminalInputPumpResumeCancelGrace pins that a cancel key repeated right
+// after a resume cancel never reaches the picker, whose exit key would quit
+// vev, while any other input, the same key once the grace passed, or a key
+// meant for another owner is delivered. Every cancel key slides the grace.
+func TestTerminalInputPumpResumeCancelGrace(t *testing.T) {
+	type step struct {
+		key  string
+		at   time.Duration // clock reading when the key's read is handled
+		read bool          // the pump consults the clock for this read
+		drop bool          // the read never reaches an owner
+	}
+	const (
+		ownerNone         = ""
+		ownerPicker       = "picker"
+		ownerDuringResume = "non-picker claimed during the resume"
+		ownerAfterResume  = "non-picker claimed after the resume"
+	)
+	tests := []struct {
+		name string
+		// windowCancels are the clock readings of the cancel keys read while
+		// the resume window is open; the first one latches the cancel.
+		windowCancels []time.Duration
+		owner         string
+		reopen        bool
+		steps         []step
+	}{
+		{name: "escape inside the grace is dropped", steps: []step{{key: "\x1b", at: resumeCancelGrace - time.Millisecond, read: true, drop: true}}},
+		{name: "ctrl+c inside the grace is dropped", steps: []step{{key: "\x03", at: time.Millisecond, read: true, drop: true}}},
+		{name: "kitty ctrl+c inside the grace is dropped", steps: []step{{key: "\x1b[99;5u", at: 100 * time.Millisecond, read: true, drop: true}}},
+		{name: "kitty escape inside the grace is dropped", steps: []step{{key: "\x1b[27u", at: 100 * time.Millisecond, read: true, drop: true}}},
+		{name: "escape at the end of the grace is delivered", steps: []step{{key: "\x1b", at: resumeCancelGrace, read: true}}},
+		{name: "ctrl+c after the grace is delivered", steps: []step{{key: "\x03", at: resumeCancelGrace + time.Second, read: true}}},
+		{name: "other key inside the grace is delivered", steps: []step{{key: "j", at: time.Millisecond}}},
+		{name: "arrow key inside the grace is delivered", steps: []step{{key: "\x1b[A", at: time.Millisecond}}},
+		{name: "ctrl+c mixed with typed text is delivered", steps: []step{{key: "j\x03", at: time.Millisecond}}},
+		{name: "typed text then escape is delivered", steps: []step{{key: "ab\x1b", at: time.Millisecond}}},
+		{name: "kitty ctrl+c mixed with typed text is delivered", steps: []step{{key: "j\x1b[99;5u", at: time.Millisecond}}},
+		{name: "two cancel keys in one read are delivered", steps: []step{{key: "\x03\x03", at: time.Millisecond}}},
+		{name: "kitty ctrl+c release is delivered", steps: []step{{key: "\x1b[99;5:3u", at: time.Millisecond}}},
+		{
+			name: "a swallowed cancel slides the grace",
+			steps: []step{
+				{key: "\x1b", at: 300 * time.Millisecond, read: true, drop: true},
+				{key: "\x03", at: 600 * time.Millisecond, read: true, drop: true},
+				{key: "\x1b", at: 900 * time.Millisecond, read: true, drop: true},
+				{key: "\x1b", at: 900*time.Millisecond + resumeCancelGrace, read: true},
+			},
+		},
+		{
+			name: "the slid grace still ends",
+			steps: []step{
+				{key: "\x1b", at: 300 * time.Millisecond, read: true, drop: true},
+				{key: "\x1b", at: 300*time.Millisecond + resumeCancelGrace, read: true},
+			},
+		},
+		{
+			name:          "a repeated cancel inside the window slides the grace",
+			windowCancels: []time.Duration{0, 300 * time.Millisecond, 600 * time.Millisecond},
+			steps:         []step{{key: "\x1b", at: 900 * time.Millisecond, read: true, drop: true}},
+		},
+		{
+			name:   "a new resume window clears the grace",
+			reopen: true,
+			steps:  []step{{key: "\x1b", at: time.Millisecond}},
+		},
+		{
+			name:  "the picker keeps the grace",
+			owner: ownerPicker,
+			steps: []step{{key: "\x1b", at: time.Millisecond, read: true, drop: true}},
+		},
+		{
+			name:  "an owner claimed during the resume gets its first cancel",
+			owner: ownerDuringResume,
+			steps: []step{{key: "\x03", at: time.Millisecond}},
+		},
+		{
+			name:  "an owner claimed after the resume gets its first cancel",
+			owner: ownerAfterResume,
+			steps: []step{{key: "\x1b", at: time.Millisecond}},
+		},
+		{
+			name:  "an unowned pump keeps the grace",
+			owner: ownerNone,
+			steps: []step{{key: "\x1b", at: time.Millisecond, read: true, drop: true}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+			windowCancels := tt.windowCancels
+			if len(windowCancels) == 0 {
+				windowCancels = []time.Duration{0}
+			}
+			clock := portsmocks.NewMockClock(t)
+			for _, at := range windowCancels {
+				clock.EXPECT().Now().Return(base.Add(at)).Once()
+			}
+			for _, st := range tt.steps {
+				if st.read {
+					clock.EXPECT().Now().Return(base.Add(st.at)).Once()
+				}
+			}
+
+			reader := newAttachTestReader()
+			pump := newTerminalInputPump(reader)
+			pump.clock = clock
+			pump.start()
+			t.Cleanup(func() {
+				pump.stop()
+				reader.close()
+			})
+
+			cancelled := pump.beginResume()
+			for range windowCancels {
+				reader.push([]byte("\x1b"))
+				reader.awaitHandled(t)
+			}
+			select {
+			case <-cancelled:
+			default:
+				require.Fail(t, "the first cancel key must cancel the resume")
+			}
+			if tt.owner == ownerDuringResume {
+				_, ok := pump.tryClaim()
+				require.True(t, ok)
+			}
+			pump.endResume()
+			switch tt.owner {
+			case ownerPicker:
+				_, ok := pump.tryClaimPicker()
+				require.True(t, ok)
+			case ownerAfterResume:
+				_, ok := pump.tryClaim()
+				require.True(t, ok)
+			}
+			if tt.reopen {
+				pump.beginResume()
+				pump.endResume()
+			}
+
+			for i, st := range tt.steps {
+				reader.push([]byte(st.key))
+				reader.awaitHandled(t)
+				pump.mu.Lock()
+				pending := pump.pending
+				pump.pending = nil
+				pump.mu.Unlock()
+				if st.drop {
+					require.Nil(t, pending, "step %d: the repeated cancel must not reach an owner", i)
+					continue
+				}
+				require.NotNil(t, pending, "step %d: the key must reach the next owner", i)
+				require.Equal(t, st.key, string(pending.data), "step %d", i)
+				pump.space <- struct{}{}
+			}
 		})
 	}
 }
@@ -308,11 +468,18 @@ func TestSupervisorResumeDiscardsTypedInput(t *testing.T) {
 	}
 }
 
+// pumpResumeOpen reports whether the pump has a resume input window open.
+func pumpResumeOpen(pump *terminalInputPump) bool {
+	pump.mu.Lock()
+	defer pump.mu.Unlock()
+	return pump.resumeActive
+}
+
 // resumeWindowClosed proves the supervisor released the resume input window:
 // no cancel signal is open on the pump.
 func resumeWindowClosed(t *testing.T, sup *Supervisor) {
 	t.Helper()
-	require.Nil(t, sup.attachments.input.resumeCancelled(), "the resume input window is closed")
+	require.False(t, pumpResumeOpen(sup.attachments.input), "the resume input window is closed")
 }
 
 // TestSupervisorResumeExitsCloseInputWindow proves every way the resume loop
@@ -362,14 +529,17 @@ func TestSupervisorResumeExitsCloseInputWindow(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := startResumeCancelHarness(t, resumeAttaches)
 			session := tt.exit(t, h)
-			resumeWindowClosed(t, h.sup)
 			if session == nil {
+				// The picker state is presented before the resume loop unwinds;
+				// the picker takes input back only after the window closed.
 				require.Eventually(t, h.picker.owns, 5*time.Second, time.Millisecond, "the picker gets input back")
+				resumeWindowClosed(t, h.sup)
 				before := h.picker.consumedCount()
 				h.reader.push([]byte("x"))
 				require.Eventually(t, func() bool { return h.picker.consumedCount() > before }, 5*time.Second, time.Millisecond)
 				return
 			}
+			resumeWindowClosed(t, h.sup)
 			h.reader.push([]byte("x"))
 			require.Eventually(t, func() bool {
 				for _, message := range session.messages() {

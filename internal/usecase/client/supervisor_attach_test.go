@@ -1441,9 +1441,9 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		// transport-class error, once the whole resume window has elapsed.
 		openUnavailableAfterWindow
 	)
-	// beyondOldBudget is more consecutive failures than the former
-	// count-based budget allowed.
-	const beyondOldBudget = 8
+	// manyFailures is a run of consecutive failures long enough to show that
+	// only the resume window, never an attempt count, ends a resume.
+	const manyFailures = 8
 	repeat := func(s step, n int) []step {
 		steps := make([]step, n)
 		for i := range steps {
@@ -1459,13 +1459,13 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 		wantPicker bool
 	}{
 		{name: "resume attaches again", steps: []step{attachAndStay}},
-		{name: "every stable resume restores the window", steps: append(repeat(attachThenLose, beyondOldBudget), attachAndStay)},
-		{name: "a flapping session keeps resuming inside the window", steps: append(repeat(attachThenFlap, beyondOldBudget), attachAndStay)},
-		{name: "failures past the old budget still resume", steps: append(repeat(loseBeforeAttach, beyondOldBudget), attachAndStay)},
-		{name: "losses past the window return to the picker", steps: append(repeat(loseBeforeAttach, beyondOldBudget), loseAfterWindow), wantPicker: true},
+		{name: "every stable resume restores the window", steps: append(repeat(attachThenLose, manyFailures), attachAndStay)},
+		{name: "a flapping session keeps resuming inside the window", steps: append(repeat(attachThenFlap, manyFailures), attachAndStay)},
+		{name: "many consecutive failures still resume", steps: append(repeat(loseBeforeAttach, manyFailures), attachAndStay)},
+		{name: "losses past the window return to the picker", steps: append(repeat(loseBeforeAttach, manyFailures), loseAfterWindow), wantPicker: true},
 		{name: "refusal is final", steps: []step{refuse}, wantPicker: true},
-		{name: "unavailable opens past the old budget still resume", steps: append(repeat(openUnavailable, beyondOldBudget), attachAndStay)},
-		{name: "unavailable opens past the window return to the picker", steps: append(repeat(openUnavailable, beyondOldBudget), openUnavailableAfterWindow), wantPicker: true},
+		{name: "many unavailable opens still resume", steps: append(repeat(openUnavailable, manyFailures), attachAndStay)},
+		{name: "unavailable opens past the window return to the picker", steps: append(repeat(openUnavailable, manyFailures), openUnavailableAfterWindow), wantPicker: true},
 		{name: "cancel during backoff never resumes", steps: []step{cancelDuringBackoff}},
 	}
 	for _, tc := range cases {
@@ -1800,30 +1800,6 @@ func TestSupervisorAttachmentConcurrentCommitAndCancellation(t *testing.T) {
 			require.False(t, picker.owns(), "a terminated run must not re-acquire the picker")
 			require.True(t, stream.closedNow(), "the admitted stream must be released")
 			require.NotEqual(t, PresentAttached, harness.sup.State().Presentation)
-		})
-	}
-}
-
-// TestResumeBackoffCadence pins the resume backoff: the same equal-jitter
-// doubling as the broker reconnect, capped at 5s instead of 2s.
-func TestResumeBackoffCadence(t *testing.T) {
-	zero := func() float64 { return 0 }
-	tests := []struct {
-		name    string
-		attempt uint64
-		jitter  func() float64
-		want    time.Duration
-	}{
-		{name: "first attempt", attempt: 1, jitter: zero, want: 50 * time.Millisecond},
-		{name: "doubles", attempt: 4, jitter: zero, want: 400 * time.Millisecond},
-		{name: "past the broker cap", attempt: 6, jitter: zero, want: 1600 * time.Millisecond},
-		{name: "reaches the resume cap", attempt: 7, jitter: zero, want: 2500 * time.Millisecond},
-		{name: "stays at the resume cap", attempt: 50, jitter: zero, want: 2500 * time.Millisecond},
-		{name: "jitter spans the upper half", attempt: 50, jitter: func() float64 { return 1 }, want: supervisorResumeRetryMax},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, backoffDelay(tt.attempt, supervisorResumeRetryMax, tt.jitter))
 		})
 	}
 }

@@ -624,6 +624,9 @@ func TestSupervisorReducerTransitions(t *testing.T) {
 	}
 }
 
+// TestSupervisorBackoffCadence pins the equal-jitter doubling for both the
+// broker reconnect cap (supervisorRetryMax) and the resume cap
+// (supervisorResumeRetryMax).
 func TestSupervisorBackoffCadence(t *testing.T) {
 	zero := func() float64 { return 0 }
 	half := func() float64 { return 0.5 }
@@ -631,36 +634,44 @@ func TestSupervisorBackoffCadence(t *testing.T) {
 	nan := func() float64 { return math.NaN() }
 	negInf := func() float64 { return math.Inf(-1) }
 	posInf := func() float64 { return math.Inf(1) }
+	one := func() float64 { return 1 }
 
 	tests := []struct {
 		name    string
 		attempt uint64
+		ceiling time.Duration
 		jitter  func() float64
 		want    time.Duration
 	}{
-		{"no attempt has no delay", 0, zero, 0},
-		{"first failure halves 100ms", 1, zero, 50 * time.Millisecond},
-		{"second failure halves 200ms", 2, zero, 100 * time.Millisecond},
-		{"third failure halves 400ms", 3, zero, 200 * time.Millisecond},
-		{"fourth failure halves 800ms", 4, zero, 400 * time.Millisecond},
-		{"fifth failure halves 1.6s", 5, zero, 800 * time.Millisecond},
-		{"cap reached at 2s", 6, zero, time.Second},
-		{"cap stays at 2s", 9, zero, time.Second},
-		{"equal jitter reaches three quarters", 1, half, 75 * time.Millisecond},
-		{"equal jitter scales with the cap", 6, half, 1500 * time.Millisecond},
-		{"full jitter reaches the cap", 1, clamped, 100 * time.Millisecond},
-		{"full jitter stays capped", 6, clamped, 2 * time.Second},
-		{"NaN jitter clamps to the minimum half", 1, nan, 50 * time.Millisecond},
-		{"NaN jitter stays at half the cap", 6, nan, time.Second},
-		{"negative jitter clamps to the minimum half", 1, negInf, 50 * time.Millisecond},
-		{"negative jitter stays at half the cap", 6, negInf, time.Second},
-		{"positive infinity clamps to the cap", 1, posInf, 100 * time.Millisecond},
-		{"positive infinity stays capped", 6, posInf, 2 * time.Second},
+		{"no attempt has no delay", 0, supervisorRetryMax, zero, 0},
+		{"first failure halves 100ms", 1, supervisorRetryMax, zero, 50 * time.Millisecond},
+		{"second failure halves 200ms", 2, supervisorRetryMax, zero, 100 * time.Millisecond},
+		{"third failure halves 400ms", 3, supervisorRetryMax, zero, 200 * time.Millisecond},
+		{"fourth failure halves 800ms", 4, supervisorRetryMax, zero, 400 * time.Millisecond},
+		{"fifth failure halves 1.6s", 5, supervisorRetryMax, zero, 800 * time.Millisecond},
+		{"cap reached at 2s", 6, supervisorRetryMax, zero, time.Second},
+		{"cap stays at 2s", 9, supervisorRetryMax, zero, time.Second},
+		{"equal jitter reaches three quarters", 1, supervisorRetryMax, half, 75 * time.Millisecond},
+		{"equal jitter scales with the cap", 6, supervisorRetryMax, half, 1500 * time.Millisecond},
+		{"full jitter reaches the cap", 1, supervisorRetryMax, clamped, 100 * time.Millisecond},
+		{"full jitter stays capped", 6, supervisorRetryMax, clamped, 2 * time.Second},
+		{"NaN jitter clamps to the minimum half", 1, supervisorRetryMax, nan, 50 * time.Millisecond},
+		{"NaN jitter stays at half the cap", 6, supervisorRetryMax, nan, time.Second},
+		{"negative jitter clamps to the minimum half", 1, supervisorRetryMax, negInf, 50 * time.Millisecond},
+		{"negative jitter stays at half the cap", 6, supervisorRetryMax, negInf, time.Second},
+		{"positive infinity clamps to the cap", 1, supervisorRetryMax, posInf, 100 * time.Millisecond},
+		{"positive infinity stays capped", 6, supervisorRetryMax, posInf, 2 * time.Second},
+		{"resume: first attempt", 1, supervisorResumeRetryMax, zero, 50 * time.Millisecond},
+		{"resume: doubles", 4, supervisorResumeRetryMax, zero, 400 * time.Millisecond},
+		{"resume: past the broker cap", 6, supervisorResumeRetryMax, zero, 1600 * time.Millisecond},
+		{"resume: reaches the resume cap", 7, supervisorResumeRetryMax, zero, 2500 * time.Millisecond},
+		{"resume: stays at the resume cap", 50, supervisorResumeRetryMax, zero, 2500 * time.Millisecond},
+		{"resume: jitter spans the upper half", 50, supervisorResumeRetryMax, one, supervisorResumeRetryMax},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, supervisorBackoffDelay(tt.attempt, tt.jitter))
+			require.Equal(t, tt.want, backoffDelay(tt.attempt, tt.ceiling, tt.jitter))
 		})
 	}
 }

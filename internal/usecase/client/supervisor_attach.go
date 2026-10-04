@@ -589,16 +589,18 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		picker.SetOwnsInput(true)
 		input.acquirePicker()
 	}()
-	// budget.resuming is true while the loop reconnects a lost attachment:
-	// attempts then return transport-class failures as attachmentRetry instead
-	// of presenting them, so a retry stays on Connecting. The resume input
-	// window (see resume_input.go) is open exactly while it is, and always
-	// closes before the picker takes input back.
+	// cancel is the cancel signal of the resume input window, non-nil while
+	// the loop reconnects a lost attachment: attempts then return
+	// transport-class failures as attachmentRetry instead of presenting them,
+	// so a retry stays on Connecting. The window (see resume_input.go) is open
+	// exactly while it is, and always closes before the picker takes input
+	// back.
 	var budget attachmentResumeBudget
+	var cancel <-chan struct{}
 	defer input.endResume()
 	for {
 		attemptStart := s.cfg.Clock.Now()
-		outcome := s.attachResolved(ctx, input, service, target, localProvenance, budget.resuming)
+		outcome := s.attachResolved(ctx, input, service, target, localProvenance, cancel)
 		switch outcome.kind {
 		case attachmentTerminated:
 			return true, outcome.cause
@@ -614,6 +616,7 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			// attachment detached cleanly, and the swap goes through Connecting
 			// exactly like any committed selection.
 			budget = attachmentResumeBudget{}
+			cancel = nil
 			input.endResume()
 			next, ok := s.withFreshStream(service, outcome.target)
 			if !ok {
@@ -636,8 +639,8 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			s.notifyAttachment(outcome.cause)
 			return false, nil
 		}
-		input.beginResume()
-		switch wait, waitErr := s.waitResume(ctx, input, service, attempt); wait {
+		cancel = input.beginResume()
+		switch wait, waitErr := s.waitResume(ctx, input, service, attempt, cancel); wait {
 		case resumeWaitTerminated:
 			return true, waitErr
 		case resumeWaitBrokerLost:
@@ -688,9 +691,9 @@ func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Durat
 	}
 	b.attempts++
 	b.resuming = true
-	// The monotonic reading pauses while the machine sleeps, but the daemon's
-	// park grace is wall time: take the larger of the two elapsed times so a
-	// suspend counts toward the window.
+	// The monotonic reading pauses while the machine sleeps, but a suspended
+	// laptop's time away is real time lost: take the larger of the monotonic
+	// and wall elapsed times so a suspend counts toward the window.
 	elapsed := max(now.Sub(b.started), now.Round(0).Sub(b.started.Round(0)))
 	return b.attempts, elapsed < attachmentResumeWindow
 }
@@ -711,22 +714,20 @@ func (s *Supervisor) withFreshStream(service ports.BrokerNavigator, target picke
 
 // attachResolved runs one resolved attachment attempt end to end: open the
 // exact stream under one absolute deadline, admit the worker through the
-// foreground grant, settle it, and classify the result. resuming marks an
-// attempt of the resume loop, whose transport-class failures are returned as
-// attachmentRetry instead of presented.
-func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
+// foreground grant, settle it, and classify the result. A non-nil cancelled is
+// the cancel signal of the resume window and marks an attempt of the resume
+// loop, whose transport-class failures are returned as attachmentRetry instead
+// of presented; nil is an attempt outside a resume.
+func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, cancelled <-chan struct{}) attachmentOutcome {
 	request := target.request
+	resuming := cancelled != nil
 	s.transition(supervisorEvent{kind: supervisorAttachBegin, resuming: resuming})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
 	// A resume attempt is abandoned the moment the user cancels: the signal
 	// cancels the attempt's context, which unblocks an in-flight open and the
 	// worker alike.
-	var cancelled <-chan struct{}
-	if resuming {
-		cancelled = input.resumeCancelled()
-		defer deadline.cancelOn(cancelled)()
-	}
+	defer deadline.cancelOn(cancelled)()
 
 	sessionEnv := s.cfg.SessionEnvironment.Clone()
 	if request.Local {
@@ -790,7 +791,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return attachmentEndedOutcome()
 	}
-	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming, cancelled)
+	return s.settleAttachment(ctx, input, service, deadline, run, request, cancelled)
 }
 
 // resumeCancelFired reports whether the resume cancel signal has fired. A nil
@@ -831,8 +832,9 @@ func (d *attachmentDeadline) cancelOn(cancelled <-chan struct{}) (stop func()) {
 // settleAttachment joins one admitted attachment while watching the parent
 // context, terminal EOF, and broker-connection loss. The deadline is the only
 // other stop: when it fires before the worker settled, the attachment ends as
-// a typed timeout without claiming attachment.
-func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest, resuming bool, cancelled <-chan struct{}) attachmentOutcome {
+// a typed timeout without claiming attachment. A non-nil cancelled is the
+// cancel signal of the resume window and marks a resume attempt; nil is not.
+func (s *Supervisor) settleAttachment(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, deadline *attachmentDeadline, run *attachmentRun, request ports.BrokerOpenStreamRequest, cancelled <-chan struct{}) attachmentOutcome {
 	settled := make(chan attachmentSettlement, 1)
 	go func() {
 		event, adopted := run.Wait(deadline.Context())
@@ -941,7 +943,7 @@ settlement:
 	}
 	if deadline.TimedOut() && !result.adopted {
 		timeout := attachmentTimeoutError(errAttachmentDeadline)
-		if outcome, ok := s.resumeRetry(timeout, resuming); ok {
+		if outcome, ok := s.resumeRetry(timeout, cancelled != nil); ok {
 			return outcome
 		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: timeout})
@@ -973,7 +975,7 @@ settlement:
 		s.logger.Warn("client_stream_closed", "local", request.Local, "endpoint", request.Endpoint, "lifecycle", request.Target.LifecycleID.String(), "session", request.Target.SessionName, "reason", result.event.Kind.String(), "error", result.event.Err, "cause", errors.Unwrap(result.event.Err))
 		// A resume attempt whose stream was lost before attaching is still a
 		// transport failure: retry instead of presenting it.
-		if result.event.Kind == AttachmentEventLost && resuming {
+		if result.event.Kind == AttachmentEventLost && cancelled != nil {
 			return attachmentOutcome{kind: attachmentRetry, cause: result.event.Err}
 		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded, err: result.event.Err})
@@ -994,9 +996,11 @@ settlement:
 }
 
 // attachmentResumeWindow is how long one lost attachment keeps reconnecting
-// before the client gives up and returns to the picker. It matches the
-// daemon's park grace (defaultResumeParkGrace): past it the remote session no
-// longer holds the attachment, so a resume could only start a new one.
+// before the client gives up and returns to the picker. It is a client-side
+// retry budget measured from the loss, in the larger of wall and monotonic
+// time. It is not bound to the daemon's park: a resume is a fresh exact
+// attach (it carries no resume token), so it does not depend on the parked
+// attachment still being held.
 const attachmentResumeWindow = 15 * time.Minute
 
 // supervisorResumeRetryMax caps the equal-jitter backoff between resume
@@ -1041,14 +1045,14 @@ const (
 // waitResume presents Connecting and waits one backoff interval before the
 // next resume attempt. It settles early on cancellation or terminal EOF, on
 // broker loss, which ends the resume and leaves the ready loop to observe and
-// retire the connection, and on the user's cancel key. The error is the
-// termination cause of resumeWaitTerminated.
-func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (resumeWaitResult, error) {
+// retire the connection, and on the user's cancel key, the cancelled signal of
+// the resume window. The error is the termination cause of
+// resumeWaitTerminated.
+func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int, cancelled <-chan struct{}) (resumeWaitResult, error) {
 	s.transition(supervisorEvent{kind: supervisorAttachBegin, resuming: true})
 	delay := backoffDelay(uint64(attempt), supervisorResumeRetryMax, s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
-	cancelled := input.resumeCancelled()
 	for {
 		select {
 		case <-timer.C():

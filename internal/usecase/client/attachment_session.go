@@ -124,6 +124,9 @@ func newSessionAttachmentWorker(cfg sessionAttachmentConfig) (*sessionAttachment
 	if supervisorNil(cfg.Clock) {
 		cfg.Clock = systemClock{}
 	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.DiscardHandler)
+	}
 	return &sessionAttachmentWorker{cfg: cfg}, nil
 }
 

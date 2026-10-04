@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
+
+	"github.com/bnema/vev/internal/ports"
 )
 
 // terminalReadResult is copied by terminalInputPump before the next Read so
@@ -78,15 +81,23 @@ type terminalInputPump struct {
 	// a lost attachment reconnects; see resume_input.go.
 	resumeActive bool
 	resumeCancel chan struct{}
-	readyMu      sync.Mutex
-	ready        map[uint64]chan struct{}
-	claimChanged chan struct{}
-	space        chan struct{}
-	state        chan struct{}
-	exited       chan struct{}
-	afterRevoke  func() // test synchronization hook
-	startMu      sync.Once
-	stopMu       sync.Once
+	// clock and resumeCancelledAt time the post-cancel grace that keeps a
+	// repeated cancel key away from the picker; see resume_input.go. A nil
+	// clock disables the grace.
+	clock             ports.Clock
+	resumeCancelledAt time.Time
+	// pickerConsumer is the id of the picker's claim; the grace applies only
+	// while the picker, or nobody yet, owns input.
+	pickerConsumer uint64
+	readyMu        sync.Mutex
+	ready          map[uint64]chan struct{}
+	claimChanged   chan struct{}
+	space          chan struct{}
+	state          chan struct{}
+	exited         chan struct{}
+	afterRevoke    func() // test synchronization hook
+	startMu        sync.Once
+	stopMu         sync.Once
 }
 
 func newTerminalInputPump(in io.Reader) *terminalInputPump {
@@ -109,6 +120,16 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 
 // tryClaim lets competing foreground owners decline admission without panicking.
 func (p *terminalInputPump) tryClaim() (uint64, bool) {
+	return p.claim(false)
+}
+
+// tryClaimPicker is tryClaim for the picker, the one consumer the post-cancel
+// grace protects; see resume_input.go.
+func (p *terminalInputPump) tryClaimPicker() (uint64, bool) {
+	return p.claim(true)
+}
+
+func (p *terminalInputPump) claim(picker bool) (uint64, bool) {
 	p.mu.Lock()
 	if p.consumer != 0 {
 		p.mu.Unlock()
@@ -116,6 +137,13 @@ func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	}
 	p.nextID++
 	p.consumer = p.nextID
+	if picker {
+		p.pickerConsumer = p.consumer
+	} else if !p.resumeActive {
+		// A non-picker owner outside a resume window starts its own input
+		// epoch: the keys it receives are its own, not repeats of a cancel.
+		p.resumeCancelledAt = time.Time{}
+	}
 	consumer := p.consumer
 	p.readyMu.Lock()
 	p.ready[consumer] = make(chan struct{}, 1)
@@ -205,6 +233,11 @@ func (p *terminalInputPump) enqueue(result terminalReadResult, activation uint64
 			p.space <- struct{}{}
 			return true
 		}
+	}
+	if !p.resumeActive && p.swallowGraceCancelLocked(&result) {
+		p.mu.Unlock()
+		p.space <- struct{}{}
+		return true
 	}
 	p.pending = &result
 	consumer := p.consumer

@@ -592,7 +592,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	input := startTerminalInputLifetimeWith(s.cfg.Terminal.In(), s.cfg.Picker, func(pump *terminalInputPump) {
+	input := startTerminalInputLifetimeWith(s.cfg.Terminal.In(), s.cfg.Picker, s.cfg.Clock, func(pump *terminalInputPump) {
 		s.detectTerminalCapabilities(ctx, pump)
 	})
 	defer input.stop()
@@ -1117,7 +1117,7 @@ func (s *Supervisor) awaitTermination(ctx context.Context, input *terminalInputL
 // count, or settles on cancellation or terminal EOF. The timer is always
 // stopped and drained, so no timer outlives the attempt transition.
 func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifetime) (bool, error) {
-	delay := supervisorBackoffDelay(s.State().Attempt, s.cfg.Jitter)
+	delay := backoffDelay(s.State().Attempt, supervisorRetryMax, s.cfg.Jitter)
 	if delay <= 0 {
 		return false, nil
 	}
@@ -1147,18 +1147,12 @@ func (s *Supervisor) waitBackoff(ctx context.Context, input *terminalInputLifeti
 	}
 }
 
-// supervisorBackoffDelay is the equal-jitter exponential interval for one
-// failure count: the cap doubles from supervisorRetryInitial to
-// supervisorRetryMax, and the interval is half the cap plus a uniform fraction
-// of the other half, so attempts spread across [cap/2, cap). It is pure so the
-// cadence can be tested exactly.
-func supervisorBackoffDelay(attempt uint64, jitter func() float64) time.Duration {
-	return backoffDelay(attempt, supervisorRetryMax, jitter)
-}
-
-// backoffDelay is supervisorBackoffDelay for an arbitrary cap, so resume
-// attempts can back off further than the broker reconnect cadence without
-// changing it.
+// backoffDelay is the equal-jitter exponential interval for one failure count:
+// the cap doubles from supervisorRetryInitial to ceiling, and the interval is
+// half the cap plus a uniform fraction of the other half, so attempts spread
+// across [cap/2, cap). Broker reconnects use supervisorRetryMax; resume
+// attempts use the higher supervisorResumeRetryMax. It is pure so the cadence
+// can be tested exactly.
 func backoffDelay(attempt uint64, ceiling time.Duration, jitter func() float64) time.Duration {
 	if attempt == 0 {
 		return 0
@@ -1399,19 +1393,21 @@ type terminalInputLifetime struct {
 // treated as an immediate orderly EOF. A nil consumer discards read bytes; a
 // non-nil consumer owns them for the picker presentation.
 func startTerminalInputLifetime(in io.Reader, consumer pickerInputConsumer) *terminalInputLifetime {
-	return startTerminalInputLifetimeWith(in, consumer, nil)
+	return startTerminalInputLifetimeWith(in, consumer, nil, nil)
 }
 
-// startTerminalInputLifetimeWith runs beforeConsumers on the started pump
+// startTerminalInputLifetimeWith times the post-resume cancel grace on clock
+// (nil disables it) and runs beforeConsumers on the started pump
 // before the picker may claim it, so a terminal probe sees its responses
 // first and hands every other byte on to the picker.
-func startTerminalInputLifetimeWith(in io.Reader, consumer pickerInputConsumer, beforeConsumers func(*terminalInputPump)) *terminalInputLifetime {
+func startTerminalInputLifetimeWith(in io.Reader, consumer pickerInputConsumer, clock ports.Clock, beforeConsumers func(*terminalInputPump)) *terminalInputLifetime {
 	lifetime := &terminalInputLifetime{eof: make(chan error, 1), consumer: consumer}
 	if supervisorNil(in) {
 		lifetime.finish(io.EOF)
 		return lifetime
 	}
 	lifetime.pump = newTerminalInputPump(in)
+	lifetime.pump.clock = clock
 	lifetime.pump.start()
 	if beforeConsumers != nil {
 		beforeConsumers(lifetime.pump)
@@ -1440,7 +1436,7 @@ func (l *terminalInputLifetime) acquirePicker() {
 		l.mu.Unlock()
 		return
 	}
-	if id, ok := l.pump.tryClaim(); ok {
+	if id, ok := l.pump.tryClaimPicker(); ok {
 		l.pickerID = id
 		l.mu.Unlock()
 		return
@@ -1458,11 +1454,12 @@ func (l *terminalInputLifetime) acquirePicker() {
 }
 
 // beginResume opens the supervisor-owned input window of a lost attachment's
-// reconnection and returns its cancel signal; see resume_input.go. A lifetime
-// without a reader returns a nil signal, which never fires.
+// reconnection and returns its cancel signal; see resume_input.go. The signal
+// is never nil: a lifetime without a reader returns one that never fires, so
+// the caller can still tell a resume from its absence.
 func (l *terminalInputLifetime) beginResume() <-chan struct{} {
-	if l == nil {
-		return nil
+	if l == nil || l.pump == nil {
+		return make(chan struct{})
 	}
 	return l.pump.beginResume()
 }
@@ -1473,14 +1470,6 @@ func (l *terminalInputLifetime) endResume() {
 		return
 	}
 	l.pump.endResume()
-}
-
-// resumeCancelled is the cancel signal of the open resume window, or nil.
-func (l *terminalInputLifetime) resumeCancelled() <-chan struct{} {
-	if l == nil {
-		return nil
-	}
-	return l.pump.resumeCancelled()
 }
 
 func (l *terminalInputLifetime) releasePicker() {

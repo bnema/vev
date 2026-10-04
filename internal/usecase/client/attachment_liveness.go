@@ -72,16 +72,12 @@ type attachmentLiveness struct {
 // newAttachmentLiveness returns the probe for a remote attachment, or nil for a
 // local one: a local daemon link does not die silently.
 func (w *sessionAttachmentWorker) newAttachmentLiveness(fg AttachmentForeground, stream ports.BrokerLogicalConnection, overlay attachmentOverlayForeground, size func() domain.Size) *attachmentLiveness {
-	if w.cfg.Request.Local || supervisorNil(w.cfg.Clock) {
+	if w.cfg.Request.Local {
 		return nil
-	}
-	log := w.cfg.Logger
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
 	}
 	l := &attachmentLiveness{
 		worker: w, fg: fg, stream: stream, overlay: overlay,
-		clock: w.cfg.Clock, log: log, size: size,
+		clock: w.cfg.Clock, log: w.cfg.Logger, size: size,
 	}
 	now := l.clock.Now()
 	l.lastRx = now

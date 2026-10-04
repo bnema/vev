@@ -1,6 +1,10 @@
 package client
 
-import "github.com/bnema/vev/internal/usecase/keys/kittykey"
+import (
+	"time"
+
+	"github.com/bnema/vev/internal/usecase/keys/kittykey"
+)
 
 // Input ownership while a lost attachment reconnects.
 //
@@ -17,6 +21,12 @@ import "github.com/bnema/vev/internal/usecase/keys/kittykey"
 // read becomes visible to a consumer, so no read can slip past it between an
 // attachment's teardown and the next attempt's claim.
 
+// resumeCancelGrace is how long after a cancel the pump keeps swallowing
+// cancel keys. The cancel returns to the picker, whose own exit key quits vev,
+// so a quick second Esc/Ctrl+C (a double press, or key repeat) must not leak
+// through and close the program the user only meant to leave the resume of.
+const resumeCancelGrace = 400 * time.Millisecond
+
 // beginResume opens the resume input window and returns its cancel signal. It
 // is idempotent while the window is open, so every attempt of one resume loop
 // shares the same latched signal. Input read before the window opened but not
@@ -32,6 +42,7 @@ func (p *terminalInputPump) beginResume() <-chan struct{} {
 		return cancel
 	}
 	p.resumeActive = true
+	p.resumeCancelledAt = time.Time{}
 	p.resumeCancel = make(chan struct{})
 	cancel := p.resumeCancel
 	dropped := false
@@ -62,22 +73,10 @@ func (p *terminalInputPump) endResume() {
 	p.mu.Unlock()
 }
 
-// resumeCancelled returns the cancel signal of the open resume window, or nil
-// (which never fires) when no window is open.
-func (p *terminalInputPump) resumeCancelled() <-chan struct{} {
-	if p == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.resumeActive {
-		return nil
-	}
-	return p.resumeCancel
-}
-
 // discardResumeInputLocked drops the human bytes of result and latches the
-// cancel signal when they contain a cancel key. Callers hold p.mu.
+// cancel signal when they contain a cancel key. Every cancel key, not only the
+// first, restarts the grace, so a held key's auto-repeat keeps sliding it.
+// Callers hold p.mu.
 func (p *terminalInputPump) discardResumeInputLocked(result *terminalReadResult) {
 	if isResumeCancelKey(result.data) {
 		select {
@@ -85,8 +84,47 @@ func (p *terminalInputPump) discardResumeInputLocked(result *terminalReadResult)
 		default:
 			close(p.resumeCancel)
 		}
+		if p.clock != nil {
+			p.resumeCancelledAt = p.clock.Now()
+		}
 	}
 	result.data = nil
+}
+
+// swallowGraceCancelLocked reports whether result is exactly one cancel key
+// read within resumeCancelGrace of the last cancel, while the picker (or no
+// consumer yet) owns input, and drops its bytes when it is. A swallowed key
+// restarts the grace. Every other read passes through untouched, including a
+// read that merely contains a cancel key among other input. Callers hold p.mu.
+func (p *terminalInputPump) swallowGraceCancelLocked(result *terminalReadResult) bool {
+	if p.clock == nil || p.resumeCancelledAt.IsZero() || result.err != nil || len(result.data) == 0 {
+		return false
+	}
+	if p.consumer != 0 && p.consumer != p.pickerConsumer {
+		return false
+	}
+	if !isSingleCancelKey(result.data) {
+		return false
+	}
+	now := p.clock.Now()
+	if now.Sub(p.resumeCancelledAt) >= resumeCancelGrace {
+		p.resumeCancelledAt = time.Time{}
+		return false
+	}
+	p.resumeCancelledAt = now
+	result.data = nil
+	return true
+}
+
+// isSingleCancelKey reports whether one terminal read is exactly one cancel
+// key press: a bare Escape or Ctrl+C byte, or a single kitty CSI-u Escape or
+// Ctrl+C press event spanning the whole read.
+func isSingleCancelKey(data []byte) bool {
+	if len(data) == 1 {
+		return data[0] == 0x1b || data[0] == 0x03
+	}
+	ev, n, ok, _ := kittykey.Parse(data)
+	return ok && n == len(data) && isKittyCancelPress(ev)
 }
 
 // isResumeCancelKey reports whether one terminal read contains Escape or
@@ -108,13 +146,17 @@ func isResumeCancelKey(data []byte) bool {
 			if !ok {
 				continue
 			}
-			if !ev.Release && (isKittyEscape(ev) || isKittyCtrlC(ev)) {
+			if isKittyCancelPress(ev) {
 				return true
 			}
 			i += n - 1
 		}
 	}
 	return false
+}
+
+func isKittyCancelPress(ev kittykey.Event) bool {
+	return !ev.Release && (isKittyEscape(ev) || isKittyCtrlC(ev))
 }
 
 func isKittyEscape(ev kittykey.Event) bool {
