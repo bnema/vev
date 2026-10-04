@@ -340,6 +340,7 @@ func cacheState(title string, generation uint64) capturedRenderState {
 func cloneComposeCache(in composeCacheInput) composeCacheInput {
 	out := in
 	out.frame = in.frame.Clone()
+	out.copyViewport.frame = in.copyViewport.frame.Clone()
 	out.titleGenerations = make(map[layout.PaneID]uint64, len(in.titleGenerations))
 	maps.Copy(out.titleGenerations, in.titleGenerations)
 	out.damage = append([]renderer.Damage(nil), in.damage...)

@@ -102,10 +102,10 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	if in.frame.Width == width && in.frame.Height == frameHeight {
 		if state.overlays.copyMode != nil {
-			// Compact Clone preserves page-local style IDs. Re-interning every
-			// cell into scratch costs more than a structural copy while scrolling.
-			// The clone still isolates committed state from failed publications.
-			frame = in.frame.Clone()
+			// A structural copy preserves page-local style IDs. Re-interning every
+			// cell costs more while scrolling. Copying into the spare page keeps
+			// committed state isolated from failed publications without a new page.
+			frame.CopyFrom(in.frame)
 		} else {
 			for y := 0; y < frame.Height; y++ {
 				for x := range frame.Width {
@@ -207,9 +207,15 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	if overlaysActive {
 		if scrollDamage != nil && in.copyViewport.frame.Width == width && in.copyViewport.frame.Height == frameHeight {
-			frame = composeScrolledCopyViewport(state, baseFrame, in.copyViewport, copyViewport, scrollDamage)
+			frame = composeScrolledCopyViewport(state, baseFrame, scratch.copyViewport.frame, in.copyViewport, copyViewport, scrollDamage)
 		} else {
-			if !toastsVisible && !state.floating.visible {
+			switch {
+			case copyOnly && !toastsVisible:
+				// A plain copy viewport becomes the next viewport cache, so build
+				// it in the spare viewport page, which never shares baseFrame's.
+				frame = scratch.copyViewport.frame
+				frame.CopyFrom(baseFrame)
+			case !toastsVisible && !state.floating.visible:
 				frame = baseFrame.Clone()
 			}
 			frame, damage = composeCapturedCopyMode(state, frame, damage, content)
@@ -241,7 +247,8 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs, contentY)
-	// A plain copy viewport is painted on a clone, never into baseFrame. Keep
+	// A plain copy viewport is painted on a clone or the spare viewport page,
+	// never into baseFrame. Keep
 	// that unadorned base reusable between wheel events. Modal/floating paths
 	// retain their conservative invalidation, and copy exit requests a reset.
 	outCache := composeCacheInput{valid: !overlaysActive || copyOnly, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
