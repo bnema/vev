@@ -12,12 +12,8 @@ import (
 	"github.com/bnema/vev/internal/ports"
 )
 
-// Composition-root factory seams keep observer propagation testable without
-// opening real transports.
-var connectBroker = connectProductionBroker
-
-var connectDaemonStopBroker = connectExistingBroker
-
+// newPerformanceTrace is the trace factory seam; tests replace it to observe
+// propagation without opening real trace files.
 var newPerformanceTrace = performanceTrace
 
 // performanceTrace creates one serialized timestamp owner for this process.

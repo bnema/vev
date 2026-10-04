@@ -17,6 +17,19 @@ import (
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
+// Broker connection seams replaced by tests.
+var (
+	connectBroker     = connectProductionBroker
+	connectListBroker = connectExistingBroker
+	dialListDaemon    = ipc.DialContext
+)
+
+var errKillOutcomeUnknown = errors.New("kill outcome unknown")
+
+// errNoLocalDaemon reports that no local daemon socket answers; nothing was
+// started to find out.
+var errNoLocalDaemon = errors.New("no local daemon")
+
 func createDetachedLocalSession(ctx context.Context, name string) error {
 	service, err := connectBroker(ctx)
 	if err != nil {
@@ -165,7 +178,7 @@ func printSessions(w io.Writer, sessions []protocol.SessionInfo) {
 }
 
 func unreadableCatalogueError(stateDir string) error {
-	return fmt.Errorf("%w: vev: durable session state at %s cannot be read and was left untouched.\n"+
+	return fmt.Errorf("%w: durable session state at %s cannot be read and was left untouched.\n"+
 		"vev does not erase it automatically. To start fresh, remove it:\n"+
 		"    rm -rf %s", persist.ErrCatalogueUnreadable, stateDir, stateDir)
 }

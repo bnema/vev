@@ -1015,6 +1015,7 @@ func TestTerminalCompositionUsesTheBrokerConnector(t *testing.T) {
 	body := sources["attach.go"]
 	require.Contains(t, body, "runBrokerClient(ctx, brokerClientConfig{")
 	require.Contains(t, body, "newProductionBrokerConnector()")
+	body += sources["sessions.go"] + sources["run.go"]
 	for _, forbidden := range []string{
 		"runAttachWithDeps", "runAttachDeps", "localDaemonDialer", "dialOnlyLocalDialer",
 		"defaultLocalDialer", "resolveMissingSessionAttach", "newClientHostRegistry",

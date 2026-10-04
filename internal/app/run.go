@@ -17,12 +17,10 @@ import (
 
 	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/config"
-	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/logging"
 	"github.com/bnema/vev/internal/platform"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/client"
 )
 
@@ -154,10 +152,7 @@ const (
 
 const daemonStopTimeout = 2 * time.Second
 
-var (
-	errDaemonNotRunning   = errors.New("no daemon running")
-	errKillOutcomeUnknown = errors.New("kill outcome unknown")
-)
+var errDaemonNotRunning = errors.New("no daemon running")
 
 func runUIRemoteCleanup(ctx context.Context) error {
 	root := os.Getenv("VEV_ENV_ROOT")
@@ -172,6 +167,9 @@ func runUIRemoteCleanup(ctx context.Context) error {
 	}
 	return nil
 }
+
+// connectDaemonStopBroker is the broker connection seam for requestDaemonStop.
+var connectDaemonStopBroker = connectExistingBroker
 
 func requestDaemonStop(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, daemonStopTimeout)
@@ -198,37 +196,6 @@ func requestDaemonStop(ctx context.Context) error {
 func unreachableBrokerError(err error) error {
 	return &exitCoded{code: 3, err: fmt.Errorf("%w: %v", errDaemonUnreachable, err)}
 }
-
-// gracefulTeardownWaiter is implemented by carriages (QUIC) whose Close defers
-// a bounded connection close past its return. The broker mux QUIC proxy owns its
-// process, so it must wait for that close before returning: exiting first
-// would discard the final synchronous envelope Close already handed to the
-// stream.
-type gracefulTeardownWaiter interface {
-	WaitGracefulTeardown(ctx context.Context) error
-}
-
-// proxyTeardownTimeout bounds the proxy's wait for a deferred graceful close,
-// leaving headroom beyond the adapter's own graceful window. A carriage that
-// does not defer its close is not waited on.
-const proxyTeardownTimeout = 2 * time.Second
-
-func waitGracefulTeardown(transport wire.Transport) error {
-	waiter, ok := transport.(gracefulTeardownWaiter)
-	if !ok {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), proxyTeardownTimeout)
-	defer cancel()
-	return waiter.WaitGracefulTeardown(ctx)
-}
-
-var connectListBroker = connectExistingBroker
-var dialListDaemon = ipc.DialContext
-
-// errNoLocalDaemon reports that no local daemon socket answers; nothing was
-// started to find out.
-var errNoLocalDaemon = errors.New("no local daemon")
 
 // stopDaemonWithoutBroker asks an existing local daemon to stop directly. A
 // daemon routinely outlives the idle broker, so "no broker" never means "no
