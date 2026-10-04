@@ -138,6 +138,22 @@ type WindowUpdate struct {
 func (WindowUpdate) muxClientMessage() {}
 func (WindowUpdate) muxServerMessage() {}
 
+// Ping is the broker's physical-connection liveness probe. It belongs to no
+// stream and bypasses the per-stream scheduler. Nonce is nonzero; the daemon
+// answers with a Pong carrying the same value.
+type Ping struct {
+	Nonce uint64
+}
+
+func (Ping) muxClientMessage() {}
+
+// Pong answers a Ping on the physical connection, echoing its nonzero Nonce.
+type Pong struct {
+	Nonce uint64
+}
+
+func (Pong) muxServerMessage() {}
+
 // Opened confirms one logical stream is established.
 type Opened struct {
 	Ref StreamRef

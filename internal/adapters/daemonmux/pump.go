@@ -115,6 +115,17 @@ type Pump struct {
 	local     EnvelopeDirection
 	terminal  *terminalState
 
+	// control is the priority slot for stream-less Ping/Pong frames; the
+	// writer drains it before the scheduler. hb is the optional broker-side
+	// heartbeat configuration; live carries a coalesced token whenever any
+	// inbound frame arrived, and pinged one whenever the writer finished
+	// sending a ping.
+	control controlSlot
+	hb      *heartbeat
+	live    chan struct{}
+	pinged  chan struct{}
+	hbDone  chan struct{}
+
 	// wake coalesces outbound wakeups: one pending token means the writer
 	// must re-check the scheduler, and a signal raised while a token is
 	// already pending is redundant rather than lost.
@@ -172,11 +183,24 @@ type Pump struct {
 // for its lifetime. An invalid advertisement is refused with ErrInvalidCeilings
 // and a missing carrier or unknown direction with ErrPumpConfig. Goroutines
 // start on Start.
-func NewPump(carrier FramedCarrier, inbound EnvelopeDirection, ceilings MuxCeilings) (*Pump, error) {
+func NewPump(carrier FramedCarrier, inbound EnvelopeDirection, ceilings MuxCeilings, opts ...PumpOption) (*Pump, error) {
 	if carrier == nil {
 		return nil, ErrPumpConfig
 	}
 	if inbound != DirectionClient && inbound != DirectionServer {
+		return nil, ErrPumpConfig
+	}
+	var options pumpOptions
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(&options); err != nil {
+			return nil, err
+		}
+	}
+	if options.heartbeat != nil && inbound != DirectionServer {
+		// Only the broker side pings; the daemon side only answers.
 		return nil, ErrPumpConfig
 	}
 	if err := ceilings.Validate(); err != nil {
@@ -198,6 +222,10 @@ func NewPump(carrier FramedCarrier, inbound EnvelopeDirection, ceilings MuxCeili
 		inbound:    inbound,
 		local:      oppositeDirection(inbound),
 		terminal:   newTerminalState(),
+		hb:         options.heartbeat,
+		hbDone:     make(chan struct{}),
+		live:       make(chan struct{}, 1),
+		pinged:     make(chan struct{}, 1),
 		wake:       make(chan struct{}, 1),
 		flushCh:    make(chan struct{}),
 		readerDone: make(chan struct{}),
@@ -228,8 +256,15 @@ func (p *Pump) Start(ctx context.Context) {
 		p.cancel = cancel
 		p.started = true
 		p.mu.Unlock()
+		var state *heartbeatState
+		if p.hb != nil {
+			state = p.hb.newState()
+		}
 		go p.readLoop(runCtx)
 		go p.writeLoop(runCtx)
+		if state != nil {
+			go p.heartbeatLoop(runCtx, state)
+		}
 	})
 }
 
@@ -257,6 +292,9 @@ func (p *Pump) Close() error {
 		if started {
 			<-p.readerDone
 			<-p.writerDone
+			if p.hb != nil {
+				<-p.hbDone
+			}
 		}
 		p.settleOrderly()
 	})
@@ -621,7 +659,9 @@ func (p *Pump) enqueue(message any) error {
 // deadline or cancellation wins, and the pump's terminal outcome when the
 // connection became terminal before the scheduler drained (a physical failure
 // carries its cause; an orderly Close carries ErrPhysicalClosed when frames
-// were still queued). It never polls: the writer signals an idle transition.
+// were still queued). Heartbeat control frames (Ping/Pong) are not part of the
+// barrier: a pending or in-flight one never delays or fails Flush. It never
+// polls: the writer signals an idle transition.
 func (p *Pump) Flush(ctx context.Context) error {
 	if p == nil {
 		return ErrPumpConfig
@@ -631,7 +671,7 @@ func (p *Pump) Flush(ctx context.Context) error {
 	}
 	for {
 		p.flushMu.Lock()
-		if p.inflight == 0 && !p.scheduler.Pending() {
+		if p.idleLocked() {
 			p.flushMu.Unlock()
 			return nil
 		}
@@ -643,7 +683,7 @@ func (p *Pump) Flush(ctx context.Context) error {
 			return ctx.Err()
 		case <-p.terminal.Done():
 			p.flushMu.Lock()
-			idle := p.inflight == 0 && !p.scheduler.Pending()
+			idle := p.idleLocked()
 			p.flushMu.Unlock()
 			if idle {
 				return nil
@@ -679,6 +719,14 @@ func (p *Pump) handleOutboundRefusal(physical PhysicalStreamID, err error) {
 	}
 }
 
+// idleLocked reports whether no scheduler frame is queued or in flight.
+// Stream-less control frames (Ping/Pong) are deliberately excluded: Flush is a
+// barrier for stream traffic and must neither wait on nor fail because of
+// heartbeat frames. The caller holds flushMu.
+func (p *Pump) idleLocked() bool {
+	return p.inflight == 0 && !p.scheduler.Pending()
+}
+
 // signalFlushLocked broadcasts one possible idle transition to every Flush
 // waiter by closing the current channel and installing a fresh one. The caller
 // holds flushMu.
@@ -695,7 +743,7 @@ func (p *Pump) signalFlushLocked() {
 // frames.
 func (p *Pump) maybeSignalFlush() {
 	p.flushMu.Lock()
-	if p.inflight == 0 && !p.scheduler.Pending() {
+	if p.idleLocked() {
 		p.signalFlushLocked()
 	}
 	p.flushMu.Unlock()
@@ -729,6 +777,9 @@ func (p *Pump) readLoop(ctx context.Context) {
 			p.settleFailure(domain.RemoteFailureTransport, err)
 			return
 		}
+		// Any inbound frame, even one that later fails to decode, proves the
+		// physical link delivered bytes.
+		p.noteLive()
 		if fatal := p.handleInbound(payload); fatal != nil {
 			p.settleFailure(domain.RemoteFailureInvalidResponse, fatal)
 			return
@@ -739,34 +790,51 @@ func (p *Pump) readLoop(ctx context.Context) {
 // writeLoop is the writer goroutine: it dequeues the scheduler's fairly
 // ordered immutable envelopes and sends them verbatim, then blocks on the
 // coalescing wake channel until more work arrives or the run context ends. It
-// never polls, sleeps, or reorders.
+// never polls, sleeps, or reorders. A pending control frame is written before
+// any scheduler frame and is not counted as in flight, so Flush ignores it.
+// The heartbeat is told when a ping was handed to the carrier, so its reply
+// deadline starts then and not while the ping waits behind a blocked write.
+// Outbound progress is never liveness: buffered transports complete writes on
+// a dead link.
 func (p *Pump) writeLoop(ctx context.Context) {
 	defer p.settleOrderly()
 	defer close(p.writerDone)
 	for {
 		p.flushMu.Lock()
-		envelope, ok := p.scheduler.Dequeue()
-		if ok {
-			p.inflight++
+		// Stream-less control frames (Ping/Pong) go first and never pass
+		// through the per-stream scheduler.
+		payload, isPing, ok := p.control.take()
+		control := ok
+		if !ok {
+			var envelope OutboundEnvelope
+			envelope, ok = p.scheduler.Dequeue()
+			payload = envelope.Bytes
+			if ok {
+				p.inflight++
+			}
 		}
 		p.flushMu.Unlock()
 		if ok {
-			err := p.carrier.Send(ctx, envelope.Bytes)
-			p.flushMu.Lock()
-			if p.inflight > 0 {
-				p.inflight--
+			err := p.carrier.Send(ctx, payload)
+			if !control {
+				p.flushMu.Lock()
+				if p.inflight > 0 {
+					p.inflight--
+				}
+				if p.idleLocked() {
+					p.signalFlushLocked()
+				}
+				p.flushMu.Unlock()
 			}
-			idle := p.inflight == 0 && !p.scheduler.Pending()
-			if idle {
-				p.signalFlushLocked()
-			}
-			p.flushMu.Unlock()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
 				p.settleFailure(domain.RemoteFailureTransport, err)
 				return
+			}
+			if isPing {
+				p.notePingWritten()
 			}
 			continue
 		}
@@ -811,6 +879,14 @@ func (p *Pump) applyClient(message ClientMessage) error {
 	case Open:
 		return p.applyOpen(m)
 	case *Open:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return p.applyClient(*m)
+	case Ping:
+		p.queuePong(m.Nonce)
+		return nil
+	case *Ping:
 		if m == nil {
 			return ErrInvalidMessage
 		}
@@ -915,6 +991,14 @@ func (p *Pump) applyServer(message ServerMessage) error {
 			return ErrInvalidMessage
 		}
 		return p.applyServer(*m)
+	case Pong:
+		// Liveness was already recorded for the frame itself.
+		return nil
+	case *Pong:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return nil
 	case Data:
 		return p.applyData(m)
 	case *Data:

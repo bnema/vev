@@ -17,12 +17,12 @@ import (
 
 // muxClientTags is the frozen client tag inventory.
 var muxClientTags = map[string]protoreflect.FieldNumber{
-	"open": 301, "data": 302, "close": 303, "reset": 304, "window_update": 305,
+	"open": 301, "data": 302, "close": 303, "reset": 304, "window_update": 305, "ping": 306,
 }
 
 // muxServerTags is the frozen server tag inventory.
 var muxServerTags = map[string]protoreflect.FieldNumber{
-	"opened": 401, "refused": 402, "data": 403, "close": 404, "reset": 405, "window_update": 406,
+	"opened": 401, "refused": 402, "data": 403, "close": 404, "reset": 405, "window_update": 406, "pong": 407,
 }
 
 func muxStreamRef() *MuxStreamRef {
@@ -63,6 +63,7 @@ func muxClientSamples() map[string]*MuxClientEnvelope {
 		"close":         {Payload: &MuxClientEnvelope_Close{Close: &MuxClose{PhysicalStreamId: 5}}},
 		"reset":         {Payload: &MuxClientEnvelope_Reset_{Reset_: &MuxReset{PhysicalStreamId: 5, Error: muxErrorDetail()}}},
 		"window_update": {Payload: &MuxClientEnvelope_WindowUpdate{WindowUpdate: &MuxWindowUpdate{PhysicalStreamId: 5, CreditBytes: 4096}}},
+		"ping":          {Payload: &MuxClientEnvelope_Ping{Ping: &MuxPing{Nonce: 9}}},
 	}
 }
 
@@ -75,6 +76,7 @@ func muxServerSamples() map[string]*MuxServerEnvelope {
 		"close":         {Payload: &MuxServerEnvelope_Close{Close: &MuxClose{PhysicalStreamId: 5}}},
 		"reset":         {Payload: &MuxServerEnvelope_Reset_{Reset_: &MuxReset{PhysicalStreamId: 5}}},
 		"window_update": {Payload: &MuxServerEnvelope_WindowUpdate{WindowUpdate: &MuxWindowUpdate{PhysicalStreamId: 5, CreditBytes: 4096}}},
+		"pong":          {Payload: &MuxServerEnvelope_Pong{Pong: &MuxPong{Nonce: 9}}},
 	}
 }
 

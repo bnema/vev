@@ -71,6 +71,25 @@ type RawCarrierDialer func(ctx context.Context, target ports.BrokerDialTarget) (
 type EndpointConnector struct {
 	dial     RawCarrierDialer
 	ceilings MuxCeilings
+	pumpOpts []PumpOption
+}
+
+// ConnectorOption configures optional EndpointConnector behavior.
+type ConnectorOption func(*EndpointConnector) error
+
+// WithHeartbeat makes every physical connection the connector creates run the
+// broker-side liveness heartbeat (see heartbeat.go) on clock. Without it a
+// connection never pings; the daemon side always answers.
+func WithHeartbeat(clock ports.Clock, cfg HeartbeatConfig) ConnectorOption {
+	return func(c *EndpointConnector) error {
+		option := WithPumpHeartbeat(clock, cfg)
+		// Validate eagerly so a bad configuration fails at construction.
+		if err := option(&pumpOptions{}); err != nil {
+			return err
+		}
+		c.pumpOpts = append(c.pumpOpts, option)
+		return nil
+	}
 }
 
 var _ ports.BrokerEndpointConnector = (*EndpointConnector)(nil)
@@ -80,14 +99,23 @@ var _ ports.BrokerEndpointConnector = (*EndpointConnector)(nil)
 // invalid ceiling advertisement is refused with ErrConnectorConfig; the
 // ceilings are validated and copied, so a later change to the caller's value
 // never changes what a connection negotiates.
-func NewEndpointConnector(dial RawCarrierDialer, ceilings MuxCeilings) (*EndpointConnector, error) {
+func NewEndpointConnector(dial RawCarrierDialer, ceilings MuxCeilings, opts ...ConnectorOption) (*EndpointConnector, error) {
 	if dial == nil {
 		return nil, ErrConnectorConfig
 	}
 	if err := ceilings.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConnectorConfig, err)
 	}
-	return &EndpointConnector{dial: dial, ceilings: ceilings}, nil
+	connector := &EndpointConnector{dial: dial, ceilings: ceilings}
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(connector); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrConnectorConfig, err)
+		}
+	}
+	return connector, nil
 }
 
 // Connect dials the resolved endpoint, completes the daemonmux physical
@@ -146,7 +174,7 @@ func (c *EndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerDi
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
 	}
 
-	pump, err := NewPump(bridge, DirectionServer, result.Ceilings)
+	pump, err := NewPump(bridge, DirectionServer, result.Ceilings, c.pumpOpts...)
 	if err != nil {
 		_ = bridge.Close()
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}

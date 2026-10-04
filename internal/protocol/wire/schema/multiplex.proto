@@ -4,7 +4,7 @@
 //
 // daemonmux is a third conversation, separate from the session protocol
 // (tags 1-32) and the broker protocol (client 101-111, server 201-209):
-// client tags 301-305 and server tags 401-406 are disjoint from every other
+// client tags 301-306 and server tags 401-407 are disjoint from every other
 // tag, and each direction is its own closed oneof union. The physical
 // preamble is a separate adapter message pair, not an envelope variant:
 // roles 5/6 negotiate the per-connection ceilings, the authenticated daemon
@@ -12,7 +12,9 @@
 //
 // MuxData, MuxClose, MuxReset, and MuxWindowUpdate are shared payloads carried in both
 // directions; MuxOpen carries the full stream identity, and every later
-// frame is routed by physical_stream_id alone.
+// frame is routed by physical_stream_id alone. MuxPing and MuxPong are the
+// exception: stream-less physical-connection liveness frames (the broker
+// pings, the daemon echoes the nonce) that bypass per-stream scheduling.
 syntax = "proto3";
 
 package vev.wire.v1;
@@ -108,6 +110,19 @@ message MuxWindowUpdate {
   uint64 credit_bytes = 2;
 }
 
+// MuxPing is the broker's physical-connection liveness probe. It belongs to
+// no stream; the daemon answers it with a MuxPong echoing the same nonce.
+// The nonce is nonzero.
+message MuxPing {
+  uint64 nonce = 1;
+}
+
+// MuxPong answers a MuxPing on the physical connection, echoing its nonce.
+// The nonce is nonzero.
+message MuxPong {
+  uint64 nonce = 1;
+}
+
 // MuxClientEnvelope is the closed broker-to-daemon mux union. Exactly one
 // variant must be set per envelope; empty, duplicate, and wrong-direction
 // payloads are rejected before generated unmarshal.
@@ -118,6 +133,7 @@ message MuxClientEnvelope {
     MuxClose close = 303;
     MuxReset reset = 304;
     MuxWindowUpdate window_update = 305;
+    MuxPing ping = 306;
   }
 }
 
@@ -131,6 +147,7 @@ message MuxServerEnvelope {
     MuxClose close = 404;
     MuxReset reset = 405;
     MuxWindowUpdate window_update = 406;
+    MuxPong pong = 407;
   }
 }
 
