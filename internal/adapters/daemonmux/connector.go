@@ -71,15 +71,18 @@ type RawCarrierDialer func(ctx context.Context, target ports.BrokerDialTarget) (
 type EndpointConnector struct {
 	dial     RawCarrierDialer
 	ceilings MuxCeilings
-	pumpOpts []PumpOption
+	// heartbeat is applied only to remote physical connections; nil disables it.
+	heartbeat PumpOption
 }
 
 // ConnectorOption configures optional EndpointConnector behavior.
 type ConnectorOption func(*EndpointConnector) error
 
-// WithHeartbeat makes every physical connection the connector creates run the
-// broker-side liveness heartbeat (see heartbeat.go) on clock. Without it a
-// connection never pings; the daemon side always answers.
+// WithHeartbeat makes every remote physical connection the connector creates
+// (a target whose fence is not Local) run the broker-side liveness heartbeat
+// (see heartbeat.go) on clock. Local connections never ping: a local Unix link
+// cannot die silently. Without this option no connection pings; the daemon
+// side always answers.
 func WithHeartbeat(clock ports.Clock, cfg HeartbeatConfig) ConnectorOption {
 	return func(c *EndpointConnector) error {
 		option := WithPumpHeartbeat(clock, cfg)
@@ -87,7 +90,7 @@ func WithHeartbeat(clock ports.Clock, cfg HeartbeatConfig) ConnectorOption {
 		if err := option(&pumpOptions{}); err != nil {
 			return err
 		}
-		c.pumpOpts = append(c.pumpOpts, option)
+		c.heartbeat = option
 		return nil
 	}
 }
@@ -174,7 +177,11 @@ func (c *EndpointConnector) Connect(ctx context.Context, endpoint ports.BrokerDi
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}
 	}
 
-	pump, err := NewPump(bridge, DirectionServer, result.Ceilings, c.pumpOpts...)
+	var pumpOpts []PumpOption
+	if c.heartbeat != nil && !endpoint.Fence.Local {
+		pumpOpts = append(pumpOpts, c.heartbeat)
+	}
+	pump, err := NewPump(bridge, DirectionServer, result.Ceilings, pumpOpts...)
 	if err != nil {
 		_ = bridge.Close()
 		return nil, ports.BrokerError{Code: ports.BrokerErrorIncompatible, Cause: err}

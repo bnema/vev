@@ -141,14 +141,17 @@ consumer therefore slows its own stream without affecting siblings. Data
 beyond the granted window, or credit beyond the window, is a peer violation
 and resets only that stream.
 
-The broker side of every daemonmux physical connection also runs a heartbeat.
+The broker side of every remote daemonmux physical connection also runs a
+heartbeat (local Unix links cannot die silently and never ping).
 `MuxPing` (client tag 306) and `MuxPong` (server tag 407) are stream-less
 frames carrying a nonzero nonce; the daemon answers each ping with a pong echoing
 the nonce, and both bypass per-stream scheduling through a priority control slot.
-Every 5 s the broker pings; if no frame of any kind arrives within 10 s the
-connection fails as a timeout and its streams are lost (the client resumes).
-When wall-clock time jumps more than 5 s past the tick interval (laptop
-suspend), it pings at once and allows only 3 s for the reply.
+Every 5 s, when no ping is outstanding, the broker sends `MuxPing`. Any
+inbound frame clears the outstanding ping. If none arrives within 10 s of the
+ping being written (or the ping cannot be written within 10 s), the connection
+fails with a heartbeat timeout and its streams are lost (the client resumes).
+After a detected suspend (the wall clock advanced more than 5 s beyond the
+tick interval) it probes immediately and allows 3 s.
 
 Setup is fully bounded: the dialer's one context/deadline covers the Unix
 dial, preamble, Register send, and wait for Registered, and the server requires Register within

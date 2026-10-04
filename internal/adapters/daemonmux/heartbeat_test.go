@@ -629,7 +629,7 @@ func TestEndpointConnectorHeartbeatEndToEnd(t *testing.T) {
 	clk := newHBClock(t)
 	connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings(), WithHeartbeat(clk.clock, hbTestConfig))
 	require.NoError(t, err)
-	physical, err := connector.Connect(context.Background(), muxEndpoint(binding.Identity(), binding.Policy(), "raw://heartbeat"))
+	physical, err := connector.Connect(context.Background(), remoteMuxEndpoint(binding.Identity(), binding.Policy(), "raw://heartbeat"))
 	require.NoError(t, err)
 	require.NoError(t, server.awaitAdoption(t))
 	t.Cleanup(func() { _ = physical.Close() })
@@ -643,6 +643,50 @@ func TestEndpointConnectorHeartbeatEndToEnd(t *testing.T) {
 	}
 	require.False(t, channelClosed(physical.Done()))
 	require.NoError(t, physical.Err())
+}
+
+// remoteMuxEndpoint is muxEndpoint with a remote fence.
+func remoteMuxEndpoint(identity ports.BrokerDaemonIdentity, policy ports.BrokerPolicy, address string) ports.BrokerDialTarget {
+	target := muxEndpoint(identity, policy, address)
+	target.Fence = ports.BrokerEndpointFence{Registration: testRegistration()}
+	return target
+}
+
+// TestEndpointConnectorHeartbeatOnlyOnRemoteTargets proves the heartbeat is
+// chosen per Connect from the dial target's fence: a local Unix link cannot die
+// silently and never pings, while a remote physical connection does.
+func TestEndpointConnectorHeartbeatOnlyOnRemoteTargets(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    func(binding ServerBinding) ports.BrokerDialTarget
+		wantHeart bool
+	}{
+		{name: "local target has no heartbeat", target: func(b ServerBinding) ports.BrokerDialTarget {
+			return muxEndpoint(b.Identity(), b.Policy(), "raw://local")
+		}},
+		{name: "remote target has a heartbeat", wantHeart: true, target: func(b ServerBinding) ports.BrokerDialTarget {
+			return remoteMuxEndpoint(b.Identity(), b.Policy(), "raw://remote")
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := mustServerBinding(t)
+			server := newSuperviseServer(t, binding, DefaultMuxCeilings(), 0, nil)
+			server.serve()
+			clk := newHBClock(t)
+			connector, err := NewEndpointConnector(server.dial(), DefaultMuxCeilings(), WithHeartbeat(clk.clock, hbTestConfig))
+			require.NoError(t, err)
+
+			physical, err := connector.Connect(context.Background(), tc.target(binding))
+			require.NoError(t, err)
+			require.NoError(t, server.awaitAdoption(t))
+			t.Cleanup(func() { _ = physical.Close() })
+
+			conn, ok := physical.(*PhysicalConnection)
+			require.True(t, ok)
+			require.Equal(t, tc.wantHeart, conn.pump.hb != nil)
+		})
+	}
 }
 
 func TestEndpointConnectorHeartbeatOptionValidation(t *testing.T) {
