@@ -121,52 +121,55 @@ func TestBuildRampWarnBorderIsAmberAndDistinctAcrossAccentHues(t *testing.T) {
 	}
 }
 
-func TestMRUStyleFadesFromNearActiveTowardBar(t *testing.T) {
+func TestMRUWeight(t *testing.T) {
 	tests := []struct {
-		name     string
-		theme    Theme
-		accent   renderer.RGB
-		fallback bool
+		count int
+		want  []float64
+	}{
+		{count: 1, want: []float64{0.5}},
+		{count: 2, want: []float64{0.5, 0.25}},
+		{count: 3, want: []float64{0.5, 1.0 / 3, 1.0 / 6}},
+		{count: 4, want: []float64{0.5, 0.375, 0.25, 0.125}},
+	}
+	for _, tt := range tests {
+		for index, want := range tt.want {
+			require.InDelta(t, want, mruWeight(index, tt.count), 1e-9, "count=%d index=%d", tt.count, index)
+		}
+	}
+}
+
+func TestMRUStylePlacesHistoryBetweenActiveAndBar(t *testing.T) {
+	tests := []struct {
+		name   string
+		theme  Theme
+		accent renderer.RGB
 	}{
 		{name: "dark teal", theme: rampTheme(false), accent: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}},
 		{name: "dark blue", theme: rampTheme(false), accent: renderer.RGB{R: 0x3b, G: 0x82, B: 0xf6}},
 		{name: "light teal", theme: rampTheme(true), accent: renderer.RGB{R: 0x2a, G: 0x7a, B: 0x7a}},
-		{name: "low contrast grey with blue fallback", theme: Theme{Foreground: renderer.RGB{R: 160, G: 160, B: 160}, Background: renderer.RGB{R: 32, G: 32, B: 32}, HasFG: true, HasBG: true, Known: true, UsePalette: true}, accent: renderer.RGB{R: 0, G: 102, B: 255}, fallback: true},
+		{name: "low contrast grey with blue", theme: Theme{Foreground: renderer.RGB{R: 160, G: 160, B: 160}, Background: renderer.RGB{R: 32, G: 32, B: 32}, HasFG: true, HasBG: true, Known: true, UsePalette: true}, accent: renderer.RGB{R: 0, G: 102, B: 255}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ramp := BuildRamp(tt.theme, Accent{RGB: tt.accent, Known: true})
 			require.True(t, ramp.rgb)
-			require.NotZero(t, ramp.mruCount)
-			require.Equal(t, tt.fallback, int(ramp.mruWeights[0]) < mruFloorWeight, "fallback range use")
-			distance := func(style renderer.Style) float64 {
-				return okLabDistance(rgbToOKLab(style.BackgroundRGB), rgbToOKLab(tt.theme.Background))
-			}
+			bar, active := ramp.SurfaceBar.BackgroundRGB, ramp.SurfaceActive.BackgroundRGB
 			for count := 1; count <= 9; count++ {
-				newest := MRUStyle(ramp, 0, count)
-				require.NotEqual(t, ramp.SurfaceActive.BackgroundRGB, newest.BackgroundRGB, "newest differs from active")
-				if !tt.fallback {
-					require.GreaterOrEqual(t, distance(newest), 0.7*distance(ramp.SurfaceActive), "newest stays close to the active accent")
-				}
-				previous := distance(ramp.SurfaceActive)
 				for index := range count {
+					weight := mruWeight(index, count)
 					style := MRUStyle(ramp, index, count)
-					require.LessOrEqual(t, distance(style), previous, "history fades with age")
-					require.Greater(t, distance(style), distance(ramp.SurfaceInactive), "oldest stays above inactive")
-					require.GreaterOrEqual(t, ContrastRatio(style.ForegroundRGB, style.BackgroundRGB), normalTextContrast)
-					previous = distance(style)
+					require.Equal(t, okLabLerp(bar, active, weight), style.BackgroundRGB, "count=%d index=%d", count, index)
+					foreground, _ := primaryText(tt.theme, style.BackgroundRGB)
+					require.Equal(t, foreground, style.ForegroundRGB)
 				}
 			}
+			require.Equal(t, okLabLerp(bar, active, 0.5), MRUStyle(ramp, 0, 1).BackgroundRGB, "the newest entry always sits halfway")
 		})
 	}
 }
 
-func TestMRUStyleWithoutReadableWeightKeepsRecentSurface(t *testing.T) {
-	theme := rampTheme(false)
-	ramp := BuildRamp(theme, Accent{RGB: renderer.RGB{R: 0x7d, G: 0xb5, B: 0xb5}, Known: true})
-	ramp.scanMRUWeights(theme, 15, 14)
-
-	require.Zero(t, ramp.mruCount)
+func TestMRUStyleWithoutRGBKeepsRecentSurface(t *testing.T) {
+	ramp := neutralRamp(rampTheme(false))
 	require.Equal(t, ramp.SurfaceRecent, MRUStyle(ramp, 0, 3))
 }
 
