@@ -179,17 +179,23 @@ func neutralRamp(t Theme) Ramp {
 	}
 }
 
-// MRUStyle spreads history entries evenly between the active surface and the
-// bar: with count entries, entry index sits at 1-(index+1)/(count+1) of the
-// way from bar to active, so neighbours are always one equal step apart. The
-// background is never moved for contrast; only the text picks the better of
-// the theme foreground and background.
+// mruWeight is the share of the way from the bar to the active surface for a
+// history entry. The newest entry always sits halfway; the remaining entries
+// split that lower half into equal steps, so the oldest stays one step above
+// the bar: 1 entry → 50; 2 → 50, 25; 3 → 50, 33, 17.
+func mruWeight(index, count int) float64 {
+	return 0.5 * (1 - float64(index)/float64(count))
+}
+
+// MRUStyle places history entries by mruWeight between the bar and the active
+// surface. The background is never moved for contrast; only the text picks the
+// better of the theme foreground and background.
 func MRUStyle(ramp Ramp, index, count int) renderer.Style {
 	if !ramp.rgb || count <= 0 {
 		return ramp.SurfaceRecent
 	}
 	index = max(0, min(index, count-1))
-	weight := 1 - float64(index+1)/float64(count+1)
+	weight := mruWeight(index, count)
 	background := okLabLerp(ramp.SurfaceBar.BackgroundRGB, ramp.SurfaceActive.BackgroundRGB, weight)
 	foreground, _ := primaryText(Theme{Foreground: ramp.foreground, Background: ramp.background}, background)
 	return rgbSurface(foreground, background)

@@ -121,7 +121,24 @@ func TestBuildRampWarnBorderIsAmberAndDistinctAcrossAccentHues(t *testing.T) {
 	}
 }
 
-func TestMRUStyleSpreadsEvenlyBetweenActiveAndBar(t *testing.T) {
+func TestMRUWeight(t *testing.T) {
+	tests := []struct {
+		count int
+		want  []float64
+	}{
+		{count: 1, want: []float64{0.5}},
+		{count: 2, want: []float64{0.5, 0.25}},
+		{count: 3, want: []float64{0.5, 1.0 / 3, 1.0 / 6}},
+		{count: 4, want: []float64{0.5, 0.375, 0.25, 0.125}},
+	}
+	for _, tt := range tests {
+		for index, want := range tt.want {
+			require.InDelta(t, want, mruWeight(index, tt.count), 1e-9, "count=%d index=%d", tt.count, index)
+		}
+	}
+}
+
+func TestMRUStylePlacesHistoryBetweenActiveAndBar(t *testing.T) {
 	tests := []struct {
 		name   string
 		theme  Theme
@@ -139,14 +156,14 @@ func TestMRUStyleSpreadsEvenlyBetweenActiveAndBar(t *testing.T) {
 			bar, active := ramp.SurfaceBar.BackgroundRGB, ramp.SurfaceActive.BackgroundRGB
 			for count := 1; count <= 9; count++ {
 				for index := range count {
-					weight := 1 - float64(index+1)/float64(count+1)
+					weight := mruWeight(index, count)
 					style := MRUStyle(ramp, index, count)
 					require.Equal(t, okLabLerp(bar, active, weight), style.BackgroundRGB, "count=%d index=%d", count, index)
 					foreground, _ := primaryText(tt.theme, style.BackgroundRGB)
 					require.Equal(t, foreground, style.ForegroundRGB)
 				}
 			}
-			require.Equal(t, okLabLerp(bar, active, 0.5), MRUStyle(ramp, 0, 1).BackgroundRGB, "a single entry sits halfway")
+			require.Equal(t, okLabLerp(bar, active, 0.5), MRUStyle(ramp, 0, 1).BackgroundRGB, "the newest entry always sits halfway")
 		})
 	}
 }
