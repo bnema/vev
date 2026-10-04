@@ -141,6 +141,17 @@ consumer therefore slows its own stream without affecting siblings. Data
 beyond the granted window, or credit beyond the window, is a peer violation
 and resets only that stream.
 
+The broker side of every remote daemonmux physical connection pings the
+daemon (local Unix links cannot die silently and never ping). `MuxPing`
+(client tag 306) and `MuxPong` (server tag 407) are stream-less frames carrying
+a nonzero nonce; the daemon answers the latest pending ping with a pong echoing the nonce (a
+newer unsent pong replaces an older one), and both bypass per-stream scheduling through a priority control slot. Every
+5 s the broker sends `MuxPing`. Any inbound frame counts as liveness (nonces are not matched; they are for
+diagnostics); if two
+consecutive ticks pass with none after a ping (10 to 15 s of silence), the
+connection fails with a heartbeat timeout and its streams are lost (the client
+resumes).
+
 Setup is fully bounded: the dialer's one context/deadline covers the Unix
 dial, preamble, Register send, and wait for Registered, and the server requires Register within
 the same accept-time handshake budget that bounded the preamble and admission.

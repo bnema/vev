@@ -16,7 +16,8 @@ package daemonmux
 // under the caller's negotiated ceiling, every application envelope is
 // additionally capped at the fixed 1 MiB control-class bound
 // (MaxMuxApplicationBytes), and opaque stream frames ride under the
-// negotiated chunk ceiling. Data, Close, and Reset are shared payloads: the
+// negotiated chunk ceiling. Ping and Pong are stream-less physical liveness
+// frames with a nonzero nonce. Data, Close, and Reset are shared payloads: the
 // same committed value converts into either direction, and direction is fixed
 // by the closed envelope oneof.
 
@@ -157,6 +158,16 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Mu
 			return nil, ErrInvalidMessage
 		}
 		return encodeClientEnvelope(*m, maxChunkBytes)
+	case Ping:
+		if m.Nonce == 0 {
+			return nil, ErrInvalidMessage
+		}
+		return &wire.MuxClientEnvelope{Payload: &wire.MuxClientEnvelope_Ping{Ping: &wire.MuxPing{Nonce: m.Nonce}}}, nil
+	case *Ping:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeClientEnvelope(*m, maxChunkBytes)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -180,6 +191,11 @@ func decodeClientEnvelope(envelope *wire.MuxClientEnvelope, maxChunkBytes uint64
 		return resetFromWire(payload.Reset_)
 	case *wire.MuxClientEnvelope_WindowUpdate:
 		return windowUpdateFromWire(payload.WindowUpdate)
+	case *wire.MuxClientEnvelope_Ping:
+		if payload.Ping == nil || payload.Ping.GetNonce() == 0 {
+			return nil, ErrInvalidMessage
+		}
+		return Ping{Nonce: payload.Ping.GetNonce()}, nil
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -257,6 +273,16 @@ func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.Mu
 			return nil, ErrInvalidMessage
 		}
 		return encodeServerEnvelope(*m, maxChunkBytes)
+	case Pong:
+		if m.Nonce == 0 {
+			return nil, ErrInvalidMessage
+		}
+		return &wire.MuxServerEnvelope{Payload: &wire.MuxServerEnvelope_Pong{Pong: &wire.MuxPong{Nonce: m.Nonce}}}, nil
+	case *Pong:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeServerEnvelope(*m, maxChunkBytes)
 	default:
 		return nil, ErrWrongDirection
 	}
@@ -286,6 +312,11 @@ func decodeServerEnvelope(envelope *wire.MuxServerEnvelope, maxChunkBytes uint64
 		return resetFromWire(payload.Reset_)
 	case *wire.MuxServerEnvelope_WindowUpdate:
 		return windowUpdateFromWire(payload.WindowUpdate)
+	case *wire.MuxServerEnvelope_Pong:
+		if payload.Pong == nil || payload.Pong.GetNonce() == 0 {
+			return nil, ErrInvalidMessage
+		}
+		return Pong{Nonce: payload.Pong.GetNonce()}, nil
 	default:
 		return nil, ErrWrongDirection
 	}

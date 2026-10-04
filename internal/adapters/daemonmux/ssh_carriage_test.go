@@ -534,7 +534,7 @@ func sshDaemonPump(t *testing.T) (*Pump, RawFramedTransport) {
 	carrier, err := NewPreambleCarrier(daemon)
 	require.NoError(t, err)
 	require.NoError(t, carrier.Negotiate(DefaultMuxCeilings()))
-	pump, err := NewPump(carrier, DirectionClient, DefaultMuxCeilings())
+	pump, err := NewPump(carrier, DirectionClient, DefaultMuxCeilings(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pump.Close() })
 	pump.Start(context.Background())

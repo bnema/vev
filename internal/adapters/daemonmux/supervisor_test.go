@@ -97,7 +97,7 @@ func TestServerSupervisorEnforcesAcceptedPolicyBeforeAdmission(t *testing.T) {
 	carrier, result := awaitHandshakeBridge(t, clientRaw, endpoint)
 	require.NoError(t, server.awaitAdoption(t))
 
-	pump, err := NewPump(carrier, DirectionServer, result.Ceilings)
+	pump, err := NewPump(carrier, DirectionServer, result.Ceilings, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pump.Close() })
 	pump.Start(context.Background())
@@ -258,7 +258,7 @@ func TestServerSupervisorRefusesLiarRegistration(t *testing.T) {
 	carrier, result := awaitHandshakeBridge(t, clientRaw, muxEndpoint(binding.Identity(), binding.Policy(), "raw://liar"))
 	require.NoError(t, server.awaitAdoption(t))
 
-	pump, err := NewPump(carrier, DirectionServer, result.Ceilings)
+	pump, err := NewPump(carrier, DirectionServer, result.Ceilings, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pump.Close() })
 	pump.Start(context.Background())

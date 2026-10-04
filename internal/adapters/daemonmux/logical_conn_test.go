@@ -89,9 +89,9 @@ func newPairedPumps(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump) {
 func newPairedPumpsUnstarted(t *testing.T, ceilings MuxCeilings) (*Pump, *Pump, func()) {
 	t.Helper()
 	brokerCarrier, daemonCarrier := newMemCarrierPair(4096)
-	broker, err := NewPump(brokerCarrier, DirectionServer, ceilings)
+	broker, err := NewPump(brokerCarrier, DirectionServer, ceilings, nil)
 	require.NoError(t, err)
-	daemon, err := NewPump(daemonCarrier, DirectionClient, ceilings)
+	daemon, err := NewPump(daemonCarrier, DirectionClient, ceilings, nil)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {

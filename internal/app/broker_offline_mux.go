@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/adapters/brokerconfig"
+	"github.com/bnema/vev/internal/adapters/clock"
 	"github.com/bnema/vev/internal/adapters/daemonmux"
 	"github.com/bnema/vev/internal/adapters/ipc"
 	"github.com/bnema/vev/internal/adapters/quic"
@@ -184,7 +185,7 @@ func brokerDynamicMuxConnector(config *brokerconfig.Config, routes *broker.Route
 			return nil, ports.BrokerError{Code: ports.BrokerErrorConflictingPolicy, Cause: errors.New("broker mux: local route authority does not match the resolved target")}
 		}
 		return dialBrokerRoute(ctx, binding.Route, target, log)
-	}, daemonmux.DefaultMuxCeilings())
+	}, daemonmux.DefaultMuxCeilings(), daemonmux.WithHeartbeat(clock.New()))
 }
 
 // dialBrokerRoute dials one provisioned route under one resolved target as an

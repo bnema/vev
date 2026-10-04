@@ -7,7 +7,10 @@
 // abstraction, and drives exactly one reader goroutine and one writer
 // goroutine. It owns no socket, listener, sessionwire conversion, or stream
 // framing: carriage framing is the carrier's, and the pump never imports a
-// concrete physical implementation.
+// concrete physical implementation. When NewPump is given a heartbeat clock
+// (the broker side of a remote connection) a third goroutine pings the
+// daemon, and Ping/Pong frames ride a priority control slot the writer drains
+// ahead of the scheduler; see heartbeat.go.
 //
 // The reader strict-decodes every inbound directional envelope with the
 // negotiated MuxCeilings and applies it to the engine: Open/Data/Close/Reset
@@ -45,13 +48,13 @@
 //
 // Cancellation is an orderly close. Cancelling the context passed to Start
 // (the carrier returns the context error from its blocked Send or Receive) or
-// calling Close stops both goroutines, closes the carrier, joins the reader
-// and writer, and publishes an orderly outcome: a nil Err and
+// calling Close stops every goroutine, closes the carrier, joins the reader,
+// writer, and heartbeat goroutine (when present), and publishes an orderly outcome: a nil Err and
 // RemoteFailureNone. A physical failure that already won keeps its cause; the
 // pump's terminal authority and the engine's are both first-wins, and the
 // pump serializes its two publications so they can never disagree. Close
 // unblocks an in-flight carrier Send or Receive through the adapter
-// prompt-close contract and joins both goroutines bounded by it: a carrier
+// prompt-close contract and joins every goroutine bounded by it: a carrier
 // whose Close promptly releases its blocked I/O lets Close return as soon as
 // the reader and writer observe the release.
 //
@@ -115,6 +118,16 @@ type Pump struct {
 	local     EnvelopeDirection
 	terminal  *terminalState
 
+	// control is the priority slot for one stream-less Ping or Pong frame
+	// (guarded by flushMu); the writer drains it before the scheduler. A pump
+	// only ever produces one of the two. hbClock, set only by NewPump on the
+	// broker side of a remote connection, enables the heartbeat; live carries
+	// a coalesced token whenever an inbound frame arrived.
+	control []byte
+	hbClock ports.Clock
+	live    chan struct{}
+	hbDone  chan struct{}
+
 	// wake coalesces outbound wakeups: one pending token means the writer
 	// must re-check the scheduler, and a signal raised while a token is
 	// already pending is redundant rather than lost.
@@ -171,12 +184,16 @@ type Pump struct {
 // the pump enforces exactly the ceilings one physical connection negotiated
 // for its lifetime. An invalid advertisement is refused with ErrInvalidCeilings
 // and a missing carrier or unknown direction with ErrPumpConfig. Goroutines
-// start on Start.
-func NewPump(carrier FramedCarrier, inbound EnvelopeDirection, ceilings MuxCeilings) (*Pump, error) {
+// start on Start. A non-nil hbClock enables the broker-side heartbeat and is
+// only valid with inbound == DirectionServer; nil disables it.
+func NewPump(carrier FramedCarrier, inbound EnvelopeDirection, ceilings MuxCeilings, hbClock ports.Clock) (*Pump, error) {
 	if carrier == nil {
 		return nil, ErrPumpConfig
 	}
 	if inbound != DirectionClient && inbound != DirectionServer {
+		return nil, ErrPumpConfig
+	}
+	if hbClock != nil && inbound != DirectionServer {
 		return nil, ErrPumpConfig
 	}
 	if err := ceilings.Validate(); err != nil {
@@ -198,6 +215,9 @@ func NewPump(carrier FramedCarrier, inbound EnvelopeDirection, ceilings MuxCeili
 		inbound:    inbound,
 		local:      oppositeDirection(inbound),
 		terminal:   newTerminalState(),
+		hbClock:    hbClock,
+		hbDone:     make(chan struct{}),
+		live:       make(chan struct{}, 1),
 		wake:       make(chan struct{}, 1),
 		flushCh:    make(chan struct{}),
 		readerDone: make(chan struct{}),
@@ -228,14 +248,22 @@ func (p *Pump) Start(ctx context.Context) {
 		p.cancel = cancel
 		p.started = true
 		p.mu.Unlock()
+		var tick ports.Timer
+		if p.hbClock != nil {
+			tick = p.hbClock.NewTimer(heartbeatInterval)
+		}
 		go p.readLoop(runCtx)
 		go p.writeLoop(runCtx)
+		if tick != nil {
+			go p.heartbeatLoop(runCtx, tick)
+		}
 	})
 }
 
 // Close orderly closes the pump: it cancels the run context, closes the
 // carrier through the adapter prompt-close contract to unblock the reader and
-// writer, joins both goroutines, and publishes an orderly terminal outcome
+// writer, joins every pump goroutine (reader, writer, and the optional
+// heartbeat goroutine of heartbeat.go), and publishes an orderly terminal outcome
 // unless a physical failure already won. It returns the carrier's Close error.
 // Close is idempotent and safe to call concurrently; every caller observes the
 // same result. A Close before Start never starts goroutines and never joins.
@@ -257,6 +285,9 @@ func (p *Pump) Close() error {
 		if started {
 			<-p.readerDone
 			<-p.writerDone
+			if p.hbClock != nil {
+				<-p.hbDone
+			}
 		}
 		p.settleOrderly()
 	})
@@ -621,7 +652,9 @@ func (p *Pump) enqueue(message any) error {
 // deadline or cancellation wins, and the pump's terminal outcome when the
 // connection became terminal before the scheduler drained (a physical failure
 // carries its cause; an orderly Close carries ErrPhysicalClosed when frames
-// were still queued). It never polls: the writer signals an idle transition.
+// were still queued). Heartbeat control frames (Ping/Pong) are not part of the
+// barrier: a pending or in-flight one never delays or fails Flush. It never
+// polls: the writer signals an idle transition.
 func (p *Pump) Flush(ctx context.Context) error {
 	if p == nil {
 		return ErrPumpConfig
@@ -631,7 +664,7 @@ func (p *Pump) Flush(ctx context.Context) error {
 	}
 	for {
 		p.flushMu.Lock()
-		if p.inflight == 0 && !p.scheduler.Pending() {
+		if p.idleLocked() {
 			p.flushMu.Unlock()
 			return nil
 		}
@@ -643,7 +676,7 @@ func (p *Pump) Flush(ctx context.Context) error {
 			return ctx.Err()
 		case <-p.terminal.Done():
 			p.flushMu.Lock()
-			idle := p.inflight == 0 && !p.scheduler.Pending()
+			idle := p.idleLocked()
 			p.flushMu.Unlock()
 			if idle {
 				return nil
@@ -679,6 +712,14 @@ func (p *Pump) handleOutboundRefusal(physical PhysicalStreamID, err error) {
 	}
 }
 
+// idleLocked reports whether no scheduler frame is queued or in flight.
+// Stream-less control frames (Ping/Pong) are deliberately excluded: Flush is a
+// barrier for stream traffic and must neither wait on nor fail because of
+// heartbeat frames. The caller holds flushMu.
+func (p *Pump) idleLocked() bool {
+	return p.inflight == 0 && !p.scheduler.Pending()
+}
+
 // signalFlushLocked broadcasts one possible idle transition to every Flush
 // waiter by closing the current channel and installing a fresh one. The caller
 // holds flushMu.
@@ -695,7 +736,7 @@ func (p *Pump) signalFlushLocked() {
 // frames.
 func (p *Pump) maybeSignalFlush() {
 	p.flushMu.Lock()
-	if p.inflight == 0 && !p.scheduler.Pending() {
+	if p.idleLocked() {
 		p.signalFlushLocked()
 	}
 	p.flushMu.Unlock()
@@ -729,6 +770,9 @@ func (p *Pump) readLoop(ctx context.Context) {
 			p.settleFailure(domain.RemoteFailureTransport, err)
 			return
 		}
+		// Any inbound frame, even one that later fails to decode, proves the
+		// physical link delivered bytes.
+		p.noteLive()
 		if fatal := p.handleInbound(payload); fatal != nil {
 			p.settleFailure(domain.RemoteFailureInvalidResponse, fatal)
 			return
@@ -739,28 +783,39 @@ func (p *Pump) readLoop(ctx context.Context) {
 // writeLoop is the writer goroutine: it dequeues the scheduler's fairly
 // ordered immutable envelopes and sends them verbatim, then blocks on the
 // coalescing wake channel until more work arrives or the run context ends. It
-// never polls, sleeps, or reorders.
+// never polls, sleeps, or reorders. A pending control frame is written before
+// any scheduler frame and is not counted as in flight, so Flush ignores it.
 func (p *Pump) writeLoop(ctx context.Context) {
 	defer p.settleOrderly()
 	defer close(p.writerDone)
 	for {
 		p.flushMu.Lock()
-		envelope, ok := p.scheduler.Dequeue()
-		if ok {
-			p.inflight++
+		// Stream-less control frames (Ping/Pong) go first and never pass
+		// through the per-stream scheduler.
+		payload, ok := p.control, p.control != nil
+		p.control = nil
+		control := ok
+		if !ok {
+			var envelope OutboundEnvelope
+			envelope, ok = p.scheduler.Dequeue()
+			payload = envelope.Bytes
+			if ok {
+				p.inflight++
+			}
 		}
 		p.flushMu.Unlock()
 		if ok {
-			err := p.carrier.Send(ctx, envelope.Bytes)
-			p.flushMu.Lock()
-			if p.inflight > 0 {
-				p.inflight--
+			err := p.carrier.Send(ctx, payload)
+			if !control {
+				p.flushMu.Lock()
+				if p.inflight > 0 {
+					p.inflight--
+				}
+				if p.idleLocked() {
+					p.signalFlushLocked()
+				}
+				p.flushMu.Unlock()
 			}
-			idle := p.inflight == 0 && !p.scheduler.Pending()
-			if idle {
-				p.signalFlushLocked()
-			}
-			p.flushMu.Unlock()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -811,6 +866,14 @@ func (p *Pump) applyClient(message ClientMessage) error {
 	case Open:
 		return p.applyOpen(m)
 	case *Open:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return p.applyClient(*m)
+	case Ping:
+		p.queueControl(EncodeServer(Pong{Nonce: m.Nonce}, p.ceilings.MaxReceiveEnvelopeBytes, p.ceilings.StreamChunkLimit))
+		return nil
+	case *Ping:
 		if m == nil {
 			return ErrInvalidMessage
 		}
@@ -915,6 +978,14 @@ func (p *Pump) applyServer(message ServerMessage) error {
 			return ErrInvalidMessage
 		}
 		return p.applyServer(*m)
+	case Pong:
+		// Liveness was already recorded for the frame itself.
+		return nil
+	case *Pong:
+		if m == nil {
+			return ErrInvalidMessage
+		}
+		return nil
 	case Data:
 		return p.applyData(m)
 	case *Data:

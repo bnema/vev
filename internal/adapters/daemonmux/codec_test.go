@@ -127,6 +127,7 @@ func TestMuxClientVariants(t *testing.T) {
 		{"reset", Reset{Physical: 5, Error: testErrorDetail(), HasError: true}, 304},
 		{"reset_orderly", Reset{Physical: 5}, 304},
 		{"window_update", WindowUpdate{Physical: 5, Credit: 4096}, 305},
+		{"ping", Ping{Nonce: 7}, 306},
 	}
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,6 +158,7 @@ func TestMuxServerVariants(t *testing.T) {
 		{"reset", Reset{Physical: 5, Error: testErrorDetail(), HasError: true}, 405},
 		{"reset_orderly", Reset{Physical: 5}, 405},
 		{"window_update", WindowUpdate{Physical: 5, Credit: 4096}, 406},
+		{"pong", Pong{Nonce: 7}, 407},
 	}
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,6 +247,90 @@ func TestMuxGoldenVectors(t *testing.T) {
 	back, err := DecodeServer(opened, testEnvelopeCeiling, testChunkCeiling)
 	require.NoError(t, err)
 	require.Equal(t, Opened{Ref: ref}, back)
+}
+
+// TestMuxHeartbeatCodec pins the Ping/Pong bytes (tag 306/407, one varint
+// nonce) and proves strict decode: zero nonces, truncated prefixes, trailing
+// garbage, and wrong-direction bytes are all refused.
+func TestMuxHeartbeatCodec(t *testing.T) {
+	tests := []struct {
+		name    string
+		encode  func(t *testing.T) ([]byte, error)
+		decode  func(raw []byte) (any, error)
+		want    []byte
+		message any
+	}{
+		{
+			name: "ping",
+			encode: func(t *testing.T) ([]byte, error) {
+				return EncodeClient(Ping{Nonce: 1}, testEnvelopeCeiling, testChunkCeiling)
+			},
+			decode:  func(raw []byte) (any, error) { return DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling) },
+			want:    []byte{0x92, 0x13, 0x02, 0x08, 0x01},
+			message: Ping{Nonce: 1},
+		},
+		{
+			name: "ping_multibyte_nonce",
+			encode: func(t *testing.T) ([]byte, error) {
+				return EncodeClient(Ping{Nonce: 300}, testEnvelopeCeiling, testChunkCeiling)
+			},
+			decode:  func(raw []byte) (any, error) { return DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling) },
+			want:    []byte{0x92, 0x13, 0x03, 0x08, 0xAC, 0x02},
+			message: Ping{Nonce: 300},
+		},
+		{
+			name: "pong",
+			encode: func(t *testing.T) ([]byte, error) {
+				return EncodeServer(Pong{Nonce: 1}, testEnvelopeCeiling, testChunkCeiling)
+			},
+			decode:  func(raw []byte) (any, error) { return DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling) },
+			want:    []byte{0xBA, 0x19, 0x02, 0x08, 0x01},
+			message: Pong{Nonce: 1},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := tc.encode(t)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, raw)
+			decoded, err := tc.decode(tc.want)
+			require.NoError(t, err)
+			require.Equal(t, tc.message, decoded)
+			for size := range len(tc.want) {
+				_, err := tc.decode(tc.want[:size])
+				require.Error(t, err, "prefix[:%d] accepted", size)
+			}
+			_, err = tc.decode(append(append([]byte(nil), tc.want...), 0xFF))
+			require.Error(t, err, "trailing garbage accepted")
+			_, err = tc.decode(append(append([]byte(nil), tc.want...), tc.want...))
+			require.Error(t, err, "concatenated envelope accepted")
+		})
+	}
+
+	t.Run("zero nonce refused on encode and decode", func(t *testing.T) {
+		_, err := EncodeClient(Ping{}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = EncodeClient((*Ping)(nil), testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = EncodeServer(Pong{}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = EncodeServer((*Pong)(nil), testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = DecodeClient([]byte{0x92, 0x13, 0x02, 0x08, 0x00}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = DecodeClient([]byte{0x92, 0x13, 0x00}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = DecodeServer([]byte{0xBA, 0x19, 0x02, 0x08, 0x00}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+		_, err = DecodeServer([]byte{0xBA, 0x19, 0x00}, testEnvelopeCeiling, testChunkCeiling)
+		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("wrong direction", func(t *testing.T) {
+		_, err := DecodeServer(mustEncodeClient(t, Ping{Nonce: 1}), testEnvelopeCeiling, testChunkCeiling)
+		require.Error(t, err)
+		_, err = DecodeClient(mustEncodeServer(t, Pong{Nonce: 1}), testEnvelopeCeiling, testChunkCeiling)
+		require.Error(t, err)
+	})
 }
 
 // TestMuxBounds proves stateless bound refusals at max-1, max, and max+1.

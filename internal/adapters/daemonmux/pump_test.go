@@ -167,7 +167,7 @@ func newTestPump(t *testing.T, inbound EnvelopeDirection) (*Pump, *fakeCarrier) 
 func newTestPumpWithCeilings(t *testing.T, inbound EnvelopeDirection, ceilings MuxCeilings) (*Pump, *fakeCarrier) {
 	t.Helper()
 	carrier := newFakeCarrier()
-	pump, err := NewPump(carrier, inbound, ceilings)
+	pump, err := NewPump(carrier, inbound, ceilings, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pump.Close() })
 	return pump, carrier
@@ -266,19 +266,24 @@ func decodeReset(t *testing.T, payload []byte, direction EnvelopeDirection) Rese
 
 func TestNewPumpValidation(t *testing.T) {
 	t.Run("missing carrier", func(t *testing.T) {
-		pump, err := NewPump(nil, DirectionClient, DefaultMuxCeilings())
+		pump, err := NewPump(nil, DirectionClient, DefaultMuxCeilings(), nil)
 		require.ErrorIs(t, err, ErrPumpConfig)
 		require.Nil(t, pump)
 	})
 	t.Run("unknown inbound direction", func(t *testing.T) {
 		for _, direction := range []EnvelopeDirection{0, EnvelopeDirection(200)} {
-			pump, err := NewPump(newFakeCarrier(), direction, DefaultMuxCeilings())
+			pump, err := NewPump(newFakeCarrier(), direction, DefaultMuxCeilings(), nil)
 			require.ErrorIs(t, err, ErrPumpConfig)
 			require.Nil(t, pump)
 		}
 	})
+	t.Run("heartbeat clock on daemon side", func(t *testing.T) {
+		pump, err := NewPump(newFakeCarrier(), DirectionClient, DefaultMuxCeilings(), newHBClock(t).clock)
+		require.ErrorIs(t, err, ErrPumpConfig)
+		require.Nil(t, pump)
+	})
 	t.Run("invalid ceilings", func(t *testing.T) {
-		pump, err := NewPump(newFakeCarrier(), DirectionClient, MuxCeilings{})
+		pump, err := NewPump(newFakeCarrier(), DirectionClient, MuxCeilings{}, nil)
 		require.ErrorIs(t, err, ErrInvalidCeilings)
 		require.Nil(t, pump)
 	})

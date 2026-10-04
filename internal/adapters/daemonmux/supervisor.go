@@ -170,7 +170,7 @@ func (s *ServerSupervisor) Adopt(ctx context.Context, raw RawFramedTransport) er
 		return err
 	}
 
-	pump, err := NewPump(bridge, DirectionClient, result.Ceilings)
+	pump, err := NewPump(bridge, DirectionClient, result.Ceilings, nil)
 	if err != nil {
 		_ = bridge.Close()
 		return err
