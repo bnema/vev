@@ -164,11 +164,11 @@ func neutralStyles(t Theme) Styles {
 	if usable(t) {
 		styles.TabActive = EmphasisStyle(rgbSurface(t.Background, t.Foreground), t)
 		styles.TabNameActive = styles.TabActive
-		// Keep the neutral history ordered visually, even without a palette
-		// accent: recent entries fade into the bar as their rank increases.
+		// Without a palette accent the history uses the same even spacing as
+		// MRUStyle, between the active tab and the bar.
 		for count := 1; count <= len(styles.mruStyles); count++ {
 			for index := range count {
-				amount := float64(index+1) / float64(count)
+				amount := float64(index+1) / float64(count+1)
 				background := Blend(t.Foreground, status.BackgroundRGB, amount)
 				foreground, ok := primaryText(t, background)
 				if !ok {

@@ -18,6 +18,6 @@ func TestNeutralHistoryGradient(t *testing.T) {
 			require.Less(t, style.BackgroundRGB.R, previous)
 			previous = style.BackgroundRGB.R
 		}
-		require.Equal(t, styles.SurfaceBar.BackgroundRGB, styles.MRUStyle(count-1, count).BackgroundRGB)
+		require.Greater(t, styles.MRUStyle(count-1, count).BackgroundRGB.R, styles.SurfaceBar.BackgroundRGB.R, "oldest stays one step above the bar")
 	}
 }
