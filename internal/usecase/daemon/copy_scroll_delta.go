@@ -66,9 +66,11 @@ func copyViewportDamage(previous, next copyViewportState, frame renderer.Frame) 
 }
 
 // Reuse retained compact rows instead of decoding and interning the whole
-// immutable viewport. Both committed frames remain untouched until send succeeds.
-func composeScrolledCopyViewport(state capturedRenderState, base renderer.Frame, previous, next copyViewportState, damage []renderer.Damage) renderer.Frame {
-	frame := previous.frame.Clone()
+// immutable viewport. The result is built in spare, the alternate viewport
+// buffer, so both committed frames remain untouched until send succeeds.
+func composeScrolledCopyViewport(state capturedRenderState, base, spare renderer.Frame, previous, next copyViewportState, damage []renderer.Damage) renderer.Frame {
+	frame := spare
+	frame.CopyFrom(previous.frame)
 	target := next.target
 	scroll := damage[0]
 	if scroll.Kind == renderer.DamageScrollDown {
@@ -78,7 +80,9 @@ func composeScrolledCopyViewport(state capturedRenderState, base renderer.Frame,
 	}
 	for y := range frame.Height {
 		if y < target.Y || y >= target.Y+target.Height {
-			frame.WriteRow(y, 0, base.Row(y))
+			for x := range frame.Width {
+				frame.Set(x, y, base.Cell(x, y))
+			}
 		}
 	}
 	paint := func(y int, row []renderer.Cell) {

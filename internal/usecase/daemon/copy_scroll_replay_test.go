@@ -66,3 +66,24 @@ func TestCopyWheelReplayMatchesFullComposition(t *testing.T) {
 		})
 	}
 }
+
+// TestCopyWheelFailedScrollKeepsCommittedFrames proves a scroll that fails to
+// publish writes only the spare buffers: the committed base and viewport
+// frames are byte-for-byte unchanged.
+func TestCopyWheelFailedScrollKeepsCommittedFrames(t *testing.T) {
+	f := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 80, Rows: 24}, panes: 1, historyRows: 200})
+	f.d.enterCopyMode(f.sess, f.ac)
+	for _, delta := range []int{-10, -3} {
+		f.d.copyWheel(f.sess, f.ac, delta)
+		f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
+	}
+	require.NotZero(t, f.ac.render.spare.copyViewport.frame.Width, "both buffers must hold a viewport page")
+	before := cloneComposeCache(f.ac.render.cache)
+	var compositions int
+	f.ac.renderStages = renderStageHooks{compose: func() { compositions++ }}
+	f.ac.replaceTransport(cacheFailTransport{})
+	f.d.copyWheel(f.sess, f.ac, -3)
+	f.d.paint(f.sess, f.ac, false, nil)
+	require.Positive(t, compositions, "the failed scroll must be composed")
+	require.Equal(t, before, cloneComposeCache(f.ac.render.cache))
+}
