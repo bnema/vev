@@ -188,7 +188,7 @@ func (w *sessionAttachmentWorker) Run(ctx context.Context, fg AttachmentForegrou
 	case protocol.ErrorMsg:
 		return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: message.Code, Text: message.Text}}
 	default:
-		return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: unexpected %T before welcome", welcome)}
+		return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("unexpected %T before welcome", welcome)}
 	}
 
 	state, event := w.awaitInitialPublication(ctx, fg, stream, token, incoming)
@@ -228,7 +228,7 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 			// shape rule, a public generation of zero. Attached is published only after
 			// that write, flush, and commit succeeded.
 			if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusConnecting), typed.Data); err != nil {
-				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing initial output: %w", err)}
+				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing initial output: %w", err)}
 				return state, &event
 			}
 			if err := w.send(ctx, fg, stream, protocol.Ack{Epoch: state.epoch, State: state.state}); err != nil {
@@ -256,7 +256,7 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 			// writes no bytes: the screen it commits is exactly the frame that just
 			// drained.
 			if err := fg.PublishAttached(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached)); err != nil {
-				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing attached presentation: %w", err)}
+				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing attached presentation: %w", err)}
 				return state, &event
 			}
 			return state, nil
@@ -419,7 +419,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 				w.noteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
-					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing output: %w", err)}
+					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing output: %w", err)}
 				}
 				if err := w.send(ctx, fg, stream, protocol.Ack{Epoch: state.epoch, State: state.state}); err != nil {
 					return w.settle(ctx, fg, stream, token, err)
@@ -438,7 +438,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				state = next
 				w.noteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), nil); err != nil {
-					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("vev: publishing view update: %w", err)}
+					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing view update: %w", err)}
 				}
 			case protocol.UIReceipt:
 				attachmentUIReceipt(fg, typed)

@@ -62,11 +62,11 @@ type killAllReport struct {
 // The daemon checkpoints named sessions on SIGTERM; numbered sessions close.
 func runKillAll(ctx context.Context, out io.Writer) error {
 	if os.Getenv("VEV") != "" {
-		return errors.New("vev: `kill --all` stops the vev you are running in; run it from a terminal outside vev")
+		return errors.New("`kill --all` stops the vev you are running in; run it from a terminal outside vev")
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("vev: resolve executable: %w", err)
+		return fmt.Errorf("resolve executable: %w", err)
 	}
 	scope := killAllScope{
 		procRoot:  "/proc",
@@ -108,7 +108,7 @@ func stopEverything(ctx context.Context, scope killAllScope, timeout time.Durati
 			return report
 		}
 		if round == killAllRounds {
-			report.errs = append(report.errs, fmt.Errorf("vev: %d vev processes kept starting again; run `vev kill --all` once more", len(procs)))
+			report.errs = append(report.errs, fmt.Errorf("%d vev processes kept starting again; run `vev kill --all` once more", len(procs)))
 			return report
 		}
 		// Clients first, so none of them can start a broker or daemon from
@@ -144,7 +144,7 @@ func installedPath(exe string) string {
 func findVevProcesses(scope killAllScope) ([]vevProcess, error) {
 	entries, err := os.ReadDir(scope.procRoot)
 	if err != nil {
-		return nil, fmt.Errorf("vev: list processes: %w", err)
+		return nil, fmt.Errorf("list processes: %w", err)
 	}
 	var procs []vevProcess
 	for _, entry := range entries {
@@ -239,7 +239,7 @@ func stopWave(ctx context.Context, procs []vevProcess, timeout time.Duration, re
 		}
 		_ = syscall.Kill(p.pid, syscall.SIGKILL)
 		if err := waitProcessExit(context.WithoutCancel(ctx), p.pid, time.Second); err != nil {
-			report.errs = append(report.errs, fmt.Errorf("vev: %s (pid %d) did not stop: %w", p.role, p.pid, err))
+			report.errs = append(report.errs, fmt.Errorf("%s (pid %d) did not stop: %w", p.role, p.pid, err))
 			survivors = append(survivors, p)
 			continue
 		}

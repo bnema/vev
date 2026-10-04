@@ -264,7 +264,7 @@ func (p *brokerClientPresentation) Failure(state client.State, err error) {
 // cancellation, joined with any failure the supervisor classified as terminal.
 func runBrokerClient(ctx context.Context, cfg brokerClientConfig) error {
 	if cfg.Terminal == nil {
-		return errors.New("vev: broker client requires a terminal")
+		return errors.New("broker client requires a terminal")
 	}
 	clk := cfg.Clock
 	if clk == nil {
@@ -341,7 +341,7 @@ func localEphemeralNavigation() client.InitialNavigation {
 // no destination was dialed, so the supervisor surfaces it as a bounded
 // selection-unavailable notice and returns to the picker instead of attaching a
 // fallback or creating implicitly.
-var errTerminalNavigationUnresolved = errors.New("vev: attach host is not in the broker catalogue")
+var errTerminalNavigationUnresolved = errors.New("attach host is not in the broker catalogue")
 
 // terminalBrokerNavigation translates the parsed terminal CLI intent into the
 // closed initial-navigation union. An intent that is fully determined before
@@ -573,7 +573,7 @@ func newProductionBrokerConnector() ports.BrokerConnector {
 // cadence.
 func (c *productionBrokerConnector) Connect(ctx context.Context) (ports.BrokerNavigator, error) {
 	if c == nil || c.connect == nil {
-		return nil, errors.New("vev: broker connector is not configured")
+		return nil, errors.New("broker connector is not configured")
 	}
 	service, err := c.connect(ctx)
 	if err != nil {

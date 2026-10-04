@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/bnema/vev/internal/app"
@@ -24,24 +25,9 @@ func TestCLIError(t *testing.T) {
 			want: "vev: invalid session name: must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}",
 		},
 		{
-			name: "daemon error",
-			err:  errors.New("vev: daemon listen: address already in use"),
+			name: "wrapped runtime error",
+			err:  fmt.Errorf("daemon listen: %w", errors.New("address already in use")),
 			want: "vev: daemon listen: address already in use",
-		},
-		{
-			name: "session error",
-			err:  errors.New("vev: no such session: work"),
-			want: "vev: no such session: work",
-		},
-		{
-			name: "repeated prefix",
-			err:  errors.New("vev: vev: message"),
-			want: "vev: message",
-		},
-		{
-			name: "prefix whitespace",
-			err:  errors.New("vev:\t message"),
-			want: "vev: message",
 		},
 	}
 

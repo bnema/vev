@@ -86,10 +86,10 @@ type BrokerOperationRoute struct {
 // destination fence. It performs no I/O and consults no snapshot.
 func (r BrokerOperationRoute) Validate() error {
 	if r.Epoch == 0 {
-		return errors.New("vev: broker operation route carries no epoch")
+		return errors.New("broker operation route carries no epoch")
 	}
 	if err := r.Destination.Validate(); err != nil {
-		return fmt.Errorf("vev: broker operation route destination: %w", err)
+		return fmt.Errorf("broker operation route destination: %w", err)
 	}
 	return nil
 }
@@ -108,10 +108,10 @@ type BrokerOperations struct {
 // missing dependency; the caller keeps ownership of the service lifetime.
 func NewBrokerOperations(service ports.BrokerNavigator, clock ports.Clock) (*BrokerOperations, error) {
 	if supervisorNil(service) {
-		return nil, errors.New("vev: broker operations require a broker service")
+		return nil, errors.New("broker operations require a broker service")
 	}
 	if supervisorNil(clock) {
-		return nil, errors.New("vev: broker operations require a clock")
+		return nil, errors.New("broker operations require a clock")
 	}
 	return &BrokerOperations{service: service, clock: clock}, nil
 }
@@ -136,14 +136,14 @@ func (o *BrokerOperations) list(ctx context.Context, route BrokerOperationRoute,
 	reply, err := o.exchange(ctx, route, mode, protocol.List{})
 	if err != nil {
 		if errors.Is(err, errBrokerOperationLost) {
-			return nil, fmt.Errorf("vev: reading session list: %w", err)
+			return nil, fmt.Errorf("reading session list: %w", err)
 		}
 		return nil, err
 	}
 	sessions, ok := reply.(protocol.Sessions)
 	if !ok {
 		logBrokerOperationCause("list reply", fmt.Errorf("unexpected reply %T", reply))
-		return nil, fmt.Errorf("vev: unexpected reply %T to list", reply)
+		return nil, fmt.Errorf("unexpected reply %T to list", reply)
 	}
 	return sessions.Sessions, nil
 }

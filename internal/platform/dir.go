@@ -17,18 +17,18 @@ func ActivateDevelopmentEnvironment() error {
 		return nil
 	}
 	if !validDevelopmentEnvironmentName(name) {
-		return fmt.Errorf("vev: invalid VEV_ENV %q (want one safe segment matching [A-Za-z0-9][A-Za-z0-9._-]{0,63})", name)
+		return fmt.Errorf("invalid VEV_ENV %q (want one safe segment matching [A-Za-z0-9][A-Za-z0-9._-]{0,63})", name)
 	}
 
 	base := os.Getenv(devEnvironmentRootEnv)
 	if base == "" {
 		absolute, err := filepath.Abs(".dev")
 		if err != nil {
-			return fmt.Errorf("vev: resolve VEV_ENV %q root: %w", name, err)
+			return fmt.Errorf("resolve VEV_ENV %q root: %w", name, err)
 		}
 		base = absolute
 	} else if !filepath.IsAbs(base) {
-		return fmt.Errorf("vev: invalid %s %q (want an absolute path)", devEnvironmentRootEnv, base)
+		return fmt.Errorf("invalid %s %q (want an absolute path)", devEnvironmentRootEnv, base)
 	}
 	root := filepath.Join(base, name)
 
@@ -56,7 +56,7 @@ func ActivateDevelopmentEnvironment() error {
 					_ = os.Unsetenv(rollbackKey)
 				}
 			}
-			return fmt.Errorf("vev: activate VEV_ENV %q: %w", name, err)
+			return fmt.Errorf("activate VEV_ENV %q: %w", name, err)
 		}
 	}
 	return nil

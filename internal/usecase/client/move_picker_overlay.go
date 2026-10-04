@@ -291,7 +291,7 @@ func (p *attachmentMovePicker) paint(state outputApplyState) error {
 	}
 	uiContext := state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(p.fg, p.fg.Token())}, ports.UIStatusAttached)
 	if err := p.overlay.overlayOutput(uiContext, frame); err != nil {
-		return fmt.Errorf("vev: publishing move picker: %w", err)
+		return fmt.Errorf("publishing move picker: %w", err)
 	}
 	return nil
 }

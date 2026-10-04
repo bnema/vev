@@ -20,11 +20,11 @@ import (
 // does in production.
 func newLocalRouteProbe(binding brokerconfig.LocalBinding, epoch ports.BrokerEpoch, dial localCarrierDialer, ceilings daemonmux.MuxCeilings) (*broker.LocalDaemonProbe, error) {
 	if dial == nil {
-		return nil, errors.New("vev: broker local probe requires a dialer")
+		return nil, errors.New("broker local probe requires a dialer")
 	}
 	connector, err := daemonmux.NewEndpointConnector(daemonmux.RawCarrierDialer(dial), ceilings)
 	if err != nil {
-		return nil, fmt.Errorf("vev: broker local probe: %w", err)
+		return nil, fmt.Errorf("broker local probe: %w", err)
 	}
 	return newLocalRouteProbeWithConnector(binding, epoch, connector)
 }

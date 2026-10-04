@@ -120,9 +120,9 @@ func (e pickerCatalogueError) noticeText() string {
 
 func (e pickerCatalogueError) Error() string {
 	if e.Text == "" {
-		return "vev: picker selection " + e.Code.String()
+		return "picker selection " + e.Code.String()
 	}
-	return "vev: picker selection " + e.Code.String() + ": " + e.Text
+	return "picker selection " + e.Code.String() + ": " + e.Text
 }
 
 // pickerSelectionKind names one closed admission variant a resolved selection

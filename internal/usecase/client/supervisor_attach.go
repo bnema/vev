@@ -337,7 +337,7 @@ func (s *Supervisor) newAttachmentWorker(request ports.BrokerOpenStreamRequest, 
 		var err error
 		geometry, err = s.cfg.Terminal.Geometry()
 		if err != nil {
-			return nil, fmt.Errorf("vev: reading terminal geometry: %w", err)
+			return nil, fmt.Errorf("reading terminal geometry: %w", err)
 		}
 	}
 	environment := s.cfg.AttachmentEnvironment
@@ -380,7 +380,7 @@ func (s *Supervisor) takeInitialNavigation(snapshot ports.BrokerSnapshot) (Initi
 	// publication consumes the intent and reports a bounded refusal instead of
 	// handing an unvalidated authority to the resolver or the request.
 	if err := snapshot.Validate(); err != nil {
-		return InitialNavigation{}, true, fmt.Errorf("vev: initial navigation snapshot: %w", err)
+		return InitialNavigation{}, true, fmt.Errorf("initial navigation snapshot: %w", err)
 	}
 	s.mu.Lock()
 	if s.navigationConsumed {
@@ -421,7 +421,7 @@ func (s *Supervisor) takeInitialNavigation(snapshot ports.BrokerSnapshot) (Initi
 // not carry yet (for example attach-or-create before the host's first
 // observation). The supervisor keeps the intent armed and resolves it again on
 // later publications, bounded by initialNavigationObservationBudget.
-var ErrInitialNavigationNotObserved = errors.New("vev: initial navigation target is not observed yet")
+var ErrInitialNavigationNotObserved = errors.New("initial navigation target is not observed yet")
 
 // InitialNavigationNotObserved is the resolver's ErrInitialNavigationNotObserved
 // naming the configured endpoint whose fresh observation it needs; the

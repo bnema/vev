@@ -70,6 +70,6 @@ func AuthorizeDaemonLaunch(target ports.BrokerDialTarget) error {
 func daemonStartRefused(reason string) error {
 	return ports.BrokerError{
 		Code:  ports.BrokerErrorConflictingPolicy,
-		Cause: fmt.Errorf("vev: refusing to start the daemon: %s", reason),
+		Cause: fmt.Errorf("refusing to start the daemon: %s", reason),
 	}
 }

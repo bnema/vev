@@ -20,7 +20,7 @@ import (
 // or stream of its own.
 func runOfflineClient(ctx context.Context, socket string, terminal ports.Terminal, ui *client.UI, log *slog.Logger, onState func(client.State), onFailure func(error)) error {
 	if terminal == nil {
-		return errors.New("vev: offline client requires a terminal")
+		return errors.New("offline client requires a terminal")
 	}
 	if log != nil {
 		log.Debug("broker_offline_client", "socket", socket)

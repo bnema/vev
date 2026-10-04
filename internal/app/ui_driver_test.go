@@ -85,8 +85,8 @@ func TestParseArgsUIOptionsAreAttachOnly(t *testing.T) {
 	command, err := parseArgs([]string{"--ui-control", "new", "work"})
 	require.NoError(t, err)
 	require.Equal(t, kindAttach, command.kind)
-	require.True(t, command.uiControl)
-	require.False(t, command.uiObserve)
+	require.True(t, command.ui.control)
+	require.False(t, command.ui.observe)
 	driver, err := parseArgs([]string{"--ui-driver", "--session", "work"})
 	require.NoError(t, err)
 	require.Equal(t, kindUIDriver, driver.kind)
@@ -101,8 +101,8 @@ func TestParseArgsUIOptionsAreAttachOnly(t *testing.T) {
 	require.Error(t, err)
 	trailing, err := parseArgs([]string{"attach", "work", "--ui-observe", "--ui-socket", "/tmp/ui.sock"})
 	require.NoError(t, err)
-	require.True(t, trailing.uiObserve)
-	require.Equal(t, "/tmp/ui.sock", trailing.uiSocket)
+	require.True(t, trailing.ui.observe)
+	require.Equal(t, "/tmp/ui.sock", trailing.ui.socket)
 	_, err = parseArgs([]string{"--ui-observe", "ls"})
 	require.Error(t, err)
 	_, err = parseArgs([]string{"--ui-socket", "/tmp/ui.sock"})
@@ -115,7 +115,7 @@ func TestParseArgsUIOptionsAreAttachOnly(t *testing.T) {
 // client over the process' production connector.
 func TestInteractiveObservedCompositionUsesTheBrokerConnector(t *testing.T) {
 	sources := loadAppSources(t, false)
-	body := sources["ui_driver.go"]
+	body := sources["ui_driver.go"] + sources["attach.go"]
 	require.Contains(t, body, "newProductionBrokerConnector()")
 	for _, forbidden := range []string{
 		"runAttachWithDeps", "localDaemonDialer", "remoteDialerFactory", "launchConfig",

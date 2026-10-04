@@ -72,15 +72,15 @@ var (
 	// errBrokerAbsent reports that no broker is bound at the endpoint, so a
 	// spawn may recover it. A missing socket and a stale socket left by a dead
 	// owner are both absence.
-	errBrokerAbsent = errors.New("vev: broker endpoint is absent")
+	errBrokerAbsent = errors.New("broker endpoint is absent")
 	// errBrokerIncompatible reports that the endpoint exists but is not a
 	// compatible broker (a foreign path, a live endpoint that fails the broker
 	// handshake, or a handshake that stalls past its bound). It is never an
 	// invitation to spawn.
-	errBrokerIncompatible = errors.New("vev: broker endpoint is not a compatible broker")
+	errBrokerIncompatible = errors.New("broker endpoint is not a compatible broker")
 	// errBrokerNotReady reports that --ensure did not observe a ready broker
 	// before the overall deadline.
-	errBrokerNotReady = errors.New("vev: broker did not become ready")
+	errBrokerNotReady = errors.New("broker did not become ready")
 )
 
 // brokerStatusReport is the bounded JSON status document. It carries exactly
@@ -160,11 +160,11 @@ func runProductionBrokerLauncherCommand(context.Context) error {
 func startDetachedBrokerServe(args []string, crashPath string) error {
 	exePath, err := selfExePath()
 	if err != nil {
-		return fmt.Errorf("vev: resolving executable path: %w", err)
+		return fmt.Errorf("resolving executable path: %w", err)
 	}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("vev: opening %s: %w", os.DevNull, err)
+		return fmt.Errorf("opening %s: %w", os.DevNull, err)
 	}
 	defer func() { _ = devNull.Close() }()
 
@@ -177,21 +177,21 @@ func startDetachedBrokerServe(args []string, crashPath string) error {
 		cmd.Stderr = devNull
 	} else {
 		if err := safedir.EnsurePrivate(filepath.Dir(crashPath)); err != nil {
-			return fmt.Errorf("vev: secure broker crash log directory: %w", err)
+			return fmt.Errorf("secure broker crash log directory: %w", err)
 		}
 		if err := os.Rename(crashPath, crashPath+".prev"); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("vev: preserve previous broker crash log: %w", err)
+			return fmt.Errorf("preserve previous broker crash log: %w", err)
 		}
 		crashLog, err := os.OpenFile(crashPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 		if err != nil {
-			return fmt.Errorf("vev: open broker crash log: %w", err)
+			return fmt.Errorf("open broker crash log: %w", err)
 		}
 		defer func() { _ = crashLog.Close() }()
 		cmd.Stderr = crashLog
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("vev: starting detached broker: %w", err)
+		return fmt.Errorf("starting detached broker: %w", err)
 	}
 	return cmd.Process.Release()
 }
@@ -209,11 +209,11 @@ func spawnProductionBrokerLauncher(ctx context.Context) error {
 func runBrokerLauncherProcess(ctx context.Context, args []string) error {
 	exePath, err := selfExePath()
 	if err != nil {
-		return fmt.Errorf("vev: resolving executable path: %w", err)
+		return fmt.Errorf("resolving executable path: %w", err)
 	}
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("vev: opening %s: %w", os.DevNull, err)
+		return fmt.Errorf("opening %s: %w", os.DevNull, err)
 	}
 	defer func() { _ = devNull.Close() }()
 
@@ -226,9 +226,9 @@ func runBrokerLauncherProcess(ctx context.Context, args []string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if detail := bytes.TrimSpace(stderr.Bytes()); len(detail) > 0 {
-			return fmt.Errorf("vev: launching broker: %w: %s", err, detail)
+			return fmt.Errorf("launching broker: %w: %s", err, detail)
 		}
-		return fmt.Errorf("vev: launching broker: %w", err)
+		return fmt.Errorf("launching broker: %w", err)
 	}
 	return nil
 }
@@ -255,10 +255,10 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 	// directory lives beneath the runtime directory, and both must be private
 	// and symlink-free before they can hold an exclusive lock.
 	if err := safedir.EnsurePrivate(req.layout.Spawn); err != nil {
-		return brokerStatusReport{}, fmt.Errorf("vev: secure broker sandbox spawn directory: %w", err)
+		return brokerStatusReport{}, fmt.Errorf("secure broker sandbox spawn directory: %w", err)
 	}
 	if err := req.layout.VerifyCreated(); err != nil {
-		return brokerStatusReport{}, fmt.Errorf("vev: verify broker sandbox paths: %w", err)
+		return brokerStatusReport{}, fmt.Errorf("verify broker sandbox paths: %w", err)
 	}
 
 	var held brokerStatusLock
@@ -293,7 +293,7 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 			return brokerStatusReport{}, err
 		}
 		if !errors.Is(err, errBrokerAbsent) {
-			return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --all\" and retry", req.socketPath, err)
+			return brokerStatusReport{}, fmt.Errorf("broker endpoint %s is live but incompatible: %w; run \"vev kill --all\" and retry", req.socketPath, err)
 		}
 
 		if held == nil {
@@ -314,7 +314,7 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 					return brokerStatusReport{}, err
 				}
 				if !errors.Is(err, errBrokerAbsent) {
-					return brokerStatusReport{}, fmt.Errorf("vev: broker endpoint %s is live but incompatible: %w; run \"vev kill --all\" and retry", req.socketPath, err)
+					return brokerStatusReport{}, fmt.Errorf("broker endpoint %s is live but incompatible: %w; run \"vev kill --all\" and retry", req.socketPath, err)
 				}
 			case errors.Is(err, lifecycle.ErrBusy):
 				// Another caller is elected and spawning. Only the elected
@@ -329,13 +329,13 @@ func ensureBrokerReady(ctx context.Context, req brokerStatusRequest, deps broker
 				}
 				continue
 			default:
-				return brokerStatusReport{}, fmt.Errorf("vev: elect broker spawner: %w", err)
+				return brokerStatusReport{}, fmt.Errorf("elect broker spawner: %w", err)
 			}
 		}
 		if held != nil && !spawned {
 			busy, err := deps.lifetimeOwner(req.layout.Runtime)
 			if err != nil {
-				return brokerStatusReport{}, fmt.Errorf("vev: inspect broker lifetime owner: %w", err)
+				return brokerStatusReport{}, fmt.Errorf("inspect broker lifetime owner: %w", err)
 			}
 			if !busy {
 				if err := deps.spawn(ctx, req.root, req.grace, req.graceSet); err != nil {
@@ -379,7 +379,7 @@ func probeBrokerStatus(ctx context.Context, socketPath string) (brokerStatusRepo
 	case errors.Is(err, fs.ErrNotExist):
 		return brokerStatusReport{}, absentError(socketPath)
 	case err != nil:
-		return brokerStatusReport{}, fmt.Errorf("vev: inspect broker endpoint %s: %w", socketPath, err)
+		return brokerStatusReport{}, fmt.Errorf("inspect broker endpoint %s: %w", socketPath, err)
 	case info.Mode()&os.ModeSocket == 0:
 		return brokerStatusReport{}, incompatibleError(socketPath, errors.New("path is not a Unix socket"))
 	}

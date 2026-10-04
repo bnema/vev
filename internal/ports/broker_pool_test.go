@@ -59,7 +59,7 @@ func TestBrokerStreamLostErrorChain(t *testing.T) {
 	cause := errors.New("transport diagnostic")
 	loss := BrokerStreamLost{Epoch: 1, Connection: BrokerConnectionID{1}, Stream: 1, Cause: domain.RemoteFailureTrust, Err: cause}
 	require.NoError(t, loss.Validate())
-	require.Equal(t, "vev: broker attachment_lost", loss.Error())
+	require.Equal(t, "broker attachment_lost", loss.Error())
 	require.ErrorIs(t, loss, cause)
 	var typed BrokerError
 	require.ErrorAs(t, loss, &typed)

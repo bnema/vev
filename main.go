@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/bnema/vev/internal/app"
 )
@@ -15,13 +14,8 @@ func main() {
 	}
 }
 
-// cliError adds the sole user-facing CLI prefix. Errors may already include
-// it when they originate from a runtime component, so remove any such prefix
-// before rendering.
+// cliError adds the sole user-facing CLI prefix; internal errors never carry
+// it.
 func cliError(err error) string {
-	message := err.Error()
-	for strings.HasPrefix(message, "vev:") {
-		message = strings.TrimSpace(strings.TrimPrefix(message, "vev:"))
-	}
-	return "vev: " + message
+	return "vev: " + err.Error()
 }

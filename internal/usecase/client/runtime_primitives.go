@@ -16,9 +16,9 @@ type ProtocolError struct {
 
 func (e *ProtocolError) Error() string {
 	if e.Text == "" {
-		return fmt.Sprintf("vev: daemon rejected attach (code %d)", e.Code)
+		return fmt.Sprintf("daemon rejected attach (code %d)", e.Code)
 	}
-	return fmt.Sprintf("vev: %s", e.Text)
+	return e.Text
 }
 
 func newClientID() [16]byte {

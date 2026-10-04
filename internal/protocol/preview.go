@@ -49,7 +49,7 @@ const (
 	RemotePreviewWatchMaxInterval = time.Second
 )
 
-var ErrInvalidRemotePreviewWatch = errors.New("vev: invalid remote preview watch")
+var ErrInvalidRemotePreviewWatch = errors.New("invalid remote preview watch")
 
 // ValidateRemotePreviewWatch accepts only a valid request and a whole
 // millisecond interval inside the watch bounds.

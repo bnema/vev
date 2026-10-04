@@ -638,9 +638,9 @@ type BrokerError struct {
 
 func (e BrokerError) Error() string {
 	if e.Text == "" {
-		return "vev: broker " + e.Code.String()
+		return "broker " + e.Code.String()
 	}
-	return "vev: broker " + e.Code.String() + ": " + e.Text
+	return "broker " + e.Code.String() + ": " + e.Text
 }
 
 func (e BrokerError) Unwrap() error { return e.Cause }
@@ -670,7 +670,7 @@ type BrokerStreamLost struct {
 }
 
 // Error and Unwrap retain exact stream scope while allowing generic lifecycle handling.
-func (e BrokerStreamLost) Error() string { return "vev: broker attachment_lost" }
+func (e BrokerStreamLost) Error() string { return "broker attachment_lost" }
 func (e BrokerStreamLost) Unwrap() error {
 	return BrokerError{Code: BrokerErrorAttachmentLost, Cause: e.Err}
 }

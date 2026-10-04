@@ -70,10 +70,10 @@ func webControlRequest(ctx context.Context, renew bool) (webAccess, error) {
 	defer conn.Close()
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
-		return webAccess{}, errors.New("vev: unsafe web control peer")
+		return webAccess{}, errors.New("unsafe web control peer")
 	}
 	if !sameWebUID(unixConn) {
-		return webAccess{}, errors.New("vev: unsafe web control peer")
+		return webAccess{}, errors.New("unsafe web control peer")
 	}
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
@@ -90,12 +90,12 @@ func webControlRequest(ctx context.Context, renew bool) (webAccess, error) {
 	}
 	var access webAccess
 	if len(data) > 4096 || json.Unmarshal(data, &access) != nil {
-		return webAccess{}, errors.New("vev: invalid web control response")
+		return webAccess{}, errors.New("invalid web control response")
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(access.Token)
 	settings, settingsErr := webterm.ParseSettings(access.Settings.Listen, access.Settings.Origin)
 	if err != nil || len(decoded) != 32 || settingsErr != nil || settings != access.Settings {
-		return webAccess{}, errors.New("vev: invalid web control response")
+		return webAccess{}, errors.New("invalid web control response")
 	}
 	return access, nil
 }

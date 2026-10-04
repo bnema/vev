@@ -47,7 +47,7 @@ func printWebLink(access webAccess) {
 func renewWebToken(ctx context.Context) error {
 	token, err := webControlRequest(ctx, true)
 	if err != nil {
-		return fmt.Errorf("vev: renewing web token: %w", err)
+		return fmt.Errorf("renewing web token: %w", err)
 	}
 	printWebLink(token)
 	return nil
@@ -71,7 +71,7 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 	defer client.CloseIdleConnections()
 	if token, err := webControlRequest(ctx, false); err == nil {
 		if token.Settings != settings {
-			return errors.New("vev: web gateway is running with different settings; stop and restart it to apply web.listen/web.origin")
+			return errors.New("web gateway is running with different settings; stop and restart it to apply web.listen/web.origin")
 		}
 		readyCtx, cancel := context.WithTimeout(ctx, webStartupTimeout)
 		defer cancel()
@@ -80,7 +80,7 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 		for !webReachable(readyCtx, client, token, settings) {
 			select {
 			case <-readyCtx.Done():
-				return fmt.Errorf("vev: existing web gateway not ready: %w", readyCtx.Err())
+				return fmt.Errorf("existing web gateway not ready: %w", readyCtx.Err())
 			case <-ticker.C:
 			}
 		}
@@ -89,12 +89,12 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 	}
 	listener, err := listenWeb(settings.Listen)
 	if err != nil {
-		return fmt.Errorf("vev: web port unavailable: %w", err)
+		return fmt.Errorf("web port unavailable: %w", err)
 	}
 	defer listener.Close()
 	inherited, ok := listener.(*net.TCPListener)
 	if !ok {
-		return fmt.Errorf("vev: web listener is not TCP")
+		return fmt.Errorf("web listener is not TCP")
 	}
 	inheritedFile, err := inherited.File()
 	if err != nil {
@@ -134,13 +134,13 @@ func launchWebDaemon(ctx context.Context, options webOptions) error {
 		select {
 		case err := <-done:
 			if err != nil {
-				return fmt.Errorf("vev: web process exited before readiness: %w", err)
+				return fmt.Errorf("web process exited before readiness: %w", err)
 			}
-			return errors.New("vev: web process exited before readiness")
+			return errors.New("web process exited before readiness")
 		case <-readyCtx.Done():
 			_ = child.Process.Kill()
 			<-done
-			return fmt.Errorf("vev: web startup: %w", readyCtx.Err())
+			return fmt.Errorf("web startup: %w", readyCtx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -225,7 +225,7 @@ func listenWeb(address string) (net.Listener, error) {
 func runWebDaemon(parent context.Context, options webOptions) error {
 	// The launcher passes resolved settings; do not reload a changing config.
 	if options.listen == "" || options.origin == "" {
-		return errors.New("vev: web server requires its launcher settings")
+		return errors.New("web server requires its launcher settings")
 	}
 	settings, err := webterm.ParseSettings(options.listen, options.origin)
 	if err != nil {
@@ -235,16 +235,16 @@ func runWebDaemon(parent context.Context, options webOptions) error {
 	defer cancel()
 	inherited := os.NewFile(3, "web-listener")
 	if inherited == nil {
-		return errors.New("vev: web server requires its launcher")
+		return errors.New("web server requires its launcher")
 	}
 	listener, err := net.FileListener(inherited)
 	_ = inherited.Close()
 	if err != nil {
-		return fmt.Errorf("vev: inherited web listener: %w", err)
+		return fmt.Errorf("inherited web listener: %w", err)
 	}
 	defer listener.Close()
 	if listener.Addr().String() != settings.Listen {
-		return errors.New("vev: inherited web listener does not match web.listen")
+		return errors.New("inherited web listener does not match web.listen")
 	}
 	token, err := webterm.NewToken()
 	if err != nil {
