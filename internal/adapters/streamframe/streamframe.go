@@ -74,8 +74,10 @@ type Framer struct {
 	queueBytes    uint64
 
 	// readMu serializes Recv so concurrent receivers each get one
-	// complete envelope instead of racing on the reused read buffer.
+	// complete envelope instead of interleaving header and body reads.
 	readMu sync.Mutex
+	// header is the length-prefix buffer, guarded by readMu.
+	header [4]byte
 
 	egressMu          sync.Mutex
 	egressClosing     bool
@@ -87,8 +89,6 @@ type Framer struct {
 	writerDone        chan struct{}
 	closeOnce         sync.Once
 	closeErr          error
-
-	readBuf []byte
 }
 
 type sendRequest struct {
@@ -196,28 +196,23 @@ func (f *Framer) negotiatedBound() uint64 {
 
 // recvLocked reads and validates one frame under readMu. The length prefix is
 // validated against bound before any body buffer exists, and the returned slice
-// is a fresh copy the caller owns.
+// is freshly allocated and owned by the caller.
 func (f *Framer) recvLocked(bound uint64) ([]byte, error) {
-	var header [4]byte
-	if _, err := io.ReadFull(f.r, header[:]); err != nil {
+	header := f.header[:]
+	if _, err := io.ReadFull(f.r, header); err != nil {
 		if f.isClosed() {
 			return nil, io.EOF
 		}
 		return nil, err
 	}
-	length := binary.BigEndian.Uint32(header[:])
+	length := binary.BigEndian.Uint32(header)
 	if length == 0 {
 		return nil, ErrZeroLength
 	}
 	if uint64(length) > bound {
 		return nil, ErrTooLarge
 	}
-	if cap(f.readBuf) < int(length) {
-		f.readBuf = make([]byte, length)
-	} else {
-		f.readBuf = f.readBuf[:length]
-	}
-	payload := f.readBuf
+	payload := make([]byte, length)
 	if _, err := io.ReadFull(f.r, payload); err != nil {
 		// Best-effort erase: a truncated frame may hold a partial secret
 		// (for example a bounded bootstrap auth record).
@@ -227,7 +222,7 @@ func (f *Framer) recvLocked(bound uint64) ([]byte, error) {
 		}
 		return nil, err
 	}
-	return append([]byte(nil), payload...), nil
+	return payload, nil
 }
 
 // Close unblocks in-flight Send and Recv, fails queued payloads, waits for

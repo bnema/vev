@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	vt "github.com/bnema/vev-vt"
@@ -246,6 +248,10 @@ type Mode struct {
 	Searches    []SearchMatch
 	SearchIndex int
 }
+
+// rowPool recycles the semantic rows lent to RenderRowsRange callbacks.
+// Renderers snapshot Mode by value, so the buffer cannot live on Mode.
+var rowPool sync.Pool
 
 func NewMode(doc *Document) *Mode {
 	m := &Mode{document: doc, SearchIndex: -1}
@@ -574,7 +580,13 @@ func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell),
 	selectionBounds, hasSelectionBounds := m.selection.bounds(d)
 	selection, hasSelection := optionalStyle(styles, 1)
 	cursor, cursorValid := d.Normalize(m.navigator.Pos)
-	row := make([]renderer.Cell, d.Width())
+	buf, _ := rowPool.Get().(*[]renderer.Cell)
+	if buf == nil || cap(*buf) < d.Width() {
+		row := make([]renderer.Cell, d.Width())
+		buf = &row
+	}
+	defer rowPool.Put(buf)
+	row := (*buf)[:d.Width()]
 	for y := max(start, 0); y < min(end, d.Height()); y++ {
 		src := m.ViewportTop + y
 		for x := range row {
@@ -639,26 +651,49 @@ func drawCopyStatus(row []renderer.Cell, m *Mode, total int, style renderer.Styl
 	for i := range row {
 		row[i] = renderer.Cell{Rune: ' ', Style: style}
 	}
-	text := " [SCROLL] "
+	col := 0
+	put := func(text string) {
+		for _, r := range text {
+			if col >= len(row) {
+				return
+			}
+			row[col] = renderer.Cell{Rune: r, Style: style}
+			col++
+		}
+	}
+	var digits [20]byte
+	putInt := func(n int) {
+		for _, b := range strconv.AppendInt(digits[:0], int64(n), 10) {
+			if col >= len(row) {
+				return
+			}
+			row[col] = renderer.Cell{Rune: rune(b), Style: style}
+			col++
+		}
+	}
 	if m.selection.Enabled {
-		text = " [SELECT] "
+		put(" [SELECT] ")
+	} else {
+		put(" [SCROLL] ")
 	}
 	if total > 0 {
-		text += strconvItoa(m.navigator.Pos.Row+1) + "/" + strconvItoa(total) + " "
+		putInt(m.navigator.Pos.Row + 1)
+		put("/")
+		putInt(total)
+		put(" ")
 	} else {
-		text += "0/0 "
+		put("0/0 ")
 	}
 	if m.SearchQuery != "" {
 		if len(m.Searches) > 0 && m.SearchIndex >= 0 && m.SearchIndex < len(m.Searches) {
-			text += strconvItoa(m.SearchIndex+1) + "/" + strconvItoa(len(m.Searches)) + " "
+			putInt(m.SearchIndex + 1)
+			put("/")
+			putInt(len(m.Searches))
+			put(" ")
 		}
-		text += "/" + m.SearchQuery + " "
-	}
-	for i, r := range text {
-		if i >= len(row) {
-			break
-		}
-		row[i] = renderer.Cell{Rune: r, Style: style}
+		put("/")
+		put(m.SearchQuery)
+		put(" ")
 	}
 }
 
@@ -674,19 +709,6 @@ func OSC52FromBase64(b64 string) []byte {
 		return nil
 	}
 	return []byte("\x1b]52;c;" + b64 + "\x07")
-}
-func strconvItoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }
 func abs(n int) int {
 	if n < 0 {
