@@ -260,7 +260,17 @@ func (a *daemonAcceptor) startRefused(id PhysicalStreamID, deadline time.Time) {
 			a.fail(err)
 			return
 		}
-		if err := a.pump.Engine().Refused(Refused{Ref: status.Ref, Error: refusal}); err != nil {
+		// The scheduler only sends for an admitted stream, so the local
+		// settlement follows the send. The broker may react to the refusal
+		// with a Reset that terminalizes the stream first; that is a settled
+		// stream, not a failure.
+		err = a.pump.Engine().Refused(Refused{Ref: status.Ref, Error: refusal})
+		if errors.Is(err, ErrStreamState) {
+			if current, ok := a.pump.Engine().Status(id); ok && current.State == StreamTerminal {
+				err = nil
+			}
+		}
+		if err != nil {
 			a.fail(err)
 			return
 		}
