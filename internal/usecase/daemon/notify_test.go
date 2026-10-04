@@ -721,7 +721,7 @@ func TestNotifyGlobalQueuesWhenUnattached(t *testing.T) {
 }
 
 // TestNotifyGlobalPersistDisabledDrainsAtFirstAttach guards the store-open
-// failure contract (Task 13): app/run.go queues this exact code and message
+// failure contract: the app daemon composition queues this exact code and message
 // via NotifyGlobal before any client has attached, and the first attach must
 // see it via firstPaint's pending-queue drain.
 func TestNotifyGlobalPersistDisabledDrainsAtFirstAttach(t *testing.T) {

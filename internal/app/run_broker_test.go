@@ -474,7 +474,7 @@ func TestCreateDetachedLocalSessionUsesBrokerOperations(t *testing.T) {
 // not reappear in its body as a fallback.
 func TestDetachedCreationProductionSourceHasNoDaemonBypass(t *testing.T) {
 	sources := loadAppSources(t, false)
-	body := sources["run.go"]
+	body := sources["sessions.go"]
 	start := strings.Index(body, "func createDetachedLocalSession")
 	require.NotEqual(t, -1, start)
 	end := strings.Index(body[start:], "\nfunc renderDetachedCreationResult")

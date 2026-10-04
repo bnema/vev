@@ -369,7 +369,7 @@ func inspectExternalDependencies(t *testing.T) []string {
 // carriage, so the composition is pinned to the multi-policy call, and the
 // shorthand stays a fixtures-only convenience.
 func TestProductionDaemonBindingComposition(t *testing.T) {
-	const runFile = "internal/app/run.go"
+	const runFile = "internal/app/daemon_run.go"
 
 	var (
 		bindingSites []string

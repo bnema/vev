@@ -1012,7 +1012,7 @@ func terminalCounts(terminal *terminalCompositionTerminal) (int, int, int) {
 // outright, so this fails if any is reintroduced as a bypass.
 func TestTerminalCompositionUsesTheBrokerConnector(t *testing.T) {
 	sources := loadAppSources(t, false)
-	body := sources["run.go"]
+	body := sources["attach.go"]
 	require.Contains(t, body, "runBrokerClient(ctx, brokerClientConfig{")
 	require.Contains(t, body, "newProductionBrokerConnector()")
 	for _, forbidden := range []string{
