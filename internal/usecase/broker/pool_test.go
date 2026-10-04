@@ -388,9 +388,17 @@ func TestPoolIdleEviction(t *testing.T) {
 	require.NoError(t, err)
 	f := <-physicals
 	require.NoError(t, s.Close())
-	require.Eventually(t, func() bool { clock.mu.Lock(); defer clock.mu.Unlock(); return len(clock.timers) > 0 }, time.Second, time.Millisecond)
-	clock.Advance(time.Minute)
-	await(t, f.done)
+	// The watcher re-arms its idle timer each loop, so an early Advance can
+	// land before the re-arm. Keep advancing until the eviction is observed.
+	require.Eventually(t, func() bool {
+		clock.Advance(time.Minute)
+		select {
+		case <-f.done:
+			return true
+		default:
+			return false
+		}
+	}, 3*time.Second, time.Millisecond)
 	require.NoError(t, p.Close())
 }
 

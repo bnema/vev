@@ -79,16 +79,17 @@ type Framer struct {
 	// header is the length-prefix buffer, guarded by readMu.
 	header [4]byte
 
-	egressMu          sync.Mutex
-	egressClosing     bool
-	egressSenders     int
-	egressSendersDone chan struct{}
-	egress            chan sendRequest
-	queuedBytes       uint64
-	done              chan struct{}
-	writerDone        chan struct{}
-	closeOnce         sync.Once
-	closeErr          error
+	egressMu      sync.Mutex
+	egressClosing bool
+	// egressSenders counts synchronous senders between admission and queue
+	// hand-off; the writer drains the queue only after they all leave.
+	egressSenders sync.WaitGroup
+	egress        chan sendRequest
+	queuedBytes   uint64
+	done          chan struct{}
+	writerDone    chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 type sendRequest struct {
@@ -139,17 +140,28 @@ func (f *Framer) Send(payload []byte) error {
 	if err != nil {
 		return err
 	}
-	result := make(chan error, 1)
+	result, _ := resultPool.Get().(chan error)
+	if result == nil {
+		result = make(chan error, 1)
+	}
 	if err := f.enqueueWait(sendRequest{data: data, done: result}); err != nil {
+		resultPool.Put(result)
 		return err
 	}
 	select {
 	case err := <-result:
+		resultPool.Put(result)
 		return err
 	case <-f.done:
+		// The writer still owns result and may complete it later, so it is
+		// not returned to the pool.
 		return ErrClosed
 	}
 }
+
+// resultPool recycles the one-slot completion channels of synchronous Send.
+// A channel is pooled only after its single result was received.
+var resultPool sync.Pool
 
 // SendAsync admits payload for ordered background transmission without
 // waiting for the write. It returns ErrBackpressure when the byte or message
@@ -272,18 +284,16 @@ func (f *Framer) enqueueWait(req sendRequest) error {
 		f.egressMu.Unlock()
 		return ErrClosed
 	}
-	if f.egressSenders == 0 {
-		f.egressSendersDone = make(chan struct{})
-	}
-	f.egressSenders++
+	// Add happens under egressMu while egressClosing is false, so it always
+	// precedes the writer's Wait, which starts only after Close set it.
+	f.egressSenders.Add(1)
 	f.egressMu.Unlock()
+	defer f.egressSenders.Done()
 
 	select {
 	case <-f.done:
-		f.finishEgressSender()
 		return ErrClosed
 	case f.egress <- req:
-		f.finishEgressSender()
 		return nil
 	}
 }
@@ -314,24 +324,6 @@ func (f *Framer) enqueueAsync(req sendRequest) error {
 	}
 }
 
-func (f *Framer) finishEgressSender() {
-	f.egressMu.Lock()
-	defer f.egressMu.Unlock()
-	f.egressSenders--
-	if f.egressSenders == 0 {
-		close(f.egressSendersDone)
-	}
-}
-
-func (f *Framer) waitForEgressSenders() {
-	f.egressMu.Lock()
-	done := f.egressSendersDone
-	f.egressMu.Unlock()
-	if done != nil {
-		<-done
-	}
-}
-
 func (f *Framer) writeLoop() {
 	defer close(f.writerDone)
 	for {
@@ -342,7 +334,7 @@ func (f *Framer) writeLoop() {
 			f.egressMu.Unlock()
 			f.completeWrite(req, writeAll(f.w, req.data))
 		case <-f.done:
-			f.waitForEgressSenders()
+			f.egressSenders.Wait()
 			f.egressMu.Lock()
 			for {
 				select {
