@@ -63,8 +63,9 @@ func (s Selection) Ranges(doc *Document) []CellRange {
 	return ranges
 }
 
-// RangeForRow returns the canonical inclusive range for one document row. It
-// lets viewport renderers avoid materializing ranges for off-screen rows.
+// RangeForRow returns the canonical inclusive range for one document row.
+// End == Start-1 denotes a selected row with no cells. It lets viewport
+// renderers avoid materializing ranges for off-screen rows.
 func (s Selection) RangeForRow(doc *Document, row int) (CellRange, bool) {
 	bounds, ok := s.bounds(doc)
 	if !ok {
@@ -120,11 +121,21 @@ func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
 		return CellRange{}, false
 	}
 	cells := doc.Row(row)
+	return b.rangeForCells(row, cells, contentEndOf(cells, doc.snapshot.Bound(row)))
+}
+
+func (b selectionBounds) rangeForCells(row int, cells []renderer.Cell, limit int) (CellRange, bool) {
+	if row < b.start.Row || row > b.end.Row {
+		return CellRange{}, false
+	}
 	if len(cells) == 0 {
 		return CellRange{Row: row}, true
 	}
+	if limit == 0 {
+		return CellRange{Row: row, End: -1}, true
+	}
 	if b.linewise {
-		return CellRange{Row: row, End: len(cells) - 1}, true
+		return CellRange{Row: row, End: limit - 1}, true
 	}
 
 	start, end := 0, len(cells)-1
@@ -134,7 +145,23 @@ func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
 	if row == b.end.Row {
 		end = glyphEnd(cells, b.end.Col)
 	}
+	end = min(end, limit-1)
+	if start > end {
+		end = start - 1
+	}
 	return CellRange{Row: row, Start: start, End: end}, true
+}
+
+// newlineMarker reports the column marking a selected hard newline on row.
+func (b selectionBounds) newlineMarker(doc *Document, row int) (int, bool) {
+	return b.newlineMarkerAt(row, doc.contentEnd(row), doc.Width(), doc.snapshot.Bound(row).Soft)
+}
+
+func (b selectionBounds) newlineMarkerAt(row, end, width int, soft bool) (int, bool) {
+	if row < b.start.Row || row > b.end.Row || soft || (!b.linewise && row == b.end.Row) {
+		return 0, false
+	}
+	return end, end > 0 && end < width
 }
 
 // Text extracts the selection's ranges. The granularity is already encoded in

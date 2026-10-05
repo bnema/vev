@@ -596,7 +596,7 @@ func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell),
 			paint(y, row)
 			continue
 		}
-		d.snapshot.CopyRow(src, row)
+		n := d.snapshot.CopyRow(src, row)
 		if match, ok := m.currentSearchMatchForRow(src); ok {
 			for x := max(match.Start, 0); x < min(match.End, len(row)); x++ {
 				applySelectionStyle(&row[x].Style, selection, hasSelection)
@@ -604,9 +604,24 @@ func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell),
 		}
 		cursorCovered := false
 		if hasSelectionBounds {
-			if r, ok := selectionBounds.rangeForRow(d, src); ok {
+			bound := d.snapshot.Bound(src)
+			width := d.RowWidth(src)
+			cells, rangeCells := row[:n], row
+			if n < width {
+				cells = d.Row(src)
+				rangeCells = cells
+			}
+			limit := contentEndOf(cells, bound)
+			r, ok := selectionBounds.rangeForCells(src, rangeCells, limit)
+			if ok {
 				for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
-					applySelectionStyle(&row[x].Style, selection, hasSelection)
+					toggleInverse(&row[x].Style)
+				}
+				if col, ok := selectionBounds.newlineMarkerAt(src, limit, width, bound.Soft); ok && col < len(row) {
+					toggleInverse(&row[col].Style)
+					if cursorValid && cursor.Row == src && cursor.Col == col {
+						cursorCovered = true
+					}
 				}
 				if cursorValid && r.Row == cursor.Row && cursor.Col >= r.Start && cursor.Col <= r.End {
 					cursorCovered = true
@@ -639,6 +654,8 @@ func optionalStyle(styles []renderer.Style, idx int) (renderer.Style, bool) {
 	}
 	return styles[idx], true
 }
+func toggleInverse(dst *renderer.Style) { dst.Inverse = !dst.Inverse }
+
 func applySelectionStyle(dst *renderer.Style, style renderer.Style, ok bool) {
 	if !ok || style.Equal(inverseStyle()) {
 		dst.Inverse = true

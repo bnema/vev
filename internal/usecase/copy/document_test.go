@@ -236,21 +236,45 @@ func TestDocumentExtractRanges(t *testing.T) {
 	}
 }
 
-func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
-	// pad renders s into a width-w row, blank-filled like a real terminal grid.
-	pad := func(s string, w int) []renderer.Cell {
-		cells := make([]renderer.Cell, w)
-		for i := range cells {
-			cells[i] = renderer.BlankCell()
-		}
-		for i, r := range []rune(s) {
-			if i >= w {
-				break
-			}
-			cells[i] = renderer.Cell{Rune: r}
-		}
-		return cells
+// padRow blank-fills a terminal row before adding text.
+func padRow(s string, w int) []renderer.Cell {
+	cells := make([]renderer.Cell, w)
+	for i := range cells {
+		cells[i] = renderer.BlankCell()
 	}
+	for i, r := range []rune(s) {
+		if i >= w {
+			break
+		}
+		cells[i] = renderer.Cell{Rune: r}
+	}
+	return cells
+}
+
+func TestDocumentContentEnd(t *testing.T) {
+	tests := []struct {
+		name   string
+		cells  []renderer.Cell
+		bounds []vt.LineBound
+		want   int
+	}{
+		{"hard short", padRow("ab", 8), []vt.LineBound{{End: 2}}, 2},
+		{"inner spaces", padRow("a b", 8), []vt.LineBound{{End: 3}}, 3},
+		{"blank", padRow("", 8), []vt.LineBound{{}}, 0},
+		{"soft trailing spaces", padRow("abc     ", 8), []vt.LineBound{{End: 8, Soft: true}}, 8},
+		{"soft partial bound", padRow("abc", 8), []vt.LineBound{{End: 5, Soft: true}}, 5},
+		{"wide glyph", []renderer.Cell{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, renderer.BlankCell(), renderer.BlankCell(), renderer.BlankCell()}, []vt.LineBound{{End: 3}}, 3},
+		{"nil bounds", padRow("ab", 8), nil, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := NewDocument(NewSnapshotFromLines([][]renderer.Cell{tt.cells}, tt.bounds, 8, 1), "")
+			require.Equal(t, tt.want, doc.contentEnd(0))
+		})
+	}
+}
+
+func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
 
 	tests := []struct {
 		name   string
@@ -261,28 +285,28 @@ func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
 	}{
 		{
 			name:   "hard row drops its padding",
-			rows:   [][]renderer.Cell{pad("ab", 8)},
+			rows:   [][]renderer.Cell{padRow("ab", 8)},
 			bounds: []vt.LineBound{{End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}},
 			want:   "ab",
 		},
 		{
 			name:   "soft row joins without a newline",
-			rows:   [][]renderer.Cell{pad("abcdefgh", 8), pad("ij", 8)},
+			rows:   [][]renderer.Cell{padRow("abcdefgh", 8), padRow("ij", 8)},
 			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
 			want:   "abcdefghij",
 		},
 		{
 			name:   "soft row keeps a real trailing space",
-			rows:   [][]renderer.Cell{pad("abc     ", 8), pad("de", 8)},
+			rows:   [][]renderer.Cell{padRow("abc     ", 8), padRow("de", 8)},
 			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
 			want:   "abc     de",
 		},
 		{
 			name: "three consecutive soft rows",
-			rows: [][]renderer.Cell{pad("aaaa", 4), pad("bbbb", 4), pad("cccc", 4), pad("dd", 4)},
+			rows: [][]renderer.Cell{padRow("aaaa", 4), padRow("bbbb", 4), padRow("cccc", 4), padRow("dd", 4)},
 			bounds: []vt.LineBound{
 				{End: 4, Soft: true}, {End: 4, Soft: true}, {End: 4, Soft: true}, {End: 2},
 			},
@@ -294,35 +318,35 @@ func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
 		},
 		{
 			name:   "hard rows keep their newline",
-			rows:   [][]renderer.Cell{pad("ab", 8), pad("cd", 8)},
+			rows:   [][]renderer.Cell{padRow("ab", 8), padRow("cd", 8)},
 			bounds: []vt.LineBound{{End: 2}, {End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
 			want:   "ab\ncd",
 		},
 		{
 			name:   "sparse ranges do not join across a row gap",
-			rows:   [][]renderer.Cell{pad("ab", 8), pad("ignored", 8), pad("cd", 8)},
+			rows:   [][]renderer.Cell{padRow("ab", 8), padRow("ignored", 8), padRow("cd", 8)},
 			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 7}, {End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 2, Start: 0, End: 7}},
 			want:   "ab\ncd",
 		},
 		{
 			name:   "invalid trailing range does not prevent final emitted row trimming",
-			rows:   [][]renderer.Cell{pad("ab", 8)},
+			rows:   [][]renderer.Cell{padRow("ab", 8)},
 			bounds: []vt.LineBound{{End: 8, Soft: true}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 99, Start: 0, End: 7}},
 			want:   "ab",
 		},
 		{
 			name:   "blank row survives as an empty line",
-			rows:   [][]renderer.Cell{pad("ab", 8), pad("", 8), pad("cd", 8)},
+			rows:   [][]renderer.Cell{padRow("ab", 8), padRow("", 8), padRow("cd", 8)},
 			bounds: []vt.LineBound{{End: 2}, {End: 0}, {End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}, {Row: 2, Start: 0, End: 7}},
 			want:   "ab\n\ncd",
 		},
 		{
 			name:   "the last row is trimmed even when soft",
-			rows:   [][]renderer.Cell{pad("ab", 8), pad("cd      ", 8)},
+			rows:   [][]renderer.Cell{padRow("ab", 8), padRow("cd      ", 8)},
 			bounds: []vt.LineBound{{End: 2}, {End: 8, Soft: true}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 7}, {Row: 1, Start: 0, End: 7}},
 			want:   "ab\ncd",
@@ -333,7 +357,7 @@ func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
 			// so End stops at 3 and column 3 is abandoned padding.
 			rows: [][]renderer.Cell{
 				{{Rune: 'a'}, {Rune: '界'}, {Continuation: true}, renderer.BlankCell()},
-				pad("b", 4),
+				padRow("b", 4),
 			},
 			bounds: []vt.LineBound{{End: 3, Soft: true}, {End: 1}},
 			ranges: []CellRange{{Row: 0, Start: 0, End: 3}, {Row: 1, Start: 0, End: 3}},
@@ -341,7 +365,7 @@ func TestDocumentExtractTrimsPaddingAndJoinsWrappedRows(t *testing.T) {
 		},
 		{
 			name:   "selection stopping mid soft row",
-			rows:   [][]renderer.Cell{pad("abcdefgh", 8), pad("ij", 8)},
+			rows:   [][]renderer.Cell{padRow("abcdefgh", 8), padRow("ij", 8)},
 			bounds: []vt.LineBound{{End: 8, Soft: true}, {End: 2}},
 			ranges: []CellRange{{Row: 0, Start: 2, End: 4}},
 			want:   "cde",
