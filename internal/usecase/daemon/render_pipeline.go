@@ -336,6 +336,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		presentation := modal.Resolve(size)
 		o.prompt = capturedModal{active: true, title: modal.Title, presentation: presentation, focused: true}
 		selection := styles.Selection
+		// Reduced copy selection is plain reverse; prompts retain bold emphasis.
 		if styles.Reduced {
 			selection = styles.SurfaceActive
 		}
