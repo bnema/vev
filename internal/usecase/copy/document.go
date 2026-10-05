@@ -299,9 +299,9 @@ func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) 
 	start = head.Col
 
 	bound := d.snapshot.Bound(r.Row)
-	soft := bound.Soft && !logicalEnd && end >= len(row)-1
+	soft := bound.Soft && !logicalEnd && end >= d.contentEnd(r.Row)-1
 	if soft {
-		end = min(end, min(max(bound.End, 0), len(row))-1)
+		end = min(end, d.contentEnd(r.Row)-1)
 	} else {
 		end = lastContentCol(row, start, end)
 	}
@@ -314,6 +314,24 @@ func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) 
 		return "", soft, true
 	}
 	return d.cellsText(row, start, tail.Col), soft, true
+}
+
+// contentEnd returns the exclusive display-cell end of row's copyable content.
+// Soft rows end at their logical bound; hard rows drop blank padding.
+func (d *Document) contentEnd(row int) int {
+	cells := d.Row(row)
+	if len(cells) == 0 {
+		return 0
+	}
+	bound := d.snapshot.Bound(row)
+	if bound.Soft {
+		return min(max(bound.End, 0), len(cells))
+	}
+	last := lastContentCol(cells, 0, len(cells)-1)
+	if last < 0 {
+		return 0
+	}
+	return glyphEnd(cells, last) + 1
 }
 
 // lastContentCol returns the rightmost column in [start, end] holding content,
