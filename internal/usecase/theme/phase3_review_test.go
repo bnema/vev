@@ -123,6 +123,7 @@ func TestLegacyAliasesPaletteOffAndForcedThemesRemainExact(t *testing.T) {
 			// Active neutral sessions and tab names share the history anchor.
 			want["Accent"] = rgbSurface(tt.theme.Background, tt.theme.Foreground)
 			want["TabNameActive"] = EmphasisStyle(rgbSurface(tt.theme.Background, tt.theme.Foreground), tt.theme)
+			want["TabTitleActive"] = MutedVariantStyle(rgbSurface(tt.theme.Background, tt.theme.Foreground), tt.theme)
 			for name, style := range want {
 				require.Equalf(t, style, legacyAndSemanticStyles(got)[name], "%s", name)
 			}

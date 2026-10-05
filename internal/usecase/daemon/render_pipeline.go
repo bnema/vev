@@ -335,7 +335,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		modal := promptModalFor(snap.promptModel.Title())
 		presentation := modal.Resolve(size)
 		o.prompt = capturedModal{active: true, title: modal.Title, presentation: presentation, focused: true}
-		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(presentation.Inner), prompt.RenderStyles{Base: styles.PromptBase, Selection: styles.SurfaceActive})
+		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(presentation.Inner), prompt.RenderStyles{Base: styles.PromptBase, Selection: styles.Selection})
 	}
 	state.cursor.hiddenByOverlay = o.active()
 }
