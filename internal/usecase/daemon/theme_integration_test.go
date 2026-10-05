@@ -161,12 +161,12 @@ func TestAccentLifecycleNeutralChromeByteSnapshots(t *testing.T) {
 		{
 			name:   "forced dark",
 			config: domain.Config{Theme: domain.ThemeDark},
-			want:   "\x1b[1;1H\x1b[0;38;2;216;216;216;48;2;47;47;47mABC\x1b[0;38;2;216;216;216;48;2;72;72;72mD\x1b[0;38;2;139;139;139mEF\x1b[0m",
+			want:   "\x1b[1;1H\x1b[0;38;2;216;216;216;48;2;47;47;47mABC\x1b[0;38;2;24;24;24;48;2;216;216;216mD\x1b[0;38;2;139;139;139mEF\x1b[0m",
 		},
 		{
 			name:   "forced light",
 			config: domain.Config{Theme: domain.ThemeLight},
-			want:   "\x1b[1;1H\x1b[0;38;2;32;32;32;48;2;222;222;222mABC\x1b[0;38;2;32;32;32;48;2;194;194;194mD\x1b[0;38;2;118;118;118mEF\x1b[0m",
+			want:   "\x1b[1;1H\x1b[0;38;2;32;32;32;48;2;222;222;222mABC\x1b[0;38;2;248;248;248;48;2;32;32;32mD\x1b[0;38;2;118;118;118mEF\x1b[0m",
 		},
 	}
 	for _, tt := range tests {

@@ -162,7 +162,11 @@ func neutralStyles(t Theme) Styles {
 	styles.PaletteDesc = legacyMutedText(t)
 	styles = withMRUStyles(styles, Ramp{SurfaceBar: styles.SurfaceBar, SurfaceRecent: styles.SurfaceRecent})
 	if usable(t) {
-		styles.TabActive = EmphasisStyle(rgbSurface(t.Background, t.Foreground), t)
+		// Sessions share the full-strength neutral endpoint with active tabs;
+		// overlay selections retain their softer neutral surface.
+		styles.SurfaceActive = rgbSurface(t.Background, t.Foreground)
+		styles.Accent = styles.SurfaceActive
+		styles.TabActive = EmphasisStyle(styles.SurfaceActive, t)
 		styles.TabNameActive = styles.TabActive
 		// Without a palette accent the history uses the same mruWeight
 		// placement as MRUStyle, between the active tab and the bar.
