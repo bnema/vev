@@ -69,6 +69,22 @@ func TestRenderRowsSelectionHighlightsContentOnly(t *testing.T) {
 	}
 }
 
+func TestRenderRowsSelectionAfterHistoryResize(t *testing.T) {
+	screen := vt.NewScreenWithHistory(12, 2, vt.HistoryConfig{MaxRows: 64})
+	screen.Write([]byte("abc     xyz\r\nq\r\nr\r\ns"))
+	screen.Resize(8, 2)
+	doc := NewDocument(NewSnapshot(screen.History(), screen, screen.LineBounds(), nil), "")
+	m := NewMode(doc)
+	m.navigator.Pos = Pos{0, 0}
+	m.ViewportTop = 0
+	m.selection = Selection{Anchor: Pos{0, 0}, Active: Pos{1, 0}, Granularity: Character, Enabled: true}
+	f := m.Render(vt.DefaultStyle(), vt.Style{HasBackgroundRGB: true})
+	require.Equal(t, "abc     xyz\nq", m.SelectedText())
+	for x := 0; x < 8; x++ {
+		require.True(t, f.At(x, 0).Style.Inverse, "visible content column %d", x)
+	}
+}
+
 func TestRenderRowsSelectionPreservesCellColors(t *testing.T) {
 	styles := []vt.Style{
 		{HasForegroundRGB: true, ForegroundRGB: vt.RGB{G: 255, B: 255}, Bold: true},

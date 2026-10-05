@@ -596,7 +596,7 @@ func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell),
 			paint(y, row)
 			continue
 		}
-		d.snapshot.CopyRow(src, row)
+		n := d.snapshot.CopyRow(src, row)
 		if match, ok := m.currentSearchMatchForRow(src); ok {
 			for x := max(match.Start, 0); x < min(match.End, len(row)); x++ {
 				applySelectionStyle(&row[x].Style, selection, hasSelection)
@@ -605,12 +605,15 @@ func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell),
 		cursorCovered := false
 		if hasSelectionBounds {
 			bound := d.snapshot.Bound(src)
-			limit := contentEndOf(row, bound)
+			limit := contentEndOf(row[:n], bound)
+			if n < d.RowWidth(src) {
+				limit = d.contentEnd(src)
+			}
 			if r, ok := selectionBounds.rangeForCells(src, row, limit); ok {
 				for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
 					toggleInverse(&row[x].Style)
 				}
-				if col, ok := selectionBounds.newlineMarkerAt(src, limit, d.Width(), bound.Soft); ok && col < len(row) {
+				if col, ok := selectionBounds.newlineMarkerAt(src, limit, d.RowWidth(src), bound.Soft); ok && col < len(row) {
 					toggleInverse(&row[col].Style)
 					if cursorValid && cursor.Row == src && cursor.Col == col {
 						cursorCovered = true

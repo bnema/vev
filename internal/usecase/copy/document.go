@@ -16,7 +16,8 @@ type Pos struct {
 }
 
 // CellRange is an inclusive display-cell range on one physical document row.
-// End == Start-1 with an in-bounds Start denotes a selected row with no cells.
+// End == Start-1 with an in-bounds Start denotes a selected row with no cells;
+// this adjacent pair is never interpreted as a reversed range.
 type CellRange struct {
 	Row   int
 	Start int
