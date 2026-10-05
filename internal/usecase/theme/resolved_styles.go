@@ -117,8 +117,8 @@ func indexedForeground(style renderer.Style, slot uint8) renderer.Style {
 	return style
 }
 
-// neutralStyles deliberately preserves the pre-accent neutral hierarchy. It
-// is used for palette-off, forced themes, incomplete defaults, and RGB-less
+// neutralStyles uses full-strength session surfaces and softer overlay selections.
+// It is used for palette-off, forced themes, incomplete defaults, and RGB-less
 // indexed fallbacks; it never performs a palette slot lookup.
 func neutralStyles(t Theme) Styles {
 	status := renderer.DefaultStyle()
@@ -162,8 +162,14 @@ func neutralStyles(t Theme) Styles {
 	styles.PaletteDesc = legacyMutedText(t)
 	styles = withMRUStyles(styles, Ramp{SurfaceBar: styles.SurfaceBar, SurfaceRecent: styles.SurfaceRecent})
 	if usable(t) {
-		styles.TabActive = EmphasisStyle(rgbSurface(t.Background, t.Foreground), t)
+		// Sessions share the full-strength neutral endpoint with active tabs;
+		// overlay selections retain their softer neutral surface.
+		styles.SurfaceActive = rgbSurface(t.Background, t.Foreground)
+		styles.Accent = styles.SurfaceActive
+		styles.TabActive = EmphasisStyle(styles.SurfaceActive, t)
 		styles.TabNameActive = styles.TabActive
+		styles.TabActiveTitle = MutedVariantStyle(styles.SurfaceActive, t)
+		styles.TabTitleActive = styles.TabActiveTitle
 		// Without a palette accent the history uses the same mruWeight
 		// placement as MRUStyle, between the active tab and the bar.
 		for count := 1; count <= len(styles.mruStyles); count++ {
