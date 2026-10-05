@@ -285,6 +285,10 @@ func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) 
 	if len(row) == 0 {
 		return "", false, r.Start == 0 && r.End == 0
 	}
+	if r.End < r.Start {
+		bound := d.snapshot.Bound(r.Row)
+		return "", bound.Soft && !logicalEnd, true
+	}
 	start, end := min(r.Start, r.End), max(r.Start, r.End)
 	if end < 0 || start >= len(row) {
 		return "", false, false

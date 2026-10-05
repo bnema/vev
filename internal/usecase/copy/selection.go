@@ -123,8 +123,12 @@ func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
 	if len(cells) == 0 {
 		return CellRange{Row: row}, true
 	}
+	limit := doc.contentEnd(row)
+	if limit == 0 {
+		return CellRange{Row: row, End: -1}, true
+	}
 	if b.linewise {
-		return CellRange{Row: row, End: len(cells) - 1}, true
+		return CellRange{Row: row, End: limit - 1}, true
 	}
 
 	start, end := 0, len(cells)-1
@@ -133,6 +137,10 @@ func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
 	}
 	if row == b.end.Row {
 		end = glyphEnd(cells, b.end.Col)
+	}
+	end = min(end, limit-1)
+	if start > end {
+		end = start - 1
 	}
 	return CellRange{Row: row, Start: start, End: end}, true
 }
