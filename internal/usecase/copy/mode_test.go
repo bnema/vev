@@ -143,7 +143,7 @@ func TestCopyModePreferredColumnAndPartialSpaces(t *testing.T) {
 	require.Equal(t, "bcde", m.SelectedText())
 }
 
-func TestCopyModeRenderSelectionWinsSearchAndWideGlyph(t *testing.T) {
+func TestCopyModeRenderSelectionInvertsSearchAndWideGlyph(t *testing.T) {
 	cells := []renderer.Cell{{Rune: '界'}, {Continuation: true}, {Rune: 'a'}}
 	m := NewMode(NewDocument(NewSnapshotFromRows([][]renderer.Cell{cells}, 3, 1), ""))
 	require.True(t, m.SetSearchMatches("界", []SearchMatch{{Row: 0, Start: 0, End: 2}}, 0))
@@ -151,6 +151,8 @@ func TestCopyModeRenderSelectionWinsSearchAndWideGlyph(t *testing.T) {
 	f := m.Render(renderer.DefaultStyle(), renderer.Style{HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 1}})
 	require.True(t, f.At(0, 0).Style.HasBackgroundRGB)
 	require.True(t, f.At(1, 0).Style.HasBackgroundRGB)
+	require.True(t, f.At(0, 0).Style.Inverse)
+	require.True(t, f.At(1, 0).Style.Inverse)
 }
 
 func TestCopyModeSearchNavigationExtendsActiveSelection(t *testing.T) {
@@ -202,7 +204,8 @@ func TestCopyModeRenderKeepsPassiveCursorOutsidePartialSameRowSelection(t *testi
 	selection := renderer.Style{HasBackgroundRGB: true, BackgroundRGB: renderer.RGB{R: 1}}
 	f := m.Render(renderer.DefaultStyle(), selection)
 	require.True(t, f.At(0, 0).Style.HasBackgroundRGB)
-	require.True(t, f.At(2, 0).Style.HasBackgroundRGB)
+	require.True(t, f.At(2, 0).Style.Inverse)
+	require.False(t, f.At(2, 0).Style.HasBackgroundRGB)
 }
 
 func TestFindMatchesUsesExclusiveDisplayCellOffsets(t *testing.T) {

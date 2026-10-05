@@ -145,6 +145,15 @@ func (b selectionBounds) rangeForRow(doc *Document, row int) (CellRange, bool) {
 	return CellRange{Row: row, Start: start, End: end}, true
 }
 
+// newlineMarker reports the column marking a selected hard newline on row.
+func (b selectionBounds) newlineMarker(doc *Document, row int) (int, bool) {
+	if row < b.start.Row || row > b.end.Row || doc.snapshot.Bound(row).Soft || (!b.linewise && row == b.end.Row) {
+		return 0, false
+	}
+	end := doc.contentEnd(row)
+	return end, end > 0 && end < doc.Width()
+}
+
 // Text extracts the selection's ranges. The granularity is already encoded in
 // those ranges, so extraction applies the same padding and wrap rules to all.
 func (s Selection) Text(doc *Document) string {
