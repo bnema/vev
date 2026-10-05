@@ -61,7 +61,7 @@ func TestRenderRowsSelectionHighlightsContentOnly(t *testing.T) {
 					copied.WriteByte('\n')
 				}
 			}
-			require.Equal(t, m.SelectedText(), copied.String(), "highlighted glyphs match copied text")
+			require.Equal(t, copied.String(), m.SelectedText(), "highlighted glyphs match copied text")
 			for y, source := range tt.rows {
 				require.Equal(t, source, doc.Row(y))
 			}

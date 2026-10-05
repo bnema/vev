@@ -16,6 +16,7 @@ type Pos struct {
 }
 
 // CellRange is an inclusive display-cell range on one physical document row.
+// End == Start-1 with an in-bounds Start denotes a selected row with no cells.
 type CellRange struct {
 	Row   int
 	Start int
@@ -285,7 +286,7 @@ func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) 
 	if len(row) == 0 {
 		return "", false, r.Start == 0 && r.End == 0
 	}
-	if r.End < r.Start {
+	if r.End == r.Start-1 && r.Start >= 0 && r.Start <= len(row) {
 		bound := d.snapshot.Bound(r.Row)
 		return "", bound.Soft && !logicalEnd, true
 	}
@@ -303,9 +304,10 @@ func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) 
 	start = head.Col
 
 	bound := d.snapshot.Bound(r.Row)
-	soft := bound.Soft && !logicalEnd && end >= d.contentEnd(r.Row)-1
+	limit := contentEndOf(row, bound)
+	soft := bound.Soft && !logicalEnd && end >= limit-1
 	if soft {
-		end = min(end, d.contentEnd(r.Row)-1)
+		end = min(end, limit-1)
 	} else {
 		end = lastContentCol(row, start, end)
 	}
@@ -323,11 +325,13 @@ func (d *Document) rangeText(r CellRange, logicalEnd bool) (string, bool, bool) 
 // contentEnd returns the exclusive display-cell end of row's copyable content.
 // Soft rows end at their logical bound; hard rows drop blank padding.
 func (d *Document) contentEnd(row int) int {
-	cells := d.Row(row)
+	return contentEndOf(d.Row(row), d.snapshot.Bound(row))
+}
+
+func contentEndOf(cells []renderer.Cell, bound vt.LineBound) int {
 	if len(cells) == 0 {
 		return 0
 	}
-	bound := d.snapshot.Bound(row)
 	if bound.Soft {
 		return min(max(bound.End, 0), len(cells))
 	}

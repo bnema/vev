@@ -45,6 +45,9 @@ func TestDocumentExtractSelectedEmptyRanges(t *testing.T) {
 		want   string
 	}{
 		{"empty", []CellRange{{Row: 0, End: -1}}, ""},
+		{"reversed", []CellRange{{Row: 2, Start: 7, End: 0}}, "cd"},
+		{"past end", []CellRange{{Row: 0, Start: 99, End: 50}, {Row: 2, End: 1}}, "cd"},
+		{"negative", []CellRange{{Row: 0, Start: -3, End: -9}, {Row: 2, End: 1}}, "cd"},
 		{"blank middle", []CellRange{{Row: 0, End: 1}, {Row: 1, End: -1}, {Row: 2, End: 1}}, "ab\n\ncd"},
 	}
 	for _, tt := range tests {
