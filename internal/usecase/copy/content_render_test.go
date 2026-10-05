@@ -78,10 +78,13 @@ func TestRenderRowsSelectionAfterHistoryResize(t *testing.T) {
 	m.navigator.Pos = Pos{0, 0}
 	m.ViewportTop = 0
 	m.selection = Selection{Anchor: Pos{0, 0}, Active: Pos{1, 0}, Granularity: Character, Enabled: true}
-	f := m.Render(vt.DefaultStyle(), vt.Style{HasBackgroundRGB: true})
 	require.Equal(t, "abc     xyz\nq", m.SelectedText())
-	for x := 0; x < 8; x++ {
-		require.True(t, f.At(x, 0).Style.Inverse, "visible content column %d", x)
+	for _, col := range []int{0, 10} {
+		m.navigator.Pos = Pos{0, col}
+		f := m.Render(vt.DefaultStyle(), vt.Style{HasBackgroundRGB: true})
+		for x := 0; x < 8; x++ {
+			require.True(t, f.At(x, 0).Style.Inverse, "cursor %d, visible content column %d", col, x)
+		}
 	}
 }
 

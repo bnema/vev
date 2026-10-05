@@ -609,7 +609,11 @@ func (m *Mode) RenderRowsRange(start, end int, paint func(int, []renderer.Cell),
 			if n < d.RowWidth(src) {
 				limit = d.contentEnd(src)
 			}
-			if r, ok := selectionBounds.rangeForCells(src, row, limit); ok {
+			r, ok := selectionBounds.rangeForCells(src, row, limit)
+			if n < d.RowWidth(src) {
+				r, ok = selectionBounds.rangeForRow(d, src)
+			}
+			if ok {
 				for x := max(r.Start, 0); x <= min(r.End, len(row)-1); x++ {
 					toggleInverse(&row[x].Style)
 				}
