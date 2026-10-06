@@ -1341,6 +1341,7 @@ func TestAttachmentResumeBudget(t *testing.T) {
 		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), step: past, want: append(repeatBools(true, maxAttachmentResumes), false)},
 		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), step: past, want: repeatBools(true, maxAttachmentResumes+2)},
 		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), step: past, want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "flaps exhaust inside the outage window", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), step: time.Second, want: append(repeatBools(true, maxAttachmentResumes), false)},
 		{name: "outage window keeps resuming", steps: repeatKinds(attachmentRetry, 3*maxAttachmentResumes), ups: repeatDurations(brief, 3*maxAttachmentResumes), step: time.Second, want: repeatBools(true, 3*maxAttachmentResumes)},
 	}
 	for _, tt := range tests {

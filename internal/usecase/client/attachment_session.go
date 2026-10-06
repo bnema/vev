@@ -349,7 +349,53 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	if err := sendFocus(); err != nil {
 		return w.settle(ctx, fg, stream, token, err)
 	}
+	// pending is the one undecided input delivery waiting on the outbox.
+	var pending *pendingInputAck
+	defer func() {
+		if pending == nil {
+			return
+		}
+		// The run ends before the delivery was written: join the sender so
+		// the outbox is final, then decide the delivery once, preserving
+		// exactly the session input that never reached the carriage.
+		stream.join()
+		if unsent := stream.unsentInput(pending.from, pending.mark); len(unsent) != 0 {
+			fg.PreserveInput(unsent)
+			return
+		}
+		fg.AckInput()
+	}()
+	// ackWritten commits pending once the outbox wrote it, then fences its
+	// UI action after it.
+	ackWritten := func() error {
+		if pending == nil || stream.writtenCount() < pending.mark {
+			return nil
+		}
+		actionID := pending.actionID
+		pending = nil
+		fg.AckInput()
+		if actionID != 0 {
+			return w.send(ctx, fg, stream, protocol.UIFence{ActionID: actionID})
+		}
+		return nil
+	}
+	// await makes the delivery just routed pending until the outbox wrote
+	// every message accepted since from.
+	await := func(from, actionID uint64) error {
+		pending = &pendingInputAck{from: from, mark: stream.accepted(), actionID: actionID}
+		return ackWritten()
+	}
 	for {
+		var progress <-chan struct{}
+		if pending != nil {
+			progress = stream.Progress()
+			if err := ackWritten(); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
+			if pending == nil {
+				progress = nil
+			}
+		}
 		select {
 		case <-focus.changed:
 			if err := sendFocus(); err != nil {
@@ -521,13 +567,16 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if event.input != nil && event.input.actionID == 0 {
 				// A physical read: replies are stripped and ordinary bytes
 				// reach the overlay or the session inside read.
+				from := stream.accepted()
 				if err := input.read(ctx, state, event.input.Data); err != nil {
 					// Part of the read may already be delivered or held, so
 					// it is committed rather than replayed.
 					fg.AckInput()
 					return w.settle(ctx, fg, stream, token, err)
 				}
-				fg.AckInput()
+				if err := await(from, 0); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
 				continue
 			}
 			if event.input != nil {
@@ -561,6 +610,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					return w.settle(ctx, fg, stream, token, err)
 				}
 			}
+			from := stream.accepted()
 			if err := w.send(ctx, fg, stream, event.message); err != nil {
 				if event.input != nil {
 					fg.PreserveInput(event.input.Data)
@@ -568,11 +618,12 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				return w.settle(ctx, fg, stream, token, err)
 			}
 			if event.input != nil {
-				fg.AckInput()
-				if event.input.actionID != 0 {
-					if err := w.send(ctx, fg, stream, protocol.UIFence{ActionID: event.input.actionID}); err != nil {
-						return w.settle(ctx, fg, stream, token, err)
-					}
+				// The delivery stays undecided until the outbox wrote it, so
+				// a link failure preserves it for the next attempt exactly as
+				// a failed synchronous send did. The pump hands out no newer
+				// delivery meanwhile, which bounds queued input.
+				if err := await(from, event.input.actionID); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
 				}
 			}
 			if event.action != 0 {
@@ -583,6 +634,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 				return attachmentLifecycleEnd(token, event.action)
 			}
+		case <-progress:
+			if err := ackWritten(); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-stream.Failed():
 			return w.settle(ctx, fg, stream, token, stream.failure())
 		case <-ctx.Done():
@@ -591,6 +646,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			return w.settle(ctx, fg, stream, token, errAttachmentForegroundRevoked)
 		}
 	}
+}
+
+// pendingInputAck is an input delivery whose messages the outbox accepted but
+// has not written yet: accepted messages numbered (from, mark].
+type pendingInputAck struct {
+	from     uint64
+	mark     uint64
+	actionID uint64
 }
 
 // attachmentLifecycleEnd gives local and daemon-triggered lifecycle actions
@@ -811,6 +874,15 @@ func (w *sessionAttachmentWorker) hello(stream ports.BrokerLogicalConnection) pr
 // wins a blocked send, closing the stream interrupts the carriage and the
 // worker joins the send before returning, so no per-send goroutine is leaked.
 func (w *sessionAttachmentWorker) send(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, message protocol.ClientMessage) error {
+	if outbox, ok := stream.(*attachmentOutbox); ok {
+		// Enqueue returns at once unless the outbox is full, and then still
+		// honours cancellation, so no helper goroutine is needed.
+		err := outbox.enqueue(ctx, fg.Done(), message)
+		if errors.Is(err, errAttachmentForegroundRevoked) || (ctx.Err() != nil && errors.Is(err, ctx.Err())) {
+			_ = outbox.Close()
+		}
+		return err
+	}
 	sent := make(chan error, 1)
 	go func() { sent <- stream.SendClient(message) }()
 	select {
@@ -827,9 +899,19 @@ func (w *sessionAttachmentWorker) send(ctx context.Context, fg AttachmentForegro
 	}
 }
 
-// drainOutbox waits until every queued message was written, or the run ends.
+// drainOutboxTimeout bounds how long a lifecycle exit waits for queued
+// messages on a stalled link. Past it the client leaves anyway; the daemon
+// parks the attachment when the detach never arrives.
+const drainOutboxTimeout = 2 * time.Second
+
+// drainOutbox waits until every queued message was written, the bound
+// elapses, or the run ends.
 func (w *sessionAttachmentWorker) drainOutbox(ctx context.Context, fg AttachmentForeground, outbox *attachmentOutbox) error {
+	timer := w.cfg.Clock.NewTimer(drainOutboxTimeout)
+	defer stopSupervisorTimer(timer)
 	select {
+	case <-timer.C():
+		return nil
 	case <-outbox.Idle():
 		return outbox.failure()
 	case <-outbox.Failed():

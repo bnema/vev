@@ -22,22 +22,23 @@ Reference: mosh (`/tmp/mosh`, `src/network/transportsender-impl.h`,
 6. Daemon ignores `Input.InputSeq`, so input in flight at a drop is lost or
    would be duplicated by a replay.
 
-## Phase 1 — non-blocking client send (client only)
+## Phase 1 — non-blocking client send (done)
 
-- Per-attachment ordered outbound queue drained by one sender goroutine;
-  the worker loop enqueues and keeps running. Failure of the sender surfaces
-  as one event into the loop, which settles as today.
-- Bounded by bytes; when full, the loop stops *reading* terminal input
-  (backpressure) instead of blocking UI work.
-- Tests: a stalled `SendClient` must not block overlay/repaint/output
-  handling; ordering preserved; error settles the run.
+- Per-attachment ordered outbox drained by one sender goroutine; the worker
+  loop enqueues and keeps running. Write failure settles the run as before.
+- Bounded by count and bytes. An input delivery stays undecided until the
+  outbox wrote it, so the pump reads no newer keys meanwhile (backpressure)
+  and a link failure preserves exactly the unwritten keys for the resume.
+- Lifecycle exits drain the outbox for at most 2 s.
 
-## Phase 2 — faster detection, patient resume (client + QUIC adapter)
+## Phase 2 — patient resume (done, except status text)
 
-- QUIC keepalive ~2 s; keep idle timeout long (resume covers longer gaps).
-- Resume loop: retry with capped backoff until the remote park window
-  (15 min) expires instead of 5 attempts; Ctrl-C/detach still exit.
-- Status bar shows "last contact Ns ago" while resuming.
+- QUIC keepalive 2 s; idle timeout stays 60 s.
+- A route that stays down keeps resuming for the 15-minute park window; a
+  session that drops right after attaching still gives up after 5 flaps.
+- During the resume backoff, Ctrl-C or a lone Esc returns to the picker;
+  other keys are kept (bounded) and replayed into the resumed session.
+- TODO: status bar "last contact Ns ago" while resuming.
 
 ## Phase 3 — exactly-once input across resume (protocol bump)
 
@@ -60,7 +61,14 @@ Reference: mosh (`/tmp/mosh`, `src/network/transportsender-impl.h`,
 - Derive `degraded`/`probing` from RTT and last-packet age in the adapter.
 - On stall or local address change, `AddPath` + probe + switch.
 
-## Phase 6 — optional predictive local echo
+## Phase 6 — client-rendered palette on remote sessions
+
+- The command palette is rendered by the serving daemon, so each keystroke
+  costs a full round trip on a remote session. Render it client-side like
+  the session picker, fed by the daemon's command catalogue, and send only
+  the chosen command.
+
+## Phase 7 — optional predictive local echo
 
 - mosh-style overlay with underline-until-confirmed. Breaks the "thin client
   interprets nothing" rule; needs an explicit design decision.

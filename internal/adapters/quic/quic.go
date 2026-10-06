@@ -62,10 +62,13 @@ var (
 // idle limits, bounded admission, no 0-RTT.
 type Config struct {
 	// KeepAlivePeriod defaults to 2s; MaxIdleTimeout defaults to 60s;
-	// HandshakeIdleTimeout defaults to 5s. The short keepalive holds mobile
-	// CGNAT bindings open and surfaces loss quickly, while the long idle
-	// timeout lets one connection ride out short outages and deliver queued
-	// input without reconnecting.
+	// HandshakeIdleTimeout defaults to 5s. The short keepalive keeps mobile
+	// CGNAT bindings open and probes the path often enough that loss
+	// recovery restarts promptly once the link returns. It does not shorten
+	// failure detection: a dead path is still declared only after
+	// MaxIdleTimeout, which stays long so one connection rides out short
+	// outages and delivers queued input without reconnecting. Both roles use
+	// it; a 2s PING is a few dozen bytes per connection.
 	KeepAlivePeriod      time.Duration
 	MaxIdleTimeout       time.Duration
 	HandshakeIdleTimeout time.Duration

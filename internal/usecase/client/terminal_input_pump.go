@@ -242,6 +242,19 @@ func (p *terminalInputPump) preserveResidual(consumer uint64, data []byte) {
 	p.residual = append(p.residual[:0], data...)
 }
 
+// appendResidual appends bytes the consumer took but did not deliver, so the
+// next owner replays them after any earlier residual. It reports false when
+// the bound would be exceeded; the bytes are then dropped.
+func (p *terminalInputPump) appendResidual(consumer uint64, data []byte, limit int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != consumer || len(p.residual)+len(data) > limit {
+		return false
+	}
+	p.residual = append(p.residual, data...)
+	return true
+}
+
 // ack commits scanner delivery of a leased read and lets the lifecycle reader
 // accept the next result. Only the consumer that holds the lease can ack it.
 // dropOwned disposes every undecided byte at an autonomous owner-class

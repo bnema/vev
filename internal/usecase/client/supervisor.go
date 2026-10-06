@@ -1490,6 +1490,115 @@ func (l *terminalInputLifetime) stop() {
 	l.pump.suspend()
 }
 
+// resumeHeldInputLimit bounds keys kept while a lost attachment resumes.
+// Past it further keys are dropped, like a full terminal buffer.
+const resumeHeldInputLimit = 64 << 10
+
+// resumeWatch reads the terminal while a lost attachment waits to resume.
+// cancelled closes on Ctrl-C or a lone Esc; any other bytes are handed back
+// to the pump on release, so the resumed attachment receives them in order.
+type resumeWatch struct {
+	cancelled chan struct{}
+	stop      chan struct{}
+	done      chan struct{}
+	lifetime  *terminalInputLifetime
+	id        uint64
+
+	mu   sync.Mutex
+	held []byte
+}
+
+// heldLen reports how many kept bytes the watch holds.
+func (w *resumeWatch) heldLen() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.held)
+}
+
+// hold keeps data within the bound.
+func (w *resumeWatch) hold(data []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.held)+len(data) <= resumeHeldInputLimit {
+		w.held = append(w.held, data...)
+	}
+}
+
+// isResumeCancelKey reports a read that is exactly Ctrl-C or a lone Esc. A
+// longer read starting with Esc is an escape sequence (arrows, focus), not a
+// cancel.
+func isResumeCancelKey(data []byte) bool {
+	return len(data) == 1 && (data[0] == 0x03 || data[0] == 0x1b)
+}
+
+// watchResume claims terminal input for one resume backoff. When the claim
+// is unavailable it returns a watch that never cancels.
+func (l *terminalInputLifetime) watchResume() *resumeWatch {
+	w := &resumeWatch{cancelled: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), lifetime: l}
+	if l == nil || l.pump == nil {
+		close(w.done)
+		return w
+	}
+	id, ok := l.pump.tryClaim()
+	if !ok {
+		close(w.done)
+		return w
+	}
+	w.id = id
+	go w.run()
+	return w
+}
+
+func (w *resumeWatch) run() {
+	defer close(w.done)
+	pump := w.lifetime.pump
+	for {
+		result, ok := pump.take(context.Background(), w.id)
+		if !ok {
+			select {
+			case <-pump.readyFor(w.id):
+			case <-w.stop:
+				return
+			case <-pump.done:
+				return
+			}
+			continue
+		}
+		if result.err != nil {
+			// Leave the final read for the terminal EOF watcher.
+			pump.ack(w.id)
+			w.hold(result.data)
+			w.lifetime.finish(result.err)
+			return
+		}
+		pump.ack(w.id)
+		if isResumeCancelKey(result.data) {
+			close(w.cancelled)
+			return
+		}
+		w.hold(result.data)
+	}
+}
+
+// release stops the watch and hands kept keys back to the pump, unless the
+// user cancelled, in which case they are dropped with the session.
+func (w *resumeWatch) release() {
+	if w.id == 0 {
+		return
+	}
+	close(w.stop)
+	<-w.done
+	pump := w.lifetime.pump
+	select {
+	case <-w.cancelled:
+	default:
+		w.mu.Lock()
+		pump.appendResidual(w.id, w.held, resumeHeldInputLimit)
+		w.mu.Unlock()
+	}
+	pump.revoke(w.id)
+}
+
 // finish publishes the terminal cause exactly once.
 func (l *terminalInputLifetime) finish(err error) {
 	l.once.Do(func() { l.eof <- err })

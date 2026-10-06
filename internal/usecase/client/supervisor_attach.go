@@ -625,7 +625,7 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			s.notifyAttachment(outcome.cause)
 			return false, nil
 		}
-		if terminated, termErr, brokerLost := s.waitResume(ctx, input, service, attempt); terminated || brokerLost {
+		if terminated, termErr, stop := s.waitResume(ctx, input, service, attempt); terminated || stop {
 			return terminated, termErr
 		}
 		next, ok := s.withFreshStream(service, outcome.target)
@@ -641,6 +641,10 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 type attachmentResumeBudget struct {
 	used     int
 	resuming bool
+	// flaps counts attachments lost before they became stable. They prove
+	// the route works but the session drops, so they are capped by count
+	// regardless of the outage window.
+	flaps int
 	// since is when the current outage began; zero before the first spend.
 	since time.Time
 }
@@ -650,17 +654,28 @@ type attachmentResumeBudget struct {
 // fresh budget; one that drops right after attaching keeps counting, so a
 // flapping session gives up.
 // It returns the 1-based resume attempt, and false once the budget is
-// exhausted: at least maxAttachmentResumes attempts and resumeOutageWindow
-// since the outage began.
+// exhausted: more than maxAttachmentResumes flaps, or more than
+// maxAttachmentResumes attempts once resumeOutageWindow has passed since the
+// outage began. A route that stays down therefore keeps resuming for the
+// whole window, while a session that keeps dropping right after it attaches
+// gives up quickly.
 func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Duration, now time.Time) (int, bool) {
-	if kind == attachmentResume && up >= resumeStableAttachment {
-		b.used = 0
+	if kind == attachmentResume {
+		if up >= resumeStableAttachment {
+			b.used = 0
+			b.flaps = 0
+		} else {
+			b.flaps++
+		}
 	}
 	if b.used == 0 {
 		b.since = now
 	}
 	b.used++
 	b.resuming = true
+	if b.flaps > maxAttachmentResumes {
+		return b.used, false
+	}
 	return b.used, b.used <= maxAttachmentResumes || now.Sub(b.since) < resumeOutageWindow
 }
 
@@ -937,15 +952,24 @@ func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForegroun
 
 // waitResume presents Connecting and waits one backoff interval before the
 // next resume attempt. It settles early on cancellation or terminal EOF
-// (terminated), or on broker loss, which ends the resume and leaves the ready
-// loop to observe and retire the connection.
-func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (terminated bool, termErr error, brokerLost bool) {
+// (terminated), or with stop on broker loss, which leaves the ready loop to
+// observe and retire the connection, or when the user cancels the resume
+// with Ctrl-C or Esc, which returns to the picker. Other keys typed during
+// the outage are kept and replayed into the session once it resumes.
+func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (terminated bool, termErr error, stop bool) {
 	s.transition(supervisorEvent{kind: supervisorAttachBegin})
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
+	keys := input.watchResume()
+	defer keys.release()
 	for {
 		select {
+		case <-keys.cancelled:
+			// The user gave up on the outage: back to the picker, quietly.
+			s.logger.Info("client_attachment_resume_cancelled", "attempt", attempt)
+			s.transition(supervisorEvent{kind: supervisorAttachEnded})
+			return false, nil, true
 		case <-timer.C():
 			return false, nil, false
 		case <-ctx.Done():
