@@ -311,6 +311,9 @@ func TestP54AttachmentFinalizeDropsUnleasedPendingBeforePicker(t *testing.T) {
 		return lifetime.pump.pending != nil && lifetime.pump.delivering == 0
 	}, 5*time.Second, time.Millisecond)
 	fg.finish()
+	// The supervisor drops unclaimed session input as the terminal returns to
+	// the picker; finish itself stays lossless for a resume.
+	lifetime.pump.dropUnclaimed()
 	lifetime.acquirePicker()
 	assertNoPickerRead(t, consumer.reads)
 }
@@ -330,6 +333,9 @@ func TestP54AttachmentFinalizeDropsPreservedResidualBeforePicker(t *testing.T) {
 	require.True(t, ok)
 	fg.PreserveInput(event.Data)
 	fg.finish()
+	// The supervisor drops unclaimed session input as the terminal returns to
+	// the picker; finish itself stays lossless for a resume.
+	lifetime.pump.dropUnclaimed()
 	lifetime.acquirePicker()
 	assertNoPickerRead(t, consumer.reads)
 }
@@ -466,5 +472,48 @@ func TestP54LifecycleInterleavingsRace(t *testing.T) {
 		wg.Wait()
 		cancel()
 		host.stopGeometry()
+	}
+}
+
+// TestResumeKeysSurviveFinishButNotThePicker runs the production owner
+// boundary: input kept for a resume survives the attachment's finish, then is
+// dropped when the terminal returns to the picker instead of resuming.
+func TestResumeKeysSurviveFinishButNotThePicker(t *testing.T) {
+	tests := []struct {
+		name         string
+		backToPicker bool
+	}{
+		{name: "resumed attachment replays kept keys"},
+		{name: "picker never sees kept keys", backToPicker: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := newAttachTestReader()
+			consumer := &recordingPickerConsumer{reads: make(chan []byte, 1)}
+			lifetime := startTerminalInputLifetime(reader, consumer)
+			defer lifetime.stop()
+			lifetime.releasePicker()
+			host := newAttachmentHost(attachmentHostConfig{Input: lifetime.pump})
+			host.ownerBoundary = true
+			fg := host.newForeground(AttachmentToken{Generation: 1}, newSessionTestStream())
+			require.True(t, host.authority.grant(fg))
+			reader.push([]byte("ls\r"))
+			event, ok := fg.Input(context.Background())
+			require.True(t, ok)
+			fg.PreserveInput(event.Data)
+			fg.finish()
+
+			if tt.backToPicker {
+				lifetime.pump.dropUnclaimed()
+				lifetime.acquirePicker()
+				assertNoPickerRead(t, consumer.reads)
+				return
+			}
+			next := host.newForeground(AttachmentToken{Generation: 2}, newSessionTestStream())
+			require.True(t, host.authority.grant(next))
+			replayed, ok := next.Input(context.Background())
+			require.True(t, ok)
+			require.Equal(t, []byte("ls\r"), replayed.Data)
+		})
 	}
 }

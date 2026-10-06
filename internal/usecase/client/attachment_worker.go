@@ -1231,12 +1231,10 @@ func (f *attachmentForeground) finish() {
 		return
 	}
 	f.finishedOnce.Do(func() {
-		// Autonomous supervisor foregrounds have a host-lifetime geometry
-		// collector. At that owner-class boundary, no attachment byte may reach
-		// the picker. Attachment-to-attachment replacement instead delivers pending input.
-		if f.input != nil && f.host != nil && f.host.ownerBoundary {
-			f.input.dropOwned(f.consumer)
-		}
+		// Finish is lossless: input kept for a resume must survive it. The
+		// supervisor drops unclaimed bytes (dropUnclaimed) when the terminal
+		// returns to the picker, the owner-class boundary no attachment byte
+		// may cross.
 		f.authority.revoke(f)
 	})
 }

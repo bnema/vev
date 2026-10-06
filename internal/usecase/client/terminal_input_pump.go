@@ -284,6 +284,27 @@ func (p *terminalInputPump) dropOwned(consumer uint64) {
 	}
 }
 
+// dropUnclaimed disposes pending and preserved bytes while no consumer holds
+// the claim. The supervisor calls it when the terminal goes back to the
+// picker, so session input kept for a resume never reaches the picker.
+func (p *terminalInputPump) dropUnclaimed() {
+	p.mu.Lock()
+	if p.consumer != 0 {
+		p.mu.Unlock()
+		return
+	}
+	hadPending := p.pending != nil
+	p.pending = nil
+	p.residual = nil
+	p.mu.Unlock()
+	if hadPending {
+		select {
+		case p.space <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func (p *terminalInputPump) ack(consumer uint64) {
 	p.mu.Lock()
 	if p.consumer != consumer || p.delivering != consumer {

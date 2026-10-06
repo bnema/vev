@@ -1524,10 +1524,11 @@ func (w *resumeWatch) hold(data []byte) {
 	}
 }
 
-// isResumeCancelKey reports a read that is exactly Ctrl-C or a lone Esc. A
-// longer read starting with Esc is an escape sequence (arrows, focus), not a
-// cancel.
+// isResumeCancelKey reports a read that is exactly Ctrl-C or a lone Esc,
+// after decoding the kitty keyboard protocol (Esc is \x1b[27u there). A longer
+// read starting with Esc is an escape sequence (arrows, focus), not a cancel.
 func isResumeCancelKey(data []byte) bool {
+	data = kittykey.Translate(data, 0)
 	return len(data) == 1 && (data[0] == 0x03 || data[0] == 0x1b)
 }
 

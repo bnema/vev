@@ -583,6 +583,9 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 		// picker catalogue.
 		picker.ApplySnapshot(service.Snapshot())
 		picker.SetOwnsInput(true)
+		if input != nil && input.pump != nil {
+			input.pump.dropUnclaimed()
+		}
 		input.acquirePicker()
 	}()
 	// budget.resuming is true while the loop reconnects a lost attachment:

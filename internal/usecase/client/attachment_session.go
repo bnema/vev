@@ -382,7 +382,18 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	// await makes the delivery just routed pending until the outbox wrote
 	// every message accepted since from.
 	await := func(from, actionID uint64) error {
-		pending = &pendingInputAck{from: from, mark: stream.accepted(), actionID: actionID}
+		mark := stream.accepted()
+		if mark == from {
+			// Nothing was queued (an overlay consumed the keys), so there is
+			// no write to wait for: an earlier stalled message must not hold
+			// the overlay's next key.
+			fg.AckInput()
+			if actionID != 0 {
+				return w.send(ctx, fg, stream, protocol.UIFence{ActionID: actionID})
+			}
+			return nil
+		}
+		pending = &pendingInputAck{from: from, mark: mark, actionID: actionID}
 		return ackWritten()
 	}
 	for {

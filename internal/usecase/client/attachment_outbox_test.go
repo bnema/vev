@@ -107,6 +107,9 @@ func TestResumeWatch(t *testing.T) {
 	}{
 		{name: "ctrl-c cancels and drops held keys", reads: []string{"ls", "\x03"}, wantCancel: true},
 		{name: "lone esc cancels", reads: []string{"\x1b"}, wantCancel: true},
+		{name: "kitty esc cancels", reads: []string{"\x1b[27u"}, wantCancel: true},
+		{name: "kitty ctrl-c cancels", reads: []string{"\x1b[99;5u"}, wantCancel: true},
+		{name: "kitty ctrl-c with lock bits cancels", reads: []string{"\x1b[99;69u"}, wantCancel: true},
 		{name: "escape sequence is kept", reads: []string{"\x1b[A"}, wantResidual: "\x1b[A"},
 		{name: "typed keys are kept in order", reads: []string{"l", "s", "\r"}, wantResidual: "ls\r"},
 	}
@@ -189,6 +192,27 @@ func TestAttachmentWorkerStalledLink(t *testing.T) {
 				require.Eventually(t, func() bool { return strings.Contains(h.term.written(), "later") }, 5*time.Second, time.Millisecond, "a stalled write blocked painting")
 				close(s.release)
 				require.Equal(t, []string{"a"}, h.awaitInputs(t, 1))
+				h.end(t)
+			},
+		},
+		{
+			name: "a read that queues nothing is acked while an earlier write is stalled",
+			run: func(t *testing.T, h *inputHarness, s *stallingSessionStream) {
+				// A queued output Ack stalls behind the link.
+				next := sessionTestOutput(2, "\x1b[Hmore")
+				next.Epoch = 2
+				h.stream.deliver(next)
+				<-s.entered
+				// An open bracketed paste is held by the coalescer and queues
+				// nothing, so there is no write to wait for.
+				h.send("\x1b[200~abc")
+				h.send("def")
+				require.Eventually(t, func() bool {
+					h.pump.mu.Lock()
+					defer h.pump.mu.Unlock()
+					return h.pump.pending == nil && h.pump.delivering == 0 && len(h.reader.chunks) == 0
+				}, 5*time.Second, time.Millisecond, "an unqueued read held the pump behind a stalled write")
+				close(s.release)
 				h.end(t)
 			},
 		},
