@@ -616,7 +616,8 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			// same target again.
 			outcome.target = target
 		}
-		attempt, ok := budget.spend(outcome.kind, s.cfg.Clock.Now().Sub(attemptStart))
+		now := s.cfg.Clock.Now()
+		attempt, ok := budget.spend(outcome.kind, now.Sub(attemptStart), now)
 		if !ok {
 			s.logger.Warn("client_attachment_resume_exhausted", "endpoint", outcome.target.request.Endpoint, "session", outcome.target.request.Target.SessionName, "attempts", attempt-1, "error", outcome.cause)
 			s.transition(supervisorEvent{kind: supervisorAttachEnded, err: outcome.cause})
@@ -640,6 +641,8 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 type attachmentResumeBudget struct {
 	used     int
 	resuming bool
+	// since is when the current outage began; zero before the first spend.
+	since time.Time
 }
 
 // spend records one resume after an attempt of the given kind that ran for
@@ -647,14 +650,18 @@ type attachmentResumeBudget struct {
 // fresh budget; one that drops right after attaching keeps counting, so a
 // flapping session gives up.
 // It returns the 1-based resume attempt, and false once the budget is
-// exhausted.
-func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Duration) (int, bool) {
+// exhausted: at least maxAttachmentResumes attempts and resumeOutageWindow
+// since the outage began.
+func (b *attachmentResumeBudget) spend(kind attachmentOutcomeKind, up time.Duration, now time.Time) (int, bool) {
 	if kind == attachmentResume && up >= resumeStableAttachment {
 		b.used = 0
 	}
+	if b.used == 0 {
+		b.since = now
+	}
 	b.used++
 	b.resuming = true
-	return b.used, b.used <= maxAttachmentResumes
+	return b.used, b.used <= maxAttachmentResumes || now.Sub(b.since) < resumeOutageWindow
 }
 
 // withFreshStream gives target a newly allocated stream identity. It is
@@ -898,10 +905,16 @@ settlement:
 	return attachmentEndedOutcome()
 }
 
-// maxAttachmentResumes bounds how many times one lost attachment reconnects
-// before the client gives up and returns to the picker. With the supervisor
-// backoff this spans a few seconds, enough to ride out a transient drop.
+// maxAttachmentResumes is the minimum number of resume attempts before the
+// client may give up on a lost attachment. Giving up also requires the outage
+// to have lasted resumeOutageWindow, so a flaky mobile link keeps resuming
+// instead of dropping to the picker after a few seconds.
 const maxAttachmentResumes = 5
+
+// resumeOutageWindow is how long one outage keeps resuming. It matches the
+// daemon's park window for a detached remote attachment: past it the session
+// view is gone anyway.
+const resumeOutageWindow = 15 * time.Minute
 
 // resumeStableAttachment is how long a resumed attachment must stay up before
 // its next loss gets a fresh resume budget.

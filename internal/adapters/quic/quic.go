@@ -61,8 +61,11 @@ var (
 // listener and none on the dialer, no unidirectional streams, keepalive /
 // idle limits, bounded admission, no 0-RTT.
 type Config struct {
-	// KeepAlivePeriod defaults to 15s; MaxIdleTimeout defaults to 60s;
-	// HandshakeIdleTimeout defaults to 5s.
+	// KeepAlivePeriod defaults to 2s; MaxIdleTimeout defaults to 60s;
+	// HandshakeIdleTimeout defaults to 5s. The short keepalive holds mobile
+	// CGNAT bindings open and surfaces loss quickly, while the long idle
+	// timeout lets one connection ride out short outages and deliver queued
+	// input without reconnecting.
 	KeepAlivePeriod      time.Duration
 	MaxIdleTimeout       time.Duration
 	HandshakeIdleTimeout time.Duration
@@ -86,7 +89,7 @@ const noIncomingStreams int64 = -1
 func baseQUICConfig(config Config) *quicgo.Config {
 	keepAlive := config.KeepAlivePeriod
 	if keepAlive == 0 {
-		keepAlive = 15 * time.Second
+		keepAlive = 2 * time.Second
 	}
 	maxIdle := config.MaxIdleTimeout
 	if maxIdle == 0 {

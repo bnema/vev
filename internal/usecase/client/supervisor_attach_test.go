@@ -1308,10 +1308,18 @@ func resumeTestJitter() float64 { return 0.5 }
 // share the clock, so it matches the exact backoff delay.
 func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 	t.Helper()
+	fireResumeTimerAfter(t, clock, attempt, func() {})
+}
+
+// fireResumeTimerAfter waits for the attempt's backoff timer, runs before, then
+// fires it.
+func fireResumeTimerAfter(t *testing.T, clock *supervisorTestClock, attempt int, before func()) {
+	t.Helper()
 	want := supervisorBackoffDelay(uint64(attempt), resumeTestJitter)
 	for {
 		timer := clock.awaitTimer(t)
 		if timer.delay == want {
+			before()
 			timer.fire()
 			return
 		}
@@ -1320,22 +1328,29 @@ func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 
 func TestAttachmentResumeBudget(t *testing.T) {
 	brief := time.Second
+	// step is the clock advance between spends: past the outage window, the
+	// attempt count alone decides; within it, resuming never gives up.
+	past := resumeOutageWindow / maxAttachmentResumes
 	tests := []struct {
 		name  string
 		steps []attachmentOutcomeKind
 		ups   []time.Duration
+		step  time.Duration
 		want  []bool
 	}{
-		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
-		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), want: repeatBools(true, maxAttachmentResumes+2)},
-		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), step: past, want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), step: past, want: repeatBools(true, maxAttachmentResumes+2)},
+		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), step: past, want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "outage window keeps resuming", steps: repeatKinds(attachmentRetry, 3*maxAttachmentResumes), ups: repeatDurations(brief, 3*maxAttachmentResumes), step: time.Second, want: repeatBools(true, 3*maxAttachmentResumes)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var budget attachmentResumeBudget
 			require.False(t, budget.resuming)
+			now := time.Unix(0, 0)
 			for i, kind := range tt.steps {
-				_, ok := budget.spend(kind, tt.ups[i])
+				_, ok := budget.spend(kind, tt.ups[i], now)
+				now = now.Add(tt.step)
 				require.Equal(t, tt.want[i], ok, "step %d", i)
 				require.True(t, budget.resuming)
 			}
@@ -1443,7 +1458,7 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 			first.fail(testStreamLoss())
 
 			attempt := 1
-			for _, s := range tc.steps {
+			for i, s := range tc.steps {
 				if s == cancelDuringBackoff {
 					backoff := supervisorBackoffDelay(1, resumeTestJitter)
 					for harness.clock.awaitTimer(t).delay != backoff {
@@ -1456,7 +1471,15 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				refusing.Store(s == refuse)
 				unavailable.Store(s == openUnavailable)
 				opened := len(harness.service.openedRequests())
-				fireResumeTimer(t, harness.clock, attempt)
+				// Giving up also requires the outage window to pass. The
+				// clock moves only once the last attempt's backoff is
+				// scheduled, so no attempt measures it as uptime.
+				last := tc.wantPicker && i == len(tc.steps)-1
+				fireResumeTimerAfter(t, harness.clock, attempt, func() {
+					if last {
+						advancePickerClock(harness.clock, resumeOutageWindow)
+					}
+				})
 				if s == refuse {
 					break
 				}

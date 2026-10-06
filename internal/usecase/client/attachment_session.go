@@ -301,9 +301,13 @@ var (
 
 // pumpAttached publishes output and concurrently forwards the foreground's
 // authorized input, latest geometry and explicit lifecycle decision.
-func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, token AttachmentToken, state outputApplyState, incoming <-chan serverReceive) AttachmentEvent {
+func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg AttachmentForeground, raw ports.BrokerLogicalConnection, token AttachmentToken, state outputApplyState, incoming <-chan serverReceive) AttachmentEvent {
 	pumpCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Every send while attached goes through the outbox so a stalled link
+	// never blocks key handling, overlays, or painting.
+	stream := newAttachmentOutbox(raw)
+	defer stream.stop()
 	outgoing := make(chan attachmentClientEvent)
 	go pumpAttachmentInput(pumpCtx, fg, outgoing)
 	go pumpAttachmentGeometry(pumpCtx, fg, outgoing)
@@ -572,8 +576,15 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				}
 			}
 			if event.action != 0 {
+				// The lifecycle message must reach the daemon before the
+				// supervisor closes the stream.
+				if err := w.drainOutbox(ctx, fg, stream); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
 				return attachmentLifecycleEnd(token, event.action)
 			}
+		case <-stream.Failed():
+			return w.settle(ctx, fg, stream, token, stream.failure())
 		case <-ctx.Done():
 			return w.settle(ctx, fg, stream, token, ctx.Err())
 		case <-fg.Done():
@@ -816,6 +827,22 @@ func (w *sessionAttachmentWorker) send(ctx context.Context, fg AttachmentForegro
 	}
 }
 
+// drainOutbox waits until every queued message was written, or the run ends.
+func (w *sessionAttachmentWorker) drainOutbox(ctx context.Context, fg AttachmentForeground, outbox *attachmentOutbox) error {
+	select {
+	case <-outbox.Idle():
+		return outbox.failure()
+	case <-outbox.Failed():
+		return outbox.failure()
+	case <-ctx.Done():
+		_ = outbox.Close()
+		return ctx.Err()
+	case <-fg.Done():
+		_ = outbox.Close()
+		return errAttachmentForegroundRevoked
+	}
+}
+
 // awaitServer waits for the next server message while the run is live.
 func (w *sessionAttachmentWorker) awaitServer(ctx context.Context, fg AttachmentForeground, incoming <-chan serverReceive) (protocol.ServerMessage, error) {
 	select {
@@ -860,6 +887,11 @@ func (w *sessionAttachmentWorker) settle(ctx context.Context, fg AttachmentForeg
 func (w *sessionAttachmentWorker) sendClosed(stream ports.BrokerLogicalConnection) {
 	if supervisorNil(stream) {
 		return
+	}
+	if outbox, ok := stream.(*attachmentOutbox); ok {
+		// Bypass the queue: the run is ending and its sender stops with it.
+		outbox.stop()
+		stream = outbox.BrokerLogicalConnection
 	}
 	sent := make(chan error, 1)
 	go func() { sent <- stream.SendClient(protocol.Detach{Closed: true}) }()

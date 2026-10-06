@@ -25,7 +25,8 @@ The transport is fixed when the host is added (`quic` by default). To switch, ru
 ## What survives a network problem
 
 - The remote session and its shells keep running while you are offline.
-- The client reconnects by itself after a network change, a VPN switch, or a laptop sleep.
+- The client reconnects by itself after a network change, a VPN switch, or a laptop sleep, and keeps retrying for up to 15 minutes of outage before it returns to the picker.
+- A stalled link never freezes the client: typing, overlays, and prompts stay responsive, and input is sent in order once the link moves again.
 - If the reconnect window has expired but the session still exists, the client opens a fresh attachment to it.
 - Several clients can attach to the same session. Each keeps its own window, tab, focus, and copy mode.
 
