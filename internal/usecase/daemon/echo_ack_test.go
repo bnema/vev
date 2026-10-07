@@ -116,3 +116,27 @@ func TestResetEchoAckDropsPendingInput(t *testing.T) {
 	require.Zero(t, ac.echoAck.Load())
 	require.Empty(t, drainAllFrames(sends), "a reset tracker must not publish the old link's input")
 }
+
+func TestEchoAckWaitsWhileOutputWindowIsFull(t *testing.T) {
+	clock := newEchoTestClock()
+	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	ac.output.maxOutstandingAtomic.Store(1)
+	ac.output.outstandingAtomic.Store(1)
+
+	d.noteInputApplied(ac, 1)
+	timer, _ := clock.nextTimer(t)
+	clock.advance(echoAckDelay)
+	timer.fire()
+
+	retry, delay := clock.nextTimer(t)
+	require.Equal(t, echoAckDelay, delay, "a full window defers the ack")
+	require.Equal(t, uint64(1), ac.echoAck.Load(), "the next frame may still carry it")
+	require.Empty(t, drainAllFrames(sends), "no ack-only output may overtake withheld frames")
+
+	ac.output.outstandingAtomic.Store(0)
+	clock.advance(echoAckDelay)
+	retry.fire()
+	output := decodeServerMessage(t, awaitFrame(t, sends, "Output")).(protocol.Output)
+	require.Equal(t, uint64(1), output.Echo)
+	require.Zero(t, output.New)
+}

@@ -62,6 +62,28 @@ func (d *Daemon) armEchoAckLocked(ac *attachedClient, delay time.Duration) {
 	})
 }
 
+// armEchoAckRetryLocked re-sends the current acknowledgement after one more
+// echo delay. The caller holds echo.mu.
+func (d *Daemon) armEchoAckRetryLocked(ac *attachedClient) {
+	t := &ac.echo
+	t.timer.retain(d.clock, echoAckDelay, func(fired ports.Timer) {
+		t.mu.Lock()
+		current := t.timer.timer == fired
+		if current {
+			t.timer.timer, t.timer.done = nil, nil
+			if len(t.pending) > 0 {
+				// New input owns the next timer and its ack covers this one.
+				d.armEchoAckLocked(ac, max(echoAckDelay-d.clock.Now().Sub(t.pending[0].at), 0))
+				current = false
+			}
+		}
+		t.mu.Unlock()
+		if current {
+			d.sendEchoAck(ac)
+		}
+	})
+}
+
 // advanceEchoAck moves echoAck to the newest input applied at least
 // echoAckDelay ago and re-arms for the rest. It reports whether echoAck moved.
 func (d *Daemon) advanceEchoAck(ac *attachedClient, fired ports.Timer) bool {
@@ -92,12 +114,27 @@ func (d *Daemon) advanceEchoAck(ac *attachedClient, fired ports.Timer) bool {
 
 // sendEchoAck publishes a new acknowledgement in an empty side-effect Output,
 // so the client learns about it even when the screen does not change.
+//
+// Side effects bypass the output window. While the window is full, the frame
+// holding the acknowledged echo may still be withheld, and an early ack would
+// make the client judge its guesses against an older screen. The ack then
+// waits: the next frame carries it, and a retry covers a screen that never
+// changes.
 func (d *Daemon) sendEchoAck(ac *attachedClient) {
 	if ac.attachmentActivity() != attachmentActive {
 		return
 	}
 	sess := ac.currentAttachmentSession()
 	if sess == nil {
+		return
+	}
+	if ac.output != nil && ac.output.atCapacity() {
+		t := &ac.echo
+		t.mu.Lock()
+		if t.timer.timer == nil {
+			d.armEchoAckRetryLocked(ac)
+		}
+		t.mu.Unlock()
 		return
 	}
 	failed, err := d.boundedSendOutputErrTransport(ac, nil)
