@@ -35,7 +35,10 @@ type Terminal struct {
 	mirror          bool
 	geometry        domain.Geometry
 	context         ports.UIContext
-	latest          ports.UISnapshot
+	published       vt.ScreenSnapshot // committed screen of the latest revision
+	publishedGeom   domain.Geometry
+	publishedCtx    ports.UIContext
+	latest          ports.UISnapshot // conversion cache, built on the first read
 	revision        uint64
 	available       bool
 	captureTooLarge bool
@@ -266,8 +269,11 @@ func (t *Terminal) Snapshot() (ports.UISnapshot, error) {
 	if t.captureTooLarge {
 		return ports.UISnapshot{}, &ports.UIError{Code: ports.UIErrCaptureTooLarge}
 	}
-	if t.latest.Revision == 0 {
+	if t.revision == 0 {
 		return ports.UISnapshot{}, ports.ErrUIUnavailable
+	}
+	if t.latest.Revision != t.revision {
+		t.latest = convertSnapshot(t.published, t.publishedGeom, t.publishedCtx, t.revision)
 	}
 	return cloneSnapshot(t.latest), nil
 }
@@ -349,9 +355,12 @@ func (t *Terminal) publishLocked() {
 	if !t.available || t.captureTooLarge || t.screen == nil {
 		return
 	}
-	screen := t.screen.Snapshot()
+	if t.dirty || t.revision == 0 {
+		t.published = t.screen.Snapshot()
+	}
+	t.publishedGeom = t.geometry
+	t.publishedCtx = t.context
 	t.revision++
-	t.latest = convertSnapshot(screen, t.geometry, t.context, t.revision)
 	t.dirty = false
 	t.signalChange()
 }
