@@ -106,12 +106,14 @@ type KeyboardConfig struct {
 type EchoPredictMode uint8
 
 const (
+	// EchoPredictNever disables prediction. It is the zero value, so a
+	// client composed without the user's config (virtual terminals, UI
+	// drivers) never predicts.
+	EchoPredictNever EchoPredictMode = iota
 	// EchoPredictAdaptive shows predictions only on a slow or glitchy link.
-	EchoPredictAdaptive EchoPredictMode = iota
+	EchoPredictAdaptive
 	// EchoPredictAlways shows predictions whatever the link latency.
 	EchoPredictAlways
-	// EchoPredictNever disables prediction.
-	EchoPredictNever
 )
 
 // EchoConfig contains client-side predictive echo settings.
@@ -217,6 +219,9 @@ func Defaults() Config {
 		},
 		Keyboard: KeyboardConfig{
 			KittyProtocol: true,
+		},
+		Echo: EchoConfig{
+			Predict: EchoPredictAdaptive,
 		},
 		Scrollback: DefaultScrollbackConfig(),
 	}

@@ -639,7 +639,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				event.message = protocol.Input{InputSeq: input.nextSeq(), ActionID: event.input.actionID, Data: append([]byte(nil), event.input.Data...)}
 			}
 			if resize, ok := event.message.(protocol.Resize); ok {
-				echo.resized()
+				if err := echo.resized(resize.Size); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
 				if err := picker.resize(ctx, state, resize.Size); err != nil {
 					return w.settle(ctx, fg, stream, token, err)
 				}

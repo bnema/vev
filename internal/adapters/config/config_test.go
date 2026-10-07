@@ -355,6 +355,9 @@ func TestParse(t *testing.T) {
 			if !tt.want.Keyboard.KittyProtocol {
 				tt.want.Keyboard = domain.Defaults().Keyboard
 			}
+			if tt.want.Echo.Predict == domain.EchoPredictNever {
+				tt.want.Echo = domain.Defaults().Echo
+			}
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}

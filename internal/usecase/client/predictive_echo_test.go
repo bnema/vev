@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +150,7 @@ func TestEchoPredictorBackspace(t *testing.T) {
 func TestEchoPredictorInsertShiftsText(t *testing.T) {
 	t.Parallel()
 	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.warm(10 * time.Millisecond)
 	// "$ ac" with the cursor on c.
 	h.p.applyOutput(protocol.Output{Epoch: 1, New: 2, Size: domain.Size{Cols: 20, Rows: 3}, Data: []byte("ac\x1b[1;4H")}, h.now)
 	h.p.confEpoch = h.p.predEpoch
@@ -316,5 +318,96 @@ func TestEchoSGR(t *testing.T) {
 	style.ForegroundRGB.R, style.ForegroundRGB.G, style.ForegroundRGB.B = 1, 2, 3
 	if got, want := echoSGR(style, false), "\x1b[0;1;38;2;1;2;3;48;5;200m"; got != want {
 		t.Fatalf("echoSGR rgb = %q, want %q", got, want)
+	}
+}
+
+func TestEchoPredictorWaitsForFirstAcknowledgement(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.p.confEpoch = h.p.predEpoch
+	if got := h.typed("b"); len(got) != 0 || h.p.active() {
+		t.Fatalf("predicted before any echo acknowledgement: %q", got)
+	}
+}
+
+func TestEchoPredictorRefusesUnshiftableText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		frame string
+	}{
+		{name: "wide rune after the cursor", frame: "a界\x1b[1;3H"},
+		{name: "pane border after the cursor", frame: "ab│\x1b[1;3H"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newEchoHarness(t, domain.EchoPredictAlways)
+			h.warm(10 * time.Millisecond)
+			h.p.applyOutput(protocol.Output{Epoch: 1, New: 2, Size: domain.Size{Cols: 20, Rows: 3}, Data: []byte(tt.frame)}, h.now)
+			h.p.confEpoch = h.p.predEpoch
+			if got := h.typed("x"); len(got) != 0 || h.p.active() {
+				t.Fatalf("shifted unshiftable text: %q", got)
+			}
+		})
+	}
+}
+
+func TestEchoPredictorRestoresWideCellWhole(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.p.applyOutput(protocol.Output{Epoch: 1, New: 2, Size: domain.Size{Cols: 20, Rows: 3}, Data: []byte("\x1b[1;1H\x1b[4:3m界\x1b[0m")}, h.now)
+	var out bytes.Buffer
+	h.p.restoreCell(&out, 0, 1)
+	if got, want := out.String(), "\x1b[1;1H\x1b[0;4:3m界"; got != want {
+		t.Fatalf("restoreCell = %q, want %q", got, want)
+	}
+}
+
+func TestEchoPredictorSameSizeResizeErasesGuesses(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.warm(10 * time.Millisecond)
+	h.confirm()
+	if got := h.typed("b"); len(got) == 0 {
+		t.Fatal("guess not drawn")
+	}
+	h.p.reset()
+	if got, want := string(h.p.render()), "\x1b[1;4H\x1b[0m \x1b[0m\x1b[1;4H"; got != want {
+		t.Fatalf("render after reset = %q, want %q", got, want)
+	}
+}
+
+func TestApcFilterStripsGraphicsAcrossOutputs(t *testing.T) {
+	t.Parallel()
+	var f apcFilter
+	chunks := []string{"a\x1b_Gf=100;AAA", "A\x1b", "\\b\x1b[1mc\x1b"}
+	var got []byte
+	for _, chunk := range chunks {
+		got = append(got, f.strip([]byte(chunk))...)
+	}
+	got = append(got, f.strip([]byte("[0m"))...)
+	if want := "ab\x1b[1mc\x1b[0m"; string(got) != want {
+		t.Fatalf("strip = %q, want %q", got, want)
+	}
+}
+
+func TestEscapeLength(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want int
+	}{
+		{in: "\x1b[A", want: 3},
+		{in: "\x1bOA", want: 3},
+		{in: "\x1b]11;?\x07x", want: 7},
+		{in: "\x1b]11;?\x1b\\x", want: 8},
+		{in: "\x1b]11;", want: 5},
+		{in: "\x1bx", want: 2},
+	}
+	for _, tt := range tests {
+		if got := escapeLength([]byte(tt.in)); got != tt.want {
+			t.Errorf("escapeLength(%q) = %d, want %d", tt.in, got, tt.want)
+		}
 	}
 }

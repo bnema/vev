@@ -47,6 +47,13 @@ packages:
           dir: internal/usecase/daemon
           filename: action_runner_mock_test.go
           pkgname: daemon
+  github.com/bnema/vev/internal/usecase/client:
+    interfaces:
+      attachmentPredictionForeground:
+        config:
+          dir: internal/usecase/client
+          filename: prediction_foreground_mock_test.go
+          pkgname: client
   github.com/bnema/vev/internal/usecase/command:
     interfaces:
       Context:

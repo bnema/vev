@@ -140,6 +140,7 @@ type echoPredictor struct {
 	drawnRow   int
 	drawn      []int
 	cursorMove bool
+	apc        apcFilter
 }
 
 func newEchoPredictor(mode domain.EchoPredictMode) *echoPredictor {
@@ -161,7 +162,9 @@ func (p *echoPredictor) applyOutput(output protocol.Output, now time.Time) {
 		p.drawn = p.drawn[:0]
 		p.cursorMove = false
 	}
-	p.screen.Write(output.Data)
+	if data := p.apc.strip(output.Data); len(data) > 0 {
+		p.screen.Write(data)
+	}
 	if output.Echo > p.echo {
 		p.sample(output.Echo, now)
 		p.echo = output.Echo
@@ -351,6 +354,23 @@ func (p *echoPredictor) cellValidity(col int) echoValidity {
 
 func isBlankRune(r rune) bool { return r == 0 || r == ' ' }
 
+// isBorderRune reports a box-drawing rune: a pane border or bar the shell
+// line never shifts across.
+func isBorderRune(r rune) bool { return r >= 0x2500 && r <= 0x257f }
+
+// isPlainCell reports a cell the engine can move and repaint exactly: one
+// column, no grapheme or hyperlink payload.
+func isPlainCell(cell vt.Cell) bool {
+	return !cell.Continuation && cell.Payload.Empty() && (cell.Rune == 0 || vt.RuneWidth(cell.Rune) == 1)
+}
+
+// unknownKey gives up on the cursor row until the daemon answers this input.
+func (p *echoPredictor) unknownKey(seq uint64) {
+	p.becomeTentative()
+	p.cursor = echoCursor{}
+	p.holdUntil = seq
+}
+
 // input records the Input numbered seq and predicts its bytes.
 func (p *echoPredictor) input(seq uint64, data []byte, now time.Time) {
 	if seq == 0 || p.mode == domain.EchoPredictNever {
@@ -361,7 +381,10 @@ func (p *echoPredictor) input(seq uint64, data []byte, now time.Time) {
 	}
 	p.sent = append(p.sent, echoSent{seq: seq, at: now})
 	p.cull(now)
-	if !p.enabled() {
+	// A daemon that never acknowledges echo (Echo stays 0) could never
+	// confirm or refute a guess, so nothing is predicted before the first
+	// acknowledgement.
+	if !p.enabled() || !p.srttKnown {
 		return
 	}
 	// A bracketed paste arrives as one Input: it is not typing.
@@ -384,9 +407,7 @@ func (p *echoPredictor) input(seq uint64, data []byte, now time.Time) {
 			p.backspace(seq, now)
 		case r == '\r':
 			// The next row's state is only known once the daemon answers.
-			p.becomeTentative()
-			p.cursor = echoCursor{}
-			p.holdUntil = seq
+			p.unknownKey(seq)
 		case vt.RuneWidth(r) != 1:
 			p.becomeTentative()
 		default:
@@ -411,6 +432,17 @@ func escapeLength(data []byte) int {
 		return len(data)
 	case 'O':
 		return min(3, len(data))
+	case ']', 'P', '_', '^', 'X':
+		// OSC, DCS, APC, PM, SOS: up to BEL or ST.
+		for i := 2; i < len(data); i++ {
+			if data[i] == 0x07 {
+				return i + 1
+			}
+			if data[i] == 0x1b && i+1 < len(data) && data[i+1] == '\\' {
+				return i + 2
+			}
+		}
+		return len(data)
 	}
 	return 2
 }
@@ -470,6 +502,12 @@ func (p *echoPredictor) print(r rune, seq uint64, now time.Time) {
 	end := col
 	for end < width-1 {
 		cell, known := p.effective(end)
+		if known && (!isPlainCell(cell) || isBorderRune(cell.Rune)) {
+			// Wide or payload text cannot be shifted exactly, and a border
+			// would move with the line.
+			p.unknownKey(seq)
+			return
+		}
 		if known && isBlankRune(cell.Rune) {
 			break
 		}
@@ -520,6 +558,16 @@ func (p *echoPredictor) backspace(seq uint64, now time.Time) {
 	}
 	width := len(p.cells)
 	col := p.cursor.col - 1
+	for i := col; i < width; i++ {
+		cell, known := p.effective(i)
+		if known && !isPlainCell(cell) {
+			p.unknownKey(seq)
+			return
+		}
+		if known && (isBlankRune(cell.Rune) || isBorderRune(cell.Rune)) {
+			break
+		}
+	}
 	p.moveCursor(col, seq)
 	for i := col; i < width; i++ {
 		cell := &p.cells[i]
@@ -530,6 +578,10 @@ func (p *echoPredictor) backspace(seq uint64, now time.Time) {
 			next, known = p.effective(i + 1)
 		}
 		blank := known && isBlankRune(next.Rune)
+		if known && isBorderRune(next.Rune) {
+			// The text ends at a border: what fills this cell is unknown.
+			known, blank = false, true
+		}
 		cell.resetWithOriginal()
 		cell.arm(seq, p.predEpoch, now)
 		cell.originals = append(cell.originals, original)
@@ -576,7 +628,7 @@ func (p *echoPredictor) render() []byte {
 			continue
 		}
 		if p.drawnRow < p.screen.Rows() && col < p.screen.Columns() {
-			writeEchoCell(&out, p.drawnRow, col, p.screen.Cell(col, p.drawnRow), false)
+			p.restoreCell(&out, p.drawnRow, col)
 		}
 	}
 	for _, col := range want {
@@ -609,18 +661,30 @@ func writeEchoCUP(out *bytes.Buffer, row, col int) {
 	out.WriteByte('H')
 }
 
+// restoreCell repaints the mirror's cell at (row, col). The right half of a
+// wide glyph is repainted from its left cell, which covers both columns.
+func (p *echoPredictor) restoreCell(out *bytes.Buffer, row, col int) {
+	cell := p.screen.Cell(col, row)
+	if cell.Continuation && col > 0 {
+		col--
+		cell = p.screen.Cell(col, row)
+	}
+	writeEchoCell(out, row, col, cell, false)
+}
+
 // writeEchoCell draws one cell. Mirror styles come from daemon output already
 // projected to this terminal's color profile, so they are written as is.
 func writeEchoCell(out *bytes.Buffer, row, col int, cell vt.Cell, underline bool) {
 	writeEchoCUP(out, row, col)
 	out.WriteString(echoSGR(cell.Style, underline))
-	r := cell.Rune
-	if cell.Continuation || r == 0 || vt.RuneWidth(r) != 1 {
-		// A wide rune's halves cannot be drawn alone; a blank is the safe
-		// stand-in until the daemon's next frame.
-		r = ' '
+	switch {
+	case cell.Continuation || cell.Rune == 0:
+		out.WriteByte(' ')
+	case cell.Payload.Grapheme() != "":
+		out.WriteString(cell.Payload.Grapheme())
+	default:
+		out.WriteRune(cell.Rune)
 	}
-	out.WriteRune(r)
 }
 
 func echoSGR(style vt.Style, underline bool) string {
@@ -635,8 +699,22 @@ func echoSGR(style vt.Style, underline bool) string {
 	if style.Italic {
 		b.WriteString(";3")
 	}
-	if underline || style.Attrs&vt.AttrUnderline != 0 {
+	switch {
+	case underline:
 		b.WriteString(";4")
+	case style.Attrs&vt.AttrUnderline != 0:
+		switch style.UnderlineStyle {
+		case vt.UnderlineDouble:
+			b.WriteString(";21")
+		case vt.UnderlineCurly:
+			b.WriteString(";4:3")
+		case vt.UnderlineDotted:
+			b.WriteString(";4:4")
+		case vt.UnderlineDashed:
+			b.WriteString(";4:5")
+		default:
+			b.WriteString(";4")
+		}
 	}
 	if style.Attrs&vt.AttrBlink != 0 {
 		b.WriteString(";5")
@@ -649,6 +727,12 @@ func echoSGR(style vt.Style, underline bool) string {
 	}
 	writeEchoColor(&b, style.HasForegroundRGB, style.ForegroundRGB, style.Foreground, 38, 30, 90)
 	writeEchoColor(&b, style.HasBackgroundRGB, style.BackgroundRGB, style.Background, 48, 40, 100)
+	switch {
+	case style.HasUnderlineColorRGB:
+		b.WriteString(";58;2;" + strconv.Itoa(int(style.UnderlineColorRGB.R)) + ";" + strconv.Itoa(int(style.UnderlineColorRGB.G)) + ";" + strconv.Itoa(int(style.UnderlineColorRGB.B)))
+	case style.HasUnderlineColor:
+		b.WriteString(";58;5;" + strconv.Itoa(style.UnderlineColor))
+	}
 	b.WriteByte('m')
 	return b.String()
 }
@@ -665,4 +749,59 @@ func writeEchoColor(b *strings.Builder, hasRGB bool, rgb vt.RGB, index, extended
 	case index < 256:
 		b.WriteString(";" + strconv.Itoa(extended) + ";5;" + strconv.Itoa(index))
 	}
+}
+
+// apcFilter drops APC strings (ESC _ ... ST), which carry kitty graphics, from
+// the mirror's input: the engine needs text only, and decoding images would
+// cost the client CPU and memory. Its state spans Output boundaries.
+type apcFilter struct {
+	state uint8
+}
+
+const (
+	apcText uint8 = iota
+	apcEscape
+	apcBody
+	apcBodyEscape
+)
+
+func (f *apcFilter) strip(data []byte) []byte {
+	if f.state == apcText && bytes.IndexByte(data, 0x1b) < 0 {
+		return data
+	}
+	out := make([]byte, 0, len(data))
+	for _, b := range data {
+		switch f.state {
+		case apcText:
+			if b == 0x1b {
+				f.state = apcEscape
+				continue
+			}
+			out = append(out, b)
+		case apcEscape:
+			if b == '_' {
+				f.state = apcBody
+				continue
+			}
+			out = append(out, 0x1b, b)
+			f.state = apcText
+			if b == 0x1b {
+				out = out[:len(out)-1]
+				f.state = apcEscape
+			}
+		case apcBody:
+			if b == 0x1b {
+				f.state = apcBodyEscape
+			}
+		case apcBodyEscape:
+			switch b {
+			case '\\':
+				f.state = apcText
+			case 0x1b:
+			default:
+				f.state = apcBody
+			}
+		}
+	}
+	return out
 }

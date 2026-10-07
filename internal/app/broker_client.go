@@ -685,9 +685,12 @@ func userTerminalAttachmentEnvironment(log *slog.Logger, cfg domain.TerminalConf
 }
 
 // configuredTerminalAttachmentEnvironment loads the user's config and returns
-// userTerminalAttachmentEnvironment for it.
+// userTerminalAttachmentEnvironment for it, with the user's echo setting.
 func configuredTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvironment {
-	return userTerminalAttachmentEnvironment(log, loadConfigOrDefaults(log, platform.ConfigPath()).Terminal)
+	cfg := loadConfigOrDefaults(log, platform.ConfigPath())
+	env := userTerminalAttachmentEnvironment(log, cfg.Terminal)
+	env.EchoPredict = cfg.Echo.Predict
+	return env
 }
 
 // outerTerminalAttachmentEnvironment extends userTerminalAttachmentEnvironment

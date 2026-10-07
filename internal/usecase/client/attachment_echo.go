@@ -62,12 +62,20 @@ func (e *attachmentEcho) output(output protocol.Output) error {
 	return e.draw()
 }
 
-// resized drops every guess: the next frame repaints the new geometry.
-func (e *attachmentEcho) resized() {
+// resized handles a terminal resize. A new size makes the daemon repaint
+// everything, so the guesses are simply forgotten. The same size brings no
+// repaint, so drawn guesses are erased from the mirror instead.
+func (e *attachmentEcho) resized(size domain.Size) error {
 	if e == nil {
-		return
+		return nil
 	}
-	e.predictor.forget()
+	screen := e.predictor.screen
+	if size.Cols != screen.Columns() || size.Rows != screen.Rows() {
+		e.predictor.forget()
+		return nil
+	}
+	e.predictor.reset()
+	return e.draw()
 }
 
 // tickC fires while a pending guess waits on a timing trigger.
