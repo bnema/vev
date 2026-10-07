@@ -2,7 +2,6 @@ package quicnettest
 
 import (
 	"container/heap"
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -19,9 +18,10 @@ var ErrClosed = errors.New("quicnettest: proxy is closed")
 // Config.ServerAddr from a separate upstream socket that can be rebound to a
 // new source address at any time.
 type Proxy struct {
-	cfg    Config
-	clock  Clock
-	server *net.UDPAddr
+	cfg          Config
+	clock        Clock
+	server       *net.UDPAddr
+	upstreamAddr *net.UDPAddr
 
 	clientConn *net.UDPConn
 	upstream   atomic.Pointer[net.UDPConn]
@@ -128,11 +128,25 @@ func New(cfg Config) (*Proxy, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	clientConn, err := listenLoopback()
+	listenAddr := cfg.ListenAddr
+	if listenAddr == nil {
+		listenAddr = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
+	}
+	clientConn, err := net.ListenUDP("udp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("quicnettest: listen client socket: %w", err)
 	}
-	upstream, err := listenLoopback()
+	upstreamAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
+	if !cfg.ServerAddr.IP.IsLoopback() {
+		upstreamAddr.IP = net.IPv4zero
+	}
+	if cfg.ServerAddr.IP.To4() == nil {
+		upstreamAddr.IP = net.IPv6unspecified
+		if cfg.ServerAddr.IP.IsLoopback() {
+			upstreamAddr.IP = net.IPv6loopback
+		}
+	}
+	upstream, err := net.ListenUDP("udp", upstreamAddr)
 	if err != nil {
 		_ = clientConn.Close()
 		return nil, fmt.Errorf("quicnettest: listen upstream socket: %w", err)
@@ -149,17 +163,18 @@ func New(cfg Config) (*Proxy, error) {
 		return newRNG(cfg.Seed, direction)
 	}
 	p := &Proxy{
-		cfg:        cfg,
-		clock:      cfg.Clock,
-		server:     cfg.ServerAddr,
-		clientConn: clientConn,
-		done:       make(chan struct{}),
-		slots:      make(chan struct{}, cfg.QueueCapacity),
-		queue:      make(chan packet, cfg.QueueCapacity),
-		start:      start,
-		toServer:   impairer{link: cfg.ToServer, rng: rngFor(ToServer), start: start},
-		toClient:   impairer{link: cfg.ToClient, rng: rngFor(ToClient), start: start},
-		onPacket:   cfg.OnPacket,
+		cfg:          cfg,
+		clock:        cfg.Clock,
+		server:       cfg.ServerAddr,
+		upstreamAddr: upstreamAddr,
+		clientConn:   clientConn,
+		done:         make(chan struct{}),
+		slots:        make(chan struct{}, cfg.QueueCapacity),
+		queue:        make(chan packet, cfg.QueueCapacity),
+		start:        start,
+		toServer:     impairer{link: cfg.ToServer, rng: rngFor(ToServer), start: start},
+		toClient:     impairer{link: cfg.ToClient, rng: rngFor(ToClient), start: start},
+		onPacket:     cfg.OnPacket,
 	}
 	p.upstream.Store(upstream)
 	p.wg.Add(3)
@@ -206,7 +221,7 @@ func (p *Proxy) Rebind() error {
 	if p.stopping() {
 		return ErrClosed
 	}
-	conn, err := listenLoopback()
+	conn, err := net.ListenUDP("udp", p.upstreamAddr)
 	if err != nil {
 		return fmt.Errorf("quicnettest: rebind: %w", err)
 	}
@@ -528,20 +543,6 @@ func directionOf(toServer bool) Direction {
 		return ToServer
 	}
 	return ToClient
-}
-
-func listenLoopback() (*net.UDPConn, error) {
-	var lc net.ListenConfig
-	conn, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
-	if err != nil {
-		return nil, err
-	}
-	udp, ok := conn.(*net.UDPConn)
-	if !ok {
-		_ = conn.Close()
-		return nil, fmt.Errorf("quicnettest: udp listener returned %T", conn)
-	}
-	return udp, nil
 }
 
 func sameUDPAddr(a, b *net.UDPAddr) bool {
