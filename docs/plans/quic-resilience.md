@@ -4,10 +4,10 @@ Goal: on a lossy or intermittent link (4G, roaming, sleep), the UI never
 freezes, typed input is kept and delivered when the link returns, and SSH is
 used only to authenticate the first QUIC handshake.
 
-Reference: mosh (`/tmp/mosh`, `src/network/transportsender-impl.h`,
-`src/frontend/terminaloverlay.cc`).
+Reference: [mosh](https://github.com/mobile-shell/mosh)
+(`src/network/transportsender-impl.h`, `src/frontend/terminaloverlay.cc`).
 
-## Diagnosis (current main)
+## Diagnosis (before Phases 1 and 2)
 
 1. Input path blocks on the network: `sessionAttachmentWorker.send` waits for
    `SendClient`, which waits for the carriage write. While QUIC stalls, the
