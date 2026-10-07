@@ -106,6 +106,37 @@ func TestTCPRelayBlackoutHoldsBytes(t *testing.T) {
 	<-done
 }
 
+// TestRelayUDPProxyInheritsActiveBlackout opens a UDP route while a blackout
+// is active and proves it drops datagrams until the blackout ends.
+func TestRelayUDPProxyInheritsActiveBlackout(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	r := &relay{ctx: ctx, cancel: cancel, remote: "127.0.0.1"}
+	defer r.close()
+	upstream, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer upstream.Close()
+	_, err = r.apply(command{Op: "blackout", UDP: true, Active: true})
+	require.NoError(t, err)
+	port, err := r.apply(command{Op: "udp", Port: upstream.LocalAddr().(*net.UDPAddr).Port})
+	require.NoError(t, err)
+	client, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port.(int)})
+	require.NoError(t, err)
+	defer client.Close()
+	_, err = client.Write([]byte("blocked"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return r.proxies[0].Stats().ToServer.BlackoutDrops == 1 }, time.Second, time.Millisecond)
+	_, err = r.apply(command{Op: "blackout", UDP: true, Active: false})
+	require.NoError(t, err)
+	_, err = client.Write([]byte("open"))
+	require.NoError(t, err)
+	require.NoError(t, upstream.SetReadDeadline(time.Now().Add(time.Second)))
+	data := make([]byte, 16)
+	n, _, err := upstream.ReadFromUDP(data)
+	require.NoError(t, err)
+	require.Equal(t, "open", string(data[:n]))
+}
+
 func TestRelayDisconnectClosesConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

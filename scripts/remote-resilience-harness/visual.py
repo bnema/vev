@@ -39,15 +39,15 @@ def main():
             for tool in ("docker", "foot", "ssh-keygen", "go"):
                 if shutil.which(tool) is None:
                     raise RuntimeError("missing prerequisite: " + tool)
-            run("go", "build", "-o", str(ROOT / "build/vev"), ".", cwd=ROOT)
+            run("go", "build", "-o", str(ROOT / "build/vev"), ".", cwd=ROOT, timeout=600)
             for helper in ("relay", "pixels"):
-                run("go", "build", "-o", str(ROOT / f"build/resilience-{helper}"), f"./scripts/remote-resilience-harness/{helper}", cwd=ROOT)
+                run("go", "build", "-o", str(ROOT / f"build/resilience-{helper}"), f"./scripts/remote-resilience-harness/{helper}", cwd=ROOT, timeout=600)
             nefer = os.environ.get("NEFERWL_BIN")
             if not nefer:
                 nefer = str(private / "neferwl")
                 common = run("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=ROOT, capture_output=True, text=True).stdout.strip()
                 source = Path(os.environ.get("NEFERWL_SOURCE", str(Path(common).parent.parent / "neferwl")))
-                run("go", "build", "-o", nefer, "./cmd/neferwl", cwd=source, env={**os.environ, "CGO_ENABLED": "0"})
+                run("go", "build", "-o", nefer, "./cmd/neferwl", cwd=source, env={**os.environ, "CGO_ENABLED": "0"}, timeout=600)
             docker("build", "-f", str(ROOT / "scripts/demo/Dockerfile"), "-t", name, str(ROOT), timeout=600)
             docker("network", "create", name)
             network = True
@@ -258,7 +258,15 @@ def main():
             frozen = artifacts / "frozen.png"
             shutil.copyfile(shots / "latest.png", frozen)
             try:
+                frozen_at = (shots / "latest.png").stat().st_mtime_ns
                 key("key Alt+space")
+                # The compositor must keep capturing, or an unchanged frame
+                # proves nothing about the stopped client.
+                deadline = time.monotonic() + 3
+                while (shots / "latest.png").stat().st_mtime_ns == frozen_at:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("compositor stopped capturing during the negative control")
+                    time.sleep(0.05)
                 time.sleep(0.3)
                 check = subprocess.run([str(ROOT / "build/resilience-pixels"), str(frozen), str(shots / "latest.png")], capture_output=True, text=True)
                 assert check.returncode == 1, "visual gate accepted a stopped client"

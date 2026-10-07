@@ -9,6 +9,7 @@ install:
 
 test:
 	go test ./... -race
+	python3 -m unittest discover -s scripts/remote-resilience-harness -p '*_test.py'
 
 test-installer:
 	sh scripts/install_platform_test.sh
