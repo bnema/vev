@@ -14,49 +14,77 @@ func TestOverlayInputCursor(t *testing.T) {
 	withCaret := func(col int) capturedModal {
 		return capturedModal{active: true, presentation: ui.Presentation{Inner: inner}, caretCol: col, hasCaret: true}
 	}
+	notices := capturedModal{active: true, presentation: ui.Presentation{Inner: inner}}
+	bar := cursorOut{valid: true, row: 5, col: 5, style: 6, hasStyle: true}
 	for _, tt := range []struct {
 		name     string
 		overlays capturedOverlayRenderState
+		pane     cursorOut
 		want     cursorOut
 	}{
 		{
-			name:     "palette caret owns the cursor",
+			name:     "palette caret owns the cursor and keeps the pane shape",
 			overlays: capturedOverlayRenderState{palette: withCaret(4)},
-			want:     cursorOut{valid: true, row: 2, col: 7, hasStyle: true},
+			pane:     bar,
+			want:     cursorOut{valid: true, row: 2, col: 7, style: 6, hasStyle: true},
+		},
+		{
+			name:     "hidden pane cursor falls back to the default shape",
+			overlays: capturedOverlayRenderState{palette: withCaret(4)},
+			pane:     cursorOut{hidden: true},
+			want:     cursorOut{valid: true, row: 2, col: 7, style: 1, hasStyle: true},
 		},
 		{
 			name:     "prompt above palette owns the cursor",
 			overlays: capturedOverlayRenderState{palette: withCaret(4), prompt: withCaret(6)},
-			want:     cursorOut{valid: true, row: 2, col: 9, hasStyle: true},
+			pane:     bar,
+			want:     cursorOut{valid: true, row: 2, col: 9, style: 6, hasStyle: true},
+		},
+		{
+			name:     "prompt above copy search owns the cursor",
+			overlays: capturedOverlayRenderState{copySearch: withCaret(1), prompt: withCaret(6)},
+			pane:     bar,
+			want:     cursorOut{valid: true, row: 2, col: 9, style: 6, hasStyle: true},
+		},
+		{
+			name:     "palette above notices owns the cursor",
+			overlays: capturedOverlayRenderState{palette: withCaret(4), noticesOverlay: notices},
+			pane:     bar,
+			want:     cursorOut{valid: true, row: 2, col: 7, style: 6, hasStyle: true},
 		},
 		{
 			name:     "copy search caret owns the cursor",
 			overlays: capturedOverlayRenderState{copySearch: withCaret(1)},
-			want:     cursorOut{valid: true, row: 2, col: 4, hasStyle: true},
+			pane:     bar,
+			want:     cursorOut{valid: true, row: 2, col: 4, style: 6, hasStyle: true},
 		},
 		{
 			name:     "notices above copy search hide the cursor",
-			overlays: capturedOverlayRenderState{copySearch: withCaret(1), noticesOverlay: capturedModal{active: true, presentation: ui.Presentation{Inner: inner}}},
+			overlays: capturedOverlayRenderState{copySearch: withCaret(1), noticesOverlay: notices},
+			pane:     bar,
 			want:     cursorOut{hidden: true},
 		},
 		{
-			name:     "full input line hides the cursor",
-			overlays: capturedOverlayRenderState{palette: capturedModal{active: true, presentation: ui.Presentation{Inner: inner}, caretCol: 10}},
+			name:     "modal without caret hides the cursor",
+			overlays: capturedOverlayRenderState{palette: capturedModal{active: true, presentation: ui.Presentation{Inner: inner}, caretCol: 4}},
+			pane:     bar,
 			want:     cursorOut{hidden: true},
 		},
 		{
 			name:     "caret outside the frame hides the cursor",
 			overlays: capturedOverlayRenderState{palette: capturedModal{active: true, presentation: ui.Presentation{Inner: domain.Rect{X: 18, Y: 2, Width: 10, Height: 1}}, hasCaret: true, caretCol: 4}},
+			pane:     bar,
 			want:     cursorOut{hidden: true},
 		},
 		{
 			name:     "copy mode without a modal hides the cursor",
 			overlays: capturedOverlayRenderState{copyActive: true},
+			pane:     bar,
 			want:     cursorOut{hidden: true},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, overlayInputCursor(tt.overlays, 20, 10))
+			require.Equal(t, tt.want, overlayInputCursor(tt.overlays, tt.pane, 20, 10))
 		})
 	}
 }

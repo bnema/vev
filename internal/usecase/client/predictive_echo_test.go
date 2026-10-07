@@ -400,6 +400,25 @@ func TestEchoPredictorTypesAheadInModalInput(t *testing.T) {
 	}
 }
 
+// TestEchoPredictorBackspaceStopsAtBorder holds backspace past an empty
+// modal query: the input's left border is never predicted away.
+func TestEchoPredictorBackspaceStopsAtBorder(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.daemon("\x1b[2;1H│\x1b[2;16H│\x1b[2;2H", 0)
+	h.warm(10 * time.Millisecond)
+	h.typed("s")
+	h.daemon("\x1b[2;2Hs", h.seq)
+	h.typed("\x7f")
+	got := string(h.typed("\x7f"))
+	if strings.Contains(got, "\x1b[2;1H") {
+		t.Fatalf("backspace predicted over the border: %q", got)
+	}
+	if h.p.cursor.active && h.p.cursor.col < 1 {
+		t.Fatalf("predicted cursor crossed the border: col %d", h.p.cursor.col)
+	}
+}
+
 func TestApcFilterStripsGraphicsAcrossOutputs(t *testing.T) {
 	t.Parallel()
 	var f apcFilter

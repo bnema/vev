@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,19 +40,20 @@ func TestDrawInputLineDrawsPrefixAndValueWithoutCaret(t *testing.T) {
 func TestInputCaret(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
-		width         int
+		width, rows   int
 		prefix, value string
 		wantCol       int
 		wantOK        bool
 	}{
-		{name: "after value", width: 6, prefix: "> ", value: "abc", wantCol: 5, wantOK: true},
-		{name: "empty value", width: 6, prefix: "/", wantCol: 1, wantOK: true},
-		{name: "wide runes count two columns", width: 8, prefix: "> ", value: "日本", wantCol: 6, wantOK: true},
-		{name: "value fills the line", width: 5, prefix: "> ", value: "abc", wantCol: 5, wantOK: false},
-		{name: "value clipped", width: 4, prefix: "> ", value: "abcdef", wantCol: 8, wantOK: false},
+		{name: "after value", width: 6, rows: 1, prefix: "> ", value: "abc", wantCol: 5, wantOK: true},
+		{name: "empty value", width: 6, rows: 1, prefix: "/", wantCol: 1, wantOK: true},
+		{name: "wide runes count two columns", width: 8, rows: 1, prefix: "> ", value: "日本", wantCol: 6, wantOK: true},
+		{name: "value fills the line", width: 5, rows: 1, prefix: "> ", value: "abc", wantCol: 5, wantOK: false},
+		{name: "value clipped", width: 4, rows: 1, prefix: "> ", value: "abcdef", wantCol: 8, wantOK: false},
+		{name: "no row", width: 6, rows: 0, prefix: "> ", value: "a", wantCol: 3, wantOK: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			col, ok := InputCaret(tt.width, tt.prefix, tt.value)
+			col, ok := InputCaret(domain.Size{Cols: tt.width, Rows: tt.rows}, tt.prefix, tt.value)
 			require.Equal(t, tt.wantCol, col)
 			require.Equal(t, tt.wantOK, ok)
 		})

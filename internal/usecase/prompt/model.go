@@ -52,13 +52,10 @@ func (m *Model) Value() string {
 // promptInputPrefix leads the value line on row 0 of the rendered frame.
 const promptInputPrefix = "> "
 
-// Caret is the value caret column on row 0 of a frame inner.Cols wide. It
-// reports false when the value fills the line.
+// Caret is the value caret column on row 0 of a Render frame of size inner
+// (see ui.InputCaret).
 func (m *Model) Caret(inner domain.Size) (int, bool) {
-	if inner.Rows <= 0 {
-		return 0, false
-	}
-	return ui.InputCaret(inner.Cols, promptInputPrefix, m.Value())
+	return ui.InputCaret(inner, promptInputPrefix, m.Value())
 }
 
 func (m *Model) Title() string {

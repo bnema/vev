@@ -131,13 +131,10 @@ func (m *Model) Query() string {
 // paletteInputPrefix leads the query line on row 0 of the rendered frame.
 const paletteInputPrefix = "> "
 
-// Caret is the query caret column on row 0 of a frame inner.Cols wide. It
-// reports false when the query fills the line.
+// Caret is the query caret column on row 0 of a Render frame of size inner
+// (see ui.InputCaret).
 func (m *Model) Caret(inner domain.Size) (int, bool) {
-	if inner.Rows <= 0 {
-		return 0, false
-	}
-	return ui.InputCaret(inner.Cols, paletteInputPrefix, m.Query())
+	return ui.InputCaret(inner, paletteInputPrefix, m.Query())
 }
 func (m *Model) Up() {
 	if m == nil || len(m.matches) == 0 {

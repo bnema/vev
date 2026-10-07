@@ -244,11 +244,9 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 		damage = appendToastDamage(damage, in.toastFootprints)
 		damage = appendToastDamage(damage, toastFootprints)
 	}
-	cursorInputs := state.cursor
-	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
-	cursor := desiredCapturedCursor(cursorInputs, contentY)
+	cursor := desiredCapturedCursor(state.cursor, contentY)
 	if overlaysActive {
-		cursor = overlayInputCursor(state.overlays, width, frameHeight)
+		cursor = overlayInputCursor(state.overlays, cursor, width, frameHeight)
 	}
 	// A plain copy viewport is painted on a clone or the spare viewport page,
 	// never into baseFrame. Keep
@@ -283,7 +281,7 @@ func drawCapturedPaneTitleBar(frame renderer.Frame, pl layout.Placement, title s
 }
 
 func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
-	if !c.renderable || c.hiddenByOverlay || !c.visible {
+	if !c.renderable || !c.visible {
 		return cursorOut{hidden: true}
 	}
 	style := c.style
@@ -296,20 +294,22 @@ func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
 // overlayInputCursor places the terminal cursor on the input caret of the
 // topmost modal, in the same priority order composeCapturedOverlays paints.
 // A real cursor (rather than a drawn caret) lets client predictive echo type
-// ahead on the input line. Any other overlay hides the cursor.
-func overlayInputCursor(o capturedOverlayRenderState, width, height int) cursorOut {
+// ahead on the input line. Any other overlay hides the cursor. The caret keeps
+// the focused pane's cursor shape, so opening a modal never changes it.
+func overlayInputCursor(o capturedOverlayRenderState, pane cursorOut, width, height int) cursorOut {
 	for _, modal := range []capturedModal{o.prompt, o.palette, o.noticesOverlay, o.copySearch} {
 		if !modal.active {
 			continue
 		}
-		inner := modal.presentation.Inner
-		row, col := inner.Y, inner.X+modal.caretCol
-		if !modal.hasCaret || modal.caretCol >= inner.Width || inner.Height <= 0 ||
-			row < 0 || row >= height || col < 0 || col >= width {
+		row, col := modal.presentation.Inner.Y, modal.presentation.Inner.X+modal.caretCol
+		if !modal.hasCaret || row < 0 || row >= height || col < 0 || col >= width {
 			break
 		}
-		// Style 0 restores the user's terminal default cursor shape.
-		return cursorOut{valid: true, row: row, col: col, style: 0, hasStyle: true}
+		style := 1
+		if pane.valid {
+			style = pane.style
+		}
+		return cursorOut{valid: true, row: row, col: col, style: style, hasStyle: true}
 	}
 	return cursorOut{hidden: true}
 }
@@ -369,7 +369,6 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(presentation.Inner), prompt.RenderStyles{Base: styles.PromptBase, Selection: selection})
 		o.prompt.caretCol, o.prompt.hasCaret = snap.promptModel.Caret(rectSize(presentation.Inner))
 	}
-	state.cursor.hiddenByOverlay = o.active()
 }
 
 func composeCapturedCopyMode(state capturedRenderState, frame renderer.Frame, damage []renderer.Damage, content domain.Rect) (renderer.Frame, []renderer.Damage) {
