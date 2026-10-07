@@ -150,12 +150,10 @@ func (tb *tab) visibleFloatingSnapshotLocked(cfg domain.FloatingConfig) (*pane, 
 	return p, geometry, true
 }
 
-// ensureFloatingWarm starts the background prewarm exactly once for a tab.
+// ensureFloatingWarm keeps the session's single pre-started floating shell
+// ready. Tabs no longer prewarm their own hidden shell; see floating_spare.go.
 func (d *Daemon) ensureFloatingWarm(sess *session, tb *tab) {
-	if d == nil || sess == nil || tb == nil || d.ptys == nil {
-		return
-	}
-	d.startFloating(sess, tb, false)
+	d.ensureFloatingSpare(sess, tb)
 }
 
 // activateTab performs the work associated with making a tab the destination.
@@ -325,6 +323,9 @@ type floatingLaunchSpec struct {
 	fallback     string
 	parentCtx    context.Context
 	userOpen     bool
+	// floatingCommand is the configured floating.command; a spare is only
+	// claimed by a launch with the same command.
+	floatingCommand string
 }
 
 // launchFloating snapshots launch inputs, then accounts for a worker through
@@ -383,24 +384,38 @@ func (d *Daemon) newFloatingLaunchSpec(sess *session, tb *tab, cfg domain.Floati
 		launch.args = []string{"-lc", cfg.Command}
 	}
 	return floatingLaunchSpec{
-		sessionName:  name,
-		cwd:          cwd,
-		size:         size,
-		ptyGeometry:  sess.geometry.paneGeometry(size),
-		geometry:     geometry,
-		paneStableID: paneStableID,
-		env:          childEnvFrom(env, name, tabStableID, paneStableID),
-		command:      launch.command,
-		args:         launch.args,
-		fallback:     floatingCommandFallback(cfg.Command, launch.command),
-		parentCtx:    tabCtx,
-		userOpen:     userOpen,
+		sessionName:     name,
+		cwd:             cwd,
+		size:            size,
+		ptyGeometry:     sess.geometry.paneGeometry(size),
+		geometry:        geometry,
+		paneStableID:    paneStableID,
+		env:             childEnvFrom(env, name, tabStableID, paneStableID),
+		command:         launch.command,
+		args:            launch.args,
+		fallback:        floatingCommandFallback(cfg.Command, launch.command),
+		parentCtx:       tabCtx,
+		userOpen:        userOpen,
+		floatingCommand: cfg.Command,
 	}, nil
 }
 
 // openAndInstallFloating runs entirely in the launch worker. No PTY operation
 // occurs under tb.mu; the pane is fully initialized before publication.
 func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLaunchSpec, generation uint64) {
+	if spec.userOpen {
+		// Claim the session spare when it matches this launch; a missing or
+		// mismatched spare falls through to a fresh launch. Once a spare was
+		// used up, the session starts the next one in the background.
+		p, had := sess.takeFloatingSpare(spec.cwd, spec.floatingCommand)
+		if had {
+			defer d.ensureFloatingSpare(sess, tb)
+		}
+		if p != nil {
+			d.adoptFloatingSpare(sess, tb, p, spec, generation)
+			return
+		}
+	}
 	// Open is context-aware and is intentionally called without any daemon,
 	// session, tab, or launch-ownership lock. Cancellation makes teardown
 	// bounded even if the adapter is waiting to create the child.

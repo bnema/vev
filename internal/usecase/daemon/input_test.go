@@ -348,11 +348,13 @@ func TestAltFToggleRetainedFloatingPaneRepaintsImmediately(t *testing.T) {
 	}
 }
 
-func requireFloatingInitialized(t *testing.T, tb *tab) {
+// requireFloatingInitialized asserts that tab activation keeps the session's
+// shared floating spare starting or ready. Tabs no longer prewarm their own.
+func requireFloatingInitialized(t *testing.T, sess *session) {
 	t.Helper()
-	tb.mu.Lock()
-	defer tb.mu.Unlock()
-	require.NotEqual(t, floatingUninitialized, tb.floating.state)
+	sess.floatingLaunchMu.Lock()
+	defer sess.floatingLaunchMu.Unlock()
+	require.True(t, sess.floatingSpareStarting || sess.floatingSpare != nil)
 }
 
 func installTestFloating(tb *tab, p *pane, visible bool) {

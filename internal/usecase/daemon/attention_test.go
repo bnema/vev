@@ -443,7 +443,7 @@ func TestAltAJumpAttentionSelectsOldestLocalTab(t *testing.T) {
 	d.handleInput(sess, ac, []byte("\x1ba"))
 
 	require.Equal(t, 2, testAttachmentTabIndex(sess))
-	requireFloatingInitialized(t, testAttachmentTab(sess))
+	requireFloatingInitialized(t, sess)
 	_ = mustOutputData(t, sends)
 }
 

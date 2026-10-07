@@ -176,7 +176,7 @@ func TestFloatingLifecycleCapturesLaunchBeforeOpenAndDoesNotHoldTabLock(t *testi
 	tb.ctx, tb.cancel = context.WithCancel(t.Context())
 	sess := &session{sessionCore: sessionCore{name: "work"}, cwd: cwd, env: []string{"ORDINARY=preserved", "DUP=first", "DUP=second", "PAIR=a=b", "SHELL=/bin/first", "SHELL=/bin/custom-shell", "TERM=old", "COLORTERM=old", "TERM_PROGRAM=old", "VEV=old"}, tabs: []*tab{tb}, ctx: t.Context()}
 	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Floating: domain.FloatingConfig{Command: "btop --utf", Width: 50, Height: 50}})
-	d.ensureFloatingWarm(sess, tb)
+	d.startFloating(sess, tb, false)
 	// Open has started while this goroutine owns tab.mu: an external factory
 	// call under that lock would deadlock this channel-controlled test.
 	tb.mu.Lock()
@@ -348,7 +348,7 @@ func TestFloatingLifecycleStaleSuccessAndOldExitCannotReplaceCurrentSlot(t *test
 	d := newTestDaemon(t, factory, stubClock{})
 	tb := newFloatingTestTab(t)
 	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
-	d.ensureFloatingWarm(sess, tb)
+	d.startFloating(sess, tb, false)
 	<-opened
 	d.teardownFloating(tb, nil) // invalidate before the delayed Open returns
 	allowOpen()

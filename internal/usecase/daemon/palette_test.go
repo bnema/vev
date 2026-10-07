@@ -212,7 +212,7 @@ func TestPaletteOpenTypeEnterRunAndEscClose(t *testing.T) {
 	d.handleInput(sess, ac, []byte("NXT\r"))
 	require.False(t, ac.overlays.paletteActive())
 	require.Equal(t, 1, testAttachmentTabIndex(sess))
-	requireFloatingInitialized(t, testAttachmentTab(sess))
+	requireFloatingInitialized(t, sess)
 	awaitFrame(t, sends, "Output")
 
 	d.handleInput(sess, ac, []byte("\x1b "))
