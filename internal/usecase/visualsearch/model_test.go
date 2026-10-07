@@ -47,6 +47,43 @@ func TestVisualSearchModelFiltersAndSelectsLineMatches(t *testing.T) {
 	require.Equal(t, matches[1], selected)
 }
 
+// Typing refines previous matches incrementally; every intermediate result
+// must equal a full search for the same query.
+func TestVisualSearchIncrementalMatchesEqualFullSearch(t *testing.T) {
+	snapshot := testSnapshot("Snapshot ssh", "snap SNAPshot snapsh", "界snap 界snapshot", "none", "  snaps  ")
+	doc := scopy.NewDocument(snapshot, "")
+	steps := []struct {
+		name string
+		edit func(*Model)
+	}{
+		{name: "type", edit: func(m *Model) {
+			for _, r := range "snapsh" {
+				m.Insert(r)
+			}
+		}},
+		{name: "backspace then retype", edit: func(m *Model) { m.Backspace(); m.Backspace(); m.Insert('S') }},
+		{name: "leading space", edit: func(m *Model) {
+			for range 10 {
+				m.Backspace()
+			}
+			for _, r := range " snap" {
+				m.Insert(r)
+			}
+		}},
+	}
+	m := New(snapshot)
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			step.edit(m)
+			require.Equal(t, scopy.FindMatches(doc, m.Query()), m.Matches(), "query %q", m.Query())
+			require.NotEmpty(t, m.Matches(), "fixture must keep the query matching")
+		})
+	}
+	clone := m.Clone()
+	clone.Insert('s')
+	require.Equal(t, scopy.FindMatches(doc, clone.Query()), clone.Matches())
+}
+
 func TestVisualSearchNewSnapshotOwnsSourceRows(t *testing.T) {
 	rows := [][]renderer.Cell{{{Rune: 'a'}, {Rune: 'l'}, {Rune: 'p'}, {Rune: 'h'}, {Rune: 'a'}}}
 	m := New(scopy.NewSnapshotFromRows(rows, 40, 1))

@@ -209,25 +209,29 @@ func (s Snapshot) FindRowID(id vt.RowID) int {
 	return -1
 }
 
-func (s Snapshot) rangeRows(yield func(int, []renderer.Cell) bool) error {
-	i := 0
+// textRows streams every row as text: one rune per non-continuation cell
+// (zero runes read as spaces) plus each rune's cell column and the row width.
+// The slices are only valid during the callback.
+type textRows func(yield func(row int, runes []rune, columns []int, width int) bool) error
+
+func (s Snapshot) rangeText(yield func(int, []rune, []int, int) bool) error {
 	stopped := false
-	err := s.history.Range(func(r []renderer.Cell) bool {
-		if !yield(i, r) {
+	err := s.history.RangeText(func(i int, runes []rune, columns []int, width int) bool {
+		if !yield(i, runes, columns, width) {
 			stopped = true
 			return false
 		}
-		i++
 		return true
 	})
-	if err != nil {
+	if err != nil || stopped {
 		return err
 	}
-	if stopped {
-		return nil
-	}
+	offset := s.history.Len()
+	var runes []rune
+	var columns []int
 	for y := range s.screen.Height {
-		if !yield(i+y, s.screen.Row(y)) {
+		runes, columns = s.screen.AppendRowText(runes[:0], columns[:0], y)
+		if !yield(offset+y, runes, columns, s.screen.Width) {
 			return nil
 		}
 	}
@@ -494,14 +498,60 @@ func FindMatches(doc *Document, query string) []SearchMatch {
 	if doc == nil || query == "" {
 		return nil
 	}
-	return findMatches(doc, query, doc.Snapshot().rangeRows)
+	return findMatches(query, doc.Snapshot().rangeText)
 }
 
-func findMatches(doc *Document, query string, rangeRows func(func(int, []renderer.Cell) bool) error) []SearchMatch {
+// RefineMatches returns FindMatches(doc, query) given previous, the complete
+// result for a query that query extends. Any row matching the longer query also
+// matched the shorter one, so only rows listed in previous are scanned again.
+func RefineMatches(doc *Document, previous []SearchMatch, query string) []SearchMatch {
+	query = strings.TrimSpace(query)
+	if doc == nil || query == "" {
+		return nil
+	}
+	snapshot := doc.Snapshot()
+	return findMatches(query, func(yield func(int, []rune, []int, int) bool) error {
+		var cells []renderer.Cell
+		var runes []rune
+		var columns []int
+		last := -1
+		for _, match := range previous {
+			if match.Row == last {
+				continue
+			}
+			last = match.Row
+			width := snapshot.RowWidth(match.Row)
+			cells = slices.Grow(cells[:0], width)[:width]
+			cells = cells[:snapshot.CopyRow(match.Row, cells)]
+			runes, columns = runes[:0], columns[:0]
+			for x, cell := range cells {
+				if cell.Continuation {
+					continue
+				}
+				r := cell.Rune
+				if r == 0 {
+					r = ' '
+				}
+				runes = append(runes, r)
+				columns = append(columns, x)
+			}
+			if !yield(match.Row, runes, columns, len(cells)) {
+				return nil
+			}
+		}
+		return nil
+	})
+}
+
+func findMatches(query string, rows textRows) []SearchMatch {
 	needle := lowerRunes(query)
 	matches := []SearchMatch{}
-	err := rangeRows(func(row int, cells []renderer.Cell) bool {
-		hay, indexes := searchableCells(cells)
+	var hay []rune
+	err := rows(func(row int, runes []rune, columns []int, width int) bool {
+		hay = hay[:0]
+		for _, r := range runes {
+			hay = append(hay, unicode.ToLower(r))
+		}
 		text := ""
 		for start := 0; start+len(needle) <= len(hay); {
 			if !slices.Equal(hay[start:start+len(needle)], needle) {
@@ -509,14 +559,15 @@ func findMatches(doc *Document, query string, rangeRows func(func(int, []rendere
 				continue
 			}
 			if text == "" {
-				text = doc.LineText(row)
+				// Same text as Document.LineText, built from the runes in hand.
+				text = strings.TrimRight(string(runes), " ")
 			}
 			end := start + len(needle)
-			cellEnd := len(cells)
-			if end < len(indexes) {
-				cellEnd = indexes[end]
+			cellEnd := width
+			if end < len(columns) {
+				cellEnd = columns[end]
 			}
-			matches = append(matches, SearchMatch{Row: row, Start: indexes[start], End: cellEnd, Text: text})
+			matches = append(matches, SearchMatch{Row: row, Start: columns[start], End: cellEnd, Text: text})
 			start += len(needle)
 		}
 		return true
@@ -526,22 +577,6 @@ func findMatches(doc *Document, query string, rangeRows func(func(int, []rendere
 		return nil
 	}
 	return matches
-}
-func searchableCells(cells []renderer.Cell) ([]rune, []int) {
-	rs := make([]rune, 0, len(cells))
-	is := make([]int, 0, len(cells))
-	for x, c := range cells {
-		if c.Continuation {
-			continue
-		}
-		r := c.Rune
-		if r == 0 {
-			r = ' '
-		}
-		rs = append(rs, unicode.ToLower(r))
-		is = append(is, x)
-	}
-	return rs, is
 }
 func lowerRunes(s string) []rune {
 	rs := []rune(s)

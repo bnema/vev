@@ -4,7 +4,6 @@ import (
 	"errors"
 	"testing"
 
-	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,9 +18,9 @@ func TestFindMatchesDiscardsPartialResultsOnHistoryError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := modeFor([]string{"match"}, 1)
 			require.True(t, m.Search("match"))
-			matches := findMatches(m.document, "match", func(yield func(int, []renderer.Cell) bool) error {
+			matches := findMatches("match", func(yield func(int, []rune, []int, int) bool) error {
 				if tc.yielded {
-					require.True(t, yield(0, row("match")))
+					require.True(t, yield(0, []rune("match"), []int{0, 1, 2, 3, 4}, 5))
 				}
 				return errors.New("corrupt cold history")
 			})
