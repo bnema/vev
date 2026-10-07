@@ -13,8 +13,24 @@ import (
 // ErrClosed is returned by operations on a closed proxy.
 var ErrClosed = errors.New("quicnettest: proxy is closed")
 
+// upstreamBindAddr returns the ephemeral upstream bind address in the server's
+// address family: loopback for a loopback server, unspecified otherwise.
+func upstreamBindAddr(server net.IP) *net.UDPAddr {
+	switch {
+	case server.To4() != nil && server.IsLoopback():
+		return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
+	case server.To4() != nil:
+		return &net.UDPAddr{IP: net.IPv4zero}
+	case server.IsLoopback():
+		return &net.UDPAddr{IP: net.IPv6loopback}
+	default:
+		return &net.UDPAddr{IP: net.IPv6unspecified}
+	}
+}
+
 // Proxy is a bounded, deterministic UDP relay with per-direction impairment. It
-// listens on an ephemeral loopback port for clients and forwards to
+// listens on Config.ListenAddr (default: ephemeral IPv4 loopback) for clients
+// and forwards to
 // Config.ServerAddr from a separate upstream socket that can be rebound to a
 // new source address at any time.
 type Proxy struct {
@@ -136,16 +152,7 @@ func New(cfg Config) (*Proxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quicnettest: listen client socket: %w", err)
 	}
-	upstreamAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
-	if !cfg.ServerAddr.IP.IsLoopback() {
-		upstreamAddr.IP = net.IPv4zero
-	}
-	if cfg.ServerAddr.IP.To4() == nil {
-		upstreamAddr.IP = net.IPv6unspecified
-		if cfg.ServerAddr.IP.IsLoopback() {
-			upstreamAddr.IP = net.IPv6loopback
-		}
-	}
+	upstreamAddr := upstreamBindAddr(cfg.ServerAddr.IP)
 	upstream, err := net.ListenUDP("udp", upstreamAddr)
 	if err != nil {
 		_ = clientConn.Close()

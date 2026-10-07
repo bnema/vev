@@ -24,6 +24,7 @@ func TestExplicitListenSurvivesRebind(t *testing.T) {
 			client, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
 			require.NoError(t, err)
 			defer client.Close()
+			var sources []string
 			for attempt := 0; attempt < 2; attempt++ {
 				if attempt == 1 {
 					require.NoError(t, proxy.Rebind())
@@ -35,6 +36,7 @@ func TestExplicitListenSurvivesRebind(t *testing.T) {
 				n, from, err := server.ReadFromUDP(data)
 				require.NoError(t, err)
 				require.Equal(t, "fixture", string(data[:n]))
+				sources = append(sources, from.String())
 				_, err = server.WriteToUDP(data[:n], from)
 				require.NoError(t, err)
 				require.NoError(t, client.SetReadDeadline(time.Now().Add(time.Second)))
@@ -42,6 +44,22 @@ func TestExplicitListenSurvivesRebind(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, "fixture", string(data[:n]))
 			}
+			require.NotEqual(t, sources[0], sources[1], "rebind must change the upstream source address")
+		})
+	}
+}
+
+func TestUpstreamBindAddrMatchesServerFamily(t *testing.T) {
+	for _, tt := range []struct {
+		server, want net.IP
+	}{
+		{net.IPv4(127, 0, 0, 1), net.IPv4(127, 0, 0, 1)},
+		{net.IPv4(192, 0, 2, 7), net.IPv4zero},
+		{net.IPv6loopback, net.IPv6loopback},
+		{net.ParseIP("2001:db8::7"), net.IPv6unspecified},
+	} {
+		t.Run(tt.server.String(), func(t *testing.T) {
+			require.True(t, upstreamBindAddr(tt.server).IP.Equal(tt.want))
 		})
 	}
 }
