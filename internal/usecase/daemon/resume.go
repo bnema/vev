@@ -627,6 +627,7 @@ func (d *Daemon) resumeParkedLocked(h protocol.Hello, tr ports.ServerConnection,
 	// abandoned transport's output chain before binding the replacement so the
 	// mandatory first paint cannot be blocked by ACKs that died with the link.
 	ac.rebaseOutput()
+	ac.resetEchoAck()
 	ac.output.setWindow(h.MaxOutputInFlight)
 	ac.replaceTransport(tr)
 	// A parked attachment can resume through any route. Reapply the declared
