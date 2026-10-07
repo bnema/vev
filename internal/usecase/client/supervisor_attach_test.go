@@ -604,6 +604,56 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 	}
 }
 
+// TestSupervisorSwapDropsKeysKeptForPreviousSession types into a session whose
+// link stalls, then swaps to another session: the stalled keys were meant for
+// the first session and must never run in the second.
+func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
+	picker := newAttachTestPicker()
+	harness := startAttachHarness(t, picker)
+	base := newSessionTestStream()
+	first := &stallingSessionStream{sessionTestStream: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return first, nil
+	})
+	picker.commit(sessionTestRequest(true))
+	deliverReadyStream(t, base)
+	awaitAttachedState(t, harness.sup)
+	require.Eventually(t, func() bool { return len(base.messages()) >= 2 }, 5*time.Second, time.Millisecond)
+	first.stall.Store(true)
+	harness.reader.push([]byte("rm -rf build\r"))
+	<-first.entered
+
+	var mu sync.Mutex
+	second := newSessionTestStream()
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return second, nil
+	})
+	base.deliver(navigationOffer(1))
+	awaitPresentation(t, harness.sup, PresentAttachedPicker)
+	other := sessionTestRequest(true)
+	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+	picker.recordOp(pickerOp{commit: true}, "row", other)
+	// The Detach queues behind the stalled write; let the bounded drain expire
+	// so the unsent keys are preserved, as on a dead link.
+	for {
+		timer := harness.clock.awaitTimer(t)
+		if timer.delay == drainOutboxTimeout {
+			timer.fire()
+			break
+		}
+	}
+	awaitStreamHello(t, &mu, &second)
+	second.deliver(protocol.Welcome{SessionName: "beta"})
+	output := sessionTestOutput(1, "\x1b[Hbeta")
+	output.Context.Route.Target = other.Target
+	second.deliver(output)
+	awaitAttachedState(t, harness.sup)
+
+	harness.reader.push([]byte("z"))
+	require.Eventually(t, func() bool { return sentInput(second) == "z" }, 5*time.Second, time.Millisecond,
+		"second session input = %q", sentInput(second))
+}
+
 // awaitStreamHello waits until the admitted stream has sent its first client
 // message, polling the guarded stream pointer rather than a stale snapshot.
 func awaitStreamHello(t *testing.T, mu *sync.Mutex, stream **sessionTestStream) {

@@ -607,6 +607,11 @@ func (s *Supervisor) runResolvedAttachment(ctx context.Context, input *terminalI
 			// attachment detached cleanly, and the swap goes through Connecting
 			// exactly like any committed selection.
 			budget = attachmentResumeBudget{}
+			// Keys kept for the previous session must not run in the next one;
+			// only a resume of the same target replays them.
+			if input != nil && input.pump != nil {
+				input.pump.dropUnclaimed()
+			}
 			next, ok := s.withFreshStream(service, outcome.target)
 			if !ok {
 				return false, nil
