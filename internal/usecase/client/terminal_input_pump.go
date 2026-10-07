@@ -105,10 +105,25 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 
 // tryClaim lets competing foreground owners decline admission without panicking.
 func (p *terminalInputPump) tryClaim() (uint64, bool) {
+	consumer, _, ok := p.claimWithBacklog()
+	return consumer, ok
+}
+
+// claimWithBacklog claims the pump and reports, atomically with the claim, how
+// many deliveries were already waiting: the residual, then the pending read.
+// They were read for an earlier owner, not typed for this one.
+func (p *terminalInputPump) claimWithBacklog() (uint64, int, bool) {
 	p.mu.Lock()
 	if p.consumer != 0 {
 		p.mu.Unlock()
-		return 0, false
+		return 0, 0, false
+	}
+	backlog := 0
+	if len(p.residual) != 0 {
+		backlog++
+	}
+	if p.pending != nil {
+		backlog++
 	}
 	p.nextID++
 	p.consumer = p.nextID
@@ -122,26 +137,7 @@ func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	if ready {
 		p.signalReady(consumer)
 	}
-	return consumer, true
-}
-
-// backlog reports how many deliveries were already waiting when consumer
-// claimed the pump: the residual, then the pending read. They were read for an
-// earlier owner, not typed for consumer.
-func (p *terminalInputPump) backlog(consumer uint64) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.consumer != consumer {
-		return 0
-	}
-	n := 0
-	if len(p.residual) != 0 {
-		n++
-	}
-	if p.pending != nil {
-		n++
-	}
-	return n
+	return consumer, backlog, true
 }
 
 // revoke invalidates an attempt before its replacement is allowed to claim

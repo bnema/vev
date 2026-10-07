@@ -2,11 +2,16 @@ package client
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/bnema/vev/internal/usecase/keys/kittykey"
 )
 
 const resumeEscapeLimit = 256
+
+// resumeEscapeDelay is how long a lone Esc stays undecided before it counts
+// as a cancel rather than the start of an escape sequence.
+const resumeEscapeDelay = 50 * time.Millisecond
 
 // resumeInputDecoder retains only an undecided escape prefix. Held bytes stay
 // in their original terminal encoding; paste content is never a cancel key.
@@ -73,6 +78,11 @@ func (d *resumeInputDecoder) feed(data []byte) (held []byte, cancel bool) {
 		d.prefix = d.prefix[:0]
 	}
 	return held, false
+}
+
+// undecided reports whether an escape prefix is still waiting for more bytes.
+func (d *resumeInputDecoder) undecided() bool {
+	return len(d.prefix) != 0
 }
 
 func (d *resumeInputDecoder) loneEscape() bool {

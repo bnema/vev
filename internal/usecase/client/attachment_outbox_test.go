@@ -212,6 +212,61 @@ func TestResumeWatchKeepsBacklogVerbatim(t *testing.T) {
 	}
 }
 
+// TestResumeWatchResolvesEscapeAtRelease presses Esc just before the phase
+// ends: release waits for the escape delay, so a lone Esc still cancels and an
+// escape sequence completed in time is kept for the session.
+func TestResumeWatchResolvesEscapeAtRelease(t *testing.T) {
+	for _, tt := range []struct {
+		name, after  string
+		wantCancel   bool
+		wantResidual string
+	}{
+		{name: "lone esc cancels", wantCancel: true},
+		{name: "arrow key is kept", after: "[A", wantResidual: "\x1b[A"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &inputTestReader{chunks: make(chan []byte, 2)}
+			pump := newTerminalInputPump(reader)
+			pump.start()
+			t.Cleanup(func() {
+				pump.stop()
+				close(reader.chunks)
+			})
+			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+			clock := newSupervisorTestClock()
+			watch := lifetime.watchResume(clock)
+			reader.chunks <- []byte("\x1b")
+			escape := clock.awaitTimer(t)
+			released := make(chan struct{})
+			go func() { watch.release(); close(released) }()
+			select {
+			case <-released:
+				t.Fatal("release returned before the escape was resolved")
+			case <-time.After(50 * time.Millisecond):
+			}
+			if tt.after != "" {
+				reader.chunks <- []byte(tt.after)
+			} else {
+				escape.fire()
+			}
+			select {
+			case <-released:
+			case <-time.After(5 * time.Second):
+				t.Fatal("release never returned")
+			}
+			select {
+			case <-watch.cancelled:
+				require.True(t, tt.wantCancel, "escape sequence cancelled the resume")
+			default:
+				require.False(t, tt.wantCancel, "lone esc at release did not cancel")
+			}
+			pump.mu.Lock()
+			defer pump.mu.Unlock()
+			require.Equal(t, tt.wantResidual, string(pump.residual))
+		})
+	}
+}
+
 func TestResumeWatchHeldOverflowIsSticky(t *testing.T) {
 	w := &resumeWatch{}
 	w.hold(bytes.Repeat([]byte("a"), resumeHeldInputLimit-1))

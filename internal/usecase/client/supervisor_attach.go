@@ -1011,6 +1011,16 @@ func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetim
 			s.transition(supervisorEvent{kind: supervisorAttachEnded})
 			return false, nil, true
 		case <-timer.C():
+			// Release resolves an Esc typed just before the backoff ended,
+			// which may still cancel.
+			keys.release()
+			select {
+			case <-keys.cancelled:
+				s.logger.Info("client_attachment_resume_cancelled", "attempt", attempt)
+				s.transition(supervisorEvent{kind: supervisorAttachEnded})
+				return false, nil, true
+			default:
+			}
 			return false, nil, false
 		case <-ctx.Done():
 			return true, ctx.Err(), false

@@ -1507,7 +1507,8 @@ type resumeWatch struct {
 
 	// backlog counts deliveries already waiting at claim: session input the
 	// lost attachment kept, held verbatim and never read as a cancel key.
-	backlog int
+	backlog     int
+	releaseOnce sync.Once
 
 	mu   sync.Mutex
 	held []byte
@@ -1542,13 +1543,13 @@ func (l *terminalInputLifetime) watchResume(clock ports.Clock) *resumeWatch {
 		close(w.done)
 		return w
 	}
-	id, ok := l.pump.tryClaim()
+	id, backlog, ok := l.pump.claimWithBacklog()
 	if !ok {
 		close(w.done)
 		return w
 	}
 	w.id = id
-	w.backlog = l.pump.backlog(id)
+	w.backlog = backlog
 	go w.run()
 	return w
 }
@@ -1564,6 +1565,7 @@ func (w *resumeWatch) run() {
 		}
 		w.hold(decoder.flush())
 	}()
+	stop := w.stop
 	for {
 		var escapeC <-chan time.Time
 		if escape != nil {
@@ -1574,10 +1576,21 @@ func (w *resumeWatch) run() {
 			select {
 			case <-pump.readyFor(w.id):
 			case <-escapeC:
-				close(w.cancelled)
+				if decoder.loneEscape() {
+					close(w.cancelled)
+				}
 				return
-			case <-w.stop:
-				return
+			case <-stop:
+				if !decoder.undecided() {
+					return
+				}
+				// Resolve an escape typed just before the phase ended: the
+				// next watch would hold it as backlog, so a cancel pressed at
+				// the boundary would reach the session instead.
+				stop = nil
+				if escape == nil {
+					escape = w.clock.NewTimer(resumeEscapeDelay)
+				}
 			case <-pump.done:
 				return
 			}
@@ -1607,18 +1620,26 @@ func (w *resumeWatch) run() {
 			escape.Stop()
 			escape = nil
 		}
-		if decoder.loneEscape() {
-			escape = w.clock.NewTimer(50 * time.Millisecond)
+		if stop == nil && !decoder.undecided() {
+			return
+		}
+		if decoder.loneEscape() || stop == nil {
+			escape = w.clock.NewTimer(resumeEscapeDelay)
 		}
 	}
 }
 
 // release stops the watch and hands kept keys back to the pump, unless the
-// user cancelled, in which case they are dropped with the session.
+// user cancelled, in which case they are dropped with the session. An escape
+// still undecided is resolved first, so it may cancel. Later calls are no-ops.
 func (w *resumeWatch) release() {
 	if w.id == 0 {
 		return
 	}
+	w.releaseOnce.Do(w.releaseClaim)
+}
+
+func (w *resumeWatch) releaseClaim() {
 	close(w.stop)
 	<-w.done
 	pump := w.lifetime.pump
