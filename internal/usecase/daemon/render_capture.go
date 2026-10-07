@@ -141,6 +141,10 @@ type capturedModal struct {
 	presentation ui.Presentation
 	inner        renderer.Frame
 	focused      bool
+	// caretCol is the input caret column on row 0 of inner, valid when
+	// hasCaret. The topmost modal with a caret owns the terminal cursor.
+	caretCol int
+	hasCaret bool
 }
 
 func (o capturedOverlayRenderState) active() bool {

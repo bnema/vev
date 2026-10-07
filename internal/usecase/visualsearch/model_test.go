@@ -234,7 +234,7 @@ func TestVisualSearchRenderStyledUsesSemanticRoles(t *testing.T) {
 		why  string
 	}{
 		{name: "blank filler", x: 19, y: 3, want: base, why: "blank filler keeps base surface"},
-		{name: "input caret", x: 2, y: 0, want: selection, why: "input caret keeps selection surface"},
+		{name: "input caret", x: 2, y: 0, want: base, why: "caret cell keeps base surface under the real cursor"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := New(testSnapshot("alpha"))

@@ -314,7 +314,10 @@ func TestRenderDrawsOnlyCodeAndDescriptionWithStyles(t *testing.T) {
 	require.Equal(t, ' ', frame.At(1, 0).Rune)
 	require.Equal(t, 'c', frame.At(2, 0).Rune)
 	require.Equal(t, 'y', frame.At(3, 0).Rune)
-	require.True(t, frame.At(4, 0).Style.Inverse, "caret is reverse-video after query")
+	require.False(t, frame.At(4, 0).Style.Inverse, "the real terminal cursor is the caret, none is drawn")
+	col, ok := m.Caret(domain.Size{Cols: 28, Rows: 3})
+	require.True(t, ok)
+	require.Equal(t, 4, col, "caret follows the query")
 
 	require.Equal(t, "CPY Enter copy mode         ", frameRow(frame, 1))
 	require.NotContains(t, frameRow(frame, 1), "Copy")

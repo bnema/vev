@@ -22,7 +22,7 @@ func TestTextInputEditsValue(t *testing.T) {
 	require.Equal(t, "ship", input.Value())
 }
 
-func TestDrawInputLineDrawsPrefixValueAndCaret(t *testing.T) {
+func TestDrawInputLineDrawsPrefixAndValueWithoutCaret(t *testing.T) {
 	frame := renderer.NewFrame(6, 1)
 	style := renderer.DefaultStyle()
 
@@ -33,21 +33,29 @@ func TestDrawInputLineDrawsPrefixValueAndCaret(t *testing.T) {
 	require.Equal(t, 'a', frame.At(2, 0).Rune)
 	require.Equal(t, 'b', frame.At(3, 0).Rune)
 	require.Equal(t, 'c', frame.At(4, 0).Rune)
-	require.Equal(t, ' ', frame.At(5, 0).Rune)
-	require.True(t, frame.At(5, 0).Style.Inverse)
+	require.False(t, frame.At(5, 0).Style.Inverse, "the real terminal cursor is the caret")
 }
 
-func TestDrawInputLineClipsCaret(t *testing.T) {
-	frame := renderer.NewFrame(4, 1)
-	style := renderer.DefaultStyle()
-
-	DrawInputLine(frame, 0, "> ", "abcdef", style)
-
-	require.Equal(t, '>', frame.At(0, 0).Rune)
-	require.Equal(t, ' ', frame.At(1, 0).Rune)
-	require.Equal(t, 'a', frame.At(2, 0).Rune)
-	require.Equal(t, 'b', frame.At(3, 0).Rune)
-	require.False(t, frame.At(3, 0).Style.Inverse, "caret beyond clip should not overwrite final value cell")
+func TestInputCaret(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		width         int
+		prefix, value string
+		wantCol       int
+		wantOK        bool
+	}{
+		{name: "after value", width: 6, prefix: "> ", value: "abc", wantCol: 5, wantOK: true},
+		{name: "empty value", width: 6, prefix: "/", wantCol: 1, wantOK: true},
+		{name: "wide runes count two columns", width: 8, prefix: "> ", value: "日本", wantCol: 6, wantOK: true},
+		{name: "value fills the line", width: 5, prefix: "> ", value: "abc", wantCol: 5, wantOK: false},
+		{name: "value clipped", width: 4, prefix: "> ", value: "abcdef", wantCol: 8, wantOK: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			col, ok := InputCaret(tt.width, tt.prefix, tt.value)
+			require.Equal(t, tt.wantCol, col)
+			require.Equal(t, tt.wantOK, ok)
+		})
+	}
 }
 
 func TestDrawInputLineIgnoresInvalidRow(t *testing.T) {

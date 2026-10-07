@@ -378,6 +378,28 @@ func TestEchoPredictorSameSizeResizeErasesGuesses(t *testing.T) {
 	}
 }
 
+// TestEchoPredictorTypesAheadInModalInput covers daemon modals (command
+// palette, prompt, copy search): the daemon places the real cursor on their
+// input line inside a bordered box, and guesses stay inside the box.
+func TestEchoPredictorTypesAheadInModalInput(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	// Row 2: "│> " then the cursor, with the box's right border at column 15.
+	h.daemon("\x1b[2;1H│> \x1b[2;16H│\x1b[2;4H", 0)
+	h.warm(10 * time.Millisecond)
+	if got := h.typed("s"); len(got) != 0 {
+		t.Fatalf("first guess is tentative, rendered %q", got)
+	}
+	h.daemon("\x1b[2;4Hs", h.seq)
+	got := string(h.typed("p"))
+	if want := "\x1b[2;5H\x1b[0mp\x1b[0m\x1b[2;6H"; got != want {
+		t.Fatalf("render = %q, want %q", got, want)
+	}
+	if cell := h.p.screen.Cell(15, 1); cell.Rune != '│' {
+		t.Fatalf("box border moved: %q", cell.Rune)
+	}
+}
+
 func TestApcFilterStripsGraphicsAcrossOutputs(t *testing.T) {
 	t.Parallel()
 	var f apcFilter

@@ -247,6 +247,9 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	cursorInputs := state.cursor
 	cursorInputs.hiddenByOverlay = cursorInputs.hiddenByOverlay || overlaysActive
 	cursor := desiredCapturedCursor(cursorInputs, contentY)
+	if overlaysActive {
+		cursor = overlayInputCursor(state.overlays, width, frameHeight)
+	}
 	// A plain copy viewport is painted on a clone or the spare viewport page,
 	// never into baseFrame. Keep
 	// that unadorned base reusable between wheel events. Modal/floating paths
@@ -290,6 +293,27 @@ func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
 	return cursorOut{valid: true, row: c.content.Y + contentY + c.row, col: c.content.X + c.col, style: style, hasStyle: true}
 }
 
+// overlayInputCursor places the terminal cursor on the input caret of the
+// topmost modal, in the same priority order composeCapturedOverlays paints.
+// A real cursor (rather than a drawn caret) lets client predictive echo type
+// ahead on the input line. Any other overlay hides the cursor.
+func overlayInputCursor(o capturedOverlayRenderState, width, height int) cursorOut {
+	for _, modal := range []capturedModal{o.prompt, o.palette, o.noticesOverlay, o.copySearch} {
+		if !modal.active {
+			continue
+		}
+		inner := modal.presentation.Inner
+		row, col := inner.Y, inner.X+modal.caretCol
+		if !modal.hasCaret || modal.caretCol >= inner.Width || inner.Height <= 0 ||
+			row < 0 || row >= height || col < 0 || col >= width {
+			break
+		}
+		// Style 0 restores the user's terminal default cursor shape.
+		return cursorOut{valid: true, row: row, col: col, style: 0, hasStyle: true}
+	}
+	return cursorOut{hidden: true}
+}
+
 func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapshot, paletteCfg domain.PaletteConfig) {
 	if state == nil || snap == nil {
 		return
@@ -313,6 +337,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		presentation := copySearchModal.Resolve(size)
 		o.copySearch = capturedModal{active: true, title: copySearchModal.Title, presentation: presentation, focused: true}
 		o.copySearch.inner = snap.copySearchModel.RenderStyled(rectSize(presentation.Inner), visualsearch.RenderStyles{Base: styles.PromptBase, Selection: styles.SearchSelection})
+		o.copySearch.caretCol, o.copySearch.hasCaret = snap.copySearchModel.Caret(rectSize(presentation.Inner))
 	}
 	if snap.noticesOverlayActive && snap.noticesOverlayModel != nil {
 		presentation := noticesModal.Resolve(size)
@@ -330,6 +355,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 		}
 		o.paletteGuidance = snap.paletteFeedback
 		o.palette.inner = snap.paletteModel.Render(rectSize(presentation.Inner), palette.RenderOptions{Styles: palette.RenderStyles{Base: styles.PickerBase, Row: styles.PickerBase, Selection: styles.PickerSelection, Description: styles.PickerDescription, SelectionDescription: styles.PickerSelectionMuted}, Guidance: guidance, Preview: snap.palettePreview, Feedback: snap.paletteFeedback})
+		o.palette.caretCol, o.palette.hasCaret = snap.paletteModel.Caret(rectSize(presentation.Inner))
 	}
 	if snap.promptActive && snap.promptModel != nil {
 		modal := promptModalFor(snap.promptModel.Title())
@@ -341,6 +367,7 @@ func captureOverlayLayers(state *capturedRenderState, snap *overlayRenderSnapsho
 			selection = styles.SurfaceActive
 		}
 		o.prompt.inner = snap.promptModel.RenderStyled(rectSize(presentation.Inner), prompt.RenderStyles{Base: styles.PromptBase, Selection: selection})
+		o.prompt.caretCol, o.prompt.hasCaret = snap.promptModel.Caret(rectSize(presentation.Inner))
 	}
 	state.cursor.hiddenByOverlay = o.active()
 }
