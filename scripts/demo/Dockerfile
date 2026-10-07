@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
       vhs ttyd ffmpeg chromium \
       htop fastfetch gifsicle imagemagick \
       eza fzf neovim man-db man-pages coreutils \
-      ncurses openssh util-linux \
+      ncurses openssh util-linux python \
       ttf-jetbrains-mono-nerd
 RUN useradd -m -u 1000 demo
 # P8.2 uses the exact worktree binary built by sandbox-run.sh, never a

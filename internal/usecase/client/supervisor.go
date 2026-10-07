@@ -1490,6 +1490,171 @@ func (l *terminalInputLifetime) stop() {
 	l.pump.suspend()
 }
 
+// resumeHeldInputLimit bounds keys kept while a lost attachment resumes.
+// Past it further keys are dropped, like a full terminal buffer.
+// TODO: the overflow flag is per resume watch; a later phase can accept keys
+// again and leave a gap. Make it sticky on the input lifetime until attach.
+const resumeHeldInputLimit = 64 << 10
+
+// resumeWatch reads the terminal while a lost attachment waits to resume.
+// cancelled closes on Ctrl-C or a lone Esc; any other bytes are handed back
+// to the pump on release, so the resumed attachment receives them in order.
+type resumeWatch struct {
+	cancelled chan struct{}
+	stop      chan struct{}
+	done      chan struct{}
+	lifetime  *terminalInputLifetime
+	id        uint64
+	clock     ports.Clock
+
+	// backlog counts deliveries already waiting at claim: session input the
+	// lost attachment kept, held verbatim and never read as a cancel key.
+	backlog     int
+	releaseOnce sync.Once
+
+	mu   sync.Mutex
+	held []byte
+	// overflowed drops every key after the first one past the bound, so the
+	// resumed session never receives input with a gap in the middle.
+	overflowed bool
+}
+
+// heldLen reports how many kept bytes the watch holds.
+func (w *resumeWatch) heldLen() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.held)
+}
+
+// hold keeps data within the bound.
+func (w *resumeWatch) hold(data []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.overflowed || len(w.held)+len(data) > resumeHeldInputLimit {
+		w.overflowed = w.overflowed || len(data) != 0
+		return
+	}
+	w.held = append(w.held, data...)
+}
+
+// watchResume claims terminal input for one resume backoff. When the claim
+// is unavailable it returns a watch that never cancels.
+func (l *terminalInputLifetime) watchResume(clock ports.Clock) *resumeWatch {
+	w := &resumeWatch{cancelled: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), lifetime: l, clock: clock}
+	if l == nil || l.pump == nil {
+		close(w.done)
+		return w
+	}
+	id, backlog, ok := l.pump.claimWithBacklog()
+	if !ok {
+		close(w.done)
+		return w
+	}
+	w.id = id
+	w.backlog = backlog
+	go w.run()
+	return w
+}
+
+func (w *resumeWatch) run() {
+	defer close(w.done)
+	pump := w.lifetime.pump
+	var decoder resumeInputDecoder
+	var escape ports.Timer
+	defer func() {
+		if escape != nil {
+			escape.Stop()
+		}
+		w.hold(decoder.flush())
+	}()
+	stop := w.stop
+	for {
+		var escapeC <-chan time.Time
+		if escape != nil {
+			escapeC = escape.C()
+		}
+		result, ok := pump.take(context.Background(), w.id)
+		if !ok {
+			select {
+			case <-pump.readyFor(w.id):
+			case <-escapeC:
+				if decoder.loneEscape() {
+					close(w.cancelled)
+				}
+				return
+			case <-stop:
+				if !decoder.undecided() {
+					return
+				}
+				// Resolve an escape typed just before the phase ended: the
+				// next watch would hold it as backlog, so a cancel pressed at
+				// the boundary would reach the session instead.
+				stop = nil
+				if escape == nil {
+					escape = w.clock.NewTimer(resumeEscapeDelay)
+				}
+			case <-pump.done:
+				return
+			}
+			continue
+		}
+		if result.err != nil {
+			// Leave the final read for the terminal EOF watcher.
+			pump.ack(w.id)
+			w.hold(decoder.flush())
+			w.hold(result.data)
+			w.lifetime.finish(result.err)
+			return
+		}
+		pump.ack(w.id)
+		if w.backlog > 0 {
+			w.backlog--
+			w.hold(result.data)
+			continue
+		}
+		held, cancel := decoder.feed(result.data)
+		w.hold(held)
+		if cancel {
+			close(w.cancelled)
+			return
+		}
+		if escape != nil {
+			escape.Stop()
+			escape = nil
+		}
+		if stop == nil && !decoder.undecided() {
+			return
+		}
+		if decoder.loneEscape() || stop == nil {
+			escape = w.clock.NewTimer(resumeEscapeDelay)
+		}
+	}
+}
+
+// release stops the watch and hands kept keys back to the pump, unless the
+// user cancelled, in which case they are dropped with the session. An escape
+// still undecided is resolved first, so it may cancel. Later calls are no-ops.
+func (w *resumeWatch) release() {
+	if w.id == 0 {
+		return
+	}
+	w.releaseOnce.Do(w.releaseClaim)
+}
+
+func (w *resumeWatch) releaseClaim() {
+	close(w.stop)
+	<-w.done
+	pump := w.lifetime.pump
+	select {
+	case <-w.cancelled:
+	default:
+		w.mu.Lock()
+		pump.appendResidual(w.id, w.held, resumeHeldInputLimit)
+		w.mu.Unlock()
+	}
+	pump.revoke(w.id)
+}
+
 // finish publishes the terminal cause exactly once.
 func (l *terminalInputLifetime) finish(err error) {
 	l.once.Do(func() { l.eof <- err })

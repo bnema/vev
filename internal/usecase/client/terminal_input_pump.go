@@ -105,10 +105,25 @@ func newTerminalInputPump(in io.Reader) *terminalInputPump {
 
 // tryClaim lets competing foreground owners decline admission without panicking.
 func (p *terminalInputPump) tryClaim() (uint64, bool) {
+	consumer, _, ok := p.claimWithBacklog()
+	return consumer, ok
+}
+
+// claimWithBacklog claims the pump and reports, atomically with the claim, how
+// many deliveries were already waiting: the residual, then the pending read.
+// They were read for an earlier owner, not typed for this one.
+func (p *terminalInputPump) claimWithBacklog() (uint64, int, bool) {
 	p.mu.Lock()
 	if p.consumer != 0 {
 		p.mu.Unlock()
-		return 0, false
+		return 0, 0, false
+	}
+	backlog := 0
+	if len(p.residual) != 0 {
+		backlog++
+	}
+	if p.pending != nil {
+		backlog++
 	}
 	p.nextID++
 	p.consumer = p.nextID
@@ -122,7 +137,7 @@ func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	if ready {
 		p.signalReady(consumer)
 	}
-	return consumer, true
+	return consumer, backlog, true
 }
 
 // revoke invalidates an attempt before its replacement is allowed to claim
@@ -242,6 +257,19 @@ func (p *terminalInputPump) preserveResidual(consumer uint64, data []byte) {
 	p.residual = append(p.residual[:0], data...)
 }
 
+// appendResidual appends bytes the consumer took but did not deliver, so the
+// next owner replays them after any earlier residual. It reports false when
+// the bound would be exceeded; the bytes are then dropped.
+func (p *terminalInputPump) appendResidual(consumer uint64, data []byte, limit int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != consumer || len(p.residual)+len(data) > limit {
+		return false
+	}
+	p.residual = append(p.residual, data...)
+	return true
+}
+
 // ack commits scanner delivery of a leased read and lets the lifecycle reader
 // accept the next result. Only the consumer that holds the lease can ack it.
 // dropOwned disposes every undecided byte at an autonomous owner-class
@@ -262,6 +290,27 @@ func (p *terminalInputPump) dropOwned(consumer uint64) {
 		p.delivering = 0
 		p.deliveringResidual = false
 	}
+	p.mu.Unlock()
+	if hadPending {
+		select {
+		case p.space <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// dropUnclaimed disposes pending and preserved bytes while no consumer holds
+// the claim. The supervisor calls it when the terminal goes back to the
+// picker, so session input kept for a resume never reaches the picker.
+func (p *terminalInputPump) dropUnclaimed() {
+	p.mu.Lock()
+	if p.consumer != 0 {
+		p.mu.Unlock()
+		return
+	}
+	hadPending := p.pending != nil
+	p.pending = nil
+	p.residual = nil
 	p.mu.Unlock()
 	if hadPending {
 		select {

@@ -9,6 +9,7 @@ install:
 
 test:
 	go test ./... -race
+	python3 -m unittest discover -s scripts/remote-resilience-harness -p '*_test.py'
 
 test-installer:
 	sh scripts/install_platform_test.sh
@@ -30,6 +31,10 @@ mocks:
 
 remote-acceptance:
 	scripts/remote-picker-harness/run.sh
+
+.PHONY: remote-resilience-visual
+remote-resilience-visual:
+	python3 scripts/remote-resilience-harness/visual.py
 
 # protocol regenerates the Protobuf wire contract from
 # internal/protocol/wire/schema using the pinned Go tools (buf + protoc-gen-go).
