@@ -815,6 +815,11 @@ func (s *serverSession) send(message brokerwire.ServerMessage) error {
 	if err != nil {
 		return err
 	}
+	return s.sendPayload(payload)
+}
+
+// sendPayload writes one already encoded server envelope.
+func (s *serverSession) sendPayload(payload []byte) error {
 	if err := s.transport.Send(wire.Envelope{Payload: payload}); err != nil {
 		return transportFailure(err)
 	}

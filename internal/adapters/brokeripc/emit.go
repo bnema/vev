@@ -107,17 +107,19 @@ func cloneCatalogSession(session catalogue.RemoteCatalogSession) catalogue.Remot
 	return out
 }
 
-// snapshotTransferBytes sums the encoded size of one prepared transfer so the
-// publisher can refuse a publication above the staged ceiling before the peer
-// aborts it.
-func snapshotTransferBytes(parts []brokerwire.SnapshotPart, maxEnvelopeBytes, maxChunkBytes uint64) (uint64, error) {
+// encodeSnapshotTransfer encodes every part of one prepared transfer once and
+// sums the encoded size, so the publisher can refuse a publication above the
+// staged ceiling before the peer aborts it and then send the same bytes.
+func encodeSnapshotTransfer(parts []brokerwire.SnapshotPart, maxEnvelopeBytes, maxChunkBytes uint64) ([][]byte, uint64, error) {
+	payloads := make([][]byte, 0, len(parts))
 	var total uint64
 	for _, part := range parts {
 		payload, err := brokerwire.EncodeServer(part, maxEnvelopeBytes, maxChunkBytes)
 		if err != nil {
-			return 0, err
+			return nil, 0, err
 		}
+		payloads = append(payloads, payload)
 		total += uint64(len(payload))
 	}
-	return total, nil
+	return payloads, total, nil
 }
