@@ -16,7 +16,8 @@ const (
 	manifestMagic                = "VEVM"
 	headMagic                    = "VEVH"
 	objectMagic                  = "VEVO"
-	ManifestVersion              = uint16(4) // Reject dense VT checkpoints before loading their objects.
+	ManifestVersion              = uint16(5) // Objects are zlib-compressed; reject older checkpoints before loading them.
+	objectVersion                = uint16(2) // kind, raw payload length, zlib payload
 	manifestHeaderSize           = 16
 	objectEnvelopeBodyPrefixSize = 1 + 4 // object kind and payload length
 	minObjectEnvelopeSize        = manifestHeaderSize + objectEnvelopeBodyPrefixSize + 1
@@ -237,8 +238,9 @@ func decodeManifest(body []byte) (Manifest, error) {
 	return m, nil
 }
 
-// MarshalObject frames payload as VEVO and returns the bytes together with the
-// SHA-256 address of those complete bytes.
+// MarshalObject frames payload as a zlib-compressed VEVO object and returns the
+// bytes together with the SHA-256 address of those complete bytes. Encoding is
+// deterministic, so equal payloads still share one content address.
 func MarshalObject(kind ObjectKind, payload []byte) (ports.SnapshotObject, error) {
 	if !validObjectKind(kind) || len(payload) == 0 || len(payload) > maxObjectPayloadSize {
 		return ports.SnapshotObject{}, fmt.Errorf("%w: object", ErrInvalidData)
@@ -246,47 +248,56 @@ func MarshalObject(kind ObjectKind, payload []byte) (ports.SnapshotObject, error
 	var w payloadWriter
 	w.putUint8(uint8(kind))
 	w.putUint32(uint32(len(payload)))
-	w.b = append(w.b, payload...)
-	data, err := marshalManifestEnvelope(objectMagic, w.b)
+	body, err := compressObjectPayload(w.b, payload)
+	if err != nil {
+		return ports.SnapshotObject{}, err
+	}
+	data, err := marshalManifestEnvelope(objectMagic, body)
 	if err != nil {
 		return ports.SnapshotObject{}, err
 	}
 	return ports.SnapshotObject{Digest: sha256.Sum256(data), Data: data}, nil
 }
 
+// UnmarshalObject verifies VEVO framing and returns the inflated payload. It
+// requires exactly the declared payload length and a clean zlib end of stream.
 func UnmarshalObject(encoded []byte) (ObjectKind, []byte, error) {
-	kind, payload, err := PreflightObject(encoded)
+	kind, rawLen, compressed, err := preflightObject(encoded)
 	if err != nil {
 		return 0, nil, err
 	}
-	return kind, append([]byte(nil), payload...), nil
+	payload, err := inflateObjectPayload(compressed, rawLen)
+	if err != nil {
+		return 0, nil, err
+	}
+	return kind, payload, nil
 }
 
-// PreflightObject verifies VEVO framing and declared payload size without
-// copying; the returned payload aliases encoded and is only valid while it is.
-func PreflightObject(encoded []byte) (ObjectKind, []byte, error) {
+// PreflightObject verifies VEVO framing (magic, version, length, CRC, kind, and
+// declared payload length) without inflating it. Repository adapters use it to
+// accept or reject stored objects cheaply; UnmarshalObject decodes the payload.
+func PreflightObject(encoded []byte) (ObjectKind, error) {
+	kind, _, _, err := preflightObject(encoded)
+	return kind, err
+}
+
+func preflightObject(encoded []byte) (ObjectKind, uint32, []byte, error) {
 	body, err := unmarshalManifestEnvelope(encoded, objectMagic)
 	if err != nil {
-		return 0, nil, err
+		return 0, 0, nil, err
 	}
-	if len(body) < 5 {
-		return 0, nil, ErrShortPayload
+	if len(body) < objectEnvelopeBodyPrefixSize+1 {
+		return 0, 0, nil, ErrShortPayload
 	}
 	kind := ObjectKind(body[0])
 	if !validObjectKind(kind) {
-		return 0, nil, fmt.Errorf("%w: object kind", ErrInvalidData)
+		return 0, 0, nil, fmt.Errorf("%w: object kind", ErrInvalidData)
 	}
 	n := binary.BigEndian.Uint32(body[1:5])
 	if n == 0 || n > maxObjectPayloadSize {
-		return 0, nil, fmt.Errorf("%w: object length", ErrInvalidData)
+		return 0, 0, nil, fmt.Errorf("%w: object length", ErrInvalidData)
 	}
-	if uint64(n) > uint64(len(body)-5) {
-		return 0, nil, ErrShortPayload
-	}
-	if uint64(n) != uint64(len(body)-5) {
-		return 0, nil, ErrTrailingBytes
-	}
-	return kind, body[5:], nil
+	return kind, n, body[objectEnvelopeBodyPrefixSize:], nil
 }
 
 func marshalManifestEnvelope(magic string, body []byte) ([]byte, error) {
@@ -303,8 +314,11 @@ func marshalManifestEnvelope(magic string, body []byte) ([]byte, error) {
 }
 
 func envelopeVersion(magic string) uint16 {
-	if magic == manifestMagic {
+	switch magic {
+	case manifestMagic:
 		return ManifestVersion
+	case objectMagic:
+		return objectVersion
 	}
 	return 1
 }

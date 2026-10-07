@@ -432,10 +432,7 @@ func generationObject(generation ports.SnapshotGeneration, ref snapcodec.ObjectR
 	if uint32(len(data)) != ref.Size {
 		return nil, fmt.Errorf("snapshot: object size mismatch")
 	}
-	// The payload aliases the loaded object. A generation's objects are private
-	// to this restore and are only decoded, never mutated, so copying here would
-	// double the transient footprint of every restored history chunk.
-	gotKind, payload, err := snapcodec.PreflightObject(data)
+	gotKind, payload, err := snapcodec.UnmarshalObject(data)
 	if err != nil || gotKind != kind {
 		return nil, fmt.Errorf("snapshot: invalid object")
 	}

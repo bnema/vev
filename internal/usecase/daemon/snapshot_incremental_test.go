@@ -199,7 +199,7 @@ func TestIncrementalPublicationReusesSealedChunkObject(t *testing.T) {
 	require.Len(t, second.Objects, 2, "a generation must supply its tail and transcript once without resupplying persisted sealed chunks")
 	kinds := make(map[snapcodec.ObjectKind]int)
 	for _, object := range second.Objects {
-		kind, _, err := snapcodec.PreflightObject(object.Data)
+		kind, err := snapcodec.PreflightObject(object.Data)
 		require.NoError(t, err)
 		kinds[kind]++
 	}
