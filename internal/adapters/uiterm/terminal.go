@@ -260,22 +260,42 @@ func (t *Terminal) completeContextLocked(context ports.UIContext) ports.UIContex
 	return context
 }
 
+// capturableLocked applies the shared availability rules for a read of the
+// latest publication. The caller must hold t.mu.
+func (t *Terminal) capturableLocked() error {
+	if !t.available {
+		return ports.ErrUIUnavailable
+	}
+	if t.captureTooLarge {
+		return &ports.UIError{Code: ports.UIErrCaptureTooLarge}
+	}
+	if t.revision == 0 {
+		return ports.ErrUIUnavailable
+	}
+	return nil
+}
+
 func (t *Terminal) Snapshot() (ports.UISnapshot, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.available {
-		return ports.UISnapshot{}, ports.ErrUIUnavailable
-	}
-	if t.captureTooLarge {
-		return ports.UISnapshot{}, &ports.UIError{Code: ports.UIErrCaptureTooLarge}
-	}
-	if t.revision == 0 {
-		return ports.UISnapshot{}, ports.ErrUIUnavailable
+	if err := t.capturableLocked(); err != nil {
+		return ports.UISnapshot{}, err
 	}
 	if t.latest.Revision != t.revision {
 		t.latest = convertSnapshot(t.published, t.publishedGeom, t.publishedCtx, t.revision)
 	}
 	return cloneSnapshot(t.latest), nil
+}
+
+// Boundary reports the latest publication's revision and context without
+// converting its cells.
+func (t *Terminal) Boundary() (ports.UIActionResult, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.capturableLocked(); err != nil {
+		return ports.UIActionResult{}, err
+	}
+	return ports.UIActionResult{Revision: t.revision, Context: t.publishedCtx}, nil
 }
 
 func (t *Terminal) Changes() <-chan struct{} { return t.changes }

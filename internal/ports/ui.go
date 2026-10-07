@@ -229,7 +229,11 @@ type UIOutputTransaction interface {
 
 // UIState exposes the latest immutable publication and a coalesced change
 // signal. Snapshot returns ErrUIUnavailable rather than stale state.
+// Boundary reports the same publication's revision and context without its
+// cells, under the same availability rules, for per-frame bookkeeping that
+// must not pay for a full capture.
 type UIState interface {
 	Snapshot() (UISnapshot, error)
+	Boundary() (UIActionResult, error)
 	Changes() <-chan struct{}
 }

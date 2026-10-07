@@ -625,6 +625,59 @@ func (_m *MockUIState) EXPECT() *MockUIState_Expecter {
 	return &MockUIState_Expecter{mock: &_m.Mock}
 }
 
+// Boundary provides a mock function for the type MockUIState
+func (_mock *MockUIState) Boundary() (ports.UIActionResult, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for Boundary")
+	}
+
+	var r0 ports.UIActionResult
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() (ports.UIActionResult, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() ports.UIActionResult); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(ports.UIActionResult)
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockUIState_Boundary_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Boundary'
+type MockUIState_Boundary_Call struct {
+	*mock.Call
+}
+
+// Boundary is a helper method to define mock.On call
+func (_e *MockUIState_Expecter) Boundary() *MockUIState_Boundary_Call {
+	return &MockUIState_Boundary_Call{Call: _e.mock.On("Boundary")}
+}
+
+func (_c *MockUIState_Boundary_Call) Run(run func()) *MockUIState_Boundary_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockUIState_Boundary_Call) Return(uIActionResult ports.UIActionResult, err error) *MockUIState_Boundary_Call {
+	_c.Call.Return(uIActionResult, err)
+	return _c
+}
+
+func (_c *MockUIState_Boundary_Call) RunAndReturn(run func() (ports.UIActionResult, error)) *MockUIState_Boundary_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Changes provides a mock function for the type MockUIState
 func (_mock *MockUIState) Changes() <-chan struct{} {
 	ret := _mock.Called()
