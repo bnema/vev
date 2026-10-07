@@ -330,6 +330,30 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	}
 	var samePeerRequests uint64
 	var samePeerSwitch *samePeerSwitchPending
+	reportInPlace := func(seq uint64, outcome inPlaceOutcome) {
+		if overlay != nil {
+			overlay.reportInPlace(seq, outcome)
+		}
+	}
+	// startSamePeer asks the daemon to move this attachment to target. seq is
+	// the supervisor's choice, or zero for a daemon offer. A switch still in
+	// flight is superseded: the newest navigation wins.
+	startSamePeer := func(target protocol.ExactSessionTarget, tab domain.TabStableID, seq uint64) error {
+		samePeerRequests++
+		request := protocol.SamePeerSwitchRequest{
+			RequestID: samePeerRequests, Target: target,
+			PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), target, tab),
+		}
+		if request.Validate() != nil {
+			reportInPlace(seq, inPlaceRefused)
+			return nil
+		}
+		if samePeerSwitch != nil {
+			reportInPlace(samePeerSwitch.seq, inPlaceSuperseded)
+		}
+		samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target, seq: seq}
+		return w.send(ctx, fg, stream, request)
+	}
 	samePeerUI := attachmentSamePeerUI(fg)
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color)}
 	defer picker.stopEscape()
@@ -475,22 +499,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		case next := <-inPlaceSwitches:
 			// The supervisor committed another session on this daemon: ask it
 			// to move this attachment there instead of reconnecting.
-			samePeerRequests++
-			request := protocol.SamePeerSwitchRequest{
-				RequestID: samePeerRequests, Target: next.target,
-				PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), next.target, next.tab),
-			}
-			if request.Validate() != nil {
-				overlay.reportInPlace(next.target, false)
-				continue
-			}
-			if samePeerSwitch != nil && samePeerSwitch.supervised {
-				// A newer choice replaces one still in flight: the older one
-				// is abandoned, never left waiting.
-				overlay.reportInPlace(samePeerSwitch.target, false)
-			}
-			samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target, supervised: true}
-			if err := w.send(ctx, fg, stream, request); err != nil {
+			if err := startSamePeer(next.target, next.tab, next.seq); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
 		case <-picker.escape():
@@ -514,9 +523,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				if samePeerSwitch != nil && state.context.Route.Target == samePeerSwitch.target {
 					// The in-place destination committed: its publication
 					// settles the action that caused the switch.
-					if samePeerSwitch.supervised {
-						overlay.reportInPlace(samePeerSwitch.target, true)
-					}
+					reportInPlace(samePeerSwitch.seq, inPlaceArrived)
 					samePeerSwitch = nil
 					if samePeerUI != nil {
 						samePeerUI.uiSamePeerArrived()
@@ -565,22 +572,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				if typed.SamePeer && typed.ExactTarget != nil {
 					// An endpoint-empty offer on this very connection: confirm
 					// it and the daemon moves this attachment in place.
-					samePeerRequests++
-					request := protocol.SamePeerSwitchRequest{
-						RequestID: samePeerRequests, Target: *typed.ExactTarget,
-						PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), *typed.ExactTarget, typed.PreferredTabID),
-					}
-					if request.Validate() != nil {
-						continue
-					}
 					if samePeerUI != nil {
 						samePeerUI.uiFollowSamePeer(typed.CauseActionID)
 					}
-					if samePeerSwitch != nil && samePeerSwitch.supervised {
-						overlay.reportInPlace(samePeerSwitch.target, false)
-					}
-					samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target}
-					if err := w.send(ctx, fg, stream, request); err != nil {
+					if err := startSamePeer(*typed.ExactTarget, typed.PreferredTabID, 0); err != nil {
 						return w.settle(ctx, fg, stream, token, err)
 					}
 					continue
@@ -591,10 +586,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			case protocol.SamePeerSwitchFailure:
 				// The daemon refused the confirmed switch and kept the source.
 				if samePeerSwitch != nil && typed.RequestID == samePeerSwitch.requestID {
-					if samePeerSwitch.supervised {
+					if samePeerSwitch.seq != 0 {
 						// The supervisor falls back to a fresh attachment; the
 						// action it follows settles there.
-						overlay.reportInPlace(samePeerSwitch.target, false)
+						reportInPlace(samePeerSwitch.seq, inPlaceRefused)
 					} else if samePeerUI != nil {
 						samePeerUI.uiSamePeerFailed()
 					}
@@ -777,9 +772,9 @@ func attachmentSamePeerUI(fg AttachmentForeground) attachmentSamePeerForeground 
 type samePeerSwitchPending struct {
 	requestID uint64
 	target    protocol.ExactSessionTarget
-	// supervised marks a switch the supervisor requested from the client
-	// picker; its outcome goes back to the supervisor.
-	supervised bool
+	// seq is the supervisor's in-place choice this switch carries out, zero
+	// for a daemon offer. A nonzero seq reports its outcome to the supervisor.
+	seq uint64
 }
 
 // pumpAttachmentInput forwards each authorized delivery to the attached loop.

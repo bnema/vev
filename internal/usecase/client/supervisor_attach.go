@@ -328,6 +328,13 @@ type pickerAttachmentTarget struct {
 	tab     attachmentTab
 }
 
+// pendingInPlace is one in-place switch the supervisor is waiting on: its
+// choice number and the target to reconnect to if the daemon refuses.
+type pendingInPlace struct {
+	seq    uint64
+	target pickerAttachmentTarget
+}
+
 // newAttachmentWorker builds the real typed-session worker for one admitted
 // request. The worker receives no endpoint, route, or raw-mode authority: it
 // only drives the typed session protocol on the stream the supervisor opened.
@@ -709,7 +716,10 @@ func (s *Supervisor) withFreshStream(service ports.BrokerNavigator, target picke
 // attachmentRetry instead of presented.
 func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
 	request := target.request
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	// A local attachment usually commits within the notice delay; a remote
+	// handshake or a resume may not, and nothing can paint once the
+	// foreground owns the terminal, so their notice shows at once.
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, slow: resuming || !request.Local})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
 
@@ -1027,7 +1037,7 @@ func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForegroun
 // with Ctrl-C or Esc, which returns to the picker. Other keys typed during
 // the outage are kept and replayed into the session once it resumes.
 func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (terminated bool, termErr error, stop bool) {
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, slow: true})
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)

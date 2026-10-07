@@ -126,17 +126,30 @@ func (h *attachmentHost) replyNavigation(token AttachmentToken, message protocol
 
 // inPlaceSwitch is one supervisor-committed session on the daemon already
 // serving the attachment. The worker asks that daemon to move the live
-// attachment there instead of reconnecting.
+// attachment there instead of reconnecting. seq identifies this choice, so a
+// result for an older one is never mistaken for it.
 type inPlaceSwitch struct {
+	seq    uint64
 	target protocol.ExactSessionTarget
 	tab    domain.TabStableID
 }
 
-// inPlaceResult reports whether the daemon moved the attachment to target or
-// refused, leaving the source attached.
+// inPlaceOutcome is how one in-place switch ended.
+type inPlaceOutcome uint8
+
+const (
+	// inPlaceArrived: the daemon moved the attachment to the target.
+	inPlaceArrived inPlaceOutcome = iota + 1
+	// inPlaceRefused: the daemon kept the source; reconnect to the target.
+	inPlaceRefused
+	// inPlaceSuperseded: a newer navigation replaced this one; drop it.
+	inPlaceSuperseded
+)
+
+// inPlaceResult reports the outcome of the in-place switch seq.
 type inPlaceResult struct {
-	target protocol.ExactSessionTarget
-	ok     bool
+	seq     uint64
+	outcome inPlaceOutcome
 }
 
 // requestInPlace hands one in-place switch to the current foreground's worker.
@@ -177,12 +190,13 @@ func (f *attachmentForeground) inPlaceSwitches() <-chan inPlaceSwitch {
 }
 
 // reportInPlace hands the outcome of one in-place switch to the supervisor.
-// The newest outcome replaces one the supervisor has not taken yet.
-func (f *attachmentForeground) reportInPlace(target protocol.ExactSessionTarget, ok bool) {
-	if f == nil || f.host == nil {
+// The newest outcome replaces one the supervisor has not taken yet; it is
+// always the latest choice, the only one the supervisor still waits for.
+func (f *attachmentForeground) reportInPlace(seq uint64, outcome inPlaceOutcome) {
+	if f == nil || f.host == nil || seq == 0 {
 		return
 	}
-	result := inPlaceResult{target: target, ok: ok}
+	result := inPlaceResult{seq: seq, outcome: outcome}
 	for {
 		select {
 		case f.host.inPlaceResults <- result:

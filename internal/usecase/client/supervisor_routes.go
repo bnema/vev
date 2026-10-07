@@ -75,22 +75,21 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerNavigator, overl
 	if actionID := navigationCauseActionID(message); actionID != 0 && s.cfg.UI != nil {
 		s.cfg.UI.follow(overlay.run.fg.uiGeneration, actionID)
 	}
-	if sameAttachmentTarget(overlay.request, s.attachments.committedTargetOrZero(), target.request) && target.tab.stopped == nil {
+	if s.pendingInPlace == nil && sameAttachmentTarget(overlay.request, s.attachments.committedTargetOrZero(), target.request) && target.tab.stopped == nil {
 		_, current, _ := s.attachments.committedView()
 		if target.tab.preferred != "" && target.tab.preferred != current {
 			s.attachments.requestTabSelection(overlay.run.token, target.tab.preferred)
 		}
 		return
 	}
-	if overlay.active {
-		overlay.exit()
-	}
 	// A recent route on the serving daemon moves in place. A daemon handoff
 	// (AttachTarget) keeps close-and-dial: the daemon chose it on purpose.
-	_, route := message.(protocol.RouteNavigationAction)
-	if route && overlay.sameDaemon(target.request) && target.tab.stopped == nil && s.attachments.requestInPlace(overlay.run.token, inPlaceSwitch{target: target.request.Target, tab: target.tab.preferred}) {
-		s.pendingInPlace = &target
+	if _, route := message.(protocol.RouteNavigationAction); route && overlay.tryInPlace(target) {
+		overlay.release(false)
 		return
+	}
+	if overlay.active {
+		overlay.exit()
 	}
 	s.pendingSwap = &target
 	overlay.swapping = true

@@ -660,14 +660,14 @@ func (h *attachmentHost) beginNavigationOverlay(sink pickerInputConsumer) bool {
 	return fg.setOverlay(attachmentOverlayNavigation, sink)
 }
 
-// endNavigationOverlay returns the terminal to the current foreground and asks
-// its worker for an authoritative repaint over the picker box.
-func (h *attachmentHost) endNavigationOverlay() {
+// endNavigationOverlay returns the terminal to the current foreground. With
+// repaint it asks the worker for an authoritative repaint over the picker box.
+func (h *attachmentHost) endNavigationOverlay(repaint bool) {
 	if h == nil {
 		return
 	}
 	if fg := h.authority.foreground(); fg != nil {
-		fg.clearOverlay(attachmentOverlayNavigation)
+		fg.releaseOverlay(attachmentOverlayNavigation, repaint)
 	}
 }
 
@@ -768,7 +768,7 @@ type attachmentOverlayForeground interface {
 	navigationReplies() <-chan protocol.ClientMessage
 	requestNavigation(message protocol.ServerMessage)
 	inPlaceSwitches() <-chan inPlaceSwitch
-	reportInPlace(target protocol.ExactSessionTarget, ok bool)
+	reportInPlace(seq uint64, outcome inPlaceOutcome)
 }
 
 var _ attachmentOverlayForeground = (*attachmentForeground)(nil)
@@ -815,6 +815,11 @@ func (f *attachmentForeground) setOverlay(kind attachmentOverlayKind, sink picke
 // authoritative repaint: the terminal still shows the picker box and any
 // attachment frames it suppressed were never written.
 func (f *attachmentForeground) clearOverlay(kind attachmentOverlayKind) {
+	f.releaseOverlay(kind, true)
+}
+
+// releaseOverlay is clearOverlay with the repaint request optional.
+func (f *attachmentForeground) releaseOverlay(kind attachmentOverlayKind, repaint bool) {
 	if f == nil {
 		return
 	}
@@ -838,6 +843,9 @@ func (f *attachmentForeground) clearOverlay(kind attachmentOverlayKind) {
 			f.overlaySink = nil
 		}
 		f.overlayMu.Unlock()
+		return
+	}
+	if !repaint {
 		return
 	}
 	select {

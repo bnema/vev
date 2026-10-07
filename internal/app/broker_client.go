@@ -146,7 +146,7 @@ func (p *brokerClientPresentation) Render(state client.State) {
 	if state.Presentation == client.PresentConnecting || state.Connectivity == client.ConnectivityRetryWait {
 		p.spinning = true
 	}
-	if state.Presentation == client.PresentConnecting && state.Connectivity != client.ConnectivityRetryWait {
+	if state.Presentation == client.PresentConnecting && state.Connectivity != client.ConnectivityRetryWait && !state.SlowConnecting {
 		now := p.clock.Now()
 		if p.connectingSince.IsZero() {
 			p.connectingSince = now
@@ -221,7 +221,15 @@ func (p *brokerClientPresentation) Spinner() <-chan time.Time {
 		return nil
 	}
 	if p.spinner == nil {
-		p.spinner = p.clock.NewTimer(120 * time.Millisecond)
+		delay := 120 * time.Millisecond
+		if !p.connectingSince.IsZero() {
+			// While the notice is held back, the next tick lands exactly when
+			// it becomes due.
+			if remaining := connectingNoticeDelay - p.clock.Now().Sub(p.connectingSince); remaining > 0 {
+				delay = remaining
+			}
+		}
+		p.spinner = p.clock.NewTimer(delay)
 	}
 	return p.spinner.C()
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
 // Picker overlay and move picker tests (Plan 003 A1/A2). They drive the real
@@ -52,6 +53,12 @@ func attachLiveSession(t *testing.T, harness *attachTestHarness, picker *attachT
 	deliverReadyStream(t, stream)
 	awaitAttachedState(t, harness.sup)
 	return stream
+}
+
+// publishLiveLocal publishes a broker catalogue whose local daemon runs
+// target, so an overlay commit to it may switch in place.
+func publishLiveLocal(harness *attachTestHarness, target protocol.ExactSessionTarget) {
+	harness.service.publishSnapshot(routeTestSnapshot(routeTestLocal(pickerTestSessionWithLifecycle(target.SessionName, target.LifecycleID))))
 }
 
 func awaitPresentation(t *testing.T, sup *Supervisor, want Presentation) {
@@ -176,10 +183,12 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 	tests := []struct {
 		name    string
 		local   bool
+		stopped bool // the catalogue shows the target stopped
 		inPlace bool // the daemon accepts the in-place switch; false refuses it
 	}{
 		{name: "same daemon switches in place", local: true, inPlace: true},
 		{name: "a refused in-place switch reconnects", local: true},
+		{name: "a stopped session reconnects at once", local: true, stopped: true},
 		{name: "another daemon reconnects"},
 	}
 	for _, tt := range tests {
@@ -189,6 +198,11 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
 				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
 			})
+			if tt.stopped {
+				harness.service.publishSnapshot(routeTestSnapshot(routeTestLocal(catalogue.RemoteCatalogSession{LifecycleID: beta.LifecycleID, Name: beta.SessionName, State: catalogue.RemoteCatalogSessionDown})))
+			} else {
+				publishLiveLocal(harness, beta)
+			}
 			first := attachLiveSession(t, harness, picker)
 			foreground := harness.sup.attachments.authority.foreground()
 			first.deliver(navigationOffer(1))
@@ -203,7 +217,7 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 			other.Target = beta
 			picker.recordOp(pickerOp{commit: true}, "row", other)
 
-			if tt.local {
+			if tt.local && !tt.stopped {
 				request := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
 				require.Equal(t, beta, request.Target)
 				awaitPresentation(t, harness.sup, PresentAttached)
@@ -213,8 +227,9 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 					first.deliver(destination)
 					require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "beta") }, 5*time.Second, time.Millisecond)
 					require.Same(t, foreground, harness.sup.attachments.authority.foreground(), "an in-place switch keeps the attachment")
-					require.Never(t, func() bool { return len(harness.service.openedRequests()) > 1 }, 50*time.Millisecond, time.Millisecond, "an in-place switch never reconnects")
+					require.Len(t, harness.service.openedRequests(), 1, "an in-place switch never reconnects")
 					require.Zero(t, countSent[protocol.Detach](first))
+					require.Zero(t, countSent[protocol.OutputResetRequest](first), "an in-place switch never repaints the source")
 					return
 				}
 				first.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
@@ -232,6 +247,9 @@ func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
 			require.Len(t, opened, 2)
 			require.Equal(t, other.Target, opened[1].Target)
 			require.True(t, first.closedNow(), "the previous attachment is released")
+			if tt.stopped || !tt.local {
+				require.Zero(t, countSent[protocol.SamePeerSwitchRequest](first), "only a live session on the serving daemon is tried in place")
+			}
 			select {
 			case notice := <-notices:
 				t.Fatalf("a swap must not report a lifecycle transition to the picker: %+v", notice)
@@ -280,6 +298,7 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 				ui = NewUI(cfg.Terminal.(ports.UIState), cfg.Clock)
 				cfg.UI = ui
 			})
+			publishLiveLocal(harness, beta)
 			stream := attachLiveSession(t, harness, picker)
 			attached := sessionTestOutput(2, "\x1b[Hattached")
 			attached.Full, attached.Base, attached.New = false, 1, 2
@@ -647,4 +666,35 @@ func TestPickerControllerLoneEscapeResolvesOnItsWindow(t *testing.T) {
 			require.False(t, op.exit, "Escape is a cancel, never the explicit exit")
 		})
 	}
+}
+
+// TestPickerOverlayInPlaceSupersededByDaemonOffer pins that a daemon same-peer
+// offer arriving while a picker in-place switch is pending wins: the picker's
+// switch is dropped, never turned into a reconnect when the daemon refuses it.
+func TestPickerOverlayInPlaceSupersededByDaemonOffer(t *testing.T) {
+	beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+	gamma := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{3}, SessionName: "gamma"}
+	picker := newAttachTestPicker()
+	harness := startAttachHarness(t, picker)
+	publishLiveLocal(harness, beta)
+	first := attachLiveSession(t, harness, picker)
+	first.deliver(navigationOffer(1))
+	awaitPresentation(t, harness.sup, PresentAttachedPicker)
+
+	other := sessionTestRequest(true)
+	other.Target = beta
+	picker.recordOp(pickerOp{commit: true}, "row", other)
+	toBeta := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+
+	first.deliver(protocol.AttachTarget{Session: gamma.SessionName, Intent: protocol.IntentAttach, ExactTarget: &gamma, EnvironmentPolicy: protocol.EnvironmentPolicyDaemonOwned, SamePeer: true})
+	require.Eventually(t, func() bool { return countSent[protocol.SamePeerSwitchRequest](first) == 2 }, 5*time.Second, time.Millisecond)
+	// The daemon refuses the older choice because its own offer is pending.
+	first.deliver(protocol.SamePeerSwitchFailure{RequestID: toBeta.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+	destination := laterOutput(2, 2, "\x1b[Hgamma")
+	destination.Context.Route.Target = gamma
+	first.deliver(destination)
+	require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "gamma") }, 5*time.Second, time.Millisecond)
+
+	require.Len(t, harness.service.openedRequests(), 1, "a superseded in-place switch never reconnects")
+	require.Zero(t, countSent[protocol.Detach](first))
 }
