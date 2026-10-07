@@ -43,7 +43,7 @@ Layer map:
 - `internal/ports`: typed application connections and infrastructure-facing use-case seams.
 - `internal/adapters/sessionwire`: typed message ↔ raw frame adaptation.
 - `internal/usecase/daemon`: sessions, tabs, panes, VT screens, renderer shadows, and daemon features.
-- `internal/usecase/client`: raw-mode thin client; writes output bytes verbatim and interprets nothing.
+- `internal/usecase/client`: raw-mode thin client; writes output bytes verbatim. On remote attachments it also mirrors them in a local VT screen for predictive echo.
 - `internal/adapters`: IPC, UDP, SSH stdio, PTY, terminal, clock, and observability implementations.
 
 Before touching daemon teardown paths, read the lock-ordering notes at the top of `internal/usecase/daemon/client.go`.

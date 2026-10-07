@@ -68,7 +68,10 @@ type attachedClient struct {
 	// credential instead of consuming it.
 	resumeClaimToken uint64
 	parked           bool
-	echoAck          atomic.Uint64
+	// echoAck is the newest client InputSeq applied at least echoAckDelay ago;
+	// echo owns its updates.
+	echoAck atomic.Uint64
+	echo    echoAckTracker
 	// focus holds the domain.TerminalFocus the client last reported. It is an
 	// atomic so any daemon path reads it without taking a lock; see
 	// terminalFocus.

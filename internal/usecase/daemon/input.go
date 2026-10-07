@@ -14,19 +14,20 @@ import (
 	"github.com/bnema/vev/internal/usecase/mouse"
 )
 
-func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, _ uint64, data []byte) {
-	// Do not acknowledge client-side echo prediction here: input has only been
-	// accepted/routed, not necessarily echoed by the PTY and incorporated into a
-	// rendered screen state. Until prediction is implemented against rendered
-	// output state, Echo must remain conservative.
+// handleSequencedInput applies input and schedules its echo acknowledgement.
+// Echo is not acknowledged immediately: the PTY needs time to echo the input
+// into a rendered screen state (see echoAckDelay).
+func (d *Daemon) handleSequencedInput(sess *session, ac *attachedClient, seq uint64, data []byte) {
 	d.handleInput(sess, ac, data)
+	d.noteInputApplied(ac, seq)
 }
 
-func (d *Daemon) handleSequencedInputForAttachment(effect *attachmentEffect, _ uint64, data []byte) {
+func (d *Daemon) handleSequencedInputForAttachment(effect *attachmentEffect, seq uint64, data []byte) {
 	if !effect.current() {
 		return
 	}
 	d.handleInputForAttachment(effect, data)
+	d.noteInputApplied(effect.ac, seq)
 }
 
 func (d *Daemon) handleInput(_ *session, ac *attachedClient, data []byte) {

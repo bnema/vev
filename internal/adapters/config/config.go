@@ -38,6 +38,7 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 	seenTabsKeys := make(map[string]bool)
 	seenEphemeralKeys := make(map[string]bool)
 	seenKeyboardKeys := make(map[string]bool)
+	seenEchoKeys := make(map[string]bool)
 	seenTerminalKeys := make(map[string]bool)
 	seenScrollbackKeys := make(map[string]bool)
 	seenWebKeys := make(map[string]bool)
@@ -173,6 +174,14 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				continue
 			}
 			cfg.Keyboard.KittyProtocol = on
+		case key == "echo.predict":
+			warnings = warnDuplicateKey(warnings, seenEchoKeys, key, lineNo)
+			mode, ok := parseEchoPredict(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid echo.predict %q (want adaptive, always, or never)", value)})
+				continue
+			}
+			cfg.Echo.Predict = mode
 		case key == "terminal.colors":
 			warnings = warnDuplicateKey(warnings, seenTerminalKeys, key, lineNo)
 			mode, auto, err := terminalcap.ParseColorMode(value)
@@ -338,6 +347,18 @@ func fileStamp(path string) (stamp, error) {
 		return stamp{}, err
 	}
 	return stamp{modTime: st.ModTime(), size: st.Size(), exists: true}, nil
+}
+
+func parseEchoPredict(value string) (domain.EchoPredictMode, bool) {
+	switch strings.ToLower(value) {
+	case "adaptive":
+		return domain.EchoPredictAdaptive, true
+	case "always":
+		return domain.EchoPredictAlways, true
+	case "never":
+		return domain.EchoPredictNever, true
+	}
+	return 0, false
 }
 
 func warnDuplicateKey(warnings []domain.Warning, seen map[string]bool, key string, lineNo int) []domain.Warning {

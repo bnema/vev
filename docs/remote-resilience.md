@@ -32,6 +32,10 @@ The transport is fixed when the host is added (`quic` by default). To switch, ru
 
 The command palette is rendered by the remote daemon, so opening it needs a working link. A client-owned session picker that is already open remains locally interactive during an outage.
 
+## Typing on a slow link
+
+On remote sessions vev shows what you type before the server answers, like mosh. When the round trip exceeds about 60 ms, typed characters and backspace appear at once on the cursor line. Above about 160 ms they are underlined until the server confirms them. A wrong guess, such as a password prompt that echoes nothing, is erased when the server answers. Set `echo.predict = always` or `never` to change this; see [configuration](configuration.md).
+
 ## Connection states
 
 | What you see | Meaning |

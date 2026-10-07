@@ -355,6 +355,9 @@ func TestParse(t *testing.T) {
 			if !tt.want.Keyboard.KittyProtocol {
 				tt.want.Keyboard = domain.Defaults().Keyboard
 			}
+			if tt.want.Echo.Predict == domain.EchoPredictNever {
+				tt.want.Echo = domain.Defaults().Echo
+			}
 			if tt.want.Snapshot.RestoreProcesses == nil && !tt.want.Snapshot.RestoreProcessesSet {
 				tt.want.Snapshot.RestoreProcesses = append([]string(nil), domain.DefaultSnapshotRestoreProcesses()...)
 			}
@@ -555,6 +558,55 @@ func TestParseKeyboardKittyProtocol(t *testing.T) {
 			}
 			if got.Keyboard.KittyProtocol != tt.want {
 				t.Fatalf("Parse() Keyboard.KittyProtocol = %v, want %v", got.Keyboard.KittyProtocol, tt.want)
+			}
+			if !reflect.DeepEqual(warnings, tt.wantWarnings) {
+				t.Fatalf("Parse() warnings = %#v, want %#v", warnings, tt.wantWarnings)
+			}
+		})
+	}
+}
+
+func TestParseEchoPredict(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		input        string
+		want         domain.EchoPredictMode
+		wantWarnings []domain.Warning
+	}{
+		{name: "absent key defaults adaptive", input: "theme = dark\n", want: domain.EchoPredictAdaptive},
+		{name: "adaptive", input: "echo.predict = adaptive\n", want: domain.EchoPredictAdaptive},
+		{name: "always", input: "echo.predict = always\n", want: domain.EchoPredictAlways},
+		{name: "never", input: "echo.predict = Never\n", want: domain.EchoPredictNever},
+		{
+			name:  "invalid value warns and keeps default",
+			input: "echo.predict = sometimes\n",
+			want:  domain.EchoPredictAdaptive,
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid echo.predict \"sometimes\" (want adaptive, always, or never)"},
+			},
+		},
+		{
+			name:  "duplicate key warns and keeps last",
+			input: "echo.predict = always\necho.predict = never\n",
+			want:  domain.EchoPredictNever,
+			wantWarnings: []domain.Warning{
+				{Line: 2, Msg: "duplicate key \"echo.predict\""},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, warnings, err := Parse(strings.NewReader(tt.input))
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got.Echo.Predict != tt.want {
+				t.Fatalf("Parse() Echo.Predict = %v, want %v", got.Echo.Predict, tt.want)
 			}
 			if !reflect.DeepEqual(warnings, tt.wantWarnings) {
 				t.Fatalf("Parse() warnings = %#v, want %#v", warnings, tt.wantWarnings)

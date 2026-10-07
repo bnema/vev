@@ -46,6 +46,10 @@ keyboard.kitty-protocol = on
 # Outer terminal colors: auto (detect), truecolor, 256, 16, or mono.
 terminal.colors = auto
 
+# Draw typed characters on remote sessions before the server echoes them:
+# adaptive (only on a slow link), always, or never.
+echo.predict = adaptive
+
 # Rebindable actions. Leave a line out to keep its built-in binding.
 open-palette = alt+space
 toggle-floating-pane = alt+f

@@ -102,6 +102,27 @@ type KeyboardConfig struct {
 	KittyProtocol bool
 }
 
+// EchoPredictMode selects when a remote attachment shows predicted local echo.
+type EchoPredictMode uint8
+
+const (
+	// EchoPredictNever disables prediction. It is the zero value, so a
+	// client composed without the user's config (virtual terminals, UI
+	// drivers) never predicts.
+	EchoPredictNever EchoPredictMode = iota
+	// EchoPredictAdaptive shows predictions only on a slow or glitchy link.
+	EchoPredictAdaptive
+	// EchoPredictAlways shows predictions whatever the link latency.
+	EchoPredictAlways
+)
+
+// EchoConfig contains client-side predictive echo settings.
+type EchoConfig struct {
+	// Predict selects when remote attachments draw typed characters before
+	// the daemon echoes them.
+	Predict EchoPredictMode
+}
+
 // TerminalConfig contains client-side outer-terminal settings. It is read by
 // each client at startup and never applied by the daemon, so a change takes
 // effect on the next client process.
@@ -153,6 +174,7 @@ type Config struct {
 	Tabs           TabsConfig
 	Ephemeral      EphemeralConfig
 	Keyboard       KeyboardConfig
+	Echo           EchoConfig
 	Terminal       TerminalConfig
 	Scrollback     ScrollbackConfig
 }
@@ -197,6 +219,9 @@ func Defaults() Config {
 		},
 		Keyboard: KeyboardConfig{
 			KittyProtocol: true,
+		},
+		Echo: EchoConfig{
+			Predict: EchoPredictAdaptive,
 		},
 		Scrollback: DefaultScrollbackConfig(),
 	}

@@ -93,6 +93,8 @@ Attention remains a daemon fact. The broker publishes it from fresh observations
 
 ### Terminal focus
 
+On remote attachments the client predicts local echo, after mosh. The attached loop mirrors every applied `Output` in a local `vev-vt` screen, guesses printable keys and backspace on the cursor row, and draws the guesses through the foreground's output lease. `Output.Echo` acknowledges input once its echo reached the screen, so the client checks each guess against the mirror and erases a wrong one. A smoothed round trip from those acknowledgements decides when guesses show and when they are underlined. Input the client cannot model makes later guesses tentative until a correct guess confirms them. Overlays, resizes, and a hidden cursor drop every guess. `echo.predict` selects `adaptive`, `always`, or `never`.
+
 The client turns on focus reporting (DEC mode 1004). Its terminal input pump strips each `ESC [ I`/`ESC [ O` report into a `TerminalFocusState` that any client feature can read or watch, `Hello` declares the focus known at attach, so the first paint already respects it, and the attached loop sends every later change to the daemon as `TerminalFocus` ahead of the input read that carried it. The daemon keeps it per attachment as a lock-free `terminalFocus()`. Unknown focus, from a terminal that never reports, counts as possibly seen, so every feature keeps its previous behavior there. Attention uses it: only an attachment that may be seen clears a bell. Geometry uses it too: a reported focus gain makes the attachment the latest shared PTY geometry claimant, so session content resizes to the focused window.
 
 ## Broker-owned hosts and daemon composition

@@ -99,6 +99,8 @@ type sessionAttachmentConfig struct {
 	Tab attachmentTab
 	// Tabs retains this client's committed tab per authority and session.
 	Tabs *sessionTabMemory
+	// EchoPredict selects predictive local echo on remote attachments.
+	EchoPredict domain.EchoPredictMode
 }
 
 // sessionAttachmentWorker implements AttachmentWorker for one broker logical
@@ -191,35 +193,35 @@ func (w *sessionAttachmentWorker) Run(ctx context.Context, fg AttachmentForegrou
 		return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("unexpected %T before welcome", welcome)}
 	}
 
-	state, event := w.awaitInitialPublication(ctx, fg, stream, token, incoming)
+	state, initial, event := w.awaitInitialPublication(ctx, fg, stream, token, incoming)
 	if event != nil {
 		return *event
 	}
 
-	return w.pumpAttached(ctx, fg, stream, token, state, incoming)
+	return w.pumpAttached(ctx, fg, stream, token, state, initial, incoming)
 }
 
 // awaitInitialPublication consumes server messages until the first valid full
-// output frame is committed. It returns the output state to continue with, or
-// a typed terminal event.
-func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, token AttachmentToken, incoming <-chan serverReceive) (outputApplyState, *AttachmentEvent) {
+// output frame is committed. It returns the output state to continue with and
+// the committed frame, or a typed terminal event.
+func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, fg AttachmentForeground, stream ports.BrokerLogicalConnection, token AttachmentToken, incoming <-chan serverReceive) (outputApplyState, protocol.Output, *AttachmentEvent) {
 	state := outputApplyState{}
 	for {
 		message, err := w.awaitServer(ctx, fg, incoming)
 		if err != nil {
 			event := w.settle(ctx, fg, stream, token, err)
-			return state, &event
+			return state, protocol.Output{}, &event
 		}
 		switch typed := message.(type) {
 		case protocol.Output:
 			next, ok := state.next(typed)
 			if !ok {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: errAttachmentPublication}
-				return state, &event
+				return state, protocol.Output{}, &event
 			}
 			if err := w.validatePublication(typed); err != nil {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: err}
-				return state, &event
+				return state, protocol.Output{}, &event
 			}
 			state = next
 			w.noteCommitted(fg, state.context)
@@ -229,11 +231,11 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 			// that write, flush, and commit succeeded.
 			if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusConnecting), typed.Data); err != nil {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing initial output: %w", err)}
-				return state, &event
+				return state, protocol.Output{}, &event
 			}
 			if err := w.send(ctx, fg, stream, protocol.Ack{Epoch: state.epoch, State: state.state}); err != nil {
 				event := w.settle(ctx, fg, stream, token, err)
-				return state, &event
+				return state, protocol.Output{}, &event
 			}
 			// Attachment is the committed publication. Complete the deadline
 			// boundary before presenting attached, so attached always implies the
@@ -241,14 +243,14 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 			if w.cfg.BeforeAttached != nil {
 				if err := w.cfg.BeforeAttached(); err != nil {
 					event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: err}
-					return state, &event
+					return state, protocol.Output{}, &event
 				}
 			}
 			// A refused marker means the grant was revoked underneath us, so the
 			// run ends as a failure.
 			if !fg.MarkAttached() {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: errAttachmentForegroundRevoked}
-				return state, &event
+				return state, protocol.Output{}, &event
 			}
 			// The attached presentation is published last, once the committed frame and
 			// the attached marker are in place. It carries the real action generation
@@ -257,17 +259,17 @@ func (w *sessionAttachmentWorker) awaitInitialPublication(ctx context.Context, f
 			// drained.
 			if err := fg.PublishAttached(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached)); err != nil {
 				event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing attached presentation: %w", err)}
-				return state, &event
+				return state, protocol.Output{}, &event
 			}
-			return state, nil
+			return state, typed, nil
 		case protocol.ErrorMsg:
 			event := AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: &ProtocolError{Code: typed.Code, Text: typed.Text}}
-			return state, &event
+			return state, protocol.Output{}, &event
 		case protocol.Detached:
 			// The daemon ended the attempt before publishing anything: it
 			// never attached.
 			event := AttachmentEvent{Token: token, Kind: AttachmentEventEnded}
-			return state, &event
+			return state, protocol.Output{}, &event
 		default:
 			// Everything else the daemon may publish before the initial frame
 			// stays outside this slice's scope and is ignored.
@@ -301,7 +303,7 @@ var (
 
 // pumpAttached publishes output and concurrently forwards the foreground's
 // authorized input, latest geometry and explicit lifecycle decision.
-func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg AttachmentForeground, raw ports.BrokerLogicalConnection, token AttachmentToken, state outputApplyState, incoming <-chan serverReceive) AttachmentEvent {
+func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg AttachmentForeground, raw ports.BrokerLogicalConnection, token AttachmentToken, state outputApplyState, initial protocol.Output, incoming <-chan serverReceive) AttachmentEvent {
 	pumpCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Every send while attached goes through the outbox so a stalled link
@@ -329,7 +331,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	samePeerUI := attachmentSamePeerUI(fg)
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color)}
 	defer picker.stopEscape()
-	input := newAttachmentInput(ctx, w, fg, stream, picker)
+	echo := newAttachmentEcho(w, fg)
+	defer echo.close()
+	echo.seed(initial)
+	input := newAttachmentInput(ctx, w, fg, stream, picker, echo)
 	defer input.close()
 	if err := input.start(ctx); err != nil {
 		return w.settle(ctx, fg, stream, token, err)
@@ -437,6 +442,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if err := input.completionFired(ctx); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
+		case <-echo.tickC():
+			if err := echo.ticked(); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-repaint:
 			// An overlay released the terminal: the picker box is still on screen
 			// and suppressed frames were never written, so ask the daemon for an
@@ -490,6 +499,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				w.noteCommitted(fg, state.context)
 				if err := fg.Output(state.uiContext(ports.UIContext{Generation: attachmentActionableGeneration(fg, token)}, ports.UIStatusAttached), typed.Data); err != nil {
 					return AttachmentEvent{Token: token, Kind: AttachmentEventFailed, Err: fmt.Errorf("publishing output: %w", err)}
+				}
+				// The guesses go on top of the frame just written.
+				if err := echo.output(typed); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
 				}
 				if err := w.send(ctx, fg, stream, protocol.Ack{Epoch: state.epoch, State: state.state}); err != nil {
 					return w.settle(ctx, fg, stream, token, err)
@@ -626,6 +639,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				event.message = protocol.Input{InputSeq: input.nextSeq(), ActionID: event.input.actionID, Data: append([]byte(nil), event.input.Data...)}
 			}
 			if resize, ok := event.message.(protocol.Resize); ok {
+				if err := echo.resized(resize.Size); err != nil {
+					return w.settle(ctx, fg, stream, token, err)
+				}
 				if err := picker.resize(ctx, state, resize.Size); err != nil {
 					return w.settle(ctx, fg, stream, token, err)
 				}
@@ -644,6 +660,11 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				// delivery meanwhile, which bounds queued input.
 				if err := await(from, event.input.actionID); err != nil {
 					return w.settle(ctx, fg, stream, token, err)
+				}
+				if message, ok := event.message.(protocol.Input); ok {
+					if err := echo.input(message.InputSeq, message.Data); err != nil {
+						return w.settle(ctx, fg, stream, token, err)
+					}
 				}
 			}
 			if event.action != 0 {
