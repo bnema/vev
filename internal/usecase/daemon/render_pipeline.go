@@ -246,7 +246,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	}
 	cursor := desiredCapturedCursor(state.cursor, contentY)
 	if overlaysActive {
-		cursor = overlayInputCursor(state.overlays, cursor, width, frameHeight)
+		cursor = overlayInputCursor(state.overlays, state.cursor, width, frameHeight)
 	}
 	// A plain copy viewport is painted on a clone or the spare viewport page,
 	// never into baseFrame. Keep
@@ -296,7 +296,7 @@ func desiredCapturedCursor(c capturedCursorInputs, contentY int) cursorOut {
 // A real cursor (rather than a drawn caret) lets client predictive echo type
 // ahead on the input line. Any other overlay hides the cursor. The caret keeps
 // the focused pane's cursor shape, so opening a modal never changes it.
-func overlayInputCursor(o capturedOverlayRenderState, pane cursorOut, width, height int) cursorOut {
+func overlayInputCursor(o capturedOverlayRenderState, pane capturedCursorInputs, width, height int) cursorOut {
 	for _, modal := range []capturedModal{o.prompt, o.palette, o.noticesOverlay, o.copySearch} {
 		if !modal.active {
 			continue
@@ -306,7 +306,7 @@ func overlayInputCursor(o capturedOverlayRenderState, pane cursorOut, width, hei
 			break
 		}
 		style := 1
-		if pane.valid {
+		if pane.hasStyle {
 			style = pane.style
 		}
 		return cursorOut{valid: true, row: row, col: col, style: style, hasStyle: true}

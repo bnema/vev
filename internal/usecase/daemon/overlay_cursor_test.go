@@ -15,11 +15,11 @@ func TestOverlayInputCursor(t *testing.T) {
 		return capturedModal{active: true, presentation: ui.Presentation{Inner: inner}, caretCol: col, hasCaret: true}
 	}
 	notices := capturedModal{active: true, presentation: ui.Presentation{Inner: inner}}
-	bar := cursorOut{valid: true, row: 5, col: 5, style: 6, hasStyle: true}
+	bar := capturedCursorInputs{style: 6, hasStyle: true, visible: true, renderable: true}
 	for _, tt := range []struct {
 		name     string
 		overlays capturedOverlayRenderState
-		pane     cursorOut
+		pane     capturedCursorInputs
 		want     cursorOut
 	}{
 		{
@@ -29,9 +29,15 @@ func TestOverlayInputCursor(t *testing.T) {
 			want:     cursorOut{valid: true, row: 2, col: 7, style: 6, hasStyle: true},
 		},
 		{
-			name:     "hidden pane cursor falls back to the default shape",
+			name:     "hidden pane cursor keeps its app-set shape",
 			overlays: capturedOverlayRenderState{palette: withCaret(4)},
-			pane:     cursorOut{hidden: true},
+			pane:     capturedCursorInputs{style: 6, hasStyle: true},
+			want:     cursorOut{valid: true, row: 2, col: 7, style: 6, hasStyle: true},
+		},
+		{
+			name:     "unstyled pane cursor falls back to the default shape",
+			overlays: capturedOverlayRenderState{palette: withCaret(4)},
+			pane:     capturedCursorInputs{visible: true, renderable: true},
 			want:     cursorOut{valid: true, row: 2, col: 7, style: 1, hasStyle: true},
 		},
 		{
