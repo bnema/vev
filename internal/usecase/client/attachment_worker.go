@@ -396,6 +396,9 @@ type attachmentHost struct {
 	// overlayActions carries driver actions the client picker overlay
 	// consumed to the supervisor, which settles them.
 	overlayActions chan overlayActionConsumed
+	// inPlaceResults carries the outcome of each in-place switch the
+	// supervisor requested on the current foreground.
+	inPlaceResults chan inPlaceResult
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -438,6 +441,7 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		routeDemand:        make(chan struct{}, 1),
 		navigations:        make(chan protocol.ServerMessage, 1),
 		overlayActions:     make(chan overlayActionConsumed, 1),
+		inPlaceResults:     make(chan inPlaceResult, 1),
 	}
 }
 
@@ -611,6 +615,7 @@ func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.Broke
 		tabSelect:  make(chan domain.TabStableID, 1),
 		routes:     make(chan protocol.RecentRouteSnapshot, 1),
 		replies:    make(chan protocol.ClientMessage, attachmentReplyCapacity),
+		inPlace:    make(chan inPlaceSwitch, 1),
 	}
 }
 
@@ -624,6 +629,7 @@ func (h *attachmentHost) drainForegroundSignals() {
 		case <-h.routeDemand:
 		case <-h.navigations:
 		case <-h.overlayActions:
+		case <-h.inPlaceResults:
 		default:
 			return
 		}
@@ -761,6 +767,8 @@ type attachmentOverlayForeground interface {
 	routeSnapshots() <-chan protocol.RecentRouteSnapshot
 	navigationReplies() <-chan protocol.ClientMessage
 	requestNavigation(message protocol.ServerMessage)
+	inPlaceSwitches() <-chan inPlaceSwitch
+	reportInPlace(target protocol.ExactSessionTarget, ok bool)
 }
 
 var _ attachmentOverlayForeground = (*attachmentForeground)(nil)
@@ -1191,6 +1199,8 @@ type attachmentForeground struct {
 	// carries the supervisor's navigation failures.
 	routes  chan protocol.RecentRouteSnapshot
 	replies chan protocol.ClientMessage
+	// inPlace carries one pending supervisor in-place switch to the worker.
+	inPlace chan inPlaceSwitch
 }
 
 // Token is the generation/attempt identity of this grant.

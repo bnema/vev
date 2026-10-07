@@ -41,7 +41,7 @@ On remote sessions vev shows what you type before the server answers, like mosh.
 | What you see | Meaning |
 |---|---|
 | The session | The link works. |
-| `Connecting to session…` | The link dropped; vev is reconnecting and keeps your keys. |
+| `Connecting to session…` | vev is opening a session or reconnecting a dropped link, and keeps your keys. It appears only when this takes longer than 200 ms. |
 | The picker with an error | The session could not be reached again, or you cancelled. |
 
 vev does not yet report a slow (`degraded`) link separately. Connection notices never appear inside your shell output.
@@ -57,6 +57,7 @@ vev host add user@host
 Then the session picker (`SSP`) shows local and remote sessions in one list. Remote sessions appear as `session@host`, with tags like `down` or `broken` when they can't be opened.
 
 - Selecting a session switches to it, local or remote. `BCK` goes back to the previous one; `JRS` jumps to a recent one.
+- Switching between sessions on the same daemon (two local sessions, or two sessions on the same host) reuses the live attachment, so there is no reconnect.
 - A remote session opened from the picker uses the remote host's environment and saved working directory.
 - `CNS` asks where to create the new session when several daemons are available.
 - Session history and the last selected tab in each session are per client and kept only while that client runs. Switching back restores that tab; choosing a specific tab overrides it. If the remembered tab was closed, vev falls back to the first tab.

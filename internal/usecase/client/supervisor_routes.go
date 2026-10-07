@@ -85,6 +85,13 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerNavigator, overl
 	if overlay.active {
 		overlay.exit()
 	}
+	// A recent route on the serving daemon moves in place. A daemon handoff
+	// (AttachTarget) keeps close-and-dial: the daemon chose it on purpose.
+	_, route := message.(protocol.RouteNavigationAction)
+	if route && overlay.sameDaemon(target.request) && target.tab.stopped == nil && s.attachments.requestInPlace(overlay.run.token, inPlaceSwitch{target: target.request.Target, tab: target.tab.preferred}) {
+		s.pendingInPlace = &target
+		return
+	}
 	s.pendingSwap = &target
 	overlay.swapping = true
 	s.attachments.requestDetach(overlay.run.token)

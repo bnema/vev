@@ -41,13 +41,19 @@ func (ac *attachedClient) clearSamePeerOffer() {
 	ac.samePeerOfferMu.Unlock()
 }
 
-// consumeSamePeerOffer linearizes the client confirmation with the daemon's
-// endpoint-empty offer. A client cannot select an arbitrary local session by
-// manufacturing this frame.
+// consumeSamePeerOffer linearizes a switch request with the daemon's pending
+// endpoint-empty offer: while one is pending, only its exact target is
+// accepted. Without a pending offer the request is the client's own picker
+// choice. It grants no more than a fresh exact attach would on this
+// authenticated connection, and samePeerTarget still requires a live session
+// with the exact lifecycle.
 func (ac *attachedClient) consumeSamePeerOffer(target protocol.ExactSessionTarget) bool {
 	ac.samePeerOfferMu.Lock()
 	defer ac.samePeerOfferMu.Unlock()
-	if ac.samePeerOffer == nil || *ac.samePeerOffer != target {
+	if ac.samePeerOffer == nil {
+		return true
+	}
+	if *ac.samePeerOffer != target {
 		return false
 	}
 	ac.samePeerOffer = nil

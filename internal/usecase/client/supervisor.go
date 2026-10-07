@@ -462,6 +462,10 @@ type Supervisor struct {
 	// committed to another target while an attachment was live. It is only
 	// touched from the run goroutine and consumed by settleAttachment.
 	pendingSwap *pickerAttachmentTarget
+	// pendingInPlace is the overlay choice the live attachment is switching
+	// to in place on its own daemon. A refusal turns it into pendingSwap. Only
+	// touched from the run goroutine; cleared when the attachment settles.
+	pendingInPlace *pickerAttachmentTarget
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
 	// routes is the client route ledger published to the serving daemon;

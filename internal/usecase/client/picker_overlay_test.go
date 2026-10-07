@@ -165,45 +165,79 @@ func TestPickerOverlayReturnsToLiveAttachment(t *testing.T) {
 	}
 }
 
-// TestPickerOverlayCommitElsewhereSwapsAttachment pins the swap: a commit to
-// another session detaches the live attachment cleanly and attaches the
-// committed target through Connecting, without passing through the plain
+// TestPickerOverlayCommitElsewhereSwitchesAttachment pins how a commit to
+// another session leaves the live attachment. A session on the same daemon
+// moves the attachment in place with no new stream or Hello; if the daemon
+// refuses, or the session is on another daemon, the attachment detaches
+// cleanly and the target attaches through Connecting, never through the plain
 // picker.
-func TestPickerOverlayCommitElsewhereSwapsAttachment(t *testing.T) {
-	picker := newAttachTestPicker()
-	notices := make(chan LifecycleNotice, 8)
-	harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
-		cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
-	})
-	first := attachLiveSession(t, harness, picker)
-	first.deliver(navigationOffer(1))
-	awaitPresentation(t, harness.sup, PresentAttachedPicker)
+func TestPickerOverlayCommitElsewhereSwitchesAttachment(t *testing.T) {
+	beta := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+	tests := []struct {
+		name    string
+		local   bool
+		inPlace bool // the daemon accepts the in-place switch; false refuses it
+	}{
+		{name: "same daemon switches in place", local: true, inPlace: true},
+		{name: "a refused in-place switch reconnects", local: true},
+		{name: "another daemon reconnects"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			picker := newAttachTestPicker()
+			notices := make(chan LifecycleNotice, 8)
+			harness := startAttachHarnessConfig(t, picker, func(cfg *SupervisorConfig) {
+				cfg.NotifyLifecycle = func(notice LifecycleNotice) { notices <- notice }
+			})
+			first := attachLiveSession(t, harness, picker)
+			foreground := harness.sup.attachments.authority.foreground()
+			first.deliver(navigationOffer(1))
+			awaitPresentation(t, harness.sup, PresentAttachedPicker)
 
-	var mu sync.Mutex
-	second := newSessionTestStream()
-	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
-		return second, nil
-	})
-	other := sessionTestRequest(true)
-	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
-	picker.recordOp(pickerOp{commit: true}, "row", other)
+			var mu sync.Mutex
+			second := newSessionTestStream()
+			harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+				return second, nil
+			})
+			other := sessionTestRequest(tt.local)
+			other.Target = beta
+			picker.recordOp(pickerOp{commit: true}, "row", other)
 
-	awaitSent(t, first, "Detach", isSent[protocol.Detach])
-	awaitStreamHello(t, &mu, &second)
-	second.deliver(protocol.Welcome{SessionName: "beta"})
-	output := sessionTestOutput(1, "\x1b[Hbeta")
-	output.Context.Route.Target = other.Target
-	second.deliver(output)
-	awaitAttachedState(t, harness.sup)
+			if tt.local {
+				request := awaitSent(t, first, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+				require.Equal(t, beta, request.Target)
+				awaitPresentation(t, harness.sup, PresentAttached)
+				if tt.inPlace {
+					destination := laterOutput(2, 2, "\x1b[Hbeta")
+					destination.Context.Route.Target = beta
+					first.deliver(destination)
+					require.Eventually(t, func() bool { return strings.Contains(harness.terminal.written(), "beta") }, 5*time.Second, time.Millisecond)
+					require.Same(t, foreground, harness.sup.attachments.authority.foreground(), "an in-place switch keeps the attachment")
+					require.Never(t, func() bool { return len(harness.service.openedRequests()) > 1 }, 50*time.Millisecond, time.Millisecond, "an in-place switch never reconnects")
+					require.Zero(t, countSent[protocol.Detach](first))
+					return
+				}
+				first.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+			}
 
-	opened := harness.service.openedRequests()
-	require.Len(t, opened, 2)
-	require.Equal(t, other.Target, opened[1].Target)
-	require.True(t, first.closedNow(), "the previous attachment is released")
-	select {
-	case notice := <-notices:
-		t.Fatalf("a swap must not report a lifecycle transition to the picker: %+v", notice)
-	default:
+			awaitSent(t, first, "Detach", isSent[protocol.Detach])
+			awaitStreamHello(t, &mu, &second)
+			second.deliver(protocol.Welcome{SessionName: "beta"})
+			output := sessionTestOutput(1, "\x1b[Hbeta")
+			output.Context.Route.Target = other.Target
+			second.deliver(output)
+			awaitAttachedState(t, harness.sup)
+
+			opened := harness.service.openedRequests()
+			require.Len(t, opened, 2)
+			require.Equal(t, other.Target, opened[1].Target)
+			require.True(t, first.closedNow(), "the previous attachment is released")
+			select {
+			case notice := <-notices:
+				t.Fatalf("a swap must not report a lifecycle transition to the picker: %+v", notice)
+			default:
+			}
+		})
 	}
 }
 
@@ -226,13 +260,17 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 		overlayFirst bool
 		keys         []string
 		// commit scripts a picker commit elsewhere for the consumed read.
-		commit     bool
+		commit bool
+		// inPlace commits a session on the serving daemon, which switches the
+		// live attachment instead of reconnecting.
+		inPlace    bool
 		wantTarget protocol.ExactSessionTarget
 		wantFence  bool
 	}{
 		{name: "the opening action settles on its suppressed receipt", keys: []string{"Enter"}, wantTarget: alpha, wantFence: true},
 		{name: "a picker-consumed action settles without a daemon fence", overlayFirst: true, keys: []string{"j"}, wantTarget: alpha},
 		{name: "a picker commit elsewhere settles on the destination", overlayFirst: true, keys: []string{"Enter"}, commit: true, wantTarget: beta},
+		{name: "an in-place picker commit settles on the destination", overlayFirst: true, keys: []string{"Enter"}, commit: true, inPlace: true, wantTarget: beta},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,7 +307,8 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 				harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 					return second, nil
 				})
-				other := sessionTestRequest(true)
+				// A remote target is another daemon, so it swaps.
+				other := sessionTestRequest(tt.inPlace)
 				other.Target = beta
 				picker.decideOnConsume(pickerOp{commit: true}, other)
 			}
@@ -298,7 +337,12 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 				}, 5*time.Second, time.Millisecond, "the suppressed output was never applied")
 				stream.deliver(protocol.UIReceipt{ActionID: fence.ActionID, Epoch: 1, State: 3, ViewPublication: 3, Outcome: protocol.UIReceiptProcessed})
 			}
-			if tt.commit {
+			if tt.inPlace {
+				awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest])
+				destination := laterOutput(2, 3, "\x1b[Hbeta")
+				destination.Context.Route.Target = beta
+				stream.deliver(destination)
+			} else if tt.commit {
 				awaitSent(t, stream, "Detach", isSent[protocol.Detach])
 				awaitStreamHello(t, &mu, &second)
 				second.deliver(protocol.Welcome{SessionName: "beta"})
@@ -325,7 +369,10 @@ func TestPickerOverlaySettlesUIActions(t *testing.T) {
 				require.Equal(t, fences, countSent[protocol.UIFence](stream), "a picker-consumed action never fences through the daemon")
 				require.Zero(t, countSent[protocol.Input](stream), "picker input never reaches the session")
 			}
-			if tt.commit {
+			if tt.inPlace {
+				require.Equal(t, snapshot.Context.Generation, outcome.result.Context.Generation, "an in-place switch keeps the generation")
+				require.Len(t, harness.service.openedRequests(), 1, "an in-place switch never reconnects")
+			} else if tt.commit {
 				require.Greater(t, outcome.result.Context.Generation, snapshot.Context.Generation, "the swap commits a new generation")
 				opened := harness.service.openedRequests()
 				require.Len(t, opened, 2)

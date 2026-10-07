@@ -1,6 +1,9 @@
 package client
 
-import "github.com/bnema/vev/internal/protocol"
+import (
+	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/protocol"
+)
 
 // Route publication and daemon navigation seams of the attached foreground.
 // The worker owns the stream, so the supervisor reaches the
@@ -118,6 +121,78 @@ func (h *attachmentHost) replyNavigation(token AttachmentToken, message protocol
 		return true
 	default:
 		return false
+	}
+}
+
+// inPlaceSwitch is one supervisor-committed session on the daemon already
+// serving the attachment. The worker asks that daemon to move the live
+// attachment there instead of reconnecting.
+type inPlaceSwitch struct {
+	target protocol.ExactSessionTarget
+	tab    domain.TabStableID
+}
+
+// inPlaceResult reports whether the daemon moved the attachment to target or
+// refused, leaving the source attached.
+type inPlaceResult struct {
+	target protocol.ExactSessionTarget
+	ok     bool
+}
+
+// requestInPlace hands one in-place switch to the current foreground's worker.
+// The newest request replaces an unsent one. It reports false when token no
+// longer owns the foreground.
+func (h *attachmentHost) requestInPlace(token AttachmentToken, request inPlaceSwitch) bool {
+	fg := h.currentForeground(token)
+	if fg == nil {
+		return false
+	}
+	for {
+		select {
+		case fg.inPlace <- request:
+			return true
+		default:
+		}
+		select {
+		case <-fg.inPlace:
+		default:
+		}
+	}
+}
+
+// InPlaceResults carries the outcome of each in-place switch to the
+// supervisor.
+func (h *attachmentHost) InPlaceResults() <-chan inPlaceResult {
+	if h == nil {
+		return nil
+	}
+	return h.inPlaceResults
+}
+
+func (f *attachmentForeground) inPlaceSwitches() <-chan inPlaceSwitch {
+	if f == nil {
+		return nil
+	}
+	return f.inPlace
+}
+
+// reportInPlace hands the outcome of one in-place switch to the supervisor.
+// The newest outcome replaces one the supervisor has not taken yet.
+func (f *attachmentForeground) reportInPlace(target protocol.ExactSessionTarget, ok bool) {
+	if f == nil || f.host == nil {
+		return
+	}
+	result := inPlaceResult{target: target, ok: ok}
+	for {
+		select {
+		case f.host.inPlaceResults <- result:
+			return
+		default:
+		}
+		select {
+		case <-f.host.inPlaceResults:
+		default:
+		}
 	}
 }
 

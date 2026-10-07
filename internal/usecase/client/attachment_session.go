@@ -320,11 +320,13 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	var tabSelections <-chan domain.TabStableID
 	var routeUpdates <-chan protocol.RecentRouteSnapshot
 	var navigationReplies <-chan protocol.ClientMessage
+	var inPlaceSwitches <-chan inPlaceSwitch
 	if overlay != nil {
 		repaint = overlay.overlayRepaint()
 		tabSelections = overlay.tabSelections()
 		routeUpdates = overlay.routeSnapshots()
 		navigationReplies = overlay.navigationReplies()
+		inPlaceSwitches = overlay.inPlaceSwitches()
 	}
 	var samePeerRequests uint64
 	var samePeerSwitch *samePeerSwitchPending
@@ -470,6 +472,27 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if err := w.send(ctx, fg, stream, reply); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
+		case next := <-inPlaceSwitches:
+			// The supervisor committed another session on this daemon: ask it
+			// to move this attachment there instead of reconnecting.
+			samePeerRequests++
+			request := protocol.SamePeerSwitchRequest{
+				RequestID: samePeerRequests, Target: next.target,
+				PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), next.target, next.tab),
+			}
+			if request.Validate() != nil {
+				overlay.reportInPlace(next.target, false)
+				continue
+			}
+			if samePeerSwitch != nil && samePeerSwitch.supervised {
+				// A newer choice replaces one still in flight: the older one
+				// is abandoned, never left waiting.
+				overlay.reportInPlace(samePeerSwitch.target, false)
+			}
+			samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target, supervised: true}
+			if err := w.send(ctx, fg, stream, request); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-picker.escape():
 			picker.escapeFired()
 			op, changed := picker.move.flush()
@@ -491,6 +514,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				if samePeerSwitch != nil && state.context.Route.Target == samePeerSwitch.target {
 					// The in-place destination committed: its publication
 					// settles the action that caused the switch.
+					if samePeerSwitch.supervised {
+						overlay.reportInPlace(samePeerSwitch.target, true)
+					}
 					samePeerSwitch = nil
 					if samePeerUI != nil {
 						samePeerUI.uiSamePeerArrived()
@@ -550,6 +576,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					if samePeerUI != nil {
 						samePeerUI.uiFollowSamePeer(typed.CauseActionID)
 					}
+					if samePeerSwitch != nil && samePeerSwitch.supervised {
+						overlay.reportInPlace(samePeerSwitch.target, false)
+					}
 					samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target}
 					if err := w.send(ctx, fg, stream, request); err != nil {
 						return w.settle(ctx, fg, stream, token, err)
@@ -562,10 +591,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			case protocol.SamePeerSwitchFailure:
 				// The daemon refused the confirmed switch and kept the source.
 				if samePeerSwitch != nil && typed.RequestID == samePeerSwitch.requestID {
-					samePeerSwitch = nil
-					if samePeerUI != nil {
+					if samePeerSwitch.supervised {
+						// The supervisor falls back to a fresh attachment; the
+						// action it follows settles there.
+						overlay.reportInPlace(samePeerSwitch.target, false)
+					} else if samePeerUI != nil {
 						samePeerUI.uiSamePeerFailed()
 					}
+					samePeerSwitch = nil
 				}
 			case protocol.RouteNavigationAction, protocol.RouteCreateSessionAction:
 				// The daemon asks the client to navigate: the supervisor
@@ -744,6 +777,9 @@ func attachmentSamePeerUI(fg AttachmentForeground) attachmentSamePeerForeground 
 type samePeerSwitchPending struct {
 	requestID uint64
 	target    protocol.ExactSessionTarget
+	// supervised marks a switch the supervisor requested from the client
+	// picker; its outcome goes back to the supervisor.
+	supervised bool
 }
 
 // pumpAttachmentInput forwards each authorized delivery to the attached loop.

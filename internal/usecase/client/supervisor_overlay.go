@@ -160,7 +160,16 @@ func (o *attachmentPickerOverlay) takeOp() {
 		if s.cfg.UI != nil && o.run != nil && o.run.fg != nil {
 			s.cfg.UI.followOverlay(o.run.fg.uiGeneration)
 		}
-		s.pendingSwap = &pickerAttachmentTarget{request: request, tab: tab}
+		target := pickerAttachmentTarget{request: request, tab: tab}
+		if o.sameDaemon(request) && tab.stopped == nil && s.attachments.requestInPlace(o.run.token, inPlaceSwitch{target: request.Target, tab: tab.preferred}) {
+			// Another session on the serving daemon: move the live
+			// attachment there without a new stream or Hello. A refusal
+			// falls back to the swap below (see inPlaceSettled).
+			s.pendingInPlace = &target
+			o.exit()
+			return
+		}
+		s.pendingSwap = &target
 		o.swapping = true
 		s.preview.close(o.picker())
 		s.attachments.requestDetach(o.run.token)
@@ -207,6 +216,37 @@ func (o *attachmentPickerOverlay) current() pickerCurrent {
 // already showing, in which case committing it is a close.
 func (o *attachmentPickerOverlay) sameTarget(request ports.BrokerOpenStreamRequest) bool {
 	return sameAttachmentTarget(o.request, o.sup.attachments.committedTargetOrZero(), request)
+}
+
+// sameDaemon reports whether request names an exact live session on the
+// daemon already serving this attachment: the local daemon, or the same
+// remote registration.
+func (o *attachmentPickerOverlay) sameDaemon(request ports.BrokerOpenStreamRequest) bool {
+	if request.Admission != ports.BrokerAdmissionExact || request.Local != o.request.Local {
+		return false
+	}
+	return request.Local || request.Registration.Equal(o.request.Registration)
+}
+
+// inPlaceSettled applies the worker's outcome for one in-place switch. A
+// stale outcome for a replaced choice is ignored. A refusal leaves the source
+// attached, so the same choice falls back to a fresh attachment.
+func (o *attachmentPickerOverlay) inPlaceSettled(result inPlaceResult) {
+	s := o.sup
+	pending := s.pendingInPlace
+	if pending == nil || pending.request.Target != result.target {
+		return
+	}
+	s.pendingInPlace = nil
+	if result.ok || o.swapping {
+		return
+	}
+	if o.active {
+		o.exit()
+	}
+	s.pendingSwap = pending
+	o.swapping = true
+	s.attachments.requestDetach(o.run.token)
 }
 
 // sameAttachmentTarget compares one committed selection with the live

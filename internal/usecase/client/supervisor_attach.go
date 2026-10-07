@@ -744,7 +744,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 			}
 		}()
 	}
-	stream, err := service.OpenStream(openCtx, request)
+	stream, err := s.openStreamTicking(openCtx, service, request)
 	if keys != nil {
 		keys.release()
 		cancelOpen()
@@ -805,6 +805,30 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming)
 }
 
+// openStreamTicking opens one stream while advancing the Connecting spinner,
+// so a slow open still shows its delayed notice. No foreground owns the
+// terminal before Begin, so painting here never overwrites session output.
+// OpenStream honors ctx, so the wait always ends.
+func (s *Supervisor) openStreamTicking(ctx context.Context, service ports.BrokerNavigator, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+	type opened struct {
+		stream ports.BrokerLogicalConnection
+		err    error
+	}
+	result := make(chan opened, 1)
+	go func() {
+		stream, err := service.OpenStream(ctx, request)
+		result <- opened{stream: stream, err: err}
+	}()
+	for {
+		select {
+		case r := <-result:
+			return r.stream, r.err
+		case <-s.spinnerTick():
+			s.cfg.Spinner.AdvanceSpinner(s.State())
+		}
+	}
+}
+
 // settleAttachment joins one admitted attachment while watching the parent
 // context, terminal EOF, and broker-connection loss. The deadline is the only
 // other stop: when it fires before the worker settled, the attachment ends as
@@ -854,6 +878,8 @@ settlement:
 			overlay.takeOp()
 		case consumed := <-s.attachments.OverlayActions():
 			overlay.settleAction(consumed)
+		case result := <-s.attachments.InPlaceResults():
+			overlay.inPlaceSettled(result)
 		case <-overlay.invalidation():
 			overlay.resize()
 		case <-notices.arm(s.cfg.Picker):
@@ -898,6 +924,9 @@ settlement:
 	// while this attachment was live; this attempt consumes it either way.
 	swap := s.pendingSwap
 	s.pendingSwap = nil
+	// An in-place switch still in flight ended with its attachment; the
+	// resume or picker path below decides what comes next.
+	s.pendingInPlace = nil
 	if terminated {
 		return attachmentTerminatedOutcome(termErr)
 	}

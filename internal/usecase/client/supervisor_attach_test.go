@@ -560,7 +560,7 @@ func TestSupervisorDetachedReasonDeterminesExitOrPicker(t *testing.T) {
 }
 
 // TestSupervisorPendingSwapContinuesRatherThanExiting guards the overlay
-// commit-elsewhere path (same-peer switch) against being folded into the
+// commit-elsewhere path (cross-daemon swap) against being folded into the
 // explicit-detach-and-exit outcome above: the outgoing attachment ends
 // through a local lifecycle action, never a protocol.Detached message, and a
 // pendingSwap in flight must land the supervisor on the new target instead of
@@ -580,7 +580,8 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return second, nil
 	})
-	other := sessionTestRequest(true)
+	// Another daemon: the commit swaps instead of switching in place.
+	other := sessionTestRequest(false)
 	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
 	picker.recordOp(pickerOp{commit: true}, "row", other)
 
@@ -594,7 +595,7 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 
 	select {
 	case <-harness.runDone:
-		t.Fatal("a same-peer swap must not end the supervisor run")
+		t.Fatal("a swap must not end the supervisor run")
 	default:
 	}
 	select {
@@ -630,7 +631,8 @@ func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
 	})
 	base.deliver(navigationOffer(1))
 	awaitPresentation(t, harness.sup, PresentAttachedPicker)
-	other := sessionTestRequest(true)
+	// Another daemon: the commit swaps instead of switching in place.
+	other := sessionTestRequest(false)
 	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
 	picker.recordOp(pickerOp{commit: true}, "row", other)
 	// The Detach queues behind the stalled write; let the bounded drain expire

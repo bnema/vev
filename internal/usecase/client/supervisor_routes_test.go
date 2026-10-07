@@ -128,6 +128,17 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 			},
 		},
 		{
+			name: "recent route on the serving daemon switches in place",
+			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
+				entry, _ := routeEntryNamed(s, "beta")
+				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: entry.Key, Generation: entry.Generation}
+			},
+			wantReply: func(t *testing.T, stream *sessionTestStream) {
+				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+				require.Equal(t, beta, request.Target)
+			},
+		},
+		{
 			name: "a stale reference is refused typed",
 			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
 				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: 999, Generation: 1}
