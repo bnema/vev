@@ -154,6 +154,11 @@ func (o *attachmentPickerOverlay) takeOp() {
 		// While an in-place switch is in flight the attachment is leaving
 		// its committed session, so choosing that session again is a new
 		// navigation, not a close.
+		if s.pendingInPlace != nil && s.pendingInPlace.target.request.Target == request.Target && tab.stopped == nil {
+			// The attachment is already switching there.
+			o.release(false)
+			return
+		}
 		if s.pendingInPlace == nil && o.sameTarget(request) && tab.stopped == nil {
 			// Another tab of the attached session switches in place; the
 			// attachment is never reconnected for it.

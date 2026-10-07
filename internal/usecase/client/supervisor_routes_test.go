@@ -256,7 +256,9 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				return
 			}
 			tt.wantReply(t, stream)
-			require.Never(t, func() bool { return len(harness.service.openedRequests()) > 1 }, 20*time.Millisecond, time.Millisecond, "a refusal or an in-place switch never reconnects")
+			// The supervisor chose before the worker sent the reply above, so
+			// no reconnect can still be pending.
+			require.Len(t, harness.service.openedRequests(), 1, "a refusal or an in-place switch never reconnects")
 			require.Zero(t, countSent[protocol.Detach](stream))
 		})
 	}

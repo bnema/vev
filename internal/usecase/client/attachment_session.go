@@ -330,6 +330,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	}
 	var samePeerRequests uint64
 	var samePeerSwitch *samePeerSwitchPending
+	// repaintOwed is set while a picker in-place switch replaced the closing
+	// picker's repaint: if the source is kept after all, the worker still owes
+	// the daemon that full repaint over the picker box.
+	repaintOwed := false
 	reportInPlace := func(seq uint64, outcome inPlaceOutcome) {
 		if overlay != nil {
 			overlay.reportInPlace(seq, outcome)
@@ -338,15 +342,17 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	// startSamePeer asks the daemon to move this attachment to target. seq is
 	// the supervisor's choice, or zero for a daemon offer. A switch still in
 	// flight is superseded: the newest navigation wins.
-	startSamePeer := func(target protocol.ExactSessionTarget, tab domain.TabStableID, seq uint64) error {
-		samePeerRequests++
+	newSamePeerRequest := func(target protocol.ExactSessionTarget, tab domain.TabStableID) (protocol.SamePeerSwitchRequest, bool) {
 		request := protocol.SamePeerSwitchRequest{
-			RequestID: samePeerRequests, Target: target,
+			RequestID: samePeerRequests + 1, Target: target,
 			PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), target, tab),
 		}
-		if request.Validate() != nil {
-			reportInPlace(seq, inPlaceRefused)
-			return nil
+		return request, request.Validate() == nil
+	}
+	startSamePeer := func(request protocol.SamePeerSwitchRequest, seq uint64) error {
+		samePeerRequests = request.RequestID
+		if seq != 0 {
+			repaintOwed = true
 		}
 		if samePeerSwitch != nil {
 			reportInPlace(samePeerSwitch.seq, inPlaceSuperseded)
@@ -499,7 +505,12 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		case next := <-inPlaceSwitches:
 			// The supervisor committed another session on this daemon: ask it
 			// to move this attachment there instead of reconnecting.
-			if err := startSamePeer(next.target, next.tab, next.seq); err != nil {
+			request, ok := newSamePeerRequest(next.target, next.tab)
+			if !ok {
+				reportInPlace(next.seq, inPlaceRefused)
+				continue
+			}
+			if err := startSamePeer(request, next.seq); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
 		case <-picker.escape():
@@ -525,6 +536,7 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 					// settles the action that caused the switch.
 					reportInPlace(samePeerSwitch.seq, inPlaceArrived)
 					samePeerSwitch = nil
+					repaintOwed = false
 					if samePeerUI != nil {
 						samePeerUI.uiSamePeerArrived()
 					}
@@ -572,10 +584,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				if typed.SamePeer && typed.ExactTarget != nil {
 					// An endpoint-empty offer on this very connection: confirm
 					// it and the daemon moves this attachment in place.
+					request, ok := newSamePeerRequest(*typed.ExactTarget, typed.PreferredTabID)
+					if !ok {
+						continue
+					}
 					if samePeerUI != nil {
 						samePeerUI.uiFollowSamePeer(typed.CauseActionID)
 					}
-					if err := startSamePeer(*typed.ExactTarget, typed.PreferredTabID, 0); err != nil {
+					if err := startSamePeer(request, 0); err != nil {
 						return w.settle(ctx, fg, stream, token, err)
 					}
 					continue
@@ -590,8 +606,19 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 						// The supervisor falls back to a fresh attachment; the
 						// action it follows settles there.
 						reportInPlace(samePeerSwitch.seq, inPlaceRefused)
-					} else if samePeerUI != nil {
-						samePeerUI.uiSamePeerFailed()
+					} else {
+						if samePeerUI != nil {
+							samePeerUI.uiSamePeerFailed()
+						}
+						if repaintOwed {
+							// No swap follows: the source stays, under what is
+							// left of the picker box.
+							repaintOwed = false
+							if err := w.send(ctx, fg, stream, protocol.OutputResetRequest{}); err != nil {
+								return w.settle(ctx, fg, stream, token, err)
+							}
+							outputResetRequested = true
+						}
 					}
 					samePeerSwitch = nil
 				}

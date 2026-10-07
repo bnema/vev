@@ -716,10 +716,12 @@ func (s *Supervisor) withFreshStream(service ports.BrokerNavigator, target picke
 // attachmentRetry instead of presented.
 func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
 	request := target.request
-	// A local attachment usually commits within the notice delay; a remote
-	// handshake or a resume may not, and nothing can paint once the
-	// foreground owns the terminal, so their notice shows at once.
-	s.transition(supervisorEvent{kind: supervisorAttachBegin, slow: resuming || !request.Local})
+	// A live local session usually commits within the notice delay; a
+	// remote handshake, a resume, or a restore may not, and nothing can paint
+	// once the foreground owns the terminal, so their notice shows at once.
+	slow := resuming || !request.Local || target.tab.stopped != nil ||
+		(request.Admission == ports.BrokerAdmissionExact && !catalogueSessionLive(service.Snapshot(), request))
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, slow: slow})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
 

@@ -41,7 +41,7 @@ On remote sessions vev shows what you type before the server answers, like mosh.
 | What you see | Meaning |
 |---|---|
 | The session | The link works. |
-| `Connecting to session…` | vev is opening a session or reconnecting a dropped link, and keeps your keys. For a local session it appears only after 200 ms. |
+| `Connecting to session…` | vev is opening a session or reconnecting a dropped link, and keeps your keys. Switching to a running local session shows it only after 200 ms. |
 | The picker with an error | The session could not be reached again, or you cancelled. |
 
 vev does not yet report a slow (`degraded`) link separately. Connection notices never appear inside your shell output.

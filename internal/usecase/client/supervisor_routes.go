@@ -75,6 +75,11 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerNavigator, overl
 	if actionID := navigationCauseActionID(message); actionID != 0 && s.cfg.UI != nil {
 		s.cfg.UI.follow(overlay.run.fg.uiGeneration, actionID)
 	}
+	if s.pendingInPlace != nil && s.pendingInPlace.target.request.Target == target.request.Target && target.tab.stopped == nil {
+		// The attachment is already switching there.
+		overlay.release(false)
+		return
+	}
 	if s.pendingInPlace == nil && sameAttachmentTarget(overlay.request, s.attachments.committedTargetOrZero(), target.request) && target.tab.stopped == nil {
 		_, current, _ := s.attachments.committedView()
 		if target.tab.preferred != "" && target.tab.preferred != current {

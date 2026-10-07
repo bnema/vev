@@ -694,6 +694,29 @@ func TestSupervisorReducerAttachmentPresentation(t *testing.T) {
 	require.ErrorIs(t, returned.Err, errAttachmentDeadline)
 }
 
+// TestSupervisorReducerSlowConnecting pins that SlowConnecting describes only
+// the Connecting an attachment entered, never a later one.
+func TestSupervisorReducerSlowConnecting(t *testing.T) {
+	ready := State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 2}
+	slow := reduceSupervisor(ready, supervisorEvent{kind: supervisorAttachBegin, slow: true})
+	tests := []struct {
+		name  string
+		event supervisorEvent
+		want  bool
+	}{
+		{name: "a slow attach begins slow", event: supervisorEvent{kind: supervisorAttachBegin, slow: true}, want: true},
+		{name: "a fast attach begins fast", event: supervisorEvent{kind: supervisorAttachBegin}},
+		{name: "attaching clears it", event: supervisorEvent{kind: supervisorAttached}},
+		{name: "a navigating broker attempt clears it", event: supervisorEvent{kind: supervisorBeginAttempt, navigating: true}},
+		{name: "a broker loss while connecting keeps it", event: supervisorEvent{kind: supervisorBrokerLoss}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, reduceSupervisor(slow, tt.event).SlowConnecting)
+		})
+	}
+}
+
 // TestSupervisorAttachmentLocalRemoteParity proves the same supervisor path
 // opens the exact resolved request for a local and a remote selection, with no
 // dialer choice in the client.

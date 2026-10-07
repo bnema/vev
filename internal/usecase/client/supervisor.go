@@ -217,6 +217,7 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 	switch event.kind {
 	case supervisorBeginAttempt:
 		state.Presentation = PresentPicker
+		state.SlowConnecting = false
 		if event.navigating {
 			state.Presentation = PresentConnecting
 		}
@@ -279,6 +280,10 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		state.Presentation = PresentTerminating
 		state.Connectivity = ConnectivityDisconnected
 		state.Err = event.err
+	}
+	// SlowConnecting describes only the Connecting that AttachBegin entered.
+	if state.Presentation != PresentConnecting {
+		state.SlowConnecting = false
 	}
 	return state
 }
