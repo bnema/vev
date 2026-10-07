@@ -265,8 +265,10 @@ type attachTestPicker struct {
 	opsReady  chan struct{}
 	ownsInput bool
 	consumed  int
-	op        pickerOp
-	key       string
+	// consumedBytes records every byte the picker consumed, in order.
+	consumedBytes []byte
+	op            pickerOp
+	key           string
 	// resolveErr makes ResolveCommit refuse locally, which is how a test reaches
 	// the local-refusal classification without dialing anything.
 	resolveErr error
@@ -288,13 +290,14 @@ func newAttachTestPicker() *attachTestPicker {
 
 func (p *attachTestPicker) ApplySnapshot(ports.BrokerSnapshot) {}
 
-func (p *attachTestPicker) ConsumeTerminalRead([]byte) bool {
+func (p *attachTestPicker) ConsumeTerminalRead(data []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.ownsInput {
 		return false
 	}
 	p.consumed++
+	p.consumedBytes = append(p.consumedBytes, data...)
 	if p.consumeOp != (pickerOp{}) {
 		p.op, p.key, p.request = p.consumeOp, "row", p.consumeRequest
 		p.consumeOp = pickerOp{}
