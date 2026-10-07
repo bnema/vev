@@ -192,6 +192,26 @@ go test github.com/bnema/vev-vt/ansi github.com/bnema/vev-vt ./internal/adapters
 go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkComposeCapturedFloatingFrameCached$' -benchmem
 ```
 
+Focused benchmarks for specific paths:
+
+| Path | Command |
+|---|---|
+| Copy-mode search over 12k rows | `go test ./internal/usecase/copy -run '^$' -bench '^BenchmarkFindMatches12K$' -benchmem` |
+| Snapshot publication bytes and time | `go test ./internal/usecase/daemon -run '^$' -bench '^BenchmarkDaemonIncrementalSnapshotRepository$' -benchmem` |
+| UI mirror flush with `--ui-observe`/`--ui-control` | `go test ./internal/adapters/uiterm -run '^$' -bench '^BenchmarkTerminalMirrorFlush$' -benchmem` |
+
+## Idle cost
+
+An idle session should cost almost nothing:
+
+- The broker rewrites `state.json` only when durable state changes, not when
+  an observation only refreshes its timestamps.
+- A routine refresh of a reachable daemon publishes one snapshot, not a
+  transient "checking" snapshot first.
+- A session keeps one pre-started floating shell, not one per tab, so its
+  process count is its panes plus one.
+- The UI mirror converts a frame to cells only when something reads it.
+
 ## Mouse scroll rendering
 
 Wheel input moves the immutable copy viewport, rather than walking the keyboard
