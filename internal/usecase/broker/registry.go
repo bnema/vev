@@ -951,7 +951,8 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 		if _, inflight := r.inflight[endpoint]; inflight {
 			continue
 		}
-		if !r.pending[endpoint] && (r.demand == 0 || !host.NextDue.IsZero() && now.Before(host.NextDue)) {
+		explicit := r.pending[endpoint]
+		if !explicit && (r.demand == 0 || !host.NextDue.IsZero() && now.Before(host.NextDue)) {
 			continue
 		}
 		delete(r.pending, endpoint)
@@ -959,8 +960,10 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 		attempt := r.attempts
 		probeCtx, cancel := context.WithCancel(ctx)
 		r.inflight[endpoint] = &probeAttempt{token: attempt, cancel: cancel}
-		started = true
-		host.Checking = true
+		if visibleCheck(host, explicit) {
+			started = true
+			host.Checking = true
+		}
 		host.LastAttempt = now
 		r.hosts[endpoint] = host
 		registration := host.Registration
@@ -982,9 +985,10 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 			}
 		}(endpoint, registration, attempt, probeCtx)
 	}
-	// Only an observation that actually started changes the projection; an
-	// idle dispatch must not bump the revision or wake subscribers. The
-	// in-flight projection is never persisted: Checking is transient.
+	// Only an observation that visibly started changes the projection; an
+	// idle dispatch or a routine refresh must not bump the revision or wake
+	// subscribers. The in-flight projection is never persisted: Checking is
+	// transient.
 	if r.dispatchLocalLocked(ctx, now, results) {
 		started = true
 	}
@@ -992,6 +996,15 @@ func (r *Registry) dispatch(ctx context.Context, now time.Time, results chan<- p
 		r.publishLocked(false)
 	}
 	r.mu.Unlock()
+}
+
+// visibleCheck reports whether starting an observation publishes the transient
+// Checking state. A routine scheduled refresh of a reachable daemon stays
+// silent until its result lands, so an idle watched broker publishes once per
+// observation instead of twice; an explicit request or a daemon that is not
+// confirmed reachable still shows that it is being checked.
+func visibleCheck(host ports.BrokerDaemonObservation, explicit bool) bool {
+	return explicit || host.Availability != domain.RemoteAvailabilityReachable
 }
 
 // observeBounded runs one observation under its attempt deadline. retire is the
@@ -1420,6 +1433,10 @@ type snapshotWriter struct {
 	mu      sync.Mutex
 	pending *ports.BrokerSnapshot
 	written ports.BrokerRevision
+	// last is the durable content of the newest successful write with its
+	// revision and observation timestamps cleared. Only the writer goroutine
+	// touches it.
+	last    *ports.BrokerSnapshot
 	started bool
 	closed  bool
 	wake    chan struct{}
@@ -1496,16 +1513,42 @@ func (w *snapshotWriter) flush() {
 		if snapshot.Revision <= written {
 			continue
 		}
-		if err := w.store.Store(durable(*snapshot)); err != nil {
+		next := durable(*snapshot)
+		key := durableContent(next)
+		if w.last != nil && reflect.DeepEqual(*w.last, key) {
+			// Only observation timestamps moved: the stored copy already
+			// carries the same durable state, so skip the rewrite and fsync.
+			// A restart re-observes every host before trusting freshness.
+			continue
+		}
+		if err := w.store.Store(next); err != nil {
+			w.last = nil
 			w.log.Error("broker: durable snapshot write failed", "revision", snapshot.Revision, "err", err)
 			continue
 		}
+		w.last = &key
 		w.mu.Lock()
 		if snapshot.Revision > w.written {
 			w.written = snapshot.Revision
 		}
 		w.mu.Unlock()
 	}
+}
+
+// durableContent returns the durable projection without the fields that change
+// on every routine observation: the revision and the attempt, success, and
+// due timestamps.
+func durableContent(snapshot ports.BrokerSnapshot) ports.BrokerSnapshot {
+	out := snapshot
+	out.Revision = 0
+	out.Daemons = make([]ports.BrokerDaemonObservation, len(snapshot.Daemons))
+	for i, daemon := range snapshot.Daemons {
+		daemon.LastAttempt = time.Time{}
+		daemon.LastSuccess = time.Time{}
+		daemon.NextDue = time.Time{}
+		out.Daemons[i] = daemon
+	}
+	return out
 }
 
 // close flushes the newest staged snapshot, stops the writer, and waits for

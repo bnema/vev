@@ -187,6 +187,11 @@ func (t *attachTestTerminal) Snapshot() (ports.UISnapshot, error) {
 	return ports.UISnapshot{Revision: t.revision, Context: ctx}, nil
 }
 
+func (t *attachTestTerminal) Boundary() (ports.UIActionResult, error) {
+	snapshot, err := t.Snapshot()
+	return ports.UIActionResult{Revision: snapshot.Revision, Context: snapshot.Context}, err
+}
+
 func (t *attachTestTerminal) Changes() <-chan struct{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()

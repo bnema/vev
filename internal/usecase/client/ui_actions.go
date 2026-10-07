@@ -148,18 +148,19 @@ func (u *UI) finishLocked(id uint64, status ports.UIActionStatus, boundary ports
 // published remembers only a committed output boundary, not receipt receive
 // time or an unrelated status-only revision.
 func (u *UI) published(generation uint64) {
-	snapshot, err := u.state.Snapshot()
+	// Runs once per committed frame: read only the boundary, never the cells.
+	boundary, err := u.state.Boundary()
 	if err != nil {
 		return
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if generation != u.generation || snapshot.Context.Generation != generation {
+	if generation != u.generation || boundary.Context.Generation != generation {
 		return
 	}
-	u.boundary = ports.UIActionResult{Revision: snapshot.Revision, Context: snapshot.Context}
+	u.boundary = boundary
 	u.suppressed = ports.UIContext{}
-	if u.handoff != nil && u.handoff.destinationGeneration == generation && snapshot.Context.Status == ports.UIStatusAttached {
+	if u.handoff != nil && u.handoff.destinationGeneration == generation && boundary.Context.Status == ports.UIStatusAttached {
 		u.handoff.boundary = u.boundary
 		if u.dispatched[u.handoff.actionID] {
 			u.finishLocked(u.handoff.actionID, ports.UIActionProcessed, u.boundary)

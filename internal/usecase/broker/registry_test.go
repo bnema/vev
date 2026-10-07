@@ -2345,10 +2345,13 @@ func TestRegistryRunIsSingleShotAndCleansUpInFlightState(t *testing.T) {
 	require.Zero(t, settled.Daemons[0].ConsecutiveFailures)
 
 	// Persistence is flushed before shutdown and no write outlives it.
+	// The settled projection only cleared transient Checking state, so the
+	// stored copy already holds its durable content and is not rewritten.
 	stored := waitStored(t, store, func(snapshot ports.BrokerSnapshot) bool {
-		return snapshot.Revision >= settled.Revision
+		return snapshot.Revision > 0
 	})
-	require.Equal(t, settled.Revision, stored.Revision)
+	require.LessOrEqual(t, stored.Revision, settled.Revision)
+	require.Equal(t, durableContent(durable(settled)), durableContent(stored))
 	require.False(t, stored.Daemons[0].Checking)
 	writes := store.writeCount()
 	require.NoError(t, registry.setHosts(nil))

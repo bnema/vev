@@ -119,9 +119,9 @@ func TestObjectCodecReturnsContentAddressedObjectAndPayload(t *testing.T) {
 	if err != nil || kind != RecoveryTranscript || !bytes.Equal(payload, []byte("canonical-vt")) {
 		t.Fatalf("round trip = %v %q %v", kind, payload, err)
 	}
-	kind, payload, err = PreflightObject(object.Data)
-	if err != nil || kind != RecoveryTranscript || !bytes.Equal(payload, []byte("canonical-vt")) {
-		t.Fatalf("preflight = %v %q %v", kind, payload, err)
+	kind, err = PreflightObject(object.Data)
+	if err != nil || kind != RecoveryTranscript {
+		t.Fatalf("preflight = %v %v", kind, err)
 	}
 	for n := range len(object.Data) {
 		if _, _, err := UnmarshalObject(object.Data[:n]); err == nil {
@@ -178,8 +178,10 @@ func TestObjectRefEnvelopeSizeBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalObject() error = %v", err)
 	}
-	if len(object.Data) != minimum {
-		t.Fatalf("MarshalObject() size = %d, want %d", len(object.Data), minimum)
+	// The smallest payload is still a complete zlib stream, so real objects sit
+	// above the declared lower bound the manifest accepts.
+	if len(object.Data) < minimum {
+		t.Fatalf("MarshalObject() size = %d, want >= %d", len(object.Data), minimum)
 	}
 
 	for _, tc := range []struct {

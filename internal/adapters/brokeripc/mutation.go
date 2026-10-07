@@ -111,15 +111,15 @@ func (s *serverSession) publishSnapshot(generation brokerwire.SubscriptionGenera
 	if err != nil {
 		return err
 	}
-	total, err := snapshotTransferBytes(parts, s.ceilings.MaxReceiveEnvelopeBytes, s.ceilings.StreamChunkLimit)
+	payloads, total, err := encodeSnapshotTransfer(parts, s.ceilings.MaxReceiveEnvelopeBytes, s.ceilings.StreamChunkLimit)
 	if err != nil {
 		return err
 	}
 	if total > uint64(brokerwire.MaxSnapshotStagedBytes) {
 		return errors.New("brokeripc: snapshot publication exceeds the staged ceiling")
 	}
-	for _, part := range parts {
-		if err := s.send(part); err != nil {
+	for _, payload := range payloads {
+		if err := s.sendPayload(payload); err != nil {
 			return err
 		}
 	}

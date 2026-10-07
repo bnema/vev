@@ -283,8 +283,8 @@ func validateSuppliedObject(objects []ports.SnapshotObject, digest ports.Snapsho
 			return ports.SnapshotObject{}, fmt.Errorf("conflicting object")
 		}
 	}
-	kind, payload, err := codec.PreflightObject(object.Data)
-	if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) || len(payload) == 0 {
+	kind, err := codec.PreflightObject(object.Data)
+	if err != nil || kind != ref.Kind || len(object.Data) != int(ref.Size) {
 		return ports.SnapshotObject{}, fmt.Errorf("invalid object envelope")
 	}
 	return ports.SnapshotObject{Digest: digest, Data: append([]byte(nil), object.Data...)}, nil
@@ -329,8 +329,8 @@ func manifestRefs(manifest codec.Manifest) map[ports.SnapshotDigest]codec.Object
 }
 
 func validObject(data []byte, ref codec.ObjectRef) bool {
-	kind, payload, err := codec.PreflightObject(data)
-	return err == nil && kind == ref.Kind && len(payload) > 0 && len(data) == int(ref.Size)
+	kind, err := codec.PreflightObject(data)
+	return err == nil && kind == ref.Kind && len(data) == int(ref.Size)
 }
 
 func (r *Repository) objectDigest(data []byte) ports.SnapshotDigest {

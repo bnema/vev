@@ -25,7 +25,7 @@ theme.accent = auto
 # bottom-left, bottom, or bottom-right.
 palette.anchor = center
 
-# One prewarmed floating terminal per tab. An empty command uses the normal shell.
+# One floating terminal per tab. An empty command uses the normal shell.
 floating.command =
 floating.width = 80%
 floating.height = 80%
@@ -287,6 +287,7 @@ Below 80 columns, popups (palette, picker, floating terminal, prompts) become fu
 - `floating.command` runs through your shell. Changes apply on the next launch.
 - Below 80 columns, the terminal takes the full width and keeps `floating.height`.
 - Floating terminals are not restored after a daemon restart.
+- Each session keeps one pre-started shell ready. The first tab that opens its floating terminal takes it, and the session starts the next one in the background. A shell started in another directory is replaced by a fresh one in the tab's directory.
 
 ## Bar anchors
 

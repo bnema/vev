@@ -122,6 +122,10 @@ type session struct {
 	floatingLaunchMu       sync.Mutex
 	floatingLaunchStopping bool
 	floatingLaunches       map[*floatingLaunch]struct{}
+	// floatingSpare is the session's single pre-started floating shell; see
+	// floating_spare.go. Guarded by floatingLaunchMu.
+	floatingSpare         *floatingSpare
+	floatingSpareStarting bool
 }
 
 func (s *session) nameSnapshot() string {
@@ -1542,6 +1546,7 @@ func (s *session) stopInMemoryLifecycle() {
 	}
 	s.lifecycleStopOnce.Do(func() {
 		s.stopFloatingLaunches()
+		s.closeFloatingSpare()
 		if s.cancel != nil {
 			s.cancel()
 		}

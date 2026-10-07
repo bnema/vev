@@ -81,13 +81,14 @@ func (l *LocalObservation) validate() error {
 // dispatchLocalLocked admits at most one local probe attempt when its schedule
 // says it is due, or immediately when localPending marks explicit demand for a
 // re-probe ahead of schedule. Callers must hold r.mu. It reports whether an
-// attempt started, so dispatch publishes the transient Checking state exactly
-// once.
+// attempt started with a visible Checking state, so dispatch publishes it
+// exactly once; a routine refresh of a reachable daemon stays silent.
 func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, results chan<- probeResult) bool {
 	if r.local == nil || r.localAttempt != nil {
 		return false
 	}
-	if !r.localPending && (r.demand == 0 || !r.localHost.NextDue.IsZero() && now.Before(r.localHost.NextDue)) {
+	explicit := r.localPending
+	if !explicit && (r.demand == 0 || !r.localHost.NextDue.IsZero() && now.Before(r.localHost.NextDue)) {
 		return false
 	}
 	r.localPending = false
@@ -95,7 +96,8 @@ func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, resul
 	attempt := r.attempts
 	probeCtx, cancel := context.WithCancel(ctx)
 	r.localAttempt = &probeAttempt{token: attempt, cancel: cancel}
-	r.localHost.Checking = true
+	visible := visibleCheck(r.localHost, explicit)
+	r.localHost.Checking = visible
 	r.localHost.LastAttempt = now
 	deadline := r.clock.NewTimer(r.probeTimeout)
 	go func(attempt uint64, probeCtx context.Context) {
@@ -109,7 +111,7 @@ func (r *Registry) dispatchLocalLocked(ctx context.Context, now time.Time, resul
 			// queueing a result the run loop would only discard.
 		}
 	}(attempt, probeCtx)
-	return true
+	return visible
 }
 
 // applyLocal adopts one completed local probe. Callers must hold r.mu, exactly

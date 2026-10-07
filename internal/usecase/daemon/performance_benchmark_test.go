@@ -1445,7 +1445,7 @@ func (s *countingSnapshotRepository) Publish(_ context.Context, publication port
 	s.headBytes += snapshotHeadBytes
 	for _, object := range publication.Objects {
 		s.suppliedObjectBytes += uint64(len(object.Data))
-		kind, _, err := snapcodec.PreflightObject(object.Data)
+		kind, err := snapcodec.PreflightObject(object.Data)
 		if err == nil && kind == snapcodec.HistoryChunk {
 			s.suppliedHistoryBytes += uint64(len(object.Data))
 		}
