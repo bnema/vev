@@ -109,10 +109,12 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 	tests := []struct {
 		name string
 		// request builds the daemon message from the first route snapshot.
-		request   func(protocol.RecentRouteSnapshot) protocol.ServerMessage
-		detached  bool
-		wantOpen  func(*testing.T, ports.BrokerOpenStreamRequest)
-		wantReply func(*testing.T, *sessionTestStream)
+		request  func(protocol.RecentRouteSnapshot) protocol.ServerMessage
+		detached bool
+		// refuseInPlace answers the in-place switch with a daemon refusal.
+		refuseInPlace bool
+		wantOpen      func(*testing.T, ports.BrokerOpenStreamRequest)
+		wantReply     func(*testing.T, *sessionTestStream)
 	}{
 		{
 			name: "recent route to another daemon swaps",
@@ -125,6 +127,29 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				require.Equal(t, routeTestRemote, request.Endpoint)
 				require.Equal(t, ports.BrokerAdmissionExact, request.Admission)
 				require.Equal(t, "rem", request.Target.SessionName)
+			},
+		},
+		{
+			name: "recent route on the serving daemon switches in place",
+			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
+				entry, _ := routeEntryNamed(s, "beta")
+				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: entry.Key, Generation: entry.Generation}
+			},
+			wantReply: func(t *testing.T, stream *sessionTestStream) {
+				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+				require.Equal(t, beta, request.Target)
+			},
+		},
+		{
+			name: "a refused in-place route reconnects",
+			request: func(s protocol.RecentRouteSnapshot) protocol.ServerMessage {
+				entry, _ := routeEntryNamed(s, "beta")
+				return protocol.RouteNavigationAction{SnapshotGeneration: s.Generation, Key: entry.Key, Generation: entry.Generation}
+			},
+			refuseInPlace: true,
+			wantOpen: func(t *testing.T, request ports.BrokerOpenStreamRequest) {
+				require.True(t, request.Local)
+				require.Equal(t, beta, request.Target)
 			},
 		},
 		{
@@ -205,6 +230,10 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				return second, nil
 			})
 			stream.deliver(tt.request(snapshot))
+			if tt.refuseInPlace {
+				request := awaitSent(t, stream, "SamePeerSwitchRequest", isSent[protocol.SamePeerSwitchRequest]).(protocol.SamePeerSwitchRequest)
+				stream.deliver(protocol.SamePeerSwitchFailure{RequestID: request.RequestID, Code: protocol.SamePeerSwitchStaleTarget})
+			}
 			if tt.detached {
 				// The daemon ends the source right after a close-and-dial
 				// handoff; the supervisor still adopts the handoff.
@@ -227,7 +256,9 @@ func TestSupervisorSettlesDaemonNavigation(t *testing.T) {
 				return
 			}
 			tt.wantReply(t, stream)
-			require.Never(t, func() bool { return len(harness.service.openedRequests()) > 1 }, 50*time.Millisecond, time.Millisecond, "a refusal or an in-place switch never reconnects")
+			// The supervisor chose before the worker sent the reply above, so
+			// no reconnect can still be pending.
+			require.Len(t, harness.service.openedRequests(), 1, "a refusal or an in-place switch never reconnects")
 			require.Zero(t, countSent[protocol.Detach](stream))
 		})
 	}

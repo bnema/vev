@@ -396,6 +396,9 @@ type attachmentHost struct {
 	// overlayActions carries driver actions the client picker overlay
 	// consumed to the supervisor, which settles them.
 	overlayActions chan overlayActionConsumed
+	// inPlaceResults carries the outcome of each in-place switch the
+	// supervisor requested on the current foreground.
+	inPlaceResults chan inPlaceResult
 }
 
 // newAttachmentHost builds the reusable foreground host. A nil clock falls back
@@ -438,6 +441,7 @@ func newAttachmentHost(cfg attachmentHostConfig) *attachmentHost {
 		routeDemand:        make(chan struct{}, 1),
 		navigations:        make(chan protocol.ServerMessage, 1),
 		overlayActions:     make(chan overlayActionConsumed, 1),
+		inPlaceResults:     make(chan inPlaceResult, 1),
 	}
 }
 
@@ -611,6 +615,7 @@ func (h *attachmentHost) newForeground(token AttachmentToken, stream ports.Broke
 		tabSelect:  make(chan domain.TabStableID, 1),
 		routes:     make(chan protocol.RecentRouteSnapshot, 1),
 		replies:    make(chan protocol.ClientMessage, attachmentReplyCapacity),
+		inPlace:    make(chan inPlaceSwitch, 1),
 	}
 }
 
@@ -624,6 +629,7 @@ func (h *attachmentHost) drainForegroundSignals() {
 		case <-h.routeDemand:
 		case <-h.navigations:
 		case <-h.overlayActions:
+		case <-h.inPlaceResults:
 		default:
 			return
 		}
@@ -654,14 +660,14 @@ func (h *attachmentHost) beginNavigationOverlay(sink pickerInputConsumer) bool {
 	return fg.setOverlay(attachmentOverlayNavigation, sink)
 }
 
-// endNavigationOverlay returns the terminal to the current foreground and asks
-// its worker for an authoritative repaint over the picker box.
-func (h *attachmentHost) endNavigationOverlay() {
+// endNavigationOverlay returns the terminal to the current foreground. With
+// repaint it asks the worker for an authoritative repaint over the picker box.
+func (h *attachmentHost) endNavigationOverlay(repaint bool) {
 	if h == nil {
 		return
 	}
 	if fg := h.authority.foreground(); fg != nil {
-		fg.clearOverlay(attachmentOverlayNavigation)
+		fg.releaseOverlay(attachmentOverlayNavigation, repaint)
 	}
 }
 
@@ -761,6 +767,8 @@ type attachmentOverlayForeground interface {
 	routeSnapshots() <-chan protocol.RecentRouteSnapshot
 	navigationReplies() <-chan protocol.ClientMessage
 	requestNavigation(message protocol.ServerMessage)
+	inPlaceSwitches() <-chan inPlaceSwitch
+	reportInPlace(seq uint64, outcome inPlaceOutcome)
 }
 
 var _ attachmentOverlayForeground = (*attachmentForeground)(nil)
@@ -807,6 +815,11 @@ func (f *attachmentForeground) setOverlay(kind attachmentOverlayKind, sink picke
 // authoritative repaint: the terminal still shows the picker box and any
 // attachment frames it suppressed were never written.
 func (f *attachmentForeground) clearOverlay(kind attachmentOverlayKind) {
+	f.releaseOverlay(kind, true)
+}
+
+// releaseOverlay is clearOverlay with the repaint request optional.
+func (f *attachmentForeground) releaseOverlay(kind attachmentOverlayKind, repaint bool) {
 	if f == nil {
 		return
 	}
@@ -830,6 +843,9 @@ func (f *attachmentForeground) clearOverlay(kind attachmentOverlayKind) {
 			f.overlaySink = nil
 		}
 		f.overlayMu.Unlock()
+		return
+	}
+	if !repaint {
 		return
 	}
 	select {
@@ -1191,6 +1207,8 @@ type attachmentForeground struct {
 	// carries the supervisor's navigation failures.
 	routes  chan protocol.RecentRouteSnapshot
 	replies chan protocol.ClientMessage
+	// inPlace carries one pending supervisor in-place switch to the worker.
+	inPlace chan inPlaceSwitch
 }
 
 // Token is the generation/attempt identity of this grant.

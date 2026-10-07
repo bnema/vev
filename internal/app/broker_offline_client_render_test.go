@@ -335,3 +335,77 @@ func TestBrokerClientFailureWritesOnlyNonRetryableErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestBrokerClientConnectingNoticeIsDelayed pins that a fast switch never
+// flashes the Connecting notice: it paints only once Connecting has lasted
+// connectingNoticeDelay, and leaving Connecting restarts the delay.
+func TestBrokerClientConnectingNoticeIsDelayed(t *testing.T) {
+	attached := client.State{Presentation: client.PresentAttached, Connectivity: client.ConnectivityReady, Generation: 1}
+	tests := []struct {
+		name    string
+		slow    bool            // a remote attach or a resume
+		steps   []time.Duration // clock advance before each Connecting render
+		reset   bool            // leave Connecting before the last render
+		painted bool
+	}{
+		{name: "first render stays silent", steps: []time.Duration{0}},
+		{name: "a fast switch stays silent", steps: []time.Duration{0, connectingNoticeDelay - time.Millisecond}},
+		{name: "a slow switch shows the notice", steps: []time.Duration{0, connectingNoticeDelay}, painted: true},
+		{name: "leaving connecting restarts the delay", steps: []time.Duration{0, connectingNoticeDelay}, reset: true},
+		{name: "a remote attach or resume shows it at once", slow: true, steps: []time.Duration{0}, painted: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			connecting := client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1, SlowConnecting: tt.slow}
+			terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+			clock := newSandboxClock()
+			presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clock}
+			for i, step := range tt.steps {
+				clock.Advance(step)
+				if tt.reset && i == len(tt.steps)-1 {
+					presentation.Render(attached)
+				}
+				presentation.Render(connecting)
+			}
+			written, _ := terminal.written()
+			require.Equal(t, tt.painted, strings.Contains(written, "Connecting to session"))
+		})
+	}
+}
+
+// TestBrokerClientSpinnerTimer pins the spinner timer lifecycle: none while
+// the plain picker shows, its first tick exactly when a held-back Connecting
+// notice becomes due, and a fresh timer after a transition ends.
+func TestBrokerClientSpinnerTimer(t *testing.T) {
+	terminal := newOfflineRenderTerminal(domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}})
+	clock := newSandboxClock()
+	presentation := &brokerClientPresentation{terminal: terminal, picker: offlineRenderPicker(t), clock: clock}
+	connecting := client.State{Presentation: client.PresentConnecting, Connectivity: client.ConnectivityReady, Generation: 1}
+
+	presentation.Render(client.State{Presentation: client.PresentPicker, Connectivity: client.ConnectivityReady, Generation: 1})
+	require.Nil(t, presentation.Spinner(), "the plain picker has no spinner")
+
+	for range 2 {
+		presentation.Render(connecting)
+		tick := presentation.Spinner()
+		require.NotNil(t, tick)
+		clock.Advance(connectingNoticeDelay - time.Millisecond)
+		select {
+		case <-tick:
+			t.Fatal("the spinner ticked before the notice was due")
+		default:
+		}
+		clock.Advance(time.Millisecond)
+		select {
+		case <-tick:
+		default:
+			t.Fatal("the spinner never ticked when the notice became due")
+		}
+		presentation.AdvanceSpinner(connecting)
+		written, _ := terminal.written()
+		require.Contains(t, written, "Connecting to session")
+		presentation.StopSpinner()
+		presentation.Render(client.State{Presentation: client.PresentAttached, Connectivity: client.ConnectivityReady, Generation: 1})
+		require.Nil(t, presentation.Spinner(), "a finished transition leaves no spinner")
+	}
+}

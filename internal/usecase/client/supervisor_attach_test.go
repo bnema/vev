@@ -560,7 +560,7 @@ func TestSupervisorDetachedReasonDeterminesExitOrPicker(t *testing.T) {
 }
 
 // TestSupervisorPendingSwapContinuesRatherThanExiting guards the overlay
-// commit-elsewhere path (same-peer switch) against being folded into the
+// commit-elsewhere path (cross-daemon swap) against being folded into the
 // explicit-detach-and-exit outcome above: the outgoing attachment ends
 // through a local lifecycle action, never a protocol.Detached message, and a
 // pendingSwap in flight must land the supervisor on the new target instead of
@@ -580,7 +580,8 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
 		return second, nil
 	})
-	other := sessionTestRequest(true)
+	// Another daemon: the commit swaps instead of switching in place.
+	other := sessionTestRequest(false)
 	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
 	picker.recordOp(pickerOp{commit: true}, "row", other)
 
@@ -594,7 +595,7 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 
 	select {
 	case <-harness.runDone:
-		t.Fatal("a same-peer swap must not end the supervisor run")
+		t.Fatal("a swap must not end the supervisor run")
 	default:
 	}
 	select {
@@ -630,7 +631,8 @@ func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
 	})
 	base.deliver(navigationOffer(1))
 	awaitPresentation(t, harness.sup, PresentAttachedPicker)
-	other := sessionTestRequest(true)
+	// Another daemon: the commit swaps instead of switching in place.
+	other := sessionTestRequest(false)
 	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
 	picker.recordOp(pickerOp{commit: true}, "row", other)
 	// The Detach queues behind the stalled write; let the bounded drain expire
@@ -690,6 +692,29 @@ func TestSupervisorReducerAttachmentPresentation(t *testing.T) {
 	require.Equal(t, PresentPicker, returned.Presentation)
 	require.Equal(t, ConnectivityReady, returned.Connectivity)
 	require.ErrorIs(t, returned.Err, errAttachmentDeadline)
+}
+
+// TestSupervisorReducerSlowConnecting pins that SlowConnecting describes only
+// the Connecting an attachment entered, never a later one.
+func TestSupervisorReducerSlowConnecting(t *testing.T) {
+	ready := State{Presentation: PresentPicker, Connectivity: ConnectivityReady, Generation: 2}
+	slow := reduceSupervisor(ready, supervisorEvent{kind: supervisorAttachBegin, slow: true})
+	tests := []struct {
+		name  string
+		event supervisorEvent
+		want  bool
+	}{
+		{name: "a slow attach begins slow", event: supervisorEvent{kind: supervisorAttachBegin, slow: true}, want: true},
+		{name: "a fast attach begins fast", event: supervisorEvent{kind: supervisorAttachBegin}},
+		{name: "attaching clears it", event: supervisorEvent{kind: supervisorAttached}},
+		{name: "a navigating broker attempt clears it", event: supervisorEvent{kind: supervisorBeginAttempt, navigating: true}},
+		{name: "a broker loss while connecting keeps it", event: supervisorEvent{kind: supervisorBrokerLoss}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, reduceSupervisor(slow, tt.event).SlowConnecting)
+		})
+	}
 }
 
 // TestSupervisorAttachmentLocalRemoteParity proves the same supervisor path

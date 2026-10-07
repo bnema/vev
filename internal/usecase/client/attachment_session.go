@@ -320,14 +320,46 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 	var tabSelections <-chan domain.TabStableID
 	var routeUpdates <-chan protocol.RecentRouteSnapshot
 	var navigationReplies <-chan protocol.ClientMessage
+	var inPlaceSwitches <-chan inPlaceSwitch
 	if overlay != nil {
 		repaint = overlay.overlayRepaint()
 		tabSelections = overlay.tabSelections()
 		routeUpdates = overlay.routeSnapshots()
 		navigationReplies = overlay.navigationReplies()
+		inPlaceSwitches = overlay.inPlaceSwitches()
 	}
 	var samePeerRequests uint64
 	var samePeerSwitch *samePeerSwitchPending
+	// repaintOwed is set while a picker in-place switch replaced the closing
+	// picker's repaint: if the source is kept after all, the worker still owes
+	// the daemon that full repaint over the picker box.
+	repaintOwed := false
+	reportInPlace := func(seq uint64, outcome inPlaceOutcome) {
+		if overlay != nil {
+			overlay.reportInPlace(seq, outcome)
+		}
+	}
+	// startSamePeer asks the daemon to move this attachment to target. seq is
+	// the supervisor's choice, or zero for a daemon offer. A switch still in
+	// flight is superseded: the newest navigation wins.
+	newSamePeerRequest := func(target protocol.ExactSessionTarget, tab domain.TabStableID) (protocol.SamePeerSwitchRequest, bool) {
+		request := protocol.SamePeerSwitchRequest{
+			RequestID: samePeerRequests + 1, Target: target,
+			PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), target, tab),
+		}
+		return request, request.Validate() == nil
+	}
+	startSamePeer := func(request protocol.SamePeerSwitchRequest, seq uint64) error {
+		samePeerRequests = request.RequestID
+		if seq != 0 {
+			repaintOwed = true
+		}
+		if samePeerSwitch != nil {
+			reportInPlace(samePeerSwitch.seq, inPlaceSuperseded)
+		}
+		samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target, seq: seq}
+		return w.send(ctx, fg, stream, request)
+	}
 	samePeerUI := attachmentSamePeerUI(fg)
 	picker := &attachmentMovePicker{worker: w, fg: fg, overlay: overlay, stream: stream, size: w.cfg.Geometry.Size, move: newMovePickerOverlay(w.cfg.Color)}
 	defer picker.stopEscape()
@@ -470,6 +502,17 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			if err := w.send(ctx, fg, stream, reply); err != nil {
 				return w.settle(ctx, fg, stream, token, err)
 			}
+		case next := <-inPlaceSwitches:
+			// The supervisor committed another session on this daemon: ask it
+			// to move this attachment there instead of reconnecting.
+			request, ok := newSamePeerRequest(next.target, next.tab)
+			if !ok {
+				reportInPlace(next.seq, inPlaceRefused)
+				continue
+			}
+			if err := startSamePeer(request, next.seq); err != nil {
+				return w.settle(ctx, fg, stream, token, err)
+			}
 		case <-picker.escape():
 			picker.escapeFired()
 			op, changed := picker.move.flush()
@@ -491,7 +534,9 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				if samePeerSwitch != nil && state.context.Route.Target == samePeerSwitch.target {
 					// The in-place destination committed: its publication
 					// settles the action that caused the switch.
+					reportInPlace(samePeerSwitch.seq, inPlaceArrived)
 					samePeerSwitch = nil
+					repaintOwed = false
 					if samePeerUI != nil {
 						samePeerUI.uiSamePeerArrived()
 					}
@@ -539,19 +584,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 				if typed.SamePeer && typed.ExactTarget != nil {
 					// An endpoint-empty offer on this very connection: confirm
 					// it and the daemon moves this attachment in place.
-					samePeerRequests++
-					request := protocol.SamePeerSwitchRequest{
-						RequestID: samePeerRequests, Target: *typed.ExactTarget,
-						PreferredTabID: w.cfg.Tabs.preferred(requestAuthority(w.cfg.Request), *typed.ExactTarget, typed.PreferredTabID),
-					}
-					if request.Validate() != nil {
+					request, ok := newSamePeerRequest(*typed.ExactTarget, typed.PreferredTabID)
+					if !ok {
 						continue
 					}
 					if samePeerUI != nil {
 						samePeerUI.uiFollowSamePeer(typed.CauseActionID)
 					}
-					samePeerSwitch = &samePeerSwitchPending{requestID: request.RequestID, target: request.Target}
-					if err := w.send(ctx, fg, stream, request); err != nil {
+					if err := startSamePeer(request, 0); err != nil {
 						return w.settle(ctx, fg, stream, token, err)
 					}
 					continue
@@ -562,10 +602,25 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 			case protocol.SamePeerSwitchFailure:
 				// The daemon refused the confirmed switch and kept the source.
 				if samePeerSwitch != nil && typed.RequestID == samePeerSwitch.requestID {
-					samePeerSwitch = nil
-					if samePeerUI != nil {
-						samePeerUI.uiSamePeerFailed()
+					if samePeerSwitch.seq != 0 {
+						// The supervisor falls back to a fresh attachment; the
+						// action it follows settles there.
+						reportInPlace(samePeerSwitch.seq, inPlaceRefused)
+					} else {
+						if samePeerUI != nil {
+							samePeerUI.uiSamePeerFailed()
+						}
+						if repaintOwed {
+							// No swap follows: the source stays, under what is
+							// left of the picker box.
+							repaintOwed = false
+							if err := w.send(ctx, fg, stream, protocol.OutputResetRequest{}); err != nil {
+								return w.settle(ctx, fg, stream, token, err)
+							}
+							outputResetRequested = true
+						}
 					}
+					samePeerSwitch = nil
 				}
 			case protocol.RouteNavigationAction, protocol.RouteCreateSessionAction:
 				// The daemon asks the client to navigate: the supervisor
@@ -744,6 +799,9 @@ func attachmentSamePeerUI(fg AttachmentForeground) attachmentSamePeerForeground 
 type samePeerSwitchPending struct {
 	requestID uint64
 	target    protocol.ExactSessionTarget
+	// seq is the supervisor's in-place choice this switch carries out, zero
+	// for a daemon offer. A nonzero seq reports its outcome to the supervisor.
+	seq uint64
 }
 
 // pumpAttachmentInput forwards each authorized delivery to the attached loop.

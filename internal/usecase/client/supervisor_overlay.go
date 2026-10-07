@@ -4,6 +4,7 @@ import (
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
+	"github.com/bnema/vev/internal/protocol/catalogue"
 )
 
 // Picker overlay over a live attachment.
@@ -88,14 +89,19 @@ func (o *attachmentPickerOverlay) enter() {
 }
 
 // exit returns the terminal to the same live attachment.
-func (o *attachmentPickerOverlay) exit() {
+func (o *attachmentPickerOverlay) exit() { o.release(true) }
+
+// release returns the terminal to the live attachment. repaint asks the
+// daemon to repaint the attached session over the picker box; an in-place
+// switch skips it because the destination's first paint is a full frame.
+func (o *attachmentPickerOverlay) release(repaint bool) {
 	if !o.active {
 		return
 	}
 	// Release the slot before the picker stops owning input, so a delivery
 	// racing the cancel reaches the session instead of a picker that no
 	// longer consumes it.
-	o.sup.attachments.endNavigationOverlay()
+	o.sup.attachments.endNavigationOverlay(repaint)
 	o.drop()
 	o.sup.transition(supervisorEvent{kind: supervisorOverlayClosed})
 }
@@ -145,7 +151,15 @@ func (o *attachmentPickerOverlay) takeOp() {
 			s.renderCurrent()
 			return
 		}
-		if o.sameTarget(request) && tab.stopped == nil {
+		// While an in-place switch is in flight the attachment is leaving
+		// its committed session, so choosing that session again is a new
+		// navigation, not a close.
+		if s.pendingInPlace != nil && s.pendingInPlace.target.request.Target == request.Target && tab.stopped == nil {
+			// The attachment is already switching there.
+			o.release(false)
+			return
+		}
+		if s.pendingInPlace == nil && o.sameTarget(request) && tab.stopped == nil {
 			// Another tab of the attached session switches in place; the
 			// attachment is never reconnected for it.
 			_, current, _ := s.attachments.committedView()
@@ -160,7 +174,12 @@ func (o *attachmentPickerOverlay) takeOp() {
 		if s.cfg.UI != nil && o.run != nil && o.run.fg != nil {
 			s.cfg.UI.followOverlay(o.run.fg.uiGeneration)
 		}
-		s.pendingSwap = &pickerAttachmentTarget{request: request, tab: tab}
+		target := pickerAttachmentTarget{request: request, tab: tab}
+		if o.tryInPlace(target) {
+			o.release(false)
+			return
+		}
+		s.pendingSwap = &target
 		o.swapping = true
 		s.preview.close(o.picker())
 		s.attachments.requestDetach(o.run.token)
@@ -207,6 +226,65 @@ func (o *attachmentPickerOverlay) current() pickerCurrent {
 // already showing, in which case committing it is a close.
 func (o *attachmentPickerOverlay) sameTarget(request ports.BrokerOpenStreamRequest) bool {
 	return sameAttachmentTarget(o.request, o.sup.attachments.committedTargetOrZero(), request)
+}
+
+// tryInPlace asks the live attachment to move to target on its own daemon,
+// without a new stream or Hello. It applies only to a live session on the
+// serving daemon (the local daemon, or the same remote registration) and
+// reports false otherwise, leaving the caller to swap. A refusal later falls
+// back to the swap (see inPlaceSettled).
+func (o *attachmentPickerOverlay) tryInPlace(target pickerAttachmentTarget) bool {
+	s := o.sup
+	request := target.request
+	if request.Admission != ports.BrokerAdmissionExact || request.Local != o.request.Local || target.tab.stopped != nil {
+		return false
+	}
+	if !request.Local && !request.Registration.Equal(o.request.Registration) {
+		return false
+	}
+	if !catalogueSessionLive(o.service.Snapshot(), request) {
+		// A stopped session needs a restore, which only a fresh attach does.
+		return false
+	}
+	s.inPlaceSeq++
+	if !s.attachments.requestInPlace(o.run.token, inPlaceSwitch{seq: s.inPlaceSeq, target: request.Target, tab: target.tab.preferred}) {
+		return false
+	}
+	s.pendingInPlace = &pendingInPlace{seq: s.inPlaceSeq, target: target}
+	return true
+}
+
+// catalogueSessionLive reports whether the broker catalogue shows the exact
+// session request names as running on its daemon.
+func catalogueSessionLive(snapshot ports.BrokerSnapshot, request ports.BrokerOpenStreamRequest) bool {
+	authority := pickerAuthorityInSnapshot(snapshot, pickerSelectionRef{local: request.Local, endpoint: request.Endpoint})
+	if !authority.found {
+		return false
+	}
+	session, ok := pickerFindSession(authority.observation.Sessions, request.Target.LifecycleID)
+	return ok && session.Name == request.Target.SessionName && session.State == catalogue.RemoteCatalogSessionUp
+}
+
+// inPlaceSettled applies the worker's outcome for the current in-place
+// switch; an outcome for an older choice is ignored. A refusal leaves the
+// source attached, so the same choice falls back to a fresh attachment. A
+// superseded switch was replaced by a newer navigation and is dropped.
+func (o *attachmentPickerOverlay) inPlaceSettled(result inPlaceResult) {
+	s := o.sup
+	pending := s.pendingInPlace
+	if pending == nil || pending.seq != result.seq {
+		return
+	}
+	s.pendingInPlace = nil
+	if result.outcome != inPlaceRefused || o.swapping {
+		return
+	}
+	if o.active {
+		o.exit()
+	}
+	s.pendingSwap = &pending.target
+	o.swapping = true
+	s.attachments.requestDetach(o.run.token)
 }
 
 // sameAttachmentTarget compares one committed selection with the live

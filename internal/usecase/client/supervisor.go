@@ -149,6 +149,11 @@ type State struct {
 	// ReadyLost is set only when an established ready generation was lost and
 	// cleared by the replacement's committed publication.
 	ReadyLost bool
+	// SlowConnecting marks a Connecting presentation that is expected to be
+	// slow (a remote attachment or a resume), so its notice is shown at once.
+	// The notice cannot be painted later: the attachment foreground owns the
+	// terminal during the handshake.
+	SlowConnecting bool
 }
 
 // supervisorEventKind is one input to the pure supervisor reducer.
@@ -200,6 +205,9 @@ type supervisorEvent struct {
 	// picker, so the attempt presents Connecting instead of flashing the
 	// picker until the navigation settles.
 	navigating bool
+	// slow marks a supervisorAttachBegin whose Connecting notice must not be
+	// delayed; see State.SlowConnecting.
+	slow bool
 }
 
 // reduceSupervisor is the pure connectivity/presentation reducer. It is
@@ -209,6 +217,7 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 	switch event.kind {
 	case supervisorBeginAttempt:
 		state.Presentation = PresentPicker
+		state.SlowConnecting = false
 		if event.navigating {
 			state.Presentation = PresentConnecting
 		}
@@ -233,6 +242,7 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		// publication: the broker connection is still ready and the attempt
 		// cadence is untouched.
 		state.Presentation = PresentConnecting
+		state.SlowConnecting = event.slow
 		state.Err = nil
 	case supervisorAttached:
 		state.Presentation = PresentAttached
@@ -270,6 +280,10 @@ func reduceSupervisor(state State, event supervisorEvent) State {
 		state.Presentation = PresentTerminating
 		state.Connectivity = ConnectivityDisconnected
 		state.Err = event.err
+	}
+	// SlowConnecting describes only the Connecting that AttachBegin entered.
+	if state.Presentation != PresentConnecting {
+		state.SlowConnecting = false
 	}
 	return state
 }
@@ -462,6 +476,13 @@ type Supervisor struct {
 	// committed to another target while an attachment was live. It is only
 	// touched from the run goroutine and consumed by settleAttachment.
 	pendingSwap *pickerAttachmentTarget
+	// pendingInPlace is the choice the live attachment is switching to in
+	// place on its own daemon. A refusal turns it into pendingSwap. Only
+	// touched from the run goroutine; cleared when the attachment settles.
+	pendingInPlace *pendingInPlace
+	// inPlaceSeq numbers in-place choices so a late outcome for an older one
+	// is never applied to a newer one.
+	inPlaceSeq uint64
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
 	// routes is the client route ledger published to the serving daemon;

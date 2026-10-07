@@ -96,9 +96,20 @@ type brokerClientPresentation struct {
 	clock   ports.Clock
 	spinner ports.Timer
 	frame   int
+	// spinning is set while a transition notice is due or shown, so the
+	// spinner timer exists only then and never repaints the plain picker.
+	spinning bool
+	// connectingSince is when the current Connecting presentation began, zero
+	// outside it. The notice stays hidden for connectingNoticeDelay so a fast
+	// session switch never flashes it.
+	connectingSince time.Time
 
 	mu sync.Mutex
 }
+
+// connectingNoticeDelay is how long Connecting stays silent before its notice
+// is painted. A spinner tick repaints after it elapses.
+const connectingNoticeDelay = 200 * time.Millisecond
 
 // Render observes the state and paints the picker frame and notice while the
 // shared client.PickerPresentation fence admits the presentation. That is
@@ -124,11 +135,26 @@ func (p *brokerClientPresentation) Render(state client.State) {
 	if p.onState != nil {
 		p.onState(state)
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if state.Presentation != client.PresentConnecting {
+		p.connectingSince = time.Time{}
+	}
 	if !client.PickerPresentation(state) && (state.Presentation != client.PresentConnecting || p.clock == nil) {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if state.Presentation == client.PresentConnecting || state.Connectivity == client.ConnectivityRetryWait {
+		p.spinning = true
+	}
+	if state.Presentation == client.PresentConnecting && state.Connectivity != client.ConnectivityRetryWait && !state.SlowConnecting {
+		now := p.clock.Now()
+		if p.connectingSince.IsZero() {
+			p.connectingSince = now
+		}
+		if now.Sub(p.connectingSince) < connectingNoticeDelay {
+			return
+		}
+	}
 	geometry, err := p.terminal.Geometry()
 	if err != nil {
 		return
@@ -191,8 +217,19 @@ func (p *brokerClientPresentation) Render(state client.State) {
 func (p *brokerClientPresentation) Spinner() <-chan time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !p.spinning || p.clock == nil {
+		return nil
+	}
 	if p.spinner == nil {
-		p.spinner = p.clock.NewTimer(120 * time.Millisecond)
+		delay := 120 * time.Millisecond
+		if !p.connectingSince.IsZero() {
+			// While the notice is held back, the next tick lands exactly when
+			// it becomes due.
+			if remaining := connectingNoticeDelay - p.clock.Now().Sub(p.connectingSince); remaining > 0 {
+				delay = remaining
+			}
+		}
+		p.spinner = p.clock.NewTimer(delay)
 	}
 	return p.spinner.C()
 }
@@ -209,8 +246,12 @@ func (p *brokerClientPresentation) AdvanceSpinner(state client.State) {
 
 func (p *brokerClientPresentation) StopSpinner() {
 	p.mu.Lock()
+	p.spinning = false
 	if p.spinner != nil {
 		p.spinner.Stop()
+		// A stopped timer never fires again: the next transition needs a
+		// fresh one or its delayed notice would never appear.
+		p.spinner = nil
 	}
 	p.mu.Unlock()
 }

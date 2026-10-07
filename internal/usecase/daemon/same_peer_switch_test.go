@@ -121,6 +121,60 @@ func TestSamePeerSwitchRejectsStaleTargetWithoutMutation(t *testing.T) {
 	require.Equal(t, protocol.SamePeerSwitchFailure{RequestID: 1, Code: protocol.SamePeerSwitchStaleTarget}, failure)
 }
 
+// TestSamePeerSwitchClientInitiated pins that the client picker can move its
+// attachment without a daemon offer, while a pending offer still admits only
+// its own exact target.
+func TestSamePeerSwitchClientInitiated(t *testing.T) {
+	lifecycle := domain.SessionLifecycleID{7}
+	requestTarget := protocol.ExactSessionTarget{LifecycleID: lifecycle, SessionName: "target"}
+	otherOffer := protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{8}, SessionName: "other"}
+	tests := []struct {
+		name     string
+		offer    *protocol.ExactSessionTarget
+		switched bool
+	}{
+		{name: "no pending offer switches", switched: true},
+		{name: "matching offer switches", offer: &requestTarget, switched: true},
+		{name: "another pending offer refuses", offer: &otherOffer},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, source, ac, sends, releases := newManualTabSession(t, 1)
+			defer releaseAll(releases)
+			target := &session{
+				sessionCore: sessionCore{id: "target", name: "target", incarnation: lifecycle, attachments: make(map[*attachedClient]struct{})},
+				ctx:         source.ctx,
+				cancel:      func() {},
+				tabs:        []*tab{newTab(nil, domain.Size{Cols: 80, Rows: 23})},
+			}
+			publishTiledPaneOwners(target, target.tabs[0])
+			d.mu.Lock()
+			d.sessions[target.id] = target
+			d.mu.Unlock()
+			ac.setRouteSnapshot(protocol.RecentRouteSnapshot{Generation: 1})
+			if tt.offer != nil {
+				ac.offerSamePeerTarget(*tt.offer)
+			}
+
+			token := source.captureAttachmentCapability(ac, ac.transport())
+			effect, admitted := ac.beginAttachmentEffect(token)
+			require.True(t, admitted)
+			defer effect.End()
+			d.switchSamePeerForAttachment(effect, protocol.SamePeerSwitchRequest{RequestID: 1, Target: requestTarget})
+
+			if tt.switched {
+				require.Same(t, target, ac.currentAttachmentSession())
+				identity := decodeServerMessage(t, awaitFrame(t, sends, "CommittedRouteIdentity")).(protocol.CommittedRouteIdentity)
+				require.Equal(t, requestTarget, identity.Target)
+				return
+			}
+			require.Same(t, source, ac.currentAttachmentSession())
+			failure := decodeServerMessage(t, awaitFrame(t, sends, "SamePeerSwitchFailure")).(protocol.SamePeerSwitchFailure)
+			require.Equal(t, protocol.SamePeerSwitchStaleTarget, failure.Code)
+		})
+	}
+}
+
 func TestSamePeerSwitchRefreshesTargetFromSwitchingAttachment(t *testing.T) {
 	targetEnv := []string{"SHELL=/usr/bin/fish", "WAYLAND_DISPLAY=wayland-old", "SSH_AUTH_SOCK=/run/other-agent"}
 	tests := []struct {

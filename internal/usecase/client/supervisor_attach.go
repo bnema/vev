@@ -328,6 +328,13 @@ type pickerAttachmentTarget struct {
 	tab     attachmentTab
 }
 
+// pendingInPlace is one in-place switch the supervisor is waiting on: its
+// choice number and the target to reconnect to if the daemon refuses.
+type pendingInPlace struct {
+	seq    uint64
+	target pickerAttachmentTarget
+}
+
 // newAttachmentWorker builds the real typed-session worker for one admitted
 // request. The worker receives no endpoint, route, or raw-mode authority: it
 // only drives the typed session protocol on the stream the supervisor opened.
@@ -709,7 +716,12 @@ func (s *Supervisor) withFreshStream(service ports.BrokerNavigator, target picke
 // attachmentRetry instead of presented.
 func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, target pickerAttachmentTarget, localProvenance SessionEnvironmentProvenance, resuming bool) attachmentOutcome {
 	request := target.request
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	// A live local session usually commits within the notice delay; a
+	// remote handshake, a resume, or a restore may not, and nothing can paint
+	// once the foreground owns the terminal, so their notice shows at once.
+	slow := resuming || !request.Local || target.tab.stopped != nil ||
+		(request.Admission == ports.BrokerAdmissionExact && !catalogueSessionLive(service.Snapshot(), request))
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, slow: slow})
 	deadline := startAttachmentDeadline(ctx, s.cfg.Clock)
 	defer deadline.finish()
 
@@ -744,7 +756,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 			}
 		}()
 	}
-	stream, err := service.OpenStream(openCtx, request)
+	stream, err := s.openStreamTicking(openCtx, service, request)
 	if keys != nil {
 		keys.release()
 		cancelOpen()
@@ -805,6 +817,30 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming)
 }
 
+// openStreamTicking opens one stream while advancing the Connecting spinner,
+// so a slow open still shows its delayed notice. No foreground owns the
+// terminal before Begin, so painting here never overwrites session output.
+// OpenStream honors ctx, so the wait always ends.
+func (s *Supervisor) openStreamTicking(ctx context.Context, service ports.BrokerNavigator, request ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+	type opened struct {
+		stream ports.BrokerLogicalConnection
+		err    error
+	}
+	result := make(chan opened, 1)
+	go func() {
+		stream, err := service.OpenStream(ctx, request)
+		result <- opened{stream: stream, err: err}
+	}()
+	for {
+		select {
+		case r := <-result:
+			return r.stream, r.err
+		case <-s.spinnerTick():
+			s.cfg.Spinner.AdvanceSpinner(s.State())
+		}
+	}
+}
+
 // settleAttachment joins one admitted attachment while watching the parent
 // context, terminal EOF, and broker-connection loss. The deadline is the only
 // other stop: when it fires before the worker settled, the attachment ends as
@@ -854,6 +890,8 @@ settlement:
 			overlay.takeOp()
 		case consumed := <-s.attachments.OverlayActions():
 			overlay.settleAction(consumed)
+		case result := <-s.attachments.InPlaceResults():
+			overlay.inPlaceSettled(result)
 		case <-overlay.invalidation():
 			overlay.resize()
 		case <-notices.arm(s.cfg.Picker):
@@ -898,6 +936,9 @@ settlement:
 	// while this attachment was live; this attempt consumes it either way.
 	swap := s.pendingSwap
 	s.pendingSwap = nil
+	// An in-place switch still in flight ended with its attachment; the
+	// resume or picker path below decides what comes next.
+	s.pendingInPlace = nil
 	if terminated {
 		return attachmentTerminatedOutcome(termErr)
 	}
@@ -998,7 +1039,7 @@ func resumeTarget(request ports.BrokerOpenStreamRequest, fg *attachmentForegroun
 // with Ctrl-C or Esc, which returns to the picker. Other keys typed during
 // the outage are kept and replayed into the session once it resumes.
 func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, attempt int) (terminated bool, termErr error, stop bool) {
-	s.transition(supervisorEvent{kind: supervisorAttachBegin})
+	s.transition(supervisorEvent{kind: supervisorAttachBegin, slow: true})
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
