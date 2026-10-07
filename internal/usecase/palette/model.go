@@ -127,6 +127,15 @@ func (m *Model) Query() string {
 	}
 	return m.input.Value()
 }
+
+// paletteInputPrefix leads the query line on row 0 of the rendered frame.
+const paletteInputPrefix = "> "
+
+// Caret is the query caret column on row 0 of a Render frame of size inner
+// (see ui.InputCaret).
+func (m *Model) Caret(inner domain.Size) (int, bool) {
+	return ui.InputCaret(inner, paletteInputPrefix, m.Query())
+}
 func (m *Model) Up() {
 	if m == nil || len(m.matches) == 0 {
 		return
@@ -371,10 +380,10 @@ func (m *Model) Render(inner domain.Size, opts RenderOptions) renderer.Frame {
 	}
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
 	if m == nil {
-		ui.DrawInputLine(frame, 0, "> ", "", base, selection)
+		ui.DrawInputLine(frame, 0, paletteInputPrefix, "", base)
 		return frame
 	}
-	ui.DrawInputLine(frame, 0, "> ", m.Query(), base, selection)
+	ui.DrawInputLine(frame, 0, paletteInputPrefix, m.Query(), base)
 	start, visible := 1, frame.Height-1
 	if visible <= 0 || len(m.matches) == 0 {
 		return frame

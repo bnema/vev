@@ -49,6 +49,15 @@ func (m *Model) Value() string {
 	return m.text.Value()
 }
 
+// promptInputPrefix leads the value line on row 0 of the rendered frame.
+const promptInputPrefix = "> "
+
+// Caret is the value caret column on row 0 of a Render frame of size inner
+// (see ui.InputCaret).
+func (m *Model) Caret(inner domain.Size) (int, bool) {
+	return ui.InputCaret(inner, promptInputPrefix, m.Value())
+}
+
 func (m *Model) Title() string {
 	if m == nil {
 		return ""
@@ -79,7 +88,7 @@ func (m *Model) RenderStyled(inner domain.Size, styles RenderStyles) renderer.Fr
 		return frame
 	}
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: styles.Base})
-	ui.DrawInputLine(frame, 0, "> ", m.Value(), styles.Base, styles.Selection)
+	ui.DrawInputLine(frame, 0, promptInputPrefix, m.Value(), styles.Base)
 	if frame.Height > 1 && m != nil && m.errMsg != "" {
 		ui.DrawText(frame, 0, 1, frame.Width, m.errMsg, styles.Selection)
 	}

@@ -70,6 +70,15 @@ func (m *Model) Query() string {
 	return m.input.Value()
 }
 
+// searchInputPrefix leads the query line on row 0 of the rendered frame.
+const searchInputPrefix = "/"
+
+// Caret is the query caret column on row 0 of a Render frame of size inner
+// (see ui.InputCaret).
+func (m *Model) Caret(inner domain.Size) (int, bool) {
+	return ui.InputCaret(inner, searchInputPrefix, m.Query())
+}
+
 func (m *Model) Up() {
 	if m != nil && m.selected > 0 {
 		m.selected--
@@ -180,7 +189,7 @@ func (m *Model) RenderStyled(inner domain.Size, styles RenderStyles) renderer.Fr
 	}
 	base, selection := styles.Base, styles.Selection
 	ui.FillRect(frame, domain.Rect{Width: frame.Width, Height: frame.Height}, renderer.Cell{Rune: ' ', Style: base})
-	ui.DrawInputLine(frame, 0, "/", m.Query(), base, selection)
+	ui.DrawInputLine(frame, 0, searchInputPrefix, m.Query(), base)
 	visible := frame.Height - 1
 	if visible <= 0 || len(m.matches) == 0 {
 		return frame

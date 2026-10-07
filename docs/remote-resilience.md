@@ -34,7 +34,7 @@ The command palette is rendered by the remote daemon, so opening it needs a work
 
 ## Typing on a slow link
 
-On remote sessions vev shows what you type before the server answers, like mosh. When the round trip exceeds about 60 ms, typed characters and backspace appear at once on the cursor line. Above about 160 ms they are underlined until the server confirms them. A wrong guess, such as a password prompt that echoes nothing, is erased when the server answers. Set `echo.predict = always` or `never` to change this; see [configuration](configuration.md).
+On remote sessions vev shows what you type before the server answers, like mosh. When the round trip exceeds about 60 ms, typed characters and backspace appear at once on the cursor line, including in the command palette, rename prompts, and copy search. Above about 160 ms they are underlined until the server confirms them. A wrong guess, such as a password prompt that echoes nothing, is erased when the server answers. Set `echo.predict = always` or `never` to change this; see [configuration](configuration.md).
 
 ## Connection states
 

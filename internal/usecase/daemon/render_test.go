@@ -1031,17 +1031,6 @@ func TestPTYKittyAnimationFallbackKeepsProtocolErrorsOutOfShell(t *testing.T) {
 	require.Equal(t, uint64(1), snapshot.Usage().Placements, "the supported first frame remains as a static fallback")
 }
 
-func TestCaptureCursorInputsHidesFocusedCursorForNoticesOverlay(t *testing.T) {
-	_, sess, _, _ := newManualSessionWithPTYs(t, nil)
-	p := sess.tabs[0].focusedPane()
-
-	p.mu.Lock()
-	cursor := captureCursorInputsLocked(p, domain.Rect{Width: 80, Height: 23}, capturedOverlayRenderState{noticesOverlayActive: true})
-	p.mu.Unlock()
-
-	require.True(t, cursor.hiddenByOverlay)
-}
-
 func TestCursorTailVisibleHideAndMoveOnly(t *testing.T) {
 	p, _ := newBlockingPTY(t)
 	d, sess, ac, sends := newManualSessionWithPTYs(t, p)

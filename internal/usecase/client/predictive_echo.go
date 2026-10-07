@@ -558,6 +558,12 @@ func (p *echoPredictor) backspace(seq uint64, now time.Time) {
 	}
 	width := len(p.cells)
 	col := p.cursor.col - 1
+	if left, known := p.effective(col); known && isBorderRune(left.Rune) {
+		// The input starts after a border (a modal box or pane divider):
+		// backspace cannot erase it.
+		p.becomeTentative()
+		return
+	}
 	for i := col; i < width; i++ {
 		cell, known := p.effective(i)
 		if known && !isPlainCell(cell) {

@@ -141,6 +141,10 @@ type capturedModal struct {
 	presentation ui.Presentation
 	inner        renderer.Frame
 	focused      bool
+	// caretCol is the input caret column on row 0 of inner, valid when
+	// hasCaret. The topmost modal with a caret owns the terminal cursor.
+	caretCol int
+	hasCaret bool
 }
 
 func (o capturedOverlayRenderState) active() bool {
@@ -148,9 +152,9 @@ func (o capturedOverlayRenderState) active() bool {
 }
 
 type capturedCursorInputs struct {
-	row, col, style                                int
-	hasStyle, visible, renderable, hiddenByOverlay bool
-	content                                        domain.Rect
+	row, col, style               int
+	hasStyle, visible, renderable bool
+	content                       domain.Rect
 }
 
 // writePaneScreenLocked is the production VT write boundary. The first
@@ -407,7 +411,7 @@ func captureLocalRenderState(
 		state.receipts = append(state.receipts, damageReceipt{pane: p, generation: captured.damageGeneration})
 		captured.placement, captured.focused = placement, placement.ID == layoutSnap.focus
 		if captured.focused {
-			state.cursor = captureCursorInputsLocked(p, placement.Content, overlays)
+			state.cursor = captureCursorInputsLocked(p, placement.Content)
 		}
 		p.mu.Unlock()
 		translated := captured.rawDamage[:0]
@@ -444,7 +448,7 @@ func captureLocalRenderState(
 		// A visible floating pane is the terminal input target, so its structural
 		// border carries the focused semantic role independently of its content.
 		state.floating = capturedFloatingRenderState{visible: true, focused: true, pane: captured, geometry: geometry, title: captured.title, generation: tb.floating.generation, titleGeneration: captured.titleGeneration}
-		state.cursor = captureCursorInputsLocked(p, geometry.Inner, overlays)
+		state.cursor = captureCursorInputsLocked(p, geometry.Inner)
 		p.mu.Unlock()
 	}
 	scratch.receipts = state.receipts
@@ -469,10 +473,9 @@ func copyRankedRecentInto(dst, src []rankedRecent) []rankedRecent {
 	return append(dst[:0], src...)
 }
 
-func captureCursorInputsLocked(p *pane, content domain.Rect, overlays capturedOverlayRenderState) capturedCursorInputs {
+func captureCursorInputsLocked(p *pane, content domain.Rect) capturedCursorInputs {
 	style, hasStyle := p.screen.CursorStyle()
-	hidden := overlays.copyActive || overlays.copySearchActive || overlays.paletteActive || overlays.promptActive || overlays.noticesOverlayActive
-	return capturedCursorInputs{row: p.screen.CursorRow(), col: p.screen.CursorCol(), style: style, hasStyle: hasStyle, visible: p.screen.CursorVisible(), renderable: content.Width > 0 && content.Height > 0, hiddenByOverlay: hidden, content: content}
+	return capturedCursorInputs{row: p.screen.CursorRow(), col: p.screen.CursorCol(), style: style, hasStyle: hasStyle, visible: p.screen.CursorVisible(), renderable: content.Width > 0 && content.Height > 0, content: content}
 }
 
 // appendStackPaneIDs returns exactly the panes whose solved placement can own a

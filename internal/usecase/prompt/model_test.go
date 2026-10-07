@@ -32,7 +32,10 @@ func TestModelRenderDrawsInputAndError(t *testing.T) {
 	frame := m.Render(domain.Size{Cols: 24, Rows: 2})
 
 	require.Equal(t, "> work                  ", promptRowText(frame.Row(0)))
-	require.True(t, frame.At(6, 0).Style.Inverse, "caret follows prefilled value")
+	require.False(t, frame.At(6, 0).Style.Inverse, "the real terminal cursor is the caret, none is drawn")
+	col, ok := m.Caret(domain.Size{Cols: 24, Rows: 2})
+	require.True(t, ok)
+	require.Equal(t, 6, col, "caret follows prefilled value")
 	require.Equal(t, "name already in use     ", promptRowText(frame.Row(1)))
 	require.True(t, frame.At(0, 1).Style.Inverse, "error line is visually distinct")
 }
@@ -65,5 +68,5 @@ func TestModelRenderStyledFillsBaseAndSelection(t *testing.T) {
 	frame := m.RenderStyled(domain.Size{Cols: 12, Rows: 2}, RenderStyles{Base: base, Selection: selection})
 
 	require.True(t, frame.At(11, 1).Style.Equal(base), "blank filler keeps base surface")
-	require.True(t, frame.At(3, 0).Style.Equal(selection), "caret keeps selection surface")
+	require.True(t, frame.At(3, 0).Style.Equal(base), "caret cell keeps base surface under the real cursor")
 }

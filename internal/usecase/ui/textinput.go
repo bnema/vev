@@ -1,6 +1,9 @@
 package ui
 
-import renderer "github.com/bnema/vev-vt"
+import (
+	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain"
+)
 
 // TextInput stores editable text as runes for terminal overlay input models.
 type TextInput struct {
@@ -20,18 +23,24 @@ func (t *TextInput) Value() string { return string(t.runes) }
 
 func (t *TextInput) SetValue(value string) { t.runes = []rune(value) }
 
-// DrawInputLine draws prefix + value followed by a reverse-video caret cell.
-func DrawInputLine(f renderer.Frame, y int, prefix, value string, style renderer.Style, caretStyle ...renderer.Style) {
+// DrawInputLine draws prefix + value. The caret is not drawn: the daemon
+// places the real terminal cursor at InputCaret, so client predictive echo
+// can type ahead on the input line.
+func DrawInputLine(f renderer.Frame, y int, prefix, value string, style renderer.Style) {
 	if y < 0 || y >= f.Height {
 		return
 	}
-	x := DrawText(f, 0, y, f.Width, prefix+value, style)
-	if x >= 0 && x < f.Width {
-		caret := style
-		caret.Inverse = true
-		if len(caretStyle) > 0 {
-			caret = caretStyle[0]
-		}
-		f.Set(x, y, renderer.Cell{Rune: ' ', Style: caret})
+	DrawText(f, 0, y, f.Width, prefix+value, style)
+}
+
+// InputCaret is the caret column of an input line drawn by DrawInputLine on
+// row 0 of a frame of size inner. It reports false when the frame has no row
+// or prefix + value leaves no room for the caret, so a clipped line never
+// shows a misplaced cursor.
+func InputCaret(inner domain.Size, prefix, value string) (int, bool) {
+	col := 0
+	for _, r := range prefix + value {
+		col += renderer.RuneWidth(r)
 	}
+	return col, inner.Rows > 0 && col < inner.Cols
 }
