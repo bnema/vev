@@ -698,6 +698,7 @@ func outerTerminalAttachmentEnvironment(log *slog.Logger) client.AttachmentEnvir
 	env := userTerminalAttachmentEnvironment(log, cfg.Terminal)
 	env.ProbeTerminal = true
 	env.KittyKeyboard = cfg.Keyboard.KittyProtocol
+	env.EchoPredict = cfg.Echo.Predict
 	return env
 }
 

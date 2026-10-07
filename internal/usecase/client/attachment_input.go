@@ -33,6 +33,7 @@ type attachmentInput struct {
 	fg     AttachmentForeground
 	stream ports.BrokerLogicalConnection
 	picker *attachmentMovePicker
+	echo   *attachmentEcho
 	clock  ports.Clock
 	seq    uint64
 
@@ -99,12 +100,13 @@ func (d *paletteDeadline) fired(kind paletteGenerationEventKind) paletteGenerati
 	return event
 }
 
-func newAttachmentInput(ctx context.Context, w *sessionAttachmentWorker, fg AttachmentForeground, stream ports.BrokerLogicalConnection, picker *attachmentMovePicker) *attachmentInput {
+func newAttachmentInput(ctx context.Context, w *sessionAttachmentWorker, fg AttachmentForeground, stream ports.BrokerLogicalConnection, picker *attachmentMovePicker, echo *attachmentEcho) *attachmentInput {
 	in := &attachmentInput{
 		worker: w,
 		fg:     fg,
 		stream: stream,
 		picker: picker,
+		echo:   echo,
 		clock:  w.cfg.Clock,
 		wake:   make(chan struct{}, 1),
 		themes: w.cfg.Theme,
@@ -310,6 +312,11 @@ func (in *attachmentInput) flush(ctx context.Context) error {
 		}
 		if err := in.send(ctx, message); err != nil {
 			return err
+		}
+		if m, ok := message.(protocol.Input); ok {
+			if err := in.echo.input(m.InputSeq, m.Data); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

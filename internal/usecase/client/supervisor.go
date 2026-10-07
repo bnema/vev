@@ -396,6 +396,8 @@ type AttachmentEnvironment struct {
 	// KittyKeyboard enables the kitty keyboard protocol when the probe finds
 	// it, which makes Ctrl+1..9 recent-session switching available.
 	KittyKeyboard bool
+	// EchoPredict selects predictive local echo on remote attachments.
+	EchoPredict domain.EchoPredictMode
 }
 
 // AttachmentLifecycleAction is an explicit process/attachment decision.

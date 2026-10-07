@@ -997,6 +997,53 @@ func (f *attachmentForeground) writeTerminalQuery(data []byte) error {
 	return err
 }
 
+// attachmentPredictionForeground is the optional predictive-echo seam of the
+// real foreground. Scripted foregrounds may omit it; the worker then never
+// predicts.
+type attachmentPredictionForeground interface {
+	writePrediction(data []byte) (bool, error)
+}
+
+var _ attachmentPredictionForeground = (*attachmentForeground)(nil)
+
+// writePrediction writes and flushes predicted echo under the output lease.
+// It reports false without writing while an overlay owns the terminal. The
+// guesses are client-local drawing, so the UI observation channel is not
+// involved.
+func (f *attachmentForeground) writePrediction(data []byte) (bool, error) {
+	if f == nil {
+		return false, errAttachmentForegroundRevoked
+	}
+	var err error
+	written := false
+	ok := f.lease.send(func() bool {
+		if !f.authority.actionAuthorized(f) {
+			return false
+		}
+		if f.overlayKind() != attachmentOverlayNone {
+			return true
+		}
+		if supervisorNil(f.term) || supervisorNil(f.term.Out()) {
+			err = ports.ErrUIUnavailable
+			return true
+		}
+		var n int
+		n, err = f.term.Out().Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		if err == nil {
+			err = f.term.Flush()
+		}
+		written = err == nil
+		return true
+	})
+	if !ok {
+		return false, errAttachmentForegroundRevoked
+	}
+	return written, err
+}
+
 // attachmentRun is one in-flight worker generation owned by the supervisor.
 type attachmentRun struct {
 	host   *attachmentHost

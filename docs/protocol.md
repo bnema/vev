@@ -162,8 +162,11 @@ base. `ValidateOutput` enforces the epoch/base/new chain
 - The client coalesces ACKs (`client.go:cumulativeAckQueue`) and keeps
   applying + acknowledging daemon frames even while a picker lease owns
   the terminal (see below) — admission without physical write.
-- `Echo` carries the client's last input acknowledgement inside output;
-  `OutputResetRequest` restarts the chain; `UIFence{ActionID}` orders UI
+- `Echo` is the newest `InputSeq` the daemon applied at least 50 ms ago
+  (mosh's echo timeout), so the screen it ships with already holds that
+  input's echo. When no frame is due, the daemon sends it in an empty
+  side-effect `Output` (`New == 0`). Clients use it to confirm predicted
+  echo. `OutputResetRequest` restarts the chain; `UIFence{ActionID}` orders UI
   operations and `UIReceipt` reports the processed boundary
   (`Processed` requires epoch/state/publication; `Unavailable` carries
   none).
