@@ -103,10 +103,11 @@ func TestResumeWatch(t *testing.T) {
 		name         string
 		reads        []string
 		wantCancel   bool
+		fireEscape   bool
 		wantResidual string
 	}{
 		{name: "ctrl-c cancels and drops held keys", reads: []string{"ls", "\x03"}, wantCancel: true},
-		{name: "lone esc cancels", reads: []string{"\x1b"}, wantCancel: true},
+		{name: "lone esc cancels", reads: []string{"\x1b"}, wantCancel: true, fireEscape: true},
 		{name: "kitty esc cancels", reads: []string{"\x1b[27u"}, wantCancel: true},
 		{name: "kitty ctrl-c cancels", reads: []string{"\x1b[99;5u"}, wantCancel: true},
 		{name: "kitty ctrl-c with lock bits cancels", reads: []string{"\x1b[99;69u"}, wantCancel: true},
@@ -123,11 +124,15 @@ func TestResumeWatch(t *testing.T) {
 				close(reader.chunks)
 			})
 			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
-			watch := lifetime.watchResume()
+			clock := newSupervisorTestClock()
+			watch := lifetime.watchResume(clock)
 			for _, read := range tt.reads {
 				reader.chunks <- []byte(read)
 			}
 			if tt.wantCancel {
+				if tt.fireEscape {
+					clock.awaitTimer(t).fire()
+				}
 				select {
 				case <-watch.cancelled:
 				case <-time.After(5 * time.Second):

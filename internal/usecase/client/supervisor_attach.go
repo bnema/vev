@@ -721,7 +721,39 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	request.Env = append([]string(nil), sessionEnv.Env...)
 
 	s.logger.Debug("client_stream_open_begin", "local", request.Local, "endpoint", request.Endpoint, "admission", request.Admission, "generation", s.State().Generation)
-	stream, err := service.OpenStream(deadline.Context(), request)
+	openCtx := deadline.Context()
+	var keys *resumeWatch
+	var cancelOpen context.CancelFunc
+	var watchDone chan struct{}
+	if resuming {
+		keys = input.watchResume(s.cfg.Clock)
+		openCtx, cancelOpen = context.WithCancel(openCtx)
+		watchDone = make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			select {
+			case <-keys.cancelled:
+				cancelOpen()
+			case <-openCtx.Done():
+			}
+		}()
+	}
+	stream, err := service.OpenStream(openCtx, request)
+	if keys != nil {
+		keys.release()
+		cancelOpen()
+		<-watchDone
+		select {
+		case <-keys.cancelled:
+			s.logger.Info("client_attachment_resume_cancelled", "phase", "stream_open")
+			if !supervisorNil(stream) {
+				_ = stream.Close()
+			}
+			s.transition(supervisorEvent{kind: supervisorAttachEnded})
+			return attachmentEndedOutcome()
+		default:
+		}
+	}
 	if err != nil {
 		s.logger.Warn("client_stream_open_failed", "local", request.Local, "endpoint", request.Endpoint, "code", brokerErrorCode(err), "error", err, "cause", errors.Unwrap(err))
 		return s.attemptFailed(deadline.cause(err), resuming)
@@ -964,7 +996,7 @@ func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetim
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
-	keys := input.watchResume()
+	keys := input.watchResume(s.cfg.Clock)
 	defer keys.release()
 	for {
 		select {

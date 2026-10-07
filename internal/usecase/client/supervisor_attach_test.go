@@ -1304,13 +1304,6 @@ func testStreamLoss() ports.BrokerStreamLost {
 // 15s attachment deadline and the 200ms palette deadline).
 func resumeTestJitter() float64 { return 0.5 }
 
-// fireResumeTimer fires the resume backoff timer for one attempt. Other timers
-// share the clock, so it matches the exact backoff delay.
-func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
-	t.Helper()
-	fireResumeTimerAfter(t, clock, attempt, func() {})
-}
-
 // fireResumeTimerAfter waits for the attempt's backoff timer, runs before, then
 // fires it.
 func fireResumeTimerAfter(t *testing.T, clock *supervisorTestClock, attempt int, before func()) {

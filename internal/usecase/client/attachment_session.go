@@ -355,9 +355,10 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		if pending == nil {
 			return
 		}
-		// The run ends before the delivery was written: join the sender so
-		// the outbox is final, then decide the delivery once, preserving
-		// exactly the session input that never reached the carriage.
+		// Join the sender before deciding which input reached the carriage.
+		// A written automation action remains OutcomeUnknown if teardown
+		// prevents its UIFence receipt; acknowledging input is not proof
+		// that the daemon processed the action.
 		stream.join()
 		if unsent := stream.unsentInput(pending.from, pending.mark); len(unsent) != 0 {
 			fg.PreserveInput(unsent)
@@ -397,6 +398,14 @@ func (w *sessionAttachmentWorker) pumpAttached(ctx context.Context, fg Attachmen
 		return ackWritten()
 	}
 	for {
+		// Failure also closes progress. Settle it before rearming that
+		// channel, rather than spinning on an acknowledgement that cannot
+		// advance.
+		select {
+		case <-stream.Failed():
+			return w.settle(ctx, fg, stream, token, stream.failure())
+		default:
+		}
 		var progress <-chan struct{}
 		if pending != nil {
 			progress = stream.Progress()

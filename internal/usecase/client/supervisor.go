@@ -1503,6 +1503,7 @@ type resumeWatch struct {
 	done      chan struct{}
 	lifetime  *terminalInputLifetime
 	id        uint64
+	clock     ports.Clock
 
 	mu   sync.Mutex
 	held []byte
@@ -1524,18 +1525,10 @@ func (w *resumeWatch) hold(data []byte) {
 	}
 }
 
-// isResumeCancelKey reports a read that is exactly Ctrl-C or a lone Esc,
-// after decoding the kitty keyboard protocol (Esc is \x1b[27u there). A longer
-// read starting with Esc is an escape sequence (arrows, focus), not a cancel.
-func isResumeCancelKey(data []byte) bool {
-	data = kittykey.Translate(data, 0)
-	return len(data) == 1 && (data[0] == 0x03 || data[0] == 0x1b)
-}
-
 // watchResume claims terminal input for one resume backoff. When the claim
 // is unavailable it returns a watch that never cancels.
-func (l *terminalInputLifetime) watchResume() *resumeWatch {
-	w := &resumeWatch{cancelled: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), lifetime: l}
+func (l *terminalInputLifetime) watchResume(clock ports.Clock) *resumeWatch {
+	w := &resumeWatch{cancelled: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), lifetime: l, clock: clock}
 	if l == nil || l.pump == nil {
 		close(w.done)
 		return w
@@ -1553,11 +1546,26 @@ func (l *terminalInputLifetime) watchResume() *resumeWatch {
 func (w *resumeWatch) run() {
 	defer close(w.done)
 	pump := w.lifetime.pump
+	var decoder resumeInputDecoder
+	var escape ports.Timer
+	defer func() {
+		if escape != nil {
+			escape.Stop()
+		}
+		w.hold(decoder.flush())
+	}()
 	for {
+		var escapeC <-chan time.Time
+		if escape != nil {
+			escapeC = escape.C()
+		}
 		result, ok := pump.take(context.Background(), w.id)
 		if !ok {
 			select {
 			case <-pump.readyFor(w.id):
+			case <-escapeC:
+				close(w.cancelled)
+				return
 			case <-w.stop:
 				return
 			case <-pump.done:
@@ -1568,16 +1576,25 @@ func (w *resumeWatch) run() {
 		if result.err != nil {
 			// Leave the final read for the terminal EOF watcher.
 			pump.ack(w.id)
+			w.hold(decoder.flush())
 			w.hold(result.data)
 			w.lifetime.finish(result.err)
 			return
 		}
 		pump.ack(w.id)
-		if isResumeCancelKey(result.data) {
+		held, cancel := decoder.feed(result.data)
+		w.hold(held)
+		if cancel {
 			close(w.cancelled)
 			return
 		}
-		w.hold(result.data)
+		if escape != nil {
+			escape.Stop()
+			escape = nil
+		}
+		if decoder.loneEscape() {
+			escape = w.clock.NewTimer(50 * time.Millisecond)
+		}
 	}
 }
 
