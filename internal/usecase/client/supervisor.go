@@ -1505,8 +1505,15 @@ type resumeWatch struct {
 	id        uint64
 	clock     ports.Clock
 
+	// backlog counts deliveries already waiting at claim: session input the
+	// lost attachment kept, held verbatim and never read as a cancel key.
+	backlog int
+
 	mu   sync.Mutex
 	held []byte
+	// overflowed drops every key after the first one past the bound, so the
+	// resumed session never receives input with a gap in the middle.
+	overflowed bool
 }
 
 // heldLen reports how many kept bytes the watch holds.
@@ -1520,9 +1527,11 @@ func (w *resumeWatch) heldLen() int {
 func (w *resumeWatch) hold(data []byte) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.held)+len(data) <= resumeHeldInputLimit {
-		w.held = append(w.held, data...)
+	if w.overflowed || len(w.held)+len(data) > resumeHeldInputLimit {
+		w.overflowed = w.overflowed || len(data) != 0
+		return
 	}
+	w.held = append(w.held, data...)
 }
 
 // watchResume claims terminal input for one resume backoff. When the claim
@@ -1539,6 +1548,7 @@ func (l *terminalInputLifetime) watchResume(clock ports.Clock) *resumeWatch {
 		return w
 	}
 	w.id = id
+	w.backlog = l.pump.backlog(id)
 	go w.run()
 	return w
 }
@@ -1582,6 +1592,11 @@ func (w *resumeWatch) run() {
 			return
 		}
 		pump.ack(w.id)
+		if w.backlog > 0 {
+			w.backlog--
+			w.hold(result.data)
+			continue
+		}
 		held, cancel := decoder.feed(result.data)
 		w.hold(held)
 		if cancel {

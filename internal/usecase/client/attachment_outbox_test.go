@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -148,6 +149,75 @@ func TestResumeWatch(t *testing.T) {
 			require.Zero(t, pump.consumer, "release returns the claim")
 		})
 	}
+}
+
+// TestResumeWatchKeepsBacklogVerbatim starts a watch while session input the
+// lost attachment kept is still waiting: a Ctrl-C or trailing Esc in it was
+// typed for the remote shell, so it is replayed, not read as a cancel key.
+// Keys typed after the watch started still cancel.
+func TestResumeWatchKeepsBacklogVerbatim(t *testing.T) {
+	for _, tt := range []struct {
+		name, residual, pending, typed string
+		wantCancel                     bool
+		wantResidual                   string
+	}{
+		{name: "kept ctrl-c", residual: "\x03", wantResidual: "\x03"},
+		{name: "kept trailing esc", residual: "ihello\x1b", wantResidual: "ihello\x1b"},
+		{name: "pending ctrl-c", pending: "x\x03", wantResidual: "x\x03"},
+		{name: "residual then pending", residual: "a", pending: "\x03", wantResidual: "a\x03"},
+		{name: "new ctrl-c still cancels", residual: "\x03", typed: "\x03", wantCancel: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &inputTestReader{chunks: make(chan []byte, 2)}
+			pump := newTerminalInputPump(reader)
+			pump.start()
+			t.Cleanup(func() {
+				pump.stop()
+				close(reader.chunks)
+			})
+			pump.mu.Lock()
+			pump.residual = []byte(tt.residual)
+			pump.mu.Unlock()
+			if tt.pending != "" {
+				reader.chunks <- []byte(tt.pending)
+				require.Eventually(t, func() bool {
+					pump.mu.Lock()
+					defer pump.mu.Unlock()
+					return pump.pending != nil
+				}, 5*time.Second, time.Millisecond)
+			}
+			lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+			watch := lifetime.watchResume(newSupervisorTestClock())
+			require.Eventually(t, func() bool { return watch.heldLen() == len(tt.residual)+len(tt.pending) }, 5*time.Second, time.Millisecond)
+			if tt.typed != "" {
+				reader.chunks <- []byte(tt.typed)
+			}
+			if tt.wantCancel {
+				select {
+				case <-watch.cancelled:
+				case <-time.After(5 * time.Second):
+					t.Fatal("new cancel key ignored")
+				}
+			}
+			watch.release()
+			select {
+			case <-watch.cancelled:
+				require.True(t, tt.wantCancel, "backlog cancelled the resume")
+			default:
+			}
+			pump.mu.Lock()
+			defer pump.mu.Unlock()
+			require.Equal(t, tt.wantResidual, string(pump.residual))
+		})
+	}
+}
+
+func TestResumeWatchHeldOverflowIsSticky(t *testing.T) {
+	w := &resumeWatch{}
+	w.hold(bytes.Repeat([]byte("a"), resumeHeldInputLimit-1))
+	w.hold([]byte("bb"))
+	w.hold([]byte("c"))
+	require.Equal(t, resumeHeldInputLimit-1, w.heldLen(), "keys after an overflow must be dropped too")
 }
 
 // stallingSessionStream passes writes through until stall is set; stalled

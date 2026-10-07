@@ -125,6 +125,25 @@ func (p *terminalInputPump) tryClaim() (uint64, bool) {
 	return consumer, true
 }
 
+// backlog reports how many deliveries were already waiting when consumer
+// claimed the pump: the residual, then the pending read. They were read for an
+// earlier owner, not typed for consumer.
+func (p *terminalInputPump) backlog(consumer uint64) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.consumer != consumer {
+		return 0
+	}
+	n := 0
+	if len(p.residual) != 0 {
+		n++
+	}
+	if p.pending != nil {
+		n++
+	}
+	return n
+}
+
 // revoke invalidates an attempt before its replacement is allowed to claim
 // input. Pending bytes are deliberately retained for that replacement.
 func (p *terminalInputPump) revoke(consumer uint64) {
