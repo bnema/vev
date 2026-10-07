@@ -41,12 +41,21 @@ func TestTCPRelayPreservesBytesAndStops(t *testing.T) {
 	require.Equal(t, uint64(len(payload)), r.bytes.Load())
 }
 
+// controlSocketPath returns a socket path in a short private directory: the
+// macOS t.TempDir path exceeds the 104-byte AF_UNIX limit.
+func controlSocketPath(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "relay")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	require.NoError(t, os.Chmod(directory, 0700))
+	return filepath.Join(directory, "control.sock")
+}
+
 func TestRelayShutdownClosesListeners(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	r := &relay{ctx: ctx, cancel: cancel, connections: make(map[net.Conn]struct{})}
-	directory := t.TempDir()
-	require.NoError(t, os.Chmod(directory, 0700))
-	path := filepath.Join(directory, "control.sock")
+	path := controlSocketPath(t)
 	done := make(chan error, 1)
 	go func() { done <- r.serve("127.0.0.1:0", path) }()
 	require.Eventually(t, func() bool { _, err := os.Stat(path); return err == nil }, time.Second, time.Millisecond)
@@ -115,9 +124,7 @@ func TestRelayControlRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	r := &relay{ctx: ctx, cancel: cancel, connections: make(map[net.Conn]struct{})}
-	directory := t.TempDir()
-	require.NoError(t, os.Chmod(directory, 0700))
-	path := filepath.Join(directory, "control.sock")
+	path := controlSocketPath(t)
 	done := make(chan error, 1)
 	go func() { done <- r.serve("127.0.0.1:0", path) }()
 	require.Eventually(t, func() bool { _, err := os.Stat(path); return err == nil }, time.Second, time.Millisecond)
