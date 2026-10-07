@@ -30,6 +30,8 @@ The transport is fixed when the host is added (`quic` by default). To switch, ru
 - If the reconnect window has expired but the session still exists, the client opens a fresh attachment to it.
 - Several clients can attach to the same session. Each keeps its own window, tab, focus, and copy mode.
 
+The command palette is rendered by the remote daemon, so opening it needs a working link. A client-owned session picker that is already open remains locally interactive during an outage.
+
 ## Connection states
 
 | State | Meaning |
@@ -79,6 +81,6 @@ VEV_LOG=debug vev attach user@host
 scripts/debug-remote-attach.sh user@host   # collects redacted connection health
 ```
 
-Useful manual checks: block UDP, switch networks or VPN, suspend the laptop, then reattach to the same session.
+Useful manual checks: block UDP, switch networks or VPN, suspend the laptop, then reattach to the same session. For isolated QUIC/SSH impairment and real Wayland terminal captures, see the [visual resilience harness](../scripts/remote-resilience-harness/README.md).
 
 Keep hostnames, usernames, and keys out of shared logs and screenshots.
