@@ -143,6 +143,9 @@ func (l LinkConfig) validate(direction Direction) error {
 
 // Config configures a [Proxy].
 type Config struct {
+	// ListenAddr optionally selects the client-facing fixture address.
+	// Nil retains the ephemeral loopback default.
+	ListenAddr *net.UDPAddr
 	// ServerAddr is the UDP server the proxy forwards to. Required.
 	ServerAddr *net.UDPAddr
 	// Clock drives all scheduling. Defaults to [SystemClock].

@@ -25,21 +25,22 @@ The transport is fixed when the host is added (`quic` by default). To switch, ru
 ## What survives a network problem
 
 - The remote session and its shells keep running while you are offline.
-- The client reconnects by itself after a network change, a VPN switch, or a laptop sleep.
+- The client reconnects by itself after a network change, a VPN switch, or a laptop sleep, and keeps retrying for up to 15 minutes of outage before it returns to the picker. Press Ctrl-C or Esc while it reconnects to give up and return to the picker.
+- A stalled link does not block the client loop. Keys typed while the link stalls or reconnects are kept and sent in order once it recovers. Keys vev had not yet sent when the link dropped are replayed to the resumed session; keys already in flight at the drop may be lost.
 - If the reconnect window has expired but the session still exists, the client opens a fresh attachment to it.
 - Several clients can attach to the same session. Each keeps its own window, tab, focus, and copy mode.
 
+The command palette is rendered by the remote daemon, so opening it needs a working link. A client-owned session picker that is already open remains locally interactive during an outage.
+
 ## Connection states
 
-| State | Meaning |
+| What you see | Meaning |
 |---|---|
-| `connected` | Everything works. |
-| `degraded` | Packets arrive, but updates are slow. |
-| `probing` | No contact; vev is looking for a working path. |
-| `offline` | No contact for a while; vev is reconnecting. |
-| `dead` | The connection is gone for good. |
+| The session | The link works. |
+| `Connecting to session…` | The link dropped; vev is reconnecting and keeps your keys. |
+| The picker with an error | The session could not be reached again, or you cancelled. |
 
-States appear in the vev status bar, never inside your shell output.
+vev does not yet report a slow (`degraded`) link separately. Connection notices never appear inside your shell output.
 
 ## Hybrid mode: local and remote together
 
@@ -78,6 +79,6 @@ VEV_LOG=debug vev attach user@host
 scripts/debug-remote-attach.sh user@host   # collects redacted connection health
 ```
 
-Useful manual checks: block UDP, switch networks or VPN, suspend the laptop, then reattach to the same session.
+Useful manual checks: block UDP, switch networks or VPN, suspend the laptop, then reattach to the same session. For isolated QUIC/SSH impairment and real Wayland terminal captures, see the [visual resilience harness](../scripts/remote-resilience-harness/README.md).
 
 Keep hostnames, usernames, and keys out of shared logs and screenshots.

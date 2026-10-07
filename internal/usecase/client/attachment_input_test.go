@@ -33,6 +33,7 @@ func (r *inputTestReader) Read(p []byte) (int, error) {
 
 type inputHarness struct {
 	stream *sessionTestStream
+	pump   *terminalInputPump
 	term   *workerTestTerminal
 	clock  *supervisorTestClock
 	reader *inputTestReader
@@ -49,6 +50,16 @@ func startInputHarness(t *testing.T, themes *terminalThemeState) *inputHarness {
 
 func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, request ports.BrokerOpenStreamRequest, clipboard ports.ClipboardReader) *inputHarness {
 	t.Helper()
+	return startInputHarnessOn(t, themes, request, clipboard, newSessionTestStream(), nil)
+}
+
+// startInputHarnessOn runs the harness over stream; transport, when non-nil,
+// is what the worker writes through (a wrapper over stream).
+func startInputHarnessOn(t *testing.T, themes *terminalThemeState, request ports.BrokerOpenStreamRequest, clipboard ports.ClipboardReader, stream *sessionTestStream, transport ports.BrokerLogicalConnection) *inputHarness {
+	t.Helper()
+	if transport == nil {
+		transport = stream
+	}
 	reader := &inputTestReader{chunks: make(chan []byte, 16)}
 	pump := newTerminalInputPump(reader)
 	pump.start()
@@ -57,7 +68,8 @@ func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, reque
 		close(reader.chunks)
 	})
 	h := &inputHarness{
-		stream: newSessionTestStream(),
+		stream: stream,
+		pump:   pump,
 		term:   newWorkerTestTerminal(),
 		clock:  newSupervisorTestClock(),
 		reader: reader,
@@ -72,7 +84,7 @@ func startInputHarnessWithConfig(t *testing.T, themes *terminalThemeState, reque
 	worker, err := newSessionAttachmentWorker(cfg)
 	require.NoError(t, err)
 	go func() {
-		event, _ := host.Run(context.Background(), AttachmentToken{Generation: 4, Attempt: 1}, worker, h.stream)
+		event, _ := host.Run(context.Background(), AttachmentToken{Generation: 4, Attempt: 1}, worker, transport)
 		h.events <- event
 	}()
 	awaitHello(t, h.stream)

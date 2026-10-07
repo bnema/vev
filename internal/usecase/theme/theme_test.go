@@ -592,7 +592,7 @@ func TestStyleHelpersFallbackAndThemed(t *testing.T) {
 		t.Fatalf("status themed=%+v", status)
 	}
 	accent := AccentStyle(theme)
-	if accent.Inverse || !accent.HasBackgroundRGB || accent.BackgroundRGB != (renderer.RGB{R: 58, G: 65, B: 73}) {
+	if accent.Inverse || !accent.HasBackgroundRGB || accent.BackgroundRGB != theme.Foreground || accent.ForegroundRGB != theme.Background {
 		t.Fatalf("accent themed=%+v", accent)
 	}
 	border := BorderStyle(theme)

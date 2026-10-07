@@ -61,8 +61,14 @@ var (
 // listener and none on the dialer, no unidirectional streams, keepalive /
 // idle limits, bounded admission, no 0-RTT.
 type Config struct {
-	// KeepAlivePeriod defaults to 15s; MaxIdleTimeout defaults to 60s;
-	// HandshakeIdleTimeout defaults to 5s.
+	// KeepAlivePeriod defaults to 2s; MaxIdleTimeout defaults to 60s;
+	// HandshakeIdleTimeout defaults to 5s. The short keepalive keeps mobile
+	// CGNAT bindings open and probes the path often enough that loss
+	// recovery restarts promptly once the link returns. It does not shorten
+	// failure detection: a dead path is still declared only after
+	// MaxIdleTimeout, which stays long so one connection rides out short
+	// outages and delivers queued input without reconnecting. Both roles use
+	// it; a 2s PING is a few dozen bytes per connection.
 	KeepAlivePeriod      time.Duration
 	MaxIdleTimeout       time.Duration
 	HandshakeIdleTimeout time.Duration
@@ -86,7 +92,7 @@ const noIncomingStreams int64 = -1
 func baseQUICConfig(config Config) *quicgo.Config {
 	keepAlive := config.KeepAlivePeriod
 	if keepAlive == 0 {
-		keepAlive = 15 * time.Second
+		keepAlive = 2 * time.Second
 	}
 	maxIdle := config.MaxIdleTimeout
 	if maxIdle == 0 {

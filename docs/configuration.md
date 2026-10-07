@@ -187,7 +187,7 @@ Configure this in `~/.config/vev/broker.json`. The file is created on first use 
 - `warmTransports`: how many idle connections to keep (0–64, default 8). The oldest one closes first. `0` disables it.
 - `warmIdleTimeout`: close an idle connection after this long, such as `5m` (max `24h`). Default `off`: no time limit.
 
-Warm connections never keep the broker running.
+Warm connections never keep the broker running. Each open QUIC connection, warm ones included, sends a small keepalive every 2 seconds so mobile and NAT paths stay open; on battery, set `warmIdleTimeout` to close idle ones.
 
 ## Logs and durable state
 

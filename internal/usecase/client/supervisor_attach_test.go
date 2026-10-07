@@ -265,8 +265,10 @@ type attachTestPicker struct {
 	opsReady  chan struct{}
 	ownsInput bool
 	consumed  int
-	op        pickerOp
-	key       string
+	// consumedBytes records every byte the picker consumed, in order.
+	consumedBytes []byte
+	op            pickerOp
+	key           string
 	// resolveErr makes ResolveCommit refuse locally, which is how a test reaches
 	// the local-refusal classification without dialing anything.
 	resolveErr error
@@ -288,13 +290,14 @@ func newAttachTestPicker() *attachTestPicker {
 
 func (p *attachTestPicker) ApplySnapshot(ports.BrokerSnapshot) {}
 
-func (p *attachTestPicker) ConsumeTerminalRead([]byte) bool {
+func (p *attachTestPicker) ConsumeTerminalRead(data []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.ownsInput {
 		return false
 	}
 	p.consumed++
+	p.consumedBytes = append(p.consumedBytes, data...)
 	if p.consumeOp != (pickerOp{}) {
 		p.op, p.key, p.request = p.consumeOp, "row", p.consumeRequest
 		p.consumeOp = pickerOp{}
@@ -599,6 +602,56 @@ func TestSupervisorPendingSwapContinuesRatherThanExiting(t *testing.T) {
 		t.Fatalf("a swap must not report a lifecycle transition: %+v", notice)
 	default:
 	}
+}
+
+// TestSupervisorSwapDropsKeysKeptForPreviousSession types into a session whose
+// link stalls, then swaps to another session: the stalled keys were meant for
+// the first session and must never run in the second.
+func TestSupervisorSwapDropsKeysKeptForPreviousSession(t *testing.T) {
+	picker := newAttachTestPicker()
+	harness := startAttachHarness(t, picker)
+	base := newSessionTestStream()
+	first := &stallingSessionStream{sessionTestStream: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return first, nil
+	})
+	picker.commit(sessionTestRequest(true))
+	deliverReadyStream(t, base)
+	awaitAttachedState(t, harness.sup)
+	require.Eventually(t, func() bool { return len(base.messages()) >= 2 }, 5*time.Second, time.Millisecond)
+	first.stall.Store(true)
+	harness.reader.push([]byte("rm -rf build\r"))
+	<-first.entered
+
+	var mu sync.Mutex
+	second := newSessionTestStream()
+	harness.service.setOpenStream(func(context.Context, ports.BrokerOpenStreamRequest) (ports.BrokerLogicalConnection, error) {
+		return second, nil
+	})
+	base.deliver(navigationOffer(1))
+	awaitPresentation(t, harness.sup, PresentAttachedPicker)
+	other := sessionTestRequest(true)
+	other.Target = protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{2}, SessionName: "beta"}
+	picker.recordOp(pickerOp{commit: true}, "row", other)
+	// The Detach queues behind the stalled write; let the bounded drain expire
+	// so the unsent keys are preserved, as on a dead link.
+	for {
+		timer := harness.clock.awaitTimer(t)
+		if timer.delay == drainOutboxTimeout {
+			timer.fire()
+			break
+		}
+	}
+	awaitStreamHello(t, &mu, &second)
+	second.deliver(protocol.Welcome{SessionName: "beta"})
+	output := sessionTestOutput(1, "\x1b[Hbeta")
+	output.Context.Route.Target = other.Target
+	second.deliver(output)
+	awaitAttachedState(t, harness.sup)
+
+	harness.reader.push([]byte("z"))
+	require.Eventually(t, func() bool { return sentInput(second) == "z" }, 5*time.Second, time.Millisecond,
+		"second session input = %q", sentInput(second))
 }
 
 // awaitStreamHello waits until the admitted stream has sent its first client
@@ -1304,14 +1357,15 @@ func testStreamLoss() ports.BrokerStreamLost {
 // 15s attachment deadline and the 200ms palette deadline).
 func resumeTestJitter() float64 { return 0.5 }
 
-// fireResumeTimer fires the resume backoff timer for one attempt. Other timers
-// share the clock, so it matches the exact backoff delay.
-func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
+// fireResumeTimerAfter waits for the attempt's backoff timer, runs before, then
+// fires it.
+func fireResumeTimerAfter(t *testing.T, clock *supervisorTestClock, attempt int, before func()) {
 	t.Helper()
 	want := supervisorBackoffDelay(uint64(attempt), resumeTestJitter)
 	for {
 		timer := clock.awaitTimer(t)
 		if timer.delay == want {
+			before()
 			timer.fire()
 			return
 		}
@@ -1320,22 +1374,30 @@ func fireResumeTimer(t *testing.T, clock *supervisorTestClock, attempt int) {
 
 func TestAttachmentResumeBudget(t *testing.T) {
 	brief := time.Second
+	// step is the clock advance between spends: past the outage window, the
+	// attempt count alone decides; within it, resuming never gives up.
+	past := resumeOutageWindow / maxAttachmentResumes
 	tests := []struct {
 		name  string
 		steps []attachmentOutcomeKind
 		ups   []time.Duration
+		step  time.Duration
 		want  []bool
 	}{
-		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
-		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), want: repeatBools(true, maxAttachmentResumes+2)},
-		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "flapping resumes exhaust", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), step: past, want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "stable attachment restores the budget", steps: repeatKinds(attachmentResume, maxAttachmentResumes+2), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+2), step: past, want: repeatBools(true, maxAttachmentResumes+2)},
+		{name: "retries never restore the budget", steps: repeatKinds(attachmentRetry, maxAttachmentResumes+1), ups: repeatDurations(resumeStableAttachment, maxAttachmentResumes+1), step: past, want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "flaps exhaust inside the outage window", steps: repeatKinds(attachmentResume, maxAttachmentResumes+1), ups: repeatDurations(brief, maxAttachmentResumes+1), step: time.Second, want: append(repeatBools(true, maxAttachmentResumes), false)},
+		{name: "outage window keeps resuming", steps: repeatKinds(attachmentRetry, 3*maxAttachmentResumes), ups: repeatDurations(brief, 3*maxAttachmentResumes), step: time.Second, want: repeatBools(true, 3*maxAttachmentResumes)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var budget attachmentResumeBudget
 			require.False(t, budget.resuming)
+			now := time.Unix(0, 0)
 			for i, kind := range tt.steps {
-				_, ok := budget.spend(kind, tt.ups[i])
+				_, ok := budget.spend(kind, tt.ups[i], now)
+				now = now.Add(tt.step)
 				require.Equal(t, tt.want[i], ok, "step %d", i)
 				require.True(t, budget.resuming)
 			}
@@ -1443,7 +1505,7 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 			first.fail(testStreamLoss())
 
 			attempt := 1
-			for _, s := range tc.steps {
+			for i, s := range tc.steps {
 				if s == cancelDuringBackoff {
 					backoff := supervisorBackoffDelay(1, resumeTestJitter)
 					for harness.clock.awaitTimer(t).delay != backoff {
@@ -1456,7 +1518,15 @@ func TestSupervisorAttachmentLossResumesSameSession(t *testing.T) {
 				refusing.Store(s == refuse)
 				unavailable.Store(s == openUnavailable)
 				opened := len(harness.service.openedRequests())
-				fireResumeTimer(t, harness.clock, attempt)
+				// Giving up also requires the outage window to pass. The
+				// clock moves only once the last attempt's backoff is
+				// scheduled, so no attempt measures it as uptime.
+				last := tc.wantPicker && i == len(tc.steps)-1
+				fireResumeTimerAfter(t, harness.clock, attempt, func() {
+					if last {
+						advancePickerClock(harness.clock, resumeOutageWindow)
+					}
+				})
 				if s == refuse {
 					break
 				}
