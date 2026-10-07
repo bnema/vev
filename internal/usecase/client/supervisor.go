@@ -1492,6 +1492,8 @@ func (l *terminalInputLifetime) stop() {
 
 // resumeHeldInputLimit bounds keys kept while a lost attachment resumes.
 // Past it further keys are dropped, like a full terminal buffer.
+// TODO: the overflow flag is per resume watch; a later phase can accept keys
+// again and leave a gap. Make it sticky on the input lifetime until attach.
 const resumeHeldInputLimit = 64 << 10
 
 // resumeWatch reads the terminal while a lost attachment waits to resume.
