@@ -779,10 +779,6 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	if supervisorNil(stream) {
 		return s.attemptFailed(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker returned no stream"}, resuming)
 	}
-	if input != nil {
-		// The outage ended: keys typed from now on reach the session again.
-		input.resumeOverflowed.Store(false)
-	}
 	if err := deadline.adopt(stream); err != nil {
 		// The accepted absolute deadline already elapsed before this client
 		// saw the stream. Fail the attachment instead of restarting a budget.
@@ -817,6 +813,11 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 		}
 		s.transition(supervisorEvent{kind: supervisorAttachEnded})
 		return attachmentEndedOutcome()
+	}
+	if input != nil {
+		// The attachment owns input again: keys typed from now on reach the
+		// session, so the outage's overflow ends here, not at stream open.
+		input.resumeOverflowed.Store(false)
 	}
 	return s.settleAttachment(ctx, input, service, deadline, run, request, resuming)
 }
