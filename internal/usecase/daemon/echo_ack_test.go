@@ -65,11 +65,13 @@ func (c *echoTestClock) nextTimer(t *testing.T) (*manualAttentionTimer, time.Dur
 
 func TestEchoAckWaitsForEchoTimeoutAndSendsAckOnlyOutput(t *testing.T) {
 	clock := newEchoTestClock()
-	d, _, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
+	d, sess, ac, sends := newManualSessionWithPTYsClock(t, clock, newQuietPTY())
 
-	d.noteInputApplied(ac, 1)
+	// Drive the production input path so the acknowledgement wiring is
+	// covered, not just the tracker.
+	d.handleSequencedInput(sess, ac, 1, []byte("a"))
 	clock.advance(20 * time.Millisecond)
-	d.noteInputApplied(ac, 2)
+	d.handleSequencedInput(sess, ac, 2, []byte("b"))
 	timer, delay := clock.nextTimer(t)
 	require.Equal(t, echoAckDelay, delay)
 	require.Zero(t, ac.echoAck.Load(), "input is not echoed when applied")
