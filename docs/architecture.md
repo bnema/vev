@@ -60,7 +60,7 @@ main → app → usecase → ports
                     carriage adapters
 ```
 
-`internal/app` may import every layer to compose the process. Adapters depend inward on ports, protocol, and domain. `internal/snapshotcodec` owns the durable snapshot format (session codec, manifests, objects, preflight); it depends only on domain and ports, and both the daemon use case and the snapshot adapter consume it. Production dependency rules and the separate test-import policy are executable in `boundary_test.go`.
+`internal/app` may import every layer to compose the process. Adapters depend inward on ports, protocol, and domain. `internal/snapshotcodec` owns the durable snapshot format (session codec, manifests, objects, preflight); it depends only on domain and ports, and only the daemon use case and the snapshot adapter consume it. Production dependency rules and the separate test-import policy are executable in `boundary_test.go`.
 
 ## UI observation and control
 
