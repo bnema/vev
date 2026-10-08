@@ -141,17 +141,29 @@ func TestEchoPredictorEnterKeepsDrawnGuessesUntilAFrame(t *testing.T) {
 
 func TestEchoPredictorUndrawRestoresMirror(t *testing.T) {
 	t.Parallel()
-	h := newEchoHarness(t, domain.EchoPredictAlways)
-	h.warm(100 * time.Millisecond)
-	h.confirm()
-	if got := h.typed("b"); !bytes.Contains(got, []byte("b")) {
-		t.Fatalf("render = %q, want the guess drawn", got)
+	tests := []struct {
+		name, typed, want string
+	}{
+		{name: "drawn guess", typed: "b", want: "\x1b[1;4H\x1b[0m \x1b[0m\x1b[1;4H"},
+		// A blank guess matches the mirror cell, so only the cursor moved.
+		{name: "cursor-only guess", typed: " ", want: "\x1b[0m\x1b[1;4H"},
 	}
-	if got, want := string(h.p.undraw()), "\x1b[1;4H\x1b[0m \x1b[0m\x1b[1;4H"; got != want {
-		t.Fatalf("undraw = %q, want %q", got, want)
-	}
-	if got := h.p.undraw(); len(got) != 0 {
-		t.Fatalf("second undraw = %q, want nothing", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newEchoHarness(t, domain.EchoPredictAlways)
+			h.warm(100 * time.Millisecond)
+			h.confirm()
+			if got := h.typed(tt.typed); len(got) == 0 {
+				t.Fatal("guess rendered nothing")
+			}
+			if got := string(h.p.undraw()); got != tt.want {
+				t.Fatalf("undraw = %q, want %q", got, tt.want)
+			}
+			if got := h.p.undraw(); len(got) != 0 {
+				t.Fatalf("second undraw = %q, want nothing", got)
+			}
+		})
 	}
 }
 
