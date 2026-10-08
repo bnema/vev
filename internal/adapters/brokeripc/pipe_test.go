@@ -115,11 +115,12 @@ func newTestPipe() *streamPipe {
 	return newStreamPipe(func([]byte) error { return nil }, func(uint64) error { return nil })
 }
 
-// TestStreamWindowCoversTheSessionOutputWindow pins the invariant that lets a
-// broker stream carry a full session output window without the daemon ever
-// waiting on the stream instead of on its own ACK window: the daemon's
-// unacknowledged byte budget plus one maximum Output fits in one stream window.
-// When it does not, credit still keeps every stream correct, only slower.
+// TestStreamWindowCoversTheSessionOutputWindow pins the sizing invariant
+// between the two flow-control layers: one broker stream window holds the
+// daemon's whole unacknowledged byte budget, so in normal operation the daemon
+// is paced by its own ACK window and coalesces frames, rather than blocking a
+// send on stream credit. A single Output larger than the window (a big image)
+// still crosses, only paced by credit.
 func TestStreamWindowCoversTheSessionOutputWindow(t *testing.T) {
 	require.GreaterOrEqual(t, brokerwire.StreamWindowBytes, uint64(protocol.MaxOutputWindowBytes),
 		"one stream window must hold the daemon's whole unacknowledged byte budget")
