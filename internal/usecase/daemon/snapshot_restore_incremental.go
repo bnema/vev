@@ -387,6 +387,14 @@ func (d *Daemon) logRejectedRestoreCandidate(record domain.CatalogueRecord, cand
 }
 
 func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Session, error) {
+	// Objects are compressed, so the on-disk read budget no longer bounds the
+	// inflated generation; budget its payloads as one uncompressed checkpoint.
+	return sessionFromGenerationBudget(generation, snapcodec.MaxGenerationPayloadBytes)
+}
+
+// sessionFromGenerationBudget decodes a generation whose inflated object
+// payloads total at most budget bytes.
+func sessionFromGenerationBudget(generation ports.SnapshotGeneration, budget int) (snapcodec.Session, error) {
 	manifest, err := snapcodec.UnmarshalManifest(generation.Manifest)
 	if err != nil {
 		return snapcodec.Session{}, err
@@ -395,9 +403,6 @@ func sessionFromGeneration(generation ports.SnapshotGeneration) (snapcodec.Sessi
 		return snapcodec.Session{}, fmt.Errorf("snapshot: generation identity mismatch")
 	}
 	result := snapcodec.Session{Name: manifest.Name, CreatedAt: manifest.CreatedAt, Active: manifest.Active, Tabs: make([]snapcodec.Tab, 0, len(manifest.Tabs))}
-	// Objects are compressed, so the on-disk read budget no longer bounds the
-	// inflated generation; budget its payloads as one uncompressed checkpoint.
-	budget := snapcodec.MaxGenerationPayloadBytes
 	object := func(ref snapcodec.ObjectRef, kind snapcodec.ObjectKind) ([]byte, error) {
 		data, err := generationObject(generation, ref, kind)
 		if err != nil {
