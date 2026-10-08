@@ -474,7 +474,7 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 			lease := rc.attachmentLease(ac)
 			epoch := rc.recordResizeRequestForLease(domain.Size{Cols: 100, Rows: 30}, ac, lease)
 			require.NotZero(t, epoch)
-			initialSize := ac.size
+			initialSize := ac.geometry.Size
 
 			entered := make(chan struct{})
 			release := make(chan struct{})
@@ -492,7 +492,7 @@ func TestTransactionalResizeRechecksLeaseAtAttachmentPublication(t *testing.T) {
 			require.NotZero(t, newer)
 			close(release)
 			require.False(t, <-done, "stale resize generation must be rejected")
-			require.Equal(t, initialSize, ac.size, "stale resize must not publish attachment size")
+			require.Equal(t, initialSize, ac.geometry.Size, "stale resize must not publish attachment size")
 			if tc.effect == resizeOwnerPostSnapshotDirty {
 				require.False(t, sess.snapDirty.Load(), "stale resize must not publish snapshot dirtiness")
 			}

@@ -390,10 +390,10 @@ func TestMovePickerCompositeFollow(t *testing.T) {
 				source.tabs = append(source.tabs, newTabWithStableID("remaining", "remaining-pane", pty, movedTab.size))
 				publishTiledPaneOwners(source, source.tabs[1])
 			}
-			peer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: ac.size}
+			peer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
 			peer.setSession(source)
 			source.registerAttachment(peer)
-			destinationPeer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: ac.size}
+			destinationPeer := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
 			destinationPeer.setSession(destination)
 			destination.registerAttachment(destinationPeer)
 			destination.selectAttachmentTabLocked(destinationPeer, domain.TabStableID(destinationTab.stableID))

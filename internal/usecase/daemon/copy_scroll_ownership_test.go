@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/stretchr/testify/require"
@@ -94,7 +95,7 @@ func TestCopyExitRefreshesAfterOtherAttachmentConsumesDamage(t *testing.T) {
 	copyBefore := captureTestFrame(ac.render.cache.frame)
 
 	tr, peerSends := newCapturingTransport(t)
-	peer := &attachedClient{tr: tr, output: newOutputStateStream(), size: ac.size}
+	peer := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: ac.geometry.Size}}
 	peer.output.attachment = peer
 	peer.initOverlays()
 	peer.setSession(sess)

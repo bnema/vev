@@ -81,14 +81,14 @@ func containsTopRight(rows []string, text string, minCol int) bool {
 func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
 	clk := newNoticeClock()
 	d, sess, ac, sends := newNoticeFixture(t, clk)
-	screen := vt.NewScreen(ac.size.Cols, ac.size.Rows)
+	screen := vt.NewScreen(ac.geometry.Size.Cols, ac.geometry.Size.Rows)
 
 	d.notify(sess, domain.NoticeError, domain.NoticePaneSpawn, "couldn't open pane", nil)
 	awaitToastCount(t, ac, 1)
 	replayOutputFrames(t, screen, drainAllFrames(sends))
 
 	rows := frameRows(captureTestFrame(screen))
-	if !containsTopRight(rows, "couldn't open pane", ac.size.Cols/2) {
+	if !containsTopRight(rows, "couldn't open pane", ac.geometry.Size.Cols/2) {
 		t.Fatalf("composed frame missing toast message top-right:\n%s", strings.Join(rows, "\n"))
 	}
 
@@ -102,7 +102,7 @@ func TestPaintComposesNoticeToastTopRightAndExpiresOnTTL(t *testing.T) {
 	}
 
 	rows = frameRows(captureTestFrame(screen))
-	if containsTopRight(rows, "couldn't open pane", ac.size.Cols/2) {
+	if containsTopRight(rows, "couldn't open pane", ac.geometry.Size.Cols/2) {
 		t.Fatalf("toast message still present after TTL expired:\n%s", strings.Join(rows, "\n"))
 	}
 }

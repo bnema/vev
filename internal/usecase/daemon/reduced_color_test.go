@@ -219,7 +219,7 @@ func TestAppliedThemeIsPerAttachment(t *testing.T) {
 	d, sess, ac16, _ := newManualSessionWithPTYs(t, p)
 	ac16.terminalCapabilities = terminalcap.Capabilities{Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16}}
 	tr, _ := newCapturingTransport(t)
-	acTrue := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	acTrue := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	acTrue.output.attachment = acTrue
 	acTrue.initOverlays()
 	sess.mu.Lock()

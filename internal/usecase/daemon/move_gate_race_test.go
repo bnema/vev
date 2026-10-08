@@ -186,7 +186,7 @@ func TestPaletteFinalCloseEndsCurrentEffectBeforeDrainingPeers(t *testing.T) {
 	d, sess, current, _ := newManualSessionWithPTYs(t, newQuietPTY())
 	d.attachCoordinator(sess, nil, current, true)
 	otherTransport := &closeTrackingTransport{}
-	other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), size: current.size}
+	other := &attachedClient{tr: otherTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: current.geometry.Size}}
 	other.initOverlays()
 	other.setSession(sess)
 	sess.mu.Lock()

@@ -191,7 +191,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	d.paint(sess, ac, true, nil)
 	first := awaitFrame(t, sends, "Output")
 	firstOutput := unmarshalTestOutput(t, first.Payload)
-	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
+	terminal := vt.NewScreen(ac.geometry.Size.Cols, ac.geometry.Size.Rows)
 	terminal.Write(firstOutput.Data)
 
 	// A clean pane relies on the attachment capture cache for its retained

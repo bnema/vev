@@ -358,7 +358,7 @@ func TestResizeWithoutPTYOutputFlushesOneFullFrameAtDeadline(t *testing.T) {
 	require.Zero(t, out.Base)
 	require.Contains(t, screenLineText(client, 0), "1")
 	require.Contains(t, screenLineText(client, 23), "work")
-	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.geometry.Size)
 	requireNoOutputFrame(t, sends)
 }
 
@@ -392,7 +392,7 @@ func TestResizeBurstFlushesOnlyLatestGeometry(t *testing.T) {
 	latest.ch <- time.Now()
 	awaitTestCompletion(t, latestDone, "latest resize callback did not complete")
 	awaitFrame(t, sends, "Output")
-	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.size)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 24}, ac.geometry.Size)
 	require.Equal(t, 120, testAttachmentTab(sess).focusedPane().screen.Columns())
 	requireNoOutputFrame(t, sends)
 }

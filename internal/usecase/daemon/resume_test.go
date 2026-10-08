@@ -1247,7 +1247,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.Len(t, sends, 1)
 	output := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, output.Base, "resume must start with a complete frame")
-	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
+	terminal := vt.NewScreen(resumedAC.geometry.Size.Cols, resumedAC.geometry.Size.Rows)
 	terminal.Write(output.Data)
 	contents := strings.Join(frameRows(terminal), "\n")
 	require.Contains(t, contents, "survivor", "resume first paint must contain current headless content")

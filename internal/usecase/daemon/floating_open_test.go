@@ -226,7 +226,7 @@ func TestFloatingOpenErrorReleasesReturnedPTYBeforePublishingFailure(t *testing.
 			d := newTestDaemon(t, factory, stubClock{})
 			tb := newFloatingTestTab(t)
 			tr, _ := newCapturingTransport(t)
-			ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+			ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 			ac.initOverlays()
 			sessCtx, cancelSession := context.WithCancel(t.Context())
 			sess := &session{sessionCore: sessionCore{id: "floating-open-error", name: "work", attachments: map[*attachedClient]struct{}{ac: {}}}, tabs: []*tab{tb}, ctx: sessCtx, cancel: cancelSession}

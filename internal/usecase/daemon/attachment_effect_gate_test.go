@@ -198,11 +198,11 @@ func TestKillSessionAcquisitionTimeoutDoesNotPublishPartialInvalidation(t *testi
 	first.replaceTransport(firstTransport)
 
 	blockedTransport := &closeTrackingTransport{}
-	blocked := &attachedClient{tr: blockedTransport, output: newOutputStateStream(), size: first.size}
+	blocked := &attachedClient{tr: blockedTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: first.geometry.Size}}
 	blocked.initOverlays()
 	blocked.setSession(sess)
 	laterTransport := &closeTrackingTransport{}
-	later := &attachedClient{tr: laterTransport, output: newOutputStateStream(), size: first.size}
+	later := &attachedClient{tr: laterTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: first.geometry.Size}}
 	later.initOverlays()
 	later.setSession(sess)
 	sess.mu.Lock()
@@ -320,7 +320,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	snatched.installTestAttachmentCapability(sess.captureAttachmentCapability(snatched, snatchedTransport))
 
 	activeTransport := newTeardownBlockingTransport()
-	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), size: snatched.size}
+	active := &attachedClient{tr: activeTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: snatched.geometry.Size}}
 	active.initOverlays()
 	transition, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess, next: active, expectedTransport: active.transportSnapshot(), ready: true,
@@ -329,7 +329,7 @@ func TestKillSessionInterruptsOnlyExactParticipantBlockedSends(t *testing.T) {
 	defer d.deferAttachmentTransitionCleanups(transition)
 
 	unrelatedTransport := &closeTrackingTransport{}
-	unrelatedClient := &attachedClient{tr: unrelatedTransport, output: newOutputStateStream(), size: active.size}
+	unrelatedClient := &attachedClient{tr: unrelatedTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: active.geometry.Size}}
 	unrelatedClient.initOverlays()
 	unrelated := &session{sessionCore: sessionCore{id: "unrelated", name: "unrelated", attachments: map[*attachedClient]struct{}{unrelatedClient: {}}}, ctx: sess.ctx, cancel: func() {}}
 	unrelatedClient.setSession(unrelated)
@@ -505,7 +505,7 @@ func TestAttachmentEffectGateReplacementInterruptsBlockedOldRenderBeforePublicat
 	<-oldTransport.sendEntered
 
 	newTransport := &closeTrackingTransport{}
-	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), size: old.size}
+	next := &attachedClient{tr: newTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	transitionDone := make(chan attachmentTransitionResult, 1)
 	transitionErr := make(chan error, 1)
@@ -554,7 +554,7 @@ func TestAttachmentEffectGateAdmittedEffectCompletesBeforeConflictingTransition(
 	ticket, ok := old.beginAttachmentEffect(token)
 	require.True(t, ok)
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
+	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	done := make(chan error, 1)
 	go func() {
@@ -668,7 +668,7 @@ func TestAttachmentEffectGateAdmittedActiveEffectsFinishBeforeReplacement(t *tes
 			}()
 			<-admitted
 
-			next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
+			next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 			next.initOverlays()
 			transitionDone := make(chan error, 1)
 			go func() {
@@ -817,7 +817,7 @@ func TestPickerDeleteDoesNotDeleteSourceAfterInitiatorReplacement(t *testing.T) 
 	}()
 	<-admissionEnded
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
+	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	result, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: sess, next: next, expectedTransport: next.transportSnapshot(), ready: true,
@@ -873,7 +873,7 @@ func TestAttachmentEffectGateAdmittedFirstPaintFinishesBeforeReplacement(t *test
 	go func() { paintDone <- d.firstPaintForTransition(token) }()
 	<-admitted
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
+	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	transitionDone := make(chan error, 1)
 	go func() {
@@ -897,7 +897,7 @@ func TestAttachmentEffectGateReversedConcurrentTransitionsDoNotDeadlock(t *testi
 	first.captureAttachmentCapability(a, aTransport)
 
 	bTransport := newDatagramTestTransport()
-	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), size: a.size}
+	b := &attachedClient{tr: bTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: a.geometry.Size}}
 	b.initOverlays()
 	second := &session{sessionCore: sessionCore{id: "second", name: "second", attachments: map[*attachedClient]struct{}{b: {}}}}
 	b.setSession(second)

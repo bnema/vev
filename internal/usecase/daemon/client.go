@@ -94,7 +94,6 @@ type attachedClient struct {
 	// sizeMu lets shared-geometry snapshots read attachment windows without
 	// waiting behind a blocked transport send.
 	sizeMu   sync.RWMutex
-	size     domain.Size     // retained for legacy fixtures; live paths publish geometry
 	geometry domain.Geometry // controlling-terminal geometry for this Attachment
 	keys     *keys.Router
 	// view is attachment-local navigation state. It is never inferred from a
@@ -181,7 +180,7 @@ func (ac *attachedClient) sizeSnapshot() domain.Size {
 	}
 	ac.sizeMu.RLock()
 	defer ac.sizeMu.RUnlock()
-	return ac.size
+	return ac.geometry.Size
 }
 
 func (ac *attachedClient) setSize(size domain.Size) {
@@ -189,7 +188,6 @@ func (ac *attachedClient) setSize(size domain.Size) {
 		return
 	}
 	ac.sizeMu.Lock()
-	ac.size = size
 	ac.geometry.Size = size
 	ac.geometry = ac.geometry.NormalizePixels()
 	ac.sizeMu.Unlock()
@@ -204,7 +202,7 @@ func (ac *attachedClient) geometrySnapshot() domain.Geometry {
 	if ac.geometry.Valid() {
 		return ac.geometry
 	}
-	return domain.Geometry{Size: ac.size}
+	return domain.Geometry{Size: ac.geometry.Size}
 }
 
 func (ac *attachedClient) setGeometry(geometry domain.Geometry) {
@@ -213,7 +211,6 @@ func (ac *attachedClient) setGeometry(geometry domain.Geometry) {
 	}
 	geometry = geometry.NormalizePixels()
 	ac.sizeMu.Lock()
-	ac.size = geometry.Size
 	ac.geometry = geometry
 	ac.sizeMu.Unlock()
 }
@@ -772,7 +769,6 @@ func (d *Daemon) prepareAttachedClientLocked(sess *session, tr ports.ServerConne
 	ac := &attachedClient{
 		tr:                     tr,
 		output:                 output,
-		size:                   geometry.Size,
 		geometry:               geometry,
 		view:                   attachmentView{windowRows: geometry.Rows, windowSet: true},
 		clientID:               opts.clientID,

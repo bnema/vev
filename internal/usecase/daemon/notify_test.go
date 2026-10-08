@@ -278,7 +278,7 @@ func newNoticeFixture(t *testing.T, clk ports.Clock) (*Daemon, *session, *attach
 	p, _ := newBlockingPTY(t)
 	d := newTestDaemon(t, nil, clk)
 	tr, sends := newCapturingTransport(t)
-	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	ac.initOverlays()
 	sctx, cancel := context.WithCancel(d.serveCtx)
 	wctx, wcancel := context.WithCancel(sctx)
@@ -443,7 +443,7 @@ func TestReportErrorNonBenignIsNeverDropped(t *testing.T) {
 func TestNotifyRoutesToSessionClientOnly(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 
-	other := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	other := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	other.initOverlays()
 	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{other: {}}}, ctx: sess.ctx, cancel: func() {}}
 	other.setSession(sess2)
@@ -533,7 +533,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	clearAttachmentsForTestLocked(sessA)
 	sessA.mu.Unlock()
 
-	clientB := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	clientB := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	clientB.initOverlays()
 	sessB := &session{sessionCore: sessionCore{id: "manual-2", name: "other"}, ctx: sessA.ctx, cancel: func() {}}
 	clientB.setSession(sessB)
@@ -572,7 +572,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 	require.Equal(t, "hello from a script", aToasts[0].Message)
 	require.Equal(t, 1, aToasts[0].Count)
 
-	secondA := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	secondA := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	secondA.initOverlays()
 	secondA.setSession(sessA)
 	sessA.mu.Lock()
@@ -586,7 +586,7 @@ func TestSessionScopedNoticeQueuedWhileDetached(t *testing.T) {
 func TestNotifyGlobalFansOutToAttachedClients(t *testing.T) {
 	d, sess, ac, _ := newNoticeFixture(t, newNoticeClock())
 
-	second := &attachedClient{output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	second := &attachedClient{output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	second.initOverlays()
 	sess2 := &session{sessionCore: sessionCore{id: "manual-2", name: "other", attachments: map[*attachedClient]struct{}{second: {}}}, ctx: sess.ctx, cancel: func() {}}
 	second.setSession(sess2)

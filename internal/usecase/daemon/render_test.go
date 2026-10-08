@@ -73,7 +73,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 			defer releasePTY()
 			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
 			ac.sendMu.Lock()
-			ac.size = tc.clientSize
+			ac.geometry.Size = tc.clientSize
 			ac.sendMu.Unlock()
 
 			// A retained visible popup still needs activation warmup. When the
@@ -404,7 +404,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		rc := d.attachCoordinator(target, nil, detached, true)
 
 		secondTransport, secondSends := newCapturingTransport(t)
-		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), size: detached.size}
+		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: detached.geometry.Size}}
 		remaining.initOverlays()
 		remaining.setSession(target)
 		target.mu.Lock()

@@ -660,7 +660,7 @@ func TestFocusDirMovesFocusAndExitsCopyMode(t *testing.T) {
 	tb.panes["pane-1"].rect = domain.Rect{Width: 20, Height: 10}
 	tb.panes["pane-2"].rect = domain.Rect{X: 21, Width: 20, Height: 10}
 	tr, _ := newCapturingTransport(t)
-	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 41, Rows: 12}}}
 	ac.initOverlays()
 	ac.setSession(sess)
 	require.True(t, sess.registerAttachment(ac))
@@ -699,7 +699,7 @@ func TestClosePaneRepaintFanoutRespectsAttachmentScope(t *testing.T) {
 			sends := make([]chan wire.Envelope, 2)
 			for i := range clients {
 				tr, sent := newCapturingTransport(t)
-				clients[i] = &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
+				clients[i] = &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 41, Rows: 12}}}
 				clients[i].clientID[0] = byte(i + 1)
 				clients[i].initOverlays()
 				clients[i].setSession(sess)
@@ -737,7 +737,7 @@ func TestFinalPaneReapClearsCopyModeForEveryAttachment(t *testing.T) {
 
 	for i := range 2 {
 		tr, _ := newCapturingTransport(t)
-		ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 41, Rows: 12}}
+		ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 41, Rows: 12}}}
 		ac.clientID[0] = byte(i + 1)
 		ac.initOverlays()
 		ac.setSession(sess)

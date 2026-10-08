@@ -2169,12 +2169,6 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	markSnapshotDirty(sess)
 }
 
-// childEnv retains the daemon-environment helper for daemon-local legacy callers.
-// Interactive PTY launch paths use childEnvFrom with their session snapshot.
-func (d *Daemon) childEnv(name, tabStableID, paneStableID string) []string {
-	return childEnvFrom(d.baseEnv, name, tabStableID, paneStableID)
-}
-
 func copyEnvironment(env []string) []string {
 	return append([]string(nil), env...)
 }

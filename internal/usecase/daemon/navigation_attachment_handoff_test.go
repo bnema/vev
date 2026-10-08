@@ -172,7 +172,7 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 		t.Fatal("stopped-session handoff did not release its role ticket")
 	}
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
+	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	replacement, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: source, next: next, expectedTransport: next.transportSnapshot(), ready: true,

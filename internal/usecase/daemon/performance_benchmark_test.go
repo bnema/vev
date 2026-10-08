@@ -265,7 +265,7 @@ func TestPerformanceFixtureResize(t *testing.T) {
 
 	for _, want := range sequence {
 		fixture.resizeTo(want)
-		require.Equal(t, want, fixture.ac.size)
+		require.Equal(t, want, fixture.ac.geometry.Size)
 		require.True(t, fixture.resized())
 	}
 	metrics := fixture.metrics()
@@ -301,7 +301,7 @@ func TestTransactionalResizeMetrics(t *testing.T) {
 	require.Equal(t, uint64(3), metrics.outputFrames, "commit, resize-failure notice toast, and successful full-reset retry")
 	require.Zero(t, metrics.frameGapEpochs, "every committed epoch emitted its required frame")
 	require.Equal(t, []domain.Size{{Cols: 50, Rows: 28}, {Cols: 50, Rows: 28}}, fixture.pty.requested())
-	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, fixture.ac.size)
+	require.Equal(t, domain.Size{Cols: 100, Rows: 30}, fixture.ac.geometry.Size)
 }
 
 func TestPerformanceFixtureLargeHistoryTopology(t *testing.T) {
@@ -1077,7 +1077,7 @@ func newPerformanceFixtureWithCleanup(t testing.TB, config performanceConfig, re
 	d.clock = clock
 	output := &countingOutputTransport{}
 	ac.tr = output
-	ac.size = config.size
+	ac.geometry.Size = config.size
 	sess.name = "performance"
 	sess.ephemeral = false
 	sess.incarnation = domain.IncarnationID{1}
@@ -1300,7 +1300,7 @@ func (f *performanceFixture) retryLatest() {
 	members := make([]resizeMember, 0)
 	for _, tb := range tabs {
 		tb.mu.Lock()
-		plan := prepareTabLayoutForSizeLocked(f.sess, tb, tabSize(f.ac.size))
+		plan := prepareTabLayoutForSizeLocked(f.sess, tb, tabSize(f.ac.geometry.Size))
 		tb.mu.Unlock()
 		members = append(members, plan.members...)
 	}
@@ -1314,7 +1314,7 @@ func (f *performanceFixture) retryLatest() {
 }
 
 func (f *performanceFixture) resized() bool {
-	if f.ac.size != f.resizedSize {
+	if f.ac.geometry.Size != f.resizedSize {
 		return false
 	}
 	for _, tb := range f.sess.tabs {

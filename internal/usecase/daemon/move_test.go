@@ -142,7 +142,7 @@ func TestMovePaneRetiresSourceParkedClients(t *testing.T) {
 	movedTab.stableID = "source-tab"
 
 	transport := &closeTrackingTransport{}
-	parked := &attachedClient{tr: transport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}, resumeCapable: true}
+	parked := &attachedClient{tr: transport, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}, resumeCapable: true}
 	parked.initOverlays()
 	require.True(t, d.parkAttachment(source, parked))
 	destinationPTY := newQuietPTY()
