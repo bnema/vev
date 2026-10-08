@@ -1236,6 +1236,44 @@ func TestBrokerTruncatedAndTrailing(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestBrokerStreamWindowUpdateByteForByte pins the window update layout in
+// both directions, then rejects every truncated prefix and trailing garbage.
+func TestBrokerStreamWindowUpdateByteForByte(t *testing.T) {
+	connection := testConnectionID(0x11)
+	message := StreamWindowUpdate{Epoch: 7, Connection: connection, Stream: 3, Credit: 4096}
+	scope := append([]byte{0x08, 0x07, 0x12, 0x10}, connection[:]...)
+	ref := append(append([]byte{0x0a, byte(len(scope))}, scope...), 0x10, 0x03)
+	body := append(append([]byte{0x0a, byte(len(ref))}, ref...), 0x10, 0x80, 0x20)
+	for _, tc := range []struct {
+		name   string
+		key    []byte // field 114 (client) or 211 (server), wire type 2
+		encode func(*testing.T, any) []byte
+		decode func([]byte) (any, error)
+	}{
+		{"client", []byte{0x92, 0x07}, func(t *testing.T, m any) []byte { return mustEncodeClient(t, m.(ClientMessage)) }, func(raw []byte) (any, error) {
+			return DecodeClient(raw, testEnvelopeCeiling, testChunkCeiling)
+		}},
+		{"server", []byte{0x9a, 0x0d}, func(t *testing.T, m any) []byte { return mustEncodeServer(t, m.(ServerMessage)) }, func(raw []byte) (any, error) {
+			return DecodeServer(raw, testEnvelopeCeiling, testChunkCeiling)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := append(append(append([]byte(nil), tc.key...), byte(len(body))), body...)
+			raw := tc.encode(t, message)
+			require.Equal(t, want, raw)
+			decoded, err := tc.decode(raw)
+			require.NoError(t, err)
+			require.Equal(t, message, decoded)
+			for size := range len(raw) {
+				_, err := tc.decode(raw[:size])
+				require.Error(t, err, "prefix[:%d] accepted", size)
+			}
+			_, err = tc.decode(append(append([]byte(nil), raw...), 0xFF))
+			require.Error(t, err, "trailing garbage accepted")
+		})
+	}
+}
+
 // TestBrokerWrongDirection proves wrong-direction decode is rejected:
 // client bytes never decode as server output and vice versa.
 func TestBrokerWrongDirection(t *testing.T) {
