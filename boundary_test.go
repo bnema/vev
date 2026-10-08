@@ -96,6 +96,7 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 		{"snapshot adapter accepts codec", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/snapshotcodec", false, true},
 		{"daemon accepts snapshot codec", modulePath + "/internal/usecase/daemon", modulePath + "/internal/snapshotcodec", false, true},
 		{"other adapter rejects snapshot codec", modulePath + "/internal/adapters/ipc", modulePath + "/internal/snapshotcodec", false, false},
+		{"client rejects snapshot codec", modulePath + "/internal/usecase/client", modulePath + "/internal/snapshotcodec", false, false},
 		{"snapshot codec rejects usecase", modulePath + "/internal/snapshotcodec", modulePath + "/internal/usecase/daemon", false, false},
 		{"snapshot codec rejects adapter", modulePath + "/internal/snapshotcodec", modulePath + "/internal/adapters/snapshot", false, false},
 		{"snapshot adapter rejects usecase", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/usecase/daemon", false, false},
@@ -216,8 +217,10 @@ func dependencyAllowed(source, target string, testFile bool) (bool, error) {
 
 // packageImportDenied encodes ADR 001 ownership at package granularity for
 // production files. Layer rules alone permit any usecase-to-usecase import;
-// other, and keep the broker free of every sibling use case. Test files stay
-// exempt so composition tests can wire adapters and orchestrators together.
+// this keeps client and daemon from importing each other, keeps the broker
+// free of every sibling use case, and limits the snapshot codec to the daemon
+// and the snapshot adapter. Test files stay exempt so composition tests can
+// wire adapters and orchestrators together.
 func packageImportDenied(source, target string) bool {
 	brokerPkg := modulePath + "/internal/usecase/broker"
 	clientPkg := modulePath + "/internal/usecase/client"
@@ -227,9 +230,14 @@ func packageImportDenied(source, target string) bool {
 		return path == root || strings.HasPrefix(path, root+"/")
 	}
 	// The durable snapshot format is shared by the daemon and its one
-	// repository adapter; no other adapter may depend on it.
-	if target == modulePath+"/internal/snapshotcodec" && strings.HasPrefix(source, modulePath+"/internal/adapters/") {
-		return source != modulePath+"/internal/adapters/snapshot"
+	// repository adapter; no other adapter or use case may depend on it.
+	if target == modulePath+"/internal/snapshotcodec" {
+		switch {
+		case strings.HasPrefix(source, modulePath+"/internal/adapters/"):
+			return source != modulePath+"/internal/adapters/snapshot"
+		case strings.HasPrefix(source, usecasePrefix):
+			return !under(source, daemonPkg)
+		}
 	}
 	switch {
 	case under(source, brokerPkg):
