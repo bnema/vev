@@ -33,10 +33,10 @@ var (
 	// ordering: a duplicate Register, a frame for an unallocated stream, or
 	// stream data before the stream was established.
 	ErrProtocol = errors.New("brokeripc: broker protocol violation")
-	// ErrStreamBackpressure reports a logical stream whose local consumer is
-	// not draining its bounded inbound queue. The affected stream is settled
-	// alone; the connection and every sibling stream stay up.
-	ErrStreamBackpressure = errors.New("brokeripc: stream consumer is not keeping up")
+	// ErrStreamCredit reports a peer that sent stream data beyond the credit it
+	// was granted, or granted credit beyond one stream window. The affected
+	// stream is settled alone; the connection and every sibling stream stay up.
+	ErrStreamCredit = errors.New("brokeripc: stream flow-control violation")
 	// ErrStreamGone reports a stream the peer retired while this side was still
 	// starting or using it.
 	ErrStreamGone = errors.New("brokeripc: logical stream is gone")

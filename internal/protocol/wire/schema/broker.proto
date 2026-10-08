@@ -89,6 +89,7 @@ message BrokerClientEnvelope {
     UpdateHostPolicy update_host_policy = 111;
     StartPreview start_preview = 112;
     CancelPreview cancel_preview = 113;
+    StreamWindowUpdate stream_window_update = 114;
   }
 }
 
@@ -106,6 +107,7 @@ message BrokerServerEnvelope {
     BrokerErrorMessage broker_error_message = 208;
     Shutdown shutdown = 209;
     PreviewPublication preview_publication = 210;
+    StreamWindowUpdate stream_window_update = 211;
   }
 }
 
@@ -219,6 +221,15 @@ message ClientStreamData {
 // CloseStream closes one logical stream.
 message CloseStream {
   BrokerStreamRef ref = 1;
+}
+
+// StreamWindowUpdate grants the peer credit to send more stream data on one
+// logical stream: the receiver consumed that much of its stream window. Each
+// direction of a stream has its own window, so a client grants credit for
+// ServerStreamData and the server grants credit for ClientStreamData.
+message StreamWindowUpdate {
+  BrokerStreamRef ref = 1;
+  uint64 credit = 2;
 }
 
 // Registered confirms one accepted client connection and its assigned scope.

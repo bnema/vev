@@ -486,6 +486,13 @@ func (c *Connection) StreamData(stream ports.BrokerStreamID) (StreamDisposition,
 	return c.streams.Data(c.scope, stream)
 }
 
+// StreamWindowUpdate classifies one credit grant for a stream exactly like
+// stream data: legal while open, discarded once retired. The ready check and
+// the tracker lookup share one connection lock.
+func (c *Connection) StreamWindowUpdate(stream ports.BrokerStreamID) (StreamDisposition, error) {
+	return c.StreamData(stream)
+}
+
 // StreamProgress reports one phase of an in-flight stream operation. The
 // ready check and the tracker mutation share one connection lock.
 func (c *Connection) StreamProgress(stream ports.BrokerStreamID) (StreamDisposition, error) {

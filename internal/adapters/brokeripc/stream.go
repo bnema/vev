@@ -42,13 +42,15 @@ func newServerStream(s *serverSession, id ports.BrokerStreamID, core ports.Broke
 		return nil, ErrConfig
 	}
 	st := &serverStream{session: s, id: id, core: core, done: make(chan struct{})}
-	st.pipe = newStreamPipe(s.cfg.StreamInboundChunks, s.cfg.StreamInboundBytes, st.sendChunk)
+	st.pipe = newStreamPipe(st.sendChunk, st.grantCredit)
 	st.carriage = newCarriage(st.pipe)
 	return st, nil
 }
 
 // sendChunk splits one outbound byte slice under the negotiated stream chunk
-// ceiling and writes each frame in order.
+// ceiling and writes each frame in order, waiting for the client's credit
+// before each one: a client that is not reading slows this relay, and through
+// the daemon link the daemon, instead of losing its stream.
 func (st *serverStream) sendChunk(data []byte) error {
 	ceiling := int(st.session.ceilings.StreamChunkLimit)
 	if ceiling <= 0 {
@@ -56,6 +58,9 @@ func (st *serverStream) sendChunk(data []byte) error {
 	}
 	for len(data) > 0 {
 		n := min(len(data), ceiling)
+		if err := st.pipe.reserve(n); err != nil {
+			return err
+		}
 		if err := st.session.send(brokerwire.ServerStreamData{
 			Epoch: st.session.epoch, Connection: st.session.scope.Connection, Stream: st.id, Data: data[:n],
 		}); err != nil {
@@ -64,6 +69,13 @@ func (st *serverStream) sendChunk(data []byte) error {
 		data = data[n:]
 	}
 	return nil
+}
+
+// grantCredit returns consumed inbound credit to the client.
+func (st *serverStream) grantCredit(credit uint64) error {
+	return st.session.send(brokerwire.StreamWindowUpdate{
+		Epoch: st.session.epoch, Connection: st.session.scope.Connection, Stream: st.id, Credit: credit,
+	})
 }
 
 // deliver accepts one inbound chunk from the connection reader.
@@ -347,36 +359,47 @@ func (s *serverSession) closeStreamByPeer(id ports.BrokerStreamID) {
 	_ = s.core.CloseStream(s.scope.Connection, id)
 }
 
-// deliverStreamData routes one inbound client chunk to its bridge. Backpressure
-// settles only that stream; a chunk for an identity the peer never opened is a
-// protocol violation.
+// deliverStreamData routes one inbound client chunk to its bridge. Data beyond
+// the granted credit settles only that stream; a chunk for an identity the peer
+// never opened is a protocol violation.
 func (s *serverSession) deliverStreamData(m brokerwire.ClientStreamData) error {
-	disposition, err := s.conn.StreamData(m.Stream)
+	st, err := s.streamFor(m.Stream)
+	if st == nil || err != nil {
+		return err
+	}
+	if err := st.deliver(m.Data); errors.Is(err, ErrStreamCredit) {
+		s.settleStream(st, ErrStreamCredit)
+	}
+	// Any other error means the stream already reached its terminal outcome;
+	// its data is discarded.
+	return nil
+}
+
+// grantStreamCredit applies one client credit grant to its bridge.
+func (s *serverSession) grantStreamCredit(m brokerwire.StreamWindowUpdate) error {
+	st, err := s.streamFor(m.Stream)
+	if st == nil || err != nil {
+		return err
+	}
+	if err := st.pipe.granted(m.Credit); err != nil {
+		s.settleStream(st, err)
+	}
+	return nil
+}
+
+// streamFor classifies one stream-scoped frame and returns its live bridge. A
+// frame for a retired stream, or one settled between the tracker check and the
+// lookup, yields no bridge and no error; a frame for a stream that was never
+// allocated, or before it was confirmed open, is a peer protocol violation.
+func (s *serverSession) streamFor(id ports.BrokerStreamID) (*serverStream, error) {
+	disposition, err := s.conn.StreamData(id)
 	if err != nil {
-		// Stream data for a stream that was never allocated, or before it was
-		// confirmed open, is a peer protocol violation.
-		return errors.Join(ErrProtocol, err)
+		return nil, errors.Join(ErrProtocol, err)
 	}
 	if disposition == brokerwire.StreamDiscarded {
-		return nil
+		return nil, nil
 	}
-	st := s.lookupStream(m.Stream)
-	if st == nil {
-		// The bridge was settled between the tracker check and the lookup (a
-		// stream-local failure won the race); the chunk is discarded with it.
-		return nil
-	}
-	switch err := st.deliver(m.Data); {
-	case err == nil:
-		return nil
-	case errors.Is(err, ErrStreamBackpressure):
-		s.settleStream(st, ErrStreamBackpressure)
-		return nil
-	default:
-		// The stream already reached its terminal outcome; its data is
-		// discarded.
-		return nil
-	}
+	return s.lookupStream(id), nil
 }
 
 // clientStream is the client-side half of one logical stream: the sessionwire
@@ -407,7 +430,7 @@ func newClientStream(c *client, id ports.BrokerStreamID) (*clientStream, error) 
 		opened: make(chan error, 1),
 		done:   make(chan struct{}),
 	}
-	st.pipe = newStreamPipe(c.cfg.StreamInboundChunks, c.cfg.StreamInboundBytes, st.sendChunk)
+	st.pipe = newStreamPipe(st.sendChunk, st.grantCredit)
 	st.carriage = newCarriage(st.pipe)
 	st.ClientConnection = sessionwire.NewClientConnection(st.carriage)
 	if st.ClientConnection == nil {
@@ -417,7 +440,7 @@ func newClientStream(c *client, id ports.BrokerStreamID) (*clientStream, error) 
 }
 
 // sendChunk splits one outbound client byte slice under the negotiated stream
-// chunk ceiling.
+// chunk ceiling, waiting for the broker's credit before each frame.
 func (st *clientStream) sendChunk(data []byte) error {
 	ceiling := int(st.client.ceilings.StreamChunkLimit)
 	if ceiling <= 0 {
@@ -425,6 +448,9 @@ func (st *clientStream) sendChunk(data []byte) error {
 	}
 	for len(data) > 0 {
 		n := min(len(data), ceiling)
+		if err := st.pipe.reserve(n); err != nil {
+			return err
+		}
 		if err := st.client.send(brokerwire.ClientStreamData{
 			Epoch: st.client.scope.Epoch, Connection: st.client.scope.Connection, Stream: st.id, Data: data[:n],
 		}); err != nil {
@@ -433,6 +459,15 @@ func (st *clientStream) sendChunk(data []byte) error {
 		data = data[n:]
 	}
 	return nil
+}
+
+// grantCredit returns consumed inbound credit to the broker. It is written
+// synchronously because a dropped grant would stall the stream forever; the
+// write never waits long, since the broker's reader never blocks on a stream.
+func (st *clientStream) grantCredit(credit uint64) error {
+	return st.client.send(brokerwire.StreamWindowUpdate{
+		Epoch: st.client.scope.Epoch, Connection: st.client.scope.Connection, Stream: st.id, Credit: credit,
+	})
 }
 
 // deliver accepts one inbound server chunk.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/bnema/vev/internal/adapters/brokerwire"
 	"github.com/bnema/vev/internal/protocol"
@@ -71,7 +72,7 @@ func TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := newStreamPipe(0, 0, func([]byte) error { return nil })
+			p := newTestPipe()
 			for _, chunk := range tt.chunks {
 				require.NoError(t, p.deliver(chunk))
 			}
@@ -109,26 +110,104 @@ func TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose(t *testing.T) {
 	}
 }
 
-// TestStreamPipeHoldsAFullOutputWindow pins the client pipe headroom for the
-// session output window. A client claims protocol.MaxOutputWindow unacked
-// Output frames; with a terminal that is not draining, all of them may sit in
-// this pipe at once, and overflow fails the whole stream
-// (ErrStreamBackpressure). The frame size is a typical text repaint: a
-// near-full page of a 500x140 terminal measured about 70 KB. Uncompressed diff
-// frames with per-cell truecolor SGR can be far larger (estimated near 1 MB at
-// 300x80), and eight of those can still overflow the default 4 MiB bound.
-func TestStreamPipeHoldsAFullOutputWindow(t *testing.T) {
-	const frameBytes = 72 << 10
+// newTestPipe is a pipe whose outbound writes and credit grants go nowhere.
+func newTestPipe() *streamPipe {
+	return newStreamPipe(func([]byte) error { return nil }, func(uint64) error { return nil })
+}
+
+// TestStreamWindowCoversTheSessionOutputWindow pins the invariant that lets a
+// broker stream carry a full session output window without the daemon ever
+// waiting on the stream instead of on its own ACK window: the daemon's
+// unacknowledged byte budget plus one maximum Output fits in one stream window.
+// When it does not, credit still keeps every stream correct, only slower.
+func TestStreamWindowCoversTheSessionOutputWindow(t *testing.T) {
+	require.GreaterOrEqual(t, brokerwire.StreamWindowBytes, uint64(protocol.MaxOutputWindowBytes),
+		"one stream window must hold the daemon's whole unacknowledged byte budget")
+}
+
+// TestStreamPipeCredit covers the receive and send sides of stream credit:
+// a peer may send up to one window, the consumer's reads return credit in
+// batches, a sender waits instead of failing while it has none, and grants or
+// data beyond the window are flow-control violations.
+func TestStreamPipeCredit(t *testing.T) {
 	chunk := int(brokerwire.MaxStreamChunkBytes)
-	p := newStreamPipe(0, 0, func([]byte) error { return nil })
-	payload := bytes.Repeat([]byte{'x'}, frameBytes)
-	for frame := range protocol.MaxOutputWindow {
-		for data := payload; len(data) > 0; {
-			n := min(len(data), chunk)
-			require.NoError(t, p.deliver(data[:n]), "frame %d overflowed the client pipe", frame)
-			data = data[n:]
+	cost := brokerwire.StreamChunkCredit(chunk)
+	perWindow := int(brokerwire.StreamWindowBytes / cost)
+
+	t.Run("a full window is accepted and one more frame is a violation", func(t *testing.T) {
+		p := newTestPipe()
+		for range perWindow {
+			require.NoError(t, p.deliver(make([]byte, chunk)))
 		}
-	}
+		require.ErrorIs(t, p.deliver(make([]byte, chunk)), ErrStreamCredit)
+	})
+
+	t.Run("reads return credit in batches", func(t *testing.T) {
+		var grants []uint64
+		p := newStreamPipe(func([]byte) error { return nil }, func(c uint64) error { grants = append(grants, c); return nil })
+		for range perWindow {
+			require.NoError(t, p.deliver(make([]byte, chunk)))
+		}
+		buf := make([]byte, chunk)
+		for range perWindow {
+			_, err := io.ReadFull(p, buf)
+			require.NoError(t, err)
+		}
+		require.NotEmpty(t, grants)
+		total := uint64(0)
+		for _, g := range grants {
+			require.GreaterOrEqual(t, g, streamCreditReturnAt(brokerwire.StreamWindowBytes))
+			total += g
+		}
+		require.LessOrEqual(t, total, uint64(perWindow)*cost)
+		// Once the returned credit reaches the peer, the window is open again.
+		require.NoError(t, p.deliver(make([]byte, chunk)))
+	})
+
+	t.Run("a sender waits for credit and resumes on a grant", func(t *testing.T) {
+		p := newTestPipe()
+		for range perWindow {
+			require.NoError(t, p.reserve(chunk))
+		}
+		reserved := make(chan error, 1)
+		go func() { reserved <- p.reserve(chunk) }()
+		select {
+		case err := <-reserved:
+			t.Fatalf("reserve returned %v without credit", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		require.NoError(t, p.granted(cost))
+		select {
+		case err := <-reserved:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("a grant must release a sender waiting for credit")
+		}
+	})
+
+	t.Run("close releases a sender waiting for credit", func(t *testing.T) {
+		p := newTestPipe()
+		for range perWindow {
+			require.NoError(t, p.reserve(chunk))
+		}
+		reserved := make(chan error, 1)
+		go func() { reserved <- p.reserve(chunk) }()
+		p.closeWith(ErrStreamGone)
+		select {
+		case err := <-reserved:
+			require.ErrorIs(t, err, ErrStreamGone)
+		case <-time.After(5 * time.Second):
+			t.Fatal("close must release a sender waiting for credit")
+		}
+	})
+
+	t.Run("a grant beyond the window is a violation", func(t *testing.T) {
+		p := newTestPipe()
+		require.ErrorIs(t, p.granted(1), ErrStreamCredit)
+		require.NoError(t, p.reserve(chunk))
+		require.NoError(t, p.granted(cost))
+		require.ErrorIs(t, p.granted(1), ErrStreamCredit)
+	})
 }
 
 // TestClientStreamPrefersTheFullOutputWindow pins what a real broker-routed

@@ -364,9 +364,24 @@ func (c *client) dispatch(message brokerwire.ServerMessage) error {
 			// lookup; its data is discarded, exactly like a retired stream.
 			return nil
 		}
-		if err := st.deliver(m.Data); err != nil {
-			if errors.Is(err, ErrStreamBackpressure) {
-				st.fail(ErrStreamBackpressure)
+		if err := st.deliver(m.Data); errors.Is(err, ErrStreamCredit) {
+			st.fail(ErrStreamCredit)
+		}
+		return nil
+	case brokerwire.StreamWindowUpdate:
+		if !c.scopeMatches(m.Epoch, m.Connection) {
+			return errors.Join(ErrScopeMismatch, ErrProtocol)
+		}
+		disposition, err := c.conn.StreamWindowUpdate(m.Stream)
+		if err != nil {
+			return errors.Join(ErrProtocol, err)
+		}
+		if disposition == brokerwire.StreamDiscarded {
+			return nil
+		}
+		if st := c.lookupStream(m.Stream); st != nil {
+			if err := st.pipe.granted(m.Credit); err != nil {
+				st.fail(err)
 			}
 		}
 		return nil

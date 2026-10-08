@@ -15,13 +15,6 @@ const (
 	// listener. A listener acquires one slot before accepting, so the bound is
 	// enforced before a socket is admitted rather than after.
 	DefaultMaxClients = 64
-	// DefaultStreamInboundChunks bounds one logical stream's inbound chunk
-	// queue: frames already accepted from the wire and not yet consumed by the
-	// local session carriage.
-	DefaultStreamInboundChunks = 64
-	// DefaultStreamInboundBytes bounds one logical stream's inbound chunk queue
-	// in bytes (4 MiB).
-	DefaultStreamInboundBytes = 4 << 20
 )
 
 // Config bounds one endpoint. The zero value is valid and selects every
@@ -29,10 +22,6 @@ const (
 type Config struct {
 	// MaxClients bounds concurrent accepted client connections.
 	MaxClients int
-	// StreamInboundChunks bounds one logical stream's inbound chunk queue.
-	StreamInboundChunks int
-	// StreamInboundBytes bounds one logical stream's inbound chunk bytes.
-	StreamInboundBytes uint64
 	// HandshakeTimeout bounds one accepted connection's broker preamble, broker
 	// admission, and the wait for its Register. The client dialer also bounds
 	// its whole setup (Unix dial, preamble, Register send, and wait for
@@ -62,12 +51,6 @@ func (c Config) withDefaults() Config {
 	if c.MaxClients <= 0 {
 		c.MaxClients = DefaultMaxClients
 	}
-	if c.StreamInboundChunks <= 0 {
-		c.StreamInboundChunks = DefaultStreamInboundChunks
-	}
-	if c.StreamInboundBytes == 0 {
-		c.StreamInboundBytes = DefaultStreamInboundBytes
-	}
 	if c.HandshakeTimeout <= 0 {
 		c.HandshakeTimeout = protocol.HandshakeTimeout
 	}
@@ -80,15 +63,10 @@ func (c Config) withDefaults() Config {
 // validate refuses a configuration whose explicit bounds cannot be honored.
 // The zero value is always valid because withDefaults has already been applied.
 func (c Config) validate() error {
-	if c.MaxClients <= 0 || c.StreamInboundChunks <= 0 || c.StreamInboundBytes == 0 || c.HandshakeTimeout <= 0 {
+	if c.MaxClients <= 0 || c.HandshakeTimeout <= 0 {
 		return ErrConfig
 	}
 	if c.MaxPendingOperations <= 0 || c.MaxPendingOperations > brokerwire.MaxPendingOperations {
-		return ErrConfig
-	}
-	// A stream inbound byte bound below one maximum chunk can never accept a
-	// full stream frame, which would starve a legal peer.
-	if c.StreamInboundBytes < brokerwire.MaxStreamChunkBytes {
 		return ErrConfig
 	}
 	return nil
