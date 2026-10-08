@@ -253,21 +253,30 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 		key, hadKey = cursor.Key, cursor.Key != ""
 	}
 	m.rebuild(key, hadKey, cursor.Index)
-	if hadKey && !m.hasRow(key) {
-		if current, ok := m.cursorKey(); !ok || current != key {
-			// The selected row left the publication (for example it was
-			// killed): rest on the nearest surviving row above it instead of
-			// jumping back to the top.
-			m.selectFirstKey(above)
-		}
+	if hadKey && !m.cursorRestsOn(key) {
+		// The selected row left the publication (for example it was killed)
+		// or stopped matching the query: rest on the nearest surviving row
+		// above it instead of jumping elsewhere.
+		m.selectFirstKey(above)
 	}
 }
 
-// hasRow reports whether a row with this id is still published, drawn or not.
-func (m *Model) hasRow(id string) bool {
-	for _, r := range m.rows {
+// cursorRestsOn reports whether the cursor is on the row with this id, or on
+// the collapsed section that hides it.
+func (m *Model) cursorRestsOn(id string) bool {
+	current, ok := m.cursorKey()
+	if !ok {
+		return false
+	}
+	if current == id {
+		return true
+	}
+	if !m.rows[m.selected].section() {
+		return false
+	}
+	for idx, r := range m.rows {
 		if r.id() == id {
-			return true
+			return m.sectionOf(idx) == m.selected
 		}
 	}
 	return false

@@ -567,6 +567,21 @@ func TestReplaceLinesPreviousRowRespectsSearch(t *testing.T) {
 	require.Equal(t, "a", selected.Key, "the hidden row above is skipped for the nearest matching one")
 }
 
+func TestReplaceLinesPreviousRowWhenTheCursorRowStopsMatching(t *testing.T) {
+	m := New([]protocol.PickerLine{navLine("a", "alpha"), navLine("b", "beta"), navLine("c", "alps"), navLine("d", "altitude")}, Config{Cursor: protocol.PickerCursor{Key: "c", Index: -1}})
+	m.EnterSearch()
+	for _, r := range "al" {
+		m.InsertSearch(r)
+	}
+	m.Down() // alpha -> alps
+	require.Equal(t, "c", mustSelectedKey(t, m))
+
+	// c is still published but no longer matches; the source hints the last row.
+	m.ReplaceLines([]protocol.PickerLine{navLine("a", "alpha"), navLine("b", "beta"), navLine("c", "cliff"), navLine("d", "altitude")}, protocol.PickerCursor{Index: 3})
+
+	require.Equal(t, "a", mustSelectedKey(t, m), "the nearest matching row above wins over the source hint")
+}
+
 // drawnRows reports the tree prefix and label of every drawn row.
 func drawnRows(m *Model) []string {
 	got := make([]string, 0, len(m.view))
