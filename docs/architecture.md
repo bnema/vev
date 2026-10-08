@@ -14,7 +14,7 @@ Every result keeps its request ID for strict correlation.
 
 ## Package ownership
 
-- `internal/domain`: pure shared values and invariants. `domain/terminalcap` owns terminal capability values and environment detection policy.
+- `internal/domain`: pure shared values and invariants. `domain/terminalcap` owns terminal capability values and environment detection policy. `domain/layout` owns the pure pane split tree and its geometry.
 - `internal/protocol`: typed, transport-neutral client/daemon messages, protocol version, semantic validation, and handshake policy.
 - `internal/protocol/catalogue`: independently versioned remote discovery JSON schema and bounded validation.
 - `internal/protocol/wire`: Protobuf wire contract. Sources of truth are

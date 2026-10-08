@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // moveTabTopology is the private whole-Tab topology Implementation consumed by

@@ -8,9 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 func TestCopyModeLifecycleResizeExitsBeforeGeometryChange(t *testing.T) {

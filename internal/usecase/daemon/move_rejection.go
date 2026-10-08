@@ -4,8 +4,8 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // moveRejectionReason is the daemon API category for a rejected move. It keeps

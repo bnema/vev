@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // floatingState describes the lifecycle of a tab's independent floating pane.

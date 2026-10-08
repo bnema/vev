@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // preflightManifest rejects hostile declarations before UnmarshalManifest

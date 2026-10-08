@@ -6,7 +6,7 @@ import (
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // movePaneCandidate contains only unpublished topology and identity changes.

@@ -6,7 +6,7 @@ import (
 	"hash/crc32"
 	"math"
 
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // marshalTest is a test-only v4 encoder. Production retains only the decoder

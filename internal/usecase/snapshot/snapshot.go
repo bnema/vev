@@ -1,6 +1,6 @@
 package snapshot
 
-import "github.com/bnema/vev/internal/usecase/layout"
+import "github.com/bnema/vev/internal/domain/layout"
 
 // Session is the durable transfer representation for a named daemon session.
 type Session struct {
