@@ -165,8 +165,9 @@ func (a SessionAdmission) Clone() SessionAdmission {
 // SessionAdmissionProvider is the optional boundary-safe port a typed accepted
 // server connection implements when the accepting side stamped admission
 // metadata onto it. A daemon-consuming use case asserts it structurally; a
-// connection built by a legacy constructor that carries no provisioned
-// admission reports ok=false rather than a zero admission.
+// connection accepted without provisioned admission (the direct local daemon
+// socket used by broker-less list and stop commands) reports ok=false rather
+// than a zero admission, and the daemon applies standard Hello validation.
 //
 // The returned value is a defensive copy: mutating it never alters the
 // connection's admitted authority, and concurrent readers each receive their

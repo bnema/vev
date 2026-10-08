@@ -65,9 +65,9 @@ import (
 
 const (
 	// brokerMuxStdioCommand is the hidden remote SSH stdio mux bridge.
-	brokerMuxStdioCommand = "_broker-mux-stdio"
+	brokerMuxStdioCommand = ports.BrokerMuxStdioCommand
 	// brokerMuxQUICBootstrapCommand is the hidden remote QUIC mux bootstrap.
-	brokerMuxQUICBootstrapCommand = "_broker-mux-quic-bootstrap"
+	brokerMuxQUICBootstrapCommand = ports.BrokerMuxQUICBootstrapCommand
 	// brokerMuxQUICProxyCommand is the hidden detached remote QUIC mux proxy.
 	brokerMuxQUICProxyCommand = "_broker-mux-quic-proxy"
 )
@@ -105,7 +105,7 @@ const brokerDaemonStartArg = "--daemon-start"
 
 // brokerScopeArg is the scope flag carried by every durable remote route argv
 // (see ports.BrokerRouteForTransport). Stored routes keep it verbatim.
-const brokerScopeArg = "--production"
+const brokerScopeArg = ports.BrokerRouteScopeArg
 
 // brokerMuxOptions is the parsed hidden mux helper invocation.
 type brokerMuxOptions struct {
