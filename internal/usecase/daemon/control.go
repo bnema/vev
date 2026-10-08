@@ -964,8 +964,8 @@ func (e controlExec) ListPanes(asJSON bool) (string, error) {
 		}
 		pane.mu.Unlock()
 		cwd := fallbackCWD
-		if e.d.procCwd != nil && pid > 0 {
-			if live, err := e.d.procCwd(pid); err == nil && live != "" {
+		if e.d.proc != nil && pid > 0 {
+			if live, err := e.d.proc.Cwd(pid); err == nil && live != "" {
 				cwd = live
 			}
 		}

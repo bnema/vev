@@ -868,10 +868,10 @@ func TestRemoteCatalogRefreshesFocusedTabTitle(t *testing.T) {
 	pty := portsmocks.NewMockPTY(t)
 	pty.EXPECT().ForegroundPgid().Return(1234, nil).Once()
 	p.pty = pty
-	d.procComm = func(pid int) (string, error) {
+	d.proc = &processInspectorFake{comm: func(pid int) (string, error) {
 		require.Equal(t, 1234, pid)
 		return "fish", nil
-	}
+	}}
 
 	result := sendCommand(t, d, protocol.CommandRequest{Slug: "remote-catalog", JSON: true})
 	require.True(t, result.Outcome == protocol.CommandSucceeded, result.Text)

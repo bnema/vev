@@ -225,11 +225,10 @@ type Daemon struct {
 	shutdownNoticedSessions        map[string]struct{}
 	restoreDone                    chan struct{}
 	restoreOnce                    sync.Once
-	procCwd                        func(int) (string, error)
-	procComm                       func(int) (string, error)
-	procArgv                       func(int) ([]string, error)
-	procGroupArgv                  func(int, int) ([]string, error)
-	dirOrHome                      func(string) string
+	// proc inspects pane processes (cwd, foreground command, argv). Nil means
+	// no inspection is available; see WithProcessInspector and WithCwdReader.
+	proc      ports.ProcessInspector
+	dirOrHome func(string) string
 	// bindings is read by keys.Router through its own atomic pointer, so it is
 	// published next to (not inside) the runtime config snapshot.
 	bindings atomic.Pointer[keys.Bindings]
@@ -567,10 +566,12 @@ func WithSnapshotGarbageCollection() Option {
 }
 
 // WithCwdReader overrides the process cwd reader used for persistence tests.
+// Every other inspection keeps using the installed process inspector, or stays
+// unavailable when none is installed.
 func WithCwdReader(fn func(int) (string, error)) Option {
 	return func(d *Daemon) {
 		if fn != nil {
-			d.procCwd = fn
+			d.proc = cwdOverrideInspector{base: unwrapCwdOverride(d.proc), cwd: fn}
 		}
 	}
 }
@@ -581,10 +582,7 @@ func WithProcessInspector(ins ports.ProcessInspector) Option {
 		if ins == nil {
 			return
 		}
-		d.procCwd = ins.Cwd
-		d.procComm = ins.Comm
-		d.procArgv = ins.Argv
-		d.procGroupArgv = ins.GroupArgv
+		d.proc = ins
 	}
 }
 
