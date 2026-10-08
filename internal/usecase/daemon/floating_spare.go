@@ -85,9 +85,11 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 			// starts with the session theme, as a new tab does.
 			d.applySessionThemeToPane(sess, p)
 		}
+		var published *pane
 		sess.floatingLaunchMu.Lock()
 		sess.floatingSpareStarting = false
 		if p != nil && !sess.floatingLaunchStopping {
+			published = p
 			sess.floatingSpare = &floatingSpare{pane: p, key: spareKey(spec)}
 			p.prestarted = true
 			spare := p
@@ -107,6 +109,11 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 		sess.floatingLaunchMu.Unlock()
 		if p != nil {
 			closeFloatingPane(p)
+		}
+		if published != nil {
+			// A theme change between the first apply and publication could
+			// not see the spare; any later one does, so apply once more.
+			d.applySessionThemeToPane(sess, published)
 		}
 	})
 }
