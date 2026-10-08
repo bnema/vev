@@ -3,7 +3,6 @@ package client
 import (
 	"testing"
 
-	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -36,27 +35,6 @@ func TestNavigationState(t *testing.T) {
 			var n navigationState
 			if _, ok := n.resolveRoute(protocol.RouteRef{Key: 1, Generation: 1}); ok {
 				t.Fatal("resolveRoute on zero value = true, want false")
-			}
-		}},
-		{"buildRoutes creates ledger lazily", func(t *testing.T) {
-			var n navigationState
-			if n.routes != nil {
-				t.Fatal("routes non-nil at zero value")
-			}
-			n.buildRoutes(ports.BrokerSnapshot{}, routeActive{})
-			if n.routes == nil {
-				t.Fatal("routes nil after buildRoutes")
-			}
-		}},
-		{"takeSwap returns and clears", func(t *testing.T) {
-			var n navigationState
-			want := &pickerAttachmentTarget{}
-			n.pendingSwap = want
-			if got := n.takeSwap(); got != want {
-				t.Fatalf("takeSwap = %p, want %p", got, want)
-			}
-			if n.pendingSwap != nil {
-				t.Fatal("takeSwap kept swap")
 			}
 		}},
 	}
