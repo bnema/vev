@@ -122,6 +122,13 @@ func Parse(r io.Reader) (domain.Config, []domain.Warning, error) {
 				interval = domain.MinBarInterval
 			}
 			cfg.Bar.Interval = interval
+		case key == "bar.background":
+			on, ok := parseOnOff(value)
+			if !ok {
+				warnings = append(warnings, domain.Warning{Line: lineNo, Msg: fmt.Sprintf("invalid bar.background %q", value)})
+				continue
+			}
+			cfg.Bar.Transparent = !on
 		case key == "palette.anchor":
 			warnings = warnDuplicateKey(warnings, seenPaletteKeys, key, lineNo)
 			if strings.EqualFold(strings.TrimSpace(value), "auto") {
