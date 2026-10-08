@@ -1005,21 +1005,21 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 	if c.pendingGeneration == 0 {
 		c.pendingGeneration = 1
 	}
-	leases := make(map[*attachedClient]*attachmentLease, len(c.leases))
+	// lease.ready is guarded by c.mu (markAttachmentReady writes it), so only
+	// leases already ready under the lock are probed after unlocking.
+	probe := make(map[*attachedClient]*attachmentLease, len(c.leases))
 	for ac, lease := range c.leases {
-		if lease != nil && lease.active {
-			leases[ac] = lease
+		if lease != nil && lease.active && lease.ready {
+			probe[ac] = lease
 		}
 	}
 	c.mu.Unlock()
 
-	ready := make(map[*attachmentLease]bool, len(leases))
-	for ac, lease := range leases {
+	ready := make(map[*attachmentLease]bool, len(probe))
+	for ac, lease := range probe {
 		// Welcome holds attachment.sendMu while its transport Send is in
 		// flight. Do not probe an incarnation before it is ready.
-		if lease.ready {
-			ready[lease] = c.attachmentAckReady(ac)
-		}
+		ready[lease] = c.attachmentAckReady(ac)
 	}
 
 	// The readiness callback can detach, replace, or publish a sync batch.
@@ -1041,7 +1041,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 
 	// Re-snapshot after every external readiness probe. A replacement may have
 	// retired one of the leases we probed while the callback was unlocked.
-	leases = make(map[*attachedClient]*attachmentLease, len(c.leases))
+	leases := make(map[*attachedClient]*attachmentLease, len(c.leases))
 	for ac, lease := range c.leases {
 		if lease != nil && lease.active {
 			leases[ac] = lease
