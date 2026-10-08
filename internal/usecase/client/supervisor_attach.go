@@ -744,7 +744,7 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	var cancelOpen context.CancelFunc
 	var watchDone chan struct{}
 	if resuming {
-		keys = input.watchResume(s.cfg.Clock)
+		keys = input.watchResume(s.cfg.Clock, s.logger)
 		openCtx, cancelOpen = context.WithCancel(openCtx)
 		watchDone = make(chan struct{})
 		go func() {
@@ -778,6 +778,10 @@ func (s *Supervisor) attachResolved(ctx context.Context, input *terminalInputLif
 	}
 	if supervisorNil(stream) {
 		return s.attemptFailed(ports.BrokerError{Code: ports.BrokerErrorUnavailable, Text: "broker returned no stream"}, resuming)
+	}
+	if input != nil {
+		// The outage ended: keys typed from now on reach the session again.
+		input.resumeOverflowed.Store(false)
 	}
 	if err := deadline.adopt(stream); err != nil {
 		// The accepted absolute deadline already elapsed before this client
@@ -1043,7 +1047,7 @@ func (s *Supervisor) waitResume(ctx context.Context, input *terminalInputLifetim
 	delay := supervisorBackoffDelay(uint64(attempt), s.cfg.Jitter)
 	timer := s.cfg.Clock.NewTimer(delay)
 	defer stopSupervisorTimer(timer)
-	keys := input.watchResume(s.cfg.Clock)
+	keys := input.watchResume(s.cfg.Clock, s.logger)
 	defer keys.release()
 	for {
 		select {

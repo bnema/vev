@@ -1387,6 +1387,10 @@ type terminalInputLifetime struct {
 
 	mu       sync.Mutex
 	pickerID uint64
+	// resumeOverflowed spans every watch of one outage: once held keys
+	// overflowed, later phases drop keys too, so the resumed session never
+	// receives input with a gap. The picker taking input clears it.
+	resumeOverflowed atomic.Bool
 }
 
 // startTerminalInputLifetime starts the single terminal read. A nil reader is
@@ -1436,6 +1440,7 @@ func (l *terminalInputLifetime) acquirePicker() {
 	}
 	if id, ok := l.pump.tryClaim(); ok {
 		l.pickerID = id
+		l.resumeOverflowed.Store(false)
 		l.mu.Unlock()
 		return
 	}
@@ -1514,9 +1519,8 @@ func (l *terminalInputLifetime) stop() {
 }
 
 // resumeHeldInputLimit bounds keys kept while a lost attachment resumes.
-// Past it further keys are dropped, like a full terminal buffer.
-// TODO: the overflow flag is per resume watch; a later phase can accept keys
-// again and leave a gap. Make it sticky on the input lifetime until attach.
+// Past it further keys are dropped, like a full terminal buffer, until the
+// picker takes input again.
 const resumeHeldInputLimit = 64 << 10
 
 // resumeWatch reads the terminal while a lost attachment waits to resume.
@@ -1529,6 +1533,7 @@ type resumeWatch struct {
 	lifetime  *terminalInputLifetime
 	id        uint64
 	clock     ports.Clock
+	logger    *slog.Logger
 
 	// backlog counts deliveries already waiting at claim: session input the
 	// lost attachment kept, held verbatim and never read as a cancel key.
@@ -1537,9 +1542,6 @@ type resumeWatch struct {
 
 	mu   sync.Mutex
 	held []byte
-	// overflowed drops every key after the first one past the bound, so the
-	// resumed session never receives input with a gap in the middle.
-	overflowed bool
 }
 
 // heldLen reports how many kept bytes the watch holds.
@@ -1553,8 +1555,11 @@ func (w *resumeWatch) heldLen() int {
 func (w *resumeWatch) hold(data []byte) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.overflowed || len(w.held)+len(data) > resumeHeldInputLimit {
-		w.overflowed = w.overflowed || len(data) != 0
+	overflowed := &w.lifetime.resumeOverflowed
+	if overflowed.Load() || len(w.held)+len(data) > resumeHeldInputLimit {
+		if len(data) != 0 {
+			overflowed.Store(true)
+		}
 		return
 	}
 	w.held = append(w.held, data...)
@@ -1562,8 +1567,8 @@ func (w *resumeWatch) hold(data []byte) {
 
 // watchResume claims terminal input for one resume backoff. When the claim
 // is unavailable it returns a watch that never cancels.
-func (l *terminalInputLifetime) watchResume(clock ports.Clock) *resumeWatch {
-	w := &resumeWatch{cancelled: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), lifetime: l, clock: clock}
+func (l *terminalInputLifetime) watchResume(clock ports.Clock, logger *slog.Logger) *resumeWatch {
+	w := &resumeWatch{cancelled: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), lifetime: l, clock: clock, logger: logger}
 	if l == nil || l.pump == nil {
 		close(w.done)
 		return w
@@ -1672,7 +1677,13 @@ func (w *resumeWatch) releaseClaim() {
 	case <-w.cancelled:
 	default:
 		w.mu.Lock()
-		pump.appendResidual(w.id, w.held, resumeHeldInputLimit)
+		if !pump.appendResidual(w.id, w.held, resumeHeldInputLimit) && len(w.held) != 0 {
+			// Replaying only part of the held keys would leave a gap.
+			w.lifetime.resumeOverflowed.Store(true)
+			if w.logger != nil {
+				w.logger.Warn("client_resume_input_dropped", "bytes", len(w.held))
+			}
+		}
 		w.mu.Unlock()
 	}
 	pump.revoke(w.id)
