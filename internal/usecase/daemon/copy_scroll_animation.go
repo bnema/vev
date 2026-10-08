@@ -119,6 +119,10 @@ func (d *Daemon) advanceCopyScrollLocked(sess *session, ac *attachedClient) (boo
 			rt.stopCopyScrollLocked()
 			return changed, exit
 		}
+		if motion.remaining == 0 {
+			// The held backlog is drained: the next scroll eases freely again.
+			motion.recovering = false
+		}
 	}
 	if motion.remaining != 0 {
 		mode := rt.copyMode

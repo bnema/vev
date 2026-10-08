@@ -136,17 +136,22 @@ func TestCopyScrollReducedMotionAndKeyboardCancellation(t *testing.T) {
 
 // TestCopyScrollAnimationFullOutputWindow covers a remote link whose output
 // window is full: the animation holds still, drains the backlog in capped
-// steps once the window reopens, and gives up after about a second of hold.
+// steps once the window reopens, eases freely again once that backlog is
+// drained, and gives up after about a second of hold.
 func TestCopyScrollAnimationFullOutputWindow(t *testing.T) {
 	tests := []struct {
 		name       string
 		heldFrames int
 		reopen     bool
-		wantMoved  int
-		wantActive bool
+		// drainThenFlick drains the held backlog, then starts a new 60-row
+		// flick past the tail deadline; wantMoved counts only that flick.
+		drainThenFlick bool
+		wantMoved      int
+		wantActive     bool
 	}{
 		{name: "full window holds the viewport", heldFrames: 1, wantMoved: 0, wantActive: true},
 		{name: "reopened window drains in capped steps", heldFrames: 1, reopen: true, wantMoved: copyScrollMaxStep, wantActive: true},
+		{name: "drained backlog lifts the cap for the next flick", heldFrames: 1, reopen: true, drainThenFlick: true, wantMoved: 60, wantActive: false},
 		{name: "long hold abandons the scroll", heldFrames: copyScrollMaxHeldFrames + 1, wantMoved: 0, wantActive: false},
 	}
 	for _, tt := range tests {
@@ -174,6 +179,20 @@ func TestCopyScrollAnimationFullOutputWindow(t *testing.T) {
 			if tt.reopen {
 				f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
 				rt.copyScroll.timer.stop()
+				changed, exit := f.d.advanceCopyScrollLocked(f.sess, f.ac)
+				require.True(t, changed)
+				require.False(t, exit)
+			}
+			if tt.drainThenFlick {
+				for rt.copyScroll.remaining != 0 {
+					f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
+					rt.copyScroll.timer.stop()
+					changed, exit := f.d.advanceCopyScrollLocked(f.sess, f.ac)
+					require.True(t, changed)
+					require.False(t, exit)
+				}
+				start = rt.copyMode.ViewportTop
+				rt.copyScroll.remaining = -60
 				changed, exit := f.d.advanceCopyScrollLocked(f.sess, f.ac)
 				require.True(t, changed)
 				require.False(t, exit)
