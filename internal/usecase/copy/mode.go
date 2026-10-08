@@ -501,48 +501,6 @@ func FindMatches(doc *Document, query string) []SearchMatch {
 	return findMatches(query, doc.Snapshot().rangeText)
 }
 
-// RefineMatches returns FindMatches(doc, query) given previous, the complete
-// result for a query that query extends. Any row matching the longer query also
-// matched the shorter one, so only rows listed in previous are scanned again.
-func RefineMatches(doc *Document, previous []SearchMatch, query string) []SearchMatch {
-	query = strings.TrimSpace(query)
-	if doc == nil || query == "" {
-		return nil
-	}
-	snapshot := doc.Snapshot()
-	return findMatches(query, func(yield func(int, []rune, []int, int) bool) error {
-		var cells []renderer.Cell
-		var runes []rune
-		var columns []int
-		last := -1
-		for _, match := range previous {
-			if match.Row == last {
-				continue
-			}
-			last = match.Row
-			width := snapshot.RowWidth(match.Row)
-			cells = slices.Grow(cells[:0], width)[:width]
-			cells = cells[:snapshot.CopyRow(match.Row, cells)]
-			runes, columns = runes[:0], columns[:0]
-			for x, cell := range cells {
-				if cell.Continuation {
-					continue
-				}
-				r := cell.Rune
-				if r == 0 {
-					r = ' '
-				}
-				runes = append(runes, r)
-				columns = append(columns, x)
-			}
-			if !yield(match.Row, runes, columns, len(cells)) {
-				return nil
-			}
-		}
-		return nil
-	})
-}
-
 func findMatches(query string, rows textRows) []SearchMatch {
 	needle := lowerRunes(query)
 	matches := []SearchMatch{}
