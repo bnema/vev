@@ -709,6 +709,52 @@ func TestComposeCapturedFloatingFrameCachedAllocationsAreOnlyFrameClone(t *testi
 	}
 }
 
+// TestComposeCapturedFloatingFrameScratchReusesPopupPage pins that a primed
+// scratch page removes the per-frame base clone, leaves the base untouched,
+// and yields exactly the frame an unscratched composition builds.
+func TestComposeCapturedFloatingFrameScratchReusesPopupPage(t *testing.T) {
+	base := renderer.NewFrame(80, 24)
+	for y := range base.Height {
+		for x := range base.Width {
+			base.Set(x, y, renderer.Cell{Rune: rune('a' + (x+y)%26), Style: renderer.DefaultStyle()})
+		}
+	}
+	content := domain.Rect{Y: 1, Width: 80, Height: 22}
+	geometry := calculateContentFloatingGeometry(domain.Size{Cols: content.Width, Rows: content.Height}, domain.FloatingConfig{Width: 80, Height: 80})
+	input := floatingComposeInput{
+		baseFrame: base,
+		floating: capturedFloatingRenderState{
+			visible:         true,
+			pane:            capturedPaneRenderState{frame: renderer.NewFrame(62, 18), title: "float", titleGeneration: 1},
+			geometry:        geometry,
+			title:           "float",
+			generation:      1,
+			titleGeneration: 1,
+		},
+		content: content,
+		cache: composeCacheInput{
+			valid: true, floatingGeneration: 1, floatingGeometry: geometry.translate(content.X, content.Y), floatingTitleGeneration: 1,
+		},
+	}
+	baseBefore := frameRows(base)
+	want, wantDamage := composeCapturedFloatingFrame(input)
+
+	var popup renderer.Frame
+	input.scratch = &popup
+	got, gotDamage := composeCapturedFloatingFrame(input) // sizes the scratch page
+	require.Equal(t, frameRows(want), frameRows(got))
+	require.Equal(t, wantDamage, gotDamage)
+	require.False(t, framesShareStorage(got, base), "popup frame must not alias the base page")
+	require.Equal(t, baseBefore, frameRows(base), "base must stay free of popup cells")
+
+	allocs := testing.AllocsPerRun(100, func() { composeCapturedFloatingFrame(input) })
+	cloneAllocs := testing.AllocsPerRun(100, func() { benchmarkComposeSink.frame = base.Clone() })
+	require.Less(t, allocs, cloneAllocs, "scratch composition must allocate less than a clone")
+	if copyEnterAllocationBudgetEnabled {
+		assertRenderByteBudget(t, func() { benchmarkComposeSink.frame, _ = composeCapturedFloatingFrame(input) }, 1<<10)
+	}
+}
+
 var (
 	benchmarkComposeSink composedRenderFrame
 	benchmarkOutputSink  []byte
@@ -816,6 +862,10 @@ func BenchmarkComposeCapturedFloatingFrameCached(b *testing.B) {
 			floatingTitleGeneration: 1,
 		},
 	}
+
+	// Production passes the attachment's reusable popup page.
+	var popup renderer.Frame
+	input.scratch = &popup
 
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -133,6 +133,9 @@ type floatingComposeInput struct {
 	borderActive renderer.Style
 	cache        composeCacheInput
 	full         bool
+	// scratch, when non-nil, is the page the popup frame is composed into. It
+	// must not alias baseFrame's page; nil allocates a clone.
+	scratch *renderer.Frame
 }
 
 func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, []renderer.Damage) {
@@ -146,7 +149,7 @@ func composeCapturedFloatingFrame(input floatingComposeInput) (renderer.Frame, [
 	cache := input.cache
 	full := input.full
 
-	frame := base.Clone()
+	frame := copyFrameInto(input.scratch, base)
 	applyOverlayBackdrop(frame, theme)
 	geometry := floating.geometry.translate(content.X, content.Y)
 	blitClippedFloatingPane(frame, geometry.Inner, floating.pane.frame)

@@ -140,11 +140,11 @@ func (n *Navigator) moveVertical(doc *Document, row int) bool {
 }
 
 func navigatorPosOnRow(doc *Document, row, col int) (Pos, bool) {
-	cells := doc.Row(row)
-	if len(cells) == 0 {
+	width := doc.RowWidth(row)
+	if width == 0 {
 		return doc.Normalize(Pos{Row: row, Col: 0})
 	}
-	col = min(max(col, 0), len(cells)-1)
+	col = min(max(col, 0), width-1)
 	return doc.Normalize(Pos{Row: row, Col: col})
 }
 
