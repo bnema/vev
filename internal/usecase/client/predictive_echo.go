@@ -158,9 +158,9 @@ func (p *echoPredictor) applyOutput(output protocol.Output, now time.Time) {
 		p.forget()
 	}
 	if output.Full {
-		// A full frame repainted every drawn guess.
-		p.drawn = p.drawn[:0]
-		p.cursorMove = false
+		// A full frame repaints everything: guesses placed against the old
+		// frame would land on unrelated content.
+		p.forget()
 	}
 	if data := p.apc.strip(output.Data); len(data) > 0 {
 		p.screen.Write(data)
@@ -608,6 +608,30 @@ func (p *echoPredictor) needsTick() bool {
 	return p.mode == domain.EchoPredictAdaptive && p.active() && !(p.glitch > 0 && p.flagging)
 }
 
+// undraw returns the bytes that repaint every drawn guess from the mirror, so
+// a daemon frame lands on the screen the daemon believes it has. A frame that
+// scrolls would otherwise move a guess where nothing ever repairs it. The
+// guesses stay pending and render draws them again after the frame.
+func (p *echoPredictor) undraw() []byte {
+	if len(p.drawn) == 0 {
+		return nil
+	}
+	var out bytes.Buffer
+	if p.drawnRow < p.screen.Rows() {
+		for _, col := range p.drawn {
+			if col < p.screen.Columns() {
+				p.restoreCell(&out, p.drawnRow, col)
+			}
+		}
+	}
+	p.drawn = p.drawn[:0]
+	if out.Len() > 0 {
+		out.WriteString("\x1b[0m")
+		writeEchoCUP(&out, p.screen.CursorRow(), p.screen.CursorCol())
+	}
+	return out.Bytes()
+}
+
 // render returns the terminal bytes that bring the screen from the last
 // render to the current guesses: drawn cells that no longer show a guess are
 // repainted from the mirror, shown guesses are drawn again (a daemon frame
@@ -617,7 +641,9 @@ func (p *echoPredictor) render() []byte {
 	var out bytes.Buffer
 	show := p.displaying() && p.enabled()
 	var want []int
-	if show && p.cells != nil && p.row < p.screen.Rows() {
+	// Until the daemon answers an unknown key (Enter), the guesses' row may
+	// have moved, so none is drawn.
+	if show && p.cells != nil && p.row < p.screen.Rows() && p.echo >= p.holdUntil {
 		for col := range p.cells {
 			cell := &p.cells[col]
 			if !cell.active || cell.unknown || cell.tentative(p.confEpoch) {

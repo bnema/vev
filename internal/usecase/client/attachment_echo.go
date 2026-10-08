@@ -53,6 +53,22 @@ func (e *attachmentEcho) input(seq uint64, data []byte) error {
 	return e.draw()
 }
 
+// beforeOutput erases drawn guesses before the foreground writes a daemon
+// frame, so the frame never scrolls or overwrites around a guess.
+func (e *attachmentEcho) beforeOutput(output protocol.Output) error {
+	if e == nil || len(output.Data) == 0 {
+		return nil
+	}
+	data := e.predictor.undraw()
+	if len(data) == 0 {
+		return nil
+	}
+	if _, err := e.out.writePrediction(data); err != nil {
+		return fmt.Errorf("erasing predicted echo: %w", err)
+	}
+	return nil
+}
+
 // output mirrors one Output after the foreground wrote it.
 func (e *attachmentEcho) output(output protocol.Output) error {
 	if e == nil {
