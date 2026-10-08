@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/bnema/vev/internal/ports"
+	"github.com/bnema/vev/internal/protocol"
 )
 
 // ProtocolError is a session- or protocol-level failure reported before attach.
@@ -29,11 +30,15 @@ func newClientID() [16]byte {
 	return id
 }
 
+// requestedOutputWindow is the number of unacknowledged Output states this
+// client lets the daemon keep in flight: what the carriage prefers, or the
+// protocol maximum when it states no preference. A window of one makes every
+// frame wait a full round trip, which stalls scrolling on any remote link.
 func requestedOutputWindow(connection ports.ClientConnection) uint8 {
-	if windowed, ok := connection.(interface{ OutputWindow() uint8 }); ok {
-		return windowed.OutputWindow()
+	if window := connection.Capabilities().PreferredOutputWindow; window != 0 {
+		return window
 	}
-	return 1
+	return protocol.MaxOutputWindow
 }
 
 type foregroundSendLease struct {

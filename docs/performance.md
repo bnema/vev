@@ -226,6 +226,18 @@ The unadorned live-pane cache stays separate from the displayed copy viewport.
 Neither committed frame is mutated while preparing a candidate; failed output
 cannot publish its viewport metadata. Copy exit refreshes live content.
 
+Clients request the full output window (`MaxOutputWindow`, 8 frames), so the
+animation keeps moving while acknowledgements are in flight; on a remote link
+it stays smooth up to about 100 ms of round trip. When the window is full the
+animation holds still instead of piling rows into one frame, then drains the
+backlog it held at no more than 9 rows per frame; the next scroll eases
+normally again. A hold longer than about one second abandons the scroll.
+Local scroll easing is unchanged, since a local window never fills.
+`TestCopyScrollOverDelayedAcks` replays a flick and a sustained scroll over
+0–400 ms acknowledgement delays with windows of 1 and 8 frames; it asserts
+that no frame jumps more than 9 rows and that every requested row is shown,
+and logs the rows moved per frame.
+
 Mouse animation is tested separately with injected clocks: first response,
 16 ms pacing, burst accumulation, deceleration, reversal, cancellation, and the
 120 ms tail deadline. The rendering benchmark deliberately bypasses those timers

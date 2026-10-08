@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 
+	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -105,4 +107,35 @@ func TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStreamPipeHoldsAFullOutputWindow pins the client pipe headroom for the
+// session output window. A client claims protocol.MaxOutputWindow unacked
+// Output frames; with a terminal that is not draining, all of them may sit in
+// this pipe at once, and overflow fails the whole stream
+// (ErrStreamBackpressure). The frame size is a typical text repaint: a
+// near-full page of a 500x140 terminal measured about 70 KB. Uncompressed diff
+// frames with per-cell truecolor SGR can be far larger (estimated near 1 MB at
+// 300x80), and eight of those can still overflow the default 4 MiB bound.
+func TestStreamPipeHoldsAFullOutputWindow(t *testing.T) {
+	const frameBytes = 72 << 10
+	chunk := int(brokerwire.MaxStreamChunkBytes)
+	p := newStreamPipe(0, 0, func([]byte) error { return nil })
+	payload := bytes.Repeat([]byte{'x'}, frameBytes)
+	for frame := range protocol.MaxOutputWindow {
+		for data := payload; len(data) > 0; {
+			n := min(len(data), chunk)
+			require.NoError(t, p.deliver(data[:n]), "frame %d overflowed the client pipe", frame)
+			data = data[n:]
+		}
+	}
+}
+
+// TestClientStreamPrefersTheFullOutputWindow pins what a real broker-routed
+// attachment reports: its carriage is a reliable stream, not a datagram link,
+// so the client claims the full output window and frames pipeline.
+func TestClientStreamPrefersTheFullOutputWindow(t *testing.T) {
+	st, err := newClientStream(&client{}, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint8(protocol.MaxOutputWindow), st.Capabilities().PreferredOutputWindow)
 }

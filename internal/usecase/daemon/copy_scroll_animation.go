@@ -9,6 +9,14 @@ import (
 const (
 	copyScrollFrame = 16 * time.Millisecond
 	copyScrollTail  = 120 * time.Millisecond
+	// copyScrollMaxStep bounds each frame drained after the animation was held
+	// on a full output window, so the backlog that built up during the stall
+	// resumes as motion rather than one catch-up jump.
+	copyScrollMaxStep = 9
+	// copyScrollMaxHeldFrames ends an animation held on a full output window
+	// for about one second: the link is effectively gone, and scrolling on its
+	// own once acknowledgements finally return would surprise the user.
+	copyScrollMaxHeldFrames = int(time.Second / copyScrollFrame)
 )
 
 // copyMu owns the animation and its single cancellable overlay-input timer.
@@ -17,6 +25,10 @@ type copyScrollAnimation struct {
 	remaining int
 	lastInput time.Time
 	timer     pendingByteTimer
+	// heldFrames counts consecutive frames held on a full output window.
+	heldFrames int
+	// recovering caps the steps that drain the backlog left by a hold.
+	recovering bool
 }
 
 func (rt *overlayRuntime) stopCopyScrollLocked() {
@@ -74,22 +86,43 @@ func (d *Daemon) advanceCopyScrollLocked(sess *session, ac *attachedClient) (boo
 	if remaining == 0 {
 		return false, false
 	}
-	magnitude := remaining
-	if magnitude < 0 {
-		magnitude = -magnitude
-	}
-	step := (magnitude + 3) / 4
-	if d.clock.Now().Sub(motion.lastInput) >= copyScrollTail {
-		step = magnitude
-	}
-	if remaining < 0 {
-		step = -step
-	}
-	motion.remaining -= step
-	changed, exit := rt.moveCopyWheelLocked(step)
-	if !changed || exit {
-		rt.stopCopyScrollLocked()
-		return changed, exit
+	// While the client has a full window of unacknowledged frames, moving the
+	// viewport would only pile rows into one catch-up jump when the window
+	// reopens. Hold the animation and keep polling at frame pace instead.
+	changed, exit := false, false
+	if ac.output.atCapacity() {
+		motion.heldFrames++
+		motion.recovering = true
+		if motion.heldFrames > copyScrollMaxHeldFrames {
+			rt.stopCopyScrollLocked()
+			return false, false
+		}
+	} else {
+		motion.heldFrames = 0
+		magnitude := remaining
+		if magnitude < 0 {
+			magnitude = -magnitude
+		}
+		step := (magnitude + 3) / 4
+		if d.clock.Now().Sub(motion.lastInput) >= copyScrollTail {
+			step = magnitude
+		}
+		if motion.recovering {
+			step = min(step, copyScrollMaxStep)
+		}
+		if remaining < 0 {
+			step = -step
+		}
+		motion.remaining -= step
+		changed, exit = rt.moveCopyWheelLocked(step)
+		if !changed || exit {
+			rt.stopCopyScrollLocked()
+			return changed, exit
+		}
+		if motion.remaining == 0 {
+			// The held backlog is drained: the next scroll eases freely again.
+			motion.recovering = false
+		}
 	}
 	if motion.remaining != 0 {
 		mode := rt.copyMode
