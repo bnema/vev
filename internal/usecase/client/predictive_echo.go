@@ -47,10 +47,9 @@ const (
 	echoGlitchRepairCount       = 10
 	echoGlitchRepairMinInterval = 150 * time.Millisecond
 
-	// echoServerDelay is the daemon's echo acknowledgement delay
-	// (usecase/daemon echoAckDelay). It is removed from each round-trip
-	// sample so the thresholds compare network time, as mosh's SRTT does.
-	echoServerDelay = 50 * time.Millisecond
+	// echoServerDelay is removed from each round-trip sample so the
+	// thresholds compare network time, as mosh's SRTT does.
+	echoServerDelay = protocol.EchoAckDelay
 
 	// maxEchoSent bounds the send-time history used for round-trip samples.
 	maxEchoSent = 256

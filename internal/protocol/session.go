@@ -229,6 +229,12 @@ func (c ViewContext) Validate() error {
 	return domain.ValidatePaneStableID(c.FocusedPaneID)
 }
 
+// EchoAckDelay is how long sequenced input must have been applied before the
+// daemon acknowledges it in Output.Echo. Like mosh's ECHO_TIMEOUT, it gives the
+// PTY time to echo the input, so the screen published with the acknowledgement
+// already contains that echo. Clients remove it from round-trip samples.
+const EchoAckDelay = 50 * time.Millisecond
+
 type Output struct {
 	Epoch        uint64
 	Base         uint64
