@@ -188,8 +188,8 @@ func TestTransportObservabilityACKBlockedSpansEndExactlyOnce(t *testing.T) {
 			observer := &daemonRuntimeObserver{}
 			ready := false
 			rc := newRenderCoordinator(renderCoordinatorOptions{
-				observer: observer,
-				ackReady: func() bool { return ready },
+				observer:    observer,
+				ackReadyFor: func(*attachedClient) bool { return ready },
 			})
 			rc.attach(&attachedClient{})
 			rc.invalidate(renderInvalidation{class: invalidateOutput})
@@ -233,9 +233,9 @@ func TestTransportObservabilityBlockedACKEndDoesNotDelayNotifyAck(t *testing.T) 
 	wakes := make(chan renderWake, 1)
 	var ready atomic.Bool
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		observer: d.runtimeObserver,
-		ackReady: ready.Load,
-		wake:     func(w renderWake) { wakes <- w },
+		observer:    d.runtimeObserver,
+		ackReadyFor: func(*attachedClient) bool { return ready.Load() },
+		wake:        func(w renderWake) { wakes <- w },
 	})
 	rc.attach(&attachedClient{})
 	rc.invalidate(renderInvalidation{class: invalidateOutput})
@@ -284,8 +284,8 @@ func (o *blockingACKEndObserver) ObserveRuntime(mark ports.RuntimeMark) {
 func TestTransportObservabilityBlockedCoordinatorObserverReleasesLock(t *testing.T) {
 	observer := newBlockingDaemonRuntimeObserver()
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		observer: observer,
-		ackReady: func() bool { return false },
+		observer:    observer,
+		ackReadyFor: func(*attachedClient) bool { return false },
 	})
 	rc.attach(&attachedClient{})
 	rc.mu.Lock()
@@ -347,9 +347,10 @@ func TestTransportObservabilityACKBlockedStartPublishesBeforeEnd(t *testing.T) {
 	observer := newACKSpanInterleavingObserver()
 	ready := false
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		observer: observer,
-		ackReady: func() bool { return ready },
+		observer:    observer,
+		ackReadyFor: func(*attachedClient) bool { return ready },
 	})
+	rc.attach(&attachedClient{})
 	rc.mu.Lock()
 	rc.pending = true
 	gen := rc.normalLane.generation

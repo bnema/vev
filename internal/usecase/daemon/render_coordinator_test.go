@@ -97,7 +97,7 @@ func TestRenderCoordinatorDetachDoesNotJoinSelectedDeadlineWorker(t *testing.T) 
 	release := make(chan struct{})
 	rc := newRenderCoordinator(renderCoordinatorOptions{
 		clock: clock,
-		ackReady: func() bool {
+		ackReadyFor: func(*attachedClient) bool {
 			close(entered)
 			<-release
 			return true
@@ -166,10 +166,10 @@ func newCoordinatorHarness(t *testing.T) *coordinatorHarness {
 	}
 	h.ackReady.Store(true)
 	h.rc = newRenderCoordinator(renderCoordinatorOptions{
-		clock:      h.clk.clock,
-		wake:       func(w renderWake) { h.wakes <- w },
-		ackReady:   func() bool { return h.ackReady.Load() },
-		syncActive: func() bool { return h.syncActive.Load() },
+		clock:       h.clk.clock,
+		wake:        func(w renderWake) { h.wakes <- w },
+		ackReadyFor: func(*attachedClient) bool { return h.ackReady.Load() },
+		syncActive:  func() bool { return h.syncActive.Load() },
 	})
 	return h
 }
@@ -449,7 +449,7 @@ func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T
 
 	var rc *renderCoordinator
 	rc = newRenderCoordinator(renderCoordinatorOptions{
-		ackReady: func() bool {
+		ackReadyFor: func(*attachedClient) bool {
 			close(ackEntered)
 			// The readiness probe models the output send path reading coordinator
 			// metadata after sendMu is held. It must never run under c.mu.
@@ -1451,9 +1451,9 @@ func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T
 
 	wakes := make(chan renderWake, 1)
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		clock:    clock,
-		ackReady: func() bool { return true },
-		wake:     func(w renderWake) { wakes <- w },
+		clock:       clock,
+		ackReadyFor: func(*attachedClient) bool { return true },
+		wake:        func(w renderWake) { wakes <- w },
 	})
 	rc.invalidate(renderInvalidation{class: invalidateOutput})
 
