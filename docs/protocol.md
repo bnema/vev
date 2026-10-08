@@ -158,7 +158,10 @@ base. `ValidateOutput` enforces the epoch/base/new chain
 - At most `MaxOutputWindow` (8) states may be in flight per attachment
   (`daemon.go:maxUnackedOutputStates`); the daemon negotiates the window
   down from the transport capabilities (`Hello.MaxOutputInFlight` claim
-  capped by the transport ceiling; datagram carriage reports 1).
+  capped by the transport ceiling; datagram carriage reports 1). A client
+  claims its carriage's preferred window, or `MaxOutputWindow` when the
+  carriage states none, so output pipelines instead of waiting a round trip
+  per frame.
 - The client coalesces ACKs (`client.go:cumulativeAckQueue`) and keeps
   applying + acknowledging daemon frames even while a picker lease owns
   the terminal (see below) — admission without physical write.
