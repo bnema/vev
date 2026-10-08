@@ -17,8 +17,8 @@ import (
 	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 type snapshotAcceptanceRepository struct {

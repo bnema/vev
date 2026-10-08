@@ -5,7 +5,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 func acceptancePublication(snapshot snapcodec.Session) (ports.SnapshotPublication, error) {

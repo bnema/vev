@@ -21,8 +21,8 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 type durableRecoveryCatalogue struct {

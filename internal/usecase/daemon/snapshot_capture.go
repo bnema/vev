@@ -1,6 +1,6 @@
 package daemon
 
-import snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+import snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 
 // captureSnapshotState copies history tails and recovery transcripts while holding
 // each pane lock. The returned capture contains only immutable state; encoding

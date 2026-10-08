@@ -31,14 +31,15 @@ go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -be
 The exhaustive production matrix and separate test-import policy are enforced by `boundary_test.go`; package ownership is documented in `docs/architecture.md`.
 
 - `pkg/` is reusable and never imports `internal/`.
-- Production use cases import only `internal/ports`, semantic `internal/protocol` packages, `internal/domain`, and approved sibling use cases.
+- Production use cases import only `internal/ports`, semantic `internal/protocol` packages, `internal/domain`, `internal/snapshotcodec`, and approved sibling use cases.
 - Production use cases never import `internal/protocol/wire`, concrete adapters, `internal/app`, `internal/persist`, or `internal/platform`.
 - `internal/ports` owns application seams, not codecs, raw frames, environment policy, or worker implementations.
 
 Layer map:
 
 - `main.go` → `internal/app`: CLI parsing, composition, daemon startup, and hidden subcommands.
-- `internal/domain`: pure shared values and terminal capability policy.
+- `internal/domain`: pure shared values, the pane layout tree, and terminal capability policy.
+- `internal/snapshotcodec`: durable snapshot format, shared by the daemon and the snapshot adapter.
 - `internal/protocol`: typed session messages; `protocol/catalogue` owns remote JSON schema; `protocol/wire` owns binary encoding and raw carriage contracts.
 - `internal/ports`: typed application connections and infrastructure-facing use-case seams.
 - `internal/adapters/sessionwire`: typed message ↔ raw frame adaptation.

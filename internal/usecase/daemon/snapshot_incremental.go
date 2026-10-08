@@ -6,7 +6,7 @@ import (
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 // snapshotChunkCacheLimit is deliberately small: history chunks remain owned

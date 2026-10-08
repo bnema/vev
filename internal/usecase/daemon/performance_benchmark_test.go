@@ -18,7 +18,7 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 func TestCountingSnapshotRepositoryPublishCountsAndRetainsManifest(t *testing.T) {

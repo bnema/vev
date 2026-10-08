@@ -1,4 +1,4 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"crypto/sha256"

@@ -30,6 +30,7 @@ const (
 	layerWire        packageLayer = "wire"
 	layerDomain      packageLayer = "domain"
 	layerPersist     packageLayer = "persist"
+	layerSnapshot    packageLayer = "snapshot-codec"
 	layerPlatform    packageLayer = "platform"
 	layerLogging     packageLayer = "logging"
 	layerPkg         packageLayer = "pkg"
@@ -40,15 +41,16 @@ var productionDependencies = map[packageLayer]map[packageLayer]bool{
 	layerRoot:      {layerApp: true},
 	layerCommand:   {layerPkg: true},
 	layerScript:    {layerAdapter: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true, layerWire: true, layerPkg: true},
-	layerApp:       {layerAdapter: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true, layerWire: true, layerUsecase: true, layerPersist: true, layerPlatform: true, layerLogging: true, layerPkg: true},
-	layerAdapter:   {layerAdapter: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true, layerWire: true, layerPlatform: true, layerPkg: true},
-	layerUsecase:   {layerUsecase: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true},
+	layerApp:       {layerAdapter: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true, layerWire: true, layerUsecase: true, layerPersist: true, layerSnapshot: true, layerPlatform: true, layerLogging: true, layerPkg: true},
+	layerAdapter:   {layerAdapter: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true, layerWire: true, layerSnapshot: true, layerPlatform: true, layerPkg: true},
+	layerUsecase:   {layerUsecase: true, layerDomain: true, layerPorts: true, layerProtocol: true, layerCatalogue: true, layerSnapshot: true},
 	layerPorts:     {layerDomain: true, layerProtocol: true, layerCatalogue: true},
 	layerProtocol:  {layerDomain: true},
 	layerCatalogue: {layerDomain: true, layerProtocol: true},
 	layerWire:      {layerDomain: true, layerProtocol: true},
 	layerDomain:    {layerDomain: true},
 	layerPersist:   {layerDomain: true, layerPorts: true, layerProtocol: true, layerPkg: true},
+	layerSnapshot:  {layerDomain: true, layerPorts: true},
 	layerPlatform:  {},
 	layerLogging:   {layerPkg: true},
 	layerPkg:       {layerPkg: true},
@@ -91,7 +93,11 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 		{"usecase rejects adapter", modulePath + "/internal/usecase/client", modulePath + "/internal/adapters/ipc", false, false},
 		{"domain rejects ports", modulePath + "/internal/domain", modulePath + "/internal/ports", false, false},
 		{"pkg rejects internal", modulePath + "/pkg/rawterm", modulePath + "/internal/domain", false, false},
-		{"snapshot adapter exception", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/usecase/snapshot", false, true},
+		{"snapshot adapter accepts codec", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/snapshotcodec", false, true},
+		{"daemon accepts snapshot codec", modulePath + "/internal/usecase/daemon", modulePath + "/internal/snapshotcodec", false, true},
+		{"snapshot codec rejects usecase", modulePath + "/internal/snapshotcodec", modulePath + "/internal/usecase/daemon", false, false},
+		{"snapshot codec rejects adapter", modulePath + "/internal/snapshotcodec", modulePath + "/internal/adapters/snapshot", false, false},
+		{"snapshot adapter rejects usecase", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/usecase/daemon", false, false},
 		{"other adapter rejects usecase", modulePath + "/internal/adapters/ipc", modulePath + "/internal/usecase/client", false, false},
 		{"usecase test may use wire fixture", modulePath + "/internal/usecase/client", modulePath + "/internal/protocol/wire", true, true},
 		{"pkg test still rejects internal", modulePath + "/pkg/rawterm", modulePath + "/internal/domain", true, false},
@@ -201,9 +207,6 @@ func dependencyAllowed(source, target string, testFile bool) (bool, error) {
 	if sourceLayer == layerTestSupport {
 		return testSupportDependencyAllowed(source, targetLayer), nil
 	}
-	if source == modulePath+"/internal/adapters/snapshot" && target == modulePath+"/internal/usecase/snapshot" {
-		return true, nil
-	}
 	if packageImportDenied(source, target) {
 		return false, nil
 	}
@@ -275,6 +278,8 @@ func classifyPackage(path string) (packageLayer, error) {
 		return layerUsecase, nil
 	case path == modulePath+"/internal/persist":
 		return layerPersist, nil
+	case path == modulePath+"/internal/snapshotcodec":
+		return layerSnapshot, nil
 	case path == modulePath+"/internal/platform":
 		return layerPlatform, nil
 	case path == modulePath+"/internal/logging":

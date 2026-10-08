@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	codec "github.com/bnema/vev/internal/usecase/snapshot"
+	codec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 func TestRepositoryRejectsSymlinkedRoot(t *testing.T) {

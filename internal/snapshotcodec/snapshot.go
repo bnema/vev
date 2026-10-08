@@ -1,4 +1,8 @@
-package snapshot
+// Package snapshotcodec owns the durable snapshot format: the session codec,
+// checkpoint manifests, content-addressed objects, and their bounded preflight.
+// It depends only on domain values and ports, so both the daemon use case and
+// the snapshot repository adapter can consume it.
+package snapshotcodec
 
 import "github.com/bnema/vev/internal/domain/layout"
 

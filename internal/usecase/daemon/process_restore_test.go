@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 func TestProcessRestorePlan(t *testing.T) {
