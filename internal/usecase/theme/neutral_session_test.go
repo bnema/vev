@@ -4,8 +4,39 @@ import (
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/domain"
 	"github.com/stretchr/testify/require"
 )
+
+// TestIndexedFallbackKeepsActiveTitleReadable covers a terminal that reports
+// its default colors but no palette: the scheme blue fallback must not recolor
+// the title drawn on the full-strength active surface.
+func TestIndexedFallbackKeepsActiveTitleReadable(t *testing.T) {
+	black := renderer.RGB{}
+	white := renderer.RGB{R: 255, G: 255, B: 255}
+	for _, tt := range []struct {
+		name                   string
+		foreground, background renderer.RGB
+		light                  bool
+	}{
+		{name: "dark", foreground: white, background: black},
+		{name: "light", foreground: black, background: white, light: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			theme := Theme{
+				Known: true, SchemeKnown: true, Light: tt.light, UsePalette: true,
+				Foreground: tt.foreground, Background: tt.background, HasFG: true, HasBG: true,
+			}
+			resolved := Resolve(theme, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})
+			require.True(t, resolved.Accent.IndexedOnly)
+
+			want := MutedVariantStyle(resolved.Styles.SurfaceActive, theme)
+			require.Equal(t, want, resolved.Styles.TabActiveTitle)
+			require.Equal(t, want, resolved.Styles.TabTitleActive)
+			require.Equal(t, int(resolved.Accent.Slot), resolved.Styles.TabInactiveTitle.Foreground)
+		})
+	}
+}
 
 func TestNeutralSessionSurfaceHierarchy(t *testing.T) {
 	black := renderer.RGB{}
