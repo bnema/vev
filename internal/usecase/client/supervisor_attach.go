@@ -477,7 +477,7 @@ func (s *Supervisor) awaitInitialNavigationObservation(ctx context.Context, inpu
 	defer timer.Stop()
 	for {
 		select {
-		case <-s.brokerChanged():
+		case <-s.nav.brokerChanged():
 			snapshot := service.Snapshot()
 			navigation, consumed, err := s.takeInitialNavigation(snapshot)
 			if errors.Is(err, ErrInitialNavigationNotObserved) {
@@ -878,7 +878,7 @@ settlement:
 			break settlement
 		case <-s.attachments.NavigationRequests():
 			overlay.enter()
-		case <-s.brokerChanged():
+		case <-s.nav.brokerChanged():
 			if overlay.active {
 				overlay.applyPublication()
 			}
@@ -939,11 +939,10 @@ settlement:
 	}
 	// The overlay or a daemon navigation may have committed another target
 	// while this attachment was live; this attempt consumes it either way.
-	swap := s.pendingSwap
-	s.pendingSwap = nil
+	swap := s.nav.takeSwap()
 	// An in-place switch still in flight ended with its attachment; the
 	// resume or picker path below decides what comes next.
-	s.pendingInPlace = nil
+	s.nav.clearInPlace()
 	if terminated {
 		return attachmentTerminatedOutcome(termErr)
 	}

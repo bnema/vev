@@ -468,28 +468,11 @@ type Supervisor struct {
 	// capabilities is the outer terminal's probed and enabled capabilities,
 	// written once in Run before any attachment starts.
 	capabilities terminalCapabilities
-	// readySub is the adopted connection's subscription while the ready phase
-	// runs, so the picker overlay over a live attachment keeps folding broker
-	// publications. It is only touched from the run goroutine.
-	readySub ports.BrokerSubscription
-	// pendingSwap is the request the picker overlay or a daemon navigation
-	// committed to another target while an attachment was live. It is only
-	// touched from the run goroutine and consumed by settleAttachment.
-	pendingSwap *pickerAttachmentTarget
-	// pendingInPlace is the choice the live attachment is switching to in
-	// place on its own daemon. A refusal turns it into pendingSwap. Only
-	// touched from the run goroutine; cleared when the attachment settles.
-	pendingInPlace *pendingInPlace
-	// inPlaceSeq numbers in-place choices so a late outcome for an older one
-	// is never applied to a newer one.
-	inPlaceSeq uint64
+	// nav is the run goroutine's navigation bookkeeping: the ready-phase
+	// subscription, pending swap and in-place choices, and the route ledger.
+	nav navigationState
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
-	// routes is the client route ledger published to the serving daemon;
-	// routesSent is the attachment that received its latest snapshot. Both are
-	// only touched from the run goroutine.
-	routes     *routeLedger
-	routesSent AttachmentToken
 }
 
 // NewSupervisor validates the required dependencies and returns a supervisor
@@ -610,7 +593,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 	retire := func() {
 		s.retirePickerKill()
 		s.preview.close(s.cfg.Picker)
-		s.readySub = nil
+		s.nav.clearReady()
 		if sub != nil {
 			sub.Close()
 			sub = nil
@@ -679,7 +662,7 @@ func (s *Supervisor) Run(ctx context.Context) (retErr error) {
 		}
 
 		service, sub = result.service, result.sub
-		s.readySub = sub
+		s.nav.setReady(sub)
 		if s.cfg.Picker != nil {
 			// Render the first committed publication immediately, before waiting
 			// for the next one; the picker never shows a stale empty catalogue
