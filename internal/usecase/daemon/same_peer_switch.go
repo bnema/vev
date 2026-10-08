@@ -69,17 +69,13 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 	if err := request.Validate(); err != nil || !effect.current() || effect.sess == nil || effect.ac == nil {
 		return
 	}
-	if !effect.ac.consumeSamePeerOffer(request.Target) {
-		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
-		return
-	}
-
 	// The switch moves an attachment between sessions, so it must not run
-	// inside the exact set a KillAll purge has captured.
+	// inside the exact set a KillAll purge has captured. A purge is retry
+	// state, so it is checked first and keeps any pending daemon offer.
 	d.mu.Lock()
 	if d.purgeAdmissionClosedLocked() {
 		d.mu.Unlock()
-		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchUnavailable)
 		return
 	}
 	d.purgeAdmissionActive++
@@ -89,6 +85,11 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(d.releasePurgeAdmission) }
 	defer release()
+
+	if !effect.ac.consumeSamePeerOffer(request.Target) {
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
+		return
+	}
 
 	target, targetTabIndex, ok := d.samePeerTarget(request)
 	if !ok || target == effect.sess {

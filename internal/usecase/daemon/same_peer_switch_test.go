@@ -133,11 +133,13 @@ func TestSamePeerSwitchClientInitiated(t *testing.T) {
 		offer    *protocol.ExactSessionTarget
 		purging  bool
 		switched bool
+		wantCode protocol.SamePeerSwitchFailureCode
 	}{
 		{name: "no pending offer switches", switched: true},
 		{name: "matching offer switches", offer: &requestTarget, switched: true},
-		{name: "another pending offer refuses", offer: &otherOffer},
-		{name: "a running purge refuses", purging: true},
+		{name: "another pending offer refuses", offer: &otherOffer, wantCode: protocol.SamePeerSwitchStaleTarget},
+		{name: "a running purge refuses", purging: true, wantCode: protocol.SamePeerSwitchUnavailable},
+		{name: "a running purge keeps the pending offer", offer: &requestTarget, purging: true, wantCode: protocol.SamePeerSwitchUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -179,7 +181,12 @@ func TestSamePeerSwitchClientInitiated(t *testing.T) {
 			}
 			require.Same(t, source, ac.currentAttachmentSession())
 			failure := decodeServerMessage(t, awaitFrame(t, sends, "SamePeerSwitchFailure")).(protocol.SamePeerSwitchFailure)
-			require.Equal(t, protocol.SamePeerSwitchStaleTarget, failure.Code)
+			require.Equal(t, tt.wantCode, failure.Code)
+			if tt.offer != nil {
+				ac.samePeerOfferMu.Lock()
+				defer ac.samePeerOfferMu.Unlock()
+				require.Equal(t, tt.offer, ac.samePeerOffer, "a refused switch keeps the pending offer")
+			}
 		})
 	}
 }
