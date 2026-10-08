@@ -1336,7 +1336,7 @@ func TestRefreshSessionCwdTouchesOnlyOnChange(t *testing.T) {
 	d := newTestDaemon(t, newFactory(t, p), stubClock{})
 	WithStore(t, store)(d)
 	cwd := "/tmp/work"
-	WithCwdReader(func(int) (string, error) { return cwd, nil })(d)
+	WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return cwd, nil }})(d)
 
 	sess, err := createSessionForTest(d, "work", false, "/tmp/work", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
@@ -1529,7 +1529,7 @@ func TestNaturalExitStoppedButExplicitKillPurges(t *testing.T) {
 	store, state := newMockStore(t)
 	d := newTestDaemon(t, newFactorySeq(t, p1, p2), stubClock{})
 	WithStore(t, store)(d)
-	WithCwdReader(func(int) (string, error) { return "/tmp/latest", nil })(d)
+	WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return "/tmp/latest", nil }})(d)
 
 	natural, err := createSessionForTest(d, "natural", false, "/tmp/old", sz, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)

@@ -187,7 +187,7 @@ type Daemon struct {
 	restoreDone             chan struct{}
 	restoreOnce             sync.Once
 	// proc inspects pane processes (cwd, foreground command, argv). Nil means
-	// no inspection is available; see WithProcessInspector and WithCwdReader.
+	// no inspection is available; see WithProcessInspector.
 	proc      ports.ProcessInspector
 	dirOrHome func(string) string
 	// bindings is read by keys.Router through its own atomic pointer, so it is
@@ -525,17 +525,6 @@ func WithNoticeStore(store ports.NoticeStore) Option {
 // recovery coordinator installed by WithRecoveryCoordinator.
 func WithSnapshotGarbageCollection() Option {
 	return func(d *Daemon) { d.snapshotGarbageCollection = true }
-}
-
-// WithCwdReader overrides the process cwd reader used for persistence tests.
-// Every other inspection keeps using the installed process inspector, or stays
-// unavailable when none is installed.
-func WithCwdReader(fn func(int) (string, error)) Option {
-	return func(d *Daemon) {
-		if fn != nil {
-			d.proc = cwdOverrideInspector{base: unwrapCwdOverride(d.proc), cwd: fn}
-		}
-	}
 }
 
 // WithProcessInspector installs the platform process-inspection implementation.
