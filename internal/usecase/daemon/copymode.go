@@ -22,6 +22,7 @@ const copyDoubleClickInterval = 500 * time.Millisecond
 
 func sameCopyPos(a, b scopy.Pos) bool { return a.Row == b.Row && a.Col == b.Col }
 
+// isCopyDoubleClickLocked requires rt.copyMu, not d.mu.
 func (d *Daemon) isCopyDoubleClickLocked(rt *overlayRuntime, pane *pane, pos scopy.Pos, now time.Time) bool {
 	candidate := rt.copyClick
 	return candidate.valid && !candidate.dragged && candidate.pane == pane &&
@@ -342,6 +343,8 @@ func (d *Daemon) handleCopyInput(ac *attachedClient, data []byte) {
 		d.invalidateRender(sess, ac, true, "copymode.go")
 	}
 }
+
+// routeCopySearchInputLocked requires rt.copyMu, not d.mu.
 func (d *Daemon) routeCopySearchInputLocked(rt *overlayRuntime, data []byte) (changed, closeSearch, accepted bool) {
 	routeOverlayBytes(data, &rt.copySearchPending, overlayEvents{rune: func(r rune) { rt.copySearch.Insert(r); changed = true }, backspace: func() { rt.copySearch.Backspace(); changed = true }, enter: func() {
 		if _, ok := rt.copySearch.Selected(); ok {
@@ -358,6 +361,8 @@ func (d *Daemon) routeCopySearchInputLocked(rt *overlayRuntime, data []byte) (ch
 	}
 	return
 }
+
+// previewCopySearchSelectionLocked requires rt.copyMu, not d.mu.
 func (d *Daemon) previewCopySearchSelectionLocked(rt *overlayRuntime) {
 	if rt == nil || rt.copyMode == nil || rt.copySearch == nil {
 		return
@@ -366,6 +371,8 @@ func (d *Daemon) previewCopySearchSelectionLocked(rt *overlayRuntime) {
 		rt.copyMode.SetPosition(scopy.Pos{Row: match.Row, Col: match.Start})
 	}
 }
+
+// retainCopyESCLocked requires ac.overlays.copyMu, not d.mu.
 func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 	rt := ac.overlays
 	mode := rt.copyMode
@@ -390,6 +397,8 @@ func (d *Daemon) retainCopyESCLocked(ac *attachedClient) {
 		}
 	})
 }
+
+// stopCopyPendingTimerLocked requires ac.overlays.copyMu, not d.mu.
 func (d *Daemon) stopCopyPendingTimerLocked(ac *attachedClient) { ac.overlays.copyESC.stop() }
 func routeCopyEscape(m *scopy.Mode, data []byte) (int, bool) {
 	if len(data) >= 3 && (data[1] == '[' || data[1] == 'O') {

@@ -316,6 +316,7 @@ func (d *Daemon) refreshBarScriptsIfDue(sess *session, now time.Time, force bool
 	return true
 }
 
+// scheduleBarScriptRefreshLocked requires d.barScripts.mu, not d.mu.
 func (d *Daemon) scheduleBarScriptRefreshLocked(sess *session, delay time.Duration) {
 	if d.barScripts.pending[sess.id] {
 		return

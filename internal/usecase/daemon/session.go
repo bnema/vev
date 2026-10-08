@@ -901,8 +901,7 @@ func (d *Daemon) startPaneGoroutines(sess *session, tb *tab, p *pane) {
 		return
 	}
 	// Scheduler ownership was removed; this launch creates exactly one reader.
-	d.sessWg.Add(1)
-	go d.readPanePTY(p)
+	d.sessWg.Go(func() { d.readPanePTY(p) })
 }
 
 // detachIfCurrent publishes terminal attachment invalidation through the attachment

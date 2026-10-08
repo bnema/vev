@@ -15,6 +15,8 @@ func (d *Daemon) applyHostTheme(sess *session, ac *attachedClient, t theme.Theme
 	return d.applyHostThemeLocked(sess, ac, t, clearUnknownScheme)
 }
 
+// applyHostThemeLocked requires sess.themeMu (and ac.sendMu when ac is non-nil),
+// not d.mu.
 func (d *Daemon) applyHostThemeLocked(sess *session, ac *attachedClient, t theme.Theme, clearUnknownScheme bool) bool {
 	// Resolve while applying, never while composing. The theme mutex only
 	// publishes the completed value and is not held across session/tab/pane

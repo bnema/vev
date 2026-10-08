@@ -179,6 +179,7 @@ func (d *Daemon) releaseMoveAdmissionLocked() {
 	d.mu.Unlock()
 }
 
+// moveLifecycleChangeLocked requires moveLifecycleMu, not d.mu.
 func (d *Daemon) moveLifecycleChangeLocked() chan struct{} {
 	if d.moveLifecycleChanged == nil {
 		d.moveLifecycleChanged = make(chan struct{})
@@ -186,6 +187,7 @@ func (d *Daemon) moveLifecycleChangeLocked() chan struct{} {
 	return d.moveLifecycleChanged
 }
 
+// signalMoveLifecycleChangedLocked requires moveLifecycleMu, not d.mu.
 func (d *Daemon) signalMoveLifecycleChangedLocked() {
 	close(d.moveLifecycleChangeLocked())
 	d.moveLifecycleChanged = make(chan struct{})

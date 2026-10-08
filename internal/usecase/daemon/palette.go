@@ -786,6 +786,7 @@ func paletteArgs(query string, cmd command.Command) []string {
 	return action.Args
 }
 
+// clearPaletteLocked requires ac.overlays.paletteMu.
 func (ac *attachedClient) clearPaletteLocked() {
 	ac.overlays.paletteGeneration++
 	ac.overlays.palette = nil

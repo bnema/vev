@@ -56,9 +56,12 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	return false
 }
 
-// ptyReader is retained as a compatibility entry point for focused tests. The
-// production goroutine calls readPanePTY, whose closure owns only the pane.
+// ptyReader is retained as a compatibility entry point for focused tests, which
+// register the goroutine with sessWg.Add before calling it. The production
+// goroutine is launched with sessWg.Go and calls readPanePTY, whose closure owns
+// only the pane.
 func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
+	defer d.sessWg.Done()
 	if p != nil && p.ownerSnapshot() == nil && sess != nil && tb != nil {
 		publishPaneOwner(p, sess, tb, 0)
 	}
@@ -66,7 +69,6 @@ func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
 }
 
 func (d *Daemon) readPanePTY(p *pane) {
-	defer d.sessWg.Done()
 	if p == nil {
 		return
 	}
