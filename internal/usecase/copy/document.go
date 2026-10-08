@@ -241,7 +241,8 @@ func (d *Document) NextWordEnd(pos Pos) (Pos, bool) {
 // LineText returns row text without duplicated continuation cells and retains
 // the established copy-mode behavior of trimming trailing blank spaces.
 func (d *Document) LineText(row int) string {
-	return strings.TrimRight(d.cellsText(d.Row(row), 0, len(d.Row(row))-1), " ")
+	cells := d.Row(row)
+	return strings.TrimRight(d.cellsText(cells, 0, len(cells)-1), " ")
 }
 
 // Extract renders inclusive ranges as copyable text. Every emitted line drops
