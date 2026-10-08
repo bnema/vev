@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	renderer "github.com/bnema/vev-vt"
+	"github.com/bnema/vev/internal/usecase/fuzzy"
 )
 
 const MaxSearchQueryRunes = 256
@@ -282,60 +283,16 @@ func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
 }
 
 func scoreField(field matchField, text, query string, needle []rune) (fieldMatch, bool) {
-	if len(needle) == 0 {
-		return fieldMatch{field: field}, true
-	}
-	if text == query {
-		positions := rangeRunePositions(len(needle))
-		return fieldMatch{field: field, positions: positions, rank: 0, span: len(positions)}, true
-	}
-	if strings.HasPrefix(text, query) {
-		positions := rangeRunePositions(len(needle))
-		return fieldMatch{field: field, positions: positions, rank: 1, span: len(positions)}, true
-	}
-	positions, ok := subsequenceRunePositions([]rune(text), needle)
+	matched, ok := fuzzy.Match(text, query, needle)
 	if !ok {
 		return fieldMatch{}, false
 	}
-	return fieldMatch{field: field, positions: positions, rank: 2, span: positions[len(positions)-1] - positions[0] + 1, first: positions[0]}, true
+	return fieldMatch{field: field, positions: matched.Positions, rank: int(matched.Kind), span: matched.Span, first: matched.First}, true
 }
 
 func lessFieldMatch(left, right fieldMatch) bool {
-	if left.rank != right.rank {
-		return left.rank < right.rank
-	}
-	if left.span != right.span {
-		return left.span < right.span
-	}
-	if left.first != right.first {
-		return left.first < right.first
+	if left.rank != right.rank || left.span != right.span || left.first != right.first {
+		return fuzzy.Less(left.rank, fuzzy.Score{Span: left.span, First: left.first}, right.rank, fuzzy.Score{Span: right.span, First: right.first})
 	}
 	return left.field < right.field
-}
-
-func rangeRunePositions(length int) []int {
-	positions := make([]int, length)
-	for i := range positions {
-		positions[i] = i
-	}
-	return positions
-}
-
-func subsequenceRunePositions(haystack, needle []rune) ([]int, bool) {
-	if len(needle) == 0 {
-		return nil, true
-	}
-	positions := make([]int, 0, len(needle))
-	next := 0
-	for idx, r := range haystack {
-		if r != needle[next] {
-			continue
-		}
-		positions = append(positions, idx)
-		next++
-		if next == len(needle) {
-			return positions, true
-		}
-	}
-	return nil, false
 }

@@ -3,7 +3,8 @@ package palette
 import (
 	"sort"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/bnema/vev/internal/usecase/fuzzy"
 )
 
 // Match is a fuzzy-matched immutable palette result.
@@ -85,7 +86,7 @@ func score(result Result, needle string, needleRunes []rune, order int) (Match, 
 		return match, true
 	}
 	if cmd, ok := result.Command(); ok {
-		if positions, ok := subsequencePositions([]rune(strings.ToLower(cmd.Desc)), needleRunes); ok {
+		if positions, ok := fuzzy.SubsequencePositions([]rune(strings.ToLower(cmd.Desc)), needleRunes); ok {
 			match.rank, match.span, match.first = 5, positions[len(positions)-1]-positions[0]+1, positions[0]
 			return match, true
 		}
@@ -101,25 +102,19 @@ type fieldScore struct {
 }
 
 func scoreField(text, needle string, needleRunes []rune, displayOffset, exactRank, prefixRank, subsequenceRank int) (fieldScore, bool) {
-	text = strings.ToLower(text)
-	var scored fieldScore
-	switch {
-	case text == needle:
-		scored.positions = rangePositions(utf8.RuneCountInString(text))
+	matched, ok := fuzzy.Match(strings.ToLower(text), needle, needleRunes)
+	if !ok {
+		return fieldScore{}, false
+	}
+	scored := fieldScore{positions: matched.Positions, span: matched.Span, first: matched.First}
+	switch matched.Kind {
+	case fuzzy.Exact:
 		scored.rank = exactRank
-	case strings.HasPrefix(text, needle):
-		scored.positions = rangePositions(utf8.RuneCountInString(needle))
+	case fuzzy.Prefix:
 		scored.rank = prefixRank
 	default:
-		positions, ok := subsequencePositions([]rune(text), needleRunes)
-		if !ok {
-			return fieldScore{}, false
-		}
-		scored.positions = positions
 		scored.rank = subsequenceRank
 	}
-	scored.span = scored.positions[len(scored.positions)-1] - scored.positions[0] + 1
-	scored.first = scored.positions[0]
 	for i := range scored.positions {
 		scored.positions[i] += displayOffset
 	}
@@ -127,13 +122,7 @@ func scoreField(text, needle string, needleRunes []rune, displayOffset, exactRan
 }
 
 func (s fieldScore) betterThan(other fieldScore) bool {
-	if s.rank != other.rank {
-		return s.rank < other.rank
-	}
-	if s.span != other.span {
-		return s.span < other.span
-	}
-	return s.first < other.first
+	return fuzzy.Less(s.rank, fuzzy.Score{Span: s.span, First: s.first}, other.rank, fuzzy.Score{Span: other.span, First: other.first})
 }
 
 func (s fieldScore) apply(match *Match) {
@@ -145,30 +134,4 @@ func (s fieldScore) apply(match *Match) {
 
 func newMatch(result Result, order int) Match {
 	return Match{Result: result, order: order, search: strings.ToLower(result.SearchText())}
-}
-
-func rangePositions(n int) []int {
-	positions := make([]int, n)
-	for i := range positions {
-		positions[i] = i
-	}
-	return positions
-}
-
-func subsequencePositions(haystack, needle []rune) ([]int, bool) {
-	if len(needle) == 0 {
-		return nil, true
-	}
-	positions := make([]int, 0, len(needle))
-	j := 0
-	for i, r := range haystack {
-		if r == needle[j] {
-			positions = append(positions, i)
-			j++
-			if j == len(needle) {
-				return positions, true
-			}
-		}
-	}
-	return nil, false
 }
