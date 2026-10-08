@@ -48,6 +48,39 @@ type composeCacheInput struct {
 	theme                   themeui.Theme
 	styleGeneration         uint64
 	copyViewport            copyViewportState
+	// transient holds reusable pages for frames that are painted for one
+	// publication only (toasts, floating popups, modals). See transientFrames.
+	transient transientFrames
+}
+
+// transientFrames are scratch pages for composed frames that never become a
+// cache: renderer.Prepare copies the frame it is given, so once a publication
+// finishes nothing references them. They travel with composeCacheInput through
+// the same commit/spare rotation as the cached frame, so a page is only ever
+// written by a composition whose input scratch owns it. Neither slot may hold
+// a page shared with a cached frame (frame, copyViewport.frame) or with another
+// slot; they are filled only by copyFrameInto, which allocates a fresh page.
+type transientFrames struct {
+	// overlay receives the toast-decorated or modal-decorated copy of the base
+	// frame. Toasts and modals never both clone, so they share the slot.
+	overlay renderer.Frame
+	// popup receives the floating-terminal composition. It may start from the
+	// overlay page (toasts under a popup), so it must be a distinct page.
+	popup renderer.Frame
+}
+
+// copyFrameInto makes *dst an independent copy of src, reusing dst's storage,
+// and returns it. A nil dst (direct callers without scratch) allocates a clone.
+func copyFrameInto(dst *renderer.Frame, src renderer.Frame) renderer.Frame {
+	if dst == nil {
+		return src.Clone()
+	}
+	dst.CopyFrom(src)
+	if dst.Width != src.Width || dst.Height != src.Height {
+		// CopyFrom leaves dst untouched for an unusable source.
+		*dst = src.Clone()
+	}
+	return *dst
 }
 
 type composedRenderFrame struct {
@@ -174,8 +207,14 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	overlaysActive := state.overlays.active()
 	toastsVisible := len(state.overlays.notices) > 0 || state.overlays.noticeOverflow > 0
 	var toastFootprints []domain.Rect
+	// Toast, popup, and modal frames are transient: they live only until the
+	// publication that consumes them, so they are composed into scratch pages
+	// carried by the cache rotation instead of a fresh clone per frame.
+	transient := scratch.transient
+	usedOverlay := false
 	if toastsVisible {
-		frame = baseFrame.Clone()
+		usedOverlay = true
+		frame = copyFrameInto(&transient.overlay, baseFrame)
 		toastFootprints = composeCapturedNotices(state.overlays, frame, state.styles)
 	}
 	if state.floating.visible {
@@ -190,6 +229,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 			borderActive: styles.BorderActive,
 			cache:        in,
 			full:         full || overlaysActive,
+			scratch:      &transient.popup,
 		})
 		damage = floatingDamage
 	}
@@ -216,11 +256,22 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 				frame = scratch.copyViewport.frame
 				frame.CopyFrom(baseFrame)
 			case !toastsVisible && !state.floating.visible:
-				frame = baseFrame.Clone()
+				// Not a copy viewport (that is the case above), so this frame is
+				// never retained as viewport cache.
+				usedOverlay = true
+				frame = copyFrameInto(&transient.overlay, baseFrame)
 			}
 			frame, damage = composeCapturedCopyMode(state, frame, damage, content)
 		}
 		frame, damage = composeCapturedOverlays(state, frame, damage)
+	}
+	// Release pages this composition did not need, so an attachment that stops
+	// showing toasts, popups, or modals does not pin two spare frames forever.
+	if !usedOverlay {
+		transient.overlay = renderer.Frame{}
+	}
+	if !state.floating.visible {
+		transient.popup = renderer.Frame{}
 	}
 	for x := range width {
 		topBar[x] = baseFrame.Cell(x, 0)
@@ -252,7 +303,7 @@ func composeFrame(state capturedRenderState, in composeCacheInput, scratchIn ...
 	// never into baseFrame. Keep
 	// that unadorned base reusable between wheel events. Modal/floating paths
 	// retain their conservative invalidation, and copy exit requests a reset.
-	outCache := composeCacheInput{valid: !overlaysActive || copyOnly, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars}
+	outCache := composeCacheInput{valid: !overlaysActive || copyOnly, frame: baseFrame, layoutFingerprint: state.layout.fingerprint, theme: state.theme, styleGeneration: state.styleGeneration, titleGenerations: titles, damage: damage, toastFootprints: append(scratch.toastFootprints[:0], toastFootprints...), floatingVisible: state.floating.visible, floatingFocused: state.floating.focused, floatingGeneration: state.floating.generation, floatingGeometry: state.floating.geometry.translate(content.X, content.Y), floatingTitleGeneration: state.floating.titleGeneration, bars: scratch.bars, transient: transient}
 	outCache.bars = barCache{top: topBar, bottom: bottomBar}
 	if copyViewport.document != nil {
 		copyViewport.frame = frame
