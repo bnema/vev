@@ -122,17 +122,22 @@ type echoPredictor struct {
 	mode   domain.EchoPredictMode
 	screen *vt.Screen
 
-	sent       []echoSent
-	echo       uint64
-	srtt       time.Duration
-	srttKnown  bool
-	srttOn     bool
-	flagging   bool
-	glitch     int
-	lastQuick  time.Time
-	predEpoch  uint64
-	confEpoch  uint64
-	holdUntil  uint64
+	sent      []echoSent
+	echo      uint64
+	srtt      time.Duration
+	srttKnown bool
+	srttOn    bool
+	flagging  bool
+	glitch    int
+	lastQuick time.Time
+	predEpoch uint64
+	confEpoch uint64
+	holdUntil uint64
+	// held is set by the first daemon frame after an unknown key (Enter)
+	// that is not its acknowledgement: that frame may move the guessed row,
+	// so guesses stay hidden until the key is acknowledged. Before such a
+	// frame, drawn guesses stay put.
+	held       bool
 	row        int
 	cells      []echoCell
 	cursor     echoCursor
@@ -161,13 +166,15 @@ func (p *echoPredictor) applyOutput(output protocol.Output, now time.Time) {
 		// frame would land on unrelated content.
 		p.forget()
 	}
-	if data := p.apc.strip(output.Data); len(data) > 0 {
+	data := p.apc.strip(output.Data)
+	if len(data) > 0 {
 		p.screen.Write(data)
 	}
 	if output.Echo > p.echo {
 		p.sample(output.Echo, now)
 		p.echo = output.Echo
 	}
+	p.held = p.echo < p.holdUntil && (p.held || len(data) > 0)
 	p.cull(now)
 }
 
@@ -624,9 +631,11 @@ func (p *echoPredictor) undraw() []byte {
 		}
 	}
 	p.drawn = p.drawn[:0]
-	if out.Len() > 0 {
+	if out.Len() > 0 || p.cursorMove {
+		// The daemon frame is relative to its own cursor, not the predicted one.
 		out.WriteString("\x1b[0m")
 		writeEchoCUP(&out, p.screen.CursorRow(), p.screen.CursorCol())
+		p.cursorMove = false
 	}
 	return out.Bytes()
 }
@@ -640,9 +649,9 @@ func (p *echoPredictor) render() []byte {
 	var out bytes.Buffer
 	show := p.displaying() && p.enabled()
 	var want []int
-	// Until the daemon answers an unknown key (Enter), the guesses' row may
-	// have moved, so none is drawn.
-	if show && p.cells != nil && p.row < p.screen.Rows() && p.echo >= p.holdUntil {
+	// Once a frame arrived while an unknown key (Enter) is unanswered, the
+	// guesses' row may have moved, so none is drawn until the answer.
+	if show && p.cells != nil && p.row < p.screen.Rows() && !(p.held && p.echo < p.holdUntil) {
 		for col := range p.cells {
 			cell := &p.cells[col]
 			if !cell.active || cell.unknown || cell.tentative(p.confEpoch) {

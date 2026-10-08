@@ -126,6 +126,19 @@ func TestEchoPredictorNeverDrawsStaleGuesses(t *testing.T) {
 	}
 }
 
+func TestEchoPredictorEnterKeepsDrawnGuessesUntilAFrame(t *testing.T) {
+	t.Parallel()
+	h := newEchoHarness(t, domain.EchoPredictAlways)
+	h.warm(100 * time.Millisecond)
+	h.confirm()
+	if got := h.typed("b"); !bytes.Contains(got, []byte("b")) {
+		t.Fatalf("render = %q, want the guess drawn", got)
+	}
+	if got := h.typed("\r"); bytes.Contains(got, []byte(" ")) {
+		t.Fatalf("render after Enter = %q erases the typed guess before any frame", got)
+	}
+}
+
 func TestEchoPredictorUndrawRestoresMirror(t *testing.T) {
 	t.Parallel()
 	h := newEchoHarness(t, domain.EchoPredictAlways)
