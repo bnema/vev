@@ -15,9 +15,13 @@ import (
 // deterministic for one toolchain and level, so content addressing stays
 // stable between checkpoints of one build.
 
-// inflateInitialCap bounds the up-front allocation for one payload, so a
-// corrupt declared length cannot allocate more than the stream produces.
+// inflateInitialCap is the up-front allocation floor for one payload.
 const inflateInitialCap = 1 << 20
+
+// deflateMaxRatio bounds how many bytes one compressed byte can inflate to
+// (deflate tops out near 1032:1), so a payload the stream can really produce
+// is allocated once while a corrupt declared length stays bounded.
+const deflateMaxRatio = 1032
 
 var objectCompressorPool = sync.Pool{New: func() any {
 	w, err := zlib.NewWriterLevel(io.Discard, zlib.BestSpeed)
@@ -58,7 +62,7 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 		return nil, invalid(err)
 	}
 	defer objectDecompressorPool.Put(r)
-	payload, err := readExact(r, int(size))
+	payload, err := readExact(r, int(size), max(inflateInitialCap, len(compressed)*deflateMaxRatio))
 	if err != nil {
 		return nil, invalid(err)
 	}
@@ -76,11 +80,11 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 }
 
 // readExact reads exactly size bytes. It doubles the buffer as data arrives,
-// starting at inflateInitialCap and capping every step at size, so a corrupt
-// declared length allocates at most about four times what the stream produces
-// (about three times live at peak) and the returned payload has no slack.
-func readExact(r io.Reader, size int) ([]byte, error) {
-	buf := make([]byte, min(size, inflateInitialCap))
+// starting at initial and capping every step at size, so a corrupt declared
+// length allocates at most about four times max(initial, what the stream
+// produces) and the returned payload has no slack.
+func readExact(r io.Reader, size, initial int) ([]byte, error) {
+	buf := make([]byte, min(size, initial))
 	for n := 0; ; {
 		m, err := io.ReadFull(r, buf[n:])
 		n += m

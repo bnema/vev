@@ -79,7 +79,7 @@ func TestInflateObjectPayloadAllocation(t *testing.T) {
 	}{
 		{name: "small payload", size: 64 << 10, maxBytes: 64<<10 + 64<<10},
 		{name: "payload at the initial cap", size: inflateInitialCap, maxBytes: inflateInitialCap + 64<<10},
-		{name: "payload above the initial cap", size: 3 << 20, maxBytes: 2*(3<<20) + 64<<10},
+		{name: "payload above the initial cap", size: 3 << 20, maxBytes: 3<<20 + 64<<10},
 		{name: "declared maximum on a small stream", size: 64 << 10, declared: maxObjectPayloadSize, maxBytes: 2*inflateInitialCap + 64<<10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
