@@ -69,7 +69,7 @@ func (s *Supervisor) startPickerKill(service ports.BrokerNavigator, key string) 
 	if !ok || key == "" || supervisorNil(service) {
 		return
 	}
-	if s.kills.running {
+	if s.picker.kills.running {
 		s.notifyPicker(pickerKillRefused("a kill is already in progress"))
 		return
 	}
@@ -82,17 +82,17 @@ func (s *Supervisor) startPickerKill(service ports.BrokerNavigator, key string) 
 		s.notifyPicker(pickerKillRefused("couldn't kill " + target.name + ": broker unavailable"))
 		return
 	}
-	if s.kills.done == nil {
-		s.kills.done = make(chan pickerKillOutcome, 1)
+	if s.picker.kills.done == nil {
+		s.picker.kills.done = make(chan pickerKillOutcome, 1)
 	}
 	killCtx, cancel := context.WithCancel(context.Background())
-	s.kills.running = true
-	s.kills.cancel = cancel
-	s.kills.wg.Add(1)
+	s.picker.kills.running = true
+	s.picker.kills.cancel = cancel
+	s.picker.kills.wg.Add(1)
 	go func() {
-		defer s.kills.wg.Done()
+		defer s.picker.kills.wg.Done()
 		result, err := operations.Kill(killCtx, target.route, target.name)
-		s.kills.done <- pickerKillOutcome{target: target, result: result, err: err}
+		s.picker.kills.done <- pickerKillOutcome{target: target, result: result, err: err}
 	}()
 }
 
@@ -110,22 +110,22 @@ func (s *Supervisor) finishPickerKill(service ports.BrokerNavigator, outcome pic
 // retirePickerKill cancels and joins an in-flight kill before its borrowed
 // service closes. Its outcome is still reported, never replayed.
 func (s *Supervisor) retirePickerKill() {
-	if !s.kills.running {
+	if !s.picker.kills.running {
 		return
 	}
-	s.kills.cancel()
-	s.kills.wg.Wait()
-	outcome := <-s.kills.done
+	s.picker.kills.cancel()
+	s.picker.kills.wg.Wait()
+	outcome := <-s.picker.kills.done
 	s.settlePickerKill()
 	s.notifyPicker(pickerKillNotice(outcome))
 }
 
 func (s *Supervisor) settlePickerKill() {
-	if s.kills.cancel != nil {
-		s.kills.cancel()
+	if s.picker.kills.cancel != nil {
+		s.picker.kills.cancel()
 	}
-	s.kills.running = false
-	s.kills.cancel = nil
+	s.picker.kills.running = false
+	s.picker.kills.cancel = nil
 }
 
 // pickerKillRefused is a kill that was never sent.

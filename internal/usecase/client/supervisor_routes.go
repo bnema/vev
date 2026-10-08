@@ -31,14 +31,6 @@ import (
 //
 // Every method runs on the supervisor's run goroutine.
 
-// brokerChanged is the adopted connection's publication wake, or nil.
-func (s *Supervisor) brokerChanged() <-chan struct{} {
-	if supervisorNil(s.readySub) {
-		return nil
-	}
-	return s.readySub.Changed()
-}
-
 // publishRoutes rebuilds the ledger over the live attachment and hands a
 // changed snapshot, or the first one of this attachment, to its worker.
 func (s *Supervisor) publishRoutes(service ports.BrokerNavigator, run *attachmentRun, request ports.BrokerOpenStreamRequest) {
@@ -46,15 +38,12 @@ func (s *Supervisor) publishRoutes(service ports.BrokerNavigator, run *attachmen
 	if !known {
 		return
 	}
-	if s.routes == nil {
-		s.routes = newRouteLedger()
-	}
-	snapshot, changed := s.routes.build(service.Snapshot(), routeActive{known: true, authority: requestAuthority(request), target: target})
-	if snapshot.Generation == 0 || (!changed && s.routesSent == run.token) {
+	snapshot, changed := s.nav.buildRoutes(service.Snapshot(), routeActive{known: true, authority: requestAuthority(request), target: target})
+	if snapshot.Generation == 0 || (!changed && s.nav.routesSent == run.token) {
 		return
 	}
 	if s.attachments.publishRoutes(run.token, snapshot) {
-		s.routesSent = run.token
+		s.nav.routesSent = run.token
 	}
 }
 
@@ -75,12 +64,12 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerNavigator, overl
 	if actionID := navigationCauseActionID(message); actionID != 0 && s.cfg.UI != nil {
 		s.cfg.UI.follow(overlay.run.fg.uiGeneration, actionID)
 	}
-	if s.pendingInPlace != nil && s.pendingInPlace.target.request.Target == target.request.Target && target.tab.stopped == nil {
+	if s.nav.switchingInPlaceTo(target.request.Target) && target.tab.stopped == nil {
 		// The attachment is already switching there.
 		overlay.release(false)
 		return
 	}
-	if s.pendingInPlace == nil && sameAttachmentTarget(overlay.request, s.attachments.committedTargetOrZero(), target.request) && target.tab.stopped == nil {
+	if s.nav.inPlaceIdle() && sameAttachmentTarget(overlay.request, s.attachments.committedTargetOrZero(), target.request) && target.tab.stopped == nil {
 		_, current, _ := s.attachments.committedView()
 		if target.tab.preferred != "" && target.tab.preferred != current {
 			s.attachments.requestTabSelection(overlay.run.token, target.tab.preferred)
@@ -96,7 +85,7 @@ func (s *Supervisor) settleDaemonNavigation(service ports.BrokerNavigator, overl
 	if overlay.active {
 		overlay.exit()
 	}
-	s.pendingSwap = &target
+	s.nav.pendingSwap = &target
 	overlay.swapping = true
 	s.attachments.requestDetach(overlay.run.token)
 }
@@ -119,14 +108,14 @@ func navigationCauseActionID(message protocol.ServerMessage) uint64 {
 // daemon detached the source right after sending it.
 func (s *Supervisor) takeSettledNavigation(service ports.BrokerNavigator, token AttachmentToken, request ports.BrokerOpenStreamRequest) {
 	message, ok := s.attachments.takeNavigation()
-	if !ok || s.pendingSwap != nil {
+	if !ok || s.nav.pendingSwap != nil {
 		return
 	}
 	if target, ok := s.resolveDaemonNavigation(service, token, request, message); ok {
 		if actionID := navigationCauseActionID(message); actionID != 0 && s.cfg.UI != nil {
 			s.cfg.UI.follow(s.cfg.UI.generation, actionID)
 		}
-		s.pendingSwap = &target
+		s.nav.pendingSwap = &target
 	}
 }
 
@@ -139,7 +128,7 @@ func (s *Supervisor) resolveDaemonNavigation(service ports.BrokerNavigator, toke
 			s.attachments.replyNavigation(token, protocol.RouteNavigationFailure{Key: typed.Key, Generation: typed.Generation, Code: code})
 			return pickerAttachmentTarget{}, false
 		}
-		routed, ok := s.resolveRoute(protocol.RouteRef{Key: typed.Key, Generation: typed.Generation})
+		routed, ok := s.nav.resolveRoute(protocol.RouteRef{Key: typed.Key, Generation: typed.Generation})
 		if !ok || routed.host {
 			return fail(protocol.RouteFailureStaleSelection)
 		}
@@ -156,7 +145,7 @@ func (s *Supervisor) resolveDaemonNavigation(service ports.BrokerNavigator, toke
 			s.attachments.replyNavigation(token, protocol.SessionCreationFailure{RequestID: typed.RequestID, Code: code})
 			return pickerAttachmentTarget{}, false
 		}
-		routed, ok := s.resolveRoute(protocol.RouteRef{Key: typed.Key, Generation: typed.Generation})
+		routed, ok := s.nav.resolveRoute(protocol.RouteRef{Key: typed.Key, Generation: typed.Generation})
 		if !ok {
 			return fail(protocol.RouteFailureStaleSelection)
 		}
@@ -200,13 +189,6 @@ func (s *Supervisor) resolveServingHandoff(service ports.BrokerNavigator, reques
 		return pickerAttachmentTarget{}, false
 	}
 	return pickerAttachmentTarget{request: next, tab: attachmentTab{preferred: handoff.PreferredTabID}}, true
-}
-
-func (s *Supervisor) resolveRoute(ref protocol.RouteRef) (routeLedgerTarget, bool) {
-	if s.routes == nil || ref.IsZero() {
-		return routeLedgerTarget{}, false
-	}
-	return s.routes.resolve(ref)
 }
 
 // resolveRouteSelection resolves one route through the same catalogue rules

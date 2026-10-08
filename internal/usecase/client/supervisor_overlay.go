@@ -44,7 +44,7 @@ func (o *attachmentPickerOverlay) previewChanged() <-chan struct{} {
 	if !o.active {
 		return nil
 	}
-	return o.sup.preview.changed()
+	return o.sup.picker.preview.changed()
 }
 
 func (o *attachmentPickerOverlay) ops() <-chan struct{} {
@@ -113,7 +113,7 @@ func (o *attachmentPickerOverlay) drop() {
 		return
 	}
 	o.active = false
-	o.sup.preview.close(o.picker())
+	o.sup.picker.preview.close(o.picker())
 	o.picker().SetOwnsInput(false)
 }
 
@@ -124,7 +124,7 @@ func (o *attachmentPickerOverlay) applyPublication() {
 }
 
 func (o *attachmentPickerOverlay) publishPreview() {
-	if o.sup.preview.publish(o.picker()) {
+	if o.sup.picker.preview.publish(o.picker()) {
 		o.sup.renderCurrent()
 	}
 }
@@ -154,12 +154,12 @@ func (o *attachmentPickerOverlay) takeOp() {
 		// While an in-place switch is in flight the attachment is leaving
 		// its committed session, so choosing that session again is a new
 		// navigation, not a close.
-		if s.pendingInPlace != nil && s.pendingInPlace.target.request.Target == request.Target && tab.stopped == nil {
+		if s.nav.switchingInPlaceTo(request.Target) && tab.stopped == nil {
 			// The attachment is already switching there.
 			o.release(false)
 			return
 		}
-		if s.pendingInPlace == nil && o.sameTarget(request) && tab.stopped == nil {
+		if s.nav.inPlaceIdle() && o.sameTarget(request) && tab.stopped == nil {
 			// Another tab of the attached session switches in place; the
 			// attachment is never reconnected for it.
 			_, current, _ := s.attachments.committedView()
@@ -179,9 +179,9 @@ func (o *attachmentPickerOverlay) takeOp() {
 			o.release(false)
 			return
 		}
-		s.pendingSwap = &target
+		s.nav.pendingSwap = &target
 		o.swapping = true
-		s.preview.close(o.picker())
+		s.picker.preview.close(o.picker())
 		s.attachments.requestDetach(o.run.token)
 	case op.kill && key != "":
 		s.startPickerKill(o.service, key)
@@ -246,11 +246,11 @@ func (o *attachmentPickerOverlay) tryInPlace(target pickerAttachmentTarget) bool
 		// A stopped session needs a restore, which only a fresh attach does.
 		return false
 	}
-	s.inPlaceSeq++
-	if !s.attachments.requestInPlace(o.run.token, inPlaceSwitch{seq: s.inPlaceSeq, target: request.Target, tab: target.tab.preferred}) {
+	seq := s.nav.nextInPlaceSeq()
+	if !s.attachments.requestInPlace(o.run.token, inPlaceSwitch{seq: seq, target: request.Target, tab: target.tab.preferred}) {
 		return false
 	}
-	s.pendingInPlace = &pendingInPlace{seq: s.inPlaceSeq, target: target}
+	s.nav.startInPlace(seq, target)
 	return true
 }
 
@@ -271,18 +271,17 @@ func catalogueSessionLive(snapshot ports.BrokerSnapshot, request ports.BrokerOpe
 // superseded switch was replaced by a newer navigation and is dropped.
 func (o *attachmentPickerOverlay) inPlaceSettled(result inPlaceResult) {
 	s := o.sup
-	pending := s.pendingInPlace
-	if pending == nil || pending.seq != result.seq {
+	pending := s.nav.takeInPlace(result.seq)
+	if pending == nil {
 		return
 	}
-	s.pendingInPlace = nil
 	if result.outcome != inPlaceRefused || o.swapping {
 		return
 	}
 	if o.active {
 		o.exit()
 	}
-	s.pendingSwap = &pending.target
+	s.nav.pendingSwap = &pending.target
 	o.swapping = true
 	s.attachments.requestDetach(o.run.token)
 }
