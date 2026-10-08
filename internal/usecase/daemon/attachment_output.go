@@ -546,15 +546,6 @@ func marshalOutputState(data []byte, epoch, base, next, echoAck, viewRevision ui
 	return output, nil
 }
 
-// sideEffect builds output without advancing the state stream. When an
-// attachment is present, callers must hold its sendMu; attachment-bound sends
-// use sideEffectLocked after validating their connection incarnation.
-func (s *attachmentOutput) sideEffect(data []byte, echoAck uint64) (protocol.Output, error) {
-	s.lockView()
-	defer s.unlockView()
-	return s.sideEffectLocked(data, echoAck)
-}
-
 // sideEffectLocked requires the attachment view lock for both output creation
 // and connection emission. Keeping that lock across the send prevents a view
 // publication from overtaking output fenced just before it.
@@ -689,13 +680,4 @@ func (s *attachmentOutput) committedState() uint64 {
 	s.lockView()
 	defer s.unlockView()
 	return s.next
-}
-
-func (s *attachmentOutput) outstanding() uint64 {
-	if s == nil {
-		return 0
-	}
-	s.lockView()
-	defer s.unlockView()
-	return s.next - s.acked
 }

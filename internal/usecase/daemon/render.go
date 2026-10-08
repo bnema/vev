@@ -56,18 +56,6 @@ func (d *Daemon) paneRenderable(sess *session, tb *tab, p *pane) bool {
 	return false
 }
 
-// ptyReader is retained as a compatibility entry point for focused tests, which
-// register the goroutine with sessWg.Add before calling it. The production
-// goroutine is launched with sessWg.Go and calls readPanePTY, whose closure owns
-// only the pane.
-func (d *Daemon) ptyReader(sess *session, tb *tab, p *pane) {
-	defer d.sessWg.Done()
-	if p != nil && p.ownerSnapshot() == nil && sess != nil && tb != nil {
-		publishPaneOwner(p, sess, tb, 0)
-	}
-	d.readPanePTY(p)
-}
-
 func (d *Daemon) readPanePTY(p *pane) {
 	if p == nil {
 		return
@@ -113,12 +101,6 @@ type panePTYEffects struct {
 	responses         []byte
 	clipboards        []string
 	syncCleanup       syncTimerCleanup
-}
-
-// processPTYData retains the old call shape for resize replay and focused tests,
-// but routing is always derived from the pane owner captured under pane.mu.
-func (d *Daemon) processPTYData(_ *session, _ *tab, p *pane, data []byte, bufferDuringApply bool) {
-	d.processPanePTYData(p, data, bufferDuringApply)
 }
 
 // processPanePTYData is the sole VT parsing path. While a resize apply owns the

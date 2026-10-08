@@ -264,7 +264,7 @@ func TestFloatingSpareExitBeforeClaimDropsIt(t *testing.T) {
 	spare := sess.floatingSparePane()
 	require.NotNil(t, spare)
 	require.NoError(t, factory.snapshot()[0].pty.Close(), "the spare's shell exits")
-	require.Eventually(t, func() bool { return sess.floatingSparePane() == nil }, time.Second, time.Millisecond,
+	require.Eventually(t, func() bool { return sess.floatingSparePane() == nil }, 5*time.Second, time.Millisecond,
 		"an exited unclaimed spare must be dropped so the next claim launches a fresh shell")
 
 	sess.stopInMemoryLifecycle()

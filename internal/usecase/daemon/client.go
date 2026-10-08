@@ -308,13 +308,6 @@ func (ac *attachedClient) getClientTheme() themeui.Theme {
 	return ac.clientTheme
 }
 
-// setThemeForTest publishes a complete applied snapshot for tests that do
-// not exercise daemon configuration. Production theme changes use
-// applyHostThemeLocked, which supplies the active policy.
-func (ac *attachedClient) setThemeForTest(t themeui.Theme) {
-	ac.setAppliedTheme(appliedTheme{Raw: t, Resolved: themeui.Resolve(t, domain.ThemeAccent{Mode: domain.ThemeAccentAuto})})
-}
-
 func (ac *attachedClient) setAppliedTheme(next appliedTheme) {
 	ac.themeMu.Lock()
 	next.Generation = ac.appliedTheme.Generation + 1

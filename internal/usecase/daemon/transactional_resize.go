@@ -421,7 +421,7 @@ func (d *Daemon) replayResizePending(sess *session, tb *tab, p *pane, resized bo
 			p.mu.Unlock()
 			continue
 		}
-		d.processPTYData(sess, tb, p, data, false)
+		d.processPanePTYData(p, data, false)
 	}
 }
 
