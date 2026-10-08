@@ -35,6 +35,7 @@ type relay struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	remote      string
+	listen      net.IP
 	degraded    bool
 	blackout    atomic.Bool
 	bytes       atomic.Uint64
@@ -48,19 +49,35 @@ type relay struct {
 func main() {
 	remote := flag.String("remote", "remote", "fixture upstream host")
 	control := flag.String("control", "", "required private Unix control path")
-	tcp := flag.String("tcp", ":2222", "SSH listener")
+	// The relay forwards without authentication, so it listens on loopback
+	// unless the disposable fixture asks for every interface.
+	tcp := flag.String("tcp", "127.0.0.1:2222", "SSH listener")
+	listen := flag.String("listen", "127.0.0.1", "UDP proxy listen IP")
 	degraded := flag.Bool("degraded", false, "enable seeded degraded profile")
 	flag.Parse()
 	if *control == "" {
 		fmt.Fprintln(os.Stderr, "-control is required")
 		os.Exit(2)
 	}
+	listenIP := net.ParseIP(*listen)
+	if listenIP == nil {
+		fmt.Fprintln(os.Stderr, "-listen must be an IP address")
+		os.Exit(2)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	r := &relay{ctx: ctx, cancel: cancel, remote: *remote, degraded: *degraded, connections: make(map[net.Conn]struct{})}
+	r := &relay{ctx: ctx, cancel: cancel, remote: *remote, listen: listenIP, degraded: *degraded, connections: make(map[net.Conn]struct{})}
 	if err := r.serve(*tcp, *control); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// listenIP is the UDP proxy bind address, loopback when unset.
+func (r *relay) listenIP() net.IP {
+	if r.listen == nil {
+		return net.IPv4(127, 0, 0, 1)
+	}
+	return r.listen
 }
 
 func (r *relay) serve(addr, path string) error {
@@ -172,7 +189,7 @@ func (r *relay) apply(c command) (any, error) {
 		if len(r.proxies) >= 32 {
 			return nil, errors.New("UDP listener limit")
 		}
-		p, err := quicnettest.New(quicnettest.Config{ServerAddr: upstream, ListenAddr: &net.UDPAddr{IP: net.IPv4zero}, Seed: 317, ToServer: link, ToClient: link})
+		p, err := quicnettest.New(quicnettest.Config{ServerAddr: upstream, ListenAddr: &net.UDPAddr{IP: r.listenIP()}, Seed: 317, ToServer: link, ToClient: link})
 		if err != nil {
 			return nil, err
 		}
