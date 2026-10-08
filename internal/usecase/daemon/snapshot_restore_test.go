@@ -529,9 +529,9 @@ func TestRestoredSessionMetadataUpdatePreservesCheckpointLineage(t *testing.T) {
 	markSnapshotDirty(restored)
 	require.True(t, d.scheduleSnapshot(restored))
 	awaitSnapshotIdle(t, restored)
-	d.snapshotNoticeMu.Lock()
-	failure := d.snapshotActiveFailureSignature
-	d.snapshotNoticeMu.Unlock()
+	d.snapshots.noticeMu.Lock()
+	failure := d.snapshots.activeFailureSignature
+	d.snapshots.noticeMu.Unlock()
 	require.Empty(t, failure)
 	require.Len(t, repository.publishes, 1)
 	require.Equal(t, record.Committed, repository.publishes[0].ParentCheckpoint)

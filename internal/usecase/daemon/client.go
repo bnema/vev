@@ -18,6 +18,17 @@
 // moveLifecycleReservation.Release must never be called with d.mu held: it takes
 // moveLifecycleMu first, releases both the move-gate and purge-gate reservations
 // in that order, and only then drops moveLifecycleMu.
+//
+// Snapshot worker locks (snapshotWorker in snapshot_worker_state.go):
+// snapshotWorker.mu (d.snapshots.mu) is a leaf with respect to d.mu and the
+// session (mu), tab, and pane locks: no path acquires any of them while holding
+// it, and the capture, queue, and worker code never takes d.mu. The only nested
+// acquisition is a session's snapshotMu inside it (enqueueFinalSnapshotCapture
+// finishes a replaced capture), so snapshotMu holders must release snapshotMu
+// before taking snapshotWorker.mu, as finishSnapshotCapture does.
+// snapshotWorker.noticeMu guards the active persistence-failure signature; it
+// is a leaf and is never held together with snapshotWorker.mu. Restoration
+// takes d.mu only outside snapshotWorker.mu.
 package daemon
 
 import (

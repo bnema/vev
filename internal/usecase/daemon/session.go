@@ -380,7 +380,7 @@ func (d *Daemon) createSessionLockedWithModeAndInactiveFence(name string, epheme
 		tabs:         tabs,
 		cwd:          cwd,
 		env:          env,
-		snapshotWake: d.snapshotWake,
+		snapshotWake: d.snapshots.wake,
 	}
 	if !ephemeral && name != "" {
 		sess.snapshotChunkCache = newSnapshotChunkCache(snapshotChunkCacheLimit)

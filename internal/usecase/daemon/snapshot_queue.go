@@ -102,18 +102,18 @@ func (d *Daemon) scheduleSnapshotWithFinalFallback(sess *session, final bool) bo
 // queue send. The queue is deliberately never closed: producers can race
 // shutdown without risking a send-on-closed panic.
 func (d *Daemon) enqueueSnapshotCapture(capture *snapshotCapture) bool {
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
+	if d.snapshots.closing || d.snapshots.cancel == nil || d.snapshots.ctx == nil || d.snapshots.ctx.Err() != nil {
 		return false
 	}
 	capture.normalWorkerAdmitted = true
 	select {
-	case d.snapshotJobs <- capture:
-		if d.snapshotAdmitted == nil {
-			d.snapshotAdmitted = make(map[*snapshotCapture]struct{})
+	case d.snapshots.jobs <- capture:
+		if d.snapshots.admitted == nil {
+			d.snapshots.admitted = make(map[*snapshotCapture]struct{})
 		}
-		d.snapshotAdmitted[capture] = struct{}{}
+		d.snapshots.admitted[capture] = struct{}{}
 		return true
 	default:
 		capture.normalWorkerAdmitted = false
@@ -129,17 +129,17 @@ func (d *Daemon) enqueueFinalSnapshotCapture(capture *snapshotCapture) bool {
 	if capture == nil || capture.session == nil {
 		return false
 	}
-	d.snapshotWorkerMu.Lock()
-	if d.snapshotWorkerClosing || d.snapshotWorkerCancel == nil || d.snapshotWorkerCtx == nil || d.snapshotWorkerCtx.Err() != nil {
-		d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	if d.snapshots.closing || d.snapshots.cancel == nil || d.snapshots.ctx == nil || d.snapshots.ctx.Err() != nil {
+		d.snapshots.mu.Unlock()
 		return false
 	}
-	if d.snapshotFinalJobs == nil {
-		d.snapshotFinalJobs = make(map[*session]*snapshotCapture)
+	if d.snapshots.finalJobs == nil {
+		d.snapshots.finalJobs = make(map[*session]*snapshotCapture)
 	}
-	replaced, exists := d.snapshotFinalJobs[capture.session]
-	if !exists && len(d.snapshotFinalJobs) >= snapshotFinalQueueCapacity {
-		d.snapshotWorkerMu.Unlock()
+	replaced, exists := d.snapshots.finalJobs[capture.session]
+	if !exists && len(d.snapshots.finalJobs) >= snapshotFinalQueueCapacity {
+		d.snapshots.mu.Unlock()
 		d.log.Warn("terminal snapshot retention saturated; capture rejected", "session", capture.name, "capacity", snapshotFinalQueueCapacity)
 		return false
 	}
@@ -148,13 +148,13 @@ func (d *Daemon) enqueueFinalSnapshotCapture(capture *snapshotCapture) bool {
 	// mark the session dirty again.
 	d.finishSnapshotCapture(replaced, false)
 	if !exists {
-		d.snapshotFinalOrder = append(d.snapshotFinalOrder, capture.session)
+		d.snapshots.finalOrder = append(d.snapshots.finalOrder, capture.session)
 	}
-	d.snapshotFinalJobs[capture.session] = capture
+	d.snapshots.finalJobs[capture.session] = capture
 	select {
-	case d.snapshotWorkerFinalWake <- struct{}{}:
+	case d.snapshots.finalWake <- struct{}{}:
 	default:
 	}
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Unlock()
 	return true
 }

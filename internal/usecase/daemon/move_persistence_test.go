@@ -183,14 +183,14 @@ func TestMoveTabPersistenceMatrix(t *testing.T) {
 			source.incarnation = domain.IncarnationID{1}
 			source.ephemeral = !tt.sourceNamed
 			source.snapEligible.Store(tt.sourceNamed)
-			source.snapshotWake = d.snapshotWake
+			source.snapshotWake = d.snapshots.wake
 			moved := source.tabs[0]
 			moved.stableID = "moved-tab"
 
 			destination := addMoveTabTestSession(d, "destination", "destination-tab")
 			destination.ephemeral = !tt.destinationNamed
 			destination.snapEligible.Store(tt.destinationNamed)
-			destination.snapshotWake = d.snapshotWake
+			destination.snapshotWake = d.snapshots.wake
 
 			catalogue := &movePersistenceCatalogue{
 				records:            map[string]domain.CatalogueRecord{},
@@ -251,7 +251,7 @@ func TestMoveSnapshotPublicationFailureReportsWithoutRollback(t *testing.T) {
 	destination := addMoveTabTestSession(d, "destination", "destination-tab")
 	destination.ephemeral = false
 	destination.snapEligible.Store(true)
-	destination.snapshotWake = d.snapshotWake
+	destination.snapshotWake = d.snapshots.wake
 
 	repository := &movePersistenceRepository{
 		publish: errors.New("injected publication failure"),

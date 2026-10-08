@@ -78,7 +78,7 @@ func TestSnapshotGarbageCollectionRequiresExplicitOption(t *testing.T) {
 	WithRecoveryCoordinator(coordinator)(d)
 	d.startDurableMaintenance()
 
-	d.snapshotWorkerMu.Lock()
-	defer d.snapshotWorkerMu.Unlock()
-	require.Nil(t, d.maintenanceWorkerDone)
+	d.snapshots.mu.Lock()
+	defer d.snapshots.mu.Unlock()
+	require.Nil(t, d.snapshots.maintenanceWorkerDone)
 }

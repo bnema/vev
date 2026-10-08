@@ -30,10 +30,10 @@ func TestWithSnapshotRepositoryRejectsTypedNil(t *testing.T) {
 func TestDurableWriterFailureNamesIncludesBufferedCapture(t *testing.T) {
 	d := newTestDaemon(t, portsmocks.NewMockPTYFactory(t), stubClock{})
 	capture := &snapshotCapture{name: "work", session: newSnapshotTestSession(t, "work", false, "/work")}
-	d.snapshotWorkerMu.Lock()
-	d.snapshotAdmitted[capture] = struct{}{}
-	d.snapshotJobs <- capture
-	d.snapshotWorkerMu.Unlock()
+	d.snapshots.mu.Lock()
+	d.snapshots.admitted[capture] = struct{}{}
+	d.snapshots.jobs <- capture
+	d.snapshots.mu.Unlock()
 
 	require.Equal(t, []string{"work"}, d.durableWriterFailureNames())
 }

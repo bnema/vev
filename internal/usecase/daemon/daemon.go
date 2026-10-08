@@ -177,45 +177,15 @@ type Daemon struct {
 	snapshotRepository        ports.SnapshotRepository
 	recovery                  *recoveryusecase.Coordinator
 	snapshotGarbageCollection bool
-	maintenanceWorkerCancel   context.CancelFunc
-	maintenanceWorkerDone     chan struct{}
-	// restoreWorkerDone is the restoration goroutine's ownership signal. Startup
-	// restoration reconciles durable checkpoints, so it is a durable writer and
-	// is guarded by snapshotWorkerMu with the other two.
-	restoreWorkerDone chan struct{}
-	snapsEnabled      bool
-	noticeStore       ports.NoticeStore
-	snapshotJobs      chan *snapshotCapture
-	// snapshotAdmitted contains every capture accepted by either worker queue,
-	// including captures buffered in snapshotJobs. Guarded by snapshotWorkerMu.
-	snapshotAdmitted map[*snapshotCapture]struct{}
-	// snapshotWake wakes the repository scheduler when a session becomes dirty
-	// or an attempt completes. It is never closed and producers only send
-	// non-blockingly.
-	snapshotWake            chan struct{}
-	snapshotWorkerMu        sync.Mutex
-	snapshotWorkerID        uint64
-	snapshotWorkerCtx       context.Context
-	snapshotWorkerCancel    context.CancelFunc
-	snapshotWorkerDone      chan struct{}
-	snapshotWorkerFlush     chan struct{}
-	snapshotWorkerFinalWake chan struct{}
-	// snapshotFinalJobs coalesces terminal captures by session when the bounded
-	// regular queue is full. It retains at most snapshotFinalQueueCapacity named
-	// sessions, each with only its newest terminal state while the worker blocks.
-	snapshotFinalJobs      map[*session]*snapshotCapture
-	snapshotFinalOrder     []*session
-	snapshotWorkerClosing  bool
-	snapshotWorkerInFlight *snapshotCapture
-	// snapshotNoticeMu guards the active global persistence failure signature.
-	// It is separate from snapshotWorkerMu so notice routing cannot block a
-	// producer or a repository worker.
-	snapshotNoticeMu               sync.Mutex
-	snapshotActiveFailureSignature string
-	shutdownNoticeMu               sync.Mutex
-	shutdownNoticedSessions        map[string]struct{}
-	restoreDone                    chan struct{}
-	restoreOnce                    sync.Once
+	snapsEnabled              bool
+	noticeStore               ports.NoticeStore
+	// snapshots owns the snapshot worker, the durable-writer lifecycle
+	// signals, and the global persistence-failure notice state.
+	snapshots               snapshotWorker
+	shutdownNoticeMu        sync.Mutex
+	shutdownNoticedSessions map[string]struct{}
+	restoreDone             chan struct{}
+	restoreOnce             sync.Once
 	// proc inspects pane processes (cwd, foreground command, argv). Nil means
 	// no inspection is available; see WithProcessInspector and WithCwdReader.
 	proc      ports.ProcessInspector
@@ -699,26 +669,28 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:              make(map[domain.SessionID]*session),
-		inactive:              make(map[string]inactiveSession),
-		creating:              make(map[string]struct{}),
-		resume:                newResumeCredentials(),
-		suspended:             make(map[*attachedClient]*suspendedAttachmentRetention),
-		graphics:              newGraphicsNamespacePool(),
-		paneProcessCtx:        paneProcessCtx,
-		paneProcessCancel:     paneProcessCancel,
-		ptys:                  ptys,
-		clock:                 clock,
-		log:                   log,
-		baseEnv:               os.Environ(),
-		shell:                 defaultShellCommand,
-		dirOrHome:             dirOrHome,
-		done:                  make(chan struct{}),
-		restoreDone:           make(chan struct{}),
-		animWake:              make(chan struct{}, 1),
-		snapshotJobs:          make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:      make(map[*snapshotCapture]struct{}),
-		snapshotWake:          make(chan struct{}, 1),
+		sessions:          make(map[domain.SessionID]*session),
+		inactive:          make(map[string]inactiveSession),
+		creating:          make(map[string]struct{}),
+		resume:            newResumeCredentials(),
+		suspended:         make(map[*attachedClient]*suspendedAttachmentRetention),
+		graphics:          newGraphicsNamespacePool(),
+		paneProcessCtx:    paneProcessCtx,
+		paneProcessCancel: paneProcessCancel,
+		ptys:              ptys,
+		clock:             clock,
+		log:               log,
+		baseEnv:           os.Environ(),
+		shell:             defaultShellCommand,
+		dirOrHome:         dirOrHome,
+		done:              make(chan struct{}),
+		restoreDone:       make(chan struct{}),
+		animWake:          make(chan struct{}, 1),
+		snapshots: snapshotWorker{
+			jobs:     make(chan *snapshotCapture, snapshotQueueCapacity),
+			admitted: make(map[*snapshotCapture]struct{}),
+			wake:     make(chan struct{}, 1),
+		},
 		notices:               newNoticeCenter(),
 		resumeParkGrace:       defaultResumeParkGrace,
 		suspendedSafetyExpiry: defaultSuspendedSafetyExpiry,
