@@ -38,8 +38,12 @@ func Fuzzy(results []Result, query string) []Match {
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
-		if a.rank != b.rank || a.span != b.span || a.first != b.first {
-			return fuzzy.Less(a.rank, fuzzy.Score{Span: a.span, First: a.first}, b.rank, fuzzy.Score{Span: b.span, First: b.first})
+		aScore, bScore := fuzzy.Score{Span: a.span, First: a.first}, fuzzy.Score{Span: b.span, First: b.first}
+		if fuzzy.Less(a.rank, aScore, b.rank, bScore) {
+			return true
+		}
+		if fuzzy.Less(b.rank, bScore, a.rank, aScore) {
+			return false
 		}
 		if a.Result.Kind() != b.Result.Kind() {
 			return a.Result.Kind() < b.Result.Kind()
