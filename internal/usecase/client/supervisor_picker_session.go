@@ -7,10 +7,10 @@ package client
 // goroutine's kills.wg/kills.done handoff. Construct with preview.clock set;
 // other fields are ready at zero.
 type pickerSession struct {
-	// pendingPickerKey retains a commit observed while connecting. It is
+	// pendingKey retains a commit observed while connecting. It is
 	// revalidated against the adopted service just like a ready-phase commit.
-	pendingPickerKey string
-	preview          previewManager
+	pendingKey string
+	preview    previewManager
 	// kills runs the picker's `x` operations off the run goroutine.
 	kills pickerKills
 }

@@ -627,7 +627,7 @@ func TestFloatingLaunchUsesLiveOrValidatedSessionCwd(t *testing.T) {
 				return cwd
 			}
 			if tt.liveCwd != "" {
-				WithCwdReader(func(int) (string, error) { return tt.liveCwd, nil })(d)
+				WithProcessInspector(&processInspectorFake{cwd: func(int) (string, error) { return tt.liveCwd, nil }})(d)
 			}
 			tb := newFloatingTestTab(t)
 			sess := &session{sessionCore: sessionCore{name: "work"}, cwd: tt.sessionCwd, tabs: []*tab{tb}, ctx: t.Context()}

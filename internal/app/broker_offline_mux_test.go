@@ -156,7 +156,7 @@ func remoteMuxFixture(t *testing.T, policy ports.BrokerPolicy) *brokerMuxFixture
 
 // cleanup kills every recorded mux helper process.
 func (e *muxTestEnv) cleanup() {
-	for _, role := range []string{brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand} {
+	for _, role := range []string{ports.BrokerMuxStdioCommand, ports.BrokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand} {
 		raw, err := os.ReadFile(filepath.Join(e.recordDir, role+".pids"))
 		if err != nil {
 			continue
@@ -260,7 +260,7 @@ func TestParseBrokerMuxArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			command, err := parseBrokerMuxArgs(brokerMuxStdioCommand, kindBrokerMuxStdio, tt.args)
+			command, err := parseBrokerMuxArgs(ports.BrokerMuxStdioCommand, kindBrokerMuxStdio, tt.args)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.wantErr)
@@ -279,8 +279,8 @@ func TestBrokerMuxHelpersHiddenFromPublicHelp(t *testing.T) {
 		name string
 		kind cmdKind
 	}{
-		{brokerMuxStdioCommand, kindBrokerMuxStdio},
-		{brokerMuxQUICBootstrapCommand, kindBrokerMuxQUICBootstrap},
+		{ports.BrokerMuxStdioCommand, kindBrokerMuxStdio},
+		{ports.BrokerMuxQUICBootstrapCommand, kindBrokerMuxQUICBootstrap},
 		{brokerMuxQUICProxyCommand, kindBrokerMuxQUICProxy},
 	} {
 		require.NotContains(t, usageText, tt.name)
@@ -305,7 +305,7 @@ func TestSSHMuxCommandSpecPreservesTrustAndNoPTY(t *testing.T) {
 	route := loadTestRoute(t, map[string]any{
 		"kind":   "ssh-stdio",
 		"target": "user@host:2222",
-		"argv":   []any{"vev", brokerMuxStdioCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxStdioCommand, "--production"},
 		"trust":  map[string]any{"knownHostsFile": "/etc/ssh/known_hosts", "connectTimeout": "30s"},
 	})
 	spec, err := sshMuxCommandSpec(route, ports.BrokerDaemonStartIfNeeded)
@@ -317,7 +317,7 @@ func TestSSHMuxCommandSpecPreservesTrustAndNoPTY(t *testing.T) {
 	require.Contains(t, spec.Args, "ConnectTimeout=30")
 	joined := strings.Join(spec.Args, " ")
 	require.Contains(t, joined, "-- user@host:2222 ")
-	require.Contains(t, joined, brokerMuxStdioCommand)
+	require.Contains(t, joined, ports.BrokerMuxStdioCommand)
 	require.Contains(t, joined, "'"+brokerDaemonStartArg+"' 'if-needed'")
 	require.NotContains(t, joined, "StrictHostKeyChecking")
 	require.NotContains(t, joined, "BatchMode")
@@ -333,7 +333,7 @@ func TestSSHMuxCommandSpecPreservesTrustAndNoPTY(t *testing.T) {
 	plain := loadTestRoute(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "host",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 	plainSpec, err := sshMuxCommandSpec(plain, ports.BrokerDaemonExistingOnly)
 	require.NoError(t, err)
@@ -350,7 +350,7 @@ func TestSSHMuxCommandSpecRefusesUnknownStartMode(t *testing.T) {
 	route := loadTestRoute(t, map[string]any{
 		"kind":   "ssh-stdio",
 		"target": "host",
-		"argv":   []any{"vev", brokerMuxStdioCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxStdioCommand, "--production"},
 	})
 	_, err := sshMuxCommandSpec(route, ports.BrokerDaemonStartMode(0))
 	require.Error(t, err)
@@ -403,7 +403,7 @@ func TestBrokerQUICPeerAddr(t *testing.T) {
 func TestBrokerMuxHelperReturnsTypedNoDaemonExit(t *testing.T) {
 	emptyProductionBrokerLayout(t, "")
 	emptyProductionBrokerLayout(t, "")
-	parsed, err := parseBrokerMuxArgs(brokerMuxStdioCommand, kindBrokerMuxStdio, []string{"--production"})
+	parsed, err := parseBrokerMuxArgs(ports.BrokerMuxStdioCommand, kindBrokerMuxStdio, []string{"--production"})
 	require.NoError(t, err)
 	err = runBrokerMuxStdioCommand(context.Background(), parsed.brokerMux)
 	var coded *exitCoded
@@ -419,11 +419,11 @@ func TestBrokerServeSSHStdioRouteRoundTrip(t *testing.T) {
 	policy := brokerTestPolicy()
 	fixture := remoteMuxFixture(t, policy)
 	argsFile := installFakeSSH(t, fakeSSHExecHelper)
-	t.Setenv(fakeSSHModeEnv, brokerMuxStdioCommand)
+	t.Setenv(fakeSSHModeEnv, ports.BrokerMuxStdioCommand)
 	writeMuxRoot(t, map[string]any{
 		"kind":   "ssh-stdio",
 		"target": "user@muxhost:2222",
-		"argv":   []any{"vev", brokerMuxStdioCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxStdioCommand, "--production"},
 	})
 
 	socketPath, stop := startMuxBrokerServe(t)
@@ -435,7 +435,7 @@ func TestBrokerServeSSHStdioRouteRoundTrip(t *testing.T) {
 	argv := readFileString(t, argsFile)
 	require.Contains(t, argv, "-T\n")
 	require.Contains(t, argv, "--\nuser@muxhost:2222\n")
-	require.Contains(t, argv, brokerMuxStdioCommand)
+	require.Contains(t, argv, ports.BrokerMuxStdioCommand)
 	require.NotContains(t, argv, "UserKnownHostsFile=")
 	require.NotContains(t, argv, "StrictHostKeyChecking")
 	require.NotContains(t, argv, "BatchMode")
@@ -451,11 +451,11 @@ func TestBrokerServeSSHQUICRouteRoundTrip(t *testing.T) {
 	policy := brokerTestPolicy()
 	fixture := remoteMuxFixture(t, policy)
 	installFakeSSH(t, fakeSSHExecHelper)
-	t.Setenv(fakeSSHModeEnv, brokerMuxQUICBootstrapCommand)
+	t.Setenv(fakeSSHModeEnv, ports.BrokerMuxQUICBootstrapCommand)
 	writeMuxRoot(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 
 	socketPath, stop := startMuxBrokerServe(t)
@@ -484,7 +484,7 @@ func TestBrokerMuxQUICRejectsBadPinWithoutLeakingSecret(t *testing.T) {
 	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -514,7 +514,7 @@ func TestBrokerMuxQUICRejectsExpiredReadiness(t *testing.T) {
 	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 	_, err := dialBrokerRoute(context.Background(), route, target, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Error(t, err)
@@ -534,7 +534,7 @@ func TestBrokerMuxDialCancellationReapsBootstrap(t *testing.T) {
 	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
@@ -562,7 +562,7 @@ func TestBrokerMuxDialFloodedStderrIsReapedAndSanitized(t *testing.T) {
 	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 
 	var logs bytes.Buffer
@@ -606,7 +606,7 @@ func TestBrokerMuxDialStalledBootstrapUsesSetupTimeout(t *testing.T) {
 	route, target := loadTestRouteTarget(t, map[string]any{
 		"kind":   "ssh-quic",
 		"target": "127.0.0.1",
-		"argv":   []any{"vev", brokerMuxQUICBootstrapCommand, "--production"},
+		"argv":   []any{"vev", ports.BrokerMuxQUICBootstrapCommand, "--production"},
 	})
 	start := time.Now()
 	_, err := dialBrokerRoute(context.Background(), route, target, slog.New(slog.NewTextHandler(io.Discard, nil)))

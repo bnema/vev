@@ -149,38 +149,15 @@ func graphicsNamespaceKey(sess *session, clientID [16]byte) string {
 	return fmt.Sprintf("session:%s:%x:%x", sess.id, sess.incarnation, clientID)
 }
 
-// reserveGraphicsNamespaceLocked chooses a deterministic preferred block and
-// linearly probes the bounded namespace table for a free block. Caller holds
-// d.mu; probing makes equal session/client identities collision-safe too.
-func (d *Daemon) reserveGraphicsNamespaceLocked(key string) uint64 {
-	base, _ := d.reserveGraphicsNamespaceLeaseLocked(key)
-	return base
-}
-
+// reserveGraphicsNamespaceLeaseLocked chooses a deterministic preferred block
+// and linearly probes the bounded namespace table for a free block, returning
+// its base and fence. Caller holds d.mu; probing makes equal session/client
+// identities collision-safe too.
 func (d *Daemon) reserveGraphicsNamespaceLeaseLocked(key string) (uint64, uint64) {
 	if d == nil {
 		return 0, 0
 	}
 	return d.graphics.reserveLease(key)
-}
-
-func (d *Daemon) releaseGraphicsNamespace(base uint64) {
-	if d == nil || base == 0 || base%graphicsIDNamespaceSize != 1 {
-		return
-	}
-	d.mu.Lock()
-	d.releaseGraphicsNamespaceLocked(base)
-	d.mu.Unlock()
-}
-
-// releaseGraphicsNamespaceLocked is used by resume publication while d.mu is
-// already held. A quarantined block is intentionally not released by this
-// legacy base-only helper; only its fenced cleanup lifecycle may retire it.
-func (d *Daemon) releaseGraphicsNamespaceLocked(base uint64) {
-	if d == nil {
-		return
-	}
-	d.graphics.releaseBase(base)
 }
 
 func (d *Daemon) releaseGraphicsNamespaceLeaseLocked(state *graphicsOutputState) {

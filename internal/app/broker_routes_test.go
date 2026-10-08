@@ -52,7 +52,7 @@ func TestBrokerRoutesDurableFirstAddAndRestart(t *testing.T) {
 	route, err := brokerconfig.RouteFromSpec(spec)
 	require.NoError(t, err)
 	require.Equal(t, brokerconfig.RouteSSHStdio, route.Kind())
-	require.Equal(t, []string{"vev", brokerMuxStdioCommand, "--production"}, route.Argv())
+	require.Equal(t, []string{"vev", ports.BrokerMuxStdioCommand, "--production"}, route.Argv())
 	identity, err := registry.BindAuthenticatedIdentity(ctx, ports.BrokerIdentityBindingRequest{Fence: target.Fence, Policy: policy, Identity: "daemon-test"})
 	require.NoError(t, err)
 	_, err = routes.AuthorizeRemoteDial(ctx, target)

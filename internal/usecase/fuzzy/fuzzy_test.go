@@ -19,6 +19,7 @@ func TestMatch(t *testing.T) {
 		{name: "prefix", text: "workspace", query: "wor", want: Score{Kind: Prefix, Positions: []int{0, 1, 2}, Span: 3}, ok: true},
 		{name: "subsequence", text: "a-b-c", query: "bc", want: Score{Kind: Subsequence, Positions: []int{2, 4}, Span: 3, First: 2}, ok: true},
 		{name: "runes not bytes", text: "été-x", query: "x", want: Score{Kind: Subsequence, Positions: []int{4}, Span: 1, First: 4}, ok: true},
+		{name: "multi-byte prefix counts runes", text: "été", query: "ét", want: Score{Kind: Prefix, Positions: []int{0, 1}, Span: 2}, ok: true},
 		{name: "no match", text: "work", query: "z", ok: false},
 		{name: "out of order", text: "ab", query: "ba", ok: false},
 	}
@@ -29,6 +30,13 @@ func TestMatch(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestKindOrder pins the best-first order callers rely on to use a Kind as a
+// rank.
+func TestKindOrder(t *testing.T) {
+	require.Less(t, Exact, Prefix)
+	require.Less(t, Prefix, Subsequence)
 }
 
 func TestLess(t *testing.T) {

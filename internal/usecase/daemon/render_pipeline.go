@@ -59,7 +59,8 @@ type composeCacheInput struct {
 // the same commit/spare rotation as the cached frame, so a page is only ever
 // written by a composition whose input scratch owns it. Neither slot may hold
 // a page shared with a cached frame (frame, copyViewport.frame) or with another
-// slot; they are filled only by copyFrameInto, which allocates a fresh page.
+// slot; they are filled only by copyFrameInto, whose first fill clones, so a
+// slot never shares a page with a cached frame.
 type transientFrames struct {
 	// overlay receives the toast-decorated or modal-decorated copy of the base
 	// frame. Toasts and modals never both clone, so they share the slot.

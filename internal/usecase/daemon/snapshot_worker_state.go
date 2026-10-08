@@ -9,10 +9,12 @@ import (
 // other durable writers joined with it (maintenance and restoration), so
 // WaitDurableWriters can read all three completion signals under one lock.
 //
-// Lock position: mu is a leaf with respect to Daemon.mu. No code path acquires
-// Daemon.mu, a session lock, or a pane lock while holding it, and capture,
-// queue, and worker code never takes Daemon.mu. noticeMu is likewise a leaf and
-// is never held together with mu.
+// Lock position: mu is a leaf with respect to Daemon.mu and the session (mu),
+// tab, and pane locks: no path acquires any of them while holding it, and
+// capture, queue, and worker code never takes Daemon.mu. The one nested lock is
+// a session's snapshotMu, taken under mu by enqueueFinalSnapshotCapture; see
+// the lock-ordering notes in client.go. noticeMu is a leaf and is never held
+// together with mu.
 //
 // The zero value is usable for tests that build &Daemon{}: nil maps are
 // allocated lazily by the enqueue paths, and a nil jobs channel never becomes

@@ -187,7 +187,7 @@ func (d *Daemon) refreshPaneDisplayTitle(_ *session, p *pane, force bool) string
 	// distinct from the display fallback: an OSC title must then stand alone,
 	// and future floating panes can supply their command fallback at format time.
 	processName := ""
-	if d.hasProcessDetails() && p.pty != nil {
+	if d.proc != nil && p.pty != nil {
 		if pgid, err := p.pty.ForegroundPgid(); err == nil && pgid > 0 {
 			if comm, err := d.proc.Comm(pgid); err == nil && strings.TrimSpace(comm) != "" {
 				processName = strings.TrimSpace(comm)

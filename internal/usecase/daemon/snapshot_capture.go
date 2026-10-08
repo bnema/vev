@@ -82,7 +82,7 @@ func (d *Daemon) captureSession(sess *session) bool {
 }
 
 func (d *Daemon) capturePaneProcess(pty interface{ ForegroundPgid() (int, error) }, shellPid int) *snapcodec.Process {
-	if d == nil || pty == nil || shellPid <= 0 || !d.hasProcessDetails() {
+	if d == nil || pty == nil || shellPid <= 0 || d.proc == nil {
 		return nil
 	}
 	pgid, err := pty.ForegroundPgid()

@@ -282,6 +282,36 @@ func TestResumeWatchHeldOverflowIsSticky(t *testing.T) {
 	require.Zero(t, next.heldLen(), "a later phase must not accept keys after an overflow")
 }
 
+// TestResumeWatchOverflowKeepsHeldPrefix overflows one phase and checks the
+// next phase still replays the gap-free prefix the first phase handed back.
+// TestResumeWatchHeldOverflowIsSticky covers dropping keys typed after it.
+func TestResumeWatchOverflowKeepsHeldPrefix(t *testing.T) {
+	reader := &inputTestReader{chunks: make(chan []byte, 2)}
+	pump := newTerminalInputPump(reader)
+	pump.start()
+	t.Cleanup(func() {
+		pump.stop()
+		close(reader.chunks)
+	})
+	lifetime := &terminalInputLifetime{eof: make(chan error, 1), pump: pump}
+	clock := newSupervisorTestClock()
+
+	first := lifetime.watchResume(clock, nil)
+	reader.chunks <- []byte("ls")
+	require.Eventually(t, func() bool { return first.heldLen() == 2 }, 5*time.Second, time.Millisecond)
+	first.hold(bytes.Repeat([]byte("x"), resumeHeldInputLimit))
+	require.True(t, lifetime.resumeOverflowed.Load())
+	first.release()
+
+	second := lifetime.watchResume(clock, nil)
+	require.Eventually(t, func() bool { return second.heldLen() == 2 }, 5*time.Second, time.Millisecond)
+	second.release()
+
+	pump.mu.Lock()
+	defer pump.mu.Unlock()
+	require.Equal(t, "ls", string(pump.residual))
+}
+
 // stallingSessionStream passes writes through until stall is set; stalled
 // writes block until release closes, then fail with failErr when set.
 type stallingSessionStream struct {

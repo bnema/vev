@@ -70,20 +70,6 @@ func (p *graphicsNamespacePool) reserveLease(key string) (uint64, uint64) {
 	return 0, 0
 }
 
-// releaseBase is the legacy base-only release. A quarantined block is never
-// released by it.
-func (p *graphicsNamespacePool) releaseBase(base uint64) {
-	if base == 0 || base%graphicsIDNamespaceSize != 1 {
-		return
-	}
-	block := (base - 1) / graphicsIDNamespaceSize
-	if _, quarantined := p.quarantines[block]; quarantined {
-		return
-	}
-	delete(p.reserved, block)
-	delete(p.fences, block)
-}
-
 func (p *graphicsNamespacePool) releaseLease(state *graphicsOutputState) {
 	if state == nil || state.namespaceBase == 0 || state.namespaceBase%graphicsIDNamespaceSize != 1 {
 		return

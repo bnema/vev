@@ -619,7 +619,7 @@ func (p *echoPredictor) needsTick() bool {
 // scrolls would otherwise move a guess where nothing ever repairs it. The
 // guesses stay pending and render draws them again after the frame.
 func (p *echoPredictor) undraw() []byte {
-	if len(p.drawn) == 0 {
+	if len(p.drawn) == 0 && !p.cursorMove {
 		return nil
 	}
 	var out bytes.Buffer

@@ -551,7 +551,7 @@ func (s *Supervisor) runInitialNavigation(ctx context.Context, input *terminalIn
 	if s.cfg.Picker != nil {
 		s.cfg.Picker.TakeOp()
 	}
-	s.picker.pendingPickerKey = ""
+	s.picker.pendingKey = ""
 	return s.runResolvedAttachment(ctx, input, service, pickerAttachmentTarget{request: request}, SessionEnvironmentLocalCLI)
 }
 

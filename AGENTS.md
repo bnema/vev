@@ -31,7 +31,7 @@ go test ./internal/adapters/ipc ./internal/usecase/daemon -run '^$' -bench=. -be
 The exhaustive production matrix and separate test-import policy are enforced by `boundary_test.go`; package ownership is documented in `docs/architecture.md`.
 
 - `pkg/` is reusable and never imports `internal/`.
-- Production use cases import only `internal/ports`, semantic `internal/protocol` packages, `internal/domain`, `internal/snapshotcodec`, and approved sibling use cases.
+- Production use cases import only `internal/ports`, semantic `internal/protocol` packages, `internal/domain`, `internal/snapshotcodec` (daemon only), and approved sibling use cases.
 - Production use cases never import `internal/protocol/wire`, concrete adapters, `internal/app`, `internal/persist`, or `internal/platform`.
 - `internal/ports` owns application seams, not codecs, raw frames, environment policy, or worker implementations.
 

@@ -205,6 +205,8 @@ func TestRefreshPaneTitleLookupFailureKeepsProcessNameEmpty(t *testing.T) {
 	require.Equal(t, "sh", d.refreshPaneDisplayTitle(sess, p, true), "pointer refresh must retain its pane-owned fallback")
 }
 
+var errProcessInspectionUnavailable = errors.New("process inspection unavailable")
+
 // processInspectorFake is a hand-written ports.ProcessInspector whose
 // behavior is set per test through func fields; an unset func reports an
 // error, the same as an inspector that cannot read the process.

@@ -895,8 +895,8 @@ type readyOutcome struct {
 // the supervisor can admit exactly the row the user committed. It opens no
 // stream and starts no terminal work itself.
 func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, sub ports.BrokerSubscription) readyOutcome {
-	if key := s.picker.pendingPickerKey; key != "" {
-		s.picker.pendingPickerKey = ""
+	if key := s.picker.pendingKey; key != "" {
+		s.picker.pendingKey = ""
 		return readyOutcome{commitKey: key}
 	}
 	var changed <-chan struct{}
@@ -991,7 +991,7 @@ func (s *Supervisor) pickerOps() <-chan struct{} {
 func (s *Supervisor) takePickerClose() bool {
 	op, key := s.cfg.Picker.TakeOp()
 	if op.commit && key != "" {
-		s.picker.pendingPickerKey = key
+		s.picker.pendingKey = key
 	}
 	if op.close && !op.exit {
 		s.notifyPicker(pickerExitHint)
@@ -1515,9 +1515,10 @@ type resumeWatch struct {
 	clock     ports.Clock
 	logger    *slog.Logger
 
-	// backlog counts deliveries already waiting at claim: session input the
-	// lost attachment kept, held verbatim and never read as a cancel key.
-	backlog     int
+	// backlog marks deliveries already waiting at claim: session input the
+	// lost attachment or an earlier phase kept, held verbatim and never read
+	// as a cancel key.
+	backlog     claimBacklog
 	releaseOnce sync.Once
 
 	mu   sync.Mutex
@@ -1531,12 +1532,24 @@ func (w *resumeWatch) heldLen() int {
 	return len(w.held)
 }
 
-// hold keeps data within the bound.
+// hold keeps newly typed data within the bound. After an overflow in this
+// outage it drops every new key, so the session never sees a gap.
 func (w *resumeWatch) hold(data []byte) {
+	w.holdInput(data, false)
+}
+
+// holdResidual keeps the residual an earlier owner handed back. It was kept
+// before any overflow, so it precedes the dropped keys and the sticky
+// overflow must not discard it.
+func (w *resumeWatch) holdResidual(data []byte) {
+	w.holdInput(data, true)
+}
+
+func (w *resumeWatch) holdInput(data []byte, residual bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	overflowed := &w.lifetime.resumeOverflowed
-	if overflowed.Load() || len(w.held)+len(data) > resumeHeldInputLimit {
+	if (!residual && overflowed.Load()) || len(w.held)+len(data) > resumeHeldInputLimit {
 		if len(data) != 0 {
 			overflowed.Store(true)
 		}
@@ -1615,8 +1628,15 @@ func (w *resumeWatch) run() {
 			return
 		}
 		pump.ack(w.id)
-		if w.backlog > 0 {
-			w.backlog--
+		if w.backlog.residual {
+			w.backlog.residual = false
+			w.holdResidual(result.data)
+			continue
+		}
+		if w.backlog.pending {
+			// Read after the earlier owner stopped: newly typed, so an
+			// overflow drops it, but it is still never a cancel key.
+			w.backlog.pending = false
 			w.hold(result.data)
 			continue
 		}

@@ -238,6 +238,7 @@ func (ac *attachedClient) geometrySnapshot() domain.Geometry {
 	if ac.geometry.Valid() {
 		return ac.geometry
 	}
+	// Pixels only describe a valid cell size; never hand them out without one.
 	return domain.Geometry{Size: ac.geometry.Size}
 }
 

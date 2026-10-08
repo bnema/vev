@@ -85,9 +85,11 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 			// starts with the session theme, as a new tab does.
 			d.applySessionThemeToPane(sess, p)
 		}
+		var published *pane
 		sess.floatingLaunchMu.Lock()
 		sess.floatingSpareStarting = false
 		if p != nil && !sess.floatingLaunchStopping {
+			published = p
 			sess.floatingSpare = &floatingSpare{pane: p, key: spareKey(spec)}
 			p.prestarted = true
 			spare := p
@@ -107,6 +109,11 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 		sess.floatingLaunchMu.Unlock()
 		if p != nil {
 			closeFloatingPane(p)
+		}
+		if published != nil {
+			// A theme change between the first apply and publication could
+			// not see the spare; any later one does, so apply once more.
+			d.applySessionThemeToPane(sess, published)
 		}
 	})
 }
@@ -153,10 +160,16 @@ func (d *Daemon) applySessionThemeToPane(sess *session, p *pane) {
 	if len(attachments) == 0 {
 		return
 	}
-	t := d.effectiveTheme(attachments[0].getClientTheme())
+	applyClientThemeToPane(d, attachments[0], p)
+}
+
+// applyClientThemeToPane reads ac's theme while holding p.mu, so a concurrent
+// theme application either is seen here or writes the pane after it; a stale
+// theme can never overwrite a newer one. ac.themeMu is a leaf lock.
+func applyClientThemeToPane(d *Daemon, ac *attachedClient, p *pane) {
 	p.mu.Lock()
-	applyPaneThemeLocked(p, t, false)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	applyPaneThemeLocked(p, d.effectiveTheme(ac.getClientTheme()), false)
 }
 
 // floatingSparePane returns the session's unclaimed spare pane, if any.

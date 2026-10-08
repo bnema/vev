@@ -96,10 +96,10 @@ func TestBarScriptContextUsesFirstOrderedPaneAndClientCols(t *testing.T) {
 	active := sess.tabs[0].focusedPane()
 	active.stableID = "pane-default"
 	active.pty = newScriptPTY(nil)
-	WithCwdReader(func(pid int) (string, error) {
+	WithProcessInspector(&processInspectorFake{cwd: func(pid int) (string, error) {
 		require.Equal(t, 4242, pid)
 		return "/pane-repo", nil
-	})(d)
+	}})(d)
 
 	require.True(t, d.refreshBarScriptsIfDue(sess, time.Unix(0, 0), true))
 	waitBarRefreshIdle(t, d)

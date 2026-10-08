@@ -770,7 +770,7 @@ func TestBrokerLocalProbeRefusesNonLocalRoute(t *testing.T) {
 	sshRoute := loadTestRoute(t, map[string]any{
 		"kind":   "ssh-stdio",
 		"target": "user@host:2222",
-		"argv":   []any{"vev", brokerMuxStdioCommand, "--offline-root", "/srv/remote"},
+		"argv":   []any{"vev", ports.BrokerMuxStdioCommand, "--offline-root", "/srv/remote"},
 	})
 	require.Equal(t, brokerconfig.RouteSSHStdio, sshRoute.Kind())
 	require.False(t, sshRoute.IsLocal(), "an ssh helper route is never dialed directly")

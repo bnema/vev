@@ -353,16 +353,14 @@ func TestUnsupportedGraphicsWarningIsBoundedForLateSceneCreation(t *testing.T) {
 func TestGraphicsNamespacesAreDeterministicAndCollisionSafe(t *testing.T) {
 	d := &Daemon{}
 	d.mu.Lock()
-	first := d.reserveGraphicsNamespaceLocked("session:work:attachment")
-	second := d.reserveGraphicsNamespaceLocked("session:work:attachment")
-	d.mu.Unlock()
+	defer d.mu.Unlock()
+	first, firstFence := d.reserveGraphicsNamespaceLeaseLocked("session:work:attachment")
+	second, _ := d.reserveGraphicsNamespaceLeaseLocked("session:work:attachment")
 	require.NotZero(t, first)
 	require.NotZero(t, second)
 	require.NotEqual(t, first, second, "equal attachment/session keys still need a collision-safe namespace")
-	d.releaseGraphicsNamespace(first)
-	d.mu.Lock()
-	reused := d.reserveGraphicsNamespaceLocked("session:work:attachment")
-	d.mu.Unlock()
+	d.releaseGraphicsNamespaceLeaseLocked(&graphicsOutputState{namespaceBase: first, namespaceFence: firstFence})
+	reused, _ := d.reserveGraphicsNamespaceLeaseLocked("session:work:attachment")
 	require.Equal(t, first, reused, "released namespaces should deterministically return to their preferred block")
 }
 

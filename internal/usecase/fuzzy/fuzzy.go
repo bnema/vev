@@ -9,6 +9,7 @@ import "strings"
 // Kind is how a field matched the query.
 type Kind uint8
 
+// Kinds are ordered best first, so a caller may use the Kind itself as a rank.
 const (
 	Exact Kind = iota
 	Prefix
@@ -33,11 +34,11 @@ func Match(text, query string, needle []rune) (Score, bool) {
 	var score Score
 	switch {
 	case text == query:
-		score = Score{Kind: Exact, Positions: Range(len(needle))}
+		score = Score{Kind: Exact, Positions: rangePositions(len(needle))}
 	case strings.HasPrefix(text, query):
-		score = Score{Kind: Prefix, Positions: Range(len(needle))}
+		score = Score{Kind: Prefix, Positions: rangePositions(len(needle))}
 	default:
-		positions, ok := SubsequencePositions([]rune(text), needle)
+		positions, ok := subsequencePositions([]rune(text), needle)
 		if !ok {
 			return Score{}, false
 		}
@@ -60,8 +61,8 @@ func Less(leftRank int, left Score, rightRank int, right Score) bool {
 	return left.First < right.First
 }
 
-// Range returns the positions 0..n-1.
-func Range(n int) []int {
+// rangePositions returns the positions 0..n-1.
+func rangePositions(n int) []int {
 	positions := make([]int, n)
 	for i := range positions {
 		positions[i] = i
@@ -69,9 +70,9 @@ func Range(n int) []int {
 	return positions
 }
 
-// SubsequencePositions returns the first in-order positions of needle in
+// subsequencePositions returns the first in-order positions of needle in
 // haystack.
-func SubsequencePositions(haystack, needle []rune) ([]int, bool) {
+func subsequencePositions(haystack, needle []rune) ([]int, bool) {
 	if len(needle) == 0 {
 		return nil, true
 	}

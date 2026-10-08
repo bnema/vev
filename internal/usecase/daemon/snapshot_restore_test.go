@@ -623,3 +623,39 @@ func TestRestoreIncrementalFallbackAndInvalidObjectMappings(t *testing.T) {
 		})
 	}
 }
+
+// TestRestoreIncrementalPayloadBudget bounds the inflated payloads of one
+// generation: compressed objects must not restore past the budget.
+func TestRestoreIncrementalPayloadBudget(t *testing.T) {
+	generation := acceptanceGeneration(t, restoreAcceptanceSession(t, "budget"), 3)
+	decoded, err := sessionFromGeneration(generation)
+	require.NoError(t, err)
+	total := 0
+	for _, tab := range decoded.Tabs {
+		for _, pane := range tab.Panes {
+			for _, chunk := range pane.SealedChunks {
+				total += len(chunk)
+			}
+			total += len(pane.Tail) + len(pane.Transcript)
+		}
+	}
+	require.Positive(t, total)
+
+	for _, tt := range []struct {
+		name    string
+		budget  int
+		wantErr bool
+	}{
+		{name: "exact budget", budget: total},
+		{name: "one byte short", budget: total - 1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := sessionFromGenerationBudget(cloneAcceptanceGeneration(generation), tt.budget)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "generation payload too large")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
