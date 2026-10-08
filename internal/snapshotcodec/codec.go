@@ -34,6 +34,10 @@ const (
 	maxSnapshotDecodedAllocation = 256 << 20
 )
 
+// MaxGenerationPayloadBytes bounds the inflated object payloads of one
+// incremental generation, the same budget an uncompressed checkpoint had.
+const MaxGenerationPayloadBytes = 256 << 20
+
 // Unmarshal first measures the complete manifest and its VT blobs without
 // allocating. After accepting aggregate budgets, it validates references and
 // blob semantics before decoding the session.

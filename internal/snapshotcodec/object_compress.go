@@ -12,7 +12,12 @@ import (
 // Object payloads are stored zlib-compressed. History cells are highly
 // repetitive, so a sealed 10k-row history shrinks several times on disk.
 // BestSpeed keeps snapshot encoding cheap; Go's deflate output is
-// deterministic for one level, so content addressing stays stable.
+// deterministic for one toolchain and level, so content addressing stays
+// stable between checkpoints of one build.
+
+// inflateInitialCap bounds the up-front allocation for one payload, so a
+// corrupt declared length cannot allocate more than the stream produces.
+const inflateInitialCap = 1 << 20
 
 var objectCompressorPool = sync.Pool{New: func() any {
 	w, err := zlib.NewWriterLevel(io.Discard, zlib.BestSpeed)
@@ -53,10 +58,14 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 		return nil, invalid(err)
 	}
 	defer objectDecompressorPool.Put(r)
-	payload := make([]byte, size)
-	if _, err := io.ReadFull(r, payload); err != nil {
+	out := bytes.NewBuffer(make([]byte, 0, min(int(size), inflateInitialCap)))
+	if _, err := io.Copy(out, io.LimitReader(r, int64(size))); err != nil {
 		return nil, invalid(err)
 	}
+	if out.Len() != int(size) {
+		return nil, invalid(io.ErrUnexpectedEOF)
+	}
+	payload := out.Bytes()
 	var extra [1]byte
 	if n, err := r.Read(extra[:]); n != 0 || err != io.EOF {
 		if err == nil || err == io.EOF {
