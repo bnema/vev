@@ -72,6 +72,18 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 		return
 	}
 
+	// The switch moves an attachment between sessions, so it must not run
+	// inside the exact set a KillAll purge has captured.
+	d.mu.Lock()
+	if d.purgeAdmissionClosedLocked() {
+		d.mu.Unlock()
+		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
+		return
+	}
+	d.purgeAdmissionActive++
+	d.mu.Unlock()
+	defer d.releasePurgeAdmission()
+
 	target, targetTabIndex, ok := d.samePeerTarget(request)
 	if !ok || target == effect.sess {
 		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)

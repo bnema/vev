@@ -505,9 +505,11 @@ func (a RouteCreateSessionAction) Validate() error {
 	return nil
 }
 
-// SamePeerSwitchRequest confirms a daemon-offered endpoint-empty target. It
-// carries only the exact lifecycle identity and the client-owned tab cursor;
-// transport origin remains proven by the existing authenticated connection.
+// SamePeerSwitchRequest moves the attachment to another session of the same
+// daemon. The client sends it from the picker or to confirm a daemon offer; a
+// pending offer pins the only accepted target. It carries only the exact
+// lifecycle identity and the client-owned tab cursor; transport origin remains
+// proven by the existing authenticated connection.
 type SamePeerSwitchRequest struct {
 	RequestID      uint64
 	Target         ExactSessionTarget
