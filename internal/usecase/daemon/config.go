@@ -21,9 +21,10 @@ var commandCodePattern = regexp.MustCompile(`^[A-Z0-9]{2,3}$`)
 // themeConfigSnapshot is the theme slice of runtimeConfig. Its zero value is
 // the default theme configuration: automatic mode with palette inheritance on.
 type themeConfigSnapshot struct {
-	mode       domain.ThemeMode
-	paletteOff bool
-	accent     domain.ThemeAccent
+	mode           domain.ThemeMode
+	paletteOff     bool
+	accent         domain.ThemeAccent
+	barTransparent bool
 }
 
 // runtimeConfig is the immutable derived configuration published by
@@ -96,7 +97,7 @@ func (d *Daemon) ApplyConfig(cfg domain.Config) {
 		tabs:                    cfg.Tabs,
 		ephemeral:               cfg.Ephemeral,
 		scrollback:              scrollback,
-		theme:                   themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent},
+		theme:                   themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent, barTransparent: cfg.Bar.Transparent},
 	}
 	d.bindings.Store(bindings)
 	d.config.Store(snapshot)
@@ -359,6 +360,9 @@ func (d *Daemon) resolveAppliedTheme(raw theme.Theme, color terminalcap.ColorCap
 	config := d.currentThemeConfig()
 	effective := effectiveThemeForConfig(raw, config)
 	resolved := theme.ResolveForColor(effective, config.accent, color)
+	if config.barTransparent {
+		resolved.Styles = resolved.Styles.WithTransparentBar()
+	}
 	return appliedTheme{Raw: resolved.Theme, Resolved: resolved}
 }
 

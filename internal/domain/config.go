@@ -47,11 +47,14 @@ func DefaultSnapshotRestoreProcesses() []string {
 	return append([]string(nil), defaultSnapshotRestoreProcesses...)
 }
 
-// BarConfig contains user-configurable bar right-anchor settings.
+// BarConfig contains user-configurable bar settings.
 type BarConfig struct {
 	TopRight    string
 	BottomRight string
 	Interval    time.Duration
+	// Transparent keeps the terminal background behind the top and bottom
+	// bars instead of the theme surface color (bar.background = off).
+	Transparent bool
 }
 
 // CopyConfig contains copy-mode selection and mouse motion settings.

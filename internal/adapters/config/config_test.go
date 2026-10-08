@@ -428,6 +428,39 @@ func TestParseThemePalette(t *testing.T) {
 	}
 }
 
+func TestParseBarBackground(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		input           string
+		wantTransparent bool
+		wantWarnings    []domain.Warning
+	}{
+		{name: "on keeps the theme surface", input: "bar.background = on\n"},
+		{name: "off makes bars transparent", input: "bar.background = off\n", wantTransparent: true},
+		{
+			name:  "invalid value warns and keeps default",
+			input: "bar.background = none\n",
+			wantWarnings: []domain.Warning{
+				{Line: 1, Msg: "invalid bar.background \"none\""},
+			},
+		},
+		{name: "absent key keeps default", input: "bar.interval = 2s\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, warnings, err := Parse(strings.NewReader(tt.input))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantTransparent, got.Bar.Transparent)
+			require.Equal(t, tt.wantWarnings, warnings)
+		})
+	}
+}
+
 func TestDefaultsThemePalette(t *testing.T) {
 	t.Parallel()
 

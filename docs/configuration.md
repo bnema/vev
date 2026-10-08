@@ -78,6 +78,8 @@ snapshot.restore_processes = vi,vim,nvim,emacs,man,less,more,tail,top,htop,btop,
 bar.top-right =
 bar.bottom-right =
 bar.interval = 5s
+# Fill the top and bottom bars with the theme surface; off keeps the terminal background.
+bar.background = on
 
 # Command palette codes: 2-3 letters or digits.
 code.new-tab = CNT
@@ -211,10 +213,11 @@ If the daemon refuses to start because its session data is broken, do not edit t
 | Setting | Effect |
 |---|---|
 | `theme = auto` | Follow your terminal's colors and light/dark mode. |
-| `theme = dark` / `light` | Neutral built-in colors. Ignores the two settings below. |
+| `theme = dark` / `light` | Neutral built-in colors. Ignores `theme.palette` and `theme.accent`. |
 | `theme.palette = off` | Neutral colors, no accent. |
 | `theme.accent = auto` | Pick an accent from your terminal's ANSI colors (blue if unsure). |
 | `theme.accent = 0`–`15` | Use exactly that ANSI color as the accent. |
+| `bar.background = off` | Keep the terminal background behind the top and bottom bars (useful with a transparent terminal). Tabs and recent sessions keep their colors. No effect on 16-color and mono terminals, where bars already use it. |
 
 - vev only colors its own UI (bars, borders, palette). Pane content is never recolored.
 - Tinted backgrounds need a truecolor or 256-color terminal. On 16-color and monochrome terminals vev uses bold, reverse, and faint instead. See [terminal colors](terminal.md#colors).

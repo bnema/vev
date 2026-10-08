@@ -127,6 +127,14 @@ type Styles struct {
 	PickerSelectionMuted renderer.Style
 }
 
+// WithTransparentBar returns s with the top and bottom bar fill on the
+// terminal's default colors. Tabs, MRU entries, and every other role keep
+// their theme colors.
+func (s Styles) WithTransparentBar() Styles {
+	s.SurfaceBar = renderer.DefaultStyle()
+	return s
+}
+
 // NewStyles applies the default automatic policy. New callers that own a
 // policy should use Resolve and retain its complete immutable result.
 func NewStyles(t Theme) Styles {
