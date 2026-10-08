@@ -726,14 +726,11 @@ func (d *Daemon) createTabForAttachment(sess *session, ac *attachedClient, _ dom
 		themeClient = attachments[0]
 	}
 	if themeClient != nil {
-		t := d.effectiveTheme(themeClient.getClientTheme())
 		tb.mu.Lock()
 		p := tb.focusedPane()
 		tb.mu.Unlock()
 		if p != nil {
-			p.mu.Lock()
-			applyPaneThemeLocked(p, t, false)
-			p.mu.Unlock()
+			applyClientThemeToPane(d, themeClient, p)
 		}
 	}
 	d.mu.Lock()

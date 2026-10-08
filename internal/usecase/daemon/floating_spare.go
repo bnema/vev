@@ -160,10 +160,16 @@ func (d *Daemon) applySessionThemeToPane(sess *session, p *pane) {
 	if len(attachments) == 0 {
 		return
 	}
-	t := d.effectiveTheme(attachments[0].getClientTheme())
+	applyClientThemeToPane(d, attachments[0], p)
+}
+
+// applyClientThemeToPane reads ac's theme while holding p.mu, so a concurrent
+// theme application either is seen here or writes the pane after it; a stale
+// theme can never overwrite a newer one. ac.themeMu is a leaf lock.
+func applyClientThemeToPane(d *Daemon, ac *attachedClient, p *pane) {
 	p.mu.Lock()
-	applyPaneThemeLocked(p, t, false)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	applyPaneThemeLocked(p, d.effectiveTheme(ac.getClientTheme()), false)
 }
 
 // floatingSparePane returns the session's unclaimed spare pane, if any.
