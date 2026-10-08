@@ -11,11 +11,11 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/catalogue"
 	"github.com/bnema/vev/internal/usecase/command"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // handleCommand serves one typed one-shot control request.

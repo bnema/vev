@@ -4,9 +4,9 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	vevgraphics "github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )

@@ -1,4 +1,4 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 func TestPayloadReaderGetBytes(t *testing.T) {

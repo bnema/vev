@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	codec "github.com/bnema/vev/internal/usecase/snapshot"
+	codec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 func TestReadBoundedRejectsUnsafeFiles(t *testing.T) {

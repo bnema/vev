@@ -118,7 +118,7 @@ func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	require.True(t, sess.repairAttachmentView(second))
 
 	tb := sess.tabs[0]
-	firstSize := first.size
+	firstSize := first.geometry.Size
 	secondRevision := second.viewSnapshot().revision
 	secondEpoch := second.output.currentEpoch()
 
@@ -136,8 +136,8 @@ func TestAttachmentResizeKeepsPeerWindowAndExpandsSharedContent(t *testing.T) {
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
 	tb.mu.Unlock()
-	require.Equal(t, firstSize, first.size)
-	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.size)
+	require.Equal(t, firstSize, first.geometry.Size)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.geometry.Size)
 	require.Equal(t, secondRevision+1, second.viewSnapshot().revision)
 	require.Greater(t, second.output.currentEpoch(), secondEpoch)
 }
@@ -292,8 +292,8 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 120, Rows: 48}, tb.size)
 	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.size)
-	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.size)
+	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.geometry.Size)
+	require.Equal(t, domain.Size{Cols: 120, Rows: 50}, second.geometry.Size)
 
 	// A same-size resize is still a claim, so the smaller peer can take
 	// authority without changing its local window state first.
@@ -308,8 +308,8 @@ func TestAttachmentResizeUsesLatestClaimedSessionGeometry(t *testing.T) {
 	tb.mu.Lock()
 	require.Equal(t, domain.Size{Cols: 70, Rows: 18}, tb.size)
 	tb.mu.Unlock()
-	require.Equal(t, domain.Size{Cols: 70, Rows: 20}, first.size)
-	require.Equal(t, domain.Size{Cols: 90, Rows: 30}, second.size)
+	require.Equal(t, domain.Size{Cols: 70, Rows: 20}, first.geometry.Size)
+	require.Equal(t, domain.Size{Cols: 90, Rows: 30}, second.geometry.Size)
 
 	// Detaching the latest claimant falls back to the most recent remaining
 	// attachment claim rather than reverting to the historical maximum.

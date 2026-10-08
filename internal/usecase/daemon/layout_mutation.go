@@ -4,7 +4,7 @@ import (
 	"slices"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // mutateTargetLayout preserves the publication semantics used by resize and

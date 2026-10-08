@@ -15,12 +15,12 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/mouse"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/bnema/vev/internal/usecase/ui"
@@ -191,7 +191,7 @@ func TestSwitchTabFirstFrameDoesNotReuseSamePaneIDCapture(t *testing.T) {
 	d.paint(sess, ac, true, nil)
 	first := awaitFrame(t, sends, "Output")
 	firstOutput := unmarshalTestOutput(t, first.Payload)
-	terminal := vt.NewScreen(ac.size.Cols, ac.size.Rows)
+	terminal := vt.NewScreen(ac.geometry.Size.Cols, ac.geometry.Size.Rows)
 	terminal.Write(firstOutput.Data)
 
 	// A clean pane relies on the attachment capture cache for its retained

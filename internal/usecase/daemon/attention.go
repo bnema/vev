@@ -19,10 +19,7 @@ func (d *Daemon) noteAttention(sess *session, tb *tab) {
 		return
 	}
 
-	now := d.clock.Now()
-	if now.IsZero() {
-		now = time.Now()
-	}
+	now := d.daemonNow()
 
 	sess.mu.Lock()
 	if !tb.attention {

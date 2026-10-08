@@ -1255,7 +1255,7 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 	d.ptys = newFactorySeq(t, firstPTY, secondPTY)
 	WithStore(t, store)(d)
 
-	first, err := createSessionForTest(d, "0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	first, err := createSessionForTest(d, "0", true, "/tmp", ac.geometry.Size, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameSession(first, "named"))
 	staleCreatedAt := first.createdAt
@@ -1263,7 +1263,7 @@ func TestEphemeralPromotionLifecyclePreventsStaleSameNamePaletteTarget(t *testin
 	require.NoError(t, d.killSession(first, protocol.ReasonSessionKilled, true))
 	d.sessWg.Wait()
 
-	second, err := createSessionForTest(d, "0", true, "/tmp", ac.size, terminalEnv{}, d.baseEnv)
+	second, err := createSessionForTest(d, "0", true, "/tmp", ac.geometry.Size, terminalEnv{}, d.baseEnv)
 	require.NoError(t, err)
 	require.NoError(t, d.renameSession(second, "named"))
 	require.NotEqual(t, staleCreatedAt, second.createdAt)
@@ -1414,7 +1414,7 @@ func TestPickerStoppedTargetKillPurges(t *testing.T) {
 func TestChildEnvEscapesLegacySessionName(t *testing.T) {
 	d := newTestDaemon(t, nil, stubClock{})
 
-	got := d.childEnv("legacy,name=value", "t_alpha", "p_beta")
+	got := childEnvFrom(d.baseEnv, "legacy,name=value", "t_alpha", "p_beta")
 
 	require.Contains(t, got, "VEV=session=legacy%2Cname%3Dvalue,tab=t_alpha,pane=p_beta")
 }
@@ -1580,7 +1580,7 @@ func TestChildEnvTrueColorCapability(t *testing.T) {
 			d := newTestDaemon(t, nil, stubClock{})
 			d.baseEnv = tt.baseEnv
 
-			got := d.childEnv("work", "t_alpha", "p_beta")
+			got := childEnvFrom(d.baseEnv, "work", "t_alpha", "p_beta")
 
 			for _, want := range tt.wantContain {
 				require.Contains(t, got, want)
@@ -1629,7 +1629,7 @@ func TestAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 	require.Contains(t, opens[0], "TERM=xterm-256color")
 	require.Contains(t, opens[0], "COLORTERM=truecolor")
 	require.Contains(t, opens[0], "TERM_PROGRAM=vev")
-	require.NoError(t, d.createTab(sess, ac.size))
+	require.NoError(t, d.createTab(sess, ac.geometry.Size))
 	require.Contains(t, opens[1], "TERM=xterm-256color")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
@@ -1675,7 +1675,7 @@ func TestLiveAttachUpdatesFutureChildEnvTrueColor(t *testing.T) {
 
 	require.Contains(t, opens[0], "TERM=xterm-256color")
 	require.Contains(t, opens[0], "COLORTERM=truecolor")
-	require.NoError(t, d.createTab(sess, ac.size))
+	require.NoError(t, d.createTab(sess, ac.geometry.Size))
 	require.Contains(t, opens[1], "TERM=xterm-256color")
 	require.Contains(t, opens[1], "COLORTERM=truecolor")
 	require.Contains(t, opens[1], "TERM_PROGRAM=vev")
@@ -1792,7 +1792,7 @@ func TestAttachEnvironmentRefreshesOnlySessionBoundFuturePTYInputs(t *testing.T)
 	require.Equal(t, "/usr/bin/fish", commands[0])
 	require.Equal(t, []string{"SECRET=first", "TERM_PROGRAM_extra=keep", "SHELL=/usr/bin/fish", "A=a=b", "WAYLAND_DISPLAY=wayland-1", "SSH_AUTH_SOCK=/run/first-agent", "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=vev", "VEV=session=work,tab=" + sess.tabs[0].stableID + ",pane=" + sess.tabs[0].panes["pane-1"].stableID}, envs[0])
 	require.Equal(t, "fish", sess.tabs[0].focusedPaneTitle(false), "the initial tab title identifies the shell requested by its creator")
-	require.NoError(t, d.createTab(sess, ac.size))
+	require.NoError(t, d.createTab(sess, ac.geometry.Size))
 	// Only session-bound variables follow the attaching client: the X11-only
 	// display group replaces the Wayland one, the absent agent socket is
 	// removed, and the creator's shell and ordinary variables stay.

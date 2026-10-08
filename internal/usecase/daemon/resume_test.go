@@ -14,12 +14,12 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 type closeTrackingTransport struct {
@@ -1247,7 +1247,7 @@ func TestParkingReleasesPaneCapturesBeforeHeadlessCloseAndResume(t *testing.T) {
 	require.Len(t, sends, 1)
 	output := unmarshalTestOutput(t, sends[0].Payload)
 	require.Zero(t, output.Base, "resume must start with a complete frame")
-	terminal := vt.NewScreen(resumedAC.size.Cols, resumedAC.size.Rows)
+	terminal := vt.NewScreen(resumedAC.geometry.Size.Cols, resumedAC.geometry.Size.Rows)
 	terminal.Write(output.Data)
 	contents := strings.Join(frameRows(terminal), "\n")
 	require.Contains(t, contents, "survivor", "resume first paint must contain current headless content")

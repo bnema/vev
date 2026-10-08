@@ -1,4 +1,4 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"encoding/binary"
@@ -7,7 +7,7 @@ import (
 	"hash/crc32"
 	"math"
 
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 var (

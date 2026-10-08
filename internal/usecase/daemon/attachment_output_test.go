@@ -9,10 +9,10 @@ import (
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev-vt/graphics"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,7 +122,7 @@ func TestAttachmentOutputEpochsAreAttachmentLocalAndPreparedFramesAreFenced(t *t
 	fillOutputStateRows(frame, []string{"abc"})
 	newAttachment := func() *attachmentOutput {
 		stream := newOutputStateStream()
-		ac := &attachedClient{output: stream, size: domain.Size{Cols: 3, Rows: 1}}
+		ac := &attachedClient{output: stream, geometry: domain.Geometry{Size: domain.Size{Cols: 3, Rows: 1}}}
 		stream.attachment = ac
 		return stream
 	}
@@ -195,7 +195,7 @@ func TestPreparedOutputDropsReplacedConnectionAndView(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			stream := newOutputStateStream()
-			ac := &attachedClient{output: stream, size: domain.Size{Cols: 3, Rows: 1}}
+			ac := &attachedClient{output: stream, geometry: domain.Geometry{Size: domain.Size{Cols: 3, Rows: 1}}}
 			stream.attachment = ac
 			frame := renderer.NewFrame(3, 1)
 			fillOutputStateRows(frame, []string{"abc"})

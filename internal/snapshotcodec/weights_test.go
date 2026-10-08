@@ -1,4 +1,4 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 func TestManifestWeightRoundTripAndOldCompatibility(t *testing.T) {

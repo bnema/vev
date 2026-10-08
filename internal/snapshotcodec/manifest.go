@@ -1,4 +1,4 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"crypto/sha256"
@@ -8,8 +8,8 @@ import (
 	"math"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 const (

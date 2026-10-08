@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 var errDaemonActionNoChange = errors.New("daemon action made no change")

@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
 

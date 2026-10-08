@@ -1,7 +1,7 @@
 package daemon
 
 import (
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 // floatingSpare is one pre-started floating shell owned by a session rather

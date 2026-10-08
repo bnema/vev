@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/picker"
 	"github.com/stretchr/testify/require"
 )
@@ -172,7 +172,7 @@ func TestStoppedSessionHandoffDoesNotResumeAfterInitiatorReplacement(t *testing.
 		t.Fatal("stopped-session handoff did not release its role ticket")
 	}
 
-	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), size: old.size}
+	next := &attachedClient{tr: &closeTrackingTransport{}, output: newOutputStateStream(), geometry: domain.Geometry{Size: old.geometry.Size}}
 	next.initOverlays()
 	replacement, err := d.transitionAttachment(attachmentTransitionRequest{
 		target: source, next: next, expectedTransport: next.transportSnapshot(), ready: true,

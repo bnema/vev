@@ -5,8 +5,8 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,9 +19,9 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 
 	secondTransport, _ := newCapturingTransport(t)
 	second := &attachedClient{
-		tr:     secondTransport,
-		output: newOutputStateStream(),
-		size:   domain.Size{Cols: 80, Rows: 24},
+		tr:       secondTransport,
+		output:   newOutputStateStream(),
+		geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
 	}
 	second.initOverlays()
 	second.clientID[0] = 2
@@ -85,7 +85,7 @@ func TestAcceptancePaletteNewTabUsesSessionGeometryAfterAttachmentResize(t *test
 	first.sendMu.Unlock()
 	require.Equal(t, firstEpoch, gotFirstEpoch, "new tab render crossed attachment boundary")
 	second.sendMu.Lock()
-	gotSecondSize := second.size
+	gotSecondSize := second.geometry.Size
 	second.sendMu.Unlock()
 	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, gotSecondSize)
 }
@@ -99,9 +99,9 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 
 	secondTransport, _ := newCapturingTransport(t)
 	second := &attachedClient{
-		tr:     secondTransport,
-		output: newOutputStateStream(),
-		size:   domain.Size{Cols: 80, Rows: 24},
+		tr:       secondTransport,
+		output:   newOutputStateStream(),
+		geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
 	}
 	second.initOverlays()
 	second.clientID[0] = 2
@@ -156,8 +156,8 @@ func TestAcceptanceAttachmentStateIsolationAcrossResetResizeAndDetach(t *testing
 	require.True(t, admitted)
 	require.True(t, d.resizeAttachmentForLease(secondEffect, domain.Size{Cols: 120, Rows: 40}))
 	secondEffect.End()
-	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, second.size)
-	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.size, "peer resize crossed attachment boundary")
+	require.Equal(t, domain.Size{Cols: 120, Rows: 40}, second.geometry.Size)
+	require.Equal(t, domain.Size{Cols: 80, Rows: 24}, first.geometry.Size, "peer resize crossed attachment boundary")
 	sess.mu.Lock()
 	tb := sess.tabs[0]
 	sess.mu.Unlock()

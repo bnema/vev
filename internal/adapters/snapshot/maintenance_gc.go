@@ -10,7 +10,7 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
-	codec "github.com/bnema/vev/internal/usecase/snapshot"
+	codec "github.com/bnema/vev/internal/snapshotcodec"
 )
 
 // SnapshotIncarnations lists the canonical incarnation directories.

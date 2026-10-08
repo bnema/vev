@@ -11,8 +11,8 @@ import (
 
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/ports"
+	codec "github.com/bnema/vev/internal/snapshotcodec"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
-	codec "github.com/bnema/vev/internal/usecase/snapshot"
 	"github.com/stretchr/testify/require"
 )
 

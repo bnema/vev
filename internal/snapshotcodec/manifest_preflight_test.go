@@ -1,4 +1,4 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"encoding/binary"
@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/bnema/vev/internal/domain"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 func TestManifestGrammarRoundTrip(t *testing.T) {

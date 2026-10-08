@@ -26,10 +26,11 @@ import (
 
 // stubClock returns timers whose channel never fires, so a scheduler under it
 // blocks in its debounce loop until the session context is cancelled. Used by
-// every test that is not specifically exercising the debounce.
+// every test that is not specifically exercising the debounce. Now reports a
+// fixed non-zero instant so recorded timestamps are deterministic and set.
 type stubClock struct{}
 
-func (stubClock) Now() time.Time                     { return time.Time{} }
+func (stubClock) Now() time.Time                     { return time.Unix(1_700_000_000, 0) }
 func (stubClock) NewTimer(time.Duration) ports.Timer { return stubTimer{} }
 
 type stubTimer struct{}
@@ -416,7 +417,7 @@ func newManualSessionWithPTYsClockCleanup(t testing.TB, clock ports.Clock, regis
 	t.Helper()
 	d := newTestDaemonWithCleanup(t, nil, clock, registerCleanup)
 	tr, sends := newCapturingTransport(t)
-	ac := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	ac := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	ac.output.attachment = ac
 	ac.initOverlays()
 	sctx, cancel := context.WithCancel(d.serveCtx)

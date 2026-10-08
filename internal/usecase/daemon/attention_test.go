@@ -12,11 +12,11 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
 
@@ -172,7 +172,7 @@ func TestNoteAttentionDoesNotBlockOnWedgedOtherClient(t *testing.T) {
 		return nil
 	}).Maybe()
 	trW.EXPECT().Close().Return(nil).Maybe()
-	acW := &attachedClient{tr: trW, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	acW := &attachedClient{tr: trW, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	acW.initOverlays()
 	sctxW, cancelW := context.WithCancel(d.serveCtx)
 	t.Cleanup(cancelW)

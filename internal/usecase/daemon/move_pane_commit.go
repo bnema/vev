@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/usecase/layout"
+import "github.com/bnema/vev/internal/domain/layout"
 
 // movePaneCommit owns pane-private validation and publication. The shared
 // moveTransaction already holds daemon, routing, ordered Session, and resize

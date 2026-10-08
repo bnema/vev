@@ -62,7 +62,7 @@ func TestMovePaneCleanupUsesCapturedSourceAttachment(t *testing.T) {
 
 	replacementTransport, _ := newCapturingTransport(t)
 	replacement := &attachedClient{
-		tr: replacementTransport, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24},
+		tr: replacementTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
 	}
 	replacement.initOverlays()
 	replacement.setSession(source)

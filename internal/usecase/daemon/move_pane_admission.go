@@ -1,6 +1,6 @@
 package daemon
 
-import "github.com/bnema/vev/internal/usecase/layout"
+import "github.com/bnema/vev/internal/domain/layout"
 
 // movePaneTopology is the private pane topology Implementation consumed by the
 // shared moveTransaction Module.

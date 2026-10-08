@@ -77,7 +77,7 @@ func TestAttachmentRegistryRepairsRemovedStableTarget(t *testing.T) {
 func TestTabForAttachmentRepairRebasesOutputBeforePublishingRevision(t *testing.T) {
 	sess := registryTestSession()
 	ac := registryTestAttachment(1)
-	ac.size = domain.Size{Cols: 80, Rows: 23}
+	ac.geometry.Size = domain.Size{Cols: 80, Rows: 23}
 	ac.output = newOutputStateStream()
 	ac.output.attachment = ac
 	require.True(t, sess.registerAttachment(ac))
@@ -105,7 +105,7 @@ func TestTabForAttachmentRepairRebasesOutputBeforePublishingRevision(t *testing.
 func TestPrepareRemovedTabViewRebasesOutputBeforeSideEffect(t *testing.T) {
 	sess := registryTestSession()
 	ac := registryTestAttachment(1)
-	ac.size = domain.Size{Cols: 80, Rows: 23}
+	ac.geometry.Size = domain.Size{Cols: 80, Rows: 23}
 	ac.output = newOutputStateStream()
 	ac.output.attachment = ac
 	require.True(t, sess.registerAttachment(ac))

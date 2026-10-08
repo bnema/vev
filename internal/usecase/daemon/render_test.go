@@ -19,11 +19,11 @@ import (
 	vt "github.com/bnema/vev-vt"
 	renderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	scopy "github.com/bnema/vev/internal/usecase/copy"
-	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 )
 
@@ -73,7 +73,7 @@ func TestFirstPaintRetainedFloatingPaneEmitsOneReset(t *testing.T) {
 			defer releasePTY()
 			d, sess, ac, sends := newManualSessionWithPTYs(t, pty)
 			ac.sendMu.Lock()
-			ac.size = tc.clientSize
+			ac.geometry.Size = tc.clientSize
 			ac.sendMu.Unlock()
 
 			// A retained visible popup still needs activation warmup. When the
@@ -404,7 +404,7 @@ func TestPTYReaderRepublishesSynchronizedCompletionAfterAttachmentLifecycle(t *t
 		rc := d.attachCoordinator(target, nil, detached, true)
 
 		secondTransport, secondSends := newCapturingTransport(t)
-		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), size: detached.size}
+		remaining := &attachedClient{tr: secondTransport, output: newOutputStateStream(), geometry: domain.Geometry{Size: detached.geometry.Size}}
 		remaining.initOverlays()
 		remaining.setSession(target)
 		target.mu.Lock()

@@ -90,14 +90,23 @@ func (r BrokerRouteSpec) Clone() BrokerRouteSpec {
 	return r
 }
 
-// BrokerRouteForTransport maps the closed legacy policy transport vocabulary
-// to canonical remote routes.
+// Remote helper argv vocabulary. Durable SSH routes store this argv verbatim,
+// so these spellings are part of the persisted route contract; the CLI parses
+// the same constants.
+const (
+	BrokerMuxStdioCommand         = "_broker-mux-stdio"
+	BrokerMuxQUICBootstrapCommand = "_broker-mux-quic-bootstrap"
+	BrokerRouteScopeArg           = "--production"
+)
+
+// BrokerRouteForTransport maps the closed policy transport vocabulary to the
+// canonical remote route.
 func BrokerRouteForTransport(transport, endpoint string) (BrokerRouteSpec, error) {
 	switch transport {
 	case "ssh-stdio", "stdio":
-		return BrokerRouteSpec{Kind: BrokerRouteSSHStdio, Target: endpoint, Argv: []string{"vev", "_broker-mux-stdio", "--production"}}, nil
+		return BrokerRouteSpec{Kind: BrokerRouteSSHStdio, Target: endpoint, Argv: []string{"vev", BrokerMuxStdioCommand, BrokerRouteScopeArg}}, nil
 	case "ssh-quic", "quic":
-		return BrokerRouteSpec{Kind: BrokerRouteSSHQUIC, Target: endpoint, Argv: []string{"vev", "_broker-mux-quic-bootstrap", "--production"}}, nil
+		return BrokerRouteSpec{Kind: BrokerRouteSSHQUIC, Target: endpoint, Argv: []string{"vev", BrokerMuxQUICBootstrapCommand, BrokerRouteScopeArg}}, nil
 	default:
 		return BrokerRouteSpec{}, fmt.Errorf("ports: unsupported broker transport %q", transport)
 	}

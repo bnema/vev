@@ -227,11 +227,11 @@ func TestCommandResultIsBoundedControlEnvelope(t *testing.T) {
 	require.ErrorIs(t, checkCategoryCeiling(oversizeRaw, categoryControl, wire.AbsoluteEnvelopeLimit), wire.ErrScanLength,
 		"a CommandResult above the control ceiling must fail even under an absolute negotiated ceiling")
 
-	send := &serverConnection{raw: &scriptedTransport{}, ceilings: defaultProtoCeilings()}
+	send := &serverConnection{handshake: handshake{raw: &scriptedTransport{}, ceilings: defaultProtoCeilings()}}
 	require.NoError(t, send.SendServer(message))
 	require.ErrorIs(t, send.SendServer(oversize), wire.ErrScanLength)
 
-	recv := &clientConnection{raw: &scriptedTransport{recv: []wire.Envelope{{Payload: oversizeRaw}}}, ceilings: defaultProtoCeilings()}
+	recv := &clientConnection{handshake: handshake{raw: &scriptedTransport{recv: []wire.Envelope{{Payload: oversizeRaw}}}, ceilings: defaultProtoCeilings()}}
 	recv.preambleOnce.Do(func() {})
 	_, err = recv.ReceiveServer()
 	require.Error(t, err)

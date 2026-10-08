@@ -12,12 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/protocol/wire"
 	"github.com/bnema/vev/internal/usecase/keys"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 // --- coordinator harness ------------------------------------------------------
@@ -97,7 +97,7 @@ func TestRenderCoordinatorDetachDoesNotJoinSelectedDeadlineWorker(t *testing.T) 
 	release := make(chan struct{})
 	rc := newRenderCoordinator(renderCoordinatorOptions{
 		clock: clock,
-		ackReady: func() bool {
+		ackReadyFor: func(*attachedClient) bool {
 			close(entered)
 			<-release
 			return true
@@ -166,10 +166,10 @@ func newCoordinatorHarness(t *testing.T) *coordinatorHarness {
 	}
 	h.ackReady.Store(true)
 	h.rc = newRenderCoordinator(renderCoordinatorOptions{
-		clock:      h.clk.clock,
-		wake:       func(w renderWake) { h.wakes <- w },
-		ackReady:   func() bool { return h.ackReady.Load() },
-		syncActive: func() bool { return h.syncActive.Load() },
+		clock:       h.clk.clock,
+		wake:        func(w renderWake) { h.wakes <- w },
+		ackReadyFor: func(*attachedClient) bool { return h.ackReady.Load() },
+		syncActive:  func() bool { return h.syncActive.Load() },
 	})
 	return h
 }
@@ -449,7 +449,7 @@ func TestRenderCoordinatorAckReadinessReentersWithoutBlockingResize(t *testing.T
 
 	var rc *renderCoordinator
 	rc = newRenderCoordinator(renderCoordinatorOptions{
-		ackReady: func() bool {
+		ackReadyFor: func(*attachedClient) bool {
 			close(ackEntered)
 			// The readiness probe models the output send path reading coordinator
 			// metadata after sendMu is held. It must never run under c.mu.
@@ -496,6 +496,7 @@ func TestRenderCoordinatorAckDoesNotBypassAnUnexpiredDeadline(t *testing.T) {
 func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 	t.Run("expired deadline flushes exactly once after readiness", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
+		h.rc.attach(&attachedClient{})
 		h.ackReady.Store(false)
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "render.go"})
 		timer := awaitCoordinatorScheduledTimer(t, h.clk)
@@ -516,6 +517,7 @@ func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 
 	t.Run("lifecycle clears deferred work and urgent explicit fires stay immediate", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
+		h.rc.attach(&attachedClient{})
 		h.ackReady.Store(false)
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
 		timer := awaitCoordinatorScheduledTimer(t, h.clk)
@@ -536,6 +538,7 @@ func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 
 func TestRenderCoordinatorAckGateBlocksCompositionUntilAck(t *testing.T) {
 	h := newCoordinatorHarness(t)
+	h.rc.attach(&attachedClient{})
 	h.ackReady.Store(false)
 
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput})
@@ -1451,9 +1454,9 @@ func TestRenderCoordinatorInertTimerFiresSynchronouslyWithoutWorker(t *testing.T
 
 	wakes := make(chan renderWake, 1)
 	rc := newRenderCoordinator(renderCoordinatorOptions{
-		clock:    clock,
-		ackReady: func() bool { return true },
-		wake:     func(w renderWake) { wakes <- w },
+		clock:       clock,
+		ackReadyFor: func(*attachedClient) bool { return true },
+		wake:        func(w renderWake) { wakes <- w },
 	})
 	rc.invalidate(renderInvalidation{class: invalidateOutput})
 

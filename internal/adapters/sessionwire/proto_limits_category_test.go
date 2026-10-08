@@ -133,7 +133,7 @@ func TestClientSendCategoryEnvelopeCeilings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := &scriptedTransport{}
-			conn := &clientConnection{raw: raw, ceilings: tt.ceilings}
+			conn := &clientConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}
 			conn.preambleOnce.Do(func() {})
 			err := conn.SendClient(tt.message)
 			if tt.wantErr != nil {
@@ -194,7 +194,7 @@ func TestServerSendCategoryEnvelopeCeilings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := &scriptedTransport{}
-			conn := &serverConnection{raw: raw, ceilings: tt.ceilings}
+			conn := &serverConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}
 			err := conn.SendServer(tt.message)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -212,7 +212,7 @@ func TestServerSendCategoryEnvelopeCeilings(t *testing.T) {
 func TestServerSendModesShareControlCategoryCap(t *testing.T) {
 	controlOver := protocol.Sessions{Sessions: []protocol.SessionInfo{{Name: strings.Repeat("x", overControlCap)}}}
 	raw := &asyncScriptedTransport{scriptedTransport: &scriptedTransport{}}
-	conn := &serverConnection{raw: raw, ceilings: defaultProtoCeilings()}
+	conn := &serverConnection{handshake: handshake{raw: raw, ceilings: defaultProtoCeilings()}}
 
 	require.ErrorIs(t, conn.SendServerAsync(controlOver), wire.ErrScanLength)
 	require.ErrorIs(t, conn.SendServerSynchronous(controlOver), wire.ErrScanLength)
@@ -331,11 +331,11 @@ func TestReceiveCategoryEnvelopeCeilings(t *testing.T) {
 			raw := &scriptedTransport{recv: []wire.Envelope{{Payload: tt.payload}}}
 			var err error
 			if tt.receiver == "server" {
-				conn := &serverConnection{raw: raw, ceilings: tt.ceilings}
+				conn := &serverConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}
 				conn.preambleOnce.Do(func() {})
 				_, err = conn.ReceiveClient()
 			} else {
-				conn := &clientConnection{raw: raw, ceilings: tt.ceilings}
+				conn := &clientConnection{handshake: handshake{raw: raw, ceilings: tt.ceilings}}
 				conn.preambleOnce.Do(func() {})
 				_, err = conn.ReceiveServer()
 			}

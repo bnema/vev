@@ -15,9 +15,9 @@ import (
 	"github.com/bnema/vev/internal/ports"
 	portsmocks "github.com/bnema/vev/internal/ports/mocks"
 	"github.com/bnema/vev/internal/protocol"
+	snapcodec "github.com/bnema/vev/internal/snapshotcodec"
 	"github.com/bnema/vev/internal/usecase/picker"
 	recoveryusecase "github.com/bnema/vev/internal/usecase/recovery"
-	snapcodec "github.com/bnema/vev/internal/usecase/snapshot"
 )
 
 func TestRestoreAmbiguousBadVersionLoadFailurePreservesCheckpoint(t *testing.T) {

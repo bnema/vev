@@ -991,9 +991,6 @@ func (c *renderCoordinator) attachmentAckReady(ac *attachedClient) bool {
 	if c.opts.ackReadyFor != nil {
 		return c.opts.ackReadyFor(ac)
 	}
-	if c.opts.ackReady != nil {
-		return c.opts.ackReady()
-	}
 	return true
 }
 
@@ -1014,25 +1011,15 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 			leases[ac] = lease
 		}
 	}
-	previewOnly := len(leases) == 0 && len(c.previewWakes) != 0
-	legacyAckReady := c.opts.ackReady
 	c.mu.Unlock()
 
 	ready := make(map[*attachmentLease]bool, len(leases))
-	if len(leases) != 0 {
-		for ac, lease := range leases {
-			// Welcome holds attachment.sendMu while its transport Send is in
-			// flight. Do not probe an incarnation before it is ready.
-			if lease.ready {
-				ready[lease] = c.attachmentAckReady(ac)
-			}
+	for ac, lease := range leases {
+		// Welcome holds attachment.sendMu while its transport Send is in
+		// flight. Do not probe an incarnation before it is ready.
+		if lease.ready {
+			ready[lease] = c.attachmentAckReady(ac)
 		}
-	} else if !previewOnly && legacyAckReady != nil {
-		// Keep coordinator-only/headless callers compatible; production always
-		// has attachment leases and uses the per-attachment callback above.
-		ready[nil] = legacyAckReady()
-	} else {
-		ready[nil] = true
 	}
 
 	// The readiness callback can detach, replace, or publish a sync batch.
@@ -1098,12 +1085,11 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 			}
 			c.ackDeferredFor[ac] = true
 		}
-	} else if !ready[nil] {
-		blockedByAck = true
-		allDelivered = false
 	}
-	legacyOutput := len(leases) == 0 && ready[nil] && (c.pendingShared || len(c.pendingTargets) == 0)
-	outputReady := len(attachmentLeases) != 0 || legacyOutput
+	// Without any attachment lease (headless sessions and coordinator-only
+	// callers) nothing gates output, so a shared invalidation renders directly.
+	leaselessOutput := len(leases) == 0 && (c.pendingShared || len(c.pendingTargets) == 0)
+	outputReady := len(attachmentLeases) != 0 || leaselessOutput
 	if len(leases) != 0 {
 		for ac, lease := range leases {
 			if !c.pendingShared && len(c.pendingTargets) != 0 {
@@ -1118,7 +1104,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 			}
 		}
 	}
-	if len(leases) == 0 && legacyOutput {
+	if leaselessOutput {
 		allDelivered = true
 	}
 	wakeGeneration := uint64(0)
@@ -1143,7 +1129,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 		ackStart = newACKBlockedSpan(c.opts.observer)
 		c.ackBlocked = ackStart
 	}
-	c.ackDeferred = len(c.ackDeferredFor) != 0 || (len(leases) == 0 && blockedByAck && deadline)
+	c.ackDeferred = len(c.ackDeferredFor) != 0
 	if !outputReady && !allDelivered {
 		c.mu.Unlock()
 		stopDetachedTimer(worker)

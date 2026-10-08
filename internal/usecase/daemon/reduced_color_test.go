@@ -11,10 +11,10 @@ import (
 	renderer "github.com/bnema/vev-vt"
 	ansirenderer "github.com/bnema/vev-vt/ansi"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/domain/terminalcap"
 	"github.com/bnema/vev/internal/protocol"
 	"github.com/bnema/vev/internal/usecase/colorprofile"
-	"github.com/bnema/vev/internal/usecase/layout"
 	themeui "github.com/bnema/vev/internal/usecase/theme"
 	"github.com/bnema/vev/internal/usecase/ui"
 )
@@ -219,7 +219,7 @@ func TestAppliedThemeIsPerAttachment(t *testing.T) {
 	d, sess, ac16, _ := newManualSessionWithPTYs(t, p)
 	ac16.terminalCapabilities = terminalcap.Capabilities{Color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16}}
 	tr, _ := newCapturingTransport(t)
-	acTrue := &attachedClient{tr: tr, output: newOutputStateStream(), size: domain.Size{Cols: 80, Rows: 24}}
+	acTrue := &attachedClient{tr: tr, output: newOutputStateStream(), geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}}}
 	acTrue.output.attachment = acTrue
 	acTrue.initOverlays()
 	sess.mu.Lock()

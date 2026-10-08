@@ -239,11 +239,11 @@ func TestKillResultIsBoundedControlEnvelope(t *testing.T) {
 	require.ErrorIs(t, checkCategoryCeiling(oversize, categoryControl, wire.AbsoluteEnvelopeLimit), wire.ErrScanLength,
 		"a KillResult above the control ceiling must fail even under an absolute negotiated ceiling")
 
-	send := &serverConnection{raw: &scriptedTransport{}, ceilings: defaultProtoCeilings()}
+	send := &serverConnection{handshake: handshake{raw: &scriptedTransport{}, ceilings: defaultProtoCeilings()}}
 	require.NoError(t, send.SendServer(message))
 	require.ErrorIs(t, send.SendServer(protocol.KillResult{RequestID: 1, Outcome: protocol.KillSucceeded, Text: string(make([]byte, wire.ControlEnvelopeLimit))}), wire.ErrScanLength)
 
-	recv := &clientConnection{raw: &scriptedTransport{recv: []wire.Envelope{{Payload: oversize}}}, ceilings: defaultProtoCeilings()}
+	recv := &clientConnection{handshake: handshake{raw: &scriptedTransport{recv: []wire.Envelope{{Payload: oversize}}}, ceilings: defaultProtoCeilings()}}
 	recv.preambleOnce.Do(func() {})
 	_, err = recv.ReceiveServer()
 	require.Error(t, err)

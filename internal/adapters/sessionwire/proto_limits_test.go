@@ -42,7 +42,7 @@ func TestServerSendEnforcesNegotiatedCeilings(t *testing.T) {
 
 	t.Run("normal send", func(t *testing.T) {
 		raw := &scriptedTransport{}
-		conn := &serverConnection{raw: raw, ceilings: envelopeBound}
+		conn := &serverConnection{handshake: handshake{raw: raw, ceilings: envelopeBound}}
 		require.ErrorIs(t, conn.SendServer(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "oversized"}), wire.ErrScanLength)
 		require.Zero(t, raw.sentLen())
 		conn.ceilings = outputBound
@@ -51,7 +51,7 @@ func TestServerSendEnforcesNegotiatedCeilings(t *testing.T) {
 	})
 	t.Run("async and owned synchronous send", func(t *testing.T) {
 		raw := &asyncScriptedTransport{scriptedTransport: &scriptedTransport{}}
-		conn := &serverConnection{raw: raw, ceilings: envelopeBound}
+		conn := &serverConnection{handshake: handshake{raw: raw, ceilings: envelopeBound}}
 		require.ErrorIs(t, conn.SendServerAsync(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "oversized"}), wire.ErrScanLength)
 		require.ErrorIs(t, conn.SendServerSynchronous(protocol.ErrorMsg{Code: protocol.ErrInternal, Text: "oversized"}), wire.ErrScanLength)
 		require.Empty(t, raw.async)
@@ -64,7 +64,7 @@ func TestServerSendEnforcesNegotiatedCeilings(t *testing.T) {
 	})
 	t.Run("within ceilings", func(t *testing.T) {
 		raw := &scriptedTransport{}
-		conn := &serverConnection{raw: raw, ceilings: defaultProtoCeilings()}
+		conn := &serverConnection{handshake: handshake{raw: raw, ceilings: defaultProtoCeilings()}}
 		require.NoError(t, conn.SendServer(protocol.Pong{}))
 		require.NoError(t, conn.SendOutput(testOutput([]byte("12345"))))
 		require.Equal(t, 2, raw.sentLen())
@@ -81,7 +81,7 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 
 	t.Run("server receive envelope ceiling", func(t *testing.T) {
 		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: largeInput}}}
-		conn := &serverConnection{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 16, outputDataLimit: uint64(protocol.MaxOutputDataLen)}}
+		conn := &serverConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 16, outputDataLimit: uint64(protocol.MaxOutputDataLen)}}}
 		conn.preambleOnce.Do(func() {})
 		_, err := conn.ReceiveClient()
 		var failure *protocol.DecodeFailure
@@ -90,7 +90,7 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 	})
 	t.Run("client receive envelope ceiling", func(t *testing.T) {
 		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: largeOutput}}}
-		conn := &clientConnection{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 16, outputDataLimit: uint64(protocol.MaxOutputDataLen)}}
+		conn := &clientConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 16, outputDataLimit: uint64(protocol.MaxOutputDataLen)}}}
 		conn.preambleOnce.Do(func() {})
 		_, err := conn.ReceiveServer()
 		var failure *protocol.DecodeFailure
@@ -99,7 +99,7 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 	})
 	t.Run("client receive output data ceiling", func(t *testing.T) {
 		raw := &scriptedTransport{recv: []wire.Envelope{{Payload: smallOutput}}}
-		conn := &clientConnection{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: wire.AbsoluteEnvelopeLimit, outputDataLimit: 4}}
+		conn := &clientConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: wire.AbsoluteEnvelopeLimit, outputDataLimit: 4}}}
 		conn.preambleOnce.Do(func() {})
 		_, err := conn.ReceiveServer()
 		var failure *protocol.DecodeFailure
@@ -108,14 +108,14 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 	})
 	t.Run("within ceilings decodes", func(t *testing.T) {
 		serverRaw := &scriptedTransport{recv: []wire.Envelope{{Payload: largeInput}}}
-		server := &serverConnection{raw: serverRaw, ceilings: defaultProtoCeilings()}
+		server := &serverConnection{handshake: handshake{raw: serverRaw, ceilings: defaultProtoCeilings()}}
 		server.preambleOnce.Do(func() {})
 		got, err := server.ReceiveClient()
 		require.NoError(t, err)
 		require.Equal(t, []byte(bytes.Repeat([]byte("x"), 64)), got.(protocol.Input).Data)
 
 		clientRaw := &scriptedTransport{recv: []wire.Envelope{{Payload: smallOutput}}}
-		client := &clientConnection{raw: clientRaw, ceilings: defaultProtoCeilings()}
+		client := &clientConnection{handshake: handshake{raw: clientRaw, ceilings: defaultProtoCeilings()}}
 		client.preambleOnce.Do(func() {})
 		decoded, err := client.ReceiveServer()
 		require.NoError(t, err)
@@ -127,12 +127,12 @@ func TestTypedReceiveEnforcesNegotiatedCeilings(t *testing.T) {
 // path and advertised capabilities reflect the negotiated ceilings.
 func TestClientSendAndCapabilitiesUseNegotiatedCeilings(t *testing.T) {
 	raw := &scriptedTransport{}
-	conn := &clientConnection{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 8, outputDataLimit: 1234}}
+	conn := &clientConnection{handshake: handshake{raw: raw, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 8, outputDataLimit: 1234}}}
 	conn.preambleOnce.Do(func() {})
 	require.ErrorIs(t, conn.SendClient(protocol.Input{InputSeq: 1, Data: []byte("hello")}), wire.ErrScanLength)
 	require.Zero(t, raw.sentLen())
 	require.Equal(t, 1234, conn.Capabilities().OutputDataLimit)
 
-	server := &serverConnection{raw: &scriptedTransport{}, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 1, outputDataLimit: 4321}}
+	server := &serverConnection{handshake: handshake{raw: &scriptedTransport{}, ceilings: protoCeilings{maxReceiveEnvelopeBytes: 1, outputDataLimit: 4321}}}
 	require.Equal(t, 4321, server.Capabilities().OutputDataLimit)
 }

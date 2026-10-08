@@ -1,11 +1,11 @@
-package snapshot
+package snapshotcodec
 
 import (
 	"errors"
 	"testing"
 
 	renderer "github.com/bnema/vev-vt"
-	"github.com/bnema/vev/internal/usecase/layout"
+	"github.com/bnema/vev/internal/domain/layout"
 )
 
 func TestPreflightRejectsDanglingTreeAndFocusReferencesBeforeDecode(t *testing.T) {

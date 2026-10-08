@@ -14,7 +14,7 @@ Every result keeps its request ID for strict correlation.
 
 ## Package ownership
 
-- `internal/domain`: pure shared values and invariants. `domain/terminalcap` owns terminal capability values and environment detection policy.
+- `internal/domain`: pure shared values and invariants. `domain/terminalcap` owns terminal capability values and environment detection policy. `domain/layout` owns the pure pane split tree and its geometry.
 - `internal/protocol`: typed, transport-neutral client/daemon messages, protocol version, semantic validation, and handshake policy.
 - `internal/protocol/catalogue`: independently versioned remote discovery JSON schema and bounded validation.
 - `internal/protocol/wire`: Protobuf wire contract. Sources of truth are
@@ -25,6 +25,7 @@ Every result keeps its request ID for strict correlation.
   envelope, no type byte).
 - `internal/ports`: application-facing interfaces and the values required by those interfaces. It contains no codecs, raw frames, environment policy, or worker implementations.
 - `internal/usecase/colorprofile`: the single `terminalcap.ColorCapabilities` → vev-vt color profile mapping shared by the client picker and daemon output renderer.
+- `internal/usecase/fuzzy`: the exact/prefix/subsequence matcher and tie-break order shared by the session picker and the command palette; each caller maps match kinds to its own ranks.
 - `internal/usecase`: client, daemon, broker, and supporting application behavior. Production use cases may consume semantic protocol packages but never `protocol/wire` or concrete adapters. The broker may use its own subpackages but cannot import sibling use cases. Client, daemon, and remote-registry use cases cannot own or import each other; they collaborate only through ports and application composition.
 - `internal/adapters/sessionwire`: translates between typed session
   connections and raw wire transports: directional `oneof` envelope
@@ -59,7 +60,7 @@ main → app → usecase → ports
                     carriage adapters
 ```
 
-`internal/app` may import every layer to compose the process. Adapters depend inward on ports, protocol, and domain. The existing `adapters/snapshot → usecase/snapshot` dependency is an explicit exception until the snapshot codec has its own owner. Production dependency rules and the separate test-import policy are executable in `boundary_test.go`.
+`internal/app` may import every layer to compose the process. Adapters depend inward on ports, protocol, and domain. `internal/snapshotcodec` owns the durable snapshot format (session codec, manifests, objects, preflight); it depends only on domain and ports, and both the daemon use case and the snapshot adapter consume it. Production dependency rules and the separate test-import policy are executable in `boundary_test.go`.
 
 ## UI observation and control
 

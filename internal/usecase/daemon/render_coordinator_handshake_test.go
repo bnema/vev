@@ -83,9 +83,9 @@ func TestRenderCoordinatorFanoutDoesNotWaitForSlowTransport(t *testing.T) {
 	d, sess, healthy, healthySends, _ := newManualTabSession(t, 1)
 	slowTransport := newFanoutBlockingTransport()
 	slow := &attachedClient{
-		tr:     slowTransport,
-		output: newOutputStateStream(),
-		size:   domain.Size{Cols: 80, Rows: 24},
+		tr:       slowTransport,
+		output:   newOutputStateStream(),
+		geometry: domain.Geometry{Size: domain.Size{Cols: 80, Rows: 24}},
 	}
 	slow.initOverlays()
 	slow.setSession(sess)

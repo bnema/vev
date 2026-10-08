@@ -17,9 +17,9 @@ import (
 
 	vt "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/domain/layout"
 	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
-	"github.com/bnema/vev/internal/usecase/layout"
 )
 
 var (
@@ -2167,12 +2167,6 @@ func (d *Daemon) refreshSessionCwd(sess *session) {
 	sess.mu.Unlock()
 	d.mu.Unlock()
 	markSnapshotDirty(sess)
-}
-
-// childEnv retains the daemon-environment helper for daemon-local legacy callers.
-// Interactive PTY launch paths use childEnvFrom with their session snapshot.
-func (d *Daemon) childEnv(name, tabStableID, paneStableID string) []string {
-	return childEnvFrom(d.baseEnv, name, tabStableID, paneStableID)
 }
 
 func copyEnvironment(env []string) []string {
