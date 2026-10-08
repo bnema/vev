@@ -58,17 +58,9 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 		return nil, invalid(err)
 	}
 	defer objectDecompressorPool.Put(r)
-	out := bytes.NewBuffer(make([]byte, 0, min(int(size), inflateInitialCap)))
-	if _, err := io.Copy(out, io.LimitReader(r, int64(size))); err != nil {
+	payload, err := readExact(r, int(size))
+	if err != nil {
 		return nil, invalid(err)
-	}
-	if out.Len() != int(size) {
-		return nil, invalid(io.ErrUnexpectedEOF)
-	}
-	payload := out.Bytes()
-	if cap(payload) > len(payload)+len(payload)/4 {
-		// Restored payloads are retained; drop the growth slack.
-		payload = bytes.Clone(payload)
 	}
 	var extra [1]byte
 	if n, err := r.Read(extra[:]); n != 0 || err != io.EOF {
@@ -81,6 +73,30 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 		return nil, ErrTrailingBytes
 	}
 	return payload, nil
+}
+
+// readExact reads exactly size bytes. It doubles the buffer as data arrives,
+// starting at inflateInitialCap and capping every step at size, so a corrupt
+// declared length allocates at most about twice what the stream produces and
+// the returned payload has no growth slack.
+func readExact(r io.Reader, size int) ([]byte, error) {
+	buf := make([]byte, min(size, inflateInitialCap))
+	for n := 0; ; {
+		m, err := io.ReadFull(r, buf[n:])
+		n += m
+		if err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+		if n == size {
+			return buf, nil
+		}
+		grown := make([]byte, min(2*len(buf), size))
+		copy(grown, buf)
+		buf = grown
+	}
 }
 
 func objectDecompressor(source io.Reader) (io.ReadCloser, error) {

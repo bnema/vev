@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"runtime"
 	"testing"
 )
 
@@ -61,6 +62,46 @@ func TestObjectCompressionRejectsMalformedPayloads(t *testing.T) {
 			}
 			if _, _, err := UnmarshalObject(bad); !errors.Is(err, tc.want) {
 				t.Fatalf("UnmarshalObject() error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestInflateObjectPayloadAllocation pins the inflate memory bound: a payload
+// costs about its own size, and a corrupt maximum declared length on a small
+// stream never allocates the declared size.
+func TestInflateObjectPayloadAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		size     int
+		declared uint32
+		maxBytes int64
+	}{
+		{name: "small payload", size: 64 << 10, maxBytes: 64<<10 + 64<<10},
+		{name: "payload at the initial cap", size: inflateInitialCap, maxBytes: inflateInitialCap + 64<<10},
+		{name: "payload above the initial cap", size: 3 << 20, maxBytes: 2*(3<<20) + 64<<10},
+		{name: "declared maximum on a small stream", size: 64 << 10, declared: maxObjectPayloadSize, maxBytes: 2*inflateInitialCap + 64<<10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte("history row "), tc.size/12+1)[:tc.size]
+			compressed, err := compressObjectPayload(nil, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared := uint32(tc.size)
+			if tc.declared != 0 {
+				declared = tc.declared
+			}
+			_, _ = inflateObjectPayload(compressed, declared) // warm the decompressor pool
+			const runs = 8
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			for range runs {
+				_, _ = inflateObjectPayload(compressed, declared)
+			}
+			runtime.ReadMemStats(&after)
+			if got := int64(after.TotalAlloc-before.TotalAlloc) / runs; got > tc.maxBytes {
+				t.Fatalf("inflate allocated %d bytes/op, want at most %d", got, tc.maxBytes)
 			}
 		})
 	}
