@@ -22,22 +22,29 @@ func TestBarBackgroundConfigResolvesBarSurface(t *testing.T) {
 
 	tests := []struct {
 		name        string
+		mode        domain.ThemeMode
+		paletteOff  bool
 		transparent bool
-		color       terminalcap.ColorCapabilities
 	}{
-		{name: "truecolor themed", color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
-		{name: "truecolor transparent", transparent: true, color: terminalcap.ColorCapabilities{Mode: terminalcap.TrueColor}},
-		{name: "ansi16 transparent", transparent: true, color: terminalcap.ColorCapabilities{Mode: terminalcap.ANSI16}},
+		{name: "accent themed"},
+		{name: "accent transparent", transparent: true},
+		{name: "palette off transparent", paletteOff: true, transparent: true},
+		{name: "forced dark transparent", mode: domain.ThemeDark, transparent: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := domain.Defaults()
+			cfg.Theme = tt.mode
+			cfg.ThemePalette = !tt.paletteOff
 			cfg.Bar.Transparent = tt.transparent
 			d := newTestDaemon(t, nil, stubClock{})
 			d.ApplyConfig(cfg)
 
-			themed := themeui.ResolveForColor(raw, cfg.ThemeAccent, tt.color).Styles
-			got := d.resolveAppliedTheme(raw, tt.color).Resolved.Styles
+			themedCfg := themeConfigSnapshot{mode: cfg.Theme, paletteOff: tt.paletteOff, accent: cfg.ThemeAccent}
+			themed := themeui.ResolveForColor(effectiveThemeForConfig(raw, themedCfg), cfg.ThemeAccent, terminalcap.ColorCapabilities{}).Styles
+			require.False(t, themed.SurfaceBar.Equal(renderer.DefaultStyle()), "fixture must produce a tinted bar")
+
+			got := d.resolveAppliedTheme(raw, terminalcap.ColorCapabilities{}).Resolved.Styles
 
 			if tt.transparent {
 				require.True(t, got.SurfaceBar.Equal(renderer.DefaultStyle()), "bar fill uses the terminal background")
@@ -52,4 +59,36 @@ func TestBarBackgroundConfigResolvesBarSurface(t *testing.T) {
 			require.True(t, got.StatusBar.Equal(themed.StatusBar))
 		})
 	}
+}
+
+func TestApplyConfigBarBackgroundRepaintsBars(t *testing.T) {
+	p, releasePTY := newBlockingPTY(t)
+	d, sess, ac, _ := newManualSessionWithPTYs(t, p)
+	defer releasePTY()
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark})
+
+	win := testAttachmentTab(sess)
+	win.mu.Lock()
+	win.size = domain.Size{Cols: 40, Rows: 4}
+	win.mu.Unlock()
+	pane := win.focusedPane()
+	pane.mu.Lock()
+	pane.screen.Resize(40, 4)
+	pane.mu.Unlock()
+
+	d.paint(sess, ac, true, nil)
+	ac.sendMu.Lock()
+	require.True(t, ac.render.cache.valid)
+	themedFill := ac.render.cache.frame.At(39, 0).Style
+	themedTab := ac.render.cache.frame.At(1, 0).Style
+	ac.sendMu.Unlock()
+	require.False(t, themedFill.Equal(renderer.DefaultStyle()), "themed bar fill is tinted")
+
+	d.ApplyConfig(domain.Config{Theme: domain.ThemeDark, Bar: domain.BarConfig{Transparent: true}})
+
+	ac.sendMu.Lock()
+	defer ac.sendMu.Unlock()
+	require.True(t, ac.render.cache.valid)
+	require.True(t, ac.render.cache.frame.At(39, 0).Style.Equal(renderer.DefaultStyle()), "reload clears the bar fill")
+	require.True(t, ac.render.cache.frame.At(1, 0).Style.Equal(themedTab), "tab keeps its theme style")
 }
