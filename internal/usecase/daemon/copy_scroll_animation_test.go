@@ -133,3 +133,55 @@ func TestCopyScrollReducedMotionAndKeyboardCancellation(t *testing.T) {
 		t.Fatal("keyboard navigation must cancel inertia")
 	}
 }
+
+// TestCopyScrollAnimationFullOutputWindow covers a remote link whose output
+// window is full: the animation holds still, drains the backlog in capped
+// steps once the window reopens, and gives up after about a second of hold.
+func TestCopyScrollAnimationFullOutputWindow(t *testing.T) {
+	tests := []struct {
+		name       string
+		heldFrames int
+		reopen     bool
+		wantMoved  int
+		wantActive bool
+	}{
+		{name: "full window holds the viewport", heldFrames: 1, wantMoved: 0, wantActive: true},
+		{name: "reopened window drains in capped steps", heldFrames: 1, reopen: true, wantMoved: copyScrollMaxStep, wantActive: true},
+		{name: "long hold abandons the scroll", heldFrames: copyScrollMaxHeldFrames + 1, wantMoved: 0, wantActive: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPerformanceFixture(t, performanceConfig{size: domain.Size{Cols: 80, Rows: 24}, panes: 1, historyRows: 200})
+			f.ac.output.setWindow(1)
+			f.d.enterCopyMode(f.sess, f.ac)
+			clock := newCoordinatorMockClock(t, 2*copyScrollMaxHeldFrames)
+			f.d.clock = clock.clock
+			require.True(t, f.ac.output.atCapacity(), "entering copy mode fills a one-frame window")
+			rt := f.ac.overlays
+			rt.copyMu.Lock()
+			defer rt.copyMu.Unlock()
+			start := rt.copyMode.ViewportTop
+			// Past the tail deadline the whole backlog is due at once.
+			rt.copyScroll.remaining = -60
+			rt.copyScroll.lastInput = time.Time{}.Add(-copyScrollTail)
+			for range tt.heldFrames {
+				// Each frame is driven directly, as its timer callback would:
+				// retire the previous frame timer before advancing.
+				rt.copyScroll.timer.stop()
+				changed, exit := f.d.advanceCopyScrollLocked(f.sess, f.ac)
+				require.False(t, changed || exit, "a held frame must not move or exit")
+			}
+			if tt.reopen {
+				f.ac.ackOutputState(f.ac.output.currentEpoch(), f.ac.output.next)
+				rt.copyScroll.timer.stop()
+				changed, exit := f.d.advanceCopyScrollLocked(f.sess, f.ac)
+				require.True(t, changed)
+				require.False(t, exit)
+			}
+			require.Equal(t, tt.wantMoved, start-rt.copyMode.ViewportTop)
+			require.Equal(t, tt.wantActive, rt.copyScroll.remaining != 0)
+			require.Equal(t, tt.wantActive, rt.copyScroll.timer.timer != nil, "the frame timer stays armed only while the scroll is active")
+			rt.copyScroll.timer.stop()
+		})
+	}
+}
