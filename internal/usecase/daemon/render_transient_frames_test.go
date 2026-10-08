@@ -5,6 +5,7 @@ import (
 
 	renderer "github.com/bnema/vev-vt"
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/usecase/ui"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,7 +25,7 @@ func framesShareStorage(a, b renderer.Frame) bool {
 	return shared
 }
 
-func transientToastFloatingState(withToast, withFloating bool, seed rune) capturedRenderState {
+func transientToastFloatingState(withToast, withFloating, withModal bool, seed rune) capturedRenderState {
 	var notices []domain.Notification
 	if withToast {
 		notices = []domain.Notification{{Code: domain.NoticeClipboard, Severity: domain.NoticeInfo, Message: "copied", Count: 1}}
@@ -42,26 +43,46 @@ func transientToastFloatingState(withToast, withFloating bool, seed rune) captur
 			generation: 1,
 		}
 	}
+	if withModal {
+		// A modal without toast or floating is the second writer of the
+		// overlay transient page.
+		state.overlays.promptActive = true
+		state.overlays.prompt = capturedModal{
+			active: true,
+			title:  "Prompt",
+			presentation: ui.Presentation{
+				Bounds:  domain.Rect{X: 10, Y: 5, Width: 20, Height: 3},
+				Inner:   domain.Rect{X: 11, Y: 6, Width: 18, Height: 1},
+				Borders: ui.BorderAll,
+			},
+		}
+	}
 	return state
 }
 
 // TestComposeFrameTransientScratchNeverAliasesCaches replays the attachment
-// commit/spare rotation across toast, floating, and plain frames. Each result
+// commit/spare rotation across toast, floating, modal, and plain frames, and
+// across failed publications that compose again without committing. Each result
 // must match an independent composition without scratch, the retained cache
 // must stay toast-free, and no handed-out frame may share a page with either
 // cache slot (which would let a later paint corrupt committed state).
 func TestComposeFrameTransientScratchNeverAliasesCaches(t *testing.T) {
 	type step struct {
-		toast, floating bool
+		toast, floating, modal bool
+		// failed skips commitComposition, as a failed prepare or send does, so
+		// the next step composes again from the same spare.
+		failed bool
 	}
 	steps := []step{
-		{false, false}, {true, false}, {true, false}, {true, true}, {false, true},
-		{true, true}, {true, false}, {false, false}, {true, false}, {false, true}, {true, true},
+		{}, {toast: true}, {toast: true}, {toast: true, floating: true}, {floating: true},
+		{modal: true}, {modal: true, failed: true}, {modal: true}, {toast: true, modal: true},
+		{toast: true, floating: true, failed: true}, {toast: true, floating: true}, {toast: true},
+		{}, {toast: true, failed: true}, {toast: true}, {floating: true}, {toast: true, floating: true},
 	}
 	var render attachmentRenderState
 	for i, st := range steps {
 		seed := rune('A' + i)
-		state := transientToastFloatingState(st.toast, st.floating, seed)
+		state := transientToastFloatingState(st.toast, st.floating, st.modal, seed)
 		state.reset = i == 0
 		// A frame without scratch is the reference: it only ever clones.
 		want := composeFrame(state, render.cache)
@@ -75,17 +96,17 @@ func TestComposeFrameTransientScratchNeverAliasesCaches(t *testing.T) {
 		// must never touch the committed cache a failed publication falls back to.
 		require.False(t, framesShareStorage(got.frame, render.cache.frame), "step %d: composed frame aliases the committed cache", i)
 		require.False(t, framesShareStorage(got.cache.frame, render.cache.frame), "step %d: new cache base aliases the committed cache", i)
-		if st.toast || st.floating {
+		if st.toast || st.floating || st.modal {
 			// A decorated frame lives on a transient page: never the cache base
 			// (toast-free by contract) nor the committed or spare cache pages.
 			require.False(t, framesShareStorage(got.frame, got.cache.frame), "step %d: decorated frame aliases the cache base", i)
 			require.False(t, framesShareStorage(got.frame, render.spare.frame), "step %d: decorated frame aliases the spare cache", i)
 		}
-		if !st.toast {
-			require.NotContains(t, frameText(got.cache.frame), "copied")
-		}
 		require.NotContains(t, frameText(got.cache.frame), "copied", "step %d: cache must stay toast-free", i)
 
+		if st.failed {
+			continue
+		}
 		beforeCommitted := frameRows(render.cache.frame)
 		render.commitComposition(got.cache)
 		if i > 0 {
@@ -122,9 +143,14 @@ func TestComposeFrameStableToastReusesScratchPages(t *testing.T) {
 		out := composeFrame(state, cache, scratch)
 		scratch, cache = cache, out.cache
 	})
+	// The baseline composes the same frame without scratch, so it clones the
+	// base page every time. Reuse must save at least one full Clone.
+	baseline := testing.AllocsPerRun(50, func() {
+		benchmarkComposeSink.frame = composeFrame(state, cache, composeCacheInput{}).frame
+	})
 	cloned := testing.AllocsPerRun(50, func() { benchmarkComposeSink.frame = cache.frame.Clone() })
-	require.Less(t, reused, 30.0, "per-frame compose allocations")
-	t.Logf("compose allocs=%v, one Clone allocs=%v", reused, cloned)
+	require.Positive(t, cloned)
+	require.LessOrEqual(t, reused, baseline-cloned, "scratch reuse must save at least one Clone (baseline=%v clone=%v)", baseline, cloned)
 	out := composeFrame(state, cache, scratch)
 	require.False(t, framesShareStorage(out.frame, out.cache.frame))
 	require.Contains(t, frameText(out.frame), "copied")
