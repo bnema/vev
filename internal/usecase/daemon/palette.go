@@ -388,21 +388,8 @@ type paletteDecision struct {
 // decidePaletteInput takes paletteMu, applies data to the attachment's palette,
 // and returns the action to run after unlocking.
 func decidePaletteInput(ac *attachedClient, data []byte) paletteDecision {
-	var cmd command.Command
-	var sessionTarget palette.Result
-	var hasSessionTarget bool
-	var importedSourceKey, importedEntryKey string
-	var hasImportedTarget bool
-	var routeTarget protocol.RouteNavigationAction
-	var hasRouteTarget bool
-	var createDestination palette.Result
-	var hasCreateDestination bool
-	var args []string
-	var routeSnapshot protocol.RecentRouteSnapshot
-	var generation uint64
-	var rawQuery string
-	var cancelInventoryInteraction uint64
-	var hasCancelInventory bool
+	// decision holds the executed selection; execute reports one was made.
+	var decision paletteDecision
 	changed, cancel, execute, chooseDestination := false, false, false, false
 
 	ac.overlays.paletteMu.Lock()
@@ -456,40 +443,35 @@ func decidePaletteInput(ac *attachedClient, data []byte) paletteDecision {
 				chooseDestination = true
 				return
 			}
-			rawQuery = ac.overlays.palette.Query()
-			if selectedCommand, ok := selected.Command(); ok {
-				cmd = selectedCommand
+			next := paletteDecision{rawQuery: ac.overlays.palette.Query(), generation: ac.overlays.paletteGeneration}
+			if cmd, ok := selected.Command(); ok {
+				next.kind, next.cmd = paletteDecisionCommand, cmd
 				if cmd.Arguments != command.ArgumentsNone {
-					action, valid := palette.ParseAction([]palette.Result{selected}, rawQuery)
+					action, valid := palette.ParseAction([]palette.Result{selected}, next.rawQuery)
 					if valid {
-						args = action.Args
+						next.args = action.Args
 					} else if cmd.Arguments == command.ArgumentsRequired {
 						changed = true
 						return
 					}
 				}
 				if cmd.ContextHint == command.ContextHintRecentSessions {
-					routeSnapshot = ac.overlays.paletteRouteSnapshot
-					routeSnapshot.Entries = append([]protocol.RecentRouteEntry(nil), routeSnapshot.Entries...)
+					next.routeSnapshot = ac.overlays.paletteRouteSnapshot
+					next.routeSnapshot.Entries = append([]protocol.RecentRouteEntry(nil), next.routeSnapshot.Entries...)
 				}
 			} else if sourceKey, entryKey, ok := selected.ImportedSessionKey(); ok {
-				importedSourceKey = sourceKey
-				importedEntryKey = entryKey
-				hasImportedTarget = true
+				next.kind, next.importedSourceKey, next.importedEntryKey = paletteDecisionImportedSession, sourceKey, entryKey
 			} else if action, ok := selected.RouteNavigationAction(); ok {
-				routeTarget = action
-				hasRouteTarget = true
+				next.kind, next.routeTarget = paletteDecisionRouteNavigation, action
 			} else if _, _, _, _, _, ok := selected.CreateSessionDestination(); ok {
-				createDestination = selected
-				hasCreateDestination = true
+				next.kind, next.createDestination = paletteDecisionCreateDestination, selected
 			} else if _, ok := selected.SessionTarget(); ok {
-				sessionTarget = selected
-				hasSessionTarget = true
+				next.kind, next.sessionTarget = paletteDecisionSessionTarget, selected
 			} else {
 				changed = true
 				return
 			}
-			generation = ac.overlays.paletteGeneration
+			decision = next
 			execute = true
 		},
 	})
@@ -515,41 +497,22 @@ func decidePaletteInput(ac *attachedClient, data []byte) paletteDecision {
 		}
 	}
 	if cancel {
-		cancelInventoryInteraction, hasCancelInventory = takePaletteInventoryClose(ac.overlays)
+		cancelled := paletteDecision{kind: paletteDecisionCancel}
+		cancelled.cancelInventoryInteraction, cancelled.hasCancelInventory = takePaletteInventoryClose(ac.overlays)
 		ac.clearPaletteLocked()
+		ac.overlays.paletteMu.Unlock()
+		return cancelled
 	}
 	ac.overlays.paletteMu.Unlock()
 
 	switch {
-	case cancel:
-		return paletteDecision{kind: paletteDecisionCancel, cancelInventoryInteraction: cancelInventoryInteraction, hasCancelInventory: hasCancelInventory}
-	case !execute && changed:
+	case execute:
+		return decision
+	case changed:
 		return paletteDecision{kind: paletteDecisionRedraw}
-	case !execute:
+	default:
 		return paletteDecision{}
 	}
-	decision := paletteDecision{generation: generation, rawQuery: rawQuery}
-	switch {
-	case hasCreateDestination:
-		decision.kind = paletteDecisionCreateDestination
-		decision.createDestination = createDestination
-	case hasImportedTarget:
-		decision.kind = paletteDecisionImportedSession
-		decision.importedSourceKey = importedSourceKey
-		decision.importedEntryKey = importedEntryKey
-	case hasRouteTarget:
-		decision.kind = paletteDecisionRouteNavigation
-		decision.routeTarget = routeTarget
-	case hasSessionTarget:
-		decision.kind = paletteDecisionSessionTarget
-		decision.sessionTarget = sessionTarget
-	default:
-		decision.kind = paletteDecisionCommand
-		decision.cmd = cmd
-		decision.args = args
-		decision.routeSnapshot = routeSnapshot
-	}
-	return decision
 }
 
 func (d *Daemon) handlePaletteInput(ac *attachedClient, data []byte, effects ...*attachmentEffect) {
