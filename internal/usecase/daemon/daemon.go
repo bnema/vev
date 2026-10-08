@@ -193,8 +193,9 @@ type Daemon struct {
 	// bindings is read by keys.Router through its own atomic pointer, so it is
 	// published next to (not inside) the runtime config snapshot.
 	bindings atomic.Pointer[keys.Bindings]
-	// config is the immutable runtime configuration snapshot built and
-	// stored once by ApplyConfig; read it through runtimeConfig.
+	// config is the immutable runtime configuration snapshot, published with
+	// defaults by New and replaced by every ApplyConfig; read it through
+	// currentRuntimeConfig.
 	config                atomic.Pointer[runtimeConfig]
 	barScripts            *barScriptState
 	notices               *noticeCenter

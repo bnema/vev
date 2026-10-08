@@ -167,7 +167,7 @@ func TestEffectiveThemePaletteGate(t *testing.T) {
 // updateRuntimeConfig publishes a modified copy of the current runtime config
 // snapshot, the way ApplyConfig does, without touching unrelated sections.
 func updateRuntimeConfig(d *Daemon, mutate func(*runtimeConfig)) {
-	next := *d.runtimeConfig()
+	next := *d.currentRuntimeConfig()
 	mutate(&next)
 	d.config.Store(&next)
 }
@@ -492,7 +492,7 @@ func TestPaletteCommandsUseOverrideSnapshotForRecentAndListing(t *testing.T) {
 			"split-right": "SRX",
 		},
 	})
-	d.recordPaletteUse("SRX")
+	d.paletteHistory.record("SRX")
 
 	commands := d.paletteCommands()
 	require.NotEmpty(t, commands)

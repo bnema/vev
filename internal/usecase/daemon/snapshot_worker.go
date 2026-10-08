@@ -275,7 +275,7 @@ func (d *Daemon) requestDurableWriterStop() (context.CancelFunc, <-chan struct{}
 }
 
 // durableWriterFailureNames includes admitted buffered captures as well as the
-// active and final queues. snapshotAdmitted tracks normal captures from queue
+// active and final queues. snapshots.admitted tracks normal captures from queue
 // admission through completion, so worker dequeue cannot make one disappear.
 func (d *Daemon) durableWriterFailureNames() []string {
 	d.snapshots.mu.Lock()

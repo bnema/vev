@@ -63,9 +63,9 @@ func defaultRuntimeConfig() *runtimeConfig {
 	}
 }
 
-// runtimeConfig returns the current snapshot, or the defaults when none has
+// currentRuntimeConfig returns the current snapshot, or the defaults when none has
 // been published (zero-value Daemon). The result is never nil.
-func (d *Daemon) runtimeConfig() *runtimeConfig {
+func (d *Daemon) currentRuntimeConfig() *runtimeConfig {
 	if cfg := d.config.Load(); cfg != nil {
 		return cfg
 	}
@@ -73,7 +73,7 @@ func (d *Daemon) runtimeConfig() *runtimeConfig {
 }
 
 func (d *Daemon) currentThemeConfig() themeConfigSnapshot {
-	return d.runtimeConfig().theme
+	return d.currentRuntimeConfig().theme
 }
 
 // ApplyConfig validates and atomically swaps daemon runtime configuration.
@@ -278,7 +278,7 @@ func buildRestoreProcessAllowlist(values []string) map[string]struct{} {
 }
 
 func (d *Daemon) restoreProcessAllowlistSnapshot() map[string]struct{} {
-	return d.runtimeConfig().restoreProcessAllowlist
+	return d.currentRuntimeConfig().restoreProcessAllowlist
 }
 
 func (d *Daemon) logConfigWarning(w domain.Warning) {
@@ -290,31 +290,31 @@ func (d *Daemon) logConfigWarning(w domain.Warning) {
 }
 
 func (d *Daemon) currentCopyConfig() domain.CopyConfig {
-	return d.runtimeConfig().copy
+	return d.currentRuntimeConfig().copy
 }
 
 func (d *Daemon) currentPaletteConfig() domain.PaletteConfig {
-	return d.runtimeConfig().palette
+	return d.currentRuntimeConfig().palette
 }
 
 func (d *Daemon) currentNavConfig() domain.NavConfig {
-	return d.runtimeConfig().nav
+	return d.currentRuntimeConfig().nav
 }
 
 func (d *Daemon) currentTabsConfig() domain.TabsConfig {
-	return d.runtimeConfig().tabs
+	return d.currentRuntimeConfig().tabs
 }
 
 func (d *Daemon) currentEphemeralConfig() domain.EphemeralConfig {
-	return d.runtimeConfig().ephemeral
+	return d.currentRuntimeConfig().ephemeral
 }
 
 func (d *Daemon) currentFloatingConfig() domain.FloatingConfig {
-	return d.runtimeConfig().floating
+	return d.currentRuntimeConfig().floating
 }
 
 func (d *Daemon) codeOverrideSnapshot() map[string]string {
-	return d.runtimeConfig().codeOverrides
+	return d.currentRuntimeConfig().codeOverrides
 }
 
 func commandWithOverrides(cmd command.Command, overrides map[string]string) command.Command {

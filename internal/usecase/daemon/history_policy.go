@@ -16,7 +16,7 @@ func historyConfigFor(policy domain.ScrollbackConfig) vt.HistoryConfig {
 }
 
 func (d *Daemon) currentHistoryConfig() vt.HistoryConfig {
-	return historyConfigFor(d.runtimeConfig().scrollback)
+	return historyConfigFor(d.currentRuntimeConfig().scrollback)
 }
 
 // historyPanes gathers references without holding a session/tab lock while

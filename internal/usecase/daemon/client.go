@@ -25,7 +25,10 @@
 // it, and the capture, queue, and worker code never takes d.mu. The only nested
 // acquisition is a session's snapshotMu inside it (enqueueFinalSnapshotCapture
 // finishes a replaced capture), so snapshotMu holders must release snapshotMu
-// before taking snapshotWorker.mu, as finishSnapshotCapture does.
+// before taking snapshotWorker.mu, as finishSnapshotCapture does. That nested
+// finishSnapshotCapture(replaced, false) cannot re-enter snapshotWorker.mu:
+// final-queue captures are never normalWorkerAdmitted, and succeeded=false
+// suppresses the forced-successor scheduling path.
 // snapshotWorker.noticeMu guards the active persistence-failure signature; it
 // is a leaf and is never held together with snapshotWorker.mu. Restoration
 // takes d.mu only outside snapshotWorker.mu.

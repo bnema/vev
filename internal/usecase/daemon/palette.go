@@ -351,10 +351,6 @@ func (d *Daemon) paletteCommands() []command.Command {
 	return out
 }
 
-func (d *Daemon) recordPaletteUse(code string) {
-	d.paletteHistory.record(code)
-}
-
 // paletteDecisionKind names what handlePaletteInput must do once the palette
 // lock is released.
 type paletteDecisionKind int
@@ -389,8 +385,8 @@ type paletteDecision struct {
 	hasCancelInventory         bool
 }
 
-// decidePaletteInput applies data to the attachment's palette while holding
-// paletteMu and returns what the caller must do after the lock is released.
+// decidePaletteInput takes paletteMu, applies data to the attachment's palette,
+// and returns the action to run after unlocking.
 func decidePaletteInput(ac *attachedClient, data []byte) paletteDecision {
 	var cmd command.Command
 	var sessionTarget palette.Result
@@ -590,14 +586,13 @@ func (d *Daemon) executePaletteDecision(ac *attachedClient, entry *session, effe
 	case paletteDecisionSessionTarget:
 		d.executePaletteSessionTarget(ac, entry, effect, generation, rawQuery, decision.sessionTarget)
 	case paletteDecisionCommand:
-		d.executePaletteCommand(ac, entry, effect, generation, rawQuery, decision)
+		d.executePaletteCommand(ac, entry, effect, generation, rawQuery, decision.cmd, decision.args, decision.routeSnapshot)
 	}
 }
 
 func (d *Daemon) executePaletteCreateDestination(ac *attachedClient, entry *session, effect *attachmentEffect, generation uint64, rawQuery string, createDestination palette.Result) {
-	sess := entry
 	name, _, _, _, _, _ := createDestination.CreateSessionDestination()
-	exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, effect: effect}
+	exec := paletteExec{d: d, sess: entry, attachment: entry, ac: ac, effect: effect}
 	if err := exec.validateCreateSessionDestination(effect, createDestination); err != nil {
 		ac.paletteFailure(generation, rawQuery, errCreateDestinationUnavailable.Error())
 		d.invalidateRender(entry, ac, true, "palette.go")
@@ -666,8 +661,7 @@ func (d *Daemon) executePaletteImportedSession(ac *attachedClient, entry *sessio
 }
 
 func (d *Daemon) executePaletteRouteNavigation(ac *attachedClient, entry *session, effect *attachmentEffect, generation uint64, rawQuery string, routeTarget protocol.RouteNavigationAction) {
-	sess := entry
-	exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, effect: effect}
+	exec := paletteExec{d: d, sess: entry, attachment: entry, ac: ac, effect: effect}
 	if err := exec.NavigateRecentRoute(routeTarget); err != nil {
 		if errors.Is(err, errAttachmentTransition) {
 			return
@@ -682,7 +676,6 @@ func (d *Daemon) executePaletteRouteNavigation(ac *attachedClient, entry *sessio
 }
 
 func (d *Daemon) executePaletteSessionTarget(ac *attachedClient, entry *session, effect *attachmentEffect, generation uint64, rawQuery string, sessionTarget palette.Result) {
-	sess := entry
 	createdAt, _ := sessionTarget.SessionCreatedAt()
 	expectedCreatedAt := createdAt.UnixNano()
 	name, _ := sessionTarget.SessionName()
@@ -695,7 +688,7 @@ func (d *Daemon) executePaletteSessionTarget(ac *attachedClient, entry *session,
 	if effect != nil {
 		err = d.switchToTargetForAttachment(effect, target, sessionHandoffGuard{allowSamePeer: true}, "palette-session")
 	} else {
-		err = d.switchToTarget(sess, ac, target)
+		err = d.switchToTarget(entry, ac, target)
 	}
 	if errors.Is(err, errAttachmentTransition) {
 		return
@@ -712,9 +705,7 @@ func (d *Daemon) executePaletteSessionTarget(ac *attachedClient, entry *session,
 	}
 }
 
-func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effect *attachmentEffect, generation uint64, rawQuery string, decision paletteDecision) {
-	sess := entry
-	cmd, args, routeSnapshot := decision.cmd, decision.args, decision.routeSnapshot
+func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effect *attachmentEffect, generation uint64, rawQuery string, cmd command.Command, args []string, routeSnapshot protocol.RecentRouteSnapshot) {
 	if cmd.Slug == "jump-recent-session" {
 		rank, err := command.ParsePositiveDecimal(args)
 		if err != nil {
@@ -722,7 +713,7 @@ func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effec
 			d.invalidateRender(entry, ac, true, "palette.go")
 			return
 		}
-		exec := paletteExec{d: d, sess: sess, attachment: entry, ac: ac, routeSnapshot: routeSnapshot, effect: effect}
+		exec := paletteExec{d: d, sess: entry, attachment: entry, ac: ac, routeSnapshot: routeSnapshot, effect: effect}
 		if err := exec.JumpRecentSession(rank); err != nil {
 			if errors.Is(err, errAttachmentTransition) {
 				return
@@ -732,7 +723,7 @@ func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effec
 			return
 		}
 		if d.closeExecutedPalette(ac, effect, generation, rawQuery) {
-			d.recordPaletteUse(cmd.Code)
+			d.paletteHistory.record(cmd.Code)
 			if current := ac.currentAttachmentSession(); current != nil {
 				d.invalidateRender(current, ac, true, "palette.go")
 			}
@@ -743,9 +734,9 @@ func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effec
 	if !attachmentHandoff && !d.closeExecutedPalette(ac, effect, generation, rawQuery) {
 		return
 	}
-	sess.dispatchMu.Lock()
-	err := cmd.Run(paletteExec{d: d, sess: sess, ac: ac, effect: effect, redrawClosedPalette: true}, args)
-	sess.dispatchMu.Unlock()
+	entry.dispatchMu.Lock()
+	err := cmd.Run(paletteExec{d: d, sess: entry, ac: ac, effect: effect, redrawClosedPalette: true}, args)
+	entry.dispatchMu.Unlock()
 	if attachmentHandoff {
 		if current := ac.currentSession(); current != nil {
 			currentToken := current.captureAttachmentCapability(ac, ac.transport())
@@ -765,9 +756,9 @@ func (d *Daemon) executePaletteCommand(ac *attachedClient, entry *session, effec
 	}
 	if err != nil {
 		d.log.Error("palette command failed", "err", err, "command", cmd.Code)
-		d.reportError(sess, paletteCommandNoticeError(cmd, err))
+		d.reportError(entry, paletteCommandNoticeError(cmd, err))
 	} else {
-		d.recordPaletteUse(cmd.Code)
+		d.paletteHistory.record(cmd.Code)
 	}
 }
 
