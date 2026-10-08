@@ -194,6 +194,11 @@ func TestStreamPipeCredit(t *testing.T) {
 		}
 		reserved := make(chan error, 1)
 		go func() { reserved <- p.reserve(chunk) }()
+		select {
+		case err := <-reserved:
+			t.Fatalf("reserve returned %v without credit", err)
+		case <-time.After(20 * time.Millisecond):
+		}
 		p.closeWith(ErrStreamGone)
 		select {
 		case err := <-reserved:

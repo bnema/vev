@@ -163,6 +163,11 @@ func TestStreamPipeCloseReleasesParkedReader(t *testing.T) {
 		_, err := parked.Read(make([]byte, 3))
 		done <- err
 	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Read returned %v on an empty pipe", err)
+	case <-time.After(20 * time.Millisecond):
+	}
 	parked.closeWith(ErrStreamCredit)
 	select {
 	case err := <-done:
