@@ -360,8 +360,9 @@ func TestBrokerClientVariants(t *testing.T) {
 		{"update_host_policy", UpdateHostPolicy{Epoch: 7, Connection: connection, Operation: operation, Registration: testRegistration(), Policy: testPolicy()}, 111},
 		{"start_preview", testStartPreview(connection), 112},
 		{"cancel_preview", CancelPreview{Epoch: 7, Connection: connection, Generation: 3}, 113},
+		{"stream_window_update", StreamWindowUpdate{Epoch: 7, Connection: connection, Stream: 3, Credit: 4096}, 114},
 	}
-	require.Len(t, messages, 13)
+	require.Len(t, messages, 14)
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := mustEncodeClient(t, tc.message)
@@ -374,6 +375,22 @@ func TestBrokerClientVariants(t *testing.T) {
 			require.Equal(t, tc.message, decoded)
 		})
 	}
+}
+
+// TestBrokerStreamDataOwnsItsBytes proves decoded stream data never aliases the
+// payload: receivers reuse their buffers, and brokeripc queues Data as is.
+func TestBrokerStreamDataOwnsItsBytes(t *testing.T) {
+	connection := testConnectionID(0x11)
+	client := mustEncodeClient(t, ClientStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")})
+	server := mustEncodeServer(t, ServerStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")})
+	decodedClient, err := DecodeClient(client, testEnvelopeCeiling, testChunkCeiling)
+	require.NoError(t, err)
+	decodedServer, err := DecodeServer(server, testEnvelopeCeiling, testChunkCeiling)
+	require.NoError(t, err)
+	clear(client)
+	clear(server)
+	require.Equal(t, []byte("frame"), decodedClient.(ClientStreamData).Data)
+	require.Equal(t, []byte("frame"), decodedServer.(ServerStreamData).Data)
 }
 
 // TestBrokerOpenStreamAdmissionVariants pins the attachment-admission
@@ -653,6 +670,7 @@ func TestBrokerServerVariants(t *testing.T) {
 		{"shutdown", Shutdown{Epoch: 7, Connection: connection, Reason: ShutdownTerminating, Text: "stopping"}, 209},
 		{"preview_publication", testPreviewPublication(connection), 210},
 		{"preview_publication_error", PreviewPublication{Epoch: 7, Connection: connection, Generation: 5, Error: testErrorDetail(), HasError: true}, 210},
+		{"stream_window_update", StreamWindowUpdate{Epoch: 7, Connection: connection, Stream: 3, Credit: StreamWindowBytes}, 211},
 	}
 	for _, tc := range messages {
 		t.Run(tc.name, func(t *testing.T) {
@@ -923,6 +941,40 @@ func TestBrokerValidationNegatives(t *testing.T) {
 	t.Run("zero stream", func(t *testing.T) {
 		_, err := EncodeClient(CloseStream{Epoch: 7, Connection: connection}, testEnvelopeCeiling, testChunkCeiling)
 		require.ErrorIs(t, err, ErrInvalidMessage)
+	})
+	t.Run("stream window update bounds", func(t *testing.T) {
+		valid := StreamWindowUpdate{Epoch: 7, Connection: connection, Stream: 3, Credit: 1}
+		cases := map[string]func(*StreamWindowUpdate){
+			"zero credit":         func(m *StreamWindowUpdate) { m.Credit = 0 },
+			"credit above window": func(m *StreamWindowUpdate) { m.Credit = StreamWindowBytes + 1 },
+			"zero epoch":          func(m *StreamWindowUpdate) { m.Epoch = 0 },
+			"zero stream":         func(m *StreamWindowUpdate) { m.Stream = 0 },
+		}
+		for name, mutate := range cases {
+			t.Run(name, func(t *testing.T) {
+				bad := valid
+				mutate(&bad)
+				_, err := EncodeClient(bad, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+				_, err = EncodeServer(bad, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+			})
+		}
+		// The decoder refuses the same out-of-range credit a peer could put
+		// on the wire directly.
+		for name, credit := range map[string]uint64{"zero credit": 0, "credit above window": StreamWindowBytes + 1} {
+			t.Run("decode "+name, func(t *testing.T) {
+				message := &wire.StreamWindowUpdate{Ref: refToWire(7, connection, 3), Credit: credit}
+				client, err := proto.Marshal(&wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_StreamWindowUpdate{StreamWindowUpdate: message}})
+				require.NoError(t, err)
+				_, err = DecodeClient(client, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+				server, err := proto.Marshal(&wire.BrokerServerEnvelope{Payload: &wire.BrokerServerEnvelope_StreamWindowUpdate{StreamWindowUpdate: message}})
+				require.NoError(t, err)
+				_, err = DecodeServer(server, testEnvelopeCeiling, testChunkCeiling)
+				require.ErrorIs(t, err, ErrInvalidMessage)
+			})
+		}
 	})
 	t.Run("error detail never travels without HasError", func(t *testing.T) {
 		detail := testErrorDetail()
@@ -1254,6 +1306,7 @@ func fuzzClientSeeds(t testing.TB) [][]byte {
 		OpenStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Purpose: ports.BrokerStreamAttachment, Admission: ports.BrokerAdmissionExact, Endpoint: "dev@host:22", Registration: testRegistration(), Target: testTarget(), Policy: testPolicy(), StartMode: ports.BrokerDaemonStartIfNeeded},
 		ClientStreamData{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Data: []byte("frame")},
 		CloseStream{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3},
+		StreamWindowUpdate{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Credit: 4096},
 	} {
 		raw, err := EncodeClient(message, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)
@@ -1272,6 +1325,7 @@ func fuzzServerSeeds(t testing.TB) [][]byte {
 		OperationResult{Epoch: 7, Connection: testConnectionID(0x11), Operation: testOperationID(0x14), Outcome: ports.BrokerOutcomeOK, Registration: testRegistration()},
 		BrokerErrorMessage{Epoch: 7, Connection: testConnectionID(0x11), Error: testErrorDetail()},
 		Shutdown{Epoch: 7, Connection: testConnectionID(0x11), Reason: ShutdownTerminating},
+		StreamWindowUpdate{Epoch: 7, Connection: testConnectionID(0x11), Stream: 3, Credit: 4096},
 	} {
 		raw, err := EncodeServer(message, testEnvelopeCeiling, testChunkCeiling)
 		require.NoError(t, err)

@@ -943,6 +943,9 @@ func (d *Daemon) cleanupAttachmentOutput(ac *attachedClient) error {
 			_ = ac.closeCapturedTransport(expected.transport)
 		}
 	}
+	if sendErr == nil {
+		ac.output.sideEffectSentLocked(output)
+	}
 	ac.output.unlockView()
 	if sendErr == nil {
 		prepared.commit()

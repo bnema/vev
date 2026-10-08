@@ -20,7 +20,7 @@ var brokerClientTags = map[string]protoreflect.FieldNumber{
 	"register": 101, "subscribe": 102, "resync": 103, "unsubscribe": 104,
 	"add_host": 105, "remove_host": 106, "reconcile": 107, "open_stream": 108,
 	"client_stream_data": 109, "close_stream": 110, "update_host_policy": 111,
-	"start_preview": 112, "cancel_preview": 113,
+	"start_preview": 112, "cancel_preview": 113, "stream_window_update": 114,
 }
 
 // brokerServerTags is the frozen server tag inventory.
@@ -28,7 +28,7 @@ var brokerServerTags = map[string]protoreflect.FieldNumber{
 	"registered": 201, "snapshot_part": 202, "operation_result": 203,
 	"stream_opened": 204, "server_stream_data": 205, "stream_closed": 206,
 	"progress": 207, "broker_error_message": 208, "shutdown": 209,
-	"preview_publication": 210,
+	"preview_publication": 210, "stream_window_update": 211,
 }
 
 func oneofTags(t *testing.T, message proto.Message) map[string]protoreflect.FieldNumber {
@@ -194,6 +194,9 @@ func brokerClientSamples() map[string]*BrokerClientEnvelope {
 		"cancel_preview": {Payload: &BrokerClientEnvelope_CancelPreview{CancelPreview: &CancelPreview{
 			Scope: brokerScope(), Generation: 3,
 		}}},
+		"stream_window_update": {Payload: &BrokerClientEnvelope_StreamWindowUpdate{StreamWindowUpdate: &StreamWindowUpdate{
+			Ref: brokerRef(), Credit: 4096,
+		}}},
 	}
 }
 
@@ -240,6 +243,9 @@ func brokerServerSamples() map[string]*BrokerServerEnvelope {
 		"preview_publication": {Payload: &BrokerServerEnvelope_PreviewPublication{PreviewPublication: &PreviewPublication{
 			Scope: brokerScope(), Generation: 3,
 			Result: &PreviewPublication_Error{Error: &BrokerErrorDetail{Code: 1, Text: "unavailable"}},
+		}}},
+		"stream_window_update": {Payload: &BrokerServerEnvelope_StreamWindowUpdate{StreamWindowUpdate: &StreamWindowUpdate{
+			Ref: brokerRef(), Credit: 4096,
 		}}},
 	}
 }

@@ -23,14 +23,22 @@ import (
 // Callers serialize access with attachedClient.sendMu. A prepared transaction
 // must be sent or committed as a no-op before the next transaction is prepared.
 type attachmentOutput struct {
-	renderer                  *renderer.Renderer
-	epoch                     uint64
-	next                      uint64
-	acked                     uint64
-	generation                uint64
-	maxOutstanding            uint64
-	outstandingAtomic         atomic.Uint64
-	maxOutstandingAtomic      atomic.Uint64
+	renderer             *renderer.Renderer
+	epoch                uint64
+	next                 uint64
+	acked                uint64
+	generation           uint64
+	maxOutstanding       uint64
+	outstandingAtomic    atomic.Uint64
+	maxOutstandingAtomic atomic.Uint64
+	// unackedBytes charges Output data sent and not yet acknowledged, keyed by
+	// the state an ACK must reach to release it. Side-effect output carries no
+	// state of its own, so it is charged to the next state. Charges stay in
+	// non-decreasing state order and merge per state, so the slice holds at most
+	// maxOutstanding+1 entries. Guarded by the view lock; unackedBytesAtomic
+	// mirrors the total for lock-free capacity reads.
+	unackedBytes              []unackedOutputBytes
+	unackedBytesAtomic        atomic.Uint64
 	forceSnapshot             bool
 	initialized               bool
 	viewPublication           uint64
@@ -41,6 +49,51 @@ type attachmentOutput struct {
 	graphicsUnsupportedWarned atomic.Bool
 	attachment                *attachedClient
 	stateMu                   sync.Mutex
+}
+
+// unackedOutputBytes is the Output data released once the client acknowledges
+// state.
+type unackedOutputBytes struct {
+	state uint64
+	bytes uint64
+}
+
+// chargeBytesLocked records n bytes released once state is acknowledged.
+// Caller holds the view lock.
+func (s *attachmentOutput) chargeBytesLocked(state uint64, n int) {
+	if n <= 0 {
+		return
+	}
+	if last := len(s.unackedBytes) - 1; last >= 0 && s.unackedBytes[last].state == state {
+		s.unackedBytes[last].bytes += uint64(n)
+	} else {
+		s.unackedBytes = append(s.unackedBytes, unackedOutputBytes{state: state, bytes: uint64(n)})
+	}
+	s.unackedBytesAtomic.Add(uint64(n))
+}
+
+// releaseBytesLocked drops every charge an acknowledgement of state covers.
+// Caller holds the view lock.
+func (s *attachmentOutput) releaseBytesLocked(state uint64) {
+	released, kept := uint64(0), 0
+	for _, charge := range s.unackedBytes {
+		if charge.state <= state {
+			released += charge.bytes
+			continue
+		}
+		s.unackedBytes[kept] = charge
+		kept++
+	}
+	clear(s.unackedBytes[kept:])
+	s.unackedBytes = s.unackedBytes[:kept]
+	s.unackedBytesAtomic.Add(-released)
+}
+
+// resetBytesLocked forgets every charge: a new epoch acknowledges nothing the
+// old one sent. Caller holds the view lock.
+func (s *attachmentOutput) resetBytesLocked() {
+	s.unackedBytes = s.unackedBytes[:0]
+	s.unackedBytesAtomic.Store(0)
 }
 
 // reconfigureAttachmentOutput applies a replacement terminal's declared
@@ -169,6 +222,9 @@ func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, f
 	ansi.viewRevision = state.view.revision
 	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
 	graphicsReset := reset || o.forceSnapshot || !o.initialized
+	// Images share the frame's data limit. The unacknowledged byte window gates
+	// the next frame rather than this one: an upload must fit one frame, so
+	// clamping it here would drop large images and their deletes outright.
 	graphicsBudget := max(protocol.MaxOutputDataLen-len(ansi.data)-len(cursor.data), 0)
 	preparedGraphics, err := graphicsOutputDataWithDaemonLimit(d, state, o.attachment, graphicsReset, graphicsBudget)
 	if err != nil {
@@ -374,6 +430,7 @@ func (p *preparedOutput) send(data []byte, echoAck uint64, send func(protocol.Ou
 		p.boundary = protocol.UIReceipt{Epoch: p.epoch, State: p.next, ViewPublication: context.Publication, Outcome: protocol.UIReceiptProcessed}
 	}
 	p.stream.next = p.next
+	p.stream.chargeBytesLocked(p.next, len(data))
 	p.stream.publishOutstanding()
 	p.sent = true
 	return nil
@@ -510,6 +567,17 @@ func (s *attachmentOutput) sideEffectLocked(data []byte, echoAck uint64) (protoc
 	return marshalOutputState(data, epoch, 0, 0, echoAck, viewRevision, size, false, nil)
 }
 
+// sideEffectSentLocked charges a side effect that reached the transport. It has
+// no state of its own, so the ACK of the next state frame releases it: every
+// state frame is sent after it on the same ordered stream. Caller holds the view
+// lock that built output, so the epoch cannot have moved.
+func (s *attachmentOutput) sideEffectSentLocked(output protocol.Output) {
+	if s == nil || output.Epoch != s.currentEpochLocked() {
+		return
+	}
+	s.chargeBytesLocked(s.next+1, len(output.Data))
+}
+
 func (s *attachmentOutput) ack(epoch, state uint64) bool {
 	if s == nil {
 		return false
@@ -520,6 +588,7 @@ func (s *attachmentOutput) ack(epoch, state uint64) bool {
 		return false
 	}
 	s.acked = state
+	s.releaseBytesLocked(state)
 	s.publishOutstanding()
 	return true
 }
@@ -556,6 +625,7 @@ func (s *attachmentOutput) rebaseLocked() {
 	s.epoch = epoch + 1
 	s.next = 0
 	s.acked = 0
+	s.resetBytesLocked()
 	s.generation++
 	s.publishOutstanding()
 	s.maxOutstandingAtomic.Store(s.maxOutstanding)
@@ -591,6 +661,11 @@ func (s *attachmentOutput) setWindow(window uint8) {
 	s.maxOutstandingAtomic.Store(s.maxOutstanding)
 }
 
+// atCapacity reports whether the next state frame must wait for an ACK: the
+// frame window is full, or unacknowledged Output data reached
+// protocol.MaxOutputWindowBytes while a state frame is in flight. With no state
+// frame in flight the next frame is always allowed, since only its ACK can
+// release bytes charged by side effects.
 func (s *attachmentOutput) atCapacity() bool {
 	if s == nil {
 		return false
@@ -599,7 +674,9 @@ func (s *attachmentOutput) atCapacity() bool {
 	if maxOutstanding == 0 {
 		maxOutstanding = s.maxOutstanding
 	}
-	return s.outstandingAtomic.Load() >= maxOutstanding
+	outstanding := s.outstandingAtomic.Load()
+	return outstanding >= maxOutstanding ||
+		(outstanding > 0 && s.unackedBytesAtomic.Load() >= protocol.MaxOutputWindowBytes)
 }
 
 // committedState reports the latest committed output state number. It takes

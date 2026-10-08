@@ -39,7 +39,21 @@ const (
 	// MaxStreamChunkBytes is the largest legal stream chunk ceiling:
 	// 64 KiB per opaque stream frame.
 	MaxStreamChunkBytes uint64 = 64 << 10
+
+	// StreamWindowBytes is the stream-data credit each side of one logical
+	// stream grants its peer per direction. A sender spends StreamChunkCredit
+	// per data frame and waits when it has too little, so the receiver never
+	// queues more than this per stream; StreamWindowUpdate returns the credit
+	// of consumed frames.
+	StreamWindowBytes uint64 = 4 << 20
+	// StreamChunkCreditOverhead is the fixed credit one data frame costs on top
+	// of its payload, so a burst of tiny frames is bounded in count as well.
+	StreamChunkCreditOverhead uint64 = 64
 )
+
+// StreamChunkCredit is the flow-control cost of one stream data frame of n
+// payload bytes.
+func StreamChunkCredit(n int) uint64 { return uint64(n) + StreamChunkCreditOverhead }
 
 // Ceilings are the immutable per-connection ceilings negotiated once by the
 // broker preamble. MaxReceiveEnvelopeBytes bounds every envelope this side

@@ -1,6 +1,7 @@
 package brokeripc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -856,43 +857,76 @@ func TestStalledSubscriberDoesNotBlockOtherClients(t *testing.T) {
 	requireConnectionDelegates(t, active)
 }
 
-// TestClientStreamBackpressureSettlesOnlyThatStream proves a local consumer that
-// stops draining a stream's bounded inbound queue settles exactly that stream:
-// the peer is told, the stream reports backpressure, and the connection and its
-// operations stay up.
-func TestClientStreamBackpressureSettlesOnlyThatStream(t *testing.T) {
+// TestStalledClientStreamWaitsForCredit proves a local consumer that stops
+// reading slows the broker relay instead of losing its stream: the daemon's
+// messages beyond one stream window wait at the broker, every one is delivered
+// in order once the consumer reads again, and the connection stays usable
+// meanwhile.
+func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 	e := startEndpoint(t, Config{MaxClients: 2})
-	client := e.dialWith(Config{StreamInboundChunks: 1})
+	client := e.dial()
 	_ = e.accept()
 	core := e.authority.last()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stream, err := client.OpenStream(ctx, openRequest(nextStreamID(t, client)))
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = stream.Close() })
 	conn := core.logicalConn(1)
 	require.NotNil(t, conn)
+	// Complete the session preamble before the daemon speaks.
+	require.NoError(t, stream.SendClient(protocol.Ping{}))
+	select {
+	case <-conn.fromClient:
+	case <-ctx.Done():
+		t.Fatal("client message never reached the broker core")
+	}
 
-	// Two daemon messages arrive while the local consumer never reads: the
-	// bounded capacity-one queue refuses the second one.
-	conn.toClient <- protocol.Pong{}
-	conn.toClient <- protocol.Pong{}
+	// Well over one stream window of daemon output while nothing reads. Side
+	// effect Outputs need no view context and are never compressed.
+	const messages = 24
+	data := bytes.Repeat([]byte{'x'}, 512<<10)
+	go func() {
+		for i := range messages {
+			payload := append([]byte{byte(i)}, data...)
+			select {
+			case conn.toClient <- protocol.Output{Epoch: 1, Size: domain.Size{Cols: 80, Rows: 24}, Data: payload}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
+	// The relay fills exactly one window of the client pipe and then waits on
+	// credit instead of failing: the stream stays open and the connection keeps
+	// serving other work.
+	local, ok := stream.(*clientStream)
+	require.True(t, ok)
+	full := brokerwire.StreamWindowBytes - brokerwire.StreamChunkCredit(int(brokerwire.MaxStreamChunkBytes))
+	held := func() uint64 {
+		local.pipe.mu.Lock()
+		defer local.pipe.mu.Unlock()
+		return local.pipe.recvUsed + local.pipe.recvReturn
+	}
+	require.Eventually(t, func() bool { return held() > full }, 5*time.Second, time.Millisecond,
+		"the relay must fill one stream window")
+	// Data beyond the credit would settle the stream with ErrStreamCredit.
 	select {
 	case <-stream.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("a stalled stream consumer must settle the stream")
+		t.Fatalf("a stalled consumer must not settle its stream: %v", stream.Err())
+	default:
 	}
-	require.ErrorIs(t, stream.(*clientStream).Err(), ErrStreamBackpressure)
-
-	require.Eventually(t, func() bool {
-		core.mu.Lock()
-		defer core.mu.Unlock()
-		return len(core.closedIDs) > 0
-	}, 5*time.Second, 10*time.Millisecond, "the broker must be told to retire the stalled stream")
-
-	// The connection survives a stream-local stall.
 	requireConnectionDelegates(t, client)
+
+	for i := range messages {
+		message, err := stream.ReceiveServer()
+		require.NoError(t, err)
+		got, ok := message.(protocol.Output)
+		require.True(t, ok, "message %d is %T", i, message)
+		require.Len(t, got.Data, len(data)+1)
+		require.Equal(t, byte(i), got.Data[0], "messages arrive in order")
+	}
 }
 
 // TestOrderlyStreamCloseReportsNoError proves a local close is an orderly end:

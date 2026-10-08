@@ -241,6 +241,17 @@ func encodeClientEnvelope(message ClientMessage, maxChunkBytes uint64) (*wire.Br
 			return nil, ErrInvalidMessage
 		}
 		return encodeClientEnvelope(*m, maxChunkBytes)
+	case StreamWindowUpdate:
+		converted, err := streamWindowUpdateToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.BrokerClientEnvelope{Payload: &wire.BrokerClientEnvelope_StreamWindowUpdate{StreamWindowUpdate: converted}}, nil
+	case *StreamWindowUpdate:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeClientEnvelope(*m, maxChunkBytes)
 	case StartPreview:
 		converted, err := startPreviewToWire(m)
 		if err != nil {
@@ -308,6 +319,8 @@ func decodeClientEnvelope(envelope *wire.BrokerClientEnvelope, maxChunkBytes uin
 			return nil, ErrInvalidMessage
 		}
 		return CloseStream{Epoch: epoch, Connection: connection, Stream: stream}, nil
+	case *wire.BrokerClientEnvelope_StreamWindowUpdate:
+		return streamWindowUpdateFromWire(payload.StreamWindowUpdate)
 	case *wire.BrokerClientEnvelope_StartPreview:
 		return startPreviewFromWire(payload.StartPreview)
 	case *wire.BrokerClientEnvelope_CancelPreview:
@@ -707,6 +720,33 @@ func openStreamFromWire(message *wire.OpenStream) (OpenStream, error) {
 	return candidate, nil
 }
 
+// streamWindowUpdateToWire refuses a zero or above-window grant: credit is
+// returned only for consumed data, so a valid grant never exceeds one window.
+func streamWindowUpdateToWire(m StreamWindowUpdate) (*wire.StreamWindowUpdate, error) {
+	if m.Epoch == 0 || m.Connection.Validate() != nil || m.Stream.Validate() != nil {
+		return nil, ErrInvalidMessage
+	}
+	if m.Credit == 0 || m.Credit > StreamWindowBytes {
+		return nil, ErrInvalidMessage
+	}
+	return &wire.StreamWindowUpdate{Ref: refToWire(m.Epoch, m.Connection, m.Stream), Credit: m.Credit}, nil
+}
+
+func streamWindowUpdateFromWire(message *wire.StreamWindowUpdate) (StreamWindowUpdate, error) {
+	if message == nil {
+		return StreamWindowUpdate{}, ErrInvalidMessage
+	}
+	epoch, connection, stream, err := refFromWire(message.GetRef())
+	if err != nil {
+		return StreamWindowUpdate{}, ErrInvalidMessage
+	}
+	credit := message.GetCredit()
+	if credit == 0 || credit > StreamWindowBytes {
+		return StreamWindowUpdate{}, ErrInvalidMessage
+	}
+	return StreamWindowUpdate{Epoch: epoch, Connection: connection, Stream: stream, Credit: credit}, nil
+}
+
 func clientStreamDataToWire(m ClientStreamData, maxChunkBytes uint64) (*wire.ClientStreamData, error) {
 	if m.Epoch == 0 {
 		return nil, ErrInvalidMessage
@@ -751,7 +791,9 @@ func clientStreamDataFromWire(message *wire.ClientStreamData, maxChunkBytes uint
 	if len(data) == 0 {
 		return ClientStreamData{}, ErrInvalidMessage
 	}
-	return ClientStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: append([]byte(nil), data...)}, nil
+	// proto.Unmarshal copies bytes fields out of the payload, so the caller
+	// owns data without another copy.
+	return ClientStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: data}, nil
 }
 
 func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.BrokerServerEnvelope, error) {
@@ -824,6 +866,17 @@ func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.Br
 		}
 		return &wire.BrokerServerEnvelope{Payload: &wire.BrokerServerEnvelope_ServerStreamData{ServerStreamData: converted}}, nil
 	case *ServerStreamData:
+		if m == nil {
+			return nil, ErrInvalidMessage
+		}
+		return encodeServerEnvelope(*m, maxChunkBytes)
+	case StreamWindowUpdate:
+		converted, err := streamWindowUpdateToWire(m)
+		if err != nil {
+			return nil, err
+		}
+		return &wire.BrokerServerEnvelope{Payload: &wire.BrokerServerEnvelope_StreamWindowUpdate{StreamWindowUpdate: converted}}, nil
+	case *StreamWindowUpdate:
 		if m == nil {
 			return nil, ErrInvalidMessage
 		}
@@ -929,6 +982,8 @@ func decodeServerEnvelope(envelope *wire.BrokerServerEnvelope, maxChunkBytes uin
 		return serverStreamDataFromWire(payload.ServerStreamData, maxChunkBytes)
 	case *wire.BrokerServerEnvelope_StreamClosed:
 		return streamClosedFromWire(payload.StreamClosed)
+	case *wire.BrokerServerEnvelope_StreamWindowUpdate:
+		return streamWindowUpdateFromWire(payload.StreamWindowUpdate)
 	case *wire.BrokerServerEnvelope_Progress:
 		return progressFromWire(payload.Progress)
 	case *wire.BrokerServerEnvelope_BrokerErrorMessage:
@@ -1492,7 +1547,9 @@ func serverStreamDataFromWire(message *wire.ServerStreamData, maxChunkBytes uint
 	if len(data) == 0 {
 		return ServerStreamData{}, ErrInvalidMessage
 	}
-	return ServerStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: append([]byte(nil), data...)}, nil
+	// proto.Unmarshal copies bytes fields out of the payload, so the caller
+	// owns data without another copy.
+	return ServerStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: data}, nil
 }
 
 func streamClosedToWire(m StreamClosed) (*wire.StreamClosed, error) {

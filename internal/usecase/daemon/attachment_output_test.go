@@ -519,3 +519,112 @@ func TestNormalizeOutputWindow(t *testing.T) {
 		require.Equal(t, tt.want, normalizeOutputWindow(tt.input))
 	}
 }
+
+// TestAttachmentOutputByteWindow covers the unacknowledged byte budget that
+// runs alongside the frame window: it fills on large frames and side effects,
+// never blocks the only frame that can release it, and an ACK or a new epoch
+// releases exactly what it covers.
+func TestAttachmentOutputByteWindow(t *testing.T) {
+	const big = protocol.MaxOutputWindowBytes / 2
+	type step struct {
+		frame      int // state frame of this many data bytes
+		sideEffect int // side effect of this many data bytes
+		ack        uint64
+		rebase     bool
+	}
+	tests := []struct {
+		name         string
+		steps        []step
+		wantBytes    uint64
+		wantCapacity bool
+	}{
+		{name: "small frames stay under the byte window", steps: []step{{frame: 100}, {frame: 100}}, wantBytes: 200},
+		{name: "large frames fill the byte window", steps: []step{{frame: big}, {frame: big}}, wantBytes: 2 * big, wantCapacity: true},
+		{name: "one oversized frame in flight blocks the next", steps: []step{{frame: protocol.MaxOutputWindowBytes + 1}}, wantBytes: protocol.MaxOutputWindowBytes + 1, wantCapacity: true},
+		{name: "side effects alone never block a state frame", steps: []step{{sideEffect: protocol.MaxOutputWindowBytes}}, wantBytes: protocol.MaxOutputWindowBytes},
+		{name: "side effects count once a frame is in flight", steps: []step{{frame: 100}, {sideEffect: protocol.MaxOutputWindowBytes}}, wantBytes: protocol.MaxOutputWindowBytes + 100, wantCapacity: true},
+		{name: "ack releases the frames it covers", steps: []step{{frame: big}, {frame: big}, {ack: 1}}, wantBytes: big},
+		{name: "a side effect is released by the next state's ack", steps: []step{{sideEffect: 50}, {frame: 100}, {ack: 1}}, wantBytes: 0},
+		{name: "a new epoch forgets every charge", steps: []step{{frame: big}, {frame: big}, {rebase: true}}, wantBytes: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := newOutputStateStream()
+			stream.ack(1, 0)
+			for _, s := range tt.steps {
+				switch {
+				case s.frame > 0:
+					stream.lockView()
+					stream.next++
+					stream.chargeBytesLocked(stream.next, s.frame)
+					stream.publishOutstanding()
+					stream.unlockView()
+				case s.sideEffect > 0:
+					out, err := stream.sideEffect(make([]byte, s.sideEffect), 0)
+					require.NoError(t, err)
+					stream.lockView()
+					stream.sideEffectSentLocked(out)
+					stream.unlockView()
+				case s.ack > 0:
+					require.True(t, stream.ack(stream.currentEpoch(), s.ack))
+				case s.rebase:
+					stream.rebase()
+				}
+			}
+			require.Equal(t, tt.wantBytes, stream.unackedBytesAtomic.Load())
+			require.Equal(t, tt.wantCapacity, stream.atCapacity())
+		})
+	}
+}
+
+// TestAttachmentOutputFullByteWindowKeepsImages proves the byte window gates
+// when a frame goes out, never what it carries: an upload must fit one frame,
+// so trimming images to the remaining byte budget would drop them for good.
+func TestAttachmentOutputFullByteWindowKeepsImages(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("asset"), Width: 1, Height: 1})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: 1, Height: 1})
+	require.NoError(t, err)
+	state := &capturedRenderState{
+		route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}},
+		view:  attachmentView{tabID: "tab-1"},
+		panes: []capturedPaneRenderState{{
+			stableID: "pane-1", focused: true,
+			graphics:         scene.Snapshot(),
+			graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 1, Rows: 1}, PixelWidth: 1, PixelHeight: 1},
+			placement:        layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
+		}}}
+	output := attachmentOutputWithGraphics(newGraphicsOutputState())
+	ac := &attachedClient{output: output, terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true}}
+	output.attachment = ac
+	// Side effects filled the byte window while no state frame is in flight.
+	output.lockView()
+	output.chargeBytesLocked(output.next+1, protocol.MaxOutputWindowBytes)
+	output.unlockView()
+	require.False(t, output.atCapacity(), "the only frame that can release side-effect bytes is allowed")
+
+	prepared, err := output.prepareFrame(nil, state, renderer.NewFrame(1, 1), []renderer.Damage{renderer.FullRedraw()}, true, cursorOut{})
+	require.NoError(t, err)
+	require.NotNil(t, prepared.graphics, "a full byte window must not drop the frame's images")
+	require.NotEmpty(t, prepared.graphics.data)
+	require.Equal(t, protocol.MaxOutputDataLen, prepared.graphics.maxBytes+len(prepared.data)-len(prepared.graphics.data),
+		"images keep the whole frame data limit")
+}
+
+func TestAttachmentOutputSentFrameChargesItsBytes(t *testing.T) {
+	stream := newOutputStateStream()
+	frame := renderer.NewFrame(3, 1)
+	fillOutputStateRows(frame, []string{"abc"})
+	prepared, err := stream.prepareTestOutput(frame, nil, true)
+	require.NoError(t, err)
+	require.NoError(t, prepared.send(prepared.data, 0, outputFrameSender(func(wire.Envelope) error { return nil })))
+	require.Equal(t, uint64(len(prepared.data)), stream.unackedBytesAtomic.Load())
+	require.True(t, stream.ack(stream.currentEpoch(), stream.next))
+	require.Zero(t, stream.unackedBytesAtomic.Load())
+
+	failed, err := stream.prepareTestOutput(frame, nil, true)
+	require.NoError(t, err)
+	require.Error(t, failed.send(failed.data, 0, outputFrameSender(func(wire.Envelope) error { return errors.New("send failed") })))
+	require.Zero(t, stream.unackedBytesAtomic.Load(), "a frame that never left must not be charged")
+}

@@ -147,71 +147,39 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	cfg := Config{}.withDefaults()
 	require.NoError(t, cfg.validate())
 	require.Equal(t, DefaultMaxClients, cfg.MaxClients)
-	require.Equal(t, DefaultStreamInboundChunks, cfg.StreamInboundChunks)
-	require.Equal(t, uint64(DefaultStreamInboundBytes), cfg.StreamInboundBytes)
 	require.Equal(t, brokerwire.MaxPendingOperations, cfg.MaxPendingOperations)
 
-	require.ErrorIs(t, (Config{StreamInboundBytes: 1}).withDefaults().validate(), ErrConfig)
 	require.ErrorIs(t, (Config{MaxPendingOperations: brokerwire.MaxPendingOperations + 1}).withDefaults().validate(), ErrConfig)
 	// A negative explicit bound is replaced by its default rather than refused.
-	require.NoError(t, (Config{MaxClients: -1, StreamInboundChunks: -1}).withDefaults().validate())
+	require.NoError(t, (Config{MaxClients: -1}).withDefaults().validate())
 }
 
-// TestStreamPipeBoundsAndClose proves the per-stream byte channel is bounded,
-// reports backpressure instead of growing, and releases a parked reader on
-// close.
-func TestStreamPipeBoundsAndClose(t *testing.T) {
-	pipe := newStreamPipe(2, 4096, func([]byte) error { return nil })
-	require.NoError(t, pipe.deliver([]byte("one")))
-	require.NoError(t, pipe.deliver([]byte("two")))
-	require.ErrorIs(t, pipe.deliver([]byte("three")), ErrStreamBackpressure)
-
-	buf := make([]byte, 3)
-	n, err := pipe.Read(buf)
-	require.NoError(t, err)
-	require.Equal(t, "one", string(buf[:n]))
-	require.NoError(t, pipe.deliver([]byte("three")))
-
-	// An orderly Close keeps what is already queued ("two" and "three"): Read
-	// drains it before observing io.EOF, so a chunk delivered just ahead of an
-	// orderly close is never discarded underneath its reader (see
-	// TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose for the focused
-	// coverage of this behavior).
-	require.NoError(t, pipe.Close())
-	require.ErrorIs(t, pipe.deliver([]byte("four")), ErrStreamGone)
-	drained := make([]byte, 8)
-	n, err = pipe.Read(drained)
-	require.NoError(t, err)
-	require.Equal(t, "two", string(drained[:n]))
-	n, err = pipe.Read(drained)
-	require.NoError(t, err)
-	require.Equal(t, "three", string(drained[:n]))
-	_, err = pipe.Read(drained)
-	require.ErrorIs(t, err, io.EOF)
-
-	// A reader parked on an empty pipe is released by closeWith with its cause.
-	parked := newStreamPipe(1, 4096, func([]byte) error { return nil })
+// TestStreamPipeCloseReleasesParkedReader proves a reader parked on an empty
+// pipe is released by closeWith with its cause.
+func TestStreamPipeCloseReleasesParkedReader(t *testing.T) {
+	parked := newTestPipe()
 	done := make(chan error, 1)
 	go func() {
-		_, err := parked.Read(buf)
+		_, err := parked.Read(make([]byte, 3))
 		done <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
-	parked.closeWith(ErrStreamBackpressure)
+	parked.closeWith(ErrStreamCredit)
 	select {
 	case err := <-done:
-		require.ErrorIs(t, err, ErrStreamBackpressure)
+		require.ErrorIs(t, err, ErrStreamCredit)
 	case <-time.After(5 * time.Second):
 		t.Fatal("closeWith must release a parked reader")
 	}
+	require.ErrorIs(t, parked.deliver([]byte("late")), ErrStreamGone)
 }
 
-// TestStreamPipeOutboundError proves a failing outbound hook surfaces instead of
+// TestStreamPipeOutboundError proves a failing sendFrame hook surfaces instead of
 // silently dropping bytes.
 func TestStreamPipeOutboundError(t *testing.T) {
-	pipe := newStreamPipe(1, 4096, func([]byte) error { return ErrStreamBackpressure })
+	failure := errors.New("outbound failed")
+	pipe := newStreamPipe(int(brokerwire.MaxStreamChunkBytes), func([]byte) error { return failure }, func(uint64) error { return nil })
 	_, err := pipe.Write([]byte("payload"))
-	require.ErrorIs(t, err, ErrStreamBackpressure)
+	require.ErrorIs(t, err, failure)
 	require.NoError(t, pipe.Close())
 	_, err = pipe.Write([]byte("payload"))
 	require.ErrorIs(t, err, ErrStreamGone)

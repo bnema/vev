@@ -763,6 +763,11 @@ func (s *serverSession) dispatch(message brokerwire.ClientMessage) error {
 		}
 		s.closeStreamByPeer(m.Stream)
 		return nil
+	case brokerwire.StreamWindowUpdate:
+		if !s.scopeMatches(m.Epoch, m.Connection) {
+			return s.refuseScope()
+		}
+		return s.grantStreamCredit(m)
 	case brokerwire.StartPreview:
 		if !s.scopeMatches(m.Epoch, m.Connection) {
 			return s.refuseScope()

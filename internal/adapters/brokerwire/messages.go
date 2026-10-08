@@ -165,6 +165,19 @@ type CloseStream struct {
 
 func (CloseStream) brokerClientMessage() {}
 
+// StreamWindowUpdate grants the peer Credit more stream-data bytes on one
+// logical stream after the receiver consumed them. It travels in both
+// directions: each side grants credit for the data it receives.
+type StreamWindowUpdate struct {
+	Epoch      ports.BrokerEpoch
+	Connection ports.BrokerConnectionID
+	Stream     ports.BrokerStreamID
+	Credit     uint64
+}
+
+func (StreamWindowUpdate) brokerClientMessage() {}
+func (StreamWindowUpdate) brokerServerMessage() {}
+
 // StartPreview starts or replaces one connection-scoped live preview.
 // Generation is the connection-scoped preview authority; Route names the
 // observed daemon (the broker allocates the stream) and Preview is the bounded
