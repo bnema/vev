@@ -523,7 +523,9 @@ type pickerOp struct {
 
 // drive applies one ui-driver operation to an open loop. Keys
 // drive cursor/search/exit: arrows and j/k move in normal mode (j/k are
-// literal in search), `/` enters search, `s` reorders locally, `x` asks to
+// literal in search), Left/Right and h/l fold the section header under the
+// cursor (Left/h from a row first climbs to its section), Enter on a section
+// header toggles it, `/` enters search, `s` reorders locally, `x` asks to
 // destroy the cursor row, `q`/Ctrl-C/Escape close in normal mode (Escape
 // exits search first), Backspace edits the query. Text runes insert only
 // while search is active; normal-mode typing is ignored exactly like the
@@ -558,7 +560,28 @@ func (loop *pickerLoop) drive(keys []string, text string) (op pickerOp, changed 
 			} else {
 				loop.up()
 			}
+		case "Left":
+			changed = loop.model.Left() || changed
+		case "Right":
+			changed = loop.model.Right() || changed
+		case "h":
+			if active {
+				loop.insert('h')
+			} else {
+				changed = loop.model.Left() || changed
+			}
+		case "l":
+			if active {
+				loop.insert('l')
+			} else {
+				changed = loop.model.Right() || changed
+			}
 		case "Enter":
+			// Enter on a section header folds it; it names no destination.
+			if loop.model.CursorOnSection() {
+				changed = loop.model.ToggleSection() || changed
+				continue
+			}
 			// Commit is typed at the call site via selection; the
 			// key itself sends zero bytes toward the PTY.
 			op.commit = true

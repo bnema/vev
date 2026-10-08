@@ -2,6 +2,7 @@ package picker
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	renderer "github.com/bnema/vev-vt"
@@ -142,6 +143,14 @@ type Model struct {
 	query         ui.TextInput
 	searchMatches map[int]searchMatch
 	matchRows     []int
+	// folded names the section headers the user collapsed. It is local
+	// presentation state, kept across publications by section label.
+	folded map[string]bool
+	// hidden and view describe which rows are drawn: a collapsed section hides
+	// its rows, and a non-empty query shows only matches and their ancestors.
+	// Both are replaced, never mutated, so clones may share them.
+	hidden []bool
+	view   []int
 }
 
 // row is one rendered line plus its case-folded search fields.
@@ -154,9 +163,10 @@ type row struct {
 	foldedContext string
 	// tree is the dimmed branch prefix drawn before the label ("├─ ", "│  └─ "…).
 	tree string
+	// sectionID names a section header locally: its label plus its occurrence
+	// among same-label sections, so two hosts sharing a label fold apart.
+	sectionID string
 }
-
-func (r row) key() string { return r.line.Key }
 
 func (r row) kind() protocol.PickerLineKind { return r.line.Kind }
 
@@ -167,9 +177,19 @@ func (r row) selectable() bool { return r.line.Actions != 0 }
 // focusable reports the source's authorisation to rest the cursor on this row.
 // A section header is never a destination; every other shape follows the
 // published flag, so a row the source kept for inspection stays reachable while
-// a row it skipped is passed over.
+// a row it skipped is passed over. The model lets the cursor rest on a section
+// header on its own, only to fold it (see eligible).
 func (r row) focusable() bool {
 	return r.line.Kind != protocol.PickerLineSection && r.line.Focusable
+}
+
+// id names the row for cursor restoration. A section has no source key, so
+// it is named by its sectionID, which no source key can collide with.
+func (r row) id() string {
+	if r.section() {
+		return r.sectionID
+	}
+	return r.line.Key
 }
 
 func (r row) rendersAsHeader() bool {
@@ -233,7 +253,7 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 		key, hadKey = cursor.Key, cursor.Key != ""
 	}
 	m.rebuild(key, hadKey, cursor.Index)
-	if hadKey {
+	if hadKey && !m.hasRow(key) {
 		if current, ok := m.cursorKey(); !ok || current != key {
 			// The selected row left the publication (for example it was
 			// killed): rest on the nearest surviving row above it instead of
@@ -243,12 +263,23 @@ func (m *Model) ReplaceLines(lines []protocol.PickerLine, cursor protocol.Picker
 	}
 }
 
-// keysAboveCursor lists the eligible row keys above the cursor, nearest first.
+// hasRow reports whether a row with this id is still published, drawn or not.
+func (m *Model) hasRow(id string) bool {
+	for _, r := range m.rows {
+		if r.id() == id {
+			return true
+		}
+	}
+	return false
+}
+
+// keysAboveCursor lists the row keys above the cursor, nearest first. Section
+// headers are left out: a removed row never hands the cursor to a header.
 func (m *Model) keysAboveCursor() []string {
 	var keys []string
 	for i := m.selected - 1; i >= 0; i-- {
-		if m.eligible(i) {
-			keys = append(keys, m.rows[i].key())
+		if m.target(i) {
+			keys = append(keys, m.rows[i].id())
 		}
 	}
 	return keys
@@ -259,7 +290,7 @@ func (m *Model) selectFirstKey(keys []string) {
 	index := make(map[string]int, len(m.rows))
 	for idx, candidate := range m.rows {
 		if m.eligible(idx) {
-			index[candidate.key()] = idx
+			index[candidate.id()] = idx
 		}
 	}
 	for _, key := range keys {
@@ -299,10 +330,13 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 		}
 		run = run[:0]
 	}
+	sections := make(map[string]int)
 	for _, line := range m.lines {
 		if line.Kind == protocol.PickerLineSection {
 			flush()
-			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label)})
+			sectionID := fmt.Sprintf("\x00section:%d:%s", sections[line.Label], line.Label)
+			sections[line.Label]++
+			m.rows = append(m.rows, row{line: line, foldedLabel: strings.ToLower(line.Label), sectionID: sectionID})
 			continue
 		}
 		run = append(run, line)
@@ -319,30 +353,159 @@ func (m *Model) rebuild(key string, hadKey bool, fallbackIndex int) {
 			session = ""
 		}
 	}
-	m.assignTreePrefixes()
 	m.searchMatches = nil
 	m.matchRows = nil
 	if m.searchActive {
 		m.refreshSearch(false)
+	} else {
+		m.refreshView()
 	}
 	m.restoreSelection(key, hadKey, fallbackIndex)
 }
 
-// assignTreePrefixes gives each row its tree branch: sessions and hosts hang
-// off their section, tabs off their session. The last sibling closes its
-// branch with └─ and its children no longer continue the parent's │.
-func (m *Model) assignTreePrefixes() {
-	isHead := func(r row) bool { return r.rendersAsHeader() }
-	parentLast := true
+// refreshView recomputes which rows are drawn. A non-empty query shows only
+// the matching rows plus their section and session headers, in tree order, and
+// ignores folds. Otherwise every row is drawn except those under a collapsed
+// section.
+func (m *Model) refreshView() {
+	hidden := make([]bool, len(m.rows))
+	if m.searchRestricted() {
+		section, session := -1, -1
+		for i, r := range m.rows {
+			hidden[i] = true
+			switch r.kind() {
+			case protocol.PickerLineSection:
+				section, session = i, -1
+				continue
+			case protocol.PickerLineSession:
+				session = i
+			case protocol.PickerLineTab:
+			default:
+				session = -1
+			}
+			if _, ok := m.searchMatches[i]; !ok {
+				continue
+			}
+			hidden[i] = false
+			if section >= 0 {
+				hidden[section] = false
+			}
+			if r.kind() == protocol.PickerLineTab && session >= 0 {
+				hidden[session] = false
+			}
+		}
+	} else {
+		folded := false
+		for i, r := range m.rows {
+			if r.section() {
+				folded = m.folded[r.sectionID]
+				continue
+			}
+			hidden[i] = folded
+		}
+	}
+	view := make([]int, 0, len(m.rows))
 	for i := range m.rows {
+		if !hidden[i] {
+			view = append(view, i)
+		}
+	}
+	m.hidden, m.view = hidden, view
+	m.assignTreePrefixes()
+}
+
+// sectionFolded reports whether section row i is drawn collapsed. A query
+// shows matches regardless of folds, so it never draws a section collapsed.
+func (m *Model) sectionFolded(i int) bool {
+	return !m.searchRestricted() && m.rows[i].section() && m.folded[m.rows[i].sectionID]
+}
+
+// sectionOf reports the section header row i belongs to, or -1.
+func (m *Model) sectionOf(i int) int {
+	for j := i; j >= 0; j-- {
+		if m.rows[j].section() {
+			return j
+		}
+	}
+	return -1
+}
+
+// setFold collapses or expands the section under the cursor and reports
+// whether anything changed. It never applies while a query filters the list.
+func (m *Model) setFold(fold bool) bool {
+	if m == nil || m.searchRestricted() || m.selected < 0 || m.selected >= len(m.rows) || !m.rows[m.selected].section() {
+		return false
+	}
+	label := m.rows[m.selected].sectionID
+	if m.folded[label] == fold {
+		return false
+	}
+	folded := make(map[string]bool, len(m.folded)+1)
+	for k, v := range m.folded {
+		folded[k] = v
+	}
+	if fold {
+		folded[label] = true
+	} else {
+		delete(folded, label)
+	}
+	m.folded = folded
+	m.refreshView()
+	return true
+}
+
+// CursorOnSection reports whether the cursor rests on a section header.
+func (m *Model) CursorOnSection() bool {
+	return m != nil && m.selected >= 0 && m.selected < len(m.rows) && m.rows[m.selected].section()
+}
+
+// ToggleSection collapses or expands the section header under the cursor and
+// reports whether it did.
+func (m *Model) ToggleSection() bool {
+	if !m.CursorOnSection() {
+		return false
+	}
+	return m.setFold(!m.folded[m.rows[m.selected].sectionID])
+}
+
+// Left collapses the section under the cursor, or moves the cursor from a row
+// up to its section header. It reports whether anything changed.
+func (m *Model) Left() bool {
+	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
+		return false
+	}
+	if m.rows[m.selected].section() {
+		return m.setFold(true)
+	}
+	if section := m.sectionOf(m.selected); m.eligible(section) {
+		m.selected = section
+		return true
+	}
+	return false
+}
+
+// Right expands the section under the cursor and reports whether it did.
+func (m *Model) Right() bool {
+	return m.setFold(false)
+}
+
+// assignTreePrefixes gives each drawn row its tree branch: sessions and hosts
+// hang off their section, tabs off their session. The last drawn sibling
+// closes its branch with └─ and its children no longer continue the parent's │.
+func (m *Model) assignTreePrefixes() {
+	parentLast := true
+	for p, i := range m.view {
 		r := &m.rows[i]
 		switch {
 		case r.section():
 			r.tree = ""
-		case isHead(*r):
+		case r.rendersAsHeader():
 			last := true
-			for j := i + 1; j < len(m.rows) && !m.rows[j].section(); j++ {
-				if isHead(m.rows[j]) {
+			for _, j := range m.view[p+1:] {
+				if m.rows[j].section() {
+					break
+				}
+				if m.rows[j].rendersAsHeader() {
 					last = false
 					break
 				}
@@ -350,7 +513,7 @@ func (m *Model) assignTreePrefixes() {
 			parentLast = last
 			r.tree = treeBranch(last)
 		case r.kind() == protocol.PickerLineTab:
-			last := i+1 >= len(m.rows) || m.rows[i+1].kind() != protocol.PickerLineTab
+			last := p+1 >= len(m.view) || m.rows[m.view[p+1]].kind() != protocol.PickerLineTab
 			stem := "│  "
 			if parentLast {
 				stem = "   "
@@ -391,9 +554,18 @@ func (m *Model) sortRun(lines []protocol.PickerLine) []protocol.PickerLine {
 func (m *Model) restoreSelection(key string, hadKey bool, fallbackIndex int) {
 	if hadKey {
 		for idx, candidate := range m.rows {
-			if m.eligible(idx) && candidate.key() == key {
+			if m.eligible(idx) && candidate.id() == key {
 				m.selected = idx
 				return
+			}
+		}
+		// A row inside a collapsed section keeps the cursor on that section.
+		for idx, candidate := range m.rows {
+			if candidate.id() == key && idx < len(m.hidden) && m.hidden[idx] {
+				if section := m.sectionOf(idx); m.eligible(section) {
+					m.selected = section
+					return
+				}
 			}
 		}
 	}
@@ -410,13 +582,34 @@ func (m *Model) searchRestricted() bool {
 	return m != nil && m.searchActive && m.query.Value() != ""
 }
 
-// eligible reports whether the cursor may rest on row i: the source authorised
-// the row as a destination and the typed query, when there is one, matches it.
+// eligible reports whether the cursor may rest on row i: the row is drawn,
+// and either the source authorised it as a destination and the typed query,
+// when there is one, matches it, or it is a section header outside a query.
 func (m *Model) eligible(i int) bool {
-	if m == nil || i < 0 || i >= len(m.rows) || !m.rows[i].focusable() {
+	if m == nil || i < 0 || i >= len(m.rows) || i < len(m.hidden) && m.hidden[i] {
+		return false
+	}
+	if m.rows[i].section() {
+		return !m.searchRestricted()
+	}
+	if !m.rows[i].focusable() {
 		return false
 	}
 	return !m.searchRestricted() || m.rowMatches(i)
+}
+
+// target reports whether the cursor may fall back to row i on its own: an
+// eligible row that is not a section header.
+func (m *Model) target(i int) bool {
+	return m.eligible(i) && !m.rows[i].section()
+}
+
+// restable is target, or eligible when section headers are allowed.
+func (m *Model) restable(i int, sections bool) bool {
+	if sections {
+		return m.eligible(i)
+	}
+	return m.target(i)
 }
 
 // committable reports whether row i may be committed: it admits an action and
@@ -432,24 +625,12 @@ func (m *Model) cursorKey() (string, bool) {
 	if m == nil || m.selected < 0 || m.selected >= len(m.rows) {
 		return "", false
 	}
-	return m.rows[m.selected].key(), true
+	return m.rows[m.selected].id(), true
 }
 
-func (m *Model) Up() {
-	if m != nil && m.searchActive {
-		m.moveSearch(-1)
-		return
-	}
-	m.move(-1)
-}
+func (m *Model) Up() { m.move(-1) }
 
-func (m *Model) Down() {
-	if m != nil && m.searchActive {
-		m.moveSearch(1)
-		return
-	}
-	m.move(1)
-}
+func (m *Model) Down() { m.move(1) }
 
 // Cursor reports the line under the picker cursor independently from whether
 // that row may be activated, so a refresh can preserve an anchor row.
@@ -481,22 +662,25 @@ func (m *Model) SelectedIndex() int {
 }
 
 // SelectNearestRow selects the nearest eligible row at or after idx, falling
-// back to the last eligible row before it.
+// back to the last eligible row before it. Section headers are taken only when
+// no other row qualifies.
 func (m *Model) SelectNearestRow(idx int) {
 	if m == nil || len(m.rows) == 0 {
 		return
 	}
 	idx = clamp(idx, 0, len(m.rows)-1)
-	for i := idx; i < len(m.rows); i++ {
-		if m.eligible(i) {
-			m.selected = i
-			return
+	for _, sections := range [2]bool{false, true} {
+		for i := idx; i < len(m.rows); i++ {
+			if m.restable(i, sections) {
+				m.selected = i
+				return
+			}
 		}
-	}
-	for i := idx - 1; i >= 0; i-- {
-		if m.eligible(i) {
-			m.selected = i
-			return
+		for i := idx - 1; i >= 0; i-- {
+			if m.restable(i, sections) {
+				m.selected = i
+				return
+			}
 		}
 	}
 }
@@ -552,10 +736,14 @@ func (m *Model) move(delta int) {
 	}
 }
 
+// firstEligible reports the first row the cursor may rest on, preferring any
+// row over a section header.
 func (m *Model) firstEligible() int {
-	for i := range m.rows {
-		if m.eligible(i) {
-			return i
+	for _, sections := range [2]bool{false, true} {
+		for i := range m.rows {
+			if m.restable(i, sections) {
+				return i
+			}
 		}
 	}
 	return -1
@@ -634,10 +822,10 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 	offset := m.scrollOffset(visible)
 	clipX := rect.X + rect.Width
 	for y := range visible {
-		idx := offset + y
-		if idx >= len(m.rows) {
+		if offset+y >= len(m.view) {
 			break
 		}
+		idx := m.view[offset+y]
 		r := m.rows[idx]
 		base, nameStyle, detailStyle := styles.Base, styles.Name, styles.Detail
 		if r.section() {
@@ -649,7 +837,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		if r.line.Stopped && idx != m.selected {
 			base, nameStyle, detailStyle = styles.Stopped, styles.Stopped, styles.Stopped
 		}
-		if r.line.Dim || m.searchActive && m.query.Value() != "" && !m.rowMatches(idx) {
+		if r.line.Dim && !(r.section() && idx == m.selected) {
 			base.Attrs |= renderer.AttrDim
 			nameStyle.Attrs |= renderer.AttrDim
 			detailStyle.Attrs |= renderer.AttrDim
@@ -659,6 +847,12 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 		name := r.line.Label
 		if r.section() {
 			nameStyle.Bold = true
+			marker := "▾ "
+			if m.sectionFolded(idx) {
+				marker = "▸ "
+				name += fmt.Sprintf(" (%d)", m.sectionSessions(idx))
+			}
+			name = marker + name
 		} else if r.rendersAsHeader() && idx != m.selected && !r.line.Stopped {
 			nameStyle.Bold = true
 		}
@@ -671,7 +865,7 @@ func (m *Model) renderList(frame renderer.Frame, rect domain.Rect, styles Render
 				treeStyle.Attrs |= renderer.AttrDim
 			} else {
 				// Only the foreground comes from Tree: the row's fill and its
-				// dimming (a Dim line or a search miss) stay as they are.
+				// dimming (a Dim line) stay as they are.
 				treeStyle.Foreground = styles.Tree.Foreground
 				treeStyle.HasForegroundRGB = styles.Tree.HasForegroundRGB
 				treeStyle.ForegroundRGB = styles.Tree.ForegroundRGB
@@ -796,6 +990,13 @@ func (m *Model) renderStatus(frame renderer.Frame, rect domain.Rect, style rende
 	if action == "" {
 		enter = "Enter unavailable"
 	}
+	if m != nil && m.CursorOnSection() {
+		enter = "Enter/h/l fold"
+		if m.searchActive {
+			// h and l type into the query while searching.
+			enter = "Enter fold"
+		}
+	}
 	var groups []string
 	if m != nil && m.searchActive {
 		groups = []string{fmt.Sprintf("%d matches", len(m.matchRows)), enter, "arrows next"}
@@ -844,15 +1045,27 @@ func actionVerb(line protocol.PickerLine, intent protocol.PickerIntent) string {
 	return "open"
 }
 
+// scrollOffset is the first drawn position so the cursor row stays visible.
 func (m *Model) scrollOffset(visible int) int {
-	if visible <= 0 || len(m.rows) <= visible || m.selected < 0 {
+	if visible <= 0 || len(m.view) <= visible || m.selected < 0 {
 		return 0
 	}
-	if m.selected < visible {
+	position := slices.Index(m.view, m.selected)
+	if position < visible {
 		return 0
 	}
-	offset := m.selected - visible + 1
-	return min(offset, len(m.rows)-visible)
+	return min(position-visible+1, len(m.view)-visible)
+}
+
+// sectionSessions counts the session and host rows under section row i.
+func (m *Model) sectionSessions(i int) int {
+	count := 0
+	for j := i + 1; j < len(m.rows) && !m.rows[j].section(); j++ {
+		if m.rows[j].rendersAsHeader() {
+			count++
+		}
+	}
+	return count
 }
 
 func clamp(n, low, high int) int {

@@ -518,7 +518,6 @@ func TestTreeStyleKeepsRowDimming(t *testing.T) {
 			dim.Dim = true
 			return []protocol.PickerLine{section("local"), navLine("a", "alpha"), dim}
 		}()},
-		{name: "search miss", lines: []protocol.PickerLine{section("local"), navLine("a", "alpha"), navLine("b", "beta")}, query: "alp"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -566,4 +565,214 @@ func TestReplaceLinesPreviousRowRespectsSearch(t *testing.T) {
 	selected, ok = m.Selected()
 	require.True(t, ok)
 	require.Equal(t, "a", selected.Key, "the hidden row above is skipped for the nearest matching one")
+}
+
+// drawnRows reports the tree prefix and label of every drawn row.
+func drawnRows(m *Model) []string {
+	got := make([]string, 0, len(m.view))
+	for _, i := range m.view {
+		got = append(got, m.rows[i].tree+m.rows[i].line.Label)
+	}
+	return got
+}
+
+func foldFixture() []protocol.PickerLine {
+	session := func(key, label string) protocol.PickerLine {
+		return protocol.PickerLine{Key: key, Kind: protocol.PickerLineSession, Label: label}
+	}
+	return []protocol.PickerLine{
+		section("LOCAL"),
+		session("w", "work"), tabLine("w1", "shell", protocol.PickerCanNavigate), tabLine("w2", "logs", protocol.PickerCanNavigate),
+		session("s", "scratch"), tabLine("s1", "apply-migrations", protocol.PickerCanNavigate),
+		section("devbox"),
+		session("a", "api"), tabLine("a1", "server", protocol.PickerCanNavigate), tabLine("a2", "db", protocol.PickerCanNavigate),
+	}
+}
+
+func TestSectionFolding(t *testing.T) {
+	tests := []struct {
+		name       string
+		keys       func(m *Model)
+		wantRows   []string
+		wantCursor string
+	}{
+		{
+			name:       "left from a tab climbs to its section",
+			keys:       func(m *Model) { m.Left() },
+			wantRows:   []string{"LOCAL", "├─ work", "│  ├─ shell", "│  └─ logs", "└─ scratch", "   └─ apply-migrations", "devbox", "└─ api", "   ├─ server", "   └─ db"},
+			wantCursor: "\x00section:0:LOCAL",
+		},
+		{
+			name:       "left on a section collapses it",
+			keys:       func(m *Model) { m.Left(); m.Left() },
+			wantRows:   []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"},
+			wantCursor: "\x00section:0:LOCAL",
+		},
+		{
+			name:       "down from a collapsed section skips its rows",
+			keys:       func(m *Model) { m.Left(); m.Left(); m.Down() },
+			wantRows:   []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"},
+			wantCursor: "\x00section:0:devbox",
+		},
+		{
+			name:       "right expands it again",
+			keys:       func(m *Model) { m.Left(); m.Left(); m.Right() },
+			wantRows:   []string{"LOCAL", "├─ work", "│  ├─ shell", "│  └─ logs", "└─ scratch", "   └─ apply-migrations", "devbox", "└─ api", "   ├─ server", "   └─ db"},
+			wantCursor: "\x00section:0:LOCAL",
+		},
+		{
+			name:       "toggle collapses and expands",
+			keys:       func(m *Model) { m.Left(); m.ToggleSection() },
+			wantRows:   []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"},
+			wantCursor: "\x00section:0:LOCAL",
+		},
+		{
+			name:       "right off a section does nothing",
+			keys:       func(m *Model) { m.Right() },
+			wantRows:   []string{"LOCAL", "├─ work", "│  ├─ shell", "│  └─ logs", "└─ scratch", "   └─ apply-migrations", "devbox", "└─ api", "   ├─ server", "   └─ db"},
+			wantCursor: "w1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+			require.Equal(t, "w1", cursorKey(t, m), "a section header never takes the initial cursor")
+			tt.keys(m)
+			require.Equal(t, tt.wantRows, drawnRows(m))
+			key, _ := m.cursorKey()
+			require.Equal(t, tt.wantCursor, key)
+		})
+	}
+}
+
+func TestSectionFoldSurvivesRepublication(t *testing.T) {
+	m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	m.Left()
+	m.Left()
+	m.ReplaceLines(foldFixture(), protocol.PickerCursor{Index: -1})
+	require.Equal(t, []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"}, drawnRows(m))
+	key, _ := m.cursorKey()
+	require.Equal(t, "\x00section:0:LOCAL", key)
+	_, ok := m.Selected()
+	require.False(t, ok, "a section header is never committable")
+
+	frame := m.Render(domain.Size{Cols: 40, Rows: 10}, Preview{})
+	require.True(t, strings.HasPrefix(rowText(frame.Row(0)), "▸ LOCAL (2)"), "collapsed header %q", rowText(frame.Row(0)))
+	require.True(t, strings.HasPrefix(rowText(frame.Row(1)), "▾ devbox"), "expanded header %q", rowText(frame.Row(1)))
+}
+
+func TestSearchShowsOnlyMatchesInTreeOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantRows   []string
+		wantCursor string
+	}{
+		{name: "matches keep their ancestors", query: "ap", wantRows: []string{"LOCAL", "└─ scratch", "   └─ apply-migrations", "devbox", "└─ api", "   ├─ server", "   └─ db"}, wantCursor: "s1"},
+		{name: "one tab match", query: "serv", wantRows: []string{"devbox", "└─ api", "   └─ server"}, wantCursor: "a1"},
+		{name: "no match draws nothing", query: "zzz", wantRows: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+			m.Down()
+			m.Down() // somewhere in the middle: typing still starts on the first match
+			// A collapsed section never hides a match.
+			m.Left()
+			m.Left()
+			m.EnterSearch()
+			for _, r := range tt.query {
+				m.InsertSearch(r)
+			}
+			require.Equal(t, tt.wantRows, drawnRows(m))
+			if tt.wantCursor == "" {
+				require.Equal(t, -1, m.SelectedIndex())
+				return
+			}
+			require.Equal(t, tt.wantCursor, mustSelectedKey(t, m))
+		})
+	}
+}
+
+func TestExitSearchRestoresFolds(t *testing.T) {
+	m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	m.Left()
+	m.Left()
+	m.EnterSearch()
+	m.InsertSearch('s') // first match: work/shell, inside the collapsed LOCAL
+	m.ExitSearch()
+	require.Equal(t, []string{"LOCAL", "devbox", "└─ api", "   ├─ server", "   └─ db"}, drawnRows(m))
+	key, _ := m.cursorKey()
+	require.Equal(t, "\x00section:0:LOCAL", key, "a match a fold hides leaves the cursor on its section")
+}
+
+func TestRemovedRowNeverHandsTheCursorToASection(t *testing.T) {
+	tests := []struct {
+		name   string
+		cursor string
+		drop   string
+		want   string
+	}{
+		{name: "first tab under LOCAL", cursor: "w1", drop: "w1", want: "w2"},
+		{name: "first tab under a remote section", cursor: "a1", drop: "a1", want: "s1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped, Cursor: protocol.PickerCursor{Key: tt.cursor, Index: -1}})
+			next := make([]protocol.PickerLine, 0)
+			for _, line := range foldFixture() {
+				if line.Key != tt.drop {
+					next = append(next, line)
+				}
+			}
+			m.ReplaceLines(next, protocol.PickerCursor{Index: -1})
+			require.Equal(t, tt.want, mustSelectedKey(t, m))
+		})
+	}
+}
+
+func TestSameLabelSectionsFoldApart(t *testing.T) {
+	m := New([]protocol.PickerLine{
+		section("remote"), navLine("a", "alpha"),
+		section("remote"), navLine("b", "beta"),
+	}, Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	m.Left()
+	m.Left()
+	require.Equal(t, []string{"remote", "remote", "└─ beta"}, drawnRows(m))
+}
+
+func TestClearSearchKeepsTheCursorOnADrawnRow(t *testing.T) {
+	m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+	m.Left()
+	m.Left()
+	m.EnterSearch()
+	m.InsertSearch('s') // first match: work/shell, inside the collapsed LOCAL
+	m.ClearSearch()
+	require.False(t, m.hidden[m.SelectedIndex()], "the cursor rests on a drawn row")
+}
+
+func TestSectionFooterHint(t *testing.T) {
+	tests := []struct {
+		name   string
+		search bool
+		want   string
+	}{
+		{name: "normal mode offers h/l", want: "Enter/h/l fold"},
+		{name: "search mode types h/l", search: true, want: "Enter fold"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(foldFixture(), Config{Intent: protocol.PickerIntentNavigation, Sort: SortGrouped})
+			m.Left()
+			if tt.search {
+				m.EnterSearch()
+			}
+			frame := m.Render(domain.Size{Cols: 80, Rows: 12}, Preview{})
+			status := rowText(frame.Row(11))
+			require.Contains(t, status, tt.want)
+			if tt.search {
+				require.NotContains(t, status, "h/l")
+			}
+		})
+	}
 }
