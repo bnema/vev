@@ -895,8 +895,8 @@ type readyOutcome struct {
 // the supervisor can admit exactly the row the user committed. It opens no
 // stream and starts no terminal work itself.
 func (s *Supervisor) awaitReady(ctx context.Context, input *terminalInputLifetime, service ports.BrokerNavigator, sub ports.BrokerSubscription) readyOutcome {
-	if key := s.picker.pendingPickerKey; key != "" {
-		s.picker.pendingPickerKey = ""
+	if key := s.picker.pendingKey; key != "" {
+		s.picker.pendingKey = ""
 		return readyOutcome{commitKey: key}
 	}
 	var changed <-chan struct{}
@@ -991,7 +991,7 @@ func (s *Supervisor) pickerOps() <-chan struct{} {
 func (s *Supervisor) takePickerClose() bool {
 	op, key := s.cfg.Picker.TakeOp()
 	if op.commit && key != "" {
-		s.picker.pendingPickerKey = key
+		s.picker.pendingKey = key
 	}
 	if op.close && !op.exit {
 		s.notifyPicker(pickerExitHint)
