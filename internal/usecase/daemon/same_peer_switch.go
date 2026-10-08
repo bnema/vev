@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"sync"
+
 	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/protocol"
 )
@@ -82,7 +84,11 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 	}
 	d.purgeAdmissionActive++
 	d.mu.Unlock()
-	defer d.releasePurgeAdmission()
+	// The reservation covers only the membership change; first paint can
+	// block on a slow client and must not stall a purge's drain.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(d.releasePurgeAdmission) }
+	defer release()
 
 	target, targetTabIndex, ok := d.samePeerTarget(request)
 	if !ok || target == effect.sess {
@@ -112,6 +118,7 @@ func (d *Daemon) switchSamePeerForAttachment(effect *attachmentEffect, request p
 		d.sendSamePeerSwitchFailure(effect, request.RequestID, protocol.SamePeerSwitchStaleTarget)
 		return
 	}
+	release()
 
 	if fresh, admitted := effect.ac.beginAttachmentEffect(transition.published); admitted {
 		fresh.End()
