@@ -468,6 +468,17 @@ func (p *Proxy) ingest(toServer bool, raw []byte, dst *net.UDPAddr) {
 		counters.reordered.Add(1)
 	}
 	due := now.Add(link.BaseLatency + decision.ExtraDelay)
+	// Emit before scheduling: once enqueued, a zero-latency copy can be
+	// delivered and answered before this call returns, and the reply's event
+	// must not be observed ahead of the packet that caused it.
+	p.emit(Event{
+		Direction: directionOf(toServer),
+		Sequence:  seq,
+		Bytes:     len(raw),
+		At:        now,
+		Due:       due,
+		Decision:  decision,
+	})
 	for copyIndex := 0; copyIndex <= decision.Duplicates; copyIndex++ {
 		copyDue := due.Add(time.Duration(copyIndex) * link.DuplicateDelay)
 		if !p.enqueue(packet{
@@ -480,14 +491,6 @@ func (p *Proxy) ingest(toServer bool, raw []byte, dst *net.UDPAddr) {
 			counters.overflowDrops.Add(1)
 		}
 	}
-	p.emit(Event{
-		Direction: directionOf(toServer),
-		Sequence:  seq,
-		Bytes:     len(raw),
-		At:        now,
-		Due:       due,
-		Decision:  decision,
-	})
 }
 
 func (p *Proxy) enqueue(pkt packet) bool {
