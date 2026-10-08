@@ -77,8 +77,8 @@ func inflateObjectPayload(compressed []byte, size uint32) ([]byte, error) {
 
 // readExact reads exactly size bytes. It doubles the buffer as data arrives,
 // starting at inflateInitialCap and capping every step at size, so a corrupt
-// declared length allocates at most about twice what the stream produces and
-// the returned payload has no growth slack.
+// declared length allocates at most about four times what the stream produces
+// (about three times live at peak) and the returned payload has no slack.
 func readExact(r io.Reader, size int) ([]byte, error) {
 	buf := make([]byte, min(size, inflateInitialCap))
 	for n := 0; ; {
