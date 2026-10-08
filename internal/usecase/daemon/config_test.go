@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -172,94 +171,47 @@ func updateRuntimeConfig(d *Daemon, mutate func(*runtimeConfig)) {
 	d.config.Store(&next)
 }
 
-func storeThemeForTest(d *Daemon, cfg domain.Config) {
-	updateRuntimeConfig(d, func(rc *runtimeConfig) {
-		rc.theme = themeConfigSnapshot{mode: cfg.Theme, paletteOff: !cfg.ThemePalette, accent: cfg.ThemeAccent}
-	})
-}
-
-func TestThemeConfigSnapshotIsAtomic(t *testing.T) {
-	d := newTestDaemon(t, nil, stubClock{})
-
-	// A nil atomic pointer is the zero/default snapshot: auto theme with
-	// terminal palette inheritance enabled.
-	require.Equal(t, themeConfigSnapshot{}, d.currentThemeConfig())
+// TestApplyConfigPublishesOneSnapshot checks ApplyConfig publishes every
+// section of one config in a single snapshot, and that the snapshot in force
+// before any reload equals the one built from vev's defaults.
+func TestApplyConfigPublishesOneSnapshot(t *testing.T) {
+	custom := domain.Defaults()
+	custom.Theme = domain.ThemeDark
+	custom.ThemePalette = false
+	custom.Codes = map[string]string{"new-tab": "nt"}
+	custom.Snapshot = domain.SnapshotConfig{RestoreProcesses: []string{"htop"}, RestoreProcessesSet: true}
+	custom.Copy.WordSeparators = "-"
+	custom.Palette = domain.PaletteConfig{Anchor: custom.Palette.Anchor, AnchorSet: true}
+	custom.Floating.Width++
+	custom.Nav.OverflowTabs = !custom.Nav.OverflowTabs
+	custom.Tabs.TerminalTitle = !custom.Tabs.TerminalTitle
+	custom.Ephemeral.CloseOnExit = !custom.Ephemeral.CloseOnExit
+	custom.Scrollback = domain.ScrollbackConfig{Megabytes: 3, Lines: 300}
 
 	for _, tt := range []struct {
 		name string
-		mode domain.ThemeMode
-		gate bool
+		cfg  domain.Config
+		want *runtimeConfig
 	}{
-		{name: "auto palette enabled", mode: domain.ThemeAuto, gate: true},
-		{name: "auto palette disabled", mode: domain.ThemeAuto, gate: false},
-		{name: "dark palette enabled", mode: domain.ThemeDark, gate: true},
-		{name: "dark palette disabled", mode: domain.ThemeDark, gate: false},
-		{name: "light palette enabled", mode: domain.ThemeLight, gate: true},
-		{name: "light palette disabled", mode: domain.ThemeLight, gate: false},
+		{name: "defaults match the pre-reload snapshot", cfg: domain.Defaults(), want: defaultRuntimeConfig()},
+		{name: "every section comes from one config", cfg: custom, want: &runtimeConfig{
+			codeOverrides:           map[string]string{"new-tab": "NT"},
+			restoreProcessAllowlist: map[string]struct{}{"htop": {}},
+			floating:                custom.Floating,
+			copy:                    custom.Copy,
+			palette:                 custom.Palette,
+			nav:                     custom.Nav,
+			tabs:                    custom.Tabs,
+			ephemeral:               custom.Ephemeral,
+			scrollback:              custom.Scrollback,
+			theme:                   themeConfigSnapshot{mode: domain.ThemeDark, paletteOff: true, accent: custom.ThemeAccent},
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			storeThemeForTest(d, domain.Config{Theme: tt.mode, ThemePalette: tt.gate})
-			require.Equal(t, themeConfigSnapshot{mode: tt.mode, paletteOff: !tt.gate}, d.currentThemeConfig())
+			d := newTestDaemon(t, nil, stubClock{})
+			d.ApplyConfig(tt.cfg)
+			require.Equal(t, tt.want, d.config.Load())
 		})
-	}
-
-	// Publish complementary configurations concurrently. Every load must be a
-	// complete published snapshot, never mode from one update and gate from
-	// another. Coordination establishes concurrent readers/writers without
-	// timing sleeps.
-	first := domain.Config{Theme: domain.ThemeAuto, ThemePalette: false}
-	second := domain.Config{Theme: domain.ThemeDark, ThemePalette: true}
-	allowed := map[themeConfigSnapshot]struct{}{
-		{mode: domain.ThemeAuto, paletteOff: true}:  {},
-		{mode: domain.ThemeDark, paletteOff: false}: {},
-	}
-	firstPublished := make(chan struct{})
-	firstObserved := make(chan struct{})
-	secondPublished := make(chan struct{})
-	secondObserved := make(chan struct{})
-	observed := make(chan themeConfigSnapshot, 2)
-	invalid := make(chan themeConfigSnapshot, 1)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		storeThemeForTest(d, first)
-		close(firstPublished)
-		<-firstObserved
-		storeThemeForTest(d, second)
-		close(secondPublished)
-		<-secondObserved
-		for range 10_000 {
-			storeThemeForTest(d, second)
-			storeThemeForTest(d, first)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-firstPublished
-		observed <- d.currentThemeConfig()
-		close(firstObserved)
-		<-secondPublished
-		observed <- d.currentThemeConfig()
-		close(secondObserved)
-		for range 20_000 {
-			snapshot := d.currentThemeConfig()
-			if _, ok := allowed[snapshot]; !ok {
-				select {
-				case invalid <- snapshot:
-				default:
-				}
-				return
-			}
-		}
-	}()
-	wg.Wait()
-	require.Equal(t, themeConfigSnapshot{mode: domain.ThemeAuto, paletteOff: true}, <-observed)
-	require.Equal(t, themeConfigSnapshot{mode: domain.ThemeDark, paletteOff: false}, <-observed)
-	select {
-	case snapshot := <-invalid:
-		t.Fatalf("observed mixed theme configuration: %#v", snapshot)
-	default:
 	}
 }
 

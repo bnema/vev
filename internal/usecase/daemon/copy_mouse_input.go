@@ -59,8 +59,9 @@ func (d *Daemon) handleFreshCopyPress(sess *session, ac *attachedClient, tb *tab
 	if routed == nil {
 		return false
 	}
+	cfg := d.currentRuntimeConfig()
 	tb.mu.Lock()
-	geometry, ok := hitTestCopyMouseGeometryLocked(tb, d.currentFloatingConfig(), ev.Col, ev.Row)
+	geometry, ok := hitTestCopyMouseGeometryLocked(tb, cfg.floating, ev.Col, ev.Row)
 	tb.mu.Unlock()
 	if !ok || geometry.pane != routed {
 		ac.overlays.copyMu.Lock()
@@ -76,7 +77,7 @@ func (d *Daemon) handleFreshCopyPress(sess *session, ac *attachedClient, tb *tab
 	if mouseMode != 0 || altScreen {
 		return false // child forwarding retains its existing raw-byte path.
 	}
-	document := scopy.NewDocument(snapshot, d.currentCopyConfig().WordSeparators)
+	document := scopy.NewDocument(snapshot, cfg.copy.WordSeparators)
 	mapped, ok := mapCopyMouse(ev, geometry, max(document.Len()-document.Height(), 0), document, false)
 	if !ok {
 		ac.overlays.copyMu.Lock()

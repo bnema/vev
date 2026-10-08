@@ -445,8 +445,9 @@ func (d *Daemon) paintLocked(entry *session, ac *attachedClient, tb *tab, reset 
 		repaintAttachedClients = sess.ackAttention(tb, ac, attentionVisible)
 	}
 
-	paletteCfg := d.currentPaletteConfig()
-	floatingCfg := d.currentFloatingConfig()
+	// One snapshot keeps palette and floating settings from the same reload.
+	cfg := d.currentRuntimeConfig()
+	paletteCfg, floatingCfg := cfg.palette, cfg.floating
 	// Title refresh may inspect process state, so it remains before the capture
 	// boundary and outside tab/pane ownership locks.
 	if local {
