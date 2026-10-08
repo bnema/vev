@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 
+	"github.com/bnema/vev/internal/adapters/brokerwire"
+	"github.com/bnema/vev/internal/protocol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -104,5 +106,25 @@ func TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose(t *testing.T) {
 				require.Equal(t, tt.wantErr, err)
 			}
 		})
+	}
+}
+
+// TestStreamPipeHoldsAFullOutputWindow pins the client pipe headroom for the
+// session output window. A client claims protocol.MaxOutputWindow unacked
+// Output frames; with a terminal that is not draining, all of them may sit in
+// this pipe at once. Overflow fails the whole stream (ErrStreamBackpressure),
+// so the default bounds must hold that window of worst realistic frames: a
+// near-full repaint of a 500x140 terminal is about 70 KB, i.e. two chunks.
+func TestStreamPipeHoldsAFullOutputWindow(t *testing.T) {
+	const frameBytes = 72 << 10
+	chunk := int(brokerwire.MaxStreamChunkBytes)
+	p := newStreamPipe(0, 0, func([]byte) error { return nil })
+	payload := bytes.Repeat([]byte{'x'}, frameBytes)
+	for frame := range protocol.MaxOutputWindow {
+		for data := payload; len(data) > 0; {
+			n := min(len(data), chunk)
+			require.NoError(t, p.deliver(data[:n]), "frame %d overflowed the client pipe", frame)
+			data = data[n:]
+		}
 	}
 }

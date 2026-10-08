@@ -35,8 +35,9 @@ func TestRequestedOutputWindow(t *testing.T) {
 	}
 }
 
-// TestHelloRequestsPipelinedOutput pins the window a real attachment Hello
-// asks for. A window of one would make every remote frame wait a round trip.
+// TestHelloRequestsPipelinedOutput pins the fallback window an attachment
+// Hello claims when its carriage states no preference. A window of one would
+// make every remote frame wait a round trip.
 func TestHelloRequestsPipelinedOutput(t *testing.T) {
 	worker, err := newSessionAttachmentWorker(sessionAttachmentConfig{Request: sessionTestRequest(false), SessionEnvironment: SessionEnvironment{Provenance: SessionEnvironmentRemote}})
 	require.NoError(t, err)
