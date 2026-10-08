@@ -156,8 +156,8 @@ type Daemon struct {
 	animFrame int
 	animWake  chan struct{}
 
-	paletteRecentMu sync.Mutex
-	paletteRecent   []string
+	// paletteHistory is the daemon-wide recent-command order; its mu is a leaf.
+	paletteHistory paletteHistory
 	// daemonTestHooks holds deterministic test seams; production leaves every
 	// hook nil.
 	daemonTestHooks

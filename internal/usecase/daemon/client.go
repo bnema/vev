@@ -29,6 +29,9 @@
 // snapshotWorker.noticeMu guards the active persistence-failure signature; it
 // is a leaf and is never held together with snapshotWorker.mu. Restoration
 // takes d.mu only outside snapshotWorker.mu.
+//
+// paletteHistory.mu guards the daemon-wide recent-command list. It is a leaf:
+// it is only held to copy or rewrite that slice, never while calling out.
 package daemon
 
 import (

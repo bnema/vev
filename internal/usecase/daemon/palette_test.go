@@ -387,7 +387,7 @@ func TestPaletteSelectedActiveSessionSwitchesWithoutRecordingCommandRecency(t *t
 	require.Same(t, target, ac.currentSession())
 	require.Contains(t, target.snapshotAttachments(), ac, "canonical handoff reuses the attached client")
 	require.False(t, ac.overlays.paletteActive())
-	require.Empty(t, d.paletteRecent, "session selections are not command recency")
+	require.Empty(t, d.paletteHistory.recent, "session selections are not command recency")
 	awaitFrame(t, sends, "Output")
 	awaitFrame(t, sends, "Output")
 }
