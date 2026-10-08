@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 
+	"github.com/bnema/vev/internal/domain"
 	"github.com/bnema/vev/internal/domain/layout"
 )
 
@@ -79,6 +80,11 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 	d.sessWg.Go(func() {
 		defer sess.finishFloatingLaunch(launch)
 		p := d.openFloatingPane(sess, spec)
+		if p != nil {
+			// The reader answers color and scheme queries, so the spare
+			// starts with the session theme, as a new tab does.
+			d.applySessionThemeToPane(sess, p)
+		}
 		sess.floatingLaunchMu.Lock()
 		sess.floatingSpareStarting = false
 		if p != nil && !sess.floatingLaunchStopping {
@@ -87,8 +93,9 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 			spare := p
 			spare.onExit = func() {
 				spare.spareExited.Store(true)
-				if spare.ownerSnapshot() == nil {
-					sess.dropFloatingSpare(spare)
+				// Still unclaimed: drop it. A claim takes the spare under the
+				// same lock, then reaps after install when spareExited is set.
+				if sess.dropFloatingSpare(spare) {
 					return
 				}
 				d.reapInstalledFloating(spare)
@@ -123,14 +130,43 @@ func (sess *session) takeFloatingSpare(spec floatingLaunchSpec) (p *pane, had bo
 	return spare.pane, true
 }
 
-// dropFloatingSpare forgets an unclaimed spare whose shell exited.
-func (sess *session) dropFloatingSpare(p *pane) {
+// dropFloatingSpare closes p when it is still the session's unclaimed spare
+// and reports whether it did. A claimed spare is left to its tab.
+func (sess *session) dropFloatingSpare(p *pane) bool {
 	sess.floatingLaunchMu.Lock()
-	if sess.floatingSpare != nil && sess.floatingSpare.pane == p {
+	unclaimed := sess.floatingSpare != nil && sess.floatingSpare.pane == p
+	if unclaimed {
 		sess.floatingSpare = nil
 	}
 	sess.floatingLaunchMu.Unlock()
-	closeFloatingPane(p)
+	if unclaimed {
+		closeFloatingPane(p)
+	}
+	return unclaimed
+}
+
+// applySessionThemeToPane gives a pane the theme of the session's first
+// attachment, as createTab does for a new tab. A headless session leaves the
+// pane unthemed until the next theme application.
+func (d *Daemon) applySessionThemeToPane(sess *session, p *pane) {
+	attachments := sess.snapshotAttachments()
+	if len(attachments) == 0 {
+		return
+	}
+	t := d.effectiveTheme(attachments[0].getClientTheme())
+	p.mu.Lock()
+	applyPaneThemeLocked(p, t, false)
+	p.mu.Unlock()
+}
+
+// floatingSparePane returns the session's unclaimed spare pane, if any.
+func (sess *session) floatingSparePane() *pane {
+	sess.floatingLaunchMu.Lock()
+	defer sess.floatingLaunchMu.Unlock()
+	if sess.floatingSpare == nil {
+		return nil
+	}
+	return sess.floatingSpare.pane
 }
 
 // closeFloatingSpare releases the spare on session teardown. The caller has
@@ -177,8 +213,19 @@ func (d *Daemon) openFloatingPane(sess *session, spec floatingLaunchSpec) *pane 
 // and installs it in the current slot generation. It runs in the launch worker
 // without any architecture lock, because PTY.Resize is external.
 func (d *Daemon) adoptFloatingSpare(sess *session, tb *tab, p *pane, spec floatingLaunchSpec, generation uint64) {
-	if p.geometry != spec.ptyGeometry {
-		if err := p.pty.Resize(spec.ptyGeometry); err != nil {
+	p.resizeMu.Lock()
+	p.mu.Lock()
+	resize := p.geometry != spec.ptyGeometry
+	if resize {
+		// The spare's reader is running: buffer its output across the
+		// resize so the redraw is parsed at the new size.
+		p.resizeApplying = true
+	}
+	p.mu.Unlock()
+	if resize {
+		if err := resizePTYGeometry(p.pty, spec.ptyGeometry); err != nil {
+			d.replayResizePending(sess, tb, p, false, domain.Rect{})
+			p.resizeMu.Unlock()
 			closeFloatingPane(p)
 			d.failFloatingLaunch(sess, tb, generation, true, spec.sessionName, err)
 			return
@@ -190,6 +237,10 @@ func (d *Daemon) adoptFloatingSpare(sess *session, tb *tab, p *pane, spec floati
 	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
 	p.mu.Unlock()
+	if resize {
+		d.replayResizePending(sess, tb, p, false, domain.Rect{})
+	}
+	p.resizeMu.Unlock()
 	d.installFloating(sess, tb, p, generation)
 	if p.spareExited.Load() {
 		// The shell exited before the owner was published, so its reader
