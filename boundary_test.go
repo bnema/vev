@@ -95,6 +95,7 @@ func TestImportBoundaryNegativeFixtures(t *testing.T) {
 		{"pkg rejects internal", modulePath + "/pkg/rawterm", modulePath + "/internal/domain", false, false},
 		{"snapshot adapter accepts codec", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/snapshotcodec", false, true},
 		{"daemon accepts snapshot codec", modulePath + "/internal/usecase/daemon", modulePath + "/internal/snapshotcodec", false, true},
+		{"other adapter rejects snapshot codec", modulePath + "/internal/adapters/ipc", modulePath + "/internal/snapshotcodec", false, false},
 		{"snapshot codec rejects usecase", modulePath + "/internal/snapshotcodec", modulePath + "/internal/usecase/daemon", false, false},
 		{"snapshot codec rejects adapter", modulePath + "/internal/snapshotcodec", modulePath + "/internal/adapters/snapshot", false, false},
 		{"snapshot adapter rejects usecase", modulePath + "/internal/adapters/snapshot", modulePath + "/internal/usecase/daemon", false, false},
@@ -224,6 +225,11 @@ func packageImportDenied(source, target string) bool {
 	usecasePrefix := modulePath + "/internal/usecase/"
 	under := func(path, root string) bool {
 		return path == root || strings.HasPrefix(path, root+"/")
+	}
+	// The durable snapshot format is shared by the daemon and its one
+	// repository adapter; no other adapter may depend on it.
+	if target == modulePath+"/internal/snapshotcodec" && strings.HasPrefix(source, modulePath+"/internal/adapters/") {
+		return source != modulePath+"/internal/adapters/snapshot"
 	}
 	switch {
 	case under(source, brokerPkg):

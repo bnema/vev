@@ -496,6 +496,7 @@ func TestRenderCoordinatorAckDoesNotBypassAnUnexpiredDeadline(t *testing.T) {
 func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 	t.Run("expired deadline flushes exactly once after readiness", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
+		h.rc.attach(&attachedClient{})
 		h.ackReady.Store(false)
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput, reset: true, producer: "render.go"})
 		timer := awaitCoordinatorScheduledTimer(t, h.clk)
@@ -516,6 +517,7 @@ func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 
 	t.Run("lifecycle clears deferred work and urgent explicit fires stay immediate", func(t *testing.T) {
 		h := newCoordinatorHarness(t)
+		h.rc.attach(&attachedClient{})
 		h.ackReady.Store(false)
 		h.rc.invalidate(renderInvalidation{class: invalidateOutput})
 		timer := awaitCoordinatorScheduledTimer(t, h.clk)
@@ -536,6 +538,7 @@ func TestRenderCoordinatorAckFlushesOnlyExpiredAckDeferredWork(t *testing.T) {
 
 func TestRenderCoordinatorAckGateBlocksCompositionUntilAck(t *testing.T) {
 	h := newCoordinatorHarness(t)
+	h.rc.attach(&attachedClient{})
 	h.ackReady.Store(false)
 
 	h.rc.invalidate(renderInvalidation{class: invalidateOutput})

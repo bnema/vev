@@ -1129,7 +1129,7 @@ func (c *renderCoordinator) fireWithTimerTokenAndLease(token *timerToken, gen ui
 		ackStart = newACKBlockedSpan(c.opts.observer)
 		c.ackBlocked = ackStart
 	}
-	c.ackDeferred = len(c.ackDeferredFor) != 0 || (len(leases) == 0 && blockedByAck && deadline)
+	c.ackDeferred = len(c.ackDeferredFor) != 0
 	if !outputReady && !allDelivered {
 		c.mu.Unlock()
 		stopDetachedTimer(worker)
