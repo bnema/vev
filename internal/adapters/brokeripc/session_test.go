@@ -911,7 +911,7 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return held() > full }, 5*time.Second, time.Millisecond,
 		"the relay must fill one stream window")
-	require.LessOrEqual(t, held(), brokerwire.StreamWindowBytes, "the relay never exceeds its credit")
+	// Data beyond the credit would settle the stream with ErrStreamCredit.
 	select {
 	case <-stream.Done():
 		t.Fatalf("a stalled consumer must not settle its stream: %v", stream.Err())

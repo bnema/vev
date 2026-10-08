@@ -791,7 +791,9 @@ func clientStreamDataFromWire(message *wire.ClientStreamData, maxChunkBytes uint
 	if len(data) == 0 {
 		return ClientStreamData{}, ErrInvalidMessage
 	}
-	return ClientStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: append([]byte(nil), data...)}, nil
+	// proto.Unmarshal copies bytes fields out of the payload, so the caller
+	// owns data without another copy.
+	return ClientStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: data}, nil
 }
 
 func encodeServerEnvelope(message ServerMessage, maxChunkBytes uint64) (*wire.BrokerServerEnvelope, error) {
@@ -1545,7 +1547,9 @@ func serverStreamDataFromWire(message *wire.ServerStreamData, maxChunkBytes uint
 	if len(data) == 0 {
 		return ServerStreamData{}, ErrInvalidMessage
 	}
-	return ServerStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: append([]byte(nil), data...)}, nil
+	// proto.Unmarshal copies bytes fields out of the payload, so the caller
+	// owns data without another copy.
+	return ServerStreamData{Epoch: epoch, Connection: connection, Stream: stream, Data: data}, nil
 }
 
 func streamClosedToWire(m StreamClosed) (*wire.StreamClosed, error) {

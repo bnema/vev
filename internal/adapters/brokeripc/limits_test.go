@@ -173,7 +173,7 @@ func TestStreamPipeCloseReleasesParkedReader(t *testing.T) {
 	require.ErrorIs(t, parked.deliver([]byte("late")), ErrStreamGone)
 }
 
-// TestStreamPipeOutboundError proves a failing outbound hook surfaces instead of
+// TestStreamPipeOutboundError proves a failing sendFrame hook surfaces instead of
 // silently dropping bytes.
 func TestStreamPipeOutboundError(t *testing.T) {
 	failure := errors.New("outbound failed")

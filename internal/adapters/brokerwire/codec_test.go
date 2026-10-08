@@ -377,6 +377,22 @@ func TestBrokerClientVariants(t *testing.T) {
 	}
 }
 
+// TestBrokerStreamDataOwnsItsBytes proves decoded stream data never aliases the
+// payload: receivers reuse their buffers, and brokeripc queues Data as is.
+func TestBrokerStreamDataOwnsItsBytes(t *testing.T) {
+	connection := testConnectionID(0x11)
+	client := mustEncodeClient(t, ClientStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")})
+	server := mustEncodeServer(t, ServerStreamData{Epoch: 7, Connection: connection, Stream: 3, Data: []byte("frame")})
+	decodedClient, err := DecodeClient(client, testEnvelopeCeiling, testChunkCeiling)
+	require.NoError(t, err)
+	decodedServer, err := DecodeServer(server, testEnvelopeCeiling, testChunkCeiling)
+	require.NoError(t, err)
+	clear(client)
+	clear(server)
+	require.Equal(t, []byte("frame"), decodedClient.(ClientStreamData).Data)
+	require.Equal(t, []byte("frame"), decodedServer.(ServerStreamData).Data)
+}
+
 // TestBrokerOpenStreamAdmissionVariants pins the attachment-admission
 // contract: exact, create-named, and create-ephemeral round-trip, control
 // carries none, and wrong admission/purpose/name/target combinations are
