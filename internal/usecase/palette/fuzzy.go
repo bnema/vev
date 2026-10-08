@@ -38,14 +38,8 @@ func Fuzzy(results []Result, query string) []Match {
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
-		if a.rank != b.rank {
-			return a.rank < b.rank
-		}
-		if a.span != b.span {
-			return a.span < b.span
-		}
-		if a.first != b.first {
-			return a.first < b.first
+		if a.rank != b.rank || a.span != b.span || a.first != b.first {
+			return fuzzy.Less(a.rank, fuzzy.Score{Span: a.span, First: a.first}, b.rank, fuzzy.Score{Span: b.span, First: b.first})
 		}
 		if a.Result.Kind() != b.Result.Kind() {
 			return a.Result.Kind() < b.Result.Kind()
@@ -86,8 +80,10 @@ func score(result Result, needle string, needleRunes []rune, order int) (Match, 
 		return match, true
 	}
 	if cmd, ok := result.Command(); ok {
-		if positions, ok := fuzzy.SubsequencePositions([]rune(strings.ToLower(cmd.Desc)), needleRunes); ok {
-			match.rank, match.span, match.first = 5, positions[len(positions)-1]-positions[0]+1, positions[0]
+		// Description matches only rank and never highlight, so Positions
+		// stays empty.
+		if matched, ok := fuzzy.Match(strings.ToLower(cmd.Desc), needle, needleRunes); ok {
+			match.rank, match.span, match.first = 5, matched.Span, matched.First
 			return match, true
 		}
 	}
