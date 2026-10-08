@@ -148,18 +148,9 @@ type Daemon struct {
 	// re-suspension, detach, or session teardown can never be retired by a
 	// stale timer. Guarded by mu.
 	suspended map[*attachedClient]*suspendedAttachmentRetention
-	// graphicsNamespaces reserves deterministic, attachment/session-scoped Kitty
-	// ID blocks. Once a block may have reached an outer terminal it remains in
-	// this bounded table for the daemon lifetime: side-effect Output frames have
-	// no terminal ACK. Pool exhaustion disables graphics for new attachments and
-	// leaves their ordinary text output intact.
-	graphicsNamespaces           map[uint64]struct{}
-	graphicsNamespaceFences      map[uint64]uint64
-	graphicsNamespaceQuarantines map[uint64]*graphicsNamespaceQuarantine
-	// graphicsNamespaceSalt separates daemon lifetimes before attachment keys
-	// are hashed. Kitty IDs are terminal-global, so a restarted or neighboring
-	// daemon must not deterministically reopen the previous daemon's block.
-	graphicsNamespaceSalt uint64
+	// graphics reserves attachment/session-scoped Kitty ID blocks. Guarded by
+	// mu; see graphicsNamespacePool.
+	graphics graphicsNamespacePool
 
 	attnMu    sync.Mutex
 	animFrame int
@@ -708,32 +699,29 @@ func New(ptys ports.PTYFactory, clock ports.Clock, log *slog.Logger, opts ...Opt
 	}
 	paneProcessCtx, paneProcessCancel := context.WithCancel(context.Background())
 	d := &Daemon{
-		sessions:                     make(map[domain.SessionID]*session),
-		inactive:                     make(map[string]inactiveSession),
-		creating:                     make(map[string]struct{}),
-		resume:                       newResumeCredentials(),
-		suspended:                    make(map[*attachedClient]*suspendedAttachmentRetention),
-		graphicsNamespaces:           make(map[uint64]struct{}),
-		graphicsNamespaceFences:      make(map[uint64]uint64),
-		graphicsNamespaceQuarantines: make(map[uint64]*graphicsNamespaceQuarantine),
-		graphicsNamespaceSalt:        newGraphicsNamespaceSalt(),
-		paneProcessCtx:               paneProcessCtx,
-		paneProcessCancel:            paneProcessCancel,
-		ptys:                         ptys,
-		clock:                        clock,
-		log:                          log,
-		baseEnv:                      os.Environ(),
-		shell:                        defaultShellCommand,
-		dirOrHome:                    dirOrHome,
-		done:                         make(chan struct{}),
-		restoreDone:                  make(chan struct{}),
-		animWake:                     make(chan struct{}, 1),
-		snapshotJobs:                 make(chan *snapshotCapture, snapshotQueueCapacity),
-		snapshotAdmitted:             make(map[*snapshotCapture]struct{}),
-		snapshotWake:                 make(chan struct{}, 1),
-		notices:                      newNoticeCenter(),
-		resumeParkGrace:              defaultResumeParkGrace,
-		suspendedSafetyExpiry:        defaultSuspendedSafetyExpiry,
+		sessions:              make(map[domain.SessionID]*session),
+		inactive:              make(map[string]inactiveSession),
+		creating:              make(map[string]struct{}),
+		resume:                newResumeCredentials(),
+		suspended:             make(map[*attachedClient]*suspendedAttachmentRetention),
+		graphics:              newGraphicsNamespacePool(),
+		paneProcessCtx:        paneProcessCtx,
+		paneProcessCancel:     paneProcessCancel,
+		ptys:                  ptys,
+		clock:                 clock,
+		log:                   log,
+		baseEnv:               os.Environ(),
+		shell:                 defaultShellCommand,
+		dirOrHome:             dirOrHome,
+		done:                  make(chan struct{}),
+		restoreDone:           make(chan struct{}),
+		animWake:              make(chan struct{}, 1),
+		snapshotJobs:          make(chan *snapshotCapture, snapshotQueueCapacity),
+		snapshotAdmitted:      make(map[*snapshotCapture]struct{}),
+		snapshotWake:          make(chan struct{}, 1),
+		notices:               newNoticeCenter(),
+		resumeParkGrace:       defaultResumeParkGrace,
+		suspendedSafetyExpiry: defaultSuspendedSafetyExpiry,
 		barScripts: &barScriptState{
 			cfg:         barConfigFromDomain(domain.Defaults().Bar),
 			outputs:     make(map[domain.SessionID]barScriptOutputs),

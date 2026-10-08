@@ -5,7 +5,6 @@ import (
 	"compress/zlib"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -106,11 +105,6 @@ var (
 	graphicsNamespaceFence      atomic.Uint64
 )
 
-type graphicsNamespaceQuarantine struct {
-	base  uint64
-	fence uint64
-}
-
 func nextGraphicsNamespaceFence() uint64 {
 	fence := graphicsNamespaceFence.Add(1)
 	if fence == 0 {
@@ -167,34 +161,7 @@ func (d *Daemon) reserveGraphicsNamespaceLeaseLocked(key string) (uint64, uint64
 	if d == nil {
 		return 0, 0
 	}
-	if d.graphicsNamespaces == nil {
-		d.graphicsNamespaces = make(map[uint64]struct{})
-	}
-	if d.graphicsNamespaceFences == nil {
-		d.graphicsNamespaceFences = make(map[uint64]uint64)
-	}
-	if d.graphicsNamespaceQuarantines == nil {
-		d.graphicsNamespaceQuarantines = make(map[uint64]*graphicsNamespaceQuarantine)
-	}
-	hashInput := []byte(key)
-	if d.graphicsNamespaceSalt != 0 {
-		salt := make([]byte, 8, 8+len(key))
-		binary.BigEndian.PutUint64(salt, d.graphicsNamespaceSalt)
-		hashInput = append(salt, hashInput...)
-	}
-	digest := sha256.Sum256(hashInput)
-	preferred := binary.BigEndian.Uint64(digest[:8]) % graphicsIDNamespaceCount
-	for offset := uint64(0); offset < graphicsIDNamespaceCount; offset++ {
-		block := (preferred + offset) % graphicsIDNamespaceCount
-		if _, exists := d.graphicsNamespaces[block]; exists {
-			continue
-		}
-		fence := nextGraphicsNamespaceFence()
-		d.graphicsNamespaces[block] = struct{}{}
-		d.graphicsNamespaceFences[block] = fence
-		return block*graphicsIDNamespaceSize + 1, fence
-	}
-	return 0, 0
+	return d.graphics.reserveLease(key)
 }
 
 func (d *Daemon) releaseGraphicsNamespace(base uint64) {
@@ -210,30 +177,17 @@ func (d *Daemon) releaseGraphicsNamespace(base uint64) {
 // already held. A quarantined block is intentionally not released by this
 // legacy base-only helper; only its fenced cleanup lifecycle may retire it.
 func (d *Daemon) releaseGraphicsNamespaceLocked(base uint64) {
-	if d == nil || base == 0 || base%graphicsIDNamespaceSize != 1 {
+	if d == nil {
 		return
 	}
-	block := (base - 1) / graphicsIDNamespaceSize
-	if _, quarantined := d.graphicsNamespaceQuarantines[block]; quarantined {
-		return
-	}
-	delete(d.graphicsNamespaces, block)
-	delete(d.graphicsNamespaceFences, block)
+	d.graphics.releaseBase(base)
 }
 
 func (d *Daemon) releaseGraphicsNamespaceLeaseLocked(state *graphicsOutputState) {
-	if d == nil || state == nil || state.namespaceBase == 0 || state.namespaceBase%graphicsIDNamespaceSize != 1 {
+	if d == nil {
 		return
 	}
-	block := (state.namespaceBase - 1) / graphicsIDNamespaceSize
-	if _, quarantined := d.graphicsNamespaceQuarantines[block]; quarantined {
-		return
-	}
-	if current := d.graphicsNamespaceFences[block]; current != 0 && current != state.namespaceFence {
-		return
-	}
-	delete(d.graphicsNamespaces, block)
-	delete(d.graphicsNamespaceFences, block)
+	d.graphics.releaseLease(state)
 }
 
 // quarantineGraphicsNamespaceLocked fences one exact namespace instance for
@@ -241,27 +195,10 @@ func (d *Daemon) releaseGraphicsNamespaceLeaseLocked(state *graphicsOutputState)
 // completion must never release a block that may have reached an outer terminal.
 // The caller holds d.mu.
 func (d *Daemon) quarantineGraphicsNamespaceLocked(state *graphicsOutputState) *graphicsNamespaceQuarantine {
-	if d == nil || state == nil || state.namespaceBase == 0 || state.namespaceBase%graphicsIDNamespaceSize != 1 {
+	if d == nil {
 		return nil
 	}
-	block := (state.namespaceBase - 1) / graphicsIDNamespaceSize
-	if d.graphicsNamespaces == nil {
-		d.graphicsNamespaces = make(map[uint64]struct{})
-	}
-	if d.graphicsNamespaceFences == nil {
-		d.graphicsNamespaceFences = make(map[uint64]uint64)
-	}
-	if d.graphicsNamespaceQuarantines == nil {
-		d.graphicsNamespaceQuarantines = make(map[uint64]*graphicsNamespaceQuarantine)
-	}
-	if _, exists := d.graphicsNamespaceQuarantines[block]; exists {
-		return nil
-	}
-	d.graphicsNamespaces[block] = struct{}{}
-	d.graphicsNamespaceFences[block] = state.namespaceFence
-	q := &graphicsNamespaceQuarantine{base: state.namespaceBase, fence: state.namespaceFence}
-	d.graphicsNamespaceQuarantines[block] = q
-	return q
+	return d.graphics.quarantine(state)
 }
 
 func cloneGraphicsOutputState(in *graphicsOutputState) graphicsOutputState {
