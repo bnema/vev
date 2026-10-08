@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bnema/vev/internal/ports"
 )
 
 const (
@@ -28,7 +30,7 @@ func TestMain(m *testing.M) {
 	// runs.
 	if len(os.Args) >= 2 && os.Getenv(brokerHelperEnv) == "1" {
 		switch os.Args[1] {
-		case brokerMuxStdioCommand, brokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand,
+		case ports.BrokerMuxStdioCommand, ports.BrokerMuxQUICBootstrapCommand, brokerMuxQUICProxyCommand,
 			brokerReadyCommand,
 			productionBrokerServeCommand, productionBrokerLauncherCommand, "--daemon":
 			recordBrokerHelperProcess(os.Args[1])

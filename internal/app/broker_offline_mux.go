@@ -63,14 +63,10 @@ import (
 // authentication, and the absence of a remote PTY are preserved: the helpers
 // only add explicit trust inputs that narrow verification, never disable it.
 
-const (
-	// brokerMuxStdioCommand is the hidden remote SSH stdio mux bridge.
-	brokerMuxStdioCommand = ports.BrokerMuxStdioCommand
-	// brokerMuxQUICBootstrapCommand is the hidden remote QUIC mux bootstrap.
-	brokerMuxQUICBootstrapCommand = ports.BrokerMuxQUICBootstrapCommand
-	// brokerMuxQUICProxyCommand is the hidden detached remote QUIC mux proxy.
-	brokerMuxQUICProxyCommand = "_broker-mux-quic-proxy"
-)
+// brokerMuxQUICProxyCommand is the hidden detached remote QUIC mux proxy. The
+// stdio and bootstrap helpers are named by ports.BrokerMuxStdioCommand and
+// ports.BrokerMuxQUICBootstrapCommand because durable routes persist them.
+const brokerMuxQUICProxyCommand = "_broker-mux-quic-proxy"
 
 // brokerMuxSetupTimeout bounds each side's bootstrap readiness wait. On the
 // broker side it caps the wait for the local ssh bootstrap child's readiness
@@ -103,10 +99,6 @@ const brokerMuxWaitDelay = 2 * time.Second
 // brokerDaemonStartArgvFlag's exact spelling, so the two sides can never drift.
 const brokerDaemonStartArg = "--daemon-start"
 
-// brokerScopeArg is the scope flag carried by every durable remote route argv
-// (see ports.BrokerRouteForTransport). Stored routes keep it verbatim.
-const brokerScopeArg = ports.BrokerRouteScopeArg
-
 // brokerMuxOptions is the parsed hidden mux helper invocation.
 type brokerMuxOptions struct {
 	// startMode is the daemon-start authorization the broker propagated. An
@@ -125,11 +117,11 @@ func parseBrokerMuxArgs(name string, kind cmdKind, args []string) (command, erro
 	scopeSet, startSet := false, false
 	for index := 0; index < len(args); {
 		switch args[index] {
-		case brokerScopeArg:
+		case ports.BrokerRouteScopeArg:
 			// The scope flag is part of every durable remote route argv, so it
 			// stays accepted; the helper always serves the per-user scope.
 			if scopeSet {
-				return command{}, usagef("`%s` received duplicate %s", name, brokerScopeArg)
+				return command{}, usagef("`%s` received duplicate %s", name, ports.BrokerRouteScopeArg)
 			}
 			scopeSet = true
 			index++
@@ -495,7 +487,7 @@ func runBrokerMuxQUICBootstrapCommand(ctx context.Context, options brokerMuxOpti
 	}
 	defer func() { _ = devNull.Close() }()
 
-	args := []string{brokerMuxQUICProxyCommand, brokerScopeArg}
+	args := []string{brokerMuxQUICProxyCommand, ports.BrokerRouteScopeArg}
 	flag, err := brokerDaemonStartArgvFlag(options.startMode)
 	if err != nil {
 		_ = writer.Close()

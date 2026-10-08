@@ -128,8 +128,8 @@ func TestProductionBrokerRemoteMuxTransports(t *testing.T) {
 	for _, tc := range []struct {
 		name, helper string
 	}{
-		{hostTransportSSH, brokerMuxStdioCommand},
-		{hostTransportQUIC, brokerMuxQUICBootstrapCommand},
+		{hostTransportSSH, ports.BrokerMuxStdioCommand},
+		{hostTransportQUIC, ports.BrokerMuxQUICBootstrapCommand},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir := shortTempDir(t, "vb")

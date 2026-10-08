@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/bnema/vev/internal/domain"
+	"github.com/bnema/vev/internal/ports"
 	"github.com/bnema/vev/internal/protocol"
 )
 
@@ -172,10 +173,10 @@ func parseSubcommand(args []string) (command, error) {
 	case brokerReadyCommand:
 		options, err := parseBrokerReadyArgs(args[1:])
 		return command{kind: kindBrokerReady, brokerReady: options}, err
-	case brokerMuxStdioCommand:
-		return parseBrokerMuxArgs(brokerMuxStdioCommand, kindBrokerMuxStdio, args[1:])
-	case brokerMuxQUICBootstrapCommand:
-		return parseBrokerMuxArgs(brokerMuxQUICBootstrapCommand, kindBrokerMuxQUICBootstrap, args[1:])
+	case ports.BrokerMuxStdioCommand:
+		return parseBrokerMuxArgs(ports.BrokerMuxStdioCommand, kindBrokerMuxStdio, args[1:])
+	case ports.BrokerMuxQUICBootstrapCommand:
+		return parseBrokerMuxArgs(ports.BrokerMuxQUICBootstrapCommand, kindBrokerMuxQUICBootstrap, args[1:])
 	case brokerMuxQUICProxyCommand:
 		return parseBrokerMuxArgs(brokerMuxQUICProxyCommand, kindBrokerMuxQUICProxy, args[1:])
 	case uiRemoteCleanupCommand:
