@@ -245,7 +245,12 @@ func TestPickerControllerInputRouting(t *testing.T) {
 		wantOp          pickerOp
 	}{
 		{name: "down", chunk: []byte("\x1b[B"), wantCursor: "beta"},
-		{name: "up skips informational host row", chunk: []byte("\x1b[A"), wantCursor: "alpha"},
+		{name: "up reaches the section header", chunk: []byte("\x1b[A"), wantNoSelection: true},
+		{name: "left climbs to the section header", chunk: []byte("\x1b[D"), wantNoSelection: true},
+		{name: "h climbs to the section header", chunk: []byte("h"), wantNoSelection: true},
+		{name: "fold and unfold keep the list", chunk: []byte("hhl\x1b[B"), wantCursor: "alpha"},
+		{name: "enter on a section header does not commit", chunk: []byte("h\r\r\x1b[B"), wantCursor: "alpha"},
+		{name: "h and l are literal in search", chunk: []byte("/hl"), wantNoSelection: true, wantSearch: true, wantQuery: "hl"},
 		{name: "search entry", chunk: []byte("/"), wantCursor: "alpha", wantSearch: true},
 		{name: "search text", chunk: []byte("/al"), wantCursor: "alpha", wantSearch: true, wantQuery: "al"},
 		{name: "enter commits", chunk: []byte("/al\r"), wantCursor: "alpha", wantSearch: true, wantQuery: "al", wantOp: pickerOp{commit: true}},
@@ -280,7 +285,7 @@ func TestPickerControllerInputRouting(t *testing.T) {
 			}
 			if tt.wantNoSelection {
 				_, ok := controller.CursorKey()
-				require.False(t, ok, "the host row is a cursor destination but not a selection")
+				require.False(t, ok, "the cursor row is not a selection")
 				return
 			}
 			want := alphaKey

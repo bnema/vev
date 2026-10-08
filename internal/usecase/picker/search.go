@@ -1,7 +1,6 @@
 package picker
 
 import (
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -22,14 +21,10 @@ const (
 type fieldMatch struct {
 	field     matchField
 	positions []int
-	rank      int
-	span      int
-	first     int
 }
 
 type searchMatch struct {
 	fieldMatches []fieldMatch
-	best         fieldMatch
 }
 
 func (m searchMatch) positions(field matchField) []int {
@@ -58,6 +53,8 @@ func (m *Model) ExitSearch() {
 	m.query.SetValue("")
 	m.searchMatches = nil
 	m.matchRows = nil
+	m.refreshView()
+	m.normalizeCursor(-1)
 }
 
 func (m *Model) SearchActive() bool { return m != nil && m.searchActive }
@@ -168,33 +165,11 @@ func (m *Model) rowMatches(idx int) bool {
 	return ok
 }
 
-func (m *Model) moveSearch(delta int) {
-	if m == nil {
-		return
-	}
-	if len(m.matchRows) == 0 {
-		// The query shows nothing, so no row may hold the cursor.
-		m.selected = -1
-		return
-	}
-	position := slices.Index(m.matchRows, m.selected)
-	if position < 0 {
-		if delta > 0 {
-			m.selected = m.matchRows[0]
-		} else {
-			m.selected = m.matchRows[len(m.matchRows)-1]
-		}
-		return
-	}
-	next := position + delta
-	if next >= 0 && next < len(m.matchRows) {
-		m.selected = m.matchRows[next]
-	}
-}
-
 // refreshSearch recomputes the rows the active query shows and re-places the
-// cursor: the editor never leaves it on a row the query hides.
-func (m *Model) refreshSearch(selectBest bool) int {
+// cursor: the editor never leaves it on a row the query hides. Matches keep
+// the list's tree order, so typing narrows the list without reordering it;
+// when the query changed (selectFirst) the cursor rests on the first match.
+func (m *Model) refreshSearch(selectFirst bool) {
 	m.searchMatches = make(map[int]searchMatch)
 	m.matchRows = make([]int, 0, len(m.rows))
 	query := strings.ToLower(m.query.Value())
@@ -204,15 +179,14 @@ func (m *Model) refreshSearch(selectBest bool) int {
 				m.matchRows = append(m.matchRows, idx)
 			}
 		}
-		if selectBest {
+		m.refreshView()
+		if selectFirst {
 			m.normalizeCursor(-1)
 		}
-		return -1
+		return
 	}
 
 	needleRunes := []rune(query)
-	bestIdx := -1
-	var best fieldMatch
 	for idx, row := range m.rows {
 		if !row.focusable() {
 			continue
@@ -223,19 +197,14 @@ func (m *Model) refreshSearch(selectBest bool) int {
 		}
 		m.searchMatches[idx] = matched
 		m.matchRows = append(m.matchRows, idx)
-		if bestIdx < 0 || lessFieldMatch(matched.best, best) {
-			bestIdx, best = idx, matched.best
+	}
+	m.refreshView()
+	if selectFirst {
+		m.selected = -1
+		if len(m.matchRows) > 0 {
+			m.selected = m.matchRows[0]
 		}
 	}
-	if selectBest {
-		if bestIdx >= 0 {
-			m.selected = bestIdx
-		} else {
-			m.selected = -1
-		}
-		m.normalizeCursor(bestIdx)
-	}
-	return bestIdx
 }
 
 // normalizeCursor places the cursor on a row the active query still shows. It
@@ -249,6 +218,21 @@ func (m *Model) normalizeCursor(best int) {
 	if best >= 0 {
 		m.selected = best
 		return
+	}
+	if m.searchRestricted() {
+		// The query shows nothing the cursor may rest on.
+		m.selected = -1
+		if len(m.matchRows) > 0 {
+			m.selected = m.matchRows[0]
+		}
+		return
+	}
+	if m.selected >= 0 && m.selected < len(m.hidden) && m.hidden[m.selected] {
+		// A row a collapsed section hides leaves the cursor on that section.
+		if section := m.sectionOf(m.selected); m.eligible(section) {
+			m.selected = section
+			return
+		}
 	}
 	hint := m.selected
 	m.selected = -1
@@ -275,9 +259,6 @@ func matchRow(row row, query string, needleRunes []rune) (searchMatch, bool) {
 			continue
 		}
 		result.fieldMatches = append(result.fieldMatches, match)
-		if len(result.fieldMatches) == 1 || lessFieldMatch(match, result.best) {
-			result.best = match
-		}
 	}
 	return result, len(result.fieldMatches) != 0
 }
@@ -287,12 +268,5 @@ func scoreField(field matchField, text, query string, needle []rune) (fieldMatch
 	if !ok {
 		return fieldMatch{}, false
 	}
-	return fieldMatch{field: field, positions: matched.Positions, rank: int(matched.Kind), span: matched.Span, first: matched.First}, true
-}
-
-func lessFieldMatch(left, right fieldMatch) bool {
-	if left.rank != right.rank || left.span != right.span || left.first != right.first {
-		return fuzzy.Less(left.rank, fuzzy.Score{Span: left.span, First: left.first}, right.rank, fuzzy.Score{Span: right.span, First: right.first})
-	}
-	return left.field < right.field
+	return fieldMatch{field: field, positions: matched.Positions}, true
 }

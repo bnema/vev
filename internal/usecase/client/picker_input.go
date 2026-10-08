@@ -292,6 +292,12 @@ func decodeEscape(buf []byte, batch *pickerInputBatch) (consumed int, held []byt
 	case 'B':
 		batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Down"})
 		return 3, nil, false
+	case 'C':
+		batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Right"})
+		return 3, nil, false
+	case 'D':
+		batch.events = append(batch.events, pickerEvent{kind: pickerEventKey, key: "Left"})
+		return 3, nil, false
 	}
 	// Any other CSI/SS3 sequence (mouse reports, probes, paste markers) is
 	// consumed through its final byte and dropped.
