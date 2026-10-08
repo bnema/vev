@@ -213,6 +213,11 @@ func filterUnsupportedKittyAnimationResponses(data []byte) []byte {
 // bytes that belonged to the old owner.
 func (d *Daemon) applyPanePTYEffects(p *pane, effects panePTYEffects) {
 	owner := effects.lease.owner
+	if owner == nil && p.prestarted && len(effects.responses) > 0 {
+		// An unclaimed spare still answers its shell's startup queries; a
+		// closed spare only fails the write.
+		_, _ = p.pty.Write(effects.responses)
+	}
 	if owner == nil || owner.session == nil || owner.tab == nil {
 		return
 	}

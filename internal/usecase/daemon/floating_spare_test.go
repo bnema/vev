@@ -183,3 +183,53 @@ type pidPTY struct {
 }
 
 func (p *pidPTY) Pid() int { return p.pid }
+
+// queryPTY is a floating shell that sends one Primary Device Attribute query
+// at startup and records what the daemon writes back.
+type queryPTY struct {
+	sparePTY
+	sent    chan struct{}
+	replied chan []byte
+}
+
+func (p *queryPTY) Read(b []byte) (int, error) {
+	select {
+	case <-p.sent:
+		return p.sparePTY.Read(b)
+	default:
+		close(p.sent)
+		return copy(b, "\x1b[c"), nil
+	}
+}
+
+func (p *queryPTY) Write(b []byte) (int, error) {
+	p.replied <- append([]byte(nil), b...)
+	return len(b), nil
+}
+
+type queryFactory struct{ pty *queryPTY }
+
+func (f *queryFactory) Open(ctx context.Context, _ string, _ []string, _ []string, _ string, _ domain.Geometry) (ports.PTY, error) {
+	f.pty.ctx = ctx
+	return f.pty, nil
+}
+
+func TestFloatingSpareAnswersStartupQueriesBeforeClaim(t *testing.T) {
+	pty := &queryPTY{sparePTY: sparePTY{closed: make(chan struct{})}, sent: make(chan struct{}), replied: make(chan []byte, 4)}
+	d := newTestDaemon(t, &queryFactory{pty: pty}, stubClock{})
+	d.ApplyConfig(domain.Config{Floating: domain.FloatingConfig{Width: 80, Height: 80}})
+	tb := newTab(&pidPTY{pid: 1}, domain.Size{Cols: 80, Rows: 24})
+	tb.ctx, tb.cancel = context.WithCancel(t.Context())
+	sess := &session{sessionCore: sessionCore{name: "work"}, tabs: []*tab{tb}, ctx: t.Context()}
+
+	d.ensureFloatingWarm(sess, tb)
+	select {
+	case reply := <-pty.replied:
+		require.Contains(t, string(reply), "\x1b[?", "the spare must answer DA1 while unclaimed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unclaimed spare never answered its shell's startup query")
+	}
+
+	sess.stopInMemoryLifecycle()
+	d.sessWg.Wait()
+}

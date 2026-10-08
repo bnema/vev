@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"strings"
+
 	"github.com/bnema/vev/internal/domain/layout"
 )
 
@@ -8,20 +10,39 @@ import (
 // than by a tab. The first tab that opens its floating pane claims it, and the
 // session then starts a new spare in the background, so a session keeps at
 // most one idle floating shell instead of one hidden shell per tab. A spare is
-// never persisted or restored. Its reader starts only once a tab installs it;
-// until then the kernel PTY buffer holds its first prompt. Its VEV identity
-// names the tab that started it; floating panes are not --self targets.
+// never persisted or restored. Its reader starts with the shell, so startup
+// terminal queries are answered before any claim; with no owner its screen
+// changes publish nothing. Its VEV identity names the tab that started it;
+// floating panes are not --self targets.
 //
-// A claim takes the claiming tab's geometry (resize before the reader starts)
-// and cwd: a spare started in another directory is discarded and the claim
-// launches a fresh shell instead.
+// A claim takes the claiming tab's geometry and requires the same cwd,
+// floating.command, shell and environment: a mismatched spare is discarded and
+// the claim launches a fresh shell instead.
 //
 // The spare is guarded by session.floatingLaunchMu, which is never held across
 // PTY operations or architecture locks.
 type floatingSpare struct {
-	pane    *pane
-	cwd     string
-	command string
+	pane *pane
+	key  floatingSpareKey
+}
+
+// floatingSpareKey is every launch input a claim must share with the spare.
+// env excludes the per-launch VEV identity.
+type floatingSpareKey struct {
+	cwd, floatingCommand, command, args, env string
+}
+
+func spareKey(spec floatingLaunchSpec) floatingSpareKey {
+	env := make([]string, 0, len(spec.env))
+	for _, entry := range spec.env {
+		if key, _, _ := environmentEntry(entry); key != "VEV" {
+			env = append(env, entry)
+		}
+	}
+	return floatingSpareKey{
+		cwd: spec.cwd, floatingCommand: spec.floatingCommand, command: spec.command,
+		args: strings.Join(spec.args, "\x00"), env: strings.Join(env, "\x00"),
+	}
 }
 
 // ensureFloatingSpare starts the session's spare when none exists or is
@@ -61,7 +82,19 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 		sess.floatingLaunchMu.Lock()
 		sess.floatingSpareStarting = false
 		if p != nil && !sess.floatingLaunchStopping {
-			sess.floatingSpare = &floatingSpare{pane: p, cwd: spec.cwd, command: cfg.Command}
+			sess.floatingSpare = &floatingSpare{pane: p, key: spareKey(spec)}
+			p.prestarted = true
+			spare := p
+			spare.onExit = func() {
+				spare.spareExited.Store(true)
+				if spare.ownerSnapshot() == nil {
+					sess.dropFloatingSpare(spare)
+					return
+				}
+				d.reapInstalledFloating(spare)
+			}
+			d.sessWg.Add(1)
+			go d.readPanePTY(p)
 			p = nil
 		}
 		sess.floatingLaunchMu.Unlock()
@@ -72,10 +105,10 @@ func (d *Daemon) ensureFloatingSpare(sess *session, tb *tab) {
 }
 
 // takeFloatingSpare removes the session spare. It returns the pane when the
-// spare was started for cwd and command; a mismatched spare is closed because
-// it can never serve this directory or config. had reports whether a spare
+// spare was started with the same launch inputs as spec; a mismatched spare is
+// closed because it can never serve this launch. had reports whether a spare
 // existed, so the caller knows to start its replacement.
-func (sess *session) takeFloatingSpare(cwd, command string) (p *pane, had bool) {
+func (sess *session) takeFloatingSpare(spec floatingLaunchSpec) (p *pane, had bool) {
 	sess.floatingLaunchMu.Lock()
 	spare := sess.floatingSpare
 	sess.floatingSpare = nil
@@ -83,11 +116,21 @@ func (sess *session) takeFloatingSpare(cwd, command string) (p *pane, had bool) 
 	if spare == nil {
 		return nil, false
 	}
-	if spare.cwd != cwd || spare.command != command {
+	if spare.key != spareKey(spec) {
 		closeFloatingPane(spare.pane)
 		return nil, true
 	}
 	return spare.pane, true
+}
+
+// dropFloatingSpare forgets an unclaimed spare whose shell exited.
+func (sess *session) dropFloatingSpare(p *pane) {
+	sess.floatingLaunchMu.Lock()
+	if sess.floatingSpare != nil && sess.floatingSpare.pane == p {
+		sess.floatingSpare = nil
+	}
+	sess.floatingLaunchMu.Unlock()
+	closeFloatingPane(p)
 }
 
 // closeFloatingSpare releases the spare on session teardown. The caller has
@@ -147,6 +190,10 @@ func (d *Daemon) adoptFloatingSpare(sess *session, tb *tab, p *pane, spec floati
 	p.rect = spec.geometry.ptyRect()
 	p.popupGeometry = spec.geometry
 	p.mu.Unlock()
-	p.onExit = func() { d.reapInstalledFloating(p) }
 	d.installFloating(sess, tb, p, generation)
+	if p.spareExited.Load() {
+		// The shell exited before the owner was published, so its reader
+		// could not reap the slot.
+		d.reapInstalledFloating(p)
+	}
 }

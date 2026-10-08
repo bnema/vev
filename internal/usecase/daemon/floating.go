@@ -407,7 +407,7 @@ func (d *Daemon) openAndInstallFloating(sess *session, tb *tab, spec floatingLau
 		// Claim the session spare when it matches this launch; a missing or
 		// mismatched spare falls through to a fresh launch. Once a spare was
 		// used up, the session starts the next one in the background.
-		p, had := sess.takeFloatingSpare(spec.cwd, spec.floatingCommand)
+		p, had := sess.takeFloatingSpare(spec)
 		if had {
 			defer d.ensureFloatingSpare(sess, tb)
 		}
