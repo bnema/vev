@@ -2,9 +2,7 @@
 package sessionwire
 
 import (
-	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -22,35 +20,15 @@ var (
 )
 
 type serverConnection struct {
-	raw      wire.Transport
-	ceilings protoCeilings
-	// ceilingsMu guards ceilings. The lazy preamble publishes the negotiated
-	// values from whichever goroutine first uses the connection, while another
-	// goroutine may already be asking for capabilities, so the once-guarded write
-	// is not by itself a happens-before edge for that reader.
-	ceilingsMu sync.Mutex
-
-	preambleOnce sync.Once
-	preambleErr  error
-	deadline     time.Time
+	handshake
 
 	// admission is the provisioned admission metadata the accepting side
-	// stamped, or the zero value with hasAdmission=false for a connection built
-	// by a legacy constructor that carried no admission. It is never mutated
-	// after construction and is exposed only through SessionAdmission, which
-	// returns a deep copy.
+	// stamped, or the zero value with hasAdmission=false for a connection whose
+	// accepting side provisioned none (a direct local daemon socket). It is
+	// never mutated after construction and is exposed only through
+	// SessionAdmission, which returns a deep copy.
 	admission    ports.SessionAdmission
 	hasAdmission bool
-
-	// preambleDone closes exactly once when the handshake has run, whether it
-	// succeeded or failed. It backs the handshake completion seam a mux listener
-	// exposes to the daemon; the absolute deadline is never restarted.
-	preambleDone chan struct{}
-
-	hooksMu       sync.Mutex
-	handshakeDone bool
-	hooksRun      bool
-	hooks         []func()
 }
 
 var (
@@ -114,12 +92,9 @@ func newServerConnection(raw wire.Transport, deadline time.Time, admission ports
 		deadline = time.Now().Add(protocol.HandshakeTimeout)
 	}
 	return &serverConnection{
-		raw:          raw,
-		ceilings:     defaultProtoCeilings(),
-		deadline:     deadline,
+		handshake:    newHandshake(raw, deadline),
 		admission:    admission.Clone(),
 		hasAdmission: hasAdmission,
-		preambleDone: make(chan struct{}),
 	}
 }
 
@@ -135,100 +110,8 @@ func (c *serverConnection) SessionAdmission() (ports.SessionAdmission, bool) {
 	return c.admission.Clone(), true
 }
 
-// HandshakeDeadline returns the absolute local deadline of the session
-// handshake this connection accepted. It is fixed for the connection's
-// lifetime and is never restarted: the preamble, Hello/Welcome, and the first
-// committed publication all share it.
-func (c *serverConnection) HandshakeDeadline() time.Time { return c.deadline }
-
-// HandshakeDone returns a channel that is closed exactly once when the
-// handshake has run, whether it succeeded or failed.
-func (c *serverConnection) HandshakeDone() <-chan struct{} { return c.preambleDone }
-
-// OnHandshakeComplete registers fn to run exactly once when the handshake has
-// run. Registering after completion runs fn immediately; a nil fn is ignored.
-func (c *serverConnection) OnHandshakeComplete(fn func()) {
-	if fn == nil {
-		return
-	}
-	c.hooksMu.Lock()
-	if c.handshakeDone {
-		c.hooksMu.Unlock()
-		fn()
-		return
-	}
-	c.hooks = append(c.hooks, fn)
-	c.hooksMu.Unlock()
-}
-
-// finishPreamble publishes handshake completion from inside the preamble's
-// sync.Once: it closes the done channel and marks the handshake complete so a
-// later registration runs immediately. It deliberately runs no registered hook,
-// because a hook that calls back into the connection would re-enter sync.Once
-// and deadlock; runHandshakeHooks runs the hooks after the Once body returns.
-// It tolerates a zero-value connection that never allocated the done channel
-// (test literals and seam-only construction), so closing is nil-safe.
-func (c *serverConnection) finishPreamble() {
-	if c.preambleDone != nil {
-		close(c.preambleDone)
-	}
-	c.hooksMu.Lock()
-	c.handshakeDone = true
-	c.hooksMu.Unlock()
-}
-
-// runHandshakeHooks runs the completion hooks registered before the handshake
-// finished exactly once, after the preamble's sync.Once body has returned.
-// Running them outside the Once is what lets a hook call back into the
-// connection - for example to receive a message - without re-entering
-// sync.Once and deadlocking. Every ensurePreamble caller invokes it; only the
-// first drains the hooks, and a registrant that arrives after completion
-// observes the completed flag and runs itself.
-func (c *serverConnection) runHandshakeHooks() {
-	c.hooksMu.Lock()
-	if c.hooksRun {
-		c.hooksMu.Unlock()
-		return
-	}
-	c.hooksRun = true
-	hooks := c.hooks
-	c.hooks = nil
-	c.hooksMu.Unlock()
-	for _, fn := range hooks {
-		fn()
-	}
-}
-
 func (c *serverConnection) ensurePreamble() error {
-	c.preambleOnce.Do(func() {
-		ctx, cancel := context.WithDeadline(context.Background(), c.deadline)
-		defer cancel()
-		next, err := runProtoServerPreamble(ctx, c.raw, c.limits())
-		c.publishLimits(next)
-		c.preambleErr = err
-		if err != nil {
-			_ = c.raw.Close()
-		}
-		c.finishPreamble()
-	})
-	c.runHandshakeHooks()
-	return c.preambleErr
-}
-
-// limits returns the negotiated ceilings under the lock the preamble publishes
-// them through. Send paths may read them without the lock once ensurePreamble
-// has returned, because that call orders the publish before the read.
-func (c *serverConnection) limits() protoCeilings {
-	c.ceilingsMu.Lock()
-	defer c.ceilingsMu.Unlock()
-	return c.ceilings
-}
-
-// publishLimits records the ceilings one preamble negotiation produced.
-func (c *serverConnection) publishLimits(next protoCeilings) {
-	c.ceilingsMu.Lock()
-	c.ceilings = next
-	c.ceilingsMu.Unlock()
+	return c.handshake.ensurePreamble(runProtoServerPreamble)
 }
 
 func (c *serverConnection) ReceiveClient() (protocol.ClientMessage, error) {
