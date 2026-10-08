@@ -38,8 +38,9 @@ type streamPipe struct {
 	wake     chan struct{}
 	closedCh chan struct{}
 
-	outbound func([]byte) error
-	grant    func(uint64) error
+	ceiling   int
+	sendFrame func([]byte) error
+	grant     func(uint64) error
 }
 
 // pipeChunk is one queued inbound frame and the credit it holds until it is
@@ -49,9 +50,11 @@ type pipeChunk struct {
 	cost uint64
 }
 
-// newStreamPipe builds one stream carriage. outbound writes one outbound byte
-// slice; grant returns consumed inbound credit to the peer. Neither may be nil.
-func newStreamPipe(outbound func([]byte) error, grant func(uint64) error) *streamPipe {
+// newStreamPipe builds one stream carriage. Write splits outbound bytes into
+// frames of at most ceiling bytes, the negotiated stream chunk limit, and hands
+// each to sendFrame once its credit is reserved; grant returns consumed inbound
+// credit to the peer. Neither hook may be nil.
+func newStreamPipe(ceiling int, sendFrame func([]byte) error, grant func(uint64) error) *streamPipe {
 	window := brokerwire.StreamWindowBytes
 	return &streamPipe{
 		returnAt:   streamCreditReturnAt(window),
@@ -59,7 +62,8 @@ func newStreamPipe(outbound func([]byte) error, grant func(uint64) error) *strea
 		creditWake: make(chan struct{}),
 		wake:       make(chan struct{}, 1),
 		closedCh:   make(chan struct{}),
-		outbound:   outbound,
+		ceiling:    ceiling,
+		sendFrame:  sendFrame,
 		grant:      grant,
 	}
 }
@@ -122,18 +126,29 @@ func (p *streamPipe) Read(b []byte) (int, error) {
 	}
 }
 
-// Write hands one byte slice to the outbound hook, which spends send credit
-// per frame through reserve. It returns ErrStreamGone once the pipe reached its
-// terminal outcome.
+// Write sends b in order as frames under the chunk ceiling, waiting for the
+// peer's credit before each one: a peer that is not reading slows this writer
+// instead of losing the stream. It returns ErrStreamGone once the pipe reached
+// its terminal outcome.
 func (p *streamPipe) Write(b []byte) (int, error) {
+	if p.ceiling <= 0 {
+		return 0, ErrConfig
+	}
 	p.mu.Lock()
 	closed := p.closed
 	p.mu.Unlock()
 	if closed {
 		return 0, ErrStreamGone
 	}
-	if err := p.outbound(b); err != nil {
-		return 0, err
+	for data := b; len(data) > 0; {
+		n := min(len(data), p.ceiling)
+		if err := p.reserve(n); err != nil {
+			return 0, err
+		}
+		if err := p.sendFrame(data[:n]); err != nil {
+			return 0, err
+		}
+		data = data[n:]
 	}
 	return len(b), nil
 }
@@ -183,7 +198,8 @@ func (p *streamPipe) granted(credit uint64) error {
 // deliver accepts one inbound frame from the connection reader. It returns
 // ErrStreamCredit when the peer sent beyond the credit it was granted and
 // ErrStreamGone once the pipe is closed; the caller settles the affected stream
-// in both cases.
+// in both cases. The pipe takes ownership of chunk: callers pass freshly
+// decoded bytes and never touch them again.
 func (p *streamPipe) deliver(chunk []byte) error {
 	if len(chunk) == 0 {
 		return nil
@@ -198,7 +214,7 @@ func (p *streamPipe) deliver(chunk []byte) error {
 		p.mu.Unlock()
 		return ErrStreamCredit
 	}
-	p.queue = append(p.queue, pipeChunk{data: append([]byte(nil), chunk...), cost: cost})
+	p.queue = append(p.queue, pipeChunk{data: chunk, cost: cost})
 	p.recvUsed += cost
 	p.mu.Unlock()
 	select {

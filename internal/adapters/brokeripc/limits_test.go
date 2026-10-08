@@ -177,7 +177,7 @@ func TestStreamPipeCloseReleasesParkedReader(t *testing.T) {
 // silently dropping bytes.
 func TestStreamPipeOutboundError(t *testing.T) {
 	failure := errors.New("outbound failed")
-	pipe := newStreamPipe(func([]byte) error { return failure }, func(uint64) error { return nil })
+	pipe := newStreamPipe(int(brokerwire.MaxStreamChunkBytes), func([]byte) error { return failure }, func(uint64) error { return nil })
 	_, err := pipe.Write([]byte("payload"))
 	require.ErrorIs(t, err, failure)
 	require.NoError(t, pipe.Close())

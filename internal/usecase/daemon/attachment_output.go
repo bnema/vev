@@ -33,8 +33,10 @@ type attachmentOutput struct {
 	maxOutstandingAtomic atomic.Uint64
 	// unackedBytes charges Output data sent and not yet acknowledged, keyed by
 	// the state an ACK must reach to release it. Side-effect output carries no
-	// state of its own, so it is charged to the next state. Guarded by the view
-	// lock; unackedBytesAtomic mirrors the total for lock-free capacity reads.
+	// state of its own, so it is charged to the next state. Charges stay in
+	// non-decreasing state order and merge per state, so the slice holds at most
+	// maxOutstanding+1 entries. Guarded by the view lock; unackedBytesAtomic
+	// mirrors the total for lock-free capacity reads.
 	unackedBytes              []unackedOutputBytes
 	unackedBytesAtomic        atomic.Uint64
 	forceSnapshot             bool
@@ -220,10 +222,10 @@ func (o *attachmentOutput) prepareFrame(d *Daemon, state *capturedRenderState, f
 	ansi.viewRevision = state.view.revision
 	cursor := o.prepareCursorTail(desired, len(ansi.data) > 0)
 	graphicsReset := reset || o.forceSnapshot || !o.initialized
-	// Images are optional decoration: they share the frame's data limit and the
-	// attachment's unacknowledged byte window, and an upload that fits neither
-	// waits for a later frame instead of overrunning buffers toward the client.
-	graphicsBudget := max(min(protocol.MaxOutputDataLen, o.unackedBytesBudget())-len(ansi.data)-len(cursor.data), 0)
+	// Images share the frame's data limit. The unacknowledged byte window gates
+	// the next frame rather than this one: an upload must fit one frame, so
+	// clamping it here would drop large images and their deletes outright.
+	graphicsBudget := max(protocol.MaxOutputDataLen-len(ansi.data)-len(cursor.data), 0)
 	preparedGraphics, err := graphicsOutputDataWithDaemonLimit(d, state, o.attachment, graphicsReset, graphicsBudget)
 	if err != nil {
 		return nil, err
@@ -675,20 +677,6 @@ func (s *attachmentOutput) atCapacity() bool {
 	outstanding := s.outstandingAtomic.Load()
 	return outstanding >= maxOutstanding ||
 		(outstanding > 0 && s.unackedBytesAtomic.Load() >= protocol.MaxOutputWindowBytes)
-}
-
-// unackedBytesBudget is the Output data that may still be sent before the byte
-// window is full. It is advisory: a frame may exceed it when no state frame is
-// in flight.
-func (s *attachmentOutput) unackedBytesBudget() int {
-	if s == nil {
-		return protocol.MaxOutputDataLen
-	}
-	used := s.unackedBytesAtomic.Load()
-	if used >= protocol.MaxOutputWindowBytes {
-		return 0
-	}
-	return int(protocol.MaxOutputWindowBytes - used)
 }
 
 // committedState reports the latest committed output state number. It takes

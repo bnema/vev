@@ -112,15 +112,16 @@ func TestStreamPipeCloseWithPreservesQueuedDataOnOrderlyClose(t *testing.T) {
 
 // newTestPipe is a pipe whose outbound writes and credit grants go nowhere.
 func newTestPipe() *streamPipe {
-	return newStreamPipe(func([]byte) error { return nil }, func(uint64) error { return nil })
+	return newStreamPipe(int(brokerwire.MaxStreamChunkBytes), func([]byte) error { return nil }, func(uint64) error { return nil })
 }
 
-// TestStreamWindowCoversTheSessionOutputWindow pins the sizing invariant
+// TestStreamWindowCoversTheSessionOutputWindow pins the sizing relation
 // between the two flow-control layers: one broker stream window holds the
-// daemon's whole unacknowledged byte budget, so in normal operation the daemon
-// is paced by its own ACK window and coalesces frames, rather than blocking a
-// send on stream credit. A single Output larger than the window (a big image)
-// still crosses, only paced by credit.
+// daemon's unacknowledged byte budget, so the daemon is mostly paced by its own
+// ACK window and coalesces frames. Credit may still pace it at the margin: the
+// receiver batches up to half a window before returning it, chunks cost 64
+// bytes of overhead, and one frame may overrun the byte budget (a big image).
+// Credit stays the hard bound either way.
 func TestStreamWindowCoversTheSessionOutputWindow(t *testing.T) {
 	require.GreaterOrEqual(t, brokerwire.StreamWindowBytes, uint64(protocol.MaxOutputWindowBytes),
 		"one stream window must hold the daemon's whole unacknowledged byte budget")
@@ -145,7 +146,7 @@ func TestStreamPipeCredit(t *testing.T) {
 
 	t.Run("reads return credit in batches", func(t *testing.T) {
 		var grants []uint64
-		p := newStreamPipe(func([]byte) error { return nil }, func(c uint64) error { grants = append(grants, c); return nil })
+		p := newStreamPipe(int(brokerwire.MaxStreamChunkBytes), func([]byte) error { return nil }, func(c uint64) error { grants = append(grants, c); return nil })
 		for range perWindow {
 			require.NoError(t, p.deliver(make([]byte, chunk)))
 		}

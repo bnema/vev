@@ -1,6 +1,7 @@
 package brokeripc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -883,13 +884,9 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 	}
 
 	// Well over one stream window of daemon output while nothing reads. Side
-	// effect Outputs need no view context; random-looking data defeats
-	// compression so every byte crosses the stream.
+	// effect Outputs need no view context and are never compressed.
 	const messages = 24
-	data := make([]byte, 512<<10)
-	for i := range data {
-		data[i] = byte(i*131 + i/7)
-	}
+	data := bytes.Repeat([]byte{'x'}, 512<<10)
 	go func() {
 		for i := range messages {
 			payload := append([]byte{byte(i)}, data...)
@@ -901,12 +898,24 @@ func TestStalledClientStreamWaitsForCredit(t *testing.T) {
 		}
 	}()
 
-	// The relay is blocked on credit, not failed: the stream stays open and the
-	// connection keeps serving other work.
+	// The relay fills exactly one window of the client pipe and then waits on
+	// credit instead of failing: the stream stays open and the connection keeps
+	// serving other work.
+	local, ok := stream.(*clientStream)
+	require.True(t, ok)
+	full := brokerwire.StreamWindowBytes - brokerwire.StreamChunkCredit(int(brokerwire.MaxStreamChunkBytes))
+	held := func() uint64 {
+		local.pipe.mu.Lock()
+		defer local.pipe.mu.Unlock()
+		return local.pipe.recvUsed + local.pipe.recvReturn
+	}
+	require.Eventually(t, func() bool { return held() > full }, 5*time.Second, time.Millisecond,
+		"the relay must fill one stream window")
+	require.LessOrEqual(t, held(), brokerwire.StreamWindowBytes, "the relay never exceeds its credit")
 	select {
 	case <-stream.Done():
 		t.Fatalf("a stalled consumer must not settle its stream: %v", stream.Err())
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 	requireConnectionDelegates(t, client)
 

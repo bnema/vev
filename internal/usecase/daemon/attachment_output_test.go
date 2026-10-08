@@ -577,6 +577,41 @@ func TestAttachmentOutputByteWindow(t *testing.T) {
 	}
 }
 
+// TestAttachmentOutputFullByteWindowKeepsImages proves the byte window gates
+// when a frame goes out, never what it carries: an upload must fit one frame,
+// so trimming images to the remaining byte budget would drop them for good.
+func TestAttachmentOutputFullByteWindowKeepsImages(t *testing.T) {
+	scene := graphics.NewScene(graphics.Limits{})
+	asset, err := scene.AddAsset(graphics.AssetBlob{Encoded: []byte("asset"), Width: 1, Height: 1})
+	require.NoError(t, err)
+	_, err = scene.PlaceAsset(asset, graphics.PixelRect{Width: 1, Height: 1})
+	require.NoError(t, err)
+	state := &capturedRenderState{
+		route: protocol.CommittedRouteIdentity{Target: protocol.ExactSessionTarget{LifecycleID: domain.SessionLifecycleID{1}, SessionName: "work"}},
+		view:  attachmentView{tabID: "tab-1"},
+		panes: []capturedPaneRenderState{{
+			stableID: "pane-1", focused: true,
+			graphics:         scene.Snapshot(),
+			graphicsGeometry: domain.Geometry{Size: domain.Size{Cols: 1, Rows: 1}, PixelWidth: 1, PixelHeight: 1},
+			placement:        layout.Placement{Content: domain.Rect{Width: 1, Height: 1}},
+		}}}
+	output := attachmentOutputWithGraphics(newGraphicsOutputState())
+	ac := &attachedClient{output: output, terminalCapabilities: terminalcap.Capabilities{KittyGraphics: true}}
+	output.attachment = ac
+	// Side effects filled the byte window while no state frame is in flight.
+	output.lockView()
+	output.chargeBytesLocked(output.next+1, protocol.MaxOutputWindowBytes)
+	output.unlockView()
+	require.False(t, output.atCapacity(), "the only frame that can release side-effect bytes is allowed")
+
+	prepared, err := output.prepareFrame(nil, state, renderer.NewFrame(1, 1), []renderer.Damage{renderer.FullRedraw()}, true, cursorOut{})
+	require.NoError(t, err)
+	require.NotNil(t, prepared.graphics, "a full byte window must not drop the frame's images")
+	require.NotEmpty(t, prepared.graphics.data)
+	require.Equal(t, protocol.MaxOutputDataLen, prepared.graphics.maxBytes+len(prepared.data)-len(prepared.graphics.data),
+		"images keep the whole frame data limit")
+}
+
 func TestAttachmentOutputSentFrameChargesItsBytes(t *testing.T) {
 	stream := newOutputStateStream()
 	frame := renderer.NewFrame(3, 1)

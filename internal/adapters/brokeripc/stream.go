@@ -42,33 +42,18 @@ func newServerStream(s *serverSession, id ports.BrokerStreamID, core ports.Broke
 		return nil, ErrConfig
 	}
 	st := &serverStream{session: s, id: id, core: core, done: make(chan struct{})}
-	st.pipe = newStreamPipe(st.sendChunk, st.grantCredit)
+	st.pipe = newStreamPipe(int(s.ceilings.StreamChunkLimit), st.sendFrame, st.grantCredit)
 	st.carriage = newCarriage(st.pipe)
 	return st, nil
 }
 
-// sendChunk splits one outbound byte slice under the negotiated stream chunk
-// ceiling and writes each frame in order, waiting for the client's credit
-// before each one: a client that is not reading slows this relay, and through
-// the daemon link the daemon, instead of losing its stream.
-func (st *serverStream) sendChunk(data []byte) error {
-	ceiling := int(st.session.ceilings.StreamChunkLimit)
-	if ceiling <= 0 {
-		return ErrConfig
-	}
-	for len(data) > 0 {
-		n := min(len(data), ceiling)
-		if err := st.pipe.reserve(n); err != nil {
-			return err
-		}
-		if err := st.session.send(brokerwire.ServerStreamData{
-			Epoch: st.session.epoch, Connection: st.session.scope.Connection, Stream: st.id, Data: data[:n],
-		}); err != nil {
-			return err
-		}
-		data = data[n:]
-	}
-	return nil
+// sendFrame writes one credited outbound frame to the client. A client that
+// is not reading slows this relay, and through the daemon link the daemon,
+// instead of losing its stream.
+func (st *serverStream) sendFrame(data []byte) error {
+	return st.session.send(brokerwire.ServerStreamData{
+		Epoch: st.session.epoch, Connection: st.session.scope.Connection, Stream: st.id, Data: data,
+	})
 }
 
 // grantCredit returns consumed inbound credit to the client.
@@ -403,7 +388,7 @@ func (s *serverSession) streamFor(id ports.BrokerStreamID) (*serverStream, error
 }
 
 // clientStream is the client-side half of one logical stream: the sessionwire
-// client connection over the stream's bounded pipe, plus the terminal outcome a
+// client connection over the stream's credit-controlled pipe, plus the terminal outcome a
 // ports.BrokerLogicalConnection exposes independently of reads.
 type clientStream struct {
 	ports.ClientConnection
@@ -430,7 +415,7 @@ func newClientStream(c *client, id ports.BrokerStreamID) (*clientStream, error) 
 		opened: make(chan error, 1),
 		done:   make(chan struct{}),
 	}
-	st.pipe = newStreamPipe(st.sendChunk, st.grantCredit)
+	st.pipe = newStreamPipe(int(c.ceilings.StreamChunkLimit), st.sendFrame, st.grantCredit)
 	st.carriage = newCarriage(st.pipe)
 	st.ClientConnection = sessionwire.NewClientConnection(st.carriage)
 	if st.ClientConnection == nil {
@@ -439,26 +424,11 @@ func newClientStream(c *client, id ports.BrokerStreamID) (*clientStream, error) 
 	return st, nil
 }
 
-// sendChunk splits one outbound client byte slice under the negotiated stream
-// chunk ceiling, waiting for the broker's credit before each frame.
-func (st *clientStream) sendChunk(data []byte) error {
-	ceiling := int(st.client.ceilings.StreamChunkLimit)
-	if ceiling <= 0 {
-		return ErrConfig
-	}
-	for len(data) > 0 {
-		n := min(len(data), ceiling)
-		if err := st.pipe.reserve(n); err != nil {
-			return err
-		}
-		if err := st.client.send(brokerwire.ClientStreamData{
-			Epoch: st.client.scope.Epoch, Connection: st.client.scope.Connection, Stream: st.id, Data: data[:n],
-		}); err != nil {
-			return err
-		}
-		data = data[n:]
-	}
-	return nil
+// sendFrame writes one credited outbound frame to the broker.
+func (st *clientStream) sendFrame(data []byte) error {
+	return st.client.send(brokerwire.ClientStreamData{
+		Epoch: st.client.scope.Epoch, Connection: st.client.scope.Connection, Stream: st.id, Data: data,
+	})
 }
 
 // grantCredit returns consumed inbound credit to the broker. It is written

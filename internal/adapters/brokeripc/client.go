@@ -351,18 +351,9 @@ func (c *client) dispatch(message brokerwire.ServerMessage) error {
 		if !c.scopeMatches(m.Epoch, m.Connection) {
 			return errors.Join(ErrScopeMismatch, ErrProtocol)
 		}
-		disposition, err := c.conn.StreamData(m.Stream)
-		if err != nil {
-			return errors.Join(ErrProtocol, err)
-		}
-		if disposition == brokerwire.StreamDiscarded {
-			return nil
-		}
-		st := c.lookupStream(m.Stream)
-		if st == nil {
-			// The stream was retired locally between the tracker check and the
-			// lookup; its data is discarded, exactly like a retired stream.
-			return nil
+		st, err := c.streamFor(m.Stream)
+		if st == nil || err != nil {
+			return err
 		}
 		if err := st.deliver(m.Data); errors.Is(err, ErrStreamCredit) {
 			st.fail(ErrStreamCredit)
@@ -372,17 +363,12 @@ func (c *client) dispatch(message brokerwire.ServerMessage) error {
 		if !c.scopeMatches(m.Epoch, m.Connection) {
 			return errors.Join(ErrScopeMismatch, ErrProtocol)
 		}
-		disposition, err := c.conn.StreamWindowUpdate(m.Stream)
-		if err != nil {
-			return errors.Join(ErrProtocol, err)
+		st, err := c.streamFor(m.Stream)
+		if st == nil || err != nil {
+			return err
 		}
-		if disposition == brokerwire.StreamDiscarded {
-			return nil
-		}
-		if st := c.lookupStream(m.Stream); st != nil {
-			if err := st.pipe.granted(m.Credit); err != nil {
-				st.fail(err)
-			}
+		if err := st.pipe.granted(m.Credit); err != nil {
+			st.fail(err)
 		}
 		return nil
 	case brokerwire.StreamClosed:
@@ -939,6 +925,21 @@ func (c *client) lookupStream(stream ports.BrokerStreamID) *clientStream {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.streams[stream]
+}
+
+// streamFor classifies one stream-scoped frame (data or a credit grant) and
+// returns its live stream. A frame for a retired stream, or one retired locally
+// between the tracker check and the lookup, yields no stream and no error; a
+// frame for a stream that was never opened is a peer protocol violation.
+func (c *client) streamFor(id ports.BrokerStreamID) (*clientStream, error) {
+	disposition, err := c.conn.StreamData(id)
+	if err != nil {
+		return nil, errors.Join(ErrProtocol, err)
+	}
+	if disposition == brokerwire.StreamDiscarded {
+		return nil, nil
+	}
+	return c.lookupStream(id), nil
 }
 
 // unregisterStream drops one local stream record.

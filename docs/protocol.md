@@ -133,8 +133,9 @@ plus 64 bytes) per data frame out of a 4 MiB window
 (`brokerwire.StreamWindowBytes`) and waits when it has too little, and the
 receiver returns the credit of frames its consumer has read in
 `StreamWindowUpdate` batches. A slow consumer therefore slows its own stream
-instead of losing it; data or credit beyond the window is a flow-control
-violation that settles only that stream. The remote helpers `_broker-mux-stdio`,
+instead of losing it. Data or cumulative credit beyond the window is a
+flow-control violation that settles only that stream; a single grant of zero
+or above the window is a malformed frame and fails the connection. The remote helpers `_broker-mux-stdio`,
 `_broker-mux-quic-bootstrap`, and `_broker-mux-quic-proxy` bridge a remote
 daemonmux socket to stdio or to one freshly authenticated QUIC stream.
 
@@ -173,8 +174,8 @@ base. `ValidateOutput` enforces the epoch/base/new chain
   (2 MiB). State frames are charged to their own state, side effects to the
   next state, and a cumulative ACK releases what it covers. The next state
   frame waits when either window is full, except that a frame may always be
-  sent while no state frame is in flight. Images share the remaining byte
-  budget and wait for a later frame when it is too small.
+  sent while no state frame is in flight. A frame carrying a large image may
+  exceed the byte window; it then holds the next frame until its ACK.
 - The client coalesces ACKs (`client.go:cumulativeAckQueue`) and keeps
   applying + acknowledging daemon frames even while a picker lease owns
   the terminal (see below) — admission without physical write.
@@ -261,7 +262,7 @@ than `KillResult` and `CommandResult`.
 | Encoding buffer | bounded per-connection framing buffers owned by `streamframe` | `adapters/streamframe` |
 | Output states in flight | 8 (`MaxOutputWindow`) preferred for QUIC/IPC/SSH | daemon, negotiated down |
 | Unacknowledged Output bytes | 2 MiB (`MaxOutputWindowBytes`); one frame always allowed when none is in flight | daemon |
-| Broker stream window | 4 MiB per stream and direction (`brokerwire.StreamWindowBytes`), returned by `StreamWindowUpdate` | `adapters/brokeripc` |
+| Broker stream window | 4 MiB per stream and direction (`brokerwire.StreamWindowBytes`), returned by `StreamWindowUpdate` | `adapters/brokerwire`, enforced in `adapters/brokeripc` |
 | QUIC unauthenticated peers | 4 connections, 3 s auth deadline, one bidirectional stream each; extra/unidirectional streams rejected | `adapters/quic` |
 | QUIC bootstrap | 32-byte token + 16-byte nonce (base64), ≤4 KiB readiness (schema v1, host-independent port, SHA-256 pin, ≤15 s expiry), one bounded (512 B) auth record, atomic one-time consumption, token erasure on close | `adapters/quic` bootstrap, `app/_broker-mux-quic-bootstrap` + `_broker-mux-quic-proxy` |
 | Handshake, dial → first committed publication | 15 s, single absolute deadline propagated unchanged, never reset | both ends |
