@@ -9,6 +9,9 @@ import (
 const (
 	copyScrollFrame = 16 * time.Millisecond
 	copyScrollTail  = 120 * time.Millisecond
+	// copyScrollMaxStep bounds one animation frame so a long backlog (a stalled
+	// remote link, a big flick) is drained over several frames, not one jump.
+	copyScrollMaxStep = 9
 )
 
 // copyMu owns the animation and its single cancellable overlay-input timer.
@@ -74,22 +77,29 @@ func (d *Daemon) advanceCopyScrollLocked(sess *session, ac *attachedClient) (boo
 	if remaining == 0 {
 		return false, false
 	}
-	magnitude := remaining
-	if magnitude < 0 {
-		magnitude = -magnitude
-	}
-	step := (magnitude + 3) / 4
-	if d.clock.Now().Sub(motion.lastInput) >= copyScrollTail {
-		step = magnitude
-	}
-	if remaining < 0 {
-		step = -step
-	}
-	motion.remaining -= step
-	changed, exit := rt.moveCopyWheelLocked(step)
-	if !changed || exit {
-		rt.stopCopyScrollLocked()
-		return changed, exit
+	// While the client has a full window of unacknowledged frames, moving the
+	// viewport would only pile rows into one catch-up jump when the window
+	// reopens. Hold the animation and keep polling at frame pace instead.
+	changed, exit := false, false
+	if ac.output == nil || !ac.output.atCapacity() {
+		magnitude := remaining
+		if magnitude < 0 {
+			magnitude = -magnitude
+		}
+		step := (magnitude + 3) / 4
+		if d.clock.Now().Sub(motion.lastInput) >= copyScrollTail {
+			step = magnitude
+		}
+		step = min(step, copyScrollMaxStep)
+		if remaining < 0 {
+			step = -step
+		}
+		motion.remaining -= step
+		changed, exit = rt.moveCopyWheelLocked(step)
+		if !changed || exit {
+			rt.stopCopyScrollLocked()
+			return changed, exit
+		}
 	}
 	if motion.remaining != 0 {
 		mode := rt.copyMode

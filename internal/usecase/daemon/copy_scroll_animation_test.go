@@ -98,12 +98,26 @@ func TestCopyScrollAnimationTailDeadline(t *testing.T) {
 	start := rt.copyMode.ViewportTop
 	rt.copyScroll.remaining = -60
 	rt.copyScroll.lastInput = time.Time{}.Add(-copyScrollTail)
+	// Past the tail deadline the whole backlog is due, but one frame still
+	// moves at most copyScrollMaxStep rows so a stalled link cannot cause a jump.
 	changed, exit := f.d.advanceCopyScrollLocked(f.sess, f.ac)
 	require.True(t, changed)
 	require.False(t, exit)
-	require.Equal(t, start-60, rt.copyMode.ViewportTop)
+	require.Equal(t, start-copyScrollMaxStep, rt.copyMode.ViewportTop)
+	require.Equal(t, -(60 - copyScrollMaxStep), rt.copyScroll.remaining)
+	rt.copyMu.Unlock()
+	for frame := 2; frame <= 7; frame++ {
+		timer := awaitCoordinatorScheduledTimer(t, clock)
+		want := start - min(frame*copyScrollMaxStep, 60)
+		timer.ch <- time.Time{}
+		require.Eventually(t, func() bool {
+			rt.copyMu.Lock()
+			defer rt.copyMu.Unlock()
+			return rt.copyMode.ViewportTop == want
+		}, time.Second, time.Millisecond, "frame %d", frame)
+	}
+	rt.copyMu.Lock()
 	require.Zero(t, rt.copyScroll.remaining)
-	require.Nil(t, rt.copyScroll.timer.timer)
 	rt.copyMu.Unlock()
 }
 
